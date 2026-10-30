@@ -15,8 +15,10 @@ const TASK_MENTIONS: &str = "task-mentions";
 const GATHER_TASKS: &str = "gather-tasks";
 const TASK_DRAG: &str = "task-drag";
 const SETTINGS_UPDATES: &str = "settings-updates";
+const ANDROID_PARITY: &str = "android-parity";
+const SETTINGS_CLOSE: &str = "settings-close";
 
-pub(super) const VISUALS: [(&str, f32, f32); 13] = [
+pub(super) const VISUALS: [(&str, f32, f32); 15] = [
     (CLAUDE_CONFIG, 7.0, 3.4),
     (COMMAND_CARDS, 6.6, 4.5),
     (COMPACTION_CARD, 7.6, 5.4),
@@ -30,6 +32,8 @@ pub(super) const VISUALS: [(&str, f32, f32); 13] = [
     (GATHER_TASKS, 7.2, 5.0),
     (TASK_DRAG, 6.8, 4.6),
     (SETTINGS_UPDATES, 6.8, 5.6),
+    (ANDROID_PARITY, 6.8, 5.0),
+    (SETTINGS_CLOSE, 4.4, 1.6),
 ];
 
 pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyElement {
@@ -47,6 +51,8 @@ pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyEleme
         GATHER_TASKS => gather_tasks_visual(theme, t, reduced),
         TASK_DRAG => task_drag_visual(theme, t),
         SETTINGS_UPDATES => settings_updates_visual(theme, t),
+        ANDROID_PARITY => android_parity_visual(theme, t, reduced),
+        SETTINGS_CLOSE => settings_close_visual(theme, t),
         _ => div().into_any_element(),
     }
 }
@@ -2179,5 +2185,215 @@ fn settings_updates_visual(theme: &Theme, t: f32) -> AnyElement {
         .flex_row()
         .child(nav)
         .child(page)
+        .into_any_element()
+}
+
+fn android_parity_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
+    const TASKS_AT: f32 = 2.6;
+    let tasks = t >= TASKS_AT;
+    let (_, _, ok) = chat_status_tone(zeron_proto::ChatIndicator::Completed, theme);
+    let row = |lead: AnyElement, title: &'static str, line: &'static str, start: f32| {
+        rise(
+            div()
+                .h(px(31.0))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .child(lead)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(text(11.0, theme.text, title))
+                        .child(text(9.5, theme.text_muted, line)),
+                ),
+            t,
+            start,
+        )
+    };
+    let group = |label: &'static str, count: &'static str, start: f32| {
+        rise(
+            div()
+                .mt(px(4.0))
+                .px(px(10.0))
+                .flex()
+                .gap(px(4.0))
+                .child(text(9.5, theme.text_faint, label))
+                .child(text(9.5, theme.text_faint, count)),
+            t,
+            start,
+        )
+    };
+    let content = if tasks {
+        div()
+            .flex()
+            .flex_col()
+            .child(group("Needs you", "1", TASKS_AT + 0.1))
+            .child(row(
+                glyph(icons::LUCIDE_CIRCLE_HELP, 12.0, theme.accent).into_any_element(),
+                "Pick the payment provider",
+                "Ship the shop \u{b7} asks a question",
+                TASKS_AT + 0.15,
+            ))
+            .child(group("Working", "2", TASKS_AT + 0.25))
+            .child(row(
+                running(theme, reduced),
+                "Write the cart tests",
+                "Codex \u{b7} 3 subagents",
+                TASKS_AT + 0.3,
+            ))
+    } else {
+        div()
+            .flex()
+            .flex_col()
+            .child(group("MacBook Pro", "", 0.1))
+            .child(row(
+                running(theme, reduced),
+                "Ship the shop",
+                "Working \u{b7} Plan",
+                0.15,
+            ))
+            .child(row(
+                tree_glyph(TreeStatus::Done, 12.0, ok, true),
+                "Cart tests",
+                "Completed",
+                0.25,
+            ))
+            .child(rise(
+                div()
+                    .mt(px(6.0))
+                    .ml(px(10.0))
+                    .flex()
+                    .child(pill("Needs you 1", theme.accent)),
+                t,
+                0.9,
+            ))
+    };
+    let tab = |path: &'static str, label: &'static str, on: bool| {
+        let tone = if on { theme.text } else { theme.text_muted };
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(1.0))
+            .child(
+                div()
+                    .h(px(18.0))
+                    .w(px(36.0))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(on, |el| el.bg(theme.accent.opacity(0.16)))
+                    .child(glyph(path, 12.0, tone)),
+            )
+            .child(text(9.0, tone, label))
+    };
+    let nav = div()
+        .h(px(40.0))
+        .flex()
+        .items_center()
+        .border_t_1()
+        .border_color(theme.border)
+        .child(tab(icons::CHAT_ROUND_LINE, "Sessions", !tasks))
+        .child(tab(icons::CHECKLIST, "Tasks", tasks))
+        .child(tab(icons::SETTINGS, "Settings", false));
+    div()
+        .flex()
+        .items_end()
+        .gap(px(18.0))
+        .child(
+            phone(theme, 230.0, 176.0)
+                .flex()
+                .flex_col()
+                .child(
+                    div().h(px(26.0)).px(px(12.0)).flex().items_end().child(
+                        text(12.5, theme.text, if tasks { "Tasks" } else { "Sessions" })
+                            .font_weight(gpui::FontWeight::SEMIBOLD),
+                    ),
+                )
+                .child(div().flex_1().min_h_0().overflow_hidden().child(content))
+                .child(nav),
+        )
+        .child(
+            div()
+                .w(px(120.0))
+                .pb(px(20.0))
+                .text_size(crate::typography::ui_rems(11.5))
+                .text_color(theme.text_faint)
+                .child("Tasks, Needs you, PRs and the chat tools from iPhone, on Android"),
+        )
+        .into_any_element()
+}
+
+fn settings_close_visual(theme: &Theme, t: f32) -> AnyElement {
+    const OPEN_AT: f32 = 0.5;
+    const CLOSE_AT: f32 = 2.4;
+    let opened = ramp(t, OPEN_AT, 360.0, motion::EASE_OUT);
+    let shown = if t < CLOSE_AT {
+        opened
+    } else {
+        1.0 - ramp(t, CLOSE_AT, 300.0, motion::EASE_IN)
+    };
+    let backdrop = if t < CLOSE_AT {
+        opened
+    } else {
+        1.0 - ramp(t, CLOSE_AT, 340.0, motion::EASE_IN)
+    };
+    let line = |width: f32| {
+        div()
+            .h(px(7.0))
+            .w(px(width))
+            .rounded_full()
+            .bg(theme.wash(0.1))
+    };
+    let page = div()
+        .absolute()
+        .inset_0()
+        .p(px(10.0))
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .child(line(150.0))
+        .child(line(220.0))
+        .child(line(180.0))
+        .child(line(240.0));
+    let panel = card(theme)
+        .w(px(200.0))
+        .h(px(62.0))
+        .p(px(10.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .bg(theme.surface_raised)
+        .relative()
+        .top(px((1.0 - shown) * 8.0))
+        .opacity(shown)
+        .child(text(11.0, theme.text, "Settings").font_weight(gpui::FontWeight::SEMIBOLD))
+        .child(line(150.0))
+        .child(line(110.0));
+    card(theme)
+        .w(px(300.0))
+        .h(px(96.0))
+        .relative()
+        .overflow_hidden()
+        .child(page)
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(crate::theme::ink(0.28 * backdrop)),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(shown > 0.0, |el| el.child(panel)),
+        )
         .into_any_element()
 }

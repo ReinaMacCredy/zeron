@@ -31,7 +31,7 @@ To reorder open tasks, point at a row and drag the grip that appears to its left
 
 File an idea without leaving what you are doing:
 
-- **From any app**: press both Option keys (⌥ + ⌥) on macOS. A bar opens over the app in front, without bringing Zeron forward. Type the idea and press Enter: the task lands at the top of **To do** and the app you were in keeps the keyboard. Shift+Enter starts the notes, **#** and a project name picks the project (the folder chip does too), **Today** sets the due date, and Cmd+V attaches an image. Cmd+Enter saves and opens the task's card in Zeron. Escape or a click outside closes the bar and keeps what you typed for next time.
+- **From any app**: press both Option keys (⌥ + ⌥) on macOS. A bar opens over the app in front, without bringing Zeron forward. Type the idea and press Enter: the task lands at the top of **To do** and the app you were in keeps the keyboard. Shift+Enter starts the notes, **#** and a project name picks the project (the folder chip does too: it opens a list of every project under the chip), **Today** sets the due date, and Cmd+V attaches an image. Cmd+Enter saves and opens the task's card in Zeron. Escape or a click outside closes the bar and keeps what you typed for next time.
 - **Inside Zeron**: click **+** under **Tasks** in the rail. Type and press Enter as many times as you like; the popover lists what you added. Escape, a click outside, or **+** again closes it.
 
 After a save from the bar, **Added to To do** shows with **Undo**, which deletes the task, and **Open**. Captured tasks start in the project you have selected for New chat and carry a **New** tag, and the Tasks icon in the rail counts them, until you next open Tasks.

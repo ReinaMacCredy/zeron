@@ -25,7 +25,7 @@ The chips under the field change this chat's settings.
 - **Start mission** comes first. Turn it on to send the message as a [mission](zeron://docs/mission-control) instead (see below).
 - **Model** reads the agent profile and the model. A dot after the profile name means you changed the profile's settings in this chat. The menu opens on your [agent profiles](zeron://docs/agent-profiles): apply one, **Revert** or **Save** an edited one, or choose **No profile**. Below them come the models of the current provider and of each provider instance; an instance that fails to load shows why, with **Retry**. On the **New session** canvas, each model shows its agent's mark, and a profile applies to the draft once its Mac is online. Switching models on a chat that already has messages asks **Switch model?** first, and the transcript notes the change.
 - **Effort** offers **Low** to **Max**, plus **Fast** where the model has it. See [Models and reasoning effort](zeron://docs/models-and-effort).
-- **Access** sets the chat's access mode: **Supervised**, **Auto-accept edits**, or **Full access**. It offers only the modes the agent supports, and the chip shows the mode the chat runs with.
+- **Access** sets the chat's access mode: **Supervised**, **Auto-accept edits**, or **Full access**. It offers only the modes the agent supports, and the chip shows the mode the chat runs with. For an agent that supports it, the menu also has **Plan mode** ("Explore and propose a plan before changing anything."), and the chip reads, for example, **Full access · Plan** while it is on. The **New session** composer has the same chip, and the session starts with that access and plan.
 - **Context** shows how full the context is, such as "92% context". It opens **Context and stats**.
 
 ![The permission menu, Context and stats, and the Hand off thread menu](ios-composer-menus.jpg)
@@ -57,7 +57,7 @@ The session's **…** menu has:
 - **New sidechat**: a [side chat](zeron://docs/side-chat) that reads this chat without changing it. Sidechats expire after 24 hours. `/btw` and `/sidechat` start one too.
 - **Hand off thread**: continue in this thread with another agent and model, in a new thread, or hand it to a project. See [Hand off a thread](zeron://docs/handoff).
 
-While a chat runs subagents or background shells, a pill above the composer counts them, such as "2 of 3 working · 1 shell". Tap it for a card with each run, its state and how long it has run. **Stop** ends one; tap a row to open its output, its review findings or its chat.
+While a chat runs subagents or background shells, a pill on the row above the composer, beside the side chat and terminal chips, counts them, such as "2 of 3 working · 1 shell". Tap it for a card with each run, its state and how long it has run. **Stop** ends one; tap a row to open its output, its review findings or its chat.
 
 ![The subagents pill, and its roster card](ios-agents-pill.jpg)
 

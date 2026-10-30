@@ -2,6 +2,44 @@
 # must be listed in crates/docs/src/images.rs IMAGES. Order does not matter.
 
 [[entry]]
+version = "0.2.130"
+date = "Oct 30"
+hero = "ios-agents-pill.jpg"
+hero_visual = "android-parity"
+
+[[entry.features]]
+id = "android-parity"
+title = "The iPhone app's features on Android"
+description = "The Android app now has the iPhone app's Sessions, Tasks and Settings tabs. Tasks holds your tasks, missions and the Supervisor. A session has the Needs you and subagents pills, review sheets, side chats, HTML pages, and the Claude Code /config panel and command cards. The composer has the / and $ lists, profiles, and the Access chip with Plan mode beside the effort and context chips. The pull requests board, Git pages, your Mac's settings pages, chat backgrounds, What's New and Docs are there too."
+details = "On a tablet, Tasks, missions, pull requests and Git open in the main column beside the session list."
+visual = "android-parity"
+
+[[entry.features]]
+id = "upstream-0-2-130"
+title = "From upstream Zeron: fx as a provider"
+description = "fx joins the providers as a native ACP agent. Install it from Settings > Providers, then set up its model provider with fx login or fx setup."
+details = "Direct links between devices now carry data over Tailscale."
+
+[[entry.improvements]]
+text = "On iPhone, a chat's Access menu has the Plan mode switch for agents that support it, and the chip reads \"· Plan\" while it is on. A new session's composer has the Access chip too, and the session starts with that access and plan."
+
+[[entry.improvements]]
+text = "On iPhone, the subagents pill sits on the pill row beside the side chat and terminal chips, one row closer to the composer."
+
+[[entry.improvements]]
+text = "Quick capture's project chip opens the list of every project as a dropdown under the chip, so the capture bar keeps its size."
+
+[[entry.improvements]]
+text = "Settings closes the way it opens: the panel and its blurred backdrop fade out together instead of vanishing."
+visual = "settings-close"
+
+[[entry.improvements]]
+text = "The sidebar's subagent count returns to 0 when a forked chat's turn ends, instead of staying on its finished subagents."
+
+[[entry.improvements]]
+text = "A read-only terminal on the phone names the computer it runs on instead of \"the Mac\"."
+
+[[entry]]
 version = "0.2.129"
 date = "Oct 29"
 hero = "claude-config-panel.jpg"
