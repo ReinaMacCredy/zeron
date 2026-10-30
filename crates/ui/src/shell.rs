@@ -1567,61 +1567,30 @@ fn settings_panel_bounds(viewport: gpui::Size<Pixels>) -> gpui::Bounds<Pixels> {
     )
 }
 
-fn settings_fade<E>(id: &'static str, reduced: bool, element: E) -> gpui::AnimationElement<E>
-where
-    E: Styled + IntoElement + 'static,
-{
-    let animation = if reduced {
-        gpui::Animation::new(Duration::from_millis(120))
-    } else {
-        motion::DIALOG_IN.animation()
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SettingsFade {
+    panel: f32,
+    backdrop: f32,
+    settled: bool,
+}
+
+fn settings_fade(closing: bool, elapsed: Duration, reduced: bool) -> SettingsFade {
+    let (panel, backdrop) = match (reduced, closing) {
+        (true, _) => (motion::SETTINGS_REDUCED, motion::SETTINGS_REDUCED),
+        (false, false) => (motion::SETTINGS_IN, motion::SETTINGS_IN),
+        (false, true) => (motion::SETTINGS_OUT, motion::SETTINGS_BACKDROP_OUT),
     };
-    element.with_animation(id, animation, |el, t| el.opacity(t))
-}
-
-fn settings_panel_in(
-    reduced: bool,
-    panel: gpui::Bounds<Pixels>,
-    element: gpui::Stateful<gpui::Div>,
-) -> gpui::AnimationElement<gpui::Stateful<gpui::Div>> {
-    if reduced {
-        return settings_fade("settings-panel-in", true, element);
+    let scale = motion::speed_scale();
+    let shown = |spec: MotionSpec| {
+        let total = spec.total().mul_f32(scale).as_secs_f32();
+        let progress = spec.progress(elapsed.as_secs_f32() / total.max(f32::EPSILON));
+        if closing { 1.0 - progress } else { progress }
+    };
+    SettingsFade {
+        panel: shown(panel),
+        backdrop: shown(backdrop),
+        settled: elapsed >= panel.total().max(backdrop.total()).mul_f32(scale),
     }
-    element.with_animation(
-        "settings-panel-in",
-        motion::DIALOG_IN.animation(),
-        move |el, t| {
-            let shrink = 0.02 * (1.0 - t);
-            let dx = panel.size.width * (shrink / 2.0);
-            let dy = panel.size.height * (shrink / 2.0);
-            el.opacity(t)
-                .left(panel.origin.x + dx)
-                .top(panel.origin.y + dy)
-                .w(panel.size.width - dx * 2.0)
-                .h(panel.size.height - dy * 2.0)
-        },
-    )
-}
-
-fn settings_close_duration(reduced: bool) -> Duration {
-    if reduced {
-        Duration::from_millis(120)
-    } else {
-        motion::MENU_OUT.total()
-    }
-}
-
-fn settings_panel_out(reduced: bool, panel: AnyElement) -> AnyElement {
-    div()
-        .absolute()
-        .inset_0()
-        .child(panel)
-        .with_animation(
-            "settings-panel-out",
-            gpui::Animation::new(settings_close_duration(reduced)),
-            |el, t| el.opacity(1.0 - t),
-        )
-        .into_any_element()
 }
 
 /// What the main outlet shows.
@@ -3365,7 +3334,8 @@ pub struct Shell {
     continuing: std::collections::HashSet<String>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     harnesses_sub: Option<Subscription>,
-    settings_closing: Option<SettingsSection>,
+    settings_opened_at: Option<std::time::Instant>,
+    settings_closing: Option<(SettingsSection, std::time::Instant)>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
     _settings_search_sub: Subscription,
@@ -4153,6 +4123,7 @@ impl Shell {
             continuing: Default::default(),
             harnesses_page: None,
             harnesses_sub: None,
+            settings_opened_at: None,
             settings_closing: None,
             settings_search,
             _settings_search_sub: settings_search_sub,
@@ -8742,12 +8713,14 @@ impl Shell {
         if route != self.route {
             settings::search::clear_reveal();
         }
-        if matches!(self.route, Route::Settings(_))
+        if let Route::Settings(section) = self.route
             && !matches!(route, Route::Settings(_))
-            && !self.settings_search.read(cx).text().is_empty()
         {
-            self.settings_search
-                .update(cx, |input, cx| input.set_text("", cx));
+            self.settings_closing = Some((section, motion::now()));
+            if !self.settings_search.read(cx).text().is_empty() {
+                self.settings_search
+                    .update(cx, |input, cx| input.set_text("", cx));
+            }
         }
         let was_pull_requests = matches!(self.route, Route::PullRequests);
         let will_show_pull_requests = matches!(route, Route::PullRequests);
@@ -9624,21 +9597,6 @@ impl Shell {
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
-        if let Route::Settings(section) = self.route {
-            self.settings_closing = Some(section);
-            let linger = settings_close_duration(self.reduced_motion);
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(linger).await;
-                this.update(cx, |shell, cx| {
-                    if !matches!(shell.route, Route::Settings(_)) {
-                        shell.settings_closing = None;
-                        cx.notify();
-                    }
-                })
-                .ok();
-            })
-            .detach();
-        }
         self.settings_search
             .update(cx, |input, cx| input.set_text("", cx));
         self.settings_focus_pending = false;
@@ -12686,6 +12644,7 @@ impl Shell {
     fn render_settings_page(
         &mut self,
         section: SettingsSection,
+        fade: SettingsFade,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -12881,10 +12840,11 @@ impl Shell {
             .top(panel.origin.y)
             .w(panel.size.width)
             .h(panel.size.height)
+            .opacity(fade.panel)
             .occlude()
             .child(crate::frost::frosted(
                 SETTINGS_PANEL_RADIUS,
-                crate::frost::MENU_BLUR,
+                crate::frost::MENU_BLUR * fade.panel,
                 card,
             ));
         let backdrop = div()
@@ -12908,23 +12868,21 @@ impl Shell {
                 .h(px(Theme::TITLEBAR_HEIGHT)),
             cx,
         );
-        let reduced = motion::reduced_motion(cx);
         div()
             .absolute()
             .top_0()
             .left_0()
             .w(viewport.width)
             .h(viewport.height)
-            .child(settings_fade(
-                "settings-backdrop-in",
-                reduced,
+            .child(
                 div()
                     .absolute()
                     .inset_0()
-                    .child(crate::frost::frosted(0.0, 8.0, backdrop)),
-            ))
+                    .opacity(fade.backdrop)
+                    .child(crate::frost::frosted(0.0, 8.0 * fade.backdrop, backdrop)),
+            )
             .child(drag)
-            .child(settings_panel_in(reduced, panel, panel_el))
+            .child(panel_el)
             .into_any_element()
     }
 
@@ -21531,13 +21489,32 @@ impl Render for Shell {
                     Route::Settings(section) => Some(section),
                     _ => None,
                 };
+                let reduced = motion::reduced_motion(cx);
                 let settings_panel = match (settings_route, self.settings_closing) {
-                    (Some(section), _) => Some(self.render_settings_page(section, window, cx)),
-                    (None, Some(section)) => {
-                        let panel = self.render_settings_page(section, window, cx);
-                        Some(settings_panel_out(self.reduced_motion, panel))
+                    (Some(section), _) => {
+                        self.settings_closing = None;
+                        let opened = *self.settings_opened_at.get_or_insert_with(motion::now);
+                        let fade = settings_fade(false, motion::since(opened), reduced);
+                        if !fade.settled {
+                            window.request_animation_frame();
+                        }
+                        Some(self.render_settings_page(section, fade, window, cx))
                     }
-                    (None, None) => None,
+                    (None, Some((section, closed))) => {
+                        self.settings_opened_at = None;
+                        let fade = settings_fade(true, motion::since(closed), reduced);
+                        if fade.settled {
+                            self.settings_closing = None;
+                            None
+                        } else {
+                            window.request_animation_frame();
+                            Some(self.render_settings_page(section, fade, window, cx))
+                        }
+                    }
+                    (None, None) => {
+                        self.settings_opened_at = None;
+                        None
+                    }
                 };
                 if settings_route.is_some() {
                     self.route = match self.settings_return_route {
@@ -27210,6 +27187,20 @@ mod settings_modal_regressions {
     }
 
     #[test]
+    fn settings_close_starts_from_the_shown_panel_and_ends_hidden() {
+        for reduced in [false, true] {
+            let opening = settings_fade(false, Duration::ZERO, reduced);
+            assert_eq!((opening.panel, opening.backdrop), (0.0, 0.0));
+            let closing = settings_fade(true, Duration::ZERO, reduced);
+            assert_eq!((closing.panel, closing.backdrop), (1.0, 1.0));
+            assert!(!closing.settled);
+            let closed = settings_fade(true, Duration::from_secs(10), reduced);
+            assert_eq!((closed.panel, closed.backdrop), (0.0, 0.0));
+            assert!(closed.settled);
+        }
+    }
+
+    #[test]
     fn open_route_names_a_section_or_reopens_the_remembered_one() {
         let remembered = SettingsSection::Notifications;
         assert_eq!(
@@ -27777,8 +27768,7 @@ mod settings_modal_regressions {
         });
         drop((first, second));
         shell.update(cx, |shell, cx| shell.close_settings(cx));
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(300));
+        std::thread::sleep(std::time::Duration::from_millis(300));
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear());
         shell.read_with(cx, |shell, _| assert!(shell.cloud_page.is_none()));
