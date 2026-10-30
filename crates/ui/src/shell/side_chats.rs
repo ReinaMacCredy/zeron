@@ -338,7 +338,6 @@ impl Shell {
                         | ComposerEvent::OpenSidechat { .. }
                         | ComposerEvent::BackgroundStarted
                         | ComposerEvent::OpenSubagent { .. }
-                        | ComposerEvent::OpenChat(_)
                         | ComposerEvent::OpenChanges
                         | ComposerEvent::StartMission(_)
                         | ComposerEvent::OpenTaskCenter(_)

@@ -3352,9 +3352,7 @@ pub struct Shell {
     source_control_page: Option<Entity<SourceControlPage>>,
     home_settings_page: Option<Entity<HomeSettingsPage>>,
     home_view: Option<Entity<crate::home::HomeView>>,
-    home_raise: Option<WidthTween>,
-    chat_work_focus: [FocusHandle; 2],
-    chat_work_slide: (usize, motion::IndicatorSlide),
+    new_work_scroll: gpui::ScrollHandle,
     _home_events: Option<Subscription>,
     appearance_page: Option<Entity<AppearancePage>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
@@ -3841,7 +3839,6 @@ impl Shell {
                 ComposerEvent::OpenComputerSetup { missing } => {
                     this.open_computer_permission_guide(missing.clone(), cx)
                 }
-                ComposerEvent::OpenChat(chat_id) => this.open_chat(chat_id.clone(), cx),
                 ComposerEvent::StartMission(start) => this.start_mission(start.clone(), cx),
                 ComposerEvent::PlanFirst => this.on_plan_first(cx),
                 ComposerEvent::OpenUsage => this.open_usage(cx),
@@ -4143,9 +4140,7 @@ impl Shell {
             source_control_page: None,
             home_settings_page: None,
             home_view: None,
-            home_raise: None,
-            chat_work_focus: [cx.focus_handle(), cx.focus_handle()],
-            chat_work_slide: (1, motion::IndicatorSlide::at(1.0, motion::now())),
+            new_work_scroll: gpui::ScrollHandle::new(),
             _home_events: None,
             appearance_page: None,
             files_settings_page: None,
@@ -8065,7 +8060,6 @@ impl Shell {
             | ComposerEvent::BackgroundStarted
             | ComposerEvent::WorkspaceCommand(_)
             | ComposerEvent::WorktreeSetup { .. }
-            | ComposerEvent::OpenChat(_)
             | ComposerEvent::OpenChanges
             | ComposerEvent::StartMission(_)
             | ComposerEvent::OpenTaskCenter(_)
@@ -16148,9 +16142,11 @@ impl Shell {
         Some(popover::modal("update-prompt-dialog", viewport, card))
     }
 
-    fn rail_item_active(&self, item: RailItem) -> bool {
+    fn rail_item_active(&self, item: RailItem, cx: &App) -> bool {
         match item {
-            RailItem::Home => matches!(self.route, Route::Chat | Route::Terminal),
+            RailItem::NewChat => {
+                matches!(self.route, Route::Chat) && self.state.read(cx).selected_chat.is_none()
+            }
             RailItem::Inbox => matches!(self.route, Route::Inbox),
             RailItem::Tasks => matches!(self.route, Route::Tasks | Route::TaskCenter),
             RailItem::PullRequests => matches!(self.route, Route::PullRequests),
@@ -16161,7 +16157,10 @@ impl Shell {
 
     fn activate_rail_item(&mut self, item: RailItem, cx: &mut Context<Self>) {
         match item {
-            RailItem::Home => self.open_home(cx),
+            RailItem::NewChat => {
+                self.settings_focus_pending = false;
+                self.open_new_session(None, cx);
+            }
             RailItem::Inbox => {
                 self.settings_focus_pending = false;
                 self.open_inbox(cx);
@@ -16211,7 +16210,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let item = entry.item;
-        let active = self.rail_item_active(item);
+        let active = self.rail_item_active(item, cx);
         let unseen = (item == RailItem::Tasks)
             .then(|| self.quick_capture_unseen(cx))
             .filter(|count| *count > 0);
@@ -16226,6 +16225,17 @@ impl Shell {
         .relative()
         .when_some(unseen, |el, count| el.child(app_rail::badge(count, theme)))
         .on_click(cx.listener(move |this, _, _, cx| this.activate_rail_item(item, cx)));
+        if item == RailItem::NewChat {
+            let tooltip: SharedString = format!(
+                "{} · {}",
+                entry.label,
+                crate::settings::badge_combo(self.settings.keymap.get(ShortcutId::NewSession))
+            )
+            .into();
+            return button
+                .tooltip(crate::settings::widgets::text_tooltip(tooltip))
+                .into_any_element();
+        }
         if item != RailItem::Settings {
             return button
                 .tooltip(crate::settings::widgets::text_tooltip(entry.label))
@@ -18072,27 +18082,15 @@ impl Shell {
             pickers.set_terminal_open(Some(terminal_open), cx)
         });
         let has_selection = self.state.read(cx).selected_chat.is_some();
-        let home = settings::home_widgets(cx);
-        let home_on = home.any_visible();
-        let home_raised = home_on && !home.collapsed;
         self.composer_dock
             .borrow_mut()
-            .set_hero_anchor(if home_raised { HOME_HERO_ANCHOR } else { 0.5 });
+            .set_hero_anchor(HOME_HERO_ANCHOR);
         let hero_floor = if self.composer.read(cx).config_panel_on_hero(cx) {
             crate::composer::claude_config::HERO_PANEL_TOP
         } else {
             0.0
         };
         self.composer_dock.borrow_mut().set_hero_floor(hero_floor);
-        let raise_target = if home_raised { 1.0 } else { 0.0 };
-        self.home_raise = Some(match self.home_raise.take() {
-            Some(tween) if (tween.to - raise_target).abs() > f32::EPSILON => {
-                WidthTween::new(self.eval_tween(Some(tween), tween.to), raise_target)
-            }
-            Some(tween) => tween,
-            None => WidthTween::new(raise_target, raise_target),
-        });
-        let raise = self.eval_tween(self.home_raise, raise_target);
         let transcript_geometry_ready =
             bottom_stack_measurement_matches(self.bottom_stack_has_composer.get(), has_selection);
         let ui_settings = settings::current(cx);
@@ -18193,12 +18191,8 @@ impl Shell {
             let bounds = self.composer.read(cx).surface_bounds();
             let opacity = new_thread_background_opacity(theme.is_frost());
             let full_height = new_thread_background_height(self.viewport_height);
-            let hero_height = match bounds.get().filter(|_| raise > 0.0) {
-                Some(pill) => motion::lerp(
-                    full_height,
-                    full_height.min(f32::from(pill.bottom()) + 24.0),
-                    raise,
-                ),
+            let hero_height = match bounds.get() {
+                Some(pill) => full_height.min(f32::from(pill.bottom()) + 24.0),
                 None => full_height,
             };
             div()
@@ -18338,7 +18332,6 @@ impl Shell {
             None
         };
         let home_grid = self.render_home_grid(
-            home_on,
             has_selection && !dock_frame.active,
             has_selection,
             chip_opacity,
@@ -18347,8 +18340,6 @@ impl Shell {
             window,
             cx,
         );
-        let chat_work_toggle = (chip_opacity > 0.001 && (!has_selection || dock_frame.active))
-            .then(|| self.render_chat_work_toggle(has_selection, theme, window, cx));
         let status = self.render_status_strip(composer_width, cx);
         let split_header = if self.split.is_some() && has_selection {
             split::SPLIT_HEADER_HEIGHT
@@ -18467,22 +18458,6 @@ impl Shell {
                     )
                 },
             )
-            .when_some(chat_work_toggle, |column, toggle| {
-                column.child(
-                    div()
-                        .absolute()
-                        .top(px(Theme::TITLEBAR_HEIGHT + 8.0))
-                        .left_0()
-                        .right_0()
-                        .flex()
-                        .justify_center()
-                        .opacity(chip_opacity)
-                        .child(toggle)
-                        .when(has_selection, |el| {
-                            el.child(div().absolute().inset_0().occlude())
-                        }),
-                )
-            })
             .when_some(home_grid, |column, grid| {
                 column.child(div().absolute().inset_0().child(
                     crate::terminal::dock::above_terminal(grid, terminal_geometry.clone()),
@@ -18601,7 +18576,6 @@ impl Shell {
     #[allow(clippy::too_many_arguments)]
     fn render_home_grid(
         &mut self,
-        home_on: bool,
         settled_in_chat: bool,
         has_selection: bool,
         opacity: f32,
@@ -18610,47 +18584,36 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !home_on || opacity <= 0.001 || settled_in_chat {
+        if opacity <= 0.001 || settled_in_chat {
             return None;
         }
         let pill = self.composer.read(cx).surface_bounds().get()?;
-        let home = match &self.home_view {
-            Some(home) => home.clone(),
-            None => {
-                let pickers = self.composer.read(cx).pickers().clone();
-                let home =
-                    cx.new(|cx| crate::home::HomeView::new(self.state.clone(), pickers, cx));
-                self._home_events = Some(cx.subscribe_in(
-                    &home,
-                    window,
-                    |this, _, event: &crate::home::HomeEvent, window, cx| match event {
-                        crate::home::HomeEvent::OpenChat(chat_id) => {
-                            this.open_chat(chat_id.clone(), cx)
-                        }
-                        crate::home::HomeEvent::OpenChatPanel(chat_id, panel) => {
-                            this.composer.update(cx, |composer, _| {
-                                composer.open_panel_when_bound(chat_id.clone(), *panel)
-                            });
-                            this.open_chat(chat_id.clone(), cx)
-                        }
-                        crate::home::HomeEvent::OpenPullRequest(url) => {
-                            crate::pull_request_detail::open_on_device(url, None, window, cx)
-                        }
-                        crate::home::HomeEvent::OpenSettings => {
-                            this.open_settings(SettingsSection::Home, cx)
-                        }
-                        crate::home::HomeEvent::OpenTaskCenter(task_id) => {
-                            this.open_task_center(task_id.clone(), cx)
-                        }
-                        crate::home::HomeEvent::OpenTasks => this.open_tasks(cx),
-                    },
-                ));
-                self.home_view = Some(home.clone());
-                home
-            }
-        };
-        home.update(cx, |home, _| {
-            home.set_composer_frame(column_width, f32::from(pill.size.width))
+        let cards = self.render_new_work_cards(f32::from(pill.size.width), window, cx);
+        let home = settings::home_widgets(cx).any_visible().then(|| {
+            let home = match &self.home_view {
+                Some(home) => home.clone(),
+                None => {
+                    let home = cx.new(|cx| crate::home::HomeView::new(self.state.clone(), cx));
+                    self._home_events = Some(cx.subscribe_in(
+                        &home,
+                        window,
+                        |this, _, event: &crate::home::HomeEvent, window, cx| match event {
+                            crate::home::HomeEvent::OpenPullRequest(url) => {
+                                crate::pull_request_detail::open_on_device(url, None, window, cx)
+                            }
+                            crate::home::HomeEvent::OpenSettings => {
+                                this.open_settings(SettingsSection::Home, cx)
+                            }
+                        },
+                    ));
+                    self.home_view = Some(home.clone());
+                    home
+                }
+            };
+            home.update(cx, |home, _| {
+                home.set_composer_frame(column_width, f32::from(pill.size.width))
+            });
+            home
         });
         let top = f32::from(pill.bottom()) + HOME_GRID_GAP;
         Some(
@@ -18661,7 +18624,28 @@ impl Shell {
                 .top(px(top))
                 .bottom(px(if notice_below { 72.0 } else { 0.0 }))
                 .opacity(opacity)
-                .child(home)
+                .child(
+                    crate::edge_fade::edge_faded(
+                        16.0,
+                        true,
+                        true,
+                        div()
+                            .id("new-work-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.new_work_scroll)
+                            .child(
+                                div()
+                                    .pb(px(48.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(24.0))
+                                    .child(cards)
+                                    .children(home),
+                            ),
+                    )
+                    .fade_overflow_y(&self.new_work_scroll),
+                )
                 .when(has_selection, |el| {
                     el.child(div().absolute().inset_0().occlude())
                 })

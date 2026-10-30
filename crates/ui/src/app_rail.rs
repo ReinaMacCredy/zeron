@@ -28,7 +28,7 @@ const HOVER_CARD_WIDTH: f32 = 272.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RailItem {
-    Home,
+    NewChat,
     Inbox,
     Tasks,
     PullRequests,
@@ -45,10 +45,10 @@ pub(crate) struct RailEntry {
 
 pub(crate) const TOP: [RailEntry; 5] = [
     RailEntry {
-        item: RailItem::Home,
-        id: "rail-home",
-        label: "Home",
-        icon: icons::HOME,
+        item: RailItem::NewChat,
+        id: "rail-new-chat",
+        label: "New chat",
+        icon: icons::PEN_NEW_SQUARE,
     },
     RailEntry {
         item: RailItem::Inbox,

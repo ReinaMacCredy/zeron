@@ -351,13 +351,10 @@ impl Default for FrostTuning {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HomeWidgets {
-    pub working_now: bool,
-    pub missions: bool,
     pub pull_requests: bool,
     pub git_activity: bool,
     pub this_mac: bool,
     pub running_services: bool,
-    pub recent_areas: bool,
     pub ci_failures: bool,
     pub services_all_ports: bool,
     pub collapsed: bool,
@@ -366,29 +363,23 @@ pub struct HomeWidgets {
 impl Default for HomeWidgets {
     fn default() -> Self {
         Self {
-            working_now: true,
-            missions: true,
             pull_requests: true,
             git_activity: true,
             this_mac: true,
             running_services: true,
-            recent_areas: true,
             ci_failures: true,
             services_all_ports: false,
-            collapsed: false,
+            collapsed: true,
         }
     }
 }
 
 impl HomeWidgets {
     pub fn any_visible(&self) -> bool {
-        self.working_now
-            || self.missions
-            || self.pull_requests
+        self.pull_requests
             || self.git_activity
             || self.this_mac
             || self.running_services
-            || self.recent_areas
             || self.ci_failures
     }
 }

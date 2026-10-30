@@ -982,7 +982,6 @@ pub struct AppState {
     /// [`Self::selected_space_row`] reads as `None` — healing must NOT
     /// re-select a project underneath it.
     pub no_project: bool,
-    work_space: Option<String>,
     /// The composer's device pick — where project-less sessions run, and the
     /// device whose projects the project picker lists. `None` falls back to
     /// the local device.
@@ -1221,7 +1220,6 @@ impl AppState {
             session_presentation: None,
             selected_space: None,
             no_project: false,
-            work_space: None,
             selected_device: None,
             canvas_target: None,
             selected_chat: None,
@@ -4023,7 +4021,6 @@ impl AppState {
         self.session_presentation = None;
         self.selected_space = None;
         self.no_project = false;
-        self.work_space = None;
         self.selected_device = None;
         self.canvas_target = None;
         self.selected_chat = None;
@@ -5104,9 +5101,6 @@ impl AppState {
                 }
             }
             None => {
-                if !self.no_project && self.selected_space.is_some() {
-                    self.work_space = self.selected_space.clone();
-                }
                 self.selected_device = self.effective_device_id();
                 self.no_project = true;
             }
@@ -5119,22 +5113,6 @@ impl AppState {
         self.selected_space = space_id;
         self.record_draft_target(cx);
         cx.notify();
-    }
-
-    pub fn select_work(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.selected_space_row().is_some() {
-            return true;
-        }
-        let Some(space_id) = self
-            .work_space
-            .clone()
-            .filter(|id| self.space_row(id).is_some())
-            .or_else(|| self.first_space_on_picked_device())
-        else {
-            return false;
-        };
-        self.select_space(Some(space_id), cx);
-        true
     }
 
     /// Synced seen marker: only fires when the chat is currently unseen
@@ -8074,37 +8052,6 @@ mod tests {
             state.select_device("empty-device".into(), cx);
             assert!(state.selected_space.is_none());
             assert_eq!(state.effective_device_id().as_deref(), Some("empty-device"));
-        });
-    }
-
-    #[gpui::test]
-    fn work_restores_the_project_left_for_chat(cx: &mut gpui::TestAppContext) {
-        let state = cx.new(|_| AppState::new());
-        state.update(cx, |state, cx| {
-            state.apply_spaces(vec![
-                space("s1", "dev", "/a", 1),
-                space("s2", "remote", "/b", 2),
-            ]);
-            state.select_space(Some("s2".into()), cx);
-            state.select_space(None, cx);
-            assert!(state.select_work(cx));
-            assert!(!state.no_project);
-            assert_eq!(state.selected_space.as_deref(), Some("s2"));
-            state.select_space(None, cx);
-            state.select_space(Some("s1".into()), cx);
-            assert!(state.select_work(cx));
-            assert_eq!(state.selected_space.as_deref(), Some("s1"));
-
-            state.select_space(Some("s2".into()), cx);
-            state.select_space(None, cx);
-            state.apply_spaces(vec![space("s1", "dev", "/a", 1)]);
-            assert!(state.select_work(cx));
-            assert_eq!(state.selected_space.as_deref(), Some("s1"));
-
-            state.select_space(None, cx);
-            state.apply_spaces(Vec::new());
-            assert!(!state.select_work(cx));
-            assert!(state.no_project);
         });
     }
 

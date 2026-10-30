@@ -1204,7 +1204,6 @@ impl Shell {
                     self.pending_workspace_command = Some(*command);
                 }
             },
-            ComposerEvent::OpenChat(target) => self.open_chat(target.clone(), cx),
             ComposerEvent::OpenChanges => {
                 self.open_chat(chat_id.to_string(), cx);
                 self.defer_in_active_window(cx, |shell, window, cx| {

@@ -380,7 +380,6 @@ impl Shell {
             | ComposerEvent::BackgroundStarted
             | ComposerEvent::WorkspaceCommand(_)
             | ComposerEvent::WorktreeSetup { .. }
-            | ComposerEvent::OpenChat(_)
             | ComposerEvent::OpenChanges
             | ComposerEvent::StartMission(_)
             | ComposerEvent::OpenTaskCenter(_)

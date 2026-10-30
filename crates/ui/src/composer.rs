@@ -97,19 +97,14 @@ const QUEUE_SIDE_INSET: f32 = 16.0;
 pub(crate) const QUEUE_COMPOSER_OVERLAP: f32 = 18.0;
 const SIDECHAT_TAB_HEIGHT: f32 = 24.0;
 const SIDECHAT_TAB_RADIUS: f32 = 10.0;
-/// The original floating selector rows use the same 20px chip height as the
-/// established-thread footer. Their surrounding rows own no plate or border.
-const NEW_THREAD_SELECTOR_ROW_HEIGHT: f32 = 20.0;
 const HERO_HEADLINE_LINE: f32 = 38.0;
 const HERO_HEADLINE_GAP: f32 = 18.0;
 const HERO_SUBTITLE_LINE: f32 = 20.0;
-const RUNNING_TAB_FADE: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT);
 const MISSION_BORDER: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE);
 const MISSION_PLACEHOLDER: motion::MotionSpec = motion::MotionSpec::new(220, motion::EASE);
 const MISSION_EXTRAS: motion::MotionSpec =
     motion::MotionSpec::new(280, motion::EASE).with_delay(60);
 const MISSION_SEND: motion::MotionSpec = motion::MotionSpec::new(280, motion::EASE_BOUNCE);
-const HOME_TAB_SLIDE: motion::MotionSpec = motion::MotionSpec::new(260, motion::EASE_BOUNCE);
 const START_MISSION_LABEL: &str = zeron_proto::mission::START_MISSION;
 
 struct MissionMotion {
@@ -6478,7 +6473,6 @@ pub enum ComposerEvent {
         title: String,
         frozen: bool,
     },
-    OpenChat(String),
     OpenChanges,
     StartMission(MissionStart),
     OpenTaskCenter(String),
@@ -7377,17 +7371,12 @@ pub struct Composer {
     #[cfg(test)]
     model_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     dock_frame: Option<crate::composer_dock::DockFrame>,
-    running_tab: bool,
-    running_tab_since: Option<Instant>,
-    running_ticker: Option<Task<()>>,
     mission: bool,
     pub(crate) mission_pending: bool,
     mission_plan_doc: bool,
     mission_review: bool,
     started_missions: HashMap<String, (String, SharedString)>,
     mission_motion: MissionMotion,
-    home_tab_slide: motion::Tween,
-    home_tab_bounds: Rc<[std::cell::Cell<Option<Bounds<Pixels>>>; 3]>,
     dock_reflow: crate::composer_dock::DockReflow,
     /// The shared clock owns this frame's height, including its final step.
     dock_height_changed: bool,
@@ -7440,11 +7429,6 @@ impl Composer {
             .dock_frame
             .is_none_or(|previous| previous.amount != frame.amount);
         self.dock_frame = Some(frame);
-        if frame.docked {
-            self.running_tab = false;
-            self.running_tab_since = None;
-            self.running_ticker = None;
-        }
         if frame.active {
             self.flip_morph = None;
             self.height_morph = None;
@@ -7464,25 +7448,6 @@ impl Composer {
 
     pub(crate) fn sidechat_tab_bounds(&self) -> Option<Bounds<Pixels>> {
         self.sidechat_tab_bounds.get()
-    }
-
-    fn set_running_tab(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.running_tab == on {
-            return;
-        }
-        self.running_tab = on;
-        self.running_tab_since = Some(motion::now());
-        self.running_ticker = on.then(|| {
-            cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(Duration::from_secs(1)).await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
-                    }
-                }
-            })
-        });
-        cx.notify();
     }
 
     fn mission_available(&self) -> bool {
@@ -7505,242 +7470,9 @@ impl Composer {
         }
         self.mission = on;
         if on {
-            self.set_running_tab(false, cx);
             cx.emit(ComposerEvent::PlanFirst);
         }
         cx.notify();
-    }
-
-    fn running_reveal(&self, window: &mut Window, cx: &App) -> f32 {
-        let target = if self.running_tab { 1.0 } else { 0.0 };
-        let Some(since) = self.running_tab_since else {
-            return target;
-        };
-        if motion::reduced_motion(cx) {
-            return target;
-        }
-        let total = RUNNING_TAB_FADE.total().as_secs_f32() * motion::speed_scale();
-        let raw = motion::since(since).as_secs_f32() / total.max(f32::EPSILON);
-        if raw < 1.0 {
-            window.request_animation_frame();
-        }
-        let progress = RUNNING_TAB_FADE.progress(raw);
-        if self.running_tab {
-            progress
-        } else {
-            1.0 - progress
-        }
-    }
-
-    fn render_home_tabs(
-        &mut self,
-        theme: &Theme,
-        running: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let now = motion::now();
-        let slot = if self.running_tab {
-            2.0
-        } else if self.mission {
-            1.0
-        } else {
-            0.0
-        };
-        if self.home_tab_slide.target() != slot {
-            self.home_tab_slide
-                .retarget(slot, HOME_TAB_SLIDE, motion::reduced_motion(cx), now);
-        }
-        if !self.home_tab_slide.settled_at(now) {
-            window.request_animation_frame();
-        }
-        let position = self.home_tab_slide.value_unclamped_at(now);
-        let current = slot as usize;
-        let amount = |slot: usize| (1.0 - (position - slot as f32).abs()).clamp(0.0, 1.0);
-        let tab = |id: &'static str,
-                   label: &'static str,
-                   glyph: Option<&'static str>,
-                   count: Option<usize>,
-                   slot: usize| {
-            let color = theme.text_muted.blend(theme.text.opacity(amount(slot)));
-            let measured = self.home_tab_bounds.clone();
-            div()
-                .id(id)
-                .debug_selector(move || id.to_string())
-                .relative()
-                .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT))
-                .px(px(8.0))
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .rounded(px(6.0))
-                .text_size(crate::typography::ui_rems(12.0))
-                .cursor_pointer()
-                .role(Role::Tab)
-                .aria_label(label)
-                .aria_selected(slot == current)
-                .when_some(count, |el, count| el.aria_description(count.to_string()))
-                .text_color(color)
-                .hover(|style| style.text_color(theme.text))
-                .when_some(glyph, |el, glyph| {
-                    el.child(crate::icons::icon(glyph).size(px(12.0)).text_color(color))
-                })
-                .child(label)
-                .when_some(count, |el, count| {
-                    el.child(div().text_color(theme.text_faint).child(count.to_string()))
-                })
-                .child(
-                    gpui::canvas(
-                        move |bounds, _, _| measured[slot].set(Some(bounds)),
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
-        };
-        let measured = self.home_tab_bounds.clone();
-        let tint = motion::mix(theme.wash(0.08), theme.accent.opacity(0.18), amount(1));
-        let indicator = gpui::canvas(
-            |_, _, _| {},
-            move |_, _, window, _| {
-                let slots = [measured[0].get(), measured[1].get(), measured[2].get()];
-                if let Some(bounds) = home_tab_indicator(slots, position) {
-                    window.paint_quad(gpui::fill(bounds, tint).corner_radii(px(6.0)));
-                }
-            },
-        )
-        .absolute()
-        .inset_0();
-        div()
-            .id("composer-home-tabs")
-            .role(Role::TabList)
-            .aria_label("New thread mode")
-            .relative()
-            .flex()
-            .items_center()
-            .gap(px(2.0))
-            .child(indicator)
-            .child(
-                tab("composer-tab-new-task", "New task", None, None, 0).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.set_running_tab(false, cx);
-                        this.set_mission(false, cx);
-                        window.focus(&this.input.focus_handle(cx), cx);
-                    },
-                )),
-            )
-            .child(
-                tab(
-                    "composer-tab-mission",
-                    "Mission Control",
-                    Some(crate::icons::MISSION_CONTROL),
-                    None,
-                    1,
-                )
-                .when(!self.mission, |el| el.child(kbd_hint("⇧Tab", theme)))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.set_mission(true, cx);
-                    window.focus(&this.input.focus_handle(cx), cx);
-                })),
-            )
-            .child(
-                tab(
-                    "composer-tab-running",
-                    "Running agents",
-                    None,
-                    Some(running),
-                    2,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.set_mission(false, cx);
-                    this.set_running_tab(true, cx)
-                })),
-            )
-    }
-
-    fn render_running_list(&self, theme: &Theme, reveal: f32, cx: &mut Context<Self>) -> gpui::Div {
-        let now = chrono::Utc::now();
-        let rows: Vec<(String, String, i64)> = {
-            let state = self.state.read(cx);
-            crate::home::running_agents(state, now)
-                .into_iter()
-                .map(|(chat, started)| {
-                    (
-                        chat.id.clone(),
-                        crate::home::chat_title(chat),
-                        (now - started).num_seconds(),
-                    )
-                })
-                .collect()
-        };
-        let entity = cx.entity_id();
-        div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .top(px(6.0 * (1.0 - reveal)))
-            .bottom_0()
-            .opacity(reveal)
-            .when(self.running_tab, |el| el.occlude())
-            .child(
-                div()
-                    .id("composer-running-list")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .p(px(8.0))
-                    .when(rows.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .px(px(10.0))
-                                .py(px(8.0))
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .text_color(theme.text_faint)
-                                .child("No agents running"),
-                        )
-                    })
-                    .children(rows.into_iter().map(|(chat_id, title, secs)| {
-                        let id: SharedString = format!("composer-running-{chat_id}").into();
-                        div()
-                            .id(id.clone())
-                            .h(px(32.0))
-                            .px(px(10.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .rounded(px(10.0))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(theme.wash(0.05)))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(ComposerEvent::OpenChat(chat_id.clone()))
-                            }))
-                            .child(crate::loaders::mini_glyph_spinner(
-                                format!("{id}-spin"),
-                                2.0,
-                                theme.glyph,
-                                entity,
-                                cx,
-                            ))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .text_size(crate::typography::ui_rems(13.0))
-                                    .text_color(theme.text)
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .font_family(theme.font_mono.clone())
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_faint)
-                                    .child(zeron_proto::background::elapsed_label(secs)),
-                            )
-                    })),
-            )
     }
 
     /// The picker entity, for the shell's canvas target selectors.
@@ -7995,17 +7727,12 @@ impl Composer {
             #[cfg(test)]
             model_bounds: Default::default(),
             dock_frame: None,
-            running_tab: false,
-            running_tab_since: None,
-            running_ticker: None,
             mission: false,
             mission_pending: false,
             mission_plan_doc: true,
             mission_review: true,
             started_missions: HashMap::new(),
             mission_motion: MissionMotion::at(false, motion::now()),
-            home_tab_slide: motion::Tween::at(0.0, motion::now()),
-            home_tab_bounds: Default::default(),
             dock_reflow: Default::default(),
             dock_height_changed: false,
             dock_clearance_correction: 0.0,
@@ -14558,6 +14285,61 @@ impl Composer {
             .into_any_element()
     }
 
+    fn render_plan_switch(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let on = self.mission;
+        let t = self.mission_motion.border.value_at(motion::now());
+        let tone = motion::mix(theme.text_muted, theme.accent, t);
+        let track = div()
+            .relative()
+            .flex_none()
+            .w(px(22.0))
+            .h(px(13.0))
+            .rounded_full()
+            .bg(motion::mix(theme.wash(0.14), theme.accent, t))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(2.0))
+                    .left(px(2.0 + 9.0 * t))
+                    .size(px(9.0))
+                    .rounded_full()
+                    .bg(theme.surface_card)
+                    .shadow_sm(),
+            );
+        div()
+            .id("composer-plan-switch")
+            .debug_selector(|| "composer-plan-switch".into())
+            .role(Role::Switch)
+            .aria_label("Plan")
+            .aria_toggled(if on {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
+            .flex_none()
+            .h(px(28.0))
+            .px(px(9.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded(px(8.0))
+            .bg(theme.accent.opacity(0.12 * t))
+            .when(!on, |el| el.hover(|style| style.bg(theme.wash(0.06))))
+            .text_size(crate::typography::ui_rems(12.5))
+            .text_color(tone)
+            .cursor_pointer()
+            .tooltip(crate::settings::widgets::text_tooltip(
+                "Plan first: the agent plans and waits for your OK (⇧Tab)",
+            ))
+            .child(track)
+            .child("Plan")
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.set_mission(!on, cx);
+                window.focus(&this.input.focus_handle(cx), cx);
+            }))
+            .into_any_element()
+    }
+
     fn render_mission_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let on = self.mission;
         let t = self.mission_motion.border.value_at(motion::now());
@@ -14785,38 +14567,6 @@ fn mission_glow(accent: gpui::Hsla, amount: f32) -> Vec<gpui::BoxShadow> {
             inset: false,
         },
     ]
-}
-
-fn home_tab_indicator(slots: [Option<Bounds<Pixels>>; 3], position: f32) -> Option<Bounds<Pixels>> {
-    let from = (position.floor() as i32).clamp(0, 1) as usize;
-    let (a, b) = (slots[from]?, slots[from + 1]?);
-    let t = position - from as f32;
-    Some(Bounds::new(
-        point(
-            px(motion::lerp(f32::from(a.left()), f32::from(b.left()), t)),
-            a.top(),
-        ),
-        size(
-            px(motion::lerp(
-                f32::from(a.size.width),
-                f32::from(b.size.width),
-                t,
-            )),
-            a.size.height,
-        ),
-    ))
-}
-
-fn kbd_hint(text: &'static str, theme: &Theme) -> gpui::Div {
-    div()
-        .flex_none()
-        .px(px(5.0))
-        .rounded(px(5.0))
-        .border_1()
-        .border_color(theme.border)
-        .text_size(crate::typography::ui_rems(10.5))
-        .text_color(theme.text_faint)
-        .child(text)
 }
 
 /// The composer's send control: a size-7 filled circle with an up arrow,
@@ -15792,6 +15542,7 @@ impl Render for Composer {
             });
         let extras = self.mission_motion.extras.value_at(mission_now);
         let clip = self.mission_motion.placeholder.value_at(mission_now);
+        let mission_in_strip = new_thread_chrome_opacity > 0.0 && self.mission_available();
         let leading = if !self.mission_motion.extras.settled_at(mission_now)
             || !self.mission_motion.placeholder.settled_at(mission_now)
         {
@@ -15809,7 +15560,7 @@ impl Render for Composer {
                             .child(attach),
                     )
                 })
-                .when(expanded && extras > 0.0, |row| {
+                .when(expanded && extras > 0.0 && !mission_in_strip, |row| {
                     row.child(
                         div()
                             .relative()
@@ -15819,10 +15570,31 @@ impl Render for Composer {
                     )
                 })
                 .into_any_element()
+        } else if self.mission && mission_in_strip {
+            div().into_any_element()
         } else if self.mission {
             self.render_mission_controls(&theme, cx)
         } else {
             attach.into_any_element()
+        };
+        let leading = if mission_in_strip {
+            let project = self
+                .pickers
+                .update(cx, |pickers, cx| pickers.render_new_thread_project(cx));
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(leading)
+                .child(div().opacity(new_thread_chrome_opacity).child(project))
+                .child(
+                    div()
+                        .opacity(new_thread_chrome_opacity)
+                        .child(self.render_plan_switch(&theme, cx)),
+                )
+                .into_any_element()
+        } else {
+            leading
         };
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
@@ -15847,7 +15619,6 @@ impl Render for Composer {
                     if !this.pickers.read(cx).is_open()
                         && !this.review_menu_open()
                         && !this.comments_menu_open()
-                        && !this.running_tab
                     {
                         window.focus(&this.input.focus_handle(cx), cx);
                         window.prevent_default();
@@ -15877,12 +15648,6 @@ impl Render for Composer {
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
         // while the model selector stays in the right action group.
-        let running_reveal = if self.dock_frame.is_some() {
-            self.running_reveal(window, cx)
-        } else {
-            0.0
-        };
-        let prompt_opacity = 1.0 - running_reveal;
         let cluster_dy = morph_cluster_dy(layout_morph_t);
         let action_inset = morph_cluster_inset(expanded, layout_morph_t);
         let surface_width = self.last_available_width.map_or_else(
@@ -15970,7 +15735,6 @@ impl Render for Composer {
                         .px(px(16.0))
                         .pt(px(text_pt))
                         .pb(px(4.0))
-                        .opacity(prompt_opacity)
                         .child(self.render_input_with_completion()),
                 )
                 .child(
@@ -15978,7 +15742,6 @@ impl Render for Composer {
                         .absolute()
                         .left_0()
                         .right_0()
-                        .opacity(prompt_opacity)
                         .bottom(px(-cluster_dy))
                         .h(px(ACTIONS_ROW_HEIGHT))
                         .flex()
@@ -16011,9 +15774,6 @@ impl Render for Composer {
                         )
                         .children(voice_track),
                 )
-                .when(running_reveal > 0.0, |el| {
-                    el.child(self.render_running_list(&theme, running_reveal, cx))
-                })
         } else {
             // Compact pill: attachment on the left, input in the middle,
             // then model, microphone and Send on the right, all on one 47px line.
@@ -16093,11 +15853,6 @@ impl Render for Composer {
                         .children(voice_track),
                 )
         };
-        let new_thread_project =
-            (new_thread_chrome_opacity > 0.0 && !self.state.read(cx).no_project).then(|| {
-                self.pickers
-                    .update(cx, |pickers, cx| pickers.render_new_thread_project(cx))
-            });
         let new_thread_git_selectors = (new_thread_chrome_opacity > 0.0)
             .then(|| {
                 self.pickers.update(cx, |pickers, cx| {
@@ -16164,10 +15919,6 @@ impl Render for Composer {
         // the top-right, no surrounding surface. Cancel the column gap as the
         // row collapses so the pill never jumps at the route boundary.
         let container = if self.dock_frame.is_some() {
-            let running =
-                crate::home::running_agents(self.state.read(cx), chrono::Utc::now()).len();
-            let tabs = (new_thread_chrome_opacity > 0.0)
-                .then(|| self.render_home_tabs(&theme, running, window, cx));
             let playbook_hero = self.playbook_hero(cx);
             let subtitle = playbook_hero
                 .as_ref()
@@ -16197,13 +15948,9 @@ impl Render for Composer {
                     .line_height(px(HERO_HEADLINE_LINE))
                     .text_color(theme.text)
                     .opacity(new_thread_chrome_opacity)
-                    .map(|el| match (playbook_hero, new_thread_project) {
-                        (Some((question, _)), _) => el.child(question),
-                        (None, Some(project)) => el
-                            .child("What should we build in")
-                            .child(div().ml(px(4.0)).min_w_0().child(project))
-                            .child("?"),
-                        (None, None) => el.child("What should we work on?"),
+                    .map(|el| match playbook_hero {
+                        Some((question, _)) => el.child(question),
+                        None => el.child("What should we work on?"),
                     })
             });
             let subtitle = subtitle
@@ -16227,36 +15974,7 @@ impl Render for Composer {
                         .children(code_spans(&subtitle, &theme))
                 });
             // Floating selectors share the surface's origin and never change its height.
-            container
-                .relative()
-                .children(headline)
-                .children(subtitle)
-                .child(
-                    div()
-                        .id("dock-target-selectors")
-                        .absolute()
-                        .top(px(-28.0))
-                        .left(px(Theme::SPACE_LG + 4.0))
-                        .right(px(Theme::SPACE_LG + 10.0))
-                        .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT))
-                        .flex()
-                        .items_start()
-                        .opacity(new_thread_chrome_opacity)
-                        .children(tabs),
-                )
-        } else if new_thread_chrome > 0.0 {
-            container.child(
-                div()
-                    .w_full()
-                    .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT * new_thread_chrome))
-                    .mb(px(-Theme::SPACE_SM * (1.0 - new_thread_chrome)))
-                    .px(px(10.0))
-                    .flex()
-                    .items_start()
-                    .justify_end()
-                    .opacity(new_thread_chrome_opacity)
-                    .children(new_thread_project),
-            )
+            container.relative().children(headline).children(subtitle)
         } else {
             container
         };
@@ -16300,6 +16018,8 @@ impl Render for Composer {
                     )
                 })
             });
+            let strip_mission_controls = (mission_in_strip && self.mission)
+                .then(|| self.render_mission_controls(&theme, cx));
             let terminal_button = self.pickers.read(cx).render_terminal_button(cx);
             let mission_chip = (session_chrome_opacity > 0.0
                 && self.mission_available()
@@ -16324,29 +16044,19 @@ impl Render for Composer {
                                 .flex()
                                 .items_center()
                                 .opacity(new_thread_chrome_opacity)
-                                .map(|row| {
-                                    if self.mission {
-                                        row.child(
+                                .gap(px(4.0))
+                                .when_some(new_thread_strip, |row, (device, permission)| {
+                                    row.child(div().flex_none().child(device))
+                                        .child(
                                             div()
-                                                .text_size(crate::typography::ui_rems(11.5))
-                                                .text_color(theme.text_faint)
-                                                .child("⇧Tab: back to New task"),
+                                                .flex_1()
+                                                .min_w_0()
+                                                .children(new_thread_git_selectors),
                                         )
-                                    } else {
-                                        row.gap(px(4.0)).when_some(
-                                            new_thread_strip,
-                                            |row, (device, permission)| {
-                                                row.child(div().flex_none().child(device))
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .children(new_thread_git_selectors),
-                                                    )
-                                                    .child(div().flex_none().child(permission))
-                                            },
-                                        )
-                                    }
+                                        .child(div().flex_none().child(permission))
+                                })
+                                .when_some(strip_mission_controls, |row, controls| {
+                                    row.child(div().opacity(extras).child(controls))
                                 }),
                         )
                     })
@@ -21751,26 +21461,6 @@ mod tests {
     }
 
     #[test]
-    fn home_tab_indicator_lands_on_each_tab_and_overshoots_past_the_last() {
-        let tab = |left: f32, width: f32| {
-            Some(Bounds::new(
-                point(px(left), px(10.0)),
-                size(px(width), px(20.0)),
-            ))
-        };
-        let slots = [tab(0.0, 60.0), tab(64.0, 120.0), tab(188.0, 100.0)];
-        for (slot, position) in [(0, 0.0), (1, 1.0), (2, 2.0)] {
-            assert_eq!(home_tab_indicator(slots, position), slots[slot]);
-        }
-        let between = home_tab_indicator(slots, 0.5).unwrap();
-        assert_eq!(between.left(), px(32.0));
-        assert_eq!(between.size.width, px(90.0));
-        let past = home_tab_indicator(slots, 2.05).unwrap();
-        assert!(past.left() > px(188.0));
-        assert_eq!(home_tab_indicator([slots[0], None, slots[2]], 0.5), None);
-    }
-
-    #[test]
     fn cluster_inset_glides_between_the_source_endpoints() {
         assert_eq!(ACTION_UTILITY_GAP, 2.0);
         assert_eq!(ACTION_PRIMARY_GAP, Theme::SPACE_SM);
@@ -21824,7 +21514,6 @@ mod tests {
 
     #[test]
     fn new_thread_selectors_restore_the_compact_floating_row() {
-        assert_eq!(NEW_THREAD_SELECTOR_ROW_HEIGHT, 20.0);
         assert_eq!(SESSION_FOOTER_HEIGHT, 24.0);
     }
 

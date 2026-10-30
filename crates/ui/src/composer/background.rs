@@ -193,18 +193,9 @@ pub(crate) fn sidebar_ring_mark(count: usize, theme: &Theme) -> Div {
         })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BackgroundPanel {
-    Subagents,
-    Shells,
-}
-
-const PANEL_WAIT: Duration = Duration::from_secs(3);
-
 #[derive(Default)]
 pub(crate) struct BackgroundUi {
     chat: Option<String>,
-    pending: Option<(String, BackgroundPanel, Instant)>,
     roster: Popup<Instant>,
     agents_pill_since: Option<Instant>,
     shells_pill_since: Option<Instant>,
@@ -399,7 +390,6 @@ impl Composer {
         if self.background.chat.as_deref() != Some(chat_id.as_str()) {
             self.background = BackgroundUi {
                 chat: Some(chat_id.clone()),
-                pending: self.background.pending.take(),
                 ..Default::default()
             };
         }
@@ -415,19 +405,6 @@ impl Composer {
                 }
                 Some(true) if !short => self.background.widen = Some(false),
                 _ => {}
-            }
-        }
-        if let Some((pending_chat, panel, asked)) = self.background.pending.take()
-            && asked.elapsed() < PANEL_WAIT
-        {
-            match panel {
-                BackgroundPanel::Subagents if pending_chat == chat_id && !agents.is_empty() => {
-                    self.background.roster.open(motion::now());
-                }
-                BackgroundPanel::Shells if pending_chat == chat_id && !shells.is_empty() => {
-                    self.background.shells.open(());
-                }
-                _ => self.background.pending = Some((pending_chat, panel, asked)),
             }
         }
         if agents.is_empty() {
@@ -571,10 +548,6 @@ impl Composer {
         let shell_pill = (!shells.is_empty())
             .then(|| self.render_shell_pill(&shells, stoppable, now_ms, shells_in, &theme, cx));
         Some((agents_pill.into_iter().chain(shell_pill).collect(), roster))
-    }
-
-    pub(crate) fn open_panel_when_bound(&mut self, chat_id: String, panel: BackgroundPanel) {
-        self.background.pending = Some((chat_id, panel, Instant::now()));
     }
 
     pub(super) fn roster_open(&self) -> bool {

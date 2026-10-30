@@ -4952,18 +4952,6 @@ impl Pickers {
         self.close(cx);
     }
 
-    pub(crate) fn pick_work(&mut self, cx: &mut Context<Self>) -> bool {
-        let picked = self.state.update(cx, |s, cx| {
-            s.auto_selected = true;
-            s.select_work(cx)
-        });
-        if picked {
-            self.remember_target(cx);
-            self.close(cx);
-        }
-        picked
-    }
-
     fn pick_device(&mut self, device_id: String, cx: &mut Context<Self>) {
         self.state
             .update(cx, |s, cx| s.select_device(device_id, cx));
@@ -6170,13 +6158,18 @@ impl Pickers {
                 PickerKind::Space.a11y_name()
             )))
             .aria_expanded(open)
+            .tooltip(crate::settings::widgets::text_tooltip(
+                "Where the agent works",
+            ))
+            .h(px(28.0))
             .flex()
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            .px(px(4.0))
+            .px(px(9.0))
             .rounded(px(8.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_size(crate::typography::ui_rems(12.5))
+            .text_color(theme.text_muted)
             .bg(if open {
                 theme.element_hover
             } else {
@@ -6192,10 +6185,16 @@ impl Pickers {
                 }),
             )
             .on_click(cx.listener(|this, _, window, cx| this.toggle(PickerKind::Space, window, cx)))
-            .child(div().min_w_0().max_w(px(360.0)).truncate().child(label))
+            .child(
+                crate::icons::icon(crate::icons::FOLDER)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(div().min_w_0().max_w(px(180.0)).truncate().child(label))
             .child(
                 crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                    .size(px(18.0))
+                    .size(px(12.0))
                     .flex_none()
                     .text_color(theme.text_muted.opacity(0.7)),
             );

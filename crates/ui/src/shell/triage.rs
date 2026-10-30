@@ -73,13 +73,43 @@ struct ShownRow {
     kind: NeedKind,
 }
 
+struct Exits {
+    shown: Vec<ShownRow>,
+    leaving: Vec<(usize, ShownRow, crate::motion::Tween)>,
+}
+
+impl Default for Exits {
+    fn default() -> Self {
+        Self {
+            shown: Vec::new(),
+            leaving: Vec::new(),
+        }
+    }
+}
+
+impl Exits {
+    fn update(&mut self, rows: Vec<ShownRow>, reduced: bool, now: std::time::Instant) {
+        let kept = |row: &ShownRow| rows.iter().any(|shown| shown.chat_id == row.chat_id);
+        for (ix, old) in self.shown.iter().enumerate() {
+            if !kept(old) {
+                let mut tween = crate::motion::Tween::at(1.0, now);
+                tween.retarget(0.0, crate::motion::SHELF_CLOSE, reduced, now);
+                self.leaving.push((ix, old.clone(), tween));
+            }
+        }
+        self.leaving
+            .retain(|(_, row, tween)| !tween.settled_at(now) && !kept(row));
+        self.shown = rows;
+    }
+}
+
 #[derive(Default)]
 pub(super) struct TriageTray {
     popup: popover::Popup<()>,
     focus: Option<FocusHandle>,
     expanded: Option<(String, crate::motion::Tween)>,
-    shown: Vec<ShownRow>,
-    leaving: Vec<(usize, ShownRow, crate::motion::Tween)>,
+    rows: Exits,
+    card_rows: Exits,
     ticker: Option<Task<()>>,
     asks: Vec<(String, usize, bool)>,
     frame: std::rc::Rc<Triage>,
@@ -197,8 +227,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if self.triage.popup.get().is_none() {
-            self.triage.shown.clear();
-            self.triage.leaving.clear();
+            self.triage.rows = Exits::default();
         }
         self.triage.popup.open(());
         let focus = self
@@ -510,17 +539,7 @@ impl Shell {
                 kind: row.kind.clone(),
             })
             .collect();
-        for (ix, old) in self.triage.shown.iter().enumerate() {
-            if !shown.iter().any(|row| row.chat_id == old.chat_id) {
-                let mut tween = crate::motion::Tween::at(1.0, now);
-                tween.retarget(0.0, crate::motion::SHELF_CLOSE, reduced, now);
-                self.triage.leaving.push((ix, old.clone(), tween));
-            }
-        }
-        self.triage.leaving.retain(|(_, row, tween)| {
-            !tween.settled_at(now) && !shown.iter().any(|shown| shown.chat_id == row.chat_id)
-        });
-        self.triage.shown = shown.clone();
+        self.triage.rows.update(shown.clone(), reduced, now);
         if self
             .triage
             .expanded
@@ -534,7 +553,7 @@ impl Shell {
             .iter()
             .map(|row| self.render_need_row(row, &popup, window, cx))
             .collect();
-        for (ix, row, tween) in self.triage.leaving.clone() {
+        for (ix, row, tween) in self.triage.rows.leaving.clone() {
             animating = true;
             let t = tween.value_at(now);
             let ghost = div()
@@ -1033,6 +1052,538 @@ impl Shell {
             })
             .into_any_element()
     }
+}
+
+impl Shell {
+    pub(super) fn render_new_work_cards(
+        &mut self,
+        width: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let triage = self.triage_frame();
+        let now = crate::motion::now();
+        let reduced = crate::motion::reduced_motion(cx);
+        let rows: Vec<ShownRow> = triage
+            .needs
+            .iter()
+            .map(|row| ShownRow {
+                chat_id: row.chat_id.clone(),
+                title: self.triage_title(&row.chat_id, cx),
+                meta: card_need_meta(
+                    &row.kind,
+                    self.state
+                        .read(cx)
+                        .session_for(&row.chat_id)
+                        .map(|session| session.updated_at),
+                ),
+                kind: row.kind.clone(),
+            })
+            .collect();
+        self.triage.card_rows.update(rows.clone(), reduced, now);
+        let tray_mounted = self.triage.popup.get().is_some();
+        if !tray_mounted
+            && self
+                .triage
+                .expanded
+                .as_ref()
+                .is_some_and(|(id, _)| !rows.iter().any(|row| &row.chat_id == id))
+        {
+            self.triage.expanded = None;
+        }
+        let mut animating = self
+            .triage
+            .expanded
+            .as_ref()
+            .is_some_and(|(_, tween)| !tween.settled_at(now));
+
+        let mut need_rows: Vec<AnyElement> = rows
+            .iter()
+            .take(CARD_ROWS)
+            .map(|row| self.render_card_need_row(row, tray_mounted, &theme, window, cx))
+            .collect();
+        for (ix, row, tween) in self.triage.card_rows.leaving.clone() {
+            if ix >= CARD_ROWS {
+                continue;
+            }
+            animating = true;
+            let t = tween.value_at(now);
+            let ghost = div()
+                .h(px(CARD_ROW_HEIGHT * t))
+                .opacity(t)
+                .overflow_hidden()
+                .child(card_row_shell(
+                    &theme,
+                    SharedString::from(format!("card-leaving-{}", row.chat_id)),
+                    need_tint(&row.kind, &theme),
+                    row.title.clone(),
+                    row.meta.clone(),
+                    need_tint(&row.kind, &theme),
+                ))
+                .into_any_element();
+            need_rows.insert(ix.min(need_rows.len()), ghost);
+        }
+
+        let working = chat_status_tone(zeron_proto::ChatIndicator::Working, &theme).2;
+        let run_rows: Vec<AnyElement> = triage
+            .running
+            .iter()
+            .take(CARD_ROWS)
+            .map(|row| {
+                let chat_id = row.chat_id.clone();
+                let state = self.state.read(cx);
+                let project = state
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == chat_id)
+                    .and_then(|chat| self.chat_project(chat, cx));
+                let doing = match row.agents.len() {
+                    0 => "Working".to_string(),
+                    1 => "1 agent".to_string(),
+                    n => format!("{n} agents"),
+                };
+                let meta = project.map_or(doing.clone(), |project| format!("{project} · {doing}"));
+                let title = self.triage_title(&chat_id, cx);
+                card_row_shell(
+                    &theme,
+                    SharedString::from(format!("card-run-{chat_id}")),
+                    working,
+                    title.clone(),
+                    meta,
+                    theme.text_muted,
+                )
+                .role(gpui::Role::Button)
+                .aria_label(title)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.wash(0.05)))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)))
+                .into_any_element()
+            })
+            .collect();
+
+        let recent = self.recent_card_rows(cx);
+        let done = chat_status_tone(zeron_proto::ChatIndicator::Completed, &theme).2;
+        let recent_rows: Vec<AnyElement> = recent
+            .into_iter()
+            .map(|(chat_id, title, meta, completed)| {
+                let target = chat_id.clone();
+                card_row_shell(
+                    &theme,
+                    SharedString::from(format!("card-recent-{chat_id}")),
+                    if completed { done } else { theme.text_faint },
+                    title.clone(),
+                    meta,
+                    theme.text_muted,
+                )
+                .role(gpui::Role::Button)
+                .aria_label(title)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.wash(0.05)))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_chat(target.clone(), cx)))
+                .into_any_element()
+            })
+            .collect();
+
+        let more = |id: &'static str, hidden: usize, label: String, cx: &mut Context<Self>| {
+            (hidden > 0).then(|| {
+                div()
+                    .id(id)
+                    .debug_selector(move || id.into())
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(label.clone()))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(6.0))
+                    .py(px(5.0))
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .text_size(crate::typography::ui_rems(11.5))
+                    .text_color(theme.text_muted)
+                    .hover(|s| s.bg(theme.wash(0.05)).text_color(theme.text))
+                    .child(SharedString::from(label))
+                    .child(popover::kbd_hint(
+                        &theme,
+                        &crate::settings::badge_combo(
+                            self.settings.keymap.get(ShortcutId::ToggleTray),
+                        ),
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_triage(None, window, cx)))
+                    .into_any_element()
+            })
+        };
+        let needs_more = more(
+            "card-needs-more",
+            triage.needs.len().saturating_sub(CARD_ROWS),
+            format!(
+                "{} more in the tray",
+                triage.needs.len().saturating_sub(CARD_ROWS)
+            ),
+            cx,
+        );
+        let running_more = more(
+            "card-running-more",
+            triage.running.len().saturating_sub(CARD_ROWS),
+            format!("{} more", triage.running.len().saturating_sub(CARD_ROWS)),
+            cx,
+        );
+
+        let gap = 10.0;
+        let unit = ((width - 2.0 * gap) / 3.4).max(0.0);
+        if animating {
+            window.request_animation_frame();
+        }
+        div()
+            .id("new-work-cards")
+            .debug_selector(|| "new-work-cards".into())
+            .w(px(width))
+            .mx_auto()
+            .flex()
+            .items_start()
+            .gap(px(gap))
+            .text_size(crate::typography::ui_rems(13.0))
+            .child(work_card(
+                &theme,
+                "card-needs",
+                icons::BELL,
+                "Needs you",
+                Some(triage.needs.len()),
+                unit * 1.4,
+                need_rows,
+                needs_more,
+            ))
+            .child(work_card(
+                &theme,
+                "card-running",
+                icons::SPEEDOMETER,
+                "Running",
+                Some(triage.running.len()),
+                unit,
+                run_rows,
+                running_more,
+            ))
+            .child(work_card(
+                &theme,
+                "card-recent",
+                icons::CLOCK_CIRCLE,
+                "Recent",
+                None,
+                unit,
+                recent_rows,
+                None,
+            ))
+            .into_any_element()
+    }
+
+    fn render_card_need_row(
+        &mut self,
+        row: &ShownRow,
+        tray_mounted: bool,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chat_id = row.chat_id.clone();
+        let expanded = self
+            .triage
+            .expanded
+            .as_ref()
+            .filter(|(id, _)| id == &row.chat_id)
+            .map(|(_, tween)| tween.value_at(crate::motion::now()));
+        let action: AnyElement = match &row.kind {
+            NeedKind::Failed | NeedKind::Asking(None) => {
+                let target = chat_id.clone();
+                card_button(theme, false)
+                    .id(SharedString::from(format!("card-open-{chat_id}")))
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Open {}", row.title))
+                    .child("Open")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.open_chat(target.clone(), cx);
+                    }))
+                    .into_any_element()
+            }
+            kind => {
+                let target = chat_id.clone();
+                let label = if kind.plan() { "Review" } else { "Answer" };
+                card_button(theme, true)
+                    .id(SharedString::from(format!("card-expand-{chat_id}")))
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("{label} {}", row.title))
+                    .aria_expanded(expanded.is_some())
+                    .child(label)
+                    .child(
+                        icon(icons::LUCIDE_CHEVRON_DOWN)
+                            .size(px(12.0))
+                            .text_color(theme.accent)
+                            .when(expanded.is_some(), |el| {
+                                el.with_transformation(gpui::Transformation::rotate(
+                                    gpui::percentage(0.5),
+                                ))
+                            }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        let open = this
+                            .triage
+                            .expanded
+                            .as_ref()
+                            .is_some_and(|(id, _)| id == &target);
+                        this.collapse_triage_row(cx);
+                        if !open {
+                            this.expand_triage_row(target.clone(), cx);
+                        }
+                    }))
+                    .into_any_element()
+            }
+        };
+        let tint = need_tint(&row.kind, theme);
+        let open_target = chat_id.clone();
+        let head = card_row_shell(
+            theme,
+            SharedString::from(format!("card-need-{chat_id}")),
+            tint,
+            row.title.clone(),
+            row.meta.clone(),
+            tint,
+        )
+        .role(gpui::Role::Button)
+        .aria_label(row.title.clone())
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.wash(0.05)))
+        .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open_target.clone(), cx)))
+        .child(action);
+        let body = expanded.filter(|_| !tray_mounted).and_then(|shown| {
+            let panel = match &row.kind {
+                NeedKind::PlanReady { task_id, steps } => {
+                    Some(self.render_plan_panel(&chat_id, task_id, steps, theme, cx))
+                }
+                NeedKind::Asking(_) => self.composer.update(cx, |composer, cx| {
+                    composer.render_ask_panel(&chat_id, window, cx)
+                }),
+                NeedKind::Failed => None,
+            }?;
+            Some(
+                div()
+                    .pl(px(CARD_ROW_INDENT))
+                    .pr(px(6.0))
+                    .pb(px(6.0))
+                    .opacity(shown)
+                    .child(panel),
+            )
+        });
+        div()
+            .rounded(px(9.0))
+            .when(expanded.is_some() && !tray_mounted, |el| {
+                el.bg(theme.wash(0.04))
+            })
+            .child(head)
+            .children(body)
+            .into_any_element()
+    }
+
+    fn recent_card_rows(&self, cx: &App) -> Vec<(String, String, String, bool)> {
+        let state = self.state.read(cx);
+        let now = Utc::now();
+        let mut done: Vec<(zeron_proto::ChatIndicator, &zeron_proto::Chat)> = state
+            .overview_chats(now)
+            .into_iter()
+            .filter(|(status, _)| {
+                matches!(
+                    status,
+                    zeron_proto::ChatIndicator::Completed | zeron_proto::ChatIndicator::Idle
+                )
+            })
+            .collect();
+        done.sort_by_key(|(_, chat)| {
+            std::cmp::Reverse(chat.last_message_at.unwrap_or(chat.created_at))
+        });
+        done.into_iter()
+            .take(CARD_ROWS)
+            .map(|(status, chat)| {
+                let completed = status == zeron_proto::ChatIndicator::Completed;
+                let ago = crate::settings::devices::format_last_seen(
+                    Some(chat.last_message_at.unwrap_or(chat.created_at)),
+                    now,
+                );
+                let when = if completed {
+                    format!("Done {ago}")
+                } else {
+                    ago
+                };
+                let meta = match self.chat_project(chat, cx) {
+                    Some(project) => format!("{project} · {when}"),
+                    None => when,
+                };
+                (
+                    chat.id.clone(),
+                    crate::transcript::single_line(&crate::home::chat_title(chat)),
+                    meta,
+                    completed,
+                )
+            })
+            .collect()
+    }
+}
+
+const CARD_ROWS: usize = 3;
+const CARD_ROW_HEIGHT: f32 = 46.0;
+const CARD_ROW_INDENT: f32 = 21.0;
+
+fn need_tint(kind: &NeedKind, theme: &Theme) -> gpui::Hsla {
+    match kind {
+        NeedKind::Failed => theme.danger,
+        _ => theme.accent,
+    }
+}
+
+fn card_need_meta(kind: &NeedKind, failed_at: Option<DateTime<Utc>>) -> String {
+    match kind {
+        NeedKind::PlanReady { steps, .. } => format!(
+            "Plan ready · {} step{}",
+            steps.len(),
+            if steps.len() == 1 { "" } else { "s" }
+        ),
+        NeedKind::Asking(Some(info)) if info.plan => "Plan ready".into(),
+        NeedKind::Asking(Some(info)) if !info.question.is_empty() => {
+            format!("Asks: {}", crate::transcript::single_line(&info.question))
+        }
+        NeedKind::Asking(_) => "Asking".into(),
+        NeedKind::Failed => match failed_at {
+            Some(at) => format!(
+                "Failed {}",
+                crate::settings::devices::format_last_seen(Some(at), Utc::now())
+            ),
+            None => "Failed".into(),
+        },
+    }
+}
+
+fn card_row_shell(
+    theme: &Theme,
+    id: SharedString,
+    dot: gpui::Hsla,
+    title: String,
+    meta: String,
+    meta_color: gpui::Hsla,
+) -> gpui::Stateful<gpui::Div> {
+    let selector = id.clone();
+    div()
+        .id(id)
+        .debug_selector(move || selector.to_string())
+        .h(px(CARD_ROW_HEIGHT))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .rounded(px(9.0))
+        .child(div().size(px(7.0)).flex_none().rounded_full().bg(dot))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(SharedString::from(title)),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(11.5))
+                        .text_color(meta_color)
+                        .child(SharedString::from(meta)),
+                ),
+        )
+}
+
+fn card_button(theme: &Theme, accent: bool) -> gpui::Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .h(px(26.0))
+        .px(px(10.0))
+        .rounded(px(7.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(12.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .when(accent, |el| {
+            el.bg(theme.accent.opacity(0.12))
+                .hover(|s| s.bg(theme.accent.opacity(0.18)))
+                .text_color(theme.accent)
+        })
+        .when(!accent, |el| {
+            el.bg(theme.wash(0.06))
+                .hover(|s| s.bg(theme.wash(0.1)))
+                .text_color(theme.text)
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn work_card(
+    theme: &Theme,
+    id: &'static str,
+    glyph: &'static str,
+    title: &'static str,
+    count: Option<usize>,
+    width: f32,
+    rows: Vec<AnyElement>,
+    more: Option<AnyElement>,
+) -> AnyElement {
+    let empty = rows.is_empty();
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .role(gpui::Role::Group)
+        .aria_label(title)
+        .w(px(width))
+        .flex_none()
+        .min_w_0()
+        .pt(px(10.0))
+        .px(px(8.0))
+        .pb(px(8.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_card)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(6.0))
+                .pb(px(6.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text_muted)
+                .child(icon(glyph).size(px(15.0)).text_color(theme.text_muted))
+                .child(title)
+                .children(count.map(|count| {
+                    div()
+                        .ml_auto()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(SharedString::from(count.to_string()))
+                })),
+        )
+        .children(rows)
+        .when(empty, |el| {
+            el.child(
+                div()
+                    .px(px(6.0))
+                    .py(px(6.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_faint)
+                    .child("Nothing"),
+            )
+        })
+        .children(more)
+        .into_any_element()
 }
 
 fn elapsed(at: DateTime<Utc>) -> String {

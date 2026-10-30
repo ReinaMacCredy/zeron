@@ -5622,12 +5622,6 @@ impl Shell {
             .tooltip(crate::settings::widgets::text_tooltip(
                 ShortcutId::NewProject.label(),
             ));
-        let new_chat = header_button("sidebar-new-chat", icons::LUCIDE_SQUARE_PEN, false)
-            .aria_label(ShortcutId::NewSession.label())
-            .on_click(cx.listener(|this, _, _, cx| this.open_new_session(None, cx)))
-            .tooltip(crate::settings::widgets::text_tooltip(
-                ShortcutId::NewSession.label(),
-            ));
         let row = div()
             .flex_none()
             .relative()
@@ -5643,8 +5637,7 @@ impl Shell {
                     .flex()
                     .flex_row()
                     .children(filter_button)
-                    .child(add_project)
-                    .child(new_chat),
+                    .child(add_project),
             );
         if self.spaces_menu.get().is_some() {
             let closing = self.spaces_menu.closing_since();
@@ -8016,60 +8009,6 @@ impl Shell {
         Some(section.into_any_element())
     }
 
-    pub(super) fn render_chat_work_toggle(
-        &mut self,
-        leaving: bool,
-        theme: &Theme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let now = motion::now();
-        let slot = usize::from(!self.state.read(cx).no_project);
-        if !leaving && self.chat_work_slide.0 != slot {
-            self.chat_work_slide
-                .1
-                .retarget(slot as f32, self.reduced_motion, now);
-            self.chat_work_slide.0 = slot;
-        }
-        if self.chat_work_slide.1.animating_at(now) {
-            window.request_animation_frame();
-        }
-        let segments = [
-            crate::pull_request_detail::DockSegment {
-                id: "new-chat-mode-chat",
-                label: "Chat",
-                glyph: icons::CHAT_ROUND_LINE,
-                count: None,
-            },
-            crate::pull_request_detail::DockSegment {
-                id: "new-chat-mode-work",
-                label: "Work",
-                glyph: icons::FOLDER,
-                count: None,
-            },
-        ];
-        crate::pull_request_detail::dock_pill(
-            "new-chat-mode",
-            "Chat or Work",
-            &segments,
-            self.chat_work_slide.0,
-            self.chat_work_slide.1.value_at(now),
-            &self.chat_work_focus,
-            theme,
-            cx,
-            Self::select_chat_work,
-        )
-    }
-
-    fn select_chat_work(&mut self, slot: usize, _: &mut Window, cx: &mut Context<Self>) {
-        let pickers = self.composer.read(cx).pickers().clone();
-        if slot == 0 {
-            pickers.update(cx, |pickers, cx| pickers.pick_no_project(cx));
-        } else if !pickers.update(cx, |pickers, cx| pickers.pick_work(cx)) {
-            self.open_add_space(cx);
-        }
-    }
-
     // ---- add-space flow ----
 
     pub(super) fn open_add_space_on_device(&mut self, device_id: &str, cx: &mut Context<Self>) {
@@ -8081,7 +8020,12 @@ impl Shell {
             .find(|device| device.id == device_id)
             .cloned();
         self.open_add_space(cx);
-        if let Some(device) = device {
+        let picked = self
+            .add_space
+            .as_ref()
+            .and_then(|flow| flow.device.as_ref())
+            .is_some_and(|picked| picked.id == device_id);
+        if let Some(device) = device.filter(|_| !picked) {
             self.add_space_pick_device(device, cx);
         }
     }
@@ -8140,6 +8084,21 @@ impl Shell {
             path_edit: None,
             _search_events: search_events,
         });
+        let only_device = {
+            let state = self.state.read(cx);
+            let mut listed = state
+                .devices
+                .iter()
+                .filter(|device| crate::cloud::is_listed(device));
+            match (listed.next(), listed.next(), add_space_cloud_device(state)) {
+                (Some(device), None, None) => Some(device.clone()),
+                _ => None,
+            }
+        };
+        if let Some(device) = only_device {
+            self.add_space_pick_device(device, cx);
+            self.add_space_goto_location("Home".into(), None, cx);
+        }
         cx.notify();
     }
 
@@ -10443,7 +10402,9 @@ impl Shell {
                 .when(step != ProjectStep::Devices, |el| {
                     el.child(command_palette::command_key_hint(&theme, "←", "Back"))
                 })
-                .child(command_palette::command_key_hint(&theme, "Esc", "Close"))
+                .when(step != ProjectStep::Folders, |el| {
+                    el.child(command_palette::command_key_hint(&theme, "Esc", "Close"))
+                })
                 .when(can_edit_path, |el| {
                     el.child(command_palette::command_key_hint(
                         &theme,
@@ -10453,52 +10414,70 @@ impl Shell {
                 })
         }
         .when(step == ProjectStep::Folders || editing, |el| {
-            el.child(div().flex_1()).child(
-                div()
-                    .id("project-add")
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    // Even 3px around the key chip, concentric corners
-                    // (chip 5px + 3px); negative margins keep the footer
-                    // height and the label on the footer's right inset.
-                    .pl(px(3.0))
-                    .pr(px(8.0))
-                    .py(px(3.0))
-                    .my(px(-3.0))
-                    .mr(px(-8.0))
-                    .rounded(px(8.0))
-                    .role(gpui::Role::Button)
-                    .aria_label("Add project")
-                    .when(can_add, |el| {
-                        el.cursor_pointer()
-                            .hover(|s| s.bg(crate::theme::card_selected_bg()))
-                            .active(|s| s.opacity(0.8))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if editing {
-                                    this.add_space_open_typed_path(true, cx)
-                                } else {
-                                    this.submit_add_space(cx)
-                                }
-                            }))
-                    })
-                    .when(!can_add, |el| el.opacity(0.5))
-                    .child(popover::kbd_hint(
-                        &theme,
-                        &crate::settings::badge_combo("mod-enter"),
-                    ))
-                    .child(
+            el.child(div().flex_1())
+                .when(!editing, |el| {
+                    el.child(
                         div()
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .id("project-cancel")
+                            .h(px(24.0))
+                            .my(px(-3.0))
+                            .px(px(10.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(7.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_size(crate::typography::ui_rems(12.0))
                             .text_color(theme.text)
-                            .child(SharedString::from(match (&cloning, busy) {
-                                (Some(label), _) => format!("Cloning {label}…"),
-                                (None, true) => "Adding…".to_string(),
-                                (None, false) => "Add project".to_string(),
-                            })),
-                    ),
-            )
+                            .cursor_pointer()
+                            .role(gpui::Role::Button)
+                            .aria_label("Cancel")
+                            .hover(|s| s.bg(theme.element_hover))
+                            .on_click(cx.listener(|this, _, _, cx| this.close_add_space(cx)))
+                            .child("Cancel"),
+                    )
+                })
+                .child(
+                    div()
+                        .id("project-add")
+                        .h(px(24.0))
+                        .my(px(-3.0))
+                        .mr(px(-8.0))
+                        .px(px(10.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .rounded(px(7.0))
+                        .bg(theme.text)
+                        .text_color(theme.on_solid)
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .role(gpui::Role::Button)
+                        .aria_label("Add project")
+                        .when(can_add, |el| {
+                            el.cursor_pointer()
+                                .hover(|s| s.opacity(0.9))
+                                .active(|s| s.opacity(0.8))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if editing {
+                                        this.add_space_open_typed_path(true, cx)
+                                    } else {
+                                        this.submit_add_space(cx)
+                                    }
+                                }))
+                        })
+                        .when(!can_add, |el| el.opacity(0.4))
+                        .child(SharedString::from(match (&cloning, busy) {
+                            (Some(label), _) => format!("Cloning {label}…"),
+                            (None, true) => "Adding…".to_string(),
+                            (None, false) => "Add project".to_string(),
+                        }))
+                        .child(
+                            div()
+                                .opacity(0.7)
+                                .child(crate::settings::badge_combo("mod-enter")),
+                        ),
+                )
         });
         let card =
             command_palette::palette_card("add-space-palette", &focus, viewport, &theme)

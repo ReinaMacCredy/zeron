@@ -8,19 +8,7 @@ use crate::theme::Theme;
 
 pub(crate) type Field = fn(&mut HomeWidgets) -> &mut bool;
 
-pub(crate) const WIDGETS: [(&str, &str, &str, Field); 8] = [
-    (
-        "home-toggle-working-now",
-        "Working now",
-        "Chats with a running turn, their elapsed time and current command.",
-        |w| &mut w.working_now,
-    ),
-    (
-        "home-toggle-missions",
-        "Missions",
-        "Running missions, their progress and what needs you.",
-        |w| &mut w.missions,
-    ),
+pub(crate) const WIDGETS: [(&str, &str, &str, Field); 5] = [
     (
         "home-toggle-pull-requests",
         "Pull requests",
@@ -44,12 +32,6 @@ pub(crate) const WIDGETS: [(&str, &str, &str, Field); 8] = [
         "Running services",
         "Ports listening on this machine.",
         |w| &mut w.running_services,
-    ),
-    (
-        "home-toggle-recent-areas",
-        "Recent areas",
-        "Projects and worktrees you worked in most recently.",
-        |w| &mut w.recent_areas,
     ),
     (
         "home-toggle-ci-failures",
@@ -208,7 +190,7 @@ mod tests {
         cx.update(|_, cx| crate::settings::flush(cx));
         let saved = UiSettings::load(dir.path()).home_widgets;
         assert!(!saved.git_activity && !saved.ci_failures);
-        assert!(saved.working_now && saved.services_all_ports);
+        assert!(saved.pull_requests && saved.services_all_ports);
 
         click(cx, "home-toggle-git-activity");
         click(cx, "home-services-by-zeron");
