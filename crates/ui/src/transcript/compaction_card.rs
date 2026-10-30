@@ -8,6 +8,23 @@ const COUNT: Duration = Duration::from_millis(600);
 const HOLD_AFTER_WAIT: Duration = Duration::from_secs(5);
 const DETAIL_MAX: f32 = 96.0;
 const INSET: f32 = 34.0;
+// How long a compaction takes is unknowable, so the bar sweeps instead of filling.
+const SWEEP: Duration = Duration::from_millis(1400);
+const SWEEP_WIDTH: f32 = 0.32;
+
+#[derive(Clone, Copy)]
+enum Bar {
+    Sweep(f32),
+    Fill(f32),
+}
+
+fn sweep(elapsed: Duration, reduce: bool) -> Bar {
+    if reduce {
+        return Bar::Fill(0.0);
+    }
+    let cycle = (elapsed.as_secs_f32() / SWEEP.as_secs_f32()).fract();
+    Bar::Sweep(motion::EASE_IN_OUT.eval(cycle))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -30,6 +47,7 @@ pub(super) struct CardClock {
     phase: Option<(String, Phase, Instant)>,
     entered: Option<(String, Instant)>,
     settled: HashMap<SharedString, Instant>,
+    tail: Option<SharedString>,
 }
 
 impl CardClock {
@@ -120,6 +138,23 @@ fn progress(spec: motion::MotionSpec, since: Instant, now: Instant, reduce: bool
     eased(spec, now.saturating_duration_since(since), reduce)
 }
 
+fn collapse(settled_at: Instant, hold: Duration, now: Instant, reduce: bool) -> f32 {
+    let held = now
+        .saturating_duration_since(settled_at)
+        .saturating_sub(hold);
+    eased(motion::RESIZE, held, reduce)
+}
+
+fn count_down(from: u64, to: u64, settled_at: Option<Instant>, now: Instant) -> u64 {
+    let t = settled_at.map_or(1.0, |at| {
+        let counted = now
+            .saturating_duration_since(at)
+            .saturating_sub(motion::FADE_QUICK.total());
+        motion::EASE_OUT.eval(counted.as_secs_f32() / COUNT.as_secs_f32())
+    });
+    motion::lerp(from as f32, to as f32, t).round() as u64
+}
+
 fn boundary_row(rows: &[Row]) -> Option<usize> {
     rows.iter()
         .rposition(|row| !matches!(row.kind, RowKind::User { .. }))
@@ -156,14 +191,6 @@ fn wait_meta(elapsed: Duration, usual: Option<u64>) -> String {
     match usual {
         Some(usual) => format!("{elapsed}, usually ~{}", format_elapsed(usual as i64)),
         None => elapsed,
-    }
-}
-
-fn bar_fill(elapsed: Duration, usual: Option<u64>) -> f32 {
-    let secs = elapsed.as_secs_f32();
-    match usual.filter(|usual| *usual > 0) {
-        Some(usual) => 0.92 * motion::EASE_OUT.eval((secs / usual as f32).min(1.0)),
-        None => 0.92 * (1.0 - (-secs / 40.0).exp()),
     }
 }
 
@@ -350,7 +377,7 @@ impl Transcript {
 
     fn card_detail(
         reason: Option<SharedString>,
-        bar: Option<f32>,
+        bar: Option<Bar>,
         reveal: f32,
         theme: &Theme,
     ) -> Option<Div> {
@@ -370,21 +397,44 @@ impl Transcript {
                         .text_color(theme.text_muted)
                         .child(reason)
                 }))
-                .children(bar.map(|fill| {
-                    div().pl(px(INSET)).pr(px(12.0)).pb(px(10.0)).child(
-                        div()
-                            .w_full()
-                            .h(px(2.0))
-                            .rounded(px(2.0))
-                            .bg(theme.border)
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(gpui::relative(fill.clamp(0.0, 1.0)))
-                                    .rounded(px(2.0))
-                                    .bg(theme.accent),
-                            ),
-                    )
+                .children(bar.map(|bar| {
+                    let accent = theme.accent;
+                    let track = div()
+                        .relative()
+                        .w_full()
+                        .h(px(2.0))
+                        .rounded(px(2.0))
+                        .overflow_hidden()
+                        .bg(theme.border);
+                    let track = match bar {
+                        Bar::Fill(fill) => track.child(
+                            div()
+                                .h_full()
+                                .w(gpui::relative(fill.clamp(0.0, 1.0)))
+                                .rounded(px(2.0))
+                                .bg(accent),
+                        ),
+                        Bar::Sweep(t) => track.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .h_full()
+                                .left(gpui::relative(motion::lerp(-SWEEP_WIDTH, 1.0, t)))
+                                .w(gpui::relative(SWEEP_WIDTH))
+                                .flex()
+                                .child(div().h_full().flex_1().bg(gpui::linear_gradient(
+                                    90.0,
+                                    gpui::linear_color_stop(accent.opacity(0.0), 0.0),
+                                    gpui::linear_color_stop(accent, 1.0),
+                                )))
+                                .child(div().h_full().flex_1().bg(gpui::linear_gradient(
+                                    90.0,
+                                    gpui::linear_color_stop(accent, 0.0),
+                                    gpui::linear_color_stop(accent.opacity(0.0), 1.0),
+                                ))),
+                        ),
+                    };
+                    div().pl(px(INSET)).pr(px(12.0)).pb(px(10.0)).child(track)
                 }))
         })
     }
@@ -396,7 +446,18 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let now = motion::now();
+        if !self
+            .compaction_clock
+            .wait
+            .as_ref()
+            .is_some_and(|(id, ..)| *id == chat_id)
+        {
+            self.compaction_clock.tail = self.rows.last().map(|row| row.id.clone());
+        }
         let since = self.compaction_clock.wait_since(&chat_id, &wait, now);
+        if self.fresh_compaction(&chat_id, now).is_some() {
+            return None;
+        }
         if matches!(wait, CompactionWait::Compacting(Some(_)))
             && boundary_row(&self.rows).is_some_and(|ix| {
                 matches!(
@@ -480,7 +541,7 @@ impl Transcript {
                     ),
                     chevron: None,
                 },
-                Some(bar_fill(elapsed, usual)),
+                Some(sweep(elapsed, reduce)),
             ),
         };
         let changed = self.compaction_clock.phase_since(&chat_id, phase, now);
@@ -567,10 +628,7 @@ impl Transcript {
         let base = if compacting_since.is_some() {
             1.0
         } else {
-            settled_at.map_or(0.0, |at| {
-                let held = now.saturating_duration_since(at).saturating_sub(hold);
-                1.0 - eased(motion::RESIZE, held, reduce)
-            })
+            settled_at.map_or(0.0, |at| 1.0 - collapse(at, hold, now, reduce))
         };
         let card = if open {
             motion::lerp(base, 1.0, toggle)
@@ -623,15 +681,9 @@ impl Transcript {
                 }
             }
             (Some(kept), None) => {
-                let post = kept.post_tokens.map(|post| {
-                    let t = settled_at.map_or(1.0, |at| {
-                        let counted = now
-                            .saturating_duration_since(at)
-                            .saturating_sub(motion::FADE_QUICK.total());
-                        motion::EASE_OUT.eval(counted.as_secs_f32() / COUNT.as_secs_f32())
-                    });
-                    motion::lerp(context as f32, post as f32, t).round() as u64
-                });
+                let post = kept
+                    .post_tokens
+                    .map(|post| count_down(context, post, settled_at, now));
                 let mut meta = format!("· {}", tokens(context));
                 if let Some(post) = post {
                     meta.push_str(&format!(" → {}", tokens(post)));
@@ -692,12 +744,9 @@ impl Transcript {
                 }
             }
         };
-        let bar = match (compacting_since, &kept) {
-            (Some(since), _) => Some(bar_fill(
-                now.saturating_duration_since(since),
-                usual_secs(&self.rows, ix),
-            )),
-            (None, Some(_)) if settled_at.is_some() => Some(1.0),
+        let bar = match (compacting_since, &kept, settled_at) {
+            (Some(since), _, _) => Some(sweep(now.saturating_duration_since(since), reduce)),
+            (None, Some(_), Some(at)) => Some(Bar::Fill(progress(motion::RESIZE, at, now, reduce))),
             _ => None,
         };
         let reveal = match (compacting_since, phase_at) {
@@ -1000,15 +1049,107 @@ impl Transcript {
             })
     }
 
+    fn fresh_compaction(&self, chat_id: &str, now: Instant) -> Option<usize> {
+        let ix = self
+            .rows
+            .iter()
+            .rposition(|row| !matches!(row.kind, RowKind::User { .. }))?;
+        let row = &self.rows[ix];
+        let clock = &self.compaction_clock;
+        let settling = clock.settled.contains_key(&row.id)
+            || clock
+                .live_phase(chat_id)
+                .is_some_and(|(phase, _)| phase == Phase::Compacting)
+                && clock.wait_ended_recently(chat_id, now);
+        (matches!(row.kind, RowKind::Compaction { .. })
+            && clock.tail.as_ref() != Some(&row.id)
+            && settling)
+            .then_some(ix)
+    }
+
     pub(super) fn render_compaction_divider(
         &mut self,
+        ix: usize,
         row_id: &SharedString,
         text: SharedString,
         record: Arc<CompactionRecord>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(kept) = self.kept_section(row_id, &record, theme) else {
+        let now = motion::now();
+        let reduce = cx.reduce_motion();
+        if let Some(chat_id) = self.chat_id.clone().filter(|_| self.doc_override.is_none())
+            && !self.compaction_clock.settled.contains_key(row_id)
+            && self.fresh_compaction(&chat_id, now) == Some(ix)
+        {
+            self.compaction_clock.settled.insert(row_id.clone(), now);
+            self.compaction_clock
+                .phase_since(&chat_id, Phase::Settled, now);
+        }
+        let plain = self.compaction_divider(row_id, text, &record, theme, cx);
+        let Some(at) = self.compaction_clock.settled.get(row_id).copied() else {
+            return plain;
+        };
+        let swap = now
+            .saturating_duration_since(at)
+            .saturating_sub(SETTLE_HOLD + motion::RESIZE.total());
+        if reduce || swap > motion::FADE_QUICK.total() {
+            self.compaction_clock.settled.remove(row_id);
+            return plain;
+        }
+        motion::pulse_lease(cx.entity_id(), cx);
+        let card = 1.0 - collapse(at, SETTLE_HOLD, now, reduce);
+        let swapped = eased(motion::FADE_QUICK, swap, reduce);
+        let meta = record.pre_tokens.map(|pre| {
+            let mut meta = format!("· {}", tokens(pre));
+            if let Some(post) = record.post_tokens {
+                meta.push_str(&format!(
+                    " → {}",
+                    tokens(count_down(pre, post, Some(at), now))
+                ));
+            }
+            SharedString::from(meta)
+        });
+        let head = Head {
+            icon: Icon::Done,
+            title: "Compacted".into(),
+            chip: None,
+            tag: None,
+            meta,
+            chevron: None,
+        };
+        let fade = progress(motion::FADE_QUICK, at, now, reduce);
+        let fill = progress(motion::RESIZE, at, now, reduce);
+        div()
+            .relative()
+            .w_full()
+            .child(
+                Self::card_frame(card, theme)
+                    .opacity(1.0 - swapped)
+                    .child(self.card_head(head, card, fade, theme, cx))
+                    .children(Self::card_detail(None, Some(Bar::Fill(fill)), card, theme)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .opacity(swapped)
+                    .child(plain),
+            )
+            .into_any_element()
+    }
+
+    fn compaction_divider(
+        &mut self,
+        row_id: &SharedString,
+        text: SharedString,
+        record: &CompactionRecord,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(kept) = self.kept_section(row_id, record, theme) else {
             return divider_row(row_id, text, None, theme);
         };
         let open = self
