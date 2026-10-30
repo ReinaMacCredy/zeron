@@ -78,7 +78,6 @@ const RAIL_IN: MotionSpec = MotionSpec::new(160, motion::EASE_OUT);
 const STATUS_GROW: MotionSpec = MotionSpec::new(220, EASE_PAGE);
 const STATUS_FADE: MotionSpec = MotionSpec::new(160, motion::EASE_OUT);
 const DOT_FLASH: MotionSpec = MotionSpec::new(900, motion::EASE_OUT);
-pub(crate) const BADGE_POP: MotionSpec = MotionSpec::new(400, motion::LINEAR);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NeedsYouRoute {
@@ -115,16 +114,6 @@ pub(crate) fn fresh_needs_you(
     };
     *seen = Some(rows.iter().map(NeedsYouRow::key).collect());
     fresh
-}
-
-pub(crate) fn badge_scale(t: f32) -> f32 {
-    let rise = 0.4;
-    let peak = if t < rise {
-        motion::EASE_OUT.eval(t / rise)
-    } else {
-        1.0 - motion::EASE_OUT.eval((t - rise) / (1.0 - rise))
-    };
-    1.0 + 0.35 * peak
 }
 
 fn no_effect_since(at: DateTime<Utc>) -> DateTime<Utc> {

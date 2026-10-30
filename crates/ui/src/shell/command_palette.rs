@@ -261,6 +261,7 @@ enum Command {
     NewProject,
     Settings,
     Inbox,
+    Supervisor,
     Usage,
     Tasks,
     Theme(AppearanceMode),
@@ -275,6 +276,7 @@ impl Command {
             Self::NewProject => "New project",
             Self::Settings => "Open settings",
             Self::Inbox => "Open inbox",
+            Self::Supervisor => "Open Supervisor",
             Self::Usage => "Open usage",
             Self::Tasks => "Tasks",
             Self::Theme(AppearanceMode::System) => "Switch to system theme",
@@ -291,6 +293,7 @@ impl Command {
             Self::NewProject => icons::FOLDER,
             Self::Settings => icons::SETTINGS,
             Self::Inbox => icons::BELL,
+            Self::Supervisor => icons::LUCIDE_SHIELD,
             Self::Usage => icons::USAGE_CHART,
             Self::Tasks => icons::TASKS,
             Self::Theme(mode) => mode.icon(),
@@ -417,6 +420,7 @@ fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
             Command::NewProject,
             Command::Settings,
             Command::Inbox,
+            Command::Supervisor,
             Command::Usage,
             Command::Tasks,
             Command::Theme(if is_dark {
@@ -1066,6 +1070,7 @@ impl Shell {
             RowKind::Command(Command::NewProject) => self.open_add_space(cx),
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
             RowKind::Command(Command::Inbox) => self.open_inbox(cx),
+            RowKind::Command(Command::Supervisor) => self.open_supervisor(cx),
             RowKind::Command(Command::Usage) => self.open_usage(cx),
             RowKind::Command(Command::Tasks) => self.open_tasks(cx),
             RowKind::Command(Command::Theme(_)) => unreachable!(),
@@ -1128,6 +1133,7 @@ impl Shell {
             Command::Theme(_)
             | Command::NewTerminal(_)
             | Command::Inbox
+            | Command::Supervisor
             | Command::Usage
             | Command::Tasks => {
                 return None;
@@ -3082,6 +3088,7 @@ mod tests {
                 Command::NewProject,
                 Command::Settings,
                 Command::Inbox,
+                Command::Supervisor,
                 Command::Usage,
                 Command::Tasks,
                 Command::Theme(AppearanceMode::Light)

@@ -2707,13 +2707,11 @@ mod tests {
         assert_eq!(statuses, [Done, Working, Planned, Skipped]);
         assert_eq!(plan.status, TaskStatus::Working);
         assert_eq!((plan.progress.done, plan.progress.total), (1, 3));
-        assert_eq!(super::super::needs_you_count(&state), 0);
 
         state.task_steps[1].turn = failed_turn();
         let plan = super::super::rollup(&state, &state.tasks[0], now);
         assert_eq!(plan.steps[1].status, Failed);
         assert_eq!(plan.status, TaskStatus::NeedsYou);
-        assert_eq!(super::super::needs_you_count(&state), 1);
     }
 
     #[gpui::test]

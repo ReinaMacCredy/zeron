@@ -2322,6 +2322,10 @@ impl Shell {
         // would sit UNDER it (both flex_none, the row overflows and paint
         // order stacks them), so they hide for the duration.
         let session_tabs = (!takeover).then(|| self.render_session_tabs(cx));
+        let triage = self.triage_frame();
+        let triage_pill = (!takeover)
+            .then(|| self.render_triage_pill(&triage, window, cx))
+            .flatten();
 
         let inner = div()
             .size_full()
@@ -2332,6 +2336,7 @@ impl Shell {
             .pr(px(right_pad))
             .children(session_tabs)
             .child(div().flex_1())
+            .children(triage_pill)
             .children(chat_actions)
             .children(page_controls)
             .children(trailing);

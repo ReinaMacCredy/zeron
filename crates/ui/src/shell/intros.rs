@@ -42,7 +42,7 @@ const SINCE_PAGES: [Page; 4] = [
     Page {
         id: TASKS_HOME,
         title: "Tasks is home for missions",
-        body: "Mission Control moved into Tasks. Missions, agent trees and tasks sit in one list, and the Missions, Trees and Needs you chips narrow it.",
+        body: "Mission Control moved into Tasks. Missions, agent trees and tasks sit in one list, and the Missions and Trees chips narrow it.",
     },
     Page {
         id: MISSION_TABS,
@@ -909,20 +909,14 @@ fn filter_chip(theme: &Theme, label: &'static str, count: &'static str, on: bool
 }
 
 fn tasks_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
-    const CHIPS: [(&str, &str); 4] = [
-        ("All", "3"),
-        ("Missions", "1"),
-        ("Trees", "1"),
-        ("Needs you", "0"),
-    ];
-    const STARTS: [f32; 4] = [0.0, 2.0, 3.4, 4.8];
+    const CHIPS: [(&str, &str); 3] = [("All", "3"), ("Missions", "1"), ("Trees", "1")];
+    const STARTS: [f32; 3] = [0.0, 2.0, 3.4];
     let filter = STARTS.iter().rposition(|start| t >= *start).unwrap_or(0);
     let start = STARTS[filter];
     let rows: &[usize] = match filter {
         0 => &[0, 1, 2],
         1 => &[0],
-        2 => &[1],
-        _ => &[],
+        _ => &[1],
     };
     let row = |ix: usize| match ix {
         0 => since_row(theme, ring(theme, 80), "Ship the shop", Some("4/5")),
@@ -959,20 +953,6 @@ fn tasks_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
                 .enumerate()
                 .map(|(n, &ix)| rise(row(ix), t, start + n as f32 * 0.07)),
         )
-        .when(rows.is_empty(), |el| {
-            el.child(rise(
-                div()
-                    .h(px(28.0))
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_faint)
-                    .child("Nothing needs you"),
-                t,
-                start,
-            ))
-        })
         .into_any_element()
 }
 

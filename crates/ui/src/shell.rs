@@ -126,6 +126,7 @@ mod playbooks;
 mod settings_updates;
 mod tabs;
 mod terminal_tabs;
+mod triage;
 mod update_glyph;
 use tabs::NewSessionTarget;
 mod voice_stage;
@@ -195,7 +196,7 @@ pub(crate) fn chat_status_tone(
             gpui::rgb(0x2b7fff).into(),
         ),
         Status::AwaitingInput => (
-            Some("Input".into()),
+            Some("Asking".into()),
             icons::LUCIDE_MESSAGE_CIRCLE_QUESTION,
             gpui::rgb(if dark { 0xa3b3ff } else { 0x4f39f6 }).into(),
         ),
@@ -233,7 +234,8 @@ actions!(
         ArchiveSession,
         IncreaseReasoning,
         DecreaseReasoning,
-        QuickCapture
+        QuickCapture,
+        ToggleTray
     ]
 );
 
@@ -627,6 +629,11 @@ pub fn apply_keymap(
         KeyBinding::new(
             &valid_or_default(&keymap.toggle_btw, ShortcutId::ToggleBtw.default_combo()),
             ToggleBtw,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(&keymap.toggle_tray, ShortcutId::ToggleTray.default_combo()),
+            ToggleTray,
             None,
         ),
     ]);
@@ -3319,6 +3326,8 @@ pub struct Shell {
     task_slide: task_actions::TaskSlide,
     mission_trees: std::collections::HashMap<String, (Entity<crate::tasks::StripTree>, Subscription)>,
     supervisor: supervisor_actions::SupervisorShell,
+    triage: triage::TriageTray,
+    _triage_observation: Subscription,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pull_request_detail_subscription: Option<Subscription>,
     /// Opened as its own page, so a narrow window shows it over the board.
@@ -3755,6 +3764,7 @@ impl Shell {
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)
         });
+        let triage_observation = triage::TriageTray::observe(&composer, cx);
         // Every send glides the prompt to the viewport top and reserves the
         // reply's space below it (notes-app parity).
         let composer_events = cx.subscribe(&composer, {
@@ -4113,6 +4123,8 @@ impl Shell {
             task_slide: task_actions::TaskSlide::resting(route),
             mission_trees: std::collections::HashMap::new(),
             supervisor: Default::default(),
+            triage: Default::default(),
+            _triage_observation: triage_observation,
             pull_request_detail: None,
             pull_request_detail_subscription: None,
             pull_request_open: false,
@@ -9375,7 +9387,6 @@ impl Shell {
         self.set_route(Route::Inbox, cx);
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
-        self.refresh_device_accounts(cx);
         cx.notify();
     }
 
@@ -9383,8 +9394,8 @@ impl Shell {
         if let Some((page, _)) = &self.inbox_page {
             return page.clone();
         }
-        let (state, composer) = (self.state.clone(), self.composer.clone());
-        let page = cx.new(|cx| crate::inbox::InboxPage::new(state, composer, cx));
+        let state = self.state.clone();
+        let page = cx.new(|cx| crate::inbox::InboxPage::new(state, cx));
         let events = cx.subscribe(&page, |this, page, event: &crate::inbox::InboxEvent, cx| {
             this.on_inbox_event(&page, event, cx)
         });
@@ -9400,7 +9411,10 @@ impl Shell {
     ) {
         match event {
             crate::inbox::InboxEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
-            crate::inbox::InboxEvent::OpenPullRequests => self.open_pull_requests(cx),
+            crate::inbox::InboxEvent::OpenTray => self
+                .defer_in_active_window(cx, |shell, window, cx| {
+                    shell.open_triage(None, window, cx)
+                }),
             crate::inbox::InboxEvent::OpenTasks => self.open_tasks(cx),
             crate::inbox::InboxEvent::OpenTaskCenter(task_id) => {
                 self.open_task_center(task_id.clone(), cx)
@@ -10636,7 +10650,8 @@ impl Shell {
     /// is not one: navigating leaves it, and its shortcut recorder intercepts
     /// the keys it records before they can dispatch.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
-        self.command_palette.is_some()
+        self.triage_open()
+            || self.command_palette.is_some()
             || self.switcher.is_some()
             || self.branch_modal.is_some()
             || self.voice.read(cx).stage_open
@@ -12004,10 +12019,13 @@ impl Shell {
         }
         self.drop_hidden_chat_action_menus(cx);
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
+        let triage = self.triage_frame();
+        let triage_pill = self.render_triage_pill(&triage, window, cx);
         let inner = div()
             .size_full()
             .flex()
             .items_center()
+            .gap(px(8.0))
             .pl(px((self.sidebar_edge() + Theme::SPACE_LG)
                 .max(self.title_bar_content_start() + plus_inset)))
             .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
@@ -12015,9 +12033,18 @@ impl Shell {
                 self.shown_pull_request_detail(cx).cloned(),
                 |bar, detail| {
                     let closable = self.pull_request_wide;
-                    bar.child(detail.update(cx, |page, cx| page.titlebar(closable, cx)))
+                    bar.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(detail.update(cx, |page, cx| page.titlebar(closable, cx))),
+                    )
                 },
-            );
+            )
+            .when(self.shown_pull_request_detail(cx).is_none(), |bar| {
+                bar.child(div().flex_1())
+            })
+            .children(triage_pill);
         let bar = div()
             .relative()
             .h(px(Theme::TITLEBAR_HEIGHT))
@@ -13349,7 +13376,7 @@ impl Shell {
         } else {
             match status {
                 zeron_proto::ChatIndicator::Working => Some("Working"),
-                zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
+                zeron_proto::ChatIndicator::AwaitingInput => Some("Asking"),
                 zeron_proto::ChatIndicator::Errored => Some("Failed"),
                 zeron_proto::ChatIndicator::Completed => Some("Done"),
                 zeron_proto::ChatIndicator::Idle => None,
@@ -13367,9 +13394,13 @@ impl Shell {
             let state = self.state.read(cx);
             zeron_proto::background::ring_label(&state.session_for(&id)?.background_tasks)
         });
-        let status_label: Option<SharedString> = match work_label {
-            Some(label) => Some(label.into()),
-            None => status_label.map(SharedString::from),
+        let need_word = (!expired && !undelivered && !queued)
+            .then(|| self.triage_word(&id))
+            .flatten();
+        let status_label: Option<SharedString> = match (need_word, work_label) {
+            (Some(word), _) => Some(word),
+            (None, Some(label)) => Some(label.into()),
+            (None, None) => status_label.map(SharedString::from),
         };
         // Subagents running under this chat show as a "● N" pill beside the
         // row's own activity indicator, never in place of it: the pill takes
@@ -14187,13 +14218,17 @@ impl Shell {
                 )
             } else if asks {
                 (
-                    Some("asks you".into()),
+                    self.triage_word(&id).or(Some("Asking".into())),
                     icons::LUCIDE_MESSAGE_CIRCLE_QUESTION,
                     theme.warning,
                 )
             } else {
                 let (label, icon, color) = chat_status_tone(status, theme);
-                (work_label.map(SharedString::from).or(label), icon, color)
+                let label = self
+                    .triage_word(&id)
+                    .or(work_label.map(SharedString::from))
+                    .or(label);
+                (label, icon, color)
             };
         let unread = (!settled_state
             && matches!(status, Status::Completed | Status::AwaitingInput))
@@ -16118,7 +16153,6 @@ impl Shell {
             RailItem::Home => matches!(self.route, Route::Chat | Route::Terminal),
             RailItem::Inbox => matches!(self.route, Route::Inbox),
             RailItem::Tasks => matches!(self.route, Route::Tasks | Route::TaskCenter),
-            RailItem::Supervisor => matches!(self.route, Route::Supervisor),
             RailItem::PullRequests => matches!(self.route, Route::PullRequests),
             RailItem::Usage => matches!(self.route, Route::Usage),
             RailItem::Settings => matches!(self.route, Route::Settings(_)),
@@ -16145,10 +16179,6 @@ impl Shell {
             RailItem::Tasks => {
                 self.settings_focus_pending = false;
                 self.open_tasks(cx);
-            }
-            RailItem::Supervisor => {
-                self.settings_focus_pending = false;
-                self.open_supervisor(cx);
             }
             RailItem::Settings => self.toggle_settings(cx),
         }
@@ -16182,26 +16212,9 @@ impl Shell {
     ) -> AnyElement {
         let item = entry.item;
         let active = self.rail_item_active(item);
-        let awaiting = (item == RailItem::Inbox)
-            .then(|| crate::inbox::awaiting_chats(self.state.read(cx), Utc::now()).len())
+        let unseen = (item == RailItem::Tasks)
+            .then(|| self.quick_capture_unseen(cx))
             .filter(|count| *count > 0);
-        let needs_you = match item {
-            RailItem::Tasks => Some(
-                crate::tasks::needs_you_count(self.state.read(cx)) + self.quick_capture_unseen(cx),
-            ),
-            RailItem::Supervisor => self
-                .state
-                .read(cx)
-                .supervisor
-                .as_ref()
-                .map(|snapshot| snapshot.needs_you_count()),
-            _ => None,
-        }
-        .filter(|count| *count > 0);
-        let pop = (item == RailItem::Supervisor)
-            .then(|| self.supervisor_badge_pop(needs_you.unwrap_or(0), cx))
-            .flatten();
-        let view = cx.entity_id();
         let button = app_rail::button(
             entry.id,
             entry.label,
@@ -16211,15 +16224,7 @@ impl Shell {
             theme,
         )
         .relative()
-        .when_some(awaiting.or(needs_you), |el, count| {
-            el.child(app_rail::badge(count, pop.unwrap_or(1.0), theme))
-        })
-        .when(pop.is_some(), |el| {
-            el.child(gpui::canvas(
-                |_, _, _| {},
-                move |_, _, window, _| window.on_next_frame(move |_, cx| cx.notify(view)),
-            ))
-        })
+        .when_some(unseen, |el, count| el.child(app_rail::badge(count, theme)))
         .on_click(cx.listener(move |this, _, _, cx| this.activate_rail_item(item, cx)));
         if item != RailItem::Settings {
             return button
@@ -17960,9 +17965,10 @@ impl Shell {
     }
 
     fn render_inbox_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let accounts = crate::account_usage::local_snapshot(cx).cloned();
+        let needs = self.triage_frame().needs.len();
+        let combo = crate::settings::badge_combo(self.settings.keymap.get(ShortcutId::ToggleTray));
         let page = self.inbox_page(cx);
-        page.update(cx, |page, cx| page.set_accounts(accounts, cx));
+        page.update(cx, |page, cx| page.set_triage(needs, combo, cx));
         div()
             .flex_1()
             .min_w_0()
@@ -20590,6 +20596,7 @@ fn header_icon_button_with(
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.chat_backdrop = None;
+        self.refresh_triage_frame(cx);
         if self.active_chat.is_empty() && self.right_pane_open(cx) {
             self.adopt_canvas_terminals(cx);
         }
@@ -21132,6 +21139,9 @@ impl Render for Shell {
             )
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTray, window, cx| {
+                this.toggle_triage(window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenModelPicker, window, cx| {
                 if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {

@@ -395,7 +395,7 @@ impl Shell {
                     .unwrap_or(ChatIndicator::Idle);
                 let status_label = match status {
                     ChatIndicator::Working => Some("Working"),
-                    ChatIndicator::AwaitingInput => Some("Input"),
+                    ChatIndicator::AwaitingInput => Some("Asking"),
                     ChatIndicator::Errored => Some("Failed"),
                     ChatIndicator::Completed => Some("Done"),
                     ChatIndicator::Idle => None,

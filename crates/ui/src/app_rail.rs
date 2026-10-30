@@ -31,7 +31,6 @@ pub(crate) enum RailItem {
     Home,
     Inbox,
     Tasks,
-    Supervisor,
     PullRequests,
     Usage,
     Settings,
@@ -44,7 +43,7 @@ pub(crate) struct RailEntry {
     pub icon: &'static str,
 }
 
-pub(crate) const TOP: [RailEntry; 6] = [
+pub(crate) const TOP: [RailEntry; 5] = [
     RailEntry {
         item: RailItem::Home,
         id: "rail-home",
@@ -62,12 +61,6 @@ pub(crate) const TOP: [RailEntry; 6] = [
         id: "open-tasks",
         label: "Tasks",
         icon: icons::TASKS,
-    },
-    RailEntry {
-        item: RailItem::Supervisor,
-        id: "open-supervisor",
-        label: "Supervisor",
-        icon: icons::LUCIDE_SHIELD,
     },
     RailEntry {
         item: RailItem::PullRequests,
@@ -125,24 +118,23 @@ pub(crate) fn button(
         }))
 }
 
-pub(crate) fn badge(count: usize, scale: f32, theme: &Theme) -> Div {
+pub(crate) fn badge(count: usize, theme: &Theme) -> Div {
     let label = if count > 99 {
         "99+".to_owned()
     } else {
         count.to_string()
     };
-    let grow = 7.5 * (scale - 1.0);
     div()
         .absolute()
-        .top(px(1.0 - grow))
-        .right(px(-grow))
-        .min_w(px(15.0 * scale))
-        .h(px(15.0 * scale))
-        .px(px(4.0 * scale))
+        .top(px(1.0))
+        .right_0()
+        .min_w(px(15.0))
+        .h(px(15.0))
+        .px(px(4.0))
         .rounded_full()
         .bg(theme.accent)
         .text_color(theme.on_accent)
-        .text_size(crate::typography::ui_rems(9.5 * scale))
+        .text_size(crate::typography::ui_rems(9.5))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .flex()
         .items_center()

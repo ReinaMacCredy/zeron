@@ -307,10 +307,6 @@ pub(super) fn pill_enter(since: Option<Instant>, reduced: bool, now: Instant) ->
     eased(&motion::FADE_QUICK, since, reduced, now)
 }
 
-pub(super) fn pill_exit(since: Instant, reduced: bool, now: Instant) -> f32 {
-    eased(&motion::MENU_OUT, Some(since), reduced, now)
-}
-
 pub(super) fn entering(pill: Stateful<Div>, t: f32) -> Stateful<Div> {
     pill.relative().top(px(PILL_RISE * (1.0 - t))).opacity(t)
 }
@@ -330,6 +326,32 @@ where
 }
 
 impl Composer {
+    pub(super) fn render_corner(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Option<AnyElement>, Option<AnyElement>) {
+        let (pills, roster) = self
+            .render_background_corner(window, cx)
+            .unwrap_or_default();
+        let theme = Theme::of(cx).clone();
+        let limit = (!self.side_chat)
+            .then(|| self.render_limit_pill(&theme, cx))
+            .flatten();
+        let row = (!pills.is_empty() || limit.is_some()).then(|| {
+            div()
+                .flex()
+                .flex_row()
+                .items_end()
+                .gap(px(6.0))
+                .children(pills)
+                .child(div().flex_1().min_w_0())
+                .children(limit)
+                .into_any_element()
+        });
+        (roster, row)
+    }
+
     pub(super) fn render_background_corner(
         &mut self,
         window: &mut Window,
@@ -566,12 +588,7 @@ impl Composer {
         }
     }
 
-    pub(super) fn drop_roster(&mut self) {
-        self.background.roster = Popup::default();
-    }
-
     pub(super) fn open_roster(&mut self, cx: &mut Context<Self>) {
-        self.drop_ask_tray(cx);
         self.background.roster.open(motion::now());
         if self.background.shells.begin_close() {
             popover::reap_popup(cx, |this: &mut Composer| &mut this.background.shells);

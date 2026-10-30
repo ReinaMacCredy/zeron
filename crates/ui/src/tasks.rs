@@ -156,7 +156,6 @@ pub(crate) enum TasksFilter {
     All,
     Missions,
     Trees,
-    NeedsYou,
 }
 
 impl TasksFilter {
@@ -165,7 +164,6 @@ impl TasksFilter {
             Self::All => "All",
             Self::Missions => "Missions",
             Self::Trees => "Trees",
-            Self::NeedsYou => "Needs you",
         }
     }
 
@@ -174,16 +172,11 @@ impl TasksFilter {
             Self::All => true,
             Self::Missions => is_mission(&row.task, &row.plan),
             Self::Trees => false,
-            Self::NeedsYou => row.status == TaskStatus::NeedsYou,
         }
     }
 
-    fn keeps_tree(self, row: &index::IndexRow) -> bool {
-        match self {
-            Self::All | Self::Trees => true,
-            Self::Missions => false,
-            Self::NeedsYou => row.asks,
-        }
+    fn keeps_trees(self) -> bool {
+        self != Self::Missions
     }
 }
 
@@ -1920,15 +1913,7 @@ impl TasksPage {
                 .text_size(ui_rems(12.0))
                 .text_color(if on { theme.text } else { theme.text_muted })
                 .child(label)
-                .child(
-                    div()
-                        .text_color(if filter == TasksFilter::NeedsYou && n > 0 {
-                            theme.warning
-                        } else {
-                            theme.text_faint
-                        })
-                        .child(n.to_string()),
-                )
+                .child(div().text_color(theme.text_faint).child(n.to_string()))
                 .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
                     page.set_filter(filter, cx);
                 }))
@@ -2577,16 +2562,6 @@ pub(crate) fn gathered_tasks(state: &AppState, chat_id: &str, now: DateTime<Utc>
         .collect()
 }
 
-pub(crate) fn needs_you_count(state: &AppState) -> usize {
-    let now = Utc::now();
-    state
-        .tasks
-        .iter()
-        .filter(|task| !task.deleted)
-        .filter(|task| rollup(state, task, now).status == TaskStatus::NeedsYou)
-        .count()
-}
-
 pub(crate) fn mention_mark(
     state: &AppState,
     task_id: &str,
@@ -2914,19 +2889,13 @@ impl Render for TasksPage {
         if view == TasksView::Kanban && self.filter == TasksFilter::Trees {
             self.filter = TasksFilter::All;
         }
-        let counts = [
-            TasksFilter::All,
-            TasksFilter::Missions,
-            TasksFilter::Trees,
-            TasksFilter::NeedsYou,
-        ]
-        .map(|filter| {
+        let counts = [TasksFilter::All, TasksFilter::Missions, TasksFilter::Trees].map(|filter| {
             let tasks = open.iter().chain(&done).filter(|row| filter.keeps(row));
             let trees = trees
                 .running
                 .iter()
                 .chain(&trees.done_today)
-                .filter(|row| filter.keeps_tree(row));
+                .filter(|_| filter.keeps_trees());
             (filter, tasks.count() + trees.count())
         });
         let counts: Vec<(TasksFilter, usize)> = counts
@@ -2937,8 +2906,10 @@ impl Render for TasksPage {
         let filter = self.filter;
         open.retain(|row| filter.keeps(row));
         done.retain(|row| filter.keeps(row));
-        trees.running.retain(|row| filter.keeps_tree(row));
-        trees.done_today.retain(|row| filter.keeps_tree(row));
+        if !filter.keeps_trees() {
+            trees.running.clear();
+            trees.done_today.clear();
+        }
         if trees.running.iter().any(|row| row.status.live()) && !reduced {
             motion::pulse_lease(cx.entity_id(), cx);
         }

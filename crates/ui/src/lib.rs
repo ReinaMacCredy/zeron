@@ -445,7 +445,7 @@ fn open_notification_target(target: String, state: &gpui::Entity<state::AppState
                 } else if target == notify::SUPERVISOR_TARGET {
                     shell.open_supervisor(cx);
                 } else {
-                    shell.open_chat(target, cx);
+                    shell.open_notification_target(target, window, cx);
                 }
             });
         }

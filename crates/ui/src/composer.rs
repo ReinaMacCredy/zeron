@@ -44,7 +44,7 @@ use crate::theme::Theme;
 mod ask_pill;
 mod claude_cards;
 pub(crate) mod claude_config;
-pub(crate) use ask_pill::pending_questions;
+pub(crate) use ask_pill::{AskInfo, pending_questions};
 pub(crate) mod background;
 mod chip;
 mod limit_pill;
@@ -13645,21 +13645,17 @@ impl Composer {
                 self.host_advance(host, cx);
                 cx.stop_propagation();
             }
-        } else if key == "escape" {
-            match host {
-                WizardHost::Own => {
-                    if wizard_escape_goes_back(key, input_focused, input_empty) {
-                        let dismisses = self.wizard.as_ref().is_some_and(|wizard| {
-                            wizard_escape_dismisses(wizard.page, wizard.page_has_pick(), input_empty)
-                        });
-                        if dismisses {
-                            self.wizard_dismiss(cx);
-                        } else {
-                            self.wizard_back(cx);
-                        }
-                    }
+        // An Ask panel's escape bubbles so the tray hosting it closes.
+        } else if key == "escape" && host == WizardHost::Own {
+            if wizard_escape_goes_back(key, input_focused, input_empty) {
+                let dismisses = self.wizard.as_ref().is_some_and(|wizard| {
+                    wizard_escape_dismisses(wizard.page, wizard.page_has_pick(), input_empty)
+                });
+                if dismisses {
+                    self.wizard_dismiss(cx);
+                } else {
+                    self.wizard_back(cx);
                 }
-                WizardHost::Ask => self.close_ask_tray(cx),
             }
             cx.stop_propagation();
         }

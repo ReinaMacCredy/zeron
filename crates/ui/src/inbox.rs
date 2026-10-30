@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
@@ -6,23 +5,14 @@ use gpui::{
     AnyElement, ClickEvent, Context, Entity, EventEmitter, IntoElement, Render, SharedString,
     Subscription, Task, Window, div, prelude::*, px, relative,
 };
-use zeron_proto::account_usage::resets_in;
-use zeron_proto::change_request_assessment::AttentionReason;
 use zeron_proto::today::{
-    self, Part, day_slots, digest, header_line, is_overdue, today_tasks, work_day,
-    work_day_start,
+    Part, day_slots, digest, is_overdue, today_tasks, work_day, work_day_start,
 };
-use zeron_proto::{
-    AgentAccountsSnapshot, AgentUsageWindow, ChangeRequestListItem, Chat, ChatIndicator, HarnessId,
-    SessionStatus, TodayRun, TodayRuns, TodayRunsRequest,
-};
+use zeron_proto::{Chat, SessionStatus, TodayRun, TodayRunStatus, TodayRuns, TodayRunsRequest};
 use zeron_rpc::methods;
 
-use crate::composer::{Composer, ComposerInput, ComposerInputEvent, MentionTab};
-use crate::home::HomePrs;
+use crate::composer::{ComposerInput, ComposerInputEvent, MentionTab};
 use crate::icons::{self, icon};
-use crate::provider_instances::InstanceIcon;
-use crate::settings::accounts;
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::tasks::{CardFocus, TaskCard, TaskCardEvent};
@@ -34,13 +24,12 @@ const TILE_RADIUS: f32 = 16.0;
 const CARD_WIDTH: f32 = 352.0;
 const CHECK_SIZE: f32 = 18.0;
 const TICK: Duration = Duration::from_secs(30);
-const PRS_EVERY: Duration = Duration::from_secs(120);
 const RUNS_EVERY: Duration = Duration::from_secs(60);
 const ADD_PLACEHOLDER: &str = "Add a task for today, or press Tab to hand it to an agent";
 
 pub enum InboxEvent {
     OpenChat(String),
-    OpenPullRequests,
+    OpenTray,
     OpenTasks,
     OpenTaskCenter(String),
     CreateTask {
@@ -60,12 +49,8 @@ pub struct InboxPage {
     add_input: Entity<ComposerInput>,
     card: Entity<TaskCard>,
     open_first_card: bool,
-    accounts: Option<AgentAccountsSnapshot>,
-    asks: HashMap<String, bool>,
-    prs: Option<HomePrs>,
-    prs_fetched: Option<Instant>,
-    prs_task: Option<Task<()>>,
-    projects_seen: Vec<String>,
+    needs: usize,
+    tray_combo: String,
     runs: Option<TodayRuns>,
     runs_failed: bool,
     runs_fetched: Option<Instant>,
@@ -80,11 +65,7 @@ pub struct InboxPage {
 impl EventEmitter<InboxEvent> for InboxPage {}
 
 impl InboxPage {
-    pub fn new(
-        state: Entity<AppState>,
-        composer: Entity<Composer>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let add_input = cx.new(|cx| {
             ComposerInput::new(ADD_PLACEHOLDER, cx)
                 .with_single_line()
@@ -111,27 +92,15 @@ impl InboxPage {
                 cx.emit(InboxEvent::Card(event.clone()))
             }),
             cx.observe(&card, |_, _, cx| cx.notify()),
-            cx.observe(&composer, |this, composer, cx| {
-                let asks = composer.read(cx).ask_kinds();
-                if asks != this.asks {
-                    this.asks = asks;
-                    cx.notify();
-                }
-            }),
             cx.observe(&state, |this, _, cx| this.on_state_changed(cx)),
         ];
-        let asks = composer.read(cx).ask_kinds();
         let mut page = Self {
             state,
             add_input,
             card,
             open_first_card: std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("task-card"),
-            accounts: None,
-            asks,
-            prs: None,
-            prs_fetched: None,
-            prs_task: None,
-            projects_seen: Vec::new(),
+            needs: 0,
+            tray_combo: String::new(),
             runs: None,
             runs_failed: false,
             runs_fetched: None,
@@ -150,13 +119,10 @@ impl InboxPage {
         &self.card
     }
 
-    pub fn set_accounts(
-        &mut self,
-        accounts: Option<AgentAccountsSnapshot>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.accounts != accounts {
-            self.accounts = accounts;
+    pub fn set_triage(&mut self, needs: usize, tray_combo: String, cx: &mut Context<Self>) {
+        if (self.needs, &self.tray_combo) != (needs, &tray_combo) {
+            self.needs = needs;
+            self.tray_combo = tray_combo;
             cx.notify();
         }
     }
@@ -245,39 +211,12 @@ impl InboxPage {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let now = Instant::now();
-        let projects: Vec<String> = crate::home::local_git_project_paths(self.state.read(cx))
-            .into_iter()
-            .map(|(id, _, _)| id)
-            .collect();
-        if projects != self.projects_seen {
-            self.projects_seen = projects;
-            self.prs_fetched = None;
-        }
-        let due = |fetched: Option<Instant>, every| fetched.is_none_or(|at| now - at >= every);
-        if self.prs_task.is_none() && due(self.prs_fetched, PRS_EVERY) {
-            self.fetch_prs(cx);
-        }
-        if self.runs_task.is_none() && due(self.runs_fetched, RUNS_EVERY) {
+        let due = self
+            .runs_fetched
+            .is_none_or(|at| Instant::now() - at >= RUNS_EVERY);
+        if self.runs_task.is_none() && due {
             self.fetch_runs(cx);
         }
-    }
-
-    fn fetch_prs(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let projects = crate::home::local_git_project_paths(self.state.read(cx));
-        self.prs_task = Some(cx.spawn(async move |this, cx| {
-            let prs = crate::home::load_home_prs(&engine, projects).await;
-            this.update(cx, |this, cx| {
-                this.prs_task = None;
-                this.prs_fetched = Some(Instant::now());
-                this.prs = Some(prs);
-                cx.notify();
-            })
-            .ok();
-        }));
     }
 
     fn fetch_runs(&mut self, cx: &mut Context<Self>) {
@@ -308,25 +247,6 @@ impl InboxPage {
             .ok();
         }));
     }
-}
-
-pub(crate) fn awaiting_chats(state: &AppState, now: DateTime<Utc>) -> Vec<&Chat> {
-    state
-        .overview_chats(now)
-        .into_iter()
-        .filter(|(indicator, _)| *indicator == ChatIndicator::AwaitingInput)
-        .map(|(_, chat)| chat)
-        .collect()
-}
-
-pub(crate) fn attention_prs(prs: &HomePrs) -> Vec<(&ChangeRequestListItem, Vec<AttentionReason>)> {
-    today::attention_prs(prs.mine.iter().chain(&prs.review))
-}
-
-pub(crate) fn tightest_window(
-    snapshot: &AgentAccountsSnapshot,
-) -> Option<(HarnessId, &AgentUsageWindow)> {
-    today::tightest_window(accounts::sidebar_accounts(snapshot))
 }
 
 fn tile(theme: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> {
@@ -413,99 +333,169 @@ fn row_text(theme: &Theme, title: String, meta: String) -> gpui::Div {
         )
 }
 
-fn brand_mark(theme: &Theme, mark: Option<InstanceIcon>, size: f32) -> AnyElement {
-    mark.unwrap_or(InstanceIcon::Brand(icons::CHAT_ROUND_LINE, None))
-        .svg(theme.text_muted)
-        .size(px(size))
-        .flex_none()
-        .into_any_element()
-}
-
 fn chat_title(chat: &Chat) -> String {
     crate::transcript::single_line(&crate::home::chat_title(chat))
 }
 
 impl InboxPage {
-    fn render_needs_you(
-        &self,
-        theme: &Theme,
-        chats: &[Chat],
-        prs: &[(&ChangeRequestListItem, Vec<AttentionReason>)],
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let total = chats.len() + prs.len();
-        if total == 0 {
+    fn render_banner(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.needs == 0 {
             return None;
         }
-        let (_, _, attention) = crate::shell::chat_status_tone(ChatIndicator::AwaitingInput, theme);
-        let state = self.state.read(cx);
-        let mut rows: Vec<AnyElement> = chats
-            .iter()
-            .map(|chat| {
-                let project = chat
-                    .space_id
-                    .as_deref()
-                    .and_then(|id| state.space_row(id))
-                    .map(|space| state.representative_space(space).display_name().to_owned());
-                let ask = match self.asks.get(&chat.id) {
-                    Some(true) => "approve a command",
-                    Some(false) => "has a question",
-                    None => "waiting for you",
-                };
-                let meta = match project {
-                    Some(project) => format!("{project}, {ask}"),
-                    None => ask.to_owned(),
-                };
-                let chat_id = chat.id.clone();
-                task_row(
-                    theme,
-                    SharedString::from(format!("inbox-needs-{}", chat.id)),
-                )
-                .child(
-                    div().mt(px(2.0)).child(
-                        icon(icons::LUCIDE_CIRCLE_ALERT)
-                            .size(px(16.0))
-                            .text_color(attention),
-                    ),
-                )
-                .child(row_text(theme, chat_title(chat), meta))
-                .child(div().mt(px(3.0)).child(brand_mark(
-                    theme,
-                    crate::pickers::chat_mark(chat, cx),
-                    14.0,
-                )))
-                .on_click(
-                    cx.listener(move |_, _, _, cx| cx.emit(InboxEvent::OpenChat(chat_id.clone()))),
-                )
-                .into_any_element()
-            })
-            .collect();
-        if !prs.is_empty() {
-            let (title, meta) = today::attention_row(prs);
-            rows.push(
-                task_row(theme, "inbox-needs-prs")
-                    .child(
-                        div().mt(px(2.0)).child(
-                            icon(icons::LUCIDE_GIT_PULL_REQUEST)
-                                .size(px(16.0))
-                                .text_color(attention),
-                        ),
-                    )
-                    .child(row_text(theme, title, meta))
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(InboxEvent::OpenPullRequests)))
-                    .into_any_element(),
-            );
-        }
+        let accent = theme.accent;
+        let line = match self.needs {
+            1 => "1 thing needs you right now.".to_owned(),
+            n => format!("{n} things need you right now."),
+        };
         Some(
-            tile(theme, "inbox-needs-you")
-                .px(px(8.0))
+            tile(theme, "inbox-tray-banner")
+                .px(px(16.0))
                 .py(px(12.0))
                 .flex()
-                .flex_col()
-                .child(group_heading(theme, "Needs you", total, None))
-                .children(rows)
+                .items_center()
+                .gap(px(10.0))
+                .child(
+                    icon(icons::BELL)
+                        .size(px(16.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(ui_rems(13.5))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(line)),
+                )
+                .child(
+                    div()
+                        .id("inbox-open-tray")
+                        .debug_selector(|| "inbox-open-tray".into())
+                        .role(gpui::Role::Button)
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .h(px(30.0))
+                        .px(px(12.0))
+                        .rounded(px(8.0))
+                        .bg(accent.opacity(0.12))
+                        .hover(move |s| s.bg(accent.opacity(0.18)))
+                        .cursor_pointer()
+                        .text_size(ui_rems(13.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(accent)
+                        .child("Open tray")
+                        .child(crate::popover::kbd_hint(theme, &self.tray_combo))
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(InboxEvent::OpenTray))),
+                )
                 .into_any_element(),
         )
+    }
+
+    fn render_history(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let now = Utc::now();
+        let state = self.state.read(cx);
+        let title = |chat_id: &str, fallback: Option<&String>| {
+            state
+                .chats
+                .iter()
+                .find(|chat| chat.id == chat_id)
+                .map(chat_title)
+                .or_else(|| fallback.map(|title| crate::transcript::single_line(title)))
+                .unwrap_or_else(|| "New session".to_owned())
+        };
+        let mut items: Vec<(i64, &'static str, gpui::Hsla, String, &'static str, String)> =
+            Vec::new();
+        if let Some(runs) = &self.runs {
+            for run in &runs.runs {
+                let (glyph, tint, what) = match run.status {
+                    TodayRunStatus::Complete => (icons::CHECK, theme.text_muted, "Finished"),
+                    TodayRunStatus::Aborted => {
+                        (icons::LUCIDE_CIRCLE_ALERT, theme.danger, "Stopped")
+                    }
+                    TodayRunStatus::Running | TodayRunStatus::Unknown => continue,
+                };
+                let at = run.started_at_ms + run.duration_ms.unwrap_or(0);
+                items.push((
+                    at,
+                    glyph,
+                    tint,
+                    run.chat_id.clone(),
+                    what,
+                    title(&run.chat_id, run.title.as_ref()),
+                ));
+            }
+            for wait in &runs.waits {
+                let Some(at) = wait.ended_at_ms else {
+                    continue;
+                };
+                items.push((
+                    at,
+                    icons::LUCIDE_MESSAGE_CIRCLE_QUESTION,
+                    theme.accent,
+                    wait.chat_id.clone(),
+                    "You answered",
+                    title(&wait.chat_id, None),
+                ));
+            }
+        }
+        items.sort_by(|a, b| b.0.cmp(&a.0));
+        let rows: Vec<AnyElement> = items
+            .into_iter()
+            .enumerate()
+            .map(|(ix, (at, glyph, tint, chat_id, what, title))| {
+                task_row(theme, ("inbox-history", ix))
+                    .items_center()
+                    .child(
+                        div()
+                            .size(px(24.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(7.0))
+                            .bg(tint.opacity(0.12))
+                            .child(icon(glyph).size(px(14.0)).text_color(tint)),
+                    )
+                    .child(row_text(theme, title, what.to_owned()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(ui_rems(12.5))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(crate::cloud::ago(at, now))),
+                    )
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(InboxEvent::OpenChat(chat_id.clone()))
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        let count = rows.len();
+        tile(theme, "inbox-history")
+            .px(px(8.0))
+            .py(px(12.0))
+            .flex()
+            .flex_col()
+            .child(group_heading(theme, "Today", count, None))
+            .when(rows.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .text_size(ui_rems(13.0))
+                        .text_color(theme.text_muted)
+                        .child(if self.runs.is_none() {
+                            "Loading today’s history…"
+                        } else {
+                            "Nothing finished or answered yet today."
+                        }),
+                )
+            })
+            .children(rows)
+            .into_any_element()
     }
 
     fn render_tasks(
@@ -851,90 +841,6 @@ impl InboxPage {
             })
             .into_any_element()
     }
-
-    fn render_usage(&self, theme: &Theme) -> Option<AnyElement> {
-        let (harness, window) = tightest_window(self.accounts.as_ref()?)?;
-        let used = window.used_fraction.clamp(0.0, 1.0);
-        let remaining = 1.0 - used;
-        let fill = accounts::usage_color(accounts::usage_level(used), theme);
-        let detail = window
-            .resets_at
-            .and_then(|at| resets_in(at, Utc::now()))
-            .map(|left| format!("Resets in {left}"))
-            .unwrap_or_else(|| "Your tightest limit".to_owned());
-        let lead = format!(
-            "Left on {}, {}",
-            harness.display_name(),
-            window.label.to_lowercase()
-        );
-        Some(
-            tile(theme, "inbox-usage")
-                .min_h(px(112.0))
-                .px(px(16.0))
-                .py(px(14.0))
-                .flex()
-                .flex_col()
-                .justify_between()
-                .gap(px(12.0))
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(ui_rems(12.5))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(lead)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(brand_mark(
-                            theme,
-                            Some(InstanceIcon::harness(harness)),
-                            18.0,
-                        ))
-                        .child(
-                            div()
-                                .text_size(ui_rems(20.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(SharedString::from(format!(
-                                    "{}%",
-                                    (remaining * 100.0).round() as u32
-                                ))),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .flex_none()
-                                .w(px(56.0))
-                                .h(px(4.0))
-                                .rounded_full()
-                                .bg(theme.wash(0.08))
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .w(relative(remaining))
-                                        .rounded_full()
-                                        .bg(fill),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(ui_rems(12.5))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(detail)),
-                        ),
-                )
-                .into_any_element(),
-        )
-    }
 }
 
 impl Render for InboxPage {
@@ -946,24 +852,6 @@ impl Render for InboxPage {
         }
         let theme = Theme::of(cx).clone();
         let now = Local::now();
-        let chats: Vec<Chat> = awaiting_chats(self.state.read(cx), now.with_timezone(&Utc))
-            .into_iter()
-            .cloned()
-            .collect();
-        let prs = self.prs.as_ref().map(attention_prs).unwrap_or_default();
-        let needs = chats.len() + prs.len();
-        let open_tasks = {
-            let state = self.state.read(cx);
-            today_tasks(
-                &state.tasks,
-                &state.chats,
-                work_day(now),
-                work_day_start(now).with_timezone(&Utc),
-            )
-            .iter()
-            .filter(|task| task.completed_at.is_none())
-            .count()
-        };
         let header = div()
             .flex()
             .flex_wrap()
@@ -983,12 +871,15 @@ impl Render for InboxPage {
                     .debug_selector(|| "inbox-greeting".into())
                     .text_size(ui_rems(15.0))
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(header_line(now, needs, open_tasks))),
+                    .child(SharedString::from(format!(
+                        "History: what your agents asked, finished and failed. Live items wait in the {} tray.",
+                        self.tray_combo
+                    ))),
             );
-        let needs_card = self.render_needs_you(&theme, &chats, &prs, cx);
+        let banner = self.render_banner(&theme, cx);
+        let history = self.render_history(&theme, cx);
         let tasks_card = self.render_tasks(&theme, now, cx);
         let day_card = self.render_day(&theme, now, cx);
-        let usage_card = self.render_usage(&theme);
         let column = div()
             .w_full()
             .max_w(px(PAGE_MAX_WIDTH))
@@ -1000,6 +891,7 @@ impl Render for InboxPage {
             .flex_col()
             .gap(px(28.0))
             .child(header)
+            .children(banner)
             .child(
                 div()
                     .w_full()
@@ -1015,7 +907,7 @@ impl Render for InboxPage {
                             .flex()
                             .flex_col()
                             .gap(px(16.0))
-                            .children(needs_card)
+                            .child(history)
                             .child(tasks_card),
                     )
                     .child(
@@ -1026,8 +918,7 @@ impl Render for InboxPage {
                             .flex()
                             .flex_col()
                             .gap(px(16.0))
-                            .child(day_card)
-                            .children(usage_card),
+                            .child(day_card),
                     ),
             );
         let frame = {
@@ -1073,33 +964,5 @@ impl Render for InboxPage {
                     .child(column),
             ))
             .children(card)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tightest_window_is_the_most_used_active_window() {
-        let snapshot: AgentAccountsSnapshot = serde_json::from_value(serde_json::json!({
-            "accounts": [
-                { "harness": "codex", "active": true, "switchable": true, "id": "c", "usageWindows": [
-                    { "label": "Session", "usedFraction": 0.4, "resetsAt": null },
-                    { "label": "Week", "usedFraction": 0.7, "resetsAt": null }
-                ]},
-                { "harness": "claude-code", "active": true, "switchable": true, "id": "a", "usageWindows": [
-                    { "label": "Session", "usedFraction": 0.5, "resetsAt": null }
-                ]},
-                { "harness": "claude-code", "active": false, "switchable": true, "id": "b", "usageWindows": [
-                    { "label": "Session", "usedFraction": 0.99, "resetsAt": null }
-                ]}
-            ],
-            "warnings": []
-        }))
-        .unwrap();
-        let (harness, window) = tightest_window(&snapshot).unwrap();
-        assert_eq!((harness, window.label.as_str()), (HarnessId::Codex, "Week"));
-        assert!(tightest_window(&AgentAccountsSnapshot::default()).is_none());
     }
 }
