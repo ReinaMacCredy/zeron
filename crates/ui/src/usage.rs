@@ -242,49 +242,18 @@ impl UsagePage {
         id: &'static str,
         options: &[(T, &'static str)],
         selected: T,
-        enabled: bool,
         theme: &Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
         select: fn(&mut Self, T, &mut Context<Self>),
     ) -> AnyElement {
-        let reduced_motion = crate::motion::reduced_motion(cx);
-        let tabs = options.iter().map(|&(value, label)| {
-            let on = value == selected;
-            let key = format!("{id}-{label}");
-            let t =
-                widgets::tab_selection_t(window, format!("{key}-selection"), on, reduced_motion);
-            widgets::section_tab(theme, on, t, SharedString::from(key.clone()), key)
-                .min_h(px(26.0))
-                .py(px(3.0))
-                .text_size(crate::typography::ui_rems(12.0))
-                .role(gpui::Role::Tab)
-                .aria_label(label)
-                .when(enabled, |tab| {
-                    tab.cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| select(this, value, cx)))
-                })
-                .child(label)
-        });
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(2.0))
-            .p(px(2.0))
-            .rounded(px(10.0))
-            .bg(crate::theme::wash(0.04))
-            .when(!enabled, |el| el.opacity(0.5))
-            .children(tabs)
-            .into_any_element()
+        let page = cx.entity().downgrade();
+        widgets::segmented(theme, id, options, selected, move |value, _, cx| {
+            page.update(cx, |page, cx| select(page, value, cx)).ok();
+        })
+        .into_any_element()
     }
 
-    fn render_header(
-        &self,
-        theme: &Theme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let loading = self.task.is_some();
         let windows: Vec<(u32, &'static str)> = WINDOWS.to_vec();
         div()
@@ -305,9 +274,7 @@ impl UsagePage {
                         "usage-metric",
                         &[(Metric::Cost, "Cost"), (Metric::Tokens, "Tokens")],
                         self.metric,
-                        true,
                         theme,
-                        window,
                         cx,
                         |this, metric, cx| {
                             this.metric = metric;
@@ -318,9 +285,7 @@ impl UsagePage {
                         "usage-window",
                         &windows,
                         self.days,
-                        true,
                         theme,
-                        window,
                         cx,
                         |this, days, cx| this.select_window(days, cx),
                     ))
@@ -776,7 +741,6 @@ impl UsagePage {
         active: &[usize],
         hourly: bool,
         theme: &Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let row = |first: bool| {
@@ -940,9 +904,7 @@ impl UsagePage {
                             (Breakdown::Period, period_label),
                         ],
                         self.breakdown,
-                        true,
                         theme,
-                        window,
                         cx,
                         |this, breakdown, cx| {
                             this.breakdown = breakdown;
@@ -1099,9 +1061,9 @@ impl UsagePage {
 }
 
 impl Render for UsagePage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let header = self.render_header(&theme, window, cx);
+        let header = self.render_header(&theme, cx);
         let plan_limits = self.render_plan_limits(&theme, cx);
         let mut column = widgets::page_column()
             .max_w(px(1080.0))
@@ -1142,7 +1104,7 @@ impl Render for UsagePage {
                         .child(self.render_chart(&view, &active, hourly, &theme, cx)),
                 )
                 .child(self.render_totals(&view, &theme))
-                .child(self.render_breakdown(&view, &active, hourly, &theme, window, cx));
+                .child(self.render_breakdown(&view, &active, hourly, &theme, cx));
         }
         widgets::scroll_faded(
             "usage-page-scroll",
