@@ -17,6 +17,7 @@ struct NewSessionDraft: Equatable, Codable {
     var profileId: String?
     var instructions: String?
     var disabledTools: [String]?
+    var plan: Bool?
 }
 
 /// Options the pickers offer (from the core's workspace + host catalogs).
@@ -67,6 +68,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private let mark = UIImageView()
     private var draft: NewSessionDraft
     private var models: [ModelChoice] = []
+    private var harnesses: [HarnessInfo] = []
     private var invocationCatalogs: [String: InvocationCatalog] = [:]
     private var mission = false
     private var missionReview = true
@@ -271,7 +273,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     /// The last catalog each host reported, so the chip opens on a real model
     /// name while a fresh one comes back over the relay.
-    private static var modelCache: [String: [ModelChoice]] = [:]
+    private static var modelCache: [String: (harnesses: [HarnessInfo], models: [ModelChoice])] = [:]
     private var modelsDevice: String?
 
     /// Models for the draft's host: cached (or the built-in catalog) at once,
@@ -283,23 +285,26 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         let cloud = device == Self.cloudModelsKey
         if cloud {
             // Cloud runs the agents it has accounts for: Claude Code, Codex.
-            models = Self.modelCache[device] ?? Self.catalogModels().filter { AppModel.cloudHarnesses.contains($0.harness) }
+            harnesses = []
+            models = Self.modelCache[device]?.models ?? Self.catalogModels().filter { AppModel.cloudHarnesses.contains($0.harness) }
             if !models.contains(where: { $0.harness == draft.harness }), let first = models.first {
                 draft.harness = first.harness
                 draft.model = nil
                 draft.effort = nil
             }
         } else {
-            models = Self.modelCache[device] ?? Self.catalogModels()
+            harnesses = Self.modelCache[device]?.harnesses ?? []
+            models = Self.modelCache[device]?.models ?? Self.catalogModels()
         }
         refreshChips()
         Task { [weak self] in
             guard let self else { return }
-            let fresh = cloud ? await self.app.cloudModels() : await self.app.models(for: device)
-            guard !fresh.isEmpty else { return }
+            let fresh = cloud ? (harnesses: [], models: await self.app.cloudModels()) : await self.app.models(for: device)
+            guard !fresh.models.isEmpty else { return }
             Self.modelCache[device] = fresh
             guard self.modelsDevice == device else { return }
-            self.models = fresh
+            self.harnesses = fresh.harnesses
+            self.models = fresh.models
             self.refreshChips()
         }
     }
@@ -386,6 +391,9 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         if let efforts = model?.efforts, !efforts.isEmpty {
             chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: draft.effort ?? efforts[efforts.count / 2]), symbol: "gauge.with.dots.needle.67percent"))
         }
+        if let chip = CoreSessionSource.accessChip(draftAccess.current, plan: draftAccess.plan) {
+            chips.append(chip)
+        }
         composer.placeholder = mission ? labels.placeholder : "Describe the task"
         composer.chips = chips
         composer.chipMenus = [
@@ -394,6 +402,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             "branch": { [weak self] in self?.branchMenu() },
             "model": { [weak self] in self?.modelMenu() },
             "effort": { [weak self] in self?.effortMenu() },
+            "permission": { [weak self] in self?.accessMenu() },
             "mission-plan": { [weak self] in self?.missionPlanMenu() },
         ]
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
@@ -616,6 +625,23 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
                 }
             }]),
         ])
+    }
+
+    private var draftAccess: (current: AccessMode, offered: [AccessMode]?, plan: Bool?) {
+        let harness = harnesses.first { $0.id == draft.harness }
+        let offered = harness?.accessModes
+        return (resolveAccess(wanted: draft.config.access ?? .fullAccess, offered: offered), offered, harness?.supportsPlan == true ? draft.plan ?? false : nil)
+    }
+
+    private func accessMenu() -> UIMenu {
+        let access = draftAccess
+        return CoreSessionSource.accessMenu(current: access.current, offered: access.offered, plan: access.plan, onPlan: { [weak self] on in
+            self?.draft.plan = on
+            self?.refreshChips()
+        }, onPick: { [weak self] mode in
+            self?.draft.setAccess(mode)
+            self?.refreshChips()
+        })
     }
 
     /// The draft's own model when it names one (even one this list lacks:
