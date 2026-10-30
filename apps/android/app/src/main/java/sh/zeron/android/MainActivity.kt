@@ -43,6 +43,8 @@ class MainActivity : ComponentActivity() {
                 voiceStage = extras?.getBoolean("voice-stage") == true,
                 remoteVoice = extras?.getBoolean("remote-voice") == true,
                 voiceSelfTest = extras?.getBoolean("voice-selftest") == true,
+                still = extras?.getBoolean("still") == true,
+                flakyPages = extras?.getBoolean("flaky-pages") == true,
             ),
         )
         handleCallback(intent)

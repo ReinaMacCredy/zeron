@@ -19,6 +19,7 @@ object ZIcons {
     val Search = R.drawable.zi_magnifer
     val TabSessions = R.drawable.zi_tab_chat
     val TabSettings = R.drawable.zi_tab_settings
+    val TabTasks = R.drawable.zi_checklist
     val Back = R.drawable.zi_arrow_left
     val More = R.drawable.zi_more_horizontal
     val Close = R.drawable.zi_close

@@ -89,6 +89,12 @@ import uniffi.zeron_core.SessionHandle
 
 private data class TextSheet(val title: String, val text: String, val mono: Boolean)
 
+private data class FindingsRequest(val taskId: String?)
+
+private data class SidechatRequest(val prompt: String?)
+
+private data class ConfigRequest(val tab: uniffi.zeron_core.ConfigTab = uniffi.zeron_core.ConfigTab.CONFIG, val query: String = "")
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SessionScreen(
@@ -109,6 +115,8 @@ fun SessionScreen(
     onOpenBilling: () -> Unit = {},
     /** Companions open beside the session (the large-screen inspector) instead of over it. */
     onShowCompanions: ((CompanionSection?) -> Unit)? = null,
+    onNeedsYou: () -> Unit = {},
+    onOpenRoute: (String) -> Unit = {},
 ) {
     val client by model.client.collectAsState()
     val core = client ?: return
@@ -121,6 +129,8 @@ fun SessionScreen(
         return
     }
     val transcript = remember(chatId) { TranscriptState() }
+    val extras = remember(chatId) { sh.zeron.android.core.SessionExtras(model, core, handle, chatId) }
+    DisposableEffect(chatId) { onDispose { extras.close() } }
     val density = LocalDensity.current.density
     DisposableEffect(chatId) {
         transcript.engine.attach(core, chatId)
@@ -159,6 +169,61 @@ fun SessionScreen(
     val scope = rememberCoroutineScope()
     var sheet by remember { mutableStateOf<TextSheet?>(null) }
     var viewing by remember { mutableStateOf<ImageBitmap?>(null) }
+    var claudeConfig by remember(chatId) { mutableStateOf<ConfigRequest?>(null) }
+    var reviewOptions by remember(chatId) { mutableStateOf(false) }
+    var findings by remember(chatId) { mutableStateOf<FindingsRequest?>(null) }
+    var changes by remember(chatId) { mutableStateOf<String?>(null) }
+    var agentsSheet by remember(chatId) { mutableStateOf(false) }
+    var info by remember(chatId) { mutableStateOf(false) }
+    var projectActions by remember(chatId) { mutableStateOf(false) }
+    var limitFor by remember(chatId) { mutableStateOf<String?>(null) }
+    var sidechat by remember(chatId) { mutableStateOf<SidechatRequest?>(null) }
+    var stopComputer by remember(chatId) { mutableStateOf(false) }
+    var stillReceiving by remember(chatId) { mutableStateOf(false) }
+    fun openSkill(name: String, path: String?) = scope.launch {
+        try {
+            val file = handle.skillFile(name, path)
+            sheet = TextSheet(name, file.text, true)
+        } catch (e: Exception) {
+            model.toast(sh.zeron.android.core.SessionExtras.failure(e, "Couldn't open $name's SKILL.md. Try again."))
+        }
+    }
+    var branchOffer by remember(chatId) { mutableStateOf<uniffi.zeron_core.BranchOffer?>(null) }
+    var handoff by remember(chatId) { mutableStateOf(false) }
+    var limitActions by remember(chatId) { mutableStateOf(false) }
+    var compactOffer by remember(chatId) { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    val quotes = remember(chatId) { kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4) }
+    // The composer's draft outlives the panel that replaces it while the agent asks.
+    val draft = remember(chatId) { ComposerModel(model.drafts.load(chatId)) }
+    fun performCard(action: uniffi.zeron_core.CardAction) {
+        when (action) {
+            is uniffi.zeron_core.CardAction.Consent -> runCatching { handle.answerConsent(action.requestId, action.questionId, action.answer) }
+            uniffi.zeron_core.CardAction.EnableComputer -> {
+                draft.setText(uniffi.zeron_core.computerUseEnablingDraft(draft.text))
+                model.drafts.save(chatId, draft.text)
+            }
+            uniffi.zeron_core.CardAction.OpenClaudeConfig -> claudeConfig = ConfigRequest()
+            uniffi.zeron_core.CardAction.OpenClaudeStatus -> claudeConfig = ConfigRequest(tab = uniffi.zeron_core.ConfigTab.STATUS)
+            uniffi.zeron_core.CardAction.OpenClaudePermissions -> claudeConfig = ConfigRequest(query = "permission")
+            uniffi.zeron_core.CardAction.OpenUsage -> onOpenRoute(usageRoute(handle))
+            uniffi.zeron_core.CardAction.OpenSettings -> onOpenRoute("settings")
+            uniffi.zeron_core.CardAction.OpenDocs -> onOpenRoute("docs")
+            uniffi.zeron_core.CardAction.Compact -> extras.compact()
+            is uniffi.zeron_core.CardAction.PickModel -> extras.applyChip(uniffi.zeron_core.ChipWrite(action.id, action.label, null, null))
+            is uniffi.zeron_core.CardAction.CopyText -> clipboard.setText(AnnotatedString(action.text))
+            is uniffi.zeron_core.CardAction.RetryCard -> extras.launch("Couldn't run that command. Try again.") { core.retryClaudeCard(chatId, action.messageId, action.command) }
+            uniffi.zeron_core.CardAction.OpenClaudeHooks -> scope.launch {
+                try {
+                    val file = core.claudeSettingsFile(chatId)
+                    sheet = TextSheet(file.path.substringAfterLast('/'), file.text, true)
+                } catch (e: Exception) {
+                    model.toast(sh.zeron.android.core.SessionExtras.failure(e, "Couldn't open Claude Code's settings.json. Try again."))
+                }
+            }
+            uniffi.zeron_core.CardAction.ExportChat -> exportChat(context, handle) { model.toast(it) }
+        }
+    }
     val actions = remember(chatId) {
         suspend fun load(ref: String): ImageBitmap? {
             val device = handle.composer().host.deviceId
@@ -172,12 +237,21 @@ fun SessionScreen(
             openUrl = { url ->
                 val uri = Uri.parse(url)
                 when (uri.scheme) {
-                    "http", "https" -> CustomTabsIntent.Builder().build().launchUrl(context, uri)
                     // An image chip opens its upload full size, as its thumbnail did.
                     "zeron-preview" -> uri.getQueryParameter("ref")?.let(open)
                     // A sender caption opens the chat that sent the message.
                     "zeron-chat" -> uri.getQueryParameter("id")?.takeIf { it != chatId }?.let(onOpenChat)
-                    else -> runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                    "zeron-limit" -> uri.getQueryParameter("chat")?.let { limitFor = it }
+                    "zeron-skill" -> uri.getQueryParameter("name")?.let { name -> openSkill(name, uri.getQueryParameter("path")) }
+                    "zeron-blob" -> uri.getQueryParameter("ref")?.let { runCatching { transcript.engine.fetchBlob(it) } }
+                    else -> {
+                        val pr = uniffi.zeron_core.pullRequestLink(url)
+                        when {
+                            pr != null -> onOpenRoute("pr:${pr.url}")
+                            uri.scheme == "http" || uri.scheme == "https" -> CustomTabsIntent.Builder().build().launchUrl(context, uri)
+                            else -> runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                        }
+                    }
                 }
             },
             loadImage = ::load,
@@ -186,10 +260,16 @@ fun SessionScreen(
             openSubagent = { doc, title, running -> onOpenSubagent(chatId, doc, title, running) },
             // An error card's "Log in": that agent's sign-in, started at once.
             act = { action -> if (action == "sign-in") signInTarget(model, chatId)?.let { onOpenAccounts(it, true) } },
+            loadHtml = { device, path ->
+                val key = (device.ifEmpty { extras.hostDevice }) + "\n" + path
+                htmlPages.get(key) ?: runCatching { core.readAttachment(device.ifEmpty { extras.hostDevice }, path).toString(Charsets.UTF_8) }.getOrNull()?.also { htmlPages.put(key, it) }
+            },
+            card = { action -> performCard(action) },
+            quote = { text -> quotes.tryEmit(text) },
+            branchBlocked = { rewind -> runCatching { handle.branchBlocked(rewind) }.getOrNull() },
+            branch = { branchOffer = it },
         )
     }
-    // The composer's draft outlives the panel that replaces it while the agent asks.
-    val draft = remember(chatId) { ComposerModel(model.drafts.load(chatId)) }
     // Text handed to this chat (a terminal's output) lands after what's typed.
     DisposableEffect(chatId) {
         model.composerSinks[chatId] = { text ->
@@ -236,6 +316,16 @@ fun SessionScreen(
         when {
             which == "companions" -> onShowCompanions?.invoke(null) ?: run { showCompanions = true }
             which == "terminal" -> onOpenTerminal(chatId, null)
+            which == "config" -> claudeConfig = ConfigRequest()
+            which == "review" -> reviewOptions = true
+            which == "findings" -> findings = FindingsRequest(null)
+            which == "changes" -> changes = "Changes"
+            which == "agents-sheet" -> agentsSheet = true
+            which == "info" -> info = true
+            which == "actions" -> projectActions = true
+            which == "stop" -> stopComputer = true
+            which == "limit" -> limitFor = chatId
+            which == "sidechat" -> sidechat = SidechatRequest(null)
             which.startsWith("side-chat:") -> onOpenSideChat(which.removePrefix("side-chat:"))
             which.startsWith("subagent:") -> {
                 val tool = which.removePrefix("subagent:")
@@ -252,7 +342,6 @@ fun SessionScreen(
     val headerTitle = if (parentId != null) "Side chat" else composer.title
     val subtitle = parentTitle ?: composer.host.name?.let { "$project @ $it" } ?: project
     var overflow by remember { mutableStateOf(false) }
-    val clipboard = LocalClipboardManager.current
 
     // Flat Material chrome: the header sits on the page and takes the
     // container tone once the transcript scrolls under it; the transcript
@@ -295,30 +384,67 @@ fun SessionScreen(
                 androidx.compose.foundation.layout.Spacer(Modifier.size(8.dp))
                 Box {
                     TonalCircleButton(ZIcons.More, "More", onClick = { overflow = true }, container = MaterialTheme.colorScheme.surfaceContainerHighest)
-                    GroupedActionMenu(
-                        overflow,
-                        { overflow = false },
-                        listOf(
+                    if (overflow) {
+                        val strip = remember { core.missionStrip(chatId) }
+                        val watch = remember { core.watchState(chatId) }
+                        val roster = remember { runCatching { handle.backgroundRoster(System.currentTimeMillis()) }.getOrNull() }
+                        val mission = listOfNotNull(
+                            strip?.let { st -> sh.zeron.android.ui.session.SessionMenuItem(uniffi.zeron_core.missionLabels().openMissionPage, ZIcons.TabTasks) { onOpenRoute("tasks:mission:${st.taskId}") } },
+                            strip?.let { st -> sh.zeron.android.ui.session.SessionMenuItem("Brief", ZIcons.Text) { onOpenRoute("tasks:task:${st.stepId ?: st.taskId}") } },
+                            watch?.takeIf { !(it.mission && strip?.stepId != null) }?.let { w ->
+                                sh.zeron.android.ui.session.SessionMenuItem(
+                                    if (w.everything) "Watched (everything is on)" else "Watched by the Supervisor",
+                                    ZIcons.Info,
+                                    enabled = !w.everything,
+                                    checked = w.watched,
+                                ) { extras.launch("Couldn't change the Supervisor's watch. Try again.") { core.setWatched(chatId, !w.watched) } }
+                            },
+                        )
+                        val compactBlocked = composer.compactBlocked
+                        sh.zeron.android.ui.session.SessionMenu(
+                            true,
+                            { overflow = false },
                             listOf(
-                                MenuAction("New side chat", ZIcons.SideChats) { newSideChat() },
-                                MenuAction("Fork into side chat", ZIcons.Fork) { fork() },
-                                MenuAction("Terminal", ZIcons.Terminal) { openTerminal() },
+                                mission,
+                                listOfNotNull(if (stillReceiving) sh.zeron.android.ui.session.SessionMenuItem("Stop Computer Use", ZIcons.Stop, destructive = true) { stopComputer = true } else null),
+                                listOf(
+                                    sh.zeron.android.ui.session.SessionMenuItem("New side chat", ZIcons.SideChats) { newSideChat() },
+                                    sh.zeron.android.ui.session.SessionMenuItem("Fork into side chat", ZIcons.Fork) { fork() },
+                                ),
+                                listOfNotNull(
+                                    row?.let { r -> sh.zeron.android.ui.session.SessionMenuItem(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
+                                    sh.zeron.android.ui.session.SessionMenuItem("Session Info", ZIcons.Info) { info = true },
+                                    sh.zeron.android.ui.session.SessionMenuItem("Terminal", ZIcons.Terminal) { openTerminal() },
+                                    sh.zeron.android.ui.session.SessionMenuItem("Project Actions", ZIcons.Command) { projectActions = true },
+                                    sh.zeron.android.ui.session.SessionMenuItem("Copy Transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
+                                    roster?.summary?.let { sum -> sh.zeron.android.ui.session.SessionMenuItem(roster.title, ZIcons.Bot, subtitle = sum) { agentsSheet = true } },
+                                    composer.review?.let { r -> sh.zeron.android.ui.session.SessionMenuItem(r.menuLabel, ZIcons.Check) { reviewOptions = true } },
+                                    if (row?.sidechatOf == null) sh.zeron.android.ui.session.SessionMenuItem(uniffi.zeron_core.newSidechatLabel(), ZIcons.Chat) { sidechat = SidechatRequest(null) } else null,
+                                    remember { runCatching { handle.handoffBlocked() }.getOrDefault(true) }.let { blocked ->
+                                        sh.zeron.android.ui.session.SessionMenuItem(uniffi.zeron_core.handoffLabels().title, ZIcons.ArrowRight, enabled = !blocked) { handoff = true }
+                                    },
+                                    sh.zeron.android.ui.session.SessionMenuItem("Compact Context", ZIcons.Collapse, subtitle = compactBlocked, enabled = compactBlocked == null) { extras.compact() },
+                                    row?.let {
+                                        sh.zeron.android.ui.session.SessionMenuItem("Archive", ZIcons.Archive) {
+                                            model.archive(chatId)
+                                            onBack()
+                                        }
+                                    },
+                                ),
+                                listOfNotNull(row?.let { sh.zeron.android.ui.session.SessionMenuItem("Delete", ZIcons.Delete, destructive = true) { confirmDelete = true } }),
                             ),
-                            listOfNotNull(
-                                row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
-                                MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
-                                row?.let {
-                                    MenuAction("Archive", ZIcons.Archive) {
-                                        model.archive(chatId)
-                                        onBack()
-                                    }
-                                },
-                            ),
-                            listOfNotNull(row?.let { MenuAction("Delete", ZIcons.Delete, destructive = true) { confirmDelete = true } }),
-                        ),
-                    )
+                        )
+                    }
                 }
             }
+        }
+        val missionStrip = remember(workspace, composer) { core.missionStrip(chatId) }
+        missionStrip?.let { st ->
+            sh.zeron.android.ui.session.MissionStripPill(
+                st,
+                onClick = { onOpenRoute("tasks:mission:${st.taskId}") },
+                modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+            )
         }
         // The transcript runs on under the chips and composer and fades out
         // behind them (iOS's edge fade), instead of stopping at a hard line.
@@ -326,7 +452,14 @@ fun SessionScreen(
             val density = LocalDensity.current
             var stack by remember { mutableStateOf(0.dp) }
             LaunchedEffect(stack) { transcript.bottomInset = stack.value + 12f }
+            sh.zeron.android.design.ChatBackground(model, chatId, Modifier.matchParentSize())
             Transcript(transcript, actions, Modifier.fillMaxSize())
+            sh.zeron.android.ui.session.ComputerStillPreview(
+                extras,
+                working = composer.live.turnRunning,
+                onReceiving = { stillReceiving = it },
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 12.dp, end = 12.dp),
+            )
             val page = MaterialTheme.colorScheme.background
             Box(
                 Modifier
@@ -362,8 +495,32 @@ fun SessionScreen(
                 androidx.compose.animation.AnimatedVisibility(cloudOutOfCredits) {
                     CloudCreditsNotice(nudges, onAddCredits = onOpenBilling)
                 }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    sh.zeron.android.ui.session.AgentsPill(
+                        model,
+                        chatId,
+                        onOpenChat = onOpenChat,
+                        onOpenSubagent = { doc, title, running -> onOpenSubagent(chatId, doc, title, running) },
+                        onOpenTerminal = { terminal -> onOpenTerminal(chatId, terminal) },
+                        extras = extras,
+                        openCard = openCompanion == "agents",
+                        onOpenFindings = { findings = FindingsRequest(it) },
+                    )
+                    NeedsYouPill(model, chatId, onClick = onNeedsYou)
+                }
                 Row(Modifier.fillMaxWidth().padding(end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.weight(1f)) { Banner(composer, connectivity?.state, onRetry = { runCatching { handle.retryDelivery() } }, cloud = if (isCloud) model.cloud else null, chatId = chatId, deviceId = row?.deviceId) }
+                    Box(Modifier.weight(1f)) { Banner(
+                            composer,
+                            connectivity?.state,
+                            onRetry = { runCatching { handle.retryDelivery() } },
+                            cloud = if (isCloud) model.cloud else null,
+                            chatId = chatId,
+                            deviceId = row?.deviceId,
+                            compactNotice = extras.compactNotice,
+                            onNotice = { extras.compactNotice = null },
+                            onLimit = { limitActions = true },
+                            onOffer = { compactOffer = true },
+                        ) }
                     CompanionStrip(companions, onTap = { section -> onShowCompanions?.invoke(section) ?: run { companionsSheet = section; showCompanions = true } }, modifier = if (companions.isEmpty) Modifier else Modifier.padding(vertical = 6.dp))
                 }
                 val input = composer.openInput
@@ -371,17 +528,96 @@ fun SessionScreen(
                 if (input != null) {
                     QuestionPanel(input) { answers -> runCatching { handle.respondInput(input.requestId, answers) } }
                 } else {
-                    Composer(model, core, handle, composer, row, transcript, draft, openModelPicker = openPicker, beforeSend = {
-                        // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.
-                        if (cloudOutOfCredits) nudges++
-                        !cloudOutOfCredits
-                    })
+                    Composer(
+                        model, core, handle, composer, row, transcript, draft,
+                        openModelPicker = openPicker,
+                        beforeSend = {
+                            // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.
+                            if (cloudOutOfCredits) nudges++ else extras.compactNotice = null
+                            !cloudOutOfCredits
+                        },
+                        onOpenClaudeConfig = { claudeConfig = ConfigRequest() },
+                        onNeedsYou = onNeedsYou,
+                        onOpenRoute = onOpenRoute,
+                        onCompact = { extras.compact(it) },
+                        onSidechat = { sidechat = SidechatRequest(it) },
+                        onOpenFindings = { findings = FindingsRequest(null) },
+                        onOpenChanges = { changes = it },
+                        quotes = quotes,
+                    )
                 }
             }
         }
     }
 
     viewing?.let { ImageViewer(it) { viewing = null } }
+
+    claudeConfig?.let { c -> sh.zeron.android.ui.session.ClaudeConfigSheet(model, chatId, extras, c.tab, c.query, onOpenUsage = { onOpenRoute(usageRoute(handle)) }) { claudeConfig = null } }
+    sh.zeron.android.ui.session.SwitchPromptDialog(extras)
+    branchOffer?.let { offer ->
+        sh.zeron.android.ui.session.BranchDialog(offer, onDismiss = { branchOffer = null }, onConfirm = {
+            scope.launch {
+                try {
+                    if (offer.rewind) {
+                        draft.setText(handle.rewindTo(offer.entryId))
+                        model.drafts.save(chatId, draft.text)
+                    } else {
+                        onOpenChat(handle.forkFrom(offer.entryId))
+                    }
+                } catch (e: Exception) {
+                    model.toast((e as? uniffi.zeron_core.CoreException.HostException)?.reason ?: if (offer.rewind) "Couldn't rewind. Try again." else "Couldn't fork. Try again.")
+                }
+            }
+        })
+    }
+    if (stopComputer) {
+        sh.zeron.android.ui.session.StopComputerDialog(composer.host.name ?: "the Mac", onDismiss = { stopComputer = false }, onStop = {
+            extras.launch("Couldn't reach the host. Try again.") {
+                model.toast(if (handle.computerStop()) "Stopped computer use" else "Computer use had already stopped")
+            }
+        })
+    }
+    if (handoff) sh.zeron.android.ui.session.HandoffSheet(extras, onOpenChat = onOpenChat) { handoff = false }
+    if (limitActions) {
+        composer.limitPill?.let { limit ->
+            sh.zeron.android.ui.session.LimitActionsSheet(
+                limit,
+                onSwitch = { extras.launch("Couldn't reach the host. Try again.") { core.resolveLimitOffer(chatId, "switch") } },
+                onToggleResume = { extras.launch("Couldn't reach the host. Try again.") { core.setLimitResume(chatId, !limit.auto) } },
+                onDismiss = { limitActions = false },
+            )
+        } ?: run { limitActions = false }
+    }
+    if (compactOffer) {
+        composer.resumeCompaction?.let { offer ->
+            sh.zeron.android.ui.session.CompactOfferDialog(offer.title, offer.body, onCompact = { extras.compact() }, onKeep = { runCatching { handle.keepFullHistory() } }, onDismiss = { compactOffer = false })
+        } ?: run { compactOffer = false }
+    }
+    if (reviewOptions) sh.zeron.android.ui.review.ReviewOptionsSheet(extras) { reviewOptions = false }
+    findings?.let { f -> sh.zeron.android.ui.review.ReviewFindingsSheet(extras, f.taskId) { findings = null } }
+    changes?.let { t -> sh.zeron.android.ui.review.ChangesSheet(extras, t) { changes = null } }
+    if (info) {
+        sh.zeron.android.ui.session.SessionInfoSheet(
+            extras,
+            sources = remember(transcript.frame) { transcript.frame?.sources().orEmpty() },
+            onOpenChanges = { changes = it },
+            onOpenImage = { ref -> scope.launch { actions.loadImage(ref)?.let { viewing = it } ?: model.toast("Couldn't load ${ref.substringAfterLast('/')}. Try again.") } },
+        ) { info = false }
+    }
+    if (projectActions) sh.zeron.android.ui.session.ProjectActionsSheet(extras) { projectActions = false }
+    limitFor?.let { id -> sh.zeron.android.ui.session.LimitCardSheet(extras, id, onOpenChat = { if (it != chatId) onOpenChat(it) }) { limitFor = null } }
+    sidechat?.let { r -> sh.zeron.android.ui.session.SidechatSheet(extras, r.prompt, onOpenChat = onOpenSideChat) { sidechat = null } }
+    if (agentsSheet) {
+        sh.zeron.android.ui.session.AgentsSheet(
+            model,
+            chatId,
+            extras,
+            onOpenChat = onOpenChat,
+            onOpenSubagent = { doc, title, running -> onOpenSubagent(chatId, doc, title, running) },
+            onOpenTerminal = { terminal -> onOpenTerminal(chatId, terminal) },
+            onOpenFindings = { findings = FindingsRequest(it) },
+        ) { agentsSheet = false }
+    }
 
     if (showCompanions) {
         CompanionsSheet(
@@ -441,12 +677,45 @@ fun SessionScreen(
     }
 }
 
+private val htmlPages = android.util.LruCache<String, String>(16)
+
+private fun usageRoute(handle: SessionHandle): String =
+    runCatching { handle.composer().host.name }.getOrNull()?.let { "page:usage@$it" } ?: "page:usage"
+
+private fun exportChat(context: android.content.Context, handle: SessionHandle, fail: (String) -> Unit) {
+    val export = runCatching { handle.exportMarkdown() }.getOrNull() ?: return
+    val uri = runCatching {
+        val dir = java.io.File(context.cacheDir, "shared").apply { mkdirs() }
+        val file = java.io.File(dir, export.fileName)
+        file.writeText(export.markdown)
+        androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+    }.getOrElse { return fail("Couldn't export the chat. Try again.") }
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "text/markdown"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_SUBJECT, export.fileName)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(send, null))
+}
+
 /** How far above the chips and composer the transcript starts to fade. */
 private val FADE = 44.dp
 
 /** The status pill above the composer (iOS SessionChrome banner). */
 @Composable
-private fun Banner(c: ComposerState, connectivity: ConnectivityState?, onRetry: () -> Unit, cloud: sh.zeron.android.core.CloudStore? = null, chatId: String = "", deviceId: String? = null) {
+private fun Banner(
+    c: ComposerState,
+    connectivity: ConnectivityState?,
+    onRetry: () -> Unit,
+    cloud: sh.zeron.android.core.CloudStore? = null,
+    chatId: String = "",
+    deviceId: String? = null,
+    compactNotice: String? = null,
+    onNotice: () -> Unit = {},
+    onLimit: () -> Unit = {},
+    onOffer: () -> Unit = {},
+) {
     // Reconnect countdowns tick each second.
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     val retryAt = c.room.retryAtMs
@@ -465,6 +734,8 @@ private fun Banner(c: ComposerState, connectivity: ConnectivityState?, onRetry: 
         if (cloud.outOfCredits) return
         cloud.sessionError(chatId, deviceId)?.let { return StatusBanner("Cloud machine: $it", "Retry" to onRetry) }
     }
+    compactNotice?.let { return TapBanner(it, onClick = onNotice) }
+    if (c.compacting) return TapBanner("Compacting context", working = true)
     val text = when {
         c.sendState == SendState.FAILED -> "Not delivered"
         c.sendState == SendState.QUEUED -> "${c.host.name ?: "Host"} is offline — will send when it's back"
@@ -472,8 +743,31 @@ private fun Banner(c: ComposerState, connectivity: ConnectivityState?, onRetry: 
         connectivity == ConnectivityState.OFFLINE -> "Offline — sends are saved"
         !c.room.connected && retryAt != null -> "Reconnecting in ${maxOf(1L, (retryAt - now) / 1000)}s"
         else -> null
-    } ?: return
-    StatusBanner(text, if (c.sendState == SendState.FAILED) "Retry" to onRetry else null)
+    }
+    if (text != null) return StatusBanner(text, if (c.sendState == SendState.FAILED) "Retry" to onRetry else null)
+    c.limitPill?.let { return TapBanner(it.text, onClick = onLimit) }
+    c.resumeCompaction?.let { TapBanner("${it.title} \u00B7 ${it.body}", onClick = onOffer) }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun TapBanner(text: String, working: Boolean = false, onClick: (() -> Unit)? = null) {
+    Surface(
+        onClick = onClick ?: {},
+        enabled = onClick != null,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+    ) {
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (working) {
+                androidx.compose.material3.CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp, color = MaterialTheme.colorScheme.onSecondaryContainer)
+                androidx.compose.foundation.layout.Spacer(Modifier.size(8.dp))
+            }
+            Text(text, style = MaterialTheme.typography.labelLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+    }
 }
 
 /** Whose logins an error card's "Log in" opens: Cloud's for a Cloud chat, else the host's. */

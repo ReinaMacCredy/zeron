@@ -53,7 +53,7 @@ final class AgentTerminalViewController: UIViewController {
         empty.accessibilityIdentifier = "terminal-empty"
         empty.translatesAutoresizingMaskIntoConstraints = false
 
-        footer.text = "Output only. Type into this terminal on the Mac."
+        footer.text = "Output only. Type into this terminal on \(source.chrome.hostName ?? "its host")."
         footer.font = Fonts.ui(.sans, 12)
         footer.textColor = Palette.secondary
         footer.numberOfLines = 0

@@ -100,6 +100,7 @@ pub struct HostCapabilities {
     pub mid_turn_steering: Option<bool>,
     /// The access modes the chat's harness honors (unknown until a live catalog).
     pub access_modes: Option<Vec<AccessMode>>,
+    pub supports_plan: Option<bool>,
     /// The host moves the chat to another provider between turns.
     pub provider_switch: bool,
 }
@@ -341,6 +342,7 @@ impl From<&zc::ComposerState> for ComposerState {
                         .access_modes
                         .as_ref()
                         .map(|modes| modes.iter().copied().map(Into::into).collect()),
+                    supports_plan: caps.supports_plan,
                     provider_switch: caps.provider_switch,
                 },
             },

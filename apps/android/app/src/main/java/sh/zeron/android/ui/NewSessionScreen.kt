@@ -78,6 +78,7 @@ fun NewSessionScreen(
     onOpenBilling: () -> Unit = {},
     /** Focus the prompt at once (a large screen's page at launch waits: the keyboard would cover the column). */
     focusOnAppear: Boolean = true,
+    onOpenRoute: (String) -> Unit = {},
 ) {
     val workspace by model.workspace.collectAsState()
     val client by model.client.collectAsState()
@@ -143,6 +144,7 @@ fun NewSessionScreen(
     var models by remember(modelsKey) {
         mutableStateOf(modelCache[modelsKey] ?: catalogModels().filter { !runsOnCloud || it.harness in sh.zeron.android.core.CloudStore.harnesses })
     }
+    var harnesses by remember(modelsKey) { mutableStateOf<List<uniffi.zeron_core.HarnessInfo>>(emptyList()) }
     LaunchedEffect(modelsKey, models) {
         if (runsOnCloud && models.none { it.harness == draft.harness }) models.firstOrNull()?.let { draft = draft.copy(harness = it.harness, model = null, effort = null) }
     }
@@ -159,8 +161,9 @@ fun NewSessionScreen(
             return@LaunchedEffect
         }
         if (deviceId.isEmpty()) return@LaunchedEffect
-        val harnesses = runCatching { c.listHarnesses(deviceId) }.getOrNull() ?: return@LaunchedEffect
-        val fresh = harnesses.filter { it.offered }.flatMap { h ->
+        val listed = runCatching { c.listHarnesses(deviceId) }.getOrNull() ?: return@LaunchedEffect
+        harnesses = listed
+        val fresh = listed.filter { it.offered }.flatMap { h ->
             (runCatching { c.listModels(deviceId, h.id) }.getOrNull() ?: fallbackModels(h.id)).map { ModelChoice(h.id, h.label, it) }
         }
         if (fresh.isNotEmpty()) {
@@ -170,6 +173,43 @@ fun NewSessionScreen(
     }
     val choice = models.firstOrNull { it.harness == draft.harness && it.model.id == draft.model }
         ?: models.firstOrNull { it.harness == draft.harness }
+
+    var profiles by remember { mutableStateOf<List<uniffi.zeron_core.ProfileRow>>(emptyList()) }
+    var profilesSaved by remember { mutableStateOf(0) }
+    val draftConfig = draft.config()
+    LaunchedEffect(client, deviceId, draftConfig, profilesSaved) {
+        val c = client ?: return@LaunchedEffect
+        if (deviceId.isEmpty()) return@LaunchedEffect
+        val rows = c.draftProfileRows(deviceId, draftConfig)
+        if (rows != profiles) profiles = rows
+    }
+    fun profileFailed(e: Exception) {
+        scope.launch { snackbar.showSnackbar(e.message ?: "Couldn't change the profile") }
+    }
+    suspend fun applyProfile(id: String) {
+        val c = client ?: return
+        try {
+            draft = draft.adopt(c.applyDraftProfile(deviceId, draft.config(), id))
+        } catch (e: Exception) {
+            profileFailed(e)
+        }
+    }
+    suspend fun saveProfile(id: String) {
+        val c = client ?: return
+        try {
+            c.saveDraftIntoProfile(deviceId, draft.config(), id)
+            profilesSaved++
+        } catch (e: Exception) {
+            profileFailed(e)
+        }
+    }
+    fun detachProfile() {
+        try {
+            draft = draft.adopt(uniffi.zeron_core.detachDraftProfile(draft.config()))
+        } catch (e: Exception) {
+            profileFailed(e)
+        }
+    }
 
     LaunchedEffect(Unit) { if (focusOnAppear) focus.requestFocus() }
 
@@ -186,7 +226,7 @@ fun NewSessionScreen(
         starting = true
         scope.launch {
             try {
-                val id = model.createCloudSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.images.map { it.outgoing })
+                val id = model.createCloudSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.attachments)
                 created = true
                 model.newSessionText = ""
                 model.newSessionImages = emptyList()
@@ -199,10 +239,55 @@ fun NewSessionScreen(
         }
     }
 
+    val mission = remember { MissionDraft() }
+    val missionLabels = remember { uniffi.zeron_core.missionComposerLabels(false) }
+
+    fun startMission() {
+        val c = client ?: return
+        mission.error(composer.images.size)?.let {
+            scope.launch { snackbar.showSnackbar(it) }
+            return
+        }
+        if (deviceId.isEmpty()) {
+            scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }
+            return
+        }
+        val brief = uniffi.zeron_core.missionText(composer.encoded(), composer.pasted.map { it.text })
+        val pictures = composer.images.toList()
+        val config = draft.copy(model = draft.model ?: choice?.model?.id).config()
+        scope.launch {
+            try {
+                val paths = pictures.map { c.uploadAttachment(deviceId, it.name, it.bytes, null) }
+                val taskId = c.startMission(deviceId, missionDraft(brief, project?.id, paths), config, mission.options())
+                created = true
+                composer.clear()
+                model.newSessionText = ""
+                model.newSessionImages = emptyList()
+                onOpenRoute("tasks:mission:$taskId")
+            } catch (e: Exception) {
+                snackbar.showSnackbar(e.message ?: "Couldn't start the mission")
+            }
+        }
+    }
+
     fun create() {
         model.lastDraft = draft
+        uniffi.zeron_core.draftCommandRefusal(composer.text, draft.harness == "claude-code")?.let {
+            scope.launch { snackbar.showSnackbar(it) }
+            return
+        }
+        if (mission.on) return startMission()
         if (runsOnCloud) return createOnCloud()
-        val id = model.createSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.images.map { it.outgoing })
+        val text = composer.encoded()
+        val skills = sh.zeron.android.core.ComposerExtras.skillNames(deviceId, draft.harness)
+        val card = draft.harness == "claude-code" && uniffi.zeron_core.isClaudeCardCommand(text, skills)
+        val offline = if (project != null) (project.deviceName ?: "Host").takeIf { !project.deviceOnline } else hosts.firstOrNull { it.id == draft.hostId && !it.online }?.name
+        if (card && offline != null) {
+            scope.launch { snackbar.showSnackbar("$offline is offline, so Claude Code can't answer ${text.trim()}.") }
+            return
+        }
+        val picked = draft.copy(model = draft.model ?: choice?.model?.id)
+        val id = if (card) model.createForCard(picked, text, skills) else model.createSession(picked, text, composer.attachments)
         if (id != null) {
             created = true
             model.newSessionText = ""
@@ -257,17 +342,29 @@ fun NewSessionScreen(
                     }
                 }
             }
-            MentionSuggestions(
+            sh.zeron.android.ui.composer.ComposerSuggestions(
                 composer,
-                search = { q ->
+                files = { q ->
                     val c = client
                     if (c == null || project == null) emptyList() else c.searchFiles(project.deviceId, null, project.id, q)
+                },
+                threads = { q -> project?.let { p -> client?.threadMentions(p.deviceId, p.id, null, q) }.orEmpty() },
+                catalog = { skill ->
+                    client?.takeIf { deviceId.isNotEmpty() }?.let { sh.zeron.android.core.ComposerExtras.invocationCatalog(it, deviceId, draft.harness, null, project?.id, skill) }
+                },
+                onInvocation = { q, entry ->
+                    when (entry.workspaceCommand) {
+                        uniffi.zeron_core.WorkspaceCommand.RESUME -> onOpenRoute("search").also { composer.dropQuery(q) }
+                        uniffi.zeron_core.WorkspaceCommand.SETTINGS -> onOpenRoute("settings").also { composer.dropQuery(q) }
+                        null -> composer.insertInvocation(q, entry)
+                        else -> composer.dropQuery(q)
+                    }
                 },
                 modifier = Modifier.padding(horizontal = 12.dp).widthIn(max = 768.dp),
             )
             ComposerSurface(
                 model = composer,
-                placeholder = "Describe the task",
+                placeholder = if (mission.on) missionLabels.placeholder else "Describe the task",
                 action = ComposerAction.Send,
                 onAction = ::create,
                 alwaysCard = true,
@@ -278,6 +375,7 @@ fun NewSessionScreen(
                     .widthIn(max = 768.dp)
                     .onGloballyPositioned { composerBounds = it.boundsInRoot() },
             ) {
+                MissionChips(mission, missionLabels)
                 ProjectChip(draft, projects, onPick = { draft = it }, onNewProject = { newProject = true }, onNewCloudProject = if (model.cloudOffered) ({ cloudProject = true }) else null)
                 HostChip(draft, project, projects, hosts, runsOnCloud, cloudReach, cloud.credits) { draft = it }
                 if (runsOnCloud && project?.githubRepo != null) {
@@ -289,6 +387,8 @@ fun NewSessionScreen(
                     draft,
                     choice,
                     models,
+                    profile = profiles.firstOrNull { it.active },
+                    profilesRow = if (profiles.isEmpty()) null else ({ ProfilesRow(profiles, ::applyProfile, ::saveProfile, { detachProfile() }) }),
                     host = if (runsOnCloud) "Cloud" else project?.deviceName ?: hosts.firstOrNull { it.id == draft.hostId }?.name ?: "This computer",
                     hostIcon = if (runsOnCloud) ZIcons.Cloud else ZIcons.Laptop,
                     openAtStart = model.launch.companion == "model-picker",
@@ -298,6 +398,14 @@ fun NewSessionScreen(
                     val effort = draft.effort?.takeIf { it in efforts } ?: choice?.model?.defaultReasoning ?: efforts[efforts.size / 2]
                     EffortChip(effort, efforts) { draft = draft.copy(effort = it) }
                 }
+                val harness = harnesses.firstOrNull { it.id == draft.harness }
+                val offered = harness?.accessModes
+                AccessChip(
+                    uniffi.zeron_core.resolveAccess(draft.access ?: uniffi.zeron_core.AccessMode.FULL_ACCESS, offered),
+                    offered,
+                    if (harness?.supportsPlan == true) draft.plan else null,
+                    onPlan = { draft = draft.copy(plan = it) },
+                ) { draft = draft.copy(access = it) }
             }
         }
     }
@@ -607,6 +715,8 @@ private fun ModelChip(
     draft: sh.zeron.android.core.NewSessionDraft,
     choice: ModelChoice?,
     models: List<ModelChoice>,
+    profile: uniffi.zeron_core.ProfileRow?,
+    profilesRow: (@Composable () -> Unit)?,
     host: String,
     @androidx.annotation.DrawableRes hostIcon: Int,
     openAtStart: Boolean = false,
@@ -620,8 +730,9 @@ private fun ModelChip(
         }
     }
     // Never the harness name in place of a model.
-    val title = choice?.model?.label ?: draft.model?.let { modelLabel(draft.harness, it) }
+    val modelTitle = choice?.model?.label ?: draft.model?.let { modelLabel(draft.harness, it) }
         ?: fallbackModels(draft.harness).firstOrNull()?.label ?: harnessLabel(draft.harness)
+    val title = profile?.let { "${it.name}${if (it.drift == null) "" else " •"} · $modelTitle" } ?: modelTitle
     ContextChip(title, leading = { HarnessMark(draft.harness, 14.dp) }, onClick = { open = true })
     if (open) {
         // A tab per provider the target runs (the draft's first), each listing the models already loaded for it.
@@ -638,6 +749,7 @@ private fun ModelChip(
             draft.model ?: choice?.model?.id,
             host = host,
             hostIcon = hostIcon,
+            header = profilesRow,
             onPick = { harness, row ->
                 onPick(draft.copy(harness = harness, model = row.id, effort = if (harness != draft.harness) null else draft.effort))
             },

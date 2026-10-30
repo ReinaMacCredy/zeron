@@ -1461,6 +1461,7 @@ impl DemoHost {
             harness.supports_steering = Some(true);
             harness.steering_mode = Some("step-boundary".into());
             harness.enabled = Some(true);
+            harness.supports_plan = true;
         }
         for (id, label) in [
             ("opencode", "OpenCode"),
@@ -1481,6 +1482,7 @@ impl DemoHost {
                 installed: true,
                 enabled: Some(true),
                 access_modes: None,
+                supports_plan: false,
             });
         }
         let disabled = lock(&self.settings).disabled_harnesses.clone();

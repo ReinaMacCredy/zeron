@@ -72,7 +72,17 @@ class TranscriptPalette(dark: Boolean, scheme: ColorScheme) {
                 ColorRole.DIFF_ADD_BAR -> c(0x15803D, 0x34D399, 0.55f)
                 ColorRole.DIFF_DEL_BAR -> c(0xDC2626, 0xF87171, 0.55f)
                 ColorRole.DIFF_HUNK -> accent.copy(alpha = if (dark) 0.08f else 0.07f).toArgb()
-                else -> w(0.06f, 0.06f)
+                ColorRole.CARD_BACKGROUND -> w(0.045f, 0.045f)
+                ColorRole.CARD_BORDER -> w(0.108f, 0.08f)
+                ColorRole.CARD_TILE -> w(0.09f, 0.09f)
+                ColorRole.SUCCESS_TILE -> c(0x15803D, 0x34D399, 0.12f)
+                ColorRole.WARNING_TILE -> c(0xA16207, 0xFACC15, 0.12f)
+                ColorRole.BUTTON_BORDER -> w(0.135f, 0.1f)
+                ColorRole.ON_SOLID -> scheme.background.toArgb()
+                ColorRole.CYAN -> c(0x0E7490, 0x22D3EE)
+                ColorRole.ACCENT_WASH -> c(0x5B43E8, 0x8B7CF6, 0.14f)
+                ColorRole.WARNING_WASH -> c(0xA16207, 0xFACC15, 0.14f)
+                ColorRole.CYAN_WASH -> c(0x0E7490, 0x22D3EE, 0.14f)
             }
         }
     }

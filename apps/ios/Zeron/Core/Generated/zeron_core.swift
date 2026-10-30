@@ -11694,6 +11694,10 @@ public struct ChatConfig: Equatable, Hashable {
      */
     public var instructions: String
     public var disabledTools: [String]
+    /**
+     * None keeps the chat's current plan mode (off for a new chat).
+     */
+    public var plan: Bool?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -11715,7 +11719,10 @@ public struct ChatConfig: Equatable, Hashable {
          */access: AccessMode? = nil, 
         /**
          * A new chat's profile instructions; an existing chat keeps its own.
-         */instructions: String = "", disabledTools: [String] = []) {
+         */instructions: String = "", disabledTools: [String] = [], 
+        /**
+         * None keeps the chat's current plan mode (off for a new chat).
+         */plan: Bool? = nil) {
         self.harness = harness
         self.model = model
         self.reasoning = reasoning
@@ -11726,6 +11733,7 @@ public struct ChatConfig: Equatable, Hashable {
         self.access = access
         self.instructions = instructions
         self.disabledTools = disabledTools
+        self.plan = plan
     }
 
     
@@ -11753,7 +11761,8 @@ public struct FfiConverterTypeChatConfig: FfiConverterRustBuffer {
                 instanceId: FfiConverterOptionString.read(from: &buf), 
                 access: FfiConverterOptionTypeAccessMode.read(from: &buf), 
                 instructions: FfiConverterString.read(from: &buf), 
-                disabledTools: FfiConverterSequenceString.read(from: &buf)
+                disabledTools: FfiConverterSequenceString.read(from: &buf), 
+                plan: FfiConverterOptionBool.read(from: &buf)
         )
     }
 
@@ -11768,6 +11777,7 @@ public struct FfiConverterTypeChatConfig: FfiConverterRustBuffer {
         FfiConverterOptionTypeAccessMode.write(value.access, into: &buf)
         FfiConverterString.write(value.instructions, into: &buf)
         FfiConverterSequenceString.write(value.disabledTools, into: &buf)
+        FfiConverterOptionBool.write(value.plan, into: &buf)
     }
 }
 
@@ -16011,6 +16021,7 @@ public struct HarnessInfo: Equatable, Hashable {
      * The access modes it honors (unknown until a live catalog).
      */
     public var accessModes: [AccessMode]?
+    public var supportsPlan: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -16026,7 +16037,7 @@ public struct HarnessInfo: Equatable, Hashable {
          */midTurnSteering: Bool?, 
         /**
          * The access modes it honors (unknown until a live catalog).
-         */accessModes: [AccessMode]?) {
+         */accessModes: [AccessMode]?, supportsPlan: Bool) {
         self.id = id
         self.label = label
         self.supportsSteering = supportsSteering
@@ -16037,6 +16048,7 @@ public struct HarnessInfo: Equatable, Hashable {
         self.offered = offered
         self.midTurnSteering = midTurnSteering
         self.accessModes = accessModes
+        self.supportsPlan = supportsPlan
     }
 
     
@@ -16064,7 +16076,8 @@ public struct FfiConverterTypeHarnessInfo: FfiConverterRustBuffer {
                 enabled: FfiConverterOptionBool.read(from: &buf), 
                 offered: FfiConverterBool.read(from: &buf), 
                 midTurnSteering: FfiConverterOptionBool.read(from: &buf), 
-                accessModes: FfiConverterOptionSequenceTypeAccessMode.read(from: &buf)
+                accessModes: FfiConverterOptionSequenceTypeAccessMode.read(from: &buf), 
+                supportsPlan: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -16079,6 +16092,7 @@ public struct FfiConverterTypeHarnessInfo: FfiConverterRustBuffer {
         FfiConverterBool.write(value.offered, into: &buf)
         FfiConverterOptionBool.write(value.midTurnSteering, into: &buf)
         FfiConverterOptionSequenceTypeAccessMode.write(value.accessModes, into: &buf)
+        FfiConverterBool.write(value.supportsPlan, into: &buf)
     }
 }
 
@@ -16174,6 +16188,7 @@ public struct HostCapabilities: Equatable, Hashable {
      * The access modes the chat's harness honors (unknown until a live catalog).
      */
     public var accessModes: [AccessMode]?
+    public var supportsPlan: Bool?
     /**
      * The host moves the chat to another provider between turns.
      */
@@ -16190,7 +16205,7 @@ public struct HostCapabilities: Equatable, Hashable {
          */midTurnSteering: Bool?, 
         /**
          * The access modes the chat's harness honors (unknown until a live catalog).
-         */accessModes: [AccessMode]?, 
+         */accessModes: [AccessMode]?, supportsPlan: Bool?, 
         /**
          * The host moves the chat to another provider between turns.
          */providerSwitch: Bool) {
@@ -16202,6 +16217,7 @@ public struct HostCapabilities: Equatable, Hashable {
         self.queuedAttachments = queuedAttachments
         self.midTurnSteering = midTurnSteering
         self.accessModes = accessModes
+        self.supportsPlan = supportsPlan
         self.providerSwitch = providerSwitch
     }
 
@@ -16229,6 +16245,7 @@ public struct FfiConverterTypeHostCapabilities: FfiConverterRustBuffer {
                 queuedAttachments: FfiConverterBool.read(from: &buf), 
                 midTurnSteering: FfiConverterOptionBool.read(from: &buf), 
                 accessModes: FfiConverterOptionSequenceTypeAccessMode.read(from: &buf), 
+                supportsPlan: FfiConverterOptionBool.read(from: &buf), 
                 providerSwitch: FfiConverterBool.read(from: &buf)
         )
     }
@@ -16242,6 +16259,7 @@ public struct FfiConverterTypeHostCapabilities: FfiConverterRustBuffer {
         FfiConverterBool.write(value.queuedAttachments, into: &buf)
         FfiConverterOptionBool.write(value.midTurnSteering, into: &buf)
         FfiConverterOptionSequenceTypeAccessMode.write(value.accessModes, into: &buf)
+        FfiConverterOptionBool.write(value.supportsPlan, into: &buf)
         FfiConverterBool.write(value.providerSwitch, into: &buf)
     }
 }

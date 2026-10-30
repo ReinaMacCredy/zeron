@@ -61,6 +61,12 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -73,7 +79,15 @@ import kotlinx.coroutines.launch
 import sh.zeron.android.design.GeistMono
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
-import uniffi.zeron_core.FileMatch
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.zIndex
+import sh.zeron.android.R
+import uniffi.zeron_core.pastedTextPreview
+import uniffi.zeron_core.predictionPlaceholder
+import uniffi.zeron_core.quoteChipLabel
 
 /**
  * The composer, shared by sessions and the new-session page. One tonal
@@ -81,6 +95,7 @@ import uniffi.zeron_core.FileMatch
  * and, while focused or holding a draft, a card with staged photos and the
  * full-width prompt above a toolbar of context chips.
  */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun ComposerSurface(
     model: ComposerModel,
@@ -91,39 +106,90 @@ fun ComposerSurface(
     alwaysCard: Boolean = false,
     attach: Boolean = true,
     focusRequester: FocusRequester = remember { FocusRequester() },
+    prediction: String? = null,
+    onFocusChange: (Boolean) -> Unit = {},
     chips: @Composable RowScope.() -> Unit = {},
 ) {
     var focused by remember { mutableStateOf(false) }
-    val card = alwaysCard || focused || model.hasContent
+    var attachOpen by remember { mutableStateOf(false) }
+    var reopenKeyboard by remember { mutableStateOf(false) }
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    val imeUp = WindowInsets.isImeVisible
+    sh.zeron.android.ui.composer.TrackKeyboardHeight()
+    fun closeAttach() {
+        attachOpen = false
+        if (reopenKeyboard) {
+            focusRequester.requestFocus()
+            keyboard?.show()
+        }
+    }
+    fun toggleAttach() {
+        if (attachOpen) return closeAttach()
+        reopenKeyboard = imeUp
+        focusManager.clearFocus()
+        attachOpen = true
+    }
+    val card = alwaysCard || focused || attachOpen || model.images.isNotEmpty() || model.pasted.isNotEmpty() || model.quotes.isNotEmpty()
+    val ghost = predictionPlaceholder(prediction, model.text)
+    Column(modifier.fillMaxWidth()) {
     Surface(
         shape = RoundedCornerShape(28.dp),
         color = composerContainer(),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.animateContentSize(MaterialTheme.motionScheme.defaultSpatialSpec())) {
-            AnimatedVisibility(model.images.isNotEmpty() && card) { StagedThumbnails(model) }
+            AnimatedVisibility(model.staged > 0 || model.quotes.isNotEmpty()) { StagedThumbnails(model) }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.heightIn(min = 56.dp)) {
                 if (!card) {
                     Spacer(Modifier.width(4.dp))
-                    AttachButton(model, attach)
+                    AttachToggle(attachOpen, attach) { toggleAttach() }
                 } else {
                     Spacer(Modifier.width(20.dp))
                 }
                 Box(Modifier.weight(1f).padding(vertical = if (card) 16.dp else 8.dp)) {
                     if (model.text.isEmpty()) {
-                        Text(placeholder, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                ghost ?: placeholder,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false).testTag("composer-placeholder"),
+                            )
+                            if (ghost != null && prediction != null) {
+                                Spacer(Modifier.width(6.dp))
+                                Surface(
+                                    onClick = {
+                                        model.setText(prediction)
+                                        focusRequester.requestFocus()
+                                    },
+                                    shape = RoundedCornerShape(50),
+                                    color = chipContainer(),
+                                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.zIndex(1f).testTag("composer-accept-prediction"),
+                                ) { Text("Accept", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)) }
+                            }
+                        }
                     }
+                    val accent = MaterialTheme.colorScheme.primary
                     BasicTextField(
                         model.value,
-                        { model.value = it },
+                        { if (!model.stagesPaste(it)) model.value = it },
                         textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                        visualTransformation = remember(model, accent) { MentionTint(model, accent) },
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         maxLines = if (card) 8 else 2,
                         modifier = Modifier
                             .fillMaxWidth()
                             .focusRequester(focusRequester)
-                            .onFocusChanged { focused = it.isFocused }
+                            .onFocusChanged {
+                                focused = it.isFocused
+                                if (it.isFocused && attachOpen) attachOpen = false
+                                onFocusChange(it.isFocused)
+                            }
                             // Hardware keyboards: Ctrl/⌘+Enter sends (plain Enter is a newline).
                             .onPreviewKeyEvent { e ->
                                 val send = e.type == androidx.compose.ui.input.key.KeyEventType.KeyDown &&
@@ -146,7 +212,7 @@ fun ComposerSurface(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.padding(start = 4.dp, end = 8.dp, bottom = 8.dp),
                 ) {
-                    AttachButton(model, attach)
+                    AttachToggle(attachOpen, attach) { toggleAttach() }
                     Row(
                         Modifier
                             .weight(1f)
@@ -154,14 +220,15 @@ fun ComposerSurface(
                             .drawWithContent {
                                 drawContent()
                                 // Chips scrolling under the send button fade out.
-                                val fade = 24.dp.toPx()
+                                val fade = ChipFade.toPx()
                                 drawRect(
                                     Brush.horizontalGradient(listOf(Color.Black, Color.Transparent), startX = size.width - fade, endX = size.width),
                                     topLeft = Offset(size.width - fade, 0f),
                                     blendMode = BlendMode.DstIn,
                                 )
                             }
-                            .horizontalScroll(rememberScrollState()),
+                            .horizontalScroll(rememberScrollState())
+                            .padding(end = ChipFade),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         content = chips,
@@ -172,126 +239,136 @@ fun ComposerSurface(
             }
         }
     }
+    if (attachOpen) sh.zeron.android.ui.composer.AttachPanel(model, onClose = ::closeAttach)
+    }
 }
 
-/** Staged photos above the prompt, each removable. */
+val ChipFade = 24.dp
+
+private class MentionTint(private val model: ComposerModel, private val accent: Color) : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText {
+        val tokens = model.mentionTokens
+        if (tokens.isEmpty()) return TransformedText(text, OffsetMapping.Identity)
+        val style = SpanStyle(color = accent, fontWeight = FontWeight.Medium)
+        val styled = AnnotatedString.Builder(text).apply {
+            for (token in tokens) {
+                var at = text.text.indexOf(token)
+                while (at >= 0) {
+                    addStyle(style, at, at + token.length)
+                    at = text.text.indexOf(token, at + token.length)
+                }
+            }
+        }.toAnnotatedString()
+        return TransformedText(styled, OffsetMapping.Identity)
+    }
+}
+
 @Composable
 private fun StagedThumbnails(model: ComposerModel) {
     Row(
         Modifier.horizontalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, top = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (model.quotes.isNotEmpty()) QuoteChip(model)
+        for (text in model.pasted) {
+            val info = remember(text.id) { pastedTextPreview(text.name, text.text) }
+            var open by remember { mutableStateOf(false) }
+            Box(Modifier.size(width = 168.dp, height = 72.dp)) {
+                Surface(onClick = { open = true }, shape = RoundedCornerShape(16.dp), color = chipContainer(), modifier = Modifier.fillMaxSize().testTag("composer-pasted-text")) {
+                    Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        ZIcon(ZIcons.Text, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.width(9.dp))
+                        Column {
+                            Text(info.title, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(info.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        }
+                    }
+                }
+                RemoveBadge("Remove pasted text", Modifier.align(Alignment.TopEnd)) { model.pasted.remove(text) }
+            }
+            if (open) PastedTextSheet(info.title, text.text) { open = false }
+        }
+        var previewing by remember { mutableStateOf<StagedImage?>(null) }
+        previewing?.let { img ->
+            val i = model.images.indexOf(img)
+            if (i >= 0) sh.zeron.android.ui.composer.AttachmentPreview(img, i, model.images.size, onRemove = { model.images.remove(img) }, onDismiss = { previewing = null })
+        }
         for (image in model.images) {
             Box(Modifier.size(72.dp)) {
-                Image(image.thumb, "Attached image", Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)), contentScale = ContentScale.Crop)
-                Surface(
-                    onClick = { model.images.remove(image) },
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = 0.85f),
-                    contentColor = MaterialTheme.colorScheme.inverseOnSurface,
-                    modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(22.dp),
-                ) {
-                    Box(contentAlignment = Alignment.Center) { ZIcon(ZIcons.Close, "Remove image", Modifier.size(14.dp)) }
-                }
+                Image(image.thumb, "Attached image", Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).clickable { previewing = image }.testTag("composer-image"), contentScale = ContentScale.Crop)
+                RemoveBadge("Remove image", Modifier.align(Alignment.TopEnd)) { model.images.remove(image) }
             }
         }
     }
 }
 
-/** [+] → Photos / Take photo / Files / Paste image, staged into the composer. */
 @Composable
-private fun AttachButton(model: ComposerModel, enabled: Boolean) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+private fun RemoveBadge(label: String, modifier: Modifier, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = 0.85f),
+        contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+        modifier = modifier.padding(4.dp).size(22.dp),
+    ) {
+        Box(contentAlignment = Alignment.Center) { ZIcon(ZIcons.Close, label, Modifier.size(14.dp)) }
+    }
+}
+
+@Composable
+private fun QuoteChip(model: ComposerModel) {
     var open by remember { mutableStateOf(false) }
-    fun add(uris: List<Uri>) {
-        scope.launch {
-            for (uri in uris.take(Staging.MAX_IMAGES - model.images.size)) Staging.stage(context, uri)?.let { model.images.add(it) }
-        }
-    }
-    val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(Staging.MAX_IMAGES)) { add(it) }
-    val files = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { add(it) }
-    // The camera writes into a cache file the FileProvider shares with it.
-    var capture by remember { mutableStateOf<Uri?>(null) }
-    val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
-        val uri = capture
-        if (saved && uri != null) add(listOf(uri))
-    }
-    val hasCamera = remember { context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY) }
     Box {
-        IconButton(onClick = { open = true }, enabled = enabled && model.images.size < Staging.MAX_IMAGES) {
-            ZIcon(ZIcons.Plus, "Attach", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Surface(onClick = { open = true }, shape = RoundedCornerShape(50), color = chipContainer(), modifier = Modifier.testTag("composer-quotes")) {
+            Row(Modifier.heightIn(min = 34.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                ZIcon(R.drawable.zi_wrap_text, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(quoteChipLabel(model.quotes.size.toUInt()), style = MaterialTheme.typography.labelLarge)
+            }
         }
-        val clip = if (open) context.getSystemService(android.content.ClipboardManager::class.java)?.primaryClip else null
-        val pasted = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
-            ?.takeIf { context.contentResolver.getType(it)?.startsWith("image/") == true }
-        ActionMenu(
-            open,
-            { open = false },
-            listOfNotNull(
-                MenuAction("Photos", ZIcons.Gallery) { photos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
-                if (hasCamera) {
-                    MenuAction("Take photo", ZIcons.Camera) {
-                        val dir = java.io.File(context.cacheDir, "camera").apply { mkdirs() }
-                        val file = java.io.File(dir, "capture-${System.currentTimeMillis()}.jpg")
-                        val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-                        capture = uri
-                        camera.launch(uri)
-                    }
-                } else {
-                    null
-                },
-                MenuAction("Files", ZIcons.Folder) { files.launch(arrayOf("image/*")) },
-                pasted?.let { uri -> MenuAction("Paste image", ZIcons.Copy) { add(listOf(uri)) } },
-            ),
+        DropdownMenuPopup(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuGroup(shapes = MenuDefaults.groupShape(0, 1)) {
+                model.quotes.forEachIndexed { i, q ->
+                    DropdownMenuItem(onClick = {}, enabled = false, text = { Text(q, maxLines = 3, overflow = TextOverflow.Ellipsis) }, shape = MenuDefaults.itemShape(i, model.quotes.size + 1).shape)
+                }
+                DropdownMenuItem(
+                    onClick = {
+                        open = false
+                        model.quotes.clear()
+                    },
+                    text = { Text("Remove", color = MaterialTheme.colorScheme.error) },
+                    leadingIcon = { ZIcon(ZIcons.Close, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.error) },
+                    shape = MenuDefaults.itemShape(model.quotes.size, model.quotes.size + 1).shape,
+                )
+            }
+        }
+    }
+}
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun PastedTextSheet(title: String, text: String, onDismiss: () -> Unit) {
+    androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss) {
+        Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 24.dp))
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = GeistMono,
+            modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState()).padding(24.dp),
         )
     }
 }
 
-/** Files matching the `@query` being typed, shown above the composer. */
 @Composable
-fun MentionSuggestions(model: ComposerModel, search: suspend (String) -> List<FileMatch>, modifier: Modifier = Modifier) {
-    val query = model.activeQuery()?.second
-    var files by remember { mutableStateOf<List<FileMatch>>(emptyList()) }
-    LaunchedEffect(query) {
-        if (query == null) {
-            files = emptyList()
-            return@LaunchedEffect
-        }
-        delay(120)
-        files = runCatching { search(query) }.getOrDefault(emptyList()).take(5)
-    }
-    AnimatedVisibility(query != null && files.isNotEmpty(), enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically(), modifier = modifier) {
-        Surface(
-            shape = RoundedCornerShape(24.dp),
-            color = composerContainer(),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-        ) {
-            Column(Modifier.padding(6.dp)) {
-                files.forEach { file ->
-                    val name = file.path.trimEnd('/').substringAfterLast('/')
-                    val dir = file.path.trimEnd('/').substringBeforeLast('/', "")
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(18.dp))
-                            .clickable { model.insertMention(file) }
-                            .padding(horizontal = 14.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        ZIcon(if (file.isDir) ZIcons.Folder else ZIcons.Text, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(name, style = MaterialTheme.typography.bodyLargeEmphasized, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (dir.isNotEmpty()) {
-                                Text(dir, style = MaterialTheme.typography.bodySmall, fontFamily = GeistMono, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
-                    }
-                }
-            }
-        }
+private fun AttachToggle(open: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val turn by androidx.compose.animation.core.animateFloatAsState(
+        if (open) 45f else 0f,
+        androidx.compose.animation.core.spring(dampingRatio = 0.72f, stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow),
+        label = "attach",
+    )
+    IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.testTag("composer-attach")) {
+        ZIcon(ZIcons.Plus, if (open) "Close attachments" else "Attach", Modifier.size(22.dp).graphicsLayer { rotationZ = turn }, tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

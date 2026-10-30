@@ -16,6 +16,11 @@ import androidx.compose.ui.text.input.TextFieldValue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import uniffi.zeron_core.FileMatch
+import uniffi.zeron_core.InvocationEntry
+import uniffi.zeron_core.ThreadMention
+import uniffi.zeron_core.nextPastedTextName
+import uniffi.zeron_core.pastesAsFile
+import uniffi.zeron_core.withQuotes
 import uniffi.zeron_core.OutgoingAttachment
 import uniffi.zeron_core.fileMentionLink
 import java.io.ByteArrayOutputStream
@@ -29,19 +34,25 @@ class StagedImage(val id: String, val name: String, val bytes: ByteArray, val th
     val outgoing get() = OutgoingAttachment(name, "image/jpeg", bytes)
 }
 
-/**
- * What's being composed: the prompt (with its cursor, for `@` mentions),
- * staged images, and the mention tokens it shows.
- */
+class PastedText(val id: String, val name: String, val text: String) {
+    val outgoing get() = OutgoingAttachment(name, "text/plain", text.toByteArray())
+}
+
+data class ActiveQuery(val start: Int, val end: Int, val query: String)
+
 @Stable
 class ComposerModel(initial: String = "") {
     var value by mutableStateOf(TextFieldValue(initial, TextRange(initial.length)))
     val images = mutableStateListOf<StagedImage>()
-    /** `@name` shown in the composer → the file it stands for. */
-    private val tokens = LinkedHashMap<String, FileMatch>()
+    val pasted = mutableStateListOf<PastedText>()
+    val quotes = mutableStateListOf<String>()
+    private val tokens = LinkedHashMap<String, String>()
 
     val text: String get() = value.text
-    val hasContent: Boolean get() = value.text.isNotBlank() || images.isNotEmpty()
+    val mentionTokens: Set<String> get() = tokens.keys
+    val staged: Int get() = images.size + pasted.size
+    val hasContent: Boolean get() = value.text.isNotBlank() || images.isNotEmpty() || pasted.isNotEmpty() || quotes.isNotEmpty()
+    val attachments: List<OutgoingAttachment> get() = images.map { it.outgoing } + pasted.map { it.outgoing }
 
     fun setText(s: String) {
         value = TextFieldValue(s, TextRange(s.length))
@@ -50,20 +61,42 @@ class ComposerModel(initial: String = "") {
     fun clear() {
         setText("")
         images.clear()
+        pasted.clear()
+        quotes.clear()
         tokens.clear()
     }
 
-    /** The `@query` being typed at the cursor: its start offset and query. */
-    fun activeQuery(): Pair<Int, String>? {
+    fun stagesPaste(next: TextFieldValue): Boolean {
+        val old = value.text
+        val added = next.text.length - old.length
+        if (added < 2 || staged >= Staging.MAX_IMAGES || !value.selection.collapsed) return false
+        val at = value.selection.start
+        if (next.text.substring(0, at) != old.substring(0, at) || next.text.substring(at + added) != old.substring(at)) return false
+        val inserted = next.text.substring(at, at + added)
+        if (!pastesAsFile(inserted, old)) return false
+        pasted.add(PastedText(UUID.randomUUID().toString(), nextPastedTextName(images.map { it.name } + pasted.map { it.name }), inserted))
+        return true
+    }
+
+    fun activeQuery(): Pair<Int, String>? = query('@')?.let { it.start to it.query }
+
+    // A second `/` makes it a path, and `$5` or `$HOME` is not a skill.
+    fun activeInvocation(): Pair<ActiveQuery, Boolean>? {
+        query('$')?.takeIf { q -> !q.query.contains('/') && q.query.firstOrNull()?.let { it.isDigit() || it.isUpperCase() } != true }?.let { return it to true }
+        query('/')?.takeIf { !it.query.contains('/') }?.let { return it to false }
+        return null
+    }
+
+    private fun query(prefix: Char): ActiveQuery? {
         val t = value.text
         if (!value.selection.collapsed) return null
         val cursor = value.selection.start
         var i = cursor - 1
         while (i >= 0) {
             val c = t[i]
-            if (c == '@') {
+            if (c == prefix) {
                 val before = if (i > 0) t[i - 1] else ' '
-                return if (before == ' ' || before == '\n') i to t.substring(i + 1, cursor) else null
+                return if (before == ' ' || before == '\n') ActiveQuery(i, cursor, t.substring(i + 1, cursor)) else null
             }
             if (c == ' ' || c == '\n') return null
             i--
@@ -71,27 +104,51 @@ class ComposerModel(initial: String = "") {
         return null
     }
 
+    private fun replace(q: ActiveQuery, with: String) {
+        val t = value.text
+        value = TextFieldValue(t.substring(0, q.start) + with + t.substring(q.end), TextRange(q.start + with.length))
+    }
+
     /** Replace the `@query` with a token for `file` (parent folder on basename clashes). */
     fun insertMention(file: FileMatch) {
-        val (start, _) = activeQuery() ?: return
+        val q = query('@') ?: return
+        val link = fileMentionLink(file.path, file.isDir)
         val parts = file.path.trim('/').split('/')
         var token = "@" + (parts.lastOrNull() ?: file.path)
         val existing = tokens[token]
-        if (existing != null && existing.path != file.path && parts.size > 1) token = "@" + parts.takeLast(2).joinToString("/")
-        tokens[token] = file
-        val t = value.text
-        val cursor = value.selection.start
-        val next = t.substring(0, start) + token + " " + t.substring(cursor)
-        value = TextFieldValue(next, TextRange(start + token.length + 1))
+        if (existing != null && existing != link && parts.size > 1) token = "@" + parts.takeLast(2).joinToString("/")
+        tokens[token] = link
+        replace(q, "$token ")
     }
 
-    /** The text to send: live tokens become canonical `zeron-file:` links. */
+    fun insertThread(thread: ThreadMention) {
+        val q = query('@') ?: return
+        val token = "@" + thread.title
+        tokens[token] = thread.link
+        replace(q, "$token ")
+    }
+
+    fun insertInvocation(q: ActiveQuery, entry: InvocationEntry) {
+        entry.link?.let { tokens[entry.insert] = it }
+        replace(q, entry.insert + " ")
+    }
+
+    fun dropQuery(q: ActiveQuery) = replace(q, "")
+
+    fun withoutQuery(q: ActiveQuery): String = value.text.removeRange(q.start, q.end)
+
+    fun beginFileMention() {
+        val t = value.text
+        val gap = if (t.isEmpty() || t.endsWith(" ") || t.endsWith("\n")) "" else " "
+        setText("$t$gap@")
+    }
+
     fun encoded(): String {
         var out = value.text
-        for ((token, file) in tokens.entries.sortedByDescending { it.key.length }) {
-            if (out.contains(token)) out = out.replace(token, fileMentionLink(file.path, file.isDir))
+        for ((token, link) in tokens.entries.sortedByDescending { it.key.length }) {
+            if (out.contains(token)) out = out.replace(token, link)
         }
-        return out.trim()
+        return withQuotes(out.trim(), quotes.toList())
     }
 }
 

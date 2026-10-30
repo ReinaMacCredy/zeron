@@ -769,15 +769,15 @@ final class AppModel {
         client?.devices().first { $0.id == id }?.name ?? "Unknown device"
     }
 
-    func models(for deviceId: String) async -> [ModelChoice] {
-        guard let client else { return [] }
+    func models(for deviceId: String) async -> (harnesses: [HarnessInfo], models: [ModelChoice]) {
+        guard let client else { return ([], []) }
         let harnesses = (try? await client.listHarnesses(deviceId: deviceId)) ?? fallbackHarnesses()
         var out: [ModelChoice] = []
         for h in harnesses where h.offered {
             let models = (try? await client.listModels(deviceId: deviceId, harness: h.id)) ?? fallbackModels(harness: h.id)
             out += models.map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels, detail: $0.description) }
         }
-        return out
+        return (harnesses, out)
     }
 
     /// A Cloud chat created whose first message didn't go out yet.
@@ -837,7 +837,7 @@ final class AppModel {
     @MainActor
     func createCloudSession(draft: NewSessionDraft, text: String, images: [StagedImage]) async throws -> String {
         guard let client, let spaceId = draft.projectId else { throw CoreError.Closed }
-        let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
+        let config = draft.config
         // A retry after a failed first send reuses that chat (and machine)
         // instead of starting a second one.
         let chatId: String
@@ -909,7 +909,7 @@ final class AppModel {
 
 extension NewSessionDraft {
     var config: ChatConfig {
-        ChatConfig(harness: harness, model: model, reasoning: effort, modelOptions: modelOptions ?? [:], sandbox: .workspaceWrite, profileId: profileId, access: permission.flatMap(Self.access), instructions: instructions ?? "", disabledTools: disabledTools ?? [])
+        ChatConfig(harness: harness, model: model, reasoning: effort, modelOptions: modelOptions ?? [:], sandbox: .workspaceWrite, profileId: profileId, access: permission.flatMap(Self.access), instructions: instructions ?? "", disabledTools: disabledTools ?? [], plan: plan)
     }
 
     mutating func adopt(_ config: ChatConfig) {
@@ -917,16 +917,23 @@ extension NewSessionDraft {
         model = config.model
         effort = config.reasoning
         modelOptions = config.modelOptions
-        permission = config.access.map { mode in
-            switch mode {
-            case .supervised: "supervised"
-            case .autoAcceptEdits: "auto-accept-edits"
-            case .fullAccess: "full-access"
-            }
-        }
+        permission = config.access.map(Self.wire)
+        plan = config.plan ?? plan
         profileId = config.profileId
         instructions = config.instructions
         disabledTools = config.disabledTools
+    }
+
+    mutating func setAccess(_ mode: AccessMode) {
+        permission = Self.wire(mode)
+    }
+
+    private static func wire(_ mode: AccessMode) -> String {
+        switch mode {
+        case .supervised: "supervised"
+        case .autoAcceptEdits: "auto-accept-edits"
+        case .fullAccess: "full-access"
+        }
     }
 
     /// Drafts saved before access modes hold ask, auto or full.
