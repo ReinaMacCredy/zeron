@@ -1705,6 +1705,53 @@ fn start_review_rpc_fits_the_default_worker_stack() {
     });
 }
 
+#[test]
+fn cloud_catalog_rpcs_fit_the_default_worker_stack() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(2 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(zeron_harness::mock::MockHarness {
+            script: Vec::new(),
+        }));
+        let core = EngineCore::assemble(
+            &tmp.path().join("data"),
+            Arc::new(registry),
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .expect("engine assembles");
+        let client = zeron_rpc::memory_client(core.rpc_service());
+        let cloud = format!("{}test", zeron_proto::CLOUD_DEVICE_PREFIX);
+        let models = client
+            .call(
+                methods::LIST_MODELS,
+                serde_json::json!({ "harness": "codex", "targetDeviceId": cloud }),
+            )
+            .await;
+        assert!(models.is_err(), "only the mock harness is registered");
+        for method in [methods::LIST_SKILLS, methods::LIST_COMMANDS] {
+            let reply = client
+                .call(
+                    method,
+                    serde_json::json!({
+                        "harness": "mock",
+                        "targetDeviceId": zeron_proto::CLOUD_ACCOUNTS_DEVICE,
+                    }),
+                )
+                .await;
+            assert!(reply.is_ok(), "{method}: {reply:?}");
+        }
+
+        core.shutdown().await;
+    });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn checkout_file_diff_text_rpc_reads_pinned_commit_sources() {
     let tmp = tempfile::tempdir().expect("tempdir");

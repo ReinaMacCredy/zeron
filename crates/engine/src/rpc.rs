@@ -1709,10 +1709,14 @@ impl EngineRpc {
                         "Cloud runs Codex and Claude Code only".into(),
                     )));
                 }
-                Some(self.handle(method, local(&[])).await)
+                Some(self.list_models(local(&[])).await)
             }
-            methods::LIST_SKILLS | methods::LIST_COMMANDS if account => Some(
-                self.handle(method, local(&["chatId", "spaceId", "path"]))
+            methods::LIST_SKILLS if account => Some(
+                self.list_skills(local(&["chatId", "spaceId", "path"]))
+                    .await,
+            ),
+            methods::LIST_COMMANDS if account => Some(
+                self.list_commands(local(&["chatId", "spaceId", "path"]))
                     .await,
             ),
             _ if account => Some(Err(RpcError::Failed(
@@ -1720,6 +1724,96 @@ impl EngineRpc {
             ))),
             _ => None,
         }
+    }
+
+    async fn list_models(&self, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let p: ListModelsParams = parse_params(params)?;
+        let harness = match &p.instance_id {
+            Some(id) => self
+                .provider_instances_store()?
+                .resolve(&self.registry, p.harness, id)
+                .map_err(|e| RpcError::Failed(e.to_string()))?,
+            None => self
+                .registry
+                .resolve(p.harness)
+                .map_err(|e| RpcError::Failed(e.to_string()))?,
+        };
+        let lease = std::sync::Arc::new(self.registry.execution_lease(p.harness).await);
+        let models = crate::model_catalogs::list_with_lease(
+            self.repos.data_dir(),
+            harness,
+            p.force,
+            Some(lease),
+        )
+        .await
+        .map_err(|e| RpcError::Failed(e.to_string()))?;
+        // The seen-models record is per driver; an instance's models must not mark them seen.
+        if p.instance_id.is_some() {
+            return RpcReply::value(&zeron_proto::ModelCatalog {
+                models,
+                new_ids: Vec::new(),
+                announce_ids: Vec::new(),
+            });
+        }
+        RpcReply::value(
+            &self
+                .registry
+                .model_catalog(p.harness, models, crate::now_ms()),
+        )
+    }
+
+    async fn catalog_target(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<
+        (
+            std::sync::Arc<dyn zeron_harness::Harness>,
+            std::path::PathBuf,
+        ),
+        RpcError,
+    > {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Params {
+            harness: HarnessId,
+            #[serde(default)]
+            chat_id: Option<String>,
+            #[serde(default)]
+            space_id: Option<String>,
+            #[serde(default)]
+            path: Option<String>,
+        }
+        let p: Params = parse_params(params)?;
+        let harness = self.discovery_harness(p.chat_id.as_deref(), p.harness)?;
+        let root = self
+            .catalog_root(&FileSearchParams {
+                query: String::new(),
+                chat_id: p.chat_id,
+                space_id: p.space_id,
+                path: p.path,
+            })
+            .await?;
+        Ok((harness, root))
+    }
+
+    async fn list_skills(&self, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let (harness, root) = self.catalog_target(params).await?;
+        let skills = self
+            .registry
+            .discover_skills(harness, &root)
+            .await
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        RpcReply::value(&skills)
+    }
+
+    async fn list_commands(&self, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let (harness, root) = self.catalog_target(params).await?;
+        let commands = self
+            .registry
+            .discover_commands(harness, &root)
+            .await
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        RpcReply::value(&commands)
     }
 
     /// `ListCloudBranches {repo, defaultBranch?}`: the branches a Cloud
@@ -4292,99 +4386,9 @@ impl RpcService for EngineRpc {
                 // round trip, and a refused/raced toggle self-corrects.
                 RpcReply::value(&self.registry.descriptors())
             }
-            methods::LIST_MODELS => {
-                let p: ListModelsParams = parse_params(params)?;
-                let harness = match &p.instance_id {
-                    Some(id) => self
-                        .provider_instances_store()?
-                        .resolve(&self.registry, p.harness, id)
-                        .map_err(|e| RpcError::Failed(e.to_string()))?,
-                    None => self
-                        .registry
-                        .resolve(p.harness)
-                        .map_err(|e| RpcError::Failed(e.to_string()))?,
-                };
-                let lease = std::sync::Arc::new(self.registry.execution_lease(p.harness).await);
-                let models = crate::model_catalogs::list_with_lease(
-                    self.repos.data_dir(),
-                    harness,
-                    p.force,
-                    Some(lease),
-                )
-                .await
-                .map_err(|e| RpcError::Failed(e.to_string()))?;
-                // The seen-models record is per driver; an instance's models must not mark them seen.
-                if p.instance_id.is_some() {
-                    return RpcReply::value(&zeron_proto::ModelCatalog {
-                        models,
-                        new_ids: Vec::new(),
-                        announce_ids: Vec::new(),
-                    });
-                }
-                RpcReply::value(
-                    &self
-                        .registry
-                        .model_catalog(p.harness, models, crate::now_ms()),
-                )
-            }
-            methods::LIST_SKILLS => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct Params {
-                    harness: HarnessId,
-                    #[serde(default)]
-                    chat_id: Option<String>,
-                    #[serde(default)]
-                    space_id: Option<String>,
-                    #[serde(default)]
-                    path: Option<String>,
-                }
-                let p: Params = parse_params(params)?;
-                let harness = self.discovery_harness(p.chat_id.as_deref(), p.harness)?;
-                let root = self
-                    .catalog_root(&FileSearchParams {
-                        query: String::new(),
-                        chat_id: p.chat_id,
-                        space_id: p.space_id,
-                        path: p.path,
-                    })
-                    .await?;
-                let skills = self
-                    .registry
-                    .discover_skills(harness, &root)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&skills)
-            }
-            methods::LIST_COMMANDS => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct Params {
-                    harness: HarnessId,
-                    #[serde(default)]
-                    chat_id: Option<String>,
-                    #[serde(default)]
-                    space_id: Option<String>,
-                    #[serde(default)]
-                    path: Option<String>,
-                }
-                let p: Params = parse_params(params)?;
-                let harness = self.discovery_harness(p.chat_id.as_deref(), p.harness)?;
-                let root = self
-                    .catalog_root(&FileSearchParams {
-                        query: String::new(),
-                        chat_id: p.chat_id,
-                        space_id: p.space_id,
-                        path: p.path,
-                    })
-                    .await?;
-                let commands = self
-                    .registry
-                    .discover_commands(harness, &root)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&commands)
-            }
+            methods::LIST_MODELS => self.list_models(params).await,
+            methods::LIST_SKILLS => self.list_skills(params).await,
+            methods::LIST_COMMANDS => self.list_commands(params).await,
             methods::READ_CLAUDE_CONFIG | methods::RUN_CLAUDE_LOCAL_COMMAND => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
