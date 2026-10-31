@@ -7642,7 +7642,7 @@ impl Shell {
                     .rounded(px(4.0))
                     .cursor_pointer()
                     .role(gpui::Role::Button)
-                    .aria_label("Mark all as read")
+                    .aria_label("Mark chats read")
                     .opacity(0.0)
                     .group_hover(group_name.clone(), |style| style.opacity(1.0))
                     .hover(|el| el.bg(theme.glass_hover()))
@@ -7652,7 +7652,7 @@ impl Shell {
                             .update(cx, |state, cx| state.mark_all_chats_seen(cx));
                     }))
                     .tooltip(crate::settings::widgets::text_tooltip_above(
-                        "Mark all as read",
+                        "Mark chats read",
                     ))
                     .child(
                         icon(icons::LUCIDE_CHECK)

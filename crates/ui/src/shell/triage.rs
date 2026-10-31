@@ -417,6 +417,16 @@ impl Shell {
         }
     }
 
+    fn dismiss_decision(&mut self, item_id: &str, cx: &mut Context<Self>) {
+        self.mutate(
+            serde_json::json!({
+                "op": "resolveSupervisorItems",
+                "answers": [{ "itemId": item_id, "choice": "Dismissed" }],
+            }),
+            cx,
+        );
+    }
+
     fn open_need(&mut self, chat_id: &str, kind: &NeedKind, cx: &mut Context<Self>) {
         match kind {
             NeedKind::Decision { .. } => self.open_supervisor(cx),
@@ -942,7 +952,7 @@ impl Shell {
             | NeedKind::Decision { .. }
             | NeedKind::Task { .. } => {
                 let (target, kind) = (chat_id.clone(), row.kind.clone());
-                popover::btn_primary(theme, "Open")
+                let open = popover::btn_primary(theme, "Open")
                     .id(SharedString::from(format!("triage-open-{key}")))
                     .debug_selector({
                         let id = key.clone();
@@ -955,8 +965,40 @@ impl Shell {
                         cx.stop_propagation();
                         this.close_triage(cx);
                         this.open_need(&target, &kind, cx);
-                    }))
-                    .into_any_element()
+                    }));
+                match &row.kind {
+                    NeedKind::Decision { item_id, .. } => {
+                        let item_id = item_id.clone();
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                popover::btn_ghost(
+                                    theme,
+                                    "Dismiss",
+                                    format!("triage-dismiss-{key}"),
+                                )
+                                .id(SharedString::from(format!("triage-dismiss-{key}")))
+                                .debug_selector({
+                                    let id = key.clone();
+                                    move || format!("triage-dismiss-{id}")
+                                })
+                                .role(gpui::Role::Button)
+                                .aria_label(format!("Dismiss {}", row.title))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.dismiss_decision(&item_id, cx);
+                                    },
+                                )),
+                            )
+                            .child(open)
+                            .into_any_element()
+                    }
+                    _ => open.into_any_element(),
+                }
             }
             kind => {
                 let target = chat_id.clone();
@@ -1566,7 +1608,7 @@ impl Shell {
             | NeedKind::Decision { .. }
             | NeedKind::Task { .. } => {
                 let (target, kind) = (chat_id.clone(), row.kind.clone());
-                card_button(theme, false)
+                let open = card_button(theme, false)
                     .id(SharedString::from(format!("card-open-{key}")))
                     .role(gpui::Role::Button)
                     .aria_label(format!("Open {}", row.title))
@@ -1574,8 +1616,33 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.open_need(&target, &kind, cx);
-                    }))
-                    .into_any_element()
+                    }));
+                match &row.kind {
+                    NeedKind::Decision { item_id, .. } => {
+                        let item_id = item_id.clone();
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                card_button(theme, false)
+                                    .bg(gpui::transparent_black())
+                                    .text_color(theme.text_muted)
+                                    .id(SharedString::from(format!("card-dismiss-{key}")))
+                                    .role(gpui::Role::Button)
+                                    .aria_label(format!("Dismiss {}", row.title))
+                                    .child("Dismiss")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.dismiss_decision(&item_id, cx);
+                                    })),
+                            )
+                            .child(open)
+                            .into_any_element()
+                    }
+                    _ => open.into_any_element(),
+                }
             }
             kind => {
                 let target = chat_id.clone();
@@ -1918,9 +1985,9 @@ pub(super) fn mark_all_read_button(
         .id(id)
         .debug_selector(move || id.into())
         .role(gpui::Role::Button)
-        .aria_label("Mark all as read")
+        .aria_label("Mark chats read")
         .tooltip(crate::settings::widgets::text_tooltip(
-            "Mark every thread as read",
+            "Clear the unread dot on every chat. Decisions stay until you answer or dismiss them.",
         ))
         .flex_none()
         .flex()
@@ -1944,7 +2011,7 @@ pub(super) fn mark_all_read_button(
                 .size(px(12.0))
                 .text_color(theme.text_muted),
         )
-        .child("Mark all read")
+        .child("Mark chats read")
         .into_any_element()
 }
 
