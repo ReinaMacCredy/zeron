@@ -1657,6 +1657,54 @@ async fn checkout_file_diff_text_rpc_fits_the_default_worker_stack() {
     core.shutdown().await;
 }
 
+#[test]
+fn start_review_rpc_fits_the_default_worker_stack() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(2 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_dir = tmp.path().join("repo");
+        init_repo(&repo_dir).await;
+        std::fs::write(repo_dir.join("a.txt"), "one\ntwo edited\n").expect("dirty tree");
+
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(zeron_harness::mock::MockHarness {
+            script: Vec::new(),
+        }));
+        let core = EngineCore::assemble(
+            &tmp.path().join("data"),
+            Arc::new(registry),
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .expect("engine assembles");
+        let cwd = repo_dir.to_str().expect("utf-8 path").to_owned();
+        core.workspace
+            .create_space("space", &core.device_id, &cwd, None, true)
+            .expect("space");
+        core.workspace
+            .create_chat("chat", Some("space"), Some(&core.device_id), None, None)
+            .expect("chat");
+        let client = zeron_rpc::memory_client(core.rpc_service());
+
+        let response = client
+            .call(
+                methods::START_REVIEW,
+                serde_json::json!({ "ownerChatId": "chat", "scope": "uncommitted" }),
+            )
+            .await
+            .expect("StartReview");
+        assert!(response["taskId"].as_str().is_some());
+        assert!(response["patch"].as_str().expect("patch").contains("a.txt"));
+
+        core.shutdown().await;
+    });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn checkout_file_diff_text_rpc_reads_pinned_commit_sources() {
     let tmp = tempfile::tempdir().expect("tempdir");

@@ -220,6 +220,17 @@ struct StartReviewParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CheckoutDiffParams {
+    cwd: String,
+    #[serde(default)]
+    mode: String,
+    base_ref: Option<String>,
+    chat_id: Option<String>,
+    commit_sha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TaskParams {
     chat_id: String,
     task_id: String,
@@ -2150,20 +2161,13 @@ impl EngineRpc {
             ),
             _ => None,
         };
-        let value = |reply: RpcReply| match reply {
-            RpcReply::Value(value) => Ok(value),
-            RpcReply::Stream(_) => Err(failed("unexpected stream")),
-        };
         let base = match scope {
             ReviewScope::Branch => {
-                let branches = value(
-                    self.handle(
-                        methods::LIST_BRANCHES,
-                        serde_json::json!({ "repoPath": cwd }),
-                    )
-                    .await?,
-                )?;
-                let branches: Vec<String> = serde_json::from_value(branches).unwrap_or_default();
+                let branches = self
+                    .repos
+                    .branches(std::path::Path::new(&cwd))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 Some(
                     crate::review::default_base_ref(&branches, chat.branch.as_deref())
                         .ok_or_else(|| failed("No base branch to compare against"))?,
@@ -2171,21 +2175,15 @@ impl EngineRpc {
             }
             _ => None,
         };
-        let diff = value(
-            self.handle(
-                methods::GET_CHECKOUT_DIFF,
-                serde_json::json!({
-                    "cwd": cwd,
-                    "mode": scope.mode(),
-                    "chatId": chat.id,
-                    "baseRef": base,
-                    "commitSha": commit,
-                }),
-            )
-            .await?,
-        )?;
-        let diff: zeron_proto::CheckoutDiff =
-            serde_json::from_value(diff).map_err(|e| RpcError::Failed(e.to_string()))?;
+        let diff = self
+            .checkout_diff(CheckoutDiffParams {
+                cwd,
+                mode: scope.mode().to_string(),
+                base_ref: base.clone(),
+                chat_id: Some(chat.id.clone()),
+                commit_sha: commit.clone(),
+            })
+            .await?;
         let files: Vec<String> = diff.files.iter().map(|file| file.path.clone()).collect();
         if files.is_empty() {
             return Err(failed("Nothing to review"));
@@ -2268,6 +2266,75 @@ impl EngineRpc {
             "scope": scope.key(),
             "commitSha": commit,
         }))
+    }
+
+    async fn checkout_diff(
+        &self,
+        p: CheckoutDiffParams,
+    ) -> Result<zeron_proto::CheckoutDiff, RpcError> {
+        let repos = self.repos.clone();
+        let device_id = self.doc_host.device_id().to_string();
+        let turn = match (p.mode.as_str(), p.chat_id.as_deref()) {
+            ("turn", Some(chat_id)) => self.diff_sync.turn_snapshot(chat_id),
+            _ => None,
+        };
+        // A task of its own: under the dispatcher's frame a debug build overflows the 2 MB worker stack.
+        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let identity = repos
+                .checkout_identity(std::path::Path::new(&p.cwd))
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+            let root = identity.root.as_path();
+            let snapshot = match p.mode.as_str() {
+                "branch" => {
+                    let base_ref = p
+                        .base_ref
+                        .as_deref()
+                        .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
+                    let base = crate::diff_sync::merge_base(root, base_ref)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    crate::diff_sync::capture_diff_against(&repos, root, Some(&base)).await
+                }
+                // One commit's own changes (History → per-commit tab):
+                // parent (or the empty tree) vs the commit itself.
+                "commit" => {
+                    let sha = p
+                        .commit_sha
+                        .as_deref()
+                        .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
+                    crate::working_tree::resolve_commit(root, sha)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    crate::diff_sync::capture_commit_diff(&repos, root, sha).await
+                }
+                "turn" => {
+                    if p.chat_id.is_none() {
+                        return Err(RpcError::Failed("chatId required".into()));
+                    }
+                    let snapshot = turn
+                        .filter(|s| s.root == identity.root)
+                        .ok_or_else(|| RpcError::Failed("no turn recorded".into()))?;
+                    crate::diff_sync::capture_turn_diff(&repos, root, &snapshot.tree).await
+                }
+                _ => crate::diff_sync::capture_diff(&repos, root).await,
+            }
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+            Ok(zeron_proto::CheckoutDiff {
+                checkout_id: identity.id,
+                device_id,
+                cwd: identity.root.to_string_lossy().to_string(),
+                patch: snapshot.patch,
+                files: snapshot.files,
+                additions: snapshot.additions,
+                deletions: snapshot.deletions,
+                truncated: snapshot.truncated,
+                checksum: snapshot.checksum,
+                updated_at: chrono::Utc::now(),
+            })
+        }));
+        task.await
+            .map_err(|e| RpcError::Failed(format!("checkout diff task failed: {e}")))?
     }
 
     fn agent_profiles_store(&self) -> Result<AgentProfilesStore, RpcError> {
@@ -6010,80 +6077,7 @@ impl RpcService for EngineRpc {
             // turn-start tree snapshot against the current tree; anything else
             // is the plain working-tree capture.
             methods::GET_CHECKOUT_DIFF => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    cwd: String,
-                    #[serde(default)]
-                    mode: String,
-                    base_ref: Option<String>,
-                    chat_id: Option<String>,
-                    commit_sha: Option<String>,
-                }
-                let p: P = parse_params(params)?;
-                let repos = self.repos.clone();
-                let device_id = self.doc_host.device_id().to_string();
-                let turn = match (p.mode.as_str(), p.chat_id.as_deref()) {
-                    ("turn", Some(chat_id)) => self.diff_sync.turn_snapshot(chat_id),
-                    _ => None,
-                };
-                // A task of its own: under the dispatcher's frame a debug build overflows the 2 MB worker stack.
-                let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-                    let identity = repos
-                        .checkout_identity(std::path::Path::new(&p.cwd))
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    let root = identity.root.as_path();
-                    let snapshot = match p.mode.as_str() {
-                        "branch" => {
-                            let base_ref = p
-                                .base_ref
-                                .as_deref()
-                                .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
-                            let base = crate::diff_sync::merge_base(root, base_ref)
-                                .await
-                                .map_err(|e| RpcError::Failed(e.to_string()))?;
-                            crate::diff_sync::capture_diff_against(&repos, root, Some(&base)).await
-                        }
-                        // One commit's own changes (History → per-commit tab):
-                        // parent (or the empty tree) vs the commit itself.
-                        "commit" => {
-                            let sha = p
-                                .commit_sha
-                                .as_deref()
-                                .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
-                            crate::working_tree::resolve_commit(root, sha)
-                                .await
-                                .map_err(|e| RpcError::Failed(e.to_string()))?;
-                            crate::diff_sync::capture_commit_diff(&repos, root, sha).await
-                        }
-                        "turn" => {
-                            if p.chat_id.is_none() {
-                                return Err(RpcError::Failed("chatId required".into()));
-                            }
-                            let snapshot = turn
-                                .filter(|s| s.root == identity.root)
-                                .ok_or_else(|| RpcError::Failed("no turn recorded".into()))?;
-                            crate::diff_sync::capture_turn_diff(&repos, root, &snapshot.tree).await
-                        }
-                        _ => crate::diff_sync::capture_diff(&repos, root).await,
-                    }
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    RpcReply::value(&zeron_proto::CheckoutDiff {
-                        checkout_id: identity.id,
-                        device_id,
-                        cwd: identity.root.to_string_lossy().to_string(),
-                        patch: snapshot.patch,
-                        files: snapshot.files,
-                        additions: snapshot.additions,
-                        deletions: snapshot.deletions,
-                        truncated: snapshot.truncated,
-                        checksum: snapshot.checksum,
-                        updated_at: chrono::Utc::now(),
-                    })
-                }));
-                task.await
-                    .map_err(|e| RpcError::Failed(format!("checkout diff task failed: {e}")))?
+                RpcReply::value(&self.checkout_diff(parse_params(params)?).await?)
             }
             methods::DISCARD_WORKING_TREE => {
                 // This destructive branch performs several nested filesystem
