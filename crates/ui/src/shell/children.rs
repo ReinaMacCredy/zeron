@@ -2,6 +2,19 @@ use std::collections::HashSet;
 
 use super::*;
 
+const PENDING_CHILD: Duration = Duration::from_secs(10);
+
+pub(super) struct PendingChild {
+    parent: String,
+    target: PendingTarget,
+    until: std::time::Instant,
+}
+
+enum PendingTarget {
+    Agent(String),
+    Chat(String),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChildKind {
     Agent,
@@ -81,6 +94,13 @@ impl Shell {
                     .find(|chat| chat.id == chat_id)
                     .cloned()
                 else {
+                    if !self.active_chat.is_empty() {
+                        self.pending_child = Some(PendingChild {
+                            parent: self.active_chat.clone(),
+                            target: PendingTarget::Chat(chat_id),
+                            until: std::time::Instant::now() + PENDING_CHILD,
+                        });
+                    }
                     return;
                 };
                 if chat.sidechat_source_chat_id.is_some() {
@@ -144,34 +164,62 @@ impl Shell {
 
     /// Tray rows carry only the label; the engine matches background agents to spawns the same way.
     pub(super) fn open_agent_of(&mut self, chat_id: String, label: String, cx: &mut Context<Self>) {
-        if self.active_chat != chat_id {
-            self.open_chat(chat_id.clone(), cx);
-        }
-        self.pending_agent = Some((chat_id, label));
-        self.resolve_pending_agent(cx);
+        self.await_child(chat_id, PendingTarget::Agent(label), cx);
     }
 
-    pub(super) fn resolve_pending_agent(&mut self, cx: &mut Context<Self>) {
-        let Some((chat_id, label)) = self.pending_agent.clone() else {
+    pub(crate) fn open_thread(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        match self.state.read(cx).sidecar_host(&chat_id, Utc::now()) {
+            Some(parent) => self.await_child(parent, PendingTarget::Chat(chat_id), cx),
+            None => self.open_chat(chat_id, cx),
+        }
+    }
+
+    fn await_child(&mut self, parent: String, target: PendingTarget, cx: &mut Context<Self>) {
+        if !matches!(self.route, Route::Chat) || self.active_chat != parent {
+            self.open_chat(parent.clone(), cx);
+        }
+        self.pending_child = Some(PendingChild {
+            parent,
+            target,
+            until: std::time::Instant::now() + PENDING_CHILD,
+        });
+        self.resolve_pending_child(cx);
+    }
+
+    pub(super) fn resolve_pending_child(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_child.as_ref() else {
             return;
         };
-        if self.state.read(cx).selected_chat.as_deref() != Some(chat_id.as_str()) {
-            self.pending_agent = None;
+        if std::time::Instant::now() > pending.until
+            || self.state.read(cx).selected_chat.as_deref() != Some(pending.parent.as_str())
+        {
+            self.pending_child = None;
             return;
         }
-        if self.active_chat != chat_id {
+        if self.active_chat != pending.parent {
             return;
         }
-        let label = transcript::single_line(&label);
-        let found = self
-            .transcript
-            .read(cx)
-            .subagent_summaries(cx)
-            .into_iter()
-            .find(|agent| transcript::single_line(&agent.title) == label);
-        if let Some(agent) = found {
-            self.pending_agent = None;
-            self.open_child(ChildRef::of_summary(&agent), cx);
+        let child = match &pending.target {
+            PendingTarget::Agent(label) => {
+                let label = transcript::single_line(label);
+                self.transcript
+                    .read(cx)
+                    .subagent_summaries(cx)
+                    .into_iter()
+                    .find(|agent| transcript::single_line(&agent.title) == label)
+                    .map(|agent| ChildRef::of_summary(&agent))
+            }
+            PendingTarget::Chat(id) => self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .any(|chat| &chat.id == id)
+                .then(|| ChildRef::Chat(id.clone())),
+        };
+        if let Some(child) = child {
+            self.pending_child = None;
+            self.open_child(child, cx);
         }
     }
 }

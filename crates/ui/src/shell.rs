@@ -3252,7 +3252,7 @@ pub struct Shell {
     /// `CreateSidechat` in flight for this source chat. A second click while
     /// it is out would mint a second sidechat (the id is client-minted).
     sidechat_create: Option<(String, Task<()>)>,
-    pending_agent: Option<(String, String)>,
+    pending_child: Option<children::PendingChild>,
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
@@ -4051,7 +4051,7 @@ impl Shell {
             sidechat_tabs: std::collections::HashMap::new(),
             sidechat_seq: 0,
             sidechat_create: None,
-            pending_agent: None,
+            pending_child: None,
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
             browsers: std::collections::HashMap::new(),
@@ -9145,15 +9145,17 @@ impl Shell {
             .map(|c| {
                 (
                     c.title.clone().unwrap_or_default(),
-                    c.created_by_chat_id.clone(),
+                    c.created_by_chat_id
+                        .clone()
+                        .or_else(|| c.delegated_by().map(str::to_owned)),
                     c.archived,
                 )
             })
         else {
             return;
         };
-        // Every chat has a sidebar row in this fork; a side chat renames under
-        // the file tree only while its parent's Chats footer is on screen.
+        // A thread the Files footer lists renames there while its parent's
+        // footer is on screen; every other chat renames on its sidebar row.
         let in_explorer = !archived
             && parent.is_some()
             && parent.as_deref() == Some(self.active_chat.as_str())
@@ -18780,7 +18782,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.chat_backdrop = None;
         self.refresh_triage_frame(cx);
-        self.resolve_pending_agent(cx);
+        self.resolve_pending_child(cx);
         self.sync_open_children(cx);
         // Every repaint (state frame, input, or the clock firing) reschedules
         // the next clock-driven one; the sidebar and transcript follow this
@@ -24396,6 +24398,66 @@ mod right_tab_mouse_regressions {
         let shell = host.read_with(cx, |host, _| host.shell.clone());
         cx.update(|window, cx| window.draw(cx).clear());
         (shell, cx)
+    }
+
+    #[gpui::test]
+    fn a_child_thread_opens_beside_its_parent_from_any_door(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        let chat = |id: &str, parent: Option<&str>| -> zeron_proto::Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "dev", "title": id, "archived": false,
+                "createdAt": chrono::Utc::now(), "forkedFromChatId": parent,
+            }))
+            .unwrap()
+        };
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats = vec![
+                    chat("parent", None),
+                    chat("fork", Some("parent")),
+                    chat("elsewhere", None),
+                ];
+                state.selected_chat = Some("elsewhere".into());
+            });
+            shell.active_chat = "elsewhere".into();
+            shell.open_thread("fork".into(), cx);
+            assert_eq!(
+                shell.state.read(cx).selected_chat.as_deref(),
+                Some("parent")
+            );
+        });
+        let open = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+            shell.read_with(cx, |shell, cx| {
+                shell.surface_child(shell.resolved_right_active(cx), cx)
+            })
+        };
+        shell.update(cx, |shell, cx| {
+            shell.active_chat = "parent".into();
+            shell.resolve_pending_child(cx);
+        });
+        assert_eq!(open(&shell, cx).as_deref(), Some("fork"));
+
+        shell.update(cx, |shell, cx| {
+            shell.open_child(children::ChildRef::Chat("late".into()), cx);
+            shell.resolve_pending_child(cx);
+            shell.state.update(cx, |state, _| {
+                state.chats.push(chat("late", Some("parent")))
+            });
+            shell.resolve_pending_child(cx);
+        });
+        assert_eq!(
+            open(&shell, cx).as_deref(),
+            Some("late"),
+            "a click on a child that had not synced yet opens it once it lands"
+        );
+
+        shell.update(cx, |shell, cx| {
+            shell.open_thread("elsewhere".into(), cx);
+            assert_eq!(
+                shell.state.read(cx).selected_chat.as_deref(),
+                Some("elsewhere")
+            );
+        });
     }
 
     #[gpui::test]

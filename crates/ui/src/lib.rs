@@ -450,7 +450,12 @@ fn open_notification_target(target: String, state: &gpui::Entity<state::AppState
             });
         }
         None if target != notify::AGENT_UPDATES_TARGET && target != notify::SUPERVISOR_TARGET => {
-            state.update(cx, |state, cx| state.select_chat(Some(target), cx))
+            state.update(cx, |state, cx| {
+                let chat = state
+                    .sidecar_host(&target, chrono::Utc::now())
+                    .unwrap_or(target);
+                state.select_chat(Some(chat), cx)
+            })
         }
         None => {}
     }

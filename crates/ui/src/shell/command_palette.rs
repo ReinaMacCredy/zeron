@@ -1038,7 +1038,7 @@ impl Shell {
             RowKind::Command(Command::Usage) => self.open_usage(cx),
             RowKind::Command(Command::Tasks) => self.open_tasks(cx),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
-            RowKind::Chat(id) => self.open_chat(id, cx),
+            RowKind::Chat(id) => self.open_thread(id, cx),
             RowKind::ImportAction { draft, .. } => {
                 self.open_project_action_editor(None, Some(draft), cx)
             }

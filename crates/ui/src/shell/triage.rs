@@ -385,7 +385,7 @@ impl Shell {
         if self.triage(cx).need(&chat_id).is_some() {
             self.open_triage(Some(chat_id), window, cx);
         } else {
-            self.open_chat(chat_id, cx);
+            self.open_thread(chat_id, cx);
         }
     }
 
@@ -421,7 +421,7 @@ impl Shell {
         match kind {
             NeedKind::Decision { .. } => self.open_supervisor(cx),
             NeedKind::Task { task_id, .. } => self.defer_open_task(task_id.clone(), cx),
-            _ => self.open_chat(chat_id.to_owned(), cx),
+            _ => self.open_thread(chat_id.to_owned(), cx),
         }
     }
 
@@ -1270,7 +1270,7 @@ impl Shell {
             .hover(|s| s.bg(theme.wash(0.05)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.close_triage(cx);
-                this.open_chat(target.clone(), cx);
+                this.open_thread(target.clone(), cx);
             }))
             .child(
                 div()
@@ -1412,7 +1412,7 @@ impl Shell {
                 .aria_label(title)
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.wash(0.05)))
-                .on_click(cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_thread(chat_id.clone(), cx)))
                 .into_any_element()
             })
             .collect();
@@ -1435,7 +1435,7 @@ impl Shell {
                 .aria_label(title)
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.wash(0.05)))
-                .on_click(cx.listener(move |this, _, _, cx| this.open_chat(target.clone(), cx)))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_thread(target.clone(), cx)))
                 .into_any_element()
             })
             .collect();
