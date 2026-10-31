@@ -285,11 +285,7 @@ impl TasksPage {
             gallery,
             card,
             done_open: true,
-            filter: if std::env::var("ZERON_OPEN_ROUTE").as_deref() == Ok("mission-control") {
-                TasksFilter::Missions
-            } else {
-                TasksFilter::All
-            },
+            filter: TasksFilter::All,
             open_first_card: std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("task-card"),
             focus: cx.focus_handle(),
             view_now: None,

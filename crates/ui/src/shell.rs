@@ -3962,7 +3962,6 @@ impl Shell {
             Some("usage") => Route::Usage,
             Some("inbox") => Route::Inbox,
             Some("tasks") => Route::Tasks,
-            Some("mission-control") => Route::Tasks,
             Some("supervisor") => Route::Supervisor,
             Some(_) if open_task.is_some() => Route::TaskCenter,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
