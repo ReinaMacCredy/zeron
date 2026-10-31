@@ -11,7 +11,7 @@ Click the caret next to it to choose what to review and who reviews:
 
 A reviewer picked here applies to this chat only.
 
-While the review runs, the chip reads **Reviewing**. Hover it and click **Stop review** to stop the reviewer; your chat keeps running. The reviewer works in a child chat you can follow from the agents pill.
+While the review runs, the chip reads **Reviewing**. Hover it and click **Stop review** to stop the reviewer; your chat keeps running. The reviewer works in a child chat you can follow beside your chat.
 
 ## Read the findings
 
