@@ -684,29 +684,17 @@ impl Shell {
                 .map(|row| self.need_title(row, cx))
                 .collect()
         };
-        for title in titles(&|kind| matches!(kind, NeedKind::Asking(_)) && !kind.plan()) {
+        for title in titles(&|kind| matches!(kind, NeedKind::Asking(None))) {
             parts.push(format!("{title} asks you."));
         }
-        let plans = titles(&NeedKind::plan);
-        if !plans.is_empty() {
-            parts.push(format!(
-                "{} {} to approve.",
-                plans.join(", "),
-                if plans.len() == 1 {
-                    "has a plan"
-                } else {
-                    "have plans"
-                }
-            ));
+        match triage.needs.iter().filter(|row| row.kind.waits()).count() {
+            0 => {}
+            1 => parts.push("1 waits in the composer.".into()),
+            n => parts.push(format!("{n} wait in the composer.")),
         }
         let failed = titles(&|kind| matches!(kind, NeedKind::Failed));
         if !failed.is_empty() {
             parts.push(format!("{} failed.", failed.join(", ")));
-        }
-        match titles(&|kind| matches!(kind, NeedKind::Decision { .. })).len() {
-            0 => {}
-            1 => parts.push("1 decision waits for you.".into()),
-            n => parts.push(format!("{n} decisions wait for you.")),
         }
         let review = titles(&|kind| {
             matches!(
@@ -1910,7 +1898,7 @@ mod tests {
             default_harness: zeron_proto::HarnessId::Mock,
         };
         let window = cx.add_window(|_, cx| Shell::new(state, boot, cx));
-        let (needs, asker_meta, mut running, waiting) = window
+        let (needs, asker_meta, mut running, waiting, summary) = window
             .update(cx, |shell, _, cx| {
                 let triage = shell.triage(cx);
                 let needs: Vec<String> = triage
@@ -1933,7 +1921,8 @@ mod tests {
                     .iter()
                     .map(|row| row.chat_id.clone())
                     .collect();
-                (needs, meta, running, waiting)
+                let summary = shell.supervisor_summary(&triage, cx);
+                (needs, meta, running, waiting, summary)
             })
             .unwrap();
         running.sort();
@@ -1960,5 +1949,9 @@ mod tests {
             "a delegated child's row names its parent"
         );
         assert_eq!(running, ["lead", "shelled"]);
+        assert_eq!(
+            summary,
+            "asker asks you. 1 waits in the composer. Check it ready to review. Ship it not sent. 2 threads are running."
+        );
     }
 }
