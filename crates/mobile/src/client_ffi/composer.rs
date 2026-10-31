@@ -478,9 +478,7 @@ fn invocation_entry(
         .filter(|link| *link != insert);
     let blocked = compact_unsupported
         .filter(|_| candidate.name == zeron_proto::app_commands::COMPACT_COMMAND && !skill);
-    let terminal = claude
-        && !skill
-        && zeron_proto::app_commands::TERMINAL_ONLY_COMMANDS.contains(&candidate.name.as_str());
+    let terminal = claude && zeron_proto::app_commands::terminal_only_command(&candidate);
     InvocationEntry {
         title: if skill {
             skill_display_name(&candidate.name)
@@ -1257,5 +1255,27 @@ mod tests {
         );
         let labels: Vec<String> = access_modes(None).into_iter().map(|m| m.label).collect();
         assert_eq!(labels, ["Supervised", "Auto-accept edits", "Full access"]);
+    }
+
+    #[test]
+    fn zerons_own_resume_is_not_tagged_terminal() {
+        use zeron_proto::command_catalog::{InvocationCandidate, WorkspaceCommand as W};
+        let entry = |name: &str, workspace_command| {
+            invocation_entry(
+                InvocationCandidate {
+                    workspace_command,
+                    name: name.into(),
+                    description: String::new(),
+                    input_hint: None,
+                    invocation: zeron_proto::invocation::Invocation::Command { name: name.into() },
+                },
+                false,
+                None,
+                true,
+            )
+        };
+        assert!(entry("status", None).terminal);
+        assert!(entry("resume", None).terminal);
+        assert!(!entry("resume", Some(W::Resume)).terminal);
     }
 }

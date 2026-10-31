@@ -59,6 +59,12 @@ pub const TERMINAL_ONLY_COMMANDS: &[&str] = &[
     "vim",
 ];
 
+pub fn terminal_only_command(candidate: &crate::command_catalog::InvocationCandidate) -> bool {
+    candidate.invocation.prefix() == '/'
+        && candidate.workspace_command.is_none()
+        && TERMINAL_ONLY_COMMANDS.contains(&candidate.name.as_str())
+}
+
 pub fn claude_card_command(
     text: &str,
     is_skill: impl Fn(&str) -> bool,

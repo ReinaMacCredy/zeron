@@ -6729,7 +6729,7 @@ fn invocation_token(text: &str, cursor: usize, prefix: char) -> Option<MentionTo
 
 use zeron_proto::app_commands::{
     COMPACT_COMMAND, COMPACT_NEEDS_CHAT, COMPUTER_USE_COMMAND, SIDECHAT_NEEDS_CHAT, compact_focus,
-    sidechat_prompt,
+    sidechat_prompt, terminal_only_command,
 };
 pub use zeron_proto::command_catalog::WorkspaceCommand;
 use zeron_proto::command_catalog::{
@@ -6759,12 +6759,6 @@ fn computer_send_blockers(
         return Vec::new();
     }
     crate::computer::cards::missing_computer_permissions(capabilities)
-}
-
-fn terminal_only_row(command: &InvocationCandidate) -> bool {
-    command.invocation.prefix() == '/'
-        && command.workspace_command.is_none()
-        && zeron_proto::app_commands::TERMINAL_ONLY_COMMANDS.contains(&command.name.as_str())
 }
 
 fn zeron_owned_command_range(raw: &str) -> Option<Range<usize>> {
@@ -10591,7 +10585,7 @@ impl Composer {
         if self.pickers.read(cx).resolved(cx).harness == Some(HarnessId::ClaudeCode) {
             self.slash
                 .filtered
-                .sort_by_key(|&ix| commands.get(ix).is_some_and(terminal_only_row));
+                .sort_by_key(|&ix| commands.get(ix).is_some_and(terminal_only_command));
         }
         self.slash.active = (!self.slash.filtered.is_empty()).then_some(0);
         // A fresh query/reopen restarts the row stack at the top.
@@ -11111,7 +11105,7 @@ impl Composer {
                         .into(),
                 };
                 let disabled = command.name == COMPACT_COMMAND && unsupported.is_some();
-                let terminal = claude && terminal_only_row(command);
+                let terminal = claude && terminal_only_command(command);
                 rows.push(
                     crate::popover::menu_row(theme, selected, format!("slash-result-{row_ix}"))
                         .id(("slash-result", row_ix))
@@ -15689,12 +15683,12 @@ mod tests {
             input_hint: None,
             invocation: zeron_proto::invocation::Invocation::Command { name: name.into() },
         };
-        assert!(terminal_only_row(&row("status", None)));
-        assert!(!terminal_only_row(&row(
+        assert!(terminal_only_command(&row("status", None)));
+        assert!(!terminal_only_command(&row(
             "resume",
             Some(WorkspaceCommand::Resume)
         )));
-        assert!(!terminal_only_row(&row("context", None)));
+        assert!(!terminal_only_command(&row("context", None)));
     }
 
     pub(super) fn composer_focus_window(
