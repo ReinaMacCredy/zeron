@@ -112,18 +112,9 @@ impl Composer {
                     if !composer.ask.awaiting.contains(&id) {
                         return true;
                     }
-                    match pending {
-                        Some((request_id, questions, steps)) => {
-                            composer.land_ask(
-                                id.clone(),
-                                Wizard::new(request_id, questions),
-                                steps,
-                                cx,
-                            );
-                            true
-                        }
-                        None => false,
-                    }
+                    pending.is_some_and(|(request_id, questions, steps)| {
+                        composer.land_ask(id.clone(), Wizard::new(request_id, questions), steps, cx)
+                    })
                 });
                 match landed {
                     Ok(false) => cx.background_executor().timer(FETCH_RETRY).await,
@@ -142,11 +133,12 @@ impl Composer {
         wizard: Wizard,
         steps: Vec<String>,
         cx: &mut Context<Self>,
-    ) {
-        if !self.ask.awaiting.contains(&chat_id)
-            || self.ask.answered.contains_key(&wizard.request_id)
-        {
-            return;
+    ) -> bool {
+        if !self.ask.awaiting.contains(&chat_id) {
+            return true;
+        }
+        if self.ask.answered.contains_key(&wizard.request_id) {
+            return false;
         }
         self.ask.entries.retain(|entry| entry.chat_id != chat_id);
         self.ask.entries.push(AskEntry {
@@ -155,6 +147,7 @@ impl Composer {
             steps,
         });
         cx.notify();
+        true
     }
 
     fn live_entry(&self, chat_id: &str) -> Option<&AskEntry> {
@@ -206,7 +199,15 @@ impl Composer {
     }
 
     pub(crate) fn ask_answered(&self, chat_id: &str) -> bool {
-        self.ask.answered.values().any(|id| id == chat_id)
+        match self
+            .ask
+            .entries
+            .iter()
+            .find(|entry| entry.chat_id == chat_id)
+        {
+            Some(entry) => self.ask.answered.contains_key(&entry.wizard.request_id),
+            None => self.ask.answered.values().any(|id| id == chat_id),
+        }
     }
 
     pub(crate) fn ask_signature(&self) -> Vec<(String, usize, bool)> {
@@ -370,11 +371,16 @@ impl Composer {
                         composer.ask.answered.remove(&request_id);
                         composer.ask_failed(chat_id, request_id, err.to_string(), cx);
                     }
-                    Ok(_) => cx.emit(super::ComposerEvent::AskAnswered {
-                        chat_id,
-                        request_id,
-                        error: None,
-                    }),
+                    Ok(_) => {
+                        if composer.ask.awaiting.contains(&chat_id) {
+                            composer.fetch_ask(chat_id.clone(), cx);
+                        }
+                        cx.emit(super::ComposerEvent::AskAnswered {
+                            chat_id,
+                            request_id,
+                            error: None,
+                        })
+                    }
                 }
             })
             .ok();
@@ -753,6 +759,24 @@ mod tests {
         assert_eq!(answers[0]["params"]["command"], command);
         assert!(cx.debug_bounds("ask-panel").is_none());
         assert!(cx.update(|_, cx| composer.read(cx).ask_answered("b")));
+    }
+
+    #[gpui::test]
+    fn a_second_question_shows_again_after_the_first_is_answered(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (composer, mut engine, cx) = mount(cx, "a");
+        engine.take(cx, methods::WATCH_DOC_MESSAGES);
+        land(cx, &composer, "b", "req-1");
+        composer.update(cx, |composer, _| {
+            composer.ask.answered.insert("req-1".into(), "b".into())
+        });
+        assert!(cx.update(|_, cx| composer.read(cx).ask_answered("b")));
+        land(cx, &composer, "b", "req-1");
+        assert!(cx.update(|_, cx| composer.read(cx).ask_answered("b")));
+        land(cx, &composer, "b", "req-2");
+        assert!(!cx.update(|_, cx| composer.read(cx).ask_answered("b")));
+        assert!(cx.update(|_, cx| composer.read(cx).ask_info("b").is_some()));
     }
 
     #[gpui::test]
