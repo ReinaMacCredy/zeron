@@ -26,7 +26,6 @@ async fn does_not_wait_for_another_features_permission_dialog(stop: &str) {
     entered.wait().await;
     match stop {
         "stop" => f.host.stop().await,
-        "suspend" => f.host.suspend().await,
         _ => f.host.pause_desktop("screen-lock").await,
     }
     .unwrap();
@@ -38,11 +37,6 @@ async fn does_not_wait_for_another_features_permission_dialog(stop: &str) {
 #[tokio::test]
 async fn stop_does_not_wait_for_another_features_permission_dialog() {
     does_not_wait_for_another_features_permission_dialog("stop").await;
-}
-
-#[tokio::test]
-async fn suspend_does_not_wait_for_another_features_permission_dialog() {
-    does_not_wait_for_another_features_permission_dialog("suspend").await;
 }
 
 #[tokio::test]
@@ -157,7 +151,6 @@ async fn does_not_start_while_locked_and_requires_fresh_state_after_all_desktop_
     let f = fixture(Driver::default());
     f.host.pause_desktop("screen-lock").await.unwrap();
     f.host.pause_desktop("system-sleep").await.unwrap();
-    f.host.resume();
     let paused = f.send(call("press_key")).await;
     assert_paused(&paused);
     assert_eq!(structured(&paused)["effect"], json!("refused"));
@@ -475,55 +468,6 @@ async fn replaces_a_driver_that_wedges_during_startup_instead_of_closing_admissi
         f.pid_events(starts[0].pid),
         ["start", "session-hang", "cancel", "retiring", "exit"]
     );
-}
-
-#[tokio::test]
-async fn rejects_later_backend_requests_throughout_suspension_and_resumes_only_on_explicit_restart()
-{
-    let f = fixture(Driver::default());
-    f.send(call("check_permissions")).await;
-    let stopping = f.host.suspend();
-    let refused = f
-        .send(call("type_text").args(json!({ "text": "must not arrive" })))
-        .await;
-    assert_not_dispatched(&refused);
-    assert!(refused.error.as_deref().unwrap().contains("suspended"));
-    stopping.await.unwrap();
-    assert_not_dispatched(&f.send(call("check_permissions")).await);
-    assert_eq!(f.starts().len(), 1);
-    assert!(!f.has("dispatch"));
-    f.host.resume();
-    assert!(f.send(call("check_permissions")).await.ok);
-    let starts = f.starts();
-    assert_eq!(starts.len(), 2);
-    let events = f.events();
-    let exit = events
-        .iter()
-        .find(|e| e.event == "exit" && e.pid == starts[0].pid)
-        .unwrap();
-    assert!(starts[1].time >= exit.time);
-}
-
-#[tokio::test]
-async fn does_not_let_resume_bypass_failed_cleanup_during_backend_suspension() {
-    let f = fixture(Driver {
-        cleanup: Some("incomplete".into()),
-        ..Driver::default()
-    });
-    f.send(call("check_permissions")).await;
-    f.send(press()).await;
-    let error = f.host.suspend().await.unwrap_err();
-    assert!(
-        error.contains("did not confirm native input cleanup"),
-        "{error}"
-    );
-    f.host.resume();
-    assert_not_dispatched(
-        &f.send(call("type_text").args(json!({ "text": "must not arrive" })))
-            .await,
-    );
-    assert_eq!(f.starts().len(), 1);
-    assert!(!f.has("dispatch"));
 }
 
 #[tokio::test]

@@ -277,7 +277,6 @@ struct PendingCheck {
 struct State {
     closed: bool,
     disposed: bool,
-    suspended: bool,
     input_monitor_armed: bool,
     input_monitor_requested: bool,
     native_input_cleanup_pending: Option<Rc<Generation>>,
@@ -322,7 +321,6 @@ impl State {
         Self {
             closed: false,
             disposed: false,
-            suspended: false,
             input_monitor_armed: false,
             input_monitor_requested: false,
             native_input_cleanup_pending: None,
@@ -516,7 +514,7 @@ impl Host {
                 if admission.stopped(&state) {
                     return Some(task_stopped_reply());
                 }
-                if state.closed || state.suspended || conn.destroyed() {
+                if state.closed || conn.destroyed() {
                     return Some(not_dispatched(CANCELLED_BEFORE_DISPATCH));
                 }
                 match state.last_user_input(task) {
@@ -680,7 +678,7 @@ impl Host {
                 }
                 let serving = {
                     let state = self.state.borrow();
-                    !state.closed && !state.suspended
+                    !state.closed
                 };
                 if serving {
                     self.interrupt_input().await?;
@@ -707,9 +705,6 @@ impl Host {
             let state = self.state.borrow();
             if state.closed {
                 return Err("Computer host is closed.".into());
-            }
-            if state.suspended {
-                return Err("Computer host is suspended while the backend is stopping.".into());
             }
             if admission.stopped(&state) {
                 return Ok(task_stopped_reply());
@@ -740,7 +735,6 @@ impl Host {
                 activation_epoch != state.epoch
                     || conn.destroyed()
                     || state.closed
-                    || state.suspended
                     || admission.stopped(&state)
             };
             if cancelled {
@@ -748,7 +742,6 @@ impl Host {
                 let state = self.state.borrow();
                 if !conn.destroyed()
                     && !state.closed
-                    && !state.suspended
                     && monitor.as_ref().is_some_and(|m| !m.ready)
                     && state.epoch - activation_epoch
                         == state.input_monitor_epoch_changes - activation_changes
@@ -795,7 +788,7 @@ impl Host {
             self.stop().await?;
             let cancelled = {
                 let state = self.state.borrow();
-                conn.destroyed() || state.closed || state.suspended
+                conn.destroyed() || state.closed
             };
             if cancelled {
                 return Ok(not_dispatched("Cancelled before permission setup."));
@@ -899,7 +892,7 @@ impl Host {
         let task = request.task.clone();
         {
             let state = self.state.borrow();
-            if state.closed || state.suspended || conn.destroyed() || epoch != state.epoch {
+            if state.closed || conn.destroyed() || epoch != state.epoch {
                 return Ok(not_dispatched(CANCELLED_BEFORE_DISPATCH));
             }
             if !state.desktop_pauses.is_empty() {
@@ -1038,11 +1031,7 @@ impl Host {
     ) -> Result<CuaReply, String> {
         let cancelled = || {
             let state = self.state.borrow();
-            state.closed
-                || state.suspended
-                || conn.destroyed()
-                || epoch != state.epoch
-                || admission.stopped(&state)
+            state.closed || conn.destroyed() || epoch != state.epoch || admission.stopped(&state)
         };
         let cancelled_reply = || not_dispatched("Cancelled before permission check completed.");
         let Some(mut permissions) = self.check_permissions_wait(conn, false, task).await? else {
@@ -1238,7 +1227,7 @@ impl Host {
             } => {
                 {
                     let state = self.state.borrow();
-                    if state.closed || state.suspended {
+                    if state.closed {
                         return Ok(not_dispatched(
                             "The activation shield is unavailable while the computer host is stopped.",
                         ));
@@ -1953,11 +1942,7 @@ impl Host {
     fn warm(self: &Rc<Self>) {
         {
             let mut state = self.state.borrow_mut();
-            if state.warm_attempted
-                || state.closed
-                || state.suspended
-                || !self.options.warm_on_first_touch
-            {
+            if state.warm_attempted || state.closed || !self.options.warm_on_first_touch {
                 return;
             }
             state.warm_attempted = true;
@@ -3019,18 +3004,6 @@ impl Host {
         }
     }
 
-    fn suspend(self: &Rc<Self>) -> Fallible {
-        self.state.borrow_mut().suspended = true;
-        self.stop()
-    }
-
-    fn resume(&self) {
-        let mut state = self.state.borrow_mut();
-        if !state.closed {
-            state.suspended = false;
-        }
-    }
-
     fn pause_desktop(self: &Rc<Self>, reason: String) -> Fallible {
         {
             let mut state = self.state.borrow_mut();
@@ -3241,8 +3214,6 @@ enum Command {
     Request(ComputerHostCall, oneshot::Sender<CuaReply>),
     Cancel(String),
     Stop(oneshot::Sender<Result<(), String>>),
-    Suspend(oneshot::Sender<Result<(), String>>),
-    Resume,
     PauseDesktop(String, oneshot::Sender<Result<(), String>>),
     ResumeDesktop(String),
     EmergencyStopInput(oneshot::Sender<bool>),
@@ -3279,8 +3250,6 @@ impl Host {
                 }
             }
             Command::Stop(reply) => reply_when(self.stop(), reply),
-            Command::Suspend(reply) => reply_when(self.suspend(), reply),
-            Command::Resume => self.resume(),
             Command::PauseDesktop(reason, reply) => reply_when(self.pause_desktop(reason), reply),
             Command::ResumeDesktop(reason) => self.resume_desktop(&reason),
             Command::EmergencyStopInput(reply) => {
@@ -3395,14 +3364,6 @@ impl CuaDriverHost {
 
     pub fn stop(&self) -> Answer<Result<(), String>> {
         self.ask(Command::Stop, || Err(closed()))
-    }
-
-    pub fn suspend(&self) -> Answer<Result<(), String>> {
-        self.ask(Command::Suspend, || Err(closed()))
-    }
-
-    pub fn resume(&self) {
-        let _ = self.commands.send(Command::Resume);
     }
 
     pub fn pause_desktop(&self, reason: &str) -> Answer<Result<(), String>> {
