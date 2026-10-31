@@ -50,7 +50,7 @@ async fn end_task_succeeds_without_a_native_preview() {
 #[tokio::test]
 async fn user_stop_refuses_subsequent_calls_from_the_same_turn() {
     let f = fixture(Driver::default());
-    f.host.stop_task_by_user(owner()).await.unwrap();
+    assert!(f.send(stop(&owner())).await.ok);
     let blocked = f
         .send(
             call("press_key")
@@ -163,7 +163,7 @@ async fn releases_a_matching_permission_wait_without_cancelling_the_shared_check
     let f = fixture_with(Driver::default(), |o| o.check_permissions = Some(seam));
     let check = f.spawn(call("check_permissions").task(&owner()));
     entered.wait().await;
-    f.host.stop_task_by_user(owner()).await.unwrap();
+    assert!(f.send(stop(&owner())).await.ok);
     assert_not_dispatched(&check.reply().await);
     assert!(f.send(press()).await.ok);
     pending.resolve(permissions(true));

@@ -3219,7 +3219,6 @@ enum Command {
     EmergencyStopInput(oneshot::Sender<bool>),
     PhysicalInput(PhysicalComputerInput, oneshot::Sender<bool>),
     InputMonitorStateChanged(ComputerInputMonitorState),
-    StopTaskByUser(CuaComputerTask, oneshot::Sender<Result<(), String>>),
     SetCursorStyle(Option<CuaCursorStyle>, oneshot::Sender<()>),
     IsInputMonitorRequested(oneshot::Sender<bool>),
     Dispose(oneshot::Sender<Result<(), String>>),
@@ -3259,12 +3258,6 @@ impl Host {
                 let _ = reply.send(self.physical_input(event));
             }
             Command::InputMonitorStateChanged(state) => self.input_monitor_state_changed(state),
-            Command::StopTaskByUser(task, reply) => {
-                let host = self.clone();
-                tokio::task::spawn_local(async move {
-                    let _ = reply.send(host.stop_task_input(task).await.map(|_| ()));
-                });
-            }
             Command::SetCursorStyle(style, reply) => {
                 reply_when(self.set_cursor_style(style), reply)
             }
@@ -3390,13 +3383,6 @@ impl CuaDriverHost {
 
     pub fn input_monitor_state_changed(&self, state: ComputerInputMonitorState) {
         let _ = self.commands.send(Command::InputMonitorStateChanged(state));
-    }
-
-    pub fn stop_task_by_user(&self, task: CuaComputerTask) -> Answer<Result<(), String>> {
-        self.ask(
-            |reply| Command::StopTaskByUser(task, reply),
-            || Err(closed()),
-        )
     }
 
     pub fn set_cursor_style(&self, style: Option<CuaCursorStyle>) -> Answer<()> {
