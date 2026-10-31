@@ -2611,6 +2611,14 @@ impl Pickers {
             .is_none_or(|d| d.supports_plan)
     }
 
+    /// Only Claude's ExitPlanMode, and the mock that stands in for it, asks before a plan runs.
+    pub(crate) fn plan_asks(&self, cx: &App) -> bool {
+        matches!(
+            self.effective_harness(cx),
+            Some(HarnessId::ClaudeCode | HarnessId::Mock)
+        )
+    }
+
     /// The chat's plan switch, else the draft's; off on a harness without one.
     pub(crate) fn effective_plan(&self, cx: &App) -> bool {
         let wanted = match self.chat_row(cx) {

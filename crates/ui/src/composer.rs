@@ -107,6 +107,8 @@ const START_PLAN_LABEL: &str = "Start plan";
 const CHIP_LABEL_MIN_WIDTH: f32 = 720.0;
 const PLAN_PLACEHOLDER_TEXT: &str =
     "Describe the goal. The agent writes a plan and waits for your OK.";
+const PLAN_ONLY_PLACEHOLDER_TEXT: &str =
+    "Describe the goal. The agent writes a plan and changes nothing.";
 
 struct PlanMotion {
     border: motion::Tween,
@@ -7377,6 +7379,10 @@ impl Composer {
         self.plan_available(cx) && self.pickers.read(cx).effective_plan(cx)
     }
 
+    fn plan_asks(&self, cx: &App) -> bool {
+        self.pickers.read(cx).plan_asks(cx)
+    }
+
     fn set_plan(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.plan(cx) != on && self.plan_available(cx) {
             self.pickers
@@ -7856,8 +7862,10 @@ impl Composer {
             return;
         }
         let prediction = self.active_prediction(cx);
-        let idle = if self.plan(cx) {
+        let idle = if self.plan(cx) && self.plan_asks(cx) {
             PLAN_PLACEHOLDER_TEXT.into()
+        } else if self.plan(cx) {
+            PLAN_ONLY_PLACEHOLDER_TEXT.into()
         } else if !self.side_chat
             && self.bound_chat_id(cx).is_none()
             && self.state.read(cx).no_project
@@ -13993,7 +14001,11 @@ impl Composer {
             .text_color(tone)
             .cursor_pointer()
             .tooltip(crate::settings::widgets::text_tooltip(
-                "Plan first: the agent plans and waits for your OK (⇧Tab)",
+                if self.plan_asks(cx) {
+                    "Plan first: the agent plans and waits for your OK (⇧Tab)"
+                } else {
+                    "Plan: the agent writes a plan and changes nothing (⇧Tab)"
+                },
             ))
             .child(track)
             .when(labelled, |el| el.child("Plan"))
@@ -14967,6 +14979,8 @@ impl Render for Composer {
         });
 
         let send_button = if mode != SendButtonMode::Send {
+            self.render_send_button(mode, cx)
+        } else if !self.plan_asks(cx) {
             self.render_send_button(mode, cx)
         } else if !self.plan_motion.send.settled_at(plan_now) {
             let t = self.plan_motion.send.value_unclamped_at(plan_now);
