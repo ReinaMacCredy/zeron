@@ -382,6 +382,7 @@ impl Shell {
             | ComposerEvent::WorktreeSetup { .. }
             | ComposerEvent::OpenChanges
             | ComposerEvent::AskAnswered { .. }
+            | ComposerEvent::Waiting(_)
             | ComposerEvent::AnnotationsChanged(_)
             | ComposerEvent::AnnotationHovered(_) => {}
             ComposerEvent::OpenTask(task_id) => self.defer_open_task(task_id.clone(), cx),

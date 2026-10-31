@@ -45,6 +45,9 @@ mod ask_pill;
 mod claude_cards;
 pub(crate) mod claude_config;
 pub(crate) use ask_pill::{AskInfo, pending_questions};
+mod waiting;
+pub use waiting::WaitingAction;
+pub(crate) use waiting::{WaitItem, WaitKind};
 pub(crate) mod background;
 mod chip;
 mod limit_notice;
@@ -6475,6 +6478,7 @@ pub enum ComposerEvent {
         request_id: String,
         error: Option<String>,
     },
+    Waiting(WaitingAction),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7217,6 +7221,7 @@ pub struct Composer {
     /// frame marks them resolved).
     answered_requests: HashSet<String>,
     ask: ask_pill::AskPills,
+    waiting: waiting::WaitingUi,
     config_panel: Option<claude_config::ConfigPanel>,
     review: review_chip::ReviewChipUi,
     comments_menu: crate::popover::Popup<()>,
@@ -7597,6 +7602,7 @@ impl Composer {
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
             ask: Default::default(),
+            waiting: Default::default(),
             config_panel: None,
             review: Default::default(),
             comments_menu: Default::default(),
@@ -14731,9 +14737,8 @@ impl Render for Composer {
                 self.staged_chip_count(cx),
             );
         let (roster, corner) = self.render_corner(window, cx);
-        let config_card = self.render_config_panel(window, cx);
-        let config_in_flow = config_card.is_some() && self.config_panel_on_hero(cx);
-        let card = config_card.or(roster);
+        let card = self.render_config_panel(window, cx).or(roster);
+        let card_in_flow = card.is_some() && self.bound_chat_id(cx).is_none();
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
         let has_queue = self.reads_selection(cx) && !self.state.read(cx).queue.is_empty();
@@ -14744,7 +14749,7 @@ impl Render for Composer {
         // Out of flow: the shell measures this stack for transcript clearance.
         // The New chat page has no transcript above, so there it takes space instead.
         let card = card.map(|card| {
-            if config_in_flow {
+            if card_in_flow {
                 div().pb(px(Theme::SPACE_SM)).child(card)
             } else {
                 div()

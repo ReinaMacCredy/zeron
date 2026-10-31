@@ -2114,11 +2114,7 @@ impl Shell {
     /// `[new-session +] [session tabs] … [toggle-changes]`.
     /// Carries the titlebar duties (drag region, animated left inset, the
     /// right-pane controls on git projects).
-    pub(super) fn render_session_title_bar(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(super) fn render_session_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         // The canvas shows no tabs-adjacent chrome beyond the strip itself;
         // the bar keeps its height, drag region, and buttons.
@@ -2304,7 +2300,7 @@ impl Shell {
         let session_tabs = (!takeover).then(|| self.render_session_tabs(cx));
         let triage = self.triage_frame();
         let triage_pill = (!takeover)
-            .then(|| self.render_triage_pill(&triage, window, cx))
+            .then(|| self.render_triage_pill(&triage, cx))
             .flatten();
 
         let inner = div()
@@ -2484,12 +2480,12 @@ mod strip_regressions {
     }
 
     impl Render for StripHost {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.shell.update(cx, |shell, cx| {
                 div()
                     .w(px(900.))
                     .h(px(60.))
-                    .child(shell.render_session_title_bar(window, cx))
+                    .child(shell.render_session_title_bar(cx))
             })
         }
     }

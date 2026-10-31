@@ -54,7 +54,7 @@ pub(crate) struct AskInfo {
 
 impl Composer {
     /// Split panes and sidechats would track the same questions twice.
-    fn hosts_asks(&self) -> bool {
+    pub(super) fn hosts_asks(&self) -> bool {
         self.chat_override.is_none() && !self.side_chat
     }
 
@@ -289,6 +289,10 @@ impl Composer {
     pub(crate) fn dismiss_corner_card(&mut self, cx: &mut Context<Self>) -> bool {
         if self.config_panel_open() {
             self.close_config_panel(cx);
+            return true;
+        }
+        if self.waiting_open() {
+            self.close_waiting(cx);
             return true;
         }
         if self.roster_open() {
@@ -563,19 +567,12 @@ mod tests {
     struct Fixture(Entity<Composer>);
 
     impl Render for Fixture {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let open = self.0.read(cx).ask.open.clone();
-            let panel = open.and_then(|chat_id| {
-                self.0.update(cx, |composer, cx| {
-                    composer.render_ask_panel(&chat_id, window, cx)
-                })
-            });
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
                 .size_full()
                 .flex()
                 .flex_col()
                 .justify_end()
-                .children(panel)
                 .child(self.0.clone())
         }
     }
@@ -742,7 +739,19 @@ mod tests {
         let info = cx.update(|_, cx| composer.read(cx).ask_info("b"));
         assert_eq!(info.map(|info| (info.page, info.total)), Some((0, 1)));
 
-        composer.update(cx, |composer, cx| composer.open_ask("b".into(), cx));
+        composer.update(cx, |composer, cx| {
+            composer.set_waiting(
+                vec![crate::composer::WaitItem {
+                    key: "b".into(),
+                    chat_id: "b".into(),
+                    title: "b".into(),
+                    from: String::new(),
+                    kind: crate::composer::WaitKind::Ask,
+                }],
+                cx,
+            );
+            composer.open_waiting(Some("b".into()), cx)
+        });
         cx.run_until_parked();
         assert!(cx.debug_bounds("ask-panel").is_some());
 
