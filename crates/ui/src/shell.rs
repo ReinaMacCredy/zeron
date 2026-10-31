@@ -3207,6 +3207,7 @@ pub struct Shell {
     sidecar_flip: Option<summary::SidecarFlip>,
     sidecar_popover: Option<summary::PopoverFade>,
     sidecar_previous_agents_open: bool,
+    sidecar_beside_all: bool,
     sidecar_clock: Option<Task<()>>,
     sidecar_press_found_popover: Option<summary::SidecarPart>,
     computer_thumbnail: Option<Entity<crate::computer::thumbnail::ComputerThumbnail>>,
@@ -4023,6 +4024,7 @@ impl Shell {
             sidecar_flip: None,
             sidecar_popover: None,
             sidecar_previous_agents_open: false,
+            sidecar_beside_all: false,
             sidecar_clock: None,
             sidecar_press_found_popover: None,
             computer_thumbnail: crate::computer::preview::store(cx).map(|store| {

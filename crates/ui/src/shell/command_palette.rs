@@ -923,18 +923,18 @@ impl Shell {
             .collect()
     }
 
-    /// Top-level chats matching every word of `query`, best match first
+    /// Chats matching every word of `query`, best match first
     /// (see `thread_search`).
     fn thread_matches(&self, query: &str, limit: usize, cx: &App) -> Vec<String> {
         let state = self.state.read(cx);
         let terms = thread_search::search_terms(query);
         // Global history deliberately ignores the sidebar's project filter and
         // collapsed groups. Archived conversations remain searchable too.
-        // Like the sidebar, only list top-level sessions, not side chats or MCP workers.
+        // Children have no sidebar row, so search is their door outside the Sidecar.
         let scored = state
             .chats
             .iter()
-            .filter(|chat| chat.is_person_opened())
+            .filter(|chat| !chat.is_system() && !state.is_hidden_chat(&chat.id))
             .filter_map(|chat| {
                 let pull_request = state
                     .change_request_for_chat(chat)
@@ -1806,7 +1806,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn history_excludes_child_chats_with_and_without_search(cx: &mut TestAppContext) {
+    fn history_lists_child_chats_only_when_searched(cx: &mut TestAppContext) {
         let (window, _dir) = palette_window(cx);
         window
             .update(cx, |shell, window, cx| {
@@ -1830,8 +1830,8 @@ mod tests {
                     "orphan-sidechat",
                 ] {
                     assert!(
-                        search_chats(shell, query, cx).is_empty(),
-                        "{query} must stay out of global history"
+                        search_chats(shell, query, cx).iter().any(|id| id == query),
+                        "{query} is found by search"
                     );
                 }
                 assert_eq!(search_chats(shell, "main-session", cx), ["main-session"]);

@@ -810,7 +810,16 @@ impl Shell {
                 .cmp(&b.created_at)
                 .then_with(|| a.id.cmp(&b.id))
         });
-        for (ix, child) in children.into_iter().take(SECTION_CAP).enumerate() {
+        section.running += children
+            .iter()
+            .filter(|child| {
+                state.display_status_for(child, now) == zeron_proto::ChatIndicator::Working
+            })
+            .count();
+        let hidden = children.len().saturating_sub(SECTION_CAP);
+        let all = self.sidecar_beside_all;
+        let shown = if all { children.len() } else { SECTION_CAP };
+        for (ix, child) in children.into_iter().take(shown).enumerate() {
             let kind = ChildKind::of(child);
             let status = state.display_status_for(child, now);
             let value = if open.contains(&child.id) {
@@ -829,9 +838,6 @@ impl Shell {
                     }
                 }
             };
-            if status == zeron_proto::ChatIndicator::Working {
-                section.running += 1;
-            }
             let title = child
                 .title
                 .clone()
@@ -843,6 +849,21 @@ impl Shell {
                     .hint(format!("{title} · {}", kind.label()))
                     .value(Some(value))
                     .action(move |this, _, cx| this.open_child(ChildRef::Chat(id.clone()), cx)),
+            );
+        }
+        if hidden > 0 {
+            let label = if all {
+                "Show fewer".to_owned()
+            } else {
+                format!("{hidden} more")
+            };
+            section.entries.push(
+                SidecarEntry::new("children-more", 0, icons::LUCIDE_ELLIPSIS, label).action(
+                    move |this, _, cx| {
+                        this.sidecar_beside_all = !all;
+                        cx.notify();
+                    },
+                ),
             );
         }
 
@@ -1764,6 +1785,57 @@ mod sidecar_regressions {
             );
             assert_eq!(beside.running, 0);
             assert!(beside.foot.is_none(), "nothing runs, so no Stop all");
+        });
+    }
+
+    #[gpui::test]
+    fn children_past_the_cap_fold_into_a_more_row_and_still_count_as_running(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                let source = state.chats[0].clone();
+                for ix in 0..9 {
+                    let mut chat = source.clone();
+                    chat.id = format!("fork-{ix}");
+                    chat.forked_from_chat_id = Some("parent".into());
+                    chat.created_at += chrono::Duration::minutes(ix + 1);
+                    state.chats.push(chat);
+                }
+                state.sessions.push(zeron_proto::Session {
+                    last_turn_outcome: None,
+                    terminal_activity: None,
+                    last_completed_turn: None,
+                    chat_id: "fork-8".into(),
+                    device_id: "dev".into(),
+                    status: zeron_proto::SessionStatus::Working,
+                    held_by_subagents: false,
+                    compacting: false,
+                    classifying: None,
+                    background_tasks: Vec::new(),
+                    started_at: Some(Utc::now()),
+                    updated_at: Utc::now(),
+                    running_subagents: 0,
+                    compact_plan: None,
+                });
+            });
+            let theme = Theme::of(cx).clone();
+            let beside = |shell: &mut Shell, cx: &mut Context<Shell>| {
+                let sections = shell.sidecar_sections(&theme, cx);
+                let beside = &sections[1];
+                let labels: Vec<String> =
+                    beside.entries.iter().map(|e| e.label.to_string()).collect();
+                (labels, beside.running)
+            };
+            let (labels, running) = beside(shell, cx);
+            assert_eq!(labels.len(), SECTION_CAP + 1);
+            assert_eq!(labels.last().map(String::as_str), Some("3 more"));
+            assert_eq!(running, 1, "the working 11th child still counts");
+            shell.sidecar_beside_all = true;
+            let (labels, _) = beside(shell, cx);
+            assert_eq!(labels.len(), 12);
+            assert_eq!(labels.last().map(String::as_str), Some("Show fewer"));
         });
     }
 

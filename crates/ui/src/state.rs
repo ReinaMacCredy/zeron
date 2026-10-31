@@ -1189,6 +1189,40 @@ fn device_presentation_at(devices: &[Device], now: DateTime<Utc>) -> Vec<(Device
         .collect()
 }
 
+struct Nesting<'a> {
+    listed: HashSet<&'a str>,
+    steps: HashSet<&'a str>,
+    parents: HashMap<&'a str, &'a str>,
+}
+
+impl<'a> Nesting<'a> {
+    fn of(state: &'a AppState, overview: &[(ChatIndicator, &'a Chat)]) -> Self {
+        Self {
+            listed: overview.iter().map(|(_, chat)| chat.id.as_str()).collect(),
+            steps: state
+                .task_steps
+                .iter()
+                .filter(|step| !step.deleted)
+                .filter_map(|step| step.chat_id.as_deref())
+                .collect(),
+            parents: state
+                .chats
+                .iter()
+                .filter_map(|chat| Some((chat.id.as_str(), chat.opened_from()?)))
+                .collect(),
+        }
+    }
+
+    /// Only a parent with its own sidebar row can hold a child; task step threads stay for the lead's nested step rows.
+    fn nests(&self, chat_id: &str, depth: usize) -> bool {
+        depth < 16
+            && !self.steps.contains(chat_id)
+            && self.parents.get(chat_id).is_some_and(|parent| {
+                self.listed.contains(parent) && !self.nests(parent, depth + 1)
+            })
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
@@ -3671,20 +3705,27 @@ impl AppState {
         space_filter: Option<&str>,
     ) -> Vec<(ChatIndicator, &Chat)> {
         let in_filter = self.project_filter(space_filter);
-        self.overview_chats(now)
-            .into_iter()
-            .filter(|(_, chat)| in_filter(chat) && !self.lives_in_parent(chat))
+        let overview = self.overview_chats(now);
+        let nesting = Nesting::of(self, &overview);
+        overview
+            .iter()
+            .filter(|(_, chat)| in_filter(chat) && !nesting.nests(&chat.id, 0))
+            .copied()
             .collect()
     }
 
-    /// Orphans keep their row; task step threads stay for the lead's nested step rows.
-    fn lives_in_parent(&self, chat: &Chat) -> bool {
-        chat.opened_from()
-            .is_some_and(|parent| self.chats.iter().any(|row| row.id == parent))
-            && !self
-                .task_steps
-                .iter()
-                .any(|step| !step.deleted && step.chat_id.as_deref() == Some(chat.id.as_str()))
+    pub(crate) fn sidecar_host(&self, chat_id: &str, now: DateTime<Utc>) -> Option<String> {
+        let chat = self.chats.iter().find(|chat| chat.id == chat_id)?;
+        let overview = self.overview_chats(now);
+        let nesting = Nesting::of(self, &overview);
+        match chat.delegated_by() {
+            Some(parent) => (nesting.listed.contains(parent) && !nesting.nests(parent, 0))
+                .then(|| parent.to_owned()),
+            None => nesting
+                .nests(chat_id, 0)
+                .then(|| chat.opened_from().map(str::to_owned))
+                .flatten(),
+        }
     }
 
     /// The sidebar's project filter matches by repository: it stores one
@@ -8880,6 +8921,44 @@ mod tests {
             .collect();
         rows.sort();
         assert_eq!(rows, ["main", "orphan", "step"]);
+
+        let mut grandchild = chat("grandchild", 6, Some(6));
+        grandchild.forked_from_chat_id = Some("side".into());
+        let mut supervised = chat("supervised", 7, Some(7));
+        supervised.created_by_chat_id = Some("supervisor-x".into());
+        let mut chats = state.chats.clone();
+        chats.extend([grandchild, supervised, chat("supervisor-x", 8, Some(8))]);
+        state.apply_chats(chats.clone());
+        let rows = |state: &AppState| {
+            let mut rows: Vec<String> = state
+                .sidebar_chats(now, None)
+                .iter()
+                .map(|(_, c)| c.id.clone())
+                .collect();
+            rows.sort();
+            rows
+        };
+        assert_eq!(
+            rows(&state),
+            ["grandchild", "main", "orphan", "step", "supervised"],
+            "a child whose parent has no sidebar row keeps its own"
+        );
+        assert_eq!(state.sidecar_host("side", now).as_deref(), Some("main"));
+        assert_eq!(state.sidecar_host("grandchild", now), None);
+
+        for chat in &mut chats {
+            chat.archived |= chat.id == "main";
+        }
+        state.apply_chats(chats);
+        assert_eq!(
+            rows(&state),
+            ["fork", "orphan", "side", "started", "step", "supervised"],
+            "an archived parent's children come back to the sidebar"
+        );
+        assert_eq!(
+            state.sidecar_host("grandchild", now).as_deref(),
+            Some("side")
+        );
     }
 
     #[test]
