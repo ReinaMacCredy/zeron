@@ -8,8 +8,6 @@ pub mod driver;
 #[cfg(target_os = "macos")]
 pub mod host;
 #[cfg(target_os = "macos")]
-pub mod host_socket;
-#[cfg(target_os = "macos")]
 pub mod native;
 pub mod presence;
 pub use zeron_proto::computer::presentation;
@@ -20,8 +18,6 @@ pub mod registration;
 #[cfg(target_os = "macos")]
 pub mod runtime_ownership;
 pub mod status_menu;
-#[cfg(target_os = "macos")]
-pub mod stop_native_helper;
 pub mod thumbnail;
 
 /// Proof knob (`ZERON_CUA_PROBE=<file>`): spawn the bundled driver through the
