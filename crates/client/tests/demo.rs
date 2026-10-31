@@ -1044,11 +1044,11 @@ fn the_demo_catalog_offers_zeron_commands_and_skills_apart() {
     ));
     let names: Vec<&str> = commands.entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(
-        &names[..4],
-        ["btw", "sidechat", "compact", "computer-use"],
+        &names[..3],
+        ["btw", "compact", "computer-use"],
         "Zeron's own commands ride first"
     );
-    assert!(names.contains(&"review") && !names.contains(&"pdf"));
+    assert!(names.contains(&"review") && !names.contains(&"pdf") && !names.contains(&"sidechat"));
     assert!(commands.warning.is_none());
     let skills = rt.block_on(client.invocation_catalog(&host, "claude-code", None, None, true));
     assert!(!skills.entries.is_empty());
