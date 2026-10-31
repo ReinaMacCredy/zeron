@@ -93,7 +93,6 @@ icon_assets![
     (FOLDER_WITH_FILES, "folder-with-files"),
     // Original tree glyph with compact nodes for the independent Files panel.
     (FILE_TREE, "file-tree"),
-    (FOLDER_TREE, "folder-tree"),
     // Hand-drawn floppy disk in the Solar Linear style. Workspace editor save.
     (FLOPPY_DISK, "floppy-disk"),
     // Zeron Icons (icons.zeron.sh): 24px canvas, 1.75px round strokes. The
@@ -148,7 +147,6 @@ icon_assets![
     (ARCHIVE_UP_MINIMALISTIC, "archive-up-minimalistic"),
     (REFRESH, "refresh"),
     (RESTART, "restart"),
-    (ADD_CIRCLE, "add-circle"),
     (TUNING, "tuning"),
     (EYE, "eye"),
     (EYE_CLOSED, "eye-closed"),
@@ -161,7 +159,6 @@ icon_assets![
     // Shared settings glyph: user-supplied horizontal sliders.
     (SETTINGS, "settings"),
     (SETTINGS_MINIMALISTIC, "settings-minimalistic"),
-    (LOGOUT_2, "logout-2"),
     (MAGNIFER, "magnifer"),
     // Compact magnifier with a distinct handle, matching the linear icon family.
     (PALETTE_SEARCH, "palette-search"),
@@ -247,24 +244,16 @@ icon_assets![
     // GitHub's mark (Octicons `mark-github`, MIT) for the Cloud page's
     // GitHub connection.
     (GITHUB_MARK, "github-mark"),
-    // Settings → Billing (drawn to the Solar linear set's 1.5 stroke).
-    (WALLET, "wallet"),
     (ANTIGRAVITY_MARK, "antigravity-mark"),
     // Astra's cursor-icons-16.woff2 glyphs as SVG: gpui draws the font's private-use codepoints as "?" boxes.
     (ASTRA_PLUS_MINUS, "astra-plus-minus"),
-    (ASTRA_GLOBE, "astra-globe"),
     (ASTRA_GIT_BRANCH, "astra-git-branch"),
     (ASTRA_LAPTOP, "astra-laptop"),
     (ASTRA_CHAT_BUBBLE, "astra-chat-bubble"),
     (ASTRA_PLUS, "astra-plus"),
-    (ASTRA_AGENT, "astra-agent"),
-    (ASTRA_FILE, "astra-file"),
-    (ASTRA_BOOK, "astra-book"),
-    (ASTRA_GRAPH, "astra-graph"),
     (ASTRA_FOLDER, "astra-folder"),
     (ASTRA_CHEVRONS_LEFT, "astra-chevrons-left"),
     (ASTRA_CHEVRONS_RIGHT, "astra-chevrons-right"),
-    (ASTRA_X, "astra-x"),
     (ASTRA_TERMINAL, "astra-terminal"),
     (LUCIDE_GIT_PULL_REQUEST, "lucide-git-pull-request"),
     (LUCIDE_GIT_MERGE, "lucide-git-merge"),
@@ -281,7 +270,6 @@ icon_assets![
     (LUCIDE_CIRCLE_X, "lucide-circle-x"),
     (LUCIDE_SEARCH, "lucide-search"),
     (LUCIDE_REFRESH_CW, "lucide-refresh-cw"),
-    (LUCIDE_ARROW_LEFT, "lucide-arrow-left"),
     (PR_BRANCH_MARK, "pr-branch-mark"),
     (LUCIDE_LIST_FILTER, "lucide-list-filter"),
     (LUCIDE_ARROW_DOWN_UP, "lucide-arrow-down-up"),
@@ -485,7 +473,6 @@ mod tests {
             CHAT_ROUND_LINE,
             GIT_BRANCH,
             CLOSE_CIRCLE,
-            FOLDER_TREE,
         ] {
             let bytes = Assets.load(path).unwrap().unwrap();
             let image = renderer.render_single_frame(&bytes, 1.0).unwrap();
