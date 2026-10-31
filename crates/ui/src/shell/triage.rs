@@ -470,7 +470,7 @@ impl Shell {
             .chats
             .iter()
             .find(|chat| chat.id == chat_id)
-            .map(|chat| crate::transcript::single_line(&crate::home::chat_title(chat)))
+            .map(|chat| crate::transcript::single_line(&chat.display_title()))
             .unwrap_or_else(|| "New session".into())
     }
 
@@ -1420,7 +1420,7 @@ impl Shell {
                 };
                 (
                     chat.id.clone(),
-                    crate::transcript::single_line(&crate::home::chat_title(chat)),
+                    crate::transcript::single_line(&chat.display_title()),
                     meta,
                     completed,
                 )

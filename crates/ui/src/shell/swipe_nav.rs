@@ -322,7 +322,7 @@ impl Shell {
                 .chats
                 .iter()
                 .find(|chat| &chat.id == id)
-                .map(|chat| transcript::single_line(&crate::home::chat_title(chat)).into())
+                .map(|chat| transcript::single_line(&chat.display_title()).into())
                 .unwrap_or_else(|| "New session".into()),
             NavEntry::Draft(id) => self
                 .state

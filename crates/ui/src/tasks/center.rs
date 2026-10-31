@@ -1870,7 +1870,7 @@ impl TaskCenter {
             let chat = state.chats.iter().find(|chat| chat.id == live.chat_id)?;
             Some((
                 chat.id.clone(),
-                crate::transcript::single_line(&crate::home::chat_title(chat)),
+                crate::transcript::single_line(&chat.display_title()),
                 chat_brand(chat),
             ))
         });

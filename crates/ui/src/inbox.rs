@@ -334,7 +334,7 @@ fn row_text(theme: &Theme, title: String, meta: String) -> gpui::Div {
 }
 
 fn chat_title(chat: &Chat) -> String {
-    crate::transcript::single_line(&crate::home::chat_title(chat))
+    crate::transcript::single_line(&chat.display_title())
 }
 
 impl InboxPage {
