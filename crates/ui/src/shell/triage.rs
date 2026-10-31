@@ -681,6 +681,7 @@ impl Shell {
             .get_or_insert_with(|| cx.focus_handle())
             .clone();
         let card = popover::popover_card(&popup)
+            .bg(popup.surface_overlay)
             .id("triage-tray")
             .debug_selector(|| "triage-tray".into())
             .role(gpui::Role::Dialog)
