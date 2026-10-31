@@ -49,7 +49,7 @@ enum WhatsNewView {
 }
 
 fn anchor_entry() -> Option<&'static Entry> {
-    let entries = whats_new::entries();
+    let entries = whats_new::released();
     whats_new::entry_for(entries, CURRENT_VERSION).or(entries.first())
 }
 
@@ -353,7 +353,7 @@ impl Shell {
     }
 
     pub(super) fn open_whats_new_changelog(&mut self, cx: &mut Context<Self>) {
-        if let Some(entry) = whats_new::entries().first() {
+        if let Some(entry) = whats_new::released().first() {
             self.open_whats_new(entry, WhatsNewView::Changelog, cx);
         }
     }
@@ -717,7 +717,7 @@ impl Shell {
         let clock = intros::loop_clock(dialog.shown, cx);
         let animated = match dialog.view {
             WhatsNewView::Highlights => vec![entry],
-            WhatsNewView::Changelog => whats_new::entries()
+            WhatsNewView::Changelog => whats_new::released()
                 .iter()
                 .filter(|release| dialog.expanded.contains(release.version.as_str()))
                 .collect(),
@@ -797,7 +797,7 @@ impl Shell {
                 .gap(px(28.0))
                 .children(release_sections(theme, "whats-new-feature", entry, clock)),
             WhatsNewView::Changelog => {
-                let entries = whats_new::entries();
+                let entries = whats_new::released();
                 div()
                     .flex()
                     .flex_col()

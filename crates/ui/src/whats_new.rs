@@ -9,6 +9,10 @@ pub use zeron_docs::changelog::{
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub fn released() -> &'static [Entry] {
+    zeron_docs::changelog::released(entries(), CURRENT_VERSION)
+}
+
 pub struct Picture {
     pub image: Arc<Image>,
     pub aspect: f32,

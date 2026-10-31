@@ -78,6 +78,14 @@ pub fn entry_for<'a>(entries: &'a [Entry], version: &str) -> Option<&'a Entry> {
         .find(|entry| entry.version.trim_start_matches('v') == version)
 }
 
+pub fn released<'a>(entries: &'a [Entry], current: &str) -> &'a [Entry] {
+    let start = entries
+        .iter()
+        .position(|entry| !version_newer(&entry.version, current))
+        .unwrap_or(entries.len());
+    &entries[start..]
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Resolution<'a> {
     Show(&'a Entry),
@@ -170,5 +178,6 @@ mod tests {
             resolve(&entries, "0.2.114", Some("0.2.112")),
             Resolution::Show(&entries[1])
         );
+        assert_eq!(released(&entries, "0.2.114"), &entries[1..]);
     }
 }
