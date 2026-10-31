@@ -352,7 +352,7 @@ impl Terminals {
         shell: Option<&str>,
         environment: &HashMap<String, String>,
     ) -> Result<TerminalSession, EngineError> {
-        self.open_session(cwd, cols, rows, shell, environment, None)
+        self.open_session(cwd, cols, rows, shell, environment, None, false)
     }
 
     /// Run an exact command in a fresh interactive login shell. On Unix, only a
@@ -364,8 +364,17 @@ impl Terminals {
         rows: u16,
         environment: &HashMap<String, String>,
         command: &str,
+        exit_after: bool,
     ) -> Result<TerminalSession, EngineError> {
-        self.open_session(cwd, cols, rows, None, environment, Some(command))
+        self.open_session(
+            cwd,
+            cols,
+            rows,
+            None,
+            environment,
+            Some(command),
+            exit_after,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -377,6 +386,7 @@ impl Terminals {
         shell: Option<&str>,
         environment: &HashMap<String, String>,
         command: Option<&str>,
+        exit_after: bool,
     ) -> Result<TerminalSession, EngineError> {
         if lock(&self.inner.sessions).len() >= MAX_TERMINALS {
             return Err(EngineError::Other(format!(
@@ -409,16 +419,17 @@ impl Terminals {
         #[cfg(not(windows))]
         let (initial_script, bootstrap) = if let Some(command) = command {
             let (suffix, source) = match shell_name.as_str() {
-                "fish" => (".fish", "source \"$ZERON_ACTION_SCRIPT\"; exit\r"),
-                _ => (".sh", ". \"$ZERON_ACTION_SCRIPT\"; exit\r"),
+                "fish" => (".fish", "source \"$ZERON_ACTION_SCRIPT\""),
+                _ => (".sh", ". \"$ZERON_ACTION_SCRIPT\""),
             };
+            let exit = if exit_after { "; exit" } else { "" };
             let mut script = tempfile::Builder::new()
                 .prefix("zeron-action-")
                 .suffix(suffix)
                 .tempfile()?;
             script.write_all(command.as_bytes())?;
             script.flush()?;
-            (Some(script), Some(source.to_string()))
+            (Some(script), Some(format!("{source}{exit}\r")))
         } else {
             (None, None)
         };
@@ -1518,6 +1529,7 @@ mod initial_command_tests {
                     wrapper.to_str(),
                     &HashMap::new(),
                     Some(&command),
+                    false,
                 )
                 .unwrap();
             let script = lock(&terminals.session(&session.id).unwrap())
@@ -1552,6 +1564,38 @@ mod initial_command_tests {
     }
 
     #[tokio::test]
+    async fn only_an_action_terminal_ends_with_its_command() {
+        let root = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        for (exit_after, expected) in [(true, Some(1)), (false, None)] {
+            let session = terminals
+                .open_session(
+                    root.path().to_str().unwrap(),
+                    80,
+                    24,
+                    Some("/bin/sh"),
+                    &HashMap::new(),
+                    Some("false"),
+                    exit_after,
+                )
+                .unwrap();
+            let mut rx = terminals.subscribe(&session.id, None).unwrap();
+            let exit = tokio::time::timeout(Duration::from_secs(3), async {
+                while let Some(event) = rx.recv().await {
+                    if let TerminalEvent::Exit { exit_code, .. } = event {
+                        return exit_code;
+                    }
+                }
+                -2
+            })
+            .await
+            .ok();
+            assert_eq!(exit, expected, "exit_after {exit_after}");
+            terminals.close(&session.id).unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn initial_script_is_removed_on_shell_exit_and_spawn_failure() {
         let root = tempfile::tempdir().unwrap();
         let terminals = Terminals::new();
@@ -1563,6 +1607,7 @@ mod initial_command_tests {
                 Some("/bin/sh"),
                 &HashMap::new(),
                 Some("sleep 0.1; exit 7"),
+                false,
             )
             .unwrap();
         let script = lock(&terminals.session(&session.id).unwrap())
@@ -1592,6 +1637,7 @@ mod initial_command_tests {
                     Some("/nonexistent/zeron-test-shell"),
                     &HashMap::new(),
                     Some("echo test"),
+                    false,
                 )
                 .is_err()
         );

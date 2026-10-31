@@ -7135,6 +7135,7 @@ impl RpcService for EngineRpc {
                         p.rows,
                         &std::collections::HashMap::new(),
                         command,
+                        false,
                     ),
                     None => self.terminals.open(&cwd, p.cols, p.rows),
                 }
