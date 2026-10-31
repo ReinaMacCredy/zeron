@@ -2027,14 +2027,20 @@ fn done_result(events: &[AgentEvent]) -> Option<String> {
 async fn access_modes_decide_what_is_asked() {
     use zeron_proto::AccessMode;
 
-    // Full asks nothing; an approved plan returns to `default`.
-    let (controls, _steer, asked) = approving(&[]);
+    // Full asks only for the plan; an approved plan returns to `default`.
+    let (controls, _steer, asked) = approving(&["Approve plan"]);
     let events = run_to_end(&harness(), request("scenario:approvals"), controls).await;
     assert_eq!(
         done_result(&events).as_deref(),
         Some("default none bash=allow edit=allow plan=allow:default")
     );
-    assert!(asked.lock().unwrap().is_empty());
+    let headers: Vec<_> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|q| q.header.clone())
+        .collect();
+    assert_eq!(headers, ["Approve plan"]);
 
     // Auto-accept edits: edits go through unasked, the rest is asked and a
     // no denies it.
