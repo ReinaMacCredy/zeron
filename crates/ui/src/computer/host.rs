@@ -3198,6 +3198,7 @@ fn computer_action_record(
 enum Command {
     Request(ComputerHostCall, oneshot::Sender<CuaReply>),
     Cancel(String),
+    #[cfg(test)]
     Stop(oneshot::Sender<Result<(), String>>),
     PauseDesktop(String, oneshot::Sender<Result<(), String>>),
     ResumeDesktop(String),
@@ -3232,6 +3233,7 @@ impl Host {
                     conn.close();
                 }
             }
+            #[cfg(test)]
             Command::Stop(reply) => reply_when(self.stop(), reply),
             Command::PauseDesktop(reason, reply) => reply_when(self.pause_desktop(reason), reply),
             Command::ResumeDesktop(reason) => self.resume_desktop(&reason),
@@ -3336,6 +3338,7 @@ impl CuaDriverHost {
         )
     }
 
+    #[cfg(test)]
     pub fn stop(&self) -> Answer<Result<(), String>> {
         self.ask(Command::Stop, || Err(closed()))
     }
