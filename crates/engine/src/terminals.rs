@@ -233,6 +233,31 @@ fn clamp_size(cols: u16, rows: u16) -> PtySize {
 }
 
 /// The user's interactive shell: `$SHELL`, else the platform default.
+/// A one-shot prompt hook reports the status, so Ctrl-C and `source .venv/bin/activate` keep the shell.
+#[cfg(not(windows))]
+fn exit_report(shell_name: &str, command: &str) -> String {
+    let osc = zeron_proto::COMMAND_EXIT_OSC;
+    match shell_name {
+        "zsh" => format!(
+            "__zeron_action_done() {{ printf '\\033]{osc};%s\\007' \"$?\"; \
+             precmd_functions=(${{precmd_functions:#__zeron_action_done}}); \
+             unfunction __zeron_action_done; }}\n\
+             precmd_functions=(__zeron_action_done $precmd_functions)\n{command}"
+        ),
+        "bash" => format!(
+            "__zeron_action_done() {{ local s=$?; printf '\\033]{osc};%s\\007' \"$s\"; \
+             PROMPT_COMMAND=${{PROMPT_COMMAND#__zeron_action_done}}; \
+             PROMPT_COMMAND=${{PROMPT_COMMAND#;}}; unset -f __zeron_action_done; return $s; }}\n\
+             PROMPT_COMMAND=\"__zeron_action_done${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}\"\n{command}"
+        ),
+        "fish" => format!(
+            "function __zeron_action_done --on-event fish_prompt; set -l s $status; \
+             printf '\\e]{osc};%s\\a' $s; functions -e __zeron_action_done; end\n{command}"
+        ),
+        _ => format!("{command}\nprintf '\\033]{osc};%s\\007' \"$?\"\n"),
+    }
+}
+
 fn selected_shell() -> String {
     if cfg!(windows) {
         return std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into());
@@ -364,7 +389,7 @@ impl Terminals {
         rows: u16,
         environment: &HashMap<String, String>,
         command: &str,
-        exit_after: bool,
+        report_exit: bool,
     ) -> Result<TerminalSession, EngineError> {
         self.open_session(
             cwd,
@@ -373,7 +398,7 @@ impl Terminals {
             None,
             environment,
             Some(command),
-            exit_after,
+            report_exit,
         )
     }
 
@@ -386,7 +411,7 @@ impl Terminals {
         shell: Option<&str>,
         environment: &HashMap<String, String>,
         command: Option<&str>,
-        exit_after: bool,
+        report_exit: bool,
     ) -> Result<TerminalSession, EngineError> {
         if lock(&self.inner.sessions).len() >= MAX_TERMINALS {
             return Err(EngineError::Other(format!(
@@ -415,21 +440,27 @@ impl Terminals {
         let environment = &environment;
 
         #[cfg(windows)]
-        let (initial_script, bootstrap) = (None, command.map(|command| format!("{command}\r")));
+        let (initial_script, bootstrap) = {
+            let _ = report_exit;
+            (None, command.map(|command| format!("{command}\r")))
+        };
         #[cfg(not(windows))]
         let (initial_script, bootstrap) = if let Some(command) = command {
             let (suffix, source) = match shell_name.as_str() {
                 "fish" => (".fish", "source \"$ZERON_ACTION_SCRIPT\""),
                 _ => (".sh", ". \"$ZERON_ACTION_SCRIPT\""),
             };
-            let exit = if exit_after { "; exit" } else { "" };
             let mut script = tempfile::Builder::new()
                 .prefix("zeron-action-")
                 .suffix(suffix)
                 .tempfile()?;
-            script.write_all(command.as_bytes())?;
+            if report_exit {
+                script.write_all(exit_report(&shell_name, command).as_bytes())?;
+            } else {
+                script.write_all(command.as_bytes())?;
+            }
             script.flush()?;
-            (Some(script), Some(format!("{source}{exit}\r")))
+            (Some(script), Some(format!("{source}\r")))
         } else {
             (None, None)
         };
@@ -1563,35 +1594,92 @@ mod initial_command_tests {
         assert!(!terminals.any_open());
     }
 
+    async fn read_until(
+        rx: &mut mpsc::UnboundedReceiver<TerminalEvent>,
+        output: &mut String,
+        done: impl Fn(&str) -> bool,
+    ) -> bool {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !done(output) {
+                match rx.recv().await {
+                    Some(TerminalEvent::Data { data, .. }) => {
+                        output.push_str(&String::from_utf8_lossy(&BASE64.decode(data).unwrap()))
+                    }
+                    _ => return false,
+                }
+            }
+            true
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     #[tokio::test]
-    async fn only_an_action_terminal_ends_with_its_command() {
+    async fn an_action_terminal_reports_its_command_and_keeps_its_shell() {
         let root = tempfile::tempdir().unwrap();
         let terminals = Terminals::new();
-        for (exit_after, expected) in [(true, Some(1)), (false, None)] {
-            let session = terminals
-                .open_session(
-                    root.path().to_str().unwrap(),
-                    80,
-                    24,
-                    Some("/bin/sh"),
-                    &HashMap::new(),
-                    Some("false"),
-                    exit_after,
-                )
-                .unwrap();
-            let mut rx = terminals.subscribe(&session.id, None).unwrap();
-            let exit = tokio::time::timeout(Duration::from_secs(3), async {
-                while let Some(event) = rx.recv().await {
-                    if let TerminalEvent::Exit { exit_code, .. } = event {
-                        return exit_code;
-                    }
+        let marker = |status: &str| format!("\x1b]{};{status}", zeron_proto::COMMAND_EXIT_OSC);
+        for shell in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+            if !std::path::Path::new(shell).exists() {
+                continue;
+            }
+            for (command, report, expected) in [
+                ("echo sta\"\"rted; sleep 100", true, Some("130\x07")),
+                ("false", true, Some("1\x07")),
+                ("export ZERON_PROBE=kept", true, Some("0\x07")),
+                ("false", false, None),
+            ] {
+                let interrupt = command.ends_with("sleep 100");
+                if interrupt && shell == "/bin/sh" {
+                    continue;
                 }
-                -2
-            })
-            .await
-            .ok();
-            assert_eq!(exit, expected, "exit_after {exit_after}");
-            terminals.close(&session.id).unwrap();
+                let session = terminals
+                    .open_session(
+                        root.path().to_str().unwrap(),
+                        80,
+                        24,
+                        Some(shell),
+                        &HashMap::new(),
+                        Some(command),
+                        report,
+                    )
+                    .unwrap();
+                let mut rx = terminals.subscribe(&session.id, None).unwrap();
+                let mut output = String::new();
+                if interrupt {
+                    assert!(read_until(&mut rx, &mut output, |out| out.contains("started")).await);
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    terminals.write_bytes(&session.id, b"\x03").unwrap();
+                }
+                terminals
+                    .write(&session.id, "echo al\"\"ive:$ZERON_PROBE\r")
+                    .unwrap();
+                let alive = read_until(&mut rx, &mut output, |out| {
+                    out.contains("alive:") && (!report || out.contains(&marker("")))
+                })
+                .await;
+                assert!(
+                    alive,
+                    "{shell} {command}: the shell must stay open: {output:?}"
+                );
+                match expected {
+                    Some(status) => assert!(
+                        output.contains(&marker(status)),
+                        "{shell} {command}: {output:?}"
+                    ),
+                    None => assert!(
+                        !output.contains(&marker("")),
+                        "{shell}: a terminal opened with a command reports nothing"
+                    ),
+                }
+                if command.starts_with("export") {
+                    assert!(
+                        read_until(&mut rx, &mut output, |out| out.contains("alive:kept")).await,
+                        "{shell}: the action's environment stays: {output:?}"
+                    );
+                }
+                terminals.close(&session.id).unwrap();
+            }
         }
     }
 

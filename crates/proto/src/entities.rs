@@ -2665,6 +2665,9 @@ pub struct AgentTerminalOpened {
     pub terminal: TerminalSession,
 }
 
+/// `ESC ] 7502 ; <status> BEL`: a project action's command ended while its shell stays open.
+pub const COMMAND_EXIT_OSC: &str = "7502";
+
 /// One `SubscribeTerminal` stream item. `seq` is a per-terminal monotonic counter
 /// used for replay resumption (`afterSeq`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
