@@ -41628,6 +41628,15 @@ public func opensConfigPanel(text: String) -> Bool  {
     )
 })
 }
+public func opensUsagePage(text: String, skills: [String]) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_opens_usage_page(
+        FfiConverterString.lower(text),
+        FfiConverterSequenceString.lower(skills),uniffiCallStatus
+    )
+})
+}
 /**
  * The modes a picker lists: those the harness `offered` (`None`, unknown
  * until a live catalog: every mode).
@@ -42246,6 +42255,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_opens_config_panel() != 1331) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_opens_usage_page() != 45169) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_access_modes() != 16601) {

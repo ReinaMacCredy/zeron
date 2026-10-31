@@ -69,7 +69,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private var draft: NewSessionDraft
     private var models: [ModelChoice] = []
     private var harnesses: [HarnessInfo] = []
-    private var invocationCatalogs: [String: InvocationCatalog] = [:]
+    private let invocationCatalogs = InvocationCatalogs()
     private var mission = false
     private var missionReview = true
     private var missionPlanDoc = true
@@ -174,11 +174,10 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         }
         composer.invocationCatalog = { [weak self] skill in
             guard let self, let client = self.app.client, !self.deviceId.isEmpty else { return nil }
-            let key = "\(self.deviceId)|\(self.project?.id ?? "")|\(self.draft.harness)|\(skill)"
-            if let hit = self.invocationCatalogs[key] { return hit }
-            let found = await client.invocationCatalog(deviceId: self.deviceId, harness: self.draft.harness, chatId: nil, spaceId: self.project?.id, skill: skill)
-            if found.warning == nil { self.invocationCatalogs[key] = found }
-            return found
+            let (device, space, harness) = (self.deviceId, self.project?.id, self.draft.harness)
+            return await self.invocationCatalogs.get("\(device)|\(space ?? "")|\(harness)|\(skill)") {
+                await client.invocationCatalog(deviceId: device, harness: harness, chatId: nil, spaceId: space, skill: skill)
+            }
         }
         composer.onWorkspaceCommand = { [weak self] command in
             guard let self else { return }
@@ -195,7 +194,11 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
                 Toast.show(refusal, in: self.view.window, above: self.composer)
                 return .kept
             }
-            let skills = self.invocationCatalogs.filter { $0.key.hasSuffix("|true") }.values.flatMap { $0.entries.map(\.name) }
+            let skills = self.invocationCatalogs.skillNames
+            if self.draft.harness == "claude-code", !self.mission, !self.runsOnCloud, !self.deviceId.isEmpty, opensUsagePage(text: text, skills: skills) {
+                self.presentPageSheet(HostPageViewController(app: self.app, deviceId: self.deviceId, page: "usage", title: "Usage"))
+                return .sent
+            }
             if self.draft.harness == "claude-code", !self.mission, !self.runsOnCloud, isClaudeCardCommand(text: text, skills: skills) {
                 if let host = self.offlineHost {
                     Toast.show("\(host) is offline, so Claude Code can't answer \(text.trimmingCharacters(in: .whitespaces)).", in: self.view.window, above: self.composer)
