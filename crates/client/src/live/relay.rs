@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::supervisor::SupervisorSnapshot;
@@ -52,48 +53,91 @@ const READ_RETRY_BACKOFF: [Duration; 3] = [
     Duration::from_secs(4),
 ];
 
-async fn read_chunks<F, Fut>(mut call: F) -> Result<Vec<u8>>
+/// Chunks asked before the earlier ones arrive: each chunk is a relay round
+/// trip, so a page of N chunks waits about N / READ_WINDOW of them.
+const READ_WINDOW: usize = 4;
+
+struct Chunk {
+    data: Vec<u8>,
+    next: u64,
+    done: bool,
+}
+
+async fn read_chunk<F, Fut>(call: &F, offset: u64) -> Result<Chunk>
 where
-    F: FnMut(u64) -> Fut,
+    F: Fn(u64) -> Fut,
     Fut: std::future::Future<Output = Result<Value>>,
 {
-    let mut out = Vec::new();
-    let mut offset: u64 = 0;
     let mut failures = 0;
-    for _ in 0..1000 {
-        let reply = match call(offset).await {
-            Ok(reply) => reply,
+    let reply = loop {
+        match call(offset).await {
+            Ok(reply) => break reply,
             Err(ClientError::HostUnavailable(_)) if failures < READ_RETRY_BACKOFF.len() => {
                 tokio::time::sleep(READ_RETRY_BACKOFF[failures]).await;
                 failures += 1;
-                continue;
             }
             Err(err) => return Err(err),
-        };
-        failures = 0;
-        let data = reply
-            .get("data")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        out.extend(
-            b64::decode(data)
-                .ok_or_else(|| ClientError::HostError("bad attachment chunk".into()))?,
-        );
-        if reply.get("done").and_then(Value::as_bool).unwrap_or(true) {
-            return Ok(out);
         }
-        let next = reply
+    };
+    let data = reply
+        .get("data")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    Ok(Chunk {
+        data: b64::decode(data)
+            .ok_or_else(|| ClientError::HostError("bad attachment chunk".into()))?,
+        next: reply
             .get("nextOffset")
             .and_then(Value::as_u64)
-            .unwrap_or(offset);
-        if next <= offset {
-            return Err(ClientError::HostError(
-                "attachment read made no progress".into(),
-            ));
+            .unwrap_or(offset),
+        done: reply.get("done").and_then(Value::as_bool).unwrap_or(true),
+    })
+}
+
+/// Hosts cut a file into fixed-size chunks, so once the first reply shows the
+/// size the rest are asked `READ_WINDOW` at a time; past the end a host
+/// answers empty and done. A reply that breaks the stride drops the window
+/// and asks again from where it really ended.
+async fn read_chunks<F, Fut>(call: F) -> Result<Vec<u8>>
+where
+    F: Fn(u64) -> Fut,
+    Fut: std::future::Future<Output = Result<Value>>,
+{
+    let call = &call;
+    let mut out = Vec::new();
+    let mut at: u64 = 0;
+    let mut stride: u64 = 0;
+    let mut chunks = 0;
+    loop {
+        let window = if stride == 0 { 1 } else { READ_WINDOW };
+        let mut ahead = futures::stream::iter(0u64..)
+            .map(move |k| {
+                let offset = at + k * stride;
+                async move { (offset, read_chunk(call, offset).await) }
+            })
+            .buffered(window);
+        while let Some((offset, chunk)) = ahead.next().await {
+            let chunk = chunk?;
+            out.extend(chunk.data);
+            if chunk.done {
+                return Ok(out);
+            }
+            if chunk.next <= offset {
+                return Err(ClientError::HostError(
+                    "attachment read made no progress".into(),
+                ));
+            }
+            chunks += 1;
+            if chunks >= 1000 {
+                return Err(ClientError::HostError("attachment too large".into()));
+            }
+            at = chunk.next;
+            if chunk.next != offset + stride {
+                stride = chunk.next - offset;
+                break;
+            }
         }
-        offset = next;
     }
-    Err(ClientError::HostError("attachment too large".into()))
 }
 
 fn map_rpc(device_id: &str, method: &str, err: RpcError) -> ClientError {
@@ -711,34 +755,78 @@ fn follow(
 mod tests {
     use super::*;
 
+    use std::cell::Cell;
+
+    fn page(len: u32) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    fn serve(page: &[u8], offset: u64, size: usize) -> Result<Value> {
+        let start = (offset as usize).min(page.len());
+        let end = (start + size).min(page.len());
+        Ok(json!({ "data": b64::encode(&page[start..end]), "nextOffset": end, "done": end == page.len() }))
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_dropped_chunk_resumes_at_its_offset() {
-        let page: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
-        let mut drops = 3;
-        let mut asked = Vec::new();
+        let page = page(300);
+        let drops = Cell::new(3);
+        let retried = Cell::new(0);
         let read = read_chunks(|offset| {
-            asked.push(offset);
-            let reply = if offset == 100 && drops > 0 {
-                drops -= 1;
+            let reply = if offset == 100 && drops.get() > 0 {
+                drops.set(drops.get() - 1);
                 Err(ClientError::HostUnavailable("timed out".into()))
             } else {
-                let start = offset as usize;
-                let end = (start + 100).min(page.len());
-                Ok(json!({ "data": b64::encode(&page[start..end]), "nextOffset": end, "done": end == page.len() }))
+                serve(&page, offset, 100)
             };
+            if offset == 100 {
+                retried.set(retried.get() + 1);
+            }
             std::future::ready(reply)
         })
         .await;
         assert_eq!(read.unwrap(), page);
-        assert_eq!(asked, [0, 100, 100, 100, 100, 200]);
+        assert_eq!(retried.get(), 4);
 
-        let mut calls = 0;
+        let calls = Cell::new(0);
         let read = read_chunks(|_| {
-            calls += 1;
+            calls.set(calls.get() + 1);
             std::future::ready(Err(ClientError::HostUnavailable("asleep".into())))
         })
         .await;
         assert!(matches!(read, Err(ClientError::HostUnavailable(_))));
-        assert_eq!(calls, 1 + READ_RETRY_BACKOFF.len());
+        assert_eq!(calls.get(), 1 + READ_RETRY_BACKOFF.len());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chunks_after_the_first_are_asked_a_window_at_a_time() {
+        let page = page(1000);
+        let in_flight = Cell::new(0);
+        let most = Cell::new(0);
+        let started = tokio::time::Instant::now();
+        let read = read_chunks(|offset| {
+            let (page, in_flight, most) = (&page, &in_flight, &most);
+            async move {
+                in_flight.set(in_flight.get() + 1);
+                most.set(most.get().max(in_flight.get()));
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                in_flight.set(in_flight.get() - 1);
+                serve(page, offset, 100)
+            }
+        })
+        .await;
+        assert_eq!(read.unwrap(), page);
+        assert_eq!(most.get(), READ_WINDOW);
+        assert!(started.elapsed() <= Duration::from_secs(2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn uneven_chunks_still_join_in_order() {
+        let page = page(1000);
+        let read = read_chunks(|offset| {
+            std::future::ready(serve(&page, offset, 60 + (offset as usize % 7) * 10))
+        })
+        .await;
+        assert_eq!(read.unwrap(), page);
     }
 }

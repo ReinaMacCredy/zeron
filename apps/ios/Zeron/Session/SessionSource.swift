@@ -132,7 +132,7 @@ protocol SessionSource: AnyObject {
     func limitCard(chatId: String) -> LimitCard?
     func resolveLimit(chatId: String, choice: String) async throws
     func setLimitResume(chatId: String, auto: Bool) async throws
-    func htmlPage(deviceId: String, path: String) async -> String?
+    func htmlPage(deviceId: String, path: String) async throws -> String
     func threadMentions(_ query: String) -> [ThreadMention]
     @MainActor
     func invocationCatalog(skill: Bool) async -> InvocationCatalog?
@@ -352,7 +352,7 @@ final class FixtureSessionSource: SessionSource {
     func limitCard(chatId: String) -> LimitCard? { nil }
     func resolveLimit(chatId: String, choice: String) async throws { throw CancellationError() }
     func setLimitResume(chatId: String, auto: Bool) async throws { throw CancellationError() }
-    func htmlPage(deviceId: String, path: String) async -> String? { nil }
+    func htmlPage(deviceId: String, path: String) async throws -> String { throw CancellationError() }
     func threadMentions(_ query: String) -> [ThreadMention] { [] }
 }
 

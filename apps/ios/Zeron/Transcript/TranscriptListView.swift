@@ -95,7 +95,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     private var visuals: [String: VisualView] = [:]
     private var pages: [(id: String, view: HtmlPageView)] = []
     private let maxPages = 6
-    var htmlLoader: ((_ deviceId: String, _ path: String) async -> String?)?
+    var htmlLoader: ((_ deviceId: String, _ path: String) async throws -> String)?
     private var memoryObserver: NSObjectProtocol?
     private var mathObserver: NSObjectProtocol?
 
@@ -809,8 +809,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
             pages.append(live)
             return live.view
         }
-        let loader = htmlLoader
-        let page = HtmlPageView { await loader?(deviceId, path) }
+        let page = HtmlPageView(source: pageSource(deviceId: deviceId, path: path))
         page.onHeight = { [weak self] height in self?.engine.setHtmlHeight(id: id, height: Float(height)) }
         page.openURL = { [weak self, weak page] url in
             guard let self, let row = page?.superview as? RowView else { return }
@@ -825,8 +824,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
 
     func rowView(_ view: RowView, expandPage title: String, deviceId: String, path: String) {
         guard let vc = findViewController() else { return }
-        let loader = htmlLoader
-        let sheet = HtmlSheetViewController(title: title, html: { await loader?(deviceId, path) }) { [weak self, weak view] url in
+        let sheet = HtmlSheetViewController(title: title, html: pageSource(deviceId: deviceId, path: path)) { [weak self, weak view] url in
             guard let self, let view else { return }
             self.rowView(view, open: url)
         }
@@ -834,6 +832,14 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
         nav.modalPresentationStyle = .pageSheet
         nav.sheetPresentationController?.prefersGrabberVisible = true
         vc.present(nav, animated: true)
+    }
+
+    private func pageSource(deviceId: String, path: String) -> () async throws -> String {
+        let loader = htmlLoader
+        return {
+            guard let loader else { throw CancellationError() }
+            return try await loader(deviceId, path)
+        }
     }
 
     fileprivate func row(at point: CGPoint) -> RowView? {

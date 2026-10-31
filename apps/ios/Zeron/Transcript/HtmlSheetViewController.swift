@@ -7,7 +7,7 @@ final class HtmlSheetViewController: UIViewController {
     private let segments = UISegmentedControl(items: ["Live", "Source"])
     private var saveButton: UIBarButtonItem?
 
-    init(title: String, html: @escaping () async -> String?, openURL: @escaping (URL) -> Void) {
+    init(title: String, html: @escaping () async throws -> String, openURL: @escaping (URL) -> Void) {
         pageTitle = title
         page = HtmlPageView(source: html)
         super.init(nibName: nil, bundle: nil)

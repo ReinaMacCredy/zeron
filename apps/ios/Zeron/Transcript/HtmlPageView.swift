@@ -9,7 +9,7 @@ final class HtmlPageView: UIView, WKNavigationDelegate, WKUIDelegate {
         didSet { web.scrollView.isScrollEnabled = scrolls }
     }
     private let web: WKWebView
-    private let source: () async -> String?
+    private let source: () async throws -> String
     private(set) var html: String?
     private let status = UIView()
     private let spinner = UIActivityIndicatorView(style: .medium)
@@ -19,7 +19,7 @@ final class HtmlPageView: UIView, WKNavigationDelegate, WKUIDelegate {
     private var crashes = 0
     private var rendered: (UIUserInterfaceStyle, Float)?
 
-    init(source: @escaping () async -> String?) {
+    init(source: @escaping () async throws -> String) {
         self.source = source
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
@@ -97,19 +97,40 @@ final class HtmlPageView: UIView, WKNavigationDelegate, WKUIDelegate {
         retry.isHidden = true
         let source = self.source
         Task { @MainActor [weak self] in
-            let html = await source()
+            let loaded: Result<String, Error>
+            do { loaded = .success(try await source()) } catch { loaded = .failure(error) }
             guard let self else { return }
             spinner.stopAnimating()
             spinner.isHidden = true
-            guard let html else {
-                message.text = "Couldn't load this page."
+            switch loaded {
+            case let .failure(error):
+                message.text = Self.failure(error)
                 retry.isHidden = false
-                return
+            case let .success(html):
+                status.isHidden = true
+                self.html = html
+                render()
+                onLoad?()
             }
-            status.isHidden = true
-            self.html = html
-            render()
-            onLoad?()
+        }
+    }
+
+    private static func failure(_ error: Error) -> String {
+        switch error as? CoreError {
+        case let .HostUnavailable(detail)? where detail.hasSuffix("timed out"):
+            "The computer this page is on is taking too long to answer. The connection may be slow."
+        case .HostUnavailable?:
+            "The computer this page is on isn't reachable. It may be asleep or offline."
+        case .Network?:
+            "This device is offline."
+        case .Unsupported?:
+            "The computer this page is on needs a newer Zeron to show it."
+        case .Auth?:
+            "Sign in again to load this page."
+        case .NotFound?, .HostError?:
+            "The computer this page is on couldn't read it."
+        default:
+            "Couldn't load this page."
         }
     }
 

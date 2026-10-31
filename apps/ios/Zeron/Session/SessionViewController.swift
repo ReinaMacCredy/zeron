@@ -123,7 +123,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 self.router?.openSession(id)
             }
         }
-        list.htmlLoader = { [weak self] device, path in await self?.source.htmlPage(deviceId: device, path: path) }
+        list.htmlLoader = { [weak self] device, path in
+            guard let self else { throw CancellationError() }
+            return try await self.source.htmlPage(deviceId: device, path: path)
+        }
         list.textFetcher = { [weak self] ref in await self?.source.attachmentText(ref) }
         // Hidden while following (the runway glide and tail spring travel).
         list.onDistanceFromBottom = { [weak self] d in

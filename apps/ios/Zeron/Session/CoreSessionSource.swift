@@ -932,13 +932,12 @@ final class CoreSessionSource: SessionSource {
     private static let images = NSCache<NSString, UIImage>()
     private static let pages = NSCache<NSString, NSString>()
 
-    func htmlPage(deviceId: String, path: String) async -> String? {
+    func htmlPage(deviceId: String, path: String) async throws -> String {
         let device = deviceId.isEmpty ? hostDevice : deviceId
         let key = "\(device)\n\(path)" as NSString
         if let hit = Self.pages.object(forKey: key) { return hit as String }
-        guard let data = try? await client.readAttachment(deviceId: device, path: path),
-              let html = String(data: data, encoding: .utf8)
-        else { return nil }
+        let data = try await client.readAttachment(deviceId: device, path: path)
+        guard let html = String(data: data, encoding: .utf8) else { throw CoreError.HostError(message: "not UTF-8 text") }
         Self.pages.setObject(html as NSString, forKey: key)
         return html
     }
