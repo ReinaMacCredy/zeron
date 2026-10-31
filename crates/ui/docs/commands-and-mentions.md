@@ -41,7 +41,7 @@ Commands that only run in Claude Code's terminal, such as `/status` or `/theme`,
 
 ### Claude Code settings
 
-Type `/config` in a Claude Code chat to open Claude Code's settings over the chat, with **Status**, **Config**, **Usage** and **Stats** tabs. On the New chat page the panel opens above the composer and pushes it down.
+Type `/config` in a Claude Code chat to open Claude Code's settings over the chat, with **Status**, **Config** and **Stats** tabs. Plan usage lives on the rail ring and the Usage page. On the New chat page the panel opens above the composer and pushes it down.
 
 ![Claude Code's settings over a chat](claude-config-panel.jpg)
 

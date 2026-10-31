@@ -14,7 +14,7 @@ use zeron_proto::{AccessMode, HarnessId};
 use zeron_rpc::methods;
 
 use super::background::{CardMotion, card_frame, card_motion};
-use super::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
+use super::{Composer, ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
 use crate::popover;
 use crate::theme::Theme;
@@ -23,6 +23,8 @@ pub(crate) use zeron_proto::claude_panel::{Meter, SUMMARY_PREFIX, parse_usage};
 // Clears the titlebar, the Chat | Work toggle and the New task row above the panel.
 pub(crate) const HERO_PANEL_TOP: f32 = Theme::TITLEBAR_HEIGHT + 96.0;
 const HERO_BELOW_PILL: f32 = 64.0;
+// Usage lives on the rail ring and the Usage page on desktop; the phone keeps its Usage tab.
+const TABS: [Tab; 3] = [Tab::Status, Tab::Config, Tab::Stats];
 const ABOVE_PILL: f32 = 52.0;
 const MIN_HEIGHT: f32 = 180.0;
 
@@ -471,7 +473,7 @@ impl Composer {
         }
         match key {
             "tab" => {
-                let tab = panel.tab.step(!mods.shift);
+                let tab = panel.tab.step(&TABS, !mods.shift);
                 self.select_config_tab(tab, cx);
             }
             "escape" => {
@@ -620,7 +622,7 @@ impl Composer {
                     .text_color(theme.text_faint)
                     .child("Claude Code settings"),
             )
-            .children(Tab::ALL.iter().map(|t| {
+            .children(TABS.iter().map(|t| {
                 let t = *t;
                 let on = t == tab;
                 div()
@@ -676,8 +678,7 @@ impl Composer {
             );
         let body = match tab {
             Tab::Config => self.config_pane(theme, window, cx),
-            Tab::Status => self.status_pane(theme, cx),
-            Tab::Usage => self.usage_pane(theme, cx),
+            Tab::Status | Tab::Usage => self.status_pane(theme, cx),
             Tab::Stats => self.stats_pane(theme, cx),
         };
         let card = div()
@@ -1169,76 +1170,6 @@ impl Composer {
                     .text_color(theme.text_faint)
                     .child(STATUS_FOOTNOTE),
             )
-            .into_any_element()
-    }
-
-    fn usage_pane(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let panel = self.config_panel.as_ref().unwrap();
-        let open = div().mx(px(14.0)).mt(px(10.0)).flex().child(
-            div()
-                .id("claude-config-open-usage")
-                .debug_selector(|| "claude-config-open-usage".into())
-                .role(gpui::Role::Button)
-                .px(px(10.0))
-                .h(px(26.0))
-                .flex()
-                .items_center()
-                .rounded(px(7.0))
-                .border_1()
-                .border_color(theme.border)
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(12.5))
-                .hover(|s| s.bg(theme.glass_hover()))
-                .child("Open Usage page")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.close_config_panel(cx);
-                    cx.emit(ComposerEvent::OpenUsage);
-                })),
-        );
-        let body: AnyElement = match &panel.status {
-            Load::Loading => {
-                waiting_note(theme, "Asking Claude Code for /usage…", panel.opened_at, cx)
-            }
-            Load::Failed(error) => empty_note(theme, error),
-            Load::Ready(out) => {
-                let report = parse_usage(&out.text);
-                if report.is_empty() {
-                    empty_note(theme, out.text.trim())
-                } else {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .children(report.meters.into_iter().map(|m| meter(theme, m)))
-                        .children(report.sections.into_iter().enumerate().map(|(ix, s)| {
-                            let detail = s
-                                .lines
-                                .iter()
-                                .take(3)
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            kv_row(theme, ix > 0, &s.title, detail, None)
-                        }))
-                        .children(report.note.map(|note| {
-                            div()
-                                .mx(px(14.0))
-                                .mt(px(8.0))
-                                .text_size(crate::typography::ui_rems(11.5))
-                                .text_color(theme.text_faint)
-                                .child(note)
-                        }))
-                        .into_any_element()
-                }
-            }
-        };
-        div()
-            .id("claude-config-usage")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .p(px(6.0))
-            .child(body)
-            .child(open)
             .into_any_element()
     }
 

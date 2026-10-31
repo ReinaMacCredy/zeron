@@ -37,10 +37,10 @@ impl Tab {
         }
     }
 
-    pub fn step(self, forward: bool) -> Tab {
-        let ix = Tab::ALL.iter().position(|t| *t == self).unwrap_or(0);
-        let n = Tab::ALL.len();
-        Tab::ALL[if forward {
+    pub fn step(self, tabs: &[Tab], forward: bool) -> Tab {
+        let ix = tabs.iter().position(|t| *t == self).unwrap_or(0);
+        let n = tabs.len();
+        tabs[if forward {
             (ix + 1) % n
         } else {
             (ix + n - 1) % n
