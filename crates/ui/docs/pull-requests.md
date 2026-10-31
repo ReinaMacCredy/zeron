@@ -30,7 +30,7 @@ Ask about the change or hand off work. Above the message box, chips show the con
 
 The dock header has **New chat**, **Open as thread** to move the chat into a normal session, and **Fold chat**. With **Chat history** set to **Keep per PR** and **New chat when idle** set to a time, it also shows how long the chat has left before Zeron starts a fresh one.
 
-Set **Chat history** and **New chat when idle** in [Settings > Source Control](zeron://settings/source-control); [Git](zeron://docs/git) explains the choices.
+Set **Chat history** and **New chat when idle** in [Settings > Agents > Source control](zeron://settings/source-control); [Git](zeron://docs/git) explains the choices.
 
 Cmd+R (**Toggle right sidebar**) opens and closes the right pane on the Pull requests page too.
 

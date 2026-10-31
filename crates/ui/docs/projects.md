@@ -4,9 +4,9 @@ A project is a folder on one of your devices that agents work in. Chats in a pro
 
 Click the folder button at the top of the sidebar (tooltip **New project**), press Cmd+Shift+N, or pick **New project** in the Cmd+K palette.
 
-![Adding a project](projects-add.jpg)
+![A device's locations in the New project picker](projects-add.jpg)
 
-Pick a device, a location (**Home** or a drive), then folders. Type to filter, press Enter to open a folder, and Left to go back up. With the folder you want open, click **Add project** or press Cmd+Enter.
+Pick a device, a location (**Home** or a drive), then folders. With only one device (and no Zeron Cloud device), the picker opens straight on that device's **Home** folders; go back to reach its other locations. Type to filter, press Enter to open a folder, and Left to go back up. With the folder you want open, click **Add project** or press Cmd+Enter; **Cancel** closes the picker.
 
 ## Rename or remove
 
@@ -28,16 +28,16 @@ With the switch on, click **Browse** to pick the folder; on another device you p
 
 ## Actions
 
-Actions are saved commands for a project, such as a dev server, a build, or tests. They show in the **Actions** section of the **Live state** column beside a chat, and in the Cmd+K palette.
+Actions are saved commands for a project, such as a dev server, a build, or tests. They show in the **Actions** section of the **Live state** column beside a chat, and that is where they run. The Cmd+K palette offers only **Add action…** and the actions to import; it does not run them.
 
 ![Project actions in the Live state column](projects-actions.jpg)
 
 - Click **Add action**, then fill in **Name**, **Command**, and **Icon**, and click **Save action**.
-- Click an action to run it. It opens in a new tab of the chat's terminal, in the chat's folder, and shows **Running**, **Done**, or **Failed**.
-- Hover an action and click the gear to edit or delete it.
+- Click an action to run it. It opens in a new tab of the terminal dock under the chat, named after the action, in the chat's folder. Its row reads **Running**, then **Done** or **Failed** when the command ends. The shell stays open, so you can keep working in that tab.
+- Hover an action and click the gear (**Edit action**) to edit or delete it.
 
-Agents can add, change and delete actions too, with the `project_actions` tool. Their changes show right away in the Live state column, the toolbar's Actions menu and Cmd+K, without reopening the chat.
+Agents can add, change and delete actions too, with the `project_actions` tool. Their changes show right away in the Live state column and Cmd+K, without reopening the chat.
 
 Check **Run automatically on worktree creation** to make an action the project's setup action. Only one action per project can have it. It runs in each new worktree that Zeron creates for a chat.
 
-> Zeron also reads a `zeron.json` file at the project root and offers its actions with an **Import** tag.
+> Zeron also reads a `zeron.json` file at the project root and offers its actions with an **Import** tag, in the Live state column and in Cmd+K. Importing one opens the editor so you can save it.

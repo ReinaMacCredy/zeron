@@ -32,7 +32,7 @@ The summary is the agent's own `/compact` with no focus. Sending a message first
 
 ## Let agents compact themselves
 
-This switch gives agents Zeron's `compact` tool. It is the same switch as **compact** in [Settings > Tools](zeron://settings/tools).
+This switch gives agents Zeron's `compact` tool. It is the same switch as **compact** in [Settings > Context & tools > Tools](zeron://settings/tools).
 
 An agent calls the tool at a natural break, for example when a piece of work is done and verified. It can name what the summary should keep, and it can write a short note, such as "Continue with slice 3", that is sent back to it as its next message once the compaction is done, so the work goes on without you.
 
@@ -90,7 +90,7 @@ Only a message you type yourself, before a new turn starts. These are never clas
 - slash commands such as `/compact`
 - messages sent while a turn is already running
 - messages from another thread
-- handbacks from delegated tasks and from a mission's steps
+- handbacks from delegated tasks and from a Task's steps
 - your answers to an agent's question, and wakes when another thread asks something
 - the Supervisor's wakes
 - the agent's own next-message note, which is checked as described above
@@ -114,9 +114,9 @@ In Classifier mode, the **Classifier** row picks who reads your messages.
 
 What leaves your Mac for each check: your last four messages, each with the agent's last written reply, every piece clipped to its last 800 characters, plus your new message. With Jev, that text is sent to TypeSafe or OpenRouter, clipped to its last 10,000 characters. Tool output and files are never sent.
 
-## In missions
+## In tasks
 
-**In missions** decides whether a mission's lead and step threads are compacted automatically. On (the default), they follow the same rules as any chat. Off leaves them alone: no idle compaction, no reminders, and no classifier check. A lead stays a mission thread after its mission is complete. The agent's own compact tool still follows **Let agents compact themselves**, and you can still compact by hand. See [Mission Control](zeron://docs/mission-control) for missions.
+**In tasks** decides whether the lead and step threads of a Task with a plan are compacted automatically. On (the default), they follow the same rules as any chat. Off leaves them alone: no idle compaction, no reminders, and no classifier check. A lead stays a Task's thread after its Task is complete. The agent's own compact tool still follows **Let agents compact themselves**, and you can still compact by hand. See [Agent trees and plans](zeron://docs/mission-control) for Tasks with a plan.
 
 ## What you see in the transcript
 
@@ -154,7 +154,7 @@ In [Settings > General](zeron://settings/general):
 | **Let agents compact themselves** | On |
 | **Compact new tasks** (Reminder, Classifier) | Classifier |
 | **Compact ahead of time** (Experimental) | Off |
-| **In missions** | On |
+| **In tasks** | On |
 | **Check from** or **Remind at** (Off, 100K, 150K, 200K) | 150K |
 | **Classifier** (Agent model, Jev · TypeSafe, Jev · OpenRouter), Classifier mode only | Agent model |
 | **Classifier model**, with Agent model | Sonnet-class |

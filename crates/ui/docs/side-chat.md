@@ -1,44 +1,36 @@
-A sidechat lets you ask a quick question about a chat without interrupting it. The main agent keeps working while a separate agent answers you on the side.
+A side chat lets you ask a quick question about a chat without interrupting it. The main agent keeps working while a separate agent answers you on the side, in a tab of the right pane.
 
-## Open a sidechat
+## Open a side chat
 
-- Type `/btw` followed by your question in the composer and send it. Zeron opens a new sidechat and sends the question as its first message. `/sidechat` does the same.
-- Send `/btw` on its own to reopen the sidechat you used last.
-- Click the tab on the top edge of the composer. It reads **New sidechat (btw)**, or **Sidechats (btw)** with a count once you have some. A dot on it shows when the latest sidechat is working, waiting for you, or failed.
-- Press Cmd+; to open or close sidechats. Rebind it as **Toggle sidechat (btw)** in [Settings > Shortcuts](zeron://settings/shortcuts).
+- Type `/btw` followed by your question in the composer and send it. Zeron opens a new side chat in the right pane and sends the question as its first message. `/sidechat` still works when you type it, but the `/` list shows only `/btw`.
+- Click the **Side chat** tab on the top edge of the composer, press Cmd+;, or send `/btw` on its own. Each brings back the side chat already open in the pane, else your newest live one, else starts a new one. A dot on the tab shows when a side chat is working. Rebind the shortcut as **Side chat** in [Settings > General > Shortcuts](zeron://settings/shortcuts).
 
-You need an existing chat first; the new chat canvas has no sidechats.
+You need an existing chat first; New chat has no side chats.
 
-## Working in the sidechat panel
+![A side chat open in the right pane, beside its chat](side-chat-pane.jpg)
 
-The sidechat takes the place of the main composer, marked with a **btw** pill. Each sidechat gets a tab named after its first question.
+## Working in a side chat
 
-![Sidechats above the composer](side-chat-tabs.jpg)
+A side chat opens as a tab in the right pane with a side chat badge, named after its first question (**New side chat** until you send one). It has its own composer, so the main composer keeps your draft. Its header says which chat it belongs to and that it got that chat's conversation as reference.
 
-- **+** (**New btw tab**) opens another sidechat.
-- The × on a tab (**Archive sidechat**) archives it.
-- A **Draft** chip shows the unsent text you left in the main composer, so nothing is lost.
-- **Open in side pane** moves the current sidechat to the right pane, where it gets a **Sidechat** tab.
-- Press Escape, or click the **Esc** chip, to close the panel and return to the main composer.
+The Sidecar lists your side chats under **Beside this thread**; click one to open its tab again. See [Live state](zeron://docs/live-state).
 
-You can also start one from the right pane's + menu with **New sidechat**. The [Live state](zeron://docs/live-state) column lists your sidechats under **Side chats**; click one to open it in the right pane.
+## What the side chat knows
 
-## What the sidechat knows
+A side chat runs in the same project and branch with the same agent and model as its chat, but in its own session. It receives a copy of the chat's conversation as reference. It is told to answer your question rather than continue the chat's task, and not to change files or git unless you ask it to.
 
-A sidechat runs in the same project and branch with the same agent and model as its chat, but in its own session. It receives a copy of the chat's conversation as reference. It is told to answer your question rather than continue the chat's task, and not to change files or git unless you ask it to.
+Images or appshots you attached in the main composer move into the side chat when you send `/btw` with a question.
 
-Images or appshots you attached in the main composer move into the sidechat when you send `/btw` with a question.
+Side chats expire after 24 hours and show as **Expired** in the Sidecar.
 
-Sidechats drop off the tab after 24 hours and show as **Expired** in the **Live state** column.
+## Side chats, new side chats, and forks
 
-## Sidechats, side chats, and forks
-
-Three similar names do different things:
+Three similar things open beside a chat, each as a tab in the right pane:
 
 | Name | Where you start it | What you get |
 | --- | --- | --- |
-| Sidechat | `/btw`, the tab on the composer, or **New sidechat** in the right pane's **+** menu or the **Live state** column | A separate session that answers you about this chat, with a copy of its conversation as reference. In the right pane its tab reads **Sidechat**. |
-| **New side chat** | Hover the **Chats** header in the Files panel, or its empty state | An empty chat beside this one, with the same project, agent, and model but none of its history. Nothing is saved until you send its first message. |
-| **Fork chat** | **Side chats** in the **Live state** column, or **Fork this chat** (**Fork** when empty) in the Files panel's **Chats** section | A copy of this conversation through its latest completed reply, as a new chat that carries on by itself. |
+| Side chat | `/btw`, the **Side chat** tab on the composer, or Cmd+; | A separate session that answers you about this chat, with a copy of its conversation as reference. |
+| **New side chat** | Hover the **Chats** header in the Files tab, or its empty state | An empty chat beside this one, with the same project, agent, and model but none of its history. Nothing is saved until you send its first message. |
+| Fork | Hover a reply and click **Fork chat from here**, or **Fork this chat** (**Fork** when empty) in the Files tab's **Chats** section | A copy of this conversation through that reply (or the latest completed one), as a new chat that carries on by itself. |
 
-Side chats and forks open in the right pane with their own composer, and the Files panel lists them under **Chats**. See [Right pane](zeron://docs/right-pane).
+All three get a badge for their kind on their tab, and the Sidecar and the Files tab's **Chats** section list them. See [Right pane](zeron://docs/right-pane).

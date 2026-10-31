@@ -2,7 +2,7 @@ Zeron has a built-in browser in the right pane, so your local app or a website s
 
 ## Open a browser tab
 
-Click **Browser** in an empty right pane, or click **+** and choose **Browser**. In a chat, a new tab lists the dev servers running in this project under **Running locally** (or **Running on your device** for a chat on another device); click **Open** next to one. A server appears when a program started in the project folder listens on a port and answers web requests. This works for chats that run on a Mac or a Linux machine.
+Open the right pane with the pane button at the right of the titlebar (or Cmd+R), then click the **Browser** tab at the head of its tab strip. In a chat, a new tab lists the dev servers running in this project under **Running locally** (or **Running on your device** for a chat on another device); click **Open** next to one. A server appears when a program started in the project folder listens on a port and answers web requests. This works for chats that run on a Mac or a Linux machine.
 
 Or choose **Or enter a website address** and type an address such as `example.com` or `localhost:3000`. The field takes http and https addresses only; it does not search the web. A tab that is not tied to a chat, such as one opened on New chat, shows **Preview your work** with an **Enter an address** button instead of the server list.
 
@@ -13,7 +13,7 @@ The toolbar has **Back**, **Forward**, **Reload page**, the address field, and *
 | Cmd+L | Focus the address field |
 | Cmd+T / Cmd+W | New tab / close tab |
 | Cmd+[ / Cmd+] | Back / forward |
-| Cmd+Shift+R | Reload (**Reload browser page** in [Settings > Shortcuts](zeron://settings/shortcuts)) |
+| Cmd+Shift+R | Reload (**Reload browser page** in [Settings > General > Shortcuts](zeron://settings/shortcuts)) |
 
 ## What is kept after a restart
 
@@ -23,7 +23,7 @@ That data belongs to a browser profile: one per device for a local workspace, an
 
 ## Agents in the browser
 
-On macOS, an agent can open and drive a tab for its own chat. It can open a new tab only on a localhost address, and only while that chat is open on the computer that runs it. In a tab it already controls, it can go to any http or https address. **Developer access** in [Settings > Computer](zeron://settings/computer) also lets tasks run JavaScript in their tabs.
+On macOS, an agent can open and drive a tab for its own chat. It can open a new tab only on a localhost address, and only while that chat is open on the computer that runs it. In a tab it already controls, it can go to any http or https address. **Developer access** in [Settings > This Mac > Computer use](zeron://settings/computer) also lets tasks run JavaScript in their tabs.
 
 When you stop the agent's computer use, the agent loses control of the tab. Only you can hand it back, with **Resume agent** in the toolbar on macOS. Annotating a tab also pauses the agent, but only while you annotate: it gets the tab back when you finish or cancel, unless it was already paused.
 

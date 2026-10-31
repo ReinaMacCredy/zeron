@@ -56,6 +56,6 @@ Moving a chat that has history to another instance works like switching to anoth
 
 ## Plan usage in the rail
 
-The left rail shows up to two usage rings, one per signed-in provider. When an account reports both limits, the outer ring is the weekly limit and the inner one the session limit. A ring turns to a warning color at 80% used and to danger at 95%. Hover it to see what is left and when it resets; click it to switch accounts or **Open Usage**.
+The left rail shows one usage ring: the tightest limit window across the accounts that report usage. It turns to a warning color at 80% used and to danger at 95%, and turns red with a **!** when a window is at its limit or a chat is waiting on a limit reset. Hover it for a card with each account's windows and when the tightest one resets; click it to open the [Usage](zeron://usage) page.
 
-> The [Usage](zeron://usage) page shows every account's limits and the token spend on this device.
+> The [Usage](zeron://usage) page shows every account's limits and the token spend on this device. To switch accounts there, click the email on a plan card for its **Switch account** menu.

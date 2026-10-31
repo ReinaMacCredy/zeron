@@ -16,9 +16,9 @@ A notification fires when a chat you started changes state, when Zeron loses its
 | Agent CLI updates are ready | "1 agent update available", or "3 agent updates available" for several |
 | An agent offers a model it did not list before | "New model available" or "New models available", with the agent and model names |
 
-On macOS, click a chat's banner to open that chat, and the Supervisor's banner to open the [Supervisor](zeron://docs/supervisor) page. On Linux, banners go through `notify-send` and clicking them does not open anything in Zeron. Windows shows no banners yet; the sounds still play there.
+On macOS, click a chat's banner to open that chat. When the chat still needs you, the banner opens the Cmd+I tray with that chat's row open instead, so you can answer it where you are. The Supervisor's banner opens the [Supervisor](zeron://docs/supervisor) page. On Linux, banners go through `notify-send` and clicking them does not open anything in Zeron. Windows shows no banners yet; the sounds still play there.
 
-Only chats you opened yourself notify you. Side chats, delegated child threads, and the voice session stay quiet, and their status still shows in the sidebar.
+Only chats you opened yourself notify you. Side chats, delegated child threads, and the voice session stay quiet. A side chat's or child thread's status shows beside its parent chat, in the **Live state** column under **Beside this thread**.
 
 ## Desktop
 
@@ -42,7 +42,7 @@ The per-event rows are dimmed and inactive while **Session sounds** is off. Erro
 
 ## Other sounds
 
-Two features have their own sound settings: the shutter cue for Appshots (**Capture sound** in [Settings > Appshots](zeron://settings/appshots)) and the click sound when an agent uses your Mac (**Click sounds** in [Settings > Computer](zeron://settings/computer)).
+Two features have their own sound settings: the shutter cue for Appshots (**Capture sound** in [Settings > This Mac > Appshots](zeron://settings/appshots)) and the click sound when an agent uses your Mac (**Click sounds** in [Settings > This Mac > Computer use](zeron://settings/computer)).
 
 A [voice call](zeron://docs/voice) plays a short chime when it starts and when it ends. **Session sounds** does not turn these off.
 

@@ -2,7 +2,7 @@ The Device hub runs iOS simulators and Android emulators inside Zeron, so you an
 
 ## Set it up
 
-Open [Settings > Device hub](zeron://settings/device-hub) and switch on **Device hub**. Zeron installs and starts its device tools.
+Open [Settings > Devices & updates > Device hub](zeron://settings/device-hub) and switch on **Device hub**. Zeron installs and starts its device tools.
 
 - **Platform support** shows whether iOS (Xcode and iOS Simulator) and Android (Android SDK and Emulator) are ready, and what to install if not. Either platform works without the other. Click **Refresh** after installing.
 - **Check versions** shows the running, required, and installed device tools. When they are out of date, an **Update to** button appears.
@@ -13,9 +13,9 @@ Until the hub is set up, a device tab walks you through the same steps. You can 
 
 ## Open a device
 
-In a chat, click **+** in the right pane and choose **Device**, or click **Device** in an empty pane. The tab lists your **iOS Simulators** and **Android Emulators**. Click **Start** for a stopped device or **Open** for a running one, or **Refresh devices** if one is missing.
+In a chat, open the right pane with the pane button at the right of the titlebar (or Cmd+R) and click the **Device** tab in its tab strip. The tab lists your **iOS Simulators** and **Android Emulators**. Click **Start** for a stopped device or **Open** for a running one, or **Refresh devices** if one is missing.
 
-**Device** is only available from a thread whose chat runs on this computer. Otherwise it is dimmed; hover it for the reason.
+The **Device** tab shows only in a chat that runs on this computer, and it steps aside once a device tab is open, since device tabs carry their own names.
 
 ## Use the device
 

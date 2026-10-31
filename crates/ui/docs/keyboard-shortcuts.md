@@ -1,18 +1,19 @@
-Most of Zeron can be driven from the keyboard. Rebindable shortcuts live in [Settings > Shortcuts](zeron://settings/shortcuts); you can also reach that page from the Help menu in the app rail with **Keybindings**.
+Most of Zeron can be driven from the keyboard. Rebindable shortcuts live in [Settings > General > Shortcuts](zeron://settings/shortcuts); you can also reach that page from the Help menu in the app rail with **Keyboard shortcuts**.
 
 ## The most useful defaults
 
 | Shortcut | What it does |
 | --- | --- |
 | Cmd+K | Open or close the command palette |
-| Cmd+N | New session (a new chat canvas) |
+| Cmd+N | New session (opens New chat, from anywhere) |
 | Cmd+Shift+N | New project |
 | Cmd+B | Toggle left sidebar |
-| Cmd+R | Toggle right sidebar |
-| Cmd+E | Toggle files panel |
-| Cmd+J | Toggle terminal |
+| Cmd+R | Toggle right sidebar (the right pane) |
+| Cmd+E | Toggle files panel (the right pane's **Files** tab) |
+| Cmd+J | Toggle terminal (the dock under a chat) |
 | Cmd+/ | Open model picker |
-| Cmd+; | Toggle sidechat (btw) |
+| Cmd+; | Side chat: reopen this chat's side chat in the right pane, or start one |
+| Cmd+I | Needs you and running: open or close the tray under the titlebar pill |
 | Ctrl+Tab, Ctrl+Shift+Tab | Next or previous session (or right pane tab) |
 | Cmd+1 to Cmd+9 | Jump to session 1 to 9 in the sidebar |
 | Cmd+Shift+A | Archive session |
@@ -23,7 +24,7 @@ Most of Zeron can be driven from the keyboard. Rebindable shortcuts live in [Set
 
 Cmd+K and Cmd+, are fixed; you can change the rest.
 
-Two shortcuts live on their feature's own settings page instead: **Hold to dictate** (Cmd+D) in **Settings > Voice**, and **Capture Appshot** in **Settings > Appshots**.
+Two shortcuts live on their feature's own settings page instead: **Hold to dictate** (Cmd+D) in **Settings > This Mac > Voice**, and **Capture Appshot** in **Settings > This Mac > Appshots**.
 
 ## Rebinding a shortcut
 
@@ -37,11 +38,11 @@ The **Keyboard shortcuts** page groups rows under **Appearance**, **Files**, **B
 
 Shortcuts must be unique. If the combination already belongs to another shortcut, Zeron keeps the old binding and says which shortcut owns it. Cmd+Enter is reserved for the composer. **Capture Appshot** has one extra rule: it needs Control, Option or Command with a letter, number, function key or navigation key. A changed row shows **Reset** to go back to its default. **Restore defaults** at the top resets every shortcut.
 
-> **Restore defaults** also resets **Hold to dictate**, **Capture Appshot**, and the keyboard options in Settings > Chat and Settings > General: **Send messages with**, **Follow-up behavior**, **Stop active agent with Escape**, **Thinking level shortcut**, and the session switcher settings.
+> **Restore defaults** also resets **Hold to dictate**, **Capture Appshot**, and the keyboard options on the **Chat** and **General** tabs of Settings > General: **Send messages with**, **Follow-up behavior**, **Stop active agent with Escape**, **Thinking level shortcut**, and the session switcher settings.
 
 ## Related keyboard settings
 
-These live in [Settings > Chat](zeron://settings/chat) and [Settings > General](zeron://settings/general):
+These live in [Settings > General > Chat](zeron://settings/chat) and [Settings > General](zeron://settings/general):
 
 - **Send messages with** (Chat): Enter or Cmd+Enter.
 - **Thinking level shortcut** (macOS only): press Cmd+- or Cmd+= to lower or raise the thinking level, or switch the modifier to **⌃ Control**. On other systems the keys are Ctrl+- and Ctrl+=.
