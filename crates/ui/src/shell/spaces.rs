@@ -2998,7 +2998,18 @@ impl SidebarMission {
     }
 
     pub(super) fn count(&self) -> SharedString {
-        format!("{}/{}", self.done, self.total).into()
+        if self.complete {
+            "Task · done".into()
+        } else if self.total == 0 {
+            "Task".into()
+        } else {
+            format!(
+                "Task · step {} of {}",
+                (self.done + 1).min(self.total),
+                self.total
+            )
+            .into()
+        }
     }
 
     pub(super) fn mark(&self, theme: &Theme) -> AnyElement {
