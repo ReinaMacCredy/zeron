@@ -1143,7 +1143,7 @@ impl EngineRpc {
         for step in self.workspace.task_steps_of(task_id) {
             if !self.unstarted(&step) {
                 return Err(refused(
-                    "A step already started, so the approval stays. Edit the plan in Mission Control or message the lead to change course.",
+                    "A step already started, so the approval stays. Edit the plan on the task page or message the lead to change course.",
                 ));
             }
         }
@@ -1451,7 +1451,7 @@ impl EngineRpc {
             None => ("The person edited", String::new(), None),
         };
         let text = format!(
-            "{who} the plan in Mission Control (task id {task_id}):\n- {}{why}\n\nRead the whole plan with the tasks tool: action \"list\", taskId \"{task_id}\". {next}",
+            "{who} the plan on the task page (task id {task_id}):\n- {}{why}\n\nRead the whole plan with the tasks tool: action \"list\", taskId \"{task_id}\". {next}",
             changes.join("\n- ")
         );
         let mut noted = changes.clone();

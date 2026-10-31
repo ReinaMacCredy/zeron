@@ -3714,7 +3714,7 @@ async fn a_plan_edit_moves_unstarted_steps_and_names_the_new_order() {
             "only the moved step is written"
         );
     }
-    let edited = "The person edited the plan in Mission Control (task id t1)";
+    let edited = "The person edited the plan on the task page (task id t1)";
     wait_for(
         || !prompts_with(&rig, edited).is_empty(),
         "the lead's edit message",
@@ -3802,7 +3802,7 @@ async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_the
     }))
     .await
     .unwrap();
-    let edited = "The person edited the plan in Mission Control (task id t1)";
+    let edited = "The person edited the plan on the task page (task id t1)";
     wait_for(
         || !prompts_with(&rig, edited).is_empty(),
         "the lead's edit message",
@@ -4097,7 +4097,7 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     supervise(false).await.unwrap();
 
     mutate(edit(Vec::new())).await.unwrap();
-    let edited = "The person edited the plan in Mission Control (task id t1)";
+    let edited = "The person edited the plan on the task page (task id t1)";
     wait_for(
         || !prompts_with(&rig, edited).is_empty(),
         "the lead's edit message",
