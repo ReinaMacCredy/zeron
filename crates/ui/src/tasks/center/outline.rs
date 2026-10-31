@@ -242,7 +242,7 @@ impl TaskCenter {
                 .num_milliseconds()
                 .max(0) as u64,
         );
-        let title = crate::transcript::single_line(&root.display_title());
+        let title = crate::transcript::single_line(&crate::home::chat_title(root));
         let watch = self.render_watch_button(
             super::watch_sheet::WatchTarget {
                 root: &root.id,
@@ -515,7 +515,9 @@ impl TaskCenter {
                     .child(match node.kind {
                         NodeKind::Root => chat
                             .as_ref()
-                            .map(|chat| crate::transcript::single_line(&chat.display_title()))
+                            .map(|chat| {
+                                crate::transcript::single_line(&crate::home::chat_title(chat))
+                            })
                             .unwrap_or_default(),
                         _ => node.title.clone(),
                     }),

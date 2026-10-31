@@ -756,41 +756,15 @@ impl Mission {
     }
 }
 
-fn mission_rows(state: &AppState, now: DateTime<Utc>) -> Vec<zeron_proto::mission::MissionRow> {
-    let mut rows: Vec<zeron_proto::mission::MissionRow> =
-        zeron_proto::mission::open_missions(&state.tasks)
-            .into_iter()
-            .map(|task| mission_row_of(state, task, now))
-            .collect();
-    rows.sort_by_key(|row| row.status != TaskStatus::NeedsYou);
-    rows
-}
-
-fn done_today_rows(state: &AppState, now: DateTime<Utc>) -> Vec<zeron_proto::mission::MissionRow> {
-    let today = now.with_timezone(&chrono::Local).date_naive();
-    zeron_proto::mission::missions_done_on(&state.tasks, today, &chrono::Local)
-        .into_iter()
-        .map(|task| mission_row_of(state, task, now))
-        .collect()
-}
-
-fn mission_row_of(
-    state: &AppState,
-    task: &zeron_proto::Task,
-    now: DateTime<Utc>,
-) -> zeron_proto::mission::MissionRow {
-    let plan = crate::tasks::rollup(state, task, now);
-    let held = approval_held(state, &task.id, now);
-    zeron_proto::mission::mission_row(task, &plan, held)
-}
-
 fn missions(state: &AppState, now: DateTime<Utc>) -> Vec<Mission> {
     let unwatched = state
         .supervisor
         .as_ref()
         .map_or(&[][..], |snapshot| snapshot.unwatched.as_slice());
-    let active = mission_rows(state, now).into_iter().map(|row| (row, false));
-    let done = done_today_rows(state, now)
+    let active = crate::home::mission_rows(state, now)
+        .into_iter()
+        .map(|row| (row, false));
+    let done = crate::home::done_today_rows(state, now)
         .into_iter()
         .map(|row| (row, true));
     let plans = active.chain(done).map(|(row, done)| {
@@ -4753,107 +4727,5 @@ mod tests {
             serde_json::from_value(ensured.lock().unwrap()[0].clone()).unwrap();
         assert_eq!(config.harness, zeron_proto::HarnessId::ClaudeCode);
         assert_eq!(config.profile_id.as_deref(), Some(PROFILE_ID));
-    }
-
-    #[test]
-    fn missions_list_open_orchestrated_tasks_needs_you_first() {
-        let task = |id: &str, key: &str, extra: serde_json::Value| -> zeron_proto::Task {
-            let mut value = serde_json::json!({
-                "id": id, "title": id, "orderKey": key, "chatId": format!("{id}-lead"),
-                "mode": "orchestrated",
-            });
-            value
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
-            serde_json::from_value(value).unwrap()
-        };
-        let step = |task: &str, key: &str, chat: Option<&str>, outcome: Option<&str>| {
-            serde_json::from_value::<zeron_proto::TaskStep>(serde_json::json!({
-                "id": format!("{task}-{key}"), "taskId": task, "orderKey": key,
-                "chatId": chat, "outcome": outcome,
-            }))
-            .unwrap()
-        };
-        let chat = |id: &str| -> Chat {
-            serde_json::from_value(serde_json::json!({
-                "id": id, "deviceId": "mac", "archived": false,
-                "createdAt": "2026-10-18T00:00:00Z",
-            }))
-            .unwrap()
-        };
-        let mut state = AppState::new();
-        state.tasks = vec![
-            task(
-                "older",
-                "0",
-                serde_json::json!({
-                    "chatId": "working-lead", "completedAt": "2026-10-17T00:00:00Z",
-                }),
-            ),
-            task("working", "a", serde_json::json!({})),
-            task("review", "b", serde_json::json!({ "planPending": true })),
-            task("stuck", "c", serde_json::json!({})),
-            task(
-                "done",
-                "d",
-                serde_json::json!({ "completedAt": "2026-10-18T00:00:00Z" }),
-            ),
-            task("gone", "e", serde_json::json!({ "deleted": true })),
-            task("single", "f", serde_json::json!({ "mode": "single" })),
-        ];
-        state.chats = [
-            "working-lead",
-            "review-lead",
-            "stuck-lead",
-            "child",
-            "stuck-child",
-            "skipped-child",
-            "gone-lead",
-            "single-lead",
-        ]
-        .into_iter()
-        .map(chat)
-        .collect();
-        state.task_steps = vec![
-            step("working", "1", None, Some("done")),
-            step("working", "2", Some("skipped-child"), Some("skipped")),
-            step("working", "3", None, Some("done")),
-            step("working", "4", Some("child"), None),
-            step("working", "5", None, None),
-            step("review", "1", None, None),
-            step("stuck", "1", None, Some("done")),
-            step("stuck", "2", Some("stuck-child"), None),
-        ];
-        state.task_steps[7].turn = Some(zeron_proto::StepTurn {
-            ended: zeron_proto::StepTurnEnd::Failed,
-            turn: None,
-        });
-        let rows = mission_rows(&state, Utc::now());
-        let labels: Vec<(&str, &str)> = rows
-            .iter()
-            .map(|row| (row.task_id.as_str(), row.label.as_str()))
-            .collect();
-        assert_eq!(
-            labels,
-            [
-                ("review", "Needs you · plan review"),
-                ("stuck", "Step 2 failed"),
-                ("working", "Step 4/5 · Working"),
-            ]
-        );
-        assert_eq!((rows[2].progress.done, rows[2].progress.total), (2, 4));
-        assert_eq!(rows[2].current.as_deref(), Some("Step 4 of 5 · "));
-        let strip = |chat: &str| {
-            crate::tasks::mission_thread(&state, chat, Utc::now())
-                .map(|thread| (thread.task_id, thread.role.label()))
-        };
-        let on = |task: &str, label: &str| Some((task.to_owned(), label.to_owned()));
-        assert_eq!(strip("working-lead"), on("working", "Lead"));
-        assert_eq!(strip("child"), on("working", "Step 4 of 5"));
-        assert_eq!(strip("skipped-child"), on("working", "Step 2 of 5"));
-        assert_eq!(strip("stuck-child"), on("stuck", "Step 2 of 2"));
-        assert_eq!(strip("gone-lead"), None);
-        assert_eq!(strip("single-lead"), None);
     }
 }

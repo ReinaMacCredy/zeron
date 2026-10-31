@@ -57,6 +57,10 @@ pub(crate) enum TreeHost {
 
 pub(crate) type RowRects = std::rc::Rc<std::cell::RefCell<HashMap<String, gpui::Bounds<Pixels>>>>;
 
+enum Source {
+    Tree { root_chat_id: String, native: bool },
+}
+
 struct Row {
     id: String,
     parent: Option<usize>,
@@ -90,8 +94,7 @@ impl Row {
 
 pub(crate) struct StripTree {
     state: Entity<AppState>,
-    root_chat_id: String,
-    native: bool,
+    source: Source,
     folded: HashSet<String>,
     seen: HashSet<String>,
     chevrons: HashMap<String, Tween>,
@@ -126,8 +129,10 @@ impl StripTree {
         Self {
             _state: cx.observe(&state, |_, _, cx| cx.notify()),
             state,
-            root_chat_id,
-            native,
+            source: Source::Tree {
+                root_chat_id,
+                native,
+            },
             folded: HashSet::new(),
             seen: HashSet::new(),
             chevrons: HashMap::new(),
@@ -150,6 +155,12 @@ impl StripTree {
     pub fn with_briefs(mut self, briefs: bool) -> Self {
         self.briefs = briefs;
         self
+    }
+
+    pub fn root_id(&self) -> &str {
+        match &self.source {
+            Source::Tree { root_chat_id, .. } => root_chat_id,
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -193,12 +204,13 @@ impl StripTree {
     }
 
     fn rows(&self, cx: &App) -> Option<Vec<Row>> {
-        let nodes = thread_tree::tree_rows(
-            self.state.read(cx),
-            &self.root_chat_id,
-            self.native,
-            Utc::now(),
-        );
+        let (root_chat_id, native) = match &self.source {
+            Source::Tree {
+                root_chat_id,
+                native,
+            } => (root_chat_id, *native),
+        };
+        let nodes = thread_tree::tree_rows(self.state.read(cx), root_chat_id, native, Utc::now());
         if nodes.is_empty() {
             return None;
         }

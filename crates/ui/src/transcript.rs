@@ -5003,7 +5003,7 @@ impl Transcript {
                 .chats
                 .iter()
                 .find(|chat| chat.id == chat_id)
-                .map(zeron_proto::Chat::display_title)
+                .map(crate::home::chat_title)
                 .unwrap_or_default();
             let rows = task
                 .map(|task| crate::tasks::rollup(state, task, chrono::Utc::now()).steps)

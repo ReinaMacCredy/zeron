@@ -33,6 +33,7 @@ pub mod device_hub;
 pub mod devices;
 pub mod files;
 pub mod harnesses;
+pub mod home;
 pub mod mission_delegation;
 pub mod notifications;
 pub mod permission_guide;
