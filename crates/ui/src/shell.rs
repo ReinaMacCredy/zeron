@@ -7453,6 +7453,27 @@ impl Shell {
         }
     }
 
+    /// ⌘J toggles the dock; `/terminal` only opens or focuses it.
+    fn terminal_on_chat_route(
+        &mut self,
+        toggle: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.route != Route::Chat {
+            crate::toast::show(
+                cx,
+                crate::toast::ToastKind::Info,
+                "The terminal opens from a chat",
+            );
+        } else if toggle || !self.terminal_open(cx) {
+            self.toggle_terminal(window, cx);
+        } else {
+            self.terminal_panel(cx)
+                .update(cx, |panel, cx| panel.request_focus(cx));
+        }
+    }
+
     /// Cmd/Ctrl+J and the header button (feature-inventory §1.10). Height
     /// animates 200 ms; closing detaches (PTYs stay alive), opening restores.
     /// The flag is per chat (zeron `sessionPanels`).
@@ -18811,7 +18832,7 @@ impl Render for Shell {
                 WorkspaceCommand::Files if !self.active_chat.is_empty() => {
                     self.add_files_surface(window, cx)
                 }
-                WorkspaceCommand::Terminal => self.toggle_terminal(window, cx),
+                WorkspaceCommand::Terminal => self.terminal_on_chat_route(false, window, cx),
                 WorkspaceCommand::Rename if !self.active_chat.is_empty() => {
                     self.open_rename_chat(self.active_chat.clone(), cx)
                 }
@@ -19086,16 +19107,9 @@ impl Render for Shell {
             // no-ops (zeron __root.tsx gates the hotkey on `!isSettings`, and
             // the terminal panel is only mounted on session routes). The
             // sidebar toggle stays live everywhere, as in the original.
-            .on_action(
-                cx.listener(|this, _: &ToggleTerminal, window, cx| match this.route {
-                    Route::Chat => this.toggle_terminal(window, cx),
-                    _ => crate::toast::show(
-                        cx,
-                        crate::toast::ToastKind::Info,
-                        "The terminal opens from a chat",
-                    ),
-                }),
-            )
+            .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                this.terminal_on_chat_route(true, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
                 if matches!(this.route, Route::Chat) && this.right_pane_open(cx) {
                     let file = match this.resolved_right_active(cx) {
