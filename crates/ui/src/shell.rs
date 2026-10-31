@@ -1115,6 +1115,11 @@ impl SettingsSection {
                     Some(Target::Setting(SettingId::PullRequestDestination)),
                 ),
                 (
+                    "Keep this Mac awake while agents work",
+                    &["sleep", "caffeinate", "power", "battery"],
+                    Some(Target::Setting(SettingId::KeepAwake)),
+                ),
+                (
                     "Show predictions",
                     &["next message", "autocomplete", "suggestions"],
                     Some(Target::Setting(SettingId::ShowPredictions)),

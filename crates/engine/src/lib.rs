@@ -46,6 +46,7 @@ mod html_render;
 mod http_error;
 pub mod instance_lock;
 pub mod jev;
+mod keep_awake;
 pub mod local_import;
 pub mod managed;
 mod model_catalogs;
@@ -791,8 +792,9 @@ pub struct Engine {
 pub struct EngineRuntime {
     core: EngineCore,
     host_relay: std::sync::Mutex<Option<zeron_rpc::HostRelay>>,
-    /// Desktop banners for this engine's sessions (desktop engines only).
-    notifier: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Banners and the keep-awake hold for this engine's sessions (desktop
+    /// engines only).
+    desktop_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 /// IPC-only lifecycle control owned by `zeron headless`. The regular
@@ -909,17 +911,17 @@ impl EngineRuntime {
     }
 
     pub async fn shutdown(&self) {
-        self.stop_notifier();
+        self.stop_desktop_tasks();
         self.disconnect_edge();
         self.core.shutdown().await;
     }
 
-    fn stop_notifier(&self) {
-        if let Some(task) = self
-            .notifier
+    fn stop_desktop_tasks(&self) {
+        for task in self
+            .desktop_tasks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
+            .drain(..)
         {
             task.abort();
         }
@@ -928,7 +930,7 @@ impl EngineRuntime {
 
 impl Drop for EngineRuntime {
     fn drop(&mut self) {
-        self.stop_notifier();
+        self.stop_desktop_tasks();
         self.host_relay
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1275,12 +1277,18 @@ impl Engine {
             core.start_host_relay(&edge.url)
         });
 
-        let notifier = desktop_notify::enabled()
-            .then(|| desktop_notify::spawn(&core, config.data_dir.clone()));
+        let desktop_tasks = if desktop_notify::enabled() {
+            vec![
+                desktop_notify::spawn(&core, config.data_dir.clone()),
+                keep_awake::spawn(&core, config.data_dir.clone()),
+            ]
+        } else {
+            Vec::new()
+        };
         Ok(EngineRuntime {
             core,
             host_relay: std::sync::Mutex::new(host_relay),
-            notifier: std::sync::Mutex::new(notifier),
+            desktop_tasks: std::sync::Mutex::new(desktop_tasks),
         })
     }
 

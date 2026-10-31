@@ -1425,6 +1425,51 @@ impl Render for ShortcutsPage {
                 )
                 .child(pull_request_destination_control)
                 .search_anchor(SettingId::PullRequestDestination);
+            let keep_awake = crate::settings::current(cx).keep_awake_while_working;
+            let keep_awake_row = widgets::card_row(&theme, true)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .child(widgets::row_title(
+                            &theme,
+                            "Keep this Mac awake while agents work",
+                        ))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(
+                                        "Blocks idle sleep until a minute after the last \
+                                         agent stops. The display still sleeps, and \
+                                         closing the lid still sleeps the Mac.",
+                                    )
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, keep_awake, "keep-awake-while-working")
+                        .id("keep-awake-while-working-toggle")
+                        .debug_selector(|| "keep-awake-while-working-toggle".into())
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Keep this Mac awake while agents work")
+                        .aria_toggled(if keep_awake {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            crate::settings::update(SavePolicy::Immediate, cx, |settings| {
+                                settings.keep_awake_while_working = !keep_awake;
+                            });
+                            cx.refresh_windows();
+                        }),
+                )
+                .search_anchor(SettingId::KeepAwake);
             let scrollbar = self.render_scrollbar(&theme, cx);
             return div()
                 .id("general-settings-page-host")
@@ -1488,6 +1533,15 @@ impl Render for ShortcutsPage {
                                                     .search_anchor(SettingId::EffortSlider),
                                             ),
                                     ))
+                                    .when(cfg!(target_os = "macos"), |page| {
+                                        page.child(widgets::section(
+                                            &theme,
+                                            "Power",
+                                            widgets::section_card(&theme)
+                                                .mt_0()
+                                                .child(keep_awake_row),
+                                        ))
+                                    })
                                     .child(widgets::section(
                                         &theme,
                                         "Links",

@@ -1739,6 +1739,8 @@ pub struct UiSettings {
     /// Whether bare Escape stops the active agent after contextual consumers
     /// decline it. Device-local and opt-in.
     pub escape_stops_active_agent: bool,
+    /// Read by the engine's keep-awake task as `keepAwakeWhileWorking`.
+    pub keep_awake_while_working: bool,
     /// The Settings section last viewed. ⌘, / Ctrl+,, the footer gear and the
     /// palette reopen it; links naming a section replace it. Files without
     /// it, or with a name this build does not know, open on General.
@@ -1925,6 +1927,7 @@ impl Default for UiSettings {
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             keymap: KeymapConfig::default(),
             escape_stops_active_agent: false,
+            keep_awake_while_working: true,
             settings_section: crate::shell::SettingsSection::default(),
             tasks_view: TasksView::List,
             tree_view: TreeView::Outline,
@@ -2834,6 +2837,7 @@ impl UiSettings {
             appshot_sound_enabled,
             appshot_destination,
             escape_stops_active_agent,
+            keep_awake_while_working,
             settings_section,
             tasks_view,
             tree_view,
@@ -4428,6 +4432,7 @@ mod tests {
                 ..KeymapConfig::default()
             },
             escape_stops_active_agent: true,
+            keep_awake_while_working: false,
             settings_section: crate::shell::SettingsSection::Shortcuts,
             tasks_view: TasksView::Kanban,
             tree_view: TreeView::Timeline,

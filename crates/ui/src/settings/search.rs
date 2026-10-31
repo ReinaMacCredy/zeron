@@ -27,6 +27,7 @@ pub enum SettingId {
     SessionSwitcherLimit,
     CtrlTabCyclesTabs,
     PullRequestDestination,
+    KeepAwake,
     ThreadNaming,
     ShowPredictions,
     WorktreeLocation,
