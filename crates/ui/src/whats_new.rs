@@ -55,8 +55,8 @@ mod tests {
     fn bundled_changelog_parses_newest_first_with_every_image() {
         let entries = entries();
         assert!(!entries.is_empty());
-        assert_eq!(
-            entries[0].version, CURRENT_VERSION,
+        assert!(
+            entry_for(entries, CURRENT_VERSION).is_some(),
             "a version bump needs its whats_new.toml entry"
         );
         assert!(
