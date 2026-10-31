@@ -37,7 +37,7 @@ The owning engine generates a stable slug id of at most 96 bytes and adds a dete
 
 ## Execution
 
-Every invocation opens a fresh managed terminal. On Unix, Zeron stores the exact saved command in a private temporary script on the owning device and sends a short instruction to source it in the user's interactive login shell. This preserves long lines and multiline commands across shell initialization without passing them through the terminal's limited input-line buffer. The script is removed when the shell exits or the terminal is closed. Windows retains direct command submission to its native terminal, which does not use the Unix canonical line buffer. Zeron does not wrap the command in `sh -c` or reuse a terminal whose foreground state is unknown.
+Every invocation opens a fresh managed terminal. On Unix, Zeron stores the exact saved command in a private temporary script on the owning device and sends a short instruction to source it in the user's interactive login shell and then exit, so the terminal ends with the command's exit status and the Action reads Done or Failed. This preserves long lines and multiline commands across shell initialization without passing them through the terminal's limited input-line buffer. The script is removed when the shell exits or the terminal is closed. Windows retains direct command submission to its native terminal, which does not use the Unix canonical line buffer. Zeron does not wrap the command in `sh -c` or reuse a terminal whose foreground state is unknown.
 
 The owning engine validates that the Space, Chat, and checkout belong to the same local project before opening the PTY. A manual run uses the chat checkout as its working directory and injects:
 

@@ -409,8 +409,8 @@ impl Terminals {
         #[cfg(not(windows))]
         let (initial_script, bootstrap) = if let Some(command) = command {
             let (suffix, source) = match shell_name.as_str() {
-                "fish" => (".fish", "source \"$ZERON_ACTION_SCRIPT\"\r"),
-                _ => (".sh", ". \"$ZERON_ACTION_SCRIPT\"\r"),
+                "fish" => (".fish", "source \"$ZERON_ACTION_SCRIPT\"; exit\r"),
+                _ => (".sh", ". \"$ZERON_ACTION_SCRIPT\"; exit\r"),
             };
             let mut script = tempfile::Builder::new()
                 .prefix("zeron-action-")

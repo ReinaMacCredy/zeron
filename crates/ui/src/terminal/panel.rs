@@ -284,6 +284,7 @@ fn selection_scroll_lines(geometry: GridGeometry, position: gpui::Point<Pixels>)
 struct TerminalTab {
     key: u64,
     title: SharedString,
+    pinned_title: bool,
     terminal_id: Option<String>,
     target_device_id: Option<String>,
     emulator: Emulator,
@@ -536,7 +537,7 @@ impl TerminalPanel {
     /// "Terminal N".
     fn display_title(tab: &TerminalTab) -> SharedString {
         match tab.emulator.title().map(str::trim) {
-            Some(title) if !title.is_empty() => title.to_string().into(),
+            Some(title) if !title.is_empty() && !tab.pinned_title => title.to_string().into(),
             _ => tab.title.clone(),
         }
     }
@@ -588,6 +589,7 @@ impl TerminalPanel {
         entry.tabs.push(TerminalTab {
             key,
             title: title.into(),
+            pinned_title: false,
             terminal_id: None,
             target_device_id: None,
             emulator: Emulator::new(80, 24),
@@ -607,6 +609,19 @@ impl TerminalPanel {
         });
         entry.active = entry.tabs.len() - 1;
         cx.notify();
+        key
+    }
+
+    pub fn reserve_action_tab_for_chat(
+        &mut self,
+        chat: String,
+        title: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let key = self.reserve_tab_for_chat(chat.clone(), title, cx);
+        if let Some(tab) = self.tab_mut(&chat, key) {
+            tab.pinned_title = true;
+        }
         key
     }
 
