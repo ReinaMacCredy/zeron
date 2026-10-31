@@ -24,7 +24,7 @@ To choose the agent and model, see [Models and effort](zeron://docs/models-and-e
 
 Under the composer, three cards sum up your other threads:
 
-- **Needs you** lists the threads that ask a question, have a plan waiting for your OK, or failed, like the Cmd+I tray. **Answer** and **Review** open the question or the plan right in the card; **Open** opens the thread. Past three rows, **N more in the tray** opens the tray.
+- **Needs you** lists the threads that ask a question, have a plan waiting for your OK, or failed, and the Supervisor's decisions. **Answer** and **Review** open the **Waiting** card above the composer on that item; **Open** opens the thread. Past three rows, **N more waiting** opens that card, or **N more in the tray** opens the Cmd+I tray when a hidden row is one you open rather than answer.
 - **Running** lists the threads that are working, with their agents.
 - **Recent** lists your finished chats, newest first.
 

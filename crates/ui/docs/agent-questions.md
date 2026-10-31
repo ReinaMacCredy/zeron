@@ -15,11 +15,11 @@ OpenCode's questions use this panel too. OpenCode 2 asks through a form in its s
 
 ## Questions from other chats
 
-When an agent in another chat is waiting, the pill at the right of the titlebar counts it, for example **1 need you · 2 running**. Click the pill or press Cmd+I to open the tray. Under **Needs you**, each waiting thread has a row with what it waits on: **Asking**, **Asking 1/2** while it has several questions, **Plan ready**, or **Failed**. A delegated child's row names its parent (**from** and the parent's name). **Answer** opens the same question panel inside the tray, and **Review** opens a plan with **Approve as Task** and **Approve**; you stay in your chat, and the row folds away once it is answered. Click a row's title to open the chat that asked. Closing the tray keeps your picks and text for later. Esc, a click outside, or Cmd+I closes it.
+When an agent in another chat asks you something or has a plan waiting for your OK, a **? 1 Waiting** pill joins the agent and shell pills above the composer; the number counts everything waiting on you, [Supervisor](zeron://docs/supervisor) decisions included. Click it to open a card above the pill with one tab per item: the chat's title for a question or a plan, or the decision's title. A question shows the same question panel as in its chat, a plan shows its steps with **Approve as Task** and **Approve**, and a decision shows its options. You stay in your chat; once you answer, the next tab slides in, and when nothing is left the pill fades out. **Open thread** opens the chat that asked. Esc, a click outside or another click on the pill closes the card and keeps your picks and text for later. The chat you are in shows its own question in place, so it is not in the pill.
 
-The **Needs you** card under the composer on New chat lists the same rows, with the same **Answer** and **Review**.
+The **Needs you** card under the composer on New chat lists the same items; **Answer** and **Review** open the card on that item. On New chat the card opens below the pill.
 
-![A question from another chat, answered in the Cmd+I tray](triage-tray.jpg)
+![The Waiting card above the composer: a question from another chat, with tabs for a second question and a Supervisor decision](answer-pill.jpg)
 
 ## When an agent needs a secret
 
@@ -32,7 +32,7 @@ An agent that needs an API key, a token or a password asks for it with Zeron's `
 - The secret goes to a private file on this Mac that only your user account can read. The agent gets the file's path, never the secret, and reads it inside its commands. The file is deleted after 24 hours.
 - The chat records only what happened: **Secret saved**, **Declined**, **Timed out** (no answer within the agent's wait, 10 minutes unless it set another), or **Cancelled** (the turn ended first). The secret never enters the chat, its history on your other devices, or the logs.
 
-Enter the secret on the Mac that runs the chat. Your iPhone shows the request but asks you to enter it on your Mac, since answers typed on a phone travel through the chat itself. A secret request from another chat shows in the tray; click its row to open the chat with its card.
+Enter the secret on the Mac that runs the chat. Your iPhone shows the request but asks you to enter it on your Mac, since answers typed on a phone travel through the chat itself. A secret request from another chat shows in the **Waiting** card; **Open thread** opens the chat with its card.
 
 ## Approvals and access modes
 
@@ -55,8 +55,8 @@ The **Plan** switch next to the access chip, or Shift+Tab, has the agent explore
 ## Where waiting chats show up
 
 - In the sidebar, a waiting chat shows **Asking** (**Asking 1/2** with several questions), or **Plan ready** for a plan that waits for your approval. A message that reaches the chat while it waits, such as another agent's message, does not clear it; **Asking** stays until you answer.
-- The pill at the right of the titlebar counts waiting chats, and the Cmd+I tray lists them under **Needs you**. While any wait, the [Inbox](zeron://inbox) shows a banner with **Open tray**.
+- The **Waiting** pill above the composer counts waiting chats and decisions, and its card lists them.
 - On the [Tasks](zeron://tasks) board, a started task whose chat stops working, to ask or to finish, moves to **Needs you**.
-- A desktop notification reads **Waiting on your input**; clicking it opens the tray with that chat's row open. See [Notifications](zeron://docs/notifications) to set it up.
+- A desktop notification reads **Waiting on your input**; clicking it opens the **Waiting** card on that chat's tab while you are in another chat, or the chat itself. See [Notifications](zeron://docs/notifications) to set it up.
 
 > Computer use asks for its own consent inside the transcript. See [Computer use](zeron://docs/computer-use).

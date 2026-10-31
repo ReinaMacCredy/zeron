@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::composer::AskInfo;
-use crate::plan_proposal::PlanTarget;
+use crate::composer::{AskInfo, WaitItem, WaitKind, WaitingAction};
 
 const TRAY_WIDTH: f32 = 450.0;
 const TRAY_RADIUS: f32 = 12.0;
@@ -23,6 +22,8 @@ pub(crate) enum NeedKind {
         item_id: String,
         title: String,
         why: zeron_proto::supervisor::ItemWhy,
+        detail: String,
+        options: Vec<String>,
     },
     Task {
         task_id: String,
@@ -34,6 +35,13 @@ pub(crate) enum NeedKind {
 impl NeedKind {
     fn of_chat(&self) -> bool {
         !matches!(self, NeedKind::Decision { .. } | NeedKind::Task { .. })
+    }
+
+    pub(crate) fn waits(&self) -> bool {
+        matches!(
+            self,
+            NeedKind::Asking(Some(_)) | NeedKind::PlanReady { .. } | NeedKind::Decision { .. }
+        )
     }
 
     fn plan(&self) -> bool {
@@ -138,7 +146,6 @@ impl Exits {
 pub(super) struct TriageTray {
     popup: popover::Popup<()>,
     focus: Option<FocusHandle>,
-    expanded: Option<(String, crate::motion::Tween)>,
     rows: Exits,
     card_rows: Exits,
     ticker: Option<Task<()>>,
@@ -151,8 +158,7 @@ impl TriageTray {
     pub(super) fn observe(composer: &Entity<Composer>, cx: &mut Context<Shell>) -> Subscription {
         cx.observe(composer, |shell, composer, cx| {
             let asks = composer.read(cx).ask_signature();
-            let panel_open = shell.triage.popup.get().is_some() && shell.triage.expanded.is_some();
-            if asks != shell.triage.asks || panel_open {
+            if asks != shell.triage.asks {
                 shell.triage.asks = asks;
                 cx.notify();
             }
@@ -290,6 +296,8 @@ impl Shell {
                         item_id: item.id.clone(),
                         title: item.title.clone(),
                         why: item.why,
+                        detail: item.detail.clone(),
+                        options: item.options.clone(),
                     },
                 });
             }
@@ -306,16 +314,11 @@ impl Shell {
         if self.triage.popup.is_open() {
             self.close_triage(cx);
         } else {
-            self.open_triage(None, window, cx);
+            self.open_triage(window, cx);
         }
     }
 
-    pub(crate) fn open_triage(
-        &mut self,
-        chat_id: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn open_triage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.triage.popup.get().is_none() {
             self.triage.rows = Exits::default();
         }
@@ -326,10 +329,6 @@ impl Shell {
             .get_or_insert_with(|| cx.focus_handle())
             .clone();
         window.focus(&focus, cx);
-        match chat_id {
-            Some(chat_id) => self.expand_triage_row(chat_id, cx),
-            None => self.collapse_triage_row(cx),
-        }
         if self.triage.ticker.is_none() {
             self.triage.ticker = Some(cx.spawn(async move |this, cx| {
                 loop {
@@ -349,30 +348,9 @@ impl Shell {
     }
 
     pub(crate) fn close_triage(&mut self, cx: &mut Context<Self>) {
-        self.collapse_triage_row(cx);
         if self.triage.popup.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.triage.popup);
         }
-        cx.notify();
-    }
-
-    fn expand_triage_row(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        let now = crate::motion::now();
-        let mut tween = crate::motion::Tween::at(0.0, now);
-        tween.retarget(
-            1.0,
-            crate::motion::MENU_IN,
-            crate::motion::reduced_motion(cx),
-            now,
-        );
-        self.triage.expanded = Some((chat_id, tween));
-        cx.notify();
-    }
-
-    fn collapse_triage_row(&mut self, cx: &mut Context<Self>) {
-        self.triage.expanded = None;
-        self.composer
-            .update(cx, |composer, cx| composer.close_ask(cx));
         cx.notify();
     }
 
@@ -382,10 +360,101 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.triage(cx).need(&chat_id).is_some() {
-            self.open_triage(Some(chat_id), window, cx);
+        let waits = match self.triage(cx).need(&chat_id) {
+            Some(kind) if kind.waits() => true,
+            Some(_) => return self.open_triage(window, cx),
+            None => false,
+        };
+        let bound = self.composer.read(cx).bound_chat_id(cx);
+        if waits && matches!(self.route, Route::Chat) && bound.as_deref() != Some(&chat_id) {
+            self.open_waiting(chat_id, cx);
         } else {
             self.open_thread(chat_id, cx);
+        }
+    }
+
+    fn open_waiting(&mut self, key: String, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |composer, cx| composer.open_waiting(Some(key), cx));
+    }
+
+    pub(super) fn sync_waiting(&mut self, cx: &mut Context<Self>) {
+        let triage = self.triage_frame();
+        let items: Vec<WaitItem> = triage
+            .needs
+            .iter()
+            .filter(|row| row.kind.waits())
+            .map(|row| self.wait_item(row, cx))
+            .collect();
+        self.composer
+            .update(cx, |composer, cx| composer.set_waiting(items, cx));
+    }
+
+    fn wait_item(&self, row: &NeedRow, cx: &App) -> WaitItem {
+        let state = self.state.read(cx);
+        let chat = state.chats.iter().find(|chat| chat.id == row.chat_id);
+        let (kind, from) = match &row.kind {
+            NeedKind::Decision {
+                item_id,
+                why,
+                detail,
+                options,
+                ..
+            } => (
+                WaitKind::Decision {
+                    item_id: item_id.clone(),
+                    label: why.label(),
+                    detail: detail.clone(),
+                    options: options.clone(),
+                },
+                match chat {
+                    Some(_) => format!("Supervisor, from {}", self.triage_title(&row.chat_id, cx)),
+                    None => "Supervisor".into(),
+                },
+            ),
+            kind => {
+                let from = chat
+                    .and_then(|chat| self.chat_project(chat, cx))
+                    .unwrap_or_default();
+                let kind = match kind {
+                    NeedKind::PlanReady { task_id, steps } => WaitKind::Plan {
+                        task_id: Some(task_id.clone()),
+                        steps: steps.clone(),
+                    },
+                    NeedKind::Asking(Some(info)) if info.plan => WaitKind::Plan {
+                        task_id: None,
+                        steps: info.steps.clone(),
+                    },
+                    _ => WaitKind::Ask,
+                };
+                (kind, from)
+            }
+        };
+        WaitItem {
+            key: row.key(),
+            chat_id: row.chat_id.clone(),
+            title: self.need_title(row, cx),
+            from,
+            kind,
+        }
+    }
+
+    pub(super) fn on_waiting_action(&mut self, action: &WaitingAction, cx: &mut Context<Self>) {
+        match action {
+            WaitingAction::ApprovePlan {
+                chat_id,
+                target,
+                as_task,
+            } => self.approve_plan(chat_id, target.clone(), *as_task, cx),
+            WaitingAction::Decide { item_id, choice } => self.mutate(
+                serde_json::json!({
+                    "op": "resolveSupervisorItems",
+                    "answers": [{ "itemId": item_id, "choice": choice }],
+                }),
+                cx,
+            ),
+            WaitingAction::Open { decision: true, .. } => self.open_supervisor(cx),
+            WaitingAction::Open { chat_id, .. } => self.open_thread(chat_id.clone(), cx),
         }
     }
 
@@ -415,16 +484,6 @@ impl Shell {
             NeedKind::Task { .. } => "Untitled task".into(),
             _ => self.triage_title(&row.chat_id, cx),
         }
-    }
-
-    fn dismiss_decision(&mut self, item_id: &str, cx: &mut Context<Self>) {
-        self.mutate(
-            serde_json::json!({
-                "op": "resolveSupervisorItems",
-                "answers": [{ "itemId": item_id, "choice": "Dismissed" }],
-            }),
-            cx,
-        );
     }
 
     fn open_need(&mut self, chat_id: &str, kind: &NeedKind, cx: &mut Context<Self>) {
@@ -522,11 +581,11 @@ impl Shell {
     pub(super) fn render_triage_pill(
         &mut self,
         triage: &Triage,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
-        let (needs, running) = (triage.needs.len(), triage.running.len());
+        let needs = triage.needs.iter().filter(|row| !row.kind.waits()).count();
+        let running = triage.running.len();
         let mounted = self.triage.popup.get().is_some();
         if needs == 0 && running == 0 && !mounted {
             return None;
@@ -617,10 +676,10 @@ impl Shell {
                 if this.triage.popup.take_press_was_open() {
                     this.close_triage(cx);
                 } else {
-                    this.open_triage(None, window, cx);
+                    this.open_triage(window, cx);
                 }
             }));
-        let tray = mounted.then(|| self.render_triage_tray(triage, &theme, window, cx));
+        let tray = mounted.then(|| self.render_triage_tray(triage, &theme, cx));
         Some(
             div()
                 .relative()
@@ -704,7 +763,6 @@ impl Shell {
         &mut self,
         triage: &Triage,
         theme: &Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let popup = theme.for_popup();
@@ -716,21 +774,15 @@ impl Shell {
         let shown: Vec<ShownRow> = triage
             .needs
             .iter()
+            .filter(|row| !row.kind.waits())
             .map(|row| self.shown_row(row, self.need_meta(row, cx), cx))
             .collect();
         self.triage.rows.update(shown.clone(), reduced, now);
-        if self
-            .triage
-            .expanded
-            .as_ref()
-            .is_some_and(|(id, _)| !shown.iter().any(|row| &row.key == id))
-        {
-            self.triage.expanded = None;
-        }
+        let need_count = shown.len();
 
         let mut need_rows: Vec<AnyElement> = shown
             .iter()
-            .map(|row| self.render_need_row(row, &popup, window, cx))
+            .map(|row| self.render_need_row(row, &popup, cx))
             .collect();
         for (ix, row, tween) in self.triage.rows.leaving.clone() {
             animating = true;
@@ -745,11 +797,6 @@ impl Shell {
                 )
                 .into_any_element();
             need_rows.insert(ix.min(need_rows.len()), ghost);
-        }
-        if let Some((_, tween)) = &self.triage.expanded
-            && !tween.settled_at(now)
-        {
-            animating = true;
         }
         if need_rows.is_empty() {
             need_rows.push(empty_line(&popup, "Nothing needs you."));
@@ -892,7 +939,7 @@ impl Shell {
                     .child(section_heading(
                         &popup,
                         "Needs you",
-                        triage.needs.len(),
+                        need_count,
                         popup.accent,
                         unread.then(|| mark_all_read_button(&popup, "triage-mark-all-read", cx)),
                     ))
@@ -935,315 +982,37 @@ impl Shell {
         &mut self,
         row: &ShownRow,
         theme: &Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let expanded = self
-            .triage
-            .expanded
-            .as_ref()
-            .filter(|(id, _)| id == &row.key)
-            .map(|(_, tween)| tween.value_at(crate::motion::now()));
-        let chat_id = row.chat_id.clone();
         let key = row.key.clone();
-        let action: AnyElement = match &row.kind {
-            NeedKind::Failed
-            | NeedKind::Asking(None)
-            | NeedKind::Decision { .. }
-            | NeedKind::Task { .. } => {
-                let (target, kind) = (chat_id.clone(), row.kind.clone());
-                let open = popover::btn_primary(theme, "Open")
-                    .id(SharedString::from(format!("triage-open-{key}")))
-                    .debug_selector({
-                        let id = key.clone();
-                        move || format!("triage-open-{id}")
-                    })
-                    .role(gpui::Role::Button)
-                    .aria_label(format!("Open {}", row.title))
-                    .flex_none()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.close_triage(cx);
-                        this.open_need(&target, &kind, cx);
-                    }));
-                match &row.kind {
-                    NeedKind::Decision { item_id, .. } => {
-                        let item_id = item_id.clone();
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .child(
-                                popover::btn_ghost(
-                                    theme,
-                                    "Dismiss",
-                                    format!("triage-dismiss-{key}"),
-                                )
-                                .id(SharedString::from(format!("triage-dismiss-{key}")))
-                                .debug_selector({
-                                    let id = key.clone();
-                                    move || format!("triage-dismiss-{id}")
-                                })
-                                .role(gpui::Role::Button)
-                                .aria_label(format!("Dismiss {}", row.title))
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.dismiss_decision(&item_id, cx);
-                                    },
-                                )),
-                            )
-                            .child(open)
-                            .into_any_element()
-                    }
-                    _ => open.into_any_element(),
-                }
-            }
-            kind => {
-                let target = chat_id.clone();
-                let label = if kind.plan() { "Review" } else { "Answer" };
-                let open = expanded.is_some();
-                div()
-                    .id(SharedString::from(format!("triage-expand-{chat_id}")))
-                    .debug_selector({
-                        let id = chat_id.clone();
-                        move || format!("triage-expand-{id}")
-                    })
-                    .role(gpui::Role::Button)
-                    .aria_label(format!("{label} {}", row.title))
-                    .aria_expanded(open)
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .h(px(28.0))
-                    .px(px(10.0))
-                    .rounded(px(8.0))
-                    .bg(theme.accent.opacity(0.12))
-                    .hover(|s| s.bg(theme.accent.opacity(0.18)))
-                    .cursor_pointer()
-                    .text_color(theme.accent)
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(label)
-                    .child(
-                        icon(icons::LUCIDE_CHEVRON_DOWN)
-                            .size(px(12.0))
-                            .text_color(theme.accent)
-                            .when(open, |el| {
-                                el.with_transformation(gpui::Transformation::rotate(
-                                    gpui::percentage(0.5),
-                                ))
-                            }),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        if this
-                            .triage
-                            .expanded
-                            .as_ref()
-                            .is_some_and(|(id, _)| id == &target)
-                        {
-                            this.collapse_triage_row(cx);
-                        } else {
-                            this.collapse_triage_row(cx);
-                            this.expand_triage_row(target.clone(), cx);
-                        }
-                    }))
-                    .into_any_element()
-            }
-        };
-        let (open_target, open_kind) = (chat_id.clone(), row.kind.clone());
-        let head = need_row_shell(row, theme)
-            .id(SharedString::from(format!("triage-need-{key}")))
+        let (target, kind) = (row.chat_id.clone(), row.kind.clone());
+        let open = popover::btn_primary(theme, "Open")
+            .id(SharedString::from(format!("triage-open-{key}")))
             .debug_selector({
                 let id = key.clone();
-                move || format!("triage-need-{id}")
+                move || format!("triage-open-{id}")
             })
+            .role(gpui::Role::Button)
+            .aria_label(format!("Open {}", row.title))
+            .flex_none()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.close_triage(cx);
+                this.open_need(&target, &kind, cx);
+            }));
+        let (open_target, open_kind) = (row.chat_id.clone(), row.kind.clone());
+        need_row_shell(row, theme)
+            .id(SharedString::from(format!("triage-need-{key}")))
+            .debug_selector(move || format!("triage-need-{key}"))
             .role(gpui::Role::Button)
             .aria_label(row.title.clone())
             .cursor_pointer()
+            .rounded(px(9.0))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.close_triage(cx);
                 this.open_need(&open_target, &open_kind, cx);
             }))
-            .child(action);
-        let body = expanded.and_then(|shown| {
-            let panel = match &row.kind {
-                NeedKind::PlanReady { task_id, steps } => Some(self.render_plan_panel(
-                    &chat_id,
-                    steps,
-                    PlanTarget::Task(task_id.clone()),
-                    theme,
-                    cx,
-                )),
-                NeedKind::Asking(Some(info)) if info.plan => {
-                    self.composer.read(cx).plan_answer(&chat_id).map(|answer| {
-                        self.render_plan_panel(
-                            &chat_id,
-                            &info.steps,
-                            PlanTarget::Question(answer),
-                            theme,
-                            cx,
-                        )
-                    })
-                }
-                NeedKind::Asking(_) => self.composer.update(cx, |composer, cx| {
-                    composer.render_ask_panel(&chat_id, window, cx)
-                }),
-                NeedKind::Failed | NeedKind::Decision { .. } | NeedKind::Task { .. } => None,
-            }?;
-            Some(
-                div()
-                    .pl(px(ROW_INDENT))
-                    .pr(px(10.0))
-                    .pb(px(10.0))
-                    .pt(px(2.0))
-                    .opacity(shown)
-                    .child(panel),
-            )
-        });
-        div()
-            .rounded(px(9.0))
-            .when(expanded.is_some(), |el| el.bg(theme.wash(0.05)))
-            .child(head)
-            .children(body)
-            .into_any_element()
-    }
-
-    fn render_plan_panel(
-        &mut self,
-        chat_id: &str,
-        steps: &[String],
-        target: PlanTarget,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let id = chat_id.to_owned();
-        let state = self.state.read(cx);
-        let (offer_task, busy, task_blocked) = match &target {
-            PlanTarget::Task(_) => (false, false, None),
-            PlanTarget::Question(answer) => (
-                true,
-                state.plan_approval(&answer.request_id).is_some(),
-                crate::tasks::chat_plan_blocker(state, chat_id),
-            ),
-        };
-        let task_off = busy || task_blocked.is_some();
-        div()
-            .debug_selector({
-                let id = id.clone();
-                move || format!("triage-plan-{id}")
-            })
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(popover::tracked_upper(&format!(
-                        "Plan · {} step{}",
-                        steps.len(),
-                        if steps.len() == 1 { "" } else { "s" }
-                    )))),
-            )
-            .children(steps.iter().enumerate().map(|(ix, step)| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .size(px(18.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .border_1()
-                            .border_color(theme.border_strong)
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from((ix + 1).to_string())),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .child(SharedString::from(step.clone())),
-                    )
-            }))
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_faint)
-                    .child("Nothing runs until you approve."),
-            )
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap(px(8.0))
-                    .pt(px(8.0))
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .when(offer_task, |row| {
-                        let id = id.clone();
-                        let chat = id.clone();
-                        let target = target.clone();
-                        row.child(
-                            div()
-                                .id(SharedString::from(format!("triage-approve-task-{id}")))
-                                .debug_selector(move || format!("triage-approve-task-{id}"))
-                                .role(gpui::Role::Button)
-                                .aria_label("Approve as Task")
-                                .aria_disabled(task_off)
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .rounded(px(8.0))
-                                .border_1()
-                                .border_color(theme.border_strong)
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(icon(icons::CHECKLIST).size(px(13.0)).text_color(theme.text))
-                                .child("Approve as Task")
-                                .when(task_off, |el| el.opacity(0.45))
-                                .when_some(task_blocked, |el, reason| {
-                                    el.tooltip(crate::settings::widgets::text_tooltip(reason))
-                                })
-                                .when(!task_off, |el| {
-                                    el.cursor_pointer()
-                                        .hover(|s| s.bg(theme.wash(0.05)))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.approve_plan(&chat, target.clone(), true, cx);
-                                        }))
-                                }),
-                        )
-                    })
-                    .child({
-                        let chat = id.clone();
-                        popover::btn_primary(theme, "Approve")
-                            .id(SharedString::from(format!("triage-approve-{id}")))
-                            .debug_selector(move || format!("triage-approve-{id}"))
-                            .role(gpui::Role::Button)
-                            .aria_label("Approve")
-                            .aria_disabled(busy)
-                            .when(busy, |el| el.opacity(0.45))
-                            .when(!busy, |el| {
-                                el.on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.approve_plan(&chat, target.clone(), false, cx);
-                                }))
-                            })
-                    }),
-            )
+            .child(open)
             .into_any_element()
     }
 
@@ -1388,26 +1157,12 @@ impl Shell {
             })
             .collect();
         self.triage.card_rows.update(rows.clone(), reduced, now);
-        let tray_mounted = self.triage.popup.get().is_some();
-        if !tray_mounted
-            && self
-                .triage
-                .expanded
-                .as_ref()
-                .is_some_and(|(id, _)| !rows.iter().any(|row| &row.key == id))
-        {
-            self.triage.expanded = None;
-        }
-        let mut animating = self
-            .triage
-            .expanded
-            .as_ref()
-            .is_some_and(|(_, tween)| !tween.settled_at(now));
+        let mut animating = false;
 
         let mut need_rows: Vec<AnyElement> = rows
             .iter()
             .take(CARD_ROWS)
-            .map(|row| self.render_card_need_row(row, tray_mounted, &theme, window, cx))
+            .map(|row| self.render_card_need_row(row, &theme, cx))
             .collect();
         for (ix, row, tween) in self.triage.card_rows.leaving.clone() {
             if ix >= CARD_ROWS {
@@ -1492,7 +1247,11 @@ impl Shell {
             })
             .collect();
 
-        let more = |id: &'static str, hidden: usize, label: String, cx: &mut Context<Self>| {
+        let more = |id: &'static str,
+                    hidden: usize,
+                    label: String,
+                    waiting: bool,
+                    cx: &mut Context<Self>| {
             (hidden > 0).then(|| {
                 div()
                     .id(id)
@@ -1510,29 +1269,47 @@ impl Shell {
                     .text_color(theme.text_muted)
                     .hover(|s| s.bg(theme.wash(0.05)).text_color(theme.text))
                     .child(SharedString::from(label))
-                    .child(popover::kbd_hint(
-                        &theme,
-                        &crate::settings::badge_combo(
-                            self.settings.keymap.get(ShortcutId::ToggleTray),
-                        ),
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_triage(None, window, cx)))
+                    .when(!waiting, |el| {
+                        el.child(popover::kbd_hint(
+                            &theme,
+                            &crate::settings::badge_combo(
+                                self.settings.keymap.get(ShortcutId::ToggleTray),
+                            ),
+                        ))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if waiting {
+                            this.composer
+                                .update(cx, |composer, cx| composer.open_waiting(None, cx));
+                        } else {
+                            this.open_triage(window, cx);
+                        }
+                    }))
                     .into_any_element()
             })
         };
+        let hidden_needs = triage.needs.len().saturating_sub(CARD_ROWS);
+        let hidden_wait = triage
+            .needs
+            .iter()
+            .skip(CARD_ROWS)
+            .all(|row| row.kind.waits());
         let needs_more = more(
             "card-needs-more",
-            triage.needs.len().saturating_sub(CARD_ROWS),
-            format!(
-                "{} more in the tray",
-                triage.needs.len().saturating_sub(CARD_ROWS)
-            ),
+            hidden_needs,
+            if hidden_wait {
+                format!("{hidden_needs} more waiting")
+            } else {
+                format!("{hidden_needs} more in the tray")
+            },
+            hidden_wait,
             cx,
         );
         let running_more = more(
             "card-running-more",
             triage.running.len().saturating_sub(CARD_ROWS),
             format!("{} more", triage.running.len().saturating_sub(CARD_ROWS)),
+            false,
             cx,
         );
 
@@ -1589,98 +1366,37 @@ impl Shell {
     fn render_card_need_row(
         &mut self,
         row: &ShownRow,
-        tray_mounted: bool,
         theme: &Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let chat_id = row.chat_id.clone();
         let key = row.key.clone();
-        let expanded = self
-            .triage
-            .expanded
-            .as_ref()
-            .filter(|(id, _)| id == &row.key)
-            .map(|(_, tween)| tween.value_at(crate::motion::now()));
-        let action: AnyElement = match &row.kind {
-            NeedKind::Failed
-            | NeedKind::Asking(None)
-            | NeedKind::Decision { .. }
-            | NeedKind::Task { .. } => {
-                let (target, kind) = (chat_id.clone(), row.kind.clone());
-                let open = card_button(theme, false)
-                    .id(SharedString::from(format!("card-open-{key}")))
-                    .role(gpui::Role::Button)
-                    .aria_label(format!("Open {}", row.title))
-                    .child("Open")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.open_need(&target, &kind, cx);
-                    }));
-                match &row.kind {
-                    NeedKind::Decision { item_id, .. } => {
-                        let item_id = item_id.clone();
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .child(
-                                card_button(theme, false)
-                                    .bg(gpui::transparent_black())
-                                    .text_color(theme.text_muted)
-                                    .id(SharedString::from(format!("card-dismiss-{key}")))
-                                    .role(gpui::Role::Button)
-                                    .aria_label(format!("Dismiss {}", row.title))
-                                    .child("Dismiss")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.dismiss_decision(&item_id, cx);
-                                    })),
-                            )
-                            .child(open)
-                            .into_any_element()
-                    }
-                    _ => open.into_any_element(),
-                }
-            }
-            kind => {
-                let target = chat_id.clone();
-                let label = if kind.plan() { "Review" } else { "Answer" };
-                card_button(theme, true)
-                    .id(SharedString::from(format!("card-expand-{chat_id}")))
-                    .role(gpui::Role::Button)
-                    .aria_label(format!("{label} {}", row.title))
-                    .aria_expanded(expanded.is_some())
-                    .child(label)
-                    .child(
-                        icon(icons::LUCIDE_CHEVRON_DOWN)
-                            .size(px(12.0))
-                            .text_color(theme.accent)
-                            .when(expanded.is_some(), |el| {
-                                el.with_transformation(gpui::Transformation::rotate(
-                                    gpui::percentage(0.5),
-                                ))
-                            }),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        let open = this
-                            .triage
-                            .expanded
-                            .as_ref()
-                            .is_some_and(|(id, _)| id == &target);
-                        this.collapse_triage_row(cx);
-                        if !open {
-                            this.expand_triage_row(target.clone(), cx);
-                        }
-                    }))
-                    .into_any_element()
-            }
+        let action = if row.kind.waits() {
+            let label = if row.kind.plan() { "Review" } else { "Answer" };
+            let target = row.key.clone();
+            card_button(theme, true)
+                .id(SharedString::from(format!("card-answer-{key}")))
+                .role(gpui::Role::Button)
+                .aria_label(format!("{label} {}", row.title))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.open_waiting(target.clone(), cx);
+                }))
+        } else {
+            let (target, kind) = (row.chat_id.clone(), row.kind.clone());
+            card_button(theme, false)
+                .id(SharedString::from(format!("card-open-{key}")))
+                .role(gpui::Role::Button)
+                .aria_label(format!("Open {}", row.title))
+                .child("Open")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.open_need(&target, &kind, cx);
+                }))
         };
         let tint = need_tint(&row.kind, theme);
-        let (open_target, open_kind) = (chat_id.clone(), row.kind.clone());
-        let head = card_row_shell(
+        let (open_target, open_kind) = (row.chat_id.clone(), row.kind.clone());
+        card_row_shell(
             theme,
             SharedString::from(format!("card-need-{key}")),
             tint,
@@ -1693,49 +1409,8 @@ impl Shell {
         .cursor_pointer()
         .hover(|s| s.bg(theme.wash(0.05)))
         .on_click(cx.listener(move |this, _, _, cx| this.open_need(&open_target, &open_kind, cx)))
-        .child(action);
-        let body = expanded.filter(|_| !tray_mounted).and_then(|shown| {
-            let panel = match &row.kind {
-                NeedKind::PlanReady { task_id, steps } => Some(self.render_plan_panel(
-                    &chat_id,
-                    steps,
-                    PlanTarget::Task(task_id.clone()),
-                    theme,
-                    cx,
-                )),
-                NeedKind::Asking(Some(info)) if info.plan => {
-                    self.composer.read(cx).plan_answer(&chat_id).map(|answer| {
-                        self.render_plan_panel(
-                            &chat_id,
-                            &info.steps,
-                            PlanTarget::Question(answer),
-                            theme,
-                            cx,
-                        )
-                    })
-                }
-                NeedKind::Asking(_) => self.composer.update(cx, |composer, cx| {
-                    composer.render_ask_panel(&chat_id, window, cx)
-                }),
-                NeedKind::Failed | NeedKind::Decision { .. } | NeedKind::Task { .. } => None,
-            }?;
-            Some(
-                div()
-                    .pl(px(CARD_ROW_INDENT))
-                    .pr(px(6.0))
-                    .pb(px(6.0))
-                    .opacity(shown)
-                    .child(panel),
-            )
-        });
-        div()
-            .rounded(px(9.0))
-            .when(expanded.is_some() && !tray_mounted, |el| {
-                el.bg(theme.wash(0.04))
-            })
-            .child(head)
-            .children(body)
-            .into_any_element()
+        .child(action)
+        .into_any_element()
     }
 
     fn recent_card_rows(&self, cx: &App) -> Vec<(String, String, String, bool)> {
@@ -1806,7 +1481,6 @@ fn outlives_turn(state: &crate::state::AppState, chat_id: &str, now: DateTime<Ut
 
 const CARD_ROWS: usize = 3;
 const CARD_ROW_HEIGHT: f32 = 46.0;
-const CARD_ROW_INDENT: f32 = 21.0;
 
 fn need_tint(kind: &NeedKind, theme: &Theme) -> gpui::Hsla {
     match kind {
@@ -2254,10 +1928,22 @@ mod tests {
             default_harness: zeron_proto::HarnessId::Mock,
         };
         let window = cx.add_window(|_, cx| Shell::new(state, boot, cx));
-        let (needs, asker_meta, mut running) = window
+        let (needs, asker_meta, mut running, waiting) = window
             .update(cx, |shell, _, cx| {
                 let triage = shell.triage(cx);
-                let needs: Vec<String> = triage.needs.iter().map(NeedRow::key).collect();
+                let needs: Vec<String> = triage
+                    .needs
+                    .iter()
+                    .filter(|row| !row.kind.waits())
+                    .map(NeedRow::key)
+                    .collect();
+                let waiting: Vec<(String, WaitKind)> = triage
+                    .needs
+                    .iter()
+                    .filter(|row| row.kind.waits())
+                    .map(|row| shell.wait_item(row, cx))
+                    .map(|item| (item.key, item.kind))
+                    .collect();
                 let asker = triage.needs.iter().find(|row| row.chat_id == "asker");
                 let meta = asker.map(|row| shell.need_meta(row, cx));
                 let running: Vec<String> = triage
@@ -2265,13 +1951,27 @@ mod tests {
                     .iter()
                     .map(|row| row.chat_id.clone())
                     .collect();
-                (needs, meta, running)
+                (needs, meta, running, waiting)
             })
             .unwrap();
         running.sort();
         assert_eq!(
             needs,
-            ["asker", "decision-d1", "task-unsent", "task-reviewed"]
+            ["asker", "task-unsent", "task-reviewed"],
+            "a question whose details have not loaded stays in the tray"
+        );
+        assert_eq!(
+            waiting,
+            [(
+                "decision-d1".into(),
+                WaitKind::Decision {
+                    item_id: "d1".into(),
+                    label: "Spend",
+                    detail: String::new(),
+                    options: Vec::new(),
+                }
+            )],
+            "decisions wait at the composer, not in the titlebar tray"
         );
         assert!(
             asker_meta.is_some_and(|meta| meta.contains("from lead")),

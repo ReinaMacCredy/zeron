@@ -347,6 +347,7 @@ impl Shell {
                         | ComposerEvent::BackgroundStarted
                         | ComposerEvent::OpenChanges
                         | ComposerEvent::AskAnswered { .. }
+                        | ComposerEvent::Waiting(_)
                         | ComposerEvent::AnnotationsChanged(_)
                         | ComposerEvent::AnnotationHovered(_) => {}
                         ComposerEvent::OpenTask(task_id) => {

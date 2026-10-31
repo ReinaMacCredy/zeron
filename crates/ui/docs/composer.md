@@ -76,7 +76,7 @@ When Claude Code's plan is ready, it arrives in the transcript as a card with it
 
 ![A plan card waiting for your approval](plan-card.jpg)
 
-The Cmd+I tray and the **Needs you** card on New chat offer the same **Approve** and **Approve as Task**. On Codex and OpenCode, Plan has the agent write a plan and change nothing, with no approval step, and the send button keeps its arrow.
+The **Waiting** card above the composer, for a plan from another chat, offers the same **Approve** and **Approve as Task**. On Codex and OpenCode, Plan has the agent write a plan and change nothing, with no approval step, and the send button keeps its arrow.
 
 ## Notices above the composer
 

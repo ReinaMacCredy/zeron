@@ -265,7 +265,12 @@ fn tween_progress(since: Option<Instant>, span: Duration, reduced: bool, now: In
     }
 }
 
-fn eased(spec: &motion::MotionSpec, since: Option<Instant>, reduced: bool, now: Instant) -> f32 {
+pub(super) fn eased(
+    spec: &motion::MotionSpec,
+    since: Option<Instant>,
+    reduced: bool,
+    now: Instant,
+) -> f32 {
     spec.progress(tween_progress(since, spec.total(), reduced, now))
 }
 
@@ -309,6 +314,10 @@ pub(super) fn pill_enter(since: Option<Instant>, reduced: bool, now: Instant) ->
     eased(&motion::FADE_QUICK, since, reduced, now)
 }
 
+pub(super) fn pill_exit(since: Instant, reduced: bool, now: Instant) -> f32 {
+    eased(&motion::MENU_OUT, Some(since), reduced, now)
+}
+
 pub(super) fn entering(pill: Stateful<Div>, t: f32) -> Stateful<Div> {
     pill.relative().top(px(PILL_RISE * (1.0 - t))).opacity(t)
 }
@@ -333,20 +342,24 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Option<AnyElement>, Option<AnyElement>) {
-        let (pills, roster) = self
+        let (mut pills, roster) = self
             .render_background_corner(window, cx)
             .unwrap_or_default();
+        let (waiting, waiting_card) = self.render_waiting(window, cx);
+        pills.extend(waiting);
         let row = (!pills.is_empty()).then(|| {
             div()
+                .relative()
                 .flex()
                 .flex_row()
                 .items_end()
                 .gap(px(6.0))
                 .children(pills)
                 .child(div().flex_1().min_w_0())
+                .child(self.waiting_row_probe())
                 .into_any_element()
         });
-        (roster, row)
+        (waiting_card.or(roster), row)
     }
 
     fn render_background_corner(
@@ -636,10 +649,16 @@ impl Composer {
 
     pub(super) fn open_roster(&mut self, cx: &mut Context<Self>) {
         self.background.roster.open(motion::now());
+        self.close_shells(cx);
+        self.close_waiting(cx);
+        cx.notify();
+    }
+
+    pub(super) fn close_shells(&mut self, cx: &mut Context<Self>) {
         if self.background.shells.begin_close() {
             popover::reap_popup(cx, |this: &mut Composer| &mut this.background.shells);
+            cx.notify();
         }
-        cx.notify();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -902,6 +921,8 @@ impl Composer {
                     return;
                 }
                 this.background.shells.open(());
+                this.close_roster(cx);
+                this.close_waiting(cx);
                 cx.notify();
             }));
         let opened = match self.background.detail.as_ref().map(|d| &d.target) {

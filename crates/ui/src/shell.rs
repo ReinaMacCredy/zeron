@@ -3898,6 +3898,7 @@ impl Shell {
                     request_id,
                     error,
                 } => this.on_ask_answered(chat_id, request_id, error.as_deref(), cx),
+                ComposerEvent::Waiting(action) => this.on_waiting_action(action, cx),
                 ComposerEvent::OpenTask(task_id) => this.defer_open_task(task_id.clone(), cx),
                 ComposerEvent::OpenChanges => this
                     .defer_in_active_window(cx, |shell, window, cx| {
@@ -7121,6 +7122,7 @@ impl Shell {
             | ComposerEvent::WorktreeSetup { .. }
             | ComposerEvent::OpenChanges
             | ComposerEvent::AskAnswered { .. }
+            | ComposerEvent::Waiting(_)
             | ComposerEvent::AnnotationsChanged(_)
             | ComposerEvent::AnnotationHovered(_) => {}
             ComposerEvent::OpenTask(task_id) => self.defer_open_task(task_id.clone(), cx),
@@ -8474,10 +8476,9 @@ impl Shell {
     ) {
         match event {
             crate::inbox::InboxEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
-            crate::inbox::InboxEvent::OpenTray => self
-                .defer_in_active_window(cx, |shell, window, cx| {
-                    shell.open_triage(None, window, cx)
-                }),
+            crate::inbox::InboxEvent::OpenTray => {
+                self.defer_in_active_window(cx, |shell, window, cx| shell.open_triage(window, cx))
+            }
             crate::inbox::InboxEvent::OpenTasks => self.open_tasks(cx),
             crate::inbox::InboxEvent::OpenTaskCenter(task_id) => {
                 self.open_task_center(task_id.clone(), cx)
@@ -11081,14 +11082,14 @@ impl Shell {
 
     /// The session titlebar, or on the Pull requests route the open pull
     /// request's own bar.
-    fn render_title_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         if !matches!(self.route, Route::PullRequests) {
-            return self.render_session_title_bar(window, cx);
+            return self.render_session_title_bar(cx);
         }
         self.drop_hidden_chat_action_menus();
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
         let triage = self.triage_frame();
-        let triage_pill = self.render_triage_pill(&triage, window, cx);
+        let triage_pill = self.render_triage_pill(&triage, cx);
         let inner = div()
             .size_full()
             .flex()
@@ -16514,7 +16515,12 @@ impl Shell {
     }
 
     fn render_inbox_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let needs = self.triage_frame().needs.len();
+        let needs = self
+            .triage_frame()
+            .needs
+            .iter()
+            .filter(|row| !row.kind.waits())
+            .count();
         let combo = crate::settings::badge_combo(self.settings.keymap.get(ShortcutId::ToggleTray));
         let page = self.inbox_page(cx);
         page.update(cx, |page, cx| page.set_triage(needs, combo, cx));
@@ -16624,7 +16630,10 @@ impl Shell {
         self.composer_dock
             .borrow_mut()
             .set_hero_anchor(HOME_HERO_ANCHOR);
-        let hero_floor = if self.composer.read(cx).config_panel_on_hero(cx) {
+        let composer = self.composer.read(cx);
+        let hero_floor = if composer.config_panel_on_hero(cx)
+            || (composer.waiting_open() && !has_selection)
+        {
             crate::composer::claude_config::HERO_PANEL_TOP
         } else {
             0.0
@@ -18977,6 +18986,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.page_backdrop = None;
         self.refresh_triage_frame(cx);
+        self.sync_waiting(cx);
         self.resolve_pending_child(cx);
         self.sync_open_children(cx);
         // Every repaint (state frame, input, or the clock firing) reschedules
@@ -20157,7 +20167,7 @@ impl Render for Shell {
                 } else {
                     Empty.into_any_element()
                 };
-                let title_bar = self.render_title_bar(window, cx);
+                let title_bar = self.render_title_bar(cx);
                 // Sidebar tone: a slightly lighter column behind the sidebar.
                 // Its width rides the same tween as the sidebar, so the tone
                 // melts away with the collapse instead of vanishing in a frame.
