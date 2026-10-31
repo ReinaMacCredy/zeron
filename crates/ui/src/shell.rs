@@ -3607,6 +3607,7 @@ pub struct Shell {
     /// Holds content geometry during masked open/close (including reversals),
     /// or resizes it during takeover. The outer mask has its own tween.
     right_content_tween: Option<WidthTween>,
+    last_pane_tool: Option<pane_tools::PaneTool>,
     /// Takeover mask transition. `from` also retains the conversation's content
     /// width while covered, even after expansion settles. Ordinary panel
     /// open/close keeps the upstream flex behavior.
@@ -4269,6 +4270,7 @@ impl Shell {
             right_edge_bounce: None,
             right_resize_edge: None,
             right_content_tween: None,
+            last_pane_tool: None,
             main_takeover_tween: None,
             right_pane_expanded: false,
             viewport_width: 1280.0,
@@ -17590,6 +17592,7 @@ impl Shell {
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
+                        this.last_pane_tool = Some(tool);
                         this.open_pane_tool(tool, window, cx);
                     }))
                     .child(icon(tool.icon()).size(px(12.0)).text_color(if is_active {

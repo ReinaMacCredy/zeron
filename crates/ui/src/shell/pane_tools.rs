@@ -144,8 +144,19 @@ impl Shell {
         self.defer_in_active_window(cx, |shell, window, cx| {
             if shell.right_pane_open(cx) && shell.resolved_right_active(cx) == RightSurface::Picker
             {
-                let tool = shell.pane_tools(cx)[0];
-                shell.open_pane_tool(tool, window, cx);
+                let tools = shell.pane_tools(cx);
+                let tool = shell
+                    .last_pane_tool
+                    .filter(|tool| tools.contains(tool))
+                    .or_else(|| {
+                        tools
+                            .first()
+                            .copied()
+                            .filter(|tool| matches!(tool, PaneTool::Changes | PaneTool::Files))
+                    });
+                if let Some(tool) = tool {
+                    shell.open_pane_tool(tool, window, cx);
+                }
             }
         });
     }
