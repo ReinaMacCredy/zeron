@@ -17735,8 +17735,9 @@ impl Shell {
             }
             let slim = slim[ix];
             let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
-            // Working chats and subagents swap their harness icon for the
-            // mini spinner; subagent liveness follows the doc's streaming tail.
+            // A running child keeps its kind icon and gains a dot; other tabs
+            // swap their icon for the mini spinner. Subagent liveness follows
+            // the doc's streaming tail.
             let browser_favicon = match surface {
                 RightSurface::Browser(id) => self
                     .browsers
@@ -17903,27 +17904,30 @@ impl Shell {
                         .size(px(20.0))
                         .rounded(px(5.0))
                         .bg(crate::theme::wash(0.08))
+                        .relative()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(if subagent_running {
-                            loaders::mini_glyph_spinner(
-                                format!("subagent-tab-{ix}"),
-                                2.0,
-                                theme.glyph,
-                                cx.entity_id(),
-                                cx,
-                            )
-                            .into_any_element()
+                        .child(icon(icon_path).size(px(12.0)).text_color(if is_active {
+                            theme.text
                         } else {
-                            icon(icon_path)
-                                .size(px(12.0))
-                                .text_color(if is_active {
-                                    theme.text
-                                } else {
-                                    theme.text_muted
-                                })
-                                .into_any_element()
+                            theme.text_muted
+                        }))
+                        .when(subagent_running, |badge| {
+                            badge.child(
+                                div()
+                                    .debug_selector(|| format!("right-surface-running-{ix}"))
+                                    .absolute()
+                                    .top(px(-1.0))
+                                    .right(px(-1.0))
+                                    .size(px(7.0))
+                                    .rounded_full()
+                                    .bg(chat_status_tone(
+                                        zeron_proto::ChatIndicator::Working,
+                                        &theme,
+                                    )
+                                    .2),
+                            )
                         })
                 } else {
                     div()
