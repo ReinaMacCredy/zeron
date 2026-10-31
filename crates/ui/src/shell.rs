@@ -371,6 +371,15 @@ fn right_panel_content_width(
     takeover_width.unwrap_or_else(|| stable_panel_content_width(target, transition))
 }
 
+#[derive(Clone)]
+struct RightChatLayer {
+    artwork: Option<std::sync::Arc<gpui::RenderImage>>,
+    settings: crate::settings::ChatBackground,
+    width: f32,
+    height: f32,
+    fade: f32,
+}
+
 fn conversation_width(viewport: f32, sidebar: f32, right: f32) -> f32 {
     (viewport - sidebar - right).max(0.0)
 }
@@ -3204,6 +3213,7 @@ pub struct Shell {
     /// blurred image, so sharing one tracker would restart the hero's fade.
     chat_artwork_ready: crate::new_thread_background_effects::FadeIn,
     page_backdrop: Option<crate::chat_background::Backdrop>,
+    right_chat_layer: Option<RightChatLayer>,
     /// Session-transient disclosure state, matching the Archived shelf.
     pub(super) pinned_open: bool,
     pub(super) sessions_open: bool,
@@ -4037,6 +4047,7 @@ impl Shell {
             new_thread_artwork_ready: Default::default(),
             chat_artwork_ready: Default::default(),
             page_backdrop: None,
+            right_chat_layer: None,
             archived_open: true,
             pinned_open: true,
             sessions_open: true,
@@ -16765,6 +16776,13 @@ impl Shell {
                     new_thread_background_height(self.viewport_height),
                 );
                 let fade = chat_artwork_opacity * dock_frame.transcript();
+                self.right_chat_layer = Some(RightChatLayer {
+                    artwork: chat_artwork.clone(),
+                    settings: chat_background,
+                    width: full_width,
+                    height,
+                    fade,
+                });
                 let backdrop = (self.settings.inset_shell && has_selection).then(|| {
                     crate::chat_background::Backdrop::chat(
                         chat_artwork.clone(),
@@ -17571,6 +17589,28 @@ impl Shell {
         // (translucent over the frost; solid otherwise). The resize grabber
         // lives outside this clipped container, on the root layout's seam.
         let panel_bg = theme.panel_bg();
+        // The conversation column clips the chat background at its edge, so
+        // a pane holding a chat paints the rest of that layer itself.
+        let chat_layer = matches!(
+            self.resolved_right_active(cx),
+            RightSurface::Sidechat(_) | RightSurface::Subagent(_)
+        )
+        .then(|| self.right_chat_layer.clone())
+        .flatten()
+        .map(|layer| {
+            let pane = self.right_visible_width(cx);
+            div().absolute().top_0().left(px(pane - layer.width)).child(
+                crate::chat_background::layer(
+                    layer.artwork,
+                    layer.settings,
+                    Some(layer.width),
+                    layer.height,
+                    theme.bg,
+                    layer.fade,
+                    None,
+                ),
+            )
+        });
         let panel = div()
             .id("right-pane-focus")
             .debug_selector(|| "right-pane".into())
@@ -17598,7 +17638,9 @@ impl Shell {
                 el.rounded_tr(px(corner)).rounded_br(px(corner))
             })
             .when(!self.settings.inset_shell, |el| el.bg(panel_bg))
+            .relative()
             .overflow_hidden()
+            .children(chat_layer)
             // The titlebar is a glass overlay over the full-height content
             // row; the panel's own chrome starts below it.
             .when(
@@ -19898,6 +19940,7 @@ impl Render for Shell {
                         cx,
                     )
                 });
+                self.right_chat_layer = None;
                 let main = if matches!(self.route, Route::Terminal) {
                     self.render_terminal_column(column, window, cx)
                 } else {

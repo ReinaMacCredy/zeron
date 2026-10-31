@@ -44,7 +44,7 @@ impl SidecarPart {
     fn icon(self) -> &'static str {
         match self {
             Self::Workspace => icons::ASTRA_LAPTOP,
-            Self::Beside => icons::BOT,
+            Self::Beside => icons::CHAT_ROUND_LINE,
             Self::Actions => icons::PLAY,
         }
     }
