@@ -222,6 +222,15 @@ final class HostPageViewController: UIViewController, UICollectionViewDelegate {
     }
 }
 
+extension UIViewController {
+    func presentPageSheet(_ page: UIViewController) {
+        let nav = UINavigationController(rootViewController: page)
+        page.navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak nav] _ in nav?.dismiss(animated: true) })
+        if let s = nav.sheetPresentationController { s.detents = [.large()]; s.prefersGrabberVisible = true }
+        present(nav, animated: true)
+    }
+}
+
 private extension HostRow {
     var isText: Bool {
         if case .text = kind { return true }

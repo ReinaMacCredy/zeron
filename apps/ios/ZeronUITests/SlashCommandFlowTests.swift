@@ -106,6 +106,15 @@ final class SlashCommandFlowTests: XCTestCase {
         XCTAssertFalse(again.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'You: /rename'")).firstMatch.exists, "never sent as a turn")
     }
 
+    func testTypedUsageOpensTheUsagePageInsteadOfAClaudeCard() {
+        let (app, input) = open("chat-deploy")
+        input.typeText("/usage")
+        app.buttons["composer-send"].tap()
+        XCTAssertTrue(app.navigationBars["Usage"].waitForExistence(timeout: 5), "a typed /usage opens Zeron's Usage page")
+        snapshot(app, "slash-usage-typed")
+        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'You: /usage'")).firstMatch.exists, "never sent as a turn")
+    }
+
     func testZeronModelOpensTheModelChip() {
         let (app, input) = open("chat-agents")
         input.typeText("/mod")

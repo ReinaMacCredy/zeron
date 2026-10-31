@@ -233,6 +233,11 @@ pub fn is_claude_card_command(text: String, skills: Vec<String>) -> bool {
 }
 
 #[uniffi::export]
+pub fn opens_usage_page(text: String, skills: Vec<String>) -> bool {
+    card_command(&text, &skills) == Some(zeron_proto::app_commands::ClaudeCardCommand::Usage)
+}
+
+#[uniffi::export]
 impl CoreClient {
     pub async fn run_claude_card(
         &self,

@@ -529,6 +529,16 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     func textViewDidBeginEditing(_ textView: UITextView) {
         updateMode(animated: true)
         onFocusChange?(true)
+        prefetchInvocations()
+    }
+
+    private func prefetchInvocations() {
+        guard let catalog = invocationCatalog else { return }
+        Task { _ = await catalog(true) }
+        Task { [weak self] in
+            guard let found = await catalog(false) else { return }
+            self?.slashCatalog = found
+        }
     }
 
     func textViewDidEndEditing(_ textView: UITextView) {

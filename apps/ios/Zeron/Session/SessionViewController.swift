@@ -196,6 +196,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             // An immediate send (new turn, steer, stop-and-send) gets the
             // desktop runway; a message queued behind a live turn keeps the
             // live turn's runway and just follows.
+            if self.source.runsClaudeCode, opensUsagePage(text: text, skills: self.source.skillNames) {
+                DispatchQueue.main.async { self.composer.resignFirstResponder() }
+                self.openUsage()
+                return .sent
+            }
             if self.source.runsClaudeCode, isClaudeCardCommand(text: text, skills: self.source.skillNames) {
                 DispatchQueue.main.async { self.composer.resignFirstResponder() }
                 self.source.runClaudeCard(text)
@@ -799,10 +804,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
     private func openUsage() {
         guard let page = source.usagePage() else { return }
-        let nav = UINavigationController(rootViewController: page)
-        page.navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak nav] _ in nav?.dismiss(animated: true) })
-        if let s = nav.sheetPresentationController { s.detents = [.large()]; s.prefersGrabberVisible = true }
-        present(nav, animated: true)
+        presentPageSheet(page)
     }
 
     private func confirmBranch(_ offer: BranchOffer) {

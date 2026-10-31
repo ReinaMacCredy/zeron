@@ -25,7 +25,7 @@ final class CoreSessionSource: SessionSource {
     private var modelsKey = ""
     private var profiles: [ProfileRow] = []
     private var profilesFor: ChatConfig?
-    private var invocationCatalogs: [String: InvocationCatalog] = [:]
+    private let invocationCatalogs = InvocationCatalogs()
     private weak var contextSheet: ContextSheetViewController?
     private let reviewSheets = NSHashTable<AnyObject>.weakObjects()
 
@@ -761,9 +761,7 @@ final class CoreSessionSource: SessionSource {
         if let permission = write.permission { setConfig { $0.access = permission } }
     }
 
-    var skillNames: [String] {
-        invocationCatalogs.filter { $0.key.hasSuffix("|true") }.values.flatMap { $0.entries.map(\.name) }
-    }
+    var skillNames: [String] { invocationCatalogs.skillNames }
 
     func runClaudeCard(_ text: String) {
         let skills = skillNames
@@ -926,11 +924,9 @@ final class CoreSessionSource: SessionSource {
     @MainActor
     func invocationCatalog(skill: Bool) async -> InvocationCatalog? {
         let harness = app?.row(chatId)?.harness ?? "claude-code"
-        let key = "\(hostDevice)|\(harness)|\(skill)"
-        if let hit = invocationCatalogs[key] { return hit }
-        let found = await client.invocationCatalog(deviceId: hostDevice, harness: harness, chatId: chatId, spaceId: nil, skill: skill)
-        if found.warning == nil { invocationCatalogs[key] = found }
-        return found
+        return await invocationCatalogs.get("\(hostDevice)|\(harness)|\(skill)") { [client, hostDevice, chatId] in
+            await client.invocationCatalog(deviceId: hostDevice, harness: harness, chatId: chatId, spaceId: nil, skill: skill)
+        }
     }
 
     private static let images = NSCache<NSString, UIImage>()
