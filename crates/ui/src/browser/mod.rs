@@ -314,7 +314,6 @@ impl BrowserSurface {
             annotation: None,
             #[cfg(target_os = "macos")]
             resize_inset: gpui::px(0.0),
-            #[cfg(any(target_os = "macos", windows))]
             #[cfg(target_os = "macos")]
             file_root: None,
             _input_sub: input_sub,
@@ -374,8 +373,6 @@ impl BrowserSurface {
         }
     }
 
-    /// Crop a GPUI overlay out of both native painting and native hit testing.
-    #[cfg(any(target_os = "macos", windows))]
     pub fn set_presentation(&mut self, presentation: Presentation, cx: &mut Context<Self>) {
         if self.presentation == presentation {
             return;
