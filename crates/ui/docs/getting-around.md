@@ -13,7 +13,7 @@ The narrow strip on the left switches between Zeron's pages. Hover a button to s
 | **Tasks** | The [Tasks](zeron://tasks) page. A number counts the tasks you captured and have not seen yet. |
 | **Pull requests** | The [Pull requests](zeron://pull-requests) board. |
 
-What needs you right now is not on the rail: the pill on the right of the titlebar counts it, and Cmd+I opens its tray. See **Needs you and running** below.
+What needs you right now is not on the rail: questions, plans and decisions wait in the **Waiting** pill above the composer, and the pill on the right of the titlebar counts the rest, with Cmd+I for its tray. See **Needs you and running** below.
 
 Further down the rail:
 
@@ -35,14 +35,14 @@ With the sidebar hidden, move the pointer just right of the app rail and it slid
 
 ## Needs you and running
 
-The pill on the right of the titlebar counts the threads that need you and the ones running, for example **2 need you · 1 running**. With nothing waiting it reads only the running count, and with nothing at all it is hidden.
+Questions from other chats, plans waiting for your OK and Supervisor decisions wait in the **? N Waiting** pill above the composer, where you answer them without leaving the chat you are in. See [When an agent asks](zeron://docs/agent-questions).
+
+The pill on the right of the titlebar counts the rest: threads that failed, Tasks whose message did not send or that are ready to review, and the ones running, for example **1 need you · 1 running**. With nothing failed or waiting it reads only the running count, and with nothing at all it is hidden.
 
 Click it or press Cmd+I to open its tray:
 
-![The Cmd+I tray: Supervisor on top, then Needs you with a question open in place](triage-tray.jpg)
-
 - The top row, **Supervisor**, sums up what is going on and opens the [Supervisor](zeron://docs/supervisor) chat.
-- **Needs you** lists each thread that asks a question, has a plan waiting for your OK, or failed. **Answer** and **Review** open the question or the plan right in the tray, so you answer without leaving the chat you are in; **Open** opens the thread.
+- **Needs you** lists each thread that failed and each Task that waits on you. **Open** opens it.
 - **Running** lists each thread that works, with its subagents under it.
 - **History** opens the Inbox and **Tasks** opens Tasks.
 

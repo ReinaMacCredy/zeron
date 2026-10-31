@@ -10,7 +10,7 @@ The line under the title reads **History: what your agents asked, finished and f
 
 ## Needs you right now
 
-While anything needs you, a banner under the title reads, for example, **2 things need you right now.** Click **Open tray ⌘I** to answer them in the tray. The banner is hidden when nothing needs you.
+While a thread failed or a Task waits on you, a banner under the title reads, for example, **2 things need you right now.** Click **Open tray ⌘I** to open them from the tray. Questions, plans and decisions wait in the **Waiting** pill above the composer instead. The banner is hidden when nothing needs you.
 
 Pull requests that need you are on the [Pull requests](zeron://pull-requests) page.
 

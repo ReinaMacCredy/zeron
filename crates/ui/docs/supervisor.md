@@ -50,7 +50,7 @@ The header shows the shield, **Supervisor**, a gear button, and the filter tabs.
 
 Only **Stopped**, **Off** and **Couldn't start** tint the card, because they need you to act. When a wake arrives, the dot flashes amber and settles back, and when the state changes the card fades to the new one.
 
-The rail has no Supervisor button. Each open decision is also a row under **Needs you** in the Cmd+I tray, with **Supervisor**, its reason (**Decision**, **Goal** or **Spend**) and the chat that raised it, and it counts in the titlebar pill. Click the row to open this page.
+The rail has no Supervisor button. Each open decision is also a tab in the **Waiting** card above the composer, with its reason (**Decision**, **Goal** or **Spend**), **Supervisor** and the chat that raised it. Pick an option there (number keys work) or **Dismiss** it, or click **Open Supervisor** to open this page.
 
 ### Window width
 

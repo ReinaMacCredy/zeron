@@ -16,7 +16,7 @@ A notification fires when a chat you started changes state, when Zeron loses its
 | Agent CLI updates are ready | "1 agent update available", or "3 agent updates available" for several |
 | An agent offers a model it did not list before | "New model available" or "New models available", with the agent and model names |
 
-On macOS, click a chat's banner to open that chat. When the chat still needs you, the banner opens the Cmd+I tray with that chat's row open instead, so you can answer it where you are. The Supervisor's banner opens the [Supervisor](zeron://docs/supervisor) page. On Linux, banners go through `notify-send` and clicking them does not open anything in Zeron. Windows shows no banners yet; the sounds still play there.
+On macOS, click a chat's banner to open that chat. When the chat still asks you something or has a plan waiting, the banner opens the **Waiting** card above the composer on that chat's tab instead, so you can answer it where you are; a failed chat opens the Cmd+I tray. The Supervisor's banner opens the [Supervisor](zeron://docs/supervisor) page. On Linux, banners go through `notify-send` and clicking them does not open anything in Zeron. Windows shows no banners yet; the sounds still play there.
 
 Only chats you opened yourself notify you. Side chats, delegated child threads, and the voice session stay quiet. A side chat's or child thread's status shows beside its parent chat, in the **Live state** column under **Beside this thread**.
 

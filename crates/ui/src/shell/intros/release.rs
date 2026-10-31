@@ -21,8 +21,9 @@ const PLAN_APPROVE_TASK: &str = "plan-approve-task";
 const CHILD_PANE_TABS: &str = "child-pane-tabs";
 const ANDROID_PARITY: &str = "android-parity";
 const SETTINGS_CLOSE: &str = "settings-close";
+const ANSWER_PILL: &str = "answer-pill";
 
-pub(super) const VISUALS: [(&str, f32, f32); 19] = [
+pub(super) const VISUALS: [(&str, f32, f32); 20] = [
     (CLAUDE_CONFIG, 7.0, 3.4),
     (COMMAND_CARDS, 6.6, 4.5),
     (COMPACTION_CARD, 7.6, 5.4),
@@ -42,6 +43,7 @@ pub(super) const VISUALS: [(&str, f32, f32); 19] = [
     (CHILD_PANE_TABS, 7.0, 4.4),
     (ANDROID_PARITY, 6.8, 5.0),
     (SETTINGS_CLOSE, 4.4, 1.6),
+    (ANSWER_PILL, 7.0, 1.4),
 ];
 
 pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyElement {
@@ -65,6 +67,7 @@ pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyEleme
         CHILD_PANE_TABS => child_pane_tabs_visual(theme, t, reduced),
         ANDROID_PARITY => android_parity_visual(theme, t, reduced),
         SETTINGS_CLOSE => settings_close_visual(theme, t),
+        ANSWER_PILL => answer_pill_visual(theme, t, reduced),
         _ => div().into_any_element(),
     }
 }
@@ -2397,6 +2400,191 @@ fn triage_tray_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
         .gap(px(4.0))
         .child(pill)
         .child(tray)
+        .into_any_element()
+}
+
+fn question_mark(theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .size(px(12.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(theme.accent.opacity(0.8))
+        .text_size(px(8.5))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(theme.accent)
+        .child("?")
+}
+
+fn answer_pill_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
+    const OPEN_AT: f32 = 0.6;
+    const PICK_AT: f32 = 1.8;
+    const NEXT_AT: f32 = 2.3;
+    const DECIDE_AT: f32 = 3.7;
+    const GONE_AT: f32 = 4.2;
+    let shown = ramp(t, OPEN_AT, 220.0, motion::EASE_OUT)
+        * (1.0 - ramp(t, GONE_AT, 160.0, motion::EASE_IN));
+    let next = ramp(t, NEXT_AT, 200.0, motion::EASE_OUT);
+    let pill_out = ramp(t, GONE_AT + 0.1, 200.0, motion::EASE_IN);
+    let on_decision = t >= NEXT_AT;
+    let frame = |el: gpui::Div| {
+        el.flex_none()
+            .h(px(22.0))
+            .px(px(9.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded_full()
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(crate::settings::widgets::block_fill(theme))
+    };
+    let agents = frame(div()).child(running(theme, reduced)).child(text(
+        11.0,
+        theme.text_muted,
+        "Audit pstack \u{b7} Working",
+    ));
+    let waiting = frame(div())
+        .opacity(1.0 - pill_out)
+        .when(shown > 0.0, |el| el.border_color(theme.text_muted))
+        .child(question_mark(theme))
+        .child(text(
+            11.0,
+            theme.accent,
+            if on_decision { "1" } else { "2" },
+        ))
+        .child(text(11.0, theme.text_muted, "Waiting"));
+    let tab = |mark: gpui::AnyElement, label: &'static str, on: bool| {
+        div()
+            .flex_none()
+            .h(px(20.0))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .rounded(px(6.0))
+            .when(on, |el| el.bg(theme.wash(0.08)))
+            .child(mark)
+            .child(text(
+                10.5,
+                if on { theme.text } else { theme.text_muted },
+                label,
+            ))
+    };
+    let option = |n: &'static str, label: &'static str, on: bool| {
+        div()
+            .h(px(20.0))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .rounded(px(6.0))
+            .when(on, |el| el.bg(theme.accent.opacity(0.12)))
+            .child(key_chip(theme, n))
+            .child(text(
+                10.5,
+                if on { theme.text } else { theme.text_muted },
+                label,
+            ))
+    };
+    let shield = || glyph(icons::LUCIDE_SHIELD, 11.0, theme.text_muted).into_any_element();
+    let mut tabs = div().flex().items_center().gap(px(3.0));
+    if !on_decision {
+        tabs = tabs.child(tab(
+            question_mark(theme).into_any_element(),
+            "Pricing research",
+            true,
+        ));
+    }
+    tabs = tabs.child(tab(shield(), "Sidebar grouping", on_decision));
+    let body = if on_decision {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(text(9.5, theme.accent, "Decision \u{b7} Supervisor"))
+            .child(text(11.5, theme.text, "Pick the sidebar grouping"))
+            .child(option("1", "By project", t >= DECIDE_AT))
+            .child(option("2", "By last update", false))
+    } else {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(text(9.5, theme.accent, "Question"))
+            .child(text(11.5, theme.text, "Which provider first?"))
+            .child(option("1", "Stripe", t >= PICK_AT))
+            .child(option("2", "Paddle", false))
+    };
+    let slide = if on_decision { (1.0 - next) * 8.0 } else { 0.0 };
+    let card = div()
+        .w(px(280.0))
+        .relative()
+        .top(px((1.0 - shown) * 10.0))
+        .opacity(shown)
+        .flex()
+        .flex_col()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
+        .child(
+            div()
+                .h(px(28.0))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border)
+                .child(tabs.flex_1())
+                .child(text(10.5, theme.text_faint, "\u{d7}")),
+        )
+        .child(
+            div()
+                .px(px(10.0))
+                .py(px(6.0))
+                .child(div().relative().left(px(slide)).child(body)),
+        )
+        .child(
+            div()
+                .h(px(20.0))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .child(text(9.5, theme.text_faint, "Esc to answer later").flex_1())
+                .child(text(
+                    9.5,
+                    theme.text_muted,
+                    if on_decision {
+                        "Dismiss"
+                    } else {
+                        "Open thread"
+                    },
+                )),
+        );
+    let composer = div()
+        .w(px(300.0))
+        .h(px(28.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(crate::settings::widgets::block_fill(theme))
+        .child(text(11.0, theme.text_faint, "Do anything\u{2026}"));
+    div()
+        .h(px(196.0))
+        .flex()
+        .flex_col()
+        .justify_end()
+        .gap(px(5.0))
+        .child(card)
+        .child(div().flex().gap(px(5.0)).child(agents).child(waiting))
+        .child(composer)
         .into_any_element()
 }
 

@@ -2,6 +2,18 @@
 # must be listed in crates/docs/src/images.rs IMAGES. Order does not matter.
 
 [[entry]]
+version = "0.2.132"
+date = "Nov 1"
+hero_visual = "answer-pill"
+
+[[entry.features]]
+id = "answer-pill"
+title = "Answer what is waiting on you from the composer"
+description = "When another thread asks you something, the Supervisor needs a decision or a plan waits for approval, a \"? 2 Waiting\" pill joins the agent and shell pills above the composer. Click it for a card with one tab per item: answer the question, pick an option (number keys work) or Dismiss, or Approve the plan. The next item slides in, and the pill fades once nothing is left."
+details = "Esc, a click outside or another click on the pill closes the card and keeps what you typed. On New chat the card opens below the pill. The titlebar pill and the Cmd+I tray now hold what is running, failed threads and Task rows; on New chat the Needs you card's Answer and Review buttons open the same card."
+visual = "answer-pill"
+
+[[entry]]
 version = "0.2.131"
 date = "Oct 31"
 hero_visual = "triage-tray"
