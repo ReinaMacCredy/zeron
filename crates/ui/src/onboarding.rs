@@ -623,10 +623,16 @@ impl Onboarding {
                     .mt(px(20.0))
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted.opacity(0.8))
-                    .child(SharedString::from(format!(
-                        "Appearance follows your {}. Change it in Settings › Appearance.",
-                        if cfg!(target_os = "macos") { "Mac" } else { "system" }
-                    ))),
+                    .child(SharedString::from(match crate::appearance::mode(cx) {
+                        crate::appearance::AppearanceMode::System => format!(
+                            "Appearance follows your {}. Change it in Settings › Appearance.",
+                            if cfg!(target_os = "macos") { "Mac" } else { "system" }
+                        ),
+                        mode => format!(
+                            "Appearance is set to {}. Change it in Settings › Appearance.",
+                            mode.label()
+                        ),
+                    })),
             )
             .into_any_element()
     }
