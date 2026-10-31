@@ -18,6 +18,7 @@ use super::{Composer, ComposerEvent};
 use crate::icons::{self, icon};
 use crate::motion;
 use crate::popover::{self, Popup};
+use crate::shell::children::child_title;
 use crate::theme::Theme;
 
 const FRAMES: [u16; 8] = [189, 220, 90, 78, 45, 291, 306, 433];
@@ -1680,18 +1681,6 @@ fn stoppable_agents(agents: &[AgentRun], stoppable: bool) -> Vec<(String, bool)>
         .filter(|run| run.can_stop(stoppable))
         .map(|run| (run.part_id.clone(), run.delegated))
         .collect()
-}
-
-fn child_title(child: &Chat) -> String {
-    child
-        .title
-        .clone()
-        .filter(|title| !title.trim().is_empty())
-        .unwrap_or_else(|| {
-            crate::shell::children::ChildKind::of(child)
-                .label()
-                .to_owned()
-        })
 }
 
 fn child_run(child: &Chat) -> AgentRun {

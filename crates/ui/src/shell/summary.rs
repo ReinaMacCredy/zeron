@@ -1,6 +1,6 @@
 //! Astra's sidecar (paseo-fork `Sidecar.tsx` + `sidecar.css`) beside the transcript.
 
-use super::children::{ChildKind, ChildRef, child_mark};
+use super::children::{ChildKind, ChildRef, child_mark, child_title};
 use super::*;
 use crate::computer::{self, presence::PresenceTone, preview};
 use crate::files::client::FilesRequestContext;
@@ -848,11 +848,7 @@ impl Shell {
                     }
                 }
             };
-            let title = child
-                .title
-                .clone()
-                .filter(|title| !title.trim().is_empty())
-                .unwrap_or_else(|| kind.label().to_owned());
+            let title = child_title(child);
             let id = child.id.clone();
             let (mark, tint) = child_mark(child);
             section.entries.push(

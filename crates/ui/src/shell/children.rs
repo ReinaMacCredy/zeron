@@ -55,15 +55,16 @@ impl ChildKind {
 /// their kind's icon.
 pub(crate) fn child_mark(chat: &zeron_proto::Chat) -> (&'static str, Option<gpui::Hsla>) {
     match ChildKind::of(chat) {
-        ChildKind::Agent => {
-            let config = chat.config.as_ref();
-            crate::pickers::agent_brand_icon(
-                config.map(|config| config.harness),
-                config.and_then(|config| config.model.as_deref()),
-            )
-        }
+        ChildKind::Agent => crate::tasks::chat_brand(chat),
         kind => (kind.icon(), None),
     }
+}
+
+pub(crate) fn child_title(chat: &zeron_proto::Chat) -> String {
+    chat.title
+        .clone()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| ChildKind::of(chat).label().to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
