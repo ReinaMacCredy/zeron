@@ -346,6 +346,7 @@ impl Shell {
                         | ComposerEvent::OpenSidechat { .. }
                         | ComposerEvent::BackgroundStarted
                         | ComposerEvent::OpenChanges
+                        | ComposerEvent::AskAnswered { .. }
                         | ComposerEvent::AnnotationsChanged(_)
                         | ComposerEvent::AnnotationHovered(_) => {}
                         ComposerEvent::OpenTask(task_id) => {

@@ -65,7 +65,14 @@ enum TaskOrigin {
     },
     Plan {
         create: Option<serde_json::Value>,
+        approval: Option<PlanApproval>,
     },
+}
+
+pub(super) struct PlanApproval {
+    chat_id: String,
+    request_id: String,
+    restore_plan: bool,
 }
 
 impl TaskOrigin {
@@ -74,7 +81,7 @@ impl TaskOrigin {
             Self::Card { patch, .. } => patch.as_ref().map(
                 |patch| serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
             ),
-            Self::Plan { create } => create.clone(),
+            Self::Plan { create, .. } => create.clone(),
         }
     }
 }
@@ -151,14 +158,18 @@ impl Shell {
         &mut self,
         chat_id: &str,
         lead: crate::tasks::Orchestrate,
+        approval: Option<PlanApproval>,
         cx: &mut Context<Self>,
     ) {
         let state = self.state.read(cx);
-        let Some(chat) = state
-            .chats
-            .iter()
-            .find(|chat| chat.id == chat_id && crate::tasks::can_add_plan(state, chat))
-        else {
+        if let Some(reason) = crate::tasks::chat_plan_blocker(state, chat_id) {
+            if let Some(approval) = approval {
+                self.show_notice(crate::toast::ToastKind::Error, reason, cx);
+                self.plan_task_failed(&approval, cx);
+            }
+            return;
+        }
+        let Some(chat) = state.chats.iter().find(|chat| chat.id == chat_id) else {
             return;
         };
         let (task_id, create) = match crate::tasks::task_led_by(&state.tasks, chat_id)
@@ -174,7 +185,7 @@ impl Shell {
             }
         };
         self.assign_task(
-            TaskOrigin::Plan { create },
+            TaskOrigin::Plan { create, approval },
             &task_id,
             chat_id,
             true,
@@ -186,70 +197,180 @@ impl Shell {
     pub(crate) fn approve_plan(
         &mut self,
         chat_id: &str,
+        target: crate::plan_proposal::PlanTarget,
         as_task: bool,
-        answer: Option<crate::plan_proposal::PlanAnswer>,
         cx: &mut Context<Self>,
     ) {
-        let pending = zeron_proto::plan_of_chat(&self.state.read(cx).tasks, chat_id)
-            .filter(|task| task.plan_pending)
-            .map(|task| task.id.clone());
-        if let Some(task_id) = pending {
-            self.mutate(
-                serde_json::json!({ "op": "approvePlan", "taskId": task_id }),
-                cx,
-            );
+        let answer = match target {
+            crate::plan_proposal::PlanTarget::Task(task_id) => {
+                self.mutate(
+                    serde_json::json!({ "op": "approvePlan", "taskId": task_id }),
+                    cx,
+                );
+                return;
+            }
+            crate::plan_proposal::PlanTarget::Question(answer) => answer,
+        };
+        let state = self.state.read(cx);
+        if state.plan_approval(&answer.request_id).is_some() {
             return;
         }
-        let Some(answer) = answer.or_else(|| self.composer.read(cx).plan_answer(chat_id)) else {
+        if let Some(reason) = as_task
+            .then(|| crate::tasks::chat_plan_blocker(state, chat_id))
+            .flatten()
+        {
+            self.show_notice(crate::toast::ToastKind::Error, reason, cx);
             return;
-        };
-        self.composer.update(cx, |composer, cx| {
+        }
+        let request_id = answer.request_id.clone();
+        self.state.update(cx, |state, cx| {
+            state.begin_plan_approval(&request_id, chat_id, as_task);
+            cx.notify();
+        });
+        let sent = self.composer.update(cx, |composer, cx| {
             composer.answer_plan(chat_id, answer, !as_task, cx)
         });
-        self.leave_plan_mode(chat_id, as_task, cx);
+        if !sent {
+            self.end_plan_approval(&request_id, cx);
+        }
     }
 
-    fn leave_plan_mode(&mut self, chat_id: &str, then_task: bool, cx: &mut Context<Self>) {
-        let lead = crate::tasks::Orchestrate {
-            approve_plan: false,
-            ..Default::default()
+    pub(super) fn on_ask_answered(
+        &mut self,
+        chat_id: &str,
+        request_id: &str,
+        error: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let flight = self.state.read(cx).plan_approval(request_id);
+        if let Some(err) = error {
+            if flight.is_some() {
+                self.end_plan_approval(request_id, cx);
+            }
+            if self.composer.read(cx).bound_chat_id(cx).as_deref() != Some(chat_id) {
+                let title = self
+                    .state
+                    .read(cx)
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == chat_id)
+                    .map(crate::home::chat_title)
+                    .unwrap_or_default();
+                self.show_notice(
+                    crate::toast::ToastKind::Error,
+                    format!("Answer to {title} failed: {err}"),
+                    cx,
+                );
+            }
+            return;
+        }
+        let Some(as_task) = flight else {
+            return;
         };
-        let config = self
+        let leave = self.set_plan_mode(chat_id, false, cx);
+        let restore_plan = leave.is_some();
+        let (chat_id, request_id) = (chat_id.to_owned(), request_id.to_owned());
+        cx.spawn(async move |this, cx| {
+            let left = match leave {
+                Some(leave) => leave.await,
+                None => Ok(()),
+            };
+            this.update(cx, |shell, cx| match left {
+                Err(err) if as_task => {
+                    shell.show_notice(
+                        crate::toast::ToastKind::Error,
+                        format!("Could not leave plan mode: {err}"),
+                        cx,
+                    );
+                    shell.plan_task_failed(
+                        &PlanApproval {
+                            chat_id,
+                            request_id,
+                            restore_plan,
+                        },
+                        cx,
+                    );
+                }
+                Err(err) => tracing::warn!(error = %err, "leaving plan mode failed"),
+                Ok(()) if as_task => {
+                    let lead = crate::tasks::Orchestrate {
+                        approve_plan: false,
+                        ..Default::default()
+                    };
+                    let approval = PlanApproval {
+                        chat_id: chat_id.clone(),
+                        request_id,
+                        restore_plan,
+                    };
+                    shell.add_plan(&chat_id, lead, Some(approval), cx);
+                }
+                Ok(()) => {}
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn end_plan_approval(&mut self, request_id: &str, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            state.end_plan_approval(request_id);
+            cx.notify();
+        });
+    }
+
+    fn plan_task_failed(&mut self, approval: &PlanApproval, cx: &mut Context<Self>) {
+        self.end_plan_approval(&approval.request_id, cx);
+        if approval.restore_plan
+            && let Some(restore) = self.set_plan_mode(&approval.chat_id, true, cx)
+        {
+            cx.spawn(async move |_, _| {
+                if let Err(err) = restore.await {
+                    tracing::warn!(error = %err, "restoring plan mode failed");
+                }
+            })
+            .detach();
+        }
+    }
+
+    fn set_plan_mode(
+        &mut self,
+        chat_id: &str,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<(), String>>> {
+        let mut config = self
             .state
             .read(cx)
             .chats
             .iter()
             .find(|chat| chat.id == chat_id)
             .and_then(|chat| chat.config.clone())
-            .filter(|config| config.plan);
-        let Some(mut config) = config else {
-            if then_task {
-                self.add_plan(chat_id, lead, cx);
-            }
-            return;
-        };
-        config.plan = false;
+            .filter(|config| config.plan != on)?;
+        let engine = self.task_engine(cx)?;
+        let before = config.clone();
+        config.plan = on;
         let chat_id = chat_id.to_owned();
         self.state.update(cx, |state, cx| {
             state.apply_chat_config(&chat_id, config.clone());
             cx.notify();
         });
-        let Some(engine) = self.task_engine(cx) else {
-            return;
-        };
-        cx.spawn(async move |this, cx| {
+        Some(cx.spawn(async move |this, cx| {
             let params = serde_json::json!({
                 "op": "setChatConfig", "chatId": chat_id, "config": config,
             });
-            if let Err(err) = engine.client().call(methods::MUTATE, params).await {
-                tracing::warn!(error = %err, "leaving plan mode failed");
-            }
-            if then_task {
-                this.update(cx, |shell, cx| shell.add_plan(&chat_id, lead, cx))
-                    .ok();
-            }
-        })
-        .detach();
+            let result = engine.client().call(methods::MUTATE, params).await;
+            let Err(err) = result else {
+                return Ok(());
+            };
+            this.update(cx, |shell, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.apply_chat_config(&chat_id, before);
+                    cx.notify();
+                })
+            })
+            .ok();
+            Err(err.to_string())
+        }))
     }
 
     fn task_origin_failed(
@@ -269,9 +390,12 @@ impl Shell {
                     card.start_failed(task_id, cx);
                 }
             }),
-            TaskOrigin::Plan { create } => {
+            TaskOrigin::Plan { create, approval } => {
                 if create.is_some() && !save_failed {
                     self.delete_task(task_id, cx);
+                }
+                if let Some(approval) = approval {
+                    self.plan_task_failed(approval, cx);
                 }
             }
         }
@@ -1179,7 +1303,7 @@ impl Shell {
                 );
             }
             TaskCenterEvent::AddPlan(chat_id) => {
-                return self.add_plan(chat_id, crate::tasks::Orchestrate::default(), cx);
+                return self.add_plan(chat_id, crate::tasks::Orchestrate::default(), None, cx);
             }
             TaskCenterEvent::Watch {
                 task_id: Some(task_id),
@@ -1362,4 +1486,253 @@ pub(super) fn tree_key(state: &crate::state::AppState, id: &str) -> String {
         .find(|task| task.id == id && !task.deleted)
         .and_then(|task| task.chat_id.clone())
         .unwrap_or_else(|| id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan_proposal::{PlanAnswer, PlanTarget};
+    use gpui::{AppContext, TestAppContext, VisualTestContext};
+    use zeron_rpc::{ClientFrame, ServerFrame};
+
+    struct Wire {
+        runtime: tokio::runtime::Runtime,
+        frames: tokio::sync::mpsc::Receiver<String>,
+        replies: tokio::sync::mpsc::Sender<String>,
+    }
+
+    impl Wire {
+        fn take(&mut self, cx: &mut VisualTestContext) -> Vec<ClientFrame> {
+            for _ in 0..4 {
+                self.runtime.block_on(async {
+                    for _ in 0..8 {
+                        tokio::task::yield_now().await;
+                    }
+                });
+                cx.run_until_parked();
+            }
+            std::iter::from_fn(|| self.frames.try_recv().ok())
+                .map(|frame| serde_json::from_str::<ClientFrame>(&frame).unwrap())
+                .filter(|frame| {
+                    matches!(
+                        frame.method.as_deref(),
+                        Some(methods::MUTATE | methods::QUEUE_COMMAND)
+                    )
+                })
+                .collect()
+        }
+
+        fn reply(&self, frame: &ClientFrame, err: Option<&str>) {
+            let reply = ServerFrame {
+                id: frame.id,
+                ok: err.is_none().then(|| serde_json::json!({})),
+                err: err.map(str::to_owned),
+                ..Default::default()
+            };
+            self.replies
+                .try_send(serde_json::to_string(&reply).unwrap())
+                .unwrap();
+        }
+    }
+
+    fn chat(id: &str, device: &str) -> zeron_proto::Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "deviceId": device, "cwd": "/repo", "archived": false,
+            "createdAt": Utc::now(),
+            "config": { "harness": "claude-code", "sandbox": "workspace-write", "plan": true },
+        }))
+        .unwrap()
+    }
+
+    fn setup(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Shell>,
+        &mut VisualTestContext,
+        Wire,
+        tempfile::TempDir,
+    ) {
+        let (out, frames) = tokio::sync::mpsc::channel::<String>(256);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(256);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::motion::set_reduced_motion(cx, true);
+            crate::app_menus::init(cx);
+            crate::terminal::panel::init(cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let client = {
+            let _guard = runtime.enter();
+            zeron_rpc::RpcClient::new(out, inbound)
+        };
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(client));
+            state.local_device_id = Some("mac".into());
+            state.chats = vec![chat("c", "mac"), chat("far", "pc")];
+        });
+        let boot = EngineBootConfig {
+            data_dir: dir.path().into(),
+            ipc_port: 0,
+            edge_url: "http://127.0.0.1:1".into(),
+            edge_token: None,
+            org_id: None,
+            workos_client_id: None,
+            default_harness: zeron_proto::HarnessId::Mock,
+        };
+        let (shell, cx) = cx.add_window_view(|_, cx| Shell::new(state, boot, cx));
+        let mut wire = Wire {
+            runtime,
+            frames,
+            replies,
+        };
+        wire.take(cx);
+        (shell, cx, wire, dir)
+    }
+
+    fn question(request_id: &str) -> PlanTarget {
+        PlanTarget::Question(PlanAnswer {
+            request_id: request_id.into(),
+            question_id: "plan".into(),
+        })
+    }
+
+    fn approve(
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+        chat_id: &str,
+        target: PlanTarget,
+        as_task: bool,
+    ) {
+        shell.update(cx, |shell, cx| {
+            shell.approve_plan(chat_id, target, as_task, cx)
+        });
+    }
+
+    fn plan_on(shell: &Entity<Shell>, cx: &mut VisualTestContext, chat_id: &str) -> bool {
+        shell.read_with(cx, |shell, cx| {
+            shell
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .find(|chat| chat.id == chat_id)
+                .and_then(|chat| chat.config.as_ref())
+                .is_some_and(|config| config.plan)
+        })
+    }
+
+    fn flight(shell: &Entity<Shell>, cx: &mut VisualTestContext, request_id: &str) -> Option<bool> {
+        shell.read_with(cx, |shell, cx| {
+            shell.state.read(cx).plan_approval(request_id)
+        })
+    }
+
+    fn ops(frames: &[ClientFrame]) -> Vec<String> {
+        frames
+            .iter()
+            .map(|frame| match frame.method.as_deref() {
+                Some(methods::QUEUE_COMMAND) => format!(
+                    "answer {}",
+                    frame.params["command"]["requestId"].as_str().unwrap_or("?")
+                ),
+                _ => frame.params["op"].as_str().unwrap_or("?").to_owned(),
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn approve_answers_the_clicked_plan_even_when_the_chat_leads_a_waiting_task(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = wire.runtime.enter();
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.tasks = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "t1", "chatId": "c", "mode": "orchestrated", "planPending": true,
+                    }))
+                    .unwrap(),
+                ];
+            })
+        });
+
+        approve(&shell, cx, "c", question("req-1"), true);
+        assert!(
+            wire.take(cx).is_empty(),
+            "a Task lead cannot become another Task"
+        );
+
+        approve(&shell, cx, "c", question("req-1"), false);
+        let frames = wire.take(cx);
+        assert_eq!(ops(&frames), ["answer req-1"]);
+        let answers = &frames[0].params["command"]["answers"];
+        assert_eq!(answers[0]["labels"][0], "Yes", "{answers}");
+
+        approve(&shell, cx, "c", PlanTarget::Task("t1".into()), false);
+        let frames = wire.take(cx);
+        assert_eq!(ops(&frames), ["approvePlan"]);
+        assert_eq!(frames[0].params["taskId"], "t1");
+    }
+
+    #[gpui::test]
+    fn approve_as_task_leaves_plan_mode_only_once_answered_and_restores_it_when_the_task_fails(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = wire.runtime.enter();
+
+        approve(&shell, cx, "far", question("req-far"), true);
+        assert!(wire.take(cx).is_empty(), "another device's chat");
+        assert_eq!(flight(&shell, cx, "req-far"), None);
+
+        approve(&shell, cx, "c", question("req-2"), true);
+        let frames = wire.take(cx);
+        assert_eq!(ops(&frames), ["answer req-2"]);
+        assert_eq!(flight(&shell, cx, "req-2"), Some(true));
+        wire.reply(&frames[0], Some("host gone"));
+        assert!(
+            wire.take(cx).is_empty(),
+            "a failed answer changes nothing else"
+        );
+        assert_eq!(flight(&shell, cx, "req-2"), None);
+        assert!(plan_on(&shell, cx, "c"));
+
+        approve(&shell, cx, "c", question("req-2"), true);
+        let frames = wire.take(cx);
+        assert_eq!(ops(&frames), ["answer req-2"]);
+        wire.reply(&frames[0], None);
+        let frames = wire.take(cx);
+        assert_eq!(ops(&frames), ["setChatConfig"]);
+        assert_ne!(frames[0].params["config"]["plan"], true);
+        assert!(!plan_on(&shell, cx, "c"));
+        wire.reply(&frames[0], None);
+        let frames = wire.take(cx);
+        assert_eq!(ops(&frames), ["createTask"]);
+        wire.reply(&frames[0], None);
+        let frames = wire.take(cx);
+        assert_eq!(ops(&frames), ["assignTask"]);
+        assert_eq!(flight(&shell, cx, "req-2"), Some(true));
+        wire.reply(&frames[0], Some("no lead"));
+        let frames = wire.take(cx);
+        let mut seen = ops(&frames);
+        seen.sort();
+        assert_eq!(seen, ["deleteTask", "setChatConfig"]);
+        assert_eq!(flight(&shell, cx, "req-2"), None);
+        assert!(plan_on(&shell, cx, "c"), "the chat is back in plan mode");
+    }
 }

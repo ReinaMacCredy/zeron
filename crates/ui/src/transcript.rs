@@ -4611,7 +4611,6 @@ pub struct Transcript {
     copied_message: Option<SharedString>,
     copied_message_clear: Option<Task<()>>,
     consent_sent: HashMap<SharedString, ConsentOutcome>,
-    plan_sent: HashMap<SharedString, bool>,
     plan_views: HashMap<SharedString, (u8, usize)>,
     consent_failures: HashMap<SharedString, SharedString>,
     foreground_sent: HashSet<SharedString>,
@@ -4777,7 +4776,7 @@ pub enum TranscriptEvent {
     ApprovePlan {
         chat_id: String,
         as_task: bool,
-        answer: Option<crate::plan_proposal::PlanAnswer>,
+        target: crate::plan_proposal::PlanTarget,
     },
     EditPlan {
         chat_id: String,
@@ -4931,6 +4930,7 @@ impl Transcript {
         }
         let transcript = cx.weak_entity();
         let approve = self.chat_id.clone();
+        let approve_task = task.id.clone();
         plan::plan_card(
             plan::PlanCard {
                 id: row_id.clone(),
@@ -4947,7 +4947,9 @@ impl Transcript {
                             cx.emit(TranscriptEvent::ApprovePlan {
                                 chat_id,
                                 as_task: false,
-                                answer: None,
+                                target: crate::plan_proposal::PlanTarget::Task(
+                                    approve_task.clone(),
+                                ),
                             })
                         })
                         .ok();
@@ -4970,7 +4972,6 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use crate::plan_proposal::{self as proposal, CardView, PlanOutcome, StepMark};
-        let sent = self.plan_sent.get(request_id).copied();
         let latest = self.rows.iter().rev().find_map(|row| match &row.kind {
             RowKind::PlanProposal { .. } => Some(&row.id),
             _ => None,
@@ -4980,7 +4981,7 @@ impl Transcript {
         let task = latest
             .then(|| zeron_proto::plan_of_chat(&state.tasks, &chat_id))
             .flatten();
-        let as_task = sent == Some(true) || (outcome == PlanOutcome::Declined && task.is_some());
+        let flight = state.plan_approval(request_id);
         let first_current = |steps: &[SharedString]| -> Vec<(SharedString, StepMark)> {
             steps
                 .iter()
@@ -4995,9 +4996,9 @@ impl Transcript {
                 })
                 .collect()
         };
-        let view = if outcome == PlanOutcome::Approved || sent == Some(false) {
+        let view = if outcome == PlanOutcome::Approved {
             CardView::Here
-        } else if as_task {
+        } else if outcome == PlanOutcome::Declined && task.is_some() {
             let title = state
                 .chats
                 .iter()
@@ -5038,13 +5039,21 @@ impl Transcript {
                     marked
                 },
             }
+        } else if outcome == PlanOutcome::Declined && flight == Some(true) {
+            CardView::Waiting {
+                busy: true,
+                task_blocked: None,
+            }
         } else if outcome == PlanOutcome::Declined {
             CardView::NotApproved
         } else {
-            CardView::Waiting
+            CardView::Waiting {
+                busy: flight.is_some(),
+                task_blocked: crate::tasks::chat_plan_blocker(state, &chat_id),
+            }
         };
         let layout = match &view {
-            CardView::Waiting => (0, steps.len()),
+            CardView::Waiting { .. } => (0, steps.len()),
             CardView::Here => (1, steps.len()),
             CardView::NotApproved => (2, steps.len()),
             CardView::Task { steps, .. } => (3, steps.len()),
@@ -5066,20 +5075,14 @@ impl Transcript {
         let on_approve = {
             let weak = weak.clone();
             let chat_id = chat_id.clone();
-            let request = request_id.clone();
             let answer = answer.clone();
             Rc::new(move |as_task: bool, _: &mut Window, cx: &mut gpui::App| {
-                weak.update(cx, |transcript, cx| {
-                    if transcript.plan_sent.contains_key(&request) {
-                        return;
-                    }
-                    transcript.plan_sent.insert(request.clone(), as_task);
+                weak.update(cx, |_, cx| {
                     cx.emit(TranscriptEvent::ApprovePlan {
                         chat_id: chat_id.clone(),
                         as_task,
-                        answer: Some(answer.clone()),
-                    });
-                    cx.notify();
+                        target: proposal::PlanTarget::Question(answer.clone()),
+                    })
                 })
                 .ok();
             })
@@ -5090,7 +5093,7 @@ impl Transcript {
             let request = request_id.clone();
             Rc::new(move |_: &mut Window, cx: &mut gpui::App| {
                 weak.update(cx, |transcript, cx| {
-                    if transcript.plan_sent.contains_key(&request) {
+                    if transcript.state.read(cx).plan_approval(&request).is_some() {
                         return;
                     }
                     cx.emit(TranscriptEvent::EditPlan {
@@ -5758,7 +5761,6 @@ impl Transcript {
             copied_message: None,
             copied_message_clear: None,
             consent_sent: HashMap::new(),
-            plan_sent: HashMap::new(),
             plan_views: HashMap::new(),
             consent_failures: HashMap::new(),
             foreground_sent: HashSet::new(),

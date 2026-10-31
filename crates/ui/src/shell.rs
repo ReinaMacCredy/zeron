@@ -3835,6 +3835,11 @@ impl Shell {
                     this.open_computer_permission_guide(missing.clone(), cx)
                 }
                 ComposerEvent::OpenUsage => this.open_usage(cx),
+                ComposerEvent::AskAnswered {
+                    chat_id,
+                    request_id,
+                    error,
+                } => this.on_ask_answered(chat_id, request_id, error.as_deref(), cx),
                 ComposerEvent::OpenTask(task_id) => this.defer_open_task(task_id.clone(), cx),
                 ComposerEvent::OpenChanges => this
                     .defer_in_active_window(cx, |shell, window, cx| {
@@ -6208,8 +6213,8 @@ impl Shell {
             TranscriptEvent::ApprovePlan {
                 chat_id,
                 as_task,
-                answer,
-            } => self.approve_plan(chat_id, *as_task, answer.clone(), cx),
+                target,
+            } => self.approve_plan(chat_id, target.clone(), *as_task, cx),
             TranscriptEvent::EditPlan { chat_id, answer } => {
                 self.composer.update(cx, |composer, cx| {
                     composer.answer_plan(chat_id, answer.clone(), false, cx)
@@ -7023,6 +7028,7 @@ impl Shell {
             | ComposerEvent::WorkspaceCommand(_)
             | ComposerEvent::WorktreeSetup { .. }
             | ComposerEvent::OpenChanges
+            | ComposerEvent::AskAnswered { .. }
             | ComposerEvent::AnnotationsChanged(_)
             | ComposerEvent::AnnotationHovered(_) => {}
             ComposerEvent::OpenTask(task_id) => self.defer_open_task(task_id.clone(), cx),
@@ -15898,7 +15904,12 @@ impl Shell {
                             .debug_selector(|| "chat-menu-plan".into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close_chat_menu(cx);
-                                this.add_plan(&plan_id, crate::tasks::Orchestrate::default(), cx);
+                                this.add_plan(
+                                    &plan_id,
+                                    crate::tasks::Orchestrate::default(),
+                                    None,
+                                    cx,
+                                );
                             }))
                             .child(
                                 icon(icons::MISSION_CONTROL)

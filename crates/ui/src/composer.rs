@@ -6469,6 +6469,11 @@ pub enum ComposerEvent {
     OpenChanges,
     OpenTask(String),
     OpenUsage,
+    AskAnswered {
+        chat_id: String,
+        request_id: String,
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

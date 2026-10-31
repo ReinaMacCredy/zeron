@@ -103,6 +103,12 @@ pub struct PlanAnswer {
     pub question_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanTarget {
+    Task(String),
+    Question(PlanAnswer),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlanOutcome {
     Waiting,
@@ -138,7 +144,10 @@ pub(crate) enum StepMark {
 }
 
 pub(crate) enum CardView {
-    Waiting,
+    Waiting {
+        busy: bool,
+        task_blocked: Option<&'static str>,
+    },
     Here,
     Task {
         title: SharedString,
@@ -252,7 +261,7 @@ pub(crate) fn proposal_card(
         .map(|step| (step.clone(), StepMark::Number))
         .collect();
     let (header, rows, why, actions) = match card_view {
-        CardView::Waiting => {
+        CardView::Waiting { busy, task_blocked } => {
             let approve = {
                 let on_approve = on_approve.clone();
                 popover::btn_primary(theme, "Approve")
@@ -260,16 +269,22 @@ pub(crate) fn proposal_card(
                     .debug_selector(|| "plan-approve".into())
                     .role(gpui::Role::Button)
                     .aria_label("Approve")
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        on_approve(false, window, cx);
+                    .aria_disabled(busy)
+                    .when(busy, |el| el.opacity(0.45))
+                    .when(!busy, |el| {
+                        el.on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            on_approve(false, window, cx);
+                        })
                     })
             };
+            let task_off = busy || task_blocked.is_some();
             let as_task = div()
                 .id(SharedString::from(format!("{id}-approve-task")))
                 .debug_selector(|| "plan-approve-task".into())
                 .role(gpui::Role::Button)
                 .aria_label("Approve as Task")
+                .aria_disabled(task_off)
                 .px(px(12.0))
                 .py(px(6.0))
                 .rounded(px(8.0))
@@ -282,27 +297,45 @@ pub(crate) fn proposal_card(
                 .text_size(crate::typography::ui_rems(13.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text)
-                .cursor_pointer()
-                .hover(|s| s.bg(crate::theme::ink(0.05)))
                 .child(icon(icons::CHECKLIST).size(px(13.0)).text_color(theme.text))
                 .child("Approve as Task")
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    on_approve(true, window, cx);
+                .when(task_off, |el| el.opacity(0.45))
+                .when_some(task_blocked, |el, reason| {
+                    el.tooltip(crate::settings::widgets::text_tooltip(reason))
+                })
+                .when(!task_off, |el| {
+                    el.cursor_pointer()
+                        .hover(|s| s.bg(crate::theme::ink(0.05)))
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            on_approve(true, window, cx);
+                        })
                 });
             let edit = popover::btn_ghost(theme, "Edit plan", format!("{id}-edit"))
                 .id(SharedString::from(format!("{id}-edit")))
                 .debug_selector(|| "plan-edit".into())
                 .role(gpui::Role::Button)
                 .aria_label("Edit plan")
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    on_edit(window, cx);
+                .aria_disabled(busy)
+                .when(busy, |el| el.opacity(0.45))
+                .when(!busy, |el| {
+                    el.on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        on_edit(window, cx);
+                    })
                 });
             (
                 div()
                     .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Plan"))
-                    .child(pill("Waiting for your approval", true, theme)),
+                    .child(pill(
+                        if busy {
+                            "Approving…"
+                        } else {
+                            "Waiting for your approval"
+                        },
+                        true,
+                        theme,
+                    )),
                 plain,
                 format!(
                     "Approve runs it in this chat. Approve as Task tracks the {count} step{} in Tasks.",

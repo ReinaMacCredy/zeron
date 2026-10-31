@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::composer::AskInfo;
+use crate::plan_proposal::PlanTarget;
 
 const TRAY_WIDTH: f32 = 450.0;
 const TRAY_RADIUS: f32 = 12.0;
@@ -13,7 +14,7 @@ const TICK: std::time::Duration = std::time::Duration::from_secs(1);
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum NeedKind {
     Asking(Option<AskInfo>),
-    PlanReady { steps: Vec<String> },
+    PlanReady { task_id: String, steps: Vec<String> },
     Failed,
 }
 
@@ -149,7 +150,7 @@ impl Shell {
         let state = self.state.read(cx);
         let composer = self.composer.read(cx);
         let now = Utc::now();
-        let mut plans: HashMap<String, Vec<String>> = HashMap::new();
+        let mut plans: HashMap<String, (String, Vec<String>)> = HashMap::new();
         for task in state.tasks.iter().filter(|task| !task.deleted) {
             if !task.plan_pending {
                 continue;
@@ -164,7 +165,7 @@ impl Shell {
                     .iter()
                     .map(|row| row.step.title.clone())
                     .collect();
-                plans.insert(chat.id.clone(), steps);
+                plans.insert(chat.id.clone(), (task.id.clone(), steps));
             }
         }
         let mut triage = Triage::default();
@@ -196,7 +197,7 @@ impl Shell {
                 }
                 _ => plans
                     .remove(&chat.id)
-                    .map(|steps| NeedKind::PlanReady { steps }),
+                    .map(|(task_id, steps)| NeedKind::PlanReady { task_id, steps }),
             };
             if let Some(kind) = kind {
                 triage.needs.push(NeedRow {
@@ -853,11 +854,23 @@ impl Shell {
             .child(action);
         let body = expanded.and_then(|shown| {
             let panel = match &row.kind {
-                NeedKind::PlanReady { steps } => {
-                    Some(self.render_plan_panel(&chat_id, steps, false, theme, cx))
-                }
+                NeedKind::PlanReady { task_id, steps } => Some(self.render_plan_panel(
+                    &chat_id,
+                    steps,
+                    PlanTarget::Task(task_id.clone()),
+                    theme,
+                    cx,
+                )),
                 NeedKind::Asking(Some(info)) if info.plan => {
-                    Some(self.render_plan_panel(&chat_id, &info.steps, true, theme, cx))
+                    self.composer.read(cx).plan_answer(&chat_id).map(|answer| {
+                        self.render_plan_panel(
+                            &chat_id,
+                            &info.steps,
+                            PlanTarget::Question(answer),
+                            theme,
+                            cx,
+                        )
+                    })
                 }
                 NeedKind::Asking(_) => self.composer.update(cx, |composer, cx| {
                     composer.render_ask_panel(&chat_id, window, cx)
@@ -886,11 +899,21 @@ impl Shell {
         &mut self,
         chat_id: &str,
         steps: &[String],
-        offer_task: bool,
+        target: PlanTarget,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = chat_id.to_owned();
+        let state = self.state.read(cx);
+        let (offer_task, busy, task_blocked) = match &target {
+            PlanTarget::Task(_) => (false, false, None),
+            PlanTarget::Question(answer) => (
+                true,
+                state.plan_approval(&answer.request_id).is_some(),
+                crate::tasks::chat_plan_blocker(state, chat_id),
+            ),
+        };
+        let task_off = busy || task_blocked.is_some();
         div()
             .debug_selector({
                 let id = id.clone();
@@ -953,12 +976,14 @@ impl Shell {
                     .when(offer_task, |row| {
                         let id = id.clone();
                         let chat = id.clone();
+                        let target = target.clone();
                         row.child(
                             div()
                                 .id(SharedString::from(format!("triage-approve-task-{id}")))
                                 .debug_selector(move || format!("triage-approve-task-{id}"))
                                 .role(gpui::Role::Button)
                                 .aria_label("Approve as Task")
+                                .aria_disabled(task_off)
                                 .px(px(12.0))
                                 .py(px(6.0))
                                 .rounded(px(8.0))
@@ -970,14 +995,20 @@ impl Shell {
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.wash(0.05)))
                                 .child(icon(icons::CHECKLIST).size(px(13.0)).text_color(theme.text))
                                 .child("Approve as Task")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.approve_plan(&chat, true, None, cx);
-                                })),
+                                .when(task_off, |el| el.opacity(0.45))
+                                .when_some(task_blocked, |el, reason| {
+                                    el.tooltip(crate::settings::widgets::text_tooltip(reason))
+                                })
+                                .when(!task_off, |el| {
+                                    el.cursor_pointer()
+                                        .hover(|s| s.bg(theme.wash(0.05)))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.approve_plan(&chat, target.clone(), true, cx);
+                                        }))
+                                }),
                         )
                     })
                     .child({
@@ -987,10 +1018,14 @@ impl Shell {
                             .debug_selector(move || format!("triage-approve-{id}"))
                             .role(gpui::Role::Button)
                             .aria_label("Approve")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.approve_plan(&chat, false, None, cx);
-                            }))
+                            .aria_disabled(busy)
+                            .when(busy, |el| el.opacity(0.45))
+                            .when(!busy, |el| {
+                                el.on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.approve_plan(&chat, target.clone(), false, cx);
+                                }))
+                            })
                     }),
             )
             .into_any_element()
@@ -1410,11 +1445,23 @@ impl Shell {
         .child(action);
         let body = expanded.filter(|_| !tray_mounted).and_then(|shown| {
             let panel = match &row.kind {
-                NeedKind::PlanReady { steps } => {
-                    Some(self.render_plan_panel(&chat_id, steps, false, theme, cx))
-                }
+                NeedKind::PlanReady { task_id, steps } => Some(self.render_plan_panel(
+                    &chat_id,
+                    steps,
+                    PlanTarget::Task(task_id.clone()),
+                    theme,
+                    cx,
+                )),
                 NeedKind::Asking(Some(info)) if info.plan => {
-                    Some(self.render_plan_panel(&chat_id, &info.steps, true, theme, cx))
+                    self.composer.read(cx).plan_answer(&chat_id).map(|answer| {
+                        self.render_plan_panel(
+                            &chat_id,
+                            &info.steps,
+                            PlanTarget::Question(answer),
+                            theme,
+                            cx,
+                        )
+                    })
                 }
                 NeedKind::Asking(_) => self.composer.update(cx, |composer, cx| {
                     composer.render_ask_panel(&chat_id, window, cx)

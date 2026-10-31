@@ -2494,13 +2494,33 @@ pub(crate) fn tab_members(state: &AppState) -> std::collections::HashMap<String,
 }
 
 pub(crate) fn can_add_plan(state: &AppState, chat: &zeron_proto::Chat) -> bool {
-    state.local_device_id.as_deref() == Some(chat.device_id.as_str())
-        && !chat.archived
-        && !chat.is_system()
-        && chat.sidechat_source_chat_id.is_none()
-        && !state.is_hidden_chat(&chat.id)
-        && !state.is_draft(&chat.id)
-        && zeron_proto::plan_of_chat(&state.tasks, &chat.id).is_none()
+    add_plan_blocker(state, chat).is_none()
+}
+
+const NO_TASK: &str = "This chat cannot become a Task";
+
+pub(crate) fn chat_plan_blocker(state: &AppState, chat_id: &str) -> Option<&'static str> {
+    state
+        .chats
+        .iter()
+        .find(|chat| chat.id == chat_id)
+        .map_or(Some(NO_TASK), |chat| add_plan_blocker(state, chat))
+}
+
+pub(crate) fn add_plan_blocker(state: &AppState, chat: &zeron_proto::Chat) -> Option<&'static str> {
+    if state.local_device_id.as_deref() != Some(chat.device_id.as_str()) {
+        Some("Only the device this chat runs on can make it a Task")
+    } else if chat.archived {
+        Some("Unarchive this chat to make it a Task")
+    } else if chat.sidechat_source_chat_id.is_some() {
+        Some("A side chat cannot become a Task")
+    } else if chat.is_system() || state.is_hidden_chat(&chat.id) || state.is_draft(&chat.id) {
+        Some(NO_TASK)
+    } else if zeron_proto::plan_of_chat(&state.tasks, &chat.id).is_some() {
+        Some("This chat already leads a Task")
+    } else {
+        None
+    }
 }
 
 fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Row {

@@ -1053,6 +1053,7 @@ pub struct AppState {
     /// Send-in-flight overlay per chat id: a queued doc command the host
     /// hasn't executed yet (see [`Self::begin_pending_send`]).
     pending_sends: HashMap<String, PendingSend>,
+    plan_approvals: HashMap<String, (String, bool)>,
     /// The in-flight send's attachment upload, when it has one.
     upload_progress: Option<UploadProgress>,
     /// Engine-side queued-attachment transfers by uploadId (`WatchTransfers`
@@ -1244,6 +1245,7 @@ impl AppState {
             link_roots_revision: 0,
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
+            plan_approvals: HashMap::new(),
             upload_progress: None,
             transfers: HashMap::new(),
             review_comments: HashMap::new(),
@@ -1678,7 +1680,26 @@ impl AppState {
         }
         self.tasks = tasks;
         self.tasks_synced = true;
+        let tasks = &self.tasks;
+        self.plan_approvals.retain(|_, (chat_id, as_task)| {
+            !*as_task || zeron_proto::plan_of_chat(tasks, chat_id).is_none()
+        });
         true
+    }
+
+    pub(crate) fn plan_approval(&self, request_id: &str) -> Option<bool> {
+        self.plan_approvals
+            .get(request_id)
+            .map(|(_, as_task)| *as_task)
+    }
+
+    pub(crate) fn begin_plan_approval(&mut self, request_id: &str, chat_id: &str, as_task: bool) {
+        self.plan_approvals
+            .insert(request_id.to_owned(), (chat_id.to_owned(), as_task));
+    }
+
+    pub(crate) fn end_plan_approval(&mut self, request_id: &str) {
+        self.plan_approvals.remove(request_id);
     }
 
     pub fn apply_task_steps(&mut self, steps: Vec<zeron_proto::TaskStep>) -> bool {

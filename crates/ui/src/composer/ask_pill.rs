@@ -196,13 +196,13 @@ impl Composer {
         answer: crate::plan_proposal::PlanAnswer,
         allow: bool,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.ask.open.as_deref() == Some(chat_id) {
             self.ask.open = None;
             self.ask.advance_task = None;
         }
         let answers = crate::plan_proposal::plan_answers(&answer.question_id, allow);
-        self.submit_ask(chat_id.to_owned(), answer.request_id, answers, cx);
+        self.submit_ask(chat_id.to_owned(), answer.request_id, answers, cx)
     }
 
     pub(crate) fn ask_answered(&self, chat_id: &str) -> bool {
@@ -348,32 +348,58 @@ impl Composer {
         request_id: String,
         answers: Vec<UserInputAnswer>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.ask.answered.contains_key(&request_id) {
-            return;
+            return false;
         }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.ask_failed(chat_id, request_id, "Engine not connected".into(), cx);
+            return true;
+        };
         self.ask
             .answered
             .insert(request_id.clone(), chat_id.clone());
         cx.notify();
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
         let key = request_id.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = respond_input(&engine, &chat_id, &request_id, answers).await;
             this.update(cx, |composer, cx| {
                 composer.ask.submits.remove(&request_id);
-                if let Err(err) = result {
-                    composer.ask.answered.remove(&request_id);
-                    composer.failure = Some(format!("Answer failed: {err}").into());
-                    composer.failure_key = None;
-                    cx.notify();
+                match result {
+                    Err(err) => {
+                        composer.ask.answered.remove(&request_id);
+                        composer.ask_failed(chat_id, request_id, err.to_string(), cx);
+                    }
+                    Ok(_) => cx.emit(super::ComposerEvent::AskAnswered {
+                        chat_id,
+                        request_id,
+                        error: None,
+                    }),
                 }
             })
             .ok();
         });
         self.ask.submits.insert(key, task);
+        true
+    }
+
+    fn ask_failed(
+        &mut self,
+        chat_id: String,
+        request_id: String,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.bound_chat_id(cx).as_deref() == Some(chat_id.as_str()) {
+            self.failure = Some(format!("Answer failed: {error}").into());
+            self.failure_key = None;
+        }
+        cx.emit(super::ComposerEvent::AskAnswered {
+            chat_id,
+            request_id,
+            error: Some(error),
+        });
+        cx.notify();
     }
 
     pub(crate) fn render_ask_panel(
