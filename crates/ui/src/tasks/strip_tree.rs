@@ -152,10 +152,6 @@ impl StripTree {
         self
     }
 
-    pub fn root_id(&self) -> &str {
-        &self.root_chat_id
-    }
-
     pub fn is_open(&self) -> bool {
         self.open.target() > 0.5
     }
