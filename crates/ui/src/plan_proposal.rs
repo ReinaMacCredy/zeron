@@ -3,21 +3,21 @@ use std::sync::Arc;
 
 use gpui::{AnyElement, App, EntityId, SharedString, Window, div, prelude::*, px};
 use zeron_doc::MessagePart;
-use zeron_proto::{ToolCall, UserInputAnswer, UserInputQuestion};
+use zeron_proto::{
+    APPROVAL_ALLOW, APPROVAL_DENY, PLAN_APPROVAL_HEADER, ToolCall, UserInputAnswer,
+    UserInputQuestion,
+};
 
 use crate::icons::{self, icon};
 use crate::popover;
 use crate::theme::Theme;
 
-const PLAN_HEADER: &str = "Approve plan";
-const ALLOW: &str = "Yes";
-const DENY: &str = "No";
 const MAX_STEPS: usize = 8;
 
 pub(crate) fn plan_question(questions: &[UserInputQuestion]) -> Option<&UserInputQuestion> {
     questions
         .iter()
-        .find(|question| question.approval && question.header == PLAN_HEADER)
+        .find(|question| question.approval && question.header == PLAN_APPROVAL_HEADER)
 }
 
 pub(crate) fn is_plan_question(questions: &[UserInputQuestion]) -> bool {
@@ -27,7 +27,7 @@ pub(crate) fn is_plan_question(questions: &[UserInputQuestion]) -> bool {
 pub(crate) fn plan_answers(question_id: &str, allow: bool) -> Vec<UserInputAnswer> {
     vec![UserInputAnswer {
         question_id: question_id.to_owned(),
-        labels: vec![if allow { ALLOW } else { DENY }.to_owned()],
+        labels: vec![if allow { APPROVAL_ALLOW } else { APPROVAL_DENY }.to_owned()],
     }]
 }
 
@@ -127,7 +127,7 @@ pub(crate) fn plan_outcome(
             && answer
                 .labels
                 .iter()
-                .any(|label| label.eq_ignore_ascii_case(ALLOW))
+                .any(|label| label.eq_ignore_ascii_case(APPROVAL_ALLOW))
     });
     match (allowed, resolved || answers.is_some() || !live) {
         (true, _) => PlanOutcome::Approved,

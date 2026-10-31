@@ -4,8 +4,8 @@
 //! so an approval reads alike whichever agent raised it.
 use zeron_proto::{AccessMode, UserInputAnswer, UserInputQuestion};
 
-pub const ALLOW: &str = "Yes";
-pub const DENY: &str = "No";
+pub const ALLOW: &str = zeron_proto::APPROVAL_ALLOW;
+pub const DENY: &str = zeron_proto::APPROVAL_DENY;
 
 /// What an agent wants to do, for deciding whether its mode covers it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

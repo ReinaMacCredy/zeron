@@ -1315,6 +1315,10 @@ pub struct UserInputQuestion {
     pub approval: bool,
 }
 
+pub const APPROVAL_ALLOW: &str = "Yes";
+pub const APPROVAL_DENY: &str = "No";
+pub const PLAN_APPROVAL_HEADER: &str = "Approve plan";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum UserInputKind {

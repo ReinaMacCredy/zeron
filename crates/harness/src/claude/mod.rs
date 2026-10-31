@@ -300,7 +300,7 @@ fn approval_question(
 ) -> Option<UserInputQuestion> {
     if tool == "ExitPlanMode" {
         return Some(approval::question(
-            "Approve plan",
+            zeron_proto::PLAN_APPROVAL_HEADER,
             "Claude wants to start implementing its plan. Allow it?",
         ));
     }
