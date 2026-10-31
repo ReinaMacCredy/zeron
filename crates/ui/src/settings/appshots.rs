@@ -894,7 +894,7 @@ impl ShortcutsPage {
                                 &theme,
                                 "Capture another app's frontmost window directly into a session.",
                             ))
-                            .child(intro)
+                            .child(intro.search_anchor(SettingId::AppshotsOverview).block())
                             .child(section_label(&theme, "Capture"))
                             .child(capture_card)
                             .child(section_label(&theme, "Quick capture to Tasks"))

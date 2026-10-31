@@ -1437,6 +1437,11 @@ impl SettingsSection {
             ],
             SettingsSection::Appshots => &[
                 (
+                    "Take an Appshot to show your agent another app's window",
+                    &["appshots", "how it works", "about"],
+                    Some(Target::Setting(SettingId::AppshotsOverview)),
+                ),
+                (
                     "Enable Appshots",
                     &["capture", "screenshot", "listener"],
                     Some(Target::Setting(SettingId::CaptureAppshots)),
@@ -20504,6 +20509,13 @@ mod tests {
         assert_eq!(
             row_titles(SettingsSection::Appshots, "capture appshot"),
             vec!["Hotkey"]
+        );
+        assert_eq!(
+            row_titles(SettingsSection::Appshots, "appshots"),
+            vec![
+                "Take an Appshot to show your agent another app's window",
+                "Enable Appshots"
+            ]
         );
         assert!(row_titles(SettingsSection::Shortcuts, "appshot").is_empty());
     }
