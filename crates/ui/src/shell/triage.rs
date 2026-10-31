@@ -509,9 +509,6 @@ impl Shell {
         let chat = state.chats.iter().find(|chat| chat.id == row.chat_id);
         let mut parts: Vec<String> = Vec::new();
         match &row.kind {
-            NeedKind::Decision { .. } => {
-                parts.push("Supervisor".into());
-            }
             NeedKind::Task { .. } => parts.push("Task".into()),
             _ => {
                 parts.extend(chat.and_then(|chat| self.chat_project(chat, cx)));
@@ -522,25 +519,12 @@ impl Shell {
         }
         parts.push(row.kind.label());
         match &row.kind {
-            NeedKind::PlanReady { steps, .. } => parts.push(format!(
-                "{} step{}, waiting for your approval",
-                steps.len(),
-                if steps.len() == 1 { "" } else { "s" }
-            )),
-            NeedKind::Asking(Some(info)) if !info.question.is_empty() => {
-                parts.push(crate::transcript::single_line(&info.question))
-            }
             NeedKind::Failed => {
                 if let Some(at) = state.session_for(&row.chat_id).map(|s| s.updated_at) {
                     parts.push(crate::settings::devices::format_last_seen(
                         Some(at),
                         Utc::now(),
                     ));
-                }
-            }
-            NeedKind::Decision { .. } => {
-                if chat.is_some() {
-                    parts.push(format!("from {}", self.triage_title(&row.chat_id, cx)));
                 }
             }
             NeedKind::Task { task_id, .. } => {
@@ -553,7 +537,7 @@ impl Shell {
                     parts.push(crate::transcript::single_line(error));
                 }
             }
-            NeedKind::Asking(_) => {}
+            _ => {}
         }
         parts.join(" · ")
     }
@@ -1747,9 +1731,7 @@ fn row_text(
 fn need_row_shell(row: &ShownRow, theme: &Theme) -> gpui::Div {
     let (glyph, tint) = match &row.kind {
         NeedKind::Failed => (icons::LUCIDE_CIRCLE_ALERT, theme.danger),
-        NeedKind::Decision { .. } => (icons::LUCIDE_SHIELD, theme.accent),
         kind @ NeedKind::Task { .. } => (icons::TASKS, need_tint(kind, theme)),
-        kind if kind.plan() => (icons::CHECKLIST, theme.accent),
         _ => (icons::LUCIDE_MESSAGE_CIRCLE_QUESTION, theme.accent),
     };
     div()
