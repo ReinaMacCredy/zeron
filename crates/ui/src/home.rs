@@ -10,8 +10,8 @@ use gpui::{
 use zeron_proto::change_request_assessment::{CiState, check_failed, check_status};
 use zeron_proto::{
     ChangeRequestDetail, ChangeRequestFilter, ChangeRequestListItem, ChangeRequestPage,
-    ChangeRequestReviewDecision, Chat, GitActivity, GitActivityRequest, ListeningServices,
-    ListeningServicesRequest, SystemStats, TaskStatus,
+    ChangeRequestReviewDecision, GitActivity, GitActivityRequest, ListeningServices,
+    ListeningServicesRequest, SystemStats,
 };
 use zeron_rpc::methods;
 
@@ -31,6 +31,24 @@ const SERVICES_EVERY: Duration = Duration::from_secs(5);
 const SLOW_EVERY: Duration = Duration::from_secs(120);
 const VISIBLE_GRACE: Duration = Duration::from_secs(2);
 const FAILING_CHECK_LOOKUPS: usize = 3;
+
+type Field = fn(&mut Toggles) -> &mut bool;
+
+const WIDGETS: [(&str, &str, Field); 5] = [
+    ("home-toggle-pull-requests", "Pull requests", |w| {
+        &mut w.pull_requests
+    }),
+    ("home-toggle-git-activity", "Git activity", |w| {
+        &mut w.git_activity
+    }),
+    ("home-toggle-this-mac", "This Mac", |w| &mut w.this_mac),
+    ("home-toggle-running-services", "Running services", |w| {
+        &mut w.running_services
+    }),
+    ("home-toggle-ci-failures", "CI failures", |w| {
+        &mut w.ci_failures
+    }),
+];
 
 pub enum HomeEvent {
     OpenPullRequest(String),
@@ -361,28 +379,26 @@ impl HomeView {
         let theme = &theme.for_popup();
         let mut toggles = crate::settings::home_widgets(cx);
         let all_ports = toggles.services_all_ports;
-        let rows = crate::settings::home::WIDGETS
-            .into_iter()
-            .map(|(id, title, field)| {
-                let on = *field(&mut toggles);
-                let row_id: SharedString = format!("{id}-quick").into();
-                popover::menu_row(theme, false, row_id.clone())
-                    .id(row_id.clone())
-                    .debug_selector(move || row_id.to_string())
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        crate::settings::update_home_widgets(cx, |widgets| {
-                            let value = field(widgets);
-                            *value = !*value;
-                        });
-                        cx.notify();
-                    }))
-                    .child(div().flex_1().min_w_0().child(title))
-                    .child(crate::settings::widgets::toggle_switch(
-                        theme,
-                        on,
-                        format!("{id}-quick"),
-                    ))
-            });
+        let rows = WIDGETS.into_iter().map(|(id, title, field)| {
+            let on = *field(&mut toggles);
+            let row_id: SharedString = format!("{id}-quick").into();
+            popover::menu_row(theme, false, row_id.clone())
+                .id(row_id.clone())
+                .debug_selector(move || row_id.to_string())
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    crate::settings::update_home_widgets(cx, |widgets| {
+                        let value = field(widgets);
+                        *value = !*value;
+                    });
+                    cx.notify();
+                }))
+                .child(div().flex_1().min_w_0().child(title))
+                .child(crate::settings::widgets::toggle_switch(
+                    theme,
+                    on,
+                    format!("{id}-quick"),
+                ))
+        });
         let rows: Vec<_> = rows.collect();
         let mode = |id: &'static str, label: &'static str, value: bool| {
             crate::settings::permission_guide::choice_button(theme, id, label, all_ports == value)
@@ -508,10 +524,6 @@ fn local_git_projects(state: &AppState) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn chat_title(chat: &Chat) -> String {
-    chat.display_title()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PrScope {
     All,
@@ -635,31 +647,6 @@ pub(crate) fn composer_pr_scope(prs: &HomePrs, state: &AppState) -> PrScope {
             repository: repo.repository.clone(),
         })
         .unwrap_or_else(|| PrScope::Unlinked(space.display_name().to_owned()))
-}
-
-pub(crate) use zeron_proto::mission::MissionRow;
-
-pub(crate) fn mission_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionRow> {
-    let mut rows: Vec<MissionRow> = zeron_proto::mission::open_missions(&state.tasks)
-        .into_iter()
-        .map(|task| mission_row_of(state, task, now))
-        .collect();
-    rows.sort_by_key(|row| row.status != TaskStatus::NeedsYou);
-    rows
-}
-
-pub(crate) fn done_today_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionRow> {
-    let today = now.with_timezone(&chrono::Local).date_naive();
-    zeron_proto::mission::missions_done_on(&state.tasks, today, &chrono::Local)
-        .into_iter()
-        .map(|task| mission_row_of(state, task, now))
-        .collect()
-}
-
-fn mission_row_of(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> MissionRow {
-    let plan = crate::tasks::rollup(state, task, now);
-    let held = crate::supervisor::approval_held(state, &task.id, now);
-    zeron_proto::mission::mission_row(task, &plan, held)
 }
 
 fn failing_prs(prs: &HomePrs) -> Vec<&ChangeRequestListItem> {
@@ -1975,108 +1962,6 @@ mod tests {
             composer_pr_scope(&listing, &state),
             PrScope::Unlinked("notes".into())
         );
-    }
-
-    #[test]
-    fn missions_list_open_orchestrated_tasks_needs_you_first() {
-        let task = |id: &str, key: &str, extra: serde_json::Value| -> zeron_proto::Task {
-            let mut value = serde_json::json!({
-                "id": id, "title": id, "orderKey": key, "chatId": format!("{id}-lead"),
-                "mode": "orchestrated",
-            });
-            value
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
-            serde_json::from_value(value).unwrap()
-        };
-        let step = |task: &str, key: &str, chat: Option<&str>, outcome: Option<&str>| {
-            serde_json::from_value::<zeron_proto::TaskStep>(serde_json::json!({
-                "id": format!("{task}-{key}"), "taskId": task, "orderKey": key,
-                "chatId": chat, "outcome": outcome,
-            }))
-            .unwrap()
-        };
-        let chat = |id: &str| -> Chat {
-            serde_json::from_value(serde_json::json!({
-                "id": id, "deviceId": "mac", "archived": false,
-                "createdAt": "2026-10-18T00:00:00Z",
-            }))
-            .unwrap()
-        };
-        let mut state = AppState::new();
-        state.tasks = vec![
-            task(
-                "older",
-                "0",
-                serde_json::json!({
-                    "chatId": "working-lead", "completedAt": "2026-10-17T00:00:00Z",
-                }),
-            ),
-            task("working", "a", serde_json::json!({})),
-            task("review", "b", serde_json::json!({ "planPending": true })),
-            task("stuck", "c", serde_json::json!({})),
-            task(
-                "done",
-                "d",
-                serde_json::json!({ "completedAt": "2026-10-18T00:00:00Z" }),
-            ),
-            task("gone", "e", serde_json::json!({ "deleted": true })),
-            task("single", "f", serde_json::json!({ "mode": "single" })),
-        ];
-        state.chats = [
-            "working-lead",
-            "review-lead",
-            "stuck-lead",
-            "child",
-            "stuck-child",
-            "skipped-child",
-            "gone-lead",
-            "single-lead",
-        ]
-        .into_iter()
-        .map(chat)
-        .collect();
-        state.task_steps = vec![
-            step("working", "1", None, Some("done")),
-            step("working", "2", Some("skipped-child"), Some("skipped")),
-            step("working", "3", None, Some("done")),
-            step("working", "4", Some("child"), None),
-            step("working", "5", None, None),
-            step("review", "1", None, None),
-            step("stuck", "1", None, Some("done")),
-            step("stuck", "2", Some("stuck-child"), None),
-        ];
-        state.task_steps[7].turn = Some(zeron_proto::StepTurn {
-            ended: zeron_proto::StepTurnEnd::Failed,
-            turn: None,
-        });
-        let rows = mission_rows(&state, Utc::now());
-        let labels: Vec<(&str, &str)> = rows
-            .iter()
-            .map(|row| (row.task_id.as_str(), row.label.as_str()))
-            .collect();
-        assert_eq!(
-            labels,
-            [
-                ("review", "Needs you · plan review"),
-                ("stuck", "Step 2 failed"),
-                ("working", "Step 4/5 · Working"),
-            ]
-        );
-        assert_eq!((rows[2].progress.done, rows[2].progress.total), (2, 4));
-        assert_eq!(rows[2].current.as_deref(), Some("Step 4 of 5 · "));
-        let strip = |chat: &str| {
-            crate::tasks::mission_thread(&state, chat, Utc::now())
-                .map(|thread| (thread.task_id, thread.role.label()))
-        };
-        let on = |task: &str, label: &str| Some((task.to_owned(), label.to_owned()));
-        assert_eq!(strip("working-lead"), on("working", "Lead"));
-        assert_eq!(strip("child"), on("working", "Step 4 of 5"));
-        assert_eq!(strip("skipped-child"), on("working", "Step 2 of 5"));
-        assert_eq!(strip("stuck-child"), on("stuck", "Step 2 of 2"));
-        assert_eq!(strip("gone-lead"), None);
-        assert_eq!(strip("single-lead"), None);
     }
 
     #[test]

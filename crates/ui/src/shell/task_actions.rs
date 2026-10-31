@@ -178,7 +178,7 @@ impl Shell {
             Some(task) => (task.id.clone(), None),
             None => {
                 let task_id = uuid::Uuid::new_v4().to_string();
-                let title = crate::home::chat_title(chat);
+                let title = chat.display_title();
                 let create =
                     Self::create_task_params(&task_id, &title, "", chat.space_id.clone(), None);
                 (task_id, Some(create))
@@ -254,7 +254,7 @@ impl Shell {
                     .chats
                     .iter()
                     .find(|chat| chat.id == chat_id)
-                    .map(crate::home::chat_title)
+                    .map(zeron_proto::Chat::display_title)
                     .unwrap_or_default();
                 self.show_notice(
                     crate::toast::ToastKind::Error,

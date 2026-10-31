@@ -440,9 +440,7 @@ impl SupervisorPage {
                 mission_title(state, Some(key))
                     .or_else(|| {
                         let root = state.chats.iter().find(|chat| chat.id == key)?;
-                        Some(crate::transcript::single_line(&crate::home::chat_title(
-                            root,
-                        )))
+                        Some(crate::transcript::single_line(&root.display_title()))
                     })
                     .unwrap_or_else(|| "A task".into())
             }
