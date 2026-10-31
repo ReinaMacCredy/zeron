@@ -2594,7 +2594,9 @@ pub fn rows_for_entry(
                         resolved,
                         answers,
                         ..
-                    } if crate::plan_proposal::is_plan_question(questions) => {
+                    } if crate::plan_proposal::is_plan_question(questions)
+                        && !crate::plan_proposal::entry_steps(&entry.parts).is_empty() =>
+                    {
                         let question =
                             crate::plan_proposal::plan_question(questions).expect("guarded");
                         let outcome = crate::plan_proposal::plan_outcome(
@@ -24811,6 +24813,52 @@ mod computer_tests {
             "output": output,
         }))
         .expect("tool part")
+    }
+
+    #[test]
+    fn a_plan_card_needs_the_plans_text() {
+        let question = MessagePart::Input {
+            id: "p1".into(),
+            request_id: "plan-1".into(),
+            questions: vec![UserInputQuestion {
+                approval: true,
+                id: "plan".into(),
+                header: "Approve plan".into(),
+                question: "Approve this plan?".into(),
+                options: vec!["Yes".into(), "No".into()],
+                multi_select: false,
+                kind: None,
+                prefill: None,
+                multiline: false,
+            }],
+            resolved: false,
+            answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
+        };
+        let exit = |input: serde_json::Value| -> MessagePart {
+            serde_json::from_value(serde_json::json!({
+                "kind": "tool",
+                "id": "t1",
+                "call": { "kind": "unknown", "name": "ExitPlanMode", "input": input },
+                "resolved": true,
+            }))
+            .expect("tool part")
+        };
+        let card = |parts: Vec<MessagePart>| {
+            rows_for_entry(
+                &entry(MessageRole::Assistant, parts),
+                false,
+                false,
+                &mut parse,
+            )
+            .iter()
+            .any(|row| matches!(row.kind, RowKind::PlanProposal { .. }))
+        };
+        let plan = serde_json::json!({ "plan": "1. Audit the checkout\n2. Ship it" });
+        assert!(card(vec![exit(plan), question.clone()]));
+        assert!(!card(vec![exit(serde_json::Value::Null), question.clone()]));
+        assert!(!card(vec![question]));
     }
 
     #[test]

@@ -175,7 +175,8 @@ impl Composer {
                 .current()
                 .map(|question| question.question.clone())
                 .unwrap_or_default(),
-            plan: crate::plan_proposal::is_plan_question(&wizard.questions),
+            plan: crate::plan_proposal::is_plan_question(&wizard.questions)
+                && !entry.steps.is_empty(),
             steps: entry.steps.clone(),
         })
     }
