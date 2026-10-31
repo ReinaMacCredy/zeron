@@ -64,6 +64,12 @@ text = "Fewer doors: the Supervisor rail button moved to the tray's top row and 
 [[entry.improvements]]
 text = "A thread that leads a Task reads \"Task · step 2 of 3\" in the sidebar instead of a bare count."
 
+[[entry.improvements]]
+text = "Claude Code's /config panel keeps Status, Config and Stats; its Usage tab is gone, since plan usage lives on the ring and the Usage page."
+
+[[entry.improvements]]
+text = "A failed update check says why in words, and names a firewall such as Little Snitch when one dropped the connection, instead of \"Bad file descriptor (os error 9)\"."
+
 [[entry]]
 version = "0.2.130"
 date = "Oct 30"
