@@ -17920,6 +17920,7 @@ impl Shell {
         for (ix, (surface, title, dirty, detail)) in rows.into_iter().enumerate() {
             let is_active = surface == active;
             let kind = kinds[ix];
+            let child_mark = self.child_surface_mark(surface, cx);
             let icon_path = match surface {
                 RightSurface::File(_) => icons::DOCUMENT,
                 RightSurface::Diff(id) => self
@@ -17935,14 +17936,17 @@ impl Shell {
                     .unwrap_or(icons::LIST),
                 RightSurface::SideChat(_)
                 | RightSurface::Subagent(_)
-                | RightSurface::Sidechat(_) => kind.map_or(icons::CHAT_ROUND_LINE, |k| k.icon()),
+                | RightSurface::Sidechat(_) => {
+                    child_mark.map_or(icons::CHAT_ROUND_LINE, |(mark, _)| mark)
+                }
                 RightSurface::Browser(_) => icons::GLOBE,
                 RightSurface::Device(id) => self.device_tab_icon(id, cx),
                 RightSurface::Files => pane_tools::PaneTool::Files.icon(),
                 RightSurface::Picker => icons::PLUS,
             };
+            let icon_tint = child_mark.and_then(|(_, tint)| tint);
             if hidden.contains(&ix) {
-                overflow.push((surface, title, icon_path));
+                overflow.push((surface, title, icon_path, icon_tint));
                 continue;
             }
             let slim = slim[ix];
@@ -18120,11 +18124,15 @@ impl Shell {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon(icon_path).size(px(12.0)).text_color(if is_active {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        }))
+                        .child(
+                            icon(icon_path)
+                                .size(px(12.0))
+                                .text_color(icon_tint.unwrap_or(if is_active {
+                                    theme.text
+                                } else {
+                                    theme.text_muted
+                                })),
+                        )
                         .when(subagent_running, |badge| {
                             badge.child(
                                 div()
@@ -18170,7 +18178,7 @@ impl Shell {
                             .when(!is_active, |icon| icon.opacity(0.78))
                             .into_any_element()
                         } else {
-                            let color = theme.text_muted;
+                            let color = icon_tint.unwrap_or(theme.text_muted);
                             icon(icon_path)
                                 .size(px(12.0))
                                 .text_color(if is_active { color } else { color.opacity(0.7) })
@@ -18316,7 +18324,7 @@ impl Shell {
 
     fn render_right_tab_more(
         &mut self,
-        hidden: Vec<(RightSurface, SharedString, &'static str)>,
+        hidden: Vec<(RightSurface, SharedString, &'static str, Option<gpui::Hsla>)>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -18357,10 +18365,8 @@ impl Shell {
             .child(SharedString::from(format!("⋯ {count}")));
         if self.right_more.get().is_some() {
             let closing = self.right_more.closing_since();
-            let rows = hidden
-                .into_iter()
-                .enumerate()
-                .map(|(ix, (surface, title, icon_path))| {
+            let rows = hidden.into_iter().enumerate().map(
+                |(ix, (surface, title, icon_path, icon_tint))| {
                     popover::menu_row(theme, false, format!("right-more-{ix}"))
                         .id(("right-more-row", ix))
                         .debug_selector(move || format!("right-more-row-{ix}"))
@@ -18368,9 +18374,14 @@ impl Shell {
                             this.close_right_more(cx);
                             this.activate_right_surface(surface, window, cx);
                         }))
-                        .child(icon(icon_path).size(px(13.0)).text_color(theme.text_muted))
+                        .child(
+                            icon(icon_path)
+                                .size(px(13.0))
+                                .text_color(icon_tint.unwrap_or(theme.text_muted)),
+                        )
                         .child(div().min_w_0().truncate().child(title))
-                });
+                },
+            );
             let menu = popover::popover_card(theme)
                 .w(px(220.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_right_more(cx)))

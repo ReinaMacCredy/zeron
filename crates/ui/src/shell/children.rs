@@ -51,6 +51,21 @@ impl ChildKind {
     }
 }
 
+/// An agent's thread wears its provider's mark; forks and side chats keep
+/// their kind's icon.
+pub(crate) fn child_mark(chat: &zeron_proto::Chat) -> (&'static str, Option<gpui::Hsla>) {
+    match ChildKind::of(chat) {
+        ChildKind::Agent => {
+            let config = chat.config.as_ref();
+            crate::pickers::agent_brand_icon(
+                config.map(|config| config.harness),
+                config.and_then(|config| config.model.as_deref()),
+            )
+        }
+        kind => (kind.icon(), None),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ChildRef {
     Subagent {
@@ -128,6 +143,27 @@ impl Shell {
             }),
             _ => None,
         }
+    }
+
+    pub(super) fn child_surface_mark(
+        &self,
+        surface: RightSurface,
+        cx: &App,
+    ) -> Option<(&'static str, Option<gpui::Hsla>)> {
+        let kind = self.child_kind(surface, cx)?;
+        let mark = match surface {
+            _ if kind != ChildKind::Agent => None,
+            RightSurface::Subagent(id) => self
+                .subagent_tabs
+                .get(&id)
+                .map(|tab| crate::pickers::agent_brand_icon(tab.harness, None)),
+            RightSurface::SideChat(id) => self
+                .side_chats
+                .get(&id)
+                .and_then(|tab| tab.state.read(cx).selected_chat_row().map(child_mark)),
+            _ => None,
+        };
+        Some(mark.unwrap_or((kind.icon(), None)))
     }
 
     pub(super) fn surface_child(&self, surface: RightSurface, cx: &App) -> Option<String> {

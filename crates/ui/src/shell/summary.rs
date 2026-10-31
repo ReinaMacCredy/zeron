@@ -1,6 +1,6 @@
 //! Astra's sidecar (paseo-fork `Sidecar.tsx` + `sidecar.css`) beside the transcript.
 
-use super::children::{ChildKind, ChildRef};
+use super::children::{ChildKind, ChildRef, child_mark};
 use super::*;
 use crate::computer::{self, presence::PresenceTone, preview};
 use crate::files::client::FilesRequestContext;
@@ -84,6 +84,7 @@ struct SidecarEntry {
     key: &'static str,
     ix: usize,
     icon: &'static str,
+    tint: Option<gpui::Hsla>,
     ink: Option<gpui::Hsla>,
     label: SharedString,
     hint: Option<SharedString>,
@@ -104,6 +105,7 @@ impl SidecarEntry {
             key,
             ix,
             icon,
+            tint: None,
             ink: None,
             label: label.into(),
             hint: None,
@@ -112,6 +114,11 @@ impl SidecarEntry {
             trail: None,
             thumbnail: None,
         }
+    }
+
+    fn tint(mut self, tint: Option<gpui::Hsla>) -> Self {
+        self.tint = tint;
+        self
     }
 
     fn ink(mut self, ink: gpui::Hsla) -> Self {
@@ -767,7 +774,10 @@ impl Shell {
             .flatten()
             .collect::<Vec<_>>()
             .join(" · ");
-            SidecarEntry::new(key, ix, ChildKind::Agent.icon(), agent.title.clone())
+            let (mark, tint) =
+                crate::pickers::agent_brand_icon(agent.harness, agent.model.as_deref());
+            SidecarEntry::new(key, ix, mark, agent.title.clone())
+                .tint(tint)
                 .hint(hint)
                 .value(value)
                 .action(move |this, _, cx| this.open_child(ChildRef::of_summary(&agent), cx))
@@ -844,8 +854,10 @@ impl Shell {
                 .filter(|title| !title.trim().is_empty())
                 .unwrap_or_else(|| kind.label().to_owned());
             let id = child.id.clone();
+            let (mark, tint) = child_mark(child);
             section.entries.push(
-                SidecarEntry::new("child", ix, kind.icon(), title.clone())
+                SidecarEntry::new("child", ix, mark, title.clone())
+                    .tint(tint)
                     .hint(format!("{title} · {}", kind.label()))
                     .value(Some(value))
                     .action(move |this, _, cx| this.open_child(ChildRef::Chat(id.clone()), cx)),
@@ -1265,8 +1277,8 @@ impl Shell {
                 icon(entry.icon)
                     .flex_none()
                     .size(px(14.0))
-                    .text_color(theme.text_muted)
-                    .when(actionable, |el| {
+                    .text_color(entry.tint.unwrap_or(theme.text_muted))
+                    .when(actionable && entry.tint.is_none(), |el| {
                         el.group_hover(group.clone(), |s| s.text_color(theme.text))
                     }),
             )
@@ -2282,8 +2294,8 @@ mod sidecar_regressions {
             assert_eq!(
                 icons,
                 [
-                    ChildKind::Agent.icon(),
-                    ChildKind::Agent.icon(),
+                    icons::CLAUDE_MARK,
+                    icons::OPENAI_MARK,
                     ChildKind::SideChat.icon(),
                     ChildKind::SideChat.icon(),
                 ]

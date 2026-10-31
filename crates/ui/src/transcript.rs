@@ -5318,10 +5318,13 @@ impl Transcript {
             .iter()
             .any(|v| v.status == Some(zeron_proto::DelegationStatus::Failed));
         let open = (ids.len() == 1).then(|| ids[0].clone());
-        let (glyph, tint) = match views {
-            [one] => crate::pickers::agent_brand_icon(one.harness, one.model.as_deref()),
-            _ => (crate::icons::BOT, None),
-        };
+        let mut marks = views
+            .iter()
+            .map(|v| crate::pickers::agent_brand_icon(v.harness, v.model.as_deref()));
+        let first = marks.next();
+        let (glyph, tint) = first
+            .filter(|first| marks.all(|mark| mark == *first))
+            .unwrap_or((crate::icons::BOT, None));
         div()
             .w_full()
             .flex()

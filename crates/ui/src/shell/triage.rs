@@ -1211,6 +1211,8 @@ impl Shell {
         let chat_id = row.chat_id.clone();
         let working = chat_status_tone(zeron_proto::ChatIndicator::Working, theme).2;
         let more = row.agents.len().saturating_sub(SHOWN_AGENTS);
+        let (mark, tint) =
+            crate::pickers::agent_brand_icon(self.state.read(cx).chat_harness(&chat_id), None);
         let agents = row
             .agents
             .iter()
@@ -1244,7 +1246,11 @@ impl Shell {
                     .min_w_0()
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
-                    .child(icon(icons::BOT).size(px(12.0)).text_color(theme.text_muted))
+                    .child(
+                        icon(mark)
+                            .size(px(12.0))
+                            .text_color(tint.unwrap_or(theme.text_muted)),
+                    )
                     .child(
                         div()
                             .flex_1()

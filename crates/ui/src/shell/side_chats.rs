@@ -443,6 +443,7 @@ impl Shell {
         id: u64,
         owner_id: String,
         title: String,
+        (mark, tint): (&'static str, Option<gpui::Hsla>),
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx);
@@ -458,9 +459,9 @@ impl Shell {
             .text_size(crate::typography::ui_rems(11.0))
             .text_color(theme.text_muted)
             .child(
-                crate::icons::icon(crate::icons::BOT)
+                crate::icons::icon(mark)
                     .size(px(12.0))
-                    .text_color(theme.text_faint),
+                    .text_color(tint.unwrap_or(theme.text_faint)),
             )
             .child(div().min_w_0().truncate().child(SharedString::from(format!(
                 "Subagent of {}",
@@ -499,19 +500,16 @@ impl Shell {
         let composer = tab.composer.clone();
         let owner = tab.state.read(cx).selected_chat.clone().and_then(|child| {
             let state = self.state.read(cx);
-            let owner_id = state
-                .chats
-                .iter()
-                .find(|chat| chat.id == child)?
-                .delegated_by()?
-                .to_owned();
+            let child = state.chats.iter().find(|chat| chat.id == child)?;
+            let owner_id = child.delegated_by()?.to_owned();
+            let mark = super::children::child_mark(child);
             let title = state
                 .chats
                 .iter()
                 .find(|chat| chat.id == owner_id)
                 .and_then(|chat| chat.title.clone())
                 .unwrap_or_else(|| "this chat".into());
-            Some((owner_id, title))
+            Some((owner_id, title, mark))
         });
         // Share the main chat's docked width cap and responsive padding. Size
         // from the width the pane lays out at, not its mask, which an open or
@@ -560,8 +558,8 @@ impl Shell {
                     )
                     .children(pill),
             )
-            .when_some(owner, |el, (owner_id, title)| {
-                el.child(self.delegate_owner_line(id, owner_id, title, cx))
+            .when_some(owner, |el, (owner_id, title, mark)| {
+                el.child(self.delegate_owner_line(id, owner_id, title, mark, cx))
             })
             .child(div().flex_none().child(composer))
             .child(Self::attachment_drop_overlay(Theme::of(cx)))
