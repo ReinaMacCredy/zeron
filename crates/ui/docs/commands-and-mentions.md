@@ -47,7 +47,6 @@ Type `/config` in a Claude Code chat to open Claude Code's settings over the cha
 
 - **Config** lists each setting with its key and value. Search with **Search settings…** (press `/`), or narrow the list with **All**, **Affects Zeron chats** and **Terminal only**. Click a row, or press Enter or Space, to change it: a switch flips, a choice cycles or opens a list, and text opens a field with **Save**. **Model**, **Effort** and **Permission mode** are tagged **= chip** and follow this chat's chips. Settings Claude Code only changes from its terminal are dimmed.
 - **Status** has Claude Code's version, the session, folder, model, permission mode, output style, MCP servers, memory and plugins.
-- **Usage** has your plan's limits as Claude Code reports them, with **Open Usage page** to open [Usage](zeron://docs/usage).
 - **Stats** has your Claude Code activity over the last 36 weeks, your favorite model, sessions, active days, current streak and tokens.
 
 Changes save one at a time through Claude Code itself; the footer reads **Saving…**, then **1 change, saved**. Close the panel with Escape or ×. When you changed something, a row stays in the chat, such as "Claude Code settings · Auto-compact → false", with **Reopen**.

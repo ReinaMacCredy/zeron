@@ -21,7 +21,7 @@ An empty pane opens on the tool you picked last, else on **Changes** in a git pr
 
 ## Agents, forks and side chats
 
-Every thread a chat starts opens here as a tab with a badge for its kind: an agent, a delegated task, a fork, a side chat, or a thread an agent started. It opens the same tab from every place you click it: the transcript chip, the Sidecar's **Beside this thread** list, the Files tab, the Cmd+I tray, or the command palette. A tab that is already open is brought forward instead of opened twice. A running child keeps its kind icon with a small dot on the badge.
+Every thread a chat starts opens here as a tab with a badge for its kind: an agent, a delegated task, a fork, a side chat, or a thread an agent started. It opens the same tab from every place you click it: the transcript chip, the Sidecar's **Beside this thread** list, the Files tab, the Cmd+I tray, or the command palette. A tab that is already open is brought forward instead of opened twice. A running child keeps its icon with a small dot on the badge.
 
 When the tabs do not fit, the tabs you are not on shrink to their badges, and past that a **⋯ N** button lists the rest. The tab you are on always keeps its name and close button.
 
