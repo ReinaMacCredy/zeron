@@ -3130,7 +3130,10 @@ impl UiSettings {
                         .get_mut("keymap")
                         .and_then(serde_json::Value::as_object_mut)
                     {
-                        for (id, field) in [(ShortcutId::ToggleFiles, "toggleFiles")] {
+                        for (id, field) in [
+                            (ShortcutId::ToggleFiles, "toggleFiles"),
+                            (ShortcutId::ToggleTray, "toggleTray"),
+                        ] {
                             let default = platform_combo(id.default_combo());
                             let taken = !keymap.contains_key(field)
                                 && keymap.values().any(|existing| {
@@ -5915,6 +5918,17 @@ mod tests {
         .unwrap();
         let keymap = UiSettings::load(dir.path()).keymap;
         assert_eq!(keymap.get(ShortcutId::ToggleFiles), "mod-e");
+        assert_eq!(keymap.get(ShortcutId::ToggleTray), "mod-i");
+
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"keymap": {"toggleSidebar": "mod-i"}}"#,
+        )
+        .unwrap();
+        let keymap = UiSettings::load(dir.path()).keymap;
+        assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-i");
+        assert_eq!(keymap.get(ShortcutId::ToggleTray), "");
+        assert!(conflicted_shortcuts(&keymap).is_empty());
     }
 
     #[test]
