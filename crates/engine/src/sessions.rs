@@ -944,7 +944,7 @@ impl Inner {
         })
     }
 
-    /// Only a delegated child gets a mid-run offer; top-level chats keep the limit pill.
+    /// Only a delegated child gets a mid-run offer; top-level chats get the limit notice.
     fn limit_offer(&self, chat_id: &str, harness: HarnessId) -> Option<zeron_proto::LimitOffer> {
         let owner = self.doc_host()?.child_owner(chat_id)?;
         let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();

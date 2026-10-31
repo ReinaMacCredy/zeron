@@ -1,6 +1,6 @@
 //! Desktop self-update: the app's own release checker plus the download /
 //! install lifecycle behind the sidebar update strip, "Check for Updates…"
-//! (macOS app menu; the account menu elsewhere) and install-on-quit.
+//! (macOS app menu) and install-on-quit.
 //!
 //! The checker runs in this process against this binary's version. The
 //! engine keeps its own checker for daemons and remote reporting, but the UI

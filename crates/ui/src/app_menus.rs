@@ -172,8 +172,7 @@ pub fn app_menus() -> Vec<Menu> {
     let mut app_items = vec![
         // The native AppKit about panel; no equivalent elsewhere yet.
         MenuItem::action("About Zeron", About).disabled(!macos),
-        // Sparkle's placement: directly under About. Other platforms reach
-        // the same check from the account menu.
+        // Sparkle's placement: directly under About.
         MenuItem::action("Check for Updates…", CheckForUpdates),
         MenuItem::action("What’s New…", shell::OpenWhatsNew),
         MenuItem::separator(),

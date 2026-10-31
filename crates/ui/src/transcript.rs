@@ -14803,7 +14803,7 @@ fn tool_file_path(call: &ToolCall) -> Option<&str> {
     }
 }
 
-/// Opens a tool chip's file in the files panel through the transcript's
+/// Opens a tool chip's file in the right pane through the transcript's
 /// workspace-link handler.
 #[derive(Clone)]
 struct ToolFileOpener {

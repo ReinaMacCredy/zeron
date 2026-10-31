@@ -2112,7 +2112,7 @@ pub(crate) fn chat_title_editor(
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
 const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
 
-/// Target of the sidebar's "Star on GitHub" banner (same as the landing page).
+/// Target of the Help menu's "Star Zeron on GitHub" row (same as the landing page).
 const GITHUB_REPO_URL: &str = "https://github.com/zeronsh/comet";
 
 /// New-thread controls float over the tail of a top-anchored image hero. The
@@ -2686,8 +2686,8 @@ enum SyncFlow {
     Enabling,
     Canceling,
     /// Signed in on a local runtime: the wizard's choice step (bring local
-    /// work / start fresh / later). `notice_open: false` = postponed, badge
-    /// in the account menu.
+    /// work / start fresh / later). `notice_open: false` = postponed;
+    /// Settings > Account reopens it.
     SwitchOffer {
         notice_open: bool,
     },
@@ -2709,8 +2709,8 @@ enum SyncFlow {
     /// structural idempotence makes re-running safe (only missing rows copy).
     /// Details ride `runtime_change_error`. `notice_open: false` = postponed:
     /// the dialog is hidden but the failure stays pending, reachable through
-    /// the account menu — dismissal must never discard the only retry
-    /// entry point (under Synced scope the menu otherwise offers just
+    /// Settings > Account — dismissal must never discard the only retry
+    /// entry point (under Synced scope the page otherwise offers just
     /// Sign out, and the local rows would be unreachable).
     ImportFailed {
         notice_open: bool,
@@ -2991,8 +2991,8 @@ fn account_menu_action(scope: Option<WorkspaceScope>, flow: SyncFlow) -> Option<
     }
 }
 
-/// The sidebar footer's profile label and the account menu's identity line.
-/// Anything without a signed-in account reads "Local"; the menu carries the
+/// The Settings > Account page's name and identity line. Anything without a
+/// signed-in account reads "Local"; the identity line carries the
 /// storage/sync detail.
 fn sidebar_account_identity(
     scope: Option<WorkspaceScope>,
@@ -8377,7 +8377,7 @@ impl Shell {
     /// Escape bubbling out of the settings page. Focused controls — open
     /// dropdowns, the shortcut recorder, a dialog's own input — consume it
     /// before it gets here. What remains open without holding focus closes
-    /// first: the account menu, a sync prompt, then the routed page's dialog
+    /// first: a sync prompt, then the routed page's dialog
     /// or login flow. Returns whether one did; only then does Settings stay.
     fn dismiss_settings_escape_surface(&mut self, cx: &mut Context<Self>) -> bool {
         if self.sync_flow.has_visible_overlay() {
@@ -17976,7 +17976,7 @@ impl Shell {
             }
             let slim = slim[ix];
             let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
-            // A running child keeps its kind icon and gains a dot; other tabs
+            // A running child keeps its icon and gains a dot; other tabs
             // swap their icon for the mini spinner. Subagent liveness follows
             // the doc's streaming tail.
             let browser_favicon = match surface {
@@ -21355,9 +21355,9 @@ mod tests {
             "a postponed import failure survives auth/scope updates"
         );
 
-        // …and the account menu on the SYNCED runtime still exposes the
+        // …and Settings > Account on the SYNCED runtime still exposes the
         // re-entry point. This is the whole point: after the switch there is
-        // no local runtime left to re-derive an offer from, so this menu row
+        // no local runtime left to re-derive an offer from, so this page row
         // is the only path back to the retry dialog.
         assert_eq!(
             account_menu_action(Some(WorkspaceScope::Synced), dismissed),

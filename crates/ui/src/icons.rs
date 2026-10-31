@@ -91,7 +91,7 @@ icon_assets![
     (CALENDAR, "calendar"),
     (LIST, "list"),
     (FOLDER_WITH_FILES, "folder-with-files"),
-    // Original tree glyph with compact nodes for the independent Files panel.
+    // Original tree glyph with compact nodes for the Files pane tool.
     (FILE_TREE, "file-tree"),
     // Hand-drawn floppy disk in the Solar Linear style. Workspace editor save.
     (FLOPPY_DISK, "floppy-disk"),
@@ -185,7 +185,7 @@ icon_assets![
     (DANGER_TRIANGLE, "danger-triangle"),
     (CHAT_ROUND_LINE, "chat-round-line"),
     // Hand-drawn bot head (antenna + eyes + ears) in the Solar Linear style
-    // — the embedded set has no bot/robot glyph. Subagent tabs.
+    // — the embedded set has no bot/robot glyph.
     (BOT, "bot"),
     // Hand-drawn bell + speaker in the Solar Linear style (like the terminal/
     // plus/return ports) — the embedded set has neither.

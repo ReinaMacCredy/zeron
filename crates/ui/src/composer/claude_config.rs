@@ -20,7 +20,6 @@ use crate::popover;
 use crate::theme::Theme;
 
 pub(crate) use zeron_proto::claude_panel::{Meter, SUMMARY_PREFIX, parse_usage};
-// Clears the titlebar, the Chat | Work toggle and the New task row above the panel.
 pub(crate) const HERO_PANEL_TOP: f32 = Theme::TITLEBAR_HEIGHT + 96.0;
 const HERO_BELOW_PILL: f32 = 64.0;
 // Usage lives on the rail ring and the Usage page on desktop; the phone keeps its Usage tab.
