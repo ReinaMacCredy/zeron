@@ -582,7 +582,6 @@ pub const SIDECAR_POPOVER_SLIDE: MotionSpec = MotionSpec::new(220, EASE_DRAWER);
 pub const PANEL_RESIZE: MotionSpec = DIALOG_IN;
 /// Terminal tab drag-reorder sliding transforms: 150ms (§1.10).
 pub const TAB_SLIDE: MotionSpec = MotionSpec::new(150, EASE_OUT);
-pub const SEGMENT_SLIDE: MotionSpec = MotionSpec::new(260, EASE_OUT_QUINT);
 pub const TAB_GROUP: MotionSpec = MotionSpec::new(240, EASE_OUT);
 /// Diff-pane per-file collapse: 180ms height (§1.11).
 pub const COLLAPSE: MotionSpec = MotionSpec::new(180, EASE_OUT);

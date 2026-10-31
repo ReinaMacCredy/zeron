@@ -1,12 +1,11 @@
 //! How many subagents are running, drawn the same way wherever it turns up:
 //! the "● 3" pill on the sidebar's chat rows (beside the row's own activity
-//! indicator) and the Subagents header, and the count badge on the
-//! titlebar's explorer toggle.
+//! indicator) and the Subagents header.
 
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, Entity, Hsla, IntoElement, Render,
-    RenderOnce, SharedString, Styled as _, TextAlign, TextRun, Window, canvas, div, fill, point,
-    prelude::*, px, size,
+    RenderOnce, SharedString, Styled as _, TextAlign, TextRun, Window, canvas, fill, point, px,
+    size,
 };
 
 use crate::motion;
@@ -27,8 +26,6 @@ const PLUS_TRIM: f32 = 1.0;
 /// fraction of the font size: (726 + -16) / 2 units of 1000 for the round
 /// digits, 710 / 2 for the flat ones.
 const DIGIT_MID: f32 = 0.355;
-/// Height of the count badge on the titlebar button.
-const BADGE: f32 = 13.0;
 /// Past this the count would outgrow the pill; it reads "99+".
 const COUNT_CAP: u32 = 99;
 
@@ -120,14 +117,7 @@ impl PillSpec {
     }
 
     fn shape(&self, window: &Window, font_size: gpui::Pixels) -> gpui::ShapedLine {
-        shape_count(
-            window,
-            self.count,
-            &self.family,
-            gpui::FontWeight::MEDIUM,
-            self.tone,
-            font_size,
-        )
+        shape_count(window, self.count, &self.family, self.tone, font_size)
     }
 }
 
@@ -135,7 +125,6 @@ fn shape_count(
     window: &Window,
     count: u32,
     family: &SharedString,
-    weight: gpui::FontWeight,
     color: Hsla,
     font_size: gpui::Pixels,
 ) -> gpui::ShapedLine {
@@ -146,7 +135,7 @@ fn shape_count(
             family: family.clone(),
             features: gpui::FontFeatures::default(),
             fallbacks: None,
-            weight,
+            weight: gpui::FontWeight::MEDIUM,
             style: gpui::FontStyle::Normal,
         },
         color,
@@ -183,25 +172,6 @@ impl Render for PillView {
 /// metrics and glyph rounding differ per font size and display scale, so the
 /// baseline is snapped to a device pixel here (as gpui would on painting),
 /// and the dot is centred on the digits' actual middle from that baseline.
-/// Where to put a line of digits so their middle sits on the middle of
-/// `bounds`: the digits' baseline, snapped to a device pixel (as gpui would on
-/// painting), and the top of the line box that lands gpui's own centring of
-/// ascent-plus-descent on that baseline. Returns `(line_top, baseline)`.
-fn digits_baseline(
-    bounds: Bounds<gpui::Pixels>,
-    font_size: gpui::Pixels,
-    line: &gpui::ShapedLine,
-    scale: f32,
-) -> (f32, f32) {
-    let height = f32::from(bounds.size.height);
-    let digit_mid = f32::from(font_size) * DIGIT_MID;
-    let baseline =
-        ((f32::from(bounds.origin.y) + height / 2.0 + digit_mid) * scale).round() / scale;
-    let baseline_in_box =
-        (height - f32::from(line.ascent) - f32::from(line.descent)) / 2.0 + f32::from(line.ascent);
-    (baseline - baseline_in_box, baseline)
-}
-
 fn paint_pill(
     bounds: Bounds<gpui::Pixels>,
     spec: &PillSpec,
@@ -247,93 +217,6 @@ fn paint_pill(
     }
 
     let _ = line.paint(text_origin, height, TextAlign::Left, None, window, cx);
-}
-
-/// Marks the titlebar's explorer button while subagents run, so they can be
-/// found with the panel closed: a small count badge sits on its corner, drawn
-/// over the button, so it keeps its size and position among the titlebar
-/// controls.
-pub fn mark_files_button(
-    button: gpui::Stateful<gpui::Div>,
-    count: u32,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    button.relative().child(
-        div()
-            .absolute()
-            .top(px(-3.0))
-            .right(px(-3.0))
-            .child(CountBadge {
-                count,
-                tone: theme.busy,
-                family: theme.font_mono.clone(),
-            }),
-    )
-}
-
-/// The count badge on the titlebar button, painted rather than laid out so
-/// the digits can be centred exactly: a laid-out text box lands on a rounded
-/// device pixel, which read as the digit sitting left of centre.
-#[derive(IntoElement)]
-struct CountBadge {
-    count: u32,
-    tone: Hsla,
-    family: SharedString,
-}
-
-/// Padding either side of the badge's digits.
-const BADGE_PAD: f32 = 3.0;
-
-impl RenderOnce for CountBadge {
-    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let font_size = crate::typography::ui_rems(9.0).to_pixels(window.rem_size());
-        let line = shape_count(
-            window,
-            self.count,
-            &self.family,
-            gpui::FontWeight::SEMIBOLD,
-            gpui::white(),
-            font_size,
-        );
-        let capped = is_capped(self.count);
-        let text_width = f32::from(line.width);
-        // Capped labels trim the padding after the "+" (see [`PLUS_TRIM`]).
-        let right_pad = if capped {
-            BADGE_PAD - PLUS_TRIM
-        } else {
-            BADGE_PAD
-        };
-        let width = (BADGE_PAD + text_width + right_pad).max(BADGE);
-        let tone = self.tone;
-        canvas(
-            |_, _, _| (),
-            move |bounds: Bounds<gpui::Pixels>, _, window, cx| {
-                let scale = window.scale_factor();
-                let snap = |value: f32| (value * scale).round() / scale;
-                window.paint_quad(fill(bounds, tone).corner_radii(bounds.size.height / 2.0));
-                let (line_top, _) = digits_baseline(bounds, font_size, &line, scale);
-                // Single digits sit centred in the badge; a capped label sits
-                // at the padding, its trimmed side toward the "+".
-                let left = f32::from(bounds.origin.x);
-                let x = if capped {
-                    left + BADGE_PAD
-                } else {
-                    left + (f32::from(bounds.size.width) - text_width) / 2.0
-                };
-                let origin = point(px(snap(x)), px(line_top));
-                let _ = line.paint(
-                    origin,
-                    bounds.size.height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
-            },
-        )
-        .w(px(width))
-        .h(px(BADGE))
-    }
 }
 
 #[cfg(test)]
