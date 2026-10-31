@@ -6778,7 +6778,8 @@ impl Shell {
     /// The main composer's Side chat tab, its shortcut, `/btw` and
     /// `/sidechat` open the source chat's side chat in the right pane. Bare
     /// reopens the one already open, else the newest live one, else a fresh
-    /// one; `prompt` always asks in a new one.
+    /// one, and hides the pane when that side chat is already showing;
+    /// `prompt` always asks in a new one.
     fn open_sidechat(
         &mut self,
         source_chat_id: String,
@@ -6786,6 +6787,14 @@ impl Shell {
         staged: SidechatStaged,
         cx: &mut Context<Self>,
     ) {
+        if prompt.is_none()
+            && staged.attachments.is_empty()
+            && staged.appshots.is_empty()
+            && self.sidechat_showing(&source_chat_id, cx)
+        {
+            self.set_surfaces_open(false, cx);
+            return;
+        }
         let reopen = prompt
             .is_none()
             .then(|| {
@@ -6802,6 +6811,19 @@ impl Shell {
             Some(chat) => self.open_sidechat_in_right_pane(&chat, None, staged, cx),
             None => self.create_sidechat(source_chat_id, prompt, staged, cx),
         }
+    }
+
+    fn sidechat_showing(&self, source_chat_id: &str, cx: &App) -> bool {
+        let RightSurface::Sidechat(id) = self.resolved_right_active(cx) else {
+            return false;
+        };
+        self.right_pane_shown(cx)
+            && self.sidechat_tabs.get(&id).is_some_and(|tab| {
+                self.state.read(cx).chats.iter().any(|chat| {
+                    chat.id == tab.chat_id
+                        && chat.sidechat_source_chat_id.as_deref() == Some(source_chat_id)
+                })
+            })
     }
 
     fn doc_held(&self, chat_id: &str) -> bool {
