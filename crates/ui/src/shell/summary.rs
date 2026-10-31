@@ -209,7 +209,14 @@ impl SidecarSection {
     fn label(&self) -> SharedString {
         match self.running {
             0 => self.part.heading().into(),
-            n => format!("{} · {n} running", self.part.heading()).into(),
+            _ => format!("{} · {}", self.part.heading(), self.running_text()).into(),
+        }
+    }
+
+    fn running_text(&self) -> String {
+        match self.running {
+            1 => "1 agent running".into(),
+            n => format!("{n} agents running"),
         }
     }
 }
@@ -841,7 +848,6 @@ impl Shell {
 
         let shells = zeron_proto::background::shell_tasks(state.session_for(&chat.id));
         let stoppable = self.composer.read(cx).can_stop_shells(cx);
-        section.running += shells.len();
         for (ix, task) in shells.into_iter().take(SECTION_CAP).enumerate() {
             let elapsed = task.started_at.map_or("Running".into(), |at| {
                 short_elapsed(now.signed_duration_since(at).num_seconds())
@@ -1059,7 +1065,7 @@ impl Shell {
                     div()
                         .flex_none()
                         .text_size(crate::typography::ui_rems(11.0))
-                        .child(SharedString::from(format!("{} running", section.running))),
+                        .child(SharedString::from(section.running_text())),
                 )
             });
         div()
@@ -2190,7 +2196,10 @@ mod sidecar_regressions {
                 .iter()
                 .find(|section| section.part == SidecarPart::Beside)
                 .expect("beside section");
-            assert_eq!(section.label().as_ref(), "Beside this thread · 2 running");
+            assert_eq!(
+                section.label().as_ref(),
+                "Beside this thread · 2 agents running"
+            );
             let labels: Vec<_> = section
                 .entries
                 .iter()
