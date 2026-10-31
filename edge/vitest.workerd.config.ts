@@ -46,7 +46,8 @@ export default defineConfig({
           PREVIEW_ROOMS: { className: "PreviewRoom", useSQLite: true },
           REGISTRY_ROOMS: { className: "RegistryRoom", useSQLite: true },
           CLOUD_ACCOUNTS: { className: "CloudAccount", useSQLite: true },
-          CLOUD_INDEX: { className: "CloudIndex", useSQLite: true }
+          CLOUD_INDEX: { className: "CloudIndex", useSQLite: true },
+          USER_DIRECTORY: { className: "UserDirectory", useSQLite: true }
         },
         workflows: {
           CLOUD_PROVISION: { name: "test-cloud-provision", className: "ProvisionWorkflow" },
@@ -76,6 +77,7 @@ export default defineConfig({
           STRIPE_API_URL: "https://stripe.test",
           CLOUD_MAX_AWAKE: "2",
           ADMIN_TOKEN: "test-admin-token",
+          WORKOS_WEBHOOK_SECRET: "workos_whsec_test",
           RUNNER_JWT_PRIVATE_KEY: JSON.stringify(runnerKeys.privateKey.export({ format: "jwk" })),
           RUNNER_JWT_PUBLIC_KEY: JSON.stringify(runnerKeys.publicKey.export({ format: "jwk" }))
         },

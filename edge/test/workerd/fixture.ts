@@ -15,12 +15,14 @@ import { previewRoute } from "../../src/preview-route";
 import { releaseRoute } from "../../src/releases";
 import { runnerRefusal } from "../../src/runner-policy";
 import { handleVaultRoute } from "../../src/vault-routes";
+import { handleUserDirectoryRoute } from "../../src/user-directory";
 export { DeviceRoom } from "../../src/device-room";
 export { ChatRoom } from "../../src/chat-room";
 export { PreviewRoom } from "../../src/preview-room";
 export { RegistryRoom } from "../../src/registry-room";
 export { CloudAccount } from "../../src/cloud/cloud-account";
 export { CloudIndex } from "../../src/cloud/cloud-index";
+export { UserDirectory } from "../../src/user-directory";
 export { DeleteWorkflow, ProvisionWorkflow, SleepWorkflow, WakeWorkflow } from "../../src/cloud/workflows";
 
 /** Bare SQLite-backed DO; tests reach its real `ctx.storage.sql` via
@@ -117,6 +119,8 @@ export default {
     if (billing) return billing;
     const runner = await handleRunnerPublicRoute(request, env, url);
     if (runner) return runner;
+    const users = await handleUserDirectoryRoute(request, env, url);
+    if (users) return users;
     const auth = await authenticate(env, request);
     if (!auth) return new Response("Unauthorized", { status: 401 });
     const refused = runnerRefusal(auth, request.method, url);

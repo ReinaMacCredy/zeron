@@ -4,7 +4,9 @@ use gpui::{
     AnyElement, Context, Entity, EventEmitter, SharedString, Stateful, Subscription, Task, Window,
     div, prelude::*, px,
 };
-use zeron_proto::tools::{TOOL_GROUPS, ToolGroup, ToolGroupInfo, ToolSettings, ToolSettingsState};
+use zeron_proto::tools::{
+    ReceivedCount, TOOL_GROUPS, ToolGroup, ToolGroupInfo, ToolSettings, ToolSettingsState,
+};
 use zeron_rpc::methods;
 
 use super::widgets::{self, ActionTone};
@@ -229,14 +231,13 @@ impl ToolsPage {
         disabled: &BTreeSet<&'static str>,
         cx: &gpui::App,
     ) -> GroupState {
-        let tools = info.tools();
-        let live = tools.iter().filter(|t| !disabled.contains(t.name)).count();
-        if !self.group_on(settings, info.group, cx) || live == 0 {
+        let count = info.received(disabled);
+        if !self.group_on(settings, info.group, cx) || count.live_tools == 0 {
             GroupState::Off
-        } else if live < tools.len() {
-            GroupState::Partial(live)
-        } else {
+        } else if count.all_live() {
             GroupState::On
+        } else {
+            GroupState::Partial
         }
     }
 
@@ -260,6 +261,8 @@ impl ToolsPage {
         wires: [art::Wire; 6],
         live: usize,
         total: usize,
+        all_live: bool,
+        (any_off, any_on): (bool, bool),
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let saving = self.pending.len();
@@ -268,7 +271,7 @@ impl ToolsPage {
                 format!("Saving {saving} group{}", if saving == 1 { "" } else { "s" }),
                 "Zeron is updating its MCP server. A running chat picks up the change on its next turn.".to_string(),
             )
-        } else if live == total {
+        } else if all_live {
             (
                 "Every tool is live".to_string(),
                 format!(
@@ -338,13 +341,13 @@ impl ToolsPage {
                     .gap(px(7.0))
                     .child(activate(
                         action(theme, "tools-all-on", "Turn all on", ActionTone::Solid),
-                        ready && live < total,
+                        ready && any_off,
                         cx,
                         |page: &mut Self, cx| page.turn_all(true, cx),
                     ))
                     .child(activate(
                         action(theme, "tools-all-off", "Turn all off", ActionTone::Filled),
-                        ready && live > 0,
+                        ready && any_on,
                         cx,
                         |page: &mut Self, cx| page.turn_all(false, cx),
                     )),
@@ -404,10 +407,7 @@ impl ToolsPage {
                     .into_any_element(),
             );
         }
-        let count = match state {
-            GroupState::Partial(live) => format!("{live}/{} TOOLS", tools.len()),
-            _ => format!("{} TOOLS", tools.len()),
-        };
+        let count = received_label(info.received(disabled), state);
         let control = activate(
             switch(
                 theme,
@@ -557,15 +557,34 @@ impl ToolsPage {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GroupState {
     Off,
-    Partial(usize),
+    Partial,
     On,
+}
+
+fn received_label(count: ReceivedCount, state: GroupState) -> String {
+    let fraction = |live: usize, total: usize| match state {
+        GroupState::Partial if live < total => format!("{live}/{total}"),
+        _ => total.to_string(),
+    };
+    let mut label = format!(
+        "{} TOOL{}",
+        fraction(count.live_tools, count.tools),
+        if count.tools == 1 { "" } else { "S" }
+    );
+    if count.actions > 0 {
+        label.push_str(&format!(
+            " · {} ACTIONS",
+            fraction(count.live_actions, count.actions)
+        ));
+    }
+    label
 }
 
 impl GroupState {
     fn lit(self) -> art::Lit {
         match self {
             Self::Off => art::Lit::Off,
-            Self::Partial(_) => art::Lit::Partial,
+            Self::Partial => art::Lit::Partial,
             Self::On => art::Lit::On,
         }
     }
@@ -637,12 +656,19 @@ impl Render for ToolsPage {
         match self.settings.ready().cloned() {
             Some(settings) => {
                 let disabled = self.disabled(&settings, cx);
-                let total: usize = TOOL_GROUPS.iter().map(|info| info.tools().len()).sum();
-                let live = total - disabled.len();
+                let counts: Vec<ReceivedCount> = TOOL_GROUPS
+                    .iter()
+                    .map(|info| info.received(&disabled))
+                    .collect();
+                let total: usize = counts.iter().map(|count| count.tools).sum();
+                let live: usize = counts.iter().map(|count| count.live_tools).sum();
                 let states: Vec<GroupState> = TOOL_GROUPS
                     .iter()
                     .map(|info| self.group_state(&settings, info, &disabled, cx))
                     .collect();
+                let all_live = states.iter().all(|state| *state == GroupState::On);
+                let switches: usize = TOOL_GROUPS.iter().map(|info| info.tools().len()).sum();
+                let any_switch = (!disabled.is_empty(), disabled.len() < switches);
                 let animate = self.wires.is_some();
                 let mut wires = self.wires.unwrap_or_default();
                 for (wire, state) in wires.iter_mut().zip(&states) {
@@ -651,11 +677,11 @@ impl Render for ToolsPage {
                 self.wires = Some(wires);
                 let groups_on = states
                     .iter()
-                    .filter(|state| matches!(state, GroupState::On | GroupState::Partial(_)))
+                    .filter(|state| matches!(state, GroupState::On | GroupState::Partial))
                     .count();
                 let status = if !self.pending.is_empty() {
                     "SAVING"
-                } else if live == total {
+                } else if all_live {
                     "ALL LIVE"
                 } else if live > 0 {
                     "PARTIAL"
@@ -671,7 +697,7 @@ impl Render for ToolsPage {
                                 .child(widgets::error_strip(&theme, error)),
                         )
                     })
-                    .child(self.hero(&theme, wires, live, total, cx));
+                    .child(self.hero(&theme, wires, live, total, all_live, any_switch, cx));
                 let mut groups = widgets::section_card(&theme).mt_0();
                 for (index, info) in TOOL_GROUPS.iter().enumerate() {
                     groups = groups.child(self.group_card(

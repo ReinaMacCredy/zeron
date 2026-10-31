@@ -1,6 +1,6 @@
 The Zeron iPhone app lets you follow and steer your sessions, tasks and missions from your phone. The phone is one more device in your synced workspace: it shows the same sessions, sends your messages and answers, starts new sessions and missions, and changes your Macs' settings, but no agent runs on it. Every session runs on one of your computers or servers, which has to be online to act on what you send.
 
-The app has three tabs, **Sessions**, **Tasks** and **Settings**, plus search. It also runs on iPad, where the session list sits in a sidebar next to the open session.
+The app has three tabs, **Sessions**, **Tasks** and **Settings**, plus search. It also runs on iPad, where the session list sits in a sidebar next to the open session. The Android app has the same tabs and pages; on an Android tablet, Tasks, missions, pull requests and Git open in the main column beside the session list.
 
 ## Sign in
 

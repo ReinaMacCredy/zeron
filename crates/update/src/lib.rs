@@ -247,6 +247,38 @@ async fn fetch_release_metadata_with_limits(
         .with_context(|| format!("fetching {url} exceeded the metadata deadline"))?
 }
 
+pub fn check_error_message(err: &anyhow::Error) -> String {
+    let request = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>());
+    let host = request
+        .and_then(reqwest::Error::url)
+        .and_then(|url| url.host_str())
+        .unwrap_or("the update server");
+    let os_error = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .and_then(std::io::Error::raw_os_error);
+    let connect = request.is_some_and(reqwest::Error::is_connect);
+    // macOS reports a content-filter drop (Little Snitch and the like) as EBADF on the new socket.
+    if cfg!(target_os = "macos") && connect && os_error == Some(9) {
+        return format!(
+            "A firewall on this Mac blocked Zeron's connection to {host}. Allow it in your firewall app (such as Little Snitch) and check again."
+        );
+    }
+    let timed_out = request.is_some_and(reqwest::Error::is_timeout)
+        || err
+            .chain()
+            .any(|cause| cause.is::<tokio::time::error::Elapsed>());
+    if timed_out {
+        return format!("Timed out waiting for {host}. Check your internet connection.");
+    }
+    if connect {
+        return format!("Couldn't connect to {host}. Check your internet connection.");
+    }
+    err.root_cause().to_string()
+}
+
 fn http_client() -> anyhow::Result<reqwest::Client> {
     http_client_with_timeouts(Duration::from_secs(15), Duration::from_secs(30))
 }
@@ -1167,7 +1199,7 @@ impl Updater {
             }
             Err(err) => {
                 self.status_tx
-                    .send_modify(|s| s.error = Some(format!("{err:#}")));
+                    .send_modify(|s| s.error = Some(check_error_message(&err)));
                 Err(err)
             }
         }
@@ -1301,9 +1333,9 @@ impl Updater {
                 true
             }
             Err(err) => {
-                tracing::debug!(error = %err, "update check failed");
+                tracing::debug!(error = %format!("{err:#}"), "update check failed");
                 self.status_tx
-                    .send_modify(|s| s.error = Some(format!("{err:#}")));
+                    .send_modify(|s| s.error = Some(check_error_message(&err)));
                 false
             }
         }
@@ -1610,7 +1642,30 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("metadata deadline"));
+        assert_eq!(
+            check_error_message(&error),
+            "Timed out waiting for the update server. Check your internet connection."
+        );
         server.abort();
+
+        let error = fetch_release_metadata_with_limits(
+            &client,
+            "http://127.0.0.1:1/manifest.json",
+            Duration::from_secs(1),
+            100,
+        )
+        .await
+        .unwrap_err();
+        let refused = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+            .expect("the connect error's io::Error is in the chain");
+        assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
+        assert!(refused.raw_os_error().is_some());
+        assert_eq!(
+            check_error_message(&error),
+            "Couldn't connect to 127.0.0.1. Check your internet connection."
+        );
     }
 
     #[tokio::test]

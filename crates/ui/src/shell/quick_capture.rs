@@ -68,6 +68,9 @@ impl Shell {
     }
 
     fn close_bar_window(&mut self, cx: &mut Context<Self>) {
+        if let Some(bar) = &self.quick_capture.bar {
+            bar.update(cx, |bar, cx| bar.close_menu(cx));
+        }
         if let Some(handle) = self.quick_capture.bar_window.take() {
             cx.defer(move |cx| {
                 handle

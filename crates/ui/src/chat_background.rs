@@ -14,14 +14,56 @@ const TAB_FADE_BOTTOM: f32 = Theme::TITLEBAR_HEIGHT + 46.0;
 
 pub(crate) type Painted = Rc<Cell<Option<(Bounds<Pixels>, Bounds<Pixels>)>>>;
 
+pub(crate) type Art = Rc<dyn Fn(Option<&Painted>) -> AnyElement>;
+
 #[derive(Clone)]
 pub(crate) struct Backdrop {
-    pub(crate) artwork: Option<Arc<RenderImage>>,
-    pub(crate) settings: ChatBackground,
+    pub(crate) art: Art,
+    pub(crate) tab_shade: f32,
     pub(crate) fade: f32,
     pub(crate) scrim_color: Hsla,
     pub(crate) body: Hsla,
     pub(crate) painted: Painted,
+}
+
+impl Backdrop {
+    pub(crate) fn chat(
+        artwork: Option<Arc<RenderImage>>,
+        settings: ChatBackground,
+        fade: f32,
+        scrim_color: Hsla,
+        body: Hsla,
+    ) -> Self {
+        Self {
+            art: art(artwork, settings, scrim_color),
+            tab_shade: settings.tab_shade,
+            fade,
+            scrim_color,
+            body,
+            painted: Default::default(),
+        }
+    }
+
+    pub(crate) fn strip(&self) -> gpui::Canvas<()> {
+        let painted = self.painted.clone();
+        let (color, tab_shade) = (self.scrim_color.opacity(self.fade), self.tab_shade);
+        gpui::canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _cx| {
+                painted.set(Some((bounds, window.content_mask().bounds)));
+                let strip = Bounds::from_corners(
+                    point(bounds.left(), bounds.top() + px(Theme::TITLEBAR_HEIGHT)),
+                    point(bounds.right(), bounds.top() + px(TAB_FADE_BOTTOM)),
+                );
+                window.paint_quad(gpui::fill(
+                    strip,
+                    tab_fade(color, tab_shade, Theme::TITLEBAR_HEIGHT, TAB_FADE_BOTTOM),
+                ));
+            },
+        )
+        .absolute()
+        .inset_0()
+    }
 }
 
 pub(crate) fn layer_height(
@@ -47,10 +89,8 @@ pub(crate) fn layer(
     height: f32,
     scrim_color: Hsla,
     fade: f32,
-    painted: Option<Painted>,
+    backdrop: Option<&Backdrop>,
 ) -> AnyElement {
-    let fade = fade.clamp(0.0, 1.0);
-    let fade_bottom = settings.placement == ChatBackgroundPlacement::Hero;
     div()
         .absolute()
         .top_0()
@@ -61,56 +101,44 @@ pub(crate) fn layer(
         })
         .h(px(height))
         .overflow_hidden()
-        .children(artwork.map(|artwork| {
+        .child(
             div()
                 .absolute()
                 .inset_0()
-                .opacity(settings.opacity.clamp(0.0, 1.0) * fade)
-                .child(
-                    gpui::canvas(
-                        |_, _, _| {},
-                        move |bounds, _, window, _cx| {
-                            crate::new_thread_background_mask::paint_chat(
-                                artwork.clone(),
-                                bounds,
-                                fade_bottom,
-                                window,
-                            );
-                        },
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
-        }))
-        .child(
-            gpui::canvas(
-                |_, _, _| {},
-                move |bounds, _, window, _cx| {
-                    if settings.scrim {
-                        paint_scrim(bounds, scrim_color, fade_bottom, fade, window);
-                    }
-                    if let Some(painted) = &painted {
-                        painted.set(Some((bounds, window.content_mask().bounds)));
-                        let strip = Bounds::from_corners(
-                            point(bounds.left(), bounds.top() + px(Theme::TITLEBAR_HEIGHT)),
-                            point(bounds.right(), bounds.top() + px(TAB_FADE_BOTTOM)),
-                        );
-                        window.paint_quad(gpui::fill(
-                            strip,
-                            tab_fade(
-                                scrim_color.opacity(fade),
-                                settings.tab_shade,
-                                Theme::TITLEBAR_HEIGHT,
-                                TAB_FADE_BOTTOM,
-                            ),
-                        ));
-                    }
-                },
-            )
-            .absolute()
-            .inset_0(),
+                .opacity(fade.clamp(0.0, 1.0))
+                .child(art(artwork, settings, scrim_color)(None)),
         )
+        .when_some(backdrop, |layer, backdrop| layer.child(backdrop.strip()))
         .into_any_element()
+}
+
+fn art(artwork: Option<Arc<RenderImage>>, settings: ChatBackground, scrim_color: Hsla) -> Art {
+    let fade_bottom = settings.placement == ChatBackgroundPlacement::Hero;
+    Rc::new(move |painted| {
+        div()
+            .absolute()
+            .inset_0()
+            .children(artwork.clone().map(|artwork| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .opacity(settings.opacity.clamp(0.0, 1.0))
+                    .child(clipped(painted, move |_, layer, window| {
+                        crate::new_thread_background_mask::paint_chat(
+                            artwork.clone(),
+                            layer,
+                            fade_bottom,
+                            window,
+                        );
+                    }))
+            }))
+            .when(settings.scrim, |el| {
+                el.child(clipped(painted, move |_, layer, window| {
+                    paint_scrim(layer, scrim_color, fade_bottom, window);
+                }))
+            })
+            .into_any_element()
+    })
 }
 
 pub(crate) fn surface(
@@ -118,50 +146,34 @@ pub(crate) fn surface(
     overlay: impl Fn(Bounds<Pixels>, Bounds<Pixels>, &mut Window) + 'static,
 ) -> gpui::Div {
     let Backdrop {
-        artwork,
-        settings,
+        art,
         fade,
-        scrim_color,
         body,
         painted,
+        ..
     } = backdrop;
-    let fade_bottom = settings.placement == ChatBackgroundPlacement::Hero;
     div()
         .absolute()
         .inset_0()
         .opacity(fade.clamp(0.0, 1.0))
-        .child(clipped(painted.clone(), move |own, _, window| {
+        .child(clipped(Some(&painted), move |own, _, window| {
             window.paint_quad(gpui::fill(own, body));
         }))
-        .children(artwork.map(|artwork| {
-            div()
-                .absolute()
-                .inset_0()
-                .opacity(settings.opacity.clamp(0.0, 1.0))
-                .child(clipped(painted.clone(), move |_, layer, window| {
-                    crate::new_thread_background_mask::paint_chat(
-                        artwork.clone(),
-                        layer,
-                        fade_bottom,
-                        window,
-                    );
-                }))
-        }))
-        .child(clipped(painted, move |own, layer, window| {
-            if settings.scrim {
-                paint_scrim(layer, scrim_color, fade_bottom, 1.0, window);
-            }
-            overlay(own, layer, window);
-        }))
+        .child(art(Some(&painted)))
+        .child(clipped(Some(&painted), overlay))
 }
 
-fn clipped(
-    painted: Painted,
+pub(crate) fn clipped(
+    painted: Option<&Painted>,
     paint: impl Fn(Bounds<Pixels>, Bounds<Pixels>, &mut Window) + 'static,
 ) -> gpui::Canvas<()> {
+    let painted = painted.cloned();
     gpui::canvas(
         |_, _, _| {},
         move |own, _, window, _cx| {
+            let Some(painted) = &painted else {
+                return paint(own, own, window);
+            };
             let Some((layer, mask)) = painted.get() else {
                 return;
             };
@@ -196,14 +208,8 @@ pub(crate) fn tab_fade(color: Hsla, tab_shade: f32, top: f32, bottom: f32) -> Ba
 /// Two stacked gradients stand in for a three-stop scrim. The hero placement
 /// releases toward the bottom where the artwork has already dissolved, so
 /// translucent themes show no edge at the layer's end.
-fn paint_scrim(
-    bounds: Bounds<Pixels>,
-    color: Hsla,
-    fade_bottom: bool,
-    fade: f32,
-    window: &mut Window,
-) {
-    let stop = |alpha: f32| color.opacity(alpha * fade);
+fn paint_scrim(bounds: Bounds<Pixels>, color: Hsla, fade_bottom: bool, window: &mut Window) {
+    let stop = |alpha: f32| color.opacity(alpha);
     let lower_end = if fade_bottom { 0.0 } else { 0.75 };
     let split = bounds.top() + bounds.size.height * 0.45;
     window.paint_quad(gpui::fill(

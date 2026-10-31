@@ -1,4 +1,4 @@
-Providers are the agents Zeron can run: Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, OpenCode, Antigravity, and Muse Code, plus any agent you add from the ACP Registry. Open [Settings > Providers](zeron://settings/providers) to choose which ones the composer offers, sign in, and add extra accounts or setups.
+Providers are the agents Zeron can run: Claude Code, Codex, Cursor, Devin, Grok, Hermes, fx, Pi, OpenCode, Antigravity, and Muse Code, plus any agent you add from the ACP Registry. Open [Settings > Providers](zeron://settings/providers) to choose which ones the composer offers, sign in, and add extra accounts or setups.
 
 ## Turn agents on and off
 
@@ -15,6 +15,8 @@ Click an enabled row to open its details:
 - **Completion**: **Use $ for skills** and **Separate / commands**.
 - **Updates**: **Update policy** is **Notify**, **Auto when idle**, or **Off**.
 - **Accounts**: every login you have for that agent.
+
+fx has no accounts in Zeron: once it is installed, its row says **Configure your model provider with fx login or fx setup.** Run one of those in a terminal to pick the model provider fx uses.
 
 ## Accounts and sign-in
 
