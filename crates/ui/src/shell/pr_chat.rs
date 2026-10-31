@@ -1060,16 +1060,6 @@ impl Shell {
             .update(cx, |state, cx| state.set_hidden_chats(hidden, cx));
     }
 
-    #[cfg(test)]
-    fn pr_chat_owns_focus(&self, window: &Window, cx: &App) -> bool {
-        self.pr_chat_tab().is_some_and(|tab| {
-            tab.composer
-                .read(cx)
-                .focus_handle(cx)
-                .contains_focused(window, cx)
-        })
-    }
-
     pub(super) fn render_pr_chat(
         &mut self,
         window: &mut Window,

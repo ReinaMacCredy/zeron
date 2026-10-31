@@ -653,10 +653,6 @@ impl ComputerPreviewStore {
         self.chats.keys().map(String::as_str)
     }
 
-    pub fn settings(&self) -> &ComputerSettings {
-        &self.settings
-    }
-
     pub fn set_settings(&mut self, settings: ComputerSettings) -> bool {
         self.settings_stale = false;
         std::mem::replace(&mut self.settings, settings) != self.settings

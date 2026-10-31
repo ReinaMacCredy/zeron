@@ -592,20 +592,6 @@ impl TerminalPanel {
     // ---- in the bottom drawer; the right-pane host also uses the keyed tab
     // ---- operations because its surface strip lives in Shell.
 
-    /// `(key, title, exited)` for the selected chat's tabs, in tab order.
-    pub fn tab_summaries(&self, cx: &App) -> Vec<(u64, SharedString, bool)> {
-        let chat = self.selected_chat(cx);
-        self.chats
-            .get(&chat)
-            .map(|tabs| {
-                tabs.tabs
-                    .iter()
-                    .map(|t| (t.key, Self::display_title(t), t.exited.is_some()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     pub fn exit_codes(&self) -> Vec<(u64, Option<i32>)> {
         self.chats
             .values()
@@ -616,14 +602,6 @@ impl TerminalPanel {
                 })
             })
             .collect()
-    }
-
-    /// Open a fresh tab for the selected chat and return its key.
-    pub fn open_tab_for_selected(&mut self, cx: &mut Context<Self>) -> Option<u64> {
-        let chat = self.selected_chat(cx);
-        self.open_tab(chat, cx);
-        self.request_focus(cx);
-        Some(self.tab_seq)
     }
 
     /// Create a named placeholder tab without opening a PTY. Project Actions
@@ -753,12 +731,6 @@ impl TerminalPanel {
             return;
         };
         self.select_tab(&chat, ix, cx);
-    }
-
-    /// Close the selected chat's tab `key` (surface-tab ✕).
-    pub fn close_tab_by_key(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let chat = self.selected_chat(cx);
-        self.close_tab(&chat, key, Some(window), cx);
     }
 
     pub fn kill_tab_by_key(&mut self, key: u64, cx: &mut Context<Self>) {
