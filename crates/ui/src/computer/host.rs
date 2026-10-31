@@ -2590,21 +2590,6 @@ impl Host {
         });
     }
 
-    fn emergency_stop_input(self: &Rc<Self>) -> bool {
-        {
-            let mut state = self.state.borrow_mut();
-            if state.closed || (state.generation.is_none() && state.starting.is_none()) {
-                return false;
-            }
-            state.desktop_observation_required = true;
-            state.browser_observation_required = true;
-            state.input_interrupt_cooldown_until = Some(Instant::now() + ESCAPE_INPUT_COOLDOWN);
-        }
-        log("physical Escape: interrupting computer input");
-        self.spawn_interrupt("emergency input interrupt failed");
-        true
-    }
-
     fn physical_input(self: &Rc<Self>, event: PhysicalComputerInput) -> bool {
         let mut state = self.state.borrow_mut();
         if state.closed || !state.generation.as_ref().is_some_and(|g| !g.retired.get()) {
@@ -3216,7 +3201,6 @@ enum Command {
     Stop(oneshot::Sender<Result<(), String>>),
     PauseDesktop(String, oneshot::Sender<Result<(), String>>),
     ResumeDesktop(String),
-    EmergencyStopInput(oneshot::Sender<bool>),
     PhysicalInput(PhysicalComputerInput, oneshot::Sender<bool>),
     InputMonitorStateChanged(ComputerInputMonitorState),
     SetCursorStyle(Option<CuaCursorStyle>, oneshot::Sender<()>),
@@ -3251,9 +3235,6 @@ impl Host {
             Command::Stop(reply) => reply_when(self.stop(), reply),
             Command::PauseDesktop(reason, reply) => reply_when(self.pause_desktop(reason), reply),
             Command::ResumeDesktop(reason) => self.resume_desktop(&reason),
-            Command::EmergencyStopInput(reply) => {
-                let _ = reply.send(self.emergency_stop_input());
-            }
             Command::PhysicalInput(event, reply) => {
                 let _ = reply.send(self.physical_input(event));
             }
@@ -3371,10 +3352,6 @@ impl CuaDriverHost {
         let _ = self
             .commands
             .send(Command::ResumeDesktop(reason.to_string()));
-    }
-
-    pub fn emergency_stop_input(&self) -> Answer<bool> {
-        self.ask(Command::EmergencyStopInput, || false)
     }
 
     pub fn physical_input(&self, event: PhysicalComputerInput) -> Answer<bool> {

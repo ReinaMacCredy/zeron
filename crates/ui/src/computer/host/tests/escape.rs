@@ -45,47 +45,6 @@ fn monitor(state: &MonitorState) -> Box<dyn Fn() -> ComputerInputMonitorState + 
 }
 
 #[tokio::test]
-async fn ignores_the_press_when_nothing_is_driving_so_escape_stays_an_ordinary_key() {
-    let f = fixture(Driver::default());
-    assert!(!f.host.emergency_stop_input().await);
-    assert!(f.send(press()).await.ok);
-}
-
-#[tokio::test]
-async fn drains_native_input_keeps_the_generation_and_requires_fresh_observation_after_escape() {
-    let releases = Arc::new(AtomicUsize::new(0));
-    let seam = counting_release(releases.clone());
-    let f = fixture_with(Driver::default(), |o| o.release_held_input = Some(seam));
-    assert!(f.send(press()).await.ok);
-    let hung = f.spawn(type_text());
-    f.wait_for("dispatch").await;
-    assert!(f.host.emergency_stop_input().await);
-    assert!(!hung.reply().await.ok);
-    f.wait_for("interrupt-ack").await;
-    assert_eq!(releases.load(Ordering::SeqCst), 0);
-    assert!(f.has("interrupt"));
-    assert_eq!(f.count("release"), 1);
-    assert!(!f.has("effect") && !f.has("cancel") && !f.has("retiring"));
-    assert_eq!(f.count("start"), 1);
-    let cooling = f.send(press()).await;
-    assert!(cooling.ok);
-    assert_paused(&cooling);
-    assert_eq!(structured(&cooling)["effect"], json!("refused"));
-    assert!(f.send(call("list_windows")).await.ok);
-    past_cooldown().await;
-    let stale = f.send(press()).await;
-    assert_paused(&stale);
-    assert_eq!(stale.desktop_interruptions, Some(0));
-    f.send(call("get_window_state")).await;
-    assert!(result_is_error(&f.send(call("check_input_ready")).await));
-    f.send(call("get_window_state").observe(true)).await;
-    assert_clean_ok(&f.send(press()).await);
-    assert_eq!(f.count("start"), 1);
-    assert_eq!(f.count("key"), 2);
-    assert!(!f.has("retiring"));
-}
-
-#[tokio::test]
 async fn interrupts_the_in_flight_action_on_the_backend_stop_verb_without_retiring() {
     let releases = Arc::new(AtomicUsize::new(0));
     let seam = counting_release(releases.clone());
@@ -125,32 +84,12 @@ async fn keeps_admission_closed_after_a_driver_crash_until_the_held_input_releas
     );
     let crashing = f.spawn(type_text());
     f.wait_for("crash").await;
-    assert!(f.host.emergency_stop_input().await);
     release.resolve(());
     assert!(!crashing.reply().await.ok);
     f.host.stop().await.unwrap();
     past_cooldown().await;
     f.send(call("get_window_state").observe(true)).await;
     assert_clean_ok(&f.send(press()).await);
-}
-
-#[tokio::test]
-async fn stays_fail_closed_when_the_crash_cleanup_is_unconfirmed_with_no_escape_latch_involved() {
-    let f = fixture_with(
-        Driver {
-            crash: true,
-            ..Driver::default()
-        },
-        |o| {
-            o.release_held_input = Some(Box::new(|| {
-                Box::pin(async { Err("helper gone".to_string()) })
-            }))
-        },
-    );
-    assert!(!f.send(type_text()).await.ok);
-    assert!(f.host.emergency_stop_input().await);
-    assert_not_dispatched(&f.send(call("check_permissions")).await);
-    assert_eq!(f.count("start"), 1);
 }
 
 #[tokio::test]
@@ -775,8 +714,6 @@ async fn keeps_escape_browser_recovery_separate_from_native_reads_and_rejects_an
     let browser = json!({ "target_id": "target-700-900", "tab_id": "tab-a" });
     f.send(call("get_browser_state").args(window.clone()).task(&owner))
         .await;
-    assert!(f.host.emergency_stop_input().await);
-    f.wait_for("interrupt-ack").await;
     f.send(call("get_desktop_state").observe(true).task(&owner))
         .await;
     f.send(
