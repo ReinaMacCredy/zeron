@@ -352,6 +352,9 @@ impl Shell {
                         ComposerEvent::OpenTask(task_id) => {
                             this.defer_open_task(task_id.clone(), cx)
                         }
+                        ComposerEvent::OpenChildChat(id) => {
+                            this.open_child(super::children::ChildRef::Chat(id.clone()), cx)
+                        }
                         ComposerEvent::OpenSubagent {
                             chat_id,
                             doc_id,

@@ -1632,6 +1632,20 @@ impl Composer {
         self.review.menu.is_open()
     }
 
+    pub(super) fn review_pill_suffix(&self, doc_id: &str, cx: &App) -> Option<String> {
+        if !self.hosts_review() {
+            return None;
+        }
+        self.state
+            .read(cx)
+            .reviews
+            .get(&self.current_key)?
+            .run
+            .as_ref()
+            .filter(|run| run.task_id.as_deref() == Some(doc_id))?
+            .pill_suffix()
+    }
+
     pub(crate) fn render_review_findings(
         &self,
         theme: &Theme,

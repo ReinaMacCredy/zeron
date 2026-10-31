@@ -291,6 +291,10 @@ impl Composer {
             self.close_config_panel(cx);
             return true;
         }
+        if self.roster_open() {
+            self.close_roster(cx);
+            return true;
+        }
         false
     }
 
