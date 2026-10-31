@@ -1,10 +1,10 @@
 //! Deterministic file and folder identity icons backed by Symbols.
 //!
 //! Resolution preserves the VS Code theme's semantics: exact basenames win,
-//! followed by the longest matching compound extension, an optional
-//! syntax-language or MIME hint, and finally the generic file/folder icon. The
-//! authored SVG colors are preserved in light mode; dark mode lifts the
-//! palette's darker accents without replacing polychrome artwork with a tint.
+//! followed by the longest matching compound extension, and finally the
+//! generic file/folder icon. The authored SVG colors are preserved in light
+//! mode; dark mode lifts the palette's darker accents without replacing
+//! polychrome artwork with a tint.
 
 use std::{
     borrow::Cow,
@@ -15,7 +15,6 @@ use std::{
 use gpui::{App, AssetSource, Img, RenderImage, Result, SharedString, Styled as _, img};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
-use zeron_syntax::LanguageId;
 
 use crate::theme::{Appearance, Theme};
 
@@ -99,8 +98,6 @@ pub struct FileIconIdentity<'a> {
     pub kind: FileIconKind,
     pub name: &'a str,
     pub expanded: bool,
-    pub language: Option<LanguageId>,
-    pub mime_type: Option<&'a str>,
 }
 
 impl<'a> FileIconIdentity<'a> {
@@ -109,8 +106,6 @@ impl<'a> FileIconIdentity<'a> {
             kind: FileIconKind::File,
             name: path,
             expanded: false,
-            language: None,
-            mime_type: None,
         }
     }
 
@@ -119,8 +114,6 @@ impl<'a> FileIconIdentity<'a> {
             kind: FileIconKind::Directory,
             name: path,
             expanded,
-            language: None,
-            mime_type: None,
         }
     }
 
@@ -129,19 +122,7 @@ impl<'a> FileIconIdentity<'a> {
             kind: FileIconKind::Symlink,
             name: path,
             expanded: false,
-            language: None,
-            mime_type: None,
         }
-    }
-
-    pub fn with_language(mut self, language: LanguageId) -> Self {
-        self.language = Some(language);
-        self
-    }
-
-    pub fn with_mime_type(mut self, mime_type: &'a str) -> Self {
-        self.mime_type = Some(mime_type);
-        self
     }
 }
 
@@ -157,8 +138,6 @@ struct Manifest {
     file_names: HashMap<String, String>,
     #[serde(default, rename = "folderNames")]
     folder_names: HashMap<String, String>,
-    #[serde(default, rename = "languageIds")]
-    language_ids: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,7 +167,7 @@ pub fn asset_path(identity: FileIconIdentity<'_>, appearance: Appearance) -> Sha
     let name = basename(identity.name).to_ascii_lowercase();
     let asset = match identity.kind {
         FileIconKind::Directory => resolve_directory(&name, identity.expanded),
-        FileIconKind::File | FileIconKind::Symlink => resolve_file(&name, identity),
+        FileIconKind::File | FileIconKind::Symlink => resolve_file(&name),
     };
     let variant = if appearance == Appearance::Dark {
         "dark/"
@@ -229,8 +208,7 @@ pub(crate) fn raster(path: &SharedString, cx: &App) -> Option<Arc<RenderImage>> 
 /// dotted token as a file reference.
 pub(crate) fn has_specific_file_icon(path: &str) -> bool {
     let name = basename(path).to_ascii_lowercase();
-    let identity = FileIconIdentity::file(path);
-    resolve_file(&name, identity) != generic_file_asset()
+    resolve_file(&name) != generic_file_asset()
 }
 
 fn basename(path: &str) -> &str {
@@ -262,7 +240,7 @@ fn resolve_directory(name: &str, _expanded: bool) -> &'static str {
         .unwrap_or("folders/folder.svg")
 }
 
-fn resolve_file(name: &str, identity: FileIconIdentity<'_>) -> &'static str {
+fn resolve_file(name: &str) -> &'static str {
     if let Some(asset) = MANIFEST
         .file_names
         .get(name)
@@ -281,9 +259,7 @@ fn resolve_file(name: &str, identity: FileIconIdentity<'_>) -> &'static str {
         }
     }
 
-    language_asset(identity.language)
-        .or_else(|| mime_asset(identity.mime_type))
-        .unwrap_or_else(generic_file_asset)
+    generic_file_asset()
 }
 
 fn generic_file_asset() -> &'static str {
@@ -298,60 +274,6 @@ fn compound_extensions(name: &str) -> impl Iterator<Item = &str> {
     name.match_indices('.')
         .map(|(index, _)| &name[index + 1..])
         .filter(|extension| !extension.is_empty())
-}
-
-fn language_asset(language: Option<LanguageId>) -> Option<&'static str> {
-    let language_id = match language? {
-        LanguageId::Rust => "rust",
-        LanguageId::JavaScript => "javascript",
-        LanguageId::Jsx => "javascriptreact",
-        LanguageId::TypeScript => "typescript",
-        LanguageId::Tsx => "typescriptreact",
-        LanguageId::Python => "python",
-        LanguageId::Go => "go",
-        LanguageId::Json | LanguageId::Jsonc => "json",
-        LanguageId::Bash => "shellscript",
-        LanguageId::Toml => return definition_asset("gear"),
-        LanguageId::Markdown => "markdown",
-        LanguageId::Html => "html",
-        LanguageId::Css => "css",
-        LanguageId::Yaml => "yaml",
-        LanguageId::C => "c",
-        LanguageId::Cpp => "cpp",
-        LanguageId::CSharp => "csharp",
-        LanguageId::Java => "java",
-        LanguageId::Kotlin => return definition_asset("kotlin"),
-        LanguageId::Swift => "swift",
-        LanguageId::Ruby => "ruby",
-        LanguageId::Php => "php",
-        LanguageId::Sql => "sql",
-        LanguageId::Lua => "lua",
-        // Not a language id in the upstream manifest; `.luau` has its icon.
-        LanguageId::Luau => return definition_asset("luau"),
-        LanguageId::Dockerfile => "dockerfile",
-        LanguageId::Nix => "nix",
-        LanguageId::Make => "makefile",
-    };
-    MANIFEST
-        .language_ids
-        .get(language_id)
-        .and_then(|definition| definition_asset(definition))
-}
-
-fn mime_asset(mime_type: Option<&str>) -> Option<&'static str> {
-    let mime_type = mime_type?.split(';').next()?.trim().to_ascii_lowercase();
-    definition_asset(match mime_type.as_str() {
-        mime if mime.starts_with("image/") => "image",
-        mime if mime.starts_with("audio/") => "audio",
-        mime if mime.starts_with("video/") => "video",
-        "application/json" | "application/ld+json" => "brackets-yellow",
-        "application/pdf" => "pdf",
-        "application/zip" | "application/gzip" | "application/x-tar" => "compressed",
-        "text/markdown" => "markdown",
-        "text/css" => "brackets-sky",
-        "text/html" => "brackets-orange",
-        _ => return None,
-    })
 }
 
 #[cfg(test)]
@@ -443,18 +365,10 @@ mod tests {
     }
 
     #[test]
-    fn appearance_independence_and_hints_are_supported() {
+    fn appearance_independence_is_supported() {
         assert_eq!(
             asset_path(FileIconIdentity::file("bun.lock"), Appearance::Light),
             "file-icons/files/bun.svg"
-        );
-        assert_eq!(
-            path(FileIconIdentity::file("untitled").with_language(LanguageId::Rust)),
-            "file-icons/files/rust.svg"
-        );
-        assert_eq!(
-            path(FileIconIdentity::file("download").with_mime_type("image/png; charset=binary")),
-            "file-icons/files/image.svg"
         );
     }
 
@@ -485,8 +399,7 @@ mod tests {
             .chain(MANIFEST.folder.iter())
             .chain(MANIFEST.file_extensions.values())
             .chain(MANIFEST.file_names.values())
-            .chain(MANIFEST.folder_names.values())
-            .chain(MANIFEST.language_ids.values());
+            .chain(MANIFEST.folder_names.values());
         for definition in referenced_definitions {
             assert!(
                 definition_asset(definition).is_some(),
