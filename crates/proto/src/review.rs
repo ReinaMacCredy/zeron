@@ -1230,14 +1230,14 @@ impl Look {
                 "Nothing to review in {}. Pick another scope from the menu.",
                 scope.label(None).to_lowercase()
             ),
-            Self::Busy => "The reviewer is working in its own thread beside this chat.".into(),
+            Self::Busy => "The reviewer is working. Its progress is in the agents pill.".into(),
             Self::Findings(_) => "Open the findings".into(),
             Self::Again(..) => {
                 "The code changed since the review. Some findings are outdated.".into()
             }
             Self::Stopped(..) => "The review was stopped. Click to run it again.".into(),
             Self::Clean => "The reviewer found no problems. Click to review again.".into(),
-            Self::Unreadable => "The reviewer did not end with a findings block. Click to review again; its thread is beside this chat.".into(),
+            Self::Unreadable => "The reviewer did not end with a findings block. Click to review again; its thread is in the agents pill.".into(),
             Self::Failed(message) => message.clone(),
         }
     }

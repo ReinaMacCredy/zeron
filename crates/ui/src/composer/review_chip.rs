@@ -17,6 +17,9 @@ use crate::theme::Theme;
 const CHIP_HEIGHT: f32 = 28.0;
 const COMMITS_ROW: usize = usize::MAX;
 const COMMIT_LIST_LIMIT: usize = 30;
+// The shared tips name mobile's agents pill; on desktop the reviewer's thread is a pane tab.
+const BUSY_TIP: &str = "The reviewer is working in its own thread beside this chat.";
+const UNREADABLE_TIP: &str = "The reviewer did not end with a findings block. Click to review again; its thread is beside this chat.";
 
 #[derive(Clone, Copy, PartialEq)]
 enum Submenu {
@@ -585,7 +588,11 @@ impl Composer {
                 )
         };
         let label: SharedString = look.label(scope, picked.as_deref()).into();
-        let tip: SharedString = look.tip(scope).into();
+        let tip: SharedString = match &look {
+            Look::Busy => BUSY_TIP.into(),
+            Look::Unreadable => UNREADABLE_TIP.into(),
+            look => look.tip(scope).into(),
+        };
         let (icon, color, border, fill) = match &look {
             Look::Idle(..) => (crate::icons::CHECKLIST, theme.text, theme.border, None),
             Look::Findings(_) => (

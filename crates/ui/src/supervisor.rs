@@ -126,6 +126,14 @@ pub(crate) fn no_effect_yet(row: &SupervisorIntervention, now: DateTime<Utc>) ->
 
 pub(crate) use zeron_proto::mission::ApprovalState;
 
+/// Desktop names the page Tasks; the shared line keeps mobile's "mission page".
+pub(crate) fn approval_line(approval: ApprovalState) -> String {
+    match approval {
+        ApprovalState::Started => "Approved by the Supervisor · steps already started. To change course, edit the plan on the task page or message the lead.".into(),
+        approval => approval.line(),
+    }
+}
+
 pub(crate) fn approval_state(
     row: &SupervisorIntervention,
     state: &AppState,

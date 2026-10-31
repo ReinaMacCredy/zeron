@@ -643,7 +643,7 @@ impl TaskCenter {
                             .min_w_0()
                             .text_size(ui_rems(11.5))
                             .text_color(theme.text_muted)
-                            .child(approval.line()),
+                            .child(crate::supervisor::approval_line(approval)),
                     )
                     .children(approval.can_take_back().then(|| {
                         widgets::text_action(theme, widgets::ActionTone::Filled, "Take back")

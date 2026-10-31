@@ -1573,7 +1573,7 @@ impl SupervisorPage {
                     .gap(px(8.0))
                     .min_w_0()
                     .text_color(theme.text_muted)
-                    .child(div().min_w_0().child(approval.line()))
+                    .child(div().min_w_0().child(super::approval_line(approval)))
                     .children(take_back),
             )
             .children(error.map(|error| {
