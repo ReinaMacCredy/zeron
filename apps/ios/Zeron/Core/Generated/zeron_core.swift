@@ -42257,7 +42257,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_opens_config_panel() != 1331) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_zeron_mobile_checksum_func_opens_usage_page() != 45169) {
+    if (uniffi_zeron_mobile_checksum_func_opens_usage_page() != 37662) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_access_modes() != 16601) {
