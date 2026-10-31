@@ -6466,6 +6466,7 @@ pub enum ComposerEvent {
         title: String,
         frozen: bool,
     },
+    OpenChildChat(String),
     OpenChanges,
     OpenTask(String),
     OpenUsage,
@@ -14729,9 +14730,10 @@ impl Render for Composer {
                 self.staged().len() + self.staged_appshots().len(),
                 self.staged_chip_count(cx),
             );
-        self.sync_background_walks(cx);
-        let card = self.render_config_panel(window, cx);
-        let config_in_flow = card.is_some() && self.config_panel_on_hero(cx);
+        let (roster, corner) = self.render_corner(window, cx);
+        let config_card = self.render_config_panel(window, cx);
+        let config_in_flow = config_card.is_some() && self.config_panel_on_hero(cx);
+        let card = config_card.or(roster);
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
         let has_queue = self.reads_selection(cx) && !self.state.read(cx).queue.is_empty();
@@ -14761,11 +14763,13 @@ impl Render for Composer {
                     .flex()
                     .items_end()
                     .gap(px(Theme::SPACE_SM))
-                    .child(div().flex_1().min_w_0())
+                    .child(div().flex_1().min_w_0().children(corner))
                     .child(tab)
                     .children(card),
             ),
-            None if card.is_some() => container.child(div().relative().children(card)),
+            None if corner.is_some() || card.is_some() => {
+                container.child(div().relative().children(corner).children(card))
+            }
             None => container,
         };
         let container = container.when_some(todo, |el, panel| {

@@ -83,7 +83,7 @@ mod chat_dropzone;
 mod chat_dropzone_tests;
 #[cfg(test)]
 mod chat_rename_tests;
-mod children;
+pub(crate) mod children;
 mod command_palette;
 mod device_tabs;
 mod docs;
@@ -3898,6 +3898,9 @@ impl Shell {
                     .defer_in_active_window(cx, |shell, window, cx| {
                         shell.focus_changes(window, cx)
                     }),
+                ComposerEvent::OpenChildChat(id) => {
+                    this.open_child(children::ChildRef::Chat(id.clone()), cx)
+                }
                 ComposerEvent::OpenSubagent {
                     chat_id,
                     doc_id,
@@ -7117,6 +7120,9 @@ impl Shell {
             | ComposerEvent::AnnotationHovered(_) => {}
             ComposerEvent::OpenTask(task_id) => self.defer_open_task(task_id.clone(), cx),
             ComposerEvent::OpenUsage => self.open_usage(cx),
+            ComposerEvent::OpenChildChat(id) => {
+                self.open_child(children::ChildRef::Chat(id.clone()), cx)
+            }
             ComposerEvent::OpenSubagent {
                 chat_id,
                 doc_id,

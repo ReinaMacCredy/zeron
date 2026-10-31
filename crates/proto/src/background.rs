@@ -109,6 +109,13 @@ pub fn delegate_runs(
         .collect()
 }
 
+pub fn child_threads<'a>(chats: &'a [Chat], owner: &str) -> Vec<&'a Chat> {
+    chats
+        .iter()
+        .filter(|chat| !chat.archived && chat.opened_from() == Some(owner))
+        .collect()
+}
+
 pub fn shell_tasks(session: Option<&Session>) -> Vec<BackgroundTask> {
     session
         .map(|session| {
