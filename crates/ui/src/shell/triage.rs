@@ -14,11 +14,28 @@ const TICK: std::time::Duration = std::time::Duration::from_secs(1);
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum NeedKind {
     Asking(Option<AskInfo>),
-    PlanReady { task_id: String, steps: Vec<String> },
+    PlanReady {
+        task_id: String,
+        steps: Vec<String>,
+    },
     Failed,
+    Decision {
+        item_id: String,
+        title: String,
+        why: zeron_proto::supervisor::ItemWhy,
+    },
+    Task {
+        task_id: String,
+        title: String,
+        reason: zeron_proto::NeedsYou,
+    },
 }
 
 impl NeedKind {
+    fn of_chat(&self) -> bool {
+        !matches!(self, NeedKind::Decision { .. } | NeedKind::Task { .. })
+    }
+
     fn plan(&self) -> bool {
         match self {
             NeedKind::PlanReady { .. } => true,
@@ -35,6 +52,8 @@ impl NeedKind {
             }
             NeedKind::Asking(_) => "Asking".into(),
             NeedKind::Failed => "Failed".into(),
+            NeedKind::Decision { why, .. } => why.label().into(),
+            NeedKind::Task { reason, .. } => reason.label(),
             NeedKind::PlanReady { .. } => unreachable!(),
         }
     }
@@ -43,6 +62,16 @@ impl NeedKind {
 pub(crate) struct NeedRow {
     pub chat_id: String,
     pub kind: NeedKind,
+}
+
+impl NeedRow {
+    fn key(&self) -> String {
+        match &self.kind {
+            NeedKind::Decision { item_id, .. } => format!("decision-{item_id}"),
+            NeedKind::Task { task_id, .. } => format!("task-{task_id}"),
+            _ => self.chat_id.clone(),
+        }
+    }
 }
 
 pub(crate) struct RunRow {
@@ -61,13 +90,14 @@ impl Triage {
     pub(crate) fn need(&self, chat_id: &str) -> Option<&NeedKind> {
         self.needs
             .iter()
-            .find(|row| row.chat_id == chat_id)
+            .find(|row| row.chat_id == chat_id && row.kind.of_chat())
             .map(|row| &row.kind)
     }
 }
 
 #[derive(Clone)]
 struct ShownRow {
+    key: String,
     chat_id: String,
     title: String,
     meta: String,
@@ -90,7 +120,7 @@ impl Default for Exits {
 
 impl Exits {
     fn update(&mut self, rows: Vec<ShownRow>, reduced: bool, now: std::time::Instant) {
-        let kept = |row: &ShownRow| rows.iter().any(|shown| shown.chat_id == row.chat_id);
+        let kept = |row: &ShownRow| rows.iter().any(|shown| shown.key == row.key);
         for (ix, old) in self.shown.iter().enumerate() {
             if !kept(old) {
                 let mut tween = crate::motion::Tween::at(1.0, now);
@@ -151,12 +181,27 @@ impl Shell {
         let composer = self.composer.read(cx);
         let now = Utc::now();
         let mut plans: HashMap<String, (String, Vec<String>)> = HashMap::new();
-        for task in state.tasks.iter().filter(|task| !task.deleted) {
-            if !task.plan_pending {
-                continue;
-            }
+        let mut tasks = Vec::new();
+        for task in state
+            .tasks
+            .iter()
+            .filter(|task| !task.deleted && task.completed_at.is_none())
+        {
             let plan = crate::tasks::rollup(state, task, now);
-            if plan.phase(task) != zeron_proto::mission::PlanPhase::PlanReady {
+            if let Some(reason @ (zeron_proto::NeedsYou::NotSent | zeron_proto::NeedsYou::Review)) =
+                plan.needs
+            {
+                tasks.push(NeedRow {
+                    chat_id: task.chat_id.clone().unwrap_or_default(),
+                    kind: NeedKind::Task {
+                        task_id: task.id.clone(),
+                        title: task.title.clone(),
+                        reason,
+                    },
+                });
+            }
+            if !task.plan_pending || plan.phase(task) != zeron_proto::mission::PlanPhase::PlanReady
+            {
                 continue;
             }
             if let Some(chat) = crate::tasks::linked_chat(&state.chats, task) {
@@ -169,7 +214,9 @@ impl Shell {
             }
         }
         let mut triage = Triage::default();
+        let mut listed = std::collections::HashSet::new();
         for (status, chat) in state.overview_chats(now) {
+            listed.insert(chat.id.as_str());
             let kind = match status {
                 zeron_proto::ChatIndicator::AwaitingInput if !composer.ask_answered(&chat.id) => {
                     Some(NeedKind::Asking(composer.ask_info(&chat.id)))
@@ -180,20 +227,30 @@ impl Shell {
                     triage.running.push(RunRow {
                         chat_id: chat.id.clone(),
                         started: session.and_then(|session| session.started_at),
-                        agents: session
-                            .map(|session| {
+                        agents: session.map(background_agents).unwrap_or_default(),
+                    });
+                    None
+                }
+                zeron_proto::ChatIndicator::Idle | zeron_proto::ChatIndicator::Completed
+                    if outlives_turn(state, &chat.id, now) =>
+                {
+                    let session = state.session_for(&chat.id);
+                    triage.running.push(RunRow {
+                        chat_id: chat.id.clone(),
+                        started: session
+                            .and_then(|session| {
                                 session
                                     .background_tasks
                                     .iter()
-                                    .filter(|task| {
-                                        task.kind == zeron_proto::BackgroundTaskKind::Agent
-                                    })
-                                    .map(|task| (task.label.clone(), task.started_at))
-                                    .collect()
+                                    .filter_map(|task| task.started_at)
+                                    .min()
                             })
-                            .unwrap_or_default(),
+                            .or_else(|| session.and_then(|session| session.started_at)),
+                        agents: session.map(background_agents).unwrap_or_default(),
                     });
-                    None
+                    plans
+                        .remove(&chat.id)
+                        .map(|(task_id, steps)| NeedKind::PlanReady { task_id, steps })
                 }
                 _ => plans
                     .remove(&chat.id)
@@ -206,6 +263,38 @@ impl Shell {
                 });
             }
         }
+        for session in &state.sessions {
+            let chat_id = session.chat_id.as_str();
+            if session.status == zeron_proto::SessionStatus::AwaitingInput
+                && !listed.contains(chat_id)
+                && !state.is_hidden_chat(chat_id)
+                && !composer.ask_answered(chat_id)
+            {
+                triage.needs.push(NeedRow {
+                    chat_id: chat_id.to_owned(),
+                    kind: NeedKind::Asking(composer.ask_info(chat_id)),
+                });
+            }
+        }
+        for row in state
+            .supervisor
+            .iter()
+            .flat_map(|snapshot| &snapshot.needs_you)
+        {
+            if let zeron_proto::supervisor::NeedsYouRow::Item(item) = row
+                && item.answer.is_none()
+            {
+                triage.needs.push(NeedRow {
+                    chat_id: item.raiser_chat_id.clone(),
+                    kind: NeedKind::Decision {
+                        item_id: item.id.clone(),
+                        title: item.title.clone(),
+                        why: item.why,
+                    },
+                });
+            }
+        }
+        triage.needs.extend(tasks);
         triage
     }
 
@@ -316,13 +405,52 @@ impl Shell {
             .unwrap_or_else(|| "New session".into())
     }
 
+    fn need_title(&self, row: &NeedRow, cx: &App) -> String {
+        match &row.kind {
+            NeedKind::Decision { title, .. } | NeedKind::Task { title, .. }
+                if !title.trim().is_empty() =>
+            {
+                crate::transcript::single_line(title)
+            }
+            NeedKind::Task { .. } => "Untitled task".into(),
+            _ => self.triage_title(&row.chat_id, cx),
+        }
+    }
+
+    fn open_need(&mut self, chat_id: &str, kind: &NeedKind, cx: &mut Context<Self>) {
+        match kind {
+            NeedKind::Decision { .. } => self.open_supervisor(cx),
+            NeedKind::Task { task_id, .. } => self.defer_open_task(task_id.clone(), cx),
+            _ => self.open_chat(chat_id.to_owned(), cx),
+        }
+    }
+
+    fn shown_row(&self, row: &NeedRow, meta: String, cx: &App) -> ShownRow {
+        ShownRow {
+            key: row.key(),
+            chat_id: row.chat_id.clone(),
+            title: self.need_title(row, cx),
+            meta,
+            kind: row.kind.clone(),
+        }
+    }
+
     fn need_meta(&self, row: &NeedRow, cx: &App) -> String {
         let state = self.state.read(cx);
         let chat = state.chats.iter().find(|chat| chat.id == row.chat_id);
-        let mut parts: Vec<String> = chat
-            .and_then(|chat| self.chat_project(chat, cx))
-            .into_iter()
-            .collect();
+        let mut parts: Vec<String> = Vec::new();
+        match &row.kind {
+            NeedKind::Decision { .. } => {
+                parts.push("Supervisor".into());
+            }
+            NeedKind::Task { .. } => parts.push("Task".into()),
+            _ => {
+                parts.extend(chat.and_then(|chat| self.chat_project(chat, cx)));
+                if let Some(parent) = chat.and_then(|chat| chat.delegated_by()) {
+                    parts.push(format!("from {}", self.triage_title(parent, cx)));
+                }
+            }
+        }
         parts.push(row.kind.label());
         match &row.kind {
             NeedKind::PlanReady { steps, .. } => parts.push(format!(
@@ -339,6 +467,21 @@ impl Shell {
                         Some(at),
                         Utc::now(),
                     ));
+                }
+            }
+            NeedKind::Decision { .. } => {
+                if chat.is_some() {
+                    parts.push(format!("from {}", self.triage_title(&row.chat_id, cx)));
+                }
+            }
+            NeedKind::Task { task_id, .. } => {
+                if let Some(error) = state
+                    .tasks
+                    .iter()
+                    .find(|task| &task.id == task_id)
+                    .and_then(|task| task.send_error.as_deref())
+                {
+                    parts.push(crate::transcript::single_line(error));
                 }
             }
             NeedKind::Asking(_) => {}
@@ -485,7 +628,7 @@ impl Shell {
                 .needs
                 .iter()
                 .filter(|row| filter(&row.kind))
-                .map(|row| self.triage_title(&row.chat_id, cx))
+                .map(|row| self.need_title(row, cx))
                 .collect()
         };
         for title in titles(&|kind| matches!(kind, NeedKind::Asking(_)) && !kind.plan()) {
@@ -506,6 +649,35 @@ impl Shell {
         let failed = titles(&|kind| matches!(kind, NeedKind::Failed));
         if !failed.is_empty() {
             parts.push(format!("{} failed.", failed.join(", ")));
+        }
+        match titles(&|kind| matches!(kind, NeedKind::Decision { .. })).len() {
+            0 => {}
+            1 => parts.push("1 decision waits for you.".into()),
+            n => parts.push(format!("{n} decisions wait for you.")),
+        }
+        let review = titles(&|kind| {
+            matches!(
+                kind,
+                NeedKind::Task {
+                    reason: zeron_proto::NeedsYou::Review,
+                    ..
+                }
+            )
+        });
+        if !review.is_empty() {
+            parts.push(format!("{} ready to review.", review.join(", ")));
+        }
+        let unsent = titles(&|kind| {
+            matches!(
+                kind,
+                NeedKind::Task {
+                    reason: zeron_proto::NeedsYou::NotSent,
+                    ..
+                }
+            )
+        });
+        if !unsent.is_empty() {
+            parts.push(format!("{} not sent.", unsent.join(", ")));
         }
         if parts.is_empty() {
             parts.push("Nothing needs you.".into());
@@ -533,19 +705,14 @@ impl Shell {
         let shown: Vec<ShownRow> = triage
             .needs
             .iter()
-            .map(|row| ShownRow {
-                chat_id: row.chat_id.clone(),
-                title: self.triage_title(&row.chat_id, cx),
-                meta: self.need_meta(row, cx),
-                kind: row.kind.clone(),
-            })
+            .map(|row| self.shown_row(row, self.need_meta(row, cx), cx))
             .collect();
         self.triage.rows.update(shown.clone(), reduced, now);
         if self
             .triage
             .expanded
             .as_ref()
-            .is_some_and(|(id, _)| !shown.iter().any(|row| &row.chat_id == id))
+            .is_some_and(|(id, _)| !shown.iter().any(|row| &row.key == id))
         {
             self.triage.expanded = None;
         }
@@ -561,10 +728,10 @@ impl Shell {
                 .h(px(ROW_HEIGHT * t))
                 .opacity(t)
                 .overflow_hidden()
-                .child(need_row_shell(&row, &popup).id(SharedString::from(format!(
-                    "triage-leaving-{}",
-                    row.chat_id
-                ))))
+                .child(
+                    need_row_shell(&row, &popup)
+                        .id(SharedString::from(format!("triage-leaving-{}", row.key))),
+                )
                 .into_any_element();
             need_rows.insert(ix.min(need_rows.len()), ghost);
         }
@@ -762,16 +929,20 @@ impl Shell {
             .triage
             .expanded
             .as_ref()
-            .filter(|(id, _)| id == &row.chat_id)
+            .filter(|(id, _)| id == &row.key)
             .map(|(_, tween)| tween.value_at(crate::motion::now()));
         let chat_id = row.chat_id.clone();
+        let key = row.key.clone();
         let action: AnyElement = match &row.kind {
-            NeedKind::Failed | NeedKind::Asking(None) => {
-                let target = chat_id.clone();
+            NeedKind::Failed
+            | NeedKind::Asking(None)
+            | NeedKind::Decision { .. }
+            | NeedKind::Task { .. } => {
+                let (target, kind) = (chat_id.clone(), row.kind.clone());
                 popover::btn_primary(theme, "Open")
-                    .id(SharedString::from(format!("triage-open-{chat_id}")))
+                    .id(SharedString::from(format!("triage-open-{key}")))
                     .debug_selector({
-                        let id = chat_id.clone();
+                        let id = key.clone();
                         move || format!("triage-open-{id}")
                     })
                     .role(gpui::Role::Button)
@@ -780,7 +951,7 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.close_triage(cx);
-                        this.open_chat(target.clone(), cx);
+                        this.open_need(&target, &kind, cx);
                     }))
                     .into_any_element()
             }
@@ -837,11 +1008,11 @@ impl Shell {
                     .into_any_element()
             }
         };
-        let open_target = chat_id.clone();
+        let (open_target, open_kind) = (chat_id.clone(), row.kind.clone());
         let head = need_row_shell(row, theme)
-            .id(SharedString::from(format!("triage-need-{chat_id}")))
+            .id(SharedString::from(format!("triage-need-{key}")))
             .debug_selector({
-                let id = chat_id.clone();
+                let id = key.clone();
                 move || format!("triage-need-{id}")
             })
             .role(gpui::Role::Button)
@@ -849,7 +1020,7 @@ impl Shell {
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.close_triage(cx);
-                this.open_chat(open_target.clone(), cx);
+                this.open_need(&open_target, &open_kind, cx);
             }))
             .child(action);
         let body = expanded.and_then(|shown| {
@@ -875,7 +1046,7 @@ impl Shell {
                 NeedKind::Asking(_) => self.composer.update(cx, |composer, cx| {
                     composer.render_ask_panel(&chat_id, window, cx)
                 }),
-                NeedKind::Failed => None,
+                NeedKind::Failed | NeedKind::Decision { .. } | NeedKind::Task { .. } => None,
             }?;
             Some(
                 div()
@@ -1156,17 +1327,13 @@ impl Shell {
         let rows: Vec<ShownRow> = triage
             .needs
             .iter()
-            .map(|row| ShownRow {
-                chat_id: row.chat_id.clone(),
-                title: self.triage_title(&row.chat_id, cx),
-                meta: card_need_meta(
-                    &row.kind,
-                    self.state
-                        .read(cx)
-                        .session_for(&row.chat_id)
-                        .map(|session| session.updated_at),
-                ),
-                kind: row.kind.clone(),
+            .map(|row| {
+                let failed_at = self
+                    .state
+                    .read(cx)
+                    .session_for(&row.chat_id)
+                    .map(|session| session.updated_at);
+                self.shown_row(row, card_need_meta(&row.kind, failed_at), cx)
             })
             .collect();
         self.triage.card_rows.update(rows.clone(), reduced, now);
@@ -1176,7 +1343,7 @@ impl Shell {
                 .triage
                 .expanded
                 .as_ref()
-                .is_some_and(|(id, _)| !rows.iter().any(|row| &row.chat_id == id))
+                .is_some_and(|(id, _)| !rows.iter().any(|row| &row.key == id))
         {
             self.triage.expanded = None;
         }
@@ -1203,7 +1370,7 @@ impl Shell {
                 .overflow_hidden()
                 .child(card_row_shell(
                     &theme,
-                    SharedString::from(format!("card-leaving-{}", row.chat_id)),
+                    SharedString::from(format!("card-leaving-{}", row.key)),
                     need_tint(&row.kind, &theme),
                     row.title.clone(),
                     row.meta.clone(),
@@ -1373,23 +1540,27 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let chat_id = row.chat_id.clone();
+        let key = row.key.clone();
         let expanded = self
             .triage
             .expanded
             .as_ref()
-            .filter(|(id, _)| id == &row.chat_id)
+            .filter(|(id, _)| id == &row.key)
             .map(|(_, tween)| tween.value_at(crate::motion::now()));
         let action: AnyElement = match &row.kind {
-            NeedKind::Failed | NeedKind::Asking(None) => {
-                let target = chat_id.clone();
+            NeedKind::Failed
+            | NeedKind::Asking(None)
+            | NeedKind::Decision { .. }
+            | NeedKind::Task { .. } => {
+                let (target, kind) = (chat_id.clone(), row.kind.clone());
                 card_button(theme, false)
-                    .id(SharedString::from(format!("card-open-{chat_id}")))
+                    .id(SharedString::from(format!("card-open-{key}")))
                     .role(gpui::Role::Button)
                     .aria_label(format!("Open {}", row.title))
                     .child("Open")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.open_chat(target.clone(), cx);
+                        this.open_need(&target, &kind, cx);
                     }))
                     .into_any_element()
             }
@@ -1428,10 +1599,10 @@ impl Shell {
             }
         };
         let tint = need_tint(&row.kind, theme);
-        let open_target = chat_id.clone();
+        let (open_target, open_kind) = (chat_id.clone(), row.kind.clone());
         let head = card_row_shell(
             theme,
-            SharedString::from(format!("card-need-{chat_id}")),
+            SharedString::from(format!("card-need-{key}")),
             tint,
             row.title.clone(),
             row.meta.clone(),
@@ -1441,7 +1612,7 @@ impl Shell {
         .aria_label(row.title.clone())
         .cursor_pointer()
         .hover(|s| s.bg(theme.wash(0.05)))
-        .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open_target.clone(), cx)))
+        .on_click(cx.listener(move |this, _, _, cx| this.open_need(&open_target, &open_kind, cx)))
         .child(action);
         let body = expanded.filter(|_| !tray_mounted).and_then(|shown| {
             let panel = match &row.kind {
@@ -1466,7 +1637,7 @@ impl Shell {
                 NeedKind::Asking(_) => self.composer.update(cx, |composer, cx| {
                     composer.render_ask_panel(&chat_id, window, cx)
                 }),
-                NeedKind::Failed => None,
+                NeedKind::Failed | NeedKind::Decision { .. } | NeedKind::Task { .. } => None,
             }?;
             Some(
                 div()
@@ -1531,13 +1702,39 @@ impl Shell {
     }
 }
 
+fn background_agents(session: &zeron_proto::Session) -> Vec<(String, Option<DateTime<Utc>>)> {
+    session
+        .background_tasks
+        .iter()
+        .filter(|task| task.kind == zeron_proto::BackgroundTaskKind::Agent)
+        .map(|task| (task.label.clone(), task.started_at))
+        .collect()
+}
+
+fn outlives_turn(state: &crate::state::AppState, chat_id: &str, now: DateTime<Utc>) -> bool {
+    state
+        .session_for(chat_id)
+        .is_some_and(|session| !session.background_tasks.is_empty())
+        || state.running_subagents_for(chat_id, now) > 0
+        || state.chats.iter().any(|chat| {
+            chat.delegation.as_ref().is_some_and(|d| {
+                d.delegated_by_chat_id == chat_id
+                    && d.status == zeron_proto::DelegationStatus::Running
+            })
+        })
+}
+
 const CARD_ROWS: usize = 3;
 const CARD_ROW_HEIGHT: f32 = 46.0;
 const CARD_ROW_INDENT: f32 = 21.0;
 
 fn need_tint(kind: &NeedKind, theme: &Theme) -> gpui::Hsla {
     match kind {
-        NeedKind::Failed => theme.danger,
+        NeedKind::Failed
+        | NeedKind::Task {
+            reason: zeron_proto::NeedsYou::NotSent,
+            ..
+        } => theme.danger,
         _ => theme.accent,
     }
 }
@@ -1554,6 +1751,8 @@ fn card_need_meta(kind: &NeedKind, failed_at: Option<DateTime<Utc>>) -> String {
             format!("Asks: {}", crate::transcript::single_line(&info.question))
         }
         NeedKind::Asking(_) => "Asking".into(),
+        NeedKind::Decision { why, .. } => format!("Supervisor · {}", why.label()),
+        NeedKind::Task { reason, .. } => format!("Task · {}", reason.label()),
         NeedKind::Failed => match failed_at {
             Some(at) => format!(
                 "Failed {}",
@@ -1747,6 +1946,8 @@ fn row_text(
 fn need_row_shell(row: &ShownRow, theme: &Theme) -> gpui::Div {
     let (glyph, tint) = match &row.kind {
         NeedKind::Failed => (icons::LUCIDE_CIRCLE_ALERT, theme.danger),
+        NeedKind::Decision { .. } => (icons::LUCIDE_SHIELD, theme.accent),
+        kind @ NeedKind::Task { .. } => (icons::TASKS, need_tint(kind, theme)),
         kind if kind.plan() => (icons::CHECKLIST, theme.accent),
         _ => (icons::LUCIDE_MESSAGE_CIRCLE_QUESTION, theme.accent),
     };
@@ -1802,4 +2003,146 @@ fn empty_line(theme: &Theme, text: &'static str) -> AnyElement {
         .text_color(theme.text_muted)
         .child(text)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+
+    #[gpui::test]
+    fn triage_lists_every_thread_that_needs_you_or_still_runs(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::terminal::panel::init(cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let now = Utc::now();
+        let chat = |id: &str, delegated_by: Option<&str>| -> zeron_proto::Chat {
+            let mut chat = serde_json::json!({
+                "id": id, "deviceId": "mac", "title": id, "archived": false, "createdAt": now,
+            });
+            if let Some(owner) = delegated_by {
+                chat["delegation"] = serde_json::json!({
+                    "delegatedByChatId": owner, "depth": 1, "anchor": "task", "wake": "always",
+                    "status": "running", "startedAt": now,
+                });
+            }
+            serde_json::from_value(chat).unwrap()
+        };
+        let session = |id: &str, status, background_tasks| zeron_proto::Session {
+            last_turn_outcome: None,
+            terminal_activity: None,
+            last_completed_turn: None,
+            chat_id: id.into(),
+            device_id: "mac".into(),
+            status,
+            held_by_subagents: false,
+            compacting: false,
+            classifying: None,
+            background_tasks,
+            started_at: None,
+            updated_at: now,
+            running_subagents: 0,
+            compact_plan: None,
+        };
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.local_device_id = Some("mac".into());
+            state.apply_chats(vec![
+                chat("lead", None),
+                chat("asker", Some("lead")),
+                chat("shelled", None),
+                chat("quiet", None),
+                chat("review", None),
+            ]);
+            state.apply_sessions(vec![
+                session("asker", zeron_proto::SessionStatus::AwaitingInput, vec![]),
+                session(
+                    "shelled",
+                    zeron_proto::SessionStatus::Idle,
+                    vec![zeron_proto::BackgroundTask {
+                        id: "build".into(),
+                        kind: zeron_proto::BackgroundTaskKind::Shell,
+                        label: "build".into(),
+                        started_at: Some(now),
+                        output_path: None,
+                    }],
+                ),
+                session("quiet", zeron_proto::SessionStatus::Idle, vec![]),
+                session("review", zeron_proto::SessionStatus::Idle, vec![]),
+            ]);
+            state.tasks = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "unsent", "title": "Ship it", "sendError": "host offline",
+                }))
+                .unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "id": "reviewed", "title": "Check it", "chatId": "review",
+                }))
+                .unwrap(),
+            ];
+            state.supervisor = Some(zeron_proto::supervisor::SupervisorSnapshot {
+                needs_you: vec![zeron_proto::supervisor::NeedsYouRow::Item(
+                    zeron_proto::supervisor::SupervisorItem {
+                        id: "d1".into(),
+                        at: now,
+                        raised_by: zeron_proto::supervisor::Raiser::Supervisor,
+                        raiser_chat_id: "lead".into(),
+                        task_id: None,
+                        title: "Spend more?".into(),
+                        why: zeron_proto::supervisor::ItemWhy::Spend,
+                        detail: String::new(),
+                        options: Vec::new(),
+                        answer: None,
+                    },
+                )],
+                ..Default::default()
+            });
+        });
+        let boot = EngineBootConfig {
+            data_dir: dir.path().into(),
+            ipc_port: 0,
+            edge_url: "http://127.0.0.1:1".into(),
+            edge_token: None,
+            org_id: None,
+            workos_client_id: None,
+            default_harness: zeron_proto::HarnessId::Mock,
+        };
+        let window = cx.add_window(|_, cx| Shell::new(state, boot, cx));
+        let (needs, asker_meta, mut running) = window
+            .update(cx, |shell, _, cx| {
+                let triage = shell.triage(cx);
+                let needs: Vec<String> = triage.needs.iter().map(NeedRow::key).collect();
+                let asker = triage.needs.iter().find(|row| row.chat_id == "asker");
+                let meta = asker.map(|row| shell.need_meta(row, cx));
+                let running: Vec<String> = triage
+                    .running
+                    .iter()
+                    .map(|row| row.chat_id.clone())
+                    .collect();
+                (needs, meta, running)
+            })
+            .unwrap();
+        running.sort();
+        assert_eq!(
+            needs,
+            ["asker", "decision-d1", "task-unsent", "task-reviewed"]
+        );
+        assert!(
+            asker_meta.is_some_and(|meta| meta.contains("from lead")),
+            "a delegated child's row names its parent"
+        );
+        assert_eq!(running, ["lead", "shelled"]);
+    }
 }
