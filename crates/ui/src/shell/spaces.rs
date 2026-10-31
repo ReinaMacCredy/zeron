@@ -7628,13 +7628,46 @@ impl Shell {
                     )
                     .into_any_element()
             });
+            let mark_read_button = (shelf == Some(InboxShelf::Inbox)
+                && !self.state.read(cx).unseen_chat_ids().is_empty())
+            .then(|| {
+                div()
+                    .id("sidebar-inbox-mark-all-read")
+                    .debug_selector(|| "sidebar-inbox-mark-all-read".into())
+                    .size(px(20.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .role(gpui::Role::Button)
+                    .aria_label("Mark all as read")
+                    .opacity(0.0)
+                    .group_hover(group_name.clone(), |style| style.opacity(1.0))
+                    .hover(|el| el.bg(theme.glass_hover()))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.state
+                            .update(cx, |state, cx| state.mark_all_chats_seen(cx));
+                    }))
+                    .tooltip(crate::settings::widgets::text_tooltip_above(
+                        "Mark all as read",
+                    ))
+                    .child(
+                        icon(icons::LUCIDE_CHECK)
+                            .size(px(14.0))
+                            .text_color(sidebar_header_glyph(theme)),
+                    )
+                    .into_any_element()
+            });
             let header =
                 sidebar_disclosure_header(
                     theme,
                     group_icon,
                     visible_label.clone(),
                     Some(session_count),
-                    new_chat_button,
+                    new_chat_button.or(mark_read_button),
                     chevron,
                 )
                     .group(group_name)

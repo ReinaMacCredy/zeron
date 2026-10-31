@@ -5235,6 +5235,23 @@ impl AppState {
         .detach();
     }
 
+    pub(crate) fn unseen_chat_ids(&self) -> Vec<String> {
+        self.chats
+            .iter()
+            .filter(|chat| {
+                !chat.archived
+                    && zeron_proto::view::has_unseen_activity(chat, self.session_for(&chat.id))
+            })
+            .map(|chat| chat.id.clone())
+            .collect()
+    }
+
+    pub(crate) fn mark_all_chats_seen(&mut self, cx: &mut Context<Self>) {
+        for chat_id in self.unseen_chat_ids() {
+            self.mark_chat_seen(&chat_id, cx);
+        }
+    }
+
     /// Navigation signal is separate from watch lifetime: resubscribing,
     /// receiving agent output and MCP reads cannot refresh focus priority.
     pub(crate) fn focus_chat_sync(&self, chat_id: &str, cx: &mut Context<Self>) {

@@ -701,6 +701,7 @@ impl Shell {
         let now = crate::motion::now();
         let reduced = crate::motion::reduced_motion(cx);
         let mut animating = false;
+        let unread = !self.state.read(cx).unseen_chat_ids().is_empty();
 
         let shown: Vec<ShownRow> = triage
             .needs
@@ -883,6 +884,7 @@ impl Shell {
                         "Needs you",
                         triage.needs.len(),
                         popup.accent,
+                        unread.then(|| mark_all_read_button(&popup, "triage-mark-all-read", cx)),
                     ))
                     .children(need_rows)
                     .child(section_heading(
@@ -890,6 +892,7 @@ impl Shell {
                         "Running",
                         triage.running.len(),
                         chat_status_tone(zeron_proto::ChatIndicator::Working, &popup).2,
+                        None,
                     ))
                     .when(running_rows.is_empty(), |el| {
                         el.child(empty_line(&popup, "Nothing running."))
@@ -1423,6 +1426,7 @@ impl Shell {
             })
             .collect();
 
+        let unread = !self.state.read(cx).unseen_chat_ids().is_empty();
         let recent = self.recent_card_rows(cx);
         let done = chat_status_tone(zeron_proto::ChatIndicator::Completed, &theme).2;
         let recent_rows: Vec<AnyElement> = recent
@@ -1513,6 +1517,7 @@ impl Shell {
                 unit * 1.4,
                 need_rows,
                 needs_more,
+                unread.then(|| mark_all_read_button(&theme, "card-mark-all-read", cx)),
             ))
             .child(work_card(
                 &theme,
@@ -1523,6 +1528,7 @@ impl Shell {
                 unit,
                 run_rows,
                 running_more,
+                None,
             ))
             .child(work_card(
                 &theme,
@@ -1532,6 +1538,7 @@ impl Shell {
                 None,
                 unit,
                 recent_rows,
+                None,
                 None,
             ))
             .into_any_element()
@@ -1843,6 +1850,7 @@ fn work_card(
     width: f32,
     rows: Vec<AnyElement>,
     more: Option<AnyElement>,
+    action: Option<AnyElement>,
 ) -> AnyElement {
     let empty = rows.is_empty();
     div()
@@ -1872,12 +1880,19 @@ fn work_card(
                 .text_color(theme.text_muted)
                 .child(icon(glyph).size(px(15.0)).text_color(theme.text_muted))
                 .child(title)
-                .children(count.map(|count| {
+                .child(
                     div()
                         .ml_auto()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(SharedString::from(count.to_string()))
-                })),
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .children(action)
+                        .children(count.map(|count| {
+                            div()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(SharedString::from(count.to_string()))
+                        })),
+                ),
         )
         .children(rows)
         .when(empty, |el| {
@@ -1891,6 +1906,45 @@ fn work_card(
             )
         })
         .children(more)
+        .into_any_element()
+}
+
+pub(super) fn mark_all_read_button(
+    theme: &Theme,
+    id: &'static str,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .role(gpui::Role::Button)
+        .aria_label("Mark all as read")
+        .tooltip(crate::settings::widgets::text_tooltip(
+            "Mark every thread as read",
+        ))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .h(px(20.0))
+        .px(px(6.0))
+        .rounded(px(5.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.5))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+        .hover(|s| s.bg(theme.wash(0.06)).text_color(theme.text))
+        .on_click(cx.listener(|this, _, _, cx| {
+            cx.stop_propagation();
+            this.state
+                .update(cx, |state, cx| state.mark_all_chats_seen(cx));
+        }))
+        .child(
+            icon(icons::LUCIDE_CHECK)
+                .size(px(12.0))
+                .text_color(theme.text_muted),
+        )
+        .child("Mark all read")
         .into_any_element()
 }
 
@@ -1973,7 +2027,13 @@ fn need_row_shell(row: &ShownRow, theme: &Theme) -> gpui::Div {
         ))
 }
 
-fn section_heading(theme: &Theme, label: &str, count: usize, tint: gpui::Hsla) -> AnyElement {
+fn section_heading(
+    theme: &Theme,
+    label: &str,
+    count: usize,
+    tint: gpui::Hsla,
+    action: Option<AnyElement>,
+) -> AnyElement {
     div()
         .flex()
         .items_center()
@@ -1998,6 +2058,7 @@ fn section_heading(theme: &Theme, label: &str, count: usize, tint: gpui::Hsla) -
                 .text_color(tint)
                 .child(SharedString::from(count.to_string())),
         )
+        .children(action.map(|action| div().ml_auto().child(action)))
         .into_any_element()
 }
 
