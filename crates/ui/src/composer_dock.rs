@@ -543,7 +543,6 @@ pub(crate) struct DockedComposer {
     now: Instant,
     terminal: Option<crate::terminal::dock::SharedGeometry>,
     shift_x: f32,
-    lift: f32,
 }
 
 pub(crate) fn docked_composer(
@@ -561,7 +560,6 @@ pub(crate) fn docked_composer(
         now,
         terminal: None,
         shift_x: 0.0,
-        lift: 0.0,
     }
 }
 
@@ -578,11 +576,6 @@ impl DockedComposer {
     /// a style inset on the child is dropped once it is laid out as a root.
     pub fn shift_x(mut self, x: f32) -> Self {
         self.shift_x = x;
-        self
-    }
-
-    pub fn lift(mut self, y: f32) -> Self {
-        self.lift = y;
         self
     }
 }
@@ -692,10 +685,9 @@ impl Element for DockedComposer {
         state.last_geometry = Some(self.now);
         state.last_docked = docked;
         state.position = Some(position);
-        let lifted = position.1.value - self.lift;
         let offset = point(
             px(position.0.value - f32::from(bounds.left())),
-            px(lifted - f32::from(bounds.top())),
+            px(position.1.value - f32::from(bounds.top())),
         );
         let unsettled = (position.0.value - x).abs() > 0.1
             || (position.1.value - y).abs() > 0.1
@@ -708,8 +700,11 @@ impl Element for DockedComposer {
         }
         drop(state);
         if *measured {
-            self.child
-                .prepaint_at(point(px(position.0.value), px(lifted)), window, cx);
+            self.child.prepaint_at(
+                point(px(position.0.value), px(position.1.value)),
+                window,
+                cx,
+            );
         } else {
             window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
         }

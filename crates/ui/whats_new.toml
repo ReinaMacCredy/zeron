@@ -2,6 +2,69 @@
 # must be listed in crates/docs/src/images.rs IMAGES. Order does not matter.
 
 [[entry]]
+version = "0.2.131"
+date = "Oct 31"
+hero_visual = "triage-tray"
+
+[[entry.features]]
+id = "triage-tray"
+title = "One place for what needs you: the Cmd+I tray"
+description = "The pill on the right of the titlebar counts the threads that need you and the ones running, like \"2 need you · 1 running\". Click it or press Cmd+I for the tray: answer a question, review a plan, or open a failed thread, and stay in the chat you are in. Its top row opens the Supervisor, and History and Tasks sit at its foot."
+details = "The tray takes over from the ask pill above the composer, the Supervisor rail button and the Tasks Needs you chip; the bell now opens History only. Change the shortcut in Settings > General > Shortcuts, under Needs you and running."
+visual = "triage-tray"
+
+[[entry.features]]
+id = "new-chat-cards"
+title = "New chat shows what needs you, what is running and what you did last"
+description = "The rail's top button is New chat, and Cmd+N opens it from anywhere, a chat included. Under its composer, with the project chip and the Plan switch, three cards list the threads that need you (answer them right there), the ones running, and your recent chats."
+details = "The cards replace the Chat and Work toggle, the New task, Mission Control and Running agents tabs, and the Working now, Missions and Recent areas widgets. With one device, New project opens straight on its folders."
+visual = "new-chat-cards"
+
+[[entry.features]]
+id = "plan-approve-task"
+title = "Approve a plan here, or as a Task"
+description = "Turn on Plan in the composer (Shift+Tab) and Claude writes a plan before it changes anything; Send reads Start plan. The plan arrives as a card with its steps. Approve runs it in this chat, Approve as Task tracks its steps in Tasks with Open in Tasks, and Edit plan tells the agent to change it."
+details = "The tray offers the same Approve and Approve as Task. On Codex and OpenCode the Plan switch has the agent write a plan and change nothing, with no approval step. Approve as Task is greyed out, with the reason, when the chat cannot become a Task."
+visual = "plan-approve-task"
+
+[[entry.features]]
+id = "child-pane-tabs"
+title = "Agents, forks and side chats open beside the chat"
+description = "Every child thread (an agent, a delegated task, a fork, a side chat, a thread an agent started) opens as a tab in the right pane with a badge for its kind, from whichever door you use. Hover a reply and click Fork to fork through it into a tab. The Side chat ⌘; tab on the composer, Cmd+; or /btw opens a side chat there."
+details = "When tabs run out of room they shrink to their badges, then a ⋯ N menu holds the rest. The btw strip above the composer is gone, and child threads are listed in the Sidecar under Beside this thread instead of the sidebar; Cmd+K search still finds them."
+visual = "child-pane-tabs"
+
+[[entry.improvements]]
+text = "The composer has a model chip and an access chip on New chat and in every chat, in the same spot. The model card no longer holds the permissions, and the access card no longer has a plan row: Plan is the one switch in the composer."
+
+[[entry.improvements]]
+text = "The Sidecar has three sections: Workspace (the branch and how far it is ahead of main), Beside this thread (agents, side chats, forks, started threads, shells, the Task row and Stop all) and Actions. With a pane tab open it folds to a 40px rail. The Working pill above the composer is gone; its agents and shells are in Beside this thread."
+
+[[entry.improvements]]
+text = "Changes, Files and Browser are tool tabs in the right pane, opened from the titlebar's pane button with the diff counts. Review and its findings sit in Changes, beside the Uncommitted and History switch."
+
+[[entry.improvements]]
+text = "Cmd+J only opens and closes the bottom dock, and the right pane's terminal moved into it. Project actions run from the Sidecar's Actions as dock tabs named after the action, and their row turns Done or Failed when the command ends while the shell stays open."
+
+[[entry.improvements]]
+text = "Usage lives in the rail ring and the Usage page. Hover the ring for each account's windows and click it for the page. At a limit the ring turns red and one notice in the composer offers Switch model (or a switch to a named model), Wait for reset or Cancel. /usage opens the page, and switching accounts is on its plan cards."
+
+[[entry.improvements]]
+text = "A new install opens on one three-step setup (Welcome, Your agents, Done). Later launches show at most this What's New card, and when several releases came out since you last looked it opens each of them."
+
+[[entry.improvements]]
+text = "Settings has eight sections plus Account, where Enable sync and Sign out now live. Search shows each result's section path, and Appearance keeps its look-only controls under Advanced look. Light and dark are set only in Settings > Appearance."
+
+[[entry.improvements]]
+text = "Star Zeron on GitHub and Agent updates are rows in the Help menu, in place of the Star banner and the agent updates card on New chat."
+
+[[entry.improvements]]
+text = "Fewer doors: the Supervisor rail button moved to the tray's top row and Cmd+K, the Usage rail button to the ring, the rail avatar to Settings > Account, the ask pill to the tray, and the btw strip to side chat tabs in the right pane. Inbox is history, and Mission Control labels read Plan or Tasks."
+
+[[entry.improvements]]
+text = "A thread that leads a Task reads \"Task · step 2 of 3\" in the sidebar instead of a bare count."
+
+[[entry]]
 version = "0.2.129"
 date = "Oct 29"
 hero = "claude-config-panel.jpg"

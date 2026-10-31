@@ -33,7 +33,7 @@ Running `zeron` with no command opens the desktop app. One engine serves each ma
 
 `zeron login` needs an interactive terminal. It prints `Sign in to Zeron:` with a link; open it, sign in, then paste the code the browser shows and press Enter. If your account has no workspace yet, it asks you to name one; with several, it lists them and asks you to pick (`Pick a workspace [1-N]:`). When it finishes, it prints `Signed in as <email>` and `Sync is ready.` Start or restart Zeron to open the synced workspace; sessions you already had stay in the local workspace.
 
-`zeron login` and `zeron logout` refuse while an engine is running, because the running engine owns the sign-in. Stop it first (`zeron daemon stop`, or quit the Zeron app), or use the account menu in the app instead. If you are already signed in, `zeron login` says so; run `zeron logout` first to switch accounts.
+`zeron login` and `zeron logout` refuse while an engine is running, because the running engine owns the sign-in. Stop it first (`zeron daemon stop`, or quit the Zeron app), or use Settings > Account in the app instead. If you are already signed in, `zeron login` says so; run `zeron logout` first to switch accounts.
 
 ### Status
 
@@ -94,7 +94,7 @@ systemctl --user restart zeron
 
 If you set up the service with `zeron daemon install`, use `zeron daemon stop` and `zeron daemon restart` instead.
 
-Use the same account and workspace as your desktop. The server then appears in [Settings > Devices](zeron://settings/devices) under **Other devices**. To work there, add a project and pick the server as its device, or pick the server in the device chip on the new chat canvas. See [Devices and sync](zeron://docs/devices). The desktop app reaches a server only through the synced workspace; there is no direct connection to type in.
+Use the same account and workspace as your desktop. The server then appears in [Settings > Devices & updates > Devices](zeron://settings/devices) under **Other devices**. To work there, add a project and pick the server as its device, or pick the server in the device chip on the new chat canvas. See [Devices and sync](zeron://docs/devices). The desktop app reaches a server only through the synced workspace; there is no direct connection to type in.
 
 To keep the server current, run `zeron update`, or set `ZERON_AUTO_UPDATE=1` (in `~/.zeron/env`) to let the engine install new releases on its own when no run or terminal is active.
 
@@ -104,7 +104,7 @@ To keep the server current, run `zeron update`, or set `ZERON_AUTO_UPDATE=1` (in
 | --- | --- |
 | `ZERON_DATA_DIR` | Where Zeron keeps its data. See below. |
 | `ZERON_IPC_PORT` | The local port the engine listens on (default 27654). The app, commands, and engine on one machine must agree on it. |
-| `ZERON_DEVICE_NAME` | The name a new device registers with. Otherwise Zeron uses the system's computer name or hostname. A name you set with **Rename** in Settings > Devices is kept. |
+| `ZERON_DEVICE_NAME` | The name a new device registers with. Otherwise Zeron uses the system's computer name or hostname. A name you set with **Rename** in Settings > Devices & updates > Devices is kept. |
 | `ZERON_HARNESS` | For `zeron headless`: the agent for chats that have none set: `codex`, `cursor`, `devin`, `grok`, `hermes`, `pi`, or `antigravity`. Unset means Claude Code. |
 | `ZERON_AUTO_UPDATE` | `1`, `true`, or `yes` turns on automatic updates. A Linux engine installed with `install.sh` installs them when idle (set it in `~/.zeron/env`). The desktop app downloads them in the background and installs a downloaded update when you quit. Off by default. |
 | `ZERON_WORKTREES_DIR` | Where new worktrees go. Overrides the location set in Settings. |

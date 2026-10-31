@@ -213,7 +213,7 @@ impl Shell {
         };
         let Some(crop) = column_crop(
             self.sidebar_edge(),
-            self.right_visible_width(cx) + self.files_reserved_width(cx) + self.content_inset(),
+            self.right_visible_width(cx) + self.content_inset(),
             frame.width,
             frame.height,
         ) else {
@@ -395,7 +395,7 @@ impl Shell {
                     .unwrap_or(ChatIndicator::Idle);
                 let status_label = match status {
                     ChatIndicator::Working => Some("Working"),
-                    ChatIndicator::AwaitingInput => Some("Input"),
+                    ChatIndicator::AwaitingInput => Some("Asking"),
                     ChatIndicator::Errored => Some("Failed"),
                     ChatIndicator::Completed => Some("Done"),
                     ChatIndicator::Idle => None,

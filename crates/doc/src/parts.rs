@@ -862,7 +862,8 @@ pub fn sidecar_payload(event: &AgentEvent) -> Option<SidecarPayload> {
 /// and a subagent spawn's model/type (see [`spawn_badge`] — a couple of short
 /// identifiers the chip names the child by).
 /// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt, Mcp/Unknown input
-/// (but `respond_to_input`, a `tasks` plan call and `delegate_task` keep the short ids [`zeron_badge`] lists).
+/// (but `respond_to_input`, a `tasks` plan call and `delegate_task` keep the short ids [`zeron_badge`] lists,
+/// and `ExitPlanMode` keeps its plan).
 /// Full inputs remain only in the host's local run journal. Idempotent.
 pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
     match call {
@@ -890,6 +891,7 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
             name: name.clone(),
             input: spawn_badge(call)
                 .or_else(|| skill_badge(call))
+                .or_else(|| plan_badge(call))
                 .or_else(|| zeron_badge(call)),
         },
         other => other.clone(),
@@ -925,6 +927,26 @@ fn zeron_badge(call: &ToolCall) -> Option<serde_json::Value> {
         })
         .collect();
     (!kept.is_empty()).then_some(serde_json::Value::Object(kept))
+}
+
+const PLAN_BADGE_MAX_CHARS: usize = 4000;
+
+/// The plan card is the only place the person reads Claude's plan before approving it.
+fn plan_badge(call: &ToolCall) -> Option<serde_json::Value> {
+    let ToolCall::Unknown { name, input } = call else {
+        return None;
+    };
+    if name != "ExitPlanMode" {
+        return None;
+    }
+    let plan: String = input
+        .as_ref()?
+        .get("plan")?
+        .as_str()?
+        .chars()
+        .take(PLAN_BADGE_MAX_CHARS)
+        .collect();
+    Some(serde_json::json!({ "plan": plan }))
 }
 
 /// A `Skill` call keeps the skill's name and file for its chip; its `args`
@@ -1366,6 +1388,23 @@ mod tests {
             ToolCall::WriteFile {
                 path: "/x".into(),
                 content: None
+            }
+        );
+        assert_eq!(sanitize_tool_call(&clean), clean);
+    }
+
+    #[test]
+    fn sanitize_keeps_a_plans_text_for_its_card() {
+        let call = ToolCall::Unknown {
+            name: "ExitPlanMode".into(),
+            input: Some(serde_json::json!({ "plan": "1. Audit\n2. Ship", "extra": "x" })),
+        };
+        let clean = sanitize_tool_call(&call);
+        assert_eq!(
+            clean,
+            ToolCall::Unknown {
+                name: "ExitPlanMode".into(),
+                input: Some(serde_json::json!({ "plan": "1. Audit\n2. Ship" })),
             }
         );
         assert_eq!(sanitize_tool_call(&clean), clean);

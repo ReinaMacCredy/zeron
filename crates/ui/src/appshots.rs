@@ -49,19 +49,6 @@ pub(crate) fn capture_ready() {
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
-static WELCOME_PENDING: AtomicBool = AtomicBool::new(false);
-
-/// Armed once at boot from the settings file, so only a real desktop launch
-/// (including a fresh install with no file yet) owes the introduction sheet;
-/// in-memory defaults never do.
-pub fn set_welcome_pending(pending: bool) {
-    WELCOME_PENDING.store(pending && is_desktop(), Ordering::Relaxed);
-}
-
-pub fn welcome_pending() -> bool {
-    WELCOME_PENDING.load(Ordering::Relaxed)
-}
-
 /// Bounds native capture buffers before platform APIs allocate or stage them.
 pub const MAX_CAPTURE_DIMENSION: u32 = 8_192;
 pub const MAX_CAPTURE_PIXELS: u64 = 32 * 1024 * 1024;

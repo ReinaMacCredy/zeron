@@ -1,21 +1,23 @@
 //! Astra's sidecar (paseo-fork `Sidecar.tsx` + `sidecar.css`) beside the transcript.
 
+use super::children::{ChildKind, ChildRef};
 use super::*;
 use crate::computer::{self, presence::PresenceTone, preview};
-use crate::files::client::{FilesRequestContext, WorkspaceFilesClient};
+use crate::files::client::FilesRequestContext;
 use crate::project_actions::{ProjectActionsStatus, action_icon, action_label};
 use std::rc::Rc;
 use zeron_proto::computer::ComputerPreviewPlacement;
 use zeron_proto::device_hub::{DeviceOpener, DevicePlatform};
+use zeron_proto::{GitHistoryComparison, GitHistoryPage};
 
 pub(super) const SIDECAR_WIDTH: f32 = 260.0;
 pub(super) const SIDECAR_RAIL_WIDTH: f32 = 40.0;
 const SIDECAR_AUTO_COLLAPSE_WIDTH: f32 = 640.0;
 const SIDECAR_TOP: f32 = Theme::TITLEBAR_HEIGHT + 4.0;
-const POPOVER_WIDTH: f32 = 276.0;
+const POPOVER_WIDTH: f32 = 262.0;
 const SECTION_CAP: usize = 8;
-/// Instructions files probed at the checkout root, first hit wins.
-const INSTRUCTION_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md"];
+const RAIL_BUTTON: f32 = 32.0;
+const RAIL_GAP: f32 = 4.0;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SidecarFlip {
@@ -23,9 +25,43 @@ pub(super) struct SidecarFlip {
     started: std::time::Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SidecarPart {
+    Workspace,
+    Beside,
+    Actions,
+}
+
+impl SidecarPart {
+    fn heading(self) -> &'static str {
+        match self {
+            Self::Workspace => "Workspace",
+            Self::Beside => "Beside this thread",
+            Self::Actions => "Actions",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Workspace => icons::ASTRA_LAPTOP,
+            Self::Beside => icons::BOT,
+            Self::Actions => icons::PLAY,
+        }
+    }
+
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Beside => "beside",
+            Self::Actions => "actions",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PopoverFade {
     open: bool,
+    part: SidecarPart,
     started: std::time::Instant,
 }
 
@@ -33,25 +69,27 @@ type SidecarAction = Rc<dyn Fn(&mut Shell, &mut Window, &mut Context<Shell>)>;
 
 enum SidecarValue {
     Text(SharedString),
-    Mono(SharedString),
     Tone(SharedString, gpui::Hsla),
-    Dot(Option<SharedString>, gpui::Hsla),
-    Counts(usize, u32, u32),
-    Meter(f32, gpui::Hsla),
+    Dot(SharedString, gpui::Hsla),
+    Open,
+}
+
+struct SidecarTrail {
+    icon: &'static str,
+    label: &'static str,
+    action: SidecarAction,
 }
 
 struct SidecarEntry {
     key: &'static str,
     ix: usize,
     icon: &'static str,
-    tint: Option<gpui::Hsla>,
-    badge: Option<gpui::Hsla>,
     ink: Option<gpui::Hsla>,
     label: SharedString,
-    suffix: Option<SharedString>,
+    hint: Option<SharedString>,
     value: Option<SidecarValue>,
     action: Option<SidecarAction>,
-    edit: Option<SidecarAction>,
+    trail: Option<SidecarTrail>,
     thumbnail: Option<String>,
 }
 
@@ -66,26 +104,14 @@ impl SidecarEntry {
             key,
             ix,
             icon,
-            tint: None,
-            badge: None,
             ink: None,
             label: label.into(),
-            suffix: None,
+            hint: None,
             value: None,
             action: None,
-            edit: None,
+            trail: None,
             thumbnail: None,
         }
-    }
-
-    fn tint(mut self, tint: Option<gpui::Hsla>) -> Self {
-        self.tint = tint;
-        self
-    }
-
-    fn badge(mut self, badge: Option<gpui::Hsla>) -> Self {
-        self.badge = badge;
-        self
     }
 
     fn ink(mut self, ink: gpui::Hsla) -> Self {
@@ -93,8 +119,8 @@ impl SidecarEntry {
         self
     }
 
-    fn suffix(mut self, suffix: Option<SharedString>) -> Self {
-        self.suffix = suffix;
+    fn hint(mut self, hint: impl Into<SharedString>) -> Self {
+        self.hint = Some(hint.into());
         self
     }
 
@@ -111,47 +137,36 @@ impl SidecarEntry {
         self
     }
 
-    fn edit(
+    fn trail(
         mut self,
-        edit: impl Fn(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
+        icon: &'static str,
+        label: &'static str,
+        action: impl Fn(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
     ) -> Self {
-        self.edit = Some(Rc::new(edit));
+        self.trail = Some(SidecarTrail {
+            icon,
+            label,
+            action: Rc::new(action),
+        });
         self
-    }
-
-    fn name(&self) -> SharedString {
-        match &self.suffix {
-            Some(suffix) => format!("{}{suffix}", self.label).into(),
-            None => self.label.clone(),
-        }
     }
 
     fn value_text(&self) -> Option<SharedString> {
         match self.value.as_ref()? {
-            SidecarValue::Text(v)
-            | SidecarValue::Mono(v)
-            | SidecarValue::Tone(v, _)
-            | SidecarValue::Dot(Some(v), _) => Some(v.clone()),
-            SidecarValue::Meter(fraction, _) => {
-                Some(format!("{}%", (fraction * 100.0).round() as u32).into())
+            SidecarValue::Text(v) | SidecarValue::Tone(v, _) | SidecarValue::Dot(v, _) => {
+                Some(v.clone())
             }
-            SidecarValue::Counts(files, add, del) => {
-                let files = if *files == 1 {
-                    "1 file".to_string()
-                } else {
-                    format!("{files} files")
-                };
-                Some(format!("{files} +{add} −{del}").into())
-            }
-            SidecarValue::Dot(None, _) => None,
+            SidecarValue::Open => Some("Open".into()),
         }
     }
 
     fn tooltip(&self) -> SharedString {
-        let label = self.name();
-        match (&self.value, self.value_text()) {
-            (Some(SidecarValue::Counts(..)), _) | (_, None) => label,
-            (_, Some(value)) => format!("{label}: {value}").into(),
+        if let Some(hint) = &self.hint {
+            return hint.clone();
+        }
+        match self.value_text() {
+            Some(value) => format!("{}: {value}", self.label).into(),
+            None => self.label.clone(),
         }
     }
 }
@@ -171,9 +186,39 @@ impl SidecarInk {
 }
 
 struct SidecarSection {
-    heading: SharedString,
+    part: SidecarPart,
+    running: usize,
     entries: Vec<SidecarEntry>,
+    empty: Option<SharedString>,
     fold: Option<SidecarFold>,
+    foot: Option<SidecarEntry>,
+}
+
+impl SidecarSection {
+    fn new(part: SidecarPart, entries: Vec<SidecarEntry>) -> Self {
+        Self {
+            part,
+            running: 0,
+            entries,
+            empty: None,
+            fold: None,
+            foot: None,
+        }
+    }
+
+    fn label(&self) -> SharedString {
+        match self.running {
+            0 => self.part.heading().into(),
+            _ => format!("{} · {}", self.part.heading(), self.running_text()).into(),
+        }
+    }
+
+    fn running_text(&self) -> String {
+        match self.running {
+            1 => "1 agent running".into(),
+            n => format!("{n} agents running"),
+        }
+    }
 }
 
 struct SidecarFold {
@@ -209,9 +254,8 @@ impl Shell {
         if split_open || self.state.read(cx).selected_chat.is_none() {
             return 0.0;
         }
-        let popover_mode = self.right_pane_shown(cx);
         let collapsed = self.settings.sidecar_collapsed
-            || popover_mode
+            || self.right_pane_shown(cx)
             || full_column <= SIDECAR_AUTO_COLLAPSE_WIDTH;
         match self.sidecar_collapsed_now {
             Some(now) if now != collapsed => {
@@ -225,11 +269,8 @@ impl Shell {
             Some(_) => {}
             None => self.sidecar_collapsed_now = Some(collapsed),
         }
-        if !(popover_mode && collapsed) && self.sidecar_popover_open() {
-            self.sidecar_popover = Some(PopoverFade {
-                open: false,
-                started: motion::now(),
-            });
+        if !collapsed && self.sidecar_popover_open() {
+            self.close_sidecar_popover();
         }
         self.sidecar_width_now().min(full_column)
     }
@@ -264,27 +305,55 @@ impl Shell {
     }
 
     pub(super) fn sidecar_popover_open(&self) -> bool {
-        matches!(self.sidecar_popover, Some(PopoverFade { open: true, .. }))
+        self.sidecar_popover_part().is_some()
     }
 
-    fn sidecar_popover_mounted(&self) -> bool {
-        self.sidecar_popover.is_some_and(|fade| {
-            fade.open
-                || motion::since(fade.started)
-                    < motion::SIDECAR_POPOVER_SLIDE
-                        .total()
-                        .mul_f32(motion::speed_scale())
-        })
+    fn sidecar_popover_part(&self) -> Option<SidecarPart> {
+        self.sidecar_popover
+            .filter(|fade| fade.open)
+            .map(|fade| fade.part)
     }
 
-    pub(super) fn set_sidecar_popover(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.sidecar_popover_open() == open {
+    fn sidecar_popover_mounted(&self) -> Option<SidecarPart> {
+        self.sidecar_popover
+            .filter(|fade| {
+                fade.open
+                    || motion::since(fade.started)
+                        < motion::SIDECAR_POPOVER_SLIDE
+                            .total()
+                            .mul_f32(motion::speed_scale())
+            })
+            .map(|fade| fade.part)
+    }
+
+    fn close_sidecar_popover(&mut self) {
+        if let Some(fade) = self.sidecar_popover.filter(|fade| fade.open) {
+            self.sidecar_popover = Some(PopoverFade {
+                open: false,
+                part: fade.part,
+                started: motion::now(),
+            });
+        }
+    }
+
+    pub(super) fn set_sidecar_popover(
+        &mut self,
+        part: Option<SidecarPart>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidecar_popover_part() == part {
             return;
         }
-        self.sidecar_popover = Some(PopoverFade {
-            open,
-            started: motion::now(),
-        });
+        match part {
+            Some(part) => {
+                self.sidecar_popover = Some(PopoverFade {
+                    open: true,
+                    part,
+                    started: motion::now(),
+                })
+            }
+            None => self.close_sidecar_popover(),
+        }
         cx.notify();
     }
 
@@ -296,79 +365,12 @@ impl Shell {
         cx.notify();
     }
 
-    /// Bring one right-pane surface on screen: open the pane if it is closed,
-    /// then make that tab active.
-    fn focus_right_surface(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
-        if !self.right_pane_open(cx) {
+    fn expand_sidecar(&mut self, cx: &mut Context<Self>) {
+        if self.right_pane_shown(cx) {
             self.toggle_right_pane(cx);
         }
-        self.set_right_active(surface, cx);
-    }
-
-    fn open_right_pane(&mut self, cx: &mut Context<Self>) {
-        if !self.right_pane_open(cx) {
-            self.toggle_right_pane(cx);
-        }
-    }
-
-    fn first_right_surface(
-        &self,
-        cx: &App,
-        matches: fn(&RightSurface) -> bool,
-    ) -> Option<RightSurface> {
-        self.right_surface_rows(cx)
-            .into_iter()
-            .map(|(surface, ..)| surface)
-            .find(matches)
-    }
-
-    /// The Changes row: focus the working-tree diff tab, else the first diff
-    /// tab, else open one.
-    pub(super) fn focus_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let rows = self.right_surface_rows(cx);
-        let diffs: Vec<u64> = rows
-            .iter()
-            .filter_map(|(surface, ..)| match surface {
-                RightSurface::Diff(id) => Some(*id),
-                _ => None,
-            })
-            .collect();
-        let target = diffs
-            .iter()
-            .copied()
-            .find(|id| {
-                self.diffs
-                    .get(id)
-                    .is_some_and(|changes| changes.read(cx).is_working_tree())
-            })
-            .or(diffs.first().copied());
-        match target {
-            Some(id) => self.focus_right_surface(RightSurface::Diff(id), cx),
-            None => {
-                self.open_right_pane(cx);
-                self.add_diff_surface(window, cx);
-            }
-        }
-    }
-
-    fn focus_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.first_right_surface(cx, |s| matches!(s, RightSurface::Browser(_))) {
-            Some(surface) => self.focus_right_surface(surface, cx),
-            None => {
-                self.open_right_pane(cx);
-                self.add_browser_surface(None, window, cx);
-            }
-        }
-    }
-
-    fn focus_terminal(&mut self, cx: &mut Context<Self>) {
-        match self.first_right_surface(cx, |s| matches!(s, RightSurface::Terminal(_))) {
-            Some(surface) => self.focus_right_surface(surface, cx),
-            None => {
-                self.open_right_pane(cx);
-                self.add_terminal_surface(cx);
-            }
-        }
+        self.set_sidecar_popover(None, cx);
+        self.set_sidecar_user_collapsed(false, cx);
     }
 
     fn toggle_computer_entry(&mut self, chat_id: &str, cx: &mut Context<Self>) {
@@ -404,72 +406,49 @@ impl Shell {
         }
     }
 
-    /// Look for an instructions file at the chat's checkout root, once per chat.
-    fn probe_summary_instructions(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        if self.summary_instruction_probes.contains_key(&chat_id)
-            || self.summary_instructions.contains_key(&chat_id)
+    fn probe_summary_git(&mut self, chat_id: &str, key: String, cx: &mut Context<Self>) {
+        if self.summary_git_probes.contains_key(chat_id)
+            || self
+                .summary_git
+                .get(chat_id)
+                .is_some_and(|(probed, _)| *probed == key)
         {
             return;
         }
         let state = self.state.read(cx);
-        let Some(context) = FilesRequestContext::for_chat(state, &chat_id) else {
+        let Some(context) = FilesRequestContext::for_chat(state, chat_id) else {
             return;
         };
         let Some(engine) = state.engine().cloned() else {
             return;
         };
-        let key = chat_id.clone();
-        let task = cx.spawn(async move |this, cx| {
-            let client = WorkspaceFilesClient::new(engine, context.clone());
-            let mut found = None;
-            for name in INSTRUCTION_FILES {
-                let request = zeron_proto::ReadWorkspaceFileRequest {
-                    target: context.target.clone(),
-                    path: (*name).into(),
-                };
-                match client.read_file(request).await {
-                    Ok(_) => {
-                        found = Some((*name).to_string());
-                        break;
-                    }
-                    Err(error) if error.retryable() => break,
-                    Err(_) => continue,
+        let chat_id = chat_id.to_owned();
+        let task = cx.spawn({
+            let chat_id = chat_id.clone();
+            async move |this, cx| {
+                let mut params = serde_json::json!({
+                    "cwd": context.cwd,
+                    "cursor": 0,
+                    "limit": 1,
+                });
+                if let Some(target) = context.target_device_id {
+                    params["targetDeviceId"] = serde_json::Value::String(target);
                 }
+                let comparison = engine
+                    .client()
+                    .call(zeron_rpc::methods::LIST_GIT_HISTORY, params)
+                    .await
+                    .ok()
+                    .and_then(|value| serde_json::from_value::<GitHistoryPage>(value).ok())
+                    .and_then(|page| page.comparison);
+                let _ = this.update(cx, |this, cx| {
+                    this.summary_git_probes.remove(&chat_id);
+                    this.summary_git.insert(chat_id, (key, comparison));
+                    cx.notify();
+                });
             }
-            let _ = this.update(cx, |this, cx| {
-                this.summary_instructions.insert(chat_id.clone(), found);
-                this.summary_instruction_probes.remove(&chat_id);
-                cx.notify();
-            });
         });
-        self.summary_instruction_probes.insert(key, task);
-    }
-
-    /// Working-tree counts from the first diff tab that carries the selected
-    /// chat's watch. Without a diff tab there is no watch, so no counts.
-    fn summary_change_counts(&self, cx: &App) -> Option<(usize, u32, u32)> {
-        self.right_surface_rows(cx)
-            .iter()
-            .filter_map(|(surface, ..)| match surface {
-                RightSurface::Diff(id) => self.diffs.get(id),
-                _ => None,
-            })
-            .find_map(|changes| {
-                let changes = changes.read(cx);
-                changes
-                    .is_working_tree()
-                    .then(|| changes.working_tree_counts(cx))
-                    .flatten()
-            })
-    }
-
-    /// The most-used usage window of the active account on the chat's
-    /// harness: `(label, fraction)`.
-    fn summary_usage(&self, chat: &zeron_proto::Chat, cx: &App) -> Option<(String, f32)> {
-        let harness = chat.config.as_ref()?.harness;
-        crate::account_usage::local_snapshot(cx)?
-            .busiest_window(harness)
-            .map(|(label, fraction)| (label.to_owned(), fraction))
+        self.summary_git_probes.insert(chat_id, task);
     }
 
     fn sidecar_actions_section(&self, theme: &Theme, cx: &App) -> Option<SidecarSection> {
@@ -485,11 +464,7 @@ impl Shell {
                     icons::LUCIDE_REFRESH_CW,
                     "Loading actions…",
                 ));
-                return Some(SidecarSection {
-                    heading: "Actions".into(),
-                    entries,
-                    fold: None,
-                });
+                return Some(SidecarSection::new(SidecarPart::Actions, entries));
             }
             ProjectActionsStatus::Unavailable { message, .. } => {
                 entries.push(SidecarEntry::new(
@@ -541,9 +516,11 @@ impl Shell {
                 entry =
                     entry.action(move |this, _, cx| this.run_project_action(&key, run.clone(), cx));
             }
-            entries.push(entry.edit(move |this, _, cx| {
-                this.open_project_action_editor(Some(action.clone()), None, cx)
-            }));
+            entries.push(entry.trail(
+                icons::SETTINGS_MINIMALISTIC,
+                "Edit action",
+                move |this, _, cx| this.open_project_action_editor(Some(action.clone()), None, cx),
+            ));
         }
         for (ix, draft) in snapshot.importable_actions.into_iter().enumerate() {
             entries.push(
@@ -571,148 +548,98 @@ impl Shell {
             SidecarEntry::new("add-action", 0, icons::ASTRA_PLUS, "Add action")
                 .action(|this, _, cx| this.open_project_action_editor(None, None, cx)),
         );
-        Some(SidecarSection {
-            heading: "Actions".into(),
-            entries,
-            fold: None,
-        })
+        Some(SidecarSection::new(SidecarPart::Actions, entries))
     }
 
     fn sidecar_sections(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<SidecarSection> {
         self.ensure_project_actions(cx);
         let chat = self.state.read(cx).selected_chat_row().cloned();
-        if let Some(chat) = chat.as_ref() {
-            self.probe_summary_instructions(chat.id.clone(), cx);
-        }
-        let surfaces = self.right_surface_rows(cx);
-        let browsers: Vec<(RightSurface, SharedString, Option<SharedString>)> = surfaces
-            .iter()
-            .filter(|(surface, ..)| matches!(surface, RightSurface::Browser(_)))
-            .map(|(surface, title, _, url)| (*surface, title.clone(), url.clone()))
-            .collect();
-        let files: Vec<(RightSurface, SharedString)> = surfaces
-            .iter()
-            .filter(|(surface, ..)| matches!(surface, RightSurface::File(_)))
-            .map(|(surface, title, ..)| (*surface, title.clone()))
-            .collect();
-        let source = self.sidechat_source_chat(cx);
-        let mut sidechats: Vec<_> = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .filter(|chat| {
-                !chat.archived
-                    && source.as_deref().is_some_and(|source| {
-                        chat.sidechat_source_chat_id.as_deref() == Some(source)
-                    })
-            })
-            .cloned()
-            .collect();
-        sidechats.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        let pickers = self.composer.read(cx).pickers().read(cx);
-        let subagents: Vec<_> = self
-            .transcript
-            .read(cx)
-            .subagent_summaries(cx)
-            .into_iter()
-            .map(|agent| {
-                let suffix = agent_tag_suffix(&agent, |harness, id| {
-                    pickers
-                        .model_label(harness, id)
-                        .or_else(|| crate::pickers::curated_model_label(harness, id))
-                });
-                (agent, suffix)
-            })
-            .collect();
-        let sources = self.transcript.read(cx).user_attachments();
-        let instructions = chat
-            .as_ref()
-            .and_then(|chat| self.summary_instructions.get(&chat.id).cloned())
-            .flatten();
-        let branch = chat.as_ref().and_then(|chat| {
+        let mut sections = vec![
+            self.sidecar_workspace(theme, chat.as_ref(), cx),
+            self.sidecar_beside(theme, chat.as_ref(), cx),
+        ];
+        sections.extend(self.sidecar_actions_section(theme, cx));
+        sections
+    }
+
+    fn sidecar_workspace(
+        &mut self,
+        theme: &Theme,
+        chat: Option<&zeron_proto::Chat>,
+        cx: &mut Context<Self>,
+    ) -> SidecarSection {
+        let branch = chat.and_then(|chat| {
             chat.source_context
                 .as_ref()
                 .map(|ctx| ctx.branch.clone())
                 .or_else(|| chat.branch.clone())
                 .filter(|branch| !branch.is_empty())
         });
-        let head = chat.as_ref().and_then(|chat| {
+        let head = chat.and_then(|chat| {
             chat.source_context
                 .as_ref()
                 .and_then(|ctx| ctx.head_sha.as_deref())
                 .map(|sha| sha.chars().take(7).collect::<String>())
         });
-        let state = self.state.read(cx);
-        let device = chat
-            .as_ref()
-            .and_then(|chat| state.device_name(&chat.device_id).map(str::to_string));
-        let space = chat
-            .as_ref()
-            .and_then(|chat| state.space_for_chat(chat))
-            .cloned();
-        // Folders need not be repos: no git, no Changes or branch rows.
-        let git = space.as_ref().is_some_and(|space| space.git_detected);
-        let project = space.as_ref().map(|space| {
-            space
-                .name
-                .clone()
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| basename(&space.path))
-        });
-        let cwd = chat
-            .as_ref()
-            .and_then(|chat| chat.cwd.as_deref())
-            .map(basename);
-        let counts = self.summary_change_counts(cx);
-        let usage = chat.as_ref().and_then(|chat| self.summary_usage(chat, cx));
-        let working = chat_status_tone(zeron_proto::ChatIndicator::Working, theme).2;
+        let (device, path, git) = {
+            let state = self.state.read(cx);
+            let device =
+                chat.and_then(|chat| state.device_name(&chat.device_id).map(str::to_owned));
+            let local = chat.is_some_and(|chat| {
+                state.local_device_id.as_deref() == Some(chat.device_id.as_str())
+            });
+            let home = local.then(|| std::env::var("HOME").ok()).flatten();
+            let path = chat
+                .and_then(|chat| chat.cwd.as_deref())
+                .map(|cwd| zeron_proto::claude_panel::tilde(cwd, home.as_deref()));
+            let git = chat
+                .and_then(|chat| state.space_for_chat(chat))
+                .is_some_and(|space| space.git_detected);
+            (device, path, git)
+        };
+        let comparison = match chat.filter(|_| git) {
+            Some(chat) => {
+                let key = format!(
+                    "{}@{}",
+                    branch.as_deref().unwrap_or_default(),
+                    head.as_deref().unwrap_or_default()
+                );
+                self.probe_summary_git(&chat.id, key, cx);
+                self.summary_git
+                    .get(&chat.id)
+                    .and_then(|(_, comparison)| comparison.clone())
+            }
+            None => None,
+        };
 
-        let mut sections = Vec::new();
-
-        let mut on = Vec::new();
+        let mut entries = vec![SidecarEntry::new(
+            "machine",
+            0,
+            icons::ASTRA_LAPTOP,
+            device.unwrap_or_else(|| "Local".into()),
+        )];
+        let path = path.unwrap_or_else(|| "No workspace".into());
+        entries.push(SidecarEntry::new("path", 0, icons::ASTRA_FOLDER, path.clone()).hint(path));
         if git {
-            on.push(
+            let commit = commit_line(head.as_deref(), branch.as_deref(), comparison.as_ref());
+            entries.push(
                 SidecarEntry::new(
-                    "changes",
+                    "branch",
                     0,
-                    icons::ASTRA_PLUS_MINUS,
-                    zeron_proto::badges::CHANGES_TITLE,
+                    icons::ASTRA_GIT_BRANCH,
+                    branch.unwrap_or_else(|| "No branch".into()),
                 )
-                .value(counts.map(|(files, add, del)| SidecarValue::Counts(files, add, del)))
-                .action(|this, window, cx| this.focus_changes(window, cx)),
+                .ink(theme.branch_ink()),
             );
+            if let Some(commit) = commit {
+                entries.push(
+                    SidecarEntry::new("commit", 0, icons::LUCIDE_GIT_COMMIT_HORIZONTAL, commit)
+                        .ink(theme.text_muted),
+                );
+            }
         }
-        on.push(
-            SidecarEntry::new("browser", 0, icons::ASTRA_GLOBE, "Browser")
-                .action(|this, window, cx| this.focus_browser(window, cx)),
-        );
-        let live_terminals = self.right_terminal.as_ref().map_or(0, |panel| {
-            panel
-                .read(cx)
-                .tab_summaries(cx)
-                .iter()
-                .filter(|(_, _, exited)| !exited)
-                .count()
-        });
-        on.push(
-            SidecarEntry::new("terminal", 0, icons::ASTRA_TERMINAL, "Terminal")
-                .value((live_terminals > 0).then(|| {
-                    SidecarValue::Dot(Some(format!("{live_terminals} running").into()), working)
-                }))
-                .action(|this, _, cx| this.focus_terminal(cx)),
-        );
-        on.push(
-            SidecarEntry::new("files", 0, icons::ASTRA_FILE, "Files")
-                .action(|this, window, cx| this.add_files_surface(window, cx)),
-        );
-        let computer = chat
-            .as_ref()
-            .and_then(|chat| computer::presence::rail_entry(&chat.id, cx));
+
+        let computer = chat.and_then(|chat| computer::presence::rail_entry(&chat.id, cx));
         if let Some(thumbnail) = &self.computer_thumbnail {
             let chat_id = computer.as_ref().map(|entry| entry.chat_id.clone());
             thumbnail.update(cx, |thumbnail, cx| thumbnail.set_chat(chat_id, cx));
@@ -725,13 +652,13 @@ impl Shell {
             };
             let chat_id = entry.chat_id.clone();
             let mut row = SidecarEntry::new("computer", 0, icons::COMPUTER_CURSOR, "Computer")
-                .value(Some(SidecarValue::Dot(entry.app.map(Into::into), dot)))
+                .value(entry.app.map(|app| SidecarValue::Dot(app.into(), dot)))
                 .action(move |this, _, cx| this.toggle_computer_entry(&chat_id, cx));
             row.thumbnail = entry.thumbnail.then_some(entry.chat_id);
-            on.push(row);
+            entries.push(row);
         }
-        if let Some(chat) = chat.as_ref() {
-            on.extend(
+        if let Some(chat) = chat {
+            entries.extend(
                 self.sidecar_devices(&chat.id, cx)
                     .into_iter()
                     .take(SECTION_CAP)
@@ -754,275 +681,250 @@ impl Shell {
                     }),
             );
         }
-        sections.push(SidecarSection {
-            heading: format!("On {}", project.as_deref().unwrap_or("this session")).into(),
-            entries: on,
-            fold: None,
-        });
+        SidecarSection::new(SidecarPart::Workspace, entries)
+    }
 
-        let mut workspace = vec![
-            SidecarEntry::new(
-                "local",
-                0,
-                icons::ASTRA_LAPTOP,
-                device.unwrap_or_else(|| "Local".into()),
-            )
-            .value(Some(SidecarValue::Text(
-                cwd.unwrap_or_else(|| "No workspace".into()).into(),
-            ))),
-        ];
-        if git {
-            workspace.push(
-                SidecarEntry::new(
-                    "branch",
-                    0,
-                    icons::ASTRA_GIT_BRANCH,
-                    branch.unwrap_or_else(|| "No branch".into()),
-                )
-                .ink(theme.branch_ink())
-                .value(head.map(|sha| SidecarValue::Mono(sha.into()))),
-            );
-        }
-        sections.push(SidecarSection {
-            heading: "Workspace".into(),
-            entries: workspace,
-            fold: None,
-        });
-
-        if !browsers.is_empty() {
-            sections.push(SidecarSection {
-                heading: "Local servers".into(),
-                entries: browsers
-                    .into_iter()
-                    .take(SECTION_CAP)
-                    .enumerate()
-                    .map(|(ix, (surface, title, url))| {
-                        let host = url.as_deref().map(url_host).filter(|host| !host.is_empty());
-                        SidecarEntry::new("server", ix, icons::ASTRA_GLOBE, title)
-                            .value(host.map(|host| SidecarValue::Text(host.into())))
-                            .action(move |this, _, cx| this.focus_right_surface(surface, cx))
-                    })
-                    .collect(),
-                fold: None,
-            });
-        }
-
-        if chat.is_some() {
-            let mut entries: Vec<SidecarEntry> = sidechats
-                .into_iter()
-                .take(SECTION_CAP)
-                .enumerate()
-                .map(|(ix, chat)| {
-                    let now = Utc::now();
-                    let status = if chat.sidechat_expired(now) {
-                        Some(SidecarValue::Text("Expired".into()))
-                    } else {
-                        let (label, _, color) = chat_status_tone(
-                            self.state.read(cx).display_status_for(&chat, now),
-                            theme,
-                        );
-                        label.map(|label| SidecarValue::Tone(label, color))
-                    };
-                    let title = chat.title.clone().unwrap_or_else(|| "Sidechat".into());
-                    SidecarEntry::new("sidechat", ix, icons::ASTRA_CHAT_BUBBLE, title)
-                        .value(status)
-                        .action(move |this, _, cx| {
-                            this.add_sidechat_surface(&chat, cx);
-                        })
+    fn sidecar_beside(
+        &mut self,
+        theme: &Theme,
+        chat: Option<&zeron_proto::Chat>,
+        cx: &mut Context<Self>,
+    ) -> SidecarSection {
+        let mut section = SidecarSection::new(SidecarPart::Beside, Vec::new());
+        let Some(chat) = chat else {
+            return section;
+        };
+        let now = Utc::now();
+        let now_ms = now.timestamp_millis();
+        let working = chat_status_tone(zeron_proto::ChatIndicator::Working, theme).2;
+        let open = self.open_children(cx);
+        let agents = self.transcript.read(cx).subagent_summaries(cx);
+        let pickers = self.composer.read(cx).pickers().read(cx);
+        let tags: Vec<Option<String>> = agents
+            .iter()
+            .map(|agent| {
+                agent_tag(agent, |harness, id| {
+                    pickers
+                        .model_label(harness, id)
+                        .or_else(|| crate::pickers::curated_model_label(harness, id))
                 })
-                .collect();
-            if let Some(source) = source {
-                entries.push(
-                    SidecarEntry::new(
-                        "new-sidechat",
-                        0,
-                        icons::ASTRA_PLUS,
-                        zeron_proto::sidechat::NEW_SIDECHAT,
-                    )
-                    .action(move |this, _, cx| {
-                        this.create_sidechat(source.clone(), None, Default::default(), cx)
-                    }),
-                );
-            }
-            entries.push(
-                SidecarEntry::new("fork-chat", 0, icons::FORK, "Fork chat")
-                    .action(|this, _, cx| this.create_side_chat(cx)),
-            );
-            sections.push(SidecarSection {
-                heading: "Side chats".into(),
-                entries,
-                fold: None,
-            });
+            })
+            .collect();
+        let agents: Vec<_> = agents.into_iter().zip(tags).collect();
+        let agent_ids: std::collections::HashSet<String> = agents
+            .iter()
+            .map(|(agent, _)| agent.doc_id.clone())
+            .collect();
+        let (running, previous) = split_subagents(agents);
+        let next_tick = running
+            .iter()
+            .filter_map(|(agent, _)| agent.started_at)
+            .map(|started| elapsed_next_change((now_ms - started) / 1000))
+            .min();
+        if let Some(secs) = next_tick
+            && self.sidecar_clock.is_none()
+        {
+            self.sidecar_clock = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_secs(secs as u64))
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.sidecar_clock = None;
+                    cx.notify();
+                })
+                .ok();
+            }));
         }
-
-        sections.extend(self.sidecar_actions_section(theme, cx));
-
-        if !subagents.is_empty() {
-            let (running, previous) = split_subagents(subagents);
-            let failed = previous
-                .iter()
-                .filter(|(agent, _)| agent.status == Some(zeron_doc::SubagentStatus::Failed))
-                .count();
-            let now = Utc::now().timestamp_millis();
-            let next_tick = running
-                .iter()
-                .filter_map(|(agent, _)| agent.started_at)
-                .map(|started| elapsed_next_change((now - started) / 1000))
-                .min();
-            if let Some(secs) = next_tick
-                && self.sidecar_clock.is_none()
-            {
-                self.sidecar_clock = Some(cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(Duration::from_secs(secs as u64))
-                        .await;
-                    this.update(cx, |this, cx| {
-                        this.sidecar_clock = None;
-                        cx.notify();
-                    })
-                    .ok();
-                }));
-            }
-            let entry = |key: &'static str, ix: usize, (agent, suffix): LabeledSubagent| {
-                let running = agent.status == Some(zeron_doc::SubagentStatus::Running);
-                let badge = match agent.status {
-                    Some(zeron_doc::SubagentStatus::Running) => Some(theme.busy),
-                    Some(zeron_doc::SubagentStatus::Failed) => Some(theme.danger),
-                    _ => None,
-                };
-                let status = match agent.status {
-                    Some(zeron_doc::SubagentStatus::Running) => Some(SidecarValue::Tone(
+        let agent_entry = |key: &'static str, ix: usize, (agent, tag): LabeledSubagent| {
+            let value = if open.contains(&agent.doc_id) {
+                Some(SidecarValue::Open)
+            } else {
+                match agent.status {
+                    Some(zeron_doc::SubagentStatus::Running) => Some(SidecarValue::Dot(
                         agent.started_at.map_or("Working".into(), |started| {
-                            short_elapsed((now - started) / 1000).into()
+                            short_elapsed((now_ms - started) / 1000).into()
                         }),
                         working,
                     )),
                     Some(zeron_doc::SubagentStatus::Failed) => {
-                        Some(SidecarValue::Tone("Failed".into(), theme.danger))
+                        Some(SidecarValue::Dot("Failed".into(), theme.danger))
                     }
                     Some(zeron_doc::SubagentStatus::Stopped) => {
-                        Some(SidecarValue::Tone("Stopped".into(), theme.text_muted))
+                        Some(SidecarValue::Dot("Stopped".into(), theme.text_faint))
                     }
-                    _ => None,
-                };
-                let (mark, tint) =
-                    crate::pickers::agent_brand_icon(agent.harness, agent.model.as_deref());
-                SidecarEntry::new(key, ix, mark, agent.title.clone())
-                    .suffix(suffix)
-                    .tint(tint)
-                    .badge(badge)
-                    .value(status)
-                    .action(move |this, _, cx| {
-                        if agent.delegated {
-                            this.open_child_chat_tab(&agent.doc_id, cx);
-                            return;
-                        }
-                        this.add_subagent_surface(
-                            agent.chat_id.clone(),
-                            agent.doc_id.clone(),
-                            agent.title.to_string(),
-                            !running,
-                            cx,
-                        )
-                    })
+                    Some(zeron_doc::SubagentStatus::Done) => {
+                        Some(SidecarValue::Dot("Done".into(), theme.success))
+                    }
+                    None => None,
+                }
             };
-            let heading = match running.len() {
-                0 => "Subagents".to_string(),
-                n => format!("Subagents · {n} running"),
-            };
-            let fold = (!previous.is_empty()).then(|| SidecarFold {
-                label: format!("Previous agents ({})", previous.len()).into(),
-                failed,
-                open: self.sidecar_previous_agents_open,
-                entries: previous
-                    .into_iter()
-                    .enumerate()
-                    .map(|(ix, agent)| entry("previous-agent", ix, agent))
-                    .collect(),
-            });
-            sections.push(SidecarSection {
-                heading: heading.into(),
-                entries: running
-                    .into_iter()
-                    .take(SECTION_CAP)
-                    .enumerate()
-                    .map(|(ix, agent)| entry("subagent", ix, agent))
-                    .collect(),
-                fold,
-            });
-        }
-
-        if !sources.is_empty() {
-            sections.push(SidecarSection {
-                heading: "Sources".into(),
-                entries: sources
-                    .into_iter()
-                    .take(SECTION_CAP)
-                    .enumerate()
-                    .map(|(ix, attachment)| {
-                        SidecarEntry::new("source", ix, icons::ASTRA_FILE, attachment.name.clone())
-                            .action(move |this, window, cx| {
-                                this.transcript.update(cx, |transcript, cx| {
-                                    transcript.preview_attachment(&attachment, window, cx);
-                                })
-                            })
-                    })
-                    .collect(),
-                fold: None,
-            });
-        }
-
-        let usage_entry = match usage {
-            Some((window, fraction)) => {
-                let tone = accounts::usage_color(accounts::usage_level(fraction), theme);
-                SidecarEntry::new("usage", 0, icons::ASTRA_GRAPH, window)
-                    .value(Some(SidecarValue::Meter(fraction, tone)))
-            }
-            None => SidecarEntry::new("usage", 0, icons::ASTRA_GRAPH, "Usage unavailable"),
+            let hint = [
+                Some(agent.title.to_string()),
+                Some(ChildKind::Agent.label().into()),
+                tag,
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+            SidecarEntry::new(key, ix, ChildKind::Agent.icon(), agent.title.clone())
+                .hint(hint)
+                .value(value)
+                .action(move |this, _, cx| this.open_child(ChildRef::of_summary(&agent), cx))
         };
-        sections.push(SidecarSection {
-            heading: "Usage".into(),
-            entries: vec![usage_entry],
-            fold: None,
+        section.running = running.len();
+        section.entries = running
+            .into_iter()
+            .take(SECTION_CAP)
+            .enumerate()
+            .map(|(ix, agent)| agent_entry("subagent", ix, agent))
+            .collect();
+        let failed = previous
+            .iter()
+            .filter(|(agent, _)| agent.status == Some(zeron_doc::SubagentStatus::Failed))
+            .count();
+        section.fold = (!previous.is_empty()).then(|| SidecarFold {
+            label: format!("Previous agents ({})", previous.len()).into(),
+            failed,
+            open: self.sidecar_previous_agents_open,
+            entries: previous
+                .into_iter()
+                .enumerate()
+                .map(|(ix, agent)| agent_entry("previous-agent", ix, agent))
+                .collect(),
         });
 
-        let mut project_entries = vec![SidecarEntry::new(
-            "repository",
-            0,
-            icons::ASTRA_FOLDER,
-            project.unwrap_or_else(|| "No repository".into()),
-        )];
-        if let Some(name) = instructions {
-            let path = name.clone();
-            project_entries.push(
-                SidecarEntry::new("instructions", 0, icons::ASTRA_BOOK, "Project instructions")
-                    .value(Some(SidecarValue::Tone(name.into(), theme.warning)))
-                    .action(move |this, window, cx| {
-                        this.open_right_pane(cx);
-                        this.add_file_surface(path.clone(), window, cx);
-                    }),
-            );
-        }
-        for (ix, (surface, title)) in files.into_iter().take(SECTION_CAP).enumerate() {
-            project_entries.push(
-                SidecarEntry::new("file", ix, icons::ASTRA_FILE, title)
-                    .action(move |this, _, cx| this.focus_right_surface(surface, cx)),
-            );
-        }
-        sections.push(SidecarSection {
-            heading: "Project".into(),
-            entries: project_entries,
-            fold: None,
+        let state = self.state.read(cx);
+        let mut children: Vec<&zeron_proto::Chat> = state
+            .chats
+            .iter()
+            .filter(|child| {
+                !child.archived
+                    && !agent_ids.contains(&child.id)
+                    && (child.opened_from() == Some(chat.id.as_str())
+                        || child.delegated_by() == Some(chat.id.as_str()))
+            })
+            .collect();
+        children.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
         });
+        section.running += children
+            .iter()
+            .filter(|child| {
+                state.display_status_for(child, now) == zeron_proto::ChatIndicator::Working
+            })
+            .count();
+        let hidden = children.len().saturating_sub(SECTION_CAP);
+        let all = self.sidecar_beside_all;
+        let shown = if all { children.len() } else { SECTION_CAP };
+        for (ix, child) in children.into_iter().take(shown).enumerate() {
+            let kind = ChildKind::of(child);
+            let status = state.display_status_for(child, now);
+            let value = if open.contains(&child.id) {
+                SidecarValue::Open
+            } else if child.sidechat_expired(now) {
+                SidecarValue::Dot("Expired".into(), theme.text_faint)
+            } else {
+                match chat_status_tone(status, theme) {
+                    (Some(label), _, color) if status != zeron_proto::ChatIndicator::Completed => {
+                        SidecarValue::Dot(label, color)
+                    }
+                    _ => {
+                        let at = child.last_message_at.unwrap_or(child.created_at);
+                        let ago = short_elapsed(now.signed_duration_since(at).num_seconds());
+                        SidecarValue::Dot(format!("{ago} ago").into(), theme.text_faint)
+                    }
+                }
+            };
+            let title = child
+                .title
+                .clone()
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| kind.label().to_owned());
+            let id = child.id.clone();
+            section.entries.push(
+                SidecarEntry::new("child", ix, kind.icon(), title.clone())
+                    .hint(format!("{title} · {}", kind.label()))
+                    .value(Some(value))
+                    .action(move |this, _, cx| this.open_child(ChildRef::Chat(id.clone()), cx)),
+            );
+        }
+        if hidden > 0 {
+            let label = if all {
+                "Show fewer".to_owned()
+            } else {
+                format!("{hidden} more")
+            };
+            section.entries.push(
+                SidecarEntry::new("children-more", 0, icons::LUCIDE_ELLIPSIS, label).action(
+                    move |this, _, cx| {
+                        this.sidecar_beside_all = !all;
+                        cx.notify();
+                    },
+                ),
+            );
+        }
 
-        sections
+        let shells = zeron_proto::background::shell_tasks(state.session_for(&chat.id));
+        let stoppable = self.composer.read(cx).can_stop_shells(cx);
+        for (ix, task) in shells.into_iter().take(SECTION_CAP).enumerate() {
+            let elapsed = task.started_at.map_or("Running".into(), |at| {
+                short_elapsed(now.signed_duration_since(at).num_seconds())
+            });
+            let mut entry = SidecarEntry::new("shell", ix, icons::ASTRA_TERMINAL, task.label)
+                .value(Some(SidecarValue::Dot(elapsed.into(), working)));
+            if stoppable {
+                let id = task.id;
+                entry = entry.trail(icons::STOP, "Stop", move |this, _, cx| {
+                    let id = id.clone();
+                    this.composer
+                        .update(cx, |composer, cx| composer.stop_background_task(id, cx));
+                });
+            }
+            section.entries.push(entry);
+        }
+
+        if let Some(mission) = crate::tasks::mission_thread(state, &chat.id, now) {
+            let zeron_proto::PlanProgress { done, total } = mission.progress;
+            let step = (done + 1).min(total);
+            let task_id = mission.task_id.clone();
+            let selection = crate::tasks::mission_selection(&mission.role);
+            section.entries.push(
+                SidecarEntry::new(
+                    "task",
+                    0,
+                    icons::CHECKLIST,
+                    format!("Task: {}", mission.title),
+                )
+                .value(Some(SidecarValue::Text(
+                    format!("step {step} of {total}").into(),
+                )))
+                .action(move |this, _, cx| {
+                    this.open_mission(task_id.clone(), selection.clone(), cx)
+                }),
+            );
+        }
+
+        if self.composer.read(cx).can_stop_background(cx) {
+            section.foot = Some(
+                SidecarEntry::new("stop-all", 0, icons::STOP, "Stop all").action(|this, _, cx| {
+                    this.composer
+                        .update(cx, |composer, cx| composer.stop_all_background(cx))
+                }),
+            );
+        }
+        if section.entries.is_empty() && section.fold.is_none() {
+            section.empty = Some("Nothing beside this thread".into());
+        }
+        section
     }
 
     pub(super) fn render_sidecar(&mut self, width: f32, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let sections = self.sidecar_sections(&theme, cx);
         let collapsed = self.sidecar_collapsed_now == Some(true);
-        let popover_mode = self.right_pane_shown(cx);
         let (slide, fade) = match self.sidecar_flip {
             Some(flip) => (
                 self.motion_progress(flip.started, motion::SIDECAR_LAYOUT),
@@ -1045,7 +947,7 @@ impl Shell {
             .flex_none()
             .h_full()
             .w(px(width));
-        if !popover_mode {
+        if !collapsed {
             root = root.overflow_hidden();
         }
         if panel_opacity > 0.0 {
@@ -1065,7 +967,6 @@ impl Shell {
                 rail_opacity,
                 rail_x,
                 collapsed,
-                popover_mode,
                 cx,
             ));
         }
@@ -1096,12 +997,10 @@ impl Shell {
             .id("sidecar-collapse")
             .debug_selector(|| "sidecar-collapse".into())
             .role(gpui::Role::Button)
-            .aria_label("Collapse live state")
-            .absolute()
-            .top_0()
-            .right(px(10.0))
+            .aria_label("Fold the Sidecar")
             .size(px(20.0))
             .flex()
+            .flex_none()
             .items_center()
             .justify_center()
             .rounded(px(6.0))
@@ -1120,6 +1019,20 @@ impl Shell {
                     .text_color(theme.text_faint)
                     .group_hover("sidecar-collapse", |s| s.text_color(theme.text)),
             );
+        let header = div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .justify_between()
+            .h(px(24.0))
+            .pl(px(12.0))
+            .pr(px(10.0))
+            .text_size(crate::typography::ui_rems(13.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme.text)
+            .child("Live state")
+            .child(collapse);
         div()
             .absolute()
             .top(px(SIDECAR_TOP))
@@ -1128,10 +1041,14 @@ impl Shell {
             .w(px(SIDECAR_WIDTH))
             .pr(px(8.0))
             .opacity(opacity)
+            .flex()
+            .flex_col()
+            .child(header)
             .child(
                 div()
                     .id("sidecar-scroll")
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
@@ -1142,7 +1059,6 @@ impl Shell {
                         self.sidecar_group(theme, section, SidecarSurface::Panel, interactive, cx)
                     })),
             )
-            .child(collapse)
             .into_any_element()
     }
 
@@ -1154,28 +1070,39 @@ impl Shell {
         interactive: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let heading = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .h(px(19.0))
+            .px(px(8.0))
+            .text_size(crate::typography::ui_rems(12.0))
+            .line_height(px(19.0))
+            .text_color(SidecarInk::of(theme).heading)
+            .child(div().min_w_0().truncate().child(section.part.heading()))
+            .when(section.running > 0, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .child(SharedString::from(section.running_text())),
+                )
+            });
         div()
             .id(SharedString::from(format!(
                 "sidecar-{}-section-{}",
                 surface.tag(),
-                section.heading
+                section.part.tag()
             )))
             .role(gpui::Role::Group)
-            .aria_label(section.heading.clone())
+            .aria_label(section.label())
             .flex()
             .flex_col()
             .flex_none()
+            .pt(px(8.0))
             .pb(px(4.0))
-            .child(
-                div()
-                    .h(px(19.0))
-                    .px(px(8.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .line_height(px(19.0))
-                    .text_color(SidecarInk::of(theme).heading)
-                    .truncate()
-                    .child(section.heading.clone()),
-            )
+            .child(heading)
             .children(section.entries.iter().flat_map(|entry| {
                 let thumbnail = entry
                     .thumbnail
@@ -1205,6 +1132,16 @@ impl Shell {
                 std::iter::once(self.sidecar_row(theme, entry, surface, interactive, cx))
                     .chain(thumbnail)
             }))
+            .children(section.empty.clone().map(|empty| {
+                div()
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_faint)
+                    .child(empty)
+            }))
             .when_some(section.fold.as_ref(), |el, fold| {
                 el.child(self.sidecar_fold_footer(theme, fold, surface, interactive, cx))
                     .when(fold.open, |el| {
@@ -1215,6 +1152,12 @@ impl Shell {
                         )
                     })
             })
+            .children(
+                section
+                    .foot
+                    .as_ref()
+                    .map(|foot| self.sidecar_row(theme, foot, surface, interactive, cx)),
+            )
             .into_any_element()
     }
 
@@ -1295,6 +1238,7 @@ impl Shell {
             .as_ref()
             .map(|value| sidecar_value(theme, value));
         let actionable = interactive && entry.action.is_some();
+        let tooltip = entry.tooltip();
         let mut row = div()
             .id(SharedString::from(id))
             .debug_selector(move || selector.clone())
@@ -1303,14 +1247,14 @@ impl Shell {
             } else {
                 gpui::Role::Group
             })
-            .aria_label(entry.name())
+            .aria_label(entry.label.clone())
             .when_some(entry.value_text(), |el, value| el.aria_value(value))
             .group(group.clone())
             .flex()
             .flex_row()
             .flex_none()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(8.0))
             .h(px(28.0))
             .px(px(8.0))
             .rounded(px(8.0))
@@ -1318,60 +1262,33 @@ impl Shell {
             .text_color(SidecarInk::of(theme).label)
             .whitespace_nowrap()
             .child(
-                div()
-                    .relative()
+                icon(entry.icon)
                     .flex_none()
                     .size(px(14.0))
-                    .child(
-                        icon(entry.icon)
-                            .size(px(14.0))
-                            .text_color(entry.tint.unwrap_or(theme.text_muted))
-                            .when(interactive && entry.tint.is_none(), |el| {
-                                el.group_hover(group.clone(), |s| s.text_color(theme.text))
-                            }),
-                    )
-                    .when_some(entry.badge, |el, color| {
-                        el.child(
-                            div()
-                                .absolute()
-                                .right(px(-2.0))
-                                .bottom(px(-2.0))
-                                .size(px(6.0))
-                                .rounded_full()
-                                .bg(color),
-                        )
+                    .text_color(theme.text_muted)
+                    .when(actionable, |el| {
+                        el.group_hover(group.clone(), |s| s.text_color(theme.text))
                     }),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .flex_row()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .when_some(entry.ink, |el, ink| el.text_color(ink))
-                            .child(entry.label.clone()),
-                    )
-                    .children(
-                        entry
-                            .suffix
-                            .clone()
-                            .map(|suffix| div().flex_none().child(suffix)),
-                    ),
+                    .truncate()
+                    .when_some(entry.ink, |el, ink| el.text_color(ink))
+                    .child(entry.label.clone()),
             )
             .children(value)
-            .when_some(entry.edit.clone().filter(|_| interactive), |el, edit| {
-                let id = format!("{group}-edit");
+            .when_some(entry.trail.as_ref().filter(|_| interactive), |el, trail| {
+                let id = format!("{group}-trail");
                 let selector = id.clone();
+                let action = trail.action.clone();
                 el.child(
                     div()
                         .id(SharedString::from(id))
                         .debug_selector(move || selector.clone())
                         .role(gpui::Role::Button)
-                        .aria_label("Edit action")
+                        .aria_label(trail.label)
                         .size(px(22.0))
                         .flex_none()
                         .flex()
@@ -1381,23 +1298,23 @@ impl Shell {
                         .invisible()
                         .group_hover(group.clone(), |style| style.visible())
                         .hover(|style| style.bg(crate::theme::wash(0.08)))
-                        .tooltip(crate::settings::widgets::text_tooltip("Edit action"))
+                        .tooltip(crate::settings::widgets::text_tooltip(trail.label))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
-                            edit(this, window, cx);
+                            action(this, window, cx);
                             if surface == SidecarSurface::Popover {
-                                this.set_sidecar_popover(false, cx);
+                                this.set_sidecar_popover(None, cx);
                             }
                             cx.notify();
                         }))
-                        .child(
-                            icon(icons::SETTINGS_MINIMALISTIC)
-                                .size(px(14.0))
-                                .text_color(theme.text_muted),
-                        ),
+                        .child(icon(trail.icon).size(px(14.0)).text_color(theme.text_muted)),
                 )
             })
             .when(interactive, |el| {
+                el.tooltip(crate::settings::widgets::text_tooltip(tooltip))
+                    .tooltip_show_delay(Duration::from_millis(500))
+            })
+            .when(actionable, |el| {
                 el.hover(|s| s.bg(crate::theme::wash(0.06)))
             });
         match entry.action.clone().filter(|_| interactive) {
@@ -1408,7 +1325,7 @@ impl Shell {
                         cx.stop_propagation();
                         action(this, window, cx);
                         if surface == SidecarSurface::Popover {
-                            this.set_sidecar_popover(false, cx);
+                            this.set_sidecar_popover(None, cx);
                         }
                         cx.notify();
                     }));
@@ -1418,7 +1335,6 @@ impl Shell {
         row.into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn sidecar_rail(
         &self,
         theme: &Theme,
@@ -1426,131 +1342,112 @@ impl Shell {
         opacity: f32,
         offset: f32,
         interactive: bool,
-        popover_mode: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let glyph_color = if theme.appearance.is_dark() {
-            gpui::white()
-        } else {
-            theme.text
-        };
-        let rail_icon =
-            |key: String, glyph: &'static str, tint: Option<gpui::Hsla>, tooltip: SharedString| {
-                let selector = key.clone();
-                div()
-                    .id(SharedString::from(key))
-                    .debug_selector(move || selector.clone())
-                    .role(gpui::Role::Button)
-                    .aria_label(tooltip.clone())
-                    .size(px(24.0))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(8.0))
-                    .when(interactive, |el| {
-                        el.cursor_pointer()
-                            .hover(|s| s.bg(crate::theme::wash(0.06)))
-                    })
-                    .when(interactive, |el| {
-                        el.tooltip(move |_, cx| {
+        let up = self.sidecar_popover_part();
+        let rail_button = |key: String, glyph: &'static str, tooltip: SharedString, on: bool| {
+            let selector = key.clone();
+            div()
+                .id(SharedString::from(key))
+                .debug_selector(move || selector.clone())
+                .role(gpui::Role::Button)
+                .aria_label(tooltip.clone())
+                .relative()
+                .size(px(RAIL_BUTTON))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.0))
+                .when(on, |el| el.bg(crate::theme::wash(0.06)))
+                .when(interactive, |el| {
+                    el.cursor_pointer()
+                        .hover(|s| s.bg(crate::theme::wash(0.06)))
+                        .tooltip(move |_, cx| {
                             cx.new(|_| SurfaceTabTooltip {
                                 text: tooltip.clone(),
                             })
                             .into()
                         })
                         .tooltip_show_delay(Duration::from_millis(260))
-                    })
-                    .child(
-                        icon(glyph)
-                            .size(px(16.0))
-                            .text_color(tint.unwrap_or(glyph_color)),
-                    )
-            };
-        let mut pill = div()
-            .id("sidecar-pill")
-            .flex()
-            .flex_col()
-            .gap(px(1.0))
-            .w(px(32.0))
-            .p(px(4.0))
-            .rounded(px(10.0))
-            .max_h(px((self.viewport_height - SIDECAR_TOP - 16.0).max(64.0)))
-            .overflow_y_scroll();
-        for (ix, section) in sections
-            .iter()
-            .filter(|section| !section.entries.is_empty())
-            .enumerate()
-        {
-            let mut group = div()
-                .flex()
-                .flex_col()
-                .flex_none()
-                .gap(px(1.0))
-                .when(ix > 0, |el| {
-                    el.pt(px(3.0))
-                        .mt(px(2.0))
-                        .border_t_1()
-                        .border_color(crate::theme::hairline(0.08))
-                });
-            for entry in &section.entries {
-                let key = format!("sidecar-rail-{}-{}", entry.key, entry.ix);
-                let mut button = rail_icon(key, entry.icon, entry.tint, entry.tooltip());
-                if interactive {
-                    let action = entry.action.clone();
-                    button = button.on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        match action.as_ref() {
-                            Some(action) => action(this, window, cx),
-                            None => this.set_sidecar_user_collapsed(false, cx),
-                        }
-                        cx.notify();
-                    }));
-                }
-                group = group.child(button);
-            }
-            pill = pill.child(group);
-        }
-        let expand_tooltip: SharedString = if self.sidecar_popover_open() {
-            "Close live state".into()
-        } else {
-            "Expand live state".into()
+                })
+                .child(icon(glyph).size(px(17.0)).text_color(if on {
+                    theme.text
+                } else {
+                    theme.text_muted
+                }))
         };
-        let mut expand = rail_icon(
+        let mut expand = rail_button(
             "sidecar-expand".into(),
             icons::ASTRA_CHEVRONS_LEFT,
-            None,
-            expand_tooltip,
+            "Expand the Sidecar".into(),
+            false,
         );
         if interactive {
-            // The popover's mouse-down-out closes it on this same press, so the
-            // click must know whether the press found it up (see `Popup::note_trigger_press`).
-            expand = expand
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, _| {
-                        this.sidecar_press_found_popover = this.sidecar_popover_mounted();
-                    }),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    let found = std::mem::take(&mut this.sidecar_press_found_popover);
-                    if popover_mode {
-                        this.set_sidecar_popover(!found, cx);
-                    } else {
-                        this.set_sidecar_user_collapsed(false, cx);
-                    }
-                }));
+            expand = expand.on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.expand_sidecar(cx);
+            }));
         }
-        pill = pill.child(expand);
-        div()
+        let mut rail = div()
             .absolute()
             .top(px(SIDECAR_TOP))
-            .right(px(8.0 - offset))
-            .w(px(32.0))
+            .right(px((SIDECAR_RAIL_WIDTH - RAIL_BUTTON) / 2.0 - offset))
+            .w(px(RAIL_BUTTON))
+            .flex()
+            .flex_col()
+            .gap(px(RAIL_GAP))
             .opacity(opacity)
-            .child(pill)
-            .into_any_element()
+            .child(expand);
+        for section in sections {
+            let part = section.part;
+            let mut button = rail_button(
+                format!("sidecar-rail-{}", part.tag()),
+                part.icon(),
+                section.label(),
+                up == Some(part),
+            );
+            if part == SidecarPart::Beside && section.running > 0 {
+                button = button.child(
+                    div()
+                        .debug_selector(|| "sidecar-rail-badge".into())
+                        .absolute()
+                        .top(px(1.0))
+                        .right_0()
+                        .min_w(px(14.0))
+                        .h(px(14.0))
+                        .px(px(3.0))
+                        .rounded(px(7.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(theme.busy)
+                        .text_color(gpui::white())
+                        .text_size(crate::typography::ui_rems(9.5))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(SharedString::from(section.running.to_string())),
+                );
+            }
+            if interactive {
+                // The popover's mouse-down-out closes it on this same press, so the click checks what the press found.
+                button = button
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| {
+                            this.sidecar_press_found_popover = this.sidecar_popover_mounted();
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        let found = this.sidecar_press_found_popover.take();
+                        if found != Some(part) {
+                            this.set_sidecar_popover(Some(part), cx);
+                        }
+                    }));
+            }
+            rail = rail.child(button);
+        }
+        rail.into_any_element()
     }
 
     fn sidecar_popover_card(
@@ -1560,6 +1457,10 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let fade = self.sidecar_popover?;
+        let slot = sections
+            .iter()
+            .position(|section| section.part == fade.part)?;
+        let section = &sections[slot];
         let opacity = self.motion_progress(fade.started, motion::SIDECAR_POPOVER_FADE);
         let slide = self.motion_progress(fade.started, motion::SIDECAR_POPOVER_SLIDE);
         let (opacity, offset) = if fade.open {
@@ -1569,53 +1470,14 @@ impl Shell {
         } else {
             (1.0 - opacity, 10.0 * slide)
         };
-        let header = div()
-            .flex()
-            .flex_row()
-            .flex_none()
-            .items_center()
-            .justify_between()
-            .h(px(34.0))
-            .pl(px(12.0))
-            .pr(px(8.0))
-            .border_b_1()
-            .border_color(crate::theme::hairline(0.08))
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text_muted)
-            .child("Live state")
-            .child(
-                div()
-                    .id("sidecar-popover-close")
-                    .debug_selector(|| "sidecar-popover-close".into())
-                    .role(gpui::Role::Button)
-                    .aria_label("Close live state")
-                    .group("sidecar-popover-close")
-                    .size(px(24.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(7.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::wash(0.06)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.set_sidecar_popover(false, cx);
-                    }))
-                    .child(
-                        icon(icons::ASTRA_X)
-                            .size(px(12.0))
-                            .text_color(theme.text_faint)
-                            .group_hover("sidecar-popover-close", |s| s.text_color(theme.text)),
-                    ),
-            );
-        let max_h = (self.viewport_height - SIDECAR_TOP - 16.0).max(120.0);
+        let top = SIDECAR_TOP + (slot + 1) as f32 * (RAIL_BUTTON + RAIL_GAP) - 6.0;
+        let max_h = (self.viewport_height - top - 16.0).max(120.0);
         let card = popover::popover_card_flush(theme)
             .w(px(POPOVER_WIDTH))
             .max_h(px(max_h))
             .flex()
             .flex_col()
             .rounded(px(12.0))
-            .child(header)
             .child(
                 div()
                     .id("sidecar-popover-scroll")
@@ -1624,26 +1486,29 @@ impl Shell {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .pt(px(2.0))
                     .px(px(4.0))
                     .pb(px(4.0))
-                    .children(sections.iter().map(|section| {
-                        self.sidecar_group(theme, section, SidecarSurface::Popover, fade.open, cx)
-                    })),
+                    .child(self.sidecar_group(
+                        theme,
+                        section,
+                        SidecarSurface::Popover,
+                        fade.open,
+                        cx,
+                    )),
             );
         Some(
             div()
                 .id("sidecar-popover")
                 .debug_selector(|| "sidecar-popover".into())
                 .absolute()
-                .top(px(SIDECAR_TOP))
-                .right(px(48.0 - offset))
+                .top(px(top))
+                .right(px(SIDECAR_RAIL_WIDTH + 4.0 - offset))
                 .w(px(POPOVER_WIDTH))
                 .opacity(opacity)
                 .occlude()
                 .when(fade.open, |el| {
                     el.on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.set_sidecar_popover(false, cx);
+                        this.set_sidecar_popover(None, cx);
                     }))
                 })
                 .child(crate::frost::frosted(
@@ -1661,14 +1526,10 @@ fn sidecar_value(theme: &Theme, value: &SidecarValue) -> AnyElement {
         .flex_none()
         .max_w(px(120.0))
         .truncate()
+        .text_size(crate::typography::ui_rems(12.0))
         .text_color(theme.text_faint);
     match value {
         SidecarValue::Text(text) => base.child(text.clone()).into_any_element(),
-        SidecarValue::Mono(text) => base
-            .font_family(theme.font_mono.clone())
-            .text_size(crate::typography::ui_rems(12.0))
-            .child(text.clone())
-            .into_any_element(),
         SidecarValue::Tone(text, color) => base
             .text_color(*color)
             .child(text.clone())
@@ -1680,59 +1541,49 @@ fn sidecar_value(theme: &Theme, value: &SidecarValue) -> AnyElement {
             .items_center()
             .gap(px(5.0))
             .max_w(px(120.0))
+            .text_size(crate::typography::ui_rems(12.0))
             .text_color(theme.text_faint)
-            .children(text.clone().map(|text| div().truncate().child(text)))
             .child(div().flex_none().size(px(6.0)).rounded_full().bg(*color))
+            .child(div().truncate().child(text.clone()))
             .into_any_element(),
-        SidecarValue::Meter(fraction, color) => div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .text_color(*color)
-            .child(
-                div()
-                    .w(px(36.0))
-                    .h(px(4.0))
-                    .rounded(px(2.0))
-                    .overflow_hidden()
-                    .bg(crate::theme::hairline(0.1))
-                    .child(div().h_full().w(px(36.0 * fraction)).bg(*color)),
-            )
-            .child(SharedString::from(format!(
-                "{}%",
-                (fraction * 100.0).round() as u32
-            )))
+        SidecarValue::Open => base
+            .text_size(crate::typography::ui_rems(11.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme.accent)
+            .child("Open")
             .into_any_element(),
-        SidecarValue::Counts(files, add, del) => {
-            let files = zeron_proto::badges::files_label(*files);
-            div()
-                .flex_none()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .font_family(theme.font_mono.clone())
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_faint)
-                .child(SharedString::from(files))
-                .child(
-                    div()
-                        .text_color(theme.success)
-                        .child(SharedString::from(format!("+{add}"))),
-                )
-                .child(
-                    div()
-                        .text_color(theme.danger)
-                        .child(SharedString::from(format!("−{del}"))),
-                )
-                .into_any_element()
-        }
     }
 }
 
-type LabeledSubagent = (crate::transcript::SubagentSummary, Option<SharedString>);
+/// On the integration branch itself "N ahead of main" would be wrong, so it gets the sha alone.
+fn commit_line(
+    sha: Option<&str>,
+    branch: Option<&str>,
+    comparison: Option<&GitHistoryComparison>,
+) -> Option<String> {
+    let status = comparison.and_then(|comparison| {
+        let base = comparison
+            .base
+            .split_once('/')
+            .map_or(comparison.base.as_str(), |(_, branch)| branch);
+        let (ahead, behind) = (comparison.ahead, comparison.behind);
+        if ahead == 0 && behind == 0 {
+            return Some("up to date".to_string());
+        }
+        if branch == Some(base) {
+            return None;
+        }
+        Some(match (ahead, behind) {
+            (0, behind) => format!("{behind} behind {base}"),
+            (ahead, 0) => format!("{ahead} ahead of {base}"),
+            (ahead, behind) => format!("{ahead} ahead, {behind} behind {base}"),
+        })
+    });
+    let parts: Vec<String> = sha.map(str::to_owned).into_iter().chain(status).collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+type LabeledSubagent = (transcript::SubagentSummary, Option<String>);
 
 fn split_subagents(
     mut agents: Vec<LabeledSubagent>,
@@ -1743,21 +1594,19 @@ fn split_subagents(
         .partition(|(agent, _)| agent.status == Some(zeron_doc::SubagentStatus::Running))
 }
 
-fn agent_tag_suffix(
-    agent: &crate::transcript::SubagentSummary,
+fn agent_tag(
+    agent: &transcript::SubagentSummary,
     model_label: impl Fn(zeron_proto::HarnessId, &str) -> Option<String>,
-) -> Option<SharedString> {
-    let tag = match agent.model.as_deref() {
-        Some(id) => agent
-            .harness
-            .and_then(|harness| model_label(harness, id))
-            .unwrap_or_else(|| id.to_owned()),
-        None => agent.kind.as_ref()?.to_string(),
-    };
-    if agent.title.to_lowercase().contains(&tag.to_lowercase()) {
-        return None;
+) -> Option<String> {
+    match agent.model.as_deref() {
+        Some(id) => Some(
+            agent
+                .harness
+                .and_then(|harness| model_label(harness, id))
+                .unwrap_or_else(|| id.to_owned()),
+        ),
+        None => agent.kind.as_ref().map(ToString::to_string),
     }
-    Some(format!(": {tag}").into())
 }
 
 fn short_elapsed(secs: i64) -> String {
@@ -1778,22 +1627,6 @@ fn elapsed_next_change(secs: i64) -> i64 {
         _ => 86_400,
     };
     unit - secs % unit
-}
-
-fn basename(path: &str) -> String {
-    let trimmed = path.trim_end_matches(['/', '\\']);
-    trimmed
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|name| !name.is_empty())
-        .unwrap_or(trimmed)
-        .to_string()
-}
-
-/// `scheme://host:port/path` → `host:port`.
-fn url_host(url: &str) -> String {
-    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    rest.split('/').next().unwrap_or(rest).to_string()
 }
 
 #[cfg(test)]
@@ -1899,11 +1732,10 @@ mod sidecar_regressions {
     #[gpui::test]
     fn panel_rows_open_each_sidechat_and_reuse_only_the_matching_tab(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
-        assert!(cx.debug_bounds("sidecar-panel-new-sidechat-0").is_some());
         for (row, expected, count) in [
-            ("sidecar-panel-sidechat-0", "side-a", 1),
-            ("sidecar-panel-sidechat-1", "side-b", 2),
-            ("sidecar-panel-sidechat-0", "side-a", 2),
+            ("sidecar-panel-child-0", "side-a", 1),
+            ("sidecar-panel-child-1", "side-b", 2),
+            ("sidecar-panel-child-0", "side-a", 2),
         ] {
             shell.update(cx, |shell, cx| {
                 if shell.right_pane_open(cx) {
@@ -1924,7 +1756,7 @@ mod sidecar_regressions {
     }
 
     #[gpui::test]
-    fn sidechat_rows_carry_the_sidebar_status(cx: &mut TestAppContext) {
+    fn side_chat_rows_carry_their_kind_and_age(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
@@ -1934,78 +1766,153 @@ mod sidecar_regressions {
             });
             let theme = Theme::of(cx).clone();
             let sections = shell.sidecar_sections(&theme, cx);
-            let side = sections
-                .iter()
-                .find(|section| section.heading.as_ref() == "Side chats")
-                .unwrap();
-            let tooltips: Vec<_> = side.entries.iter().map(|e| e.tooltip()).collect();
-            assert_eq!(tooltips[0].as_ref(), "Parent: Expired");
-            assert_eq!(tooltips[1].as_ref(), "Parent: Done");
+            let parts: Vec<_> = sections.iter().map(|section| section.part).collect();
+            assert_eq!(parts, [SidecarPart::Workspace, SidecarPart::Beside]);
+            let beside = &sections[1];
+            let hints: Vec<_> = beside.entries.iter().map(|e| e.tooltip()).collect();
+            assert_eq!(hints, ["Parent · Side chat", "Parent · Side chat"]);
+            assert_eq!(beside.entries[0].value_text().as_deref(), Some("Expired"));
+            assert!(
+                beside.entries[1]
+                    .value_text()
+                    .is_some_and(|value| value.ends_with(" ago"))
+            );
+            assert!(
+                beside
+                    .entries
+                    .iter()
+                    .all(|e| e.icon == ChildKind::SideChat.icon())
+            );
+            assert_eq!(beside.running, 0);
+            assert!(beside.foot.is_none(), "nothing runs, so no Stop all");
+        });
+    }
+
+    #[gpui::test]
+    fn children_past_the_cap_fold_into_a_more_row_and_still_count_as_running(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                let source = state.chats[0].clone();
+                for ix in 0..9 {
+                    let mut chat = source.clone();
+                    chat.id = format!("fork-{ix}");
+                    chat.forked_from_chat_id = Some("parent".into());
+                    chat.created_at += chrono::Duration::minutes(ix + 1);
+                    state.chats.push(chat);
+                }
+                state.sessions.push(zeron_proto::Session {
+                    last_turn_outcome: None,
+                    terminal_activity: None,
+                    last_completed_turn: None,
+                    chat_id: "fork-8".into(),
+                    device_id: "dev".into(),
+                    status: zeron_proto::SessionStatus::Working,
+                    held_by_subagents: false,
+                    compacting: false,
+                    classifying: None,
+                    background_tasks: Vec::new(),
+                    started_at: Some(Utc::now()),
+                    updated_at: Utc::now(),
+                    running_subagents: 0,
+                    compact_plan: None,
+                });
+            });
+            let theme = Theme::of(cx).clone();
+            let beside = |shell: &mut Shell, cx: &mut Context<Shell>| {
+                let sections = shell.sidecar_sections(&theme, cx);
+                let beside = &sections[1];
+                let labels: Vec<String> =
+                    beside.entries.iter().map(|e| e.label.to_string()).collect();
+                (labels, beside.running)
+            };
+            let (labels, running) = beside(shell, cx);
+            assert_eq!(labels.len(), SECTION_CAP + 1);
+            assert_eq!(labels.last().map(String::as_str), Some("3 more"));
+            assert_eq!(running, 1, "the working 11th child still counts");
+            shell.sidecar_beside_all = true;
+            let (labels, _) = beside(shell, cx);
+            assert_eq!(labels.len(), 12);
+            assert_eq!(labels.last().map(String::as_str), Some("Show fewer"));
         });
     }
 
     #[gpui::test]
     fn collapse_persists_and_the_rail_chevrons_bring_the_panel_back(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
-        assert!(cx.debug_bounds("sidecar-rail-browser-0").is_none());
+        assert!(cx.debug_bounds("sidecar-rail-beside").is_none());
         click(cx, "sidecar-collapse");
         shell.read_with(cx, |shell, cx| {
             assert!(shell.settings.sidecar_collapsed);
             assert!(crate::settings::current(cx).sidecar_collapsed);
             assert_eq!(shell.sidecar_width_now(), SIDECAR_RAIL_WIDTH);
         });
-        assert!(cx.debug_bounds("sidecar-panel-browser-0").is_none());
-        assert!(cx.debug_bounds("sidecar-rail-browser-0").is_some());
+        assert!(cx.debug_bounds("sidecar-panel-machine-0").is_none());
+        assert!(cx.debug_bounds("sidecar-rail-beside").is_some());
         click(cx, "sidecar-expand");
         shell.read_with(cx, |shell, cx| {
             assert!(!shell.settings.sidecar_collapsed);
             assert!(!crate::settings::current(cx).sidecar_collapsed);
             assert_eq!(shell.sidecar_width_now(), SIDECAR_WIDTH);
         });
-        assert!(cx.debug_bounds("sidecar-panel-browser-0").is_some());
+        assert!(cx.debug_bounds("sidecar-panel-machine-0").is_some());
     }
 
     #[gpui::test]
-    fn with_the_pane_open_the_rail_opens_live_state_and_a_row_closes_it(cx: &mut TestAppContext) {
+    fn with_the_pane_open_each_rail_button_pops_its_section_and_a_row_closes_it(
+        cx: &mut TestAppContext,
+    ) {
         let (shell, cx) = setup(cx);
         shell.update(cx, |shell, cx| shell.toggle_right_pane(cx));
         cx.update(|window, cx| window.draw(cx).clear());
-        assert!(cx.debug_bounds("sidecar-rail-server-0").is_some());
+        assert!(cx.debug_bounds("sidecar-rail-workspace").is_some());
+        assert!(cx.debug_bounds("sidecar-rail-beside").is_some());
         assert!(cx.debug_bounds("sidecar-popover").is_none());
-        click(cx, "sidecar-expand");
+        click(cx, "sidecar-rail-beside");
         shell.read_with(cx, |shell, _| {
-            assert!(shell.sidecar_popover_open());
-            assert!(!shell.settings.sidecar_collapsed);
+            assert_eq!(shell.sidecar_popover_part(), Some(SidecarPart::Beside));
         });
-        click(cx, "sidecar-popover-server-0");
+        assert!(cx.debug_bounds("sidecar-popover-machine-0").is_none());
+        click(cx, "sidecar-popover-child-1");
         shell.read_with(cx, |shell, cx| {
             assert!(!shell.sidecar_popover_open());
-            assert_eq!(shell.resolved_right_active(cx), RightSurface::Browser(1));
+            let RightSurface::Sidechat(id) = shell.resolved_right_active(cx) else {
+                panic!("the side chat must be active");
+            };
+            assert_eq!(shell.sidechat_tabs[&id].chat_id, "side-b");
         });
         shell.update(cx, |shell, cx| {
-            shell.set_sidecar_popover(true, cx);
+            shell.set_sidecar_popover(Some(SidecarPart::Beside), cx);
             assert!(shell.capture_escape_surface(cx));
             assert!(!shell.sidecar_popover_open());
         });
-        shell.update(cx, |shell, cx| shell.set_sidecar_popover(true, cx));
         cx.update(|window, cx| window.draw(cx).clear());
+        click(cx, "sidecar-rail-workspace");
+        assert!(cx.debug_bounds("sidecar-popover-machine-0").is_some());
+        click(cx, "sidecar-rail-beside");
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.sidecar_popover_part(),
+                Some(SidecarPart::Beside),
+                "another rail button swaps the section"
+            );
+        });
+        click(cx, "sidecar-rail-beside");
+        shell.read_with(cx, |shell, _| {
+            assert!(
+                !shell.sidecar_popover_open(),
+                "the same button closes its popover instead of reopening it"
+            );
+        });
         click(cx, "sidecar-expand");
-        shell.read_with(cx, |shell, _| {
-            assert!(
-                !shell.sidecar_popover_open(),
-                "the chevrons close an open popover instead of reopening it"
-            );
-        });
-        shell.update(cx, |shell, cx| {
-            shell.set_sidecar_popover(true, cx);
-            shell.toggle_right_pane(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert!(!shell.right_pane_open(cx), "expand closes the pane");
+            assert!(!shell.sidecar_popover_open());
         });
         cx.update(|window, cx| window.draw(cx).clear());
         shell.read_with(cx, |shell, _| {
-            assert!(
-                !shell.sidecar_popover_open(),
-                "closing the pane drops the popover"
-            );
             assert_eq!(shell.sidecar_width_now(), SIDECAR_WIDTH);
         });
     }
@@ -2091,7 +1998,7 @@ mod sidecar_regressions {
         shell.update(cx, |shell, cx| shell.set_sidecar_user_collapsed(true, cx));
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("sidecar-computer-thumbnail").is_none());
-        assert!(cx.debug_bounds("sidecar-rail-computer-0").is_some());
+        assert!(cx.debug_bounds("sidecar-rail-workspace").is_some());
         shell.update(cx, |shell, cx| shell.set_sidecar_user_collapsed(false, cx));
 
         change(cx, &|store| {
@@ -2202,7 +2109,7 @@ mod sidecar_regressions {
                 .collect::<Vec<_>>()
         };
         click(cx, "sidecar-panel-device-0");
-        assert!(cx.debug_bounds("sidecar-rail-device-0").is_some());
+        assert!(cx.debug_bounds("sidecar-rail-workspace").is_some());
         let tab = shell.read_with(cx, |shell, cx| {
             assert!(shell.right_pane_open(cx));
             let RightSurface::Device(id) = shell.resolved_right_active(cx) else {
@@ -2222,7 +2129,7 @@ mod sidecar_regressions {
             shell.read_with(cx, |shell, cx| shell.resolved_right_active(cx)),
             RightSurface::Device(tab)
         );
-        click(cx, "sidecar-expand");
+        click(cx, "sidecar-rail-workspace");
         click(cx, "sidecar-popover-device-0");
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.resolved_right_active(cx), RightSurface::Device(tab));
@@ -2268,7 +2175,7 @@ mod sidecar_regressions {
     }
 
     #[gpui::test]
-    fn subagents_wear_their_brand_and_fold_the_finished_ones(cx: &mut TestAppContext) {
+    fn beside_lists_agents_then_children_and_folds_the_finished_agents(cx: &mut TestAppContext) {
         use zeron_doc::{MessagePart, MessageStatus, SessionMessageEntry, SubagentStatus};
         let (shell, cx) = setup(cx);
         let spawn = |id: &str, call: zeron_proto::ToolCall, sub: &str, status| MessagePart::Tool {
@@ -2359,23 +2266,41 @@ mod sidecar_regressions {
             let sections = shell.sidecar_sections(&theme, cx);
             let section = sections
                 .iter()
-                .find(|section| section.heading.starts_with("Subagents"))
-                .expect("subagents section");
-            assert_eq!(section.heading.as_ref(), "Subagents · 2 running");
-            let marks: Vec<_> = section.entries.iter().map(|e| e.icon).collect();
-            assert_eq!(marks, [icons::CLAUDE_MARK, icons::OPENAI_MARK]);
+                .find(|section| section.part == SidecarPart::Beside)
+                .expect("beside section");
+            assert_eq!(
+                section.label().as_ref(),
+                "Beside this thread · 2 agents running"
+            );
             let labels: Vec<_> = section
                 .entries
                 .iter()
-                .map(|e| format!("{}{}", e.label, e.suffix.as_deref().unwrap_or_default()))
+                .map(|e| e.label.to_string())
                 .collect();
-            assert_eq!(labels, ["Kid: anthropic/claude-opus-5", "task a: Explore"]);
-            assert!(section.entries.iter().all(|e| e.badge == Some(theme.busy)));
+            assert_eq!(labels, ["Kid", "task a", "Parent", "Parent"]);
+            let icons: Vec<_> = section.entries.iter().map(|e| e.icon).collect();
+            assert_eq!(
+                icons,
+                [
+                    ChildKind::Agent.icon(),
+                    ChildKind::Agent.icon(),
+                    ChildKind::SideChat.icon(),
+                    ChildKind::SideChat.icon(),
+                ]
+            );
+            assert_eq!(
+                section.entries[0].tooltip().as_ref(),
+                "Kid · Agent · anthropic/claude-opus-5"
+            );
+            assert_eq!(
+                section.entries[1].tooltip().as_ref(),
+                "task a · Agent · Explore"
+            );
             let fold = section.fold.as_ref().expect("previous agents fold");
             assert_eq!(fold.label.as_ref(), "Previous agents (2)");
             assert_eq!(fold.failed, 1);
-            assert_eq!(fold.entries[0].badge, Some(theme.danger));
-            assert_eq!(fold.entries[1].badge, None);
+            assert_eq!(fold.entries[0].value_text().as_deref(), Some("Failed"));
+            assert_eq!(fold.entries[1].value_text().as_deref(), Some("Done"));
         });
         assert!(cx.debug_bounds("sidecar-panel-subagent-1").is_some());
         assert!(cx.debug_bounds("sidecar-panel-previous-agent-0").is_none());
@@ -2469,27 +2394,35 @@ mod sidecar_regressions {
         crate::device_panel::tests::calls_of(calls, method)
     }
 
-    #[gpui::test]
-    fn fork_chat_follows_new_sidechat_and_forks_from_panel_and_rail(cx: &mut TestAppContext) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let _guard = runtime.enter();
-        cx.executor().allow_parking();
-        let (shell, cx) = setup(cx);
-        let calls = attach_engine(&shell, &runtime, cx);
-        let new = cx.debug_bounds("sidecar-panel-new-sidechat-0").unwrap();
-        let fork = cx.debug_bounds("sidecar-panel-fork-chat-0").unwrap();
-        assert!(
-            fork.top() >= new.bottom(),
-            "Fork chat sits under New sidechat"
+    #[test]
+    fn the_commit_row_never_says_ahead_of_the_branch_it_is_on() {
+        let cmp = |ahead, behind| GitHistoryComparison {
+            base: "origin/main".into(),
+            ahead,
+            behind,
+        };
+        let line = |branch, cmp: Option<GitHistoryComparison>| {
+            commit_line(Some("a1b2c3d"), Some(branch), cmp.as_ref())
+        };
+        assert_eq!(
+            line("checkout-stripe", Some(cmp(2, 0))).as_deref(),
+            Some("a1b2c3d · 2 ahead of main")
         );
-        click(cx, "sidecar-panel-fork-chat-0");
-        let forks = called(cx, &calls, zeron_rpc::methods::FORK_SIDE_CHAT, 1);
-        assert_eq!(forks[0]["sourceChatId"], "parent");
-        assert_eq!(forks[0]["createdByChatId"], "parent");
-
-        // The fork's progress tab opens the right pane, which folds the sidecar to its rail.
-        click(cx, "sidecar-rail-fork-chat-0");
-        called(cx, &calls, zeron_rpc::methods::FORK_SIDE_CHAT, 2);
+        assert_eq!(
+            line("checkout-stripe", Some(cmp(2, 3))).as_deref(),
+            Some("a1b2c3d · 2 ahead, 3 behind main")
+        );
+        assert_eq!(
+            line("checkout-stripe", Some(cmp(0, 1))).as_deref(),
+            Some("a1b2c3d · 1 behind main")
+        );
+        assert_eq!(line("main", Some(cmp(2, 1))).as_deref(), Some("a1b2c3d"));
+        assert_eq!(
+            line("main", Some(cmp(0, 0))).as_deref(),
+            Some("a1b2c3d · up to date")
+        );
+        assert_eq!(line("main", None).as_deref(), Some("a1b2c3d"));
+        assert_eq!(commit_line(None, Some("main"), None), None);
     }
 
     #[gpui::test]
@@ -2538,16 +2471,22 @@ mod sidecar_regressions {
         });
         cx.update(|window, cx| window.draw(cx).clear());
 
-        let headings = shell.update(cx, |shell, cx| {
+        let parts = shell.update(cx, |shell, cx| {
             let theme = Theme::of(cx).clone();
             shell
                 .sidecar_sections(&theme, cx)
                 .iter()
-                .map(|section| section.heading.to_string())
+                .map(|section| section.part)
                 .collect::<Vec<_>>()
         });
-        let side = headings.iter().position(|h| h == "Side chats").unwrap();
-        assert_eq!(headings[side + 1], "Actions");
+        assert_eq!(
+            parts,
+            [
+                SidecarPart::Workspace,
+                SidecarPart::Beside,
+                SidecarPart::Actions
+            ]
+        );
         let rows = [
             "sidecar-panel-action-0",
             "sidecar-panel-import-action-0",
@@ -2581,7 +2520,7 @@ mod sidecar_regressions {
         let row = cx.debug_bounds("sidecar-panel-action-0").unwrap();
         cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
         cx.update(|window, cx| window.draw(cx).clear());
-        click(cx, "sidecar-panel-action-0-edit");
+        click(cx, "sidecar-panel-action-0-trail");
         shell.update(cx, |shell, _| {
             let editor = shell.project_actions.editor.take().expect("the gear edits");
             assert_eq!(editor.action_id.as_deref(), Some("dev"));
@@ -2624,8 +2563,9 @@ mod sidecar_regressions {
                 .accept_load(&key, generation, Ok(snapshot));
         });
         click(cx, "sidecar-collapse");
-        assert!(cx.debug_bounds("sidecar-rail-add-action-0").is_some());
-        click(cx, "sidecar-rail-action-0");
+        click(cx, "sidecar-rail-actions");
+        assert!(cx.debug_bounds("sidecar-popover-add-action-0").is_some());
+        click(cx, "sidecar-popover-action-0");
         called(cx, &calls, zeron_rpc::methods::RUN_PROJECT_ACTION, 2);
     }
 }

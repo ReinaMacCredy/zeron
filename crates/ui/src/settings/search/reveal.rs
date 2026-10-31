@@ -66,6 +66,13 @@ pub fn reveal(target: Target, window: &Window) {
     REVEAL.set(reveal);
 }
 
+pub fn pending(window: &Window) -> Option<Target> {
+    with_reveal(window, |reveal| {
+        (reveal.phase == Phase::Seeking).then_some(reveal.target)
+    })
+    .flatten()
+}
+
 /// Drop the reveal under way, if any: the route changed under it.
 pub fn clear_reveal() {
     REVEAL.set(None);

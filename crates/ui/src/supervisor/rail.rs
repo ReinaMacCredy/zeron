@@ -151,7 +151,7 @@ impl SupervisorPage {
                                     rail_button(
                                         theme,
                                         "supervisor-rail-collapse",
-                                        "Collapse the missions rail",
+                                        "Collapse the tasks rail",
                                         icons::LUCIDE_CHEVRON_RIGHT,
                                     )
                                     .on_click(cx.listener(
@@ -287,7 +287,7 @@ impl SupervisorPage {
                 rail_button(
                     theme,
                     "supervisor-rail-expand",
-                    "Show missions",
+                    "Show tasks",
                     icons::LUCIDE_CHEVRON_LEFT,
                 )
                 .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.toggle_rail(cx))),
@@ -321,13 +321,13 @@ impl SupervisorPage {
             .id(SharedString::from(open_key.clone()))
             .debug_selector(move || open_key.clone())
             .role(gpui::Role::Button)
-            .aria_label(zeron_proto::mission::OPEN_MISSION_PAGE)
+            .aria_label(crate::tasks::OPEN_TASK_PAGE)
             .flex_none()
             .cursor_pointer()
             .text_size(ui_rems(11.5))
             .text_color(theme.text_muted)
             .hover(|s| s.text_color(theme.text))
-            .child(format!("{} ›", zeron_proto::mission::OPEN_MISSION_PAGE))
+            .child(format!("{} ›", crate::tasks::OPEN_TASK_PAGE))
             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                 cx.emit(SupervisorEvent::OpenTaskCenter(open_id.clone()))
             }));

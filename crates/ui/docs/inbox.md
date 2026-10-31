@@ -1,18 +1,22 @@
-The Inbox page is a start-of-day view: what is waiting on you, today's tasks, how the day is going, and how much of your plan is left.
+The Inbox page is the day's history: what your agents asked, finished and failed today, today's tasks, and how the day is going. What needs you right now waits in the Cmd+I tray, not here.
 
 ![The Inbox page](inbox.jpg)
 
 ## Open the Inbox
 
-Click **Inbox** in the rail, or pick **Open inbox** in the Cmd+K palette. The rail button shows a count when chats are waiting for your input.
+Click **Inbox** in the rail, or pick **Open inbox** in the Cmd+K palette. **History** at the foot of the Cmd+I tray opens it too. The rail button shows no count: what needs you is counted by the pill at the right of the titlebar and listed in its tray. See [When an agent asks](zeron://docs/agent-questions).
 
-The line under the title greets you and sums things up, for example "Good morning. Tuesday, October 6. 2 things need you. 3 tasks to do." The day starts at 4 AM, so late-night work still counts toward the day before.
+The line under the title reads **History: what your agents asked, finished and failed. Live items wait in the ⌘I tray.** The day starts at 4 AM, so late-night work still counts toward the day before.
 
-## Needs you
+## Needs you right now
 
-This tile lists every chat that is waiting on you, with what it wants: **approve a command**, **has a question**, or **waiting for you**. Click a row to open that chat.
+While anything needs you, a banner under the title reads, for example, **2 things need you right now.** Click **Open tray ⌘I** to answer them in the tray. The banner is hidden when nothing needs you.
 
-For local git projects, a GitHub row also counts pull requests that need you, such as review requests, requested changes, or failing CI. Click it to open the [Pull requests](zeron://pull-requests) page. The tile is hidden when nothing needs you.
+Pull requests that need you are on the [Pull requests](zeron://pull-requests) page.
+
+## Today
+
+This tile lists the runs that finished, stopped or failed today, and the questions you answered (**You answered**), newest first, each with how long ago. Click a row to open its thread. Before anything happens it says **Nothing finished or answered yet today.**
 
 ## Today's tasks
 
@@ -24,8 +28,8 @@ Type in the last row, **Add a task for today, or press Tab to hand it to an agen
 
 A short summary of the day: how many prompts you sent across how many chats, how long your agents ran, and how many of today's tasks are done. Below it, **Morning**, **Afternoon**, and **Evening** show your prompts by hour. Before anything runs it says **Nothing ran yet today. This fills in as your agents work.**
 
-## Plan left
+## Plan limits
 
-The last tile shows your tightest plan limit across your agent accounts, for example **Left on Claude Code, week**, with the percent left and when it resets. It only appears once an account reports usage. See [Usage](zeron://docs/usage) for every limit.
+Your plan limits are not on the Inbox. Hover the usage ring in the rail to see each account's limits, or click it for the [Usage](zeron://docs/usage) page.
 
 > The sidebar has its own Inbox mode: open the **...** menu above the sidebar (**Sidebar view options**) and pick **Inbox** to sort chats into **Inbox** and **Settled**, plus **Working** when **Show > Working** is on. See [Sessions in the sidebar](zeron://docs/sessions-sidebar).

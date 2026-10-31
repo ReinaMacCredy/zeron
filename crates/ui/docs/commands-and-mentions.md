@@ -6,8 +6,8 @@ Type `/` to list the agent's built-in commands. They come from the agent itself,
 
 | Command | What it does |
 | --- | --- |
+| `/btw` | Side chat: ask about this chat without touching it. It opens in the right pane. `/sidechat` does the same when typed, but is not listed. |
 | `/compact` | Free up context by summarizing the conversation. |
-| `/btw` or `/sidechat` | Ask about this chat on the side, without touching it. |
 | `/computer-use` | Use Zeron Computer for this request only. Offered for Claude Code, Codex, Devin, Grok, and Hermes. |
 | `/model` | Choose agent, model, and reasoning. |
 | `/new` | Start a new conversation. |
@@ -16,7 +16,7 @@ Type `/` to list the agent's built-in commands. They come from the agent itself,
 
 ![The / command menu](commands-slash-menu.jpg)
 
-Inside a chat you also get `/diff` (open changes), `/files` (open project files), `/terminal`, `/rename` (rename this conversation), and `/stop` (stop the active run). `/diff` and `/terminal` each open a tab in the [right pane](zeron://docs/right-pane), and `/files` opens the Files panel; `/terminal` gives you a terminal tab there, not the Cmd+J drawer.
+Inside a chat you also get `/diff` (open changes), `/files` (open project files), `/terminal`, `/rename` (rename this conversation), and `/stop` (stop the active run). `/diff` opens the **Changes** tab and `/files` the **Files** tab in the [right pane](zeron://docs/right-pane). `/terminal` opens the terminal dock under the chat, or focuses it when it is already open; see [Terminal](zeron://docs/terminal).
 
 `/model`, `/new`, `/resume`, `/settings`, and the five chat commands run in Zeron and are never sent to the agent; their menu descriptions start with **Zeron:**. If the agent has a command with one of these names, Zeron's shows as `/zeron:<name>`. `/compact`, `/btw`, and `/sidechat` work differently: when the agent lists its own command with that name, the menu shows only the agent's row, but Zeron still handles what you type. Zeron's `/computer-use` replaces any `/computer-use` the agent has.
 
@@ -29,7 +29,7 @@ In a Claude Code chat, some of Claude Code's own commands answer with a card ins
 | Command | The card |
 | --- | --- |
 | `/context` | What fills the context: a bar and a legend by kind (system prompt, MCP tools, memory files, skills, messages and the rest), the free space, and the largest tools, memory files, agents and skills in lists you can open. **Compact now** compacts the chat. |
-| `/usage` or `/cost` | Your plan's limits and when each resets, then what used them over **24h** or **7d** on this Mac. **Open Usage page** opens [Usage](zeron://docs/usage). |
+| `/usage` or `/cost` | No card: opens the [Usage](zeron://docs/usage) page. On the New chat page it opens the page without starting a chat. |
 | `/model` | The models to pick from. Picking one changes this chat's model chip. |
 | `/mcp` | The folder's MCP servers, connected or not. |
 
@@ -41,13 +41,13 @@ Commands that only run in Claude Code's terminal, such as `/status` or `/theme`,
 
 ### Claude Code settings
 
-Type `/config` in a Claude Code chat to open Claude Code's settings over the chat, with **Status**, **Config**, **Usage** and **Stats** tabs. On the new chat page the panel opens under **New task** and pushes the composer down.
+Type `/config` in a Claude Code chat to open Claude Code's settings over the chat, with **Status**, **Config**, **Usage** and **Stats** tabs. On the New chat page the panel opens above the composer and pushes it down.
 
 ![Claude Code's settings over a chat](claude-config-panel.jpg)
 
 - **Config** lists each setting with its key and value. Search with **Search settings…** (press `/`), or narrow the list with **All**, **Affects Zeron chats** and **Terminal only**. Click a row, or press Enter or Space, to change it: a switch flips, a choice cycles or opens a list, and text opens a field with **Save**. **Model**, **Effort** and **Permission mode** are tagged **= chip** and follow this chat's chips. Settings Claude Code only changes from its terminal are dimmed.
 - **Status** has Claude Code's version, the session, folder, model, permission mode, output style, MCP servers, memory and plugins.
-- **Usage** has the same meters as `/usage`.
+- **Usage** has your plan's limits as Claude Code reports them, with **Open Usage page** to open [Usage](zeron://docs/usage).
 - **Stats** has your Claude Code activity over the last 36 weeks, your favorite model, sessions, active days, current streak and tokens.
 
 Changes save one at a time through Claude Code itself; the footer reads **Saving…**, then **1 change, saved**. Close the panel with Escape or ×. When you changed something, a row stays in the chat, such as "Claude Code settings · Auto-compact → false", with **Reopen**.
@@ -79,4 +79,4 @@ Type `@task ` (with the space) to search only tasks. A task already in your mess
 
 You can also drag a file from the file tree, or a session from the sidebar (**Drop to mention**), onto the conversation to insert the same mention.
 
-> `/btw` runs a side question without disturbing the thread. Cmd+; toggles the sidechat too.
+> `/btw` runs a side question without disturbing the thread. Cmd+; (**Side chat**) and the **Side chat** tab on the composer reopen this chat's latest side chat, or start a new one. See [Side questions with /btw](zeron://docs/side-chat).

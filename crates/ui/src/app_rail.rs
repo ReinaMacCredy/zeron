@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
-use gpui::{AnyElement, Div, Hsla, SharedString, Stateful, div, prelude::*, px};
+use gpui::{Div, Hsla, SharedString, Stateful, div, prelude::*, px};
 use zeron_proto::account_usage::UsageBlock;
-use zeron_proto::{AgentAccount, AgentAccountsSnapshot, AgentUsageWindow, HarnessId};
+use zeron_proto::{AgentAccount, AgentAccountsSnapshot, AgentUsageWindow};
 
 use crate::account_usage::used_fraction;
 use crate::icons::{self, icon};
@@ -18,22 +18,14 @@ pub(crate) const PAD_Y: f32 = 8.0;
 const RING_RADIUS: f32 = 13.0;
 const RING_STROKE: f32 = 2.5;
 const RING_GLYPH: f32 = 14.0;
-const DOUBLE_RING_STROKE: f32 = 2.25;
-const DOUBLE_RING_RADIUS: f32 = (BUTTON - DOUBLE_RING_STROKE) / 2.0;
-const DOUBLE_RING_SPACING: f32 = 4.5;
-const DOUBLE_RING_GLYPH: f32 = 12.0;
-const MAX_RINGS: usize = 2;
-const CARD_WIDTH: f32 = 400.0;
-const HOVER_CARD_WIDTH: f32 = 272.0;
+const HOVER_CARD_WIDTH: f32 = 290.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RailItem {
-    Home,
+    NewChat,
     Inbox,
     Tasks,
-    Supervisor,
     PullRequests,
-    Usage,
     Settings,
 }
 
@@ -44,12 +36,12 @@ pub(crate) struct RailEntry {
     pub icon: &'static str,
 }
 
-pub(crate) const TOP: [RailEntry; 6] = [
+pub(crate) const TOP: [RailEntry; 4] = [
     RailEntry {
-        item: RailItem::Home,
-        id: "rail-home",
-        label: "Home",
-        icon: icons::HOME,
+        item: RailItem::NewChat,
+        id: "rail-new-chat",
+        label: "New chat",
+        icon: icons::PEN_NEW_SQUARE,
     },
     RailEntry {
         item: RailItem::Inbox,
@@ -64,22 +56,10 @@ pub(crate) const TOP: [RailEntry; 6] = [
         icon: icons::TASKS,
     },
     RailEntry {
-        item: RailItem::Supervisor,
-        id: "open-supervisor",
-        label: "Supervisor",
-        icon: icons::LUCIDE_SHIELD,
-    },
-    RailEntry {
         item: RailItem::PullRequests,
         id: "open-pull-requests",
         label: "Pull requests",
         icon: icons::LUCIDE_GIT_PULL_REQUEST,
-    },
-    RailEntry {
-        item: RailItem::Usage,
-        id: "open-usage",
-        label: "Usage",
-        icon: icons::LUCIDE_CHART_NO_AXES_COLUMN,
     },
 ];
 
@@ -125,24 +105,23 @@ pub(crate) fn button(
         }))
 }
 
-pub(crate) fn badge(count: usize, scale: f32, theme: &Theme) -> Div {
+pub(crate) fn badge(count: usize, theme: &Theme) -> Div {
     let label = if count > 99 {
         "99+".to_owned()
     } else {
         count.to_string()
     };
-    let grow = 7.5 * (scale - 1.0);
     div()
         .absolute()
-        .top(px(1.0 - grow))
-        .right(px(-grow))
-        .min_w(px(15.0 * scale))
-        .h(px(15.0 * scale))
-        .px(px(4.0 * scale))
+        .top(px(1.0))
+        .right_0()
+        .min_w(px(15.0))
+        .h(px(15.0))
+        .px(px(4.0))
         .rounded_full()
         .bg(theme.accent)
         .text_color(theme.on_accent)
-        .text_size(crate::typography::ui_rems(9.5 * scale))
+        .text_size(crate::typography::ui_rems(9.5))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .flex()
         .items_center()
@@ -150,15 +129,25 @@ pub(crate) fn badge(count: usize, scale: f32, theme: &Theme) -> Div {
         .child(SharedString::from(label))
 }
 
-pub(crate) fn ring_accounts(snapshot: &AgentAccountsSnapshot) -> Vec<&AgentAccount> {
+pub(crate) fn usage_accounts(snapshot: &AgentAccountsSnapshot) -> Vec<&AgentAccount> {
     accounts::sidebar_accounts(snapshot)
         .into_iter()
         .filter(|account| accounts::reports_usage(account.harness))
-        .take(MAX_RINGS)
         .collect()
 }
 
-pub(crate) fn ring_tooltip(account: Option<&AgentAccount>, loading: bool) -> SharedString {
+pub(crate) fn tightest(accounts: &[AgentAccount]) -> Option<&AgentAccount> {
+    accounts
+        .iter()
+        .filter_map(|account| used_fraction(account).map(|used| (account, used)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(account, _)| account)
+}
+
+pub(crate) fn ring_label(account: Option<&AgentAccount>, hot: bool, loading: bool) -> SharedString {
+    if hot {
+        return "Usage: limit reached".into();
+    }
     let Some(account) = account else {
         return if loading {
             "Loading usage…".into()
@@ -173,64 +162,28 @@ pub(crate) fn ring_tooltip(account: Option<&AgentAccount>, loading: bool) -> Sha
         .map(|window| {
             format!(
                 "{} {}%",
-                window.label,
+                zeron_proto::account_usage::window_label(&window.label),
                 (window.used_fraction.clamp(0.0, 1.0) * 100.0).round() as u32
             )
         })
         .collect::<Vec<_>>();
     match (windows.is_empty(), account.usage_error.as_deref()) {
-        (false, _) => format!("{name} · {}", windows.join(", ")).into(),
-        (true, Some(error)) => format!("{name} · {error}").into(),
-        (true, None) => format!("{name} · no usage reported").into(),
+        (false, _) => format!("Usage: {name} · {}", windows.join(", ")).into(),
+        (true, Some(error)) => format!("Usage: {name} · {error}").into(),
+        (true, None) => format!("Usage: {name} · no usage reported").into(),
     }
 }
 
-/// Outermost first, like Synara: the week ring around the session ring.
-fn ring_windows(account: &AgentAccount) -> Option<[&AgentUsageWindow; 2]> {
-    let find = |label: &str| account.usage_windows.iter().find(|w| w.label == label);
-    if let (Some(week), Some(session)) = (find("Week"), find("Session")) {
-        return Some([week, session]);
-    }
-    match account.usage_windows.as_slice() {
-        [first, second] if first.label == "Week" => Some([first, second]),
-        [first, second] => Some([second, first]),
-        _ => None,
-    }
-}
-
-pub(crate) fn ring(account: Option<&AgentAccount>, theme: &Theme) -> Div {
+pub(crate) fn ring(account: Option<&AgentAccount>, hot: bool, theme: &Theme) -> Div {
     let fraction = account.and_then(used_fraction);
     let (mark, tint) = account.map_or((icons::USAGE_CHART, None), |account| {
         crate::pickers::harness_brand_icon(account.harness)
     });
-    let track = theme.text_faint.opacity(0.25);
-    let arc = |radius: f32, stroke: f32, fraction: f32| {
-        div()
-            .absolute()
-            .inset_0()
-            .child(crate::context_usage::progress_ring(
-                BUTTON,
-                radius,
-                stroke,
-                fraction,
-                usage_color(usage_level(fraction), theme),
-                track,
-            ))
-    };
-    let pair = account.and_then(ring_windows);
-    let rings: Vec<Div> = match pair {
-        Some(windows) => windows
-            .iter()
-            .enumerate()
-            .map(|(ix, window)| {
-                arc(
-                    DOUBLE_RING_RADIUS - ix as f32 * DOUBLE_RING_SPACING,
-                    DOUBLE_RING_STROKE,
-                    window.used_fraction.clamp(0.0, 1.0),
-                )
-            })
-            .collect(),
-        None => vec![arc(RING_RADIUS, RING_STROKE, fraction.unwrap_or(0.0))],
+    let shown = if hot { 1.0 } else { fraction.unwrap_or(0.0) };
+    let color = if hot {
+        theme.danger
+    } else {
+        usage_color(usage_level(shown), theme)
     };
     div()
         .size(px(BUTTON))
@@ -238,31 +191,55 @@ pub(crate) fn ring(account: Option<&AgentAccount>, theme: &Theme) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .children(rings)
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .child(crate::context_usage::progress_ring(
+                    BUTTON,
+                    RING_RADIUS,
+                    RING_STROKE,
+                    shown,
+                    color,
+                    theme.text_faint.opacity(0.25),
+                )),
+        )
         .child(
             icon(mark)
-                .size(px(if pair.is_some() {
-                    DOUBLE_RING_GLYPH
-                } else {
-                    RING_GLYPH
-                }))
+                .size(px(RING_GLYPH))
                 .text_color(tint.unwrap_or(theme.text))
-                .when(fraction.is_none(), |glyph| glyph.opacity(0.5)),
+                .when(fraction.is_none() && !hot, |glyph| glyph.opacity(0.5)),
         )
+        .when(hot, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .top(px(1.0))
+                    .right_0()
+                    .size(px(12.0))
+                    .rounded_full()
+                    .bg(theme.danger)
+                    .text_color(theme.on_accent)
+                    .text_size(crate::typography::ui_rems(9.0))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child("!"),
+            )
+        })
 }
 
-/// The card stays while the ring or the card holds the pointer, so Details is reachable.
+/// The card stays while the ring or the card holds the pointer.
 #[derive(Default)]
 pub(crate) struct RingHover {
-    pub harness: Option<HarnessId>,
     pub trigger: bool,
     pub card: bool,
-    pub details: bool,
 }
 
 impl RingHover {
-    pub fn shown(&self) -> Option<HarnessId> {
-        self.harness.filter(|_| self.trigger || self.card)
+    pub fn shown(&self) -> bool {
+        self.trigger || self.card
     }
 }
 
@@ -410,7 +387,7 @@ fn block(block: UsageBlock, theme: &Theme) -> Div {
     )
 }
 
-/// One block per plan window, then Claude's Extra Usage: the hover card and the Usage page.
+/// One block per plan window, then Claude's Extra Usage: the Usage page.
 pub(crate) fn usage_blocks(account: &AgentAccount, now: DateTime<Utc>, theme: &Theme) -> Vec<Div> {
     zeron_proto::account_usage::usage_blocks(account, now)
         .into_iter()
@@ -474,48 +451,145 @@ pub(crate) fn details_fold(
         })
 }
 
-pub(crate) fn ring_hover_card(
-    account: &AgentAccount,
-    details_open: bool,
-    on_details: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-    now: DateTime<Utc>,
-    theme: &Theme,
-) -> Div {
-    let legend = ring_windows(account).map(|windows| {
+pub(crate) fn ring_hover_card(accounts: &[AgentAccount], now: DateTime<Utc>, theme: &Theme) -> Div {
+    let updated = accounts
+        .iter()
+        .filter_map(|account| account.usage_fetched_at)
+        .max()
+        .and_then(DateTime::<Utc>::from_timestamp_millis)
+        .map(|at| {
+            format!(
+                "used · updated {}",
+                crate::pull_requests::relative_time(at, now)
+            )
+        });
+    let binding = tightest(accounts).and_then(|account| {
+        account
+            .usage_windows
+            .iter()
+            .max_by(|a, b| a.used_fraction.total_cmp(&b.used_fraction))
+    });
+    let window_row = |window: &AgentUsageWindow| {
+        let used = window.used_fraction.clamp(0.0, 1.0);
+        let hot = used >= 1.0;
+        let sub = binding
+            .is_some_and(|binding| std::ptr::eq(binding, window))
+            .then(|| match (hot, window.resets_at) {
+                (true, at) => Some(match accounts::format_reset(at, now) {
+                    Some(reset) => format!("Limit reached · {reset}"),
+                    None => "Limit reached".to_owned(),
+                }),
+                (false, Some(at)) => zeron_proto::account_usage::resets_in(at, now)
+                    .map(|left| format!("Resets in {left}")),
+                (false, None) => None,
+            })
+            .flatten();
+        let tone = if hot { theme.danger } else { theme.text_muted };
         div()
             .flex()
-            .items_center()
-            .gap(px(12.0))
-            .text_color(theme.text_muted)
-            .children(
-                windows
-                    .iter()
-                    .zip(["outer", "inner"])
-                    .map(|(window, ring)| {
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
                         div()
+                            .w(px(62.0))
+                            .flex_none()
+                            .truncate()
+                            .text_color(tone)
+                            .child(SharedString::from(
+                                zeron_proto::account_usage::window_label(&window.label).to_owned(),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .h(px(4.0))
+                            .rounded_full()
+                            .overflow_hidden()
+                            .bg(theme.wash(0.08))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(gpui::relative(used))
+                                    .rounded_full()
+                                    .bg(usage_color(usage_level(used), theme)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(44.0))
+                            .flex_none()
                             .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(div().size(px(6.0)).rounded_full().bg(usage_color(
-                                usage_level(window.used_fraction.clamp(0.0, 1.0)),
-                                theme,
-                            )))
-                            .child(format!(
-                                "{} · {ring}",
-                                zeron_proto::account_usage::window_label(&window.label)
-                            ))
-                    }),
+                            .justify_end()
+                            .text_color(if hot { theme.danger } else { theme.text })
+                            .child(SharedString::from(format!(
+                                "{}%",
+                                (used * 100.0).round() as u32
+                            ))),
+                    ),
             )
-    });
-    let details = details_fold(
-        "rail-usage-hover-details".into(),
-        "rail-usage-hover-details".into(),
-        account,
-        details_open,
-        on_details,
-        now,
-        theme,
-    );
+            .children(sub.map(|line| {
+                div()
+                    .pl(px(70.0))
+                    .text_color(tone)
+                    .child(SharedString::from(line))
+            }))
+    };
+    let account_section = |account: &AgentAccount| {
+        let (mark, tint) = crate::pickers::harness_brand_icon(account.harness);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        icon(mark)
+                            .size(px(13.0))
+                            .text_color(tint.unwrap_or(theme.text)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(13.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(accounts::provider_name(account.harness)),
+                    )
+                    .children(account.plan_label.clone().map(|plan| {
+                        div()
+                            .flex_none()
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(plan))
+                    }))
+                    .children(
+                        account
+                            .email
+                            .clone()
+                            .or_else(|| account.display_name.clone())
+                            .map(|who| {
+                                div()
+                                    .ml_auto()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(who))
+                            }),
+                    ),
+            )
+            .children(account.usage_error.clone().map(|error| {
+                div()
+                    .text_color(theme.warning)
+                    .child(SharedString::from(error))
+            }))
+            .children(account.usage_windows.iter().map(window_row))
+    };
     div()
         .debug_selector(|| "rail-usage-hover-card".into())
         .w(px(HOVER_CARD_WIDTH))
@@ -523,145 +597,51 @@ pub(crate) fn ring_hover_card(
         .border_1()
         .border_color(theme.text.opacity(0.1))
         .bg(popover::surface_bg(theme))
-        .p(px(10.0))
         .flex()
         .flex_col()
-        .gap(px(8.0))
         .text_size(crate::typography::ui_rems(11.5))
         .line_height(px(16.0))
         .text_color(theme.text)
         .child(
             div()
+                .p(px(10.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child("Usage"),
+                        )
+                        .children(updated.map(|line| {
+                            div()
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(line))
+                        })),
+                )
+                .children(accounts.iter().map(account_section)),
+        )
+        .child(popover::menu_separator())
+        .child(
+            div()
+                .px(px(10.0))
+                .py(px(8.0))
                 .flex()
                 .items_center()
                 .justify_between()
-                .gap(px(8.0))
+                .text_color(theme.text_muted)
+                .child("Click the ring for the Usage page")
                 .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(accounts::provider_name(account.harness)),
-                )
-                .children(account.plan_label.clone().map(|plan| {
-                    div()
-                        .flex_none()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(plan))
-                })),
-        )
-        .children(legend)
-        .children(account.usage_error.clone().map(|error| {
-            div()
-                .text_color(theme.warning)
-                .child(SharedString::from(error))
-        }))
-        .children(usage_blocks(account, now, theme))
-        .child(details)
-}
-
-pub(crate) fn ring_card(
-    harness: HarnessId,
-    rows: Vec<AnyElement>,
-    error: Option<SharedString>,
-    footer: AnyElement,
-    theme: &Theme,
-) -> Div {
-    let title = format!("{} accounts", accounts::provider_name(harness));
-    popover::popover_card(theme)
-        .w(px(CARD_WIDTH))
-        .flex()
-        .flex_col()
-        .child(popover::menu_heading(theme, &title))
-        .children(rows)
-        .children(error.map(|error| {
-            div()
-                .px(px(8.0))
-                .py(px(4.0))
-                .text_size(px(12.0))
-                .text_color(theme.danger)
-                .child(error)
-        }))
-        .child(popover::menu_separator())
-        .child(footer)
-}
-
-pub(crate) fn account_row(
-    account: &AgentAccount,
-    ix: usize,
-    theme: &Theme,
-    now: DateTime<Utc>,
-) -> Stateful<Div> {
-    let email: SharedString = account
-        .email
-        .clone()
-        .or_else(|| account.display_name.clone())
-        .unwrap_or_else(|| "Unknown account".into())
-        .into();
-    let mut meta: Vec<AnyElement> = account
-        .plan_label
-        .iter()
-        .map(|plan| {
-            div()
-                .child(SharedString::from(plan.clone()))
-                .into_any_element()
-        })
-        .collect();
-    if account.active {
-        meta.push(
-            div()
-                .text_color(theme.accent)
-                .child(SharedString::from("In use"))
-                .into_any_element(),
-        );
-    } else if let Some(reason) = account
-        .usage_error
-        .clone()
-        .filter(|_| account.usage_windows.is_empty())
-    {
-        meta.push(div().child(SharedString::from(reason)).into_any_element());
-    }
-    popover::menu_row(theme, account.active, format!("rail-account-row-{ix}"))
-        .id(("rail-account-row", ix))
-        .debug_selector(move || format!("rail-account-row-{ix}"))
-        .when(account.active || !account.switchable, |row| {
-            row.cursor_default()
-        })
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(px(12.5))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(email),
-                )
-                .when(!meta.is_empty(), |el| {
-                    el.child(crate::settings::widgets::meta_line(theme, meta))
-                }),
-        )
-        .child(
-            div()
-                .id(("rail-account-meters", ix))
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .when(!account.usage_windows.is_empty(), |meters| {
-                    meters.tooltip(crate::settings::widgets::text_tooltip(
-                        accounts::usage_resets(&account.usage_windows, now),
-                    ))
-                })
-                .children(
-                    account
-                        .usage_windows
-                        .iter()
-                        .take(2)
-                        .map(|window| accounts::render_usage_meter(window, theme)),
+                    icon(icons::LUCIDE_CHEVRON_RIGHT)
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
                 ),
         )
 }
@@ -669,6 +649,7 @@ pub(crate) fn account_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_proto::{AgentUsageWindow, HarnessId};
 
     fn account(harness: HarnessId, active: bool, used: &[f32]) -> AgentAccount {
         serde_json::from_value(serde_json::json!({
@@ -691,25 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn two_windows_draw_the_week_ring_outside_the_session_ring() {
-        let mut claude = account(HarnessId::ClaudeCode, true, &[0.3, 0.8]);
-        claude.usage_windows[0].label = "Session".into();
-        claude.usage_windows[1].label = "Week".into();
-        let labels = ring_windows(&claude).map(|rings| rings.map(|window| window.label.clone()));
-        assert_eq!(labels, Some(["Week".to_string(), "Session".to_string()]));
-        claude.usage_windows.push(AgentUsageWindow {
-            label: "Fable".into(),
-            used_fraction: 0.1,
-            resets_at: None,
-        });
-        claude.usage_windows.swap(0, 1);
-        let labels = ring_windows(&claude).map(|rings| rings.map(|window| window.label.clone()));
-        assert_eq!(labels, Some(["Week".to_string(), "Session".to_string()]));
-        assert!(ring_windows(&account(HarnessId::Cursor, true, &[0.4])).is_none());
-    }
-
-    #[test]
-    fn rings_take_the_first_two_harnesses_with_landed_usage() {
+    fn the_ring_follows_the_tightest_window_across_reporting_accounts() {
         let snapshot = AgentAccountsSnapshot {
             accounts: vec![
                 account(HarnessId::Cursor, true, &[0.4]),
@@ -720,10 +683,12 @@ mod tests {
             ],
             warnings: Vec::new(),
         };
-        let harnesses: Vec<_> = ring_accounts(&snapshot)
-            .into_iter()
-            .map(|account| account.harness)
-            .collect();
+        let shown: Vec<AgentAccount> = usage_accounts(&snapshot).into_iter().cloned().collect();
+        let harnesses: Vec<_> = shown.iter().map(|account| account.harness).collect();
         assert_eq!(harnesses, vec![HarnessId::Codex, HarnessId::Cursor]);
+        assert_eq!(
+            tightest(&shown).map(|account| account.harness),
+            Some(HarnessId::Cursor)
+        );
     }
 }

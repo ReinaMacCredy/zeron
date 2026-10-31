@@ -36,7 +36,7 @@ impl Shell {
         let panel = self.terminal_panel(cx);
         let title = format!("{} (setup)", run.action_name);
         let tab = panel.update(cx, |panel, cx| {
-            panel.reserve_tab_for_chat(chat_id.clone(), title, cx)
+            panel.reserve_action_tab_for_chat(chat_id.clone(), title, cx)
         });
         let attached = panel.update(cx, |panel, cx| {
             panel.attach_reserved_session(&chat_id, tab, run.terminal, target_device_id, cx)
@@ -489,7 +489,7 @@ impl Shell {
 
         let panel = self.terminal_panel(cx);
         let tab = panel.update(cx, |panel, cx| {
-            panel.reserve_tab_for_chat(context.chat_id.clone(), action.name.clone(), cx)
+            panel.reserve_action_tab_for_chat(context.chat_id.clone(), action.name.clone(), cx)
         });
         self.project_action_tabs
             .insert((context.chat_id.clone(), action.id.clone()), tab);

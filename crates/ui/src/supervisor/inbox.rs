@@ -444,7 +444,7 @@ impl SupervisorPage {
                             root,
                         )))
                     })
-                    .unwrap_or_else(|| "A mission".into())
+                    .unwrap_or_else(|| "A task".into())
             }
         };
         let open_needs = feed
@@ -1573,7 +1573,7 @@ impl SupervisorPage {
                     .gap(px(8.0))
                     .min_w_0()
                     .text_color(theme.text_muted)
-                    .child(div().min_w_0().child(approval.line()))
+                    .child(div().min_w_0().child(super::approval_line(approval)))
                     .children(take_back),
             )
             .children(error.map(|error| {
@@ -1632,7 +1632,7 @@ impl SupervisorPage {
         let state = if listed {
             resource_label(resource.state)
         } else {
-            "No longer shared by watched missions"
+            "No longer shared by watched tasks"
         };
         let name = resource.key.clone();
         let mut detail = format!("{held} · declared by {declared}");

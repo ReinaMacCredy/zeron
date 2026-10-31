@@ -1,4 +1,4 @@
-An agent can hand part of its work to a child agent on any agent and model you have installed, not only its own. A Claude Code chat can hand a task to Codex, Grok, OpenCode or an ACP agent, and a Codex chat can hand one to Claude Code. Zeron shows each child in the transcript, in the **Live state** column next to the chat, and in the agents pill above the composer, so you can follow or stop it.
+An agent can hand part of its work to a child agent on any agent and model you have installed, not only its own. A Claude Code chat can hand a task to Codex, Grok, OpenCode or an ACP agent, and a Codex chat can hand one to Claude Code. Zeron shows each child in the transcript and in the **Live state** column next to the chat, under **Beside this thread**, so you can follow or stop it.
 
 ## Ask for a delegated task
 
@@ -8,7 +8,7 @@ Ask in your own words, and name the agent and model you want when it matters:
 - "Have Grok review this diff while you keep going."
 - "Run the migration with a Claude Code child on its strongest model, and wait for it."
 
-Without a name, the child runs where [Settings > Routing](zeron://settings/routing) sends its role, or, when that role is **Off**, on this chat's agent, model and reasoning level. The agent gives each child a role: **worker** to write and change code, **validator** to review and test, **research** to read and report, **design** to shape an approach, or **general**. See [Routing](zeron://docs/routing).
+Without a name, the child runs where [Settings > Agents > Routing](zeron://settings/routing) sends its role, or, when that role is **Off**, on this chat's agent, model and reasoning level. The agent gives each child a role: **worker** to write and change code, **validator** to review and test, **research** to read and report, **design** to shape an approach, or **general**. See [Routing](zeron://docs/routing).
 
 The agent looks up what it can use with Zeron's `orchestrator_capabilities` tool: every agent installed and turned on in [Settings > Providers](zeron://settings/providers), with its models from the same list as the model picker, your agent profiles, and the limits below. For each agent it lists the models in use and the first eight, says how many it left out, and searches the rest when the agent asks for one by name; any model in the list can be used. An agent that is not installed or is turned off cannot run a child. When the agent picks another agent without naming a model, the child gets that agent's default model; a model that agent does not offer is refused.
 
@@ -36,7 +36,7 @@ When an agent delegates, a chip appears in the transcript with the child's agent
 
 If the parent's agent is in the middle of a turn and its agent takes messages mid-turn, the message reaches it inside that turn. Otherwise it waits for the turn to end and then starts a new one. Archiving the parent chat drops the message.
 
-Click the chip to open the child chat as a tab in the right pane. It has its own composer, so you can talk to the child directly. A line above that composer reads **Subagent of** the parent chat, with **Open parent** to jump back. Delegated chats do not appear in the sidebar.
+Click the chip to open the child chat as a tab in the right pane, with an **Agent** badge; clicking the chip again, or the child's row in the **Live state** column, brings back the same tab. The chip of a child that is open in the pane has an accent border. The tab has its own composer, so you can talk to the child directly. A line above that composer reads **Subagent of** the parent chat, with **Open parent** to jump back. A delegated chat has no sidebar row while its parent chat has one; find it in the parent's **Live state** column.
 
 Built-in subagents of agents such as Claude Code get a chip too; it opens a read-only transcript tab in the right pane.
 
@@ -50,7 +50,7 @@ The question waits for you as well, so you can answer it yourself. If you answer
 
 ## When you write to a child
 
-You can talk to a child yourself in its tab. When you send a message to a delegated task that is still running, its parent's agent gets a note that names the child and quotes what you wrote, so it knows the child's plan may have changed. The same goes for a step of a [Mission Control](zeron://docs/mission-control) mission: its lead gets the note. The note is only news: it does not change the child's result, and the parent's agent does not need to answer it. A thread another chat merely opened with `create_thread` sends no note.
+You can talk to a child yourself in its tab. When you send a message to a delegated task that is still running, its parent's agent gets a note that names the child and quotes what you wrote, so it knows the child's plan may have changed. The same goes for a step of a Task with a plan (see [Agent trees and plans](zeron://docs/mission-control)): its lead gets the note. The note is only news: it does not change the child's result, and the parent's agent does not need to answer it. A thread another chat merely opened with `create_thread` sends no note.
 
 ## Check on or stop a task
 
@@ -60,27 +60,27 @@ With Zeron's `task_status` tool, the agent reads where a task stands: still work
 
 ## The Live state column
 
-The **Live state** column on the right of a chat lists **Subagents**, with a count of running ones. Each row shows the agent's icon, its task, and its model. A running row shows its elapsed time; a failed one reads **Failed**, and one that was stopped reads **Stopped**. Finished agents fold under **Previous agents**. Click any row to open that agent.
+The **Live state** column on the right of a chat has three sections: **Workspace**, **Beside this thread** and **Actions**. **Beside this thread** lists the chat's children, with a count of running agents in its header, such as **Beside this thread · 2 agents running**. Running agents come first. Each row shows the agent's icon and its task. A running row shows its elapsed time; a failed one reads **Failed**, and one that was stopped reads **Stopped**. Finished agents fold under **Previous agents**. Side chats, forks and threads an agent started follow, then background shells. Click any row to open that child as a tab in the right pane; the row of the open one reads **Open**.
 
-The chevron at the top collapses the column to a narrow rail, and the rail's chevron expands it again. When the right pane is open, the rail button opens the same content as a **Live state** popover.
+The chevron at the top folds the column to a narrow rail, and the rail's top button expands it again. While a tab is open in the right pane, the column shows as the rail: its **Workspace**, **Beside this thread** and **Actions** buttons each open that section as a popover, and the **Beside this thread** button counts the running agents.
 
-## The agents pill
+## Stop agents
 
-While child agents run, a pill above the composer shows how many are working. Click it to open the roster. Delegated tasks, and Claude Code's own subagents, have a stop button on their row, and **Stop all** stops them all. Click a row to see its log, then **Open in pane** to read it in the right pane.
+While child agents or background shells run, **Stop all** at the foot of **Beside this thread** stops them all: delegated tasks, Claude Code's own subagents and shells. Hover a background shell's row for its own **Stop**.
 
 ## Limits
 
-The **Delegation** section at the bottom of [Settings > Routing](zeron://settings/routing) has two limits for agents that delegate:
+The **Delegation** section at the bottom of [Settings > Agents > Routing](zeron://settings/routing) has two limits for agents that delegate:
 
 | Setting | Default | Range |
 | --- | --- | --- |
 | **Delegation depth**: how many levels of delegated tasks an agent may nest | 2 | 1 to 5 |
 | **Delegated tasks per chat**: how many delegated tasks one chat may run at once | 8 | 1 to 32 |
 
-**Delegated tasks per chat** also caps how many steps of a [Mission Control task](zeron://docs/mission-control) its lead runs at once. Those steps run on ordinary chats, not as delegated tasks, so they show in the sidebar.
+**Delegated tasks per chat** also caps how many steps of a Task's plan (see [Agent trees and plans](zeron://docs/mission-control)) its lead runs at once. Those steps run on ordinary chats, not as delegated tasks, so they show in the sidebar.
 
 An agent that hits a limit is told so and cannot start the task.
 
 To have an agent work with your other chats instead of its own children, see [Agents and other threads](zeron://docs/threads).
 
-> To stop agents from delegating at all, turn off **delegate_task** in the **Delegation** group of [Settings > Tools](zeron://settings/tools).
+> To stop agents from delegating at all, turn off **delegate_task** in the **Delegation** group of [Settings > Context & tools > Tools](zeron://settings/tools).

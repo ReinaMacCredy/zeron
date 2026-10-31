@@ -10,7 +10,7 @@ Zeron checks for a new version shortly after launch and then every hour. When on
 - **Update failed**: click to try again.
 - **Restarting…**: Zeron is quitting to start the new version.
 
-Zeron downloads only when you click, and a downloaded update installs only when you restart from the button or the update dialog; quitting Zeron does not install it. Turn on **Automatic updates** in [Settings > Updates](zeron://settings/updates) to have it download on its own and install when you quit. Setting `ZERON_AUTO_UPDATE` wins over the switch while it is set; see [Command line and servers](zeron://docs/command-line).
+Zeron downloads only when you click, and a downloaded update installs only when you restart from the button or the update dialog; quitting Zeron does not install it. Turn on **Automatic updates** in [Settings > Devices & updates > Updates](zeron://settings/updates) to have it download on its own and install when you quit. Setting `ZERON_AUTO_UPDATE` wins over the switch while it is set; see [Command line and servers](zeron://docs/command-line).
 
 Some copies of Zeron cannot replace themselves, and the button says so:
 
@@ -18,9 +18,9 @@ Some copies of Zeron cannot replace themselves, and the button says so:
 - **Update available — v… · run `zeron update`**: install it from a terminal (see [Command line and servers](zeron://docs/command-line)). Clicking hides the button until the next version.
 - A copy without permission to replace itself, or a Mac copy running from a disk image or another temporary location, shows **Update available**, and clicking explains why. On a Mac, move Zeron to your Applications folder and reopen it.
 
-## Settings > Updates
+## Settings > Devices & updates > Updates
 
-[Settings > Updates](zeron://settings/updates) gathers every update in one page:
+[Settings > Devices & updates > Updates](zeron://settings/updates) gathers every update in one page:
 
 - **This Mac**: **Version** shows the version you run and the same steps as the rail button: **Check for Updates**, **Checking…**, **Download**, **Downloading…**, **Restart to update**, or **Retry** when a check or download failed. **Automatic updates** downloads in the background and installs when Zeron quits.
 - **Agent CLIs**: each agent CLI installed on this Mac with its version and the new one, its **Update policy** (**Notify**, **Auto when idle**, or **Off**) and **Update**. **Update all** updates every agent that has one.
@@ -28,31 +28,27 @@ Some copies of Zeron cannot replace themselves, and the button says so:
 
 **Update everything** in the page header opens a dialog that lists this Mac with what will update: Zeron itself, which restarts last, and its agent CLIs, with how many running threads will be interrupted. Other devices are listed under **skipped** with "update on that device". Click **Update** to start, or **Cancel**.
 
-![Settings > Updates](settings-updates.jpg)
+![The Updates page in Settings > Devices & updates](updates-page.jpg)
 
-To check by hand, choose **Zeron > Check for Updates…** in the menu bar on macOS, or **Check for updates** in the account menu on Windows and Linux. The dialog tells you whether **Zeron is up to date**, or offers **Download** and then **Restart to update**. **Later** closes it without restarting.
+To check by hand, choose **Zeron > Check for Updates…** in the menu bar on macOS, or **Check for Updates** in [Settings > Devices & updates > Updates](zeron://settings/updates) on Windows and Linux. The dialog tells you whether **Zeron is up to date**, or offers **Download** and then **Restart to update**. **Later** closes it without restarting.
 
 From a terminal, `zeron update` checks and installs in one step, and `zeron update --check` only reports.
 
 ## Updating agents
 
-On the new chat canvas, a small card at the bottom lists agent CLIs (Claude, Codex, and others) with an update, across your devices. Each row shows the installed and new version and an **Update** button, or **View steps** when Zeron cannot install that agent for you. While an update runs you can **Cancel** it. A failed update offers **Retry update**, and a failed check offers **Check again**. A busy agent shows "Waiting for the current run" and updates once the run ends.
+When agent CLIs (Claude, Codex, and others) have an update on any of your devices, the **Help** menu in the app rail shows **Agent updates** with how many; click it to open [Settings > Devices & updates > Updates](zeron://settings/updates), where each agent has **Update** and **Update all** updates every agent that has one. On a new install, setup's **Your agents** step shows the same count with **Update all**.
 
-![Agent updates waiting on the new chat canvas](updates-agent-card.jpg)
-
-When two or more updates are waiting, the app itself included, the card shows **Update all**. The dialog lists each machine with what will update there; the app restarts last. Running threads are interrupted and pick up again after the restart. Click **Update** to start.
-
-[Settings > Updates](zeron://settings/updates) sets each agent's **Update policy**: **Notify**, **Auto when idle**, or **Off**. The refresh button in the header of [Settings > Providers](zeron://settings/providers) looks for new versions.
+[Settings > Devices & updates > Updates](zeron://settings/updates) sets each agent's **Update policy**: **Notify**, **Auto when idle**, or **Off**. The refresh button in the header of [Settings > Providers](zeron://settings/providers) looks for new versions.
 
 ## Resuming after a usage limit
 
-When a thread stops on a plan's usage limit, a pill above the composer says when the limit resets, for example "Usage limit · resumes 3:45 PM". Zeron continues the thread on its own shortly after the reset. Click **Cancel** on the pill to keep that thread stopped, or **Resume at reset** to turn it back on.
+When a thread stops on a plan's usage limit, a notice inside that chat's composer says so. While Zeron waits to continue the thread on its own shortly after the reset, it reads, for example, "Waiting for the Claude Code reset at 4:10 PM." with **Cancel** to keep the thread stopped. Otherwise it reads, for example, "**Claude Code 5-hour limit reached.** Resets at 4:10 PM." with **Wait for reset**, which turns the automatic resume back on, and **Switch model** (or **Switch to** a model Zeron offers) to go on with another model now. The usage ring in the rail turns red with a **!** while a chat waits.
 
 This follows **Auto-resume after usage limits** in [Settings > Providers](zeron://settings/providers), which is on by default and set per device.
 
 ## What's new
 
-After an update, a card at the bottom of the sidebar names the release's headline feature, and counts the release's smaller changes, such as "+ 9 improvements and fixes". Click **See what's new** to open the **What's new?** dialog with that release's highlights, or click the **×** to dismiss the card. Each new feature has its own section, most with a moving picture; the smaller changes follow as one list under **Improvements and fixes**. In the dialog, **View changelog** shows the **Changelog**: every release, newest first, each one expandable. **Got it** closes the dialog.
+After an update, a card at the bottom of the sidebar names the release's headline feature, and counts the release's smaller changes, such as "+ 9 improvements and fixes". Click **See what's new** to open the **What's new?** dialog with that release's highlights; when more than one release came out since you last looked, it opens the **Changelog** with each of those releases unfolded instead. You can also click the **×** to dismiss the card. Each new feature has its own section, most with a moving picture; the smaller changes follow as one list under **Improvements and fixes**. In the dialog, **View changelog** shows the **Changelog**: every release, newest first, each one expandable. **Got it** closes the dialog.
 
 ![The What's new card](updates-whats-new-card.jpg)
 
@@ -64,23 +60,12 @@ On iPhone, the same card shows above the tabs after an update, and **Settings** 
 
 The question-mark button in the app rail (**Help**) opens a menu with:
 
-- **What's new**: the three most recent releases, each with its headline and date. Click one to read it in the changelog.
-- **Full changelog**: the complete [changelog](zeron://changelog).
-- **Keybindings**: opens [Settings > Shortcuts](zeron://settings/shortcuts).
 - **Docs**: opens these help pages. See [Getting around](zeron://docs/getting-around).
-- **New since 0.2.114**: shows the introduction to what changed since 0.2.114 again.
+- **What's New**: the latest release's highlights, with **View changelog** for every release.
+- **Keyboard shortcuts**: opens [Settings > General > Shortcuts](zeron://settings/shortcuts).
+- **Star Zeron on GitHub**: opens the repository in your browser.
+- **Agent updates**, when an agent CLI has an update: how many, and a click opens [Settings > Devices & updates > Updates](zeron://settings/updates).
 
-## Introductions
+## One sheet per launch
 
-When a release brings something you have not used yet, Zeron introduces it once in a sheet over the window, with a picture on each page, page dots, **Not now** and **Next**. The left and right arrow keys turn the pages and Escape closes the sheet.
-
-**New since 0.2.114** has four pages: **Tasks is home for missions**, **A mission's tabs travel together**, **Missions on the sidebar**, and **Ask the Supervisor about any thread**. **Open Tasks** on its last page opens [Tasks](zeron://docs/tasks).
-
-![The New since 0.2.114 sheet](updates-new-since.jpg)
-
-An introduction stays out of your way:
-
-- Once you close it, with **Not now** or its last button, it does not come back on its own. The **Help** menu above shows it again.
-- A page about something you have already used is left out. Opening Tasks, folding a mission's tab group, opening a mission's steps on the sidebar, and opening the Supervisor's **Conversation** each count. When every page is covered, the sheet does not appear at all.
-- A new install skips the introductions to earlier releases, since everything is new to it.
-- At most one introduction appears each time Zeron starts, and only after sign-in and sync are done. Another one waits for the next start.
+Zeron shows at most one sheet each time it starts. A new install opens on setup in three steps: a welcome that offers sync (**Use without an account** keeps everything on this device), **Your agents**, and a last step with a link to these docs. After an update it is the What's new card above, and only one card is shown however many releases you skipped. How Tasks and plans work is in [Tasks](zeron://docs/tasks) and [Agent trees and plans](zeron://docs/mission-control).

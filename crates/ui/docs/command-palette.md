@@ -23,9 +23,11 @@ Thread search includes archived threads and ignores the sidebar's project filter
 
 ## Commands
 
-The commands include **New chat**, **New terminal**, **New project**, **Open settings**, **Open inbox**, **Open usage**, **Tasks**, a light or dark theme switch, and **Archive thread** for the open chat. Each row shows its shortcut when it has one. In a chat, the palette also lists the project's actions, plus **Add action…** to create one.
+The commands include **New chat**, **New terminal**, **New project**, **Open settings**, **Open inbox**, **Open Supervisor**, **Open usage**, **Tasks**, and **Archive thread** for the open chat. Each row shows its shortcut when it has one. Light and dark are set in [Settings > Appearance](zeron://settings/appearance), not here.
 
-Opening a thread switches to it. Opening a file shows it in the right pane; a content match opens the file at that line.
+In a chat, the palette also lists **Add action…** to create a project action, and the actions the project's `zeron.json` offers, tagged **Import**; either opens the action editor. The palette does not run actions: run them from **Actions** in the [Live state](zeron://docs/live-state) column. See [Projects](zeron://docs/projects).
+
+Opening a thread switches to it. A child thread, such as a fork, a side chat or a thread an agent started, opens as a tab in its parent's right pane instead. Opening a file shows it in the right pane; a content match opens the file at that line.
 
 > Drag a thread row out of the palette to drop it where a sidebar row can go, such as a split side or a composer to mention it. If the drop misses, the palette comes back.
 
@@ -35,7 +37,7 @@ Hold Ctrl and press Tab to open the switcher: a row of cards for your sessions, 
 
 ![The Ctrl+Tab session switcher](palette-switcher.jpg)
 
-Each card shows the last view of that session, its title, project and device, and a status: **Working**, **Input**, **Failed**, or **Done**. When the right pane has focus, Ctrl+Tab cycles the right pane's tabs instead.
+Each card shows the last view of that session, its title, project and device, and a status: **Working**, **Asking**, **Failed**, or **Done**. When the right pane has focus, Ctrl+Tab cycles the right pane's tabs instead.
 
 [Settings > General](zeron://settings/general) controls the switcher:
 

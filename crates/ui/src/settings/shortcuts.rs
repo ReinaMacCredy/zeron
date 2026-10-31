@@ -891,7 +891,8 @@ pub(super) fn group(id: ShortcutId) -> &'static str {
         ShortcutId::ToggleSidebar
         | ShortcutId::ToggleChanges
         | ShortcutId::ToggleFiles
-        | ShortcutId::ToggleTerminal => "Panels",
+        | ShortcutId::ToggleTerminal
+        | ShortcutId::ToggleTray => "Panels",
         ShortcutId::NewProject => "Projects",
         ShortcutId::ToggleDictation => "Voice",
         ShortcutId::OpenModelPicker

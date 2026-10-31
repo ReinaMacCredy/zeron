@@ -153,6 +153,51 @@ pub fn active_after_close(active: usize, closed: usize, len_after: usize) -> usi
     }
 }
 
+/// The last [`zeron_proto::COMMAND_EXIT_OSC`] status a project action's shell printed.
+#[derive(Default)]
+struct CommandExit {
+    tail: Vec<u8>,
+    status: Option<i32>,
+}
+
+impl CommandExit {
+    fn feed(&mut self, bytes: &[u8]) {
+        let prefix = format!("\x1b]{};", zeron_proto::COMMAND_EXIT_OSC).into_bytes();
+        let mut buf = std::mem::take(&mut self.tail);
+        buf.extend_from_slice(bytes);
+        let mut from = 0;
+        while let Some(at) = buf[from..]
+            .windows(prefix.len())
+            .position(|window| window == prefix.as_slice())
+        {
+            let start = from + at;
+            let body = start + prefix.len();
+            let digits = buf[body..]
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .count();
+            match buf.get(body + digits) {
+                Some(0x07) if digits > 0 => {
+                    self.status = std::str::from_utf8(&buf[body..body + digits])
+                        .ok()
+                        .and_then(|code| code.parse().ok());
+                    from = body + digits + 1;
+                }
+                None if digits <= 10 => {
+                    self.tail = buf[start..].to_vec();
+                    return;
+                }
+                _ => from = body,
+            }
+        }
+        let partial = (1..prefix.len())
+            .rev()
+            .find(|len| buf.ends_with(&prefix[..*len]))
+            .unwrap_or(0);
+        self.tail = buf[buf.len() - partial..].to_vec();
+    }
+}
+
 /// The `[process exited N]` trailer, dimmed (§1.10).
 pub fn exit_message(code: i32) -> Vec<u8> {
     format!("\r\n\x1b[90m[process exited {code}]\x1b[0m\r\n").into_bytes()
@@ -284,6 +329,7 @@ fn selection_scroll_lines(geometry: GridGeometry, position: gpui::Point<Pixels>)
 struct TerminalTab {
     key: u64,
     title: SharedString,
+    pinned_title: bool,
     terminal_id: Option<String>,
     target_device_id: Option<String>,
     emulator: Emulator,
@@ -293,6 +339,7 @@ struct TerminalTab {
     /// Fractional wheel rows owed to a program (reports / arrow keys).
     wheel_remainder: f32,
     exited: Option<i32>,
+    command_exit: Option<CommandExit>,
     last_seq: u64,
     pushed_selection: Option<String>,
     input: InputQueue,
@@ -536,7 +583,7 @@ impl TerminalPanel {
     /// "Terminal N".
     fn display_title(tab: &TerminalTab) -> SharedString {
         match tab.emulator.title().map(str::trim) {
-            Some(title) if !title.is_empty() => title.to_string().into(),
+            Some(title) if !title.is_empty() && !tab.pinned_title => title.to_string().into(),
             _ => tab.title.clone(),
         }
     }
@@ -562,7 +609,12 @@ impl TerminalPanel {
     pub fn exit_codes(&self) -> Vec<(u64, Option<i32>)> {
         self.chats
             .values()
-            .flat_map(|tabs| tabs.tabs.iter().map(|t| (t.key, t.exited)))
+            .flat_map(|tabs| {
+                tabs.tabs.iter().map(|t| {
+                    let ended = t.command_exit.as_ref().and_then(|scan| scan.status);
+                    (t.key, t.exited.or(ended))
+                })
+            })
             .collect()
     }
 
@@ -588,12 +640,14 @@ impl TerminalPanel {
         entry.tabs.push(TerminalTab {
             key,
             title: title.into(),
+            pinned_title: false,
             terminal_id: None,
             target_device_id: None,
             emulator: Emulator::new(80, 24),
             scroll_remainder: 0.0,
             wheel_remainder: 0.0,
             exited: None,
+            command_exit: None,
             last_seq: 0,
             pushed_selection: None,
             input: InputQueue::default(),
@@ -607,6 +661,20 @@ impl TerminalPanel {
         });
         entry.active = entry.tabs.len() - 1;
         cx.notify();
+        key
+    }
+
+    pub fn reserve_action_tab_for_chat(
+        &mut self,
+        chat: String,
+        title: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let key = self.reserve_tab_for_chat(chat.clone(), title, cx);
+        if let Some(tab) = self.tab_mut(&chat, key) {
+            tab.pinned_title = true;
+            tab.command_exit = Some(CommandExit::default());
+        }
         key
     }
 
@@ -1002,7 +1070,11 @@ impl TerminalPanel {
         match event {
             TerminalEvent::Data { seq, data } => {
                 tab.last_seq = seq;
-                let responses = tab.emulator.feed(&decode_base64(&data));
+                let bytes = decode_base64(&data);
+                if let Some(scan) = tab.command_exit.as_mut() {
+                    scan.feed(&bytes);
+                }
+                let responses = tab.emulator.feed(&bytes);
                 if tab.emulator.alt_screen() {
                     tab.predictor.reset();
                 }
@@ -2897,6 +2969,19 @@ mod tests {
         assert_eq!(active_after_close(1, 1, 2), 1); // close active mid-list
         assert_eq!(active_after_close(2, 2, 2), 1); // close active at tail
         assert_eq!(active_after_close(0, 0, 0), 0); // last tab closed
+    }
+
+    #[test]
+    fn command_exit_reads_a_report_split_across_chunks() {
+        let mut scan = CommandExit::default();
+        scan.feed(b"npm run dev\r\n^C\r\n\x1b]75");
+        assert_eq!(scan.status, None);
+        scan.feed(b"02;13");
+        assert_eq!(scan.status, None);
+        scan.feed(b"0\x07\x1b]7502;x\x07% ");
+        assert_eq!(scan.status, Some(130));
+        scan.feed(b"\x1b]7502;0\x07");
+        assert_eq!(scan.status, Some(0));
     }
 
     #[test]

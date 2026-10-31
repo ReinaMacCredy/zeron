@@ -359,6 +359,7 @@ fn launch_project_action_with_environment(
         rows,
         &environment,
         &action.command,
+        true,
     )?;
     Ok(ProjectActionRun {
         action_id: action.id.clone(),

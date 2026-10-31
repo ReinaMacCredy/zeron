@@ -2008,7 +2008,7 @@ mod tests {
                         .unwrap()
                         .read(cx)
                         .embedded_harness(),
-                    Some(zeron_proto::HarnessId::Codex)
+                    zeron_proto::HarnessId::Codex
                 );
                 assert_eq!(page.pending_sign_in, None, "started once");
             })
@@ -2057,7 +2057,7 @@ mod tests {
                         .unwrap()
                         .read(cx)
                         .embedded_harness(),
-                    Some(zeron_proto::HarnessId::ClaudeCode)
+                    zeron_proto::HarnessId::ClaudeCode
                 );
             })
             .unwrap();
@@ -2073,7 +2073,7 @@ mod tests {
                         .unwrap()
                         .read(cx)
                         .embedded_harness(),
-                    Some(zeron_proto::HarnessId::Codex)
+                    zeron_proto::HarnessId::Codex
                 );
             })
             .unwrap();
@@ -2093,7 +2093,7 @@ mod tests {
                         .unwrap()
                         .read(cx)
                         .embedded_harness(),
-                    Some(zeron_proto::HarnessId::Antigravity)
+                    zeron_proto::HarnessId::Antigravity
                 );
             })
             .unwrap();

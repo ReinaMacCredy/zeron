@@ -117,14 +117,6 @@ fn live_sessions(
 }
 
 impl Shell {
-    pub(super) fn toggle_pr_chat(&mut self, cx: &mut Context<Self>) {
-        if self.pr_chat_expanded(cx) {
-            self.fold_pr_chat(cx);
-        } else {
-            self.reveal_pr_chat(cx);
-        }
-    }
-
     pub(super) fn pr_chat_expanded(&self, cx: &App) -> bool {
         self.shown_pull_request_detail(cx)
             .is_some_and(|page| page.read(cx).chat_expanded())
@@ -2386,12 +2378,9 @@ mod tests {
             assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, chat_id, "kept");
         });
 
-        shell.update(cx, |shell, cx| shell.toggle_pr_chat(cx));
+        shell.update(cx, |shell, cx| shell.reveal_pr_chat(cx));
         settle(cx);
-        assert!(
-            cx.debug_bounds("pr-chat-sheet").is_some(),
-            "the toggle unfolds"
-        );
+        assert!(cx.debug_bounds("pr-chat-sheet").is_some(), "reveal unfolds");
         cx.update(|window, cx| {
             assert!(
                 composer
@@ -3141,7 +3130,7 @@ mod tests {
 
         shell.update(cx, |shell, cx| shell.fold_pr_chat(cx));
         set_last_message(&shell, cx, "old", chrono::Duration::hours(2));
-        shell.update(cx, |shell, cx| shell.toggle_pr_chat(cx));
+        shell.update(cx, |shell, cx| shell.reveal_pr_chat(cx));
         shell.read_with(cx, |shell, cx| {
             let panel = shell.pr_chat.as_ref().unwrap();
             assert_ne!(panel.chat_id, "old", "the kept panel expires too");
@@ -3310,7 +3299,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cmd_j_toggles_the_terminal_in_a_chat_and_the_ai_chat_on_a_pull_request(
+    fn cmd_j_toggles_the_terminal_in_a_chat_and_leaves_a_pull_request_alone(
         cx: &mut TestAppContext,
     ) {
         let (runtime, shell, cx, mut wire, _dir) = setup(cx);
@@ -3338,26 +3327,12 @@ mod tests {
         wire.serve(&runtime, cx, |_, _| None);
         settle(cx);
         assert!(
-            cx.debug_bounds("pr-chat-bar").is_some(),
-            "the toggle expands"
+            cx.debug_bounds("pr-chat-bar").is_none(),
+            "only the orb expands the chat"
         );
-        assert!(cx.debug_bounds("pr-comment-surface").is_some());
-        cx.update(|window, cx| {
-            shell.update(cx, |shell, cx| {
-                assert!(shell.pr_chat_owns_focus(window, cx), "focuses the bar");
-                assert!(!shell.pr_chat_sheet_open(cx), "nothing to show yet");
-                assert!(!shell.panels.get(&key).terminal_open);
-            })
+        shell.read_with(cx, |shell, _| {
+            assert!(!shell.panels.get(&key).terminal_open);
         });
-        fill(&shell, cx, "Done.");
-        shell.read_with(cx, |shell, cx| assert!(shell.pr_chat_sheet_open(cx)));
-        cx.simulate_keystrokes(combo);
-        shell.read_with(cx, |shell, cx| {
-            assert!(!shell.pr_chat_sheet_open(cx));
-            assert!(!shell.pr_chat_expanded(cx));
-        });
-        cx.simulate_keystrokes(combo);
-        shell.read_with(cx, |shell, cx| assert!(shell.pr_chat_sheet_open(cx)));
     }
 
     fn composer_focused(composer: &Entity<Composer>, cx: &mut VisualTestContext) -> bool {

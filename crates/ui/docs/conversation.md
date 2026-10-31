@@ -32,21 +32,23 @@ While you are at the end of the chat, it follows new output as it arrives. Scrol
 
 ## Fork or rewind
 
-**Fork from a reply.** Hover a reply and click the branch icon. The **Fork chat from here** dialog shows which reply you picked. Click **Fork in this workspace** to start a new chat with the conversation up to and including that reply; the original chat stays as it is. The new chat opens, and its transcript starts with a **Forked from** marker naming the source chat. Click the marker to go back to the source.
+**Fork from a reply.** Hover a reply and click the branch icon (**Fork chat from here**). Zeron copies the conversation up to and including that reply into a new chat and opens it right away as a **Fork** tab in the [right pane](zeron://docs/right-pane); there is no dialog, and the original chat stays as it is. The fork starts a fresh session with the agent. Its transcript starts with a **Forked from** marker naming the source chat. Click the marker to go back to the source.
 
 **Rewind to a prompt.** Hover one of your prompts and click the restart icon. The **Rewind to here** dialog offers **Restore conversation**: it removes this prompt and everything after it and puts the prompt back in the composer so you can edit and resend it. Files on disk stay as they are; only the conversation is rewound.
 
-When the icon is dimmed, the action is not available, and clicking it shows the reason in the composer:
+When the rewind icon is dimmed, rewind is not available, and clicking it shows the reason in the composer:
 
-- **Cursor does not support fork or rewind** (or the name of your agent): this agent cannot branch a conversation.
-- **Stop the running turn before rewinding**: rewind waits until the agent is idle. Forking works while it runs.
+- **Cursor does not support rewind** (or the name of your agent): this agent cannot rewind a conversation.
+- **Stop the running turn before rewinding**: rewind waits until the agent is idle.
+
+Fork is always offered. Forking a reply that is still being written fails with **Wait for the reply to finish.**
 
 Prompts that have not been sent yet and subagent transcripts have no fork or rewind.
 
 Two other ways to branch a chat:
 
-- **Fork chat** in the **Live state** column copies the conversation through the latest finished reply into a new chat in the right pane. See [The Live state column](zeron://docs/live-state).
-- A sidechat answers a quick question on the side without changing this chat. See [Side questions with /btw](zeron://docs/side-chat). A sidechat's transcript starts with a **Sidechat of** marker.
+- **Fork this chat**, on the **Chats** header of the right pane's **Files** tab, copies the conversation through the latest finished reply into a new chat in a **Fork** tab. The **+** next to it (**New side chat**) starts a side chat.
+- A side chat answers a quick question on the side without changing this chat. Open one with `/btw`, Cmd+;, or the **Side chat** tab on the composer; it opens as a tab in the right pane. See [Side questions with /btw](zeron://docs/side-chat). A side chat's transcript starts with a **Sidechat of** marker.
 
 ## Links
 
@@ -104,7 +106,7 @@ Inside a group, each chip names one call. Click a chip to see exactly what ran a
 
 | On a chip | What it does |
 | --- | --- |
-| A file name | Opens the file in the right pane: a **Working tree** Diffs tab scrolled to it when the file has uncommitted changes, otherwise the file itself. |
+| A file name | Opens the file in the right pane: the **Changes** tab on its **Working tree** diff, scrolled to the file, when the file has uncommitted changes, otherwise the file itself. |
 | A violet skill name | Opens that skill's `SKILL.md`. See [Commands and mentions](zeron://docs/commands-and-mentions). |
 | **Show full output** / **Show full diff** | Long output is cut short; this loads the rest. The label may include the size, such as **Show full output (12 KB)**. |
 
@@ -114,7 +116,7 @@ When the agent asked you a question, a **Question** row stays in the transcript 
 
 ## Compact mode
 
-Turn on **Compact mode** ("Collapse thinking and tools.") in [Settings > Chat](zeron://settings/chat) to see less of the work. Each turn's tool calls, thinking, subagent chips, and in-between text fold under one header, and only the final reply stays in view. Text the agent wrote along the way becomes **Wrote** chips. Nothing opens by itself; click the header to look inside.
+Turn on **Compact mode** ("Collapse thinking and tools.") in [Settings > General > Chat](zeron://settings/chat) to see less of the work. Each turn's tool calls, thinking, subagent chips, and in-between text fold under one header, and only the final reply stays in view. Text the agent wrote along the way becomes **Wrote** chips. Nothing opens by itself; click the header to look inside.
 
 While the turn runs, the header sums up the work. When the turn finishes, it changes to **Worked for** and the time, such as **Worked for 1m 35s**.
 
@@ -131,7 +133,7 @@ The row can also read:
 | **Queued — will send automatically** | You are offline. Your message is saved and goes out when the connection is back. |
 | **Not delivered — click to retry** | The message did not reach the agent. Click to send it again. |
 
-The agent can run shell commands in the background. While any run, a **N Running** pill shows near the composer. Click it to list them under **Background shells**; open one to read its latest output, **Copy** it, or stop it. The separate pill for subagents is covered in [Delegation and subagents](zeron://docs/delegation).
+The agent can run shell commands in the background. While any run, each shows as a row under **Beside this thread** in the [Live state](zeron://docs/live-state) column, with how long it has run; hover a row and click **Stop** to end it, or click **Stop all** at the foot of the section to stop every agent and shell. Subagents are covered in [Delegation and subagents](zeron://docs/delegation).
 
 To stop the agent, see [The composer](zeron://docs/composer).
 

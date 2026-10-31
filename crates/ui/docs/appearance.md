@@ -1,8 +1,10 @@
 [Settings > Appearance](zeron://settings/appearance) controls how Zeron looks: light or dark, themes, fonts, glass, and background art.
 
+The page opens on the basics: light or dark, themes, accent, fonts and **Reduce motion**. The look-only controls (**Match wallpaper colors**, glass, inset card, sidebar reveal, background art, animations and scrolling, the theme library, and math) sit under **Advanced look**, folded until you click it. Searching Settings for one of them opens the fold.
+
 ## Color scheme and themes
 
-Pick **System**, **Light**, or **Dark** at the top of the page. **System** follows macOS. The same choice is in the menu bar under **View** (**Appearance: System**, **Appearance: Light**, **Appearance: Dark**), and in the command palette.
+Pick **System**, **Light**, or **Dark** at the top of the page. **System** follows macOS. This is the only place light and dark are set.
 
 ![Theme and accent settings](appearance-themes.jpg)
 
@@ -55,4 +57,4 @@ Zeron typesets LaTeX math in messages, Markdown file previews, and pull request 
 
 These read as math: `$…$` or `\(…\)` for a formula inside a line, and `$$…$$` or `\[…\]` for one on its own line. Dollar signs in prices and shell variables stay text, so `$5`, `costs $5 and $10 total`, `$HOME/$USER`, and `echo $PATH and $HOME` show as written, and so does a closing `$` followed by a digit, as in `$x$5`. Nothing inside code spans or code blocks is math. A formula Zeron cannot typeset shows its source as code, as with **Render math** off. Copying a formula copies its source, with its `$` or `$$` delimiters.
 
-> **Compact mode** is in [Settings > Chat](zeron://settings/chat), not here. It collapses thinking and tool calls so only the replies stay in view. For one-line sidebar rows, use **Compact** in the sidebar's **…** menu.
+> **Compact mode** is in [Settings > General > Chat](zeron://settings/chat), not here. It collapses thinking and tool calls so only the replies stay in view. For one-line sidebar rows, use **Compact** in the sidebar's **…** menu.

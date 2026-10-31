@@ -48,6 +48,18 @@ pub const IMAGES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/assets/whats_new/kanban.jpg"),
     ),
     (
+        "triage-tray.jpg",
+        include_bytes!("../../ui/assets/whats_new/triage-tray.jpg"),
+    ),
+    (
+        "plan-card.jpg",
+        include_bytes!("../../ui/assets/whats_new/plan-card.jpg"),
+    ),
+    (
+        "updates-page.jpg",
+        include_bytes!("../../ui/assets/whats_new/updates-page.jpg"),
+    ),
+    (
         "usage.jpg",
         include_bytes!("../../ui/assets/whats_new/usage.jpg"),
     ),
@@ -84,8 +96,8 @@ pub const IMAGES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/assets/whats_new/new-chat-canvas.jpg"),
     ),
     (
-        "new-chat-mission.jpg",
-        include_bytes!("../../ui/assets/whats_new/new-chat-mission.jpg"),
+        "new-chat-plan.jpg",
+        include_bytes!("../../ui/assets/whats_new/new-chat-plan.jpg"),
     ),
     (
         "composer-queue.jpg",
@@ -160,14 +172,6 @@ pub const IMAGES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/assets/whats_new/updates-whats-new-card.jpg"),
     ),
     (
-        "updates-agent-card.jpg",
-        include_bytes!("../../ui/assets/whats_new/updates-agent-card.jpg"),
-    ),
-    (
-        "updates-new-since.jpg",
-        include_bytes!("../../ui/assets/whats_new/updates-new-since.jpg"),
-    ),
-    (
         "providers-add.jpg",
         include_bytes!("../../ui/assets/whats_new/providers-add.jpg"),
     ),
@@ -188,8 +192,8 @@ pub const IMAGES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/assets/whats_new/threads-from-row.jpg"),
     ),
     (
-        "side-chat-tabs.jpg",
-        include_bytes!("../../ui/assets/whats_new/side-chat-tabs.jpg"),
+        "side-chat-pane.jpg",
+        include_bytes!("../../ui/assets/whats_new/side-chat-pane.jpg"),
     ),
     (
         "handoff-menu.jpg",
@@ -216,10 +220,6 @@ pub const IMAGES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/assets/whats_new/agent-questions-panel.jpg"),
     ),
     (
-        "agent-questions-pill.jpg",
-        include_bytes!("../../ui/assets/whats_new/agent-questions-pill.jpg"),
-    ),
-    (
         "agent-tools-settings.jpg",
         include_bytes!("../../ui/assets/whats_new/agent-tools-settings.jpg"),
     ),
@@ -232,8 +232,8 @@ pub const IMAGES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/assets/whats_new/projects-actions.jpg"),
     ),
     (
-        "right-pane-menu.jpg",
-        include_bytes!("../../ui/assets/whats_new/right-pane-menu.jpg"),
+        "right-pane-tabs.jpg",
+        include_bytes!("../../ui/assets/whats_new/right-pane-tabs.jpg"),
     ),
     (
         "right-pane-diffs.jpg",

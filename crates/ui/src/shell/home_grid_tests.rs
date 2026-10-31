@@ -73,34 +73,36 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
 }
 
 #[gpui::test]
-fn home_grid_sits_below_a_raised_composer(cx: &mut TestAppContext) {
+fn new_work_cards_sit_below_a_raised_composer(cx: &mut TestAppContext) {
     let (_shell, cx) = setup(cx);
     let pill = cx.debug_bounds("composer-surface").expect("composer");
-    let customize = cx.debug_bounds("home-customize").expect("home grid");
-    assert!(customize.top() > pill.bottom(), "{customize:?} vs {pill:?}");
+    let cards = cx.debug_bounds("new-work-cards").expect("cards");
+    let customize = cx.debug_bounds("home-customize").expect("home widgets");
+    assert!(cards.top() > pill.bottom(), "{cards:?} vs {pill:?}");
+    assert!(
+        customize.top() > cards.bottom(),
+        "{customize:?} vs {cards:?}"
+    );
     let centered = (1000.0 - f32::from(pill.size.height)) * 0.5;
     assert!(
         f32::from(pill.top()) < centered,
-        "composer stays raised while widgets show: {pill:?}"
+        "composer stays raised over the cards: {pill:?}"
     );
 }
 
 #[gpui::test]
-fn turning_every_widget_off_restores_the_centered_hero(cx: &mut TestAppContext) {
+fn turning_every_widget_off_keeps_the_cards(cx: &mut TestAppContext) {
     let (_shell, cx) = setup(cx);
     cx.update(|_, cx| {
         settings::update_home_widgets(cx, |widgets| {
             *widgets = settings::HomeWidgets {
-                working_now: false,
-                missions: false,
                 pull_requests: false,
                 git_activity: false,
                 this_mac: false,
                 running_services: false,
-                recent_areas: false,
                 ci_failures: false,
                 services_all_ports: false,
-                collapsed: false,
+                collapsed: true,
             }
         })
     });
@@ -108,7 +110,5 @@ fn turning_every_widget_off_restores_the_centered_hero(cx: &mut TestAppContext) 
         cx.update(|window, cx| window.draw(cx).clear());
     }
     assert!(cx.debug_bounds("home-customize").is_none());
-    let pill = cx.debug_bounds("composer-surface").expect("composer");
-    let composer_top = f32::from(pill.top());
-    assert!(composer_top > 300.0, "centered again: {pill:?}");
+    assert!(cx.debug_bounds("new-work-cards").is_some());
 }

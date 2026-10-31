@@ -78,7 +78,6 @@ const RAIL_IN: MotionSpec = MotionSpec::new(160, motion::EASE_OUT);
 const STATUS_GROW: MotionSpec = MotionSpec::new(220, EASE_PAGE);
 const STATUS_FADE: MotionSpec = MotionSpec::new(160, motion::EASE_OUT);
 const DOT_FLASH: MotionSpec = MotionSpec::new(900, motion::EASE_OUT);
-pub(crate) const BADGE_POP: MotionSpec = MotionSpec::new(400, motion::LINEAR);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NeedsYouRoute {
@@ -117,16 +116,6 @@ pub(crate) fn fresh_needs_you(
     fresh
 }
 
-pub(crate) fn badge_scale(t: f32) -> f32 {
-    let rise = 0.4;
-    let peak = if t < rise {
-        motion::EASE_OUT.eval(t / rise)
-    } else {
-        1.0 - motion::EASE_OUT.eval((t - rise) / (1.0 - rise))
-    };
-    1.0 + 0.35 * peak
-}
-
 fn no_effect_since(at: DateTime<Utc>) -> DateTime<Utc> {
     at + chrono::Duration::minutes(NO_EFFECT_AFTER_MINUTES)
 }
@@ -136,6 +125,14 @@ pub(crate) fn no_effect_yet(row: &SupervisorIntervention, now: DateTime<Utc>) ->
 }
 
 pub(crate) use zeron_proto::mission::ApprovalState;
+
+/// Desktop names the page Tasks; the shared line keeps mobile's "mission page".
+pub(crate) fn approval_line(approval: ApprovalState) -> String {
+    match approval {
+        ApprovalState::Started => "Approved by the Supervisor · steps already started. To change course, edit the plan on the task page or message the lead.".into(),
+        approval => approval.line(),
+    }
+}
 
 pub(crate) fn approval_state(
     row: &SupervisorIntervention,
@@ -183,7 +180,6 @@ pub enum SupervisorEvent {
     OpenChat(String),
     WatchDoc(Option<String>),
     Discuss(String),
-    ConversationOpened,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -314,7 +310,7 @@ fn intervention_kind_label(kind: InterventionKind) -> &'static str {
         InterventionKind::Send => "Message",
         InterventionKind::Respond => "Answer",
         InterventionKind::Rebrief => "Re-brief",
-        InterventionKind::Start => "Start a mission",
+        InterventionKind::Start => "Start a plan",
         InterventionKind::Pause => "Pause a step",
         InterventionKind::Resume => "Resume a step",
         InterventionKind::Decide => "Decision",
@@ -513,7 +509,7 @@ fn action_text(row: &SupervisorIntervention, state: &AppState, now: DateTime<Utc
         InterventionKind::Rebrief => format!("re-briefed {who}"),
         InterventionKind::Start => match mission_title(state, row.task_id.as_deref()) {
             Some(title) => format!("started {title}"),
-            None => "started a mission".into(),
+            None => "started a plan".into(),
         },
         InterventionKind::Pause => format!("paused {who}"),
         InterventionKind::Resume => format!("resumed {who}"),
@@ -546,7 +542,7 @@ fn last_parts(snapshot: &SupervisorSnapshot, state: &AppState, now: DateTime<Utc
 
 fn next_parts(snapshot: &SupervisorSnapshot, state: &AppState) -> Vec<Part> {
     let Some(check) = &snapshot.next_check else {
-        return vec![text("the next event from a watched mission")];
+        return vec![text("the next event from a watched task")];
     };
     let at = clock(check.at);
     let on = |what: &str, title: Option<String>, tail: String| match title {
@@ -681,10 +677,9 @@ fn verified_line(resource: &SharedResource, title: &dyn Fn(&str) -> String) -> O
                 .collect::<Vec<_>>()
                 .join("; "),
         ),
-        CheckTool::Ps if check.uses.is_empty() => (
-            "ps",
-            "no other mission used more than half a core".to_string(),
-        ),
+        CheckTool::Ps if check.uses.is_empty() => {
+            ("ps", "no other task used more than half a core".to_string())
+        }
         CheckTool::Ps => {
             let mut loads: Vec<(String, f32, String)> = Vec::new();
             for used in &check.uses {
@@ -1920,9 +1915,6 @@ impl SupervisorPage {
 
     fn toggle_conversation(&mut self, cx: &mut Context<Self>) {
         self.conversation_open = !self.conversation_open;
-        if self.conversation_open {
-            cx.emit(SupervisorEvent::ConversationOpened);
-        }
         self.conversation.retarget(
             if self.conversation_open { 1.0 } else { 0.0 },
             FOLD,
@@ -2503,7 +2495,7 @@ impl SupervisorPage {
                         vec![text(match (&self.ensure, snapshot) {
                             (_, None) => "Waiting for the engine to report the Supervisor.",
                             (Ensure::Running, _) => "Starting the Supervisor…",
-                            _ => "No Supervisor thread. Missions and trees run unwatched.",
+                            _ => "No Supervisor thread. Tasks and trees run unwatched.",
                         })],
                     )],
                 ),
@@ -2969,7 +2961,7 @@ impl SupervisorPage {
         }
         toggles.push((
             "supervisor-auth-start",
-            "Start a new mission",
+            "Start a new plan",
             settings.start_missions,
             |s, on| SupervisorSettings {
                 start_missions: on,
@@ -2987,7 +2979,7 @@ impl SupervisorPage {
         ));
         toggles.push((
             "supervisor-auth-goal",
-            "Change a mission's goal or spend",
+            "Change a task's goal or spend",
             settings.goal_and_spend,
             |s, on| SupervisorSettings {
                 goal_and_spend: on,
@@ -3426,7 +3418,7 @@ impl SupervisorPage {
                         .flex()
                         .justify_between()
                         .text_color(theme.text_muted)
-                        .child("This mission is gone.")
+                        .child("This task is gone.")
                         .child(close),
                 )
                 .into_any_element();
@@ -3761,10 +3753,10 @@ fn calm_line(
         );
     }
     let line = match (missions, watched) {
-        (0, _) => "Nothing watched is running. Start a mission, or Watch a tree.".into(),
+        (0, _) => "Nothing watched is running. Start a plan, or Watch a tree.".into(),
         (_, 0) => "No tree is watched. Turn Watched on for one below.".into(),
         (_, n) => format!(
-            "Watching {n} {}. A mission's open decisions arrive here as one sheet.",
+            "Watching {n} {}. A task's open decisions arrive here as one sheet.",
             plural(n, "tree", "trees")
         ),
     };
@@ -3797,7 +3789,7 @@ fn render_wake_log(wakes: &[SupervisorWake], theme: &Theme) -> AnyElement {
             .pb(px(8.0))
             .text_size(ui_rems(11.5))
             .text_color(theme.text_faint)
-            .child("No wakes yet. Events from watched missions wake it here.")
+            .child("No wakes yet. Events from watched tasks wake it here.")
             .into_any_element();
     }
     div()

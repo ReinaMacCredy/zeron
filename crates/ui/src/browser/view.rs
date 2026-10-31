@@ -456,14 +456,12 @@ impl BrowserSurface {
                 }
             }
         };
-        let right_occlusion = self.right_occlusion;
         let mut body = body.cursor(self.page_cursor).child(
             gpui::canvas(
                 |_, _, _| (),
                 move |bounds, _, window, _| {
-                    // The Files panel slides over the page from the right.
                     let mut mask = window.content_mask().bounds;
-                    let right = (window.viewport_size().width - right_occlusion).max(mask.left());
+                    let right = window.viewport_size().width.max(mask.left());
                     mask.size.width = mask.size.width.min(right - mask.left());
                     let scale = window.scale_factor();
                     let composition = window.native_composition();
@@ -760,15 +758,13 @@ impl Render for BrowserSurface {
             } else {
                 let native = native.handle();
                 let resize_inset = self.resize_inset;
-                let right_occlusion = self.right_occlusion;
                 body.child(
                     gpui::canvas(
                         |_, _, _| (),
                         move |bounds, _, window, cx| {
                             let native = std::rc::Rc::downgrade(&native);
                             let mut mask = window.content_mask().bounds;
-                            let right =
-                                (window.viewport_size().width - right_occlusion).max(mask.left());
+                            let right = window.viewport_size().width.max(mask.left());
                             mask.size.width = mask.size.width.min(right - mask.left());
                             let dragging = cx.has_active_drag();
                             // GPUIView refuses first responder, so a click on GPUI

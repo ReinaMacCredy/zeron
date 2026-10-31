@@ -64,7 +64,7 @@ impl Shell {
                 .role(gpui::Role::Button)
                 .aria_label(format!(
                     "{}: {}",
-                    zeron_proto::mission::OPEN_MISSION_PAGE,
+                    crate::tasks::OPEN_TASK_PAGE,
                     mission.title
                 ))
                 .flex_none()
@@ -74,7 +74,7 @@ impl Shell {
                 .whitespace_nowrap()
                 .text_color(theme.text)
                 .cursor_pointer()
-                .child(zeron_proto::mission::MISSION_PAGE)
+                .child(crate::tasks::TASK_PAGE)
                 .child(
                     icon(icons::LUCIDE_CHEVRON_RIGHT)
                         .size(px(12.0))
@@ -93,11 +93,7 @@ impl Shell {
             .aria_label(match open {
                 Some(true) => format!("Fold the steps of {}", mission.title),
                 Some(false) => format!("Show the steps of {}", mission.title),
-                None => format!(
-                    "{}: {}",
-                    zeron_proto::mission::OPEN_MISSION_PAGE,
-                    mission.title
-                ),
+                None => format!("{}: {}", crate::tasks::OPEN_TASK_PAGE, mission.title),
             })
             .when_some(open, |el, open| el.aria_expanded(open))
             .flex_none()
@@ -514,7 +510,15 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.open_chat(parent_chat_id.clone(), cx);
-        self.add_subagent_surface(parent_chat_id, doc_id, title, frozen, cx);
+        self.open_child(
+            super::children::ChildRef::Subagent {
+                chat_id: parent_chat_id,
+                doc_id,
+                title,
+                frozen,
+            },
+            cx,
+        );
     }
 
     fn strip_reveal(&mut self, chat_id: String, shown: bool) -> f32 {

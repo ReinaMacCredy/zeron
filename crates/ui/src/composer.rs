@@ -44,10 +44,10 @@ use crate::theme::Theme;
 mod ask_pill;
 mod claude_cards;
 pub(crate) mod claude_config;
-pub(crate) use ask_pill::pending_questions;
+pub(crate) use ask_pill::{AskInfo, pending_questions};
 pub(crate) mod background;
 mod chip;
-mod limit_pill;
+mod limit_notice;
 mod review_chip;
 mod staged_comments;
 pub use chip::ChipKind;
@@ -97,36 +97,32 @@ const QUEUE_SIDE_INSET: f32 = 16.0;
 pub(crate) const QUEUE_COMPOSER_OVERLAP: f32 = 18.0;
 const SIDECHAT_TAB_HEIGHT: f32 = 24.0;
 const SIDECHAT_TAB_RADIUS: f32 = 10.0;
-/// The original floating selector rows use the same 20px chip height as the
-/// established-thread footer. Their surrounding rows own no plate or border.
-const NEW_THREAD_SELECTOR_ROW_HEIGHT: f32 = 20.0;
 const HERO_HEADLINE_LINE: f32 = 38.0;
 const HERO_HEADLINE_GAP: f32 = 18.0;
 const HERO_SUBTITLE_LINE: f32 = 20.0;
-const RUNNING_TAB_FADE: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT);
-const MISSION_BORDER: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE);
-const MISSION_PLACEHOLDER: motion::MotionSpec = motion::MotionSpec::new(220, motion::EASE);
-const MISSION_EXTRAS: motion::MotionSpec =
-    motion::MotionSpec::new(280, motion::EASE).with_delay(60);
-const MISSION_SEND: motion::MotionSpec = motion::MotionSpec::new(280, motion::EASE_BOUNCE);
-const HOME_TAB_SLIDE: motion::MotionSpec = motion::MotionSpec::new(260, motion::EASE_BOUNCE);
-const START_MISSION_LABEL: &str = zeron_proto::mission::START_MISSION;
+const PLAN_BORDER: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE);
+const PLAN_PLACEHOLDER: motion::MotionSpec = motion::MotionSpec::new(220, motion::EASE);
+const PLAN_SEND: motion::MotionSpec = motion::MotionSpec::new(280, motion::EASE_BOUNCE);
+const START_PLAN_LABEL: &str = "Start plan";
+const CHIP_LABEL_MIN_WIDTH: f32 = 720.0;
+const PLAN_PLACEHOLDER_TEXT: &str =
+    "Describe the goal. The agent writes a plan and waits for your OK.";
+const PLAN_ONLY_PLACEHOLDER_TEXT: &str =
+    "Describe the goal. The agent writes a plan and changes nothing.";
 
-struct MissionMotion {
+struct PlanMotion {
     border: motion::Tween,
     placeholder: motion::Tween,
-    extras: motion::Tween,
     send: motion::Tween,
     placeholder_from: SharedString,
 }
 
-impl MissionMotion {
+impl PlanMotion {
     fn at(on: bool, now: Instant) -> Self {
         let value = if on { 1.0 } else { 0.0 };
         Self {
             border: motion::Tween::at(value, now),
             placeholder: motion::Tween::at(value, now),
-            extras: motion::Tween::at(value, now),
             send: motion::Tween::at(value, now),
             placeholder_from: SharedString::default(),
         }
@@ -136,25 +132,17 @@ impl MissionMotion {
         self.placeholder.target() > 0.5
     }
 
-    fn light(&mut self, lit: bool, reduced: bool, now: Instant) {
-        let to = if lit { 1.0 } else { 0.0 };
-        if self.border.target() != to {
-            self.border.retarget(to, MISSION_BORDER, reduced, now);
-        }
-    }
-
     fn retarget(&mut self, on: bool, placeholder_from: SharedString, reduced: bool, now: Instant) {
         let to = if on { 1.0 } else { 0.0 };
-        self.border.retarget(to, MISSION_BORDER, reduced, now);
+        self.border.retarget(to, PLAN_BORDER, reduced, now);
         self.placeholder
-            .retarget(to, MISSION_PLACEHOLDER, reduced, now);
-        self.extras.retarget(to, MISSION_EXTRAS, reduced, now);
-        self.send.retarget(to, MISSION_SEND, reduced, now);
+            .retarget(to, PLAN_PLACEHOLDER, reduced, now);
+        self.send.retarget(to, PLAN_SEND, reduced, now);
         self.placeholder_from = placeholder_from;
     }
 
     fn settled_at(&self, now: Instant) -> bool {
-        [self.border, self.placeholder, self.extras, self.send]
+        [self.border, self.placeholder, self.send]
             .iter()
             .all(|tween| tween.settled_at(now))
     }
@@ -6478,72 +6466,14 @@ pub enum ComposerEvent {
         title: String,
         frozen: bool,
     },
-    OpenChat(String),
     OpenChanges,
-    StartMission(MissionStart),
-    OpenTaskCenter(String),
     OpenTask(String),
-    PlanFirst,
     OpenUsage,
-}
-
-#[derive(Debug, Clone)]
-pub struct MissionStart {
-    pub key: String,
-    pub text: String,
-    pub chat_id: Option<String>,
-    pub space_id: Option<String>,
-    pub config: Option<zeron_proto::ChatConfig>,
-    pub orchestrate: crate::tasks::Orchestrate,
-    pub staged: SidechatStaged,
-    pub quotes: Vec<crate::quotes::Quote>,
-    pub comments: Vec<crate::comments::ReviewComment>,
-}
-
-impl MissionStart {
-    pub fn title_notes(&self) -> (String, String) {
-        let mut text = String::new();
-        let mut at = 0;
-        for mention in zeron_proto::attachment_mentions::attachment_mentions(&self.text) {
-            let Some(pasted) = self
-                .staged
-                .attachments
-                .iter()
-                .find(|att| att.mention == Some(mention.index) && att.image().is_none())
-            else {
-                continue;
-            };
-            text.push_str(&self.text[at..mention.range.start]);
-            text.push_str(&String::from_utf8_lossy(pasted.bytes()));
-            at = mention.range.end;
-        }
-        text.push_str(&self.text[at..]);
-        let text = zeron_proto::attachment_mentions::attachment_mention_prompt(&text);
-        let text = crate::quotes::with_quotes(&text, &self.quotes);
-        let text = crate::comments::with_comments(&text, &self.comments);
-        let text = text.trim();
-        let (title, notes) = text.split_once('\n').unwrap_or((text, ""));
-        let title = title.trim();
-        if title.chars().count() > zeron_doc::TASK_TITLE_MAX_CHARS {
-            let cut: String = title
-                .chars()
-                .take(zeron_doc::TASK_TITLE_MAX_CHARS)
-                .collect();
-            return (cut.trim_end().to_string(), text.to_string());
-        }
-        (title.to_string(), notes.trim().to_string())
-    }
-
-    pub fn images(&self) -> Vec<StagedAttachment> {
-        let staged = &self.staged;
-        staged
-            .attachments
-            .iter()
-            .filter(|att| att.image().is_some())
-            .chain(staged.appshots.iter().map(|appshot| &appshot.screenshot))
-            .cloned()
-            .collect()
-    }
+    AskAnswered {
+        chat_id: String,
+        request_id: String,
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6806,7 +6736,6 @@ use zeron_proto::command_catalog::{
 use zeron_proto::compaction::{
     RESUME_COMPACTION_TITLE, ResumeCompaction, compact_outcome_notice, resume_compaction_due,
 };
-use zeron_proto::sidechat::{SIDECHAT_TAB_PREFIX, sidechat_tab_label};
 
 /// Remote hosts own their grants, so only a macOS UI on the chat's host checks them.
 fn computer_preflight_applies(
@@ -6838,9 +6767,6 @@ fn zeron_owned_command_range(raw: &str) -> Option<Range<usize>> {
     let end = name.as_ptr() as usize - raw.as_ptr() as usize + name.len();
     zeron_owned_command(name).then(|| end - name.len() - 1..end)
 }
-
-const SIDECHAT_COUNT_ROLL: motion::MotionSpec =
-    motion::MotionSpec::new(180, motion::EASE_OUT_QUINT);
 
 /// The catalog's names live on the engine's harness descriptors, which the
 /// composer never holds; this is the same list, for one sentence of copy.
@@ -7377,24 +7303,14 @@ pub struct Composer {
     #[cfg(test)]
     model_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     dock_frame: Option<crate::composer_dock::DockFrame>,
-    running_tab: bool,
-    running_tab_since: Option<Instant>,
-    running_ticker: Option<Task<()>>,
-    mission: bool,
-    pub(crate) mission_pending: bool,
-    mission_plan_doc: bool,
-    mission_review: bool,
-    started_missions: HashMap<String, (String, SharedString)>,
-    mission_motion: MissionMotion,
-    home_tab_slide: motion::Tween,
-    home_tab_bounds: Rc<[std::cell::Cell<Option<Bounds<Pixels>>>; 3]>,
+    pub(crate) plan_pending: bool,
+    plan_snap: bool,
+    plan_motion: PlanMotion,
     dock_reflow: crate::composer_dock::DockReflow,
     /// The shared clock owns this frame's height, including its final step.
     dock_height_changed: bool,
     dock_clearance_correction: f32,
     surface_bounds: crate::new_thread_background_mask::SurfaceBounds,
-    sidechat_tab_bounds: crate::new_thread_background_mask::SurfaceBounds,
-    sidechat_count: Option<(String, usize, usize, Instant)>,
     last_target_height: f32,
     height_morph: Option<FlipMorph>,
     /// Monotonic clock anchor for the morph timeline.
@@ -7409,7 +7325,6 @@ pub struct Composer {
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
     pr_chat: bool,
-    btw: bool,
     full_chat: bool,
     pr_context: Option<String>,
     pr_chips: Vec<(crate::pull_request_detail::ContextChip, SharedString)>,
@@ -7440,11 +7355,6 @@ impl Composer {
             .dock_frame
             .is_none_or(|previous| previous.amount != frame.amount);
         self.dock_frame = Some(frame);
-        if frame.docked {
-            self.running_tab = false;
-            self.running_tab_since = None;
-            self.running_ticker = None;
-        }
         if frame.active {
             self.flip_morph = None;
             self.height_morph = None;
@@ -7462,285 +7372,28 @@ impl Composer {
         self.surface_bounds.clone()
     }
 
-    pub(crate) fn sidechat_tab_bounds(&self) -> Option<Bounds<Pixels>> {
-        self.sidechat_tab_bounds.get()
+    fn main_composer(&self) -> bool {
+        self.chat_override.is_none() && !self.side_chat && !self.pr_chat
     }
 
-    fn set_running_tab(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.running_tab == on {
-            return;
-        }
-        self.running_tab = on;
-        self.running_tab_since = Some(motion::now());
-        self.running_ticker = on.then(|| {
-            cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(Duration::from_secs(1)).await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
-                    }
-                }
-            })
-        });
-        cx.notify();
+    fn plan_available(&self, cx: &App) -> bool {
+        self.main_composer() && self.pickers.read(cx).offers_plan(cx)
     }
 
-    fn mission_available(&self) -> bool {
-        self.chat_override.is_none() && !self.side_chat && !self.btw && !self.pr_chat
+    fn plan(&self, cx: &App) -> bool {
+        self.plan_available(cx) && self.pickers.read(cx).effective_plan(cx)
     }
 
-    fn leads_open_mission(&self, cx: &App) -> bool {
-        let state = self.state.read(cx);
-        self.mission_available()
-            && state
-                .selected_chat
-                .as_deref()
-                .is_some_and(|chat_id| zeron_proto::plan_of_chat(&state.tasks, chat_id).is_some())
+    fn plan_asks(&self, cx: &App) -> bool {
+        self.pickers.read(cx).plan_asks(cx)
     }
 
-    fn set_mission(&mut self, on: bool, cx: &mut Context<Self>) {
-        let on = on && self.mission_available();
-        if self.mission == on {
-            return;
+    fn set_plan(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.plan(cx) != on && self.plan_available(cx) {
+            self.pickers
+                .update(cx, |pickers, cx| pickers.toggle_plan(cx));
+            cx.notify();
         }
-        self.mission = on;
-        if on {
-            self.set_running_tab(false, cx);
-            cx.emit(ComposerEvent::PlanFirst);
-        }
-        cx.notify();
-    }
-
-    fn running_reveal(&self, window: &mut Window, cx: &App) -> f32 {
-        let target = if self.running_tab { 1.0 } else { 0.0 };
-        let Some(since) = self.running_tab_since else {
-            return target;
-        };
-        if motion::reduced_motion(cx) {
-            return target;
-        }
-        let total = RUNNING_TAB_FADE.total().as_secs_f32() * motion::speed_scale();
-        let raw = motion::since(since).as_secs_f32() / total.max(f32::EPSILON);
-        if raw < 1.0 {
-            window.request_animation_frame();
-        }
-        let progress = RUNNING_TAB_FADE.progress(raw);
-        if self.running_tab {
-            progress
-        } else {
-            1.0 - progress
-        }
-    }
-
-    fn render_home_tabs(
-        &mut self,
-        theme: &Theme,
-        running: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let now = motion::now();
-        let slot = if self.running_tab {
-            2.0
-        } else if self.mission {
-            1.0
-        } else {
-            0.0
-        };
-        if self.home_tab_slide.target() != slot {
-            self.home_tab_slide
-                .retarget(slot, HOME_TAB_SLIDE, motion::reduced_motion(cx), now);
-        }
-        if !self.home_tab_slide.settled_at(now) {
-            window.request_animation_frame();
-        }
-        let position = self.home_tab_slide.value_unclamped_at(now);
-        let current = slot as usize;
-        let amount = |slot: usize| (1.0 - (position - slot as f32).abs()).clamp(0.0, 1.0);
-        let tab = |id: &'static str,
-                   label: &'static str,
-                   glyph: Option<&'static str>,
-                   count: Option<usize>,
-                   slot: usize| {
-            let color = theme.text_muted.blend(theme.text.opacity(amount(slot)));
-            let measured = self.home_tab_bounds.clone();
-            div()
-                .id(id)
-                .debug_selector(move || id.to_string())
-                .relative()
-                .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT))
-                .px(px(8.0))
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .rounded(px(6.0))
-                .text_size(crate::typography::ui_rems(12.0))
-                .cursor_pointer()
-                .role(Role::Tab)
-                .aria_label(label)
-                .aria_selected(slot == current)
-                .when_some(count, |el, count| el.aria_description(count.to_string()))
-                .text_color(color)
-                .hover(|style| style.text_color(theme.text))
-                .when_some(glyph, |el, glyph| {
-                    el.child(crate::icons::icon(glyph).size(px(12.0)).text_color(color))
-                })
-                .child(label)
-                .when_some(count, |el, count| {
-                    el.child(div().text_color(theme.text_faint).child(count.to_string()))
-                })
-                .child(
-                    gpui::canvas(
-                        move |bounds, _, _| measured[slot].set(Some(bounds)),
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
-        };
-        let measured = self.home_tab_bounds.clone();
-        let tint = motion::mix(theme.wash(0.08), theme.accent.opacity(0.18), amount(1));
-        let indicator = gpui::canvas(
-            |_, _, _| {},
-            move |_, _, window, _| {
-                let slots = [measured[0].get(), measured[1].get(), measured[2].get()];
-                if let Some(bounds) = home_tab_indicator(slots, position) {
-                    window.paint_quad(gpui::fill(bounds, tint).corner_radii(px(6.0)));
-                }
-            },
-        )
-        .absolute()
-        .inset_0();
-        div()
-            .id("composer-home-tabs")
-            .role(Role::TabList)
-            .aria_label("New thread mode")
-            .relative()
-            .flex()
-            .items_center()
-            .gap(px(2.0))
-            .child(indicator)
-            .child(
-                tab("composer-tab-new-task", "New task", None, None, 0).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.set_running_tab(false, cx);
-                        this.set_mission(false, cx);
-                        window.focus(&this.input.focus_handle(cx), cx);
-                    },
-                )),
-            )
-            .child(
-                tab(
-                    "composer-tab-mission",
-                    "Mission Control",
-                    Some(crate::icons::MISSION_CONTROL),
-                    None,
-                    1,
-                )
-                .when(!self.mission, |el| el.child(kbd_hint("⇧Tab", theme)))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.set_mission(true, cx);
-                    window.focus(&this.input.focus_handle(cx), cx);
-                })),
-            )
-            .child(
-                tab(
-                    "composer-tab-running",
-                    "Running agents",
-                    None,
-                    Some(running),
-                    2,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.set_mission(false, cx);
-                    this.set_running_tab(true, cx)
-                })),
-            )
-    }
-
-    fn render_running_list(&self, theme: &Theme, reveal: f32, cx: &mut Context<Self>) -> gpui::Div {
-        let now = chrono::Utc::now();
-        let rows: Vec<(String, String, i64)> = {
-            let state = self.state.read(cx);
-            crate::home::running_agents(state, now)
-                .into_iter()
-                .map(|(chat, started)| {
-                    (
-                        chat.id.clone(),
-                        crate::home::chat_title(chat),
-                        (now - started).num_seconds(),
-                    )
-                })
-                .collect()
-        };
-        let entity = cx.entity_id();
-        div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .top(px(6.0 * (1.0 - reveal)))
-            .bottom_0()
-            .opacity(reveal)
-            .when(self.running_tab, |el| el.occlude())
-            .child(
-                div()
-                    .id("composer-running-list")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .p(px(8.0))
-                    .when(rows.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .px(px(10.0))
-                                .py(px(8.0))
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .text_color(theme.text_faint)
-                                .child("No agents running"),
-                        )
-                    })
-                    .children(rows.into_iter().map(|(chat_id, title, secs)| {
-                        let id: SharedString = format!("composer-running-{chat_id}").into();
-                        div()
-                            .id(id.clone())
-                            .h(px(32.0))
-                            .px(px(10.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .rounded(px(10.0))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(theme.wash(0.05)))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(ComposerEvent::OpenChat(chat_id.clone()))
-                            }))
-                            .child(crate::loaders::mini_glyph_spinner(
-                                format!("{id}-spin"),
-                                2.0,
-                                theme.glyph,
-                                entity,
-                                cx,
-                            ))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .text_size(crate::typography::ui_rems(13.0))
-                                    .text_color(theme.text)
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .font_family(theme.font_mono.clone())
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_faint)
-                                    .child(zeron_proto::background::elapsed_label(secs)),
-                            )
-                    })),
-            )
     }
 
     /// The picker entity, for the shell's canvas target selectors.
@@ -7995,23 +7648,13 @@ impl Composer {
             #[cfg(test)]
             model_bounds: Default::default(),
             dock_frame: None,
-            running_tab: false,
-            running_tab_since: None,
-            running_ticker: None,
-            mission: false,
-            mission_pending: false,
-            mission_plan_doc: true,
-            mission_review: true,
-            started_missions: HashMap::new(),
-            mission_motion: MissionMotion::at(false, motion::now()),
-            home_tab_slide: motion::Tween::at(0.0, motion::now()),
-            home_tab_bounds: Default::default(),
+            plan_pending: false,
+            plan_snap: true,
+            plan_motion: PlanMotion::at(false, motion::now()),
             dock_reflow: Default::default(),
             dock_height_changed: false,
             dock_clearance_correction: 0.0,
             surface_bounds: Default::default(),
-            sidechat_tab_bounds: Default::default(),
-            sidechat_count: None,
             last_target_height: 0.0,
             height_morph: None,
             morph_clock: motion::now(),
@@ -8021,7 +7664,6 @@ impl Composer {
             context_ring,
             side_chat: false,
             pr_chat: false,
-            btw: false,
             full_chat: false,
             pr_context: None,
             pr_chips: Vec::new(),
@@ -8203,7 +7845,7 @@ impl Composer {
 
     fn active_prediction(&self, cx: &App) -> Option<SharedString> {
         if self.side_chat
-            || self.mission
+            || self.plan(cx)
             || (self.chat_override.is_some() && !self.full_chat)
             || self.wizard.is_some()
             || self.editing_queued.is_some()
@@ -8225,8 +7867,10 @@ impl Composer {
             return;
         }
         let prediction = self.active_prediction(cx);
-        let idle = if self.mission {
-            zeron_proto::mission::mission_placeholder(self.bound_chat_id(cx).is_some()).into()
+        let idle = if self.plan(cx) && self.plan_asks(cx) {
+            PLAN_PLACEHOLDER_TEXT.into()
+        } else if self.plan(cx) {
+            PLAN_ONLY_PLACEHOLDER_TEXT.into()
         } else if !self.side_chat
             && self.bound_chat_id(cx).is_none()
             && self.state.read(cx).no_project
@@ -8493,17 +8137,6 @@ impl Composer {
                 self.full_chat && self.state.read(cx).selected_chat.as_deref() == Some(chat_id)
             }
         }
-    }
-
-    pub(crate) fn set_btw(&mut self, cx: &mut Context<Self>) {
-        const PLACEHOLDER: &str = "Ask a side question \u{b7} /btw opens a new tab";
-        self.btw = true;
-        self.idle_placeholder = PLACEHOLDER.into();
-        if self.wizard.is_none() {
-            self.input
-                .update(cx, |input, cx| input.set_placeholder(PLACEHOLDER, cx));
-        }
-        cx.notify();
     }
 
     pub(crate) fn set_idle_placeholder(
@@ -11302,15 +10935,12 @@ impl Composer {
         }
     }
 
-    /// Expired sidechats are left to the sidecar, so they are not counted here.
     fn render_sidechat_tab(
         &mut self,
         trays: usize,
         theme: &Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        self.sidechat_tab_bounds.set(None);
         if (self.chat_override.is_some() && !self.full_chat) || self.side_chat || self.pr_chat {
             return None;
         }
@@ -11320,31 +10950,11 @@ impl Composer {
         }
         let state = self.state.read(cx);
         let sidechats = state.live_sidechats_of(&chat.id, chrono::Utc::now());
-        let count = sidechats.len();
-        let now = motion::now();
-        let roll = match &self.sidechat_count {
-            Some((id, _, to, _)) if *id == chat.id && *to == count => self.sidechat_count.clone(),
-            Some((id, _, to, _))
-                if *id == chat.id && *to > 0 && count > 0 && !motion::reduced_motion(cx) =>
-            {
-                Some((chat.id.clone(), *to, count, now))
-            }
-            _ => Some((chat.id.clone(), count, count, now)),
-        };
-        self.sidechat_count = roll.clone();
-        let roll = roll.and_then(|(_, from, _, since)| {
-            let total = SIDECHAT_COUNT_ROLL.total().mul_f32(motion::speed_scale());
-            let raw = now.saturating_duration_since(since).as_secs_f32() / total.as_secs_f32();
-            (from != count && raw < 1.0).then(|| (from, SIDECHAT_COUNT_ROLL.progress(raw)))
-        });
-        if roll.is_some() {
-            window.request_animation_frame();
-        }
-        let sidechat = sidechats.last().copied();
         let open = sidechats
             .iter()
             .any(|s| state.open_sidechat_tabs.contains(&s.id));
-        let dot = sidechat
+        let dot = sidechats
+            .last()
             .and_then(|s| state.session_for(&s.id))
             .and_then(|session| match session.status {
                 zeron_proto::SessionStatus::Working => Some(theme.busy),
@@ -11352,52 +10962,20 @@ impl Composer {
                 zeron_proto::SessionStatus::Errored => Some(theme.danger),
                 zeron_proto::SessionStatus::Idle => None,
             });
-        let label: SharedString = sidechat_tab_label(count).into();
-        let icon = if sidechat.is_some() {
-            crate::icons::CHAT_ROUND_LINE
-        } else {
-            crate::icons::ASTRA_PLUS
-        };
+        let combo = crate::settings::badge_combo(
+            crate::settings::current(cx)
+                .keymap
+                .get(crate::settings::ShortcutId::ToggleBtw),
+        );
         let text = if open { theme.text } else { theme.text_muted };
-        let label = match roll {
-            Some((from, t)) => {
-                let number = |value: usize| {
-                    div()
-                        .h(px(SIDECHAT_TAB_HEIGHT))
-                        .flex()
-                        .items_center()
-                        .child(value.to_string())
-                };
-                div()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .child(div().min_w_0().truncate().child(SIDECHAT_TAB_PREFIX))
-                    .child(
-                        div()
-                            .flex_none()
-                            .relative()
-                            .h(px(SIDECHAT_TAB_HEIGHT))
-                            .overflow_hidden()
-                            .child(
-                                number(from)
-                                    .absolute()
-                                    .left_0()
-                                    .top(px(-SIDECHAT_TAB_HEIGHT * t)),
-                            )
-                            .child(
-                                number(count)
-                                    .relative()
-                                    .top(px(SIDECHAT_TAB_HEIGHT * (1.0 - t))),
-                            ),
-                    )
-            }
-            None => div().min_w_0().truncate().child(label),
-        };
-        let measured = self.sidechat_tab_bounds.clone();
         let surface = crate::queue::queue_panel_surface(theme, cx.has_active_drag())
             .id("composer-sidechat-tab")
             .debug_selector(|| "composer-sidechat-tab".into())
+            .role(gpui::Role::Button)
+            .aria_label("Side chat")
+            .tooltip(crate::settings::widgets::text_tooltip(
+                "Side chat (/btw): ask on the side, opens in the right pane",
+            ))
             .cursor_pointer()
             .hover(|s| s.opacity(0.85))
             .on_click(cx.listener(|this, _, _, cx| this.request_sidechat(None, false, cx)))
@@ -11416,7 +10994,7 @@ impl Composer {
                     .text_size(px(11.0))
                     .text_color(text)
                     .child(
-                        crate::icons::icon(icon)
+                        crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
                             .flex_none()
                             .size(px(12.0))
                             .text_color(text),
@@ -11424,15 +11002,8 @@ impl Composer {
                     .children(
                         dot.map(|color| div().flex_none().size(px(6.0)).rounded_full().bg(color)),
                     )
-                    .child(label),
-            )
-            .child(
-                gpui::canvas(
-                    move |bounds, _, _| measured.set(Some(bounds)),
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
+                    .child(div().min_w_0().truncate().child("Side chat"))
+                    .child(crate::popover::kbd_hint(theme, &combo)),
             );
         Some(
             div()
@@ -11650,7 +11221,10 @@ impl Composer {
                 (self.chat_override.is_none() || self.full_chat)
                     .then(|| pending_input_request(self.bound_transcript(s)))
                     .flatten()
-                    .filter(|(_, questions)| !questions.iter().any(UserInputQuestion::is_secret)),
+                    .filter(|(_, questions)| {
+                        !questions.iter().any(UserInputQuestion::is_secret)
+                            && !crate::plan_proposal::is_plan_question(questions)
+                    }),
                 editing_id
                     .as_ref()
                     .is_none_or(|id| s.queue.iter().any(|item| item.id == *id)),
@@ -11757,8 +11331,7 @@ impl Composer {
                 }
             };
             self.current_key = key;
-            self.mission = false;
-            self.mission_motion = MissionMotion::at(false, motion::now());
+            self.plan_snap = true;
             self.prompt_history = None;
             // `failure` deliberately survives navigation: chat-scoped
             // failures render only under their own chat (see `failure_key`),
@@ -12073,12 +11646,6 @@ impl Composer {
             self.execute_workspace_command(action, 0..self.input.read(cx).text().len(), cx);
             return;
         }
-        if self.mission {
-            if !text.trim().is_empty() && !self.send_blocked(cx) {
-                self.start_mission(text, cx);
-            }
-            return;
-        }
         let no_content = !composer_has_content(
             &text,
             self.staged().len() + self.staged_appshots().len(),
@@ -12112,111 +11679,6 @@ impl Composer {
         }
     }
 
-    fn start_mission(&mut self, text: String, cx: &mut Context<Self>) {
-        let chat_id = self.bound_chat_id(cx);
-        let space_id = match &chat_id {
-            Some(_) => self
-                .bound_chat_row(cx)
-                .and_then(|chat| chat.space_id.clone()),
-            None => self
-                .state
-                .read(cx)
-                .selected_space_row()
-                .map(|space| space.id.clone()),
-        };
-        let file = self.staged().iter().find(|att| {
-            att.image().is_none()
-                && zeron_proto::attachment_mentions::pasted_text_index_from_name(&att.name)
-                    .is_none()
-        });
-        let images = self
-            .staged()
-            .iter()
-            .filter(|att| att.image().is_some())
-            .count()
-            + self.staged_appshots().len();
-        if let Some(message) = zeron_proto::mission::mission_staged_error(
-            images,
-            zeron_doc::TASK_IMAGES_MAX,
-            file.map(|att| att.name.as_str()),
-        ) {
-            crate::toast::error(cx, message);
-            return;
-        }
-        let key = self.current_key.clone();
-        let attachments = self.attachments.remove(&key).unwrap_or_default();
-        self.attachment_drafts.remove(&key);
-        let appshots = self.appshots.remove(&key).unwrap_or_default();
-        let (quotes, comments) = self.state.update(cx, |state, cx| {
-            cx.notify();
-            (state.take_quotes(&key), state.take_review_comments(&key))
-        });
-        let start = MissionStart {
-            key,
-            text,
-            chat_id,
-            space_id,
-            config: self.pickers.read(cx).resolved(cx).chat_config(),
-            orchestrate: crate::tasks::Orchestrate {
-                approve_plan: self.mission_review,
-                same_agents: false,
-                plan_doc: self.mission_plan_doc,
-            },
-            staged: SidechatStaged {
-                attachments,
-                appshots,
-            },
-            quotes,
-            comments,
-        };
-        self.input.update(cx, |input, cx| input.set_text("", cx));
-        self.sync_draft(cx);
-        self.mission = false;
-        cx.emit(ComposerEvent::StartMission(start));
-        cx.notify();
-    }
-
-    pub(crate) fn mission_failed(&mut self, start: &MissionStart, cx: &mut Context<Self>) {
-        if self.current_key != start.key || !self.input.read(cx).text().is_empty() {
-            return;
-        }
-        let mut attachments = start.staged.attachments.clone();
-        for att in self.attachments.remove(&start.key).unwrap_or_default() {
-            if !attachments.iter().any(|staged| staged.id == att.id) {
-                attachments.push(att);
-            }
-        }
-        if !attachments.is_empty() {
-            self.attachments.insert(start.key.clone(), attachments);
-        }
-        self.restore_failed_appshots(&start.staged.appshots, &start.key, &start.key);
-        self.state.update(cx, |state, cx| {
-            for quote in &start.quotes {
-                state.add_quote(&start.key, quote.clone());
-            }
-            for comment in &start.comments {
-                state.add_review_comment(&start.key, comment.clone());
-            }
-            cx.notify();
-        });
-        self.input
-            .update(cx, |input, cx| input.set_text(start.text.clone(), cx));
-        self.sync_draft(cx);
-        self.set_mission(true, cx);
-    }
-
-    pub(crate) fn mission_started(
-        &mut self,
-        chat_id: String,
-        task_id: String,
-        title: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.started_missions
-            .insert(chat_id, (task_id, title.into()));
-        cx.notify();
-    }
-
     /// Send `prompt` as this composer's turn without it ever being typed —
     /// the sidechat tab's first turn, handed over by `/sidechat <prompt>`.
     /// Queues instead when the bound chat is already busy, like a submit.
@@ -12246,9 +11708,6 @@ impl Composer {
         }
         if self.commit_queue_edit(cx) {
             return;
-        }
-        if self.mission {
-            return self.submit(false, cx);
         }
         let text = self.input.read(cx).text().to_string();
         let has_content = composer_has_content(
@@ -12763,6 +12222,10 @@ impl Composer {
         self.launching_new_chat = is_new && !background;
         if is_new && !background {
             cx.emit(ComposerEvent::NewThreadTransitionStarted);
+        }
+        if is_new {
+            self.pickers
+                .update(cx, |pickers, cx| pickers.clear_draft_plan(cx));
         }
         // A queued message is not in the transcript yet — the queue panel is
         // its echo, and it gets a real bubble when the host sends it.
@@ -13645,21 +13108,17 @@ impl Composer {
                 self.host_advance(host, cx);
                 cx.stop_propagation();
             }
-        } else if key == "escape" {
-            match host {
-                WizardHost::Own => {
-                    if wizard_escape_goes_back(key, input_focused, input_empty) {
-                        let dismisses = self.wizard.as_ref().is_some_and(|wizard| {
-                            wizard_escape_dismisses(wizard.page, wizard.page_has_pick(), input_empty)
-                        });
-                        if dismisses {
-                            self.wizard_dismiss(cx);
-                        } else {
-                            self.wizard_back(cx);
-                        }
-                    }
+        // An Ask panel's escape bubbles so the tray hosting it closes.
+        } else if key == "escape" && host == WizardHost::Own {
+            if wizard_escape_goes_back(key, input_focused, input_empty) {
+                let dismisses = self.wizard.as_ref().is_some_and(|wizard| {
+                    wizard_escape_dismisses(wizard.page, wizard.page_has_pick(), input_empty)
+                });
+                if dismisses {
+                    self.wizard_dismiss(cx);
+                } else {
+                    self.wizard_back(cx);
                 }
-                WizardHost::Ask => self.close_ask_tray(cx),
             }
             cx.stop_propagation();
         }
@@ -14498,124 +13957,71 @@ impl Composer {
             .into_any_element()
     }
 
-    fn render_mission_controls(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let composer = cx.entity().downgrade();
-        let plan = crate::settings::widgets::segmented(
-            theme,
-            "composer-mission-plan",
-            &[
-                (true, zeron_proto::mission::PLAN_DOC),
-                (false, zeron_proto::mission::STEPS_ONLY),
-            ],
-            self.mission_plan_doc,
-            move |plan_doc, _, cx| {
-                composer
-                    .update(cx, |composer, cx| {
-                        composer.mission_plan_doc = plan_doc;
-                        cx.notify();
-                    })
-                    .ok();
-            },
-        )
-        .debug_selector(|| "composer-mission-plan".into());
-        let review = self.mission_review;
-        let switch = div()
-            .id("composer-mission-review")
-            .debug_selector(|| "composer-mission-review".into())
+    fn render_plan_switch(
+        &self,
+        labelled: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let on = self.plan(cx);
+        let t = self.plan_motion.border.value_at(motion::now());
+        let tone = motion::mix(theme.text_muted, theme.accent, t);
+        let track = div()
+            .relative()
+            .flex_none()
+            .w(px(22.0))
+            .h(px(13.0))
+            .rounded_full()
+            .bg(motion::mix(theme.wash(0.14), theme.accent, t))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(2.0))
+                    .left(px(2.0 + 9.0 * t))
+                    .size(px(9.0))
+                    .rounded_full()
+                    .bg(theme.surface_card)
+                    .shadow_sm(),
+            );
+        div()
+            .id("composer-plan-switch")
+            .debug_selector(|| "composer-plan-switch".into())
             .role(Role::Switch)
-            .aria_label(zeron_proto::mission::REVIEW_PLAN_FIRST)
-            .aria_toggled(if review {
+            .aria_label("Plan")
+            .aria_toggled(if on {
                 gpui::Toggled::True
             } else {
                 gpui::Toggled::False
             })
             .flex_none()
             .h(px(28.0))
-            .pl(px(5.0))
-            .pr(px(10.0))
+            .px(px(9.0))
             .flex()
             .items_center()
             .gap(px(6.0))
-            .rounded_full()
-            .border_1()
-            .border_color(theme.border)
-            .text_size(crate::typography::ui_rems(11.5))
-            .text_color(theme.text_muted)
+            .rounded(px(8.0))
+            .bg(theme.accent.opacity(0.12 * t))
+            .when(!on, |el| el.hover(|style| style.bg(theme.wash(0.06))))
+            .text_size(crate::typography::ui_rems(12.5))
+            .text_color(tone)
             .cursor_pointer()
-            .hover(|style| style.text_color(theme.text))
-            .child(crate::settings::widgets::toggle_switch(
-                theme,
-                review,
-                "composer-mission-review-switch",
+            .tooltip(crate::settings::widgets::text_tooltip(
+                if self.plan_asks(cx) {
+                    "Plan first: the agent plans and waits for your OK (⇧Tab)"
+                } else {
+                    "Plan: the agent writes a plan and changes nothing (⇧Tab)"
+                },
             ))
-            .child(zeron_proto::mission::REVIEW_PLAN_FIRST)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.mission_review = !review;
-                cx.notify();
-            }));
-        div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(plan)
-            .child(switch)
+            .child(track)
+            .when(labelled, |el| el.child("Plan"))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.set_plan(!on, cx);
+                window.focus(&this.input.focus_handle(cx), cx);
+            }))
             .into_any_element()
     }
 
-    fn render_mission_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
-        let on = self.mission;
-        let t = self.mission_motion.border.value_at(motion::now());
-        let tone = motion::mix(theme.text_muted, theme.text, t);
-        div()
-            .flex_none()
-            .pl(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .child(
-                div()
-                    .id("composer-mission-chip")
-                    .debug_selector(|| "composer-mission-chip".into())
-                    .role(Role::Switch)
-                    .aria_label("Mission Control")
-                    .aria_toggled(if on {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
-                    .h(px(22.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(motion::mix(theme.border, theme.accent.opacity(0.5), t))
-                    .bg(theme.accent.opacity(0.16 * t))
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(tone)
-                    .cursor_pointer()
-                    .hover(|style| style.text_color(theme.text))
-                    .child(
-                        crate::icons::icon(crate::icons::MISSION_CONTROL)
-                            .size(px(12.0))
-                            .text_color(tone),
-                    )
-                    .child("Mission Control")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_mission(!on, cx);
-                        window.focus(&this.input.focus_handle(cx), cx);
-                    })),
-            )
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_faint)
-                    .child(if on { "⇧Tab: back to chat" } else { "⇧Tab" }),
-            )
-    }
-
-    fn render_start_mission(
+    fn render_start_plan(
         &mut self,
         morph: Option<f32>,
         window: &mut Window,
@@ -14623,8 +14029,8 @@ impl Composer {
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let blocked = self.send_blocked(cx);
-        let (id, label) = if self.mission {
-            ("composer-start-mission", START_MISSION_LABEL)
+        let (id, label) = if self.plan(cx) {
+            ("composer-start-plan", START_PLAN_LABEL)
         } else {
             ("composer-send", "Send message")
         };
@@ -14658,7 +14064,7 @@ impl Composer {
             return button
                 .px(px(12.0))
                 .gap(px(6.0))
-                .child(START_MISSION_LABEL)
+                .child(START_PLAN_LABEL)
                 .into_any_element();
         };
         let shown = t.clamp(0.0, 1.0);
@@ -14666,7 +14072,7 @@ impl Composer {
             let mut font = gpui::font(theme.font_sans.clone());
             font.weight = gpui::FontWeight::MEDIUM;
             let run = TextRun {
-                len: START_MISSION_LABEL.len(),
+                len: START_PLAN_LABEL.len(),
                 font,
                 color: theme.bg,
                 background_color: None,
@@ -14677,7 +14083,7 @@ impl Composer {
             f32::from(
                 window
                     .text_system()
-                    .shape_line(START_MISSION_LABEL.into(), size, &[run], None)
+                    .shape_line(START_PLAN_LABEL.into(), size, &[run], None)
                     .width,
             )
         };
@@ -14692,7 +14098,7 @@ impl Composer {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .opacity(shown)
-                    .child(START_MISSION_LABEL),
+                    .child(START_PLAN_LABEL),
             )
             .into_any_element()
     }
@@ -14772,7 +14178,7 @@ impl Composer {
     }
 }
 
-fn mission_glow(accent: gpui::Hsla, amount: f32) -> Vec<gpui::BoxShadow> {
+fn plan_glow(accent: gpui::Hsla, amount: f32) -> Vec<gpui::BoxShadow> {
     vec![
         gpui::BoxShadow {
             color: accent.opacity(0.14 * amount),
@@ -14789,38 +14195,6 @@ fn mission_glow(accent: gpui::Hsla, amount: f32) -> Vec<gpui::BoxShadow> {
             inset: false,
         },
     ]
-}
-
-fn home_tab_indicator(slots: [Option<Bounds<Pixels>>; 3], position: f32) -> Option<Bounds<Pixels>> {
-    let from = (position.floor() as i32).clamp(0, 1) as usize;
-    let (a, b) = (slots[from]?, slots[from + 1]?);
-    let t = position - from as f32;
-    Some(Bounds::new(
-        point(
-            px(motion::lerp(f32::from(a.left()), f32::from(b.left()), t)),
-            a.top(),
-        ),
-        size(
-            px(motion::lerp(
-                f32::from(a.size.width),
-                f32::from(b.size.width),
-                t,
-            )),
-            a.size.height,
-        ),
-    ))
-}
-
-fn kbd_hint(text: &'static str, theme: &Theme) -> gpui::Div {
-    div()
-        .flex_none()
-        .px(px(5.0))
-        .rounded(px(5.0))
-        .border_1()
-        .border_color(theme.border)
-        .text_size(crate::typography::ui_rems(10.5))
-        .text_color(theme.text_faint)
-        .child(text)
 }
 
 /// The composer's send control: a size-7 filled circle with an up arrow,
@@ -14925,35 +14299,31 @@ impl Render for Composer {
             let focus = self.input.focus_handle(cx);
             window.focus(&focus, cx);
         }
-        if std::mem::take(&mut self.mission_pending) {
-            self.set_mission(true, cx);
+        if std::mem::take(&mut self.plan_pending) {
+            self.set_plan(true, cx);
         }
-        let mission_flipped = self.mission != self.mission_motion.on();
-        if mission_flipped {
+        let plan = self.plan(cx);
+        if std::mem::take(&mut self.plan_snap) {
+            self.plan_motion = PlanMotion::at(plan, motion::now());
+        }
+        let plan_flipped = plan != self.plan_motion.on();
+        if plan_flipped {
             let from = self.input.read(cx).placeholder.clone();
-            self.mission_motion.retarget(
-                self.mission,
-                from,
-                motion::reduced_motion(cx),
-                motion::now(),
-            );
+            self.plan_motion
+                .retarget(plan, from, motion::reduced_motion(cx), motion::now());
         }
-        let lit = self.mission || self.leads_open_mission(cx);
-        self.mission_motion
-            .light(lit, motion::reduced_motion(cx), motion::now());
         self.sync_prediction(cx);
-        let mission_now = motion::now();
-        if !self.mission_motion.settled_at(mission_now) {
+        let plan_now = motion::now();
+        if !self.plan_motion.settled_at(plan_now) {
             window.request_animation_frame();
         }
-        let placeholder_fade =
-            (!self.mission_motion.placeholder.settled_at(mission_now)).then(|| {
-                let t = self.mission_motion.placeholder.value_at(mission_now);
-                (
-                    self.mission_motion.placeholder_from.clone(),
-                    if self.mission { t } else { 1.0 - t },
-                )
-            });
+        let placeholder_fade = (!self.plan_motion.placeholder.settled_at(plan_now)).then(|| {
+            let t = self.plan_motion.placeholder.value_at(plan_now);
+            (
+                self.plan_motion.placeholder_from.clone(),
+                if plan { t } else { 1.0 - t },
+            )
+        });
         self.input.update(cx, |input, cx| {
             if input.placeholder_fade != placeholder_fade {
                 input.placeholder_fade = placeholder_fade;
@@ -15116,14 +14486,14 @@ impl Render for Composer {
         } else {
             flip_morph_step(
                 self.flip_morph,
-                (committed_flip || (mission_flipped && !self.expanded_mode)) && !new_chat,
+                (committed_flip || (plan_flipped && !self.expanded_mode)) && !new_chat,
                 self.last_rendered_height,
                 now_ms,
                 motion::reduced_motion(cx),
                 route_snap,
             )
         };
-        let expanded = self.expanded_mode || self.mission;
+        let expanded = self.expanded_mode || plan;
 
         let failure = self.visible_failure();
         let queue_notice = self.current_link_notice(cx);
@@ -15148,20 +14518,6 @@ impl Render for Composer {
         });
         let effort_hint = self.computer_effort_hint(cx);
         let resume_compaction = self.resume_compaction(cx);
-        let started_mission = self
-            .bound_chat_id(cx)
-            .filter(|_| self.mission_available())
-            .and_then(|chat_id| {
-                let started = self.started_missions.get(&chat_id).cloned()?;
-                self.state
-                    .read(cx)
-                    .tasks
-                    .iter()
-                    .any(|task| {
-                        task.id == started.0 && !task.deleted && task.completed_at.is_none()
-                    })
-                    .then_some((chat_id, started))
-            });
         // The shell owns the width and its route animation. A route-dependent
         // cap here would cut a wide composer before its return glide finishes.
         let container = div()
@@ -15218,50 +14574,6 @@ impl Render for Composer {
                             cx,
                         ))
                         .child("Compacting context…"),
-                )
-            })
-            .when_some(started_mission, |el, (chat_id, (task_id, title))| {
-                let open = cx.entity().downgrade();
-                let dismiss = open.clone();
-                el.child(
-                    div()
-                        .mx(px(4.0))
-                        .debug_selector(|| "composer-started-mission".into())
-                        .child(crate::computer::cards::computer_card(
-                            crate::computer::cards::CardTone::Info,
-                            crate::icons::MISSION_CONTROL,
-                            format!("Started mission {title}").into(),
-                            vec!["Its lead reads this chat".into()],
-                            vec![
-                                crate::computer::cards::CardAction {
-                                    id: "composer-started-mission-open".into(),
-                                    label: "Open".into(),
-                                    primary: true,
-                                    on_click: Box::new(move |_, _, cx| {
-                                        let task_id = task_id.clone();
-                                        open.update(cx, |_, cx| {
-                                            cx.emit(ComposerEvent::OpenTaskCenter(task_id))
-                                        })
-                                        .ok();
-                                    }),
-                                },
-                                crate::computer::cards::CardAction {
-                                    id: "composer-started-mission-dismiss".into(),
-                                    label: "Dismiss".into(),
-                                    primary: false,
-                                    on_click: Box::new(move |_, _, cx| {
-                                        dismiss
-                                            .update(cx, |composer, cx| {
-                                                composer.started_missions.remove(&chat_id);
-                                                cx.notify();
-                                            })
-                                            .ok();
-                                    }),
-                                },
-                            ],
-                            None,
-                            &theme,
-                        )),
                 )
             })
             .when_some(resume_compaction, |el, offer| {
@@ -15417,17 +14729,16 @@ impl Render for Composer {
                 self.staged().len() + self.staged_appshots().len(),
                 self.staged_chip_count(cx),
             );
-        let (card, corner) = self.render_corner(window, cx);
-        let config_card = self.render_config_panel(window, cx);
-        let config_in_flow = config_card.is_some() && self.config_panel_on_hero(cx);
-        let card = config_card.or(card);
+        self.sync_background_walks(cx);
+        let card = self.render_config_panel(window, cx);
+        let config_in_flow = card.is_some() && self.config_panel_on_hero(cx);
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
         let has_queue = self.reads_selection(cx) && !self.state.read(cx).queue.is_empty();
         let todo = self.render_todo_panel(has_queue, window, cx);
         let queue = self.render_queue_panel(show_queue_latest_shortcut, window, cx);
         let trays = usize::from(todo.is_some()) + usize::from(queue.is_some());
-        let tab = self.render_sidechat_tab(trays, &Theme::of(cx).clone(), window, cx);
+        let tab = self.render_sidechat_tab(trays, &Theme::of(cx).clone(), cx);
         // Out of flow: the shell measures this stack for transcript clearance.
         // The New chat page has no transcript above, so there it takes space instead.
         let card = card.map(|card| {
@@ -15450,13 +14761,11 @@ impl Render for Composer {
                     .flex()
                     .items_end()
                     .gap(px(Theme::SPACE_SM))
-                    .child(div().flex_1().min_w_0().children(corner))
+                    .child(div().flex_1().min_w_0())
                     .child(tab)
                     .children(card),
             ),
-            None if corner.is_some() || card.is_some() => {
-                container.child(div().relative().children(corner).children(card))
-            }
+            None if card.is_some() => container.child(div().relative().children(card)),
             None => container,
         };
         let container = container.when_some(todo, |el, panel| {
@@ -15479,13 +14788,14 @@ impl Render for Composer {
             }
         }));
         let container = container.on_action(cx.listener(|this, _: &OutdentList, _, cx| {
-            if !this.mission_available()
+            if !this.plan_available(cx)
                 || this.mention.token.is_some()
                 || this.slash.token.is_some()
             {
                 return cx.propagate();
             }
-            this.set_mission(!this.mission, cx);
+            let on = this.plan(cx);
+            this.set_plan(!on, cx);
         }));
         // Escape backs out of a queue-row edit (the row keeps its old text).
         // Bound here rather than in the input: the input's own Escape belongs
@@ -15534,7 +14844,8 @@ impl Render for Composer {
         let appshot_count = self.staged_appshots().len();
         let strip_h = attachment_strip_height(staged_count, strip_width_hint);
         let comment_strip_h = comment_strip_height(self.staged_chip_count(cx))
-            + pr_chip_strip_height(self.pr_chips.len());
+            + pr_chip_strip_height(self.pr_chips.len())
+            + self.limit_notice_height(cx);
         let base_height = if self.dock_frame.is_some() {
             dock_layout.height(dock_amount)
         } else if expanded {
@@ -15672,11 +14983,15 @@ impl Render for Composer {
             }
         });
 
-        let send_button = if !self.mission_motion.send.settled_at(mission_now) {
-            let t = self.mission_motion.send.value_unclamped_at(mission_now);
-            self.render_start_mission(Some(t), window, cx)
-        } else if self.mission {
-            self.render_start_mission(None, window, cx)
+        let send_button = if mode != SendButtonMode::Send {
+            self.render_send_button(mode, cx)
+        } else if !self.plan_asks(cx) {
+            self.render_send_button(mode, cx)
+        } else if !self.plan_motion.send.settled_at(plan_now) {
+            let t = self.plan_motion.send.value_unclamped_at(plan_now);
+            self.render_start_plan(Some(t), window, cx)
+        } else if plan {
+            self.render_start_plan(None, window, cx)
         } else {
             self.render_send_button(mode, cx)
         };
@@ -15794,40 +15109,34 @@ impl Render for Composer {
                         ),
                 )
             });
-        let extras = self.mission_motion.extras.value_at(mission_now);
-        let clip = self.mission_motion.placeholder.value_at(mission_now);
-        let leading = if !self.mission_motion.extras.settled_at(mission_now)
-            || !self.mission_motion.placeholder.settled_at(mission_now)
-        {
-            div()
-                .flex()
-                .items_center()
-                .when(clip < 1.0, |row| {
-                    row.child(
-                        div()
-                            .flex_none()
-                            .w(px(28.0 * (1.0 - clip)))
-                            .mr(px(ACTION_UTILITY_GAP * (1.0 - clip)))
-                            .overflow_hidden()
-                            .opacity(1.0 - clip)
-                            .child(attach),
-                    )
-                })
-                .when(expanded && extras > 0.0, |row| {
-                    row.child(
-                        div()
-                            .relative()
-                            .left(px(-8.0 * (1.0 - extras)))
-                            .opacity(extras)
-                            .child(self.render_mission_controls(&theme, cx)),
-                    )
-                })
-                .into_any_element()
-        } else if self.mission {
-            self.render_mission_controls(&theme, cx)
-        } else {
-            attach.into_any_element()
-        };
+        let surface_width = self.last_available_width.map_or_else(
+            || {
+                self.surface_bounds
+                    .get()
+                    .map_or(strip_width_hint + PILL_BORDER_V, |bounds| {
+                        f32::from(bounds.size.width)
+                    })
+            },
+            |width| (width - 2.0 * Theme::SPACE_LG).max(0.0),
+        );
+        let chips_labelled = expanded || surface_width >= CHIP_LABEL_MIN_WIDTH;
+        let plan_switch = self
+            .plan_available(cx)
+            .then(|| self.render_plan_switch(chips_labelled, &theme, cx));
+        let project = (new_thread_chrome_opacity > 0.0 && self.main_composer()).then(|| {
+            self.pickers
+                .update(cx, |pickers, cx| pickers.render_new_thread_project(cx))
+        });
+        let leading = div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(attach)
+            .children(
+                project.map(|project| div().opacity(new_thread_chrome_opacity).child(project)),
+            )
+            .children(plan_switch)
+            .into_any_element();
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);
@@ -15837,9 +15146,10 @@ impl Render for Composer {
         }
         let comments_chip = self.render_staged_chips(&theme, cx);
         let pr_chips = self.render_pr_chips(&theme, cx);
+        let limit_notice = self.render_limit_notice(&theme, cx);
 
         let pill_border = theme.composer_surface_border();
-        let mission_border = self.mission_motion.border.value_at(mission_now);
+        let plan_border = self.plan_motion.border.value_at(plan_now);
         // Compensate for the transcript canvas beneath the frosted surface.
         // Keep the opaque fallback when frost is disabled or unsupported.
         let pill = div()
@@ -15851,7 +15161,6 @@ impl Render for Composer {
                     if !this.pickers.read(cx).is_open()
                         && !this.review_menu_open()
                         && !this.comments_menu_open()
-                        && !this.running_tab
                     {
                         window.focus(&this.input.focus_handle(cx), cx);
                         window.prevent_default();
@@ -15864,41 +15173,24 @@ impl Render for Composer {
                 el.border_color(gpui::transparent_black())
             })
             .when(!self.pr_chat, |el| {
-                el.border_color(if self.btw {
-                    theme.accent
-                } else {
-                    motion::mix(pill_border, theme.accent, mission_border)
-                })
-                .bg(theme.composer_surface_bg())
-                .when(!theme.is_frost() && mission_border <= 0.0, |el| {
-                    el.shadow_lg()
-                })
-                .when(mission_border > 0.0, |el| {
-                    el.shadow(mission_glow(theme.accent, mission_border))
-                })
+                el.border_color(motion::mix(pill_border, theme.accent, plan_border))
+                    .bg(theme.composer_surface_bg())
+                    .when(!theme.is_frost() && plan_border <= 0.0, |el| el.shadow_lg())
+                    .when(plan_border > 0.0, |el| {
+                        el.shadow(plan_glow(theme.accent, plan_border))
+                    })
             });
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
         // while the model selector stays in the right action group.
-        let running_reveal = if self.dock_frame.is_some() {
-            self.running_reveal(window, cx)
-        } else {
-            0.0
-        };
-        let prompt_opacity = 1.0 - running_reveal;
         let cluster_dy = morph_cluster_dy(layout_morph_t);
         let action_inset = morph_cluster_inset(expanded, layout_morph_t);
-        let surface_width = self.last_available_width.map_or_else(
-            || {
-                self.surface_bounds
-                    .get()
-                    .map_or(strip_width_hint + PILL_BORDER_V, |bounds| {
-                        f32::from(bounds.size.width)
-                    })
-            },
-            |width| (width - 2.0 * Theme::SPACE_LG).max(0.0),
-        );
+        let access_chip = (!self.pr_chat).then(|| {
+            self.pickers.update(cx, |pickers, cx| {
+                pickers.render_permission_chip(chips_labelled, cx)
+            })
+        });
         let model_picker = div()
             .min_w_0()
             .max_w(px(surface_width * 0.45))
@@ -15962,6 +15254,7 @@ impl Render for Composer {
                 .relative()
                 .flex()
                 .flex_col()
+                .children(limit_notice)
                 .children(pr_chips)
                 .children(comments_chip)
                 .children(appshot_strip)
@@ -15974,7 +15267,6 @@ impl Render for Composer {
                         .px(px(16.0))
                         .pt(px(text_pt))
                         .pb(px(4.0))
-                        .opacity(prompt_opacity)
                         .child(self.render_input_with_completion()),
                 )
                 .child(
@@ -15982,7 +15274,6 @@ impl Render for Composer {
                         .absolute()
                         .left_0()
                         .right_0()
-                        .opacity(prompt_opacity)
                         .bottom(px(-cluster_dy))
                         .h(px(ACTIONS_ROW_HEIGHT))
                         .flex()
@@ -16003,6 +15294,12 @@ impl Render for Composer {
                                 .gap(px(ACTION_UTILITY_GAP))
                                 .child(leading),
                         )
+                        .child(
+                            div()
+                                .flex_none()
+                                .opacity(beneath_voice)
+                                .children(access_chip),
+                        )
                         .child(model_picker)
                         .child(
                             div()
@@ -16015,9 +15312,6 @@ impl Render for Composer {
                         )
                         .children(voice_track),
                 )
-                .when(running_reveal > 0.0, |el| {
-                    el.child(self.render_running_list(&theme, running_reveal, cx))
-                })
         } else {
             // Compact pill: attachment on the left, input in the middle,
             // then model, microphone and Send on the right, all on one 47px line.
@@ -16039,6 +15333,7 @@ impl Render for Composer {
                 .flex()
                 .flex_col()
                 .justify_end()
+                .children(limit_notice)
                 .children(pr_chips)
                 .children(comments_chip)
                 .children(appshot_strip)
@@ -16075,6 +15370,14 @@ impl Render for Composer {
                         )
                         .child(
                             div()
+                                .flex_none()
+                                .relative()
+                                .top(px(-cluster_dy))
+                                .opacity(beneath_voice)
+                                .children(access_chip),
+                        )
+                        .child(
+                            div()
                                 .min_w_0()
                                 .max_w(px(surface_width * 0.45))
                                 .relative()
@@ -16097,11 +15400,6 @@ impl Render for Composer {
                         .children(voice_track),
                 )
         };
-        let new_thread_project =
-            (new_thread_chrome_opacity > 0.0 && !self.state.read(cx).no_project).then(|| {
-                self.pickers
-                    .update(cx, |pickers, cx| pickers.render_new_thread_project(cx))
-            });
         let new_thread_git_selectors = (new_thread_chrome_opacity > 0.0)
             .then(|| {
                 self.pickers.update(cx, |pickers, cx| {
@@ -16168,10 +15466,6 @@ impl Render for Composer {
         // the top-right, no surrounding surface. Cancel the column gap as the
         // row collapses so the pill never jumps at the route boundary.
         let container = if self.dock_frame.is_some() {
-            let running =
-                crate::home::running_agents(self.state.read(cx), chrono::Utc::now()).len();
-            let tabs = (new_thread_chrome_opacity > 0.0)
-                .then(|| self.render_home_tabs(&theme, running, window, cx));
             let playbook_hero = self.playbook_hero(cx);
             let subtitle = playbook_hero
                 .as_ref()
@@ -16201,13 +15495,9 @@ impl Render for Composer {
                     .line_height(px(HERO_HEADLINE_LINE))
                     .text_color(theme.text)
                     .opacity(new_thread_chrome_opacity)
-                    .map(|el| match (playbook_hero, new_thread_project) {
-                        (Some((question, _)), _) => el.child(question),
-                        (None, Some(project)) => el
-                            .child("What should we build in")
-                            .child(div().ml(px(4.0)).min_w_0().child(project))
-                            .child("?"),
-                        (None, None) => el.child("What should we work on?"),
+                    .map(|el| match playbook_hero {
+                        Some((question, _)) => el.child(question),
+                        None => el.child("What should we work on?"),
                     })
             });
             let subtitle = subtitle
@@ -16231,36 +15521,7 @@ impl Render for Composer {
                         .children(code_spans(&subtitle, &theme))
                 });
             // Floating selectors share the surface's origin and never change its height.
-            container
-                .relative()
-                .children(headline)
-                .children(subtitle)
-                .child(
-                    div()
-                        .id("dock-target-selectors")
-                        .absolute()
-                        .top(px(-28.0))
-                        .left(px(Theme::SPACE_LG + 4.0))
-                        .right(px(Theme::SPACE_LG + 10.0))
-                        .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT))
-                        .flex()
-                        .items_start()
-                        .opacity(new_thread_chrome_opacity)
-                        .children(tabs),
-                )
-        } else if new_thread_chrome > 0.0 {
-            container.child(
-                div()
-                    .w_full()
-                    .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT * new_thread_chrome))
-                    .mb(px(-Theme::SPACE_SM * (1.0 - new_thread_chrome)))
-                    .px(px(10.0))
-                    .flex()
-                    .items_start()
-                    .justify_end()
-                    .opacity(new_thread_chrome_opacity)
-                    .children(new_thread_project),
-            )
+            container.relative().children(headline).children(subtitle)
         } else {
             container
         };
@@ -16290,25 +15551,11 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
-            let permission_chip = (session_chrome_opacity > 0.0
-                && self.pickers.read(cx).names_permission(cx))
-            .then(|| {
+            let new_thread_device = (new_thread_chrome_opacity > 0.0).then(|| {
                 self.pickers
-                    .update(cx, |pickers, cx| pickers.render_permission_chip(cx))
-            });
-            let new_thread_strip = (new_thread_chrome_opacity > 0.0 && !self.mission).then(|| {
-                self.pickers.update(cx, |pickers, cx| {
-                    (
-                        pickers.render_new_thread_device_chip(cx),
-                        pickers.render_permission_chip(cx),
-                    )
-                })
+                    .update(cx, |pickers, cx| pickers.render_new_thread_device_chip(cx))
             });
             let terminal_button = self.pickers.read(cx).render_terminal_button(cx);
-            let mission_chip = (session_chrome_opacity > 0.0
-                && self.mission_available()
-                && self.bound_chat_id(cx).is_some())
-            .then(|| self.render_mission_chip(&theme, cx));
             if session_chrome_opacity > 0.0 {
                 let chat = self.bound_chat_id(cx);
                 self.context_ring.update(cx, |ring, _| ring.track(chat));
@@ -16328,29 +15575,11 @@ impl Render for Composer {
                                 .flex()
                                 .items_center()
                                 .opacity(new_thread_chrome_opacity)
-                                .map(|row| {
-                                    if self.mission {
-                                        row.child(
-                                            div()
-                                                .text_size(crate::typography::ui_rems(11.5))
-                                                .text_color(theme.text_faint)
-                                                .child("⇧Tab: back to New task"),
-                                        )
-                                    } else {
-                                        row.gap(px(4.0)).when_some(
-                                            new_thread_strip,
-                                            |row, (device, permission)| {
-                                                row.child(div().flex_none().child(device))
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .children(new_thread_git_selectors),
-                                                    )
-                                                    .child(div().flex_none().child(permission))
-                                            },
-                                        )
-                                    }
+                                .gap(px(4.0))
+                                .when_some(new_thread_device, |row, device| {
+                                    row.child(div().flex_none().child(device)).child(
+                                        div().flex_1().min_w_0().children(new_thread_git_selectors),
+                                    )
                                 }),
                         )
                     })
@@ -16364,7 +15593,6 @@ impl Render for Composer {
                                 .flex()
                                 .items_center()
                                 .opacity(session_chrome_opacity)
-                                .children(mission_chip)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
                                 .child(
                                     // The footer row's own 4px gap: the PR badge
@@ -16377,7 +15605,6 @@ impl Render for Composer {
                                         .flex()
                                         .items_center()
                                         .gap(px(4.0))
-                                        .children(permission_chip)
                                         .child(self.context_ring.clone())
                                         .children(terminal_button),
                                 ),
@@ -16502,9 +15729,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tab_takes_the_prediction_and_shift_tab_toggles_mission_control(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn tab_takes_the_prediction_and_shift_tab_toggles_plan(cx: &mut gpui::TestAppContext) {
         let (_dir, handle) = composer_focus_window(cx);
         cx.update(|cx| init(cx, ComposerSendBehavior::default()));
         handle
@@ -16569,6 +15794,10 @@ mod tests {
 
         handle
             .update(cx, |composer, _, cx| {
+                composer
+                    .state
+                    .update(cx, |state, _| state.selected_chat = None);
+                composer.on_state_changed(cx);
                 composer.input.update(cx, |input, cx| {
                     input.set_text("- shop\n  - cart", cx);
                     input.move_to(input.text().len(), cx);
@@ -16579,15 +15808,14 @@ mod tests {
         handle
             .update(cx, |composer, _, cx| {
                 assert_eq!(composer.input_text(cx), "- shop\n- cart");
-                assert!(!composer.mission, "a list line still outdents");
+                assert!(!composer.plan(cx), "a list line still outdents");
             })
             .unwrap();
         cx.simulate_keystrokes(handle.into(), "shift-tab");
         handle
             .update(cx, |composer, _, cx| {
                 assert_eq!(composer.input_text(cx), "- shop\n- cart");
-                assert!(composer.mission, "a top-level list line toggles");
-                composer.set_mission(false, cx);
+                assert!(composer.plan(cx), "a top-level list line toggles");
                 composer.input.update(cx, |input, cx| {
                     input.set_text("Shop frontend\nNext.js and Tailwind", cx)
                 });
@@ -16595,41 +15823,12 @@ mod tests {
             .unwrap();
         cx.simulate_keystrokes(handle.into(), "shift-tab");
         handle
-            .read_with(cx, |composer, _| assert!(composer.mission))
+            .read_with(cx, |composer, cx| assert!(!composer.plan(cx)))
             .unwrap();
         cx.simulate_keystrokes(handle.into(), "shift-tab");
         handle
-            .read_with(cx, |composer, _| assert!(!composer.mission))
+            .read_with(cx, |composer, cx| assert!(composer.plan(cx)))
             .unwrap();
-        cx.simulate_keystrokes(handle.into(), "shift-tab");
-        let started = Rc::new(std::cell::RefCell::new(Vec::new()));
-        handle
-            .update(cx, |composer, _, cx| {
-                assert!(composer.mission);
-                let sink = started.clone();
-                let composer_entity = cx.entity();
-                cx.subscribe(&composer_entity, move |_, _, event: &ComposerEvent, _| {
-                    if let ComposerEvent::StartMission(start) = event {
-                        sink.borrow_mut().push(start.clone());
-                    }
-                })
-                .detach();
-                composer.on_submit(cx);
-                assert!(!composer.mission, "Send returns the chat to chat mode");
-                assert_eq!(composer.input_text(cx), "");
-            })
-            .unwrap();
-        let started = started.borrow();
-        assert_eq!(started.len(), 1);
-        assert_eq!(started[0].chat_id.as_deref(), Some("chat-a"));
-        assert_eq!(
-            started[0].title_notes(),
-            (
-                "Shop frontend".to_string(),
-                "Next.js and Tailwind".to_string()
-            )
-        );
-        assert!(started[0].orchestrate.plan_doc && started[0].orchestrate.approve_plan);
     }
 
     #[gpui::test]
@@ -16752,7 +15951,7 @@ mod tests {
                     settings.compact_model_picker = compact_picker;
                 });
             });
-            for thread_width in [436.0, 592.0, 768.0, 1232.0] {
+            for thread_width in [592.0, 768.0, 1232.0] {
                 for docked in [true, false] {
                     let amounts = if docked {
                         [0.0, 0.2, 0.6, 0.98, 1.0]
@@ -17567,6 +16766,41 @@ mod tests {
             .expect("the send creates the chat");
         assert_eq!(create.params["deviceId"], "remote");
         assert!(create.params.get("spaceId").is_none());
+    }
+
+    #[gpui::test]
+    fn a_plan_sent_from_new_chat_leaves_the_next_draft_without_plan(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, _requests) = tokio::sync::mpsc::channel::<String>(64);
+        let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ));
+            state.local_device_id = Some("local".into());
+            state.select_space(None, cx);
+            state.select_device("local".into(), cx);
+        });
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        composer.update(cx, |composer, cx| {
+            composer.set_plan(true, cx);
+            assert!(composer.plan(cx));
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("Ship Apple Pay", cx));
+            composer.on_submit(cx);
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, _| state.selected_chat = None);
+        composer.update(cx, |composer, cx| {
+            composer.on_state_changed(cx);
+            assert!(!composer.plan(cx));
+        });
     }
 
     /// Out of credits, a send that would run on Cloud is held at the button:
@@ -21755,26 +20989,6 @@ mod tests {
     }
 
     #[test]
-    fn home_tab_indicator_lands_on_each_tab_and_overshoots_past_the_last() {
-        let tab = |left: f32, width: f32| {
-            Some(Bounds::new(
-                point(px(left), px(10.0)),
-                size(px(width), px(20.0)),
-            ))
-        };
-        let slots = [tab(0.0, 60.0), tab(64.0, 120.0), tab(188.0, 100.0)];
-        for (slot, position) in [(0, 0.0), (1, 1.0), (2, 2.0)] {
-            assert_eq!(home_tab_indicator(slots, position), slots[slot]);
-        }
-        let between = home_tab_indicator(slots, 0.5).unwrap();
-        assert_eq!(between.left(), px(32.0));
-        assert_eq!(between.size.width, px(90.0));
-        let past = home_tab_indicator(slots, 2.05).unwrap();
-        assert!(past.left() > px(188.0));
-        assert_eq!(home_tab_indicator([slots[0], None, slots[2]], 0.5), None);
-    }
-
-    #[test]
     fn cluster_inset_glides_between_the_source_endpoints() {
         assert_eq!(ACTION_UTILITY_GAP, 2.0);
         assert_eq!(ACTION_PRIMARY_GAP, Theme::SPACE_SM);
@@ -21828,7 +21042,6 @@ mod tests {
 
     #[test]
     fn new_thread_selectors_restore_the_compact_floating_row() {
-        assert_eq!(NEW_THREAD_SELECTOR_ROW_HEIGHT, 20.0);
         assert_eq!(SESSION_FOOTER_HEIGHT, 24.0);
     }
 

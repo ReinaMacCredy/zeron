@@ -64,7 +64,6 @@ pub enum TaskCardEvent {
     },
     OpenChat(String),
     Refused(String),
-    PlanFirst,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -999,9 +998,6 @@ impl TaskCard {
     fn set_plan_first(&mut self, plan_first: bool, cx: &mut Context<Self>) {
         if let Some(open) = self.open.as_mut() {
             open.plan_first = plan_first;
-        }
-        if plan_first {
-            cx.emit(TaskCardEvent::PlanFirst);
         }
         cx.notify();
     }
@@ -2707,13 +2703,11 @@ mod tests {
         assert_eq!(statuses, [Done, Working, Planned, Skipped]);
         assert_eq!(plan.status, TaskStatus::Working);
         assert_eq!((plan.progress.done, plan.progress.total), (1, 3));
-        assert_eq!(super::super::needs_you_count(&state), 0);
 
         state.task_steps[1].turn = failed_turn();
         let plan = super::super::rollup(&state, &state.tasks[0], now);
         assert_eq!(plan.steps[1].status, Failed);
         assert_eq!(plan.status, TaskStatus::NeedsYou);
-        assert_eq!(super::super::needs_you_count(&state), 1);
     }
 
     #[gpui::test]

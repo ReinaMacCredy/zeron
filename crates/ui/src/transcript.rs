@@ -1204,6 +1204,12 @@ enum HtmlFileState {
 
 #[derive(Clone)]
 pub enum RowKind {
+    PlanProposal {
+        request_id: SharedString,
+        question_id: SharedString,
+        steps: Arc<Vec<SharedString>>,
+        outcome: crate::plan_proposal::PlanOutcome,
+    },
     PlanEstimate {
         task_id: SharedString,
         tool: Arc<ToolItem>,
@@ -2067,6 +2073,14 @@ pub fn rows_for_entry(
                 delegate_route,
                 ..
             } => {
+                if crate::plan_proposal::proposed_plan(call).is_some()
+                    && entry.parts.iter().any(|part| {
+                        matches!(part, MessagePart::Input { questions, .. }
+                            if crate::plan_proposal::is_plan_question(questions))
+                    })
+                {
+                    continue;
+                }
                 // A message to another chat reads as one line naming the
                 // recipient, one per recipient, out of the tool fold (compact
                 // mode folds it with the rest of the work).
@@ -2565,6 +2579,48 @@ pub fn rows_for_entry(
                                 scope: consent_scope(question),
                                 app: consent_app(question),
                                 detail: consent_detail(question).into(),
+                                outcome,
+                            },
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
+                        });
+                    }
+                    MessagePart::Input {
+                        id: part_id,
+                        request_id,
+                        questions,
+                        resolved,
+                        answers,
+                        ..
+                    } if crate::plan_proposal::is_plan_question(questions)
+                        && !crate::plan_proposal::entry_steps(&entry.parts).is_empty() =>
+                    {
+                        let question =
+                            crate::plan_proposal::plan_question(questions).expect("guarded");
+                        let outcome = crate::plan_proposal::plan_outcome(
+                            &question.id,
+                            *resolved,
+                            answers.as_deref(),
+                            streaming,
+                        );
+                        let steps: Vec<SharedString> =
+                            crate::plan_proposal::entry_steps(&entry.parts)
+                                .into_iter()
+                                .map(SharedString::from)
+                                .collect();
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version: fnv1a(
+                                format!("plan\0{request_id}\0{outcome:?}\0{}", steps.join("\0"))
+                                    .as_bytes(),
+                            ),
+                            turn_start: false,
+                            kind: RowKind::PlanProposal {
+                                request_id: request_id.clone().into(),
+                                question_id: question.id.clone().into(),
+                                steps: Arc::new(steps),
                                 outcome,
                             },
                             entry_id: entry_id.clone(),
@@ -4404,6 +4460,7 @@ pub struct Transcript {
     /// boundary invalidates only the live tail per commit.
     render_cache: Rc<RefCell<RenderCache>>,
     workspace_link: Option<render::LinkUi>,
+    open_children: HashSet<String>,
     /// File-link roots per linking chat, valid for one
     /// `AppState::link_roots_revision`: every rendered row asks for them.
     file_link_roots: (
@@ -4554,6 +4611,7 @@ pub struct Transcript {
     copied_message: Option<SharedString>,
     copied_message_clear: Option<Task<()>>,
     consent_sent: HashMap<SharedString, ConsentOutcome>,
+    plan_views: HashMap<SharedString, (u8, usize)>,
     consent_failures: HashMap<SharedString, SharedString>,
     foreground_sent: HashSet<SharedString>,
     secrets: secret_card::SecretCards,
@@ -4646,14 +4704,15 @@ pub fn branch_blocked(
     branching: Option<bool>,
     turn_active: bool,
 ) -> Option<String> {
+    if kind == BranchKind::Fork {
+        return None;
+    }
     match (harness, branching) {
         (Some(h), Some(false)) => Some(format!(
-            "{} does not support fork or rewind",
+            "{} does not support rewind",
             crate::composer::harness_display_name(h)
         )),
-        _ if kind == BranchKind::Rewind && turn_active => {
-            Some("Stop the running turn before rewinding".into())
-        }
+        _ if turn_active => Some("Stop the running turn before rewinding".into()),
         _ => None,
     }
 }
@@ -4699,7 +4758,7 @@ pub enum TranscriptEvent {
     OpenChat {
         chat_id: String,
     },
-    OpenDelegate {
+    OpenChildChat {
         chat_id: String,
     },
     /// `path` is workspace-relative; the shell re-resolves it.
@@ -4715,7 +4774,13 @@ pub enum TranscriptEvent {
         link: route_badge::RouteLink,
     },
     ApprovePlan {
-        task_id: String,
+        chat_id: String,
+        as_task: bool,
+        target: crate::plan_proposal::PlanTarget,
+    },
+    EditPlan {
+        chat_id: String,
+        answer: crate::plan_proposal::PlanAnswer,
     },
     OpenTask {
         task_id: String,
@@ -4779,6 +4844,7 @@ impl Transcript {
         delegate_chip(
             &view,
             badge,
+            false,
             row_id.clone(),
             None::<fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>,
             false,
@@ -4863,7 +4929,8 @@ impl Transcript {
             .detach();
         }
         let transcript = cx.weak_entity();
-        let approve = task.id.clone();
+        let approve = self.chat_id.clone();
+        let approve_task = task.id.clone();
         plan::plan_card(
             plan::PlanCard {
                 id: row_id.clone(),
@@ -4872,16 +4939,189 @@ impl Transcript {
                 lead,
                 on_link: self.route_links(cx),
                 on_start: Rc::new(move |_, cx| {
+                    let Some(chat_id) = approve.clone() else {
+                        return;
+                    };
                     transcript
                         .update(cx, |_, cx| {
                             cx.emit(TranscriptEvent::ApprovePlan {
-                                task_id: approve.clone(),
+                                chat_id,
+                                as_task: false,
+                                target: crate::plan_proposal::PlanTarget::Task(
+                                    approve_task.clone(),
+                                ),
                             })
                         })
                         .ok();
                 }),
             },
             theme,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_plan_proposal(
+        &mut self,
+        row_id: &SharedString,
+        request_id: &SharedString,
+        question_id: &SharedString,
+        steps: &Arc<Vec<SharedString>>,
+        outcome: crate::plan_proposal::PlanOutcome,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::plan_proposal::{self as proposal, CardView, PlanOutcome, StepMark};
+        let latest = self.rows.iter().rev().find_map(|row| match &row.kind {
+            RowKind::PlanProposal { .. } => Some(&row.id),
+            _ => None,
+        }) == Some(row_id);
+        let chat_id = self.chat_id.clone().unwrap_or_default();
+        let state = self.state.read(cx);
+        let task = latest
+            .then(|| zeron_proto::plan_of_chat(&state.tasks, &chat_id))
+            .flatten();
+        let flight = state.plan_approval(request_id);
+        let first_current = |steps: &[SharedString]| -> Vec<(SharedString, StepMark)> {
+            steps
+                .iter()
+                .enumerate()
+                .map(|(ix, step)| {
+                    let mark = if ix == 0 {
+                        StepMark::Current
+                    } else {
+                        StepMark::Number
+                    };
+                    (step.clone(), mark)
+                })
+                .collect()
+        };
+        let view = if outcome == PlanOutcome::Approved {
+            CardView::Here
+        } else if outcome == PlanOutcome::Declined && task.is_some() {
+            let title = state
+                .chats
+                .iter()
+                .find(|chat| chat.id == chat_id)
+                .map(crate::home::chat_title)
+                .unwrap_or_default();
+            let rows = task
+                .map(|task| crate::tasks::rollup(state, task, chrono::Utc::now()).steps)
+                .unwrap_or_default();
+            let mut current = false;
+            let marked: Vec<(SharedString, StepMark)> = rows
+                .iter()
+                .map(|row| {
+                    let done = matches!(
+                        row.status,
+                        zeron_proto::StepStatus::Done | zeron_proto::StepStatus::Skipped
+                    );
+                    let mark = match (done, current) {
+                        (true, _) => StepMark::Done,
+                        (false, false) => {
+                            current = true;
+                            StepMark::Current
+                        }
+                        (false, true) => StepMark::Number,
+                    };
+                    (SharedString::from(row.step.title.clone()), mark)
+                })
+                .collect();
+            CardView::Task {
+                title: task
+                    .map(|task| task.title.clone())
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or(title)
+                    .into(),
+                steps: if marked.is_empty() {
+                    first_current(steps)
+                } else {
+                    marked
+                },
+            }
+        } else if outcome == PlanOutcome::Declined && flight == Some(true) {
+            CardView::Waiting {
+                busy: true,
+                task_blocked: None,
+            }
+        } else if outcome == PlanOutcome::Declined {
+            CardView::NotApproved
+        } else {
+            CardView::Waiting {
+                busy: flight.is_some(),
+                task_blocked: crate::tasks::chat_plan_blocker(state, &chat_id),
+            }
+        };
+        let layout = match &view {
+            CardView::Waiting { .. } => (0, steps.len()),
+            CardView::Here => (1, steps.len()),
+            CardView::NotApproved => (2, steps.len()),
+            CardView::Task { steps, .. } => (3, steps.len()),
+        };
+        if self.plan_views.insert(row_id.clone(), layout) != Some(layout) {
+            let row = row_id.clone();
+            cx.spawn(async move |this, cx| {
+                this.update(cx, |this, cx| this.diagram_layout_changed(&[row], cx))
+                    .ok();
+            })
+            .detach();
+        }
+        let task_id = task.map(|task| task.id.clone());
+        let weak = cx.weak_entity();
+        let answer = proposal::PlanAnswer {
+            request_id: request_id.to_string(),
+            question_id: question_id.to_string(),
+        };
+        let on_approve = {
+            let weak = weak.clone();
+            let chat_id = chat_id.clone();
+            let answer = answer.clone();
+            Rc::new(move |as_task: bool, _: &mut Window, cx: &mut gpui::App| {
+                weak.update(cx, |_, cx| {
+                    cx.emit(TranscriptEvent::ApprovePlan {
+                        chat_id: chat_id.clone(),
+                        as_task,
+                        target: proposal::PlanTarget::Question(answer.clone()),
+                    })
+                })
+                .ok();
+            })
+        };
+        let on_edit = {
+            let weak = weak.clone();
+            let chat_id = chat_id.clone();
+            let request = request_id.clone();
+            Rc::new(move |_: &mut Window, cx: &mut gpui::App| {
+                weak.update(cx, |transcript, cx| {
+                    if transcript.state.read(cx).plan_approval(&request).is_some() {
+                        return;
+                    }
+                    cx.emit(TranscriptEvent::EditPlan {
+                        chat_id: chat_id.clone(),
+                        answer: answer.clone(),
+                    })
+                })
+                .ok();
+            })
+        };
+        let on_open_task = Rc::new(move |_: &mut Window, cx: &mut gpui::App| {
+            let Some(task_id) = task_id.clone() else {
+                return;
+            };
+            weak.update(cx, |_, cx| cx.emit(TranscriptEvent::OpenTask { task_id }))
+                .ok();
+        });
+        proposal::proposal_card(
+            proposal::ProposalCard {
+                id: row_id.clone(),
+                steps: steps.clone(),
+                view,
+                on_approve,
+                on_edit,
+                on_open_task,
+            },
+            theme,
+            cx.entity_id(),
             cx,
         )
     }
@@ -5123,7 +5363,7 @@ impl Transcript {
                         .child(SharedString::from("Open subagent"))
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.stop_propagation();
-                            cx.emit(TranscriptEvent::OpenDelegate {
+                            cx.emit(TranscriptEvent::OpenChildChat {
                                 chat_id: child.clone(),
                             });
                         })),
@@ -5208,6 +5448,13 @@ impl Transcript {
 
     pub(crate) fn set_workspace_link_handler(&mut self, handler: render::LinkUi) {
         self.workspace_link = Some(handler);
+    }
+
+    pub(crate) fn set_open_children(&mut self, open: HashSet<String>, cx: &mut Context<Self>) {
+        if self.open_children != open {
+            self.open_children = open;
+            cx.notify();
+        }
     }
 
     pub(crate) fn link_ui(&mut self, cx: &mut Context<Self>) -> Option<render::LinkUi> {
@@ -5457,6 +5704,7 @@ impl Transcript {
             veil_attach_pending: true,
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
             workspace_link: None,
+            open_children: HashSet::new(),
             file_link_roots: Default::default(),
             inline_code_links: Default::default(),
             rendered_rows: HashSet::new(),
@@ -5513,6 +5761,7 @@ impl Transcript {
             copied_message: None,
             copied_message_clear: None,
             consent_sent: HashMap::new(),
+            plan_views: HashMap::new(),
             consent_failures: HashMap::new(),
             foreground_sent: HashSet::new(),
             secrets: Default::default(),
@@ -6786,43 +7035,6 @@ impl Transcript {
             })
             .filter(|summary| seen.insert(summary.doc_id.clone()))
             .collect()
-    }
-
-    /// Every image the user attached to a prompt, in transcript order.
-    pub(crate) fn user_attachments(&self) -> Vec<crate::attachments::UserImageAttachment> {
-        self.rows
-            .iter()
-            .filter_map(|row| match &row.kind {
-                RowKind::User { attachments, .. } => Some(attachments.iter().cloned()),
-                _ => None,
-            })
-            .flatten()
-            .collect()
-    }
-
-    /// Open the image viewer on one user attachment — the same path a click on
-    /// its bubble thumbnail takes. A thumbnail that has not loaded yet only
-    /// starts its load; the caller's click is then a no-op.
-    pub(crate) fn preview_attachment(
-        &mut self,
-        attachment: &crate::attachments::UserImageAttachment,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let device_ids = self.attachment_device_ids(cx);
-        let crate::attachments::AttachmentSnapshot::Loaded(image) =
-            self.attachment_state(&device_ids, &attachment.path, None, cx)
-        else {
-            return false;
-        };
-        let preview =
-            crate::attachments::PreviewImage::new(attachment.name.clone(), image.image.clone());
-        self.attachment_preview_return_focus = window.focused(cx);
-        preview.viewer.reset();
-        self.attachment_preview = Some(preview);
-        window.focus(&self.attachment_preview_focus, cx);
-        cx.notify();
-        true
     }
 
     /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
@@ -11313,6 +11525,20 @@ impl Transcript {
             RowKind::PlanEstimate { task_id, tool } => {
                 self.render_plan_estimate(&row.id, task_id, tool, &theme, cx)
             }
+            RowKind::PlanProposal {
+                request_id,
+                question_id,
+                steps,
+                outcome,
+            } => self.render_plan_proposal(
+                &row.id,
+                request_id,
+                question_id,
+                steps,
+                *outcome,
+                &theme,
+                cx,
+            ),
             RowKind::ComputerConsent {
                 request_id,
                 question_id,
@@ -12609,7 +12835,7 @@ impl Transcript {
                         badge,
                         row_height,
                         cx.listener(move |_, _, _, cx| {
-                            cx.emit(TranscriptEvent::OpenChat {
+                            cx.emit(TranscriptEvent::OpenChildChat {
                                 chat_id: thread.to_string(),
                             });
                         }),
@@ -12642,12 +12868,14 @@ impl Transcript {
                                 theme,
                             )
                         });
+                    let open = self.open_children.contains(child.as_ref());
                     return delegate_chip(
                         &view,
                         badge,
+                        open,
                         SharedString::from(format!("{row_id}#s{ix}")),
                         Some(cx.listener(move |_, _, _, cx| {
-                            cx.emit(TranscriptEvent::OpenDelegate {
+                            cx.emit(TranscriptEvent::OpenChildChat {
                                 chat_id: child.to_string(),
                             });
                         })),
@@ -12672,9 +12900,11 @@ impl Transcript {
                     let (glyph, tint) =
                         crate::pickers::agent_brand_icon(harness, tool.call.subagent_model());
                     let mark = (glyph, tint, spawn_tag(harness, &tool.call));
+                    let open = self.open_children.contains(doc_id.as_ref());
                     return subagent_chip(
                         tool,
                         mark,
+                        open,
                         SharedString::from(format!("{row_id}#s{ix}")),
                         cx.listener(move |_, _, _, cx| {
                             cx.emit(TranscriptEvent::OpenSubagent {
@@ -15387,6 +15617,7 @@ fn started_thread_line(
 fn delegate_chip(
     view: &DelegateView,
     badge: Option<AnyElement>,
+    open: bool,
     id: SharedString,
     on_open: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>,
     rail: bool,
@@ -15525,7 +15756,8 @@ fn delegate_chip(
                     ),
             )
         });
-    agent_chip_card(id, a11y_label, Some("delegate-chip"), rail, on_open, header)
+    let open = open.then_some(theme.accent);
+    agent_chip_card(id, a11y_label, Some("delegate-chip"), rail, open, on_open, header)
 }
 
 pub(crate) use zeron_proto::transcript::{handback_quotes, step_handback_threads, wake_task_ids};
@@ -15544,6 +15776,7 @@ pub(crate) fn wake_summary(views: &[DelegateView]) -> String {
 fn subagent_chip(
     tool: &ToolItem,
     mark: (&'static str, Option<gpui::Hsla>, Option<SharedString>),
+    open: bool,
     id: SharedString,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     rail: bool,
@@ -15556,6 +15789,7 @@ fn subagent_chip(
         chip_a11y_label(tool),
         None,
         rail,
+        open.then_some(theme.accent),
         Some(on_open),
         chip_header_row(
             tool,
@@ -15574,6 +15808,7 @@ fn agent_chip_card(
     label: SharedString,
     debug_selector: Option<&'static str>,
     rail: bool,
+    open: Option<gpui::Hsla>,
     on_open: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>,
     header: impl IntoElement,
 ) -> AnyElement {
@@ -15612,7 +15847,7 @@ fn agent_chip_card(
                 .overflow_hidden()
                 .rounded(px(9.0))
                 .border_1()
-                .border_color(crate::theme::hairline(0.07))
+                .border_color(open.unwrap_or(crate::theme::hairline(0.07)))
                 .bg(crate::theme::ink(0.03))
                 .when_some(on_open, |card, on_open| {
                     card.cursor_pointer()
@@ -19378,9 +19613,9 @@ mod tests {
                 Some(HarnessId::Cursor),
                 Some(false),
                 false
-            )
-            .as_deref(),
-            Some("Cursor does not support fork or rewind")
+            ),
+            None,
+            "a fork copies the transcript, so it needs no harness branching"
         );
         assert_eq!(
             branch_blocked(
@@ -19390,7 +19625,7 @@ mod tests {
                 true
             )
             .as_deref(),
-            Some("Cursor does not support fork or rewind")
+            Some("Cursor does not support rewind")
         );
         assert_eq!(
             branch_blocked(
@@ -24585,6 +24820,52 @@ mod computer_tests {
             "output": output,
         }))
         .expect("tool part")
+    }
+
+    #[test]
+    fn a_plan_card_needs_the_plans_text() {
+        let question = MessagePart::Input {
+            id: "p1".into(),
+            request_id: "plan-1".into(),
+            questions: vec![UserInputQuestion {
+                approval: true,
+                id: "plan".into(),
+                header: "Approve plan".into(),
+                question: "Approve this plan?".into(),
+                options: vec!["Yes".into(), "No".into()],
+                multi_select: false,
+                kind: None,
+                prefill: None,
+                multiline: false,
+            }],
+            resolved: false,
+            answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
+        };
+        let exit = |input: serde_json::Value| -> MessagePart {
+            serde_json::from_value(serde_json::json!({
+                "kind": "tool",
+                "id": "t1",
+                "call": { "kind": "unknown", "name": "ExitPlanMode", "input": input },
+                "resolved": true,
+            }))
+            .expect("tool part")
+        };
+        let card = |parts: Vec<MessagePart>| {
+            rows_for_entry(
+                &entry(MessageRole::Assistant, parts),
+                false,
+                false,
+                &mut parse,
+            )
+            .iter()
+            .any(|row| matches!(row.kind, RowKind::PlanProposal { .. }))
+        };
+        let plan = serde_json::json!({ "plan": "1. Audit the checkout\n2. Ship it" });
+        assert!(card(vec![exit(plan), question.clone()]));
+        assert!(!card(vec![exit(serde_json::Value::Null), question.clone()]));
+        assert!(!card(vec![question]));
     }
 
     #[test]

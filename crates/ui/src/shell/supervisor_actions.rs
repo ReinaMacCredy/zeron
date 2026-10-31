@@ -8,7 +8,6 @@ pub(super) struct SupervisorShell {
     pane: Option<super::task_actions::DocPane>,
     doc: Option<String>,
     seen: Option<std::collections::HashSet<String>>,
-    badge: Option<(usize, crate::motion::Tween)>,
 }
 
 impl SupervisorShell {
@@ -38,7 +37,6 @@ impl Shell {
 
     pub(super) fn enter_supervisor_route(&mut self, cx: &mut Context<Self>) {
         self.set_route(Route::Supervisor, cx);
-        self.close_user_menu(cx);
         self.close_chat_menu(cx);
         if let Some((page, _)) = &self.supervisor.page {
             page.update(cx, |page, cx| page.entered(cx));
@@ -143,9 +141,6 @@ impl Shell {
             SupervisorEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             SupervisorEvent::WatchDoc(doc) => self.set_supervisor_doc(doc.clone(), cx),
             SupervisorEvent::Discuss(text) => self.discuss_with_supervisor(text.clone(), cx),
-            SupervisorEvent::ConversationOpened => {
-                self.mark_onboarded(super::intros::SUPERVISOR_CONVERSATION, cx)
-            }
         }
     }
 
@@ -177,21 +172,6 @@ impl Shell {
             Route::Chat => self.state.read(cx).selected_chat.as_deref() == Some(raiser),
             _ => false,
         }
-    }
-
-    pub(super) fn supervisor_badge_pop(&mut self, count: usize, cx: &App) -> Option<f32> {
-        let now = crate::motion::now();
-        let reduced = crate::motion::reduced_motion(cx);
-        let (seen, pop) = self
-            .supervisor
-            .badge
-            .get_or_insert_with(|| (count, crate::motion::Tween::at(1.0, now)));
-        if count > *seen {
-            *pop = crate::motion::Tween::at(0.0, now);
-            pop.retarget(1.0, crate::supervisor::BADGE_POP, reduced, now);
-        }
-        *seen = count;
-        (!pop.settled_at(now)).then(|| crate::supervisor::badge_scale(pop.value_at(now)))
     }
 
     pub(super) fn route_supervisor_needs(&mut self, cx: &mut Context<Self>) {

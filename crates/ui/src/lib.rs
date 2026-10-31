@@ -71,6 +71,7 @@ pub mod overscroll;
 mod pasted_text;
 pub mod pickers;
 mod plan_estimate;
+mod plan_proposal;
 pub mod popover;
 pub mod project_actions;
 pub mod provider_instances;
@@ -287,7 +288,6 @@ pub fn run_app(config: UiConfig) {
                 );
                 composer::init(cx, ui_settings.composer_send_behavior);
                 appshots::set_enabled(ui_settings.appshots_enabled);
-                appshots::set_welcome_pending(!ui_settings.appshot_welcome_acknowledged);
                 terminal::panel::init(cx);
                 app_menus::init(cx);
                 app_update::AppUpdate::init(
@@ -445,12 +445,17 @@ fn open_notification_target(target: String, state: &gpui::Entity<state::AppState
                 } else if target == notify::SUPERVISOR_TARGET {
                     shell.open_supervisor(cx);
                 } else {
-                    shell.open_chat(target, cx);
+                    shell.open_notification_target(target, window, cx);
                 }
             });
         }
         None if target != notify::AGENT_UPDATES_TARGET && target != notify::SUPERVISOR_TARGET => {
-            state.update(cx, |state, cx| state.select_chat(Some(target), cx))
+            state.update(cx, |state, cx| {
+                let chat = state
+                    .sidecar_host(&target, chrono::Utc::now())
+                    .unwrap_or(target);
+                state.select_chat(Some(chat), cx)
+            })
         }
         None => {}
     }

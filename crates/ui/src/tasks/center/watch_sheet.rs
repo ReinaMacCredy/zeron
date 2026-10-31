@@ -499,7 +499,7 @@ impl TaskCenter {
         }));
         let goal = row(
             "task-center-watch-goal",
-            "Change a mission's goal or spend",
+            "Change a task's goal or spend",
             if plan {
                 "Lets it decide those too."
             } else {

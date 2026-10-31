@@ -1291,65 +1291,6 @@ pub fn dialog_card(theme: &Theme) -> gpui::Div {
         .text_color(theme.text)
 }
 
-pub fn welcome_sheet(theme: &Theme, id: &'static str, title: &str) -> gpui::Stateful<gpui::Div> {
-    dialog_card(theme)
-        .id(id)
-        .role(gpui::Role::Dialog)
-        .aria_label(SharedString::from(title.to_string()))
-        .w(px(420.0))
-        .rounded(px(20.0))
-}
-
-pub fn welcome_title(theme: &Theme, title: &str) -> gpui::Div {
-    div()
-        .text_size(px(19.0))
-        .line_height(px(23.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.text)
-        .child(SharedString::from(title.to_string()))
-}
-
-pub fn welcome_body(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
-    div()
-        .mt(px(8.0))
-        .text_size(crate::typography::ui_rems(14.0))
-        .line_height(px(21.0))
-        .text_color(theme.text_muted)
-        .child(copy.into())
-}
-
-pub fn welcome_action(
-    theme: &Theme,
-    id: &'static str,
-    label: &'static str,
-    primary: bool,
-) -> gpui::Stateful<gpui::Div> {
-    let text = theme.text;
-    let action = div()
-        .id(id)
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .h(px(32.0))
-        .px(px(14.0))
-        .rounded(px(10.0))
-        .flex()
-        .items_center()
-        .text_size(crate::typography::ui_rems(14.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .cursor_pointer()
-        .child(label);
-    if primary {
-        action
-            .bg(theme.text)
-            .text_color(theme.on_solid)
-            .hover(|s| s.opacity(0.9))
-    } else {
-        action
-            .text_color(theme.text_muted)
-            .hover(move |s| s.bg(crate::theme::ink(0.06)).text_color(text))
-    }
-}
-
 /// Dialog title: `text-[15px] font-semibold tracking-tight`.
 pub fn dialog_title(theme: &Theme, title: &str) -> gpui::Div {
     div()

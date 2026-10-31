@@ -1,172 +1,21 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, Entity, Hsla, MouseButton, MouseDownEvent,
-    SharedString, Stateful, Window, div, point, prelude::*, px,
-};
+use gpui::{App, Context, Div, SharedString, div, prelude::*, px};
+use zeron_doc::SessionMessageEntry;
 use zeron_doc::background::{agent_runs, agent_tree, latest_prompt, rows_missing, walked_docs};
-use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
-use zeron_proto::background::{
-    AgentRun, RunState, aggregate, agents_label, delegate_runs, elapsed_label, latest_line,
-    roster_heading, run_depths, shell_tasks, shells_label,
-};
-use zeron_proto::{BackgroundTask, HarnessId, ReasoningLevel};
+use zeron_proto::background::{delegate_runs, shell_tasks};
+use zeron_proto::{BackgroundTask, HarnessId};
 use zeron_rpc::methods;
 
-use super::{Composer, ComposerEvent};
-use crate::icons::{self, icon};
+use super::Composer;
 use crate::motion;
-use crate::popover::{self, Popup};
 use crate::theme::Theme;
 
-const FRAMES: [u16; 8] = [189, 220, 90, 78, 45, 291, 306, 433];
-const FRAME_MS: u64 = 175;
-const DOT_GRID_CYCLE: motion::MotionSpec =
-    motion::MotionSpec::new(FRAME_MS * FRAMES.len() as u64, motion::EASE);
-const DOT_SIZE: f32 = 2.25;
-const DOT_GAP: f32 = 1.75;
-const DOT_BOX: f32 = DOT_SIZE * 3.0 + DOT_GAP * 2.0;
-const GLYPH_SIZE: f32 = 12.0;
-const PILL_HEIGHT: f32 = 28.0;
-const SETTLE_FADE: Duration = Duration::from_millis(160);
 const CARD_RISE: f32 = 10.0;
 const CARD_DROP: f32 = 4.0;
-const PILL_RISE: f32 = 4.0;
-const AGENTS_PILL_FLOOR: f32 = 140.0;
-const AGENTS_PILL_SHRINK: f32 = 100.0;
-const ELAPSED_TICK: Duration = Duration::from_secs(1);
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
-const SHELLS_MENU_WIDTH: f32 = 420.0;
-const DETAIL_MENU_WIDTH: f32 = 600.0;
-const DETAIL_LOG_HEIGHT: f32 = 300.0;
-const RAW_BLOCK_LIMIT: usize = 300;
-const RAW_BLOCK_CHARS: usize = 4_000;
 pub(crate) use zeron_proto::transcript::compact_count;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RawRole {
-    User,
-    Assistant,
-    Thinking,
-    ToolUse,
-    ToolResult,
-    Error,
-}
-
-impl RawRole {
-    fn label(self) -> &'static str {
-        match self {
-            RawRole::User => "user",
-            RawRole::Assistant => "assistant",
-            RawRole::Thinking => "thinking",
-            RawRole::ToolUse => "tool_use",
-            RawRole::ToolResult => "tool_result",
-            RawRole::Error => "error",
-        }
-    }
-
-    fn color(self, theme: &Theme) -> Hsla {
-        match self {
-            RawRole::User => theme.accent,
-            RawRole::Assistant => theme.text,
-            RawRole::Thinking | RawRole::ToolUse => theme.text_muted,
-            RawRole::ToolResult => theme.success,
-            RawRole::Error => theme.danger,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RawBlock {
-    pub role: RawRole,
-    pub text: String,
-}
-
-fn clip(text: &str) -> String {
-    match text.char_indices().nth(RAW_BLOCK_CHARS) {
-        Some((cut, _)) => format!("{}…", &text[..cut]),
-        None => text.to_owned(),
-    }
-}
-
-pub(crate) fn raw_blocks(entries: &[SessionMessageEntry], hide_thinking: bool) -> Vec<RawBlock> {
-    let mut blocks = Vec::new();
-    let mut push = |role: RawRole, text: &str| {
-        let text = text.trim_end();
-        if !text.is_empty() {
-            blocks.push(RawBlock {
-                role,
-                text: clip(text),
-            });
-        }
-    };
-    for entry in entries {
-        let user = entry.role == MessageRole::User;
-        for part in &entry.parts {
-            match part {
-                MessagePart::Text { text, .. } | MessagePart::Handoff { text, .. } => push(
-                    if user {
-                        RawRole::User
-                    } else {
-                        RawRole::Assistant
-                    },
-                    text,
-                ),
-                MessagePart::Image { name, .. } => push(RawRole::User, &format!("[image] {name}")),
-                MessagePart::Reasoning { text, .. } if !hide_thinking => {
-                    push(RawRole::Thinking, text)
-                }
-                MessagePart::Reasoning { .. } => {}
-                MessagePart::Tool {
-                    call,
-                    is_error,
-                    output,
-                    ..
-                } => {
-                    push(
-                        RawRole::ToolUse,
-                        &serde_json::to_string(call).unwrap_or_default(),
-                    );
-                    if let Some(output) = output {
-                        push(
-                            if *is_error {
-                                RawRole::Error
-                            } else {
-                                RawRole::ToolResult
-                            },
-                            output,
-                        );
-                    }
-                }
-                MessagePart::Input { questions, .. } => push(
-                    RawRole::Assistant,
-                    &serde_json::to_string(questions).unwrap_or_default(),
-                ),
-                MessagePart::Error { message, .. } => push(RawRole::Error, message),
-                MessagePart::Fork { .. }
-                | MessagePart::Switch { .. }
-                | MessagePart::Visual { .. }
-                | MessagePart::Classifier { .. }
-                | MessagePart::Compaction { .. } => {}
-            }
-        }
-    }
-    let skip = blocks.len().saturating_sub(RAW_BLOCK_LIMIT);
-    blocks.split_off(skip)
-}
-
-pub(crate) fn tool_count(entries: &[SessionMessageEntry]) -> usize {
-    entries
-        .iter()
-        .flat_map(|entry| &entry.parts)
-        .filter(|part| matches!(part, MessagePart::Tool { .. }))
-        .count()
-}
-
-pub(crate) fn dot_lit(frame: u16, dot: usize) -> bool {
-    frame & (1 << (8 - dot)) != 0
-}
 
 pub(crate) fn sidebar_ring_mark(count: usize, theme: &Theme) -> Div {
     div()
@@ -193,63 +42,25 @@ pub(crate) fn sidebar_ring_mark(count: usize, theme: &Theme) -> Div {
         })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BackgroundPanel {
-    Subagents,
-    Shells,
-}
-
-const PANEL_WAIT: Duration = Duration::from_secs(3);
-
 #[derive(Default)]
 pub(crate) struct BackgroundUi {
     chat: Option<String>,
-    pending: Option<(String, BackgroundPanel, Instant)>,
-    roster: Popup<Instant>,
-    agents_pill_since: Option<Instant>,
-    shells_pill_since: Option<Instant>,
-    shells: Popup<()>,
-    agents_glyph: Option<(RunState, Option<Instant>)>,
-    tick: Option<gpui::Task<()>>,
-    outputs: HashMap<String, ShellOutput>,
-    tokens: HashMap<String, AgentTokens>,
     walks: HashMap<String, AgentWalk>,
     widen: Option<bool>,
-    detail: Option<TrayDetail>,
 }
 
-struct ShellOutput {
-    lines: Vec<String>,
-    _watch: Option<gpui::Task<()>>,
+struct BackgroundRuns {
+    chat_id: String,
+    harness: Option<HarnessId>,
+    agents: Vec<zeron_proto::background::AgentRun>,
+    shells: Vec<BackgroundTask>,
+    walk: Vec<String>,
+    counted: u32,
 }
 
 struct AgentWalk {
     entries: Vec<SessionMessageEntry>,
     loaded: bool,
-    _watch: Option<gpui::Task<()>>,
-}
-
-struct AgentTokens {
-    count: Option<u64>,
-    _watch: Option<gpui::Task<()>>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum DetailTarget {
-    Shell(String),
-    Agent(String),
-}
-
-struct TrayDetail {
-    target: DetailTarget,
-    scroll: gpui::ScrollHandle,
-    hide_thinking: bool,
-    feed: Option<AgentFeed>,
-}
-
-struct AgentFeed {
-    doc_id: String,
-    entries: Vec<SessionMessageEntry>,
     _watch: Option<gpui::Task<()>>,
 }
 
@@ -295,26 +106,6 @@ pub(super) fn card_motion(
     }
 }
 
-pub(super) fn presence(since: &mut Option<Instant>, shown: bool, now: Instant) -> Option<Instant> {
-    if !shown {
-        *since = None;
-        return None;
-    }
-    Some(*since.get_or_insert(now))
-}
-
-pub(super) fn pill_enter(since: Option<Instant>, reduced: bool, now: Instant) -> f32 {
-    eased(&motion::FADE_QUICK, since, reduced, now)
-}
-
-pub(super) fn pill_exit(since: Instant, reduced: bool, now: Instant) -> f32 {
-    eased(&motion::MENU_OUT, Some(since), reduced, now)
-}
-
-pub(super) fn entering(pill: Stateful<Div>, t: f32) -> Stateful<Div> {
-    pill.relative().top(px(PILL_RISE * (1.0 - t))).opacity(t)
-}
-
 pub(super) fn card_frame<E>(card: E, motion: CardMotion) -> crate::frost::Frosted
 where
     E: Styled + ParentElement + IntoElement,
@@ -330,54 +121,20 @@ where
 }
 
 impl Composer {
-    pub(super) fn render_background_corner(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<(Vec<AnyElement>, Option<AnyElement>)> {
-        let (chat_id, harness, chat_reasoning) = self.bound_chat_row(cx).map(|chat| {
-            let config = chat.config.as_ref();
-            (
-                chat.id.clone(),
-                config.map(|c| c.harness),
-                config.and_then(|c| c.reasoning),
-            )
-        })?;
-        let chat_reasoning =
-            chat_reasoning.or_else(|| self.pickers.read(cx).resolved(cx).reasoning);
-        let (agents, shells, walk, counted) = {
-            let state = self.state.read(cx);
-            let transcript = self.bound_transcript(state);
-            let turn_start = latest_prompt(transcript);
-            let walks = &self.background.walks;
-            let mut agents = agent_tree(transcript, turn_start.unwrap_or(0), &|id| {
-                walks.get(id).map(|walk| walk.entries.as_slice())
-            });
-            let pending_review = state
-                .reviews
-                .get(&chat_id)
-                .and_then(|review| review.run.as_ref())
-                .filter(|run| !run.findings.is_empty())
-                .and_then(|run| run.task_id.as_deref());
-            agents.extend(delegate_runs(
-                &state.chats,
-                &chat_id,
-                turn_start.map_or(0, |ix| transcript[ix].created_at),
-                pending_review,
-            ));
-            let walk = walked_docs(transcript, &agents, self.background.widen == Some(true));
-            let counted = state.running_subagents_for(&chat_id, chrono::Utc::now());
-            (
-                agents,
-                shell_tasks(state.session_for(&chat_id)),
-                walk,
-                counted,
-            )
+    pub(super) fn sync_background_walks(&mut self, cx: &mut Context<Self>) {
+        let Some(BackgroundRuns {
+            chat_id,
+            agents,
+            walk,
+            counted,
+            ..
+        }) = self.background_runs(cx)
+        else {
+            return;
         };
         if self.background.chat.as_deref() != Some(chat_id.as_str()) {
             self.background = BackgroundUi {
-                chat: Some(chat_id.clone()),
-                pending: self.background.pending.take(),
+                chat: Some(chat_id),
                 ..Default::default()
             };
         }
@@ -395,625 +152,92 @@ impl Composer {
                 _ => {}
             }
         }
-        if let Some((pending_chat, panel, asked)) = self.background.pending.take()
-            && asked.elapsed() < PANEL_WAIT
-        {
-            match panel {
-                BackgroundPanel::Subagents if pending_chat == chat_id && !agents.is_empty() => {
-                    self.background.roster.open(motion::now());
-                }
-                BackgroundPanel::Shells if pending_chat == chat_id && !shells.is_empty() => {
-                    self.background.shells.open(());
-                }
-                _ => self.background.pending = Some((pending_chat, panel, asked)),
-            }
-        }
-        if agents.is_empty() {
-            self.background.roster = Popup::default();
-            self.background.agents_glyph = None;
-        }
-        if shells.is_empty() {
-            self.background.shells = Popup::default();
-        }
-        let stale = match self.background.detail.as_ref().map(|d| &d.target) {
-            Some(DetailTarget::Shell(id)) => {
-                self.background.shells.get().is_none() || !shells.iter().any(|t| &t.id == id)
-            }
-            Some(DetailTarget::Agent(part)) => {
-                self.background.roster.get().is_none()
-                    || !agents.iter().any(|run| &run.part_id == part)
-            }
-            None => false,
-        };
-        if stale {
-            self.background.detail = None;
-        }
-        if agents.is_empty() && shells.is_empty() {
-            return None;
-        }
+    }
 
-        let theme = Theme::of(cx).clone();
-        let stoppable = harness == Some(HarnessId::ClaudeCode);
-        let now = motion::now();
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let reduced = motion::reduced_motion(cx);
-
-        let overall = aggregate(&agents);
-        let settled_since = match self.background.agents_glyph {
-            Some((state, since)) if state == overall => since,
-            Some(_) => {
-                self.background.agents_glyph = Some((overall, Some(now)));
-                Some(now)
-            }
-            None => {
-                self.background.agents_glyph = Some((overall, None));
-                None
-            }
-        };
-        let fade = tween_progress(settled_since, SETTLE_FADE, reduced, now);
-        let roster_motion = self.background.roster.get().map(|opened| {
-            card_motion(
-                *opened,
-                self.background.roster.closing_since(),
-                reduced,
-                now,
+    fn background_runs(&self, cx: &App) -> Option<BackgroundRuns> {
+        let (chat_id, harness) = self.bound_chat_row(cx).map(|chat| {
+            (
+                chat.id.clone(),
+                chat.config.as_ref().map(|config| config.harness),
             )
+        })?;
+        let state = self.state.read(cx);
+        let transcript = self.bound_transcript(state);
+        let turn_start = latest_prompt(transcript);
+        let walks = &self.background.walks;
+        let mut agents = agent_tree(transcript, turn_start.unwrap_or(0), &|id| {
+            walks.get(id).map(|walk| walk.entries.as_slice())
         });
-        let roster_open = self.background.roster.is_open();
-        let agents_since = presence(
-            &mut self.background.agents_pill_since,
-            !agents.is_empty(),
-            now,
-        );
-        let shells_since = presence(
-            &mut self.background.shells_pill_since,
-            !shells.is_empty(),
-            now,
-        );
-        let agents_in = pill_enter(agents_since, reduced, now);
-        let shells_in = pill_enter(shells_since, reduced, now);
-        if fade < 1.0
-            || roster_motion.is_some_and(|motion| motion.animating)
-            || agents_in < 1.0
-            || shells_in < 1.0
-        {
-            window.request_animation_frame();
-        }
-        let shells_mounted = self.background.shells.get().is_some();
-        self.sync_output_watches(if shells_mounted { &shells } else { &[] }, cx);
-        let token_docs: Vec<&str> = match roster_motion {
-            Some(_) => agents.iter().map(|run| run.doc_id.as_str()).collect(),
-            None => Vec::new(),
+        let pending_review = state
+            .reviews
+            .get(&chat_id)
+            .and_then(|review| review.run.as_ref())
+            .filter(|run| !run.findings.is_empty())
+            .and_then(|run| run.task_id.as_deref());
+        agents.extend(delegate_runs(
+            &state.chats,
+            &chat_id,
+            turn_start.map_or(0, |ix| transcript[ix].created_at),
+            pending_review,
+        ));
+        let walk = walked_docs(transcript, &agents, self.background.widen == Some(true));
+        let counted = state.running_subagents_for(&chat_id, chrono::Utc::now());
+        let shells = shell_tasks(state.session_for(&chat_id));
+        Some(BackgroundRuns {
+            chat_id,
+            harness,
+            agents,
+            shells,
+            walk,
+            counted,
+        })
+    }
+
+    fn stoppable_runs(&self, cx: &App) -> (Vec<(String, bool)>, Vec<String>) {
+        let Some(runs) = self.background_runs(cx) else {
+            return Default::default();
         };
-        self.sync_token_watches(&token_docs, cx);
-        let ticking = (roster_motion.is_some() && overall == RunState::Working) || shells_mounted;
-        if ticking && self.background.tick.is_none() {
-            self.background.tick = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(ELAPSED_TICK).await;
-                this.update(cx, |composer, cx| {
-                    composer.background.tick = None;
-                    cx.notify();
-                })
-                .ok();
-            }));
-        }
-
-        let roster = roster_motion.map(|motion| {
-            self.render_roster(
-                &agents,
-                harness,
-                chat_reasoning,
-                stoppable,
-                motion,
-                now_ms,
-                &theme,
-                cx,
-            )
-        });
-        let (agents_title, agents_tail) = match agents.as_slice() {
-            [one] => match self.review_pill_suffix(&one.doc_id, cx) {
-                Some(suffix) => (Some(one.title.clone()), format!("· {suffix}")),
-                None => agents_label(&agents),
-            },
-            _ => agents_label(&agents),
-        };
-        let agents_pill = (!agents.is_empty()).then(|| {
-            let pill = pill_frame("background-agents-pill", &theme)
-                .debug_selector(|| "background-agents-pill".into())
-                .when(roster_open, |el| {
-                    el.border_color(theme.border_strong).text_color(theme.text)
-                })
-                .child(pill_leading(glyph(
-                    "background-agents-glyph",
-                    overall,
-                    fade,
-                    &theme,
-                )))
-                .when_some(agents_title, |el, title| {
-                    el.flex_shrink(AGENTS_PILL_SHRINK)
-                        .min_w(px(AGENTS_PILL_FLOOR))
-                        .child(div().min_w_0().truncate().child(title))
-                })
-                .child(div().flex_none().child(SharedString::from(agents_tail)))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, _| this.background.roster.note_trigger_press()),
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if !this.background.roster.take_press_was_open() {
-                        this.open_roster(cx);
-                    }
-                }));
-            frosted_pill(entering(pill, agents_in), agents_in).into_any_element()
-        });
-        let shell_pill = (!shells.is_empty())
-            .then(|| self.render_shell_pill(&shells, stoppable, now_ms, shells_in, &theme, cx));
-        Some((agents_pill.into_iter().chain(shell_pill).collect(), roster))
-    }
-
-    pub(crate) fn open_panel_when_bound(&mut self, chat_id: String, panel: BackgroundPanel) {
-        self.background.pending = Some((chat_id, panel, Instant::now()));
-    }
-
-    pub(super) fn roster_open(&self) -> bool {
-        self.background.roster.is_open()
-    }
-
-    pub(super) fn close_roster(&mut self, cx: &mut Context<Self>) {
-        if self.background.roster.begin_close() {
-            popover::reap_popup(cx, |this: &mut Composer| &mut this.background.roster);
-            cx.notify();
-        }
-    }
-
-    pub(super) fn drop_roster(&mut self) {
-        self.background.roster = Popup::default();
-    }
-
-    pub(super) fn open_roster(&mut self, cx: &mut Context<Self>) {
-        self.drop_ask_tray(cx);
-        self.background.roster.open(motion::now());
-        if self.background.shells.begin_close() {
-            popover::reap_popup(cx, |this: &mut Composer| &mut this.background.shells);
-        }
-        cx.notify();
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_roster(
-        &self,
-        agents: &[AgentRun],
-        harness: Option<HarnessId>,
-        chat_reasoning: Option<ReasoningLevel>,
-        stoppable: bool,
-        motion: CardMotion,
-        now_ms: i64,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let running: Vec<(String, bool)> = agents
+        let stoppable = runs.harness == Some(HarnessId::ClaudeCode);
+        let agents = runs
+            .agents
             .iter()
             .filter(|run| run.can_stop(stoppable))
             .map(|run| (run.part_id.clone(), run.delegated))
             .collect();
-        let header = div()
-            .h(px(36.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .pl(px(12.0))
-            .pr(px(8.0))
-            .text_size(crate::typography::ui_rems(13.0))
-            .text_color(theme.text.opacity(0.8))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(SharedString::from(roster_heading(agents))),
-            )
-            .when(!running.is_empty(), |el| {
-                el.child(
-                    div()
-                        .id("background-roster-stop-all")
-                        .debug_selector(|| "background-roster-stop-all".into())
-                        .cursor_pointer()
-                        .text_color(theme.text_muted)
-                        .hover(|s| s.text_color(theme.text))
-                        .child("Stop all")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            for (task_id, delegated) in &running {
-                                this.stop_agent_run(task_id.clone(), *delegated, cx);
-                            }
-                        })),
-                )
-            })
-            .child(
-                div()
-                    .id("background-roster-close")
-                    .debug_selector(|| "background-roster-close".into())
-                    .size(px(20.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .text_color(theme.text_muted)
-                    .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-                    .child(
-                        icon(icons::CLOSE)
-                            .size(px(12.0))
-                            .text_color(theme.text_muted),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.close_roster(cx))),
-            );
-        let dismiss = motion.live.then(|| {
-            cx.listener(|this: &mut Self, _: &MouseDownEvent, _, cx| this.close_roster(cx))
-        });
-        let depths = run_depths(agents);
-        let rows = agents.iter().enumerate().map(|(ix, run)| {
-            let depth = depths[ix];
-            let open = {
-                let part_id = run.part_id.clone();
-                let doc_id = run.doc_id.clone();
-                cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.open_agent_detail(part_id.clone(), doc_id.clone(), cx);
-                })
-            };
-            let state_text = run_state_text(run, now_ms);
-            let run_harness = run.harness.or(harness);
-            let tag = run.tag(harness);
-            let level = run.reasoning.or(chat_reasoning);
-            let tokens = self.agent_tokens(&run.doc_id);
-            let stop = run.can_stop(stoppable).then(|| {
-                let task_id = run.part_id.clone();
-                let delegated = run.delegated;
-                stop_button(format!("background-roster-stop-{ix}"), theme).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.stop_agent_run(task_id.clone(), delegated, cx);
-                    },
-                ))
-            });
-            let findings = self.render_review_findings(&run.doc_id, theme, cx);
-            let row = div()
-                .id(("background-roster-row", ix))
-                .debug_selector(move || format!("background-roster-row-{ix}"))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .px(px(12.0))
-                .pl(px(12.0 + 16.0 * depth as f32))
-                .py(px(7.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(13.0))
-                .text_color(theme.text.opacity(0.8))
-                .hover(|s| s.bg(theme.glass_hover()))
-                .child(glyph(
-                    SharedString::from(format!("background-roster-glyph-{ix}")),
-                    run.state,
-                    1.0,
-                    theme,
-                ))
-                .child(
-                    div()
-                        .debug_selector(move || format!("background-roster-title-{ix}"))
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(run.title.clone()),
-                )
-                .when_some(tag, |el, tag| el.child(model_tag(tag, run_harness, theme)))
-                .when_some(level, |el, level| {
-                    el.child(
-                        detail_chip(
-                            "thinking",
-                            crate::pickers::reasoning_label(level).to_string(),
-                            theme,
-                        )
-                        .debug_selector(move || format!("background-roster-thinking-{ix}")),
-                    )
-                })
-                .when_some(tokens, |el, tokens| {
-                    el.child(
-                        detail_chip("tokens", compact_count(tokens), theme)
-                            .debug_selector(move || format!("background-roster-tokens-{ix}")),
-                    )
-                })
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(state_text)),
-                )
-                .child(div().size(px(20.0)).flex_none().children(stop))
-                .on_click(open);
-            div().flex().flex_col().child(row).children(findings)
-        });
-        let opened = match self.background.detail.as_ref().map(|d| &d.target) {
-            Some(DetailTarget::Agent(part)) => agents.iter().find(|run| &run.part_id == part),
-            _ => None,
+        let shells = if stoppable {
+            runs.shells.into_iter().map(|task| task.id).collect()
+        } else {
+            Vec::new()
         };
-        let card = div()
-            .when_some(dismiss, |el, dismiss| {
-                el.debug_selector(|| "background-roster".into())
-                    .on_mouse_down_out(dismiss)
-            })
-            .occlude()
-            .w_full()
-            .rounded(px(14.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(popover::surface_bg(theme))
-            .when(!theme.is_frost(), |el| el.shadow_lg())
-            .overflow_hidden()
-            .pb(px(4.0));
-        let card = match opened {
-            Some(run) => card.p(px(6.0)).child(self.render_agent_detail(
-                run,
-                harness,
-                chat_reasoning,
-                stoppable,
-                now_ms,
-                theme,
-                cx,
-            )),
-            None => card.child(header).children(rows),
-        };
-        card_frame(card, motion).into_any_element()
+        (agents, shells)
     }
 
-    fn render_shell_pill(
-        &self,
-        shells: &[BackgroundTask],
-        stoppable: bool,
-        now_ms: i64,
-        enter: f32,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let pill = pill_frame("background-shells-pill", theme)
-            .debug_selector(|| "background-shells-pill".into())
-            .child(pill_leading(glyph(
-                "background-shells-glyph",
-                RunState::Working,
-                1.0,
-                theme,
-            )))
-            .child(
-                div()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child(">_"),
-            )
-            .child(div().child(SharedString::from(shells_label(shells.len()))))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.background.shells.note_trigger_press()),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                if this.background.shells.take_press_was_open() {
-                    return;
-                }
-                this.background.shells.open(());
-                cx.notify();
-            }));
-        let opened = match self.background.detail.as_ref().map(|d| &d.target) {
-            Some(DetailTarget::Shell(id)) => shells.iter().find(|task| &task.id == id),
-            _ => None,
-        };
-        let menu = self.background.shells.get().map(|_| {
-            let rows = shells.iter().enumerate().map(|(ix, task)| {
-                let elapsed = task
-                    .started_at
-                    .map(|at| elapsed_label((now_ms - at.timestamp_millis()) / 1000));
-                let stop = stoppable.then(|| {
-                    let task_id = task.id.clone();
-                    stop_button(format!("background-shell-stop-{ix}"), theme).on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.stop_background_task(task_id.clone(), cx);
-                        },
-                    ))
-                });
-                let lines = self
-                    .background
-                    .outputs
-                    .get(&task.id)
-                    .map(|output| output.lines.as_slice())
-                    .unwrap_or_default();
-                let latest = latest_line(lines).map(|line| {
-                    div()
-                        .debug_selector(move || format!("background-shell-line-{ix}"))
-                        .pl(px(GLYPH_SIZE + 8.0))
-                        .truncate()
-                        .font_family(theme.font_mono.clone())
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(line.to_owned()))
-                });
-                let open = {
-                    let task_id = task.id.clone();
-                    cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.background.detail = Some(TrayDetail {
-                            target: DetailTarget::Shell(task_id.clone()),
-                            scroll: gpui::ScrollHandle::new(),
-                            hide_thinking: false,
-                            feed: None,
-                        });
-                        cx.notify();
-                    })
-                };
-                let head = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(glyph(
-                        SharedString::from(format!("background-shell-glyph-{ix}")),
-                        RunState::Working,
-                        1.0,
-                        theme,
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(theme.font_mono.clone())
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text)
-                            .child(SharedString::from(task.label.clone())),
-                    )
-                    .children(elapsed.map(|elapsed| {
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(elapsed))
-                    }))
-                    .child(div().size(px(20.0)).flex_none().children(stop));
-                div()
-                    .id(("background-shell-row", ix))
-                    .debug_selector(move || format!("background-shell-row-{ix}"))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .px(px(8.0))
-                    .py(px(7.0))
-                    .rounded(px(popover::MENU_ITEM_RADIUS))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.glass_hover()))
-                    .child(head)
-                    .children(latest)
-                    .on_click(open)
-            });
-            let rows: Vec<_> = rows.collect();
-            let card = popover::popover_card(theme)
-                .debug_selector(|| "background-shells-menu".into())
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    if this.background.shells.begin_close() {
-                        popover::reap_popup(cx, |this: &mut Composer| &mut this.background.shells);
-                        cx.notify();
-                    }
-                }));
-            let content = match opened {
-                Some(task) => card
-                    .w(px(DETAIL_MENU_WIDTH))
-                    .child(self.render_shell_detail(task, stoppable, now_ms, theme, cx))
-                    .into_any_element(),
-                None => card
-                    .w(px(SHELLS_MENU_WIDTH))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .px(px(8.0))
-                            .pt(px(6.0))
-                            .pb(px(4.0))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(div().flex_1().child("Background shells"))
-                            .child(SharedString::from(format!("{} running", shells.len()))),
-                    )
-                    .children(rows)
-                    .into_any_element(),
-            };
-            popover::anchored_menu_above_at(
-                "background-shells-menu",
-                point(px(0.0), px(0.0)),
-                content,
-                self.background.shells.closing_since(),
-            )
-        });
-        div()
-            .relative()
-            .child(frosted_pill(entering(pill, enter), enter))
-            .children(menu)
-            .into_any_element()
+    pub(crate) fn can_stop_background(&self, cx: &App) -> bool {
+        let (agents, shells) = self.stoppable_runs(cx);
+        !agents.is_empty() || !shells.is_empty()
     }
 
-    fn sync_output_watches(&mut self, shells: &[BackgroundTask], cx: &mut Context<Self>) {
-        let watched: Vec<&str> = shells
-            .iter()
-            .filter(|task| task.output_path.is_some())
-            .map(|task| task.id.as_str())
-            .collect();
-        self.background
-            .outputs
-            .retain(|id, _| watched.contains(&id.as_str()));
-        for id in watched {
-            if !self.background.outputs.contains_key(id) {
-                let watch = self.watch_shell_output(id.to_owned(), cx);
-                self.background.outputs.insert(
-                    id.to_owned(),
-                    ShellOutput {
-                        lines: Vec::new(),
-                        _watch: watch,
-                    },
-                );
-            }
+    pub(crate) fn can_stop_shells(&self, cx: &App) -> bool {
+        self.bound_chat_row(cx)
+            .and_then(|chat| chat.config.as_ref())
+            .is_some_and(|config| config.harness == HarnessId::ClaudeCode)
+    }
+
+    pub(crate) fn stop_all_background(&mut self, cx: &mut Context<Self>) {
+        let (agents, shells) = self.stoppable_runs(cx);
+        for (task_id, delegated) in agents {
+            self.stop_agent_run(task_id, delegated, cx);
         }
-    }
-
-    fn watch_shell_output(
-        &self,
-        task_id: String,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Task<()>> {
-        #[derive(serde::Deserialize)]
-        struct OutputFrame {
-            #[serde(default)]
-            lines: Vec<String>,
+        for task_id in shells {
+            self.stop_background_task(task_id, cx);
         }
-        let engine = self.state.read(cx).engine().cloned()?;
-        let (chat_id, device_id) = self
-            .bound_chat_row(cx)
-            .map(|chat| (chat.id.clone(), chat.device_id.clone()))?;
-        let params = serde_json::json!({
-            "chatId": chat_id,
-            "taskId": task_id,
-            "targetDeviceId": device_id,
-        });
-        Some(cx.spawn(async move |this, cx| {
-            let mut rx = match engine
-                .client()
-                .subscribe_checked(methods::WATCH_BACKGROUND_OUTPUT, params)
-                .await
-            {
-                Ok(rx) => rx,
-                Err(error) => {
-                    tracing::debug!(%error, task_id, "background output watch failed");
-                    return;
-                }
-            };
-            while let Some(value) = rx.recv().await {
-                let Ok(frame) = serde_json::from_value::<OutputFrame>(value) else {
-                    continue;
-                };
-                let alive = this.update(cx, |this, cx| {
-                    if let Some(output) = this.background.outputs.get_mut(&task_id) {
-                        output.lines = frame.lines;
-                        cx.notify();
-                    }
-                });
-                if alive.is_err() {
-                    return;
-                }
-            }
-        }))
     }
 
     fn sync_agent_walks(&mut self, docs: Vec<String>, cx: &mut Context<Self>) {
         self.background.walks.retain(|id, _| docs.contains(id));
         for id in docs {
             if !self.background.walks.contains_key(&id) {
-                let watch = self.watch_doc_entries(id.clone(), true, cx);
+                let watch = self.watch_walk(id.clone(), cx);
                 self.background.walks.insert(
                     id,
                     AgentWalk {
@@ -1026,94 +250,7 @@ impl Composer {
         }
     }
 
-    fn agent_tokens(&self, doc_id: &str) -> Option<u64> {
-        self.background.tokens.get(doc_id)?.count
-    }
-
-    fn sync_token_watches(&mut self, docs: &[&str], cx: &mut Context<Self>) {
-        self.background
-            .tokens
-            .retain(|id, _| docs.contains(&id.as_str()));
-        for &id in docs {
-            if !self.background.tokens.contains_key(id) {
-                let watch = self.watch_agent_tokens(id.to_owned(), cx);
-                self.background.tokens.insert(
-                    id.to_owned(),
-                    AgentTokens {
-                        count: None,
-                        _watch: watch,
-                    },
-                );
-            }
-        }
-    }
-
-    fn watch_agent_tokens(&self, doc_id: String, cx: &mut Context<Self>) -> Option<gpui::Task<()>> {
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct UsageFrame {
-            #[serde(default)]
-            context_usage: Option<zeron_proto::ContextUsage>,
-        }
-        let engine = self.state.read(cx).engine().cloned()?;
-        Some(cx.spawn(async move |this, cx| {
-            let mut rx = match engine
-                .client()
-                .subscribe_checked(
-                    methods::WATCH_DOC_MESSAGES,
-                    serde_json::json!({ "chatId": doc_id }),
-                )
-                .await
-            {
-                Ok(rx) => rx,
-                Err(error) => {
-                    tracing::debug!(%error, doc_id, "subagent token watch failed");
-                    return;
-                }
-            };
-            while let Some(value) = rx.recv().await {
-                let Ok(frame) = serde_json::from_value::<UsageFrame>(value) else {
-                    continue;
-                };
-                let Some(count) = frame.context_usage.and_then(|usage| usage.tokens) else {
-                    continue;
-                };
-                let alive = this.update(cx, |this, cx| {
-                    if let Some(tokens) = this.background.tokens.get_mut(&doc_id)
-                        && tokens.count != Some(count)
-                    {
-                        tokens.count = Some(count);
-                        cx.notify();
-                    }
-                });
-                if alive.is_err() {
-                    return;
-                }
-            }
-        }))
-    }
-
-    fn open_agent_detail(&mut self, part_id: String, doc_id: String, cx: &mut Context<Self>) {
-        let watch = self.watch_doc_entries(doc_id.clone(), false, cx);
-        self.background.detail = Some(TrayDetail {
-            target: DetailTarget::Agent(part_id),
-            scroll: gpui::ScrollHandle::new(),
-            hide_thinking: false,
-            feed: Some(AgentFeed {
-                doc_id,
-                entries: Vec::new(),
-                _watch: watch,
-            }),
-        });
-        cx.notify();
-    }
-
-    fn watch_doc_entries(
-        &self,
-        doc_id: String,
-        walk: bool,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Task<()>> {
+    fn watch_walk(&self, doc_id: String, cx: &mut Context<Self>) -> Option<gpui::Task<()>> {
         let engine = self.state.read(cx).engine().cloned()?;
         Some(cx.spawn(async move |this, cx| {
             'resubscribe: loop {
@@ -1142,19 +279,9 @@ impl Composer {
                         continue;
                     };
                     let applied = this.update(cx, |this, cx| {
-                        let (entries, quiet) = if walk {
-                            let agent = this.background.walks.get_mut(&doc_id)?;
-                            let loaded = std::mem::replace(&mut agent.loaded, true);
-                            (&mut agent.entries, loaded)
-                        } else {
-                            let feed = this
-                                .background
-                                .detail
-                                .as_mut()
-                                .and_then(|detail| detail.feed.as_mut())
-                                .filter(|feed| feed.doc_id == doc_id)?;
-                            (&mut feed.entries, false)
-                        };
+                        let agent = this.background.walks.get_mut(&doc_id)?;
+                        let quiet = std::mem::replace(&mut agent.loaded, true);
+                        let entries = &mut agent.entries;
                         let spawns = quiet.then(|| agent_runs(&*entries, 0));
                         let synced =
                             zeron_doc::apply_transcript_frame(entries, update.frame).is_ok();
@@ -1172,314 +299,6 @@ impl Composer {
                 return;
             }
         }))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_agent_detail(
-        &self,
-        run: &AgentRun,
-        harness: Option<HarnessId>,
-        chat_reasoning: Option<ReasoningLevel>,
-        stoppable: bool,
-        now_ms: i64,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(detail) = self.background.detail.as_ref() else {
-            return div().into_any_element();
-        };
-        let entries = detail
-            .feed
-            .as_ref()
-            .map(|feed| feed.entries.as_slice())
-            .unwrap_or_default();
-        let tokens = self.agent_tokens(&run.doc_id);
-        let hide_thinking = detail.hide_thinking;
-        let stop = run.can_stop(stoppable).then(|| {
-            let task_id = run.part_id.clone();
-            let delegated = run.delegated;
-            stop_button("background-detail-stop".into(), theme).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.stop_agent_run(task_id.clone(), delegated, cx);
-                },
-            ))
-        });
-        let head = detail_head(
-            glyph("background-detail-glyph", run.state, 1.0, theme),
-            run.title.clone().into(),
-            run_state_text(run, now_ms),
-            stop,
-            theme,
-            cx,
-        );
-        let level = run.reasoning.or(chat_reasoning);
-        let run_harness = run.harness.or(harness);
-        let chips = div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(6.0))
-            .pl(px(36.0))
-            .pb(px(8.0))
-            .children(run.tag(harness).map(|tag| model_tag(tag, run_harness, theme)))
-            .children(level.map(|level| {
-                detail_chip(
-                    "thinking",
-                    crate::pickers::reasoning_label(level).to_string(),
-                    theme,
-                )
-                .debug_selector(|| "background-detail-thinking".into())
-            }))
-            .children(tokens.map(|tokens| {
-                detail_chip("tokens", compact_count(tokens), theme)
-                    .debug_selector(|| "background-detail-tokens".into())
-            }))
-            .child(detail_chip("tools", tool_count(entries).to_string(), theme));
-        let rows = raw_blocks(entries, hide_thinking)
-            .into_iter()
-            .map(|block| {
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(74.0))
-                            .text_color(block.role.color(theme))
-                            .child(block.role.label()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_color(theme.text.opacity(0.8))
-                            .child(SharedString::from(block.text)),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-        let chat_id = self.background.chat.clone().unwrap_or_default();
-        let open_pane = {
-            let doc_id = run.doc_id.clone();
-            let title = run.title.to_string();
-            let frozen = run.state != RunState::Working;
-            cx.listener(move |_, _: &ClickEvent, _, cx| {
-                cx.emit(ComposerEvent::OpenSubagent {
-                    chat_id: chat_id.clone(),
-                    doc_id: doc_id.clone(),
-                    title: title.clone(),
-                    frozen,
-                });
-            })
-        };
-        let footer = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(14.0))
-            .px(px(8.0))
-            .pt(px(8.0))
-            .pb(px(2.0))
-            .text_size(crate::typography::ui_rems(12.0))
-            .child(
-                detail_link(
-                    "background-detail-thinking-toggle",
-                    if hide_thinking {
-                        "Show thinking"
-                    } else {
-                        "Hide thinking"
-                    },
-                    theme.text_muted,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(detail) = this.background.detail.as_mut() {
-                        detail.hide_thinking = !detail.hide_thinking;
-                        cx.notify();
-                    }
-                })),
-            )
-            .child(div().flex_1())
-            .child(
-                detail_link("background-detail-copy", "Copy", theme.accent).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        let Some(detail) = this.background.detail.as_ref() else {
-                            return;
-                        };
-                        let entries = detail
-                            .feed
-                            .as_ref()
-                            .map(|feed| feed.entries.as_slice())
-                            .unwrap_or_default();
-                        let text = raw_blocks(entries, detail.hide_thinking)
-                            .iter()
-                            .map(|block| format!("{}  {}", block.role.label(), block.text))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                    },
-                )),
-            )
-            .child(
-                detail_link("background-detail-open-pane", "Open in pane", theme.accent)
-                    .on_click(open_pane),
-            );
-        div()
-            .debug_selector(|| "background-detail".into())
-            .flex()
-            .flex_col()
-            .child(head)
-            .child(chips)
-            .child(self.detail_log(rows, theme, cx))
-            .child(footer)
-            .into_any_element()
-    }
-
-    fn render_shell_detail(
-        &self,
-        task: &BackgroundTask,
-        stoppable: bool,
-        now_ms: i64,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let lines = self
-            .background
-            .outputs
-            .get(&task.id)
-            .map(|output| output.lines.as_slice())
-            .unwrap_or_default();
-        let text = lines.join("\n");
-        let stop = stoppable.then(|| {
-            let task_id = task.id.clone();
-            stop_button("background-detail-stop".into(), theme).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.stop_background_task(task_id.clone(), cx);
-                },
-            ))
-        });
-        let elapsed = task
-            .started_at
-            .map(|at| elapsed_label((now_ms - at.timestamp_millis()) / 1000))
-            .unwrap_or_default();
-        let head = detail_head(
-            glyph("background-detail-glyph", RunState::Working, 1.0, theme),
-            SharedString::from(task.label.clone()),
-            elapsed,
-            stop,
-            theme,
-            cx,
-        );
-        let body = (!text.trim().is_empty())
-            .then(|| {
-                div()
-                    .text_color(theme.text.opacity(0.8))
-                    .child(SharedString::from(text.clone()))
-                    .into_any_element()
-            })
-            .into_iter()
-            .collect();
-        let footer = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .px(px(8.0))
-            .pt(px(8.0))
-            .pb(px(2.0))
-            .text_size(crate::typography::ui_rems(12.0))
-            .child(div().flex_1())
-            .child(
-                detail_link("background-detail-copy", "Copy", theme.accent).on_click(
-                    move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
-                    },
-                ),
-            );
-        div()
-            .debug_selector(|| "background-detail".into())
-            .flex()
-            .flex_col()
-            .p(px(2.0))
-            .child(head.pb(px(8.0)))
-            .child(self.detail_log(body, theme, cx))
-            .child(footer)
-            .into_any_element()
-    }
-
-    fn detail_log(&self, rows: Vec<AnyElement>, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let scroll = self
-            .background
-            .detail
-            .as_ref()
-            .map(|detail| detail.scroll.clone())
-            .unwrap_or_else(gpui::ScrollHandle::new);
-        let pinned = -scroll.offset().y >= scroll.max_offset().y - px(4.0);
-        if pinned {
-            scroll.scroll_to_bottom();
-        }
-        let jump = (!pinned).then(|| {
-            let scroll = scroll.clone();
-            div()
-                .id("background-detail-jump")
-                .debug_selector(|| "background-detail-jump".into())
-                .absolute()
-                .right(px(10.0))
-                .bottom(px(8.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded_full()
-                .border_1()
-                .border_color(theme.border)
-                .bg(popover::surface_bg(theme))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .hover(|s| s.text_color(theme.text))
-                .child("Jump to latest")
-                .child(
-                    icon(icons::ALT_ARROW_DOWN)
-                        .size(px(10.0))
-                        .text_color(theme.text_muted),
-                )
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    scroll.scroll_to_bottom();
-                    cx.notify();
-                }))
-        });
-        let empty = rows.is_empty().then(|| {
-            div()
-                .debug_selector(|| "background-detail-empty".into())
-                .child("No output yet")
-        });
-        div()
-            .relative()
-            .child(
-                div()
-                    .id("background-detail-log")
-                    .debug_selector(|| "background-detail-log".into())
-                    .max_h(px(DETAIL_LOG_HEIGHT))
-                    .overflow_y_scroll()
-                    .track_scroll(&scroll)
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .px(px(10.0))
-                    .py(px(8.0))
-                    .rounded(px(8.0))
-                    .bg(theme.wash(0.06))
-                    .font_family(theme.font_mono.clone())
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .children(rows)
-                    .children(empty),
-            )
-            .children(jump)
     }
 
     pub(super) fn stop_agent_run(
@@ -1501,7 +320,7 @@ impl Composer {
         );
     }
 
-    fn stop_background_task(&mut self, task_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn stop_background_task(&mut self, task_id: String, cx: &mut Context<Self>) {
         self.send_stop(
             methods::STOP_BACKGROUND_TASK,
             "stop background task",
@@ -1549,290 +368,11 @@ impl Composer {
     }
 }
 
-fn run_state_text(run: &AgentRun, now_ms: i64) -> String {
-    match run.state {
-        RunState::Working => elapsed_label((now_ms - run.started_ms) / 1000),
-        RunState::Completed => "Done".to_string(),
-        RunState::Stopped => "Stopped".to_string(),
-        RunState::Failed => "Failed".to_string(),
-    }
-}
-
-fn model_tag(tag: String, harness: Option<HarnessId>, theme: &Theme) -> Div {
-    div()
-        .flex_none()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-        .px(px(5.0))
-        .py(px(1.0))
-        .rounded(px(5.0))
-        .bg(theme.wash(0.08))
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(theme.text_muted)
-        .when_some(harness, |el, harness| {
-            let (path, tint) = crate::pickers::harness_brand_icon(harness);
-            el.child(
-                icon(path)
-                    .size(px(11.0))
-                    .text_color(tint.unwrap_or(theme.text_muted)),
-            )
-        })
-        .child(SharedString::from(tag))
-}
-
-fn detail_chip(key: &'static str, value: String, theme: &Theme) -> Div {
-    div()
-        .flex_none()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-        .px(px(6.0))
-        .py(px(1.0))
-        .rounded(px(5.0))
-        .bg(theme.wash(0.08))
-        .text_size(crate::typography::ui_rems(11.0))
-        .child(div().text_color(theme.text_faint).child(key))
-        .child(
-            div()
-                .text_color(theme.text_muted)
-                .child(SharedString::from(value)),
-        )
-}
-
-fn detail_link(id: &'static str, label: &'static str, color: Hsla) -> Stateful<Div> {
-    div()
-        .id(id)
-        .debug_selector(move || id.into())
-        .cursor_pointer()
-        .text_color(color)
-        .hover(|s| s.opacity(0.75))
-        .child(label)
-}
-
-fn detail_head(
-    glyph: AnyElement,
-    title: SharedString,
-    state: String,
-    stop: Option<Stateful<Div>>,
-    theme: &Theme,
-    cx: &mut Context<Composer>,
-) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .pr(px(4.0))
-        .pb(px(6.0))
-        .child(
-            div()
-                .id("background-detail-back")
-                .debug_selector(|| "background-detail-back".into())
-                .size(px(24.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.glass_hover()))
-                .child(
-                    icon(icons::ALT_ARROW_LEFT)
-                        .size(px(12.0))
-                        .text_color(theme.text_muted),
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.background.detail = None;
-                    cx.notify();
-                })),
-        )
-        .child(glyph)
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_size(crate::typography::ui_rems(13.0))
-                .text_color(theme.text)
-                .child(title),
-        )
-        .child(
-            div()
-                .flex_none()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(state)),
-        )
-        .child(div().size(px(20.0)).flex_none().children(stop))
-}
-
-pub(super) fn pill_frame(id: &'static str, theme: &Theme) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_none()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-        .h(px(PILL_HEIGHT))
-        .px(px(10.0))
-        .rounded_full()
-        .border_1()
-        .border_color(theme.composer_surface_border())
-        .bg(theme.composer_surface_bg())
-        .text_size(crate::typography::ui_rems(13.0))
-        .text_color(theme.text_muted)
-        .whitespace_nowrap()
-        .cursor_pointer()
-        .hover(|s| s.border_color(theme.border_strong).text_color(theme.text))
-        .active(|s| s.opacity(0.85))
-}
-
-pub(super) fn frosted_pill(pill: impl IntoElement, opacity: f32) -> crate::frost::Frosted {
-    crate::frost::frosted(PILL_HEIGHT / 2.0, crate::frost::MENU_BLUR * opacity, pill)
-}
-
-pub(super) fn pill_leading(glyph: AnyElement) -> Div {
-    div().flex().items_center().mr(px(4.0)).child(glyph)
-}
-
-fn stop_button(id: String, theme: &Theme) -> Stateful<Div> {
-    div()
-        .id(SharedString::from(id.clone()))
-        .debug_selector(move || id.clone())
-        .size(px(20.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(5.0))
-        .cursor_pointer()
-        .text_color(theme.text_faint)
-        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.danger))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(
-            icon(icons::STOP)
-                .size(px(10.0))
-                .text_color(theme.text_faint),
-        )
-}
-
-fn glyph(key: impl Into<SharedString>, state: RunState, fade: f32, theme: &Theme) -> AnyElement {
-    let tint = theme.text_faint;
-    let dots_opacity = if state == RunState::Working {
-        1.0
-    } else {
-        1.0 - fade
-    };
-    let dots = (dots_opacity > 0.0).then(|| {
-        let grid = if state == RunState::Working {
-            DotGrid {
-                key: key.into(),
-                tint,
-            }
-            .into_any_element()
-        } else {
-            dot_cells(FRAMES[0], tint).into_any_element()
-        };
-        layer().opacity(dots_opacity).child(grid)
-    });
-    let outcome = (state != RunState::Working).then(|| {
-        let (path, color) = match state {
-            RunState::Failed => (icons::CLOSE, theme.danger),
-            RunState::Stopped => (icons::STOP, theme.text_muted),
-            _ => (icons::CHECK, theme.success),
-        };
-        layer()
-            .opacity(fade)
-            .child(icon(path).size(px(11.0)).text_color(color))
-    });
-    div()
-        .relative()
-        .flex_none()
-        .size(px(GLYPH_SIZE))
-        .children(dots)
-        .children(outcome)
-        .into_any_element()
-}
-
-fn layer() -> Div {
-    div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-}
-
-fn dot_cells(frame: u16, tint: Hsla) -> Div {
-    div()
-        .size(px(DOT_BOX))
-        .flex()
-        .flex_col()
-        .gap(px(DOT_GAP))
-        .children((0..3).map(move |row| {
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(DOT_GAP))
-                .children((0..3).map(move |col| {
-                    div().size(px(DOT_SIZE)).rounded_full().bg(tint).opacity(
-                        if dot_lit(frame, row * 3 + col) {
-                            1.0
-                        } else {
-                            0.0
-                        },
-                    )
-                }))
-        }))
-}
-
-#[derive(IntoElement)]
-struct DotGrid {
-    key: SharedString,
-    tint: Hsla,
-}
-
-impl RenderOnce for DotGrid {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let view = window.with_global_id(self.key.into(), |id, window| {
-            window.with_element_state(id, |previous: Option<Entity<DotGridView>>, _| {
-                let view = previous.unwrap_or_else(|| cx.new(|_| DotGridView { tint: self.tint }));
-                view.update(cx, |view, cx| {
-                    if view.tint != self.tint {
-                        view.tint = self.tint;
-                        cx.notify();
-                    }
-                });
-                (view.clone(), view)
-            })
-        });
-        view.cached(
-            gpui::StyleRefinement::default()
-                .w(px(DOT_BOX))
-                .h(px(DOT_BOX)),
-        )
-    }
-}
-
-struct DotGridView {
-    tint: Hsla,
-}
-
-impl Render for DotGridView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let phase = motion::pulse_delta_slow(&DOT_GRID_CYCLE, cx.entity_id(), cx);
-        let frame = ((phase * FRAMES.len() as f32) as usize).min(FRAMES.len() - 1);
-        dot_cells(FRAMES[frame], self.tint)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_doc::SubagentStatus;
+    use gpui::{Entity, Window};
+    use zeron_doc::{MessagePart, MessageRole, SubagentStatus};
     use zeron_proto::{BackgroundTaskKind, Session, SessionStatus, ToolCall};
 
     fn entry(
@@ -1916,7 +456,6 @@ mod tests {
         }
     }
 
-
     fn claude_chat(id: &str) -> zeron_proto::Chat {
         zeron_proto::Chat {
             id: id.into(),
@@ -1960,9 +499,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pills_render_above_the_composer_and_the_roster_opens(cx: &mut gpui::TestAppContext) {
-        use std::{cell::RefCell, rc::Rc};
-
+    fn stop_all_reaches_agents_shells_and_walks_nested_runs(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -2004,23 +541,6 @@ mod tests {
             ];
         });
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
-        let opened: Rc<RefCell<Vec<(String, String, bool)>>> = Rc::default();
-        let sink = opened.clone();
-        cx.update(|cx| {
-            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
-                if let ComposerEvent::OpenSubagent {
-                    chat_id,
-                    doc_id,
-                    frozen,
-                    ..
-                } = event
-                {
-                    sink.borrow_mut()
-                        .push((chat_id.clone(), doc_id.clone(), *frozen));
-                }
-            })
-            .detach()
-        });
         struct Fixture(Entity<Composer>);
         impl Render for Fixture {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -2035,34 +555,13 @@ mod tests {
         let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(composer.clone()));
         cx.run_until_parked();
 
-        let agents_pill = cx
-            .debug_bounds("background-agents-pill")
-            .expect("agents pill painted");
-        let shells_pill = cx
-            .debug_bounds("background-shells-pill")
-            .expect("shells pill painted");
-        assert!(shells_pill.left() > agents_pill.right());
-        assert!(cx.debug_bounds("background-roster").is_none());
-
-        cx.simulate_click(agents_pill.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-roster").is_some());
-        assert!(cx.debug_bounds("background-agents-pill").is_some());
-        assert!(cx.debug_bounds("background-roster-stop-all").is_some());
-        assert!(cx.debug_bounds("background-roster-stop-0").is_some());
-        assert!(cx.debug_bounds("background-roster-tokens-0").is_none());
-        composer.update(cx, |composer, cx| {
-            composer
-                .background
-                .tokens
-                .get_mut("c1--sub--p1")
-                .expect("the open roster watches each run's tokens")
-                .count = Some(29_216);
-            cx.notify();
+        composer.read_with(cx, |composer, cx| {
+            let (agents, shells) = composer.stoppable_runs(cx);
+            assert_eq!(agents, [("p1".to_string(), false)]);
+            assert_eq!(shells, ["shell-1"]);
+            assert!(composer.can_stop_background(cx));
         });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-roster-tokens-0").is_some());
-        assert!(cx.debug_bounds("background-roster-row-1").is_none());
+
         composer.update(cx, |composer, cx| {
             composer
                 .background
@@ -2082,167 +581,13 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        let parent = cx
-            .debug_bounds("background-roster-title-0")
-            .expect("parent row painted");
-        let nested = cx
-            .debug_bounds("background-roster-title-1")
-            .expect("a nested subagent gets its own row");
-        assert!(nested.top() > parent.top());
-        assert!(nested.left() > parent.left(), "nested rows indent");
         composer.read_with(cx, |composer, _| {
             assert!(composer.background.walks.contains_key("c1--sub--n1"));
         });
-
-        let row = cx
-            .debug_bounds("background-roster-row-0")
-            .expect("roster row painted");
-        cx.simulate_click(row.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(opened.borrow().is_empty());
-        assert!(cx.debug_bounds("background-detail").is_some());
-        assert!(cx.debug_bounds("background-roster-row-0").is_none());
-        assert!(cx.debug_bounds("background-detail-tokens").is_some());
-        assert!(cx.debug_bounds("background-detail-empty").is_some());
-        composer.update(cx, |composer, cx| {
-            let feed = composer
-                .background
-                .detail
-                .as_mut()
-                .and_then(|detail| detail.feed.as_mut())
-                .expect("the detail owns a feed");
-            assert_eq!(feed.doc_id, "c1--sub--p1");
-            feed.entries = vec![entry(
-                "s1",
-                MessageRole::Assistant,
-                3,
-                vec![MessagePart::Reasoning {
-                    id: "r0".into(),
-                    text: "think".into(),
-                }],
-            )];
-            cx.notify();
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-detail-log").is_some());
-        assert!(cx.debug_bounds("background-detail-empty").is_none());
-        let open_pane = cx
-            .debug_bounds("background-detail-open-pane")
-            .expect("open in pane painted");
-        cx.simulate_click(open_pane.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(
-            opened.borrow().as_slice(),
-            [("c1".to_string(), "c1--sub--p1".to_string(), false)]
-        );
-        let back = cx
-            .debug_bounds("background-detail-back")
-            .expect("back painted");
-        cx.simulate_click(back.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-detail").is_none());
-        assert!(cx.debug_bounds("background-roster-row-0").is_some());
-
-        let close = cx
-            .debug_bounds("background-roster-close")
-            .expect("close painted");
-        cx.simulate_click(close.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-roster").is_none());
-        assert!(cx.debug_bounds("background-agents-pill").is_some());
-        finish_exit(cx, &composer);
-        composer.read_with(cx, |composer, _| {
-            assert!(composer.background.tokens.is_empty())
-        });
-
-        cx.simulate_click(agents_pill.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-roster").is_some());
-        cx.simulate_click(gpui::point(px(4.0), px(4.0)), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("background-roster").is_none(),
-            "a click outside the roster closes it"
-        );
-        finish_exit(cx, &composer);
-        cx.simulate_click(agents_pill.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(composer.update(cx, |composer, cx| composer.dismiss_corner_card(cx)));
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("background-roster").is_none(),
-            "escape closes it"
-        );
-        assert!(!composer.update(cx, |composer, cx| composer.dismiss_corner_card(cx)));
-        finish_exit(cx, &composer);
-
-        let shells_pill = cx
-            .debug_bounds("background-shells-pill")
-            .expect("shells pill painted");
-        cx.simulate_click(shells_pill.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-shells-menu").is_some());
-        assert!(cx.debug_bounds("background-shell-row-0").is_some());
-        assert!(cx.debug_bounds("background-shell-stop-0").is_some());
-        assert!(cx.debug_bounds("background-shell-line-0").is_none());
-
-        composer.update(cx, |composer, cx| {
-            composer
-                .background
-                .outputs
-                .get_mut("shell-1")
-                .unwrap()
-                .lines = vec![
-                "Compiling zeron".into(),
-                "   Finished dev".into(),
-                "".into(),
-            ];
-            cx.notify();
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-shell-line-0").is_some());
-
-        let row = cx
-            .debug_bounds("background-shell-row-0")
-            .expect("shell row painted");
-        cx.simulate_click(row.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-shells-menu").is_some());
-        assert!(cx.debug_bounds("background-detail-log").is_some());
-        assert!(cx.debug_bounds("background-shell-row-0").is_none());
-        assert!(cx.debug_bounds("background-detail-stop").is_some());
-        assert!(cx.debug_bounds("background-detail-empty").is_none());
-        composer.update(cx, |composer, cx| {
-            composer
-                .background
-                .outputs
-                .get_mut("shell-1")
-                .unwrap()
-                .lines
-                .clear();
-            cx.notify();
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-detail-empty").is_some());
-        let back = cx
-            .debug_bounds("background-detail-back")
-            .expect("back painted");
-        cx.simulate_click(back.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-detail").is_none());
-        assert!(cx.debug_bounds("background-shell-row-0").is_some());
-    }
-
-    fn finish_exit(cx: &mut gpui::VisualTestContext, composer: &Entity<Composer>) {
-        let span = motion::MENU_OUT.total() + Duration::from_millis(30);
-        std::thread::sleep(span);
-        cx.executor().advance_clock(span);
-        composer.update(cx, |_, cx| cx.notify());
-        cx.run_until_parked();
     }
 
     #[gpui::test]
-    fn a_chat_bound_composer_shows_its_own_chats_pills(cx: &mut gpui::TestAppContext) {
+    fn a_chat_bound_composer_stops_its_own_chats_runs(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -2293,8 +638,13 @@ mod tests {
         }
         let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(composer.clone()));
         cx.run_until_parked();
-        assert!(cx.debug_bounds("background-shells-pill").is_some());
-        assert!(cx.debug_bounds("background-agents-pill").is_none());
+        let counts = |cx: &mut gpui::VisualTestContext| {
+            composer.read_with(cx, |composer, cx| {
+                let (agents, shells) = composer.stoppable_runs(cx);
+                (agents.len(), shells.len())
+            })
+        };
+        assert_eq!(counts(cx), (0, 1));
 
         state.update(cx, |state, _| {
             state.set_subagent_snapshot(
@@ -2312,7 +662,7 @@ mod tests {
         });
         composer.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
-        assert!(cx.debug_bounds("background-agents-pill").is_some());
+        assert_eq!(counts(cx), (1, 1));
     }
 
     #[test]
@@ -2320,84 +670,5 @@ mod tests {
         assert_eq!(compact_count(950), "950");
         assert_eq!(compact_count(29_216), "29.2k");
         assert_eq!(compact_count(1_250_000), "1.25M");
-    }
-
-    #[test]
-    fn the_raw_transcript_tags_every_part_and_can_hide_thinking() {
-        let entries = vec![
-            entry(
-                "u1",
-                MessageRole::User,
-                1,
-                vec![MessagePart::Text {
-                    id: "t0".into(),
-                    text: "scan the fold".into(),
-                }],
-            ),
-            entry(
-                "a1",
-                MessageRole::Assistant,
-                2,
-                vec![
-                    MessagePart::Reasoning {
-                        id: "r0".into(),
-                        text: "start at the drop target".into(),
-                    },
-                    {
-                        let mut part = tool(
-                            "t1",
-                            ToolCall::Exec {
-                                command: "rg on_drag".into(),
-                            },
-                            None,
-                        );
-                        if let MessagePart::Tool { output, .. } = &mut part {
-                            *output = Some("sidebar.rs:1204".into());
-                        }
-                        part
-                    },
-                    MessagePart::Text {
-                        id: "t2".into(),
-                        text: "Three handlers.\n".into(),
-                    },
-                    MessagePart::Error {
-                        id: "e0".into(),
-                        message: "Stopped".into(),
-                    },
-                ],
-            ),
-        ];
-        let roles: Vec<RawRole> = raw_blocks(&entries, false)
-            .iter()
-            .map(|block| block.role)
-            .collect();
-        assert_eq!(
-            roles,
-            [
-                RawRole::User,
-                RawRole::Thinking,
-                RawRole::ToolUse,
-                RawRole::ToolResult,
-                RawRole::Assistant,
-                RawRole::Error,
-            ]
-        );
-        let blocks = raw_blocks(&entries, true);
-        assert!(!blocks.iter().any(|block| block.role == RawRole::Thinking));
-        assert!(blocks[1].text.contains("rg on_drag"));
-        assert_eq!(blocks[3].text, "Three handlers.");
-        assert_eq!(tool_count(&entries), 1);
-        let long = "x".repeat(RAW_BLOCK_CHARS + 10);
-        let clipped = clip(&long);
-        assert_eq!(clipped.chars().count(), RAW_BLOCK_CHARS + 1);
-    }
-
-    #[test]
-    fn dot_frames() {
-        let lit: Vec<bool> = (0..9).map(|dot| dot_lit(FRAMES[0], dot)).collect();
-        assert_eq!(
-            lit,
-            [false, true, false, true, true, true, true, false, true]
-        );
     }
 }

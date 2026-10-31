@@ -26,7 +26,6 @@ const PAD_X: f32 = 10.0;
 const PAD_BOTTOM: f32 = 10.0;
 const LINK_WIDTH: f32 = 1.75;
 const DOT_RADIUS: f32 = 3.5;
-const LEAD: &str = "lead";
 
 #[derive(Clone)]
 pub(crate) enum StripTreeEvent {
@@ -53,23 +52,13 @@ struct RowMenu {
 pub(crate) enum TreeHost {
     Strip,
     Supervisor,
-    Intro,
     Center,
 }
 
 pub(crate) type RowRects = std::rc::Rc<std::cell::RefCell<HashMap<String, gpui::Bounds<Pixels>>>>;
 
-pub(crate) struct SampleRow {
-    pub title: &'static str,
-    pub status: Status,
-    pub word: &'static str,
-    pub brand: Option<(&'static str, Option<Hsla>)>,
-    pub secs: Option<i64>,
-}
-
 enum Source {
     Tree { root_chat_id: String, native: bool },
-    Sample(Vec<SampleRow>, DateTime<Utc>),
 }
 
 struct Row {
@@ -168,16 +157,9 @@ impl StripTree {
         self
     }
 
-    pub fn sample(state: Entity<AppState>, rows: Vec<SampleRow>, cx: &mut Context<Self>) -> Self {
-        let mut tree = Self::new(state, String::new(), false, true, TreeHost::Intro, cx);
-        tree.source = Source::Sample(rows, Utc::now());
-        tree
-    }
-
     pub fn root_id(&self) -> &str {
         match &self.source {
             Source::Tree { root_chat_id, .. } => root_chat_id,
-            Source::Sample(..) => "",
         }
     }
 
@@ -227,7 +209,6 @@ impl StripTree {
                 root_chat_id,
                 native,
             } => (root_chat_id, *native),
-            Source::Sample(rows, at) => return Some(sample_rows(rows, *at)),
         };
         let nodes = thread_tree::tree_rows(self.state.read(cx), root_chat_id, native, Utc::now());
         if nodes.is_empty() {
@@ -412,7 +393,7 @@ impl StripTree {
                 } else {
                     item(
                         "strip-tree-menu-open",
-                        zeron_proto::mission::OPEN_MISSION_PAGE,
+                        crate::tasks::OPEN_TASK_PAGE,
                         icons::LUCIDE_CHEVRON_RIGHT,
                     )
                 }
@@ -458,7 +439,7 @@ impl Render for StripTree {
         let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         let theme = match self.host {
-            TreeHost::Strip | TreeHost::Intro => Theme::of(cx).for_popup(),
+            TreeHost::Strip => Theme::of(cx).for_popup(),
             TreeHost::Supervisor | TreeHost::Center => Theme::of(cx).clone(),
         };
         let Some(rows) = self.rows(cx) else {
@@ -704,7 +685,7 @@ impl Render for StripTree {
             let current = self.host == TreeHost::Strip
                 && row.chat_id.is_some()
                 && row.chat_id.as_deref() == selected.as_deref();
-            let opens = self.host != TreeHost::Intro && !current;
+            let opens = !current;
             let go = opens.then(|| {
                 let over_fold = self.fold_hover.as_deref() == Some(row.id.as_str());
                 div()
@@ -877,29 +858,4 @@ impl Render for StripTree {
             .children(menu)
             .into_any_element()
     }
-}
-
-fn sample_rows(rows: &[SampleRow], at: DateTime<Utc>) -> Vec<Row> {
-    rows.iter()
-        .enumerate()
-        .map(|(ix, row)| Row {
-            id: if ix == 0 { LEAD.into() } else { ix.to_string() },
-            parent: (ix > 0).then_some(0),
-            depth: usize::from(ix > 0),
-            head: (ix == 0).then_some("Lead"),
-            title: row.title.into(),
-            status: row.status,
-            word: row.word,
-            brand: row.brand,
-            chat_id: None,
-            since: row.secs.map(|secs| at - chrono::Duration::seconds(secs)),
-            selection: if ix == 0 {
-                Selection::Lead
-            } else {
-                Selection::Step(ix.to_string())
-            },
-            label: None,
-            native_of: None,
-        })
-        .collect()
 }

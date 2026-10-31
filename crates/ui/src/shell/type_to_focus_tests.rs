@@ -175,8 +175,8 @@ fn shell_window<'a>(
 fn typing_on_a_rail_control_reaches_the_composer(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, cx) = shell_window(dir.path(), cx);
-    let account = cx.debug_bounds("user-menu").expect("rail account");
-    cx.simulate_click(account.center(), gpui::Modifiers::default());
+    let help = cx.debug_bounds("rail-help").expect("rail help");
+    cx.simulate_click(help.center(), gpui::Modifiers::default());
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     cx.update(|window, cx| {

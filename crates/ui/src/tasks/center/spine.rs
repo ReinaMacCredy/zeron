@@ -643,7 +643,7 @@ impl TaskCenter {
                             .min_w_0()
                             .text_size(ui_rems(11.5))
                             .text_color(theme.text_muted)
-                            .child(approval.line()),
+                            .child(crate::supervisor::approval_line(approval)),
                     )
                     .children(approval.can_take_back().then(|| {
                         widgets::text_action(theme, widgets::ActionTone::Filled, "Take back")
@@ -3349,7 +3349,7 @@ impl TaskCenter {
                     .text_size(ui_rems(12.0))
                     .text_color(theme.text_muted)
                     .child(
-                        "Agents start from the chat as it goes. A plan turns this tree into a mission in place.",
+                        "Agents start from the chat as it goes. A plan turns this tree into a Task in place.",
                     ),
             );
         let (tokens, time) = {

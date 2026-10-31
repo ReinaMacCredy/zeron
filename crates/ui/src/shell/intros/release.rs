@@ -15,8 +15,12 @@ const TASK_MENTIONS: &str = "task-mentions";
 const GATHER_TASKS: &str = "gather-tasks";
 const TASK_DRAG: &str = "task-drag";
 const SETTINGS_UPDATES: &str = "settings-updates";
+const TRIAGE_TRAY: &str = "triage-tray";
+const NEW_CHAT_CARDS: &str = "new-chat-cards";
+const PLAN_APPROVE_TASK: &str = "plan-approve-task";
+const CHILD_PANE_TABS: &str = "child-pane-tabs";
 
-pub(super) const VISUALS: [(&str, f32, f32); 13] = [
+pub(super) const VISUALS: [(&str, f32, f32); 17] = [
     (CLAUDE_CONFIG, 7.0, 3.4),
     (COMMAND_CARDS, 6.6, 4.5),
     (COMPACTION_CARD, 7.6, 5.4),
@@ -30,6 +34,10 @@ pub(super) const VISUALS: [(&str, f32, f32); 13] = [
     (GATHER_TASKS, 7.2, 5.0),
     (TASK_DRAG, 6.8, 4.6),
     (SETTINGS_UPDATES, 6.8, 5.6),
+    (TRIAGE_TRAY, 7.0, 2.4),
+    (NEW_CHAT_CARDS, 7.0, 2.0),
+    (PLAN_APPROVE_TASK, 7.2, 1.6),
+    (CHILD_PANE_TABS, 7.0, 4.4),
 ];
 
 pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyElement {
@@ -47,6 +55,10 @@ pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyEleme
         GATHER_TASKS => gather_tasks_visual(theme, t, reduced),
         TASK_DRAG => task_drag_visual(theme, t),
         SETTINGS_UPDATES => settings_updates_visual(theme, t),
+        TRIAGE_TRAY => triage_tray_visual(theme, t, reduced),
+        NEW_CHAT_CARDS => new_chat_cards_visual(theme, t, reduced),
+        PLAN_APPROVE_TASK => plan_approve_task_visual(theme, t, reduced),
+        CHILD_PANE_TABS => child_pane_tabs_visual(theme, t, reduced),
         _ => div().into_any_element(),
     }
 }
@@ -2179,5 +2191,714 @@ fn settings_updates_visual(theme: &Theme, t: f32) -> AnyElement {
         .flex_row()
         .child(nav)
         .child(page)
+        .into_any_element()
+}
+
+fn dot(size: f32, color: gpui::Hsla) -> gpui::Div {
+    div().flex_none().size(px(size)).rounded_full().bg(color)
+}
+
+fn clip(size: f32, color: gpui::Hsla, copy: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .min_w_0()
+        .truncate()
+        .text_size(crate::typography::ui_rems(size))
+        .text_color(color)
+        .child(copy.into())
+}
+
+fn key_chip(theme: &Theme, label: &'static str) -> gpui::Div {
+    div()
+        .flex_none()
+        .h(px(15.0))
+        .px(px(4.0))
+        .flex()
+        .items_center()
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(crate::typography::ui_rems(9.5))
+        .text_color(theme.text_faint)
+        .child(label)
+}
+
+fn working_tone(theme: &Theme) -> gpui::Hsla {
+    chat_status_tone(zeron_proto::ChatIndicator::Working, theme).2
+}
+
+fn triage_tray_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
+    const OPEN_AT: f32 = 0.6;
+    const EXPAND_AT: f32 = 1.5;
+    const PICK_AT: f32 = 2.9;
+    const GONE_AT: f32 = 3.5;
+    const CLOSE_AT: f32 = 6.0;
+    let shown = ramp(t, OPEN_AT, 220.0, motion::EASE_OUT)
+        * (1.0 - ramp(t, CLOSE_AT, 200.0, motion::EASE_IN));
+    let expand = ramp(t, EXPAND_AT, 200.0, motion::EASE_OUT);
+    let gone = ramp(t, GONE_AT, 260.0, motion::EASE_IN_OUT);
+    let answered = t >= GONE_AT;
+    let pill = div()
+        .flex_none()
+        .h(px(22.0))
+        .px(px(9.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .rounded_full()
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(crate::settings::widgets::block_fill(theme))
+        .child(dot(6.0, theme.accent))
+        .child(text(
+            11.0,
+            theme.accent,
+            if answered { "1 need you" } else { "2 need you" },
+        ))
+        .child(text(11.0, theme.text_faint, "\u{b7}"))
+        .child(dot(6.0, working_tone(theme)))
+        .child(text(11.0, theme.text_muted, "1 running"))
+        .child(key_chip(theme, "\u{2318}I"));
+    let header = |label: &'static str| {
+        div()
+            .h(px(14.0))
+            .flex()
+            .items_center()
+            .child(text(9.5, theme.text_faint, label))
+    };
+    let row = |title: &'static str, word: &'static str, action: &'static str| {
+        div()
+            .h(px(20.0))
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .child(clip(11.5, theme.text, title).flex_1())
+            .child(text(10.5, theme.accent, word))
+            .child(text(10.5, theme.text_muted, action))
+    };
+    let option = |label: &'static str, on: bool| {
+        div()
+            .flex_none()
+            .h(px(20.0))
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(if on { theme.accent } else { theme.border })
+            .when(on, |el| el.bg(theme.accent.opacity(0.12)))
+            .text_size(crate::typography::ui_rems(10.5))
+            .text_color(if on { theme.text } else { theme.text_muted })
+            .child(label)
+    };
+    let asking = div()
+        .h(px((20.0 + 26.0 * expand) * (1.0 - gone)))
+        .opacity(1.0 - gone)
+        .overflow_hidden()
+        .child(row(
+            "Pricing research",
+            "Asking 1/2",
+            if expand > 0.5 {
+                "Answer \u{25b4}"
+            } else {
+                "Answer \u{25be}"
+            },
+        ))
+        .child(
+            div()
+                .h(px(26.0 * expand))
+                .overflow_hidden()
+                .pl(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(text(10.5, theme.text_muted, "Which provider first?"))
+                .child(option("Stripe", t >= PICK_AT))
+                .child(option("Paddle", false)),
+        );
+    let tray = div()
+        .w(px(300.0))
+        .relative()
+        .top(px((1.0 - shown) * 6.0))
+        .opacity(shown)
+        .px(px(10.0))
+        .py(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
+        .child(
+            div()
+                .h(px(18.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(glyph(icons::SPARK, 11.0, theme.text_muted))
+                .child(text(11.5, theme.text, "Supervisor"))
+                .child(
+                    clip(
+                        10.5,
+                        theme.text_faint,
+                        if answered {
+                            "Changelog cleanup has a plan to approve."
+                        } else {
+                            "Pricing research asks you."
+                        },
+                    )
+                    .flex_1(),
+                )
+                .child(text(10.5, theme.accent, "Ask \u{203a}")),
+        )
+        .child(header(if answered {
+            "NEEDS YOU 1"
+        } else {
+            "NEEDS YOU 2"
+        }))
+        .child(asking)
+        .child(row("Changelog cleanup", "Plan ready", "Review \u{25be}"))
+        .child(
+            div()
+                .h(px(37.0 * (1.0 - expand * (1.0 - gone))))
+                .opacity(1.0 - expand * (1.0 - gone))
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(header("RUNNING 1"))
+                .child(
+                    div()
+                        .h(px(20.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(running(theme, reduced))
+                        .child(clip(11.5, theme.text, "Ship the shop").flex_1())
+                        .child(mono(
+                            theme,
+                            10.5,
+                            theme.text_faint,
+                            format!("Working {}s", 42 + t as u32),
+                        )),
+                ),
+        );
+    div()
+        .h(px(166.0))
+        .flex()
+        .flex_col()
+        .items_end()
+        .gap(px(4.0))
+        .child(pill)
+        .child(tray)
+        .into_any_element()
+}
+
+fn new_chat_cards_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
+    const ANSWER_AT: f32 = 2.6;
+    const MOVE_AT: f32 = 3.2;
+    let gone = ramp(t, MOVE_AT, 240.0, motion::EASE_IN_OUT);
+    let moved = t >= MOVE_AT;
+    let entry = |title: &'static str, sub: gpui::Div| {
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(clip(11.5, theme.text, title))
+            .child(sub)
+    };
+    let row = |height: f32| div().h(px(height)).flex().items_center().gap(px(6.0));
+    let panel = |label: &'static str, count: &'static str| {
+        card(theme)
+            .flex_1()
+            .min_w_0()
+            .h(px(90.0))
+            .overflow_hidden()
+            .px(px(9.0))
+            .py(px(5.0))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(16.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .child(text(10.5, theme.text_muted, label))
+                    .child(text(10.5, theme.text_faint, count)),
+            )
+    };
+    let answer = div()
+        .flex_none()
+        .h(px(18.0))
+        .px(px(7.0))
+        .flex()
+        .items_center()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(theme.accent)
+        .when(t >= ANSWER_AT, |el| el.bg(theme.accent))
+        .text_size(crate::typography::ui_rems(10.0))
+        .text_color(if t >= ANSWER_AT {
+            theme.on_accent
+        } else {
+            theme.accent
+        })
+        .child("Answer");
+    let needs = panel("Needs you", if moved { "0" } else { "1" })
+        .child(
+            div()
+                .h(px(32.0 * (1.0 - gone)))
+                .opacity(1.0 - gone)
+                .overflow_hidden()
+                .child(rise(
+                    row(32.0)
+                        .child(entry(
+                            "Pricing research",
+                            clip(10.0, theme.accent, "Asking 1/2"),
+                        ))
+                        .child(answer),
+                    t,
+                    0.2,
+                )),
+        )
+        .when(moved, |el| {
+            el.child(rise(
+                row(32.0).child(clip(10.5, theme.text_faint, "Nothing needs you")),
+                t,
+                MOVE_AT + 0.25,
+            ))
+        });
+    let secs = 72 + t as u32;
+    let working = panel("Running", "1").child(rise(
+        row(32.0)
+            .child(running(theme, reduced))
+            .child(entry(
+                "Ship the shop",
+                clip(10.0, theme.text_faint, "Working"),
+            ))
+            .child(mono(
+                theme,
+                10.0,
+                theme.text_faint,
+                format!("{}m {:02}s", secs / 60, secs % 60),
+            )),
+        t,
+        0.3,
+    ));
+    let recent_row = |title: &'static str, sub: &'static str| {
+        row(32.0).child(entry(title, clip(10.0, theme.text_faint, sub)))
+    };
+    let recent = panel("Recent", "")
+        .child(
+            div()
+                .h(px(32.0 * gone))
+                .opacity(gone)
+                .overflow_hidden()
+                .child(recent_row("Pricing research", "shop \u{b7} Done just now")),
+        )
+        .child(rise(
+            recent_row("Fix the login test", "shop \u{b7} Done 12m ago"),
+            t,
+            0.4,
+        ))
+        .child(
+            div()
+                .h(px(32.0 * (1.0 - gone)))
+                .opacity(1.0 - gone)
+                .overflow_hidden()
+                .child(rise(
+                    recent_row("Write release notes", "docs \u{b7} Done 1h ago"),
+                    t,
+                    0.5,
+                )),
+        );
+    let switch = div()
+        .flex_none()
+        .w(px(22.0))
+        .h(px(12.0))
+        .p(px(2.0))
+        .rounded_full()
+        .bg(theme.border_strong)
+        .child(dot(8.0, theme.surface));
+    let composer = card(theme)
+        .w(px(400.0))
+        .h(px(40.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(glyph(icons::PAPERCLIP, 12.0, theme.text_faint))
+        .child(clip(11.5, theme.text_faint, "Describe a task").flex_1())
+        .child(
+            div()
+                .flex_none()
+                .h(px(20.0))
+                .px(px(7.0))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(theme.border)
+                .child(glyph(icons::FOLDER, 11.0, theme.text_muted))
+                .child(text(10.5, theme.text_muted, "shop"))
+                .child(glyph(icons::LUCIDE_CHEVRON_DOWN, 10.0, theme.text_faint)),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(switch)
+                .child(text(10.5, theme.text_muted, "Plan")),
+        )
+        .child(
+            div()
+                .flex_none()
+                .size(px(22.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(theme.accent)
+                .child(glyph(icons::ARROW_UP, 12.0, theme.on_accent)),
+        );
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(6.0))
+        .child(
+            text(14.0, theme.text, "What should we work on?")
+                .font_weight(gpui::FontWeight::SEMIBOLD),
+        )
+        .child(composer)
+        .child(
+            div()
+                .w(px(400.0))
+                .flex()
+                .gap(px(8.0))
+                .child(needs)
+                .child(working)
+                .child(recent),
+        )
+        .into_any_element()
+}
+
+fn plan_approve_task_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
+    const HOVER_AT: f32 = 2.0;
+    const TURN_AT: f32 = 2.8;
+    const STEP_AT: f32 = 4.6;
+    const STEPS: [&str; 3] = [
+        "Add the Apple Pay button",
+        "Wire the payment sheet",
+        "Test checkout",
+    ];
+    let tasked = t >= TURN_AT;
+    let current = if t >= STEP_AT { 1 } else { 0 };
+    let mark_box = || {
+        div()
+            .flex_none()
+            .size(px(16.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+    };
+    let mark = |ix: usize| -> AnyElement {
+        if tasked && ix < current {
+            mark_box()
+                .bg(theme.accent)
+                .child(glyph(icons::CHECK, 10.0, theme.on_accent))
+                .into_any_element()
+        } else if tasked && ix == current {
+            mark_box().child(running(theme, reduced)).into_any_element()
+        } else {
+            mark_box()
+                .border_1()
+                .border_color(theme.border_strong)
+                .text_size(crate::typography::ui_rems(9.5))
+                .text_color(theme.text_muted)
+                .child(SharedString::from((ix + 1).to_string()))
+                .into_any_element()
+        }
+    };
+    let steps = div()
+        .flex()
+        .flex_col()
+        .children(STEPS.iter().enumerate().map(|(ix, step)| {
+            div()
+                .h(px(19.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(mark(ix))
+                .child(text(
+                    11.5,
+                    if tasked && ix < current {
+                        theme.text_muted
+                    } else {
+                        theme.text
+                    },
+                    *step,
+                ))
+        }));
+    let title = |path: &'static str, label: &'static str| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(glyph(path, 12.0, theme.text_muted))
+            .child(text(12.0, theme.text, label).font_weight(gpui::FontWeight::SEMIBOLD))
+    };
+    let body = if tasked {
+        rise(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .h(px(20.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(title(icons::TASKS, "Task"))
+                        .child(clip(11.5, theme.text_muted, "Ship Apple Pay").flex_1())
+                        .child(text(
+                            11.0,
+                            theme.text_faint,
+                            if current == 0 {
+                                "Step 1 of 3"
+                            } else {
+                                "Step 2 of 3"
+                            },
+                        )),
+                )
+                .child(steps)
+                .child(
+                    div()
+                        .h(px(16.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(text(11.0, theme.accent, "Open in Tasks \u{203a}"))
+                        .child(
+                            clip(10.5, theme.text_faint, "Tracked in Tasks with its 3 steps.")
+                                .flex_1(),
+                        ),
+                ),
+            t,
+            TURN_AT,
+        )
+    } else {
+        let hot = t >= HOVER_AT;
+        let button = |label: &'static str, primary: bool, lit: bool| {
+            div()
+                .flex_none()
+                .h(px(24.0))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(if primary || lit {
+                    theme.accent
+                } else {
+                    theme.border
+                })
+                .when(primary, |el| el.bg(theme.accent))
+                .when(lit, |el| el.bg(theme.accent.opacity(0.14)))
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(if primary { theme.on_accent } else { theme.text })
+                .child(label)
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .h(px(20.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(title(icons::CHECKLIST, "Plan"))
+                    .child(pill("Waiting for your approval", theme.accent)),
+            )
+            .child(steps)
+            .child(
+                div()
+                    .flex()
+                    .gap(px(6.0))
+                    .child(button("Approve", true, false))
+                    .child(button("Approve as Task", false, hot))
+                    .child(button("Edit plan", false, false)),
+            )
+            .child(clip(
+                10.5,
+                theme.text_faint,
+                "Approve runs it in this chat. Approve as Task tracks the 3 steps in Tasks.",
+            ))
+    };
+    card(theme)
+        .w(px(400.0))
+        .p(px(10.0))
+        .child(body)
+        .into_any_element()
+}
+
+fn child_pane_tabs_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
+    const OPENS: [f32; 3] = [0.7, 2.1, 3.5];
+    const KIDS: [(&str, &str, &str); 3] = [
+        (icons::BOT, "Research providers", "1m"),
+        (icons::FORK, "Fork", "4m ago"),
+        (icons::CHAT_ROUND_LINE, "Side chat", "\u{2318};"),
+    ];
+    let opened = OPENS.iter().filter(|at| t >= **at).count();
+    let active = opened.checked_sub(1);
+    let working = working_tone(theme);
+    let badge = |path: &'static str, ix: usize| {
+        div()
+            .flex_none()
+            .size(px(18.0))
+            .relative()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.0))
+            .border_1()
+            .border_color(theme.border)
+            .child(glyph(path, 11.0, theme.text_muted))
+            .when(ix == 0, |el| {
+                el.child(dot(6.0, working).absolute().top(px(-2.0)).right(px(-2.0)))
+            })
+    };
+    let sidecar = card(theme)
+        .w(px(150.0))
+        .p(px(8.0))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(text(10.0, theme.text_faint, "Beside this thread"))
+        .child(
+            div()
+                .mb(px(2.0))
+                .child(text(10.0, theme.text_muted, "1 agent running")),
+        )
+        .children(KIDS.iter().enumerate().map(|(ix, (path, title, meta))| {
+            let open = active == Some(ix);
+            let flash = if reduced {
+                0.0
+            } else {
+                ramp(t, OPENS[ix] - 0.3, 160.0, motion::EASE_OUT)
+                    * (1.0 - ramp(t, OPENS[ix] + 0.2, 300.0, motion::EASE_OUT))
+            };
+            div()
+                .h(px(24.0))
+                .px(px(5.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .rounded(px(6.0))
+                .bg(theme.wash(if open { 0.06_f32 } else { 0.0 }.max(0.12 * flash)))
+                .child(glyph(path, 12.0, theme.text_muted))
+                .child(clip(11.0, theme.text, *title).flex_1())
+                .child(if open {
+                    text(10.0, theme.accent, "Open")
+                } else {
+                    text(10.0, theme.text_faint, *meta)
+                })
+        }));
+    let tool = |path: &'static str| {
+        div()
+            .flex_none()
+            .size(px(24.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(glyph(path, 12.0, theme.text_faint))
+    };
+    let tabs = (0..opened).map(|ix| {
+        let (path, title, _) = KIDS[ix];
+        let on = active == Some(ix);
+        rise(
+            div()
+                .flex_none()
+                .h(px(26.0))
+                .px(px(4.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .rounded(px(7.0))
+                .when(on, |el| {
+                    el.bg(theme.surface_raised)
+                        .border_1()
+                        .border_color(theme.border)
+                })
+                .child(badge(path, ix))
+                .when(on, |el| {
+                    el.child(text(11.0, theme.text, title)).child(glyph(
+                        icons::CLOSE,
+                        9.0,
+                        theme.text_faint,
+                    ))
+                }),
+            t,
+            OPENS[ix],
+        )
+    });
+    const LINES: [f32; 4] = [0.9, 0.65, 0.8, 0.5];
+    let body = div()
+        .flex_1()
+        .p(px(10.0))
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .child(match active {
+            Some(ix) => text(11.5, theme.text, KIDS[ix].1),
+            None => text(11.5, theme.text_faint, "Children open here"),
+        })
+        .children(active.into_iter().flat_map(|ix| {
+            LINES.iter().enumerate().map(move |(n, width)| {
+                rise(
+                    div()
+                        .h(px(6.0))
+                        .w(relative(*width))
+                        .rounded_full()
+                        .bg(theme.border),
+                    t,
+                    OPENS[ix] + 0.08 * (n + 1) as f32,
+                )
+            })
+        }));
+    let pane = card(theme)
+        .w(px(240.0))
+        .h(px(150.0))
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(34.0))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(3.0))
+                .border_b_1()
+                .border_color(theme.border)
+                .child(tool(icons::LUCIDE_FILE_DIFF))
+                .child(tool(icons::FOLDER))
+                .children(tabs),
+        )
+        .child(body);
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(sidecar)
+        .child(pane)
         .into_any_element()
 }

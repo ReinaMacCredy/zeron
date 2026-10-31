@@ -19,7 +19,7 @@ pub fn sidechat_context_line(source_title: &str) -> String {
 pub fn sidechat_tab_title(prompt: Option<&str>) -> String {
     prompt
         .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
-        .unwrap_or("New btw")
+        .unwrap_or("New side chat")
         .to_string()
 }
 
@@ -46,8 +46,8 @@ mod tests {
     #[test]
     fn a_sidechat_is_titled_by_its_first_prompt_line() {
         assert_eq!(sidechat_tab_title(Some("\n  Why 2ⁿ?\nmore")), "Why 2ⁿ?");
-        assert_eq!(sidechat_tab_title(Some("  ")), "New btw");
-        assert_eq!(sidechat_tab_title(None), "New btw");
+        assert_eq!(sidechat_tab_title(Some("  ")), "New side chat");
+        assert_eq!(sidechat_tab_title(None), "New side chat");
     }
 
     #[test]

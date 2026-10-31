@@ -35,7 +35,7 @@ id = "new-chat"
 section = "basics"
 title = "Start a new chat"
 icon = "lucide-square-pen"
-blurb = "Pick Chat or Work, a project and checkout, then send your first message."
+blurb = "Pick a project, see what needs you and what runs, then send your first message or start a plan."
 actions = ["settings/chat"]
 
 [[article]]
@@ -107,8 +107,7 @@ id = "home-widgets"
 section = "basics"
 title = "Home widgets"
 icon = "home"
-blurb = "Cards under the new chat composer: running agents, PRs, Git, ports."
-actions = ["settings/home"]
+blurb = "Cards under the New chat composer: pull requests, Git activity, and your machine."
 
 [[article]]
 id = "updates"
@@ -218,7 +217,7 @@ id = "right-pane"
 section = "work"
 title = "Right pane and files"
 icon = "lucide-panel-right"
-blurb = "Open a browser, terminal, file, or diff next to the chat, and browse the file tree."
+blurb = "Changes, Files and a browser as tabs next to the chat, beside its agents, forks and side chats."
 actions = ["settings/files"]
 
 [[article]]
@@ -226,14 +225,14 @@ id = "live-state"
 section = "work"
 title = "The Live state column"
 icon = "lucide-layers"
-blurb = "What runs beside a chat: changes, terminals, subagents, side chats, and actions."
+blurb = "What a chat has around it: its workspace, agents, side chats, shells, and actions."
 
 [[article]]
 id = "terminal"
 section = "work"
 title = "Terminal"
 icon = "terminal"
-blurb = "A terminal drawer under every chat, plus full-window terminal tabs."
+blurb = "A terminal dock under every chat, plus full-window terminal tabs."
 actions = ["settings/shortcuts", "settings/appearance"]
 
 [[article]]
@@ -263,9 +262,9 @@ actions = ["tasks"]
 [[article]]
 id = "mission-control"
 section = "work"
-title = "Mission Control"
+title = "Agent trees and plans"
 icon = "hugeicons-target-02"
-blurb = "Every chat that started other agents, as a tree, and missions: a plan whose lead runs each step on its own thread."
+blurb = "Every chat that started other agents, as a tree, and Tasks with a plan whose lead runs each step on its own thread."
 actions = ["tasks", "supervisor", "settings/general"]
 
 [[article]]
@@ -273,7 +272,7 @@ id = "supervisor"
 section = "work"
 title = "Supervisor"
 icon = "lucide-shield"
-blurb = "One agent above your missions and the trees you pick: it wakes on their events, and you set what it may do."
+blurb = "One agent above your planned Tasks and the trees you pick: it wakes on their events, and you set what it may do."
 actions = ["supervisor", "tasks", "docs/mission-control"]
 
 [[article]]
@@ -281,7 +280,7 @@ id = "inbox"
 section = "work"
 title = "Inbox"
 icon = "bell"
-blurb = "What needs you, today's tasks, your day so far, and plan left."
+blurb = "Today's history of what your agents asked, finished and failed, today's tasks, and your day so far."
 actions = ["inbox"]
 
 [[article]]

@@ -299,12 +299,10 @@ fn approval_question(
     access: AccessMode,
 ) -> Option<UserInputQuestion> {
     if tool == "ExitPlanMode" {
-        return (!access.is_full_access()).then(|| {
-            approval::question(
-                "Approve plan",
-                "Claude wants to start implementing its plan. Allow it?",
-            )
-        });
+        return Some(approval::question(
+            "Approve plan",
+            "Claude wants to start implementing its plan. Allow it?",
+        ));
     }
     let edit = EDIT_TOOLS.contains(&tool);
     let action = if edit {
@@ -3072,16 +3070,17 @@ mod access_tests {
     }
 
     #[test]
-    fn tool_calls_ask_unless_the_mode_is_full() {
+    fn tool_calls_ask_unless_the_mode_is_full_and_plans_always_ask() {
         let bash = json!({"command": "cargo test", "description": "Run tests"});
         let edit = json!({"file_path": "/work/src/lib.rs", "old_string": "a"});
         let notebook = json!({"notebook_path": "/work/a.ipynb"});
         let ask = |tool: &str, input: &Value, mode: AccessMode| {
             approval_question(tool, None, None, input, mode).map(|q| q.question)
         };
-        for tool in ["Bash", "Edit", "WebFetch", "ExitPlanMode", "mcp__x__y"] {
+        for tool in ["Bash", "Edit", "WebFetch", "mcp__x__y"] {
             assert_eq!(ask(tool, &bash, AccessMode::FullAccess), None, "{tool}");
         }
+        assert!(ask("ExitPlanMode", &bash, AccessMode::FullAccess).is_some());
         assert_eq!(
             ask("Bash", &bash, AccessMode::AutoAcceptEdits).as_deref(),
             Some("Claude wants to run `cargo test`. Allow it?")

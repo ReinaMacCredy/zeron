@@ -3,12 +3,11 @@
 //! sections; tabs narrow them to one kind.
 use super::terminal_tabs::TerminalLaunch;
 use super::*;
-use crate::appearance::AppearanceMode;
 use crate::files::client::{FilesClientError, FilesRequestContext, WorkspaceFilesClient};
-use crate::project_actions::{ProjectActionsKey, ProjectActionsStatus, action_icon, action_label};
+use crate::project_actions::{ProjectActionsStatus, action_icon};
 use zeron_engine::playbooks::Playbook;
 use zeron_proto::{
-    ProjectAction, ProjectActionDraft, SearchWorkspaceContentRequest, SearchWorkspaceFilesRequest,
+    ProjectActionDraft, SearchWorkspaceContentRequest, SearchWorkspaceFilesRequest,
     WorkspaceContentMatch, WorkspaceEntryKind, WorkspaceFileSearchMatch, WorkspaceSearchIndexState,
     WorkspaceTarget,
 };
@@ -261,9 +260,9 @@ enum Command {
     NewProject,
     Settings,
     Inbox,
+    Supervisor,
     Usage,
     Tasks,
-    Theme(AppearanceMode),
     ArchiveThread,
 }
 
@@ -275,11 +274,9 @@ impl Command {
             Self::NewProject => "New project",
             Self::Settings => "Open settings",
             Self::Inbox => "Open inbox",
+            Self::Supervisor => "Open Supervisor",
             Self::Usage => "Open usage",
             Self::Tasks => "Tasks",
-            Self::Theme(AppearanceMode::System) => "Switch to system theme",
-            Self::Theme(AppearanceMode::Light) => "Switch to light theme",
-            Self::Theme(AppearanceMode::Dark) => "Switch to dark theme",
             Self::ArchiveThread => "Archive thread",
         }
     }
@@ -291,9 +288,9 @@ impl Command {
             Self::NewProject => icons::FOLDER,
             Self::Settings => icons::SETTINGS,
             Self::Inbox => icons::BELL,
+            Self::Supervisor => icons::LUCIDE_SHIELD,
             Self::Usage => icons::USAGE_CHART,
             Self::Tasks => icons::TASKS,
-            Self::Theme(mode) => mode.icon(),
             Self::ArchiveThread => icons::ARCHIVE_MINIMALISTIC,
         }
     }
@@ -310,11 +307,6 @@ enum RowKind {
     },
     /// A line of a file in the focused chat's workspace.
     Content(WorkspaceContentMatch),
-    RunAction {
-        key: ProjectActionsKey,
-        action: ProjectAction,
-        label: String,
-    },
     ImportAction {
         draft: ProjectActionDraft,
         label: String,
@@ -328,9 +320,6 @@ enum RowKind {
 impl RowKind {
     fn project_action(&self) -> Option<(&'static str, &str, &'static str)> {
         match self {
-            Self::RunAction { action, label, .. } => {
-                Some((action_icon(action.icon), label, "run action"))
-            }
             Self::ImportAction { draft, label } => {
                 Some((action_icon(draft.icon), label, "import action"))
             }
@@ -363,7 +352,6 @@ impl PaletteRow {
             RowKind::Content(found) => {
                 format!("content:{}:{}:{}", found.path, found.line, found.column)
             }
-            RowKind::RunAction { action, .. } => format!("action:{}", action.id),
             RowKind::ImportAction { draft, .. } => format!("import-action:{}", draft.name),
             RowKind::AddAction { .. } => "add-action".into(),
             RowKind::Playbook(playbook) => format!("playbook:{}", playbook.id),
@@ -409,7 +397,7 @@ fn matches_query(query: &str, text: &str) -> bool {
 }
 
 /// `can_archive`: a focused, unarchived chat exists for Archive thread.
-fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
+fn commands_for(query: &str, can_archive: bool) -> Vec<Command> {
     [Command::NewChat]
         .into_iter()
         .chain(TerminalLaunch::ALL.map(Command::NewTerminal))
@@ -417,13 +405,9 @@ fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
             Command::NewProject,
             Command::Settings,
             Command::Inbox,
+            Command::Supervisor,
             Command::Usage,
             Command::Tasks,
-            Command::Theme(if is_dark {
-                AppearanceMode::Light
-            } else {
-                AppearanceMode::Dark
-            }),
         ])
         .chain(can_archive.then_some(Command::ArchiveThread))
         .filter(|command| matches_query(query, command.label()))
@@ -760,7 +744,7 @@ impl Shell {
         let commands = |section| {
             PaletteSection::new(
                 section,
-                commands_for(&query, Theme::of(cx).appearance.is_dark(), can_archive)
+                commands_for(&query, can_archive)
                     .into_iter()
                     .map(RowKind::Command)
                     .chain(
@@ -885,14 +869,14 @@ impl Shell {
         else {
             return Vec::new();
         };
-        let Some(status) = self.project_actions.active_status().filter(|status| {
+        if !self.project_actions.active_status().is_some_and(|status| {
             !matches!(
                 status,
                 ProjectActionsStatus::Idle | ProjectActionsStatus::Loading
             )
-        }) else {
+        }) {
             return Vec::new();
-        };
+        }
         let Some(snapshot) = self.project_actions.visible_snapshot() else {
             return Vec::new();
         };
@@ -902,16 +886,6 @@ impl Shell {
             .space_row(&key.space_id)
             .map(|space| space.display_name().to_owned())
             .unwrap_or_default();
-        let runs = status
-            .can_run()
-            .then_some(snapshot.actions)
-            .into_iter()
-            .flatten()
-            .map(|action| RowKind::RunAction {
-                label: format!("{} · {project}", action_label(&action)),
-                key: key.clone(),
-                action,
-            });
         let imports = snapshot
             .importable_actions
             .into_iter()
@@ -922,7 +896,7 @@ impl Shell {
         let add = RowKind::AddAction {
             label: format!("Add action… · {project}"),
         };
-        runs.chain(imports)
+        imports
             .chain([add])
             .filter(|row| {
                 row.project_action().is_some_and(|(_, label, verbs)| {
@@ -949,18 +923,18 @@ impl Shell {
             .collect()
     }
 
-    /// Top-level chats matching every word of `query`, best match first
+    /// Chats matching every word of `query`, best match first
     /// (see `thread_search`).
     fn thread_matches(&self, query: &str, limit: usize, cx: &App) -> Vec<String> {
         let state = self.state.read(cx);
         let terms = thread_search::search_terms(query);
         // Global history deliberately ignores the sidebar's project filter and
         // collapsed groups. Archived conversations remain searchable too.
-        // Like the sidebar, only list top-level sessions, not side chats or MCP workers.
+        // Children have no sidebar row, so search is their door outside the Sidecar.
         let scored = state
             .chats
             .iter()
-            .filter(|chat| chat.is_person_opened())
+            .filter(|chat| !chat.is_system() && !state.is_hidden_chat(&chat.id))
             .filter_map(|chat| {
                 let pull_request = state
                     .change_request_for_chat(chat)
@@ -1053,12 +1027,6 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let RowKind::Command(Command::Theme(mode)) = row.kind {
-            // Keep the palette open so this ordinary action updates to its next state.
-            crate::appearance::set_mode(mode, cx);
-            cx.notify();
-            return;
-        }
         self.close_command_palette(window, cx);
         match row.kind {
             RowKind::Command(Command::NewChat) => self.open_new_session(None, cx),
@@ -1066,12 +1034,11 @@ impl Shell {
             RowKind::Command(Command::NewProject) => self.open_add_space(cx),
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
             RowKind::Command(Command::Inbox) => self.open_inbox(cx),
+            RowKind::Command(Command::Supervisor) => self.open_supervisor(cx),
             RowKind::Command(Command::Usage) => self.open_usage(cx),
             RowKind::Command(Command::Tasks) => self.open_tasks(cx),
-            RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
-            RowKind::Chat(id) => self.open_chat(id, cx),
-            RowKind::RunAction { key, action, .. } => self.run_project_action(&key, action, cx),
+            RowKind::Chat(id) => self.open_thread(id, cx),
             RowKind::ImportAction { draft, .. } => {
                 self.open_project_action_editor(None, Some(draft), cx)
             }
@@ -1125,9 +1092,9 @@ impl Shell {
             Command::NewProject => ShortcutId::NewProject,
             Command::Settings => return Some(crate::settings::badge_combo("mod-,")),
             Command::ArchiveThread => ShortcutId::ArchiveSession,
-            Command::Theme(_)
-            | Command::NewTerminal(_)
+            Command::NewTerminal(_)
             | Command::Inbox
+            | Command::Supervisor
             | Command::Usage
             | Command::Tasks => {
                 return None;
@@ -1173,9 +1140,7 @@ impl Shell {
                 })
                 .into_any_element()
             }
-            RowKind::RunAction { .. }
-            | RowKind::ImportAction { .. }
-            | RowKind::AddAction { .. } => {
+            RowKind::ImportAction { .. } | RowKind::AddAction { .. } => {
                 let (glyph, label, _) = row.kind.project_action()?;
                 let import = matches!(row.kind, RowKind::ImportAction { .. });
                 let target = row.clone();
@@ -1782,8 +1747,7 @@ pub(super) fn command_key_hint(theme: &Theme, keys: &str, label: &'static str) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::appearance::AppearanceMode;
-    use gpui::{AppContext, TestAppContext};
+        use gpui::{AppContext, TestAppContext};
 
     fn palette_window(cx: &mut TestAppContext) -> (gpui::WindowHandle<Shell>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -1842,7 +1806,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn history_excludes_child_chats_with_and_without_search(cx: &mut TestAppContext) {
+    fn history_lists_child_chats_only_when_searched(cx: &mut TestAppContext) {
         let (window, _dir) = palette_window(cx);
         window
             .update(cx, |shell, window, cx| {
@@ -1866,8 +1830,8 @@ mod tests {
                     "orphan-sidechat",
                 ] {
                     assert!(
-                        search_chats(shell, query, cx).is_empty(),
-                        "{query} must stay out of global history"
+                        search_chats(shell, query, cx).iter().any(|id| id == query),
+                        "{query} is found by search"
                     );
                 }
                 assert_eq!(search_chats(shell, "main-session", cx), ["main-session"]);
@@ -2057,9 +2021,9 @@ mod tests {
 
     #[test]
     fn archive_is_offered_only_with_a_focused_chat() {
-        assert!(!commands_for("archive", true, false).contains(&Command::ArchiveThread));
+        assert!(!commands_for("archive", false).contains(&Command::ArchiveThread));
         assert_eq!(
-            commands_for("archive", true, true),
+            commands_for("archive", true),
             vec![Command::ArchiveThread]
         );
     }
@@ -3073,7 +3037,7 @@ mod tests {
     #[test]
     fn action_search_hides_empty_section_and_preserves_order() {
         assert_eq!(
-            commands_for("", true, false),
+            commands_for("", false),
             vec![
                 Command::NewChat,
                 Command::NewTerminal(TerminalLaunch::Shell),
@@ -3082,13 +3046,13 @@ mod tests {
                 Command::NewProject,
                 Command::Settings,
                 Command::Inbox,
+                Command::Supervisor,
                 Command::Usage,
-                Command::Tasks,
-                Command::Theme(AppearanceMode::Light)
+                Command::Tasks
             ]
         );
         assert_eq!(
-            commands_for("new", true, false),
+            commands_for("new", false),
             vec![
                 Command::NewChat,
                 Command::NewTerminal(TerminalLaunch::Shell),
@@ -3098,38 +3062,15 @@ mod tests {
             ]
         );
         assert_eq!(
-            commands_for("codex", true, false),
+            commands_for("codex", false),
             vec![Command::NewTerminal(TerminalLaunch::Codex)]
         );
         assert_eq!(
-            commands_for("settings", true, false),
+            commands_for("settings", false),
             vec![Command::Settings]
         );
-        assert_eq!(
-            commands_for("theme", true, false),
-            vec![Command::Theme(AppearanceMode::Light)]
-        );
-        assert!(commands_for("deployment", true, false).is_empty());
-    }
-
-    #[test]
-    fn theme_action_targets_the_opposite_resolved_appearance() {
-        assert_eq!(
-            commands_for("theme", true, false),
-            vec![Command::Theme(AppearanceMode::Light)]
-        );
-        assert_eq!(
-            commands_for("theme", false, false),
-            vec![Command::Theme(AppearanceMode::Dark)]
-        );
-        assert_eq!(
-            commands_for("light", true, false),
-            vec![Command::Theme(AppearanceMode::Light)]
-        );
-        assert_eq!(
-            commands_for("dark", false, false),
-            vec![Command::Theme(AppearanceMode::Dark)]
-        );
+        assert!(commands_for("theme", false).is_empty());
+        assert!(commands_for("deployment", false).is_empty());
     }
 
     #[test]
@@ -3375,7 +3316,7 @@ mod tests {
         assert_eq!(action_labels(window, cx), expected);
     }
 
-    const ALPHA: [&str; 3] = ["Dev · alpha", "Lint · alpha", "Add action… · alpha"];
+    const ALPHA: [&str; 2] = ["Lint · alpha", "Add action… · alpha"];
 
     #[gpui::test]
     fn palette_lists_the_current_projects_actions_and_none_without_one(cx: &mut TestAppContext) {
@@ -3390,12 +3331,7 @@ mod tests {
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0]["spaceId"], "s1");
         let rows = action_rows(window, cx);
-        assert!(matches!(&rows[0], RowKind::RunAction { action, .. } if action.id == "dev"));
-        assert!(matches!(&rows[1], RowKind::ImportAction { draft, .. } if draft.name == "Lint"));
-        assert_eq!(
-            rows[0].project_action().unwrap().0,
-            action_icon(zeron_proto::ProjectActionIcon::Play)
-        );
+        assert!(matches!(&rows[0], RowKind::ImportAction { draft, .. } if draft.name == "Lint"));
         window
             .update(cx, |shell, _, cx| {
                 let quick = sections(shell, cx)
@@ -3475,17 +3411,13 @@ mod tests {
             })
             .unwrap();
         open_palette(window, cx);
-        wait_for_labels(
-            window,
-            cx,
-            &["Dev · beta", "Lint · beta", "Add action… · beta"],
-        );
+        wait_for_labels(window, cx, &["Lint · beta", "Add action… · beta"]);
         let loads = crate::device_panel::tests::calls_of(&calls, methods::LIST_PROJECT_ACTIONS);
         assert_eq!(loads.last().unwrap()["spaceId"], "s2");
     }
 
     #[gpui::test]
-    fn palette_action_rows_run_import_and_add_through_the_sidecar_handlers(
+    fn palette_action_rows_import_and_add_through_the_sidecar_handlers_and_never_run(
         cx: &mut TestAppContext,
     ) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -3511,7 +3443,7 @@ mod tests {
                 .unwrap();
         };
 
-        activate(2, cx);
+        activate(1, cx);
         window
             .update(cx, |shell, _, cx| {
                 let editor = shell
@@ -3523,7 +3455,7 @@ mod tests {
                 assert_eq!(editor.name.read(cx).text(), "");
             })
             .unwrap();
-        activate(1, cx);
+        activate(0, cx);
         window
             .update(cx, |shell, _, cx| {
                 let editor = shell
@@ -3537,24 +3469,15 @@ mod tests {
             })
             .unwrap();
 
-        activate(0, cx);
-        for _ in 0..400 {
-            cx.run_until_parked();
-            if !crate::device_panel::tests::calls_of(&calls, methods::RUN_PROJECT_ACTION).is_empty()
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let runs = crate::device_panel::tests::calls_of(&calls, methods::RUN_PROJECT_ACTION);
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0]["actionId"], "dev");
-        assert_eq!(runs[0]["spaceId"], "s1");
-        assert_eq!(runs[0]["chatId"], "a");
+        cx.run_until_parked();
+        assert!(
+            crate::device_panel::tests::calls_of(&calls, methods::RUN_PROJECT_ACTION).is_empty(),
+            "runs start only from the Sidecar's Actions"
+        );
     }
 
     #[gpui::test]
-    fn palette_search_finds_actions_by_name_and_run(cx: &mut TestAppContext) {
+    fn palette_search_finds_action_imports_and_add_by_name(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
         let dir = tempfile::tempdir().unwrap();
@@ -3562,8 +3485,8 @@ mod tests {
         open_palette(window, cx);
         wait_for_labels(window, cx, &ALPHA);
         for (query, expected) in [
-            ("run", &["Dev · alpha"][..]),
-            ("dev", &["Dev · alpha"]),
+            ("run", &[][..]),
+            ("dev", &[]),
             ("lint", &["Lint · alpha"]),
             ("add action", &["Add action… · alpha"]),
             ("alpha", &ALPHA),

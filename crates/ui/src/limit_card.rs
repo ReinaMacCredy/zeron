@@ -60,16 +60,17 @@ fn radio(selected: bool, tint: Hsla, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-fn button(
+pub(crate) fn button(
     id: SharedString,
-    label: &'static str,
+    label: impl Into<SharedString>,
     primary: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    let label = label.into();
     div()
         .id(id)
         .role(gpui::Role::Button)
-        .aria_label(label)
+        .aria_label(label.clone())
         .h(px(26.0))
         .px(px(12.0))
         .flex()

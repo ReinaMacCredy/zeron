@@ -28,9 +28,9 @@ Click the top row, **Uncommitted changes**, click the commit button next to the 
 
 When an agent is working in the same checkout, a banner says what the Git tab can still do.
 
-## Settings > Source Control
+## Settings > Agents > Source control
 
-[Settings > Source Control](zeron://settings/source-control) has three sections:
+[Settings > Agents > Source control](zeron://settings/source-control) has three sections:
 
 | Section | Rows |
 | --- | --- |
@@ -71,4 +71,4 @@ This decides what the Git tab may do in a checkout where an agent is working:
 | **Read-only** | The Git tab makes no changes until the agent stops. |
 | **Allow everything** | Every action runs, with a warning banner while the agent works. |
 
-> Each chat's own changes are also in the right pane: add **Diffs** or **History** from its tab menu. See [Right pane](zeron://docs/right-pane).
+> Each chat's own changes are also in the right pane: open its **Changes** tab from the pane button at the right of the titlebar, and use the **Uncommitted** | **History** switch at its top. See [Right pane](zeron://docs/right-pane).

@@ -220,6 +220,17 @@ struct StartReviewParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CheckoutDiffParams {
+    cwd: String,
+    #[serde(default)]
+    mode: String,
+    base_ref: Option<String>,
+    chat_id: Option<String>,
+    commit_sha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TaskParams {
     chat_id: String,
     task_id: String,
@@ -1698,10 +1709,14 @@ impl EngineRpc {
                         "Cloud runs Codex and Claude Code only".into(),
                     )));
                 }
-                Some(self.handle(method, local(&[])).await)
+                Some(self.list_models(local(&[])).await)
             }
-            methods::LIST_SKILLS | methods::LIST_COMMANDS if account => Some(
-                self.handle(method, local(&["chatId", "spaceId", "path"]))
+            methods::LIST_SKILLS if account => Some(
+                self.list_skills(local(&["chatId", "spaceId", "path"]))
+                    .await,
+            ),
+            methods::LIST_COMMANDS if account => Some(
+                self.list_commands(local(&["chatId", "spaceId", "path"]))
                     .await,
             ),
             _ if account => Some(Err(RpcError::Failed(
@@ -1709,6 +1724,96 @@ impl EngineRpc {
             ))),
             _ => None,
         }
+    }
+
+    async fn list_models(&self, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let p: ListModelsParams = parse_params(params)?;
+        let harness = match &p.instance_id {
+            Some(id) => self
+                .provider_instances_store()?
+                .resolve(&self.registry, p.harness, id)
+                .map_err(|e| RpcError::Failed(e.to_string()))?,
+            None => self
+                .registry
+                .resolve(p.harness)
+                .map_err(|e| RpcError::Failed(e.to_string()))?,
+        };
+        let lease = std::sync::Arc::new(self.registry.execution_lease(p.harness).await);
+        let models = crate::model_catalogs::list_with_lease(
+            self.repos.data_dir(),
+            harness,
+            p.force,
+            Some(lease),
+        )
+        .await
+        .map_err(|e| RpcError::Failed(e.to_string()))?;
+        // The seen-models record is per driver; an instance's models must not mark them seen.
+        if p.instance_id.is_some() {
+            return RpcReply::value(&zeron_proto::ModelCatalog {
+                models,
+                new_ids: Vec::new(),
+                announce_ids: Vec::new(),
+            });
+        }
+        RpcReply::value(
+            &self
+                .registry
+                .model_catalog(p.harness, models, crate::now_ms()),
+        )
+    }
+
+    async fn catalog_target(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<
+        (
+            std::sync::Arc<dyn zeron_harness::Harness>,
+            std::path::PathBuf,
+        ),
+        RpcError,
+    > {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Params {
+            harness: HarnessId,
+            #[serde(default)]
+            chat_id: Option<String>,
+            #[serde(default)]
+            space_id: Option<String>,
+            #[serde(default)]
+            path: Option<String>,
+        }
+        let p: Params = parse_params(params)?;
+        let harness = self.discovery_harness(p.chat_id.as_deref(), p.harness)?;
+        let root = self
+            .catalog_root(&FileSearchParams {
+                query: String::new(),
+                chat_id: p.chat_id,
+                space_id: p.space_id,
+                path: p.path,
+            })
+            .await?;
+        Ok((harness, root))
+    }
+
+    async fn list_skills(&self, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let (harness, root) = self.catalog_target(params).await?;
+        let skills = self
+            .registry
+            .discover_skills(harness, &root)
+            .await
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        RpcReply::value(&skills)
+    }
+
+    async fn list_commands(&self, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let (harness, root) = self.catalog_target(params).await?;
+        let commands = self
+            .registry
+            .discover_commands(harness, &root)
+            .await
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        RpcReply::value(&commands)
     }
 
     /// `ListCloudBranches {repo, defaultBranch?}`: the branches a Cloud
@@ -2150,20 +2255,13 @@ impl EngineRpc {
             ),
             _ => None,
         };
-        let value = |reply: RpcReply| match reply {
-            RpcReply::Value(value) => Ok(value),
-            RpcReply::Stream(_) => Err(failed("unexpected stream")),
-        };
         let base = match scope {
             ReviewScope::Branch => {
-                let branches = value(
-                    self.handle(
-                        methods::LIST_BRANCHES,
-                        serde_json::json!({ "repoPath": cwd }),
-                    )
-                    .await?,
-                )?;
-                let branches: Vec<String> = serde_json::from_value(branches).unwrap_or_default();
+                let branches = self
+                    .repos
+                    .branches(std::path::Path::new(&cwd))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 Some(
                     crate::review::default_base_ref(&branches, chat.branch.as_deref())
                         .ok_or_else(|| failed("No base branch to compare against"))?,
@@ -2171,21 +2269,15 @@ impl EngineRpc {
             }
             _ => None,
         };
-        let diff = value(
-            self.handle(
-                methods::GET_CHECKOUT_DIFF,
-                serde_json::json!({
-                    "cwd": cwd,
-                    "mode": scope.mode(),
-                    "chatId": chat.id,
-                    "baseRef": base,
-                    "commitSha": commit,
-                }),
-            )
-            .await?,
-        )?;
-        let diff: zeron_proto::CheckoutDiff =
-            serde_json::from_value(diff).map_err(|e| RpcError::Failed(e.to_string()))?;
+        let diff = self
+            .checkout_diff(CheckoutDiffParams {
+                cwd,
+                mode: scope.mode().to_string(),
+                base_ref: base.clone(),
+                chat_id: Some(chat.id.clone()),
+                commit_sha: commit.clone(),
+            })
+            .await?;
         let files: Vec<String> = diff.files.iter().map(|file| file.path.clone()).collect();
         if files.is_empty() {
             return Err(failed("Nothing to review"));
@@ -2268,6 +2360,75 @@ impl EngineRpc {
             "scope": scope.key(),
             "commitSha": commit,
         }))
+    }
+
+    async fn checkout_diff(
+        &self,
+        p: CheckoutDiffParams,
+    ) -> Result<zeron_proto::CheckoutDiff, RpcError> {
+        let repos = self.repos.clone();
+        let device_id = self.doc_host.device_id().to_string();
+        let turn = match (p.mode.as_str(), p.chat_id.as_deref()) {
+            ("turn", Some(chat_id)) => self.diff_sync.turn_snapshot(chat_id),
+            _ => None,
+        };
+        // A task of its own: under the dispatcher's frame a debug build overflows the 2 MB worker stack.
+        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let identity = repos
+                .checkout_identity(std::path::Path::new(&p.cwd))
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+            let root = identity.root.as_path();
+            let snapshot = match p.mode.as_str() {
+                "branch" => {
+                    let base_ref = p
+                        .base_ref
+                        .as_deref()
+                        .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
+                    let base = crate::diff_sync::merge_base(root, base_ref)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    crate::diff_sync::capture_diff_against(&repos, root, Some(&base)).await
+                }
+                // One commit's own changes (History → per-commit tab):
+                // parent (or the empty tree) vs the commit itself.
+                "commit" => {
+                    let sha = p
+                        .commit_sha
+                        .as_deref()
+                        .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
+                    crate::working_tree::resolve_commit(root, sha)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    crate::diff_sync::capture_commit_diff(&repos, root, sha).await
+                }
+                "turn" => {
+                    if p.chat_id.is_none() {
+                        return Err(RpcError::Failed("chatId required".into()));
+                    }
+                    let snapshot = turn
+                        .filter(|s| s.root == identity.root)
+                        .ok_or_else(|| RpcError::Failed("no turn recorded".into()))?;
+                    crate::diff_sync::capture_turn_diff(&repos, root, &snapshot.tree).await
+                }
+                _ => crate::diff_sync::capture_diff(&repos, root).await,
+            }
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+            Ok(zeron_proto::CheckoutDiff {
+                checkout_id: identity.id,
+                device_id,
+                cwd: identity.root.to_string_lossy().to_string(),
+                patch: snapshot.patch,
+                files: snapshot.files,
+                additions: snapshot.additions,
+                deletions: snapshot.deletions,
+                truncated: snapshot.truncated,
+                checksum: snapshot.checksum,
+                updated_at: chrono::Utc::now(),
+            })
+        }));
+        task.await
+            .map_err(|e| RpcError::Failed(format!("checkout diff task failed: {e}")))?
     }
 
     fn agent_profiles_store(&self) -> Result<AgentProfilesStore, RpcError> {
@@ -4225,99 +4386,9 @@ impl RpcService for EngineRpc {
                 // round trip, and a refused/raced toggle self-corrects.
                 RpcReply::value(&self.registry.descriptors())
             }
-            methods::LIST_MODELS => {
-                let p: ListModelsParams = parse_params(params)?;
-                let harness = match &p.instance_id {
-                    Some(id) => self
-                        .provider_instances_store()?
-                        .resolve(&self.registry, p.harness, id)
-                        .map_err(|e| RpcError::Failed(e.to_string()))?,
-                    None => self
-                        .registry
-                        .resolve(p.harness)
-                        .map_err(|e| RpcError::Failed(e.to_string()))?,
-                };
-                let lease = std::sync::Arc::new(self.registry.execution_lease(p.harness).await);
-                let models = crate::model_catalogs::list_with_lease(
-                    self.repos.data_dir(),
-                    harness,
-                    p.force,
-                    Some(lease),
-                )
-                .await
-                .map_err(|e| RpcError::Failed(e.to_string()))?;
-                // The seen-models record is per driver; an instance's models must not mark them seen.
-                if p.instance_id.is_some() {
-                    return RpcReply::value(&zeron_proto::ModelCatalog {
-                        models,
-                        new_ids: Vec::new(),
-                        announce_ids: Vec::new(),
-                    });
-                }
-                RpcReply::value(
-                    &self
-                        .registry
-                        .model_catalog(p.harness, models, crate::now_ms()),
-                )
-            }
-            methods::LIST_SKILLS => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct Params {
-                    harness: HarnessId,
-                    #[serde(default)]
-                    chat_id: Option<String>,
-                    #[serde(default)]
-                    space_id: Option<String>,
-                    #[serde(default)]
-                    path: Option<String>,
-                }
-                let p: Params = parse_params(params)?;
-                let harness = self.discovery_harness(p.chat_id.as_deref(), p.harness)?;
-                let root = self
-                    .catalog_root(&FileSearchParams {
-                        query: String::new(),
-                        chat_id: p.chat_id,
-                        space_id: p.space_id,
-                        path: p.path,
-                    })
-                    .await?;
-                let skills = self
-                    .registry
-                    .discover_skills(harness, &root)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&skills)
-            }
-            methods::LIST_COMMANDS => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct Params {
-                    harness: HarnessId,
-                    #[serde(default)]
-                    chat_id: Option<String>,
-                    #[serde(default)]
-                    space_id: Option<String>,
-                    #[serde(default)]
-                    path: Option<String>,
-                }
-                let p: Params = parse_params(params)?;
-                let harness = self.discovery_harness(p.chat_id.as_deref(), p.harness)?;
-                let root = self
-                    .catalog_root(&FileSearchParams {
-                        query: String::new(),
-                        chat_id: p.chat_id,
-                        space_id: p.space_id,
-                        path: p.path,
-                    })
-                    .await?;
-                let commands = self
-                    .registry
-                    .discover_commands(harness, &root)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&commands)
-            }
+            methods::LIST_MODELS => self.list_models(params).await,
+            methods::LIST_SKILLS => self.list_skills(params).await,
+            methods::LIST_COMMANDS => self.list_commands(params).await,
             methods::READ_CLAUDE_CONFIG | methods::RUN_CLAUDE_LOCAL_COMMAND => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
@@ -4908,6 +4979,8 @@ impl RpcService for EngineRpc {
                     /// side chat's parent so the copy lists as a sibling.
                     #[serde(default)]
                     created_by_chat_id: Option<String>,
+                    #[serde(default)]
+                    entry_id: Option<String>,
                 }
                 let p: ForkParams = parse_params(params)?;
                 let created_by_chat_id = p
@@ -4937,17 +5010,29 @@ impl RpcService for EngineRpc {
                     .doc()
                     .read_entries()
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let boundary = entries
-                    .iter()
-                    .rposition(|entry| {
-                        entry.role == zeron_doc::MessageRole::Assistant
-                            && entry.status == Some(zeron_doc::MessageStatus::Complete)
-                    })
-                    .ok_or_else(|| {
+                let complete = |entry: &zeron_doc::SessionMessageEntry| {
+                    entry.role == zeron_doc::MessageRole::Assistant
+                        && entry.status == Some(zeron_doc::MessageStatus::Complete)
+                };
+                let boundary = match p.entry_id.as_deref() {
+                    Some(entry_id) => {
+                        let ix = entries
+                            .iter()
+                            .position(|entry| entry.id == entry_id)
+                            .ok_or_else(|| {
+                                RpcError::Failed("That reply is no longer in the chat.".into())
+                            })?;
+                        if !complete(&entries[ix]) {
+                            return Err(RpcError::Failed("Wait for the reply to finish.".into()));
+                        }
+                        ix
+                    }
+                    None => entries.iter().rposition(complete).ok_or_else(|| {
                         RpcError::Failed(
                             "Wait for a completed response before starting a side chat".into(),
                         )
-                    })?;
+                    })?,
+                };
                 let mut chat = source.clone();
                 chat.id = p.chat_id;
                 chat.created_by_chat_id = Some(created_by_chat_id);
@@ -5996,80 +6081,7 @@ impl RpcService for EngineRpc {
             // turn-start tree snapshot against the current tree; anything else
             // is the plain working-tree capture.
             methods::GET_CHECKOUT_DIFF => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    cwd: String,
-                    #[serde(default)]
-                    mode: String,
-                    base_ref: Option<String>,
-                    chat_id: Option<String>,
-                    commit_sha: Option<String>,
-                }
-                let p: P = parse_params(params)?;
-                let repos = self.repos.clone();
-                let device_id = self.doc_host.device_id().to_string();
-                let turn = match (p.mode.as_str(), p.chat_id.as_deref()) {
-                    ("turn", Some(chat_id)) => self.diff_sync.turn_snapshot(chat_id),
-                    _ => None,
-                };
-                // A task of its own: under the dispatcher's frame a debug build overflows the 2 MB worker stack.
-                let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-                    let identity = repos
-                        .checkout_identity(std::path::Path::new(&p.cwd))
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    let root = identity.root.as_path();
-                    let snapshot = match p.mode.as_str() {
-                        "branch" => {
-                            let base_ref = p
-                                .base_ref
-                                .as_deref()
-                                .ok_or_else(|| RpcError::Failed("baseRef required".into()))?;
-                            let base = crate::diff_sync::merge_base(root, base_ref)
-                                .await
-                                .map_err(|e| RpcError::Failed(e.to_string()))?;
-                            crate::diff_sync::capture_diff_against(&repos, root, Some(&base)).await
-                        }
-                        // One commit's own changes (History → per-commit tab):
-                        // parent (or the empty tree) vs the commit itself.
-                        "commit" => {
-                            let sha = p
-                                .commit_sha
-                                .as_deref()
-                                .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
-                            crate::working_tree::resolve_commit(root, sha)
-                                .await
-                                .map_err(|e| RpcError::Failed(e.to_string()))?;
-                            crate::diff_sync::capture_commit_diff(&repos, root, sha).await
-                        }
-                        "turn" => {
-                            if p.chat_id.is_none() {
-                                return Err(RpcError::Failed("chatId required".into()));
-                            }
-                            let snapshot = turn
-                                .filter(|s| s.root == identity.root)
-                                .ok_or_else(|| RpcError::Failed("no turn recorded".into()))?;
-                            crate::diff_sync::capture_turn_diff(&repos, root, &snapshot.tree).await
-                        }
-                        _ => crate::diff_sync::capture_diff(&repos, root).await,
-                    }
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    RpcReply::value(&zeron_proto::CheckoutDiff {
-                        checkout_id: identity.id,
-                        device_id,
-                        cwd: identity.root.to_string_lossy().to_string(),
-                        patch: snapshot.patch,
-                        files: snapshot.files,
-                        additions: snapshot.additions,
-                        deletions: snapshot.deletions,
-                        truncated: snapshot.truncated,
-                        checksum: snapshot.checksum,
-                        updated_at: chrono::Utc::now(),
-                    })
-                }));
-                task.await
-                    .map_err(|e| RpcError::Failed(format!("checkout diff task failed: {e}")))?
+                RpcReply::value(&self.checkout_diff(parse_params(params)?).await?)
             }
             methods::DISCARD_WORKING_TREE => {
                 // This destructive branch performs several nested filesystem
@@ -7127,6 +7139,7 @@ impl RpcService for EngineRpc {
                         p.rows,
                         &std::collections::HashMap::new(),
                         command,
+                        false,
                     ),
                     None => self.terminals.open(&cwd, p.cols, p.rows),
                 }

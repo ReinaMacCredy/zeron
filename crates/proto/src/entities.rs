@@ -521,6 +521,13 @@ impl Chat {
             .map(|d| d.delegated_by_chat_id.as_str())
     }
 
+    pub fn opened_from(&self) -> Option<&str> {
+        self.sidechat_source_chat_id
+            .as_deref()
+            .or(self.forked_from_chat_id.as_deref())
+            .or(self.created_by_chat_id.as_deref())
+    }
+
     pub fn is_person_opened(&self) -> bool {
         self.created_by_chat_id.is_none() && self.delegation.is_none() && !self.is_system()
     }
@@ -2657,6 +2664,9 @@ pub struct AgentTerminalOpened {
     pub chat_id: String,
     pub terminal: TerminalSession,
 }
+
+/// `ESC ] 7502 ; <status> BEL`: a project action's command ended while its shell stays open.
+pub const COMMAND_EXIT_OSC: &str = "7502";
 
 /// One `SubscribeTerminal` stream item. `seq` is a per-terminal monotonic counter
 /// used for replay resumption (`afterSeq`).

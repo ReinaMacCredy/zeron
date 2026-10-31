@@ -982,7 +982,6 @@ pub struct AppState {
     /// [`Self::selected_space_row`] reads as `None` — healing must NOT
     /// re-select a project underneath it.
     pub no_project: bool,
-    work_space: Option<String>,
     /// The composer's device pick — where project-less sessions run, and the
     /// device whose projects the project picker lists. `None` falls back to
     /// the local device.
@@ -1054,6 +1053,7 @@ pub struct AppState {
     /// Send-in-flight overlay per chat id: a queued doc command the host
     /// hasn't executed yet (see [`Self::begin_pending_send`]).
     pending_sends: HashMap<String, PendingSend>,
+    plan_approvals: HashMap<String, (String, bool)>,
     /// The in-flight send's attachment upload, when it has one.
     upload_progress: Option<UploadProgress>,
     /// Engine-side queued-attachment transfers by uploadId (`WatchTransfers`
@@ -1189,6 +1189,40 @@ fn device_presentation_at(devices: &[Device], now: DateTime<Utc>) -> Vec<(Device
         .collect()
 }
 
+struct Nesting<'a> {
+    listed: HashSet<&'a str>,
+    steps: HashSet<&'a str>,
+    parents: HashMap<&'a str, &'a str>,
+}
+
+impl<'a> Nesting<'a> {
+    fn of(state: &'a AppState, overview: &[(ChatIndicator, &'a Chat)]) -> Self {
+        Self {
+            listed: overview.iter().map(|(_, chat)| chat.id.as_str()).collect(),
+            steps: state
+                .task_steps
+                .iter()
+                .filter(|step| !step.deleted)
+                .filter_map(|step| step.chat_id.as_deref())
+                .collect(),
+            parents: state
+                .chats
+                .iter()
+                .filter_map(|chat| Some((chat.id.as_str(), chat.opened_from()?)))
+                .collect(),
+        }
+    }
+
+    /// Only a parent with its own sidebar row can hold a child; task step threads stay for the lead's nested step rows.
+    fn nests(&self, chat_id: &str, depth: usize) -> bool {
+        depth < 16
+            && !self.steps.contains(chat_id)
+            && self.parents.get(chat_id).is_some_and(|parent| {
+                self.listed.contains(parent) && !self.nests(parent, depth + 1)
+            })
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
@@ -1221,7 +1255,6 @@ impl AppState {
             session_presentation: None,
             selected_space: None,
             no_project: false,
-            work_space: None,
             selected_device: None,
             canvas_target: None,
             selected_chat: None,
@@ -1246,6 +1279,7 @@ impl AppState {
             link_roots_revision: 0,
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
+            plan_approvals: HashMap::new(),
             upload_progress: None,
             transfers: HashMap::new(),
             review_comments: HashMap::new(),
@@ -1680,7 +1714,26 @@ impl AppState {
         }
         self.tasks = tasks;
         self.tasks_synced = true;
+        let tasks = &self.tasks;
+        self.plan_approvals.retain(|_, (chat_id, as_task)| {
+            !*as_task || zeron_proto::plan_of_chat(tasks, chat_id).is_none()
+        });
         true
+    }
+
+    pub(crate) fn plan_approval(&self, request_id: &str) -> Option<bool> {
+        self.plan_approvals
+            .get(request_id)
+            .map(|(_, as_task)| *as_task)
+    }
+
+    pub(crate) fn begin_plan_approval(&mut self, request_id: &str, chat_id: &str, as_task: bool) {
+        self.plan_approvals
+            .insert(request_id.to_owned(), (chat_id.to_owned(), as_task));
+    }
+
+    pub(crate) fn end_plan_approval(&mut self, request_id: &str) {
+        self.plan_approvals.remove(request_id);
     }
 
     pub fn apply_task_steps(&mut self, steps: Vec<zeron_proto::TaskStep>) -> bool {
@@ -3652,10 +3705,27 @@ impl AppState {
         space_filter: Option<&str>,
     ) -> Vec<(ChatIndicator, &Chat)> {
         let in_filter = self.project_filter(space_filter);
-        self.overview_chats(now)
-            .into_iter()
-            .filter(|(_, chat)| in_filter(chat))
+        let overview = self.overview_chats(now);
+        let nesting = Nesting::of(self, &overview);
+        overview
+            .iter()
+            .filter(|(_, chat)| in_filter(chat) && !nesting.nests(&chat.id, 0))
+            .copied()
             .collect()
+    }
+
+    pub(crate) fn sidecar_host(&self, chat_id: &str, now: DateTime<Utc>) -> Option<String> {
+        let chat = self.chats.iter().find(|chat| chat.id == chat_id)?;
+        let overview = self.overview_chats(now);
+        let nesting = Nesting::of(self, &overview);
+        match chat.delegated_by() {
+            Some(parent) => (nesting.listed.contains(parent) && !nesting.nests(parent, 0))
+                .then(|| parent.to_owned()),
+            None => nesting
+                .nests(chat_id, 0)
+                .then(|| chat.opened_from().map(str::to_owned))
+                .flatten(),
+        }
     }
 
     /// The sidebar's project filter matches by repository: it stores one
@@ -3936,8 +4006,8 @@ impl AppState {
             .map(|config| config.harness)
     }
 
-    /// The btw tabs of `chat_id`: its unarchived, unexpired sidechats, oldest
-    /// first by creation, not by activity.
+    /// The side chats `/btw` can reopen for `chat_id`: its unarchived,
+    /// unexpired sidechats, oldest first by creation, not by activity.
     pub fn live_sidechats_of(&self, chat_id: &str, now: DateTime<Utc>) -> Vec<&Chat> {
         let mut sidechats: Vec<&Chat> = self
             .chats
@@ -4023,7 +4093,6 @@ impl AppState {
         self.session_presentation = None;
         self.selected_space = None;
         self.no_project = false;
-        self.work_space = None;
         self.selected_device = None;
         self.canvas_target = None;
         self.selected_chat = None;
@@ -5104,9 +5173,6 @@ impl AppState {
                 }
             }
             None => {
-                if !self.no_project && self.selected_space.is_some() {
-                    self.work_space = self.selected_space.clone();
-                }
                 self.selected_device = self.effective_device_id();
                 self.no_project = true;
             }
@@ -5119,22 +5185,6 @@ impl AppState {
         self.selected_space = space_id;
         self.record_draft_target(cx);
         cx.notify();
-    }
-
-    pub fn select_work(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.selected_space_row().is_some() {
-            return true;
-        }
-        let Some(space_id) = self
-            .work_space
-            .clone()
-            .filter(|id| self.space_row(id).is_some())
-            .or_else(|| self.first_space_on_picked_device())
-        else {
-            return false;
-        };
-        self.select_space(Some(space_id), cx);
-        true
     }
 
     /// Synced seen marker: only fires when the chat is currently unseen
@@ -6427,7 +6477,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_or_archived_sidechats_are_not_btw_tabs() {
+    fn expired_or_archived_sidechats_are_not_reopened() {
         let mut state = AppState::new();
         let mut expired = chat("expired", 0, None);
         expired.sidechat_source_chat_id = Some("parent".into());
@@ -8078,37 +8128,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn work_restores_the_project_left_for_chat(cx: &mut gpui::TestAppContext) {
-        let state = cx.new(|_| AppState::new());
-        state.update(cx, |state, cx| {
-            state.apply_spaces(vec![
-                space("s1", "dev", "/a", 1),
-                space("s2", "remote", "/b", 2),
-            ]);
-            state.select_space(Some("s2".into()), cx);
-            state.select_space(None, cx);
-            assert!(state.select_work(cx));
-            assert!(!state.no_project);
-            assert_eq!(state.selected_space.as_deref(), Some("s2"));
-            state.select_space(None, cx);
-            state.select_space(Some("s1".into()), cx);
-            assert!(state.select_work(cx));
-            assert_eq!(state.selected_space.as_deref(), Some("s1"));
-
-            state.select_space(Some("s2".into()), cx);
-            state.select_space(None, cx);
-            state.apply_spaces(vec![space("s1", "dev", "/a", 1)]);
-            assert!(state.select_work(cx));
-            assert_eq!(state.selected_space.as_deref(), Some("s1"));
-
-            state.select_space(None, cx);
-            state.apply_spaces(Vec::new());
-            assert!(!state.select_work(cx));
-            assert!(state.no_project);
-        });
-    }
-
-    #[gpui::test]
     fn canvas_reopens_on_its_own_target_after_visiting_chats(cx: &mut gpui::TestAppContext) {
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, cx| {
@@ -8865,6 +8884,81 @@ mod tests {
             .map(|(_, c)| c.id.as_str())
             .collect();
         assert_eq!(filtered, ["b"]);
+    }
+
+    #[test]
+    fn child_threads_leave_the_sidebar_while_their_parent_exists() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut side = chat("side", 1, Some(1));
+        side.sidechat_source_chat_id = Some("main".into());
+        let mut fork = chat("fork", 2, Some(2));
+        fork.forked_from_chat_id = Some("main".into());
+        let mut started = chat("started", 3, Some(3));
+        started.created_by_chat_id = Some("main".into());
+        let mut step = chat("step", 4, Some(4));
+        step.created_by_chat_id = Some("main".into());
+        let mut orphan = chat("orphan", 5, Some(5));
+        orphan.forked_from_chat_id = Some("deleted".into());
+        state.apply_chats(vec![
+            chat("main", 0, Some(0)),
+            side,
+            fork,
+            started,
+            step,
+            orphan,
+        ]);
+        state.task_steps = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "s", "taskId": "t", "chatId": "step",
+            }))
+            .unwrap(),
+        ];
+        let mut rows: Vec<&str> = state
+            .sidebar_chats(now, None)
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        rows.sort();
+        assert_eq!(rows, ["main", "orphan", "step"]);
+
+        let mut grandchild = chat("grandchild", 6, Some(6));
+        grandchild.forked_from_chat_id = Some("side".into());
+        let mut supervised = chat("supervised", 7, Some(7));
+        supervised.created_by_chat_id = Some("supervisor-x".into());
+        let mut chats = state.chats.clone();
+        chats.extend([grandchild, supervised, chat("supervisor-x", 8, Some(8))]);
+        state.apply_chats(chats.clone());
+        let rows = |state: &AppState| {
+            let mut rows: Vec<String> = state
+                .sidebar_chats(now, None)
+                .iter()
+                .map(|(_, c)| c.id.clone())
+                .collect();
+            rows.sort();
+            rows
+        };
+        assert_eq!(
+            rows(&state),
+            ["grandchild", "main", "orphan", "step", "supervised"],
+            "a child whose parent has no sidebar row keeps its own"
+        );
+        assert_eq!(state.sidecar_host("side", now).as_deref(), Some("main"));
+        assert_eq!(state.sidecar_host("grandchild", now), None);
+
+        for chat in &mut chats {
+            chat.archived |= chat.id == "main";
+        }
+        state.apply_chats(chats);
+        assert_eq!(
+            rows(&state),
+            ["fork", "orphan", "side", "started", "step", "supervised"],
+            "an archived parent's children come back to the sidebar"
+        );
+        assert_eq!(
+            state.sidecar_host("grandchild", now).as_deref(),
+            Some("side")
+        );
     }
 
     #[test]

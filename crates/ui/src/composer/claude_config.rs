@@ -92,7 +92,6 @@ impl Composer {
             self.set_chat_failure("Engine not connected".into(), cx);
             return;
         };
-        self.close_ask_tray(cx);
         let chat = self.bound_chat_row(cx).cloned();
         let local = self.state.read(cx).local_device_id.clone();
         let params = self.catalog_params(cx);

@@ -826,8 +826,7 @@ impl Pickers {
             + if effort { EFFORT_BLOCK } else { 0.0 }
             + self
                 .compact_options_height(cx)
-                .map_or(0.0, |height| OPTIONS_GAP + height)
-            + super::PERMISSIONS_SECTION_HEIGHT;
+                .map_or(0.0, |height| OPTIONS_GAP + height);
         let page = if self.compact_model_list {
             CompactPage::Models
         } else {
@@ -1342,8 +1341,7 @@ impl Pickers {
             let chrome = CARD_BORDERS
                 + header_block(!levels.is_empty())
                 + if levels.is_empty() { 0.0 } else { EFFORT_BLOCK }
-                + OPTIONS_GAP
-                + super::PERMISSIONS_SECTION_HEIGHT;
+                + OPTIONS_GAP;
             // Space, not a rule, separates the options from the effort group.
             panel = panel.child(
                 div().mt(px(OPTIONS_GAP)).child(
@@ -1360,9 +1358,7 @@ impl Pickers {
                 ),
             );
         }
-        panel
-            .child(self.render_permissions_section(cx))
-            .into_any_element()
+        panel.into_any_element()
     }
 }
 

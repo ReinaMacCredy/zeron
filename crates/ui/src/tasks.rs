@@ -46,9 +46,11 @@ pub(crate) use index::tree_index;
 use logic::COLUMNS;
 pub(crate) use logic::top_order_key;
 use morph::{Key, Morph, Painted, Rects};
-pub(crate) use strip_tree::{SampleRow, StripTree, StripTreeEvent, TreeHost};
+pub(crate) use strip_tree::{StripTree, StripTreeEvent, TreeHost};
 pub(crate) use tree::{Status as TreeStatus, StatusTone, glyph as tree_glyph, kind_badge};
 
+pub(crate) const TASK_PAGE: &str = "Task page";
+pub(crate) const OPEN_TASK_PAGE: &str = "Open in Tasks";
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";
 const LIST_MAX_WIDTH: f32 = 640.0;
 const CARD_WIDTH: f32 = 340.0;
@@ -156,16 +158,14 @@ pub(crate) enum TasksFilter {
     All,
     Missions,
     Trees,
-    NeedsYou,
 }
 
 impl TasksFilter {
     fn label(self) -> &'static str {
         match self {
             Self::All => "All",
-            Self::Missions => "Missions",
+            Self::Missions => "Plans",
             Self::Trees => "Trees",
-            Self::NeedsYou => "Needs you",
         }
     }
 
@@ -174,16 +174,11 @@ impl TasksFilter {
             Self::All => true,
             Self::Missions => is_mission(&row.task, &row.plan),
             Self::Trees => false,
-            Self::NeedsYou => row.status == TaskStatus::NeedsYou,
         }
     }
 
-    fn keeps_tree(self, row: &index::IndexRow) -> bool {
-        match self {
-            Self::All | Self::Trees => true,
-            Self::Missions => false,
-            Self::NeedsYou => row.asks,
-        }
+    fn keeps_trees(self) -> bool {
+        self != Self::Missions
     }
 }
 
@@ -1920,15 +1915,7 @@ impl TasksPage {
                 .text_size(ui_rems(12.0))
                 .text_color(if on { theme.text } else { theme.text_muted })
                 .child(label)
-                .child(
-                    div()
-                        .text_color(if filter == TasksFilter::NeedsYou && n > 0 {
-                            theme.warning
-                        } else {
-                            theme.text_faint
-                        })
-                        .child(n.to_string()),
-                )
+                .child(div().text_color(theme.text_faint).child(n.to_string()))
                 .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
                     page.set_filter(filter, cx);
                 }))
@@ -2507,13 +2494,33 @@ pub(crate) fn tab_members(state: &AppState) -> std::collections::HashMap<String,
 }
 
 pub(crate) fn can_add_plan(state: &AppState, chat: &zeron_proto::Chat) -> bool {
-    state.local_device_id.as_deref() == Some(chat.device_id.as_str())
-        && !chat.archived
-        && !chat.is_system()
-        && chat.sidechat_source_chat_id.is_none()
-        && !state.is_hidden_chat(&chat.id)
-        && !state.is_draft(&chat.id)
-        && zeron_proto::plan_of_chat(&state.tasks, &chat.id).is_none()
+    add_plan_blocker(state, chat).is_none()
+}
+
+const NO_TASK: &str = "This chat cannot become a Task";
+
+pub(crate) fn chat_plan_blocker(state: &AppState, chat_id: &str) -> Option<&'static str> {
+    state
+        .chats
+        .iter()
+        .find(|chat| chat.id == chat_id)
+        .map_or(Some(NO_TASK), |chat| add_plan_blocker(state, chat))
+}
+
+pub(crate) fn add_plan_blocker(state: &AppState, chat: &zeron_proto::Chat) -> Option<&'static str> {
+    if state.local_device_id.as_deref() != Some(chat.device_id.as_str()) {
+        Some("Only the device this chat runs on can make it a Task")
+    } else if chat.archived {
+        Some("Unarchive this chat to make it a Task")
+    } else if chat.sidechat_source_chat_id.is_some() {
+        Some("A side chat cannot become a Task")
+    } else if chat.is_system() || state.is_hidden_chat(&chat.id) || state.is_draft(&chat.id) {
+        Some(NO_TASK)
+    } else if zeron_proto::plan_of_chat(&state.tasks, &chat.id).is_some() {
+        Some("This chat already leads a Task")
+    } else {
+        None
+    }
 }
 
 fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Row {
@@ -2575,16 +2582,6 @@ pub(crate) fn gathered_tasks(state: &AppState, chat_id: &str, now: DateTime<Utc>
             status: rollup(state, task, now).status,
         })
         .collect()
-}
-
-pub(crate) fn needs_you_count(state: &AppState) -> usize {
-    let now = Utc::now();
-    state
-        .tasks
-        .iter()
-        .filter(|task| !task.deleted)
-        .filter(|task| rollup(state, task, now).status == TaskStatus::NeedsYou)
-        .count()
 }
 
 pub(crate) fn mention_mark(
@@ -2914,19 +2911,13 @@ impl Render for TasksPage {
         if view == TasksView::Kanban && self.filter == TasksFilter::Trees {
             self.filter = TasksFilter::All;
         }
-        let counts = [
-            TasksFilter::All,
-            TasksFilter::Missions,
-            TasksFilter::Trees,
-            TasksFilter::NeedsYou,
-        ]
-        .map(|filter| {
+        let counts = [TasksFilter::All, TasksFilter::Missions, TasksFilter::Trees].map(|filter| {
             let tasks = open.iter().chain(&done).filter(|row| filter.keeps(row));
             let trees = trees
                 .running
                 .iter()
                 .chain(&trees.done_today)
-                .filter(|row| filter.keeps_tree(row));
+                .filter(|_| filter.keeps_trees());
             (filter, tasks.count() + trees.count())
         });
         let counts: Vec<(TasksFilter, usize)> = counts
@@ -2937,8 +2928,10 @@ impl Render for TasksPage {
         let filter = self.filter;
         open.retain(|row| filter.keeps(row));
         done.retain(|row| filter.keeps(row));
-        trees.running.retain(|row| filter.keeps_tree(row));
-        trees.done_today.retain(|row| filter.keeps_tree(row));
+        if !filter.keeps_trees() {
+            trees.running.clear();
+            trees.done_today.clear();
+        }
         if trees.running.iter().any(|row| row.status.live()) && !reduced {
             motion::pulse_lease(cx.entity_id(), cx);
         }

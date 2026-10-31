@@ -8,21 +8,20 @@ The narrow strip on the left switches between Zeron's pages. Hover a button to s
 
 | Button | What it opens |
 | --- | --- |
-| **Home** | Back to your chats. |
-| **Inbox** | The [Inbox](zeron://inbox), with what needs you today. A number shows how many agents are waiting for your input. |
-| **Tasks** | The [Tasks](zeron://tasks) page. A number shows how many tasks need you. |
-| **Supervisor** | The [Supervisor](zeron://supervisor) page. A number counts its open **Needs you** cards. |
+| **New chat** | [New chat](zeron://docs/new-chat), with a composer and the **Needs you**, **Running** and **Recent** cards. Cmd+N opens it from anywhere. |
+| **Inbox** | The [Inbox](zeron://inbox): the history of what your agents asked, finished and failed today. |
+| **Tasks** | The [Tasks](zeron://tasks) page. A number counts the tasks you captured and have not seen yet. |
 | **Pull requests** | The [Pull requests](zeron://pull-requests) board. |
-| **Usage** | The [Usage](zeron://usage) page. |
+
+What needs you right now is not on the rail: the pill on the right of the titlebar counts it, and Cmd+I opens its tray. See **Needs you and running** below.
 
 Further down the rail:
 
-- **Usage rings** show how much of your plan's limits are left, one ring per agent account, at most two. The outer ring is the week and the inner ring the current session. Hover for details. Click a ring to list that provider's accounts, with the one in use marked **In use**; click another to switch, or click **Open Usage**.
+- The **usage ring** shows the tightest limit window of the agent accounts you use. Hover it for a card with each account's windows and when they reset, and click it to open the [Usage](zeron://usage) page. At a limit it turns red. See [Usage](zeron://docs/usage).
 - A microphone button for voice mode, when Codex is installed and turned on in [Settings > Providers](zeron://settings/providers). See [Voice and dictation](zeron://docs/voice).
-- Your **account** button, with your initial; hover it for your name, or **Local** when you are not signed in. Its menu starts with your email, or **Stored on this device** for a local workspace (**Not signed in** for a synced one without an account), then a **Usage · this device** section with each provider's plan and meters (**Refresh** updates them), **Usage** to open the Usage page, and one sync row: **Enable sync**, **Sync setup in progress**, **Finish sync setup**, or **Sign out**. On Windows and Linux it also has **Check for updates**. To sync with your other devices, see [Devices](zeron://docs/devices).
-- **Help**: recent releases, the full changelog, keybindings, and these docs. See [Updates and what's new](zeron://docs/updates).
+- **Help**: these docs, what's new, keyboard shortcuts, **Star Zeron on GitHub**, and **Agent updates** when an agent CLI has one. See [Updates and what's new](zeron://docs/updates).
 - A download button, when an app update is available.
-- **Settings** at the bottom. Cmd+, opens and closes it too. Settings opens as a panel over the app, with its pages grouped in a list on the left (Agents, Code, Connections) and **Search settings** on top; press / or Cmd+F to search, and pick a found setting to open its page at that row. The header names the page, for example **Settings › Updates**, and holds that page's actions. Close it with the **×**, Escape, or a click outside the panel.
+- **Settings** at the bottom. Cmd+, opens and closes it too. Settings opens as a panel over the app, with eight sections in a list on the left (General, Appearance, Notifications, Providers, Agents, Context & tools, This Mac, Devices & updates), then **Account**, and **Search settings** on top. A section with more than one page shows them as tabs above the page. Press / or Cmd+F to search: each found setting shows its path, such as **Appearance › Advanced look**, and picking one opens its page at that row. The header names the section, for example **Settings › Devices & updates**, and holds that page's actions. **Account** shows who you are signed in as, or **Stored on this device**, with **Enable sync** or **Sign out**. To sync with your other devices, see [Devices](zeron://docs/devices). Close it with the **×**, Escape, or a click outside the panel.
 
 ## The sidebar
 
@@ -33,6 +32,21 @@ Drag the sidebar's right edge to resize it, from 242 to 400 px wide. Double-clic
 To hide or show the sidebar, click the sidebar button at the top left of the window or press Cmd+B (**Toggle left sidebar**). Zeron remembers your choice.
 
 With the sidebar hidden, move the pointer just right of the app rail and it slides out as a floating panel. Move away and it hides again; press Escape to dismiss it. Turn this off with **Reveal sidebar on hover** in [Settings > Appearance](zeron://settings/appearance).
+
+## Needs you and running
+
+The pill on the right of the titlebar counts the threads that need you and the ones running, for example **2 need you · 1 running**. With nothing waiting it reads only the running count, and with nothing at all it is hidden.
+
+Click it or press Cmd+I to open its tray:
+
+![The Cmd+I tray: Supervisor on top, then Needs you with a question open in place](triage-tray.jpg)
+
+- The top row, **Supervisor**, sums up what is going on and opens the [Supervisor](zeron://docs/supervisor) chat.
+- **Needs you** lists each thread that asks a question, has a plan waiting for your OK, or failed. **Answer** and **Review** open the question or the plan right in the tray, so you answer without leaving the chat you are in; **Open** opens the thread.
+- **Running** lists each thread that works, with its subagents under it.
+- **History** opens the Inbox and **Tasks** opens Tasks.
+
+Escape, a click outside or Cmd+I closes the tray. Change the shortcut in [Settings > General > Shortcuts](zeron://settings/shortcuts), under **Needs you and running**.
 
 ## Going back and forward
 
@@ -50,9 +64,9 @@ On a trackpad that supports it, you feel a light tick when the swipe is far enou
 
 ## Session tabs
 
-The titlebar shows a tab for each session open on this device. A tab shows the agent's mark (which changes while the agent works), the title, and a status dot that turns into a close button when you hover the tab or select it. The tabs of a mission's lead and its steps gather into one group behind a tab with the mission's title; see [Mission Control](zeron://docs/mission-control).
+The titlebar shows a tab for each session open on this device. A tab shows the agent's mark (which changes while the agent works), the title, and a status dot that turns into a close button when you hover the tab or select it. The tabs of a Task's lead and its steps gather into one group behind a tab with the Task's title; see [Agent trees and plans](zeron://docs/mission-control).
 
-![Session tabs in the titlebar, with a mission's tab group and the tab menu open](getting-around-tabs.jpg)
+![Session tabs in the titlebar, with a Task's tab group and the tab menu open](getting-around-tabs.jpg)
 
 Selecting a session anywhere (the sidebar, the command palette, a notification) opens its tab. A chat you started opens its tab again by itself when it begins a new run, and any chat that starts waiting for your input opens its tab too.
 
@@ -73,4 +87,4 @@ The buttons under an article's title open the page or setting it describes. **Pr
 
 ## The right pane
 
-The open chat can show a right pane with changes, files, a browser, and a terminal. Toggle it with Cmd+R (**Toggle right sidebar**). See [Right pane](zeron://docs/right-pane).
+The open chat can show a right pane with Changes, Files and a browser as tool tabs, and its agents, forks and side chats as tabs beside them. Toggle it with Cmd+R (**Toggle right sidebar**). Terminals live in the dock under the chat, which Cmd+J opens and closes. See [Right pane](zeron://docs/right-pane).

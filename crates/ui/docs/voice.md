@@ -2,7 +2,7 @@ Dictation turns your speech into text in the composer, using a speech model that
 
 ## Turn on dictation
 
-Open [Settings > Voice](zeron://settings/voice) and switch on **Dictation**. The first time, Zeron downloads the speech model (Parakeet v3); the row shows its size and then the download progress. Dictation turns on when the download finishes.
+Open [Settings > This Mac > Voice](zeron://settings/voice) and switch on **Dictation**. The first time, Zeron downloads the speech model (Parakeet v3); the row shows its size and then the download progress. Dictation turns on when the download finishes.
 
 The same card has:
 

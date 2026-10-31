@@ -9,11 +9,12 @@ Click **Tasks** in the rail, or pick **Tasks** in the Cmd+K palette. The Inbox's
 Chips above the list filter it, each with its count:
 
 - **All**: every task, and in **List** also every tree.
-- **Missions**: tasks with a plan. See **Missions** below.
-- **Trees**, in **List** only: chats that started other threads without a plan. Each row shows the tree's state, its title, a **Tree** badge, what it is doing (**Watching 2 agents**, **Idle**, or **Needs you** and who asks) and how many of its agents are done. Click a row to open the tree's page, described in [Mission Control](zeron://docs/mission-control).
-- **Needs you**: tasks and trees that wait on you.
+- **Plans**: tasks with a plan. See **Tasks with a plan** below.
+- **Trees**, in **List** only: chats that started other threads without a plan. Each row shows the tree's state, its title, a **Tree** badge, what it is doing (**Watching 2 agents**, **Idle**, or **Needs you** and who asks) and how many of its agents are done. Click a row to open the tree's page, described in [Agent trees and plans](zeron://docs/mission-control).
 
-![The Tasks list with its chips, a mission and a tree](tasks-list.jpg)
+What waits on you is not a chip here: the pill at the right of the titlebar counts it, and its Cmd+I tray lists it, with a row for a task that was **Not sent** or is **Ready to review**. Click such a row to open the task.
+
+![The Tasks list with its chips, a plan and a tree](tasks-list.jpg)
 
 ## Add a task
 
@@ -36,7 +37,7 @@ File an idea without leaving what you are doing:
 
 After a save from the bar, **Added to To do** shows with **Undo**, which deletes the task, and **Open**. Captured tasks start in the project you have selected for New chat and carry a **New** tag, and the Tasks icon in the rail counts them, until you next open Tasks.
 
-The chord is set in Settings > Appshots under **Quick capture to Tasks**: ⌘ + ⌘, ⌥ + ⌥, ⇧ + ⇧ or None. It needs the same Input Monitoring permission as the Appshot chord, and the two cannot share a chord. Linux and Windows have no quick-capture hotkey; use the **+** in the rail.
+The chord is set in [Settings > This Mac > Appshots](zeron://settings/appshots) under **Quick capture to Tasks**: ⌘ + ⌘, ⌥ + ⌥, ⇧ + ⇧ or None. It needs the same Input Monitoring permission as the Appshot chord, and the two cannot share a chord. Linux and Windows have no quick-capture hotkey; use the **+** in the rail.
 
 ![The quick capture bar with the project menu](quick-capture-bar.jpg)
 
@@ -62,7 +63,7 @@ On the **New chat** tab, pick the agent and model. The line under it reads **in*
 
 Zeron creates a chat named after the task, sends the title and notes as the first message, and opens the chat. The card then shows the chat's status and an **Open thread** button.
 
-Turn on **Plan first** under the agent to have that chat lead a mission: it writes the steps before it starts, and the card shows the plan's options and a **Reads** row. See **Missions** below. Plan first is off by default; you can still add a plan later from the task's page.
+Turn on **Plan first** under the agent to have that chat lead the task with a plan: it writes the steps before it starts, and the card shows the plan's options and a **Reads** row. See **Tasks with a plan** below. Plan first is off by default; you can still add a plan later from the task's page.
 
 ## Assign a task to a thread
 
@@ -89,11 +90,11 @@ Each task's row then shows the chat it shares and that chat's status. Every task
 
 Once a task has a chat, clicking it opens the task's page. The header shows the title, the chat's state (**Working**, **Asked you a question**, **Failed** or **Ready for you**) and its agent, with **Add plan**, **Mark as done** and **⋯** on the right. When the chat asks you something, **Answer** shows too. The page shows the lead's row; click it to watch the chat live on the right, with **Open thread** and a composer.
 
-## Missions
+## Tasks with a plan
 
-A mission is a task with a plan: a lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back, and the [Supervisor](zeron://docs/supervisor) can watch it from above. Start one with **Plan first** on the card, or click **Add plan** on a task's page to make its chat the lead in place: the same task becomes the mission, and threads the chat already started show under **Outside the plan**. Until the lead writes its steps, the mission reads **Planning**.
+A task can have a plan: a lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back, and the [Supervisor](zeron://docs/supervisor) can watch it from above. Start one with **Plan first** on the card, or click **Add plan** on a task's page to make its chat the lead in place: the same task gets the plan, and threads the chat already started show under **Outside the plan**. In a chat, **Approve as Task** on the agent's plan card does the same with the plan the agent wrote (see [When an agent asks](zeron://docs/agent-questions)). Until the lead writes its steps, the task reads **Planning**.
 
-In the list a mission has a progress ring in place of its circle, and its tabs gather into one group in the titlebar. Its page, the plan, the views and the tab group are described in [Mission Control](zeron://docs/mission-control).
+In the list a task with a plan has a progress ring in place of its circle and a **Plan** badge, and its tabs gather into one group in the titlebar. How a plan runs, from the goal to the Supervisor, and its page, views and tab group are described in [Agent trees and plans](zeron://docs/mission-control).
 
 ## Images
 
@@ -104,11 +105,11 @@ A task can carry up to 12 images:
 
 Thumbnails show in the task's row and on its board card. Click one to see it large; the left and right arrows, or the ‹ › buttons, move between the task's images, and Escape or a click outside closes it.
 
-The images go to the agent that does the work, the same way an image you attach in a chat does: with the task's first message when you start or send it. Images are stored on this device with your chat attachments, and deleting a task leaves them there. Images on a mission's overview and steps are in [Mission Control](zeron://docs/mission-control).
+The images go to the agent that does the work, the same way an image you attach in a chat does: with the task's first message when you start or send it. Images are stored on this device with your chat attachments, and deleting a task leaves them there. Images on a plan's overview and steps are in [Agent trees and plans](zeron://docs/mission-control).
 
 ## Tasks from agents
 
-Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit them, mark them done, and assign them to a chat on this device. An agent's new task lands in that agent's project. A [Mission Control](zeron://docs/mission-control) lead uses the same tool to write its plan and mark its steps done. See [Agent tools](zeron://docs/agent-tools).
+Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit them, mark them done, and assign them to a chat on this device. An agent's new task lands in that agent's project. The lead of a task with a plan uses the same tool to write its plan and mark its steps done (see [Agent trees and plans](zeron://docs/mission-control)). See [Agent tools](zeron://docs/agent-tools).
 
 ## Kanban columns
 
@@ -116,9 +117,9 @@ Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit t
 | --- | --- |
 | **To do** | Tasks with no chat yet |
 | **Working** | Tasks whose agent is working |
-| **Needs you** | Tasks whose agent stopped: finished, failed, or asking you something. A task whose message to its chat did not send (**Not sent**) also lands here. A mission also lands here while its plan waits for you, or a step needs you or has failed |
+| **Needs you** | Tasks whose agent stopped: finished, failed, or asking you something. A task whose message to its chat did not send (**Not sent**) also lands here. A task with a plan also lands here while its plan waits for you, or a step needs you or has failed |
 | **Done** | Tasks you marked done |
 
 Drag a card to **Done** to finish it, or from **Done** back to **To do** to reopen it. **Working** and **Needs you** follow the chat, so you cannot drop cards there. A card stays in **Needs you** until you mark it done.
 
-When tasks need you, the **Tasks** button in the rail shows how many.
+The **Tasks** button in the rail counts only newly captured tasks (see **Quick capture** above). Tasks that need you are counted by the pill at the right of the titlebar and listed in its Cmd+I tray.

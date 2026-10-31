@@ -14,7 +14,6 @@
 
 use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window, actions};
 
-use crate::appearance::{self, AppearanceMode};
 use crate::composer;
 use crate::shell;
 
@@ -30,9 +29,6 @@ actions!(
         Minimize,
         Zoom,
         CloseWindow,
-        AppearanceSystem,
-        AppearanceLight,
-        AppearanceDark,
     ]
 );
 
@@ -59,11 +55,6 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window| window.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |window| window.zoom_window()));
     cx.on_action(close_window);
-    // Appearance. Each verb persists and repaints every window; see
-    // `appearance::set_mode`.
-    cx.on_action(|_: &AppearanceSystem, cx| appearance::set_mode(AppearanceMode::System, cx));
-    cx.on_action(|_: &AppearanceLight, cx| appearance::set_mode(AppearanceMode::Light, cx));
-    cx.on_action(|_: &AppearanceDark, cx| appearance::set_mode(AppearanceMode::Dark, cx));
 }
 
 fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
@@ -221,13 +212,6 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::os_action("Select All", composer::SelectAll, OsAction::SelectAll),
         ]),
     ];
-    // Appearance lives under View on every platform — it is the only View verb
-    // today, but "Appearance" as a top-level menu would read oddly next to Edit.
-    menus.push(Menu::new("View").items([
-        MenuItem::action("Appearance: System", AppearanceSystem),
-        MenuItem::action("Appearance: Light", AppearanceLight),
-        MenuItem::action("Appearance: Dark", AppearanceDark),
-    ]));
     if macos {
         // Standard Window menu; macOS appends the open-window list itself.
         menus.push(Menu::new("Window").items([
@@ -348,23 +332,6 @@ mod tests {
             assert_eq!(got_name, want_name);
             assert!(got_os == want_os, "OsAction mismatch for {want_name}");
         }
-    }
-
-    #[test]
-    fn view_menu_offers_all_three_appearance_modes() {
-        let menus = app_menus();
-        let view = menus
-            .iter()
-            .find(|m| m.name.as_ref() == "View")
-            .expect("View menu present");
-        assert_eq!(
-            action_names(view),
-            vec![
-                AppearanceSystem.name(),
-                AppearanceLight.name(),
-                AppearanceDark.name()
-            ]
-        );
     }
 
     #[test]

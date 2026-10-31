@@ -1,16 +1,21 @@
-Mission Control follows every chat that started other agents, and every mission. A chat that hands work to other threads becomes the root of a tree: its children, their children, and the sub-agents they run. A mission is the same tree with a plan: a lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back. You can add a plan to any chat at any time, read and change it, approve it before anything runs, and watch every thread live. A mission is a task on your [Tasks](zeron://docs/tasks) list, so it shows there with the rest of your work.
+This page covers every chat that started other agents, and every Task with a plan. A chat that hands work to other threads becomes the root of a tree: its children, their children, and the sub-agents they run. A Task with a plan is the same tree with a plan: a lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back. You can add a plan to any chat at any time, read and change it, approve it before anything runs, and watch every thread live. Such a Task is a task on your [Tasks](zeron://docs/tasks) list, with a **Plan** badge, so it shows there with the rest of your work.
 
-Mission Control introduces itself once, in a four-page sheet that appears the first time you turn on **Plan first** (or press Shift+Tab in the composer), unless you have already started a mission: **Start with a goal**, **Approve the plan**, **Watch every step**, and **A lead and a Supervisor watch**. **Try Mission Control** on its last page opens New chat in Mission Control mode.
+## How plans work
 
-## Find missions and trees
+1. **Start with a goal.** Turn on **Plan** in the composer (Shift+Tab), describe what you want done, and click **Approve as Task** on the plan the agent writes. Or turn on **Plan first** on a task's card, where you can add up to five chats for the lead to read before it plans.
+2. **Approve the plan.** A lead agent turns your goal into steps you can edit, reorder and add images to. By default nothing runs until you approve it.
+3. **Watch every step.** Each step runs on its own thread, side by side when steps don't depend on each other. The tree on the lead's thread follows them live, and the Task's page adds each step's token count.
+4. **A lead and a Supervisor watch.** The lead reviews each step's work when it finishes and sends it back if something is missing. The Supervisor gathers what needs you into one sheet per plan, and one Send answers it all.
 
-Missions and trees live on the [Tasks](zeron://docs/tasks) page. The **Missions** chip shows the tasks with a plan, and in **List** the **Trees** chip shows every chat that started other threads without a plan, newest activity first: the ones still working or waiting on you, and those that finished today. A chat makes a tree when it started another thread: a delegated task, a thread it created with `create_thread`, or a step. A sidechat, a fork, or Claude Code's own built-in sub-agents never make one by themselves, and a thread that belongs to a tree shows inside it, not as its own row.
+## Find Tasks and trees
 
-Click a mission to open its page, or a tree to open the tree's page. The Supervisor's rail, the **Missions** widget on Home and the strip at the top of a lead's chat open the same pages.
+Tasks with a plan and trees live on the [Tasks](zeron://docs/tasks) page. The **Plans** chip shows the tasks with a plan, and in **List** the **Trees** chip shows every chat that started other threads without a plan, newest activity first: the ones still working or waiting on you, and those that finished today. A chat makes a tree when it started another thread: a delegated task, a thread it created with `create_thread`, or a step. A sidechat, a fork, or Claude Code's own built-in sub-agents never make one by themselves, and a thread that belongs to a tree shows inside it, not as its own row.
 
-## A mission's tabs
+Click a Task to open its page, or a tree to open the tree's page. The Supervisor's rail and the strip at the top of a lead's chat open the same pages.
 
-The tabs of a mission's lead and its step threads gather into one group in the titlebar, behind a tab with the mission's title. The lead's tab reads **Lead**. Click the title to fold the group down to the lead's tab and the one you are on, and again to unfold it. Hover a folded group for a menu with **Mission page** and every thread in the group; a dot on the title says a hidden thread asks you something. While you are on the mission's page, its title tab is the selected one.
+## A Task's tabs
+
+The tabs of a Task's lead and its step threads gather into one group in the titlebar, behind a tab with the Task's title. The lead's tab reads **Lead**. Click the title to fold the group down to the lead's tab and the one you are on, and again to unfold it. Hover a folded group for a menu with **Task page** and every thread in the group; a dot on the title says a hidden thread asks you something. While you are on the Task's page, its title tab is the selected one.
 
 ## How threads link
 
@@ -22,14 +27,14 @@ Zeron reads how each thread started and links it to its parent:
 
 ## A tree's page
 
-Click a row under **Trees** on the Tasks page, or **Open mission page** on a tree in the Supervisor's rail. The header shows the root chat's title with **Tree**, the lead's agent and model, when the tree started and **No plan**. On the right: **Watch** (see **Watched by the Supervisor** below), the tree's state, **Add plan**, **Mark as done** and **⋯**. **Mark as done** sets the root chat done without stopping anything; **Reopen** undoes it. A bar under them has one segment per thread, with agents done out of all agents, how many work, and the tokens and time.
+Click a row under **Trees** on the Tasks page, or **Open in Tasks** on a tree in the Supervisor's rail. The header shows the root chat's title with **Tree**, the lead's agent and model, when the tree started and **No plan**. On the right: **Watch** (see **Watched by the Supervisor** below), the tree's state, **Add plan**, **Mark as done** and **⋯**. **Mark as done** sets the root chat done without stopping anything; **Reopen** undoes it. A bar under them has one segment per thread, with agents done out of all agents, how many work, and the tokens and time.
 
 ![A tree's page in Outline, with the lead live on the right](mission-tree.jpg)
 
-The titlebar switches the page between three views, for every tree and mission alike. Zeron remembers your choice; a new install starts on **Outline**.
+The titlebar switches the page between three views, for every tree and Task alike. Zeron remembers your choice; a new install starts on **Outline**.
 
 - **Outline**: the whole tree as rows, at any depth, with **Steps** and **Outside the plan** as two small groups under the lead when there is a plan. Click a row to see that thread on the right: who started it and when, which step it fills, its spec, its own children, its live transcript, **Open thread** and a composer. A built-in sub-agent's row opens its read-only transcript.
-- **Spine**: the cards described under **A mission's page**. Without a plan, the lead card says **No plan** with **Add plan**, and every child is an **Agent** card. A card whose thread started others lists them inside it, **Started 2 agents**. With a plan, agents that fill no step sit after **Add a step**, under **Outside the plan**, with how many and **started by the Lead**.
+- **Spine**: the cards described under **A Task's page**. Without a plan, the lead card says **No plan** with **Add plan**, and every child is an **Agent** card. A card whose thread started others lists them inside it, **Started 2 agents**. With a plan, agents that fill no step sit after **Add a step**, under **Outside the plan**, with how many and **started by the Lead**.
 - **Timeline**: the outline on the left and, on the right, one bar per turn of each thread: blue while it runs, green when done, amber while it waited on an answer, labelled **Needs you** or **Waited 35s**. A dotted line drops from the parent's bar at the moment it started the child. Planned steps show as dashed pills after now. A finished tree fits its whole run; a live one follows the clock.
 
 Switching views moves each card to its row and back; with reduced motion the view changes at once.
@@ -38,15 +43,15 @@ When a thread starts a new child, it rises into the tree on the page, the Tasks 
 
 ## Add a plan to any chat
 
-**Add plan** on a tree's page, on its lead card, on a task's page, or in a chat's right-click menu turns the chat into a mission's lead in place. When the chat already does a task, that task becomes the mission; otherwise Zeron makes a task named after the chat, and the chat gets the lead's instructions as a message: write a plan for the work it is already doing, do a step itself or with its own sub-agents and mark it done, start a new thread only when a step needs one, and match a thread it already started to a step. Then the plan waits for your review. The chat's own conversation continues where it was.
+**Add plan** on a tree's page, on its lead card, on a task's page, or in a chat's right-click menu turns the chat into a Task's lead in place. When the chat already does a task, that task gets the plan; otherwise Zeron makes a task named after the chat, and the chat gets the lead's instructions as a message: write a plan for the work it is already doing, do a step itself or with its own sub-agents and mark it done, start a new thread only when a step needs one, and match a thread it already started to a step. Then the plan waits for your review. The chat's own conversation continues where it was.
 
-While the lead writes, its line reads **Planning**. The planned steps rise in above the threads it had already started, which move under **Outside the plan**, and the badge turns from **Tree** to **Mission**. **Approve and run** starts the steps. A chat leads one unfinished plan at a time. Add plan does not show for sidechats, pull request chats, the Supervisor, or chats on another device.
+While the lead writes, its line reads **Planning**. The planned steps rise in above the threads it had already started, which move under **Outside the plan**, and the badge turns from **Tree** to **Plan**. **Approve and run** starts the steps. A chat leads one unfinished plan at a time. Add plan does not show for sidechats, pull request chats, the Supervisor, or chats on another device. In a chat, **Approve as Task** on the agent's plan card does the same with the plan the agent wrote; see **Start a plan from a chat** below.
 
 ## Watched by the Supervisor
 
-Every mission is watched by the [Supervisor](zeron://docs/supervisor) unless you turn it off. A tree without a plan, or whose plan has finished, is watched only when you pick it: click **Watch** in its header, read what the Supervisor will do, set its two **Authority** switches if you want, and click **Start watching**. The button turns into **Watched** with a green eye. Click it again for **Stop watching**. With **Watch everything** on, every tree is watched.
+Every Task with a plan is watched by the [Supervisor](zeron://docs/supervisor) unless you turn it off. A tree without a plan, or whose plan has finished, is watched only when you pick it: click **Watch** in its header, read what the Supervisor will do, set its two **Authority** switches if you want, and click **Start watching**. The button turns into **Watched** with a green eye. Click it again for **Stop watching**. With **Watch everything** on, every tree is watched.
 
-## Start a mission from a task
+## Start a plan from a task
 
 Open a task's card on the Tasks page and, on the **New chat** tab under **Hand it to**, pick the lead's agent and model and the project it runs **in**, then turn on **Plan first**. The card then shows:
 
@@ -57,47 +62,50 @@ Open a task's card on the Tasks page and, on the **New chat** tab under **Hand i
 - **Steps**: **Lead picks** (the default) lets the lead choose an agent and model for each step. **Same as lead** runs every step on the lead's agent and model.
 - **Let me review the plan before it runs** (with **Steps only**: **Show me the plan before it runs**) is on by default: the lead writes the plan and waits for you. Turn it off to let the lead start the steps as soon as the plan is written.
 
-A mission from the card always starts a new lead. To make a chat you already have the lead, start the mission from that chat's composer, or click **Add plan** on its task's page.
+A plan from the card always starts a new lead. To make a chat you already have the lead, turn on **Plan** in that chat's composer and click **Approve as Task** on its plan, or click **Add plan** on its task's page.
 
 Click **Start** or press Cmd+Enter. Zeron starts the lead's chat and opens the task's page.
 
 ## Chats the lead reads
 
-A mission can read up to 5 chats you already have before it plans: a review that found the bugs, the chat where you worked out the design. In the **Reads** row, type **@** and part of a chat's name, and pick it from the list that opens, or press Enter for the first match. Each chat becomes a chip with its status and a ×; Backspace in the empty field removes the last one. A chat from another project carries that project's name. The list offers chats on this Mac only, because the lead can only read those, and leaves out drafts.
+A Task's lead can read up to 5 chats you already have before it plans: a review that found the bugs, the chat where you worked out the design. In the **Reads** row, type **@** and part of a chat's name, and pick it from the list that opens, or press Enter for the first match. Each chat becomes a chip with its status and a ×; Backspace in the empty field removes the last one. A chat from another project carries that project's name. The list offers chats on this Mac only, because the lead can only read those, and leaves out drafts.
 
 These chats are context, not assignments. Nothing is sent to them, and the task does not follow their status. The lead's first message lists each one by title and id, and the lead reads them with Zeron's `read_thread` tool before it writes the plan. The message tells it that they are context only: it does not write to them or answer their questions. A chat that is still working is fine; the lead is told to read it again before it sends the plan. When a step needs one of them, the lead names it in that step's instructions, so the step's thread can read it too.
 
-If the lead's tools leave out `read_thread`, in its profile or in [Settings > Tools](zeron://settings/tools), the field turns off and says why. With chats already picked, **Start** waits until you remove them, turn `read_thread` back on, or pick another lead.
+If the lead's tools leave out `read_thread`, in its profile or in [Settings > Context & tools > Tools](zeron://settings/tools), the field turns off and says why. With chats already picked, **Start** waits until you remove them, turn `read_thread` back on, or pick another lead.
 
-The list is fixed once the mission starts, and the mission's page shows it as read-only chips under the lead. To point the lead at another chat later, mention it with **@** in the lead's composer.
+The list is fixed once the Task starts, and the Task's page shows it as read-only chips under the lead. To point the lead at another chat later, mention it with **@** in the lead's composer.
 
-## Start a mission from a composer
+## Start a plan from a chat
 
-You do not need a task card to start a mission. On the New chat canvas, the **Mission Control** tab starts one from what you type: see [Start a new chat](zeron://docs/new-chat).
+You do not need a task card to start a plan. In the composer, on New chat or in a chat, turn on **Plan** or press Shift+Tab: the composer's border takes the accent color, and the agent writes a plan before it changes anything. Shift+Tab again turns it off. See [Start a new chat](zeron://docs/new-chat).
 
-In an open chat, press Shift+Tab in the composer, or click **Mission Control** under it, to turn the composer into a mission. Pick **plan.md** or **Steps only**, leave **Review plan first** on or turn it off, type the mission and click **Start mission**. The first line becomes the task's title and the rest its notes; a first line too long for a title is cut for the title, and the whole text goes to the notes. Chats you mention in the text with **@** become the chats the lead reads, up to 5, as on the card; past 5, a notice says the later ones were left out. The lead's own chat is left out. A mission started from a composer has no **Steps** choice: the lead picks per step. Shift+Tab again goes back to the chat, and so does starting the mission. What happens next follows **In a chat, Mission Control** under **Delegation** in [Settings > Routing](zeron://settings/routing):
+In a Claude Code chat, Send reads **Start plan**, and the plan arrives in the transcript as a card: **Plan · Waiting for your approval**, the plan's steps numbered, and three buttons:
 
-- **This chat leads**, the default: the chat becomes the mission's lead. It keeps its name and its agent, and the task with the lead's instructions arrives in it as a message, so the agent plans from the conversation you already had. If the agent is working, the message steers its turn instead of stopping it. The step threads show in the sidebar under this chat. A chat leads one unfinished mission at a time: while it still leads one, Zeron refuses a second and gives your text back.
-- **New mission reads this chat**: Zeron starts a new lead with the chat's agent, model, permissions and project, and this chat is the first of the chats the lead reads before it plans. The chat shows **Started mission** with the task's name until the mission is done or deleted. Click **Open** for the mission's page, or **Dismiss** to hide the notice.
+- **Approve** runs the plan in this chat. The card reads **Running here**: no Task is made.
+- **Approve as Task** makes this chat the lead of a new Task that tracks the plan's steps. The chat keeps its name and its agent, and the lead's instructions arrive in it as a message, so the agent works from the conversation you already had. The card turns into **Task** with its title and **Step 1 of 3**, and **Open in Tasks ›** opens the Task's page. The step threads show in the sidebar under this chat. A chat leads one unfinished Task at a time: when the chat cannot become a Task, the button is greyed out and its tooltip says why, such as **This chat already leads a Task**.
+- **Edit plan** tells the agent no. Plan stays on, and you tell the agent what to change in the composer.
 
-## A mission's page
+The same plan shows as a **Plan ready** row in the Cmd+I tray, where **Review** offers **Approve as Task** and **Approve**. Codex and OpenCode write a plan and change nothing; they show no card. To track their work as a Task, use **Add plan** (above).
 
-A mission opens its own page instead of the card, from the Tasks list, the board, the Inbox, the **Missions** widget on Home, the Supervisor's **Missions** list, the **Mission page** row of its tab group, or the strip at the top of its chats. The titlebar keeps the session tabs, with **Outline**, **Spine** and **Timeline** at its right end. **Tasks** above the title goes back to Tasks, and the back arrows and swipe go back to where you were.
+## A Task's page
 
-![A mission's plan as a tree](mission-control-tree.jpg)
+A Task with a plan opens its own page instead of the card, from the Tasks list, the board, the Inbox, the Supervisor's rail, the **Task page** row of its tab group, the strip at the top of its chats, or **Open in Tasks** on its plan card. The titlebar keeps the session tabs, with **Outline**, **Spine** and **Timeline** at its right end. **Tasks** above the title goes back to Tasks, and the back arrows and swipe go back to where you were.
 
-The header shows the task's title with **Mission**, and under it the lead's agent and model and when the mission started, or when it finished. On the right:
+![A Task's plan as a tree](mission-control-tree.jpg)
 
-- **Watched** with a green eye while the Supervisor watches the mission, or **Watch**.
-- A status pill: **Needs you** with what waits (**plan review**, **1 question**), **1 step failed**, **✓ Done**, or the lead's state (**Planning**, **Working**, **Idle**). A mission with no steps yet reads **Planning**. Click **Needs you** or **failed** for a small window that lists those steps, with **Open thread** and **Answer**, **Approve and run** for a plan that waits for you, or **Skip** and **Retry**.
+The header shows the task's title with **Plan**, and under it the lead's agent and model and when the Task started, or when it finished. On the right:
+
+- **Watched** with a green eye while the Supervisor watches the Task, or **Watch**.
+- A status pill: **Needs you** with what waits (**plan review**, **1 question**), **1 step failed**, **✓ Done**, or the lead's state (**Planning**, **Working**, **Idle**). A Task with no steps yet reads **Planning**. Click **Needs you** or **failed** for a small window that lists those steps, with **Open thread** and **Answer**, **Approve and run** for a plan that waits for you, or **Skip** and **Retry**.
 - The next thing to do, when there is one: **Answer** (or **Approve and run**) for the first thing that waits on you, or **Retry step N** for the first failed step.
-- **Mark as done**, or **Reopen** once the mission is done, and **⋯** with **Open lead thread** and **Fold the steps**.
+- **Mark as done**, or **Reopen** once the Task is done, and **⋯** with **Open lead thread** and **Fold the steps**.
 
-Under them a bar has one segment per step in its state's color: green when done, amber when it needs you, red when it failed, blue with a moving shine while it works, faint when planned. Hover a segment to name its step; click it to open that step's thread on the right. Next to the bar: steps done out of all steps, how many are working, the tokens the whole mission has used so far, and how long it has run (**took** and the time it took, once done).
+Under them a bar has one segment per step in its state's color: green when done, amber when it needs you, red when it failed, blue with a moving shine while it works, faint when planned. Hover a segment to name its step; click it to open that step's thread on the right. Next to the bar: steps done out of all steps, how many are working, the tokens the whole Task has used so far, and how long it has run (**took** and the time it took, once done).
 
 In **Spine**, under the header the plan is drawn as a tree:
 
-- The lead's card on top: its agent and model, its state (**Not started**, **Planning**, **Working**, **Needs you**, **Done**), what it is doing (**The lead is planning**, **Watching** its running steps, **Working**, what waits on you such as **Plan review, 1 question**, or **Idle**), and, with **plan.md**, the **Overview** the lead wrote. The overview shows one line; click **Overview** to read all of it. **Reads**, when the mission has chats to read, shows one chip per chat with its status, read-only. The bottom line has the tokens the lead and its steps have used, and a button with the number of steps that folds them away and brings them back.
+- The lead's card on top: its agent and model, its state (**Not started**, **Planning**, **Working**, **Needs you**, **Done**), what it is doing (**The lead is planning**, **Watching** its running steps, **Working**, what waits on you such as **Plan review, 1 question**, or **Idle**), and, with **plan.md**, the **Overview** the lead wrote. The overview shows one line; click **Overview** to read all of it. **Reads**, when the Task has chats to read, shows one chip per chat with its status, read-only. The bottom line has the tokens the lead and its steps have used, and a button with the number of steps that folds them away and brings them back.
 - The steps, from the top down, alternating left and right of a line that runs down the middle, each joined to it. Each card shows the step's number with its agent and model (or **Not started**) above its title, its state (**Planned**, **Working**, **Needs you**, **Failed**, **Stopped**, **Interrupted**, **Done**, or **Skipped**), and at the bottom the tokens it has used and its time: the time so far while it works, then the time its agent spent working. A step that needs you shows its question with **Answer**, which opens its thread; a failed step shows what went wrong with **Retry**. Click **Spec** at the bottom right, which counts the spec's images, to open what the lead wrote for the step in a box under it, with **Edit**, **Add image** and **Open thread**. The spec slides open and closed, and the cards below move with it.
 - **Add a step**, a dashed card at the end.
 
@@ -109,7 +117,7 @@ The page keeps its place while you are away: go back to it from a chat, and the 
 
 ## Approve the plan
 
-While the lead writes the plan, its card reads **The lead is planning**. Then **Plan ready** on the lead's card shows how many steps there are, and the lead waits. Until you approve, the lead cannot start any step. Click **Approve and run** when it looks right. If you changed the plan and have not sent the changes yet, approving sends them first. Each step has a role, and [Routing](zeron://docs/routing) decides which agent and model runs it. The lead's chat shows the plan as a card with that estimate, the cost against running every step on the lead's model, and its own **Start mission** button.
+While the lead writes the plan, its card reads **The lead is planning**. Then **Plan ready** on the lead's card shows how many steps there are, and the lead waits. Until you approve, the lead cannot start any step. Click **Approve and run** when it looks right. If you changed the plan and have not sent the changes yet, approving sends them first. Each step has a role, and [Routing](zeron://docs/routing) decides which agent and model runs it. The lead's chat shows the plan as a card with that estimate, the cost against running every step on the lead's model, and its own **Approve** button.
 
 With **Decide for me** on, the [Supervisor](zeron://docs/supervisor) may approve the plan for you. The lead card then reads **Approved by the Supervisor · starts in 0:24** for 30 seconds before the lead hears of it, with **Take back**, which returns the plan to review and brings **Approve and run** back. **Take back** stays until the first step starts. After that the card reads **Approved by the Supervisor · steps already started**: change course by editing the plan here or messaging the lead.
 
@@ -129,7 +137,7 @@ Your changes are tagged **Edited**, **New**, **Removed**, or **New order**, and 
 
 ## Images
 
-A mission's overview and a step's spec can carry images, up to 12 each:
+A Task's overview and a step's spec can carry images, up to 12 each:
 
 - While you edit a step's spec or the overview, paste or drop an image on the card, or click **＋ Add image** under the text. **Save** keeps the images and **Cancel** drops the ones you added.
 - **Add image** in a step's open spec or its right-click menu adds the picked images to its spec at once.
@@ -137,13 +145,13 @@ A mission's overview and a step's spec can carry images, up to 12 each:
 
 Thumbnails show under the overview once you click **Overview** to open it, and in a step's open spec. Click one to see it large; the left and right arrows, or the ‹ › buttons, move between the images of that overview or step, and Escape or a click outside closes it.
 
-The images go to the agent that does the work, the same way an image you attach in a chat does: the overview's images with the lead's first message (images added to the overview later go with the **Send to lead** message), and a step's images with the first message of the step's thread. An image added to a step whose thread has already started does not reach that thread; the edit card says so. The overview's images are the task's own, so images the task had before you started the mission show under the overview.
+The images go to the agent that does the work, the same way an image you attach in a chat does: the overview's images with the lead's first message (images added to the overview later go with the **Send to lead** message), and a step's images with the first message of the step's thread. An image added to a step whose thread has already started does not reach that thread; the edit card says so. The overview's images are the task's own, so images the task had before it got a plan show under the overview.
 
 When the lead rewrites the plan, a step that has not started keeps its images if the new plan has exactly one step with the same title. Otherwise its images move to the overview, up to 12, and the lead is told which images moved. A rewrite whose images would not fit on the overview is refused, so no image is lost.
 
 ## While the steps run
 
-Steps that do not depend on each other run at the same time. The lead opens a new chat for each step. These are ordinary chats: each shows in the sidebar indented under the lead's chat, and clicking it, or **Open thread** on the task page, opens it like any other chat, where you can write to it. In the lead's chat, each one reads **Started thread** with its name and an **Open** link. **Delegated tasks per chat** in Settings > Routing caps how many steps one lead runs at once.
+Steps that do not depend on each other run at the same time. The lead opens a new chat for each step. These are ordinary chats: each shows in the sidebar indented under the lead's chat, and clicking it, or **Open thread** on the task page, opens it like any other chat, where you can write to it. In the lead's chat, each one reads **Started thread** with its name and an **Open** link. **Delegated tasks per chat** in Settings > Agents > Routing caps how many steps one lead runs at once.
 
 A step turns **Done** when its chat finishes a turn, and **Failed** when the chat fails. Zeron tells the lead either way and quotes the chat's last reply, cut short after 4,000 characters. Steps that finish within half a second of each other, or while that message still waits for the lead, share one message. In the lead's chat, the message starts with **From** and the name of each step thread it reports on; click a name to open that thread. Each reply shows as a quote under it. The lead reads the chat, then marks the step done or skipped, sends the chat what is still missing, or runs the step again on a new chat. Hover a step that is planned, needs you, or failed, and that the lead has not marked yet, to **Skip** it; hover one the lead has marked done or skipped to **Reopen** it. When a step's chat failed or was stopped, **Retry** asks the lead to look at what happened and fix it or run the step again.
 
@@ -153,35 +161,35 @@ If a message to the lead, such as an approval or a retry, does not get through, 
 
 The lead writes its plan, with the overview when you picked **plan.md**, and marks steps done or skipped with Zeron's `tasks` tool, and runs each step on a new chat with `create_thread`. See [Zeron tools for agents](zeron://docs/agent-tools).
 
-Whether the lead's chat and the step chats compact on their own follows **In missions** in [Settings > General](zeron://settings/general). See [Compaction and context](zeron://docs/compaction).
+Whether the lead's chat and the step chats compact on their own follows **In tasks** in [Settings > General](zeron://settings/general). See [Compaction and context](zeron://docs/compaction).
 
-## Open the mission page from a chat
+## Open the Task's page from a chat
 
 The lead's chat and the chat of every step show a strip at the top of the conversation. It stays in place while you scroll, and shows:
 
 - the task's progress ring and its title;
-- **Lead**, or which step this chat runs, such as **Step 3 of 5**, numbered as on the mission's page;
+- **Lead**, or which step this chat runs, such as **Step 3 of 5**, numbered as on the Task's page;
 - a bar with the steps done;
-- **Mission page**.
+- **Task page**.
 
-In the lead's chat, the strip also shows the mission as a tree: the lead with what it is doing, and each step on its own line under it with its state, its agent's mark and its time: the time so far while it works or waits on you, then the time its agent spent working. Running steps shimmer; the lines to each step draw themselves in as the plan arrives. The button at the end of the lead's line (**6** with a chevron) folds the steps away; click it again to bring them back. Click the strip's top row to fold the whole tree into the strip, and again to open it. With reduced motion, the tree appears and folds at once.
+In the lead's chat, the strip also shows the Task as a tree: the lead with what it is doing, and each step on its own line under it with its state, its agent's mark and its time: the time so far while it works or waits on you, then the time its agent spent working. Running steps shimmer; the lines to each step draw themselves in as the plan arrives. The button at the end of the lead's line (**6** with a chevron) folds the steps away; click it again to bring them back. Click the strip's top row to fold the whole tree into the strip, and again to open it. With reduced motion, the tree appears and folds at once.
 
-![The mission strip at the top of a lead's chat](mission-control-strip.jpg)
+![The strip at the top of a lead's chat](mission-control-strip.jpg)
 
-Click **Mission page** in the strip to open the mission's page with that thread live on the right. Click a step's line in the tree to open that step's chat; a step with no thread yet opens the mission's page on that step. The lead's own line does nothing there, since you are already in its chat. From a step's chat, clicking the strip opens the page with that step selected. The page slides in from the right over the chat. Back slides it out to the right and returns you to the chat where you left it, scrolled where it was. Opening the page from anywhere else in a chat, or going back and forward between them, moves the same way. With reduced motion, the page fades in and out instead. The strip goes away when the task is deleted.
+Click **Task page** in the strip to open the Task's page with that thread live on the right. Click a step's line in the tree to open that step's chat; a step with no thread yet opens the Task's page on that step. The lead's own line does nothing there, since you are already in its chat. From a step's chat, clicking the strip opens the page with that step selected. The page slides in from the right over the chat. Back slides it out to the right and returns you to the chat where you left it, scrolled where it was. Opening the page from anywhere else in a chat, or going back and forward between them, moves the same way. With reduced motion, the page fades in and out instead. The strip goes away when the task is deleted.
 
 ## In the sidebar
 
-A lead is one row with a progress ring and its steps done out of all steps, such as **3/7**; click it to open the mission's page. Only the steps that are running or asking you show indented under it, and a step that asks reads **asks you**. One faint row, such as **5 more steps**, counts the rest and opens the mission's page. Hover the lead and click the chevron at its left edge, or use the right-click menu, to fold the steps away. A collapsed lead sums up its steps, for example **4 · 1 running**: the number of steps, then the most pressing of asking you, failed, or running. See [Sessions in the sidebar](zeron://docs/sessions-sidebar).
+A lead is one row with a progress ring and the step it is on, such as **Task · step 4 of 7**; click it to open the Task's page. Only the steps that are running or asking you show indented under it, and a step that asks reads **Asking**. One faint row, such as **5 more steps**, counts the rest and opens the Task's page. Hover the lead and click the chevron at its left edge, or use the right-click menu, to fold the steps away. A collapsed lead sums up its steps, for example **4 · 1 running**: the number of steps, then the most pressing of asking you, failed, or running. See [Sessions in the sidebar](zeron://docs/sessions-sidebar).
 
 ## On the Tasks page
 
-In the list, a mission has a progress ring in place of its circle, and its line reads **Mission** and shows the agents on it, steps done out of the steps that are not skipped, and how many are running or need you. On the board, its card has a bar with one segment per step that is not skipped. A mission lands in **Needs you** while its plan waits for you, a step needs you or has failed, its lead asks you something or has failed, a message to the lead did not get through, or its lead is idle with no step running.
+In the list, a Task with a plan has a progress ring in place of its circle, and its line reads **Plan** and shows the agents on it, steps done out of the steps that are not skipped, and how many are running or need you. On the board, its card has a bar with one segment per step that is not skipped. It lands in the **Needs you** column while its plan waits for you, a step needs you or has failed, its lead asks you something or has failed, a message to the lead did not get through, or its lead is idle with no step running.
 
 ## The Supervisor
 
-The [Supervisor](zeron://docs/supervisor) is one agent above the leads of all your missions. Open its page once, from **Supervisor** in the rail, to start it. From then on, every mission whose lead runs on this Mac is watched: Zeron wakes the Supervisor when a step fails, a thread waits on you, a mission finishes or goes quiet, the plan is edited after the mission started, or the lead escalates.
+The [Supervisor](zeron://docs/supervisor) is one agent above the leads of all your Tasks. Open its page once, from the top row of the Cmd+I tray or **Open Supervisor** in the Cmd+K palette, to start it. From then on, every Task whose lead runs on this Mac is watched: Zeron wakes the Supervisor when a step fails, a thread waits on you, a Task finishes or goes quiet, the plan is edited after the Task started, or the lead escalates.
 
-The Supervisor acts through the leads, within the switches you set under **Authority**: it messages a lead or a step's thread, answers their questions, re-briefs a step through its lead, pauses a step that blocks a shared resource, or starts a new mission, whose plan you review before any step runs. It never adds or removes a step and never changes the overview. A change to a mission's goal or spend comes to you as a **Needs you** card on the Supervisor page, and so does a decision a lead escalates. When you turn on **Decide for me** under **Authority**, the Supervisor decides the leads' decisions and approves plans itself. **Change a mission's goal or spend** is a separate switch: on its own it lets the Supervisor decide goal and spend decisions and change a mission's title and notes. Each decision shows on the Supervisor page, where you can change it.
+The Supervisor acts through the leads, within the switches you set under **Authority**: it messages a lead or a step's thread, answers their questions, re-briefs a step through its lead, pauses a step that blocks a shared resource, or starts a new Task, whose plan you review before any step runs. It never adds or removes a step and never changes the overview. A change to a Task's goal or spend comes to you as a **Needs you** card on the Supervisor page and a row in the Cmd+I tray, and so does a decision a lead escalates. When you turn on **Decide for me** under **Authority**, the Supervisor decides the leads' decisions and approves plans itself. **Change a task's goal or spend** is a separate switch: on its own it lets the Supervisor decide goal and spend decisions and change a Task's title and notes. Each decision shows on the Supervisor page, where you can change it.
 
-The Supervisor's rail shows every mission that is not done and every tree it watches, who works on it, and **Open mission page** for its page. Turn off **Watched by the Supervisor** there to keep a mission or tree from waking it. A mission whose lead runs on another device is not watched.
+The Supervisor's rail shows every Task that is not done and every tree it watches, who works on it, and **Open in Tasks** for its page. Turn off **Watched by the Supervisor** there to keep a Task or tree from waking it. A Task whose lead runs on another device is not watched.

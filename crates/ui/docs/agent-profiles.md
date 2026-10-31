@@ -2,7 +2,7 @@ An agent profile saves an agent, model, mode, and effort, plus optional instruct
 
 ## Create a profile
 
-Open [Settings > Agent profiles](zeron://settings/agent-profiles) and click **New profile**. The editor has these fields:
+Open [Settings > Agents > Profiles](zeron://settings/agent-profiles) and click **New profile**. The editor has these fields:
 
 | Field | What it sets |
 | --- | --- |
@@ -16,11 +16,11 @@ Open [Settings > Agent profiles](zeron://settings/agent-profiles) and click **Ne
 
 ![Editing an agent profile](agent-profiles-editor.jpg)
 
-**Mode** is **Supervised**, **Auto-accept edits**, or **Full access**, the same choices as the permission chip, limited to the modes the profile's agent supports.
+**Mode** is **Supervised**, **Auto-accept edits**, or **Full access**, the same choices as the access chip in the composer, limited to the modes the profile's agent supports.
 
 The **Tools** list has these groups:
 
-- **Zeron tools**: the groups from [Settings > Tools](zeron://settings/tools), each with a switch and its single tools. A tool or group that is off in Settings > Tools shows **off in Settings** and cannot be turned on here.
+- **Zeron tools**: the groups from [Settings > Context & tools > Tools](zeron://settings/tools), each with a switch and its single tools. A tool or group that is off in Settings > Context & tools > Tools shows **off in Settings** and cannot be turned on here.
 - **Claude built-in** and **MCP servers**: only when **Agent** is Claude Code. Zeron asks Claude Code for its built-in tools and reads the MCP servers from your Claude config.
 - **Not found**: tools the profile turns off that no list has any more, marked **not found · turn on to remove**. Switch one on to drop it from the profile.
 

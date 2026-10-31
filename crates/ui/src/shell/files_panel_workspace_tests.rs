@@ -1,7 +1,7 @@
 //! Exercise the explorer and editors against an isolated real workspace/RPC.
 //! Set ZERON_FILES_CAPTURES to a directory to run on X11 and capture the fixture.
 use super::*;
-use crate::settings::{CHAT_PANEL_MIN, FILES_PANEL_DEFAULT, RIGHT_PANE_DEFAULT};
+use crate::settings::{CHAT_PANEL_MIN, RIGHT_PANE_DEFAULT};
 use gpui::{AppContext, AsyncApp, WindowHandle};
 use std::{path::Path, sync::Arc};
 
@@ -280,29 +280,19 @@ fn files_panel_workspace_navigation_and_external_updates() {
                     .unwrap();
                 window
                     .update(cx, |shell, window, cx| {
-                        shell.settings.files_panel_width = FILES_PANEL_MAX;
                         shell.settings.right_pane_width = 760.0;
-                        shell.set_surfaces_open(true, cx);
                         window.resize(gpui::size(px(1200.0), px(800.0)));
                         window.bounds_changed(cx);
                     })
                     .unwrap();
-                frame(window, cx, output.as_deref(), "01b-picker-files-compact").await;
+                frame(window, cx, output.as_deref(), "01b-files-compact").await;
                 window
                     .update(cx, |shell, window, cx| {
-                        let squeezed = shell.content_width()
-                            - shell.sidebar_now()
-                            - CHAT_PANEL_MIN
-                            - RIGHT_PANE_MIN;
-                        assert_eq!(shell.files_visible_width(cx), squeezed);
-                        assert_eq!(shell.files_reserved_width(cx), squeezed);
-                        assert_eq!(shell.right_visible_width(cx), RIGHT_PANE_MIN);
-                        // Squeezed by the narrow window, Files keeps its own
-                        // width for when there is room again.
-                        assert_eq!(shell.settings.files_panel_width, FILES_PANEL_MAX);
-                        assert!(shell.right_surface_rows(cx).is_empty());
-                        shell.set_surfaces_open(false, cx);
-                        shell.settings.files_panel_width = FILES_PANEL_DEFAULT;
+                        assert!(shell.files_tool_shown(cx));
+                        assert!(
+                            shell.right_visible_width(cx)
+                                <= shell.content_width() - shell.sidebar_now() - CHAT_PANEL_MIN
+                        );
                         shell.settings.right_pane_width = RIGHT_PANE_DEFAULT;
                         window.resize(gpui::size(px(1400.0), px(800.0)));
                         window.bounds_changed(cx);
@@ -343,9 +333,6 @@ fn files_panel_workspace_navigation_and_external_updates() {
                     })
                     .unwrap();
                 frame(window, cx, output.as_deref(), "02b-two-file-tabs").await;
-                window
-                    .update(cx, |shell, window, cx| shell.toggle_files_panel(window, cx))
-                    .unwrap();
                 frame(
                     window,
                     cx,
@@ -357,13 +344,12 @@ fn files_panel_workspace_navigation_and_external_updates() {
                     .update(cx, |shell, _, cx| {
                         assert!(
                             shell.files["first"].read(cx).test_git_source().is_none(),
-                            "closing the explorer releases its status subscription"
+                            "a hidden Files tab releases its status subscription"
                         );
                     })
                     .unwrap();
                 window
                     .update(cx, |shell, window, cx| {
-                        shell.toggle_files_panel(window, cx);
                         shell.add_file_surface("src/nested/main.rs".into(), window, cx);
                     })
                     .unwrap();
@@ -381,13 +367,10 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 frame(window, cx, output.as_deref(), "04-narrow-files").await;
                 window
                     .update(cx, |shell, _, cx| {
-                        let files = shell.files_visible_width(cx);
                         let surface = shell.right_visible_width(cx);
                         let sidebar = shell.eval_tween(shell.sidebar_tween, shell.sidebar_target());
-                        assert_eq!(shell.files_reserved_width(cx), files);
-                        assert!(files > 0.0 && surface > 0.0);
-                        assert!(sidebar + files + surface < shell.viewport_width);
-                        assert_eq!(shell.settings.files_panel_width, FILES_PANEL_DEFAULT);
+                        assert!(surface > 0.0);
+                        assert!(sidebar + surface < shell.viewport_width);
                     })
                     .unwrap();
                 window
@@ -396,15 +379,10 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 frame(window, cx, output.as_deref(), "04b-expanded-narrow-files").await;
                 window
                     .update(cx, |shell, _, cx| {
-                        // Takeover keeps Files at its own width.
-                        assert_eq!(shell.files_visible_width(cx), FILES_PANEL_DEFAULT);
                         // The narrow fit already hid the sidebar. Takeover must
                         // keep it hidden and give only the chat's space to the editor.
                         assert_eq!(shell.sidebar_now(), 0.0);
-                        assert_eq!(
-                            shell.right_visible_width(cx),
-                            shell.content_width() - FILES_PANEL_DEFAULT
-                        );
+                        assert_eq!(shell.right_visible_width(cx), shell.content_width());
                         shell.toggle_right_pane_expand(cx);
                     })
                     .unwrap();
@@ -418,7 +396,6 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 window
                     .update(cx, |shell, window, cx| {
                         shell.add_file_surface("src/nested/main.rs".into(), window, cx);
-                        shell.toggle_files_panel(window, cx);
                     })
                     .unwrap();
                 std::fs::write(
@@ -513,13 +490,14 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 .await;
                 window
                     .update(cx, |shell, window, cx| {
-                        assert!(shell.files_panel_open(cx));
+                        shell.add_files_surface(window, cx);
+                        assert!(shell.files_tool_shown(cx));
                         assert_eq!(shell.files["first"].entity_id(), first_explorer.entity_id());
                         assert!(shell.files_subs.contains_key("first"));
-                        shell.toggle_files_panel(window, cx);
-                        assert!(!shell.files_panel_open(cx));
-                        shell.toggle_files_panel(window, cx);
-                        assert!(shell.files_panel_open(cx));
+                        shell.toggle_files_tool(window, cx);
+                        assert!(!shell.files_tool_shown(cx));
+                        shell.toggle_files_tool(window, cx);
+                        assert!(shell.files_tool_shown(cx));
                     })
                     .unwrap();
                 // An archived chat's explorer must survive subsequent state updates
@@ -527,7 +505,7 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 state.update(cx, |_, cx| cx.notify());
                 std::fs::write(project.join("archived.txt"), "still accessible\n").unwrap();
                 wait_for(window, cx, "archived explorer update", |shell, cx| {
-                    shell.files_panel_open(cx)
+                    shell.files_tool_shown(cx)
                         && shell.files.get("first").is_some_and(|files| {
                             files.read(cx).tree().node("archived.txt").is_some()
                         })
@@ -535,9 +513,7 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 .await;
                 core.workspace.delete_chat("first").unwrap();
                 wait_for(window, cx, "deleted explorer cleanup", |shell, _| {
-                    !shell.files.contains_key("first")
-                        && !shell.files_subs.contains_key("first")
-                        && !shell.panels.get("first").files_open
+                    !shell.files.contains_key("first") && !shell.files_subs.contains_key("first")
                 })
                 .await;
                 drop(first_explorer);

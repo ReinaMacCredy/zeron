@@ -3,7 +3,7 @@ A playbook is a saved recipe your agent follows: a markdown file with steps. Sta
 ## Start a playbook
 
 - Open the command palette with Cmd+K and pick **Triage an issue**, or a row named **Playbook:** and the playbook's title.
-- Or open [Settings > Playbooks](zeron://settings/playbooks) and click **Start** on its row.
+- Or open [Settings > Context & tools > Playbooks](zeron://settings/playbooks) and click **Start** on its row.
 
 A new chat opens. The headline above the composer is the playbook's question, and the composer already holds `Read [<file>.md](<path>) and follow it.` with the cursor on a blank line under it. Write your request there, choose the agent and model, and send. Nothing is sent until you do.
 
@@ -32,7 +32,7 @@ It writes the same files and starts Claude Code or Codex in the terminal with th
 
 ## Write your own
 
-[Settings > Playbooks](zeron://settings/playbooks) lists every playbook with where it comes from.
+[Settings > Context & tools > Playbooks](zeron://settings/playbooks) lists every playbook with where it comes from.
 
 - **New playbook** (top right) writes a template into `~/.zeron/playbooks` and opens it in your default editor.
 - **Edit** opens a playbook's file; **Delete** asks once more, then removes it. The built-in Triage playbook cannot be edited or deleted.

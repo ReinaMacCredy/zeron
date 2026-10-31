@@ -4,8 +4,7 @@
 # settings and logins are untouched.
 #
 #   scripts/onboarding-demo.sh               # from the welcome
-#   scripts/onboarding-demo.sh providers     # jump to a step (appearance,
-#                                            # sync, providers, done)
+#   scripts/onboarding-demo.sh agents        # jump to a step (agents, done)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
