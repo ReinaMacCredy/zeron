@@ -216,7 +216,11 @@ impl Shell {
         }));
     }
 
-    fn tween_t(&self, started: std::time::Instant, spec: motion::MotionSpec) -> Option<f32> {
+    pub(super) fn tween_t(
+        &self,
+        started: std::time::Instant,
+        spec: motion::MotionSpec,
+    ) -> Option<f32> {
         let total = spec.total().mul_f32(motion::speed_scale());
         let raw = self.tween_elapsed(started).as_secs_f32() / total.as_secs_f32();
         if raw >= 1.0 {

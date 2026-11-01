@@ -133,14 +133,25 @@ impl SplitPane {
     }
 }
 
-/// Which drop zone the pointer is over during a drag; `epoch` keys the
-/// grow/shrink animation restarts (the tab strip's slide idiom).
-#[derive(Debug, Default)]
+/// Which drop zone the pointer is over during a drag, and when the split
+/// cards started sliding in.
+#[derive(Debug)]
 pub(super) struct SplitDropHot {
     pub(super) hot: Option<SplitSide>,
-    pub(super) prev: Option<SplitSide>,
-    pub(super) epoch: usize,
+    shown: std::time::Instant,
 }
+
+impl Default for SplitDropHot {
+    fn default() -> Self {
+        Self {
+            hot: None,
+            shown: motion::now(),
+        }
+    }
+}
+
+const SPLIT_CARD_ENTER: motion::MotionSpec = motion::MotionSpec::new(120, motion::EASE_OUT);
+const SPLIT_CARD_GROW: motion::MotionSpec = motion::MotionSpec::new(160, motion::EASE_OUT);
 
 /// Slack above the composer pill where the split halves already yield to
 /// it, so a drop aimed at the pill's top edge still lands as a mention.
@@ -510,9 +521,7 @@ impl Shell {
     fn set_split_drop_hot(&mut self, side: Option<SplitSide>, cx: &mut Context<Self>) {
         let state = self.split_drop_hot.get_or_insert_with(Default::default);
         if state.hot != side {
-            state.prev = state.hot;
             state.hot = side;
-            state.epoch += 1;
             cx.notify();
         }
     }
@@ -761,12 +770,12 @@ impl Shell {
         )
     }
 
-    /// The two drop zones over the conversation column. Mounted only while
-    /// a drag is active; GPUI reveals them by the dragged payload's concrete
-    /// type (`drag_over`), so a pane-resize drag never shows them. The zone
-    /// under the pointer grows and fills (Atlas-style) on a 150ms curve; a
-    /// drag that cannot split (the lone selected session, a draft) dims the
-    /// whole layer.
+    /// The two drop zones over the conversation column, mounted while a drag
+    /// is active; each half takes drops for its side. A tab or sidebar row
+    /// drag also slides a split card in from each edge (Helium): small while
+    /// the tab is still in the strip, tall once it leaves, wider under the
+    /// pointer. A drag that cannot split (the lone selected session, a draft)
+    /// dims the cards.
     pub(super) fn render_split_drop_zones(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !cx.has_active_drag() {
             self.split_drop_hot = None;
@@ -780,70 +789,30 @@ impl Shell {
                 || terminal_tabs::is_terminal_tab(chat_id)
                 || selected.as_deref() == Some(chat_id)
         });
-        let (hot, prev, epoch) = self
-            .split_drop_hot
-            .as_ref()
-            .map(|h| (h.hot, h.prev, h.epoch))
-            .unwrap_or((None, None, 0));
+        let tall = match &self.tab_drag {
+            Some(drag) => Some(drag.out),
+            None => self.sidebar_session_transfer.is_some().then_some(true),
+        };
+        let drop_hot = self.split_drop_hot.get_or_insert_with(Default::default);
+        let hot = drop_hot.hot;
+        let shown = drop_hot.shown;
+        let reduced = self.reduced_motion;
+        let enter = if reduced {
+            1.0
+        } else {
+            self.tween_t(shown, SPLIT_CARD_ENTER).unwrap_or(1.0)
+        };
         let zone = |side: SplitSide, cx: &mut Context<Self>| {
-            let (id, label) = match side {
-                SplitSide::Left => ("split-drop-left", "Split left"),
-                SplitSide::Right => ("split-drop-right", "Split right"),
+            let id = match side {
+                SplitSide::Left => "split-drop-left",
+                SplitSide::Right => "split-drop-right",
             };
-            let is_hot = hot == Some(side);
-            let was_hot = prev == Some(side);
-            let size = |hot: bool| if hot { (184.0, 520.0) } else { (148.0, 420.0) };
-            let (from_w, from_h) = size(was_hot);
-            let (to_w, to_h) = size(is_hot);
-            let (border, bg, text) = if is_hot {
-                (theme.accent, theme.accent.opacity(0.12), theme.text)
-            } else {
-                (
-                    theme.border_strong,
-                    crate::theme::wash(0.0),
-                    theme.text_muted,
-                )
-            };
-            let card = div()
-                .max_h(px(to_h))
-                .h_full()
-                .rounded(px(14.0))
-                .border_1()
-                .border_dashed()
-                .border_color(border)
-                .bg(bg)
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(10.0))
-                .text_size(crate::typography::ui_rems(12.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(text)
-                .child(icon(icons::SPLIT_COLUMNS).size(px(18.0)).text_color(text))
-                .child(SharedString::from(label))
-                .with_animation(
-                    SharedString::from(format!("{id}-grow-{epoch}")),
-                    TAB_SLIDE.animation(),
-                    move |el, t| {
-                        el.w(px(motion::lerp(from_w, to_w, t)))
-                            .max_h(px(motion::lerp(from_h, to_h, t)))
-                    },
-                );
             div()
                 .id(id)
                 .debug_selector(|| id.to_string())
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .px(px(32.0))
-                .py(px(24.0))
-                .flex()
-                .items_center()
-                // The boxes hug the column's outer edges (Atlas): the middle
-                // stays clear so the drag ghost reads over the transcript.
-                .when(side == SplitSide::Left, |el| el.justify_start())
-                .when(side == SplitSide::Right, |el| el.justify_end())
                 .on_drop::<tabs::TabDragPayload>(cx.listener(
                     move |this, payload: &tabs::TabDragPayload, _, cx| {
                         tracing::info!(chat = %payload.chat_id, ?side, "split: tab dropped");
@@ -858,7 +827,6 @@ impl Shell {
                         cx.stop_propagation();
                     },
                 ))
-                .child(card)
         };
         let left = zone(SplitSide::Left, cx);
         let right = zone(SplitSide::Right, cx);
@@ -868,6 +836,22 @@ impl Shell {
         let spacer_h = composer_top
             .map(|top| (self.viewport_height - f32::from(top) + COMPOSER_DROP_MARGIN).max(0.0))
             .unwrap_or(0.0);
+        let layer_h = self.viewport_height - Theme::TITLEBAR_HEIGHT - spacer_h;
+        let cards = tall.map(|tall| {
+            let grow = motion::state_t("split-card-tall", tall, SPLIT_CARD_GROW, reduced);
+            [SplitSide::Left, SplitSide::Right].map(|side| {
+                let lit = motion::state_t(
+                    match side {
+                        SplitSide::Left => "split-card-hot-left",
+                        SplitSide::Right => "split-card-hot-right",
+                    },
+                    hot == Some(side),
+                    SPLIT_CARD_GROW,
+                    reduced,
+                );
+                split_card(side, grow, lit, enter, layer_h, &theme)
+            })
+        });
         let inert_tab = inert.clone();
         Some(
             div()
@@ -879,8 +863,6 @@ impl Shell {
                 .bottom_0()
                 .flex()
                 .flex_col()
-                .opacity(0.0)
-                .bg(theme.scrim().opacity(0.35))
                 .on_drag_move::<tabs::TabDragPayload>(cx.listener(
                     |this, event: &gpui::DragMoveEvent<tabs::TabDragPayload>, _, cx| {
                         let top = this.composer_drop_top(cx);
@@ -919,9 +901,85 @@ impl Shell {
                         .child(right),
                 )
                 .child(div().flex_none().h(px(spacer_h)))
+                .children(cards.into_iter().flatten())
                 .into_any_element(),
         )
     }
+}
+
+/// One split card: white on light themes and black on dark (Helium), an
+/// inset dashed rule, the split icon and "Add left/right split". `grow` is
+/// small (tab still in the strip) to tall, `lit` the pointer over its half,
+/// `enter` the slide in from the edge.
+fn split_card(
+    side: SplitSide,
+    grow: f32,
+    lit: f32,
+    enter: f32,
+    layer_h: f32,
+    theme: &Theme,
+) -> AnyElement {
+    let lerp = motion::lerp;
+    let width = lerp(120.0, lerp(160.0, 200.0, lit), grow);
+    let height = lerp(
+        (layer_h * 0.42).clamp(160.0, 320.0),
+        (layer_h - 36.0).max(160.0),
+        grow,
+    );
+    let inset = lerp(-width - 30.0, 12.0, enter);
+    let dark = theme.appearance.is_dark();
+    let (bg, rule, ring) = if dark {
+        (
+            gpui::hsla(0.0, 0.0, 0.02, 1.0),
+            gpui::white().opacity(0.16),
+            gpui::white().opacity(0.07),
+        )
+    } else {
+        (
+            gpui::white(),
+            gpui::black().opacity(0.14),
+            gpui::black().opacity(0.05),
+        )
+    };
+    let text = theme.text_muted.blend(theme.text.opacity(lit));
+    let label = match side {
+        SplitSide::Left => "Add left split",
+        SplitSide::Right => "Add right split",
+    };
+    div()
+        .absolute()
+        .top(px(lerp(22.0, 18.0, grow)))
+        .map(|el| match side {
+            SplitSide::Left => el.left(px(inset)),
+            SplitSide::Right => el.right(px(inset)),
+        })
+        .w(px(width))
+        .h(px(height))
+        .rounded(px(16.0))
+        .bg(bg)
+        .border_1()
+        .border_color(ring)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(6.0))
+        .text_size(crate::typography::ui_rems(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(text)
+        .child(
+            div()
+                .absolute()
+                .inset(px(5.0))
+                .rounded(px(12.0))
+                .border_1()
+                .border_dashed()
+                .border_color(rule),
+        )
+        .child(icon(icons::SPLIT_COLUMNS).size(px(16.0)).text_color(text))
+        .child(SharedString::from(label))
+        .into_any_element()
 }
 
 #[cfg(test)]

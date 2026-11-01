@@ -14444,6 +14444,7 @@ impl Shell {
                     let tab = cx.new(|_| tabs::TabGhost {
                         title: title.clone(),
                         brand: brand.clone(),
+                        lift: None,
                     });
                     let shell = shell.clone();
                     cx.new(|_| SessionRowGhost { shell, tab })

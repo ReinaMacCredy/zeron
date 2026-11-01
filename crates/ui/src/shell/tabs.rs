@@ -38,6 +38,16 @@ const TAB_GAP: f32 = 4.0;
 const FADE_WIDTH: f32 = 36.0;
 const FOLDER_FLARE: f32 = 8.0;
 const FOLDER_DROP: f32 = (Theme::TITLEBAR_HEIGHT - TAB_HEIGHT) / 2.0;
+/// How far below the titlebar a dragged tab must go before it leaves the
+/// strip (Helium): its slot closes and it turns into a thumbnail.
+const TAB_LIFT_OUT: f32 = 30.0;
+const TAB_THUMB_WIDTH: f32 = 150.0;
+const TAB_THUMB_HEIGHT: f32 = 92.0;
+const TAB_LIFT_MORPH: motion::MotionSpec = motion::MotionSpec::new(160, motion::EASE_OUT);
+
+pub(super) fn tab_lifted_out(y: Pixels) -> bool {
+    f32::from(y) > Theme::TITLEBAR_HEIGHT + TAB_LIFT_OUT
+}
 
 /// Drag-reorder state; `epoch` keys the 150ms slide animation restarts.
 pub(super) struct TabDragState {
@@ -45,6 +55,10 @@ pub(super) struct TabDragState {
     over: usize,
     epoch: usize,
     prev_over: usize,
+    pub(super) out: bool,
+    width: f32,
+    grab_x: f32,
+    x: f32,
 }
 
 /// The dragged-tab payload (gpui drag-and-drop). `chat_id` is what the split
@@ -60,10 +74,107 @@ pub(crate) struct TabDragPayload {
 pub(super) struct TabGhost {
     pub(super) title: SharedString,
     pub(super) brand: Option<InstanceIcon>,
+    pub(super) lift: Option<TabLift>,
+}
+
+/// A strip tab's own drag: the strip draws the tab itself under the pointer,
+/// so this ghost shows only once the tab leaves the strip, growing from the
+/// tab's size and grab point into a thumbnail.
+#[derive(Clone, Copy)]
+pub(super) struct TabLift {
+    width: f32,
+    grab: Point<Pixels>,
+    top: f32,
+}
+
+impl TabLift {
+    fn new(width: f32, grab: Point<Pixels>, window: &Window) -> Self {
+        Self {
+            width,
+            grab,
+            top: f32::from(window.mouse_position().y - grab.y),
+        }
+    }
+}
+
+impl TabGhost {
+    fn render_lifted(&self, lift: TabLift, window: &Window, cx: &App) -> AnyElement {
+        let theme = Theme::of(cx);
+        let origin = window.mouse_position() - lift.grab;
+        let t = motion::state_t(
+            "session-tab-lift",
+            tab_lifted_out(window.mouse_position().y),
+            TAB_LIFT_MORPH,
+            motion::reduced_motion(cx),
+        );
+        let lerp = motion::lerp;
+        let left = lerp(0.0, f32::from(lift.grab.x) - TAB_THUMB_WIDTH / 2.0, t);
+        let top = lerp(
+            lift.top - f32::from(origin.y),
+            f32::from(lift.grab.y) - 12.0,
+            t,
+        );
+        let line = |width: f32| {
+            div()
+                .h(px(4.0))
+                .w(gpui::relative(width))
+                .rounded(px(2.0))
+                .bg(theme.wash(0.08))
+        };
+        div()
+            .relative()
+            .opacity(t)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(lerp(lift.width, TAB_THUMB_WIDTH, t)))
+                    .h(px(lerp(TAB_HEIGHT, TAB_THUMB_HEIGHT, t)))
+                    .overflow_hidden()
+                    .rounded(px(lerp(8.0, 10.0, t)))
+                    .bg(theme.surface_raised)
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .shadow_lg()
+                    .px(px(10.0))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(lerp(TAB_HEIGHT - 2.0, 24.0, t)))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .text_size(px(lerp(12.0, 10.0, t)))
+                            .text_color(theme.text)
+                            .when_some(self.brand.as_ref(), |el, brand| {
+                                el.child(brand.svg(theme.text_muted).size(px(14.0)).flex_none())
+                            })
+                            .child(div().truncate().child(self.title.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .opacity(t)
+                            .child(line(0.9))
+                            .child(line(0.7))
+                            .child(line(0.82))
+                            .child(line(0.5)),
+                    ),
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for TabGhost {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(lift) = self.lift {
+            return self.render_lifted(lift, window, cx);
+        }
         let theme = Theme::of(cx);
         div()
             .w(px(TAB_MAX_WIDTH))
@@ -83,6 +194,7 @@ impl Render for TabGhost {
                 el.child(brand.svg(theme.text_muted).size(px(14.0)).flex_none())
             })
             .child(div().truncate().child(self.title.clone()))
+            .into_any_element()
     }
 }
 
@@ -163,10 +275,11 @@ fn slide_tab<E: gpui::Element + gpui::Styled + 'static>(
     id: String,
     slots: usize,
     width: f32,
-    drag: Option<(usize, usize, usize, usize)>,
+    drag: Option<(usize, usize, usize, usize, f32)>,
+    lifted: &mut Option<AnyElement>,
 ) -> AnyElement {
     match drag {
-        Some((from, over, epoch, prev_over)) if ix != from => {
+        Some((from, over, epoch, prev_over, _)) if ix != from => {
             let slot = width + TAB_GAP;
             let target = slide_offset(ix, from, over) * slot;
             let start = slide_offset(ix, from, prev_over) * slot;
@@ -179,15 +292,21 @@ fn slide_tab<E: gpui::Element + gpui::Styled + 'static>(
                 ))
                 .into_any_element()
         }
-        // The dragged tab is represented by the cursor ghost; its flow slot
-        // renders as an INVISIBLE spacer. A dimmed tab here overlapped
-        // whatever sibling slid into the vacated slot (slide_offset moves one
-        // tab exactly there — user-reported double-exposure).
-        Some((from, ..)) if ix == from => div()
-            .w(px(width * slots as f32 + TAB_GAP * (slots - 1) as f32))
-            .h(px(TAB_HEIGHT))
-            .flex_none()
-            .into_any_element(),
+        // The strip draws the dragged tab itself on top, under the pointer;
+        // its flow slot renders as an INVISIBLE spacer that closes once the
+        // tab leaves the strip. A dimmed tab here would overlap whatever
+        // sibling slides into the vacated slot.
+        Some((from, .., out)) if ix == from => {
+            *lifted = Some(tab_el.into_any_element());
+            div()
+                .w(px(
+                    (width * slots as f32 + TAB_GAP * (slots - 1) as f32) * (1.0 - out)
+                ))
+                .mr(px(-TAB_GAP * out))
+                .h(px(TAB_HEIGHT))
+                .flex_none()
+                .into_any_element()
+        }
         _ => tab_el.into_any_element(),
     }
 }
@@ -392,6 +511,7 @@ fn tab_grip(theme: &Theme) -> AnyElement {
 /// carries the split's own close.
 fn split_tab_chip(
     ix: usize,
+    width: f32,
     halves: [(String, SharedString, Vec<InstanceIcon>, ChatIndicator); 2],
     selected: Option<&str>,
     hovered: Option<&str>,
@@ -504,11 +624,12 @@ fn split_tab_chip(
                         title: title.clone(),
                         brand,
                     },
-                    |payload, _point, _, cx| {
+                    move |payload, grab, window, cx| {
                         let title = payload.title.clone();
                         let brand = payload.brand.clone();
+                        let lift = Some(TabLift::new(width, grab, window));
                         cx.stop_propagation();
-                        cx.new(|_| TabGhost { title, brand })
+                        cx.new(|_| TabGhost { title, brand, lift })
                     },
                 )
                 .map(|el| {
@@ -1276,13 +1397,29 @@ impl Shell {
 
     /// Track the drop slot while a tab is dragged over the strip (150ms sibling
     /// slides restart per committed `over` change).
-    fn update_tab_drag_over(&mut self, from: usize, over: usize, cx: &mut Context<Self>) {
+    fn update_tab_drag_over(
+        &mut self,
+        from: usize,
+        over: usize,
+        out: bool,
+        x: f32,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) {
         match &mut self.tab_drag {
             Some(drag) if drag.from == from => {
+                if drag.x != x {
+                    drag.x = x;
+                    cx.notify();
+                }
                 if drag.over != over {
                     drag.prev_over = drag.over;
                     drag.over = over;
                     drag.epoch += 1;
+                    cx.notify();
+                }
+                if drag.out != out {
+                    drag.out = out;
                     cx.notify();
                 }
             }
@@ -1292,10 +1429,30 @@ impl Shell {
                     over,
                     epoch: 0,
                     prev_over: from,
+                    out,
+                    width,
+                    grab_x: x - from as f32 * (width + TAB_GAP),
+                    x,
                 });
                 cx.notify();
             }
         }
+    }
+
+    /// A tab dropped on the strip, or on a tab in it: each tab blocks the
+    /// strip's hitbox, the dragged one too since it rides under the pointer.
+    fn drop_tab_on_strip(
+        &mut self,
+        payload: &TabDragPayload,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let to = self
+            .tab_drag
+            .as_ref()
+            .map(|d| d.over)
+            .unwrap_or(payload.from);
+        self.commit_tab_reorder(payload.from, to, cx);
     }
 
     /// Commit a drag: the reordered visual list becomes the stored list, with
@@ -1444,224 +1601,247 @@ impl Shell {
         let hovered = self.tab_hover.clone();
         let count = tabs.len();
         let strip_pad = if tones.is_some() { FOLDER_FLARE } else { 0.0 };
-        let width = tab_width(
-            f32::from(self.tabs_scroll.bounds().size.width) - strip_pad * 2.0,
-            count,
+        // Frozen for the drag: the strip hugs its tabs, so measuring it while
+        // the dragged slot closes would shrink every tab frame by frame.
+        let width = self.tab_drag.as_ref().map_or_else(
+            || {
+                tab_width(
+                    f32::from(self.tabs_scroll.bounds().size.width) - strip_pad * 2.0,
+                    count,
+                )
+            },
+            |drag| drag.width,
         );
-        let drag = self
-            .tab_drag
-            .as_ref()
-            .map(|d| (d.from, d.over, d.epoch, d.prev_over));
+        let reduced = motion::reduced_motion(cx);
+        let drag = self.tab_drag.as_ref().map(|d| {
+            let out = motion::state_t("session-tab-slot-out", d.out, TAB_SLIDE, reduced);
+            (d.from, d.over, d.epoch, d.prev_over, out)
+        });
+        let mut lifted = None;
 
         let tabs_by_id: std::collections::HashMap<
             String,
             (SharedString, Vec<InstanceIcon>, ChatIndicator),
         > = tabs
             .iter()
-            .map(|(id, title, harness, status, _)| (id.clone(), (title.clone(), harness.clone(), *status)))
-            .collect();
-        let tab_elements: Vec<(String, AnyElement)> = tabs
-            .into_iter()
-            .enumerate()
-            .filter_map(|(ix, (id, title, harness, status, is_draft))| {
-                if let Some((left, right)) = &group {
-                    if id == *right {
-                        // Drawn as the second half of the chip below.
-                        return None;
-                    }
-                    if id == *left {
-                        let chip = split_tab_chip(
-                            ix,
-                            [left, right].map(|id| {
-                                let (title, harness, status) = tabs_by_id[id].clone();
-                                (id.clone(), title, harness, status)
-                            }),
-                            selected.as_deref(),
-                            hovered.as_deref(),
-                            tones,
-                            self.page_backdrop.clone(),
-                            &theme,
-                            cx,
-                        );
-                        return Some((id.clone(), slide_tab(chip, ix, id.clone(), 2, width, drag)));
-                    }
-                }
-                // The split's secondary wears the selected look too: it
-                // is on screen beside the selected session.
-                let is_selected = selected.as_deref() == Some(id.as_str())
-                    || split.as_deref() == Some(id.as_str());
-                let is_hovered = hovered.as_deref() == Some(id.as_str());
-                // Hover state lives in Shell (the trailing slot swaps dot ↔
-                // close), so the wash snaps off it too — gpui allows only one
-                // `on_hover` per element, and the state listener wins.
-                let terminal = terminals.get(&id).map(|row| row.launch.brand());
-                let (text_color, bg) = match (is_selected, is_hovered, tones) {
-                    (true, _, Some(_)) => (theme.text, crate::theme::wash(0.0)),
-                    (true, _, None) => (theme.text, crate::theme::glass_selected_bg()),
-                    (false, true, Some(tones)) => (theme.text, tones.wash),
-                    (false, true, None) => (theme.text, theme.glass_hover()),
-                    (false, false, _) => (theme.text_muted, crate::theme::wash(0.0)),
-                };
-                let glyph_alpha = 0.9;
-                let brand = terminal
-                    .map(|(path, tint)| InstanceIcon::Brand(path, tint))
-                    .or_else(|| harness.last().cloned());
-                let select_id = id.clone();
-                let middle_id = id.clone();
-                let menu_id = id.clone();
-                let hover_id = id.clone();
-                let trailing =
-                    tab_trailing(&id, &title, status, is_selected || is_hovered, &theme, cx);
-                let grouped = members.contains_key(&id);
-                let tab_el = div()
-                    .id(SharedString::from(format!("session-tab-{id}")))
-                    .debug_selector(|| format!("session-tab-{id}"))
-                    .role(gpui::Role::Tab)
-                    .aria_label(title.clone())
-                    .aria_selected(is_selected)
-                    .w(px(TAB_MAX_WIDTH))
-                    .min_w(px(TAB_MIN_WIDTH))
-                    .h(px(TAB_HEIGHT))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .pl(px(10.0))
-                    .pr(px(4.0))
-                    .rounded(px(8.0))
-                    .text_size(px(12.0))
-                    .text_color(text_color)
-                    .bg(bg)
-                    .when(is_selected, |el| match tones {
-                        Some(tones) => el
-                            .relative()
-                            .child(folder_tab_backdrop(tones, self.page_backdrop.clone())),
-                        None => el.shadow(crate::theme::glass_selected_shadows()),
-                    })
-                    .cursor_pointer()
-                    // Tabs sit inside the titlebar drag strip — carve them out.
-                    // NOT `.occlude()`: a BlockMouse hitbox ends the hit test,
-                    // so the scroll container behind the tabs never saw wheel
-                    // events and an overflowing strip could not be scrolled
-                    // (tabs tile the whole region). ExceptScroll keeps the
-                    // drag-region carve-out and lets the strip scroll.
-                    .block_mouse_except_scroll()
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                    // Track hover in Shell state: the trailing slot flips
-                    // between dot and close button (hover_blend only fades
-                    // colors; child swaps need real state).
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered {
-                            this.tab_hover = Some(hover_id.clone());
-                        } else if this.tab_hover.as_deref() == Some(hover_id.as_str()) {
-                            this.tab_hover = None;
-                        }
-                        cx.notify();
-                    }))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.navigate_to(Some(select_id.clone()), true, cx);
-                    }))
-                    // Middle-click closes (terminal-tab parity).
-                    .on_mouse_down(
-                        MouseButton::Middle,
-                        cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.close_session_tab(middle_id.clone(), cx);
-                        }),
-                    )
-                    // Right-click: close / close others / close to a side.
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.tab_menu.open((menu_id.clone(), event.position));
-                            cx.notify();
-                        }),
-                    )
-                    .when(!grouped, |el| {
-                        el.on_drag(
-                            TabDragPayload {
-                                from: ix,
-                                chat_id: id.clone(),
-                                title: title.clone(),
-                                brand,
-                            },
-                            |payload, _point, _, cx| {
-                                let title = payload.title.clone();
-                                let brand = payload.brand.clone();
-                                cx.stop_propagation();
-                                cx.new(|_| TabGhost { title, brand })
-                            },
-                        )
-                    })
-                    .when_some(terminal.filter(|_| !is_hovered), |el, (path, tint)| {
-                        el.child(
-                            icon(path)
-                                .size(px(14.0))
-                                .flex_none()
-                                .text_color(tint.unwrap_or(theme.text_muted).opacity(glyph_alpha)),
-                        )
-                    })
-                    .when(terminal.is_some() && is_hovered, |el| {
-                        el.child(tab_grip(&theme))
-                    })
-                    .when(terminal.is_none(), |el| {
-                        el.map(|el| {
-                            match crate::computer::presence::chat_glyph(
-                                "session-tab",
-                                &id,
-                                14.0,
-                                glyph_alpha,
-                                &theme,
-                                cx,
-                            ) {
-                                Some(glyph) => el.child(glyph),
-                                None if status == ChatIndicator::Working => {
-                                    el.child(tab_spinner(&id, &theme, cx))
-                                }
-                                None if is_hovered && !harness.is_empty() => {
-                                    el.child(tab_grip(&theme))
-                                }
-                                None => el.when(!harness.is_empty(), |el| {
-                                    let selector = format!("session-tab-harness-{id}");
-                                    el.child(
-                                        crate::pickers::harness_mark_stack(
-                                            &harness,
-                                            14.0,
-                                            theme.text_muted,
-                                            glyph_alpha,
-                                        )
-                                        .debug_selector(move || selector),
-                                    )
-                                }),
-                            }
-                        })
-                    })
-                    // A draft wears the amber pen where a session wears
-                    // its harness brand (d18); a session with unsent
-                    // composer text wears both, like its sidebar row.
-                    .when(
-                        terminal.is_none()
-                            && (is_draft || crate::draft_store::has_content(&id, cx)),
-                        |el| {
-                            el.child(
-                                icon(icons::PEN)
-                                    .size(px(13.0))
-                                    .flex_none()
-                                    .text_color(theme.warning.opacity(glyph_alpha)),
-                            )
-                        },
-                    )
-                    .child(div().flex_1().min_w_0().truncate().child(title))
-                    .child(trailing);
-
-                if grouped {
-                    return Some((id, tab_el.into_any_element()));
-                }
-                Some((id.clone(), slide_tab(tab_el, ix, id, 1, width, drag)))
+            .map(|(id, title, harness, status, _)| {
+                (id.clone(), (title.clone(), harness.clone(), *status))
             })
             .collect();
+        let tab_elements: Vec<(String, AnyElement)> =
+            tabs.into_iter()
+                .enumerate()
+                .filter_map(|(ix, (id, title, harness, status, is_draft))| {
+                    if let Some((left, right)) = &group {
+                        if id == *right {
+                            // Drawn as the second half of the chip below.
+                            return None;
+                        }
+                        if id == *left {
+                            let chip = split_tab_chip(
+                                ix,
+                                width,
+                                [left, right].map(|id| {
+                                    let (title, harness, status) = tabs_by_id[id].clone();
+                                    (id.clone(), title, harness, status)
+                                }),
+                                selected.as_deref(),
+                                hovered.as_deref(),
+                                tones,
+                                self.page_backdrop.clone(),
+                                &theme,
+                                cx,
+                            )
+                            .on_drop::<TabDragPayload>(cx.listener(Self::drop_tab_on_strip));
+                            return Some((
+                                id.clone(),
+                                slide_tab(chip, ix, id.clone(), 2, width, drag, &mut lifted),
+                            ));
+                        }
+                    }
+                    // The split's secondary wears the selected look too: it
+                    // is on screen beside the selected session.
+                    // The dragged tab wears the selected look (Chrome) without
+                    // becoming the selection, so it can still split beside it.
+                    let is_selected = selected.as_deref() == Some(id.as_str())
+                        || split.as_deref() == Some(id.as_str())
+                        || drag.is_some_and(|d| d.0 == ix);
+                    let is_hovered = hovered.as_deref() == Some(id.as_str());
+                    // Hover state lives in Shell (the trailing slot swaps dot ↔
+                    // close), so the wash snaps off it too — gpui allows only one
+                    // `on_hover` per element, and the state listener wins.
+                    let terminal = terminals.get(&id).map(|row| row.launch.brand());
+                    let (text_color, bg) = match (is_selected, is_hovered, tones) {
+                        (true, _, Some(_)) => (theme.text, crate::theme::wash(0.0)),
+                        (true, _, None) => (theme.text, crate::theme::glass_selected_bg()),
+                        (false, true, Some(tones)) => (theme.text, tones.wash),
+                        (false, true, None) => (theme.text, theme.glass_hover()),
+                        (false, false, _) => (theme.text_muted, crate::theme::wash(0.0)),
+                    };
+                    let glyph_alpha = 0.9;
+                    let brand = terminal
+                        .map(|(path, tint)| InstanceIcon::Brand(path, tint))
+                        .or_else(|| harness.last().cloned());
+                    let select_id = id.clone();
+                    let middle_id = id.clone();
+                    let menu_id = id.clone();
+                    let hover_id = id.clone();
+                    let trailing =
+                        tab_trailing(&id, &title, status, is_selected || is_hovered, &theme, cx);
+                    let grouped = members.contains_key(&id);
+                    let tab_el = div()
+                        .id(SharedString::from(format!("session-tab-{id}")))
+                        .on_drop::<TabDragPayload>(cx.listener(Self::drop_tab_on_strip))
+                        .debug_selector(|| format!("session-tab-{id}"))
+                        .role(gpui::Role::Tab)
+                        .aria_label(title.clone())
+                        .aria_selected(is_selected)
+                        .w(px(TAB_MAX_WIDTH))
+                        .min_w(px(TAB_MIN_WIDTH))
+                        .h(px(TAB_HEIGHT))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .pl(px(10.0))
+                        .pr(px(4.0))
+                        .rounded(px(8.0))
+                        .text_size(px(12.0))
+                        .text_color(text_color)
+                        .bg(bg)
+                        .when(is_selected, |el| match tones {
+                            Some(tones) => el
+                                .relative()
+                                .child(folder_tab_backdrop(tones, self.page_backdrop.clone())),
+                            None => el.shadow(crate::theme::glass_selected_shadows()),
+                        })
+                        .cursor_pointer()
+                        // Tabs sit inside the titlebar drag strip — carve them out.
+                        // NOT `.occlude()`: a BlockMouse hitbox ends the hit test,
+                        // so the scroll container behind the tabs never saw wheel
+                        // events and an overflowing strip could not be scrolled
+                        // (tabs tile the whole region). ExceptScroll keeps the
+                        // drag-region carve-out and lets the strip scroll.
+                        .block_mouse_except_scroll()
+                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                        // Track hover in Shell state: the trailing slot flips
+                        // between dot and close button (hover_blend only fades
+                        // colors; child swaps need real state).
+                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                            if *hovered {
+                                this.tab_hover = Some(hover_id.clone());
+                            } else if this.tab_hover.as_deref() == Some(hover_id.as_str()) {
+                                this.tab_hover = None;
+                            }
+                            cx.notify();
+                        }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.navigate_to(Some(select_id.clone()), true, cx);
+                        }))
+                        // Middle-click closes (terminal-tab parity).
+                        .on_mouse_down(
+                            MouseButton::Middle,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.close_session_tab(middle_id.clone(), cx);
+                            }),
+                        )
+                        // Right-click: close / close others / close to a side.
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.tab_menu.open((menu_id.clone(), event.position));
+                                cx.notify();
+                            }),
+                        )
+                        .when(!grouped, |el| {
+                            el.on_drag(
+                                TabDragPayload {
+                                    from: ix,
+                                    chat_id: id.clone(),
+                                    title: title.clone(),
+                                    brand,
+                                },
+                                move |payload, grab, window, cx| {
+                                    let title = payload.title.clone();
+                                    let brand = payload.brand.clone();
+                                    let lift = Some(TabLift::new(width, grab, window));
+                                    cx.stop_propagation();
+                                    cx.new(|_| TabGhost { title, brand, lift })
+                                },
+                            )
+                        })
+                        .when_some(terminal.filter(|_| !is_hovered), |el, (path, tint)| {
+                            el.child(
+                                icon(path).size(px(14.0)).flex_none().text_color(
+                                    tint.unwrap_or(theme.text_muted).opacity(glyph_alpha),
+                                ),
+                            )
+                        })
+                        .when(terminal.is_some() && is_hovered, |el| {
+                            el.child(tab_grip(&theme))
+                        })
+                        .when(terminal.is_none(), |el| {
+                            el.map(|el| {
+                                match crate::computer::presence::chat_glyph(
+                                    "session-tab",
+                                    &id,
+                                    14.0,
+                                    glyph_alpha,
+                                    &theme,
+                                    cx,
+                                ) {
+                                    Some(glyph) => el.child(glyph),
+                                    None if status == ChatIndicator::Working => {
+                                        el.child(tab_spinner(&id, &theme, cx))
+                                    }
+                                    None if is_hovered && !harness.is_empty() => {
+                                        el.child(tab_grip(&theme))
+                                    }
+                                    None => el.when(!harness.is_empty(), |el| {
+                                        let selector = format!("session-tab-harness-{id}");
+                                        el.child(
+                                            crate::pickers::harness_mark_stack(
+                                                &harness,
+                                                14.0,
+                                                theme.text_muted,
+                                                glyph_alpha,
+                                            )
+                                            .debug_selector(move || selector),
+                                        )
+                                    }),
+                                }
+                            })
+                        })
+                        // A draft wears the amber pen where a session wears
+                        // its harness brand (d18); a session with unsent
+                        // composer text wears both, like its sidebar row.
+                        .when(
+                            terminal.is_none()
+                                && (is_draft || crate::draft_store::has_content(&id, cx)),
+                            |el| {
+                                el.child(
+                                    icon(icons::PEN)
+                                        .size(px(13.0))
+                                        .flex_none()
+                                        .text_color(theme.warning.opacity(glyph_alpha)),
+                                )
+                            },
+                        )
+                        .child(div().flex_1().min_w_0().truncate().child(title))
+                        .child(trailing);
+
+                    if grouped {
+                        return Some((id, tab_el.into_any_element()));
+                    }
+                    Some((
+                        id.clone(),
+                        slide_tab(tab_el, ix, id, 1, width, drag, &mut lifted),
+                    ))
+                })
+                .collect();
         let tab_elements = self.assemble_tab_groups(
             tab_elements,
             &members,
@@ -1682,6 +1862,27 @@ impl Shell {
         let fade_right = scrolled < max_scroll - 1.0;
         let scroll_for_drag = self.tabs_scroll.clone();
         let folder = tones.is_some();
+        let lifted = lifted
+            .zip(self.tab_drag.as_ref().zip(drag))
+            .map(|(el, (state, d))| {
+                let last = count.saturating_sub(1) as f32 * (width + TAB_GAP);
+                let left = (state.x - state.grab_x).clamp(-6.0, last + 6.0);
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(strip_pad + left))
+                    .flex()
+                    .map(|el| {
+                        if folder {
+                            el.items_start().pt(px(FOLDER_DROP))
+                        } else {
+                            el.items_center()
+                        }
+                    })
+                    .opacity(1.0 - d.4)
+                    .child(el)
+            });
         let tab_region = div()
             .relative()
             .min_w_0()
@@ -1691,6 +1892,7 @@ impl Shell {
             .child(
                 div()
                     .id("session-tabs-scroll")
+                    .relative()
                     .role(gpui::Role::TabList)
                     .aria_label("Sessions")
                     .flex()
@@ -1721,21 +1923,18 @@ impl Shell {
                                 - f32::from(event.bounds.left())
                                 - strip_pad
                                 - f32::from(scroll_for_drag.offset().x);
-                            let over = drop_index(rel_x, width + TAB_GAP, count);
-                            this.update_tab_drag_over(from, over, cx);
+                            let out = tab_lifted_out(event.event.position.y);
+                            let over = if out {
+                                from
+                            } else {
+                                drop_index(rel_x, width + TAB_GAP, count)
+                            };
+                            this.update_tab_drag_over(from, over, out, rel_x, width, cx);
                         },
                     ))
-                    .on_drop::<TabDragPayload>(cx.listener(
-                        move |this, payload: &TabDragPayload, _, cx| {
-                            let to = this
-                                .tab_drag
-                                .as_ref()
-                                .map(|d| d.over)
-                                .unwrap_or(payload.from);
-                            this.commit_tab_reorder(payload.from, to, cx);
-                        },
-                    ))
-                    .children(tab_elements),
+                    .on_drop::<TabDragPayload>(cx.listener(Self::drop_tab_on_strip))
+                    .children(tab_elements)
+                    .children(lifted),
             );
         crate::edge_fade::edge_faded(FADE_WIDTH, false, false, tab_region)
             .fade_left(fade_left)
