@@ -12452,7 +12452,7 @@ impl Shell {
                 .rounded(px(8.0))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.glass_hover()))
-                .focus_visible(|s| s.bg(theme.glass_hover()))
+                .focus_visible(|s| s.bg(crate::theme::glass_selected_bg()))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.clear_settings_search(cx);
                     this.open_settings(page, cx);
