@@ -422,9 +422,15 @@ pub fn link_file(path: &Path) -> Result<StagedAttachment, String> {
     ))
 }
 
-/// Heuristic: uploads are stored as `{id8}-{name}`, so a linked file named that way reads as one.
+/// An absolute path the engine did not store: uploads land as `{id8}-{name}`
+/// directly in an `uploads` dir (`Uploads::pending_target`).
 pub fn is_linked_ref(path: &str) -> bool {
-    Path::new(path).is_absolute() && upload_alias_id8(path).is_none()
+    let path_ref = Path::new(path);
+    let in_uploads = path_ref
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|dir| dir == "uploads");
+    path_ref.is_absolute() && !(in_uploads && upload_alias_id8(path).is_some())
 }
 
 pub fn linked_elsewhere_message(name: &str) -> String {
@@ -457,7 +463,6 @@ pub fn stage_clipboard_image(image: Image) -> StagedAttachment {
     };
     StagedAttachment::from_image(ensure_extension("image", image.format), image)
 }
-
 
 pub fn stage_pasted_text(text: String) -> Result<StagedAttachment, String> {
     if text.len() as u64 > MAX_ATTACHMENT_BYTES {
@@ -1607,6 +1612,7 @@ mod tests {
         }
         assert!(stage_file(&dir.path().join("missing.md")).is_err());
         assert!(!is_linked_ref("/uploads/ab12cd34-large.bin"));
+        assert!(is_linked_ref("/Users/me/Movies/20261101-clip.mp4"));
         assert!(!is_linked_ref("pending://ab12cd34-ef/large.bin"));
     }
 

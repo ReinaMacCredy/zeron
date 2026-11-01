@@ -10490,7 +10490,7 @@ impl Transcript {
                 continue;
             }
             if !crate::attachments::is_image_path(&att.path) {
-                let label = crate::attachments::attachment_display_name(&att.name);
+                let label = crate::attachments::attachment_display_name(&att.path);
                 strip = strip.child(user_file_pill(
                     &att.name,
                     label.to_owned().into(),
@@ -13713,9 +13713,7 @@ impl gpui::Element for ChipOverlays {
                     } else {
                         format!(
                             "Preview {}",
-                            crate::attachments::attachment_display_name(
-                                path.rsplit(['/', '\\']).next().unwrap_or(&path),
-                            )
+                            crate::attachments::attachment_display_name(&path)
                         )
                     })
                     .on_click(move |event, window, cx| {

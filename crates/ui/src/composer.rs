@@ -7376,6 +7376,9 @@ pub struct Composer {
     /// after the transcript lands instead of vanishing.
     voice_last: Option<VoiceFrame>,
     voice_tween: VoiceTween,
+    /// `ZERON_ATTACH` files, held until the composer has a chat key: staged
+    /// under the boot key they were dropped when the draft got its own.
+    env_attach: Vec<StagedAttachment>,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -7714,6 +7717,7 @@ impl Composer {
             dictation_focus: cx.focus_handle(),
             voice_last: None,
             voice_tween: VoiceTween::default(),
+            env_attach: Vec::new(),
         };
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on
         // a rig) — `ZERON_ATTACH=/path/a.png[,/path/b.png]`, and
@@ -7740,12 +7744,10 @@ impl Composer {
                     .map(|image| attachments::PreviewImage::new(first.name.clone(), image.clone()));
                 composer.preview_focus_pending = true;
             }
-            if !staged.is_empty() {
-                let key = composer.current_key.clone();
-                composer.adopt_staged_attachments(key, staged, cx);
-            }
+            composer.env_attach = staged;
         }
         composer.restore_drafts(cx);
+        composer.adopt_env_attach(cx);
         composer
     }
 
@@ -7761,6 +7763,15 @@ impl Composer {
             .or_default()
             .extend(entry.appshots);
         self.apply_draft_text(cx);
+    }
+
+    fn adopt_env_attach(&mut self, cx: &mut Context<Self>) {
+        if self.current_key.is_empty() || self.env_attach.is_empty() {
+            return;
+        }
+        let staged = std::mem::take(&mut self.env_attach);
+        let key = self.current_key.clone();
+        self.adopt_staged_attachments(key, staged, cx);
     }
 
     /// Capture knob (`ZERON_DRAFT_TEXT`): type into the current key as a
@@ -11416,6 +11427,7 @@ impl Composer {
             }
             self.input.update(cx, |input, cx| input.set_text(draft, cx));
             self.sync_draft(cx);
+            self.adopt_env_attach(cx);
         }
 
         // A pending agent question must not take over an active queue edit.
@@ -16829,6 +16841,55 @@ mod tests {
             .expect("the send creates the chat");
         assert_eq!(create.params["deviceId"], "remote");
         assert!(create.params.get("spaceId").is_none());
+    }
+
+    #[gpui::test]
+    fn a_linked_file_is_refused_for_a_chat_on_another_device(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.mp4");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(attachments::MAX_ATTACHMENT_BYTES + 1)
+            .unwrap();
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(64);
+        let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ));
+            state.local_device_id = Some("local".into());
+            state.select_space(None, cx);
+            state.select_device("remote".into(), cx);
+        });
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            let staged = attachments::stage_file(&path).unwrap();
+            assert!(staged.linked().is_some());
+            let key = composer.current_key.clone();
+            composer.adopt_staged_attachments(key, vec![staged], cx);
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("watch this", cx));
+            composer.on_submit(cx);
+            assert_eq!(
+                composer.failure.as_deref(),
+                Some(attachments::linked_elsewhere_message("clip.mp4").as_str())
+            );
+            assert_eq!(composer.staged().len(), 1, "the file stays staged");
+        });
+        cx.run_until_parked();
+        assert!(
+            std::iter::from_fn(|| requests.try_recv().ok())
+                .map(|frame| serde_json::from_str::<zeron_rpc::ClientFrame>(&frame).unwrap())
+                .all(|frame| frame.params["op"] != "createChat"),
+            "nothing is sent"
+        );
     }
 
     #[gpui::test]

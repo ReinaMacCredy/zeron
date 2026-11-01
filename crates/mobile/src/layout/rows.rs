@@ -988,7 +988,7 @@ impl RowBuilder {
         let files = others
             .iter()
             .map(|f| {
-                let name = zeron_proto::attachment_mentions::attachment_display_name(&f.name);
+                let name = zeron_proto::attachment_mentions::attachment_display_name(&f.path);
                 match zeron_proto::attachment_mentions::pasted_text_index_from_name(&f.path) {
                     Some(index) => (
                         file_icon_asset(name),

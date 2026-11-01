@@ -39,8 +39,7 @@ impl AttachmentMention {
                 })
                 .collect()
         };
-        let name = attachment_display_name(path.rsplit(['/', '\\']).next().unwrap_or(path));
-        sanitized(&self.label) == sanitized(name)
+        sanitized(&self.label) == sanitized(attachment_display_name(path))
     }
 }
 
@@ -157,12 +156,22 @@ pub fn is_image_path(path: &str) -> bool {
     })
 }
 
-/// The file name to show for an attachment ref: uploads are stored as
-/// `{id8}-{name}`, and the prefix is not part of the name.
+/// The file name to show for an attachment ref, a bare name or a path:
+/// uploads are stored as `{id8}-{name}` in an `uploads` dir, and the prefix is
+/// not part of the name. A file linked from elsewhere keeps its own name.
 pub fn attachment_display_name(name: &str) -> &str {
-    match name.split_once('-') {
-        Some((id, rest)) if id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit()) => rest,
-        _ => name,
+    let (dir, base) = match name.rsplit_once(['/', '\\']) {
+        Some((dir, base)) => (Some(dir), base),
+        None => (None, name),
+    };
+    let upload = dir.is_none_or(|dir| dir.rsplit(['/', '\\']).next() == Some("uploads"));
+    match base.split_once('-') {
+        Some((id, rest))
+            if upload && id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            rest
+        }
+        _ => base,
     }
 }
 
@@ -427,5 +436,13 @@ mod tests {
         assert!(!is_image_path("/uploads/png"));
         assert_eq!(attachment_display_name("ab12cd34-notes.zip"), "notes.zip");
         assert_eq!(attachment_display_name("my-notes.zip"), "my-notes.zip");
+        assert_eq!(
+            attachment_display_name("/data/uploads/ab12cd34-notes.zip"),
+            "notes.zip"
+        );
+        assert_eq!(
+            attachment_display_name("/Users/me/Movies/20261101-clip.mp4"),
+            "20261101-clip.mp4"
+        );
     }
 }
