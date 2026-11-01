@@ -145,7 +145,7 @@ const TOOL_LABEL_SIZE: f32 = 13.0;
 const TOOL_LABEL_LINE_HEIGHT: f32 = 18.0;
 const TOOL_GROUP_HEADER_HEIGHT: f32 = 26.0;
 /// Compact rows retain the analytic heights used by row and group folds.
-const TOOL_TREE_ROW_HEIGHT: f32 = 32.0;
+pub(crate) const TOOL_TREE_ROW_HEIGHT: f32 = 32.0;
 const TOOL_FOLD: motion::MotionSpec = motion::MotionSpec::new(140, motion::EASE_OUT);
 /// BoardUI task-list cadence: a slow light sweep keeps the active summary
 /// legible, while each newly appended row reveals quickly enough to read as a
@@ -516,7 +516,7 @@ pub(crate) struct SubagentSummary {
 
 /// Ordinary tool groups fold behind a summary header; agent/spawn chips
 /// render as their own always-open row.
-fn tool_group_collapses(tools: &[ToolItem]) -> bool {
+pub(crate) fn tool_group_collapses(tools: &[ToolItem]) -> bool {
     tools
         .iter()
         .any(|t| !matches!(tool_genus(t), ToolGenus::Agent | ToolGenus::Thread))
@@ -1388,7 +1388,7 @@ fn runs_plain_text(runs: &[InlineRun]) -> String {
     runs.iter().map(|run| run.text.as_str()).collect()
 }
 
-fn block_plain_text(block: &Block) -> String {
+pub(crate) fn block_plain_text(block: &Block) -> String {
     match block {
         Block::Paragraph { runs } | Block::Heading { runs, .. } => runs_plain_text(runs),
         Block::CodeBlock { code, .. } => code.clone(),
@@ -3143,7 +3143,11 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     summary
 }
 
-fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Theme) -> AnyElement {
+pub(crate) fn tool_group_title(
+    text: SharedString,
+    shimmer_phase: Option<f32>,
+    theme: &Theme,
+) -> AnyElement {
     let Some(shimmer_phase) = shimmer_phase else {
         // Keep the ordinary inherited hover color when the group is settled
         // (and when reduced motion turns the active shimmer off).
@@ -3161,6 +3165,61 @@ fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Them
     .h_full()
     .flex_1()
     .into_any_element()
+}
+
+pub(crate) fn tool_group_header(
+    id: SharedString,
+    disclosure_progress: f32,
+    title: AnyElement,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .pr(px(4.0))
+        .h(px(TOOL_GROUP_HEADER_HEIGHT))
+        .cursor_pointer()
+        .text_size(px(TOOL_LABEL_SIZE))
+        .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+        // Quiet even when children failed: agents routinely have failed
+        // probes mid-work, and a red HEADER read as "this whole step
+        // broke" (user report). Failures still show on the individual
+        // chips (destructive tint, zeron tool-chip.tsx) and in the
+        // summary's "· N failed" count.
+        .text_color(theme.text_muted)
+        .hover(|s| s.text_color(theme.text))
+        .child(
+            div()
+                // Keep the title adjacent to its disclosure affordance.
+                .w(px(22.0))
+                .h(px(18.0))
+                .flex_none()
+                .relative()
+                .child(
+                    crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                        .absolute()
+                        .left(px(ACTIVITY_TRUNK_X - 7.0))
+                        .top(px(2.0))
+                        .size(px(14.0))
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            -std::f32::consts::FRAC_PI_2 * (1.0 - disclosure_progress),
+                        )))
+                        .text_color(theme.text_muted),
+                ),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .h(px(TOOL_LABEL_LINE_HEIGHT))
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .child(title),
+        )
 }
 
 pub(crate) fn shimmer_label(
@@ -12685,88 +12744,47 @@ impl Transcript {
         };
         // A quiet summary sits above the activity rail; its chevron occupies
         // the same gutter as the rounded task-tree elbows below it.
-        let header = div()
-            .id(SharedString::from(format!("{row_id}-hdr")))
-            .role(gpui::Role::Button)
-            .aria_label(match worked_secs {
-                Some(secs) => SharedString::from(worked_for_label(secs)),
-                None => summary.clone(),
-            })
-            .when(worked_secs.is_some(), |el| {
-                el.aria_description(summary.clone())
-            })
-            .when(collapses, |el| el.aria_expanded(header_expanded))
-            .relative()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .pr(px(4.0))
-            .h(px(TOOL_GROUP_HEADER_HEIGHT))
-            .cursor_pointer()
-            .text_size(px(TOOL_LABEL_SIZE))
-            .line_height(px(TOOL_LABEL_LINE_HEIGHT))
-            // Quiet even when children failed: agents routinely have failed
-            // probes mid-work, and a red HEADER read as "this whole step
-            // broke" (user report). Failures still show on the individual
-            // chips (destructive tint, zeron tool-chip.tsx) and in the
-            // summary's "· N failed" count.
-            .text_color(theme.text_muted)
-            .hover(|s| s.text_color(theme.text))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                this.toggle_fold(toggle_id.clone(), viewport_height, effective_auto_open, cx);
-                cx.notify();
-            }))
-            .child(
-                div()
-                    // Keep the title adjacent to its disclosure affordance.
-                    .w(px(22.0))
-                    .h(px(18.0))
-                    .flex_none()
-                    .relative()
-                    .child(
-                        crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                            .absolute()
-                            .left(px(ACTIVITY_TRUNK_X - 7.0))
-                            .top(px(2.0))
-                            .size(px(14.0))
-                            .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                                -std::f32::consts::FRAC_PI_2 * (1.0 - disclosure_progress),
-                            )))
-                            .text_color(theme.text_muted),
-                    ),
+        let title = match worked_secs {
+            Some(secs) => compact_work_title(
+                summary.clone(),
+                SharedString::from(worked_for_label(secs)),
+                worked_fade_t,
+                shimmer_phase,
+                theme,
+            ),
+            None => rolled_summary
+                .unwrap_or_else(|| tool_group_title(summary.clone(), shimmer_phase, theme)),
+        };
+        let header = tool_group_header(
+            SharedString::from(format!("{row_id}-hdr")),
+            disclosure_progress,
+            title,
+            theme,
+        )
+        .role(gpui::Role::Button)
+        .aria_label(match worked_secs {
+            Some(secs) => SharedString::from(worked_for_label(secs)),
+            None => summary.clone(),
+        })
+        .when(worked_secs.is_some(), |el| {
+            el.aria_description(summary.clone())
+        })
+        .when(collapses, |el| el.aria_expanded(header_expanded))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.toggle_fold(toggle_id.clone(), viewport_height, effective_auto_open, cx);
+            cx.notify();
+        }))
+        .when(worked_secs.is_some(), |header| {
+            header.child(
+                div().flex_1().min_w_0().h(px(1.0)).ml(px(4.0)).child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(worked_fade_t))
+                        .bg(theme.border_strong),
+                ),
             )
-            .child(
-                div()
-                    .min_w_0()
-                    .h(px(TOOL_LABEL_LINE_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .overflow_hidden()
-                    .child(match worked_secs {
-                        Some(secs) => compact_work_title(
-                            summary.clone(),
-                            SharedString::from(worked_for_label(secs)),
-                            worked_fade_t,
-                            shimmer_phase,
-                            theme,
-                        ),
-                        None => rolled_summary.unwrap_or_else(|| {
-                            tool_group_title(summary.clone(), shimmer_phase, theme)
-                        }),
-                    }),
-            )
-            .when(worked_secs.is_some(), |header| {
-                header.child(
-                    div().flex_1().min_w_0().h(px(1.0)).ml(px(4.0)).child(
-                        div()
-                            .h_full()
-                            .w(gpui::relative(worked_fade_t))
-                            .bg(theme.border_strong),
-                    ),
-                )
-            });
+        });
 
         if compact_shell {
             let view = cx.entity_id();
@@ -13118,6 +13136,7 @@ impl Transcript {
                             connector_reveal,
                             continuation_reveal,
                             base_row_height,
+                            None,
                             theme,
                         ))
                     })
@@ -14567,7 +14586,7 @@ fn file_badge_name(path: &str) -> &str {
 /// syntax runs — so an inline tool diff is indistinguishable from the
 /// checkout diff sidebar. Output renders as a code block: verbatim mono
 /// lines, indentation intact, counted-tail truncation.
-fn detail_body(
+pub(crate) fn detail_body(
     detail: &ToolDetail,
     label: Option<&'static str>,
     diff_highlights: Option<Arc<crate::changes::DiffHighlights>>,
@@ -14784,7 +14803,7 @@ fn note_chip_detail(tool: &ToolItem) -> String {
 }
 
 /// The trailing tile on a chip header, when it has one.
-enum ChipTrail {
+pub(crate) enum ChipTrail {
     /// Expand/collapse chevron — flipped while the detail body is open.
     Chevron { open: bool },
     /// Top-right "opens elsewhere" arrow — the spawn chip's link to its
@@ -14806,7 +14825,7 @@ fn tool_file_path(call: &ToolCall) -> Option<&str> {
 /// Opens a tool chip's file in the right pane through the transcript's
 /// workspace-link handler.
 #[derive(Clone)]
-struct ToolFileOpener {
+pub(crate) struct ToolFileOpener {
     link: render::LinkUi,
     on_open: Rc<dyn Fn(&str, &mut Window, &mut gpui::App)>,
     on_open_skill: Rc<dyn Fn(&str, &mut gpui::App)>,
@@ -14877,7 +14896,7 @@ fn chip_label(tool: &ToolItem) -> (SharedString, String) {
     }
 }
 
-fn chip_a11y_label(tool: &ToolItem) -> SharedString {
+pub(crate) fn chip_a11y_label(tool: &ToolItem) -> SharedString {
     match chip_label(tool) {
         (label, detail) if detail.is_empty() => label,
         (label, detail) => format!("{label} {detail}").into(),
@@ -14897,11 +14916,13 @@ fn chip_a11y_description(tool: &ToolItem) -> Option<SharedString> {
     (!text.is_empty()).then(|| a11y_clip(&text, 200).into())
 }
 
-fn chip_header_row(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn chip_header_row(
     tool: &ToolItem,
     mark: Option<(&'static str, Option<gpui::Hsla>, Option<SharedString>)>,
     trail: Option<ChipTrail>,
     file_opener: Option<&ToolFileOpener>,
+    shimmer: Option<f32>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -14991,7 +15012,10 @@ fn chip_header_row(
                     label.font_weight(gpui::FontWeight::MEDIUM)
                 })
                 .text_color(tint)
-                .child(label)
+                .child(match shimmer {
+                    Some(phase) => tool_group_title(label, Some(phase), theme),
+                    None => label.into_any_element(),
+                })
                 .map(|label| {
                     if hover_text {
                         label
@@ -15246,6 +15270,7 @@ fn chip_header(
         None,
         Some(ChipTrail::Chevron { open }),
         file_opener,
+        None,
         theme,
         view,
         cx,
@@ -15303,13 +15328,15 @@ fn reveal_tool_row(row: AnyElement, height: f32, progress: f32) -> AnyElement {
 /// The previous row draws the first leg of a new arrival to its lower boundary;
 /// this row then continues down, rounds the elbow, and finally reveals the icon.
 /// One paint owns every segment in a row, avoiding alpha-darkened joints.
-fn activity_rail(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn activity_rail(
     tool: &ToolItem,
     has_predecessor: bool,
     continues: bool,
     reveal: f32,
     continuation_reveal: f32,
     row_height: f32,
+    glyph: Option<AnyElement>,
     theme: &Theme,
 ) -> gpui::Div {
     let color = theme.hairline(0.12);
@@ -15365,15 +15392,25 @@ fn activity_rail(
             .absolute()
             .inset_0(),
         )
-        .child(match computer_app_icon(tool) {
-            Some(icon) => gpui::img(icon)
+        .child(match (glyph, computer_app_icon(tool)) {
+            (Some(glyph), _) => div()
+                .absolute()
+                .left(px(ACTIVITY_ICON_LEFT))
+                .top(px(row_height / 2.0 - ACTIVITY_ICON_SIZE / 2.0))
+                .size(px(ACTIVITY_ICON_SIZE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(glyph)
+                .into_any_element(),
+            (None, Some(icon)) => gpui::img(icon)
                 .absolute()
                 .left(px(ACTIVITY_ICON_LEFT))
                 .top(px(row_height / 2.0 - ACTIVITY_ICON_SIZE / 2.0))
                 .size(px(ACTIVITY_ICON_SIZE))
                 .opacity(branch_reveal)
                 .into_any_element(),
-            None => crate::icons::icon(match tool.kind {
+            (None, None) => crate::icons::icon(match tool.kind {
                 ToolItemKind::Thought => crate::icons::CHAT_ROUND_LINE,
                 ToolItemKind::Note => crate::icons::PEN,
                 ToolItemKind::Call => tool_icon_path(&tool.call),
@@ -15417,6 +15454,29 @@ fn activity_ribbon(path: &mut PathBuilder, points: &[Point<Pixels>]) {
     path.close();
 }
 
+pub(crate) fn chip_card(rail: bool) -> gpui::Div {
+    let row_height = if rail {
+        TOOL_TREE_ROW_HEIGHT
+    } else {
+        CHIP_HEIGHT
+    };
+    div()
+        .when(rail, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
+        .my(px((row_height - CHIP_CARD_HEIGHT) / 2.0))
+        .h(px(CHIP_CARD_HEIGHT))
+        .min_w_0()
+        .flex_1()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .when(!rail, |card| {
+            card.rounded(px(9.0))
+                .border_1()
+                .border_color(crate::theme::hairline(0.07))
+                .bg(crate::theme::ink(0.03))
+        })
+}
+
 /// A plain activity row, or a card for a subagent without a linked document.
 fn tool_chip(
     id: SharedString,
@@ -15454,25 +15514,12 @@ fn tool_chip(
                 connector_reveal,
                 continuation_reveal,
                 row_height,
+                None,
                 theme,
             ))
         })
         .child(
-            div()
-                .when(rail, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
-                .my(px((row_height - CHIP_CARD_HEIGHT) / 2.0))
-                .h(px(CHIP_CARD_HEIGHT))
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .when(!rail, |card| {
-                    card.rounded(px(9.0))
-                        .border_1()
-                        .border_color(crate::theme::hairline(0.07))
-                        .bg(crate::theme::ink(0.03))
-                })
+            chip_card(rail)
                 .when(rail && content_reveal < 1.0, |card| {
                     card.relative()
                         .top(px(4.0 * (1.0 - content_reveal)))
@@ -15483,6 +15530,7 @@ fn tool_chip(
                     None,
                     None,
                     file_opener,
+                    None,
                     theme,
                     view,
                     cx,
@@ -15798,6 +15846,7 @@ fn subagent_chip(
             tool,
             Some(mark),
             Some(ChipTrail::OpenArrow),
+            None,
             None,
             theme,
             view,

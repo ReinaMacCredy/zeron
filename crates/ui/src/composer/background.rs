@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -6,7 +7,7 @@ use gpui::{
     SharedString, Stateful, Window, div, point, prelude::*, px,
 };
 use zeron_doc::background::{agent_runs, agent_tree, latest_prompt, rows_missing, walked_docs};
-use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
+use zeron_doc::{MessagePart, SessionMessageEntry};
 use zeron_proto::background::{
     AgentRun, RunState, agents_done, agents_label, aggregate, child_state, child_threads,
     delegate_runs, elapsed_label, latest_line, roster_heading, run_depths, shell_tasks,
@@ -21,6 +22,11 @@ use crate::motion;
 use crate::popover::{self, Popup};
 use crate::shell::children::child_title;
 use crate::theme::Theme;
+use crate::transcript::{
+    ChipTrail, Row, RowKind, TOOL_TREE_ROW_HEIGHT, ToolItem, ToolItemKind, activity_rail,
+    block_plain_text, chip_a11y_label, chip_card, chip_header_row, detail_body, rows_for_entry,
+    tool_group_collapses, tool_group_header, tool_title_shimmer_phase,
+};
 
 const FRAMES: [u16; 8] = [189, 220, 90, 78, 45, 291, 306, 433];
 const FRAME_MS: u64 = 175;
@@ -42,120 +48,81 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const SHELLS_MENU_WIDTH: f32 = 420.0;
 const DETAIL_MENU_WIDTH: f32 = 600.0;
 const DETAIL_LOG_HEIGHT: f32 = 300.0;
-const RAW_BLOCK_LIMIT: usize = 300;
-const RAW_BLOCK_CHARS: usize = 4_000;
+const DETAIL_ROW_LIMIT: usize = 300;
+const DETAIL_TEXT_CHARS: usize = 4_000;
 pub(crate) use zeron_proto::transcript::compact_count;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RawRole {
-    User,
-    Assistant,
-    Thinking,
-    ToolUse,
-    ToolResult,
-    Error,
-}
-
-impl RawRole {
-    fn label(self) -> &'static str {
-        match self {
-            RawRole::User => "user",
-            RawRole::Assistant => "assistant",
-            RawRole::Thinking => "thinking",
-            RawRole::ToolUse => "tool_use",
-            RawRole::ToolResult => "tool_result",
-            RawRole::Error => "error",
-        }
-    }
-
-    fn color(self, theme: &Theme) -> Hsla {
-        match self {
-            RawRole::User => theme.accent,
-            RawRole::Assistant => theme.text,
-            RawRole::Thinking | RawRole::ToolUse => theme.text_muted,
-            RawRole::ToolResult => theme.success,
-            RawRole::Error => theme.danger,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RawBlock {
-    pub role: RawRole,
-    pub text: String,
-}
-
 fn clip(text: &str) -> String {
-    match text.char_indices().nth(RAW_BLOCK_CHARS) {
+    match text.char_indices().nth(DETAIL_TEXT_CHARS) {
         Some((cut, _)) => format!("{}…", &text[..cut]),
         None => text.to_owned(),
     }
 }
 
-pub(crate) fn raw_blocks(entries: &[SessionMessageEntry], hide_thinking: bool) -> Vec<RawBlock> {
-    let mut blocks = Vec::new();
-    let mut push = |role: RawRole, text: &str| {
-        let text = text.trim_end();
-        if !text.is_empty() {
-            blocks.push(RawBlock {
-                role,
-                text: clip(text),
-            });
-        }
-    };
-    for entry in entries {
-        let user = entry.role == MessageRole::User;
-        for part in &entry.parts {
-            match part {
-                MessagePart::Text { text, .. } | MessagePart::Handoff { text, .. } => push(
-                    if user {
-                        RawRole::User
-                    } else {
-                        RawRole::Assistant
-                    },
-                    text,
-                ),
-                MessagePart::Image { name, .. } => push(RawRole::User, &format!("[image] {name}")),
-                MessagePart::Reasoning { text, .. } if !hide_thinking => {
-                    push(RawRole::Thinking, text)
-                }
-                MessagePart::Reasoning { .. } => {}
-                MessagePart::Tool {
-                    call,
-                    is_error,
-                    output,
+pub(crate) fn detail_rows(entries: &[SessionMessageEntry], hide_thinking: bool) -> Vec<Row> {
+    let mut parse = |_: &str, text: &str| Arc::new(crate::markdown::parse_full(text));
+    let mut rows: Vec<Row> = entries
+        .iter()
+        .flat_map(|entry| {
+            let mut entry = entry.clone();
+            entry
+                .parts
+                .retain(|part| !(hide_thinking && matches!(part, MessagePart::Reasoning { .. })));
+            for part in &mut entry.parts {
+                if let MessagePart::Tool {
+                    output: Some(output),
                     ..
-                } => {
-                    push(
-                        RawRole::ToolUse,
-                        &serde_json::to_string(call).unwrap_or_default(),
-                    );
-                    if let Some(output) = output {
-                        push(
-                            if *is_error {
-                                RawRole::Error
-                            } else {
-                                RawRole::ToolResult
-                            },
-                            output,
-                        );
-                    }
+                } = part
+                {
+                    *output = clip(output);
                 }
-                MessagePart::Input { questions, .. } => push(
-                    RawRole::Assistant,
-                    &serde_json::to_string(questions).unwrap_or_default(),
-                ),
-                MessagePart::Error { message, .. } => push(RawRole::Error, message),
-                MessagePart::Fork { .. }
-                | MessagePart::Switch { .. }
-                | MessagePart::Visual { .. }
-                | MessagePart::Classifier { .. }
-                | MessagePart::Compaction { .. } => {}
             }
-        }
-    }
-    let skip = blocks.len().saturating_sub(RAW_BLOCK_LIMIT);
-    blocks.split_off(skip)
+            rows_for_entry(&entry, false, false, &mut parse)
+        })
+        .collect();
+    let skip = rows.len().saturating_sub(DETAIL_ROW_LIMIT);
+    rows.split_off(skip)
+}
+
+fn detail_copy_text(rows: &[Row]) -> String {
+    rows.iter()
+        .flat_map(|row| match &row.kind {
+            RowKind::ToolGroup { tools, .. } => tools
+                .iter()
+                .map(|tool| chip_a11y_label(tool).to_string())
+                .collect(),
+            RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => tree
+                .blocks
+                .get(*block_ix)
+                .map(|top| block_plain_text(&top.block))
+                .into_iter()
+                .collect(),
+            RowKind::User { text, .. } => vec![text.to_string()],
+            RowKind::ErrorChip { message } => vec![message.to_string()],
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn live_part(rows: &[Row]) -> Option<&str> {
+    let RowKind::ToolGroup { tools, .. } = &rows.last()?.kind else {
+        return None;
+    };
+    tools
+        .last()
+        .filter(|tool| tool.kind == ToolItemKind::Call && !tool.resolved)
+        .map(|tool| tool.part_id.as_str())
+}
+
+fn reasoning_text<'a>(entries: &'a [SessionMessageEntry], part_id: &str) -> Option<&'a str> {
+    entries
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .find_map(|part| match part {
+            MessagePart::Reasoning { id, text } if id == part_id => Some(text.as_str()),
+            _ => None,
+        })
 }
 
 pub(crate) fn tool_count(entries: &[SessionMessageEntry]) -> usize {
@@ -251,11 +218,35 @@ struct TrayDetail {
     scroll: gpui::ScrollHandle,
     hide_thinking: bool,
     feed: Option<AgentFeed>,
+    folded: HashSet<SharedString>,
+    expanded: HashSet<SharedString>,
+    opened: Instant,
+}
+
+impl TrayDetail {
+    fn new(target: DetailTarget, feed: Option<AgentFeed>) -> Self {
+        Self {
+            target,
+            scroll: gpui::ScrollHandle::new(),
+            hide_thinking: false,
+            feed,
+            folded: HashSet::new(),
+            expanded: HashSet::new(),
+            opened: motion::now(),
+        }
+    }
+
+    fn rebuild_rows(&mut self) {
+        if let Some(feed) = self.feed.as_mut() {
+            feed.rows = detail_rows(&feed.entries, self.hide_thinking);
+        }
+    }
 }
 
 struct AgentFeed {
     doc_id: String,
     entries: Vec<SessionMessageEntry>,
+    rows: Vec<Row>,
     _watch: Option<gpui::Task<()>>,
 }
 
@@ -515,6 +506,7 @@ impl Composer {
                 motion,
                 now_ms,
                 &theme,
+                window,
                 cx,
             )
         });
@@ -705,6 +697,7 @@ impl Composer {
         motion: CardMotion,
         now_ms: i64,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let running = stoppable_agents(agents, stoppable);
@@ -916,6 +909,7 @@ impl Composer {
                 stoppable,
                 now_ms,
                 theme,
+                window,
                 cx,
             )),
             None => card.child(header).children(rows).children(child_rows),
@@ -999,12 +993,8 @@ impl Composer {
                 let open = {
                     let task_id = task.id.clone();
                     cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.background.detail = Some(TrayDetail {
-                            target: DetailTarget::Shell(task_id.clone()),
-                            scroll: gpui::ScrollHandle::new(),
-                            hide_thinking: false,
-                            feed: None,
-                        });
+                        this.background.detail =
+                            Some(TrayDetail::new(DetailTarget::Shell(task_id.clone()), None));
                         cx.notify();
                     })
                 };
@@ -1251,16 +1241,15 @@ impl Composer {
 
     fn open_agent_detail(&mut self, part_id: String, doc_id: String, cx: &mut Context<Self>) {
         let watch = self.watch_doc_entries(doc_id.clone(), false, cx);
-        self.background.detail = Some(TrayDetail {
-            target: DetailTarget::Agent(part_id),
-            scroll: gpui::ScrollHandle::new(),
-            hide_thinking: false,
-            feed: Some(AgentFeed {
+        self.background.detail = Some(TrayDetail::new(
+            DetailTarget::Agent(part_id),
+            Some(AgentFeed {
                 doc_id,
                 entries: Vec::new(),
+                rows: Vec::new(),
                 _watch: watch,
             }),
-        });
+        ));
         cx.notify();
     }
 
@@ -1317,6 +1306,9 @@ impl Composer {
                         if spawns.is_none_or(|spawns| spawns != agent_runs(&*entries, 0)) {
                             cx.notify();
                         }
+                        if !walk && let Some(detail) = this.background.detail.as_mut() {
+                            detail.rebuild_rows();
+                        }
                         Some(synced)
                     });
                     match applied {
@@ -1339,6 +1331,7 @@ impl Composer {
         stoppable: bool,
         now_ms: i64,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(detail) = self.background.detail.as_ref() else {
@@ -1395,30 +1388,7 @@ impl Composer {
                     .debug_selector(|| "background-detail-tokens".into())
             }))
             .child(detail_chip("tools", tool_count(entries).to_string(), theme));
-        let rows = raw_blocks(entries, hide_thinking)
-            .into_iter()
-            .map(|block| {
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(74.0))
-                            .text_color(block.role.color(theme))
-                            .child(block.role.label()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_color(theme.text.opacity(0.8))
-                            .child(SharedString::from(block.text)),
-                    )
-                    .into_any_element()
-            })
-            .collect();
+        let rows = self.detail_feed_rows(run.state == RunState::Working, theme, window, cx);
         let chat_id = self.background.chat.clone().unwrap_or_default();
         let open_pane = {
             let doc_id = run.doc_id.clone();
@@ -1455,6 +1425,7 @@ impl Composer {
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(detail) = this.background.detail.as_mut() {
                         detail.hide_thinking = !detail.hide_thinking;
+                        detail.rebuild_rows();
                         cx.notify();
                     }
                 })),
@@ -1463,19 +1434,15 @@ impl Composer {
             .child(
                 detail_link("background-detail-copy", "Copy", theme.accent).on_click(cx.listener(
                     |this, _, _, cx| {
-                        let Some(detail) = this.background.detail.as_ref() else {
+                        let Some(feed) = this
+                            .background
+                            .detail
+                            .as_ref()
+                            .and_then(|detail| detail.feed.as_ref())
+                        else {
                             return;
                         };
-                        let entries = detail
-                            .feed
-                            .as_ref()
-                            .map(|feed| feed.entries.as_slice())
-                            .unwrap_or_default();
-                        let text = raw_blocks(entries, detail.hide_thinking)
-                            .iter()
-                            .map(|block| format!("{}  {}", block.role.label(), block.text))
-                            .collect::<Vec<_>>()
-                            .join("\n");
+                        let text = detail_copy_text(&feed.rows);
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                     },
                 )),
@@ -1490,8 +1457,238 @@ impl Composer {
             .flex_col()
             .child(head)
             .child(chips)
-            .child(self.detail_log(rows, theme, cx))
+            .child(self.detail_log(rows, false, theme, cx))
             .child(footer)
+            .into_any_element()
+    }
+
+    fn detail_feed_rows(
+        &self,
+        working: bool,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(detail) = self.background.detail.as_ref() else {
+            return Vec::new();
+        };
+        let Some(feed) = detail.feed.as_ref() else {
+            return Vec::new();
+        };
+        let live = live_part(&feed.rows).filter(|_| working);
+        let shimmer = live.filter(|_| !cx.reduce_motion()).map(|_| {
+            motion::pulse_lease(cx.entity_id(), cx);
+            tool_title_shimmer_phase(detail.opened, motion::now())
+        });
+        let mut group_ix = 0;
+        feed.rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::ToolGroup { summary, tools, .. } => {
+                    let group = group_ix;
+                    group_ix += 1;
+                    Some(
+                        self.detail_group(
+                            detail, row, group, summary, tools, live, shimmer, theme, cx,
+                        ),
+                    )
+                }
+                RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
+                    let options = crate::markdown::render::RenderOptions {
+                        math: crate::settings::math_style(cx),
+                        ..crate::markdown::render::RenderOptions::settled(row.id.clone())
+                    };
+                    let block = &tree.blocks.get(*block_ix)?.block;
+                    Some(
+                        div()
+                            .py(px(4.0))
+                            .child(crate::markdown::render::render_block(
+                                block, *block_ix, *block_ix, &options, theme, window, None,
+                            ))
+                            .into_any_element(),
+                    )
+                }
+                RowKind::User { text, .. } => Some(
+                    div()
+                        .debug_selector(|| "background-detail-user".into())
+                        .my(px(4.0))
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .rounded(px(8.0))
+                        .bg(theme.wash(0.06))
+                        .text_size(crate::typography::ui_rems(12.5))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(clip(text)))
+                        .into_any_element(),
+                ),
+                RowKind::ErrorChip { message } => Some(
+                    div()
+                        .py(px(4.0))
+                        .text_size(crate::typography::ui_rems(12.5))
+                        .text_color(theme.danger)
+                        .child(message.clone())
+                        .into_any_element(),
+                ),
+                RowKind::InputChip { header, .. } => Some(
+                    div()
+                        .py(px(4.0))
+                        .text_size(crate::typography::ui_rems(12.5))
+                        .text_color(theme.text_muted)
+                        .child(header.clone())
+                        .into_any_element(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn detail_group(
+        &self,
+        detail: &TrayDetail,
+        row: &Row,
+        group: usize,
+        summary: &SharedString,
+        tools: &[ToolItem],
+        live: Option<&str>,
+        shimmer: Option<f32>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let rail = tool_group_collapses(tools);
+        let open = !rail || !detail.folded.contains(&row.id);
+        let header = rail.then(|| {
+            let key = row.id.clone();
+            tool_group_header(
+                SharedString::from(format!("{}-hdr", row.id)),
+                if open { 1.0 } else { 0.0 },
+                summary.clone().into_any_element(),
+                theme,
+            )
+            .debug_selector(move || format!("background-detail-group-{group}"))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(detail) = this.background.detail.as_mut()
+                    && !detail.folded.remove(&key)
+                {
+                    detail.folded.insert(key.clone());
+                }
+                cx.notify();
+            }))
+        });
+        let entries = detail
+            .feed
+            .as_ref()
+            .map(|feed| feed.entries.as_slice())
+            .unwrap_or_default();
+        let items: Vec<AnyElement> = if open {
+            tools
+                .iter()
+                .enumerate()
+                .map(|(ix, tool)| {
+                    let key = SharedString::from(format!("{}/{}", row.id, tool.part_id));
+                    let expanded = detail.expanded.contains(&key);
+                    let thought = tool.kind == ToolItemKind::Thought;
+                    let expandable = if thought {
+                        reasoning_text(entries, &tool.part_id).is_some()
+                    } else {
+                        tool.detail.is_some()
+                    };
+                    let body = (expanded && expandable).then(|| {
+                        if thought {
+                            div()
+                                .pb(px(6.0))
+                                .text_size(crate::typography::ui_rems(12.5))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(clip(
+                                    reasoning_text(entries, &tool.part_id).unwrap_or_default(),
+                                )))
+                                .into_any_element()
+                        } else {
+                            div()
+                                .mb(px(6.0))
+                                .px(px(9.0))
+                                .rounded(px(7.0))
+                                .bg(theme.wash(0.06))
+                                .text_color(theme.text_muted)
+                                .children(
+                                    tool.detail
+                                        .as_deref()
+                                        .map(|output| detail_body(output, None, None, &key, theme)),
+                                )
+                                .into_any_element()
+                        }
+                    });
+                    let live = live == Some(tool.part_id.as_str());
+                    let header = chip_header_row(
+                        tool,
+                        None,
+                        expandable.then_some(ChipTrail::Chevron { open: expanded }),
+                        None,
+                        shimmer.filter(|_| live),
+                        theme,
+                        cx.entity_id(),
+                        cx,
+                    );
+                    let toggle = key.clone();
+                    let card = chip_card(rail)
+                        .id(key.clone())
+                        .debug_selector(move || format!("background-detail-row-{group}-{ix}"))
+                        .when(expandable, |card| {
+                            card.cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(detail) = this.background.detail.as_mut()
+                                        && !detail.expanded.remove(&toggle)
+                                    {
+                                        detail.expanded.insert(toggle.clone());
+                                    }
+                                    cx.notify();
+                                }))
+                        })
+                        .child(header);
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .when(rail, |el| {
+                            el.child(activity_rail(
+                                tool,
+                                ix > 0,
+                                ix + 1 < tools.len(),
+                                1.0,
+                                1.0,
+                                TOOL_TREE_ROW_HEIGHT,
+                                live.then(|| {
+                                    glyph(
+                                        SharedString::from(format!("{key}-live")),
+                                        RunState::Working,
+                                        1.0,
+                                        theme,
+                                    )
+                                }),
+                                theme,
+                            ))
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(card)
+                                .children(body),
+                        )
+                        .into_any_element()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .py(px(2.0))
+            .children(header)
+            .children(items)
             .into_any_element()
     }
 
@@ -1559,12 +1756,18 @@ impl Composer {
             .flex_col()
             .p(px(2.0))
             .child(head.pb(px(8.0)))
-            .child(self.detail_log(body, theme, cx))
+            .child(self.detail_log(body, true, theme, cx))
             .child(footer)
             .into_any_element()
     }
 
-    fn detail_log(&self, rows: Vec<AnyElement>, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn detail_log(
+        &self,
+        rows: Vec<AnyElement>,
+        mono: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let scroll = self
             .background
             .detail
@@ -1624,14 +1827,22 @@ impl Composer {
                     .track_scroll(&scroll)
                     .flex()
                     .flex_col()
-                    .gap(px(6.0))
                     .px(px(10.0))
                     .py(px(8.0))
-                    .rounded(px(8.0))
-                    .bg(theme.wash(0.06))
-                    .font_family(theme.font_mono.clone())
-                    .text_size(crate::typography::ui_rems(10.5))
                     .text_color(theme.text_muted)
+                    .map(|log| {
+                        if mono {
+                            log.gap(px(6.0))
+                                .rounded(px(8.0))
+                                .bg(theme.wash(0.06))
+                                .font_family(theme.font_mono.clone())
+                                .text_size(crate::typography::ui_rems(10.5))
+                        } else {
+                            log.border_t_1()
+                                .border_color(theme.border)
+                                .font_family(theme.font_sans_fixed.clone())
+                        }
+                    })
                     .children(rows)
                     .children(empty),
             )
@@ -2049,7 +2260,7 @@ impl Render for DotGridView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_doc::SubagentStatus;
+    use zeron_doc::{MessageRole, SubagentStatus};
     use zeron_proto::{BackgroundTaskKind, Session, SessionStatus, ToolCall};
 
     fn entry(
@@ -2584,7 +2795,17 @@ mod tests {
     }
 
     #[test]
-    fn the_raw_transcript_tags_every_part_and_can_hide_thinking() {
+    fn detail_rows_group_tools_between_messages_and_can_hide_thinking() {
+        let mut grep = tool(
+            "t1",
+            ToolCall::Exec {
+                command: "rg on_drag".into(),
+            },
+            None,
+        );
+        if let MessagePart::Tool { output, .. } = &mut grep {
+            *output = Some("x".repeat(DETAIL_TEXT_CHARS + 10));
+        }
         let entries = vec![
             entry(
                 "u1",
@@ -2604,23 +2825,25 @@ mod tests {
                         id: "r0".into(),
                         text: "start at the drop target".into(),
                     },
-                    {
-                        let mut part = tool(
-                            "t1",
-                            ToolCall::Exec {
-                                command: "rg on_drag".into(),
-                            },
-                            None,
-                        );
-                        if let MessagePart::Tool { output, .. } = &mut part {
-                            *output = Some("sidebar.rs:1204".into());
-                        }
-                        part
-                    },
+                    grep,
+                    tool(
+                        "t2",
+                        ToolCall::ReadFile {
+                            path: "sidebar.rs".into(),
+                        },
+                        None,
+                    ),
                     MessagePart::Text {
-                        id: "t2".into(),
+                        id: "t3".into(),
                         text: "Three handlers.\n".into(),
                     },
+                    tool(
+                        "t4",
+                        ToolCall::Exec {
+                            command: "cargo test".into(),
+                        },
+                        None,
+                    ),
                     MessagePart::Error {
                         id: "e0".into(),
                         message: "Stopped".into(),
@@ -2628,29 +2851,81 @@ mod tests {
                 ],
             ),
         ];
-        let roles: Vec<RawRole> = raw_blocks(&entries, false)
+        let groups = |rows: &[Row]| -> Vec<(String, Vec<String>)> {
+            rows.iter()
+                .filter_map(|row| match &row.kind {
+                    RowKind::ToolGroup { summary, tools, .. } => Some((
+                        summary.to_string(),
+                        tools.iter().map(|tool| tool.part_id.clone()).collect(),
+                    )),
+                    _ => None,
+                })
+                .collect()
+        };
+        let rows = detail_rows(&entries, false);
+        let kinds: Vec<&str> = rows
             .iter()
-            .map(|block| block.role)
+            .map(|row| match row.kind {
+                RowKind::User { .. } => "user",
+                RowKind::ToolGroup { .. } => "group",
+                RowKind::Markdown { .. } => "text",
+                RowKind::ErrorChip { .. } => "error",
+                _ => "other",
+            })
             .collect();
+        assert_eq!(kinds, ["user", "group", "text", "group", "error"]);
         assert_eq!(
-            roles,
+            groups(&rows),
             [
-                RawRole::User,
-                RawRole::Thinking,
-                RawRole::ToolUse,
-                RawRole::ToolResult,
-                RawRole::Assistant,
-                RawRole::Error,
+                (
+                    "Thought process · Ran 1 command · read 1 file".to_string(),
+                    vec!["r0".to_string(), "t1".into(), "t2".into()],
+                ),
+                ("Ran 1 command".to_string(), vec!["t4".to_string()]),
             ]
         );
-        let blocks = raw_blocks(&entries, true);
-        assert!(!blocks.iter().any(|block| block.role == RawRole::Thinking));
-        assert!(blocks[1].text.contains("rg on_drag"));
-        assert_eq!(blocks[3].text, "Three handlers.");
-        assert_eq!(tool_count(&entries), 1);
-        let long = "x".repeat(RAW_BLOCK_CHARS + 10);
-        let clipped = clip(&long);
-        assert_eq!(clipped.chars().count(), RAW_BLOCK_CHARS + 1);
+        let RowKind::ToolGroup { tools, .. } = &rows[1].kind else {
+            unreachable!()
+        };
+        let Some(crate::transcript::ToolDetail::Output { lines, .. }) = tools[1].detail.as_deref()
+        else {
+            panic!("the run keeps its output");
+        };
+        assert_eq!(lines[0].chars().count(), DETAIL_TEXT_CHARS + 1);
+        assert_eq!(live_part(&rows), None);
+
+        let hidden = detail_rows(&entries, true);
+        assert_eq!(
+            groups(&hidden),
+            [
+                (
+                    "Ran 1 command · read 1 file".to_string(),
+                    vec!["t1".to_string(), "t2".into()],
+                ),
+                ("Ran 1 command".to_string(), vec!["t4".to_string()]),
+            ]
+        );
+        assert_eq!(
+            detail_copy_text(&hidden),
+            "scan the fold\nRun rg on_drag\nRead sidebar.rs\nThree handlers.\nRun cargo test\nStopped"
+        );
+        assert_eq!(tool_count(&entries), 3);
+    }
+
+    #[test]
+    fn the_unfinished_last_tool_is_the_live_step() {
+        let mut running = tool(
+            "t1",
+            ToolCall::Exec {
+                command: "bun test".into(),
+            },
+            None,
+        );
+        if let MessagePart::Tool { resolved, .. } = &mut running {
+            *resolved = false;
+        }
+        let entries = vec![entry("a1", MessageRole::Assistant, 1, vec![running])];
+        assert_eq!(live_part(&detail_rows(&entries, false)), Some("t1"));
     }
 
     #[test]
