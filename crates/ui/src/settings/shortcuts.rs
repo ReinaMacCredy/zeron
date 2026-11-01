@@ -1554,11 +1554,14 @@ impl Render for ShortcutsPage {
                                         "Predictions",
                                         self.predictions.clone(),
                                     ))
-                                    .child(widgets::section(
-                                        &theme,
-                                        "Compaction",
-                                        self.compaction.clone(),
-                                    ))
+                                    .child(
+                                        widgets::section(
+                                            &theme,
+                                            "Compaction",
+                                            self.compaction.clone(),
+                                        )
+                                        .search_anchor(SettingId::Compaction),
+                                    )
                                     .child(self.worktrees.clone()),
                             ),
                     )

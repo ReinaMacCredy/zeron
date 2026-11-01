@@ -30,6 +30,7 @@ pub enum SettingId {
     KeepAwake,
     ThreadNaming,
     ShowPredictions,
+    Compaction,
     WorktreeLocation,
     CommitCredit,
     ColorScheme,
@@ -41,6 +42,8 @@ pub enum SettingId {
     InsetCard,
     SidebarHoverReveal,
     NewThreadBackground,
+    ChatBackground,
+    TerminalBackground,
     WallpaperFolder,
     BackgroundEffect,
     ReduceMotion,
@@ -68,6 +71,7 @@ pub enum SettingId {
     SpeechModel,
     SkillDollar,
     SkillSlash,
+    AutoResume,
     CloudUsage,
     CloudGitHub,
     Credits,
@@ -93,7 +97,9 @@ impl SettingId {
     /// only once its parent is on (or, for a background effect, set).
     pub fn parent(self) -> Option<SettingId> {
         match self {
-            SettingId::BackgroundEffect => Some(SettingId::NewThreadBackground),
+            SettingId::BackgroundEffect
+            | SettingId::ChatBackground
+            | SettingId::TerminalBackground => Some(SettingId::NewThreadBackground),
             SettingId::Microphone | SettingId::SpeechModel => Some(SettingId::Dictation),
             SettingId::AutosaveDelay => Some(SettingId::Autosave),
             SettingId::AppshotsOverview => Some(SettingId::CaptureAppshots),
@@ -110,6 +116,8 @@ impl SettingId {
                 | SettingId::InsetCard
                 | SettingId::SidebarHoverReveal
                 | SettingId::NewThreadBackground
+                | SettingId::ChatBackground
+                | SettingId::TerminalBackground
                 | SettingId::WallpaperFolder
                 | SettingId::BackgroundEffect
                 | SettingId::PauseAnimations
@@ -140,10 +148,11 @@ pub enum Target {
 
 impl Target {
     /// Where a hit lands while this row is hidden. A provider's own rows show
-    /// only once it is expanded: until then, the provider list, to pick one.
+    /// only once it is expanded, and auto-resume only once the engine reports
+    /// it: until then, the provider list.
     pub(crate) fn fallback(self) -> Option<Target> {
         match self {
-            Target::Setting(id) if id.per_provider() => {
+            Target::Setting(id) if id.per_provider() || id == SettingId::AutoResume => {
                 Some(Target::Page(SettingsSection::Harnesses))
             }
             Target::Setting(id) => id.parent().map(Target::Setting),

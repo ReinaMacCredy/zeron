@@ -1125,8 +1125,81 @@ impl SettingsSection {
                     Some(Target::Setting(SettingId::ShowPredictions)),
                 ),
                 (
+                    "Predict with",
+                    &["predictions", "agent", "custom api"],
+                    Some(Target::Setting(SettingId::ShowPredictions)),
+                ),
+                (
+                    "Agent model",
+                    &["predictions"],
+                    Some(Target::Setting(SettingId::ShowPredictions)),
+                ),
+                (
+                    "Base URL",
+                    &[
+                        "predictions",
+                        "custom api",
+                        "model id",
+                        "endpoint",
+                        "api key",
+                    ],
+                    Some(Target::Setting(SettingId::ShowPredictions)),
+                ),
+                (
+                    "Compact idle chats before the cache expires",
+                    &["compaction", "idle", "prompt cache", "summarize"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Idle threshold",
+                    &["compaction", "idle"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Let agents compact themselves",
+                    &["compaction", "compact tool", "reminder"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Compact new tasks",
+                    &["compaction", "reminder", "classifier"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Compact ahead of time",
+                    &["compaction", "background", "summary"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "In tasks",
+                    &["compaction", "lead", "step threads"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Remind at",
+                    &["compaction", "check from", "context", "threshold"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Classifier",
+                    &["compaction", "jev", "typesafe", "openrouter", "api key"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Classifier model",
+                    &["compaction", "jev"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
                     "Custom worktree location",
-                    &["folder", "directory", "checkout", "branches"],
+                    &[
+                        "folder",
+                        "directory",
+                        "checkout",
+                        "branches",
+                        "device",
+                        "browse",
+                    ],
                     Some(Target::Setting(SettingId::WorktreeLocation)),
                 ),
                 (
@@ -1163,12 +1236,61 @@ impl SettingsSection {
                 ),
             ],
             SettingsSection::Routing => &[
+                (
+                    "Roles",
+                    &[
+                        "worker",
+                        "validator",
+                        "research",
+                        "design",
+                        "general",
+                        "harness",
+                        "model",
+                        "reasoning",
+                        "quota",
+                    ],
+                    None,
+                ),
+                (
+                    "When the routed harness is out of quota",
+                    &["quota", "limit", "fallback"],
+                    None,
+                ),
+                ("Fallback list", &["quota", "order"], None),
+                ("Mid-run limit", &["countdown", "quota", "ask"], None),
+                (
+                    "Claude Code native sub-agents",
+                    &["subagent", "task tool", "claude"],
+                    None,
+                ),
                 ("Delegation depth", &["delegate", "subagent", "nest"], None),
                 (
                     "Delegated tasks per chat",
                     &["delegate", "subagent", "limit"],
                     None,
                 ),
+            ],
+            SettingsSection::Tools => &[
+                ("Turn all on", &["enable"], None),
+                ("Turn all off", &["disable"], None),
+            ],
+            SettingsSection::AgentProfiles => &[
+                ("New profile", &["create", "agent profile"], None),
+                ("System prompt", &["instructions", "profile"], None),
+            ],
+            SettingsSection::CodeReview => &[
+                ("Reviewer", &["harness"], None),
+                ("Reviewer model", &["model"], None),
+                ("Thinking", &["reasoning", "effort"], None),
+                ("Review instructions", &["prompt"], None),
+            ],
+            SettingsSection::Devices => &[
+                ("Rename device", &["name"], None),
+                ("Copy ID", &["device id"], None),
+            ],
+            SettingsSection::Archived => &[
+                ("Unarchive", &["restore"], None),
+                ("Delete all", &["remove"], None),
             ],
             SettingsSection::Playbooks => &[
                 (
@@ -1188,9 +1310,26 @@ impl SettingsSection {
                     None,
                 ),
                 ("Devices", &["device", "remote"], None),
+                ("Update everything", &["update all", "agents"], None),
+                ("Update policy", &["auto update", "agent cli"], None),
             ],
             SettingsSection::Harnesses => &[
                 ("Add account", &["sign in", "api key", "login"], None),
+                (
+                    "Add provider",
+                    &["acp", "custom provider", "instance"],
+                    None,
+                ),
+                (
+                    "Check for agents and updates",
+                    &["install", "update", "detect"],
+                    None,
+                ),
+                (
+                    "Auto-resume after usage limits",
+                    &["limit", "quota", "resume"],
+                    Some(Target::Setting(SettingId::AutoResume)),
+                ),
                 (
                     "Use $ for skills",
                     &["dollar", "skill picker", "autocomplete"],
@@ -1220,7 +1359,16 @@ impl SettingsSection {
                 ),
                 (
                     "Theme library",
-                    &["theme", "import", "custom"],
+                    &[
+                        "theme",
+                        "import",
+                        "custom",
+                        "reload",
+                        "reveal",
+                        "duplicate",
+                        "unlink",
+                        "remove",
+                    ],
                     Some(Target::Setting(SettingId::ThemeLibrary)),
                 ),
                 (
@@ -1274,6 +1422,21 @@ impl SettingsSection {
                     Some(Target::Setting(SettingId::Glass)),
                 ),
                 (
+                    "Glass tint",
+                    &["frosted", "color"],
+                    Some(Target::Setting(SettingId::Glass)),
+                ),
+                (
+                    "Dim bright backdrops",
+                    &["frosted", "wallpaper", "contrast"],
+                    Some(Target::Setting(SettingId::Glass)),
+                ),
+                (
+                    "Backdrop brightness",
+                    &["frosted", "wallpaper", "contrast"],
+                    Some(Target::Setting(SettingId::Glass)),
+                ),
+                (
                     "Inset card",
                     &["rounded", "sidebar", "window background"],
                     Some(Target::Setting(SettingId::InsetCard)),
@@ -1285,7 +1448,7 @@ impl SettingsSection {
                 ),
                 (
                     "New thread composer background",
-                    &["image"],
+                    &["image", "adjust", "remove"],
                     Some(Target::Setting(SettingId::NewThreadBackground)),
                 ),
                 (
@@ -1293,7 +1456,23 @@ impl SettingsSection {
                     &["random", "shuffle", "images"],
                     Some(Target::Setting(SettingId::WallpaperFolder)),
                 ),
-                ("Chat background", &["image", "placement"], None),
+                (
+                    "Chat background",
+                    &[
+                        "image",
+                        "placement",
+                        "opacity",
+                        "blur",
+                        "scrim",
+                        "tab bar shade",
+                    ],
+                    Some(Target::Setting(SettingId::ChatBackground)),
+                ),
+                (
+                    "Terminal background",
+                    &["image", "placement", "opacity", "blur", "scrim"],
+                    Some(Target::Setting(SettingId::TerminalBackground)),
+                ),
                 (
                     "Background effect",
                     &["dither", "ascii", "halftone", "scanlines"],
@@ -1426,7 +1605,7 @@ impl SettingsSection {
                 ),
                 (
                     "Plan",
-                    &["subscription", "upgrade", "stripe"],
+                    &["subscription", "upgrade", "stripe", "manage subscription"],
                     Some(Target::Setting(SettingId::Plan)),
                 ),
                 (
@@ -1503,7 +1682,11 @@ impl SettingsSection {
                 ("Device hub", &["simulator", "emulator", "version"], None),
                 ("Platform support", &["xcode", "android sdk"], None),
                 ("Agent device access", &["agent"], None),
-                ("Device hosts", &["ssh", "remote"], None),
+                (
+                    "Device hosts",
+                    &["ssh", "remote", "add host", "test connection"],
+                    None,
+                ),
                 ("Auto-show floating preview", &["float"], None),
             ],
             SettingsSection::SourceControl => &[
@@ -1522,6 +1705,13 @@ impl SettingsSection {
     }
 
     fn search_rows(self) -> Vec<SettingsSearchRow> {
+        if self == SettingsSection::Tools {
+            return zeron_proto::tools::TOOL_GROUPS
+                .iter()
+                .map(|info| (info.title, &[] as &'static [&'static str], None))
+                .chain(self.rows().iter().copied())
+                .collect();
+        }
         if self != SettingsSection::Shortcuts {
             return self.rows().to_vec();
         }
@@ -1668,32 +1858,6 @@ fn settings_panel_bounds(viewport: gpui::Size<Pixels>) -> gpui::Bounds<Pixels> {
         gpui::point(px((width - panel_width) / 2.0), px(top)),
         gpui::size(px(panel_width), px(panel_height)),
     )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct SettingsFade {
-    panel: f32,
-    backdrop: f32,
-    settled: bool,
-}
-
-fn settings_fade(closing: bool, elapsed: Duration, reduced: bool) -> SettingsFade {
-    let (panel, backdrop) = match (reduced, closing) {
-        (true, _) => (motion::SETTINGS_REDUCED, motion::SETTINGS_REDUCED),
-        (false, false) => (motion::SETTINGS_IN, motion::SETTINGS_IN),
-        (false, true) => (motion::SETTINGS_OUT, motion::SETTINGS_BACKDROP_OUT),
-    };
-    let scale = motion::speed_scale();
-    let shown = |spec: MotionSpec| {
-        let total = spec.total().mul_f32(scale).as_secs_f32();
-        let progress = spec.progress(elapsed.as_secs_f32() / total.max(f32::EPSILON));
-        if closing { 1.0 - progress } else { progress }
-    };
-    SettingsFade {
-        panel: shown(panel),
-        backdrop: shown(backdrop),
-        settled: elapsed >= panel.total().max(backdrop.total()).mul_f32(scale),
-    }
 }
 
 /// What the main outlet shows.
@@ -3440,8 +3604,6 @@ pub struct Shell {
     continuing: std::collections::HashSet<String>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     harnesses_sub: Option<Subscription>,
-    settings_opened_at: Option<std::time::Instant>,
-    settings_closing: Option<(SettingsSection, std::time::Instant)>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
     _settings_search_sub: Subscription,
@@ -4213,8 +4375,6 @@ impl Shell {
             continuing: Default::default(),
             harnesses_page: None,
             harnesses_sub: None,
-            settings_opened_at: None,
-            settings_closing: None,
             settings_search,
             _settings_search_sub: settings_search_sub,
             shortcuts_sub: None,
@@ -7826,10 +7986,7 @@ impl Shell {
         if route != self.route {
             settings::search::clear_reveal();
         }
-        if let Route::Settings(section) = self.route
-            && !matches!(route, Route::Settings(_))
-        {
-            self.settings_closing = Some((section, motion::now()));
+        if matches!(self.route, Route::Settings(_)) && !matches!(route, Route::Settings(_)) {
             if !self.settings_search.read(cx).text().is_empty() {
                 self.settings_search
                     .update(cx, |input, cx| input.set_text("", cx));
@@ -11786,7 +11943,6 @@ impl Shell {
     fn render_settings_page(
         &mut self,
         section: SettingsSection,
-        fade: SettingsFade,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -12009,11 +12165,10 @@ impl Shell {
             .top(panel.origin.y)
             .w(panel.size.width)
             .h(panel.size.height)
-            .opacity(fade.panel)
             .occlude()
             .child(crate::frost::frosted(
                 SETTINGS_PANEL_RADIUS,
-                crate::frost::MENU_BLUR * fade.panel,
+                crate::frost::MENU_BLUR,
                 card,
             ));
         let backdrop = div()
@@ -12043,13 +12198,7 @@ impl Shell {
             .left_0()
             .w(viewport.width)
             .h(viewport.height)
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .opacity(fade.backdrop)
-                    .child(crate::frost::frosted(0.0, 8.0 * fade.backdrop, backdrop)),
-            )
+            .child(crate::frost::frosted(0.0, 8.0, backdrop))
             .child(drag)
             .child(panel_el)
             .into_any_element()
@@ -12296,14 +12445,23 @@ impl Shell {
                 path,
                 target,
             } = hit;
-            settings::widgets::card_row(theme, ix == 0)
+            let fill = div()
                 .id(("settings-hit", ix))
                 .debug_selector(move || format!("settings-hit-{title}"))
                 .role(gpui::Role::Button)
                 .aria_label(SharedString::from(format!("{title}, {path}")))
                 .tab_index(0)
+                .mx(px(6.0))
+                .my(px(4.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .min_h(px(52.0))
+                .flex()
+                .items_center()
+                .rounded(px(8.0))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.glass_hover()))
+                .focus_visible(|s| s.bg(crate::theme::glass_selected_bg()))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.clear_settings_search(cx);
                     this.open_settings(page, cx);
@@ -12320,7 +12478,19 @@ impl Shell {
                             theme,
                             vec![div().child(path).into_any_element()],
                         )),
-                )
+                );
+            div()
+                .flex()
+                .flex_col()
+                .when(ix > 0, |el| {
+                    el.child(
+                        div()
+                            .mx(px(16.0))
+                            .h(px(1.0))
+                            .bg(settings::widgets::row_divider(theme)),
+                    )
+                })
+                .child(fill)
         });
         div()
             .id("settings-search-results")
@@ -16635,13 +16805,12 @@ impl Shell {
             .borrow_mut()
             .set_hero_anchor(HOME_HERO_ANCHOR);
         let composer = self.composer.read(cx);
-        let hero_floor = if composer.config_panel_on_hero(cx)
-            || (composer.waiting_open() && !has_selection)
-        {
-            crate::composer::claude_config::HERO_PANEL_TOP
-        } else {
-            0.0
-        };
+        let hero_floor =
+            if composer.config_panel_on_hero(cx) || (composer.waiting_open() && !has_selection) {
+                crate::composer::claude_config::HERO_PANEL_TOP
+            } else {
+                0.0
+            };
         self.composer_dock.borrow_mut().set_hero_floor(hero_floor);
         let transcript_geometry_ready =
             bottom_stack_measurement_matches(self.bottom_stack_has_composer.get(), has_selection);
@@ -19872,33 +20041,8 @@ impl Render for Shell {
                     Route::Settings(section) => Some(section),
                     _ => None,
                 };
-                let reduced = motion::reduced_motion(cx);
-                let settings_panel = match (settings_route, self.settings_closing) {
-                    (Some(section), _) => {
-                        self.settings_closing = None;
-                        let opened = *self.settings_opened_at.get_or_insert_with(motion::now);
-                        let fade = settings_fade(false, motion::since(opened), reduced);
-                        if !fade.settled {
-                            window.request_animation_frame();
-                        }
-                        Some(self.render_settings_page(section, fade, window, cx))
-                    }
-                    (None, Some((section, closed))) => {
-                        self.settings_opened_at = None;
-                        let fade = settings_fade(true, motion::since(closed), reduced);
-                        if fade.settled {
-                            self.settings_closing = None;
-                            None
-                        } else {
-                            window.request_animation_frame();
-                            Some(self.render_settings_page(section, fade, window, cx))
-                        }
-                    }
-                    (None, None) => {
-                        self.settings_opened_at = None;
-                        None
-                    }
-                };
+                let settings_panel =
+                    settings_route.map(|section| self.render_settings_page(section, window, cx));
                 if settings_route.is_some() {
                     self.route = match self.settings_return_route {
                         Route::Settings(_) => Route::Chat,
@@ -25507,20 +25651,6 @@ mod settings_modal_regressions {
     }
 
     #[test]
-    fn settings_close_starts_from_the_shown_panel_and_ends_hidden() {
-        for reduced in [false, true] {
-            let opening = settings_fade(false, Duration::ZERO, reduced);
-            assert_eq!((opening.panel, opening.backdrop), (0.0, 0.0));
-            let closing = settings_fade(true, Duration::ZERO, reduced);
-            assert_eq!((closing.panel, closing.backdrop), (1.0, 1.0));
-            assert!(!closing.settled);
-            let closed = settings_fade(true, Duration::from_secs(10), reduced);
-            assert_eq!((closed.panel, closed.backdrop), (0.0, 0.0));
-            assert!(closed.settled);
-        }
-    }
-
-    #[test]
     fn open_route_names_a_section_or_reopens_the_remembered_one() {
         let remembered = SettingsSection::Notifications;
         assert_eq!(
@@ -25772,6 +25902,11 @@ mod settings_modal_regressions {
                 && !section.needs_account()
                 && *section != SettingsSection::Routing
         });
+        let indexed: Vec<Target> = SettingsSection::ALL
+            .into_iter()
+            .flat_map(|section| section.search_rows())
+            .filter_map(|(_, _, target)| target)
+            .collect();
         for section in sections {
             take_anchored();
             shell.update(cx, |shell, cx| shell.open_settings(section, cx));
@@ -25782,6 +25917,15 @@ mod settings_modal_regressions {
             }
             draw(cx);
             let anchored = take_anchored();
+            let unindexed: Vec<_> = anchored
+                .iter()
+                .filter(|target| !matches!(target, Target::Page(_)) && !indexed.contains(target))
+                .collect();
+            assert_eq!(
+                unindexed,
+                [] as [&Target; 0],
+                "{section:?} rows search cannot find"
+            );
             let unanchored: Vec<_> = section
                 .search_rows()
                 .into_iter()
@@ -25821,6 +25965,14 @@ mod settings_modal_regressions {
             Route::Settings(SettingsSection::Appearance)
         );
         assert_eq!(lit(), Some(Target::Setting(SettingId::SmoothScrolling)));
+
+        assert!(cx.debug_bounds("settings-panel").is_some());
+        shell.update(cx, |shell, cx| shell.close_settings(cx));
+        draw(cx);
+        assert!(
+            cx.debug_bounds("settings-panel").is_none(),
+            "closing swaps Settings out in one frame, like t3code's settings route"
+        );
     }
 
     #[gpui::test]

@@ -40,7 +40,7 @@ use crate::popover::{self, Loadable};
 use crate::provider_instances::{self, ProviderInstanceWrite};
 use crate::settings::accounts::{self, AccountsPage};
 use crate::settings::add_provider::{self, AddProviderDialog, AddProviderEvent};
-use crate::settings::search::{SearchAnchor, Target};
+use crate::settings::search::{SearchAnchor, SettingId, Target};
 use crate::settings::widgets;
 use crate::shell::SettingsSection;
 use crate::state::AppState;
@@ -1283,7 +1283,8 @@ impl HarnessesPage {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.set_auto_resume_limits(!enabled, cx)
                                 })),
-                        ),
+                        )
+                        .search_anchor(SettingId::AutoResume),
                 )
                 .into_any_element(),
         )
