@@ -1397,6 +1397,7 @@ impl AppearancePage {
                         }),
                     ),
                 )
+                .search_anchor(SettingId::ChatBackground)
                 .into_any_element(),
         ];
         if !chat.enabled {
@@ -1483,6 +1484,7 @@ impl AppearancePage {
                         .gap(px(6.0))
                         .children(mode_controls),
                 )
+                .search_anchor(SettingId::TerminalBackground)
                 .into_any_element(),
         ];
         let resolved = terminal.resolve(chat);

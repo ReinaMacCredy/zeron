@@ -1125,8 +1125,81 @@ impl SettingsSection {
                     Some(Target::Setting(SettingId::ShowPredictions)),
                 ),
                 (
+                    "Predict with",
+                    &["predictions", "agent", "custom api"],
+                    Some(Target::Setting(SettingId::ShowPredictions)),
+                ),
+                (
+                    "Agent model",
+                    &["predictions"],
+                    Some(Target::Setting(SettingId::ShowPredictions)),
+                ),
+                (
+                    "Base URL",
+                    &[
+                        "predictions",
+                        "custom api",
+                        "model id",
+                        "endpoint",
+                        "api key",
+                    ],
+                    Some(Target::Setting(SettingId::ShowPredictions)),
+                ),
+                (
+                    "Compact idle chats before the cache expires",
+                    &["compaction", "idle", "prompt cache", "summarize"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Idle threshold",
+                    &["compaction", "idle"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Let agents compact themselves",
+                    &["compaction", "compact tool", "reminder"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Compact new tasks",
+                    &["compaction", "reminder", "classifier"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Compact ahead of time",
+                    &["compaction", "background", "summary"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "In tasks",
+                    &["compaction", "lead", "step threads"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Remind at",
+                    &["compaction", "check from", "context", "threshold"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Classifier",
+                    &["compaction", "jev", "typesafe", "openrouter", "api key"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
+                    "Classifier model",
+                    &["compaction", "jev"],
+                    Some(Target::Setting(SettingId::Compaction)),
+                ),
+                (
                     "Custom worktree location",
-                    &["folder", "directory", "checkout", "branches"],
+                    &[
+                        "folder",
+                        "directory",
+                        "checkout",
+                        "branches",
+                        "device",
+                        "browse",
+                    ],
                     Some(Target::Setting(SettingId::WorktreeLocation)),
                 ),
                 (
@@ -1163,12 +1236,61 @@ impl SettingsSection {
                 ),
             ],
             SettingsSection::Routing => &[
+                (
+                    "Roles",
+                    &[
+                        "worker",
+                        "validator",
+                        "research",
+                        "design",
+                        "general",
+                        "harness",
+                        "model",
+                        "reasoning",
+                        "quota",
+                    ],
+                    None,
+                ),
+                (
+                    "When the routed harness is out of quota",
+                    &["quota", "limit", "fallback"],
+                    None,
+                ),
+                ("Fallback list", &["quota", "order"], None),
+                ("Mid-run limit", &["countdown", "quota", "ask"], None),
+                (
+                    "Claude Code native sub-agents",
+                    &["subagent", "task tool", "claude"],
+                    None,
+                ),
                 ("Delegation depth", &["delegate", "subagent", "nest"], None),
                 (
                     "Delegated tasks per chat",
                     &["delegate", "subagent", "limit"],
                     None,
                 ),
+            ],
+            SettingsSection::Tools => &[
+                ("Turn all on", &["enable"], None),
+                ("Turn all off", &["disable"], None),
+            ],
+            SettingsSection::AgentProfiles => &[
+                ("New profile", &["create", "agent profile"], None),
+                ("System prompt", &["instructions", "profile"], None),
+            ],
+            SettingsSection::CodeReview => &[
+                ("Reviewer", &["harness"], None),
+                ("Reviewer model", &["model"], None),
+                ("Thinking", &["reasoning", "effort"], None),
+                ("Review instructions", &["prompt"], None),
+            ],
+            SettingsSection::Devices => &[
+                ("Rename device", &["name"], None),
+                ("Copy ID", &["device id"], None),
+            ],
+            SettingsSection::Archived => &[
+                ("Unarchive", &["restore"], None),
+                ("Delete all", &["remove"], None),
             ],
             SettingsSection::Playbooks => &[
                 (
@@ -1188,9 +1310,26 @@ impl SettingsSection {
                     None,
                 ),
                 ("Devices", &["device", "remote"], None),
+                ("Update everything", &["update all", "agents"], None),
+                ("Update policy", &["auto update", "agent cli"], None),
             ],
             SettingsSection::Harnesses => &[
                 ("Add account", &["sign in", "api key", "login"], None),
+                (
+                    "Add provider",
+                    &["acp", "custom provider", "instance"],
+                    None,
+                ),
+                (
+                    "Check for agents and updates",
+                    &["install", "update", "detect"],
+                    None,
+                ),
+                (
+                    "Auto-resume after usage limits",
+                    &["limit", "quota", "resume"],
+                    Some(Target::Setting(SettingId::AutoResume)),
+                ),
                 (
                     "Use $ for skills",
                     &["dollar", "skill picker", "autocomplete"],
@@ -1220,7 +1359,7 @@ impl SettingsSection {
                 ),
                 (
                     "Theme library",
-                    &["theme", "import", "custom"],
+                    &["theme", "import", "custom", "apply", "remove"],
                     Some(Target::Setting(SettingId::ThemeLibrary)),
                 ),
                 (
@@ -1274,6 +1413,21 @@ impl SettingsSection {
                     Some(Target::Setting(SettingId::Glass)),
                 ),
                 (
+                    "Glass tint",
+                    &["frosted", "color"],
+                    Some(Target::Setting(SettingId::Glass)),
+                ),
+                (
+                    "Dim bright backdrops",
+                    &["frosted", "wallpaper", "contrast"],
+                    Some(Target::Setting(SettingId::Glass)),
+                ),
+                (
+                    "Backdrop brightness",
+                    &["frosted", "wallpaper", "contrast"],
+                    Some(Target::Setting(SettingId::Glass)),
+                ),
+                (
                     "Inset card",
                     &["rounded", "sidebar", "window background"],
                     Some(Target::Setting(SettingId::InsetCard)),
@@ -1285,7 +1439,7 @@ impl SettingsSection {
                 ),
                 (
                     "New thread composer background",
-                    &["image"],
+                    &["image", "adjust", "remove"],
                     Some(Target::Setting(SettingId::NewThreadBackground)),
                 ),
                 (
@@ -1293,7 +1447,23 @@ impl SettingsSection {
                     &["random", "shuffle", "images"],
                     Some(Target::Setting(SettingId::WallpaperFolder)),
                 ),
-                ("Chat background", &["image", "placement"], None),
+                (
+                    "Chat background",
+                    &[
+                        "image",
+                        "placement",
+                        "opacity",
+                        "blur",
+                        "scrim",
+                        "tab bar shade",
+                    ],
+                    Some(Target::Setting(SettingId::ChatBackground)),
+                ),
+                (
+                    "Terminal background",
+                    &["image", "placement", "opacity", "blur", "scrim"],
+                    Some(Target::Setting(SettingId::TerminalBackground)),
+                ),
                 (
                     "Background effect",
                     &["dither", "ascii", "halftone", "scanlines"],
@@ -1426,7 +1596,7 @@ impl SettingsSection {
                 ),
                 (
                     "Plan",
-                    &["subscription", "upgrade", "stripe"],
+                    &["subscription", "upgrade", "stripe", "manage subscription"],
                     Some(Target::Setting(SettingId::Plan)),
                 ),
                 (
@@ -1503,7 +1673,11 @@ impl SettingsSection {
                 ("Device hub", &["simulator", "emulator", "version"], None),
                 ("Platform support", &["xcode", "android sdk"], None),
                 ("Agent device access", &["agent"], None),
-                ("Device hosts", &["ssh", "remote"], None),
+                (
+                    "Device hosts",
+                    &["ssh", "remote", "add host", "test connection"],
+                    None,
+                ),
                 ("Auto-show floating preview", &["float"], None),
             ],
             SettingsSection::SourceControl => &[
@@ -1522,6 +1696,13 @@ impl SettingsSection {
     }
 
     fn search_rows(self) -> Vec<SettingsSearchRow> {
+        if self == SettingsSection::Tools {
+            return zeron_proto::tools::TOOL_GROUPS
+                .iter()
+                .map(|info| (info.title, &[] as &'static [&'static str], None))
+                .chain(self.rows().iter().copied())
+                .collect();
+        }
         if self != SettingsSection::Shortcuts {
             return self.rows().to_vec();
         }
@@ -16635,13 +16816,12 @@ impl Shell {
             .borrow_mut()
             .set_hero_anchor(HOME_HERO_ANCHOR);
         let composer = self.composer.read(cx);
-        let hero_floor = if composer.config_panel_on_hero(cx)
-            || (composer.waiting_open() && !has_selection)
-        {
-            crate::composer::claude_config::HERO_PANEL_TOP
-        } else {
-            0.0
-        };
+        let hero_floor =
+            if composer.config_panel_on_hero(cx) || (composer.waiting_open() && !has_selection) {
+                crate::composer::claude_config::HERO_PANEL_TOP
+            } else {
+                0.0
+            };
         self.composer_dock.borrow_mut().set_hero_floor(hero_floor);
         let transcript_geometry_ready =
             bottom_stack_measurement_matches(self.bottom_stack_has_composer.get(), has_selection);
@@ -25780,6 +25960,11 @@ mod settings_modal_regressions {
                 && !section.needs_account()
                 && *section != SettingsSection::Routing
         });
+        let indexed: Vec<Target> = SettingsSection::ALL
+            .into_iter()
+            .flat_map(|section| section.search_rows())
+            .filter_map(|(_, _, target)| target)
+            .collect();
         for section in sections {
             take_anchored();
             shell.update(cx, |shell, cx| shell.open_settings(section, cx));
@@ -25790,6 +25975,15 @@ mod settings_modal_regressions {
             }
             draw(cx);
             let anchored = take_anchored();
+            let unindexed: Vec<_> = anchored
+                .iter()
+                .filter(|target| !matches!(target, Target::Page(_)) && !indexed.contains(target))
+                .collect();
+            assert_eq!(
+                unindexed,
+                [] as [&Target; 0],
+                "{section:?} rows search cannot find"
+            );
             let unanchored: Vec<_> = section
                 .search_rows()
                 .into_iter()
