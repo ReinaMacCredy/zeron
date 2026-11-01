@@ -783,11 +783,13 @@ impl Shell {
         }
         let theme = Theme::of(cx).clone();
         let selected = self.state.read(cx).selected_chat.clone();
+        let paired = self.split_pair.clone();
         let state = self.state.clone();
         let inert = std::rc::Rc::new(move |chat_id: &str, cx: &App| {
             state.read(cx).is_draft(chat_id)
                 || terminal_tabs::is_terminal_tab(chat_id)
-                || selected.as_deref() == Some(chat_id)
+                || (selected.as_deref() == Some(chat_id)
+                    && !paired.as_ref().is_some_and(|pair| pair.contains(chat_id)))
         });
         let tall = match &self.tab_drag {
             Some(drag) => Some(drag.out),

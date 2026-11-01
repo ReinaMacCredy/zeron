@@ -292,6 +292,9 @@ fn slide_tab<E: gpui::Element + gpui::Styled + 'static>(
                 ))
                 .into_any_element()
         }
+        // A split pair stays put once one half leaves the strip: only that
+        // half travels to a split card, the other is still on screen.
+        Some((from, .., out)) if ix == from && slots > 1 && out > 0.0 => tab_el.into_any_element(),
         // The strip draws the dragged tab itself on top, under the pointer;
         // its flow slot renders as an INVISIBLE spacer that closes once the
         // tab leaves the strip. A dimmed tab here would overlap whatever
