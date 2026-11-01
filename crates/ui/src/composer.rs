@@ -56,8 +56,8 @@ mod staged_comments;
 pub use chip::ChipKind;
 use chip::*;
 pub(crate) use chip::{
-    CHIP_PAD_FAMILY, ChipIcon, chip_icon, chip_pad_ranges, chip_text, paint_chip,
-    text_chip_label_offset,
+    CHIP_PAD_FAMILY, ChipAttachment, ChipIcon, chip_icon, chip_link_slot, chip_pad_ranges,
+    chip_text, paint_chip, text_chip_label_offset,
 };
 
 // ---------------------------------------------------------------------------
@@ -1632,6 +1632,7 @@ fn wrap_reference_chips(line: &mut WrappedLine, chips: &[Range<usize>], width: P
 }
 
 impl TextProjection {
+    #[cfg(test)]
     fn new(raw: &str) -> Self {
         Self::project(raw, None, false, None)
     }
@@ -1768,6 +1769,9 @@ impl TextProjection {
                 }
                 let label = match attachment {
                     Some(Some(ChipAttachment::PastedText(Some(preview)))) => preview.to_string(),
+                    Some(Some(ChipAttachment::Linked { label, .. })) => {
+                        format!("{label} {CHIP_LINK_SLOT}")
+                    }
                     _ => label,
                 };
                 let label = label.replace(' ', "\u{00A0}");
@@ -1975,6 +1979,7 @@ pub struct SentMentionSpan {
     pub attachment: Option<u32>,
     /// The upload an attachment chip names, once the transcript pairs them.
     pub upload: Option<SharedString>,
+    pub linked: bool,
 }
 
 /// Cheap probe: whether `raw` could hold a file, thread, skill or attachment chip.
@@ -1995,10 +2000,17 @@ fn has_mention_scheme(raw: &str) -> bool {
 /// substring probe keeps ordinary prompts on the zero-allocation path, so this
 /// is safe to call for every user row.
 pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)> {
+    sent_mention_display_with(raw, None)
+}
+
+pub(crate) fn sent_mention_display_with(
+    raw: &str,
+    live: Option<&HashMap<u32, ChipAttachment>>,
+) -> Option<(String, Vec<SentMentionSpan>)> {
     if !has_mention_scheme(raw) {
         return None;
     }
-    let projection = TextProjection::new(raw);
+    let projection = TextProjection::project(raw, None, false, live);
     if projection.mentions.is_empty() {
         return None;
     }
@@ -2015,6 +2027,11 @@ pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)>
             kind: link.kind,
             attachment: link.attachment,
             upload: None,
+            linked: link
+                .attachment
+                .zip(live)
+                .and_then(|(index, live)| live.get(&index))
+                .is_some_and(|chip| matches!(chip, ChipAttachment::Linked { .. })),
         })
         .collect();
     Some((projection.display, spans))
@@ -3291,6 +3308,9 @@ impl ComposerInput {
     fn mention_tooltip_text(&self, target: &MentionTooltipTarget) -> SharedString {
         match self.chip_attachment(target) {
             Some(ChipAttachment::PastedText(_)) => "Click to show in text field".into(),
+            Some(ChipAttachment::Linked { path, .. }) => {
+                format!("Linked, not copied: {path}").into()
+            }
             _ => target.path.clone(),
         }
     }
@@ -5855,6 +5875,22 @@ impl gpui::Element for ComposerTextElement {
                     );
                     mention_icons.push((slot, icon));
                 }
+            }
+            let linked = mention
+                .attachment
+                .and_then(|index| input.attachment_chips.as_ref()?.get(&index))
+                .is_some_and(|chip| matches!(chip, ChipAttachment::Linked { .. }));
+            if linked
+                && let Some(slot) = input
+                    .bounds_for_display_range(chip_link_slot(display))
+                    .into_iter()
+                    .next()
+            {
+                let slot = Bounds::new(
+                    point(origin.x + slot.origin.x, origin.y + slot.origin.y),
+                    slot.size,
+                );
+                mention_icons.push((slot, (crate::icons::LUCIDE_LINK, None)));
             }
             let mut first_row = true;
             // Thread chips carry no hover popup: the title is already the
@@ -12055,6 +12091,17 @@ impl Composer {
                 return;
             }
         }
+        let runs_elsewhere = matches!(plan, crate::pickers::CheckoutPlan::Cloud { .. }) && is_new
+            || host_device_id
+                .as_deref()
+                .is_some_and(|id| local_device_id.as_deref() != Some(id));
+        if runs_elsewhere && let Some(att) = self.staged().iter().find(|att| att.linked().is_some())
+        {
+            self.failure = Some(attachments::linked_elsewhere_message(&att.name).into());
+            self.failure_key = self.bound_chat_id(cx);
+            cx.notify();
+            return;
+        }
         // Snapshot-and-clear NOW (use-attachments.ts takeAttachments): the
         // strip empties the instant you hit send; a failure hands the files
         // back into the chat's stash.
@@ -12158,18 +12205,15 @@ impl Composer {
         // refresh replaces with the host's absolute paths. Either way the
         // staged bytes are seeded into the transcript cache under every
         // device key the transcript consults.
-        let echo_paths: Vec<String> = if queued_flow {
-            staged
-                .iter()
-                .zip(&upload_ids)
-                .map(|(att, id)| format!("pending://{id}/{}", att.name))
-                .collect()
-        } else {
-            staged
-                .iter()
-                .map(|att| format!("pending/{}/{}", att.id, att.name))
-                .collect()
-        };
+        let echo_paths: Vec<String> = staged
+            .iter()
+            .zip(&upload_ids)
+            .map(|(att, id)| match att.linked() {
+                Some((path, _)) => path.to_string(),
+                None if queued_flow => format!("pending://{id}/{}", att.name),
+                None => format!("pending/{}/{}", att.id, att.name),
+            })
+            .collect();
         let echo_appshot_paths: HashMap<String, String> = staged
             .iter()
             .zip(&echo_paths)
@@ -12349,6 +12393,9 @@ impl Composer {
                         .ok();
                     }
                     for (att, upload_id) in staged.iter().zip(&upload_ids) {
+                        if att.linked().is_some() {
+                            continue;
+                        }
                         if let Err(err) = attachments::upload_attachment(
                             &engine,
                             cx.background_executor(),
@@ -12384,6 +12431,10 @@ impl Composer {
                         .ok();
                     }
                     for (att, upload_id) in staged.iter().zip(&upload_ids) {
+                        if let Some((path, _)) = att.linked() {
+                            attachment_paths.push(path.to_string());
+                            continue;
+                        }
                         match attachments::upload_attachment(
                             &engine,
                             cx.background_executor(),

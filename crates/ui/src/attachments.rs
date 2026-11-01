@@ -233,6 +233,7 @@ pub fn user_message_rail_text(content: &str) -> String {
 pub enum AttachmentContent {
     Image(Arc<Image>),
     File(Arc<Vec<u8>>),
+    Linked { path: String, size: u64 },
 }
 
 /// A file staged in the composer, before upload.
@@ -254,6 +255,7 @@ impl StagedAttachment {
         match &self.content {
             AttachmentContent::Image(image) => &image.bytes,
             AttachmentContent::File(bytes) => bytes,
+            AttachmentContent::Linked { .. } => &[],
         }
     }
 
@@ -261,7 +263,14 @@ impl StagedAttachment {
     pub fn image(&self) -> Option<&Arc<Image>> {
         match &self.content {
             AttachmentContent::Image(image) => Some(image),
-            AttachmentContent::File(_) => None,
+            AttachmentContent::File(_) | AttachmentContent::Linked { .. } => None,
+        }
+    }
+
+    pub fn linked(&self) -> Option<(&str, u64)> {
+        match &self.content {
+            AttachmentContent::Linked { path, size } => Some((path, *size)),
+            _ => None,
         }
     }
 
@@ -328,6 +337,12 @@ pub fn ensure_extension(name: &str, format: ImageFormat) -> String {
 /// regular file is staged as opaque bytes. `Err` carries the user-facing
 /// message (mirrors the old `onError` copy).
 pub fn stage_file(path: &Path) -> Result<StagedAttachment, String> {
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.is_file()
+        && meta.len() > MAX_ATTACHMENT_BYTES
+    {
+        return link_file(path);
+    }
     if format_by_extension(path).is_none() {
         return stage_plain_file(path);
     }
@@ -386,6 +401,47 @@ fn stage_plain_file(path: &Path) -> Result<StagedAttachment, String> {
     let name = file_name(path, "file");
     let bytes = read_regular_file(path, &name)?;
     Ok(StagedAttachment::from_file(&name, bytes))
+}
+
+pub fn link_file(path: &Path) -> Result<StagedAttachment, String> {
+    let name = file_name(path, "file").replace(['\r', '\n'], "_");
+    let path = std::fs::canonicalize(path).map_err(|_| format!("{name} could not be read."))?;
+    let meta = std::fs::metadata(&path).map_err(|_| format!("{name} could not be read."))?;
+    if !meta.is_file() {
+        return Err(format!("{name} is not a file."));
+    }
+    let Some(path) = path.to_str().filter(|path| !path.contains(['\r', '\n'])) else {
+        return Err(format!("{name} could not be read."));
+    };
+    Ok(StagedAttachment::new(
+        name,
+        AttachmentContent::Linked {
+            path: path.to_string(),
+            size: meta.len(),
+        },
+    ))
+}
+
+/// Heuristic: uploads are stored as `{id8}-{name}`, so a linked file named that way reads as one.
+pub fn is_linked_ref(path: &str) -> bool {
+    Path::new(path).is_absolute() && upload_alias_id8(path).is_none()
+}
+
+pub fn linked_elsewhere_message(name: &str) -> String {
+    format!(
+        "{name} is too large to send to another device ({} MB max).",
+        MAX_ATTACHMENT_BYTES / (1024 * 1024)
+    )
+}
+
+pub fn size_label(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    let mb = bytes as f64 / MB;
+    if mb >= 1024.0 {
+        format!("{:.1} GB", mb / 1024.0)
+    } else {
+        format!("{mb:.0} MB")
+    }
 }
 
 /// Stage an image pasted from the clipboard. A BMP (what Windows puts there for
@@ -1530,16 +1586,28 @@ mod tests {
     }
 
     #[test]
-    fn folders_and_oversize_files_are_refused_with_a_message() {
+    fn folders_are_refused_and_oversize_files_are_linked_by_path() {
         let dir = tempfile::tempdir().unwrap();
         assert!(stage_file(dir.path()).err().unwrap().contains("not a file"));
-        let large = dir.path().join("large.bin");
-        std::fs::File::create(&large)
-            .unwrap()
-            .set_len(MAX_ATTACHMENT_BYTES + 1)
-            .unwrap();
-        assert!(stage_file(&large).err().unwrap().contains("too large"));
+        for name in ["large.bin", "large.png"] {
+            let large = dir.path().join(name);
+            std::fs::File::create(&large)
+                .unwrap()
+                .set_len(MAX_ATTACHMENT_BYTES + 1)
+                .unwrap();
+            let staged = stage_file(&large).unwrap();
+            let path = std::fs::canonicalize(&large).unwrap();
+            assert_eq!(staged.name, name);
+            assert_eq!(
+                staged.linked(),
+                Some((path.to_str().unwrap(), MAX_ATTACHMENT_BYTES + 1))
+            );
+            assert!(staged.bytes().is_empty() && staged.image().is_none());
+            assert!(is_linked_ref(path.to_str().unwrap()));
+        }
         assert!(stage_file(&dir.path().join("missing.md")).is_err());
+        assert!(!is_linked_ref("/uploads/ab12cd34-large.bin"));
+        assert!(!is_linked_ref("pending://ab12cd34-ef/large.bin"));
     }
 
     #[test]

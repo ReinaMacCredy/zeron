@@ -1591,7 +1591,9 @@ impl Composer {
                     .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok());
                 let mut load_failed = paths.is_none();
                 for path in paths.unwrap_or_default() {
-                    let loaded = if crate::attachments::is_image_path(&path) {
+                    let loaded = if crate::attachments::is_linked_ref(&path) {
+                        crate::attachments::link_file(std::path::Path::new(&path)).ok()
+                    } else if crate::attachments::is_image_path(&path) {
                         crate::attachments::read_attachment_image(
                             &engine, cx.background_executor(), Some(&host_device_id), &path,
                             None,
@@ -1843,6 +1845,14 @@ impl Composer {
             cx.notify();
             return;
         };
+        if action == "commit"
+            && self.state.read(cx).local_device_id.as_deref() != Some(host_device_id.as_str())
+            && let Some(att) = self.staged().iter().find(|att| att.linked().is_some())
+        {
+            self.failure = Some(crate::attachments::linked_elsewhere_message(&att.name).into());
+            cx.notify();
+            return;
+        }
         let expected = self.queue_edit_base_text_hash.clone();
         let mut staged = self.staged().to_vec();
         let staged_appshots = self.staged_appshots().to_vec();
@@ -1868,6 +1878,10 @@ impl Composer {
                 if action == "commit" {
                     let mut paths = Vec::new();
                     for attachment in &staged {
+                        if let Some((path, _)) = attachment.linked() {
+                            paths.push(path.to_string());
+                            continue;
+                        }
                         let path = crate::attachments::upload_attachment(
                             &engine, cx.background_executor(), Some(&host_device_id),
                             &uuid::Uuid::new_v4().to_string(), attachment, None,

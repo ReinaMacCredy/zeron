@@ -1783,10 +1783,12 @@ pub fn rows_for_entry(
         // a click opening it.
         let chips = zeron_proto::attachment_mentions::attachment_mentions(&body);
         let mut attachments = parsed.attachments;
-        let (text, mut mentions) = match crate::composer::sent_mention_display(&body) {
-            Some((display, spans)) => (display, spans),
-            None => (body, Vec::new()),
-        };
+        let linked = linked_chips(&chips, &attachments);
+        let (text, mut mentions) =
+            match crate::composer::sent_mention_display_with(&body, linked.as_ref()) {
+                Some((display, spans)) => (display, spans),
+                None => (body, Vec::new()),
+            };
         for span in &mut mentions {
             let Some(chip) = chips
                 .iter()
@@ -9166,6 +9168,12 @@ impl Transcript {
                         crate::composer::ChipKind::Task => {
                             crate::tasks::mention_mark(state, &span.path, theme, now)
                         }
+                        _ if span.linked => {
+                            return Some((
+                                crate::composer::chip_link_slot(&span.range),
+                                (crate::icons::LUCIDE_LINK, None),
+                            ));
+                        }
                         _ => return None,
                     };
                     Some((crate::composer::thread_icon_slot(&span.range), icon))
@@ -13746,6 +13754,38 @@ impl gpui::Element for ChipOverlays {
             target.paint(window, cx);
         }
     }
+}
+
+fn linked_chips(
+    chips: &[zeron_proto::attachment_mentions::AttachmentMention],
+    attachments: &[crate::attachments::UserImageAttachment],
+) -> Option<HashMap<u32, crate::composer::ChipAttachment>> {
+    let linked_path = |chip: &zeron_proto::attachment_mentions::AttachmentMention| {
+        attachments
+            .iter()
+            .find(|att| crate::attachments::chip_names_attachment(chip, &att.path))
+            .map(|att| att.path.as_str())
+            .filter(|path| !chip.is_image && crate::attachments::is_linked_ref(path))
+    };
+    if !chips.iter().any(|chip| linked_path(chip).is_some()) {
+        return None;
+    }
+    Some(
+        chips
+            .iter()
+            .map(|chip| {
+                let live = match linked_path(chip) {
+                    Some(path) => crate::composer::ChipAttachment::linked(
+                        &chip.label,
+                        std::fs::metadata(path).ok().map(|meta| meta.len()),
+                        path,
+                    ),
+                    None => crate::composer::ChipAttachment::File,
+                };
+                (chip.index, live)
+            })
+            .collect(),
+    )
 }
 
 /// A sent message's non-image attachment: the file's icon and a label on the
@@ -23382,6 +23422,45 @@ mod tests {
         };
         assert!(text.is_empty());
         assert_eq!(attachments.len(), 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        let recording = dir.path().join("recording.mp4");
+        std::fs::File::create(&recording)
+            .unwrap()
+            .set_len(30 * 1024 * 1024)
+            .unwrap();
+        let recording = recording.to_str().unwrap().to_string();
+        let body = format!(
+            "see {} and {}",
+            attachment_mention_link(1, Some("recording.mp4")),
+            attachment_mention_link(2, Some("notes.md")),
+        );
+        let raw = crate::attachments::with_attachments(
+            &body,
+            &[recording.clone(), "/uploads/ef56ab78-notes.md".into()],
+        );
+        entry.parts = vec![text_part("t0", &raw)];
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let RowKind::User {
+            text,
+            mentions,
+            attachments,
+            ..
+        } = &rows[0].kind
+        else {
+            panic!("expected a user row");
+        };
+        assert!(attachments.is_empty());
+        assert_eq!(
+            mentions.iter().map(|m| m.linked).collect::<Vec<_>>(),
+            [true, false]
+        );
+        assert_eq!(mentions[0].upload.as_deref(), Some(recording.as_str()));
+        assert!(
+            text[mentions[0].range.clone()]
+                .replace('\u{a0}', " ")
+                .contains("recording.mp4 · 30 MB")
+        );
     }
 
     #[test]
