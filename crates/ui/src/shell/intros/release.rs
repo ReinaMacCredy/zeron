@@ -22,8 +22,11 @@ const CHILD_PANE_TABS: &str = "child-pane-tabs";
 const ANDROID_PARITY: &str = "android-parity";
 const SETTINGS_CLOSE: &str = "settings-close";
 const ANSWER_PILL: &str = "answer-pill";
+const KEEP_AWAKE: &str = "keep-awake";
+const COMPACTION_MORPH: &str = "compaction-morph";
+const SWIPE_DOT: &str = "swipe-dot";
 
-pub(super) const VISUALS: [(&str, f32, f32); 20] = [
+pub(super) const VISUALS: [(&str, f32, f32); 23] = [
     (CLAUDE_CONFIG, 7.0, 3.4),
     (COMMAND_CARDS, 6.6, 4.5),
     (COMPACTION_CARD, 7.6, 5.4),
@@ -44,6 +47,9 @@ pub(super) const VISUALS: [(&str, f32, f32); 20] = [
     (ANDROID_PARITY, 6.8, 5.0),
     (SETTINGS_CLOSE, 4.4, 1.6),
     (ANSWER_PILL, 7.0, 1.4),
+    (KEEP_AWAKE, 6.0, 1.8),
+    (COMPACTION_MORPH, 5.2, 4.2),
+    (SWIPE_DOT, 4.2, 1.8),
 ];
 
 pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyElement {
@@ -68,6 +74,9 @@ pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyEleme
         ANDROID_PARITY => android_parity_visual(theme, t, reduced),
         SETTINGS_CLOSE => settings_close_visual(theme, t),
         ANSWER_PILL => answer_pill_visual(theme, t, reduced),
+        KEEP_AWAKE => keep_awake_visual(theme, t, reduced),
+        COMPACTION_MORPH => compaction_morph_visual(theme, t, reduced),
+        SWIPE_DOT => swipe_dot_visual(theme, t),
         _ => div().into_any_element(),
     }
 }
@@ -3304,5 +3313,246 @@ fn settings_close_visual(theme: &Theme, t: f32) -> AnyElement {
                 .justify_center()
                 .when(shown > 0.0, |el| el.child(panel)),
         )
+        .into_any_element()
+}
+
+fn keep_awake_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
+    const DONE_AT: f32 = 3.2;
+    let done = t >= DONE_AT;
+    let swap = ramp(t, DONE_AT, 220.0, motion::EASE_OUT);
+    let (_, _, ok) = chat_status_tone(zeron_proto::ChatIndicator::Completed, theme);
+    let setting = div()
+        .h(px(28.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(clip(11.5, theme.text, "Keep this Mac awake while agents work").flex_1())
+        .child(crate::settings::widgets::toggle_switch(
+            theme,
+            true,
+            "keep-awake-visual",
+        ));
+    let agent = div()
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .child(if done {
+            tree_glyph(TreeStatus::Done, 12.0, ok, true)
+        } else {
+            running(theme, reduced)
+        })
+        .child(clip(11.5, theme.text, "Ship the shop").flex_1())
+        .child(mono(
+            theme,
+            10.5,
+            theme.text_faint,
+            if done {
+                "Done".to_string()
+            } else {
+                format!("Working {}s", 42 + t as u32)
+            },
+        ));
+    let state = div()
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .opacity(if done { swap } else { 1.0 })
+        .child(if done {
+            glyph(icons::MOON, 12.0, theme.text_muted)
+        } else {
+            glyph(icons::LAPTOP, 12.0, working_tone(theme))
+        })
+        .child(text(
+            10.5,
+            if done {
+                theme.text_muted
+            } else {
+                working_tone(theme)
+            },
+            if done {
+                "The Mac can sleep again a minute later"
+            } else {
+                "Awake while 1 agent works"
+            },
+        ));
+    card(theme)
+        .w(px(300.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(setting)
+        .child(div().h(px(1.0)).bg(theme.border))
+        .child(agent)
+        .child(state)
+        .into_any_element()
+}
+
+fn compaction_morph_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
+    const DONE_AT: f32 = 2.6;
+    let done = t >= DONE_AT;
+    let swap = ramp(t, DONE_AT, 200.0, motion::EASE_OUT);
+    let fill = ramp(t, DONE_AT, 320.0, motion::EASE_OUT)
+        * (1.0 - ramp(t, DONE_AT + 0.77, 400.0, motion::EASE_OUT));
+    let streak = 1.0 - ramp(t, DONE_AT, 300.0, motion::EASE_OUT);
+    let sweep = (t * 0.8).fract();
+    let rule = |toward_left: bool| {
+        let green = div()
+            .absolute()
+            .top_0()
+            .h_full()
+            .w(relative(fill))
+            .bg(theme.success.opacity(0.8));
+        let streak_bar = div()
+            .absolute()
+            .top_0()
+            .h_full()
+            .w(relative(0.25))
+            .bg(theme.accent.opacity(streak * (1.0 - sweep)));
+        let (green, streak_bar) = if toward_left {
+            (green.right_0(), streak_bar.right(relative(sweep * 0.75)))
+        } else {
+            (green.left_0(), streak_bar.left(relative(sweep * 0.75)))
+        };
+        div()
+            .flex_1()
+            .h(px(1.0))
+            .relative()
+            .bg(theme.border)
+            .child(green)
+            .when(streak > 0.0 && !reduced, |el| el.child(streak_bar))
+    };
+    let icon = if done {
+        div()
+            .opacity(swap)
+            .child(glyph(icons::LUCIDE_CHECK, 13.0, theme.success))
+            .into_any_element()
+    } else {
+        running(theme, reduced)
+    };
+    let label = div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .child(
+            div()
+                .size(px(14.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon),
+        )
+        .child(text(
+            12.0,
+            theme.text_muted,
+            if done { "Compacted" } else { "Compacting" },
+        ))
+        .child(text(11.0, theme.text_faint, "\u{b7} 120.0k"))
+        .when(done, |el| {
+            el.child(text(11.0, theme.text_faint, "\u{2192} 40.2k").opacity(swap))
+        })
+        .child(div().w(px(16.0 * swap)).overflow_hidden().child(glyph(
+            icons::LUCIDE_CHEVRON_RIGHT,
+            12.0,
+            theme.text_faint,
+        )));
+    div()
+        .w(px(400.0))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .child(rule(true))
+        .child(label)
+        .child(rule(false))
+        .into_any_element()
+}
+
+fn swipe_dot_visual(theme: &Theme, t: f32) -> AnyElement {
+    const DRAG_AT: f32 = 0.5;
+    const ARM_AT: f32 = 1.25;
+    const COMMIT_AT: f32 = 2.0;
+    const WIDTH: f32 = 300.0;
+    const DOT: f32 = 44.0;
+    let committed = t >= COMMIT_AT;
+    let armed = ramp(t, ARM_AT, 200.0, motion::EASE_BOUNCE);
+    let pop = ramp(t, COMMIT_AT, 200.0, motion::EASE_TAILWIND);
+    let enter = ramp(t, COMMIT_AT, 260.0, motion::EASE_OUT_QUINT);
+    let center = -24.0 + 58.0 * ramp(t, DRAG_AT, 750.0, motion::EASE_OUT);
+    let size = DOT * (1.0 + 0.1 * armed) * (1.0 - 0.88 * pop);
+    let line = |width: f32| {
+        div()
+            .h(px(7.0))
+            .w(px(width))
+            .rounded_full()
+            .bg(theme.wash(0.1))
+    };
+    let page = |title: &'static str| {
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(px(WIDTH))
+            .p(px(12.0))
+            .pl(px(24.0))
+            .flex()
+            .flex_col()
+            .gap(px(7.0))
+            .child(text(11.5, theme.text, title).font_weight(gpui::FontWeight::MEDIUM))
+            .child(line(170.0))
+            .child(line(220.0))
+            .child(line(140.0))
+    };
+    let current = if committed {
+        page("Fix login redirect")
+            .left(px(-12.0 * (1.0 - enter)))
+            .opacity(enter)
+    } else {
+        page("Ship the shop").left_0()
+    };
+    let dot = div()
+        .absolute()
+        .top(relative(0.5))
+        .mt(px(-size / 2.0))
+        .left(px(center - size / 2.0))
+        .size(px(size))
+        .rounded_full()
+        .border_1()
+        .border_color(theme.border)
+        .shadow_md()
+        .bg(theme.surface_raised)
+        .opacity(1.0 - ((pop - 0.55) / 0.45).clamp(0.0, 1.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(glyph(
+            icons::LUCIDE_CHEVRON_LEFT,
+            (16.0 + 2.0 * armed) * (1.0 - 0.88 * pop),
+            theme.text.opacity(0.45 + 0.55 * armed.min(1.0)),
+        ));
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .child(
+            card(theme)
+                .w(px(WIDTH))
+                .h(px(96.0))
+                .relative()
+                .overflow_hidden()
+                .child(current)
+                .when(t >= DRAG_AT && pop < 1.0, |el| el.child(dot)),
+        )
+        .child(text(
+            11.0,
+            theme.text_faint,
+            match t {
+                t if t < ARM_AT => "Swipe back and a round button slides in",
+                t if t < COMMIT_AT => "It darkens once letting go will go back",
+                _ => "Let go and it shrinks to a dot",
+            },
+        ))
         .into_any_element()
 }

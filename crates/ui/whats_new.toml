@@ -14,6 +14,54 @@ description = "When another thread asks you something, the Supervisor needs a de
 details = "Esc, a click outside or another click on the pill closes the card and keeps what you typed. On New chat the card opens below the pill. The titlebar pill and the Cmd+I tray now hold what is running, failed threads and Task rows; on New chat the Needs you card's Answer and Review buttons open the same card."
 visual = "answer-pill"
 
+[[entry.features]]
+id = "keep-awake"
+title = "Your Mac stays awake while agents work"
+description = "While an agent on this Mac is working, Zeron keeps the Mac from sleeping, and lets it sleep again a minute after the last one stops. Turn it off in Settings > General, under Power, with Keep this Mac awake while agents work."
+details = "The display can still turn off; only system sleep is held back."
+visual = "keep-awake"
+
+[[entry.features]]
+id = "upstream-0-2-131"
+title = "From upstream Zeron: background processes"
+description = "Shells an agent leaves running, from Claude Code or Codex, show in the shells pill above the composer. Open one to read its output as it arrives, copy it, or stop it."
+details = "Streaming chats no longer leak memory."
+
+[[entry.improvements]]
+text = "The agents and shells pills are back above the composer and read like \"2 Working · ✓ 1 Done\". The agents pill also lists running forks, side chats and threads an agent started, and the ones this turn started stay listed with a Done mark after they finish."
+
+[[entry.improvements]]
+text = "An agent's detail in the agents pill reads like the chat: grouped tool rows, a folded Thought process and formatted replies, instead of raw labels and JSON."
+
+[[entry.improvements]]
+text = "The titlebar pill shows the marks of the agents that are running with \"2 Working\", then an icon and \"1 Asking\", \"1 Failed\" or \"1 Need you\". Cmd+I is in its tooltip."
+
+[[entry.improvements]]
+text = "Subagents wear their provider's mark instead of a robot."
+
+[[entry.improvements]]
+text = "Compaction is one centered divider, and Compacting turns into Compacted in place instead of swapping cards. The composer chip shows the same spinner and words."
+visual = "compaction-morph"
+
+[[entry.improvements]]
+text = "A two-finger swipe back or forward slides a round button in from the edge. Its arrow darkens once letting go will move, and on release it shrinks to a dot and disappears."
+visual = "swipe-dot"
+
+[[entry.improvements]]
+text = "The Usage page lines its cards up under the title in two columns, and Extra Usage that is off takes one quiet line."
+
+[[entry.improvements]]
+text = "Mark chats read on the Needs you card, the Cmd+I tray and the sidebar Inbox header clears unread chats in one click."
+
+[[entry.improvements]]
+text = "Settings opens and closes at once, without a fade. Its search finds the controls the new layout had hidden from it, such as Compaction, Predictions, Chat and Terminal background, Glass tint, Tools, Routing and Code review, and a hovered result highlights as a rounded row."
+
+[[entry.improvements]]
+text = "The Side chat tab and Cmd+; hide the side chat when it is already showing, and the side chat pane paints the chat background."
+
+[[entry.improvements]]
+text = "On iPhone, HTML pages load in parallel chunks and say why a page failed, and /usage opens the Usage page."
+
 [[entry]]
 version = "0.2.131"
 date = "Oct 31"
