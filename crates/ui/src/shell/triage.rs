@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::composer::{AskInfo, WaitItem, WaitKind, WaitingAction};
+use crate::provider_instances::InstanceIcon;
 
 const TRAY_WIDTH: f32 = 450.0;
 const TRAY_RADIUS: f32 = 12.0;
@@ -568,18 +569,51 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
-        let needs = triage.needs.iter().filter(|row| !row.kind.waits()).count();
+        let needs: Vec<&NeedKind> = triage
+            .needs
+            .iter()
+            .map(|row| &row.kind)
+            .filter(|kind| !kind.waits())
+            .collect();
         let running = triage.running.len();
         let mounted = self.triage.popup.get().is_some();
-        if needs == 0 && running == 0 && !mounted {
+        if needs.is_empty() && running == 0 && !mounted {
             return None;
         }
         let open = self.triage.popup.is_open();
-        let dot = |color: gpui::Hsla| div().size(px(7.0)).flex_none().rounded_full().bg(color);
-        let label = match (needs, running) {
-            (0, r) => format!("{r} running"),
-            (n, 0) => format!("{n} need you"),
-            (n, r) => format!("{n} need you · {r} running"),
+        let marks = {
+            let state = self.state.read(cx);
+            let marks: Vec<InstanceIcon> = triage
+                .running
+                .iter()
+                .map(|row| {
+                    state
+                        .chats
+                        .iter()
+                        .find(|chat| chat.id == row.chat_id)
+                        .and_then(|chat| crate::pickers::chat_mark(chat, cx))
+                        .unwrap_or_else(|| {
+                            let (mark, tint) = crate::pickers::agent_brand_icon(
+                                state.chat_harness(&row.chat_id),
+                                None,
+                            );
+                            InstanceIcon::Brand(mark, tint)
+                        })
+                })
+                .collect();
+            pill_marks(marks)
+        };
+        let badge = needs_badge(&needs, &theme);
+        let working = format!("{running} Working");
+        let needing = badge.map(|(_, _, word)| format!("{} {word}", needs.len()));
+        let label = [(running > 0).then(|| working.clone()), needing.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ring = gpui::Hsla {
+            a: 1.0,
+            ..theme.surface
         };
         let pill = div()
             .id("triage-pill")
@@ -587,68 +621,51 @@ impl Shell {
             .role(gpui::Role::Button)
             .aria_label(SharedString::from(label))
             .aria_expanded(open)
-            .h(px(28.0))
+            .h(px(26.0))
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(7.0))
-            .pl(px(9.0))
-            .pr(px(6.0))
-            .rounded(px(14.0))
+            .gap(px(8.0))
+            .pl(px(if running > 0 { 5.0 } else { 9.0 }))
+            .pr(px(9.0))
+            .rounded(px(13.0))
             .border_1()
             .border_color(theme.border)
             .bg(if open {
-                theme.wash(0.08)
+                theme.element_hover
             } else {
-                crate::motion::hover_blend("triage-pill", theme.surface_card, theme.wash(0.06))
+                crate::motion::hover_blend(
+                    "triage-pill",
+                    theme.element_hover.opacity(0.0),
+                    theme.element_hover,
+                )
             })
             .on_hover(crate::motion::hover_listener("triage-pill"))
             .cursor_pointer()
             .text_size(crate::typography::ui_rems(12.5))
-            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.text)
             .whitespace_nowrap()
-            .when(needs > 0, |el| {
-                el.child(dot(theme.accent)).child(
-                    div()
-                        .text_color(theme.accent)
-                        .child(SharedString::from(format!("{needs} need you"))),
-                )
-            })
-            .when(needs > 0 && running > 0, |el| {
-                el.child(div().text_color(theme.text_muted).child("·"))
-            })
             .when(running > 0, |el| {
-                el.child(dot(chat_status_tone(
-                    zeron_proto::ChatIndicator::Working,
-                    &theme,
-                )
-                .2))
-                    .child(
-                        div()
-                            .text_color(theme.text_muted)
-                            .font_weight(gpui::FontWeight::NORMAL)
-                            .child(SharedString::from(format!("{running} running"))),
-                    )
+                el.child(mark_chips(&marks, ring, &theme))
+                    .child(SharedString::from(working))
             })
-            .child(
-                div()
-                    .ml(px(2.0))
-                    .px(px(5.0))
-                    .h(px(18.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(5.0))
-                    .bg(theme.wash(0.06))
-                    .child(popover::kbd_hint(
-                        &theme,
-                        &crate::settings::badge_combo(
-                            self.settings.keymap.get(ShortcutId::ToggleTray),
-                        ),
-                    )),
-            )
-            .tooltip(crate::settings::widgets::text_tooltip(
-                "What needs you and what is running",
-            ))
+            .when(running > 0 && badge.is_some(), |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .w(px(1.0))
+                        .h(px(12.0))
+                        .bg(theme.border_strong),
+                )
+            })
+            .when_some(badge.zip(needing), |el, ((glyph, tint, _), text)| {
+                el.child(icons::icon(glyph).size(px(15.0)).text_color(tint))
+                    .child(SharedString::from(text))
+            })
+            .tooltip(crate::settings::widgets::text_tooltip(format!(
+                "What needs you and what is running · {}",
+                crate::settings::badge_combo(self.settings.keymap.get(ShortcutId::ToggleTray))
+            )))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -1716,6 +1733,107 @@ fn row_text(
         )
 }
 
+const PILL_MARKS: usize = 3;
+const MARK_CHIP: f32 = 18.0;
+const MARK_RING: f32 = 1.5;
+const MARK_STEP: f32 = MARK_CHIP - 5.0;
+
+fn pill_marks(marks: Vec<InstanceIcon>) -> (Vec<InstanceIcon>, usize) {
+    let mut distinct: Vec<InstanceIcon> = Vec::new();
+    for mark in marks {
+        if !distinct.contains(&mark) {
+            distinct.push(mark);
+        }
+    }
+    let more = distinct.len().saturating_sub(PILL_MARKS);
+    distinct.truncate(PILL_MARKS);
+    (distinct, more)
+}
+
+fn needs_badge(
+    needs: &[&NeedKind],
+    theme: &Theme,
+) -> Option<(&'static str, gpui::Hsla, &'static str)> {
+    if needs.is_empty() {
+        return None;
+    }
+    let failed = |kind: &&NeedKind| matches!(kind, NeedKind::Failed);
+    let asking = |kind: &&NeedKind| matches!(kind, NeedKind::Asking(None));
+    let alert = |tint| (icons::LUCIDE_CIRCLE_ALERT, tint);
+    let ask = (
+        icons::LUCIDE_MESSAGE_CIRCLE_QUESTION,
+        chat_status_tone(zeron_proto::ChatIndicator::AwaitingInput, theme).2,
+    );
+    let ((glyph, tint), word) = if needs.iter().all(failed) {
+        (alert(theme.danger), "Failed")
+    } else if needs.iter().all(asking) {
+        (ask, "Asking")
+    } else if needs.iter().any(failed) {
+        (alert(theme.danger), "Need you")
+    } else if needs.iter().any(asking) {
+        (ask, "Need you")
+    } else {
+        (alert(theme.warning), "Need you")
+    };
+    Some((glyph, tint, word))
+}
+
+fn mark_chips(
+    (marks, more): &(Vec<InstanceIcon>, usize),
+    ring: gpui::Hsla,
+    theme: &Theme,
+) -> gpui::Div {
+    let chip = |fill: gpui::Hsla, content: AnyElement| {
+        div()
+            .size(px(MARK_CHIP + MARK_RING * 2.0))
+            .rounded_full()
+            .bg(ring)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .size(px(MARK_CHIP))
+                    .rounded_full()
+                    .bg(fill)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(content),
+            )
+    };
+    let mut chips: Vec<gpui::Div> = marks
+        .iter()
+        .map(|mark| {
+            chip(
+                theme.surface_card,
+                mark.svg(theme.text).size(px(11.0)).into_any_element(),
+            )
+        })
+        .collect();
+    if *more > 0 {
+        chips.push(chip(
+            theme.wash(0.06),
+            div()
+                .text_size(crate::typography::ui_rems(10.0))
+                .text_color(theme.text_muted)
+                .child(SharedString::from(format!("+{more}")))
+                .into_any_element(),
+        ));
+    }
+    let width = MARK_CHIP + MARK_STEP * chips.len().saturating_sub(1) as f32;
+    div()
+        .flex_none()
+        .relative()
+        .w(px(width))
+        .h(px(MARK_CHIP))
+        .children(chips.into_iter().enumerate().map(|(ix, chip)| {
+            chip.absolute()
+                .top(px(-MARK_RING))
+                .left(px(MARK_STEP * ix as f32 - MARK_RING))
+        }))
+}
+
 fn need_row_shell(row: &ShownRow, theme: &Theme) -> gpui::Div {
     let (glyph, tint) = match &row.kind {
         NeedKind::Failed => (icons::LUCIDE_CIRCLE_ALERT, theme.danger),
@@ -1787,6 +1905,52 @@ fn empty_line(theme: &Theme, text: &'static str) -> AnyElement {
 mod tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
+
+    #[test]
+    fn pill_stacks_distinct_providers_and_names_the_need() {
+        let mark = |harness| InstanceIcon::harness(harness);
+        let (shown, more) = pill_marks(vec![
+            mark(zeron_proto::HarnessId::ClaudeCode),
+            mark(zeron_proto::HarnessId::Codex),
+            mark(zeron_proto::HarnessId::ClaudeCode),
+            mark(zeron_proto::HarnessId::Cursor),
+            mark(zeron_proto::HarnessId::Grok),
+            mark(zeron_proto::HarnessId::Pi),
+        ]);
+        assert_eq!(
+            shown,
+            [
+                mark(zeron_proto::HarnessId::ClaudeCode),
+                mark(zeron_proto::HarnessId::Codex),
+                mark(zeron_proto::HarnessId::Cursor),
+            ]
+        );
+        assert_eq!(more, 2);
+
+        let theme = Theme::default();
+        let task = NeedKind::Task {
+            task_id: "t".into(),
+            title: "t".into(),
+            reason: zeron_proto::NeedsYou::Review,
+        };
+        let ask = NeedKind::Asking(None);
+        let word = |needs: &[&NeedKind]| needs_badge(needs, &theme);
+        let tone = chat_status_tone(zeron_proto::ChatIndicator::AwaitingInput, &theme).2;
+        let alert = icons::LUCIDE_CIRCLE_ALERT;
+        let question = icons::LUCIDE_MESSAGE_CIRCLE_QUESTION;
+        assert_eq!(word(&[]), None);
+        assert_eq!(
+            word(&[&NeedKind::Failed, &NeedKind::Failed]),
+            Some((alert, theme.danger, "Failed"))
+        );
+        assert_eq!(word(&[&ask]), Some((question, tone, "Asking")));
+        assert_eq!(
+            word(&[&ask, &NeedKind::Failed]),
+            Some((alert, theme.danger, "Need you"))
+        );
+        assert_eq!(word(&[&ask, &task]), Some((question, tone, "Need you")));
+        assert_eq!(word(&[&task]), Some((alert, theme.warning, "Need you")));
+    }
 
     #[gpui::test]
     fn triage_lists_every_thread_that_needs_you_or_still_runs(cx: &mut TestAppContext) {
