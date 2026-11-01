@@ -67,7 +67,7 @@ impl TitleGenerator {
         }
         let this = self.clone();
         let chat_id = chat_id.to_string();
-        let prompt = prompt.to_string();
+        let prompt = zeron_proto::invocation::harness_prompt(prompt, harness);
         let cwd = cwd.to_string();
         tokio::spawn(async move {
             if let Err(err) = this
