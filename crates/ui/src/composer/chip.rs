@@ -7,16 +7,33 @@ pub(crate) enum ChipAttachment {
     Image(std::sync::Arc<gpui::Image>),
     PastedText(Option<SharedString>),
     File,
+    Linked {
+        label: SharedString,
+        path: SharedString,
+    },
 }
 
 impl ChipAttachment {
     pub(super) fn of(att: &crate::attachments::StagedAttachment) -> Self {
+        if let Some((path, size)) = att.linked() {
+            return Self::linked(&att.name, Some(size), path);
+        }
         match att.image() {
             Some(image) => Self::Image(image.clone()),
             None if att.is_pasted_text() => {
                 Self::PastedText(crate::pasted_text::chip_preview(att.bytes()))
             }
             None => Self::File,
+        }
+    }
+
+    pub(crate) fn linked(name: &str, size: Option<u64>, path: &str) -> Self {
+        Self::Linked {
+            label: match size {
+                Some(size) => format!("{name} · {}", crate::attachments::size_label(size)).into(),
+                None => SharedString::from(name.to_owned()),
+            },
+            path: SharedString::from(path.to_owned()),
         }
     }
 
@@ -31,6 +48,9 @@ impl PartialEq for ChipAttachment {
             (Self::Image(a), Self::Image(b)) => std::sync::Arc::ptr_eq(a, b),
             (Self::PastedText(a), Self::PastedText(b)) => a == b,
             (Self::File, Self::File) => true,
+            (Self::Linked { label: a, path: x }, Self::Linked { label: b, path: y }) => {
+                a == b && x == y
+            }
             _ => false,
         }
     }
@@ -43,6 +63,7 @@ impl PartialEq for ChipAttachment {
 pub(super) const CHIP_ICON_SLOT: &str = "\u{00A0}\u{00A0}\u{00A0}\u{00A0}\u{00A0}";
 /// Breathing room after a chip's label.
 pub(super) const CHIP_TRAILING_PAD: &str = "\u{00A0}\u{00A0}";
+pub(super) const CHIP_LINK_SLOT: &str = "\u{00A0}\u{00A0}\u{00A0}\u{00A0}";
 /// The bundled face a chip's padding is shaped in. A space's advance follows
 /// the font (Geist Mono's is 2.4× Geist's), and the counts above are tuned to
 /// Geist, so pinning the padding keeps every chip's icon slot and insets the
@@ -94,6 +115,11 @@ pub(crate) fn chip_pad_ranges(range: &Range<usize>) -> [Range<usize>; 2] {
         .saturating_sub(CHIP_TRAILING_PAD.len())
         .max(lead_end);
     [range.start..lead_end, trail_start..range.end]
+}
+
+pub(crate) fn chip_link_slot(range: &Range<usize>) -> Range<usize> {
+    let end = range.end.saturating_sub(CHIP_TRAILING_PAD.len());
+    end.saturating_sub(CHIP_LINK_SLOT.len())..end
 }
 
 /// How far to move a chip's pill down from the middle of its row, which

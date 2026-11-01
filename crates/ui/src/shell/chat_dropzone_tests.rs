@@ -382,10 +382,11 @@ fn staged_names(composer: &Entity<Composer>, cx: &App) -> Vec<String> {
 
 /// A mixed drop from outside the app lands in the conversation it is released
 /// over, main or side chat: the archive and the image are staged with chips in
-/// that draft, and the folder and the oversize file are both named in that
-/// composer's error notice. Composers not yet dropped on stay untouched.
+/// that draft, the oversize file is linked by its path with a chip of its own,
+/// and the folder is named in that composer's error notice. Composers not yet
+/// dropped on stay untouched.
 #[gpui::test]
-fn external_file_drops_stage_files_and_refuse_folders_and_oversize_files(cx: &mut TestAppContext) {
+fn external_file_drops_stage_files_link_oversize_files_and_refuse_folders(cx: &mut TestAppContext) {
     use zeron_proto::attachment_mentions::attachment_mention_link;
     let (shell, cx) = setup_with_shell(cx, true);
     let (_files, paths) = external_files();
@@ -418,21 +419,26 @@ fn external_file_drops_stage_files_and_refuse_folders_and_oversize_files(cx: &mu
             let dropped = composer(shell, target);
             assert_eq!(
                 staged_names(&dropped, cx),
-                ["notes.zip", "Image 2.png"],
+                ["notes.zip", "Image 2.png", "huge.bin"],
+                "target={target:?}"
+            );
+            assert!(
+                dropped.read(cx).staged()[2].linked().is_some(),
                 "target={target:?}"
             );
             assert_eq!(
                 text(&dropped, cx),
                 format!(
-                    "{} {} ",
+                    "{} {} {} ",
                     attachment_mention_link(1, Some("notes.zip")),
-                    attachment_mention_link(2, None)
+                    attachment_mention_link(2, None),
+                    attachment_mention_link(3, Some("huge.bin"))
                 ),
                 "target={target:?}"
             );
             assert_eq!(
                 dropped.read(cx).visible_failure().as_deref(),
-                Some("folder is not a file. huge.bin is too large (24 MB max)."),
+                Some("folder is not a file."),
                 "target={target:?}"
             );
             for other in targets[n + 1..].iter().map(|other| composer(shell, *other)) {

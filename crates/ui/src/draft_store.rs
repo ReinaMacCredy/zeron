@@ -104,6 +104,8 @@ struct PersistedAttachment {
     is_file: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mention: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    linked: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -398,6 +400,20 @@ fn restore_entry(entry: PersistedEntry) -> DraftEntry {
 }
 
 fn restore_attachment(persisted: PersistedAttachment) -> Option<StagedAttachment> {
+    if persisted.linked {
+        return match crate::attachments::link_file(&persisted.path) {
+            Ok(mut staged) => {
+                staged.id = persisted.id;
+                staged.name = persisted.name;
+                staged.mention = persisted.mention;
+                Some(staged)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, path = %persisted.path.display(), "draft attachment missing; dropped");
+                None
+            }
+        };
+    }
     let format = if persisted.is_file {
         None
     } else {
@@ -496,6 +512,16 @@ fn persist_attachment(
     att: &StagedAttachment,
     referenced: &mut Vec<PathBuf>,
 ) -> io::Result<PersistedAttachment> {
+    if let Some((path, _)) = att.linked() {
+        return Ok(PersistedAttachment {
+            id: att.id.clone(),
+            name: att.name.clone(),
+            path: PathBuf::from(path),
+            is_file: true,
+            mention: att.mention,
+            linked: true,
+        });
+    }
     let ext = Path::new(&att.name)
         .extension()
         .and_then(|e| e.to_str())
@@ -511,6 +537,7 @@ fn persist_attachment(
         path,
         is_file: att.image().is_none(),
         mention: att.mention,
+        linked: false,
     })
 }
 
