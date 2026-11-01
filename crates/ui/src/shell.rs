@@ -25518,6 +25518,14 @@ mod settings_modal_regressions {
             assert_eq!((closed.panel, closed.backdrop), (0.0, 0.0));
             assert!(closed.settled);
         }
+        let halfway = motion::SETTINGS_OUT
+            .total()
+            .mul_f32(motion::speed_scale() / 2.0);
+        let closing = settings_fade(true, halfway, false);
+        assert!(
+            closing.panel < 0.5 && closing.backdrop < 0.5,
+            "the close eases out like the open, not holding then cutting: {closing:?}"
+        );
     }
 
     #[test]
