@@ -149,6 +149,7 @@ pub(super) struct TriageTray {
     focus: Option<FocusHandle>,
     rows: Exits,
     card_rows: Exits,
+    card_dim: [Option<crate::motion::Tween>; 3],
     ticker: Option<Task<()>>,
     asks: Vec<(String, usize, bool)>,
     frame: std::rc::Rc<Triage>,
@@ -930,7 +931,14 @@ impl Shell {
                         "Needs you",
                         need_count,
                         popup.accent,
-                        unread.then(|| mark_all_read_button(&popup, "triage-mark-all-read", cx)),
+                        unread.then(|| {
+                            mark_all_read_button(
+                                &popup,
+                                "triage-mark-all-read",
+                                "Mark chats read",
+                                cx,
+                            )
+                        }),
                     ))
                     .children(need_rows)
                     .child(section_heading(
@@ -1125,7 +1133,6 @@ impl Shell {
 impl Shell {
     pub(super) fn render_new_work_cards(
         &mut self,
-        width: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1302,41 +1309,69 @@ impl Shell {
             cx,
         );
 
-        let gap = 10.0;
-        let unit = ((width - 2.0 * gap) / 3.4).max(0.0);
+        let mut dims = [0.0; 3];
+        let empties = [
+            need_rows.is_empty(),
+            run_rows.is_empty(),
+            recent_rows.is_empty(),
+        ];
+        for (dim, (slot, empty)) in dims
+            .iter_mut()
+            .zip(self.triage.card_dim.iter_mut().zip(empties))
+        {
+            let target = if empty { 1.0 } else { 0.0 };
+            let tween = slot.get_or_insert_with(|| crate::motion::Tween::at(target, now));
+            if tween.target() != target {
+                tween.retarget(target, crate::motion::FADE_QUICK, reduced, now);
+            }
+            animating |= !tween.settled_at(now);
+            *dim = tween.value_at(now);
+        }
+        let swap = if unread {
+            crate::motion::hover_t("card-needs")
+        } else {
+            0.0
+        };
         if animating {
             window.request_animation_frame();
         }
         div()
             .id("new-work-cards")
             .debug_selector(|| "new-work-cards".into())
-            .w(px(width))
-            .mx_auto()
+            .w_full()
             .flex()
-            .items_start()
-            .gap(px(gap))
+            .items_stretch()
             .text_size(crate::typography::ui_rems(13.0))
-            .child(work_card(
-                &theme,
-                "card-needs",
-                icons::BELL,
-                "Needs you",
-                Some(triage.needs.len()),
-                unit * 1.4,
-                need_rows,
-                needs_more,
-                unread.then(|| mark_all_read_button(&theme, "card-mark-all-read", cx)),
-            ))
+            .child(
+                work_card(
+                    &theme,
+                    "card-needs",
+                    icons::BELL,
+                    "Needs you",
+                    Some(triage.needs.len()),
+                    need_rows,
+                    needs_more,
+                    unread.then(|| {
+                        mark_all_read_button(&theme, "card-mark-all-read", "Mark read", cx)
+                    }),
+                    swap,
+                    dims[0],
+                    true,
+                )
+                .on_hover(crate::motion::hover_listener("card-needs")),
+            )
             .child(work_card(
                 &theme,
                 "card-running",
                 icons::SPEEDOMETER,
                 "Running",
                 Some(triage.running.len()),
-                unit,
                 run_rows,
                 running_more,
                 None,
+                0.0,
+                dims[1],
+                false,
             ))
             .child(work_card(
                 &theme,
@@ -1344,10 +1379,12 @@ impl Shell {
                 icons::CLOCK_CIRCLE,
                 "Recent",
                 None,
-                unit,
                 recent_rows,
                 None,
                 None,
+                0.0,
+                dims[2],
+                false,
             ))
             .into_any_element()
     }
@@ -1577,27 +1614,26 @@ fn work_card(
     glyph: &'static str,
     title: &'static str,
     count: Option<usize>,
-    width: f32,
     rows: Vec<AnyElement>,
     more: Option<AnyElement>,
     action: Option<AnyElement>,
-) -> AnyElement {
+    swap: f32,
+    dim: f32,
+    first: bool,
+) -> gpui::Stateful<gpui::Div> {
     let empty = rows.is_empty();
     div()
         .id(id)
         .debug_selector(move || id.into())
         .role(gpui::Role::Group)
         .aria_label(title)
-        .w(px(width))
-        .flex_none()
+        .flex_1()
         .min_w_0()
         .pt(px(10.0))
         .px(px(8.0))
         .pb(px(8.0))
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface_card)
+        .when(!first, |el| el.border_l_1().border_color(theme.border))
+        .opacity(1.0 - 0.55 * dim)
         .child(
             div()
                 .flex()
@@ -1613,15 +1649,31 @@ fn work_card(
                 .child(
                     div()
                         .ml_auto()
+                        .relative()
+                        .h(px(20.0))
                         .flex()
                         .items_center()
-                        .gap(px(6.0))
-                        .children(action)
-                        .children(count.map(|count| {
-                            div()
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .child(SharedString::from(count.to_string()))
-                        })),
+                        .when(!empty, |el| {
+                            el.children(count.map(|count| {
+                                div()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .opacity(1.0 - swap)
+                                    .child(SharedString::from(count.to_string()))
+                            }))
+                        })
+                        .when(swap > 0.001, |el| {
+                            el.children(action.map(|action| {
+                                div()
+                                    .absolute()
+                                    .right(px(-4.0))
+                                    .top_0()
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .opacity(swap)
+                                    .child(action)
+                            }))
+                        }),
                 ),
         )
         .children(rows)
@@ -1636,12 +1688,12 @@ fn work_card(
             )
         })
         .children(more)
-        .into_any_element()
 }
 
 pub(super) fn mark_all_read_button(
     theme: &Theme,
     id: &'static str,
+    label: &'static str,
     cx: &mut Context<Shell>,
 ) -> AnyElement {
     div()
@@ -1674,7 +1726,7 @@ pub(super) fn mark_all_read_button(
                 .size(px(12.0))
                 .text_color(theme.text_muted),
         )
-        .child("Mark chats read")
+        .child(label)
         .into_any_element()
 }
 

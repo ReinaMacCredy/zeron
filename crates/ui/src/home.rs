@@ -21,10 +21,8 @@ use crate::settings::HomeWidgets as Toggles;
 use crate::state::AppState;
 use crate::theme::Theme;
 
-const GRID_MAX_WIDTH: f32 = 880.0;
-const GRID_PADDING_X: f32 = 24.0;
 const COLUMN_GAP: f32 = 10.0;
-const CARD_RADIUS: f32 = 16.0;
+const CARD_RADIUS: f32 = 10.0;
 const ROW_HEIGHT: f32 = 28.0;
 const STATS_EVERY: Duration = Duration::from_secs(3);
 const SERVICES_EVERY: Duration = Duration::from_secs(5);
@@ -86,7 +84,6 @@ pub struct HomeView {
     customize: popover::Popup<()>,
     collapse_since: Option<Instant>,
     grid_height: std::rc::Rc<std::cell::Cell<f32>>,
-    composer_inset: f32,
     services: Source<ListeningServices>,
     services_all_ports: bool,
     stats: Source<SystemStats>,
@@ -122,7 +119,6 @@ impl HomeView {
             customize: popover::Popup::default(),
             collapse_since: None,
             grid_height: Default::default(),
-            composer_inset: 0.0,
             services: Source::default(),
             services_all_ports: false,
             stats: Source::default(),
@@ -133,11 +129,6 @@ impl HomeView {
             projects_seen: Vec::new(),
             _ticker: ticker,
         }
-    }
-
-    pub fn set_composer_frame(&mut self, column_width: f32, composer_width: f32) {
-        let row = column_width.min(GRID_MAX_WIDTH) - 2.0 * GRID_PADDING_X;
-        self.composer_inset = ((row - composer_width) / 2.0).max(0.0);
     }
 
     fn visible(&self) -> bool {
@@ -1008,9 +999,13 @@ impl HomeView {
                         .items_center()
                         .gap(px(6.0))
                         .child(dot(theme.success))
-                        .child(div().text_color(theme.text).child(name))
+                        .child(div().flex_none().text_color(theme.text).child(name))
                         .child(
                             div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(theme.text_faint)
                                 .child(format!(
@@ -1787,16 +1782,13 @@ impl Render for HomeView {
         let pill = div()
             .id("home-collapse")
             .debug_selector(|| "home-collapse".into())
-            .h(px(32.0))
-            .pl(px(12.0))
-            .pr(px(6.0))
+            .h(px(28.0))
+            .pl(px(8.0))
+            .pr(px(4.0))
             .flex()
             .items_center()
             .gap(px(8.0))
-            .rounded_full()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.wash(0.03))
+            .rounded(px(7.0))
             .cursor_pointer()
             .hover(|style| style.bg(theme.wash(0.06)))
             .role(gpui::Role::Button)
@@ -1831,29 +1823,27 @@ impl Render for HomeView {
                         .size(px(14.0))
                         .text_color(theme.text_muted)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            std::f32::consts::PI * (1.0 - reveal),
+                            std::f32::consts::PI * reveal,
                         ))),
                 ),
             );
         let header = div()
-            .relative()
-            .h(px(32.0))
+            .h(px(40.0))
+            .px(px(8.0))
             .flex()
-            .justify_center()
+            .items_center()
+            .border_t_1()
+            .border_color(theme.border)
             .child(pill)
-            .child(
-                div()
-                    .absolute()
-                    .right(px(self.composer_inset * (1.0 - reveal)))
-                    .top(px(4.0))
-                    .child(customize),
-            );
+            .child(div().ml_auto().child(customize));
         let measured = self.grid_height.clone();
         let natural = measured.get();
         let grid = div()
             .relative()
             .top(px(-8.0 * (1.0 - reveal)))
             .opacity(reveal)
+            .px(px(10.0))
+            .pb(px(10.0))
             .flex()
             .items_start()
             .gap(px(COLUMN_GAP))
@@ -1871,26 +1861,16 @@ impl Render for HomeView {
             .id("home-widgets")
             .w_full()
             .text_size(crate::typography::ui_rems(13.0))
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(GRID_MAX_WIDTH))
-                    .mx_auto()
-                    .px(px(GRID_PADDING_X))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(header)
-                    .when(reveal > 0.0, |el| {
-                        el.child(
-                            div()
-                                .when(reveal < 1.0 && natural > 0.0, |el| {
-                                    el.h(px(natural * reveal)).overflow_hidden()
-                                })
-                                .child(grid),
-                        )
-                    }),
-            )
+            .child(header)
+            .when(reveal > 0.0, |el| {
+                el.child(
+                    div()
+                        .when(reveal < 1.0 && natural > 0.0, |el| {
+                            el.h(px(natural * reveal)).overflow_hidden()
+                        })
+                        .child(grid),
+                )
+            })
     }
 }
 

@@ -17084,7 +17084,6 @@ impl Shell {
             has_selection && !dock_frame.active,
             has_selection,
             chip_opacity,
-            main_content_width,
             window,
             cx,
         );
@@ -17282,13 +17281,11 @@ impl Shell {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_home_grid(
         &mut self,
         settled_in_chat: bool,
         has_selection: bool,
         opacity: f32,
-        column_width: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -17296,7 +17293,7 @@ impl Shell {
             return None;
         }
         let pill = self.composer.read(cx).surface_bounds().get()?;
-        let cards = self.render_new_work_cards(f32::from(pill.size.width), window, cx);
+        let cards = self.render_new_work_cards(window, cx);
         let home = settings::home_widgets(cx).any_visible().then(|| {
             let home = match &self.home_view {
                 Some(home) => home.clone(),
@@ -17315,11 +17312,9 @@ impl Shell {
                     home
                 }
             };
-            home.update(cx, |home, _| {
-                home.set_composer_frame(column_width, f32::from(pill.size.width))
-            });
             home
         });
+        let theme = Theme::of(cx);
         let top = f32::from(pill.bottom()) + HOME_GRID_GAP;
         Some(
             div()
@@ -17340,13 +17335,18 @@ impl Shell {
                             .overflow_y_scroll()
                             .track_scroll(&self.new_work_scroll)
                             .child(
-                                div()
-                                    .pb(px(48.0))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(24.0))
-                                    .child(cards)
-                                    .children(home),
+                                div().pb(px(48.0)).child(
+                                    div()
+                                        .id("home-panel")
+                                        .w(pill.size.width)
+                                        .mx_auto()
+                                        .rounded(px(12.0))
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .bg(theme.surface_card)
+                                        .child(cards)
+                                        .children(home),
+                                ),
                             ),
                     )
                     .fade_overflow_y(&self.new_work_scroll),
