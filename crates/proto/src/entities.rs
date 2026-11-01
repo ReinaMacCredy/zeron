@@ -1245,11 +1245,13 @@ pub struct BackgroundTask {
     pub id: String,
     /// The command line, or the agent's description of it when the runtime
     /// never said what it runs.
+    #[serde(alias = "label", default)]
     pub command: String,
     /// The agent's one-line description, when it gave one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// When the host first saw it running.
+    #[serde(default = "Utc::now")]
     pub started_at: DateTime<Utc>,
     #[serde(default)]
     pub kind: BackgroundTaskKind,
@@ -3262,6 +3264,25 @@ mod tests {
             WorkspaceReadOnlyReason::Symlink,
             "older peers keep parsing every reason they knew"
         );
+    }
+
+    #[test]
+    fn sessions_from_an_engine_that_predates_the_command_field_still_parse() {
+        let sessions: Vec<Session> = serde_json::from_value(serde_json::json!([{
+            "chatId": "c", "deviceId": "dev", "status": "idle",
+            "heldBySubagents": false, "compacting": false,
+            "updatedAt": "2026-11-01T13:39:40Z",
+            "backgroundTasks": [
+                {"id": "b1", "kind": "shell", "label": "Build Dev 71",
+                 "startedAt": "2026-11-01T13:37:41Z"},
+                {"id": "b2", "kind": "shell", "label": "Wait for the tests"}
+            ]
+        }]))
+        .unwrap();
+        let tasks = &sessions[0].background_tasks;
+        assert_eq!(tasks[0].command, "Build Dev 71");
+        assert_eq!(tasks[0].kind, BackgroundTaskKind::Shell);
+        assert_eq!(tasks[1].command, "Wait for the tests");
     }
 
     #[test]
