@@ -51,6 +51,13 @@ visual = "swipe-dot"
 text = "The Usage page lines its cards up under the title in two columns, and Extra Usage that is off takes one quiet line."
 
 [[entry.improvements]]
+text = "Dragging a tab moves the tab itself along the strip, the way Chrome does. Pull it below the strip and it becomes a thumbnail while a split card slides in from each edge, white on light themes and black on dark; drop it on one to split."
+visual = "tab-drag"
+
+[[entry.improvements]]
+text = "A file over 24 MB is linked by its path instead of refused. Its chip shows the size and a link mark, and the agent opens the file where it is."
+
+[[entry.improvements]]
 text = "Mark chats read on the Needs you card, the Cmd+I tray and the sidebar Inbox header clears unread chats in one click."
 
 [[entry.improvements]]

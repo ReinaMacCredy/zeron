@@ -25,8 +25,9 @@ const ANSWER_PILL: &str = "answer-pill";
 const KEEP_AWAKE: &str = "keep-awake";
 const COMPACTION_MORPH: &str = "compaction-morph";
 const SWIPE_DOT: &str = "swipe-dot";
+const TAB_DRAG: &str = "tab-drag";
 
-pub(super) const VISUALS: [(&str, f32, f32); 23] = [
+pub(super) const VISUALS: [(&str, f32, f32); 24] = [
     (CLAUDE_CONFIG, 7.0, 3.4),
     (COMMAND_CARDS, 6.6, 4.5),
     (COMPACTION_CARD, 7.6, 5.4),
@@ -50,6 +51,7 @@ pub(super) const VISUALS: [(&str, f32, f32); 23] = [
     (KEEP_AWAKE, 6.0, 1.8),
     (COMPACTION_MORPH, 5.2, 4.2),
     (SWIPE_DOT, 4.2, 1.8),
+    (TAB_DRAG, 4.4, 1.8),
 ];
 
 pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyElement {
@@ -77,6 +79,7 @@ pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyEleme
         KEEP_AWAKE => keep_awake_visual(theme, t, reduced),
         COMPACTION_MORPH => compaction_morph_visual(theme, t, reduced),
         SWIPE_DOT => swipe_dot_visual(theme, t),
+        TAB_DRAG => tab_drag_visual(theme, t),
         _ => div().into_any_element(),
     }
 }
@@ -3532,27 +3535,178 @@ fn swipe_dot_visual(theme: &Theme, t: f32) -> AnyElement {
             (16.0 + 2.0 * armed) * (1.0 - 0.88 * pop),
             theme.text.opacity(0.45 + 0.55 * armed.min(1.0)),
         ));
-    div()
+    card(theme)
+        .w(px(WIDTH))
+        .h(px(96.0))
+        .relative()
+        .overflow_hidden()
+        .child(current)
+        .when(t >= DRAG_AT && pop < 1.0, |el| el.child(dot))
+        .into_any_element()
+}
+
+fn tab_drag_visual(theme: &Theme, t: f32) -> AnyElement {
+    const DRAG_AT: f32 = 0.4;
+    const OUT_AT: f32 = 1.5;
+    const AIM_AT: f32 = 2.1;
+    const DROP_AT: f32 = 3.0;
+    const WIDTH: f32 = 300.0;
+    const HEIGHT: f32 = 96.0;
+    const STRIP: f32 = 24.0;
+    const TAB_W: f32 = 84.0;
+    const SLOT: f32 = TAB_W + 4.0;
+    let lerp = motion::lerp;
+    let slide = ramp(t, DRAG_AT, 900.0, motion::EASE_OUT) * 2.0 * SLOT;
+    let out = ramp(t, OUT_AT, 320.0, motion::EASE_OUT);
+    let aim = ramp(t, AIM_AT, 600.0, motion::EASE_OUT);
+    let hot = ramp(t, AIM_AT + 0.4, 160.0, motion::EASE_OUT);
+    let enter = ramp(t, DRAG_AT, 120.0, motion::EASE_OUT);
+    let split = ramp(t, DROP_AT, 260.0, motion::EASE_OUT_QUINT);
+    let page_bg = crate::settings::widgets::block_fill(theme);
+    let line = |width: f32| {
+        div()
+            .h(px(6.0))
+            .w(px(width))
+            .rounded_full()
+            .bg(theme.wash(0.1))
+    };
+    let tab = |title: &'static str, x: f32, selected: bool| {
+        div()
+            .absolute()
+            .top(px(4.0))
+            .left(px(x))
+            .w(px(TAB_W))
+            .h(px(STRIP - 4.0))
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .rounded_t(px(7.0))
+            .when(selected, |el| el.bg(page_bg))
+            .child(text(
+                10.0,
+                if selected {
+                    theme.text
+                } else {
+                    theme.text_muted
+                },
+                title,
+            ))
+    };
+    let sibling = |slot: f32| {
+        let pass = ((slide / SLOT) - slot + 0.5).clamp(0.0, 1.0);
+        8.0 + SLOT * slot - SLOT * motion::EASE_OUT.eval(pass)
+    };
+    let dragged_x = 8.0 + slide;
+    let thumb_x = lerp(dragged_x, lerp(170.0, 30.0, aim), out);
+    let thumb_y = lerp(4.0, lerp(40.0, 44.0, aim), out);
+    let dark = theme.appearance.is_dark();
+    let (fill, rule) = if dark {
+        (gpui::hsla(0.0, 0.0, 0.02, 1.0), gpui::white().opacity(0.16))
+    } else {
+        (gpui::white(), gpui::black().opacity(0.14))
+    };
+    let split_card = |left: bool, lit: f32| {
+        let w = lerp(32.0, lerp(46.0, 60.0, lit), out);
+        let h = lerp(40.0, HEIGHT - STRIP - 16.0, out);
+        let inset = lerp(-w - 12.0, 8.0, enter);
+        div()
+            .absolute()
+            .top(px(STRIP + 8.0))
+            .map(|el| {
+                if left {
+                    el.left(px(inset))
+                } else {
+                    el.right(px(inset))
+                }
+            })
+            .w(px(w))
+            .h(px(h))
+            .rounded(px(10.0))
+            .bg(fill)
+            .shadow_md()
+            .p(px(3.0))
+            .opacity(1.0 - split)
+            .child(
+                div()
+                    .size_full()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(rule)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(glyph(
+                        icons::SPLIT_COLUMNS,
+                        11.0,
+                        theme.text_muted.blend(theme.text.opacity(lit)),
+                    )),
+            )
+    };
+    let column = |title: &'static str| {
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .p(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .overflow_hidden()
+            .child(text(10.5, theme.text, title).font_weight(gpui::FontWeight::MEDIUM))
+            .child(line(110.0))
+            .child(line(80.0))
+    };
+    let page = div()
+        .absolute()
+        .top(px(STRIP))
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .bg(page_bg)
+        .flex()
+        .when(split > 0.0, |el| {
+            el.child(
+                column("Ship the shop")
+                    .flex_none()
+                    .w(px(WIDTH / 2.0 * split))
+                    .border_r_1()
+                    .border_color(theme.border),
+            )
+        })
+        .child(column("Fix login redirect"));
+    let thumb = div()
+        .absolute()
+        .left(px(thumb_x))
+        .top(px(thumb_y))
+        .w(px(lerp(TAB_W, 64.0, out)))
+        .h(px(lerp(STRIP - 4.0, 40.0, out)))
+        .rounded(px(lerp(7.0, 8.0, out)))
+        .bg(page_bg)
+        .when(out > 0.0, |el| {
+            el.border_1().border_color(theme.border_strong).shadow_lg()
+        })
+        .px(px(8.0))
+        .pt(px(lerp(4.0, 6.0, out)))
         .flex()
         .flex_col()
-        .gap(px(10.0))
-        .child(
-            card(theme)
-                .w(px(WIDTH))
-                .h(px(96.0))
-                .relative()
-                .overflow_hidden()
-                .child(current)
-                .when(t >= DRAG_AT && pop < 1.0, |el| el.child(dot)),
-        )
-        .child(text(
-            11.0,
-            theme.text_faint,
-            match t {
-                t if t < ARM_AT => "Swipe back and a round button slides in",
-                t if t < COMMIT_AT => "It darkens once letting go will go back",
-                _ => "Let go and it shrinks to a dot",
-            },
-        ))
+        .gap(px(4.0))
+        .opacity(1.0 - split)
+        .child(text(10.0, theme.text, "Ship the shop"))
+        .child(div().opacity(out).child(line(54.0)))
+        .child(div().opacity(out).child(line(40.0)));
+    card(theme)
+        .w(px(WIDTH))
+        .h(px(HEIGHT))
+        .relative()
+        .overflow_hidden()
+        .child(page)
+        .child(tab("Fix login redirect", sibling(1.0), split > 0.0))
+        .child(tab("Usage page", sibling(2.0), false))
+        .when(t >= DRAG_AT && split < 1.0, |el| {
+            el.child(split_card(true, hot))
+                .child(split_card(false, 0.0))
+        })
+        .when(split < 1.0, |el| el.child(thumb))
         .into_any_element()
 }
