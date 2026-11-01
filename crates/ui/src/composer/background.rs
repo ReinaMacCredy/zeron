@@ -2574,12 +2574,12 @@ mod tests {
         assert!(cx.debug_bounds("background-detail-tokens").is_some());
         assert!(cx.debug_bounds("background-detail-empty").is_some());
         composer.update(cx, |composer, cx| {
-            let feed = composer
+            let detail = composer
                 .background
                 .detail
                 .as_mut()
-                .and_then(|detail| detail.feed.as_mut())
-                .expect("the detail owns a feed");
+                .expect("the detail is open");
+            let feed = detail.feed.as_mut().expect("the detail owns a feed");
             assert_eq!(feed.doc_id, "c1--sub--p1");
             feed.entries = vec![entry(
                 "s1",
@@ -2590,6 +2590,7 @@ mod tests {
                     text: "think".into(),
                 }],
             )];
+            detail.rebuild_rows();
             cx.notify();
         });
         cx.run_until_parked();
