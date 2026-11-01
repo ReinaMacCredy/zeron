@@ -12477,14 +12477,23 @@ impl Shell {
                 path,
                 target,
             } = hit;
-            settings::widgets::card_row(theme, ix == 0)
+            let fill = div()
                 .id(("settings-hit", ix))
                 .debug_selector(move || format!("settings-hit-{title}"))
                 .role(gpui::Role::Button)
                 .aria_label(SharedString::from(format!("{title}, {path}")))
                 .tab_index(0)
+                .mx(px(6.0))
+                .my(px(4.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .min_h(px(52.0))
+                .flex()
+                .items_center()
+                .rounded(px(8.0))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.glass_hover()))
+                .focus_visible(|s| s.bg(theme.glass_hover()))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.clear_settings_search(cx);
                     this.open_settings(page, cx);
@@ -12501,7 +12510,19 @@ impl Shell {
                             theme,
                             vec![div().child(path).into_any_element()],
                         )),
-                )
+                );
+            div()
+                .flex()
+                .flex_col()
+                .when(ix > 0, |el| {
+                    el.child(
+                        div()
+                            .mx(px(16.0))
+                            .h(px(1.0))
+                            .bg(settings::widgets::row_divider(theme)),
+                    )
+                })
+                .child(fill)
         });
         div()
             .id("settings-search-results")
