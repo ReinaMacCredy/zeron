@@ -2175,6 +2175,14 @@ mod tests {
         }
     }
 
+    fn host_device() -> zeron_proto::Device {
+        serde_json::from_value(serde_json::json!({
+            "id": "dev", "name": "Dev", "platform": "macos",
+            "capabilities": [zeron_proto::capabilities::BACKGROUND_TASKS_V1]
+        }))
+        .unwrap()
+    }
+
     #[gpui::test]
     fn pills_render_above_the_composer_and_the_roster_opens(cx: &mut gpui::TestAppContext) {
         use std::{cell::RefCell, rc::Rc};
@@ -2203,6 +2211,7 @@ mod tests {
                 },
             ];
             state.selected_chat = Some("c1".into());
+            state.devices = vec![host_device()];
             state.sessions = vec![
                 session(
                     SessionStatus::Working,
@@ -2543,6 +2552,8 @@ mod tests {
                 (agents.len(), shells.len())
             })
         };
+        assert_eq!(counts(cx), (0, 0));
+        state.update(cx, |state, _| state.devices = vec![host_device()]);
         assert_eq!(counts(cx), (0, 1));
 
         state.update(cx, |state, _| {
