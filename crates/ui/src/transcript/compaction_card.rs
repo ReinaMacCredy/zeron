@@ -2,29 +2,17 @@ use super::*;
 use gpui::Div;
 use zeron_doc::{ClassifierRecord, ClassifierVerdict, CompactionRecord, DecidedBy};
 
-const SETTLE_HOLD: Duration = Duration::from_millis(700);
-const COUNT: Duration = Duration::from_millis(600);
+// Long enough for the rules to fill and fade before the label goes static.
+const SETTLE: Duration = Duration::from_millis(900);
 // The compaction flag drops before its entry lands; hold Compacting across the gap.
 const HOLD_AFTER_WAIT: Duration = Duration::from_secs(5);
-const DETAIL_MAX: f32 = 96.0;
-const INSET: f32 = 34.0;
-// How long a compaction takes is unknowable, so the bar sweeps instead of filling.
+// How long a compaction takes is unknowable, so the rules sweep instead of filling.
 const SWEEP: Duration = Duration::from_millis(1400);
-const SWEEP_WIDTH: f32 = 0.32;
-
-#[derive(Clone, Copy)]
-enum Bar {
-    Sweep(f32),
-    Fill(f32),
-}
-
-fn sweep(elapsed: Duration, reduce: bool) -> Bar {
-    if reduce {
-        return Bar::Fill(0.0);
-    }
-    let cycle = (elapsed.as_secs_f32() / SWEEP.as_secs_f32()).fract();
-    Bar::Sweep(motion::EASE_IN_OUT.eval(cycle))
-}
+const SWEEP_WIDTH: f32 = 0.4;
+const INSET: f32 = 14.0;
+const SWEEP_FADE: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE_OUT);
+const FILL: motion::MotionSpec = motion::MotionSpec::new(320, motion::EASE_OUT_QUINT);
+const FILL_FADE: motion::MotionSpec = motion::MotionSpec::new(400, motion::EASE).with_delay(450);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -46,6 +34,8 @@ pub(super) struct CardClock {
     wait_ended: Option<(String, Instant)>,
     phase: Option<(String, Phase, Instant)>,
     entered: Option<(String, Instant)>,
+    epoch: u64,
+    look: Option<(SharedString, Look, Option<Look>, Instant)>,
     settled: HashMap<SharedString, Instant>,
     tail: Option<SharedString>,
 }
@@ -76,6 +66,7 @@ impl CardClock {
                     .is_some_and(|(id, last, _)| id == chat_id && last.live());
                 if phase.live() && !was_live {
                     self.entered = Some((chat_id.to_string(), now));
+                    self.epoch += 1;
                 }
                 self.phase = Some((chat_id.to_string(), phase, now));
                 now
@@ -103,6 +94,33 @@ impl CardClock {
                 id == chat_id && now.saturating_duration_since(*at) < HOLD_AFTER_WAIT
             })
     }
+
+    // One key per compaction, shared by the trailer and the row that replaces
+    // it, so the label's text rolls across the handoff instead of restarting.
+    fn label_key(&self, chat_id: &str) -> SharedString {
+        format!("compaction-{chat_id}-{}", self.epoch).into()
+    }
+
+    fn look_since(
+        &mut self,
+        key: &SharedString,
+        look: &Look,
+        now: Instant,
+    ) -> (Option<Look>, Instant) {
+        match &mut self.look {
+            Some((last_key, last, from, at)) if last_key == key => {
+                if last != look {
+                    *from = Some(std::mem::replace(last, look.clone()));
+                    *at = now;
+                }
+                (from.clone(), *at)
+            }
+            _ => {
+                self.look = Some((key.clone(), look.clone(), None, now));
+                (None, now)
+            }
+        }
+    }
 }
 
 pub(super) fn merge_compaction_rows(rows: &mut Vec<Row>) {
@@ -127,6 +145,30 @@ pub(super) fn merge_compaction_rows(rows: &mut Vec<Row>) {
     }
 }
 
+/// What the composer's chip says while `chat_id` is checking or compacting:
+/// the same words as the divider in the chat.
+pub(crate) fn composer_label(
+    state: &crate::state::AppState,
+    chat_id: &str,
+) -> Option<&'static str> {
+    if state.chat_compacting(chat_id) {
+        return Some("Compacting");
+    }
+    let session = state.session_for(chat_id)?;
+    session.classifying.as_ref()?;
+    Some(checking_title(
+        session.compact_plan == Some(zeron_proto::CompactPlan::Agent),
+    ))
+}
+
+fn checking_title(agent_note: bool) -> &'static str {
+    if agent_note {
+        "Checking the agent's note"
+    } else {
+        "Checking whether to compact"
+    }
+}
+
 fn eased(spec: motion::MotionSpec, elapsed: Duration, reduce: bool) -> f32 {
     if reduce {
         return 1.0;
@@ -136,23 +178,6 @@ fn eased(spec: motion::MotionSpec, elapsed: Duration, reduce: bool) -> f32 {
 
 fn progress(spec: motion::MotionSpec, since: Instant, now: Instant, reduce: bool) -> f32 {
     eased(spec, now.saturating_duration_since(since), reduce)
-}
-
-fn collapse(settled_at: Instant, hold: Duration, now: Instant, reduce: bool) -> f32 {
-    let held = now
-        .saturating_duration_since(settled_at)
-        .saturating_sub(hold);
-    eased(motion::RESIZE, held, reduce)
-}
-
-fn count_down(from: u64, to: u64, settled_at: Option<Instant>, now: Instant) -> u64 {
-    let t = settled_at.map_or(1.0, |at| {
-        let counted = now
-            .saturating_duration_since(at)
-            .saturating_sub(motion::FADE_QUICK.total());
-        motion::EASE_OUT.eval(counted.as_secs_f32() / COUNT.as_secs_f32())
-    });
-    motion::lerp(from as f32, to as f32, t).round() as u64
 }
 
 fn boundary_row(rows: &[Row]) -> Option<usize> {
@@ -212,6 +237,7 @@ fn carried_body(carried: &str) -> &str {
     inner.split_once("\n\n").map_or(inner, |(_, rest)| rest)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Icon {
     Spinner,
     Done,
@@ -228,6 +254,99 @@ struct Head {
     tag: Option<(SharedString, gpui::Hsla)>,
     meta: Option<SharedString>,
     chevron: Option<bool>,
+}
+
+#[derive(Clone, PartialEq)]
+struct Look {
+    icon: Icon,
+    chip: bool,
+    tag: Option<SharedString>,
+    chevron: bool,
+}
+
+impl Head {
+    fn look(&self) -> Look {
+        Look {
+            icon: self.icon,
+            chip: self.chip.is_some(),
+            tag: self.tag.as_ref().map(|(label, _)| label.clone()),
+            chevron: self.chevron.is_some(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct Rules {
+    sweep: Option<(f32, f32)>,
+    fill: Option<(f32, f32)>,
+}
+
+fn rules(
+    live_since: Option<Instant>,
+    settled_at: Option<Instant>,
+    filled: bool,
+    now: Instant,
+    reduce: bool,
+) -> Rules {
+    if reduce {
+        return Rules::default();
+    }
+    let glow = settled_at.map_or(1.0, |at| 1.0 - progress(SWEEP_FADE, at, now, false));
+    Rules {
+        sweep: live_since.filter(|_| glow > 0.0).map(|since| {
+            let cycle =
+                (now.saturating_duration_since(since).as_secs_f32() / SWEEP.as_secs_f32()).fract();
+            (motion::EASE_IN_OUT.eval(cycle), glow)
+        }),
+        fill: settled_at.filter(|_| filled).map(|at| {
+            (
+                progress(FILL, at, now, false),
+                1.0 - progress(FILL_FADE, at, now, false),
+            )
+        }),
+    }
+}
+
+fn rule(left: bool, rules: &Rules, theme: &Theme) -> Div {
+    let accent = theme.accent;
+    div()
+        .flex_1()
+        .min_w(px(24.0))
+        .h(px(1.0))
+        .relative()
+        .overflow_hidden()
+        .bg(crate::theme::hairline(0.08))
+        .children(rules.sweep.map(|(t, alpha)| {
+            let (near, far) = (accent.opacity(alpha), accent.opacity(0.0));
+            let at = gpui::relative(motion::lerp(-SWEEP_WIDTH, 1.0, t));
+            let streak = div()
+                .absolute()
+                .top_0()
+                .h_full()
+                .w(gpui::relative(SWEEP_WIDTH));
+            if left {
+                streak.right(at).bg(gpui::linear_gradient(
+                    90.0,
+                    gpui::linear_color_stop(far, 0.0),
+                    gpui::linear_color_stop(near, 1.0),
+                ))
+            } else {
+                streak.left(at).bg(gpui::linear_gradient(
+                    90.0,
+                    gpui::linear_color_stop(near, 0.0),
+                    gpui::linear_color_stop(far, 1.0),
+                ))
+            }
+        }))
+        .children(rules.fill.map(|(width, alpha)| {
+            let fill = div()
+                .absolute()
+                .top_0()
+                .h_full()
+                .w(gpui::relative(width))
+                .bg(theme.success.opacity(0.7 * alpha));
+            if left { fill.right_0() } else { fill.left_0() }
+        }))
 }
 
 fn verdict_tag(record: &ClassifierRecord, theme: &Theme) -> (SharedString, gpui::Hsla) {
@@ -256,18 +375,22 @@ fn reason(record: &ClassifierRecord) -> Option<SharedString> {
 }
 
 impl Transcript {
-    fn card_icon(&self, icon: Icon, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn glyph(&self, icon: Icon, scale: f32, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let glyph = |path: &'static str, color: gpui::Hsla| {
             crate::icons::icon(path)
-                .size(px(13.0))
+                .size(px(13.0 * scale))
                 .text_color(color)
                 .into_any_element()
         };
-        let inner = match icon {
-            Icon::Spinner => {
-                crate::loaders::gradient_spinner("compaction-card", theme, 2.5, cx.entity_id(), cx)
-                    .into_any_element()
-            }
+        match icon {
+            Icon::Spinner => crate::loaders::mini_mono_spinner(
+                "compaction-spinner",
+                2.0 * scale,
+                theme.text_muted,
+                cx.entity_id(),
+                cx,
+            )
+            .into_any_element(),
             Icon::Done => glyph(crate::icons::LUCIDE_CHECK, theme.success),
             Icon::Alert => glyph(crate::icons::LUCIDE_CIRCLE_ALERT, theme.warning),
             Icon::Decision => glyph(crate::icons::LUCIDE_LIST_FILTER, theme.text_muted),
@@ -276,167 +399,169 @@ impl Transcript {
                 .text_color(theme.text_muted)
                 .child("–")
                 .into_any_element(),
+        }
+    }
+
+    fn label_icon(
+        &self,
+        icon: Icon,
+        from: Option<Icon>,
+        p: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let layer = |glyph: AnyElement, opacity: f32| {
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .opacity(opacity)
+                .child(glyph)
+        };
+        let from = from.filter(|from| *from != icon && p < 1.0);
+        let (scale, shown) = match from {
+            Some(_) => (motion::lerp(0.6, 1.0, p), p),
+            None => (1.0, 1.0),
         };
         div()
+            .relative()
             .size(px(14.0))
             .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(inner)
+            .children(from.map(|from| {
+                layer(
+                    self.glyph(from, motion::lerp(1.0, 0.6, p), theme, cx),
+                    1.0 - p,
+                )
+            }))
+            .child(layer(self.glyph(icon, scale, theme, cx), shown))
             .into_any_element()
     }
 
-    // Shared by the trailer and the row so the handoff between them never moves a pixel.
-    fn card_head(
+    // `morph` is the look this label had before its last change and how far
+    // the change has run; new pieces fade in, the chevron's slot grows.
+    fn divider_label(
         &self,
+        key: &SharedString,
         head: Head,
-        card: f32,
-        fade: f32,
+        morph: Option<(Option<Look>, f32)>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Div {
-        let icon = self.card_icon(head.icon, theme, cx);
-        let title_color = motion::mix(theme.text_muted, theme.text, card);
+        let reduce = cx.reduce_motion();
+        let (from, p) = morph.unwrap_or((None, 1.0));
+        let shown = |had: bool| if from.is_none() || had { 1.0 } else { p };
+        let chip_in = shown(from.as_ref().is_some_and(|from| from.chip));
+        let tag_in =
+            shown(from.as_ref().is_some_and(|from| {
+                from.tag.as_ref() == head.tag.as_ref().map(|(label, _)| label)
+            }));
+        let chevron_in = shown(from.as_ref().is_some_and(|from| from.chevron));
+        let icon = self.label_icon(head.icon, from.as_ref().map(|from| from.icon), p, theme, cx);
+        let small = crate::typography::ui_rems(11.5);
         div()
-            .w_full()
+            .flex_none()
+            .max_w(gpui::relative(0.8))
+            .min_w_0()
             .flex()
             .items_center()
-            .gap(px(8.0))
-            .px(px(12.0))
-            .py(px(motion::lerp(4.0, 9.0, card)))
+            .px(px(6.0))
+            .py(px(2.0))
+            .rounded(px(6.0))
+            .overflow_hidden()
             .text_size(crate::typography::ui_rems(12.5))
             .child(icon)
             .child(
                 div()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .opacity(fade)
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(title_color)
-                            .when(card > 0.5, |title| {
-                                title.font_weight(gpui::FontWeight::SEMIBOLD)
-                            })
-                            .child(head.title),
-                    )
-                    .children(head.chip.map(|chip| {
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text_muted)
-                            .child(chip)
-                    }))
-                    .children(head.tag.map(|(label, color)| {
-                        div()
-                            .flex_none()
-                            .px(px(8.0))
-                            .py(px(1.0))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(color.opacity(0.4))
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(color)
-                            .child(label)
-                    }))
-                    .children(head.meta.map(|meta| {
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text_faint)
-                            .child(meta)
-                    })),
+                    .ml(px(7.0))
+                    .flex_none()
+                    .text_color(theme.text_muted)
+                    .child(crate::roll_text::roll_text(
+                        format!("{key}-title"),
+                        head.title,
+                        reduce,
+                    )),
             )
+            .children(head.chip.map(|chip| {
+                div()
+                    .ml(px(7.0))
+                    .flex_none()
+                    .opacity(chip_in)
+                    .text_size(small)
+                    .text_color(theme.text_muted)
+                    .child(chip)
+            }))
+            .children(head.tag.map(|(label, color)| {
+                div()
+                    .ml(px(7.0))
+                    .flex_none()
+                    .opacity(tag_in)
+                    .px(px(8.0))
+                    .py(px(1.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(color.opacity(0.4))
+                    .text_size(small)
+                    .text_color(color)
+                    .child(label)
+            }))
+            .children(head.meta.map(|meta| {
+                div()
+                    .ml(px(7.0))
+                    .min_w_0()
+                    .text_size(small)
+                    .text_color(theme.text_faint)
+                    .child(crate::roll_text::roll_text(
+                        format!("{key}-meta"),
+                        meta,
+                        reduce,
+                    ))
+            }))
             .children(head.chevron.map(|open| {
-                div().ml_auto().flex_none().child(
-                    crate::icons::icon(if open {
-                        crate::icons::LUCIDE_CHEVRON_DOWN
-                    } else {
-                        crate::icons::LUCIDE_CHEVRON_RIGHT
-                    })
-                    .size(px(12.0))
-                    .text_color(theme.text_faint),
-                )
+                div()
+                    .flex_none()
+                    .w(px(16.0 * chevron_in))
+                    .opacity(chevron_in)
+                    .overflow_hidden()
+                    .flex()
+                    .justify_end()
+                    .child(
+                        crate::icons::icon(if open {
+                            crate::icons::LUCIDE_CHEVRON_DOWN
+                        } else {
+                            crate::icons::LUCIDE_CHEVRON_RIGHT
+                        })
+                        .size(px(12.0))
+                        .text_color(theme.text_faint),
+                    )
             }))
     }
 
-    fn card_frame(card: f32, theme: &Theme) -> Div {
+    fn divider_line(label: impl IntoElement, rules: Rules, theme: &Theme) -> Div {
         div()
             .w_full()
+            .h(px(24.0))
             .flex()
-            .flex_col()
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(theme.border.opacity(card))
-            .bg(theme.surface_card.opacity(0.85 * card))
+            .items_center()
+            .gap(px(8.0))
+            .child(rule(true, &rules, theme))
+            .child(label)
+            .child(rule(false, &rules, theme))
     }
 
-    fn card_detail(
-        reason: Option<SharedString>,
-        bar: Option<Bar>,
-        reveal: f32,
-        theme: &Theme,
-    ) -> Option<Div> {
-        (reveal > 0.0 && (reason.is_some() || bar.is_some())).then(|| {
-            div()
-                .w_full()
-                .max_h(px(DETAIL_MAX * reveal))
-                .overflow_hidden()
-                .opacity(reveal)
-                .children(reason.map(|reason| {
-                    div()
-                        .pl(px(INSET))
-                        .pr(px(12.0))
-                        .pb(px(9.0))
-                        .text_size(crate::typography::ui_rems(12.5))
-                        .line_height(px(19.0))
-                        .text_color(theme.text_muted)
-                        .child(reason)
-                }))
-                .children(bar.map(|bar| {
-                    let accent = theme.accent;
-                    let track = div()
-                        .relative()
-                        .w_full()
-                        .h(px(2.0))
-                        .rounded(px(2.0))
-                        .overflow_hidden()
-                        .bg(theme.border);
-                    let track = match bar {
-                        Bar::Fill(fill) => track.child(
-                            div()
-                                .h_full()
-                                .w(gpui::relative(fill.clamp(0.0, 1.0)))
-                                .rounded(px(2.0))
-                                .bg(accent),
-                        ),
-                        Bar::Sweep(t) => track.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .h_full()
-                                .left(gpui::relative(motion::lerp(-SWEEP_WIDTH, 1.0, t)))
-                                .w(gpui::relative(SWEEP_WIDTH))
-                                .flex()
-                                .child(div().h_full().flex_1().bg(gpui::linear_gradient(
-                                    90.0,
-                                    gpui::linear_color_stop(accent.opacity(0.0), 0.0),
-                                    gpui::linear_color_stop(accent, 1.0),
-                                )))
-                                .child(div().h_full().flex_1().bg(gpui::linear_gradient(
-                                    90.0,
-                                    gpui::linear_color_stop(accent, 0.0),
-                                    gpui::linear_color_stop(accent.opacity(0.0), 1.0),
-                                ))),
-                        ),
-                    };
-                    div().pl(px(INSET)).pr(px(12.0)).pb(px(10.0)).child(track)
-                }))
-        })
+    // The detail opens in a frame under the divider; its first section's top
+    // border sits on the frame's.
+    fn panel(content: impl IntoElement, theme: &Theme) -> Div {
+        div()
+            .w_full()
+            .mt(px(6.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_card.opacity(0.85))
+            .overflow_hidden()
+            .child(div().mt(px(-1.0)).flex().flex_col().child(content))
     }
 
     pub(super) fn render_compaction_wait(
@@ -476,7 +601,7 @@ impl Transcript {
         let theme = Theme::of(cx).clone();
         let elapsed = now.saturating_duration_since(since);
         let usual = usual_secs(&self.rows, usize::MAX);
-        let (phase, head, bar) = match &wait {
+        let (phase, head) = match &wait {
             CompactionWait::Queued => (
                 Phase::Queued,
                 Head {
@@ -487,7 +612,6 @@ impl Transcript {
                     meta: Some("· starts when the turn settles".into()),
                     chevron: None,
                 },
-                None,
             ),
             CompactionWait::Classifying {
                 harness,
@@ -497,18 +621,12 @@ impl Transcript {
                 Phase::Checking,
                 Head {
                     icon: Icon::Spinner,
-                    title: if *agent_note {
-                        "Checking the agent's note"
-                    } else {
-                        "Checking whether to compact"
-                    }
-                    .into(),
+                    title: checking_title(*agent_note).into(),
                     chip: Some(HandoffSide::new(*harness, model.as_deref(), cx).chip(&theme)),
                     tag: None,
-                    meta: Some(format!("· {:.1}s", elapsed.as_secs_f32()).into()),
+                    meta: Some(format!("· {}", format_elapsed(elapsed.as_secs() as i64)).into()),
                     chevron: None,
                 },
-                None,
             ),
             CompactionWait::Compacting(boundary) => (
                 Phase::Compacting,
@@ -541,7 +659,6 @@ impl Transcript {
                     ),
                     chevron: None,
                 },
-                Some(sweep(elapsed, reduce)),
             ),
         };
         let changed = self.compaction_clock.phase_since(&chat_id, phase, now);
@@ -550,19 +667,25 @@ impl Transcript {
             .entered_at(&chat_id)
             .unwrap_or(changed);
         let enter = progress(motion::RESIZE, entered, now, reduce);
-        let fade = progress(motion::FADE_QUICK, changed, now, reduce);
-        let reveal = progress(motion::RESIZE, changed, now, reduce);
-        let head = self.card_head(head, 1.0, fade, &theme, cx);
+        let key = self.compaction_clock.label_key(&chat_id);
+        let (from, at) = self.compaction_clock.look_since(&key, &head.look(), now);
+        let morph = (from, progress(motion::RESIZE, at, now, reduce));
+        let rules = rules(
+            (phase != Phase::Queued).then_some(entered),
+            None,
+            false,
+            now,
+            reduce,
+        );
+        let label = self.divider_label(&key, head, Some(morph), &theme, cx);
         Some(
             div()
                 .pt(px(Theme::SPACE_LG))
                 .child(
-                    Self::card_frame(1.0, &theme)
+                    Self::divider_line(label, rules, &theme)
                         .relative()
                         .top(px(8.0 * (1.0 - enter)))
-                        .opacity(enter)
-                        .child(head)
-                        .children(Self::card_detail(None, bar, reveal, &theme)),
+                        .opacity(enter),
                 )
                 .into_any_element(),
         )
@@ -609,43 +732,14 @@ impl Transcript {
                     .phase_since(chat_id, Phase::Settled, now);
             }
         }
-        let hold = if kept.is_some() {
-            SETTLE_HOLD
-        } else {
-            SETTLE_HOLD + Duration::from_millis(200)
-        };
         if let Some(at) = settled_at
-            && (reduce || now.saturating_duration_since(at) > hold + motion::RESIZE.total())
+            && (reduce || now.saturating_duration_since(at) > SETTLE)
         {
             self.compaction_clock.settled.remove(row_id);
             settled_at = None;
         }
         let fold = self.folds.get(row_id).copied().unwrap_or_default();
         let open = fold.open.unwrap_or(false);
-        let toggle = fold
-            .toggled_at
-            .map_or(1.0, |at| progress(motion::RESIZE, at, now, reduce));
-        let base = if compacting_since.is_some() {
-            1.0
-        } else {
-            settled_at.map_or(0.0, |at| 1.0 - collapse(at, hold, now, reduce))
-        };
-        let card = if open {
-            motion::lerp(base, 1.0, toggle)
-        } else {
-            motion::lerp(1.0, base, toggle)
-        };
-        let phase_at = live_chat
-            .as_deref()
-            .and_then(|chat_id| {
-                self.compaction_clock
-                    .phase
-                    .as_ref()
-                    .filter(|(id, ..)| id == chat_id)
-            })
-            .map(|(_, _, at)| *at)
-            .filter(|_| compacting_since.is_some() || settled_at.is_some());
-        let fade = phase_at.map_or(1.0, |at| progress(motion::FADE_QUICK, at, now, reduce));
         let animating = compacting_since.is_some()
             || settled_at.is_some()
             || fold
@@ -681,11 +775,8 @@ impl Transcript {
                 }
             }
             (Some(kept), None) => {
-                let post = kept
-                    .post_tokens
-                    .map(|post| count_down(context, post, settled_at, now));
                 let mut meta = format!("· {}", tokens(context));
-                if let Some(post) = post {
+                if let Some(post) = kept.post_tokens {
                     meta.push_str(&format!(" → {}", tokens(post)));
                 }
                 let copy = record.decided_by == DecidedBy::BackgroundCopy;
@@ -744,22 +835,30 @@ impl Transcript {
                 }
             }
         };
-        let bar = match (compacting_since, &kept, settled_at) {
-            (Some(since), _, _) => Some(sweep(now.saturating_duration_since(since), reduce)),
-            (None, Some(_), Some(at)) => Some(Bar::Fill(progress(motion::RESIZE, at, now, reduce))),
-            _ => None,
-        };
-        let reveal = match (compacting_since, phase_at) {
-            (Some(_), Some(at)) => progress(motion::RESIZE, at, now, reduce),
-            (Some(_), None) => 1.0,
-            _ => card,
-        };
+        let live_key = live_chat
+            .as_deref()
+            .filter(|_| boundary)
+            .map(|chat_id| self.compaction_clock.label_key(chat_id));
+        let morph = live_key.as_ref().map(|key| {
+            let (from, at) = self.compaction_clock.look_since(key, &head.look(), now);
+            (from, progress(motion::RESIZE, at, now, reduce))
+        });
+        let live_since = live_chat
+            .as_deref()
+            .and_then(|chat_id| self.compaction_clock.entered_at(chat_id))
+            .or(compacting_since)
+            .filter(|_| compacting_since.is_some() || settled_at.is_some());
+        let rules = rules(live_since, settled_at, kept.is_some(), now, reduce);
+        let key = live_key.unwrap_or_else(|| row_id.clone());
         let toggle_id = row_id.clone();
-        let head = self
-            .card_head(head, card, fade, theme, cx)
+        let hover = theme.wash(0.08);
+        let label = self
+            .divider_label(&key, head, morph, theme, cx)
             .id(SharedString::from(format!("{row_id}-head")))
-            .when(settled, |head| {
-                head.cursor_pointer()
+            .when(settled, |label| {
+                label
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let fold = this.folds.entry(toggle_id.clone()).or_default();
                         fold.open = Some(!fold.open.unwrap_or(false));
@@ -768,30 +867,29 @@ impl Transcript {
                     }))
             });
         let body = (settled && open).then(|| {
-            let shown = progress(
-                motion::FADE_QUICK,
-                fold.toggled_at.unwrap_or(now),
-                now,
-                reduce,
-            );
-            div()
-                .w_full()
-                .relative()
-                .top(px(-4.0 * (1.0 - shown)))
-                .opacity(if fold.toggled_at.is_some() {
-                    shown
-                } else {
-                    1.0
-                })
-                .children(
-                    kept.as_ref()
-                        .and_then(|kept| self.kept_section(row_id, kept, theme)),
-                )
-                .child(self.classifier_section(row_id, &record, theme, cx))
+            let shown = fold
+                .toggled_at
+                .map_or(1.0, |at| progress(motion::FADE_QUICK, at, now, reduce));
+            Self::panel(
+                div()
+                    .flex()
+                    .flex_col()
+                    .children(
+                        kept.as_ref()
+                            .and_then(|kept| self.kept_section(row_id, kept, theme)),
+                    )
+                    .child(self.classifier_section(row_id, &record, theme, cx)),
+                theme,
+            )
+            .relative()
+            .top(px(-4.0 * (1.0 - shown)))
+            .opacity(shown)
         });
-        Self::card_frame(card, theme)
-            .child(head)
-            .children(Self::card_detail(reason(&record), bar, reveal, theme))
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(Self::divider_line(label, rules, theme))
             .children(body)
             .into_any_element()
     }
@@ -1066,7 +1164,6 @@ impl Transcript {
             && settling)
             .then_some(ix)
     }
-
     pub(super) fn render_compaction_divider(
         &mut self,
         ix: usize,
@@ -1078,137 +1175,87 @@ impl Transcript {
     ) -> AnyElement {
         let now = motion::now();
         let reduce = cx.reduce_motion();
-        if let Some(chat_id) = self.chat_id.clone().filter(|_| self.doc_override.is_none())
+        let live_chat = self.chat_id.clone().filter(|_| self.doc_override.is_none());
+        if let Some(chat_id) = live_chat.as_deref()
             && !self.compaction_clock.settled.contains_key(row_id)
-            && self.fresh_compaction(&chat_id, now) == Some(ix)
+            && self.fresh_compaction(chat_id, now) == Some(ix)
         {
             self.compaction_clock.settled.insert(row_id.clone(), now);
             self.compaction_clock
-                .phase_since(&chat_id, Phase::Settled, now);
+                .phase_since(chat_id, Phase::Settled, now);
         }
-        let plain = self.compaction_divider(row_id, text, &record, theme, cx);
-        let Some(at) = self.compaction_clock.settled.get(row_id).copied() else {
-            return plain;
-        };
-        let swap = now
-            .saturating_duration_since(at)
-            .saturating_sub(SETTLE_HOLD + motion::RESIZE.total());
-        if reduce || swap > motion::FADE_QUICK.total() {
+        let mut settled_at = self.compaction_clock.settled.get(row_id).copied();
+        if let Some(at) = settled_at
+            && (reduce || now.saturating_duration_since(at) > SETTLE)
+        {
             self.compaction_clock.settled.remove(row_id);
-            return plain;
+            settled_at = None;
         }
-        motion::pulse_lease(cx.entity_id(), cx);
-        let card = 1.0 - collapse(at, SETTLE_HOLD, now, reduce);
-        let swapped = eased(motion::FADE_QUICK, swap, reduce);
-        let meta = record.pre_tokens.map(|pre| {
-            let mut meta = format!("· {}", tokens(pre));
-            if let Some(post) = record.post_tokens {
-                meta.push_str(&format!(
-                    " → {}",
-                    tokens(count_down(pre, post, Some(at), now))
-                ));
-            }
-            SharedString::from(meta)
-        });
-        let head = Head {
-            icon: Icon::Done,
-            title: "Compacted".into(),
-            chip: None,
-            tag: None,
-            meta,
-            chevron: None,
-        };
-        let fade = progress(motion::FADE_QUICK, at, now, reduce);
-        let fill = progress(motion::RESIZE, at, now, reduce);
-        div()
-            .relative()
-            .w_full()
-            .child(
-                Self::card_frame(card, theme)
-                    .opacity(1.0 - swapped)
-                    .child(self.card_head(head, card, fade, theme, cx))
-                    .children(Self::card_detail(None, Some(Bar::Fill(fill)), card, theme)),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .opacity(swapped)
-                    .child(plain),
-            )
-            .into_any_element()
-    }
-
-    fn compaction_divider(
-        &mut self,
-        row_id: &SharedString,
-        text: SharedString,
-        record: &CompactionRecord,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(kept) = self.kept_section(row_id, record, theme) else {
-            return divider_row(row_id, text, None, theme);
-        };
+        if settled_at.is_some() {
+            motion::pulse_lease(cx.entity_id(), cx);
+        }
+        let kept = self.kept_section(row_id, &record, theme);
         let open = self
             .folds
             .get(row_id)
             .and_then(|fold| fold.open)
             .unwrap_or(false);
-        let muted = theme.text_muted.opacity(0.7);
-        let bright = theme.text_muted;
+        let meta = record.pre_tokens.map(|pre| {
+            let mut meta = format!("· {}", tokens(pre));
+            if let Some(post) = record.post_tokens {
+                meta.push_str(&format!(" → {}", tokens(post)));
+            }
+            if let Some(ms) = record.duration_ms {
+                meta.push_str(&format!(" · {}", format_elapsed((ms / 1000) as i64)));
+            }
+            SharedString::from(meta)
+        });
+        let head = Head {
+            icon: Icon::Done,
+            title: if meta.is_none() && !text.is_empty() {
+                text
+            } else {
+                "Compacted".into()
+            },
+            chip: None,
+            tag: None,
+            meta,
+            chevron: kept.is_some().then_some(open),
+        };
+        let live_key = live_chat
+            .as_deref()
+            .filter(|_| settled_at.is_some())
+            .map(|chat_id| self.compaction_clock.label_key(chat_id));
+        let morph = live_key.as_ref().map(|key| {
+            let (from, at) = self.compaction_clock.look_since(key, &head.look(), now);
+            (from, progress(motion::RESIZE, at, now, reduce))
+        });
+        let live_since = live_chat
+            .as_deref()
+            .and_then(|chat_id| self.compaction_clock.entered_at(chat_id))
+            .filter(|_| settled_at.is_some());
+        let rules = rules(live_since, settled_at, true, now, reduce);
+        let key = live_key.unwrap_or_else(|| row_id.clone());
         let toggle_id = row_id.clone();
-        let rule = || div().flex_1().h(px(1.0)).bg(crate::theme::hairline(0.08));
+        let hover = theme.wash(0.08);
+        let label = self
+            .divider_label(&key, head, morph, theme, cx)
+            .id(SharedString::from(format!("{row_id}-toggle")))
+            .when(kept.is_some(), |label| {
+                label
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.folds.entry(toggle_id.clone()).or_default().open = Some(!open);
+                        this.diagram_layout_changed(std::slice::from_ref(&toggle_id), cx);
+                    }))
+            });
         div()
             .w_full()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .py(px(4.0))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(rule())
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("{row_id}-toggle")))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .cursor_pointer()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(muted)
-                            .hover(move |s| s.text_color(bright))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.folds.entry(toggle_id.clone()).or_default().open = Some(!open);
-                                this.diagram_layout_changed(std::slice::from_ref(&toggle_id), cx);
-                            }))
-                            .child(text)
-                            .child(
-                                crate::icons::icon(if open {
-                                    crate::icons::LUCIDE_CHEVRON_DOWN
-                                } else {
-                                    crate::icons::LUCIDE_CHEVRON_RIGHT
-                                })
-                                .size(px(11.0))
-                                .text_color(muted.opacity(0.7)),
-                            ),
-                    )
-                    .child(rule()),
-            )
-            .when(open, |row| {
-                row.child(
-                    Self::card_frame(1.0, theme)
-                        .mt(px(6.0))
-                        .overflow_hidden()
-                        .child(kept),
-                )
-            })
+            .child(Self::divider_line(label, rules, theme))
+            .children(kept.filter(|_| open).map(|kept| Self::panel(kept, theme)))
             .into_any_element()
     }
 }

@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 mod claude_cards;
 mod compaction_card;
+pub(crate) use compaction_card::composer_label as compaction_composer_label;
 mod html_card;
 mod secret_card;
 pub(crate) use claude_cards::ClaudeCardAction;

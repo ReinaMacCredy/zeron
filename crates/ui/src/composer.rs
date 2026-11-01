@@ -10767,6 +10767,11 @@ impl Composer {
             .then(|| compaction_unsupported(harness).into())
     }
 
+    fn compaction_label(&self, cx: &App) -> Option<&'static str> {
+        let chat_id = self.bound_chat_id(cx)?;
+        crate::transcript::compaction_composer_label(self.state.read(cx), &chat_id)
+    }
+
     /// This composer's chat is compacting. Another chat's compaction must not
     /// lock this one's composer.
     pub(crate) fn compacting(&self, cx: &App) -> bool {
@@ -14554,7 +14559,7 @@ impl Render for Composer {
                     })),
                 )
             })
-            .when(self.compacting(cx), |el| {
+            .when_some(self.compaction_label(cx), |el, label| {
                 // The compaction writes nothing until it lands, so this chip
                 // is the only sign the chat is doing anything.
                 el.child(
@@ -14574,7 +14579,11 @@ impl Render for Composer {
                             cx.entity_id(),
                             cx,
                         ))
-                        .child("Compacting context…"),
+                        .child(crate::roll_text::roll_text(
+                            "composer-compaction",
+                            SharedString::from(label),
+                            cx.reduce_motion(),
+                        )),
                 )
             })
             .when_some(resume_compaction, |el, offer| {
