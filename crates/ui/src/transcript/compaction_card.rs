@@ -126,15 +126,18 @@ impl CardClock {
 pub(super) fn merge_compaction_rows(rows: &mut Vec<Row>) {
     let mut ix = 0;
     while ix + 1 < rows.len() {
+        // A message sent while the chat compacts lands between the decision and its result.
+        let next = (ix + 1..rows.len()).find(|&at| !matches!(rows[at].kind, RowKind::User { .. }));
         if let (
             RowKind::Classifier {
                 compaction: None, ..
             },
-            RowKind::Compaction { record, .. },
-        ) = (&rows[ix].kind, &rows[ix + 1].kind)
+            Some(next),
+        ) = (&rows[ix].kind, next)
+            && let RowKind::Compaction { record, .. } = &rows[next].kind
         {
             let record = record.clone();
-            let version = rows.remove(ix + 1).version;
+            let version = rows.remove(next).version;
             let row = &mut rows[ix];
             row.version = row.version.rotate_left(7) ^ version;
             if let RowKind::Classifier { compaction, .. } = &mut row.kind {
@@ -1300,6 +1303,22 @@ mod tests {
         )
     }
 
+    fn user(id: &str) -> Row {
+        row(
+            id,
+            RowKind::User {
+                text: "how is it going".into(),
+                mentions: Arc::default(),
+                markdown: None,
+                attachments: Arc::default(),
+                badges: Arc::default(),
+                sender: None,
+                pending: false,
+                from_chat_id: None,
+            },
+        )
+    }
+
     fn divider(id: &str) -> Row {
         row(
             id,
@@ -1353,6 +1372,15 @@ mod tests {
             }
         ));
         assert_ne!(rows[0].version, decided);
+
+        let mut sent_meanwhile = vec![classifier("k1"), user("u1"), compaction("c1", 10)];
+        merge_compaction_rows(&mut sent_meanwhile);
+        let ids: Vec<&str> = sent_meanwhile.iter().map(|row| row.id.as_ref()).collect();
+        assert_eq!(ids, ["k1", "u1"]);
+        assert!(matches!(
+            &sent_meanwhile[0].kind,
+            RowKind::Classifier { compaction: Some(record), .. } if record.post_tokens == Some(10)
+        ));
 
         let mut later = vec![classifier("k1"), compaction("c1", 10)];
         later[1].version ^= 1;
