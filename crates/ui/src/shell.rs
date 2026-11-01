@@ -1359,7 +1359,16 @@ impl SettingsSection {
                 ),
                 (
                     "Theme library",
-                    &["theme", "import", "custom", "apply", "remove"],
+                    &[
+                        "theme",
+                        "import",
+                        "custom",
+                        "reload",
+                        "reveal",
+                        "duplicate",
+                        "unlink",
+                        "remove",
+                    ],
                     Some(Target::Setting(SettingId::ThemeLibrary)),
                 ),
                 (
