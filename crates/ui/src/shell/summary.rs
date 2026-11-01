@@ -45,7 +45,7 @@ impl SidecarPart {
         match self {
             Self::Workspace => icons::ASTRA_LAPTOP,
             Self::Beside => icons::CHAT_ROUND_LINE,
-            Self::Actions => icons::PLAY,
+            Self::Actions => icons::ACTION_BUILD,
         }
     }
 
