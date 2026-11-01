@@ -327,6 +327,32 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
 }
 
 #[test]
+fn background_processes_replicate_and_clear() {
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    let mut row = session("chat", "host", SessionStatus::Idle);
+    row.background_tasks = vec![zeron_proto::BackgroundTask {
+        id: "bgsh".into(),
+        command: "npm run dev".into(),
+        description: Some("Start the dev server".into()),
+        started_at: ts(3_100),
+        ..Default::default()
+    }];
+    host.upsert_session(&row).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
+
+    // Every process ended: an empty list replaces the old one.
+    row.background_tasks.clear();
+    row.updated_at = ts(3_600);
+    host.upsert_session(&row).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row]);
+}
+
+#[test]
 fn program_activity_and_native_outcome_survive_replication_and_restart() {
     use zeron_proto::{
         DoneStatus, ProgramInputKind, ProgramState, ProgramStatus, TerminalActivity,

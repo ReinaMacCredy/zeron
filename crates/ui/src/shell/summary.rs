@@ -878,10 +878,8 @@ impl Shell {
         let shells = zeron_proto::background::shell_tasks(state.session_for(&chat.id));
         let stoppable = self.composer.read(cx).can_stop_shells(cx);
         for (ix, task) in shells.into_iter().take(SECTION_CAP).enumerate() {
-            let elapsed = task.started_at.map_or("Running".into(), |at| {
-                short_elapsed(now.signed_duration_since(at).num_seconds())
-            });
-            let mut entry = SidecarEntry::new("shell", ix, icons::ASTRA_TERMINAL, task.label)
+            let elapsed = short_elapsed(now.signed_duration_since(task.started_at).num_seconds());
+            let mut entry = SidecarEntry::new("shell", ix, icons::ASTRA_TERMINAL, task.command)
                 .value(Some(SidecarValue::Dot(elapsed.into(), working)));
             if stoppable {
                 let id = task.id;

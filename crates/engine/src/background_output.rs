@@ -16,21 +16,27 @@ pub fn watch(
     chat_id: String,
     task_id: String,
 ) -> anyhow::Result<BoxStream<'static, serde_json::Value>> {
-    let path = sessions
+    let task = sessions
         .session_status(&chat_id)
         .and_then(|s| s.background_tasks.into_iter().find(|t| t.id == task_id))
-        .and_then(|t| t.output_path)
-        .ok_or_else(|| anyhow::anyhow!("no output file for background task {task_id}"))?;
-    let path = PathBuf::from(path);
-    let named = path.file_name().and_then(|n| n.to_str()) == Some(&format!("{task_id}.output"));
-    if !named || !path.is_absolute() {
-        anyhow::bail!("refusing output path {}", path.display());
-    }
+        .ok_or_else(|| anyhow::anyhow!("no background task {task_id}"))?;
+    let file = task
+        .output_path
+        .map(|path| {
+            let path = PathBuf::from(path);
+            let named =
+                path.file_name().and_then(|n| n.to_str()) == Some(&format!("{task_id}.output"));
+            if !named || !path.is_absolute() {
+                anyhow::bail!("refusing output path {}", path.display());
+            }
+            Ok(path)
+        })
+        .transpose()?;
     let state = Watch {
         sessions,
         chat_id,
         task_id,
-        path,
+        file,
         last: None,
         first: true,
         done: false,
@@ -48,10 +54,22 @@ pub fn watch(
                 .sessions
                 .session_status(&st.chat_id)
                 .is_some_and(|s| s.background_tasks.iter().any(|t| t.id == st.task_id));
-            let path = st.path.clone();
-            let lines = tokio::task::spawn_blocking(move || read_tail(&path))
-                .await
-                .unwrap_or_default();
+            let lines = match &st.file {
+                Some(path) => {
+                    let path = path.clone();
+                    tokio::task::spawn_blocking(move || read_tail(&path))
+                        .await
+                        .unwrap_or_default()
+                }
+                None => match st
+                    .sessions
+                    .background_task_output(&st.chat_id, &st.task_id)
+                    .await
+                {
+                    Some(output) => last_lines(&output.text),
+                    None => st.last.clone().unwrap_or_default(),
+                },
+            };
             st.done = !running;
             if !running || st.last.as_ref() != Some(&lines) {
                 st.last = Some(lines.clone());
@@ -67,10 +85,19 @@ struct Watch {
     sessions: SessionsEngine,
     chat_id: String,
     task_id: String,
-    path: PathBuf,
+    file: Option<PathBuf>,
     last: Option<Vec<String>>,
     first: bool,
     done: bool,
+}
+
+fn last_lines(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let skip = lines.len().saturating_sub(TAIL_LINES);
+    lines[skip..]
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect()
 }
 
 fn read_tail(path: &Path) -> Vec<String> {

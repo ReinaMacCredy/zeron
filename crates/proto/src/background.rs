@@ -64,7 +64,7 @@ impl AgentRun {
     }
 }
 
-/// Only Claude Code can stop one of its own subagents or shells mid-run.
+/// Only Claude Code can stop one of its own subagents mid-run.
 pub fn stoppable(harness: Option<HarnessId>) -> bool {
     harness == Some(HarnessId::ClaudeCode)
 }
@@ -109,10 +109,29 @@ pub fn delegate_runs(
         .collect()
 }
 
-pub fn child_threads<'a>(chats: &'a [Chat], owner: &str) -> Vec<&'a Chat> {
+pub fn child_state(indicator: ChatIndicator) -> RunState {
+    match indicator {
+        ChatIndicator::Working | ChatIndicator::AwaitingInput => RunState::Working,
+        ChatIndicator::Errored => RunState::Failed,
+        ChatIndicator::Completed | ChatIndicator::Idle => RunState::Completed,
+    }
+}
+
+pub fn child_threads<'a>(
+    chats: &'a [Chat],
+    owner: &str,
+    turn_start_ms: i64,
+    state: impl Fn(&Chat) -> RunState,
+) -> Vec<(&'a Chat, RunState)> {
     chats
         .iter()
         .filter(|chat| !chat.archived && chat.opened_from() == Some(owner))
+        .map(|chat| (chat, state(chat)))
+        .filter(|(chat, state)| {
+            *state == RunState::Working
+                || (chat.created_at.timestamp_millis() >= turn_start_ms
+                    && chat.last_message_at.is_some())
+        })
         .collect()
 }
 
@@ -171,6 +190,14 @@ pub fn agents_label(runs: &[AgentRun]) -> (Option<String>, String) {
     }
 }
 
+pub fn agents_done(runs: &[AgentRun]) -> Option<String> {
+    let done = runs
+        .iter()
+        .filter(|run| run.state == RunState::Completed)
+        .count();
+    (runs.len() > 1 && working_count(runs) > 0 && done > 0).then(|| format!("\u{2713} {done} Done"))
+}
+
 fn settled_counts(runs: &[AgentRun]) -> String {
     [RunState::Completed, RunState::Stopped, RunState::Failed]
         .into_iter()
@@ -217,14 +244,11 @@ pub fn roster_summary(runs: &[AgentRun], shells: usize) -> Option<String> {
 }
 
 pub fn shell_line(task: &BackgroundTask, now_ms: i64) -> String {
-    match task.started_at {
-        Some(started) => format!(
-            "{} · {}",
-            RunState::Working.word(),
-            elapsed_label((now_ms - started.timestamp_millis()) / 1000)
-        ),
-        None => RunState::Working.word().to_string(),
-    }
+    format!(
+        "{} · {}",
+        RunState::Working.word(),
+        elapsed_label((now_ms - task.started_at.timestamp_millis()) / 1000)
+    )
 }
 
 pub fn elapsed_label(secs: i64) -> String {
@@ -298,10 +322,9 @@ mod tests {
     fn task(id: &str, kind: BackgroundTaskKind) -> BackgroundTask {
         BackgroundTask {
             id: id.into(),
+            command: format!("cargo test {id}"),
             kind,
-            label: format!("cargo test {id}"),
-            started_at: None,
-            output_path: None,
+            ..Default::default()
         }
     }
 
@@ -416,6 +439,41 @@ mod tests {
         assert_eq!(runs[0].state, RunState::Working);
         assert_eq!(runs[2].state, RunState::Failed);
         assert_eq!(runs[3].state, RunState::Stopped);
+
+        let opened = |id: &str, created_ms: i64, ran: bool| {
+            let mut chat = child(id, "elsewhere", Running, 0);
+            chat.delegation = None;
+            chat.sidechat_source_chat_id = Some("owner".into());
+            chat.created_at = DateTime::from_timestamp_millis(created_ms).unwrap();
+            chat.last_message_at = ran.then_some(chat.created_at);
+            chat
+        };
+        let chats = vec![
+            opened("old-working", 1_000, true),
+            opened("old-done", 1_000, true),
+            opened("new-done", 5_000, true),
+            opened("new-errored", 5_000, true),
+            opened("new-unsent", 5_000, false),
+        ];
+        let indicator = |chat: &Chat| match chat.id.as_str() {
+            "old-working" => ChatIndicator::Working,
+            "new-errored" => ChatIndicator::Errored,
+            "new-unsent" => ChatIndicator::Idle,
+            _ => ChatIndicator::Completed,
+        };
+        let kept: Vec<(&str, RunState)> =
+            child_threads(&chats, "owner", 4_000, |chat| child_state(indicator(chat)))
+                .into_iter()
+                .map(|(chat, state)| (chat.id.as_str(), state))
+                .collect();
+        assert_eq!(
+            kept,
+            [
+                ("old-working", RunState::Working),
+                ("new-done", RunState::Completed),
+                ("new-errored", RunState::Failed),
+            ]
+        );
     }
 
     #[test]
@@ -438,6 +496,8 @@ mod tests {
             run("c", RunState::Working),
         ];
         assert_eq!(agents_label(&mixed), (None, "2 Working".to_string()));
+        assert_eq!(agents_done(&mixed).as_deref(), Some("\u{2713} 1 Done"));
+        assert_eq!(agents_done(&[run("a", RunState::Working)]), None);
         assert_eq!(roster_heading(&mixed), "2 of 3 working");
         assert_eq!(aggregate(&mixed), RunState::Working);
         let settled = [run("a", RunState::Completed), run("b", RunState::Failed)];
@@ -445,6 +505,7 @@ mod tests {
             agents_label(&settled),
             (None, "1 Completed · 1 Failed".to_string())
         );
+        assert_eq!(agents_done(&settled), None);
         let stopped = [run("a", RunState::Stopped), run("b", RunState::Stopped)];
         assert_eq!(agents_label(&stopped), (None, "2 Stopped".to_string()));
         assert_eq!(aggregate(&stopped), RunState::Stopped);
@@ -494,8 +555,7 @@ mod tests {
         assert_eq!(working.line(None, 73_000), "Completed");
 
         let mut shell = task("s1", BackgroundTaskKind::Shell);
-        assert_eq!(shell_line(&shell, 50_000), "Working");
-        shell.started_at = chrono::DateTime::from_timestamp_millis(9_000);
+        shell.started_at = chrono::DateTime::from_timestamp_millis(9_000).unwrap();
         assert_eq!(shell_line(&shell, 50_000), "Working · 41s");
     }
 

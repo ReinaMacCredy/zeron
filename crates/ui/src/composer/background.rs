@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -8,10 +8,11 @@ use gpui::{
 use zeron_doc::background::{agent_runs, agent_tree, latest_prompt, rows_missing, walked_docs};
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::background::{
-    AgentRun, RunState, agents_label, aggregate, child_threads, delegate_runs, elapsed_label,
-    latest_line, roster_heading, run_depths, shell_tasks, shells_label,
+    AgentRun, RunState, agents_done, agents_label, aggregate, child_state, child_threads,
+    delegate_runs, elapsed_label, latest_line, roster_heading, run_depths, shell_tasks,
+    shells_label, stoppable,
 };
-use zeron_proto::{BackgroundTask, Chat, ChatIndicator, HarnessId, ReasoningLevel};
+use zeron_proto::{BackgroundTask, Chat, HarnessId, ReasoningLevel};
 use zeron_rpc::methods;
 
 use super::{Composer, ComposerEvent};
@@ -208,6 +209,7 @@ pub(crate) struct BackgroundUi {
     walks: HashMap<String, AgentWalk>,
     widen: Option<bool>,
     detail: Option<TrayDetail>,
+    stopping: HashSet<String>,
 }
 
 struct BackgroundRuns {
@@ -215,8 +217,9 @@ struct BackgroundRuns {
     harness: Option<HarnessId>,
     chat_reasoning: Option<ReasoningLevel>,
     agents: Vec<AgentRun>,
-    children: Vec<Chat>,
+    children: Vec<(Chat, RunState)>,
     shells: Vec<BackgroundTask>,
+    shells_stoppable: bool,
     walk: Vec<String>,
     counted: u32,
 }
@@ -375,6 +378,7 @@ impl Composer {
             agents,
             children,
             shells,
+            shells_stoppable,
             walk,
             counted,
         } = self.background_runs(cx)?;
@@ -401,7 +405,11 @@ impl Composer {
         let listed: Vec<AgentRun> = agents
             .iter()
             .cloned()
-            .chain(children.iter().map(child_run))
+            .chain(
+                children
+                    .iter()
+                    .map(|(child, state)| child_run(child, *state)),
+            )
             .collect();
         if listed.is_empty() {
             self.background.roster = Popup::default();
@@ -410,6 +418,9 @@ impl Composer {
         if shells.is_empty() {
             self.background.shells = Popup::default();
         }
+        self.background
+            .stopping
+            .retain(|id| shells.iter().any(|task| &task.id == id));
         let stale = match self.background.detail.as_ref().map(|d| &d.target) {
             Some(DetailTarget::Shell(id)) => {
                 self.background.shells.get().is_none() || !shells.iter().any(|t| &t.id == id)
@@ -428,7 +439,7 @@ impl Composer {
         }
 
         let theme = Theme::of(cx).clone();
-        let stoppable = harness == Some(HarnessId::ClaudeCode);
+        let stoppable = stoppable(harness);
         let now = motion::now();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let reduced = motion::reduced_motion(cx);
@@ -514,6 +525,7 @@ impl Composer {
             },
             _ => agents_label(&listed),
         };
+        let agents_done = agents_done(&listed).filter(|_| agents_title.is_none());
         let agents_pill = (!listed.is_empty()).then(|| {
             let pill = pill_frame("background-agents-pill", &theme)
                 .debug_selector(|| "background-agents-pill".into())
@@ -532,6 +544,15 @@ impl Composer {
                         .child(div().min_w_0().truncate().child(title))
                 })
                 .child(div().flex_none().child(SharedString::from(agents_tail)))
+                .when_some(agents_done, |el, done| {
+                    el.child(div().flex_none().child("·")).child(
+                        div()
+                            .flex_none()
+                            .debug_selector(|| "background-agents-done".into())
+                            .text_color(theme.success)
+                            .child(SharedString::from(done)),
+                    )
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, _, _| this.background.roster.note_trigger_press()),
@@ -543,8 +564,9 @@ impl Composer {
                 }));
             frosted_pill(entering(pill, agents_in), agents_in).into_any_element()
         });
-        let shell_pill = (!shells.is_empty())
-            .then(|| self.render_shell_pill(&shells, stoppable, now_ms, shells_in, &theme, cx));
+        let shell_pill = (!shells.is_empty()).then(|| {
+            self.render_shell_pill(&shells, shells_stoppable, now_ms, shells_in, &theme, cx)
+        });
         Some((agents_pill.into_iter().chain(shell_pill).collect(), roster))
     }
 
@@ -572,23 +594,23 @@ impl Composer {
             .and_then(|review| review.run.as_ref())
             .filter(|run| !run.findings.is_empty())
             .and_then(|run| run.task_id.as_deref());
+        let turn_start_ms = turn_start.map_or(0, |ix| transcript[ix].created_at);
         agents.extend(delegate_runs(
             &state.chats,
             &chat_id,
-            turn_start.map_or(0, |ix| transcript[ix].created_at),
+            turn_start_ms,
             pending_review,
         ));
         let walk = walked_docs(transcript, &agents, self.background.widen == Some(true));
         let now = chrono::Utc::now();
         let counted = state.running_subagents_for(&chat_id, now);
-        let children = child_threads(&state.chats, &chat_id)
-            .into_iter()
-            .filter(|child| {
-                !agents.iter().any(|run| run.doc_id == child.id)
-                    && state.display_status_for(child, now) == ChatIndicator::Working
-            })
-            .cloned()
-            .collect();
+        let children = child_threads(&state.chats, &chat_id, turn_start_ms, |child| {
+            child_state(state.display_status_for(child, now))
+        })
+        .into_iter()
+        .filter(|(child, _)| !agents.iter().any(|run| run.doc_id == child.id))
+        .map(|(child, state)| (child.clone(), state))
+        .collect();
         let shells = shell_tasks(state.session_for(&chat_id));
         Some(BackgroundRuns {
             chat_id,
@@ -597,8 +619,20 @@ impl Composer {
             agents,
             children,
             shells,
+            shells_stoppable: self.shells_stoppable(cx),
             walk,
             counted,
+        })
+    }
+
+    fn shells_stoppable(&self, cx: &App) -> bool {
+        let capability = zeron_proto::capabilities::BACKGROUND_TASKS_V1;
+        let state = self.state.read(cx);
+        self.bound_chat_row(cx).is_some_and(|chat| {
+            state.device_supports(&chat.device_id, capability)
+                && state
+                    .engine()
+                    .is_none_or(|engine| engine.engine_info().supports(capability))
         })
     }
 
@@ -606,9 +640,8 @@ impl Composer {
         let Some(runs) = self.background_runs(cx) else {
             return Default::default();
         };
-        let stoppable = runs.harness == Some(HarnessId::ClaudeCode);
-        let agents = stoppable_agents(&runs.agents, stoppable);
-        let shells = if stoppable {
+        let agents = stoppable_agents(&runs.agents, stoppable(runs.harness));
+        let shells = if runs.shells_stoppable {
             runs.shells.into_iter().map(|task| task.id).collect()
         } else {
             Vec::new()
@@ -622,9 +655,7 @@ impl Composer {
     }
 
     pub(crate) fn can_stop_shells(&self, cx: &App) -> bool {
-        self.bound_chat_row(cx)
-            .and_then(|chat| chat.config.as_ref())
-            .is_some_and(|config| config.harness == HarnessId::ClaudeCode)
+        self.shells_stoppable(cx)
     }
 
     pub(crate) fn stop_all_background(&mut self, cx: &mut Context<Self>) {
@@ -666,7 +697,7 @@ impl Composer {
     fn render_roster(
         &self,
         agents: &[AgentRun],
-        children: &[Chat],
+        children: &[(Chat, RunState)],
         listed: &[AgentRun],
         harness: Option<HarnessId>,
         chat_reasoning: Option<ReasoningLevel>,
@@ -813,9 +844,13 @@ impl Composer {
                 .child(div().size(px(20.0)).flex_none().children(stop))
                 .on_click(open)
         });
-        let child_rows = children.iter().enumerate().map(|(ix, child)| {
+        let child_rows = children.iter().enumerate().map(|(ix, (child, state))| {
             let kind = crate::shell::children::ChildKind::of(child);
             let id = child.id.clone();
+            let state_text = match state {
+                RunState::Working => RunState::Working.word().to_string(),
+                _ => run_state_text(&child_run(child, *state), now_ms),
+            };
             div()
                 .id(("background-roster-child", ix))
                 .debug_selector(move || format!("background-roster-child-{ix}"))
@@ -831,7 +866,7 @@ impl Composer {
                 .hover(|s| s.bg(theme.glass_hover()))
                 .child(glyph(
                     SharedString::from(format!("background-roster-child-glyph-{ix}")),
-                    RunState::Working,
+                    *state,
                     1.0,
                     theme,
                 ))
@@ -848,7 +883,7 @@ impl Composer {
                         .flex_none()
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_faint)
-                        .child(RunState::Working.word()),
+                        .child(SharedString::from(state_text)),
                 )
                 .child(div().size(px(20.0)).flex_none())
                 .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
@@ -932,17 +967,18 @@ impl Composer {
         };
         let menu = self.background.shells.get().map(|_| {
             let rows = shells.iter().enumerate().map(|(ix, task)| {
-                let elapsed = task
-                    .started_at
-                    .map(|at| elapsed_label((now_ms - at.timestamp_millis()) / 1000));
+                let elapsed = elapsed_label((now_ms - task.started_at.timestamp_millis()) / 1000);
                 let stop = stoppable.then(|| {
-                    let task_id = task.id.clone();
-                    stop_button(format!("background-shell-stop-{ix}"), theme).on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.stop_background_task(task_id.clone(), cx);
-                        },
-                    ))
+                    self.shell_stop(&task.id, format!("background-shell-stop-{ix}"), theme, cx)
+                });
+                let description = task.description.clone().map(|description| {
+                    div()
+                        .debug_selector(move || format!("background-shell-description-{ix}"))
+                        .pl(px(GLYPH_SIZE + 8.0))
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(11.5))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(description))
                 });
                 let lines = self
                     .background
@@ -991,16 +1027,16 @@ impl Composer {
                             .font_family(theme.font_mono.clone())
                             .text_size(crate::typography::ui_rems(11.5))
                             .text_color(theme.text)
-                            .child(SharedString::from(task.label.clone())),
+                            .child(SharedString::from(task.command.clone())),
                     )
-                    .children(elapsed.map(|elapsed| {
+                    .child(
                         div()
                             .flex_none()
                             .text_size(crate::typography::ui_rems(11.5))
                             .text_color(theme.text_muted)
-                            .child(SharedString::from(elapsed))
-                    }))
-                    .child(div().size(px(20.0)).flex_none().children(stop));
+                            .child(SharedString::from(elapsed)),
+                    )
+                    .child(stop_slot(stop));
                 div()
                     .id(("background-shell-row", ix))
                     .debug_selector(move || format!("background-shell-row-{ix}"))
@@ -1013,6 +1049,7 @@ impl Composer {
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.glass_hover()))
                     .child(head)
+                    .children(description)
                     .children(latest)
                     .on_click(open)
             });
@@ -1062,11 +1099,7 @@ impl Composer {
     }
 
     fn sync_output_watches(&mut self, shells: &[BackgroundTask], cx: &mut Context<Self>) {
-        let watched: Vec<&str> = shells
-            .iter()
-            .filter(|task| task.output_path.is_some())
-            .map(|task| task.id.as_str())
-            .collect();
+        let watched: Vec<&str> = shells.iter().map(|task| task.id.as_str()).collect();
         self.background
             .outputs
             .retain(|id, _| watched.contains(&id.as_str()));
@@ -1321,12 +1354,12 @@ impl Composer {
         let stop = run.can_stop(stoppable).then(|| {
             let task_id = run.part_id.clone();
             let delegated = run.delegated;
-            stop_button("background-detail-stop".into(), theme).on_click(cx.listener(
-                move |this, _, _, cx| {
+            stop_button("background-detail-stop".into(), theme)
+                .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.stop_agent_run(task_id.clone(), delegated, cx);
-                },
-            ))
+                }))
+                .into_any_element()
         });
         let head = detail_head(
             glyph("background-detail-glyph", run.state, 1.0, theme),
@@ -1477,22 +1510,12 @@ impl Composer {
             .map(|output| output.lines.as_slice())
             .unwrap_or_default();
         let text = lines.join("\n");
-        let stop = stoppable.then(|| {
-            let task_id = task.id.clone();
-            stop_button("background-detail-stop".into(), theme).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.stop_background_task(task_id.clone(), cx);
-                },
-            ))
-        });
-        let elapsed = task
-            .started_at
-            .map(|at| elapsed_label((now_ms - at.timestamp_millis()) / 1000))
-            .unwrap_or_default();
+        let stop = stoppable
+            .then(|| self.shell_stop(&task.id, "background-detail-stop".into(), theme, cx));
+        let elapsed = elapsed_label((now_ms - task.started_at.timestamp_millis()) / 1000);
         let head = detail_head(
             glyph("background-detail-glyph", RunState::Working, 1.0, theme),
-            SharedString::from(task.label.clone()),
+            SharedString::from(task.command.clone()),
             elapsed,
             stop,
             theme,
@@ -1515,7 +1538,14 @@ impl Composer {
             .pt(px(8.0))
             .pb(px(2.0))
             .text_size(crate::typography::ui_rems(12.0))
-            .child(div().flex_1())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text_muted)
+                    .children(task.description.clone().map(SharedString::from)),
+            )
             .child(
                 detail_link("background-detail-copy", "Copy", theme.accent).on_click(
                     move |_, _, cx| {
@@ -1627,7 +1657,34 @@ impl Composer {
         );
     }
 
+    fn shell_stop(
+        &self,
+        task_id: &str,
+        id: String,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.background.stopping.contains(task_id) {
+            return div()
+                .flex_none()
+                .debug_selector(move || format!("{id}-stopping"))
+                .text_size(crate::typography::ui_rems(11.5))
+                .text_color(theme.warning)
+                .child("Stopping\u{2026}")
+                .into_any_element();
+        }
+        let task_id = task_id.to_owned();
+        stop_button(id, theme)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.stop_background_task(task_id.clone(), cx);
+            }))
+            .into_any_element()
+    }
+
     pub(crate) fn stop_background_task(&mut self, task_id: String, cx: &mut Context<Self>) {
+        self.background.stopping.insert(task_id.clone());
+        cx.notify();
         self.send_stop(
             methods::STOP_BACKGROUND_TASK,
             "stop background task",
@@ -1683,14 +1740,14 @@ fn stoppable_agents(agents: &[AgentRun], stoppable: bool) -> Vec<(String, bool)>
         .collect()
 }
 
-fn child_run(child: &Chat) -> AgentRun {
+fn child_run(child: &Chat, state: RunState) -> AgentRun {
     AgentRun {
         part_id: child.id.clone(),
         doc_id: child.id.clone(),
         title: child_title(child),
         model: None,
         reasoning: None,
-        state: RunState::Working,
+        state,
         started_ms: child.created_at.timestamp_millis(),
         delegated: false,
         harness: None,
@@ -1765,7 +1822,7 @@ fn detail_head(
     glyph: AnyElement,
     title: SharedString,
     state: String,
-    stop: Option<Stateful<Div>>,
+    stop: Option<AnyElement>,
     theme: &Theme,
     cx: &mut Context<Composer>,
 ) -> Div {
@@ -1815,7 +1872,18 @@ fn detail_head(
                 .text_color(theme.text_muted)
                 .child(SharedString::from(state)),
         )
-        .child(div().size(px(20.0)).flex_none().children(stop))
+        .child(stop_slot(stop))
+}
+
+fn stop_slot(stop: Option<AnyElement>) -> Div {
+    div()
+        .min_w(px(20.0))
+        .h(px(20.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_end()
+        .children(stop)
 }
 
 pub(super) fn pill_frame(id: &'static str, theme: &Theme) -> Stateful<Div> {
@@ -2059,9 +2127,9 @@ mod tests {
         BackgroundTask {
             id: id.into(),
             kind,
-            label: format!("cargo test {id}"),
-            started_at: None,
-            output_path: None,
+            command: format!("cargo test {id}"),
+            started_at: chrono::Utc::now(),
+            ..Default::default()
         }
     }
 
@@ -2107,6 +2175,14 @@ mod tests {
         }
     }
 
+    fn host_device() -> zeron_proto::Device {
+        serde_json::from_value(serde_json::json!({
+            "id": "dev", "name": "Dev", "platform": "macos",
+            "capabilities": [zeron_proto::capabilities::BACKGROUND_TASKS_V1]
+        }))
+        .unwrap()
+    }
+
     #[gpui::test]
     fn pills_render_above_the_composer_and_the_roster_opens(cx: &mut gpui::TestAppContext) {
         use std::{cell::RefCell, rc::Rc};
@@ -2135,6 +2211,7 @@ mod tests {
                 },
             ];
             state.selected_chat = Some("c1".into());
+            state.devices = vec![host_device()];
             state.sessions = vec![
                 session(
                     SessionStatus::Working,
@@ -2475,6 +2552,8 @@ mod tests {
                 (agents.len(), shells.len())
             })
         };
+        assert_eq!(counts(cx), (0, 0));
+        state.update(cx, |state, _| state.devices = vec![host_device()]);
         assert_eq!(counts(cx), (0, 1));
 
         state.update(cx, |state, _| {

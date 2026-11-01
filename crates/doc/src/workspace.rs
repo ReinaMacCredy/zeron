@@ -873,6 +873,8 @@ pub(crate) struct RawSession {
     updated_at: i64,
     #[serde(default)]
     running_subagents: u32,
+    #[serde(default)]
+    background_tasks: Vec<zeron_proto::BackgroundTask>,
 }
 
 impl From<RawSession> for Session {
@@ -884,12 +886,12 @@ impl From<RawSession> for Session {
             status: raw.status,
             held_by_subagents: raw.held_by_subagents,
             compacting: raw.compacting,
-            background_tasks: Vec::new(),
             started_at: raw.started_at.map(dt),
             updated_at: dt(raw.updated_at),
             last_turn_outcome: raw.last_turn_outcome,
             terminal_activity: raw.terminal_activity,
             running_subagents: raw.running_subagents,
+            background_tasks: raw.background_tasks,
             compact_plan: None,
             classifying: None,
         }

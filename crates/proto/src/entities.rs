@@ -1168,25 +1168,10 @@ pub enum SessionStatus {
     Errored,
 }
 
-/// Work a harness runs beside its turns — a background shell today. Lives
-/// only as long as the harness process that owns it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BackgroundTask {
-    pub id: String,
-    pub kind: BackgroundTaskKind,
-    pub label: String,
-    /// Stamped by the engine the first time it sees the task; the harness
-    /// wire carries no start time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackgroundTaskKind {
+    #[default]
     Shell,
     Agent,
     #[serde(other)]
@@ -1233,10 +1218,6 @@ pub struct Session {
     pub compacting: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classifying: Option<Classifying>,
-    /// The run's live background tasks; independent of `status`, which
-    /// they never hold Working.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub background_tasks: Vec<BackgroundTask>,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     /// Subagents of this chat streaming right now. Rides the session row (and
@@ -1244,9 +1225,47 @@ pub struct Session {
     /// has not opened; read it through `view::running_subagents`.
     #[serde(default)]
     pub running_subagents: u32,
+    /// Processes the chat's agent started in the background that still run
+    /// (Claude's `run_in_background` shells, Codex commands that outlived
+    /// their turn). The runtime's own authoritative set, oldest first; read it
+    /// through `view::background_tasks`. Missing on older peers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_tasks: Vec<BackgroundTask>,
     /// Host-local, never mirrored into the workspace doc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_plan: Option<CompactPlan>,
+}
+
+/// One background process of a chat's agent, as its runtime reports it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundTask {
+    /// The runtime's id for it: what `StopBackgroundTask` and
+    /// `ReadBackgroundTaskOutput` address.
+    pub id: String,
+    /// The command line, or the agent's description of it when the runtime
+    /// never said what it runs.
+    pub command: String,
+    /// The agent's one-line description, when it gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// When the host first saw it running.
+    pub started_at: DateTime<Utc>,
+    #[serde(default)]
+    pub kind: BackgroundTaskKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+}
+
+/// The tail of a background process's output (`ReadBackgroundTaskOutput`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundTaskOutput {
+    /// Plain text (terminal escapes stripped), ending with the latest line.
+    pub text: String,
+    /// Earlier output was cut off.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1260,14 +1279,9 @@ pub struct Classifying {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum CompactPlan {
-    Idle {
-        at: i64,
-    },
+    Idle { at: i64 },
     Agent,
-    Copy {
-        since: i64,
-        ready: bool,
-    },
+    Copy { since: i64, ready: bool },
 }
 
 impl Session {

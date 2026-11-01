@@ -111,10 +111,7 @@ pub mod methods {
     /// `{chatId}` -> `{text}`: the compaction reminder for a turn still
     /// running, asked by `zeron hook` after each Claude Code tool call.
     pub const MID_TURN_NUDGE: &str = "MidTurnNudge";
-    /// Stop one live background task (a shell, or a subagent by its spawn
-    /// tool id) of `chatId`'s running harness: `{chatId, taskId}`.
-    pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";
-    /// Tail of a live background shell's output file: `{chatId, taskId}` →
+    /// Tail of a live background process's output: `{chatId, taskId}` →
     /// stream of `{lines, running}`, ending after the task leaves the set.
     pub const WATCH_BACKGROUND_OUTPUT: &str = "WatchBackgroundOutput";
     /// Live output tokens/s of `chatId`'s running harness: `{chatId}` →
@@ -359,6 +356,10 @@ pub mod methods {
     pub const PREPARE_ACP_AGENT: &str = "PrepareAcpAgent";
     pub const GET_SYSTEM_PROMPT: &str = "GetSystemPrompt";
     pub const SET_SYSTEM_PROMPT: &str = "SetSystemPrompt";
+    // A chat's background processes (`Session::background_tasks`) live in
+    // its host's runtime: `{chatId, taskId}`, relay-forwardable.
+    pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";
+    pub const READ_BACKGROUND_TASK_OUTPUT: &str = "ReadBackgroundTaskOutput";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";

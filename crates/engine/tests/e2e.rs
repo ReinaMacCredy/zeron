@@ -3433,8 +3433,9 @@ async fn background_tasks_ride_the_session_without_holding_it_working() {
     let shell = |id: &str| zeron_proto::BackgroundTask {
         id: id.into(),
         kind: zeron_proto::BackgroundTaskKind::Shell,
-        label: format!("shell {id}"),
-        started_at: None,
+        command: format!("shell {id}"),
+        started_at: chrono::Utc::now(),
+        description: None,
         output_path: None,
     };
     tx.send(AgentEvent::TextDelta {
@@ -3451,7 +3452,6 @@ async fn background_tasks_ride_the_session_without_holding_it_working() {
     )
     .await;
     let first_seen = session().unwrap().background_tasks[0].started_at;
-    assert!(first_seen.is_some());
 
     tx.send(done(DoneStatus::Completed)).unwrap();
     wait_for(
@@ -3477,14 +3477,11 @@ async fn background_tasks_ride_the_session_without_holding_it_working() {
     assert_eq!(both.status, SessionStatus::Idle);
     assert_eq!(both.background_tasks[0].started_at, first_seen);
 
-    core.sessions
-        .stop_background_task(CHAT, "a")
-        .expect("a live run takes a stop request");
     assert!(
-        core.sessions
-            .stop_background_task("no-such-chat", "a")
-            .is_err()
+        core.sessions.stop_background_task(CHAT, "a"),
+        "a live run takes a stop request"
     );
+    assert!(!core.sessions.stop_background_task("no-such-chat", "a"));
 
     drop(tx);
     wait_for(
@@ -3517,8 +3514,9 @@ async fn a_background_shell_streams_its_output_tail_until_it_ends() {
     let shell = |id: &str, path: &std::path::Path| zeron_proto::BackgroundTask {
         id: id.into(),
         kind: zeron_proto::BackgroundTaskKind::Shell,
-        label: "cargo build".into(),
-        started_at: None,
+        command: "cargo build".into(),
+        started_at: chrono::Utc::now(),
+        description: None,
         output_path: Some(path.display().to_string()),
     };
     tx.send(AgentEvent::BackgroundTasks {
@@ -3748,8 +3746,9 @@ async fn idle_reaper_waits_for_background_shells() {
             .map(|id| zeron_proto::BackgroundTask {
                 id: (*id).into(),
                 kind: zeron_proto::BackgroundTaskKind::Shell,
-                label: "cargo test".into(),
-                started_at: None,
+                command: "cargo test".into(),
+                started_at: chrono::Utc::now(),
+                description: None,
                 output_path: None,
             })
             .collect(),

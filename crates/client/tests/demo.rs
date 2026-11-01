@@ -1157,7 +1157,7 @@ fn the_roster_lists_subagents_and_shells_and_stops_them() {
     assert_eq!(compact.heading, "Idle compaction");
     assert_eq!(compact.rows.last().unwrap().0, "Compacts at");
     let shell = roster.shells[0].id.clone();
-    assert_eq!(roster.shells[0].label, "cargo test -p zeron-mobile");
+    assert_eq!(roster.shells[0].command, "cargo test -p zeron-mobile");
     session.watch_shell_output(Some(shell.clone()));
     assert!(
         session

@@ -174,13 +174,13 @@ fn project(
             started_at: None,
             updated_at: activity.updated_at,
             running_subagents: 0,
+            background_tasks: Vec::new(),
             last_completed_turn: None,
             last_turn_outcome: None,
             terminal_activity: None,
             held_by_subagents: Default::default(),
             compacting: Default::default(),
             classifying: Default::default(),
-            background_tasks: Default::default(),
             compact_plan: Default::default(),
         });
         row.terminal_activity = Some(activity.clone());
@@ -221,7 +221,8 @@ mod tests {
                 .find(|row| row.chat_id == "late")
                 .map(|row| row.status)
         };
-        core.sessions.set_status("late", SessionStatus::Working, true);
+        core.sessions
+            .set_status("late", SessionStatus::Working, true);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(published(&core), None, "no chat row yet");
 
@@ -253,13 +254,13 @@ mod tests {
             started_at: Some(now),
             updated_at: now,
             running_subagents: 0,
+            background_tasks: Vec::new(),
             last_completed_turn: Some("previous-turn".into()),
             last_turn_outcome: None,
             terminal_activity: None,
             held_by_subagents: Default::default(),
             compacting: Default::default(),
             classifying: Default::default(),
-            background_tasks: Default::default(),
             compact_plan: Default::default(),
         };
         let activity = TerminalActivity {

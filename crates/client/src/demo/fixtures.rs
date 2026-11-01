@@ -830,6 +830,7 @@ pub(crate) fn devices(self_id: &str, self_name: &str, now: i64) -> Vec<Device> {
                         host::SOURCE_CONTROL_V1,
                         host::SOURCE_CONTROL_SYNC_V1,
                         host::SOURCE_CONTROL_COMMITS_V1,
+                        host::BACKGROUND_TASKS_V1,
                     ])
                     .map(|c| (*c).to_owned())
                     .collect()

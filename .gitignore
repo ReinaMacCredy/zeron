@@ -11,6 +11,8 @@ node_modules
 build/
 edge/dist/
 xcuserdata/
+# the card pages' static files, copied in by `npm -C edge run card-assets`
+edge/public/
 .agents
 .claude
 CLAUDE.md

@@ -123,13 +123,6 @@ struct ListModelsParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BackgroundTaskParams {
-    chat_id: String,
-    task_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct CompactChatParams {
     chat_id: String,
     /// Passed to the harness's own compaction command as its focus argument.
@@ -611,6 +604,13 @@ struct SetSystemPromptParams {
 #[serde(rename_all = "camelCase")]
 struct ReorderAgentProfilesParams {
     profile_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackgroundTaskParams {
+    chat_id: String,
+    task_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1450,7 +1450,9 @@ impl EngineRpc {
         }
         if on_cloud {
             self.delete_cloud_machines(
-                std::iter::once(chat_id.to_owned()).chain(children).collect(),
+                std::iter::once(chat_id.to_owned())
+                    .chain(children)
+                    .collect(),
             );
         }
         Ok(())
@@ -3703,7 +3705,6 @@ fn forwardable(method: &str) -> bool {
             | methods::HARNESS_COMPACTION
             | methods::COMPACT_CHAT
             | methods::REQUEST_COMPACT
-            | methods::STOP_BACKGROUND_TASK
             | methods::WATCH_BACKGROUND_OUTPUT
             | methods::WATCH_TOKEN_RATE
             | methods::WATCH_COMPOSER_PREDICTION
@@ -3777,6 +3778,9 @@ fn forwardable(method: &str) -> bool {
             | methods::PREPARE_ACP_AGENT
             | methods::GET_SYSTEM_PROMPT
             | methods::SET_SYSTEM_PROMPT
+            // Background processes run in the chat host's runtime.
+            | methods::STOP_BACKGROUND_TASK
+            | methods::READ_BACKGROUND_TASK_OUTPUT
             // Checkout diffs are produced on the device holding the checkout.
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
@@ -4537,13 +4541,6 @@ impl RpcService for EngineRpc {
                     branching: harness.branching(),
                 })
             }
-            methods::STOP_BACKGROUND_TASK => {
-                let p: BackgroundTaskParams = parse_params(params)?;
-                self.sessions
-                    .stop_background_task(&p.chat_id, &p.task_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
             methods::WATCH_BACKGROUND_OUTPUT => {
                 let p: BackgroundTaskParams = parse_params(params)?;
                 let stream =
@@ -5292,6 +5289,19 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "removed": removed }))
+            }
+            methods::STOP_BACKGROUND_TASK => {
+                let p: BackgroundTaskParams = parse_params(params)?;
+                let stopping = self.sessions.stop_background_task(&p.chat_id, &p.task_id);
+                RpcReply::value(&serde_json::json!({ "stopping": stopping }))
+            }
+            methods::READ_BACKGROUND_TASK_OUTPUT => {
+                let p: BackgroundTaskParams = parse_params(params)?;
+                let output = self
+                    .sessions
+                    .background_task_output(&p.chat_id, &p.task_id)
+                    .await;
+                RpcReply::value(&output)
             }
             methods::SEND_QUEUED_MESSAGE_NOW => {
                 let p: QueuedMessageParams = parse_params(params)?;
