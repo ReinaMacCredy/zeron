@@ -412,8 +412,9 @@ pub(super) fn background_session(chat_id: &str) -> Option<Session> {
         background_tasks: vec![BackgroundTask {
             id: DEMO_SHELL.into(),
             kind: BackgroundTaskKind::Shell,
-            label: "cargo test -p zeron-mobile".into(),
-            started_at: Some(Utc::now() - Duration::seconds(41)),
+            command: "cargo test -p zeron-mobile".into(),
+            description: Some("Run the mobile tests".into()),
+            started_at: Utc::now() - Duration::seconds(41),
             output_path: Some("/tmp/zeron-demo/shell-mobile-tests.log".into()),
         }],
         started_at: None,

@@ -6,7 +6,7 @@ use zeron_proto::{
     AgentEvent, AnchorRole, DoneStatus, HarnessId, TodoItem, TodoStatus, ToolCall, ToolDiff,
 };
 
-use super::wire::{ContentBlock, Frame, MessageFrame, ResultFrame};
+use super::wire::{BackgroundTaskFrame, ContentBlock, Frame, MessageFrame, ResultFrame};
 
 /// Human-readable text for the CLI's assistant-level error codes. These arrive
 /// as a terse `error` field on an `assistant` frame — usually with NO text
@@ -306,25 +306,6 @@ fn tool_result_text(content: &Value) -> String {
     }
 }
 
-fn background_launch(text: &str) -> Option<(String, String)> {
-    let id = text
-        .split("with ID: ")
-        .nth(1)?
-        .split(|c: char| c == '.' || c.is_whitespace())
-        .next()?;
-    let path = text
-        .split("Output is being written to: ")
-        .nth(1)?
-        .split_whitespace()
-        .next()?
-        .trim_end_matches('.');
-    let named = std::path::Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        == Some(&format!("{id}.output"));
-    (!id.is_empty() && named).then(|| (id.to_owned(), path.to_owned()))
-}
-
 /// A forked skill's chip once it runs: a spawn named after the skill
 /// (`Agent: /review`), like an Agent call is after its description.
 fn forked_skill_call(input: Value) -> ToolCall {
@@ -528,8 +509,6 @@ pub(crate) struct Normalizer {
     /// SendMessage call; its frames and completion then carry that id. It
     /// maps back to the original spawn so the resumed run settles its chip.
     spawn_aliases: std::collections::HashMap<String, String>,
-    /// Only the Bash launch tool_result names a shell's output file.
-    task_outputs: std::collections::HashMap<String, String>,
     live_tasks: Vec<zeron_proto::BackgroundTask>,
     nested_agent_tasks: std::collections::HashSet<String>,
     /// Parent-feed `Skill` calls, tool_use id → input, until their task
@@ -598,7 +577,6 @@ impl Normalizer {
             last_model: None,
             agent_tasks: std::collections::HashMap::new(),
             spawn_aliases: std::collections::HashMap::new(),
-            task_outputs: std::collections::HashMap::new(),
             live_tasks: Vec::new(),
             nested_agent_tasks: std::collections::HashSet::new(),
             skill_calls: std::collections::HashMap::new(),
@@ -1185,26 +1163,30 @@ impl Normalizer {
                         post_tokens: meta.post_tokens,
                     }];
                 }
+                // Shells come from the driver's process list (`super::background`).
                 if f.subtype == "background_tasks_changed" {
+                    let now = chrono::Utc::now();
                     let tasks = f
                         .tasks
                         .unwrap_or_default()
                         .into_iter()
+                        .filter_map(|t| serde_json::from_value::<BackgroundTaskFrame>(t).ok())
                         .filter(|t| {
-                            !t.task_id.is_empty() && !self.nested_agent_tasks.contains(&t.task_id)
+                            !t.task_id.is_empty()
+                                && t.task_type != "local_bash"
+                                && !self.nested_agent_tasks.contains(&t.task_id)
                         })
                         .map(|t| zeron_proto::BackgroundTask {
-                            output_path: self.task_outputs.get(&t.task_id).cloned(),
                             kind: match t.task_type.as_str() {
-                                "local_bash" => zeron_proto::BackgroundTaskKind::Shell,
                                 "local_agent" | "remote_agent" => {
                                     zeron_proto::BackgroundTaskKind::Agent
                                 }
                                 _ => zeron_proto::BackgroundTaskKind::Other,
                             },
-                            label: t.description,
+                            command: t.description,
                             id: t.task_id,
-                            started_at: None,
+                            started_at: now,
+                            ..Default::default()
                         })
                         .collect::<Vec<_>>();
                     self.live_tasks = tasks.clone();
@@ -1439,27 +1421,13 @@ impl Normalizer {
                 let diff = (results.len() == 1)
                     .then(|| f.tool_use_result.as_ref().and_then(file_diff))
                     .flatten();
-                let mut learned_output = false;
                 if f.parent_tool_use_id.is_none() {
                     // A skill whose result came back without a task start ran
                     // inline: it never forks now.
                     for b in &results {
                         self.skill_calls.remove(&b.tool_use_id);
                     }
-                    for (task, path) in results
-                        .iter()
-                        .filter_map(|b| background_launch(&tool_result_text(&b.content)))
-                    {
-                        if let Some(live) = self.live_tasks.iter_mut().find(|t| t.id == task) {
-                            live.output_path = Some(path.clone());
-                            learned_output = true;
-                        }
-                        self.task_outputs.insert(task, path);
-                    }
                 }
-                let relisted = learned_output.then(|| AgentEvent::BackgroundTasks {
-                    tasks: self.live_tasks.clone(),
-                });
                 let skill_paths: Vec<AgentEvent> = f
                     .message
                     .blocks()
@@ -1567,7 +1535,6 @@ impl Normalizer {
                     .into_iter()
                     .chain(tool_results)
                     .chain(skill_paths)
-                    .chain(relisted)
                     .collect()
             }
 
@@ -2734,21 +2701,20 @@ mod tests {
             let frame = crate::claude::wire::parse_frame(line).expect("parses");
             norm.normalize(frame, false)
         };
-        // Captured from CLI 2.1.281 running `sleep 4 && echo hi` in the background.
+        // Captured from CLI 2.1.281 running `sleep 4 && echo hi` in the background,
+        // beside a background agent; the shell is the driver's to list.
         let started = feed(
-            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b7wb5vp5o","task_type":"local_bash","description":"Sleep for 4 seconds then echo hi"}],"uuid":"u1","session_id":"s1"}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b7wb5vp5o","task_type":"local_bash","description":"Sleep for 4 seconds then echo hi"},{"task_id":"a1","task_type":"local_agent","description":"scout"}],"uuid":"u1","session_id":"s1"}"#,
         );
+        let [AgentEvent::BackgroundTasks { tasks }] = started.as_slice() else {
+            panic!("{started:?}");
+        };
         assert_eq!(
-            started,
-            [AgentEvent::BackgroundTasks {
-                tasks: vec![zeron_proto::BackgroundTask {
-                    id: "b7wb5vp5o".into(),
-                    kind: zeron_proto::BackgroundTaskKind::Shell,
-                    label: "Sleep for 4 seconds then echo hi".into(),
-                    started_at: None,
-                    output_path: None,
-                }]
-            }]
+            tasks
+                .iter()
+                .map(|t| (t.id.as_str(), t.kind, t.command.as_str()))
+                .collect::<Vec<_>>(),
+            [("a1", zeron_proto::BackgroundTaskKind::Agent, "scout")]
         );
         let shell_started = feed(
             r#"{"type":"system","subtype":"task_started","task_id":"b7wb5vp5o","tool_use_id":"toolu_bash","description":"Sleep for 4 seconds then echo hi","is_backgrounded":true,"task_type":"local_bash","uuid":"u2","session_id":"s1"}"#,
@@ -2816,66 +2782,6 @@ mod tests {
             r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"afe3","task_type":"local_agent","description":"Sleep then pong A"},{"task_id":"ac82","task_type":"local_agent","description":"Sleep then pong B"}],"session_id":"s1"}"#,
         );
         assert_eq!(listed(&parent_done), [Vec::<String>::new()]);
-    }
-
-    #[test]
-    fn a_background_launch_result_names_the_shell_output_file() {
-        let mut norm = Normalizer::new();
-        let mut feed = |line: &str| {
-            let frame = crate::claude::wire::parse_frame(line).expect("parses");
-            norm.normalize(frame, false)
-        };
-        let listed = |events: &[AgentEvent]| -> Vec<(String, Option<String>)> {
-            events
-                .iter()
-                .filter_map(|e| match e {
-                    AgentEvent::BackgroundTasks { tasks } => Some(tasks),
-                    _ => None,
-                })
-                .flatten()
-                .map(|t| (t.id.clone(), t.output_path.clone()))
-                .collect()
-        };
-        let path = "/private/tmp/claude-501/-Users-me-proj/s1/tasks/bq1.output";
-        let first = feed(
-            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bq1","task_type":"local_bash","description":"cargo test"}],"session_id":"s1"}"#,
-        );
-        assert_eq!(listed(&first), [("bq1".into(), None)]);
-        let launched = feed(&format!(
-            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_bash","content":[{{"type":"text","text":"Command running in background with ID: bq1. Output is being written to: {path}"}}]}}]}},"session_id":"s1"}}"#
-        ));
-        assert_eq!(listed(&launched), [("bq1".into(), Some(path.into()))]);
-        let later = feed(&format!(
-            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_bash2","content":"Command running in background with ID: bq2. Output is being written to: {}"}}]}},"session_id":"s1"}}"#,
-            path.replace("bq1", "bq2")
-        ));
-        assert!(listed(&later).is_empty(), "{later:?}");
-        let both = feed(
-            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bq1","task_type":"local_bash","description":"cargo test"},{"task_id":"bq2","task_type":"local_bash","description":"sleep"}],"session_id":"s1"}"#,
-        );
-        assert_eq!(
-            listed(&both),
-            [
-                ("bq1".into(), Some(path.into())),
-                ("bq2".into(), Some(path.replace("bq1", "bq2")))
-            ]
-        );
-        assert_eq!(
-            background_launch(
-                "Command running in background with ID: bo4rzant3. Output is being written to: /private/tmp/claude-501/p/s/tasks/bo4rzant3.output. You will be notified when it completes."
-            ),
-            Some((
-                "bo4rzant3".into(),
-                "/private/tmp/claude-501/p/s/tasks/bo4rzant3.output".into()
-            ))
-        );
-        assert_eq!(
-            background_launch(
-                "Command running in background with ID: bq3. Output is being written to: /tmp/other.output"
-            ),
-            None,
-            "a path whose file is not <id>.output is refused"
-        );
     }
 
     #[test]

@@ -921,7 +921,10 @@ impl Inner {
         let guidance = (!blocks.is_empty()).then(|| blocks.join("\n\n"));
         let mut env = vec![(zeron_rpc::COMPUTER_RUN_SECRET_ENV.into(), secret.into())];
         if side_chats_only {
-            env.push((zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV.into(), "1".into()));
+            env.push((
+                zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV.into(),
+                "1".into(),
+            ));
         }
         // A path, never the token: some harnesses put this env on a command line.
         if let Some(path) = lock(&self.ipc_token_file)
@@ -1328,17 +1331,13 @@ impl SessionsEngine {
             .subscribe()
     }
 
-    /// Ask the chat's live run to stop one background task (a shell's task
-    /// id, or a subagent's spawn tool id). Harnesses without a stop ignore it.
-    pub fn stop_background_task(&self, chat_id: &str, task_id: &str) -> Result<(), EngineError> {
-        let runs = lock(&self.inner.runs);
-        let handle = runs
-            .get(chat_id)
-            .ok_or_else(|| EngineError::Other(format!("no live run for chat {chat_id}")))?;
-        handle
-            .stop_tx
-            .send(task_id.to_owned())
-            .map_err(|_| EngineError::Other("the run has ended".into()))
+    /// Ask the chat's live run to stop one background task: a process the
+    /// runtime lists, else a subagent by its spawn tool id (harnesses without
+    /// a stop ignore it). False when no live run takes it.
+    pub fn stop_background_task(&self, chat_id: &str, task_id: &str) -> bool {
+        lock(&self.inner.runs).get(chat_id).is_some_and(|h| {
+            h.turn.stop_background_process(task_id) || h.stop_tx.send(task_id.to_owned()).is_ok()
+        })
     }
 
     pub fn bind_html_render(
@@ -1407,7 +1406,6 @@ impl SessionsEngine {
             .is_some_and(|h| h.turn.background_live())
     }
 
-    /// Only Claude lists its tasks on the row; Codex counts its shells on the runtime alone.
     fn background_work(&self, chat_id: &str) -> (usize, u32) {
         let (tasks, subagents) = self.session_status(chat_id).map_or((0, 0), |s| {
             (
@@ -1424,6 +1422,21 @@ impl SessionsEngine {
     fn restart_ends_work(&self, chat_id: &str, in_place: bool) -> bool {
         let (tasks, subagents) = self.background_work(chat_id);
         !in_place && tasks + subagents as usize > 0
+    }
+
+    /// The tail of one background process's output; `None` when no live
+    /// runtime lists it.
+    pub async fn background_task_output(
+        &self,
+        chat_id: &str,
+        task_id: &str,
+    ) -> Option<zeron_proto::BackgroundTaskOutput> {
+        let turn = lock(&self.inner.runs).get(chat_id)?.turn.clone();
+        let task_id = task_id.to_owned();
+        tokio::task::spawn_blocking(move || turn.background_output(&task_id))
+            .await
+            .ok()
+            .flatten()
     }
 
     /// How many chats have a turn in flight (the Cloud runner heartbeat's
@@ -1487,7 +1500,9 @@ impl SessionsEngine {
         if !self.turn_in_flight(chat_id) {
             return None;
         }
-        lock(&self.inner.runs).get(chat_id).map(|h| h.runtime_config.harness_id)
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| h.runtime_config.harness_id)
     }
 
     /// Mark the provider-switch seam for a send about to run on `harness_id`
@@ -2916,7 +2931,7 @@ impl SessionsEngine {
                     BackgroundTaskKind::Other => "background task",
                 },
                 id: task.id.clone(),
-                what: task.label.clone(),
+                what: task.command.clone(),
             })
             .collect();
         // Claude lists a background agent both as a task and as its spawn chip.
@@ -2925,7 +2940,7 @@ impl SessionsEngine {
                 .into_iter()
                 .filter(|spawn| {
                     !tasks.iter().any(|task| {
-                        task.kind == BackgroundTaskKind::Agent && task.label == spawn.what
+                        task.kind == BackgroundTaskKind::Agent && task.command == spawn.what
                     })
                 }),
         );
@@ -3823,7 +3838,14 @@ impl SessionsEngine {
             Ok(stream) => {
                 match tokio::time::timeout(
                     COMPACT_TIMEOUT,
-                    drain_compaction(&self.inner, chat_id, harness_id, &run_cwd, stream, &mut cancel_rx),
+                    drain_compaction(
+                        &self.inner,
+                        chat_id,
+                        harness_id,
+                        &run_cwd,
+                        stream,
+                        &mut cancel_rx,
+                    ),
                 )
                 .await
                 {
@@ -5733,7 +5755,15 @@ impl Inner {
 
     /// One publish, so no status watcher reads the compaction's Working as a turn.
     fn set_working_compacting(&self, chat_id: &str) {
-        self.publish_status(chat_id, SessionStatus::Working, true, None, false, true, None);
+        self.publish_status(
+            chat_id,
+            SessionStatus::Working,
+            true,
+            None,
+            false,
+            true,
+            None,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5889,12 +5919,9 @@ impl Inner {
             let tasks: Vec<_> = tasks
                 .into_iter()
                 .map(|mut task| {
-                    task.started_at = entry
-                        .background_tasks
-                        .iter()
-                        .find(|known| known.id == task.id)
-                        .and_then(|known| known.started_at)
-                        .or(Some(now));
+                    if let Some(known) = entry.background_tasks.iter().find(|k| k.id == task.id) {
+                        task.started_at = known.started_at.min(task.started_at);
+                    }
                     task
                 })
                 .collect();
@@ -5909,7 +5936,9 @@ impl Inner {
             self.sessions_tx.send_replace(list);
             session
         };
-        if let Some(ws) = self.workspace() {
+        if self.activity_tx.get().is_none()
+            && let Some(ws) = self.workspace()
+        {
             ws.record_session(&session);
         }
     }
@@ -6183,10 +6212,7 @@ impl Inner {
     /// The chat's stored harness session and the cwd it was created under,
     /// ungated: a branch resumes the session where it lives, whatever the
     /// row's cwd says today. `None` for a tombstone or a chat that never ran.
-    fn stored_harness_session(
-        &self,
-        chat_id: &str,
-    ) -> Option<(String, String, Option<HarnessId>)> {
+    fn stored_harness_session(&self, chat_id: &str) -> Option<(String, String, Option<HarnessId>)> {
         if let Some(known) = lock(&self.harness_sessions).get(chat_id).cloned() {
             return (!known.session_id.is_empty()).then_some((
                 known.session_id,
@@ -7762,6 +7788,19 @@ fn record_session_stats(
     }
 }
 
+fn joined_background(
+    mut processes: Vec<zeron_proto::BackgroundTask>,
+    listed: &[zeron_proto::BackgroundTask],
+) -> Vec<zeron_proto::BackgroundTask> {
+    let extra: Vec<_> = listed
+        .iter()
+        .filter(|task| !processes.iter().any(|p| p.id == task.id))
+        .cloned()
+        .collect();
+    processes.extend(extra);
+    processes
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drive_run(
     inner: Arc<Inner>,
@@ -8239,6 +8278,8 @@ async fn drive_run(
     // so the gate still catches real crashes. touch_session throttles at 10s.
     let mut live_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
     live_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The runtime's background processes, published on the session row.
+    let mut background_processes = turn.watch_background_processes();
     // PERSISTENT SESSION (zeron runsBySession): a completed turn on a
     // steerable harness parks here instead of ending the run — the child and
     // its steering mailbox stay warm, and the next user message (dispatch
@@ -8344,6 +8385,7 @@ async fn drive_run(
     // The harness has background shells running: the process that owns them
     // must outlive the idle window, or they die unfinished.
     let mut background_busy = false;
+    let mut listed_tasks: Vec<zeron_proto::BackgroundTask> = Vec::new();
     // Tagged ids that failed the spawn gate ([`is_chat_spawn`]): not looked
     // up again until a call with that id folds.
     let mut foreign_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -8388,6 +8430,11 @@ async fn drive_run(
                 },
                 _ = live_heartbeat.tick() => {
                     inner.touch_session(&chat_id);
+                    continue;
+                }
+                Ok(()) = background_processes.changed() => {
+                    let processes = background_processes.borrow_and_update().clone();
+                    inner.set_background_tasks(&chat_id, joined_background(processes, &listed_tasks));
                     continue;
                 }
                 // A hang-up restarts the idle window, however long the call.
@@ -8888,7 +8935,9 @@ async fn drive_run(
             if was_busy && !background_busy && idle_since.is_some() {
                 idle_since = Some(tokio::time::Instant::now());
             }
-            inner.set_background_tasks(&chat_id, tasks.clone());
+            listed_tasks = tasks.clone();
+            let processes = background_processes.borrow().clone();
+            inner.set_background_tasks(&chat_id, joined_background(processes, &listed_tasks));
             continue;
         }
         if let AgentEvent::Compacting { active } = &event {
@@ -9690,6 +9739,8 @@ async fn drive_run(
         }
     }
     inner.set_running_subagents(&chat_id, 0);
+    // The runtime is gone, and its background processes with it.
+    inner.set_background_tasks(&chat_id, Vec::new());
 
     // Claim any accepted-but-unconfirmed steers BEFORE the handle goes away:
     // a routed send that raced this exit either finds its entry gone (we own
@@ -10505,7 +10556,11 @@ mod tests {
         std::io::Write::write_all(&mut f, b"{\"seq\":3,\"event\":{\"type\":\"done\"").unwrap();
         assert_eq!(
             sessions.inner.journal_harness_session("started-only"),
-            Some(("s1".into(), "/a".into(), Some(zeron_proto::HarnessId::ClaudeCode)))
+            Some((
+                "s1".into(),
+                "/a".into(),
+                Some(zeron_proto::HarnessId::ClaudeCode)
+            ))
         );
     }
 
@@ -10631,9 +10686,12 @@ mod tests {
             .unwrap();
         let mut request = request();
         request.prompt.clear();
-        core.sessions
-            .inner
-            .remember_harness_session("idle", "old-native-thread", &request.cwd, HarnessId::Codex);
+        core.sessions.inner.remember_harness_session(
+            "idle",
+            "old-native-thread",
+            &request.cwd,
+            HarnessId::Codex,
+        );
         core.sessions.start_idle("idle", request).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -10677,7 +10735,10 @@ mod tests {
                 SessionStatus::Idle
             );
             assert_eq!(
-                core.workspace.chat_harness_session("idle").unwrap().session_id,
+                core.workspace
+                    .chat_harness_session("idle")
+                    .unwrap()
+                    .session_id,
                 "new-native-thread"
             );
             let events = core.sessions.inner.journal.replay("idle", 0).unwrap();

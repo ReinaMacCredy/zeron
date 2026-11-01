@@ -859,9 +859,9 @@ impl SessionHandle {
                 .iter()
                 .map(|task| ShellRow {
                     task_id: task.id.clone(),
-                    label: task.label.clone(),
+                    label: task.command.clone(),
                     line: shell_line(task, now_ms),
-                    can_stop: stoppable,
+                    can_stop: roster.shells_stoppable,
                 })
                 .collect(),
         }

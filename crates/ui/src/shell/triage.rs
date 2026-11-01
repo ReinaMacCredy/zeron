@@ -248,7 +248,7 @@ impl Shell {
                                 session
                                     .background_tasks
                                     .iter()
-                                    .filter_map(|task| task.started_at)
+                                    .map(|task| task.started_at)
                                     .min()
                             })
                             .or_else(|| session.and_then(|session| session.started_at)),
@@ -1434,7 +1434,7 @@ fn background_agents(session: &zeron_proto::Session) -> Vec<(String, Option<Date
         .background_tasks
         .iter()
         .filter(|task| task.kind == zeron_proto::BackgroundTaskKind::Agent)
-        .map(|task| (task.label.clone(), task.started_at))
+        .map(|task| (task.command.clone(), Some(task.started_at)))
         .collect()
 }
 
@@ -1851,10 +1851,9 @@ mod tests {
                     zeron_proto::SessionStatus::Idle,
                     vec![zeron_proto::BackgroundTask {
                         id: "build".into(),
-                        kind: zeron_proto::BackgroundTaskKind::Shell,
-                        label: "build".into(),
-                        started_at: Some(now),
-                        output_path: None,
+                        command: "build".into(),
+                        started_at: now,
+                        ..Default::default()
                     }],
                 ),
                 session("quiet", zeron_proto::SessionStatus::Idle, vec![]),

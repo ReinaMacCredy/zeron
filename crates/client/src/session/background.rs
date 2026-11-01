@@ -15,8 +15,10 @@ pub struct BackgroundRoster {
     pub agents: Vec<AgentRun>,
     pub shells: Vec<BackgroundTask>,
     /// The chat's own harness: names a run without a model, and only
-    /// Claude Code stops its own subagents and shells.
+    /// Claude Code stops its own subagents.
     pub harness: Option<HarnessId>,
+    /// The chat's host stops its background processes.
+    pub shells_stoppable: bool,
 }
 
 pub(super) struct AgentWalk {
@@ -31,8 +33,8 @@ struct OutputFrame {
     lines: Vec<String>,
 }
 
-/// The host's own session row: background shells and the compact plan never
-/// reach the synced registry (`background_tasks` is host-local).
+/// The host's own session row: the compact plan never reaches the synced
+/// registry.
 pub(super) fn start(core: &Arc<SessionCore>) -> Option<CancellationToken> {
     let client = core.client().ok()?;
     if let Some(demo) = client.demo() {
@@ -171,13 +173,25 @@ impl SessionHandle {
                 turn_start.map_or(0, |ix| transcript[ix].message.created_at),
                 pending_review.as_deref(),
             ));
-            client.workspace.chat(&self.core.chat_id)
+            let chat = client.workspace.chat(&self.core.chat_id)?;
+            let stoppable = client
+                .workspace
+                .snapshot()
+                .device(&chat.device_id)
+                .is_some_and(|device| {
+                    device
+                        .capabilities
+                        .iter()
+                        .any(|c| c == zeron_proto::capabilities::BACKGROUND_TASKS_V1)
+                });
+            Some((chat, stoppable))
         });
         BackgroundRoster {
             agents,
             shells: shell_tasks(lock(&self.core.state).session.as_ref()),
+            shells_stoppable: chat.as_ref().is_some_and(|(_, stoppable)| *stoppable),
             harness: chat
-                .and_then(|chat| chat.config)
+                .and_then(|(chat, _)| chat.config)
                 .map(|config| config.harness),
         }
     }

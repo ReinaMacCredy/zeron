@@ -713,8 +713,9 @@ fn sleeping_shell() -> Vec<zeron_proto::BackgroundTask> {
     vec![zeron_proto::BackgroundTask {
         id: "b7wb5vp5o".into(),
         kind: zeron_proto::BackgroundTaskKind::Shell,
-        label: "sleep 300 && echo done".into(),
-        started_at: None,
+        command: "sleep 300 && echo done".into(),
+        started_at: chrono::Utc::now(),
+        description: None,
         output_path: None,
     }]
 }
@@ -1499,8 +1500,9 @@ async fn a_carry_lists_the_jobs_still_running() {
     *harness.background.lock().unwrap() = vec![zeron_proto::BackgroundTask {
         id: "b7wb5vp5o".into(),
         kind: zeron_proto::BackgroundTaskKind::Shell,
-        label: "sleep 300 && echo done".into(),
-        started_at: None,
+        command: "sleep 300 && echo done".into(),
+        started_at: chrono::Utc::now(),
+        description: None,
         output_path: None,
     }];
     let core = engine_with_one_turn_by(tmp.path(), harness.clone()).await;

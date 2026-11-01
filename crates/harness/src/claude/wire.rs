@@ -115,10 +115,10 @@ pub(crate) struct SystemFrame {
     /// just performed.
     #[serde(default)]
     pub compact_metadata: Option<CompactMetadata>,
-    /// `background_tasks_changed`: every live background task after the
-    /// change (the CLI's replace semantics).
+    /// `background_tasks_changed`: every background task the session holds
+    /// now (agents and shells) — the authoritative set, not a delta.
     #[serde(default)]
-    pub tasks: Option<Vec<BackgroundTaskFrame>>,
+    pub tasks: Option<Vec<Value>>,
     /// `api_retry`: which retry this is, of how many, and the wait before it.
     #[serde(default)]
     pub attempt: Option<u64>,
@@ -687,6 +687,17 @@ pub(crate) fn stop_turn_request_line(request_id: &str) -> String {
     .to_string()
 }
 
+/// Stop one background task (`stop_task`): the CLI kills it, then reports
+/// it `stopped` and the roster without it.
+pub(crate) fn stop_task_request_line(request_id: &str, task_id: &str) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "stop_task", "task_id": task_id },
+    })
+    .to_string()
+}
+
 /// Success reply to a CLI control request (`can_use_tool` allow/deny payloads).
 pub(crate) fn control_response_line(request_id: &str, response: Value) -> String {
     json!({
@@ -740,15 +751,6 @@ pub(crate) fn interrupt_request_line(request_id: &str) -> String {
         "type": "control_request",
         "request_id": request_id,
         "request": { "subtype": "interrupt" },
-    })
-    .to_string()
-}
-
-pub(crate) fn stop_task_request_line(request_id: &str, task_id: &str) -> String {
-    json!({
-        "type": "control_request",
-        "request_id": request_id,
-        "request": { "subtype": "stop_task", "task_id": task_id },
     })
     .to_string()
 }
