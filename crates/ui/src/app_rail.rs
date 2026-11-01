@@ -389,10 +389,28 @@ fn block(block: UsageBlock, theme: &Theme) -> Div {
 
 /// One block per plan window, then Claude's Extra Usage: the Usage page.
 pub(crate) fn usage_blocks(account: &AgentAccount, now: DateTime<Utc>, theme: &Theme) -> Vec<Div> {
-    zeron_proto::account_usage::usage_blocks(account, now)
+    let mut blocks: Vec<Div> = zeron_proto::account_usage::usage_blocks(account, now)
         .into_iter()
         .map(|b| block(b, theme))
-        .collect()
+        .collect();
+    if let Some(extra) = account
+        .extra_usage
+        .as_ref()
+        .filter(|extra| !extra.enabled || extra.used.is_none())
+    {
+        let view = crate::account_usage::extra_usage_view(extra);
+        blocks.pop();
+        blocks.push(
+            div()
+                .flex()
+                .justify_between()
+                .gap(px(12.0))
+                .text_color(theme.text_faint)
+                .child("Extra Usage")
+                .child(view.note.unwrap_or(view.headline)),
+        );
+    }
+    blocks
 }
 
 pub(crate) fn details_fold(

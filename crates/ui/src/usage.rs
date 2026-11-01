@@ -947,27 +947,27 @@ impl UsagePage {
             Some(when) => format!("Updated {when} · refreshes after each turn"),
             None => "Refreshes after each turn".to_owned(),
         };
-        let mut cards: Vec<AnyElement> = accounts
-            .iter()
-            .enumerate()
-            .map(|(ix, account)| self.plan_card(ix, account, now, theme, cx))
-            .collect();
-        if cards.len() % 2 == 1 {
-            cards.push(div().flex_1().min_w_0().into_any_element());
+        let mut columns: [(usize, Vec<AnyElement>); 2] = Default::default();
+        for (ix, account) in accounts.iter().enumerate() {
+            let rows = 2
+                + usize::from(account.usage_error.is_some())
+                + 3 * account.usage_windows.len()
+                + usize::from(account.extra_usage.is_some());
+            let column = if columns[0].0 <= columns[1].0 { 0 } else { 1 };
+            columns[column].0 += rows;
+            columns[column]
+                .1
+                .push(self.plan_card(ix, account, now, theme, cx));
         }
-        let mut rows = Vec::new();
-        let mut cards = cards.into_iter();
-        while let (Some(left), Some(right)) = (cards.next(), cards.next()) {
-            rows.push(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_start()
-                    .gap(px(16.0))
-                    .child(left)
-                    .child(right),
-            );
-        }
+        let columns = columns.map(|(_, cards)| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(16.0))
+                .children(cards)
+        });
         Some(
             div()
                 .flex()
@@ -983,7 +983,14 @@ impl UsagePage {
                         .child(heading(theme, "Plan limits"))
                         .child(muted(theme, 12.0, note)),
                 )
-                .children(rows)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(16.0))
+                        .children(columns),
+                )
                 .into_any_element(),
         )
     }
@@ -1005,8 +1012,6 @@ impl UsagePage {
             cx.notify();
         });
         div()
-            .flex_1()
-            .min_w_0()
             .p(px(14.0))
             .rounded(px(12.0))
             .border_1()
@@ -1280,11 +1285,14 @@ impl Render for UsagePage {
                 div()
                     .flex()
                     .flex_col()
-                    .child(widgets::page_header(&theme, "Usage", None))
-                    .child(widgets::page_subtitle(
-                        &theme,
-                        "Plan limits from your agent accounts, then token spend from chats on this device.",
-                    )),
+                    .child(widgets::page_header(&theme, "Usage", None).px_0())
+                    .child(
+                        widgets::page_subtitle(
+                            &theme,
+                            "Plan limits from your agent accounts, then token spend from chats on this device.",
+                        )
+                        .px_0(),
+                    ),
             )
             .children(plan_limits)
             .child(header);

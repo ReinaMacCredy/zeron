@@ -1,12 +1,10 @@
 use super::*;
 use crate::swipe::{self, Step, SwipeDir};
 
-const SHIFT_MAX: f32 = 28.0;
 const SHIFT_MAX_BLOCKED: f32 = 14.0;
-const PILL_HIDDEN: f32 = -56.0;
-const PILL_SHOWN: f32 = 14.0;
-const PILL_SIZE: f32 = 40.0;
-const RING_SIZE: f32 = 48.0;
+const PEEK_MAX: f32 = 220.0;
+const PEEK_INNER: f32 = 560.0;
+const PEEK_PARALLAX: f32 = 0.3;
 const ENTER_OFFSET: f32 = 32.0;
 const SPRING_BACK: motion::MotionSpec = motion::MotionSpec::new(180, motion::EASE_OUT);
 const ENTER: motion::MotionSpec = motion::MotionSpec::new(260, motion::EASE_OUT_QUINT);
@@ -20,27 +18,21 @@ pub(super) struct SwipeNav {
     armed: bool,
     release: Option<(f32, bool, std::time::Instant)>,
     enter: Option<(SwipeDir, std::time::Instant)>,
+    expand: Option<(SwipeDir, f32, SharedString, std::time::Instant)>,
     watchdog: Option<Task<()>>,
 }
 
 pub(super) struct SwipeLayers {
     pub(super) shift: f32,
     pub(super) alpha: f32,
-    pub(super) pill: Option<AnyElement>,
+    pub(super) peek: Option<AnyElement>,
 }
 
 impl SwipeNav {
     pub(super) fn yield_to_slide(&mut self) {
         self.enter = None;
+        self.expand = None;
     }
-}
-
-struct SwipePill {
-    dir: SwipeDir,
-    offset: f32,
-    progress: f32,
-    armed: bool,
-    label: Option<SharedString>,
 }
 
 fn demo_wheel(
@@ -164,6 +156,7 @@ impl Shell {
                     crate::haptics::selection_step();
                 }
                 if self.swipe.travel.is_none() {
+                    self.swipe.expand = None;
                     self.start_swipe_watchdog(cx);
                 }
                 self.swipe.armed = armed;
@@ -179,9 +172,15 @@ impl Shell {
                     if !armed {
                         crate::haptics::selection_step();
                     }
+                    let title = self
+                        .swipe_target(dir)
+                        .map(|entry| self.nav_entry_title(entry, cx));
                     self.step_history(dir, cx);
                     if self.swipe.enter.is_none() {
                         self.swipe.release = Some((travel, true, now));
+                    } else if !self.reduced_motion {
+                        self.swipe.expand =
+                            title.map(|title| (dir, Self::peek_width(travel), title, now));
                     }
                 }
             }
@@ -230,48 +229,68 @@ impl Shell {
         let mut frame = SwipeLayers {
             shift: 0.0,
             alpha: 1.0,
-            pill: None,
+            peek: None,
         };
         if let Some(travel) = self.swipe.travel {
             let dir = SwipeDir::of(travel);
-            let target = self.swipe_target(dir);
-            frame.shift = Self::swipe_shift(travel, target.is_some());
-            let (offset, progress) = Self::pill_at(travel, target.is_some());
-            let label = match target {
-                Some(entry) if self.swipe.armed => Some(self.nav_entry_title(entry, cx)),
-                Some(_) => None,
-                None if swipe::armed(travel) => Some(SharedString::from(match dir {
-                    SwipeDir::Back => "No previous page",
-                    SwipeDir::Forward => "No next page",
-                })),
-                None => None,
-            };
-            frame.pill = Some(self.render_swipe_pill(
-                SwipePill {
-                    dir,
-                    offset,
-                    progress,
-                    armed: self.swipe.armed,
-                    label,
-                },
-                right_inset,
-                cx,
-            ));
+            match self.swipe_target(dir) {
+                Some(entry) => {
+                    let width = Self::peek_width(travel);
+                    frame.shift = dir.sign() * width * PEEK_PARALLAX;
+                    frame.peek = Some(self.render_swipe_peek(
+                        dir,
+                        width,
+                        1.0,
+                        self.nav_entry_title(entry, cx),
+                        self.swipe.armed,
+                        right_inset,
+                        cx,
+                    ));
+                }
+                None => {
+                    frame.shift = dir.sign() * swipe::rubber(travel, SHIFT_MAX_BLOCKED);
+                    frame.peek =
+                        Some(self.render_swipe_blocked(dir, swipe::armed(travel), right_inset, cx));
+                }
+            }
         } else if let Some((travel, has_target, started)) = self.swipe.release
             && !self.reduced_motion
             && let Some(t) = self.tween_t(started, SPRING_BACK)
         {
             let dir = SwipeDir::of(travel);
-            let (offset, progress) = Self::pill_at(travel, has_target);
-            frame.shift = motion::lerp(Self::swipe_shift(travel, has_target), 0.0, t);
-            frame.pill = Some(self.render_swipe_pill(
-                SwipePill {
-                    dir,
-                    offset: motion::lerp(offset, PILL_HIDDEN, t),
-                    progress,
-                    armed: false,
-                    label: None,
-                },
+            match self.swipe_target(dir).filter(|_| has_target) {
+                Some(entry) => {
+                    let width = Self::peek_width(travel);
+                    frame.shift = motion::lerp(dir.sign() * width * PEEK_PARALLAX, 0.0, t);
+                    frame.peek = Some(self.render_swipe_peek(
+                        dir,
+                        motion::lerp(width, 0.0, t),
+                        1.0,
+                        self.nav_entry_title(entry, cx),
+                        false,
+                        right_inset,
+                        cx,
+                    ));
+                }
+                None => {
+                    frame.shift = motion::lerp(
+                        dir.sign() * swipe::rubber(travel, SHIFT_MAX_BLOCKED),
+                        0.0,
+                        t,
+                    );
+                }
+            }
+        }
+        if let Some((dir, from, title, started)) = &self.swipe.expand
+            && let Some(t) = self.tween_t(*started, ENTER)
+        {
+            let full = (self.viewport_width - self.sidebar_edge() - right_inset).max(*from);
+            frame.peek = Some(self.render_swipe_peek(
+                *dir,
+                motion::lerp(*from, full, t),
+                1.0 - t,
+                title.clone(),
+                true,
                 right_inset,
                 cx,
             ));
@@ -292,25 +311,9 @@ impl Shell {
         frame
     }
 
-    fn swipe_shift(travel: f32, has_target: bool) -> f32 {
-        let max = if has_target {
-            SHIFT_MAX
-        } else {
-            SHIFT_MAX_BLOCKED
-        };
-        SwipeDir::of(travel).sign() * swipe::rubber(travel, max)
-    }
-
-    fn pill_at(travel: f32, has_target: bool) -> (f32, f32) {
+    fn peek_width(travel: f32) -> f32 {
         let progress = (travel.abs() / swipe::ARM_DISTANCE).min(1.0);
-        let reach = if has_target {
-            progress
-        } else {
-            progress * 0.75
-        };
-        let eased = 1.0 - (1.0 - reach).powi(3);
-        let ring = if has_target { progress } else { 0.0 };
-        (motion::lerp(PILL_HIDDEN, PILL_SHOWN, eased), ring)
+        PEEK_MAX * (1.0 - (1.0 - progress).powi(3))
     }
 
     fn nav_entry_title(&self, entry: &NavEntry, cx: &App) -> SharedString {
@@ -358,84 +361,108 @@ impl Shell {
         }
     }
 
-    fn render_swipe_pill(&self, pill: SwipePill, right_inset: f32, cx: &App) -> AnyElement {
-        let theme = Theme::of(cx).for_popup();
-        let glass = theme.is_frost();
-        let labeled = pill.label.is_some();
-        let open = motion::state_t(
-            "swipe-pill-open",
-            labeled,
-            motion::SNAP,
-            self.reduced_motion,
-        );
-        let (bg, fg) = if pill.armed {
-            (theme.accent, theme.on_accent)
-        } else if labeled {
-            (popover::surface_bg(&theme), theme.text_faint)
-        } else if glass {
-            (popover::surface_bg(&theme), theme.text)
-        } else {
-            (theme.surface_raised, theme.text)
-        };
-        let arrow = match pill.dir {
-            SwipeDir::Back => icons::ARROW_LEFT,
-            SwipeDir::Forward => icons::ARROW_RIGHT,
-        };
-        let label = div()
-            .max_w(px(240.0 * open))
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .text_size(crate::typography::ui_rems(13.0))
-            .text_color(fg)
-            .children(pill.label);
-        let body = div()
-            .h(px(PILL_SIZE))
-            .min_w(px(PILL_SIZE))
-            .px(px(12.0))
-            .rounded_full()
-            .border_1()
-            .border_color(if pill.armed {
-                gpui::transparent_black()
-            } else {
-                theme.border
-            })
-            .when(!glass, |el| el.shadow_md())
-            .bg(bg)
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap(px(8.0 * open))
-            .when(pill.dir == SwipeDir::Forward, |el| el.flex_row_reverse())
-            .child(icon(arrow).size(px(16.0)).text_color(fg))
-            .child(label);
-        let ring = (!pill.armed && !labeled).then(|| {
+    #[allow(clippy::too_many_arguments)]
+    fn render_swipe_peek(
+        &self,
+        dir: SwipeDir,
+        width: f32,
+        alpha: f32,
+        title: SharedString,
+        armed: bool,
+        right_inset: f32,
+        cx: &App,
+    ) -> AnyElement {
+        let theme = Theme::of(cx);
+        let lit = motion::state_t("swipe-peek-armed", armed, motion::SNAP, self.reduced_motion);
+        let line = |fraction: f32| {
             div()
-                .absolute()
-                .top(px((PILL_SIZE - RING_SIZE) / 2.0))
-                .left(px((PILL_SIZE - RING_SIZE) / 2.0))
-                .child(crate::context_usage::progress_ring(
-                    RING_SIZE,
-                    RING_SIZE / 2.0 - 2.0,
-                    2.0,
-                    pill.progress,
-                    theme.accent,
-                    theme.text_faint.opacity(0.25),
-                ))
-        });
+                .h(px(10.0))
+                .w(gpui::relative(fraction))
+                .rounded_full()
+                .bg(theme.wash(0.07))
+        };
+        let page = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left_0()
+            .w(px(PEEK_INNER))
+            .px(px(40.0))
+            .pt(px(Theme::TITLEBAR_HEIGHT + 16.0))
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .opacity(0.55 + 0.45 * lit)
+            .child(
+                div()
+                    .mb(px(8.0))
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(17.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(title),
+            )
+            .child(line(0.9))
+            .child(line(0.75))
+            .child(line(0.82));
+        let edge = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(px(2.0))
+            .bg(theme.accent)
+            .opacity(lit)
+            .map(|el| match dir {
+                SwipeDir::Back => el.right_0(),
+                SwipeDir::Forward => el.left_0(),
+            });
+        let panel = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(px(width))
+            .overflow_hidden()
+            .opacity(alpha)
+            .bg(if theme.is_frost() {
+                popover::surface_bg(theme)
+            } else {
+                theme.bg
+            })
+            .border_color(theme.border)
+            .shadow_lg()
+            .map(|el| match dir {
+                SwipeDir::Back => el.left_0().border_r_1(),
+                SwipeDir::Forward => el.right(px(right_inset)).border_l_1(),
+            })
+            .child(page)
+            .child(edge);
+        crate::frost::frosted(0.0, crate::frost::MENU_BLUR * alpha, panel).into_any_element()
+    }
+
+    fn render_swipe_blocked(
+        &self,
+        dir: SwipeDir,
+        armed: bool,
+        right_inset: f32,
+        cx: &App,
+    ) -> AnyElement {
+        let theme = Theme::of(cx);
+        let shown = motion::state_t("swipe-blocked", armed, motion::SNAP, self.reduced_motion);
         div()
             .absolute()
             .top(gpui::relative(0.5))
-            .mt(px(-PILL_SIZE / 2.0))
-            .map(|el| match pill.dir {
-                SwipeDir::Back => el.left(px(pill.offset)),
-                SwipeDir::Forward => el.right(px(pill.offset + right_inset)),
+            .mt(px(-9.0))
+            .map(|el| match dir {
+                SwipeDir::Back => el.left(px(16.0)),
+                SwipeDir::Forward => el.right(px(16.0 + right_inset)),
             })
-            .child(crate::frost::frosted(
-                PILL_SIZE / 2.0,
-                crate::frost::MENU_BLUR,
-                div().relative().child(body).children(ring),
-            ))
+            .opacity(shown)
+            .text_size(crate::typography::ui_rems(13.0))
+            .text_color(theme.text_faint)
+            .child(match dir {
+                SwipeDir::Back => "No previous page",
+                SwipeDir::Forward => "No next page",
+            })
             .into_any_element()
     }
 }

@@ -20266,11 +20266,12 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .overflow_hidden()
-                    .opacity(under_stage * swipe.alpha)
+                    .opacity(under_stage)
                     .child(
                         div()
                             .size_full()
                             .relative()
+                            .opacity(swipe.alpha)
                             .left(px(swipe.shift))
                             .flex()
                             .flex_row()
@@ -20278,7 +20279,7 @@ impl Render for Shell {
                             .children(sidecar)
                             .children(drop_zones),
                     )
-                    .children(swipe.pill)
+                    .children(swipe.peek)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zeron
                 // App.tsx `<div key={phase} className="animate-in h-full">`):
