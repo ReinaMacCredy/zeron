@@ -1591,7 +1591,7 @@ impl Composer {
                     let expandable = if thought {
                         reasoning_text(entries, &tool.part_id).is_some()
                     } else {
-                        tool.detail.is_some()
+                        tool.invocation.is_some() || tool.detail.is_some()
                     };
                     let body = (expanded && expandable).then(|| {
                         if thought {
@@ -1610,11 +1610,18 @@ impl Composer {
                                 .rounded(px(7.0))
                                 .bg(theme.wash(0.06))
                                 .text_color(theme.text_muted)
-                                .children(
-                                    tool.detail
-                                        .as_deref()
-                                        .map(|output| detail_body(output, None, None, &key, theme)),
-                                )
+                                .children(tool.invocation.as_deref().map(|call| {
+                                    detail_body(
+                                        call,
+                                        Some("Call"),
+                                        None,
+                                        &format!("{key}-call"),
+                                        theme,
+                                    )
+                                }))
+                                .children(tool.detail.as_deref().map(|output| {
+                                    detail_body(output, None, None, &format!("{key}-out"), theme)
+                                }))
                                 .into_any_element()
                         }
                     });
