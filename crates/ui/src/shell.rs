@@ -20279,7 +20279,7 @@ impl Render for Shell {
                             .children(sidecar)
                             .children(drop_zones),
                     )
-                    .children(swipe.peek)
+                    .children(swipe.dot)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zeron
                 // App.tsx `<div key={phase} className="animate-in h-full">`):

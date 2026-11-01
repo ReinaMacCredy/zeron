@@ -1,11 +1,16 @@
 use super::*;
 use crate::swipe::{self, Step, SwipeDir};
 
-const SHIFT_MAX_BLOCKED: f32 = 14.0;
-const PEEK_MAX: f32 = 220.0;
-const PEEK_INNER: f32 = 560.0;
-const PEEK_PARALLAX: f32 = 0.3;
+const DOT: f32 = 56.0;
+const DOT_HIDDEN: f32 = -30.0;
+const DOT_REACH: f32 = 44.0;
+const DOT_REACH_BLOCKED: f32 = 6.0;
+const DOT_OVERSHOOT: f32 = 10.0;
+const DOT_ARMED_GROWTH: f32 = 0.1;
+const DOT_POP_SCALE: f32 = 0.12;
 const ENTER_OFFSET: f32 = 32.0;
+const ARM_BOUNCE: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_BOUNCE);
+const POP: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_TAILWIND);
 const SPRING_BACK: motion::MotionSpec = motion::MotionSpec::new(180, motion::EASE_OUT);
 const ENTER: motion::MotionSpec = motion::MotionSpec::new(260, motion::EASE_OUT_QUINT);
 const ENTER_REDUCED: motion::MotionSpec = motion::MotionSpec::new(150, motion::EASE);
@@ -18,20 +23,20 @@ pub(super) struct SwipeNav {
     armed: bool,
     release: Option<(f32, bool, std::time::Instant)>,
     enter: Option<(SwipeDir, std::time::Instant)>,
-    expand: Option<(SwipeDir, f32, SharedString, std::time::Instant)>,
+    pop: Option<(SwipeDir, f32, std::time::Instant)>,
     watchdog: Option<Task<()>>,
 }
 
 pub(super) struct SwipeLayers {
     pub(super) shift: f32,
     pub(super) alpha: f32,
-    pub(super) peek: Option<AnyElement>,
+    pub(super) dot: Option<AnyElement>,
 }
 
 impl SwipeNav {
     pub(super) fn yield_to_slide(&mut self) {
         self.enter = None;
-        self.expand = None;
+        self.pop = None;
     }
 }
 
@@ -156,7 +161,7 @@ impl Shell {
                     crate::haptics::selection_step();
                 }
                 if self.swipe.travel.is_none() {
-                    self.swipe.expand = None;
+                    self.swipe.pop = None;
                     self.start_swipe_watchdog(cx);
                 }
                 self.swipe.armed = armed;
@@ -172,15 +177,11 @@ impl Shell {
                     if !armed {
                         crate::haptics::selection_step();
                     }
-                    let title = self
-                        .swipe_target(dir)
-                        .map(|entry| self.nav_entry_title(entry, cx));
                     self.step_history(dir, cx);
                     if self.swipe.enter.is_none() {
                         self.swipe.release = Some((travel, true, now));
                     } else if !self.reduced_motion {
-                        self.swipe.expand =
-                            title.map(|title| (dir, Self::peek_width(travel), title, now));
+                        self.swipe.pop = Some((dir, Self::dot_center(travel, true), now));
                     }
                 }
             }
@@ -229,67 +230,38 @@ impl Shell {
         let mut frame = SwipeLayers {
             shift: 0.0,
             alpha: 1.0,
-            peek: None,
+            dot: None,
         };
         if let Some(travel) = self.swipe.travel {
-            let dir = SwipeDir::of(travel);
-            match self.swipe_target(dir) {
-                Some(entry) => {
-                    let width = Self::peek_width(travel);
-                    frame.shift = dir.sign() * width * PEEK_PARALLAX;
-                    frame.peek = Some(self.render_swipe_peek(
-                        dir,
-                        width,
-                        1.0,
-                        self.nav_entry_title(entry, cx),
-                        self.swipe.armed,
-                        right_inset,
-                        cx,
-                    ));
-                }
-                None => {
-                    frame.shift = dir.sign() * swipe::rubber(travel, SHIFT_MAX_BLOCKED);
-                    frame.peek =
-                        Some(self.render_swipe_blocked(dir, swipe::armed(travel), right_inset, cx));
-                }
-            }
+            let has_target = self.swipe_target(SwipeDir::of(travel)).is_some();
+            frame.dot = Some(self.render_swipe_dot(
+                SwipeDir::of(travel),
+                Self::dot_center(travel, has_target),
+                1.0,
+                self.swipe.armed,
+                right_inset,
+                cx,
+            ));
         } else if let Some((travel, has_target, started)) = self.swipe.release
             && !self.reduced_motion
             && let Some(t) = self.tween_t(started, SPRING_BACK)
         {
-            let dir = SwipeDir::of(travel);
-            match self.swipe_target(dir).filter(|_| has_target) {
-                Some(entry) => {
-                    let width = Self::peek_width(travel);
-                    frame.shift = motion::lerp(dir.sign() * width * PEEK_PARALLAX, 0.0, t);
-                    frame.peek = Some(self.render_swipe_peek(
-                        dir,
-                        motion::lerp(width, 0.0, t),
-                        1.0,
-                        self.nav_entry_title(entry, cx),
-                        false,
-                        right_inset,
-                        cx,
-                    ));
-                }
-                None => {
-                    frame.shift = motion::lerp(
-                        dir.sign() * swipe::rubber(travel, SHIFT_MAX_BLOCKED),
-                        0.0,
-                        t,
-                    );
-                }
-            }
+            frame.dot = Some(self.render_swipe_dot(
+                SwipeDir::of(travel),
+                motion::lerp(Self::dot_center(travel, has_target), DOT_HIDDEN, t),
+                1.0,
+                false,
+                right_inset,
+                cx,
+            ));
         }
-        if let Some((dir, from, title, started)) = &self.swipe.expand
-            && let Some(t) = self.tween_t(*started, ENTER)
+        if let Some((dir, center, started)) = self.swipe.pop
+            && let Some(t) = self.tween_t(started, POP)
         {
-            let full = (self.viewport_width - self.sidebar_edge() - right_inset).max(*from);
-            frame.peek = Some(self.render_swipe_peek(
-                *dir,
-                motion::lerp(*from, full, t),
-                1.0 - t,
-                title.clone(),
+            frame.dot = Some(self.render_swipe_dot(
+                dir,
+                center,
+                motion::lerp(1.0, DOT_POP_SCALE, t),
                 true,
                 right_inset,
                 cx,
@@ -304,165 +276,88 @@ impl Shell {
             if let Some(t) = self.tween_t(started, spec) {
                 frame.alpha = t;
                 if !self.reduced_motion {
-                    frame.shift -= dir.sign() * ENTER_OFFSET * (1.0 - t);
+                    frame.shift = -dir.sign() * ENTER_OFFSET * (1.0 - t);
                 }
             }
         }
         frame
     }
 
-    fn peek_width(travel: f32) -> f32 {
+    fn dot_center(travel: f32, has_target: bool) -> f32 {
         let progress = (travel.abs() / swipe::ARM_DISTANCE).min(1.0);
-        PEEK_MAX * (1.0 - (1.0 - progress).powi(3))
-    }
-
-    fn nav_entry_title(&self, entry: &NavEntry, cx: &App) -> SharedString {
-        match entry {
-            NavEntry::Chat(id) if id.is_empty() => "New session".into(),
-            NavEntry::Chat(id) => self
-                .state
-                .read(cx)
-                .chats
-                .iter()
-                .find(|chat| &chat.id == id)
-                .map(|chat| transcript::single_line(&chat.display_title()).into())
-                .unwrap_or_else(|| "New session".into()),
-            NavEntry::Draft(id) => self
-                .state
-                .read(cx)
-                .is_draft(id)
-                .then(|| crate::draft_store::entry_prompt(id, cx))
-                .flatten()
-                .map(|prompt| transcript::single_line(&prompt).into())
-                .unwrap_or_else(|| "New session".into()),
-            NavEntry::PullRequests => "Pull requests".into(),
-            NavEntry::PullRequest { url, .. } => url
-                .rsplit('/')
-                .next()
-                .filter(|number| number.parse::<u64>().is_ok())
-                .map(|number| format!("Pull request #{number}").into())
-                .unwrap_or_else(|| "Pull request".into()),
-            NavEntry::Settings(_) => "Settings".into(),
-            NavEntry::Usage => "Usage".into(),
-            NavEntry::Inbox => "Inbox".into(),
-            NavEntry::Tasks => "Tasks".into(),
-            NavEntry::TaskCenter(id) => self
-                .state
-                .read(cx)
-                .tasks
-                .iter()
-                .find(|task| &task.id == id)
-                .map(|task| transcript::single_line(&task.title).into())
-                .unwrap_or_else(|| "Task".into()),
-            NavEntry::Supervisor => "Supervisor".into(),
-            NavEntry::Docs(article) => article
-                .and_then(crate::docs::article)
-                .map_or_else(|| "Docs".into(), |article| article.title.clone().into()),
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        if !has_target {
+            return motion::lerp(DOT_HIDDEN, DOT_REACH_BLOCKED, eased);
         }
+        let past = travel.abs() - swipe::ARM_DISTANCE;
+        let overshoot = if past > 0.0 {
+            swipe::rubber(past, DOT_OVERSHOOT)
+        } else {
+            0.0
+        };
+        motion::lerp(DOT_HIDDEN, DOT_REACH, eased) + overshoot
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn render_swipe_peek(
+    fn render_swipe_dot(
         &self,
         dir: SwipeDir,
-        width: f32,
-        alpha: f32,
-        title: SharedString,
+        center: f32,
+        shrink: f32,
         armed: bool,
         right_inset: f32,
         cx: &App,
     ) -> AnyElement {
-        let theme = Theme::of(cx);
-        let lit = motion::state_t("swipe-peek-armed", armed, motion::SNAP, self.reduced_motion);
-        let line = |fraction: f32| {
-            div()
-                .h(px(10.0))
-                .w(gpui::relative(fraction))
-                .rounded_full()
-                .bg(theme.wash(0.07))
+        let theme = Theme::of(cx).for_popup();
+        let glass = theme.is_frost();
+        let lit = motion::state_t("swipe-dot-armed", armed, ARM_BOUNCE, self.reduced_motion);
+        let size = DOT * (1.0 + DOT_ARMED_GROWTH * lit) * shrink;
+        let alpha = 1.0 - ((1.0 - shrink) / (1.0 - DOT_POP_SCALE) - 0.55).clamp(0.0, 0.45) / 0.45;
+        let chevron = match dir {
+            SwipeDir::Back => icons::LUCIDE_CHEVRON_LEFT,
+            SwipeDir::Forward => icons::LUCIDE_CHEVRON_RIGHT,
         };
-        let page = div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left_0()
-            .w(px(PEEK_INNER))
-            .px(px(40.0))
-            .pt(px(Theme::TITLEBAR_HEIGHT + 16.0))
+        let body = div()
+            .size(px(size))
+            .rounded_full()
+            .border_1()
+            .border_color(theme.border)
+            .when(!glass, |el| el.shadow_md())
+            .bg(if glass {
+                popover::surface_bg(&theme)
+            } else {
+                theme.surface_raised
+            })
+            .relative()
             .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .opacity(0.55 + 0.45 * lit)
+            .items_center()
+            .justify_center()
             .child(
                 div()
-                    .mb(px(8.0))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(17.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(title),
+                    .absolute()
+                    .inset_0()
+                    .rounded_full()
+                    .bg(theme.wash(0.08)),
             )
-            .child(line(0.9))
-            .child(line(0.75))
-            .child(line(0.82));
-        let edge = div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .w(px(2.0))
-            .bg(theme.accent)
-            .opacity(lit)
-            .map(|el| match dir {
-                SwipeDir::Back => el.right_0(),
-                SwipeDir::Forward => el.left_0(),
-            });
-        let panel = div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .w(px(width))
-            .overflow_hidden()
-            .opacity(alpha)
-            .bg(if theme.is_frost() {
-                popover::surface_bg(theme)
-            } else {
-                theme.bg
-            })
-            .border_color(theme.border)
-            .shadow_lg()
-            .map(|el| match dir {
-                SwipeDir::Back => el.left_0().border_r_1(),
-                SwipeDir::Forward => el.right(px(right_inset)).border_l_1(),
-            })
-            .child(page)
-            .child(edge);
-        crate::frost::frosted(0.0, crate::frost::MENU_BLUR * alpha, panel).into_any_element()
-    }
-
-    fn render_swipe_blocked(
-        &self,
-        dir: SwipeDir,
-        armed: bool,
-        right_inset: f32,
-        cx: &App,
-    ) -> AnyElement {
-        let theme = Theme::of(cx);
-        let shown = motion::state_t("swipe-blocked", armed, motion::SNAP, self.reduced_motion);
+            .child(
+                icon(chevron)
+                    .size(px((20.0 + 3.0 * lit) * shrink))
+                    .text_color(theme.text.opacity(0.45 + 0.55 * lit.min(1.0))),
+            );
+        let edge = center - size / 2.0;
         div()
             .absolute()
             .top(gpui::relative(0.5))
-            .mt(px(-9.0))
+            .mt(px(-size / 2.0))
             .map(|el| match dir {
-                SwipeDir::Back => el.left(px(16.0)),
-                SwipeDir::Forward => el.right(px(16.0 + right_inset)),
+                SwipeDir::Back => el.left(px(edge)),
+                SwipeDir::Forward => el.right(px(edge + right_inset)),
             })
-            .opacity(shown)
-            .text_size(crate::typography::ui_rems(13.0))
-            .text_color(theme.text_faint)
-            .child(match dir {
-                SwipeDir::Back => "No previous page",
-                SwipeDir::Forward => "No next page",
-            })
+            .opacity(alpha)
+            .child(crate::frost::frosted(
+                size / 2.0,
+                crate::frost::MENU_BLUR * alpha,
+                body,
+            ))
             .into_any_element()
     }
 }
