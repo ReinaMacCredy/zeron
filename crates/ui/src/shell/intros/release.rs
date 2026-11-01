@@ -22,12 +22,13 @@ const CHILD_PANE_TABS: &str = "child-pane-tabs";
 const ANDROID_PARITY: &str = "android-parity";
 const SETTINGS_CLOSE: &str = "settings-close";
 const ANSWER_PILL: &str = "answer-pill";
+const ANSWER_PILL_HERO: &str = "answer-pill-hero";
 const KEEP_AWAKE: &str = "keep-awake";
 const COMPACTION_MORPH: &str = "compaction-morph";
 const SWIPE_DOT: &str = "swipe-dot";
 const TAB_DRAG: &str = "tab-drag";
 
-pub(super) const VISUALS: [(&str, f32, f32); 24] = [
+pub(super) const VISUALS: [(&str, f32, f32); 25] = [
     (CLAUDE_CONFIG, 7.0, 3.4),
     (COMMAND_CARDS, 6.6, 4.5),
     (COMPACTION_CARD, 7.6, 5.4),
@@ -48,6 +49,7 @@ pub(super) const VISUALS: [(&str, f32, f32); 24] = [
     (ANDROID_PARITY, 6.8, 5.0),
     (SETTINGS_CLOSE, 4.4, 1.6),
     (ANSWER_PILL, 7.0, 1.4),
+    (ANSWER_PILL_HERO, 7.0, 1.4),
     (KEEP_AWAKE, 6.0, 1.8),
     (COMPACTION_MORPH, 5.2, 4.2),
     (SWIPE_DOT, 4.2, 1.8),
@@ -75,7 +77,8 @@ pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyEleme
         CHILD_PANE_TABS => child_pane_tabs_visual(theme, t, reduced),
         ANDROID_PARITY => android_parity_visual(theme, t, reduced),
         SETTINGS_CLOSE => settings_close_visual(theme, t),
-        ANSWER_PILL => answer_pill_visual(theme, t, reduced),
+        ANSWER_PILL => answer_pill_visual(theme, t, reduced, false),
+        ANSWER_PILL_HERO => answer_pill_visual(theme, t, reduced, true),
         KEEP_AWAKE => keep_awake_visual(theme, t, reduced),
         COMPACTION_MORPH => compaction_morph_visual(theme, t, reduced),
         SWIPE_DOT => swipe_dot_visual(theme, t),
@@ -2431,7 +2434,7 @@ fn question_mark(theme: &Theme) -> gpui::Div {
         .child("?")
 }
 
-fn answer_pill_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
+fn answer_pill_visual(theme: &Theme, t: f32, reduced: bool, hero: bool) -> AnyElement {
     const OPEN_AT: f32 = 0.6;
     const PICK_AT: f32 = 1.8;
     const NEXT_AT: f32 = 2.3;
@@ -2457,7 +2460,11 @@ fn answer_pill_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
     let agents = frame(div()).child(running(theme, reduced)).child(text(
         11.0,
         theme.text_muted,
-        "Audit pstack \u{b7} Working",
+        if hero {
+            "Working"
+        } else {
+            "Audit pstack \u{b7} Working"
+        },
     ));
     let waiting = frame(div())
         .opacity(1.0 - pill_out)
@@ -2507,12 +2514,27 @@ fn answer_pill_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
     if !on_decision {
         tabs = tabs.child(tab(
             question_mark(theme).into_any_element(),
-            "Pricing research",
+            if hero { "Pricing" } else { "Pricing research" },
             true,
         ));
     }
-    tabs = tabs.child(tab(shield(), "Sidebar grouping", on_decision));
-    let body = if on_decision {
+    tabs = tabs.child(tab(
+        shield(),
+        if hero { "Grouping" } else { "Sidebar grouping" },
+        on_decision,
+    ));
+    let body = if hero {
+        let (first, second, picked) = if on_decision {
+            ("By project", "By date", t >= DECIDE_AT)
+        } else {
+            ("Stripe", "Paddle", t >= PICK_AT)
+        };
+        div()
+            .flex()
+            .gap(px(4.0))
+            .child(option("1", first, picked))
+            .child(option("2", second, false))
+    } else if on_decision {
         div()
             .flex()
             .flex_col()
@@ -2533,9 +2555,9 @@ fn answer_pill_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
     };
     let slide = if on_decision { (1.0 - next) * 8.0 } else { 0.0 };
     let card = div()
-        .w(px(280.0))
+        .map(|el| if hero { el.w_full() } else { el.w(px(280.0)) })
         .relative()
-        .top(px((1.0 - shown) * 10.0))
+        .top(px((1.0 - shown) * if hero { -6.0 } else { 10.0 }))
         .opacity(shown)
         .flex()
         .flex_col()
@@ -2545,7 +2567,7 @@ fn answer_pill_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
         .bg(theme.surface_raised)
         .child(
             div()
-                .h(px(28.0))
+                .h(px(if hero { 24.0 } else { 28.0 }))
                 .px(px(6.0))
                 .flex()
                 .items_center()
@@ -2556,27 +2578,29 @@ fn answer_pill_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
         )
         .child(
             div()
-                .px(px(10.0))
-                .py(px(6.0))
+                .px(px(if hero { 6.0 } else { 10.0 }))
+                .py(px(if hero { 5.0 } else { 6.0 }))
                 .child(div().relative().left(px(slide)).child(body)),
         )
-        .child(
-            div()
-                .h(px(20.0))
-                .px(px(10.0))
-                .flex()
-                .items_center()
-                .child(text(9.5, theme.text_faint, "Esc to answer later").flex_1())
-                .child(text(
-                    9.5,
-                    theme.text_muted,
-                    if on_decision {
-                        "Dismiss"
-                    } else {
-                        "Open thread"
-                    },
-                )),
-        );
+        .when(!hero, |el| {
+            el.child(
+                div()
+                    .h(px(20.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .child(text(9.5, theme.text_faint, "Esc to answer later").flex_1())
+                    .child(text(
+                        9.5,
+                        theme.text_muted,
+                        if on_decision {
+                            "Dismiss"
+                        } else {
+                            "Open thread"
+                        },
+                    )),
+            )
+        });
     let composer = div()
         .w(px(300.0))
         .h(px(28.0))
@@ -2588,6 +2612,19 @@ fn answer_pill_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
         .border_color(theme.border)
         .bg(crate::settings::widgets::block_fill(theme))
         .child(text(11.0, theme.text_faint, "Do anything\u{2026}"));
+    let pills = div().flex().gap(px(5.0)).child(agents).child(waiting);
+    if hero {
+        return div()
+            .w_full()
+            .h(px(84.0))
+            .px(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(5.0))
+            .child(pills)
+            .child(card)
+            .into_any_element();
+    }
     div()
         .h(px(196.0))
         .flex()
@@ -2595,7 +2632,7 @@ fn answer_pill_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
         .justify_end()
         .gap(px(5.0))
         .child(card)
-        .child(div().flex().gap(px(5.0)).child(agents).child(waiting))
+        .child(pills)
         .child(composer)
         .into_any_element()
 }

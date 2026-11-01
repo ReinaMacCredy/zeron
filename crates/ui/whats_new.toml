@@ -5,7 +5,7 @@
 version = "0.2.132"
 date = "Nov 1"
 hero = "answer-pill.jpg"
-hero_visual = "answer-pill"
+hero_visual = "answer-pill-hero"
 
 [[entry.features]]
 id = "answer-pill"
