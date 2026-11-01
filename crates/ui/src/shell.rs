@@ -1851,32 +1851,6 @@ fn settings_panel_bounds(viewport: gpui::Size<Pixels>) -> gpui::Bounds<Pixels> {
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct SettingsFade {
-    panel: f32,
-    backdrop: f32,
-    settled: bool,
-}
-
-fn settings_fade(closing: bool, elapsed: Duration, reduced: bool) -> SettingsFade {
-    let (panel, backdrop) = match (reduced, closing) {
-        (true, _) => (motion::SETTINGS_REDUCED, motion::SETTINGS_REDUCED),
-        (false, false) => (motion::SETTINGS_IN, motion::SETTINGS_IN),
-        (false, true) => (motion::SETTINGS_OUT, motion::SETTINGS_BACKDROP_OUT),
-    };
-    let scale = motion::speed_scale();
-    let shown = |spec: MotionSpec| {
-        let total = spec.total().mul_f32(scale).as_secs_f32();
-        let progress = spec.progress(elapsed.as_secs_f32() / total.max(f32::EPSILON));
-        if closing { 1.0 - progress } else { progress }
-    };
-    SettingsFade {
-        panel: shown(panel),
-        backdrop: shown(backdrop),
-        settled: elapsed >= panel.total().max(backdrop.total()).mul_f32(scale),
-    }
-}
-
 /// What the main outlet shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
@@ -3621,8 +3595,6 @@ pub struct Shell {
     continuing: std::collections::HashSet<String>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     harnesses_sub: Option<Subscription>,
-    settings_opened_at: Option<std::time::Instant>,
-    settings_closing: Option<(SettingsSection, std::time::Instant)>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
     _settings_search_sub: Subscription,
@@ -4394,8 +4366,6 @@ impl Shell {
             continuing: Default::default(),
             harnesses_page: None,
             harnesses_sub: None,
-            settings_opened_at: None,
-            settings_closing: None,
             settings_search,
             _settings_search_sub: settings_search_sub,
             shortcuts_sub: None,
@@ -8007,10 +7977,7 @@ impl Shell {
         if route != self.route {
             settings::search::clear_reveal();
         }
-        if let Route::Settings(section) = self.route
-            && !matches!(route, Route::Settings(_))
-        {
-            self.settings_closing = Some((section, motion::now()));
+        if matches!(self.route, Route::Settings(_)) && !matches!(route, Route::Settings(_)) {
             if !self.settings_search.read(cx).text().is_empty() {
                 self.settings_search
                     .update(cx, |input, cx| input.set_text("", cx));
@@ -11967,7 +11934,6 @@ impl Shell {
     fn render_settings_page(
         &mut self,
         section: SettingsSection,
-        fade: SettingsFade,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -12190,11 +12156,10 @@ impl Shell {
             .top(panel.origin.y)
             .w(panel.size.width)
             .h(panel.size.height)
-            .opacity(fade.panel)
             .occlude()
             .child(crate::frost::frosted(
                 SETTINGS_PANEL_RADIUS,
-                crate::frost::MENU_BLUR * fade.panel,
+                crate::frost::MENU_BLUR,
                 card,
             ));
         let backdrop = div()
@@ -12224,13 +12189,7 @@ impl Shell {
             .left_0()
             .w(viewport.width)
             .h(viewport.height)
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .opacity(fade.backdrop)
-                    .child(crate::frost::frosted(0.0, 8.0 * fade.backdrop, backdrop)),
-            )
+            .child(crate::frost::frosted(0.0, 8.0, backdrop))
             .child(drag)
             .child(panel_el)
             .into_any_element()
@@ -20073,33 +20032,8 @@ impl Render for Shell {
                     Route::Settings(section) => Some(section),
                     _ => None,
                 };
-                let reduced = motion::reduced_motion(cx);
-                let settings_panel = match (settings_route, self.settings_closing) {
-                    (Some(section), _) => {
-                        self.settings_closing = None;
-                        let opened = *self.settings_opened_at.get_or_insert_with(motion::now);
-                        let fade = settings_fade(false, motion::since(opened), reduced);
-                        if !fade.settled {
-                            window.request_animation_frame();
-                        }
-                        Some(self.render_settings_page(section, fade, window, cx))
-                    }
-                    (None, Some((section, closed))) => {
-                        self.settings_opened_at = None;
-                        let fade = settings_fade(true, motion::since(closed), reduced);
-                        if fade.settled {
-                            self.settings_closing = None;
-                            None
-                        } else {
-                            window.request_animation_frame();
-                            Some(self.render_settings_page(section, fade, window, cx))
-                        }
-                    }
-                    (None, None) => {
-                        self.settings_opened_at = None;
-                        None
-                    }
-                };
+                let settings_panel =
+                    settings_route.map(|section| self.render_settings_page(section, window, cx));
                 if settings_route.is_some() {
                     self.route = match self.settings_return_route {
                         Route::Settings(_) => Route::Chat,
@@ -25708,28 +25642,6 @@ mod settings_modal_regressions {
     }
 
     #[test]
-    fn settings_close_starts_from_the_shown_panel_and_ends_hidden() {
-        for reduced in [false, true] {
-            let opening = settings_fade(false, Duration::ZERO, reduced);
-            assert_eq!((opening.panel, opening.backdrop), (0.0, 0.0));
-            let closing = settings_fade(true, Duration::ZERO, reduced);
-            assert_eq!((closing.panel, closing.backdrop), (1.0, 1.0));
-            assert!(!closing.settled);
-            let closed = settings_fade(true, Duration::from_secs(10), reduced);
-            assert_eq!((closed.panel, closed.backdrop), (0.0, 0.0));
-            assert!(closed.settled);
-        }
-        let halfway = motion::SETTINGS_OUT
-            .total()
-            .mul_f32(motion::speed_scale() / 2.0);
-        let closing = settings_fade(true, halfway, false);
-        assert!(
-            closing.panel < 0.5 && closing.backdrop < 0.5,
-            "the close eases out like the open, not holding then cutting: {closing:?}"
-        );
-    }
-
-    #[test]
     fn open_route_names_a_section_or_reopens_the_remembered_one() {
         let remembered = SettingsSection::Notifications;
         assert_eq!(
@@ -26044,6 +25956,14 @@ mod settings_modal_regressions {
             Route::Settings(SettingsSection::Appearance)
         );
         assert_eq!(lit(), Some(Target::Setting(SettingId::SmoothScrolling)));
+
+        assert!(cx.debug_bounds("settings-panel").is_some());
+        shell.update(cx, |shell, cx| shell.close_settings(cx));
+        draw(cx);
+        assert!(
+            cx.debug_bounds("settings-panel").is_none(),
+            "closing swaps Settings out in one frame, like t3code's settings route"
+        );
     }
 
     #[gpui::test]
