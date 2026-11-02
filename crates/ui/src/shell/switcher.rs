@@ -263,6 +263,7 @@ impl Shell {
                 | Route::Supervisor
                 | Route::Usage
                 | Route::Docs
+                | Route::Skills
         ) {
             self.open_home(cx);
         }

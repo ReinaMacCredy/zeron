@@ -1647,6 +1647,9 @@ pub struct UiSettings {
     pub skills_in_slash_menu: bool,
     pub skill_completion_by_harness:
         std::collections::HashMap<zeron_proto::HarnessId, SkillCompletionSettings>,
+    /// UI-side only: the harnesses' own skill configs are untouched.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub disabled_skills: std::collections::BTreeSet<String>,
     /// Open model selection with an effort slider and a separate model list.
     pub compact_model_picker: bool,
     pub compact_effort_slider: EffortSliderStyle,
@@ -1947,6 +1950,7 @@ impl Default for UiSettings {
             switcher_cycles_tabs: false,
             skills_in_slash_menu: false,
             skill_completion_by_harness: Default::default(),
+            disabled_skills: Default::default(),
             compact_model_picker: true,
             compact_effort_slider: EffortSliderStyle::Glass,
             computer_click_sounds: ComputerClickSounds::Foreground,
@@ -2806,6 +2810,7 @@ impl UiSettings {
             composer_send_behavior,
             skills_in_slash_menu,
             skill_completion_by_harness,
+            disabled_skills,
             compact_model_picker,
             sidebar_width,
             sidebar_collapsed,
@@ -4454,6 +4459,7 @@ mod tests {
             switcher_cycles_tabs: true,
             skills_in_slash_menu: true,
             skill_completion_by_harness: Default::default(),
+            disabled_skills: Default::default(),
             compact_model_picker: true,
             compact_effort_slider: EffortSliderStyle::Glass,
             computer_click_sounds: ComputerClickSounds::Foreground,

@@ -87,6 +87,7 @@ pub(crate) mod children;
 mod command_palette;
 mod device_tabs;
 mod docs;
+mod skills;
 mod file_mutations;
 mod files_panel;
 mod handoff;
@@ -1873,6 +1874,7 @@ pub enum Route {
     TaskCenter,
     Supervisor,
     Docs,
+    Skills,
 }
 
 /// Maximum width the right pane may occupy while retaining the conversation
@@ -2042,6 +2044,7 @@ pub enum NavEntry {
     TaskCenter(String),
     Supervisor,
     Docs(Option<&'static str>),
+    Skills,
 }
 
 /// Browser-style navigation history for the titlebar back/forward buttons
@@ -3325,7 +3328,11 @@ impl Render for SidebarPane {
             if shell.whats_new_card_animates(cx) && window.is_window_active() {
                 window.request_animation_frame();
             }
-            shell.render_chat_sidebar(&theme, cx)
+            if matches!(shell.route, Route::Skills) {
+                shell.render_skills_sidebar(&theme, window, cx)
+            } else {
+                shell.render_chat_sidebar(&theme, cx)
+            }
         });
         div().size_full().child(inner).into_any_element()
     }
@@ -3548,6 +3555,7 @@ pub struct Shell {
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     usage_page: Option<Entity<crate::usage::UsagePage>>,
     docs_article: Option<&'static str>,
+    skills: skills::SkillsPage,
     docs_search: Entity<ComposerInput>,
     _docs_search_sub: Subscription,
     inbox_page: Option<(Entity<crate::inbox::InboxPage>, Subscription)>,
@@ -4126,6 +4134,7 @@ impl Shell {
             Some("inbox") => Route::Inbox,
             Some("tasks") => Route::Tasks,
             Some("supervisor") => Route::Supervisor,
+            Some("skills") => Route::Skills,
             Some(_) if open_task.is_some() => Route::TaskCenter,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
@@ -4184,6 +4193,7 @@ impl Shell {
             Route::TaskCenter => NavEntry::TaskCenter(open_task.clone().unwrap_or_default()),
             Route::Supervisor => NavEntry::Supervisor,
             Route::Docs => NavEntry::Docs(None),
+            Route::Skills => NavEntry::Skills,
         });
         // Parent notifications carry presentation changes (session status,
         // elapsed labels, menus); sibling animation/caret ticks do not.
@@ -4327,6 +4337,7 @@ impl Shell {
             pull_requests_page: None,
             usage_page: None,
             docs_article: None,
+            skills: Default::default(),
             docs_search,
             _docs_search_sub: docs_search_sub,
             inbox_page: None,
@@ -8974,6 +8985,7 @@ impl Shell {
             NavEntry::TaskCenter(task_id) => self.enter_task_center_route(task_id, cx),
             NavEntry::Supervisor => self.enter_supervisor_route(cx),
             NavEntry::Docs(article) => self.enter_docs_route(article, cx),
+            NavEntry::Skills => self.enter_skills_route(cx),
             NavEntry::Settings(section) => {
                 if !matches!(self.route, Route::Settings(_)) {
                     self.settings_return_route = self.route;
@@ -15448,6 +15460,7 @@ impl Shell {
             }
             RailItem::Inbox => matches!(self.route, Route::Inbox),
             RailItem::Tasks => matches!(self.route, Route::Tasks | Route::TaskCenter),
+            RailItem::Skills => matches!(self.route, Route::Skills),
             RailItem::PullRequests => matches!(self.route, Route::PullRequests),
             RailItem::Settings => matches!(self.route, Route::Settings(_)),
         }
@@ -15471,6 +15484,10 @@ impl Shell {
                 self.enter_pull_requests_route(cx);
                 self.nav.push(NavEntry::PullRequests);
                 cx.notify();
+            }
+            RailItem::Skills => {
+                self.settings_focus_pending = false;
+                self.open_skills(cx);
             }
             RailItem::Tasks => {
                 self.settings_focus_pending = false;
@@ -15885,6 +15902,9 @@ impl Shell {
         // path close here; the others remain explicit blockers.
         if self.whats_new_dialog.is_some() && !self.sync_flow.has_visible_overlay() {
             self.close_whats_new(cx);
+            return true;
+        }
+        if self.escape_skill_dialog(cx) {
             return true;
         }
         if self.help_menu.is_open() {
@@ -16513,6 +16533,10 @@ impl Shell {
             overlays.push(dialog);
         }
 
+        if let Some(dialog) = self.render_skill_dialog(viewport, &theme, window, cx) {
+            overlays.push(dialog);
+        }
+
         if let Some(flow) = self.discard_working_tree.clone() {
             let card = match flow {
                 DiscardWorkingTreeFlow::Confirm(_) => {
@@ -16833,6 +16857,10 @@ impl Shell {
 
         if matches!(self.route, Route::Docs) {
             return self.render_docs_page(main_content_width, window, cx);
+        }
+
+        if matches!(self.route, Route::Skills) {
+            return self.render_skills_page(main_content_width, cx);
         }
 
         if matches!(self.route, Route::PullRequests) {
@@ -20153,6 +20181,7 @@ impl Render for Shell {
                             | Route::Tasks
                             | Route::Supervisor
                             | Route::Docs
+                            | Route::Skills
                     )
                     || (self.route == Route::TaskCenter && !chat_under);
                 // The Pull requests route shares this layout without the

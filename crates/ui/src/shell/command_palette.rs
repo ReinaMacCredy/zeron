@@ -1564,7 +1564,7 @@ impl Shell {
         let card = card.when(closing.is_some(), |card| {
             card.relative().child(div().absolute().inset_0().occlude())
         });
-        Some(palette_overlay(viewport, card, motion))
+        Some(palette_overlay(viewport, card, motion, false))
     }
 }
 
@@ -1734,6 +1734,7 @@ pub(super) fn palette_overlay(
     viewport: gpui::Size<Pixels>,
     card: gpui::Stateful<gpui::Div>,
     motion: PaletteMotion,
+    centered: bool,
 ) -> AnyElement {
     let shown = motion.shown;
     // Match the composer's 16px backdrop blur, including its opaque fallback.
@@ -1749,7 +1750,13 @@ pub(super) fn palette_overlay(
         .flex()
         .flex_col()
         .items_center()
-        .pt(px(palette_top(viewport)))
+        .map(|el| {
+            if centered {
+                el.justify_center()
+            } else {
+                el.pt(px(palette_top(viewport)))
+            }
+        })
         .opacity(shown)
         .child(div().relative().top(px(2.0 * (1.0 - shown))).child(card));
     // `shown` comes off the wall clock; the animation only pumps frames, and

@@ -147,7 +147,8 @@ impl Shell {
             | Route::Tasks
             | Route::TaskCenter
             | Route::Supervisor
-            | Route::Docs => None,
+            | Route::Docs
+            | Route::Skills => None,
             _ => self.state.read(cx).focused_id(),
         }
     }
