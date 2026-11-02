@@ -26311,11 +26311,14 @@ mod settings_modal_regressions {
             shell.debug_gate = Some(GatePhase::Ready);
             shell.splash = SplashPhase::Gone;
         });
-        // Routing draws its Delegation rows only once the engine answers.
+        // Routing and Compaction draw their rows only once the engine answers.
         let sections = SettingsSection::ALL.into_iter().filter(|section| {
             section.visible_in_nav()
                 && !section.needs_account()
-                && *section != SettingsSection::Routing
+                && !matches!(
+                    section,
+                    SettingsSection::Routing | SettingsSection::Compaction
+                )
         });
         let indexed: Vec<Target> = SettingsSection::ALL
             .into_iter()
