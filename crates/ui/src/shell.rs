@@ -3586,6 +3586,7 @@ pub struct Shell {
     archived_page: Option<Entity<ArchivedPage>>,
     source_control_page: Option<Entity<SourceControlPage>>,
     home_view: Option<Entity<crate::home::HomeView>>,
+    home_raise: Option<WidthTween>,
     new_work_scroll: gpui::ScrollHandle,
     _home_events: Option<Subscription>,
     appearance_page: Option<Entity<AppearancePage>>,
@@ -4357,6 +4358,7 @@ impl Shell {
             archived_page: None,
             source_control_page: None,
             home_view: None,
+            home_raise: None,
             new_work_scroll: gpui::ScrollHandle::new(),
             _home_events: None,
             appearance_page: None,
@@ -16875,9 +16877,11 @@ impl Shell {
             pickers.set_terminal_open(Some(terminal_open), cx)
         });
         let has_selection = self.state.read(cx).selected_chat.is_some();
+        let home = settings::home_widgets(cx);
+        let home_raised = home.any_visible() && !home.collapsed;
         self.composer_dock
             .borrow_mut()
-            .set_hero_anchor(HOME_HERO_ANCHOR);
+            .set_hero_anchor(if home_raised { HOME_HERO_ANCHOR } else { 0.5 });
         let composer = self.composer.read(cx);
         let hero_floor =
             if composer.config_panel_on_hero(cx) || (composer.waiting_open() && !has_selection) {
@@ -16886,6 +16890,15 @@ impl Shell {
                 0.0
             };
         self.composer_dock.borrow_mut().set_hero_floor(hero_floor);
+        let raise_target = if home_raised { 1.0 } else { 0.0 };
+        self.home_raise = Some(match self.home_raise.take() {
+            Some(tween) if (tween.to - raise_target).abs() > f32::EPSILON => {
+                WidthTween::new(self.eval_tween(Some(tween), tween.to), raise_target)
+            }
+            Some(tween) => tween,
+            None => WidthTween::new(raise_target, raise_target),
+        });
+        let raise = self.eval_tween(self.home_raise, raise_target);
         let transcript_geometry_ready =
             bottom_stack_measurement_matches(self.bottom_stack_has_composer.get(), has_selection);
         let ui_settings = settings::current(cx);
@@ -16981,8 +16994,12 @@ impl Shell {
             let bounds = self.composer.read(cx).surface_bounds();
             let opacity = new_thread_background_opacity(theme.is_frost());
             let full_height = new_thread_background_height(self.viewport_height);
-            let hero_height = match bounds.get() {
-                Some(pill) => full_height.min(f32::from(pill.bottom()) + 24.0),
+            let hero_height = match bounds.get().filter(|_| raise > 0.0) {
+                Some(pill) => motion::lerp(
+                    full_height,
+                    full_height.min(f32::from(pill.bottom()) + 24.0),
+                    raise,
+                ),
                 None => full_height,
             };
             let backdrop = if self.settings.inset_shell && !has_selection {
