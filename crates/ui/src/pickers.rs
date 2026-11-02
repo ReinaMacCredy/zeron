@@ -6332,17 +6332,18 @@ impl Pickers {
                 .flex_row()
                 .items_center()
                 .min_w_0()
-                .child(Self::footer_label(icon_path, label, &theme))
-                .when(work_tree.is_some_and(|work_tree| work_tree.removed), |el| {
-                    el.child(
-                        div()
-                            .flex_none()
-                            .ml(px(-4.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from("· removed")),
-                    )
-                });
+                .child(Self::footer_label(icon_path, label, &theme).when(
+                    work_tree.is_some_and(|work_tree| work_tree.removed),
+                    |el| {
+                        el.max_w(px(240.0)).child(
+                            div()
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from("· removed")),
+                        )
+                    },
+                ));
             let branch_label = match work_tree {
                 Some(work_tree) => work_tree
                     .branch
