@@ -257,6 +257,67 @@ impl ChatBackground {
     }
 }
 
+pub const SHELL_FRAME_SHADE_MAX: f32 = 0.8;
+pub const SHELL_FRAME_BLUR_MAX: f32 = 40.0;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ShellFrameStyle {
+    Off,
+    #[default]
+    Dark,
+    Glass,
+}
+
+impl ShellFrameStyle {
+    pub const ALL: [Self; 3] = [Self::Off, Self::Dark, Self::Glass];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Dark => "Dark",
+            Self::Glass => "Glass",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Off => "Only the tab bar shows the artwork.",
+            Self::Dark => "The artwork runs under the tab bar and rail, darkened.",
+            Self::Glass => "The artwork runs under the tab bar and rail, blurred and darkened.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ShellFrame {
+    pub style: ShellFrameStyle,
+    pub shade: f32,
+    pub blur: f32,
+}
+
+impl Default for ShellFrame {
+    fn default() -> Self {
+        Self {
+            style: ShellFrameStyle::Dark,
+            shade: 0.58,
+            blur: 28.0,
+        }
+    }
+}
+
+impl ShellFrame {
+    pub fn clamped(mut self) -> Self {
+        let default = Self::default();
+        self.shade = (clamp_or(self.shade, 0.0, SHELL_FRAME_SHADE_MAX, default.shade) * 100.0)
+            .round()
+            / 100.0;
+        self.blur = clamp_or(self.blur, 0.0, SHELL_FRAME_BLUR_MAX, default.blur).round();
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TerminalBackgroundMode {
@@ -1083,6 +1144,15 @@ pub fn update_terminal_background(
     }
 }
 
+pub fn update_shell_frame(policy: SavePolicy, cx: &mut App, mutate: impl FnOnce(&mut ShellFrame)) {
+    if update(policy, cx, |settings| {
+        mutate(&mut settings.shell_frame);
+        settings.shell_frame = settings.shell_frame.clamped();
+    }) {
+        cx.refresh_windows();
+    }
+}
+
 pub fn set_new_thread_background_adjustment(
     adjustment: NewThreadBackgroundAdjustment,
     cx: &mut App,
@@ -1854,6 +1924,7 @@ pub struct UiSettings {
     /// How the same artwork shows behind an open conversation.
     pub chat_background: ChatBackground,
     pub terminal_background: TerminalBackground,
+    pub shell_frame: ShellFrame,
     /// Snap animations to rest. Defaults to following the OS.
     pub reduce_motion: crate::motion::ReduceMotion,
     /// Also snap animations while the main window is not focused.
@@ -2002,6 +2073,7 @@ impl Default for UiSettings {
             new_thread_background_effect: NewThreadBackgroundEffect::None,
             chat_background: ChatBackground::default(),
             terminal_background: TerminalBackground::default(),
+            shell_frame: ShellFrame::default(),
             reduce_motion: crate::motion::ReduceMotion::System,
             pause_animations_in_background: false,
             commit_message_instruction: DEFAULT_COMMIT_INSTRUCTION.to_string(),
@@ -2909,6 +2981,7 @@ impl UiSettings {
             frost,
             chat_background,
             terminal_background,
+            shell_frame,
             commit_message_instruction,
             commit_message_model,
             pr_chat_history,
@@ -3049,6 +3122,7 @@ impl UiSettings {
         );
         self.chat_background = self.chat_background.clamped();
         self.terminal_background.custom = self.terminal_background.custom.clamped();
+        self.shell_frame = self.shell_frame.clamped();
         self.frost = self.frost.clamped();
         self.ui_font_size = self.ui_font_size.normalized();
         if let Some(background) = self.new_thread_composer_background.as_mut() {
@@ -4560,6 +4634,7 @@ mod tests {
                     ..ChatBackground::default()
                 },
             },
+            shell_frame: ShellFrame::default(),
             reduce_motion: crate::motion::ReduceMotion::On,
             pause_animations_in_background: true,
             commit_message_instruction: "Use the imperative mood.".into(),

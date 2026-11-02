@@ -594,6 +594,7 @@ impl Shell {
                     cx,
                 )
             });
+        let card = self.art_card();
         let frame_time = self.render_time.unwrap_or_else(motion::now);
         let artwork_opacity = self.chat_artwork_ready.opacity(
             artwork.as_ref().map(|image| image.id),
@@ -611,6 +612,7 @@ impl Shell {
                     artwork_opacity,
                     theme.bg,
                     theme.inset_tones().body,
+                    card.clone(),
                 )
             });
             crate::chat_background::layer(
@@ -625,6 +627,7 @@ impl Shell {
                 theme.bg,
                 artwork_opacity,
                 self.page_backdrop.as_ref(),
+                card,
             )
         });
         let resize_suspended =
