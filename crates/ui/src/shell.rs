@@ -11979,11 +11979,7 @@ impl Shell {
         let viewport = window.viewport_size();
         let panel = settings_panel_bounds(viewport);
         let header = settings::widgets::SETTINGS_HEADER_HEIGHT;
-        let query = self.settings_search.read(cx).text().to_string();
-        let searching = !query.trim().is_empty();
-        let subtabs = (!searching)
-            .then(|| self.render_settings_subtabs(section, &theme, cx))
-            .flatten();
+        let subtabs = self.render_settings_subtabs(section, &theme, cx);
         let page_top = header
             + if subtabs.is_some() {
                 SETTINGS_SUBTABS_HEIGHT
@@ -12001,19 +11997,9 @@ impl Shell {
             cx,
         );
         let nav = self.render_settings_nav(section, &theme, window, cx);
-        let outlet = if searching {
-            self.render_settings_results(&query, &theme, cx)
-        } else {
-            self.settings_outlet(section, window, cx)
-        };
-        let action = (!searching)
-            .then(|| self.settings_header_action(section, &theme, window, cx))
-            .flatten();
-        let crumb = if searching {
-            "Search"
-        } else {
-            section.group().label()
-        };
+        let outlet = self.settings_outlet(section, window, cx);
+        let action = self.settings_header_action(section, &theme, window, cx);
+        let crumb = section.group().label();
         let header_row = div()
             .id("settings-header")
             .h(px(header))
@@ -12295,8 +12281,35 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let query = self.settings_search.read(cx).text().to_string();
-        let searching = !query.trim().is_empty();
-        let current = (!searching).then(|| section.group());
+        if !query.trim().is_empty() {
+            let hits = self.render_settings_hits(&query, theme, cx);
+            return settings::widgets::scroll_faded(
+                "settings-nav-scroll",
+                div()
+                    .id("settings-sections")
+                    .role(gpui::Role::List)
+                    .aria_label("Settings search results")
+                    .w_full()
+                    .overflow_y_scroll()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(Theme::SPACE_SM))
+                            .pt(px(Theme::SPACE_MD))
+                            .pb(px(Theme::SPACE_SM))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(self.render_settings_search(theme, &query, cx))
+                            .child(hits),
+                    ),
+            )
+            .into_any_element();
+        }
+        let current = section.group();
         settings::widgets::scroll_faded(
             "settings-nav-scroll",
             div()
@@ -12320,8 +12333,7 @@ impl Shell {
                         .child(self.render_settings_search(theme, &query, cx))
                         .children(SettingsGroup::ALL.into_iter().enumerate().map(
                             |(index, group)| {
-                                let selected = current == Some(group);
-                                let tab_stop = selected || (current.is_none() && index == 0);
+                                let selected = current == group;
                                 let key = format!("settings-nav-{}", group.label());
                                 let hover_key = format!("{key}-hover");
                                 let selection_t = settings::widgets::tab_selection_t(
@@ -12346,10 +12358,10 @@ impl Shell {
                                 .aria_label(group.label())
                                 .aria_selected(selected)
                                 .track_focus(
-                                    &self.settings_nav_focus[index].clone().tab_stop(tab_stop),
+                                    &self.settings_nav_focus[index].clone().tab_stop(selected),
                                 )
                                 .tab_index(0)
-                                .tab_stop(tab_stop)
+                                .tab_stop(selected)
                                 .on_key_down(cx.listener(
                                     move |this, event: &gpui::KeyDownEvent, window, cx| {
                                         let count = SettingsGroup::ALL.len();
@@ -12435,23 +12447,25 @@ impl Shell {
         )
     }
 
-    fn render_settings_results(
+    fn render_settings_hits(
         &self,
         query: &str,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let hits = settings_hits(query, self.state.read(cx).cloud_offered());
-        let title = if hits.is_empty() {
-            format!("No settings match “{}”", query.trim())
-        } else {
-            format!(
-                "{} result{} for “{}”",
-                hits.len(),
-                if hits.len() == 1 { "" } else { "s" },
-                query.trim()
-            )
-        };
+        if hits.is_empty() {
+            return div()
+                .px(px(Theme::SPACE_SM))
+                .py(px(6.0))
+                .text_size(crate::typography::ui_rems(13.0))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(format!(
+                    "No settings match “{}”",
+                    query.trim()
+                )))
+                .into_any_element();
+        }
         let rows = hits.into_iter().enumerate().map(|(ix, hit)| {
             let SettingsHit {
                 page,
@@ -12459,62 +12473,65 @@ impl Shell {
                 path,
                 target,
             } = hit;
-            let fill = div()
+            div()
                 .id(("settings-hit", ix))
                 .debug_selector(move || format!("settings-hit-{title}"))
                 .role(gpui::Role::Button)
                 .aria_label(SharedString::from(format!("{title}, {path}")))
                 .tab_index(0)
-                .mx(px(6.0))
-                .my(px(4.0))
-                .px(px(10.0))
-                .py(px(8.0))
-                .min_h(px(52.0))
                 .flex()
-                .items_center()
+                .flex_row()
+                .items_start()
+                .gap(px(8.0))
                 .rounded(px(8.0))
+                .px(px(Theme::SPACE_SM))
+                .py(px(6.0))
+                .flex_shrink_0()
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.glass_hover()))
                 .focus_visible(|s| s.bg(crate::theme::glass_selected_bg()))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.clear_settings_search(cx);
                     this.open_settings(page, cx);
                     if let Some(target) = target {
                         settings::search::reveal(target, window);
                     }
                 }))
                 .child(
+                    div().h(px(18.0)).flex().items_center().child(
+                        icon(page.group().icon())
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    ),
+                )
+                .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(settings::widgets::row_title(theme, title))
-                        .child(settings::widgets::meta_line(
-                            theme,
-                            vec![div().child(path).into_any_element()],
-                        )),
-                );
-            div()
-                .flex()
-                .flex_col()
-                .when(ix > 0, |el| {
-                    el.child(
-                        div()
-                            .mx(px(16.0))
-                            .h(px(1.0))
-                            .bg(settings::widgets::row_divider(theme)),
-                    )
-                })
-                .child(fill)
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .line_height(crate::typography::ui_rems(18.0))
+                                .text_color(theme.text)
+                                .child(SharedString::from(title)),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .line_height(crate::typography::ui_rems(16.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(path)),
+                        ),
+                )
         });
         div()
-            .id("settings-search-results")
-            .size_full()
-            .overflow_y_scroll()
-            .child(
-                settings::widgets::settings_page()
-                    .child(settings::widgets::page_header(theme, &title, None))
-                    .child(settings::widgets::section_card(theme).children(rows)),
-            )
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .children(rows)
             .into_any_element()
     }
 
