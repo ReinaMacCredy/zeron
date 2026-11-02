@@ -476,9 +476,25 @@ impl Render for CompactionCard {
                 .into_any_element(),
             Some(source) => key_row(&theme, source, has_jev_key, cx).into_any_element(),
         });
+        let ahead_row = widgets::card_row(&theme, false)
+            .child(row_text(
+                &theme,
+                AHEAD_TITLE,
+                "Moved to Lab › Experimental.",
+            ))
+            .child(
+                widgets::text_action(&theme, widgets::ActionTone::Quiet, "Open Lab")
+                    .id("compaction-open-lab")
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .aria_label("Open Lab")
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenExperimental))),
+            );
         card.children(rows)
             .children(source_row)
             .children(detail_row)
+            .child(ahead_row)
             .when_some(self.error.clone(), |card, error| {
                 card.child(
                     widgets::card_row(&theme, false).child(widgets::error_strip(&theme, error)),
@@ -486,6 +502,10 @@ impl Render for CompactionCard {
             })
     }
 }
+
+pub struct OpenExperimental;
+
+impl gpui::EventEmitter<OpenExperimental> for CompactionCard {}
 
 pub struct CompactAheadCard {
     card: Entity<CompactionCard>,
@@ -538,10 +558,7 @@ impl Render for CompactAheadCard {
             .overflow_y_scroll()
             .child(
                 widgets::settings_page()
-                    .child(widgets::page_note(
-                        &theme,
-                        "Experimental and beta features. They may change or go away in a later version.",
-                    ))
+                    .child(widgets::page_note(&theme, widgets::LAB_NOTE))
                     .child(widgets::section(
                         &theme,
                         "Agents",

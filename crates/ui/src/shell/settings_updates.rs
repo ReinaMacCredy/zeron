@@ -74,7 +74,8 @@ impl Shell {
         let agents = self.render_agent_clis(&theme, cx);
         let devices = self.render_update_devices(&theme, cx);
         let column = widgets::settings_page()
-            .child(widgets::section(&theme, "This Mac", this_mac).mt_0())
+            .child(widgets::page_note(&theme, widgets::LAB_NOTE))
+            .child(widgets::section(&theme, "This Mac", this_mac))
             .child(agents)
             .child(widgets::section(&theme, "Devices", devices));
         div()
