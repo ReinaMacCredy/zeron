@@ -1,7 +1,9 @@
 //! The new-thread artwork shown again behind an open conversation, sized and
 //! softened by [`ChatBackground`]. Shared by the shell and the Appearance
 //! preview so both draw the same layer.
-use crate::settings::{ChatBackground, ChatBackgroundPlacement, ShellFrameSidebar};
+use crate::settings::{
+    ChatBackground, ChatBackgroundPlacement, ShellFrameBlend, ShellFrameSidebar,
+};
 use crate::theme::Theme;
 use gpui::{
     AnyElement, Background, Bounds, ContentMask, Corners, Hsla, IntoElement, ParentElement, Pixels,
@@ -14,6 +16,8 @@ const TAB_FADE_BOTTOM: f32 = Theme::TITLEBAR_HEIGHT + 46.0;
 const SIDEBAR_GLASS_BLUR: f32 = 24.0;
 const SIDEBAR_GLASS_SHADE: f32 = 0.62;
 const SIDEBAR_DARKER: f32 = 0.42;
+const SIDEBAR_FADE_WIDTH: f32 = 260.0;
+const SIDEBAR_FADE_STEPS: usize = 8;
 
 pub(crate) type Painted = Rc<Cell<Option<(Bounds<Pixels>, Bounds<Pixels>)>>>;
 
@@ -114,7 +118,8 @@ impl Backdrop {
         blur: f32,
         card_left: f32,
         inset: f32,
-        column: Option<ShellFrameSidebar>,
+        look: ShellFrameSidebar,
+        blend: ShellFrameBlend,
     ) -> gpui::Div {
         let frame_painted = Painted::default();
         let (painted, target) = (self.painted.clone(), frame_painted.clone());
@@ -138,15 +143,31 @@ impl Backdrop {
                 gpui::canvas(
                     |_, _, _| {},
                     move |own, _, window, _| {
-                        let pieces = frame_pieces(own, card_left, inset, column.is_some());
-                        let column_blur = match column {
-                            Some(ShellFrameSidebar::Glass) => blur.max(SIDEBAR_GLASS_BLUR),
+                        let fade = blend == ShellFrameBlend::Fade;
+                        let pieces = frame_pieces(own, card_left, inset, fade);
+                        let in_look = |in_column: bool| in_column || !fade;
+                        let feather = fade.then(|| {
+                            let left = own.left() + px(card_left);
+                            Bounds::from_corners(
+                                point(left, own.top()),
+                                point(
+                                    (left + px(SIDEBAR_FADE_WIDTH)).min(own.right()),
+                                    own.top() + px(Theme::TITLEBAR_HEIGHT),
+                                ),
+                            )
+                        });
+                        let column_blur = match look {
+                            ShellFrameSidebar::Glass => blur.max(SIDEBAR_GLASS_BLUR),
                             _ => blur,
                         };
                         if blur > 0.0 || column_blur > 0.0 {
                             window.paint_layer(own, |window| {
                                 for &(piece, in_column) in &pieces {
-                                    let radius = if in_column { column_blur } else { blur };
+                                    let radius = if in_look(in_column) {
+                                        column_blur
+                                    } else {
+                                        blur
+                                    };
                                     if radius > 0.0 {
                                         window.paint_backdrop_blur(
                                             piece,
@@ -155,19 +176,46 @@ impl Backdrop {
                                         );
                                     }
                                 }
+                                if let Some(band) = feather.filter(|_| column_blur > blur) {
+                                    let step = band.size.width / SIDEBAR_FADE_STEPS as f32;
+                                    for n in 0..SIDEBAR_FADE_STEPS {
+                                        let t = (n as f32 + 0.5) / SIDEBAR_FADE_STEPS as f32;
+                                        let slice = Bounds::new(
+                                            point(band.left() + step * n as f32, band.top()),
+                                            size(step, band.size.height),
+                                        );
+                                        window.paint_backdrop_blur(
+                                            slice,
+                                            Default::default(),
+                                            px((column_blur - blur) * (1.0 - t)),
+                                        );
+                                    }
+                                }
                             });
                         }
                         window.paint_quad(gpui::fill(own, color.opacity(shade)));
-                        let extra = match column {
-                            Some(ShellFrameSidebar::Darker) => SIDEBAR_DARKER,
-                            Some(ShellFrameSidebar::Glass) => {
+                        let extra = match look {
+                            ShellFrameSidebar::Darker => SIDEBAR_DARKER,
+                            ShellFrameSidebar::Glass => {
                                 1.0 - (1.0 - SIDEBAR_GLASS_SHADE) / (1.0 - shade).max(0.01)
                             }
-                            _ => 0.0,
+                            ShellFrameSidebar::Plain => 0.0,
                         };
                         if extra > 0.0 {
-                            for &(piece, _) in pieces.iter().filter(|(_, in_column)| *in_column) {
+                            for &(piece, _) in
+                                pieces.iter().filter(|(_, in_column)| in_look(*in_column))
+                            {
                                 window.paint_quad(gpui::fill(piece, color.opacity(extra)));
+                            }
+                            if let Some(band) = feather {
+                                window.paint_quad(gpui::fill(
+                                    band,
+                                    gpui::linear_gradient(
+                                        90.0,
+                                        gpui::linear_color_stop(color.opacity(extra), 0.0),
+                                        gpui::linear_color_stop(color.opacity(0.0), 1.0),
+                                    ),
+                                ));
                             }
                         }
                     },
@@ -179,6 +227,7 @@ impl Backdrop {
 }
 
 /// Strips reach under the card by its radius so its rounded corners show frame, not raw art.
+/// They never overlap: each one is shaded on its own, so an overlap would paint twice.
 fn frame_pieces(
     own: Bounds<Pixels>,
     card_left: f32,
@@ -190,25 +239,29 @@ fn frame_pieces(
     let card_left = own.left() + px(card_left);
     let card_right = own.right() - px(inset);
     let card_bottom = own.bottom() - px(inset);
-    let gutter = Bounds::from_corners(point(card_right - reach, card_top), own.bottom_right());
+    let bottom = Bounds::from_corners(
+        point(card_left + reach, card_bottom - reach),
+        point(card_right - reach, own.bottom()),
+    );
     if !column {
+        let below = card_top + reach;
         return vec![
             (
-                Bounds::from_corners(own.origin, point(own.right(), card_top + reach)),
+                Bounds::from_corners(own.origin, point(own.right(), below)),
                 false,
             ),
             (
                 Bounds::from_corners(
-                    point(own.left(), card_top),
+                    point(own.left(), below),
                     point(card_left + reach, own.bottom()),
                 ),
                 false,
             ),
-            (gutter, false),
             (
-                Bounds::from_corners(point(own.left(), card_bottom - reach), own.bottom_right()),
+                Bounds::from_corners(point(card_right - reach, below), own.bottom_right()),
                 false,
             ),
+            (bottom, false),
         ];
     }
     vec![
@@ -216,14 +269,11 @@ fn frame_pieces(
             Bounds::from_corners(point(card_left, own.top()), point(own.right(), card_top)),
             false,
         ),
-        (gutter, false),
         (
-            Bounds::from_corners(
-                point(card_left + reach, card_bottom - reach),
-                own.bottom_right(),
-            ),
+            Bounds::from_corners(point(card_right - reach, card_top), own.bottom_right()),
             false,
         ),
+        (bottom, false),
         (
             Bounds::from_corners(own.origin, point(card_left, own.bottom())),
             true,
