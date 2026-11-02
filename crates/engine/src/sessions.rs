@@ -1084,6 +1084,7 @@ impl Inner {
                     && !*is_error
                     && call
                         .html_render_html()
+                        .or_else(|| call.html_render_url())
                         .is_some_and(|html| crate::html_render::html_key(html) == *key) =>
                 {
                     Some(html_render)
