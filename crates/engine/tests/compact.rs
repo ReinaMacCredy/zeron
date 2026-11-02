@@ -625,6 +625,38 @@ async fn an_agent_compaction_waits_for_its_turn_then_continues() {
     assert_eq!(plan(), None);
 }
 
+/// An in-place harness is due the tick the chat changes, the same tick compact-ahead looks at it.
+/// One worker keeps compact-ahead's task from finishing first, as it can on a busy runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn an_in_place_agent_compaction_runs_with_compact_ahead_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness = Arc::new(TestHarness::new(requests.clone(), true));
+    harness.in_place.store(true, Ordering::SeqCst);
+    let core = engine_with_one_turn_under(
+        tmp.path(),
+        harness.clone(),
+        Some(CompactionSettings {
+            nudge_tokens: 150_000,
+            mode: CompactionMode::Threshold,
+            compact_ahead: true,
+            ..Default::default()
+        }),
+    )
+    .await;
+
+    zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            zeron_rpc::methods::REQUEST_COMPACT,
+            serde_json::json!({ "chatId": CHAT, "focus": "keep the plan", "continueWith": "go on" }),
+        )
+        .await
+        .expect("request compact");
+    let mailbox = || harness.mailbox.lock().unwrap().clone();
+    wait_for(|| mailbox().len() == 2, "the compaction and its follow-up").await;
+    assert_eq!(mailbox(), ["/compact keep the plan", "go on"]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_before_the_agent_compaction_cancels_it() {
     let tmp = tempfile::tempdir().unwrap();

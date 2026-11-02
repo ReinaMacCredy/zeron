@@ -22,6 +22,8 @@ const LATE_MS: i64 = 60_000;
 /// Harnesses that restart to compact: a finished background shell makes the
 /// CLI open its own turn seconds after the chat settles.
 const AGENT_SETTLE_MS: i64 = 10_000;
+/// An agent compaction that finds the chat's slot taken retries; the row may not change again.
+const AGENT_RETRY_MS: i64 = 1_000;
 /// Monotonic sleeps stop while the Mac sleeps; re-read the wall clock often.
 const MAX_NAP: Duration = Duration::from_secs(60);
 /// A ready copy waits on background work the session row may not report ending.
@@ -70,13 +72,13 @@ fn run_agent_compaction(
     host: &DocHost,
     running: &Arc<Mutex<HashSet<String>>>,
     chat_id: &str,
-) {
+) -> bool {
     if !running
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(chat_id.to_string())
     {
-        return;
+        return false;
     }
     let (sessions, host, running, chat_id) = (
         sessions.clone(),
@@ -122,6 +124,7 @@ fn run_agent_compaction(
             .unwrap_or_else(|e| e.into_inner())
             .remove(&chat_id);
     });
+    true
 }
 
 fn run_once(
@@ -209,7 +212,7 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, ho
                     continue;
                 }
                 ahead_seen.insert(session.chat_id.clone(), session.updated_at);
-                if !settings.compact_ahead {
+                if !settings.compact_ahead || sessions.agent_compact_waiting(&session.chat_id) {
                     continue;
                 }
                 let (sessions, chat_id) = (sessions.clone(), session.chat_id.clone());
@@ -290,8 +293,12 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, ho
                 .map(|(chat, _)| chat.clone())
                 .collect();
             for chat_id in agents {
-                agent_due.remove(&chat_id);
-                run_agent_compaction(&sessions, &host, &running, &chat_id);
+                if run_agent_compaction(&sessions, &host, &running, &chat_id) {
+                    agent_due.remove(&chat_id);
+                } else {
+                    tracing::info!(chat = %chat_id, "agent compaction waits for the chat's other compaction work");
+                    agent_due.insert(chat_id, now + AGENT_RETRY_MS);
+                }
             }
             let due: Vec<(String, Armed)> = armed
                 .iter()
