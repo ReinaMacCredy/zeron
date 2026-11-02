@@ -25,6 +25,7 @@ pub(crate) enum RailItem {
     NewChat,
     Inbox,
     Tasks,
+    Skills,
     PullRequests,
     Settings,
 }
@@ -36,7 +37,7 @@ pub(crate) struct RailEntry {
     pub icon: &'static str,
 }
 
-pub(crate) const TOP: [RailEntry; 4] = [
+pub(crate) const TOP: [RailEntry; 5] = [
     RailEntry {
         item: RailItem::NewChat,
         id: "rail-new-chat",
@@ -54,6 +55,12 @@ pub(crate) const TOP: [RailEntry; 4] = [
         id: "open-tasks",
         label: "Tasks",
         icon: icons::TASKS,
+    },
+    RailEntry {
+        item: RailItem::Skills,
+        id: "rail-skills",
+        label: "Skills",
+        icon: icons::MAGIC_STICK_3,
     },
     RailEntry {
         item: RailItem::PullRequests,

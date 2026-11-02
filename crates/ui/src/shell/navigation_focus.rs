@@ -99,6 +99,7 @@ impl Shell {
                 | Route::TaskCenter
                 | Route::Supervisor
                 | Route::Docs
+                | Route::Skills
         ) {
             (self.unfocused.clone(), self.unfocused.clone())
         } else if self.right_pane_open(cx)
