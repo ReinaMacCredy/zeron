@@ -168,6 +168,15 @@ impl HtmlPages {
             self.pages.remove(row);
             return true;
         }
+        #[cfg(target_os = "macos")]
+        if let Some(sheet) = self.sheet.as_mut().filter(|sheet| {
+            &sheet.row == row
+                && sheet.url.is_some()
+                && sheet.page.as_ref().is_some_and(|page| page.concealed())
+        }) {
+            sheet.page = None;
+            return true;
+        }
         let _ = row;
         false
     }
