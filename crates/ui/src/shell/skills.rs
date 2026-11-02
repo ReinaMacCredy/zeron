@@ -12,6 +12,7 @@ const TWO_COLUMN_MIN: f32 = 560.0;
 pub(super) struct SkillEntry {
     pub name: String,
     pub path: String,
+    pub paths: Vec<String>,
     pub description: String,
     pub harnesses: Vec<HarnessId>,
     pub commands: Vec<SkillCommand>,
@@ -83,27 +84,47 @@ impl SkillsPage {
     }
 }
 
+/// Stow links one skill folder into several harness roots; they are one skill.
+fn real_path(path: &str) -> String {
+    if native_skill_identity(path) {
+        return path.to_string();
+    }
+    std::fs::canonicalize(path).map_or_else(
+        |_| path.to_string(),
+        |real| real.to_string_lossy().into_owned(),
+    )
+}
+
 fn group(per_harness: Vec<(HarnessId, Vec<Skill>)>) -> Vec<SkillEntry> {
-    let mut entries: Vec<SkillEntry> = Vec::new();
+    let mut entries: Vec<(String, SkillEntry)> = Vec::new();
     for (harness, skills) in per_harness {
         for skill in skills {
-            match entries.iter_mut().find(|entry| entry.path == skill.path) {
-                Some(entry) => {
+            let real = real_path(&skill.path);
+            match entries.iter_mut().find(|(key, _)| *key == real) {
+                Some((_, entry)) => {
                     if !entry.harnesses.contains(&harness) {
                         entry.harnesses.push(harness);
                     }
+                    if !entry.paths.contains(&skill.path) {
+                        entry.paths.push(skill.path);
+                    }
                     entry.commands.extend(skill.command);
                 }
-                None => entries.push(SkillEntry {
-                    name: skill.name,
-                    path: skill.path,
-                    description: skill.description,
-                    harnesses: vec![harness],
-                    commands: skill.command.into_iter().collect(),
-                }),
+                None => entries.push((
+                    real,
+                    SkillEntry {
+                        name: skill.name,
+                        path: skill.path.clone(),
+                        paths: vec![skill.path],
+                        description: skill.description,
+                        harnesses: vec![harness],
+                        commands: skill.command.into_iter().collect(),
+                    },
+                )),
             }
         }
     }
+    let mut entries: Vec<SkillEntry> = entries.into_iter().map(|(_, entry)| entry).collect();
     entries.sort_by_key(|entry| entry.name.to_lowercase());
     entries
 }
@@ -173,7 +194,7 @@ impl Shell {
                 .filter(|d| per_harness.iter().any(|(id, _)| *id == d.id))
                 .map(|d| (d.id, d.name.clone()))
                 .collect();
-            let entries = group(per_harness);
+            let entries = cx.background_spawn(async move { group(per_harness) }).await;
             this.update(cx, |shell, cx| {
                 shell.skills.harnesses = names;
                 shell.skills.entries = Some(entries);
@@ -320,6 +341,9 @@ impl Shell {
     }
 
     pub(super) fn render_skills_page(&mut self, width: f32, cx: &mut Context<Self>) -> AnyElement {
+        if self.skills.load.is_none() {
+            self.load_skills(cx);
+        }
         let theme = Theme::of(cx).clone();
         let title = match self.skills.filter {
             Some(harness) => self.skills.harness_name(harness),
@@ -566,9 +590,14 @@ impl Shell {
         }
     }
 
-    fn toggle_skill_enabled(&mut self, path: String, cx: &mut Context<Self>) {
-        if !self.settings.disabled_skills.remove(&path) {
-            self.settings.disabled_skills.insert(path);
+    fn toggle_skill_enabled(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
+        let disabled = &mut self.settings.disabled_skills;
+        if paths.iter().any(|path| disabled.contains(path)) {
+            for path in &paths {
+                disabled.remove(path);
+            }
+        } else {
+            disabled.extend(paths);
         }
         self.schedule_save(cx);
         cx.notify();
@@ -612,20 +641,27 @@ impl Shell {
     }
 
     fn uninstall_skill(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self
+        let Some(entry) = self
             .skills
             .dialog
             .as_open()
-            .map(|dialog| dialog.path.clone())
+            .and_then(|dialog| self.skills.entry(&dialog.path))
+            .cloned()
         else {
             return;
         };
-        match move_skill_to_trash(std::path::Path::new(&path)) {
+        let moved = entry
+            .paths
+            .iter()
+            .try_for_each(|path| move_skill_to_trash(std::path::Path::new(path)));
+        match moved {
             Ok(()) => {
-                self.settings.disabled_skills.remove(&path);
+                for path in &entry.paths {
+                    self.settings.disabled_skills.remove(path);
+                }
                 self.schedule_save(cx);
                 if let Some(entries) = self.skills.entries.as_mut() {
-                    entries.retain(|entry| entry.path != path);
+                    entries.retain(|other| other.path != entry.path);
                 }
                 self.close_skill_dialog(cx);
                 self.load_skills(cx);
@@ -658,7 +694,10 @@ impl Shell {
             None => motion::DIALOG_IN.progress_since(dialog.opened_at),
         };
         let on_disk = entry.on_disk();
-        let enabled = !self.settings.disabled_skills.contains(&entry.path);
+        let enabled = !entry
+            .paths
+            .iter()
+            .any(|path| self.settings.disabled_skills.contains(path));
         let menu_open = dialog.menu.is_open();
         let menu_closing = dialog.menu.closing_since();
         let menu_mounted = dialog.menu.get().is_some();
@@ -680,7 +719,7 @@ impl Shell {
                 .hover(|s| s.bg(theme.glass_hover()))
                 .child(icon(glyph).size(px(16.0)).text_color(theme.text_muted))
         };
-        let toggle_path = entry.path.clone();
+        let toggle_paths = entry.paths.clone();
         let header = div()
             .flex()
             .flex_row()
@@ -703,7 +742,7 @@ impl Shell {
                     .mr(px(4.0))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_skill_enabled(toggle_path.clone(), cx)
+                        this.toggle_skill_enabled(toggle_paths.clone(), cx)
                     }))
                     .child(widgets::toggle_switch(
                         theme,
@@ -1051,6 +1090,9 @@ fn move_skill_to_trash(path: &std::path::Path) -> std::io::Result<()> {
         Some(dir) if path.file_name().is_some_and(|name| name == "SKILL.md") => dir,
         _ => path,
     };
+    if target.symlink_metadata().is_err() {
+        return Ok(());
+    }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| std::io::Error::other("HOME is not set"))?;
