@@ -1443,6 +1443,26 @@ impl SettingsSection {
                     Some(Target::Setting(SettingId::InsetCard)),
                 ),
                 (
+                    "Window frame",
+                    &["rail", "tab bar", "artwork", "dark", "glass"],
+                    Some(Target::Setting(SettingId::InsetCard)),
+                ),
+                (
+                    "Frame sidebar",
+                    &["sidebar", "plain", "darker", "glass", "legible"],
+                    Some(Target::Setting(SettingId::InsetCard)),
+                ),
+                (
+                    "Frame shade",
+                    &["rail", "tab bar", "darken"],
+                    Some(Target::Setting(SettingId::InsetCard)),
+                ),
+                (
+                    "Frame blur",
+                    &["rail", "tab bar", "glass"],
+                    Some(Target::Setting(SettingId::InsetCard)),
+                ),
+                (
                     "Reveal sidebar on hover",
                     &["collapsed sidebar", "left edge", "peek"],
                     Some(Target::Setting(SettingId::SidebarHoverReveal)),
@@ -15691,10 +15711,12 @@ impl Shell {
             .page_backdrop
             .clone()
             .filter(|_| shell_frame.style != crate::settings::ShellFrameStyle::Off);
+        let sidebar_out = framed.is_some() && tone_width > 0.0;
+        let card_left = if sidebar_out { tone_width } else { 0.0 };
         let card = || {
             div()
                 .absolute()
-                .left_0()
+                .left(px(card_left))
                 .right_0()
                 .bottom_0()
                 .top(px(Theme::TITLEBAR_HEIGHT))
@@ -15716,8 +15738,9 @@ impl Shell {
                         lift.child(backdrop.frame(
                             shell_frame.shade,
                             blur,
-                            self.content_left(),
+                            self.content_left() + card_left,
                             inset,
+                            sidebar_out.then_some(shell_frame.sidebar),
                         ))
                     }),
             )
@@ -15743,22 +15766,31 @@ impl Shell {
                         }])
                     }),
             )
-            .child(card().child(Self::sidebar_tone(
-                tone_width,
-                CARD_RADIUS,
-                tones.panel,
-                tones.edge,
-            )))
+            .when(!sidebar_out, |frame| {
+                frame.child(card().child(Self::sidebar_tone(
+                    tone_width,
+                    CARD_RADIUS,
+                    tones.panel,
+                    tones.edge,
+                )))
+            })
             .child(
-                card().overflow_hidden().child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        .top(px(-Theme::TITLEBAR_HEIGHT))
-                        .child(content),
-                ),
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .top(px(Theme::TITLEBAR_HEIGHT))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .top(px(-Theme::TITLEBAR_HEIGHT))
+                            .child(content),
+                    ),
             )
             .when_some(
                 self.page_backdrop.clone().filter(|_| framed.is_none()),

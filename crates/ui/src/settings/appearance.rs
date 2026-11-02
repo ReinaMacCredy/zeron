@@ -1369,8 +1369,8 @@ impl AppearancePage {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         use crate::settings::{
-            SHELL_FRAME_BLUR_MAX, SHELL_FRAME_SHADE_MAX, SavePolicy, ShellFrameStyle,
-            update_shell_frame,
+            SHELL_FRAME_BLUR_MAX, SHELL_FRAME_SHADE_MAX, SavePolicy, ShellFrameSidebar,
+            ShellFrameStyle, update_shell_frame,
         };
         let style_controls = ShellFrameStyle::ALL
             .into_iter()
@@ -1402,16 +1402,18 @@ impl AppearancePage {
                 .child(control)
                 .into_any_element()
         };
-        let mut rows = vec![
+        let choice_row = |title: &'static str,
+                          description: &'static str,
+                          controls: Vec<gpui::Stateful<gpui::Div>>| {
             widgets::card_row(theme, false)
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(widgets::row_title(theme, "Window frame"))
+                        .child(widgets::row_title(theme, title))
                         .child(widgets::meta_line(
                             theme,
-                            vec![div().child(frame.style.description()).into_any_element()],
+                            vec![div().child(description).into_any_element()],
                         )),
                 )
                 .child(
@@ -1421,13 +1423,38 @@ impl AppearancePage {
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .children(style_controls),
+                        .children(controls),
                 )
-                .into_any_element(),
-        ];
+                .into_any_element()
+        };
+        let mut rows = vec![choice_row(
+            "Window frame",
+            frame.style.description(),
+            style_controls,
+        )];
         if frame.style == ShellFrameStyle::Off {
             return rows;
         }
+        let sidebar_controls = ShellFrameSidebar::ALL
+            .into_iter()
+            .map(|look| {
+                choice_chip(
+                    theme,
+                    format!("shell-frame-sidebar-{}", look.label().to_lowercase()),
+                    look.label(),
+                    look == frame.sidebar,
+                )
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    update_shell_frame(SavePolicy::Immediate, cx, |frame| frame.sidebar = look);
+                    cx.notify();
+                }))
+            })
+            .collect::<Vec<_>>();
+        rows.push(choice_row(
+            "Frame sidebar",
+            frame.sidebar.description(),
+            sidebar_controls,
+        ));
         rows.push(value_row(
             "Frame shade",
             format!("{}%", (frame.shade * 100.0).round()),

@@ -283,8 +283,39 @@ impl ShellFrameStyle {
     pub const fn description(self) -> &'static str {
         match self {
             Self::Off => "Only the tab bar shows the artwork.",
-            Self::Dark => "The artwork runs under the tab bar and rail, darkened.",
-            Self::Glass => "The artwork runs under the tab bar and rail, blurred and darkened.",
+            Self::Dark => "The artwork runs under the tab bar, rail and sidebar, darkened.",
+            Self::Glass => {
+                "The artwork runs under the tab bar, rail and sidebar, blurred and darkened."
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ShellFrameSidebar {
+    Plain,
+    Darker,
+    #[default]
+    Glass,
+}
+
+impl ShellFrameSidebar {
+    pub const ALL: [Self; 3] = [Self::Plain, Self::Darker, Self::Glass];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Plain => "Plain",
+            Self::Darker => "Darker",
+            Self::Glass => "Glass",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Plain => "The rail and sidebar show the frame as it is.",
+            Self::Darker => "The rail and sidebar are darker than the rest of the frame.",
+            Self::Glass => "The rail and sidebar are always blurred, so text sits on color only.",
         }
     }
 }
@@ -295,6 +326,7 @@ pub struct ShellFrame {
     pub style: ShellFrameStyle,
     pub shade: f32,
     pub blur: f32,
+    pub sidebar: ShellFrameSidebar,
 }
 
 impl Default for ShellFrame {
@@ -303,6 +335,7 @@ impl Default for ShellFrame {
             style: ShellFrameStyle::Dark,
             shade: 0.58,
             blur: 28.0,
+            sidebar: ShellFrameSidebar::Glass,
         }
     }
 }
