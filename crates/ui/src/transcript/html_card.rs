@@ -23,8 +23,6 @@ const ACTIVE_LIVE: std::time::Duration = std::time::Duration::from_millis(700);
 #[cfg(target_os = "macos")]
 const POINTER_LIVE: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// A shown live page's server is checked this often, so one that stops
-/// turns into the not-responding state.
 const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -357,7 +355,7 @@ impl Transcript {
         }
     }
 
-    /// Live pages run their own animations, so one not painted in the last render is closed.
+    /// Live pages run their own animations, so one the last two renders did not paint is closed.
     #[cfg(target_os = "macos")]
     fn release_html_frames(&mut self, window: &mut Window) {
         let pages = &mut self.html_pages;
@@ -797,8 +795,6 @@ impl Transcript {
         cx.notify();
     }
 
-    /// Checks the server while its row is shown and answering; a server that
-    /// stops turns the row down until the reader retries.
     fn probe_live_page(&mut self, row: SharedString, url: SharedString, cx: &mut Context<Self>) {
         if !self.html_pages.probing.insert(row.clone()) {
             return;

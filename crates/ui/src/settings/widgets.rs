@@ -324,8 +324,6 @@ pub fn page_column() -> gpui::Div {
         .flex_col()
 }
 
-/// A settings page's content column: left-aligned beside the nav, under the
-/// page title the settings panel draws above it.
 pub const SETTINGS_PAGE_PAD_LEFT: f32 = 48.0;
 const SETTINGS_PAGE_PAD_RIGHT: f32 = 32.0;
 pub const SETTINGS_PAGE_MAX_WIDTH: f32 = 720.0;

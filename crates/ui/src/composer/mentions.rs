@@ -18,7 +18,6 @@ use super::{
 use crate::state::AppState;
 use crate::theme::Theme;
 
-/// Where an `@` looks: the host's device, project and checkout.
 #[derive(Default)]
 pub(crate) struct MentionTarget {
     pub(crate) context: String,
@@ -33,7 +32,6 @@ pub(crate) enum MentionMenuEvent {
     Changed,
 }
 
-/// The `@` completion shared by the chat composer and Quick capture.
 pub(crate) struct MentionMenu {
     state: Entity<AppState>,
     input: Entity<ComposerInput>,

@@ -141,8 +141,7 @@ impl SettingId {
         self == SettingId::CompactAhead
     }
 
-    /// A row on the Compaction page, drawn once the engine reports its
-    /// settings (the classifier rows only in classifier mode).
+    /// Drawn only once the engine answers, the classifier rows only in classifier mode.
     fn on_compaction_page(self) -> bool {
         matches!(
             self,
