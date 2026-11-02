@@ -11953,7 +11953,7 @@ impl Shell {
         let card = card.when(closing.is_some(), |card| {
             card.child(div().absolute().inset_0().occlude())
         });
-        Some(command_palette::palette_overlay(viewport, card, motion))
+        Some(command_palette::palette_overlay(viewport, card, motion, false))
     }
 
     // ---- space context menu / rename / delete overlays ----
@@ -12219,6 +12219,7 @@ mod tests {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            work_tree: None,
             unsettled_at: None,
         }
     }

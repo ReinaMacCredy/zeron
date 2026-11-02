@@ -1324,6 +1324,14 @@ impl RegistryDoc {
                     .unwrap_or(Value::Null),
             ),
             ("unsettledAt", opt_ms(chat.unsettled_at)),
+            (
+                "workTree",
+                chat.work_tree
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?
+                    .unwrap_or(Value::Null),
+            ),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1549,6 +1557,30 @@ impl RegistryDoc {
         config: &ChatConfig,
     ) -> Result<bool, DocError> {
         self.write_chat_config(chat_id, config, true)
+    }
+
+    pub fn set_chat_work_tree(
+        &mut self,
+        chat_id: &str,
+        work_tree: Option<&zeron_proto::ChatWorkTree>,
+    ) -> Result<bool, DocError> {
+        let Some(current) = self.chat(chat_id)? else {
+            return Ok(false);
+        };
+        if current.work_tree.as_ref() == work_tree {
+            return Ok(true);
+        }
+        let value = work_tree
+            .map(serde_json::to_value)
+            .transpose()?
+            .unwrap_or(Value::Null);
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("workTree", value)]),
+        );
+        Ok(true)
     }
 
     /// The config write of a switch that replaces one nobody sent to: the

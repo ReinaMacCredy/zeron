@@ -778,6 +778,8 @@ pub(crate) struct RawChat {
     settle: Option<zeron_proto::SidebarSettle>,
     #[serde(default)]
     unsettled_at: Option<i64>,
+    #[serde(default, deserialize_with = "lenient")]
+    work_tree: Option<zeron_proto::ChatWorkTree>,
 }
 
 fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -847,6 +849,7 @@ impl From<RawChat> for Chat {
             delegation: raw.delegation,
             settle: raw.settle,
             unsettled_at: raw.unsettled_at.map(dt),
+            work_tree: raw.work_tree,
         }
     }
 }
@@ -1018,6 +1021,7 @@ mod tests {
             delegation: None,
             settle: None,
             unsettled_at: None,
+            work_tree: None,
         }
     }
 

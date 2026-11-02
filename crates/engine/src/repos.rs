@@ -273,7 +273,11 @@ impl Repos {
     // ── git plumbing ────────────────────────────────────────────────────────
 
     /// Run `git <args>` (optionally under `cwd`), returning trimmed stdout.
-    async fn git(&self, args: &[&str], cwd: Option<&Path>) -> Result<String, EngineError> {
+    pub(crate) async fn git(
+        &self,
+        args: &[&str],
+        cwd: Option<&Path>,
+    ) -> Result<String, EngineError> {
         let mut cmd = tokio::process::Command::new("git");
         #[cfg(windows)]
         {
@@ -803,6 +807,7 @@ impl Repos {
                 current: current.as_deref() == Some(name.as_str()),
                 worktree_path: worktrees.get(&name).cloned(),
                 name,
+                ..Default::default()
             })
             .collect())
     }

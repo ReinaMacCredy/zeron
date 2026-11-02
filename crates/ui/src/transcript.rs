@@ -18845,6 +18845,7 @@ mod tests {
                 previous_harnesses: Vec::new(),
                 delegation: None,
                 settle: None,
+                work_tree: None,
                 unsettled_at: None,
                 harness_session_harness: Default::default(),
             }];
@@ -19591,6 +19592,7 @@ mod tests {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            work_tree: None,
             unsettled_at: None,
             space_id: None,
             last_seen_at: None,

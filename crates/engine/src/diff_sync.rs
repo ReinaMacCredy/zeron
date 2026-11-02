@@ -204,7 +204,10 @@ struct DiffSyncInner {
     /// one root must never interleave. File-system watchers and read-only
     /// captures may still run concurrently.
     discard_lock: tokio::sync::Mutex<()>,
+    sync_listener: std::sync::OnceLock<SyncListener>,
 }
+
+pub type SyncListener = Arc<dyn Fn(&Path) + Send + Sync>;
 
 #[derive(Default)]
 struct Interest {
@@ -350,6 +353,7 @@ impl CheckoutDiffSync {
                 interest_linger,
                 interest_changed: Arc::new(Notify::new()),
                 discard_lock: tokio::sync::Mutex::new(()),
+                sync_listener: std::sync::OnceLock::new(),
             }),
         };
         let task = tokio::spawn(diff_sync_task(
@@ -360,6 +364,10 @@ impl CheckoutDiffSync {
         ));
         *lock(&sync.inner.supervisor) = Some(task);
         sync
+    }
+
+    pub fn set_sync_listener(&self, listener: SyncListener) {
+        let _ = self.inner.sync_listener.set(listener);
     }
 
     /// Stop the sync graph and wait for the supervisor to exit. Per-entry
@@ -606,7 +614,12 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
             archived.insert(chat.id);
             continue;
         }
-        let Some(cwd) = chat.cwd.clone() else {
+        let work_tree = chat
+            .work_tree
+            .as_ref()
+            .filter(|work_tree| !work_tree.removed)
+            .map(|work_tree| work_tree.path.clone());
+        let Some(cwd) = work_tree.or_else(|| chat.cwd.clone()) else {
             continue;
         };
         let identity = match resolved.get(&cwd) {
@@ -885,6 +898,9 @@ async fn entry_task(
 // ---------------------------------------------------------------------------
 
 async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
+    if let Some(listener) = inner.sync_listener.get() {
+        listener(&entry.identity.root);
+    }
     let snapshot = match capture_diff(&inner.repos, &entry.identity.root).await {
         Ok(snapshot) => snapshot,
         Err(err) => {
