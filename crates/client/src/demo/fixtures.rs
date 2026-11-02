@@ -1019,6 +1019,7 @@ pub(crate) fn seed(
                 settled,
                 at: ms(now - ago),
             }),
+            work_tree: None,
             unsettled_at: demo
                 .settle
                 .filter(|(settled, _)| !settled)

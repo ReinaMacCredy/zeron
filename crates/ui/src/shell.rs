@@ -9732,6 +9732,20 @@ impl Shell {
         true
     }
 
+    fn chat_work_tree(
+        &self,
+        chat_id: &str,
+        cx: &App,
+    ) -> (Option<zeron_proto::ChatWorkTree>, Option<String>) {
+        self.state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .map(|chat| (chat.work_tree.clone(), chat.branch.clone()))
+            .unwrap_or_default()
+    }
+
     fn set_chat_settled(&mut self, chat_id: String, settled: bool, cx: &mut Context<Self>) {
         self.close_chat_menu(cx);
         self.mutate(
@@ -12553,6 +12567,10 @@ impl Shell {
         // relative time instead. Hovering the ROW swaps the corner for the
         // ARCHIVE button. Compact rows keep status first and elapsed time last;
         // their archive control occupies the remote-icon slot on hover.
+        let branch = match self.chat_work_tree(&id, cx).0 {
+            Some(work_tree) => work_tree.branch.map(SharedString::from),
+            None => branch,
+        };
         if search_query.is_none() && !self.settings.sidebar_compact {
             return self.render_sidebar_card(
                 id,
@@ -12593,6 +12611,21 @@ impl Shell {
             .iter()
             .find(|chat| chat.id == id)
             .map(|chat| chat.device_id.clone());
+        let (work_tree, work_tree_base) = self.chat_work_tree(&id, cx);
+        let has_change_request = change_request.is_some();
+        let work_tree_badge = |key: &str| {
+            (!has_change_request)
+                .then(|| {
+                    crate::work_tree_badge::chat_badge(
+                        format!("{row_id}-{key}"),
+                        work_tree.as_ref(),
+                        work_tree_base.as_deref(),
+                        crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                        theme,
+                    )
+                })
+                .flatten()
+        };
         let compact = search_query.is_none() && (slim || self.settings.sidebar_compact);
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
         let host = self
@@ -13214,93 +13247,98 @@ impl Shell {
                         .then(|| subagent_pill("compact"))
                         .flatten();
                     let archive_id = id.clone();
-                    el.children(change_request.clone().map(|summary| {
-                        if preview {
-                            crate::change_requests::pull_request_badge_preview(
-                                format!("{row_id}-compact-pr").into(),
-                                summary,
-                                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                theme,
-                            )
-                        } else {
-                            crate::change_requests::pull_request_badge(
-                                format!("{row_id}-compact-pr").into(),
-                                summary,
-                                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                pr_device.clone(),
-                                theme,
-                            )
-                        }
-                    }))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("{row_id}-corner")))
-                            .debug_selector({
-                                let id = id.clone();
-                                move || format!("chat-time-{id}")
-                            })
-                            .when(text_hint, |el| {
-                                el.min_w(crate::typography::ui_rems(COMPACT_JUMP_HINT_WIDTH))
-                            })
-                            // A running-subagents pill can be wider than the plain time.
-                            .when(!text_hint, |el| el.min_w(px(30.0)))
-                            // Fixed height so swapping the time text for the
-                            // archive glyph never resizes the slot.
-                            .h(px(14.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_end()
-                            .aria_label(if show_archive {
-                                if archived { "Unarchive" } else { "Archive" }
+                    el.children(work_tree_badge("compact-work-tree"))
+                        .children(change_request.clone().map(|summary| {
+                            if preview {
+                                crate::change_requests::pull_request_badge_preview(
+                                    format!("{row_id}-compact-pr").into(),
+                                    summary,
+                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    theme,
+                                )
                             } else {
-                                "Session time"
-                            })
-                            .when(show_archive, |el| {
-                                el.role(gpui::Role::Button)
-                                    .cursor_pointer()
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.chat_hover_resync = true;
-                                        this.set_chat_archived(archive_id.clone(), !archived, cx);
-                                    }))
-                                    .tooltip(crate::settings::widgets::text_tooltip_above(
-                                        if archived {
-                                            "Unarchive session"
-                                        } else {
-                                            ShortcutId::ArchiveSession.label()
-                                        },
-                                    ))
-                            })
-                            .child(if show_archive {
-                                icon(if archived {
-                                    icons::ARCHIVE_UP_MINIMALISTIC
-                                } else {
-                                    icons::ARCHIVE_MINIMALISTIC
+                                crate::change_requests::pull_request_badge(
+                                    format!("{row_id}-compact-pr").into(),
+                                    summary,
+                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    pr_device.clone(),
+                                    theme,
+                                )
+                            }
+                        }))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("{row_id}-corner")))
+                                .debug_selector({
+                                    let id = id.clone();
+                                    move || format!("chat-time-{id}")
                                 })
-                                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                .when(text_hint, |el| {
+                                    el.min_w(crate::typography::ui_rems(COMPACT_JUMP_HINT_WIDTH))
+                                })
+                                // A running-subagents pill can be wider than the plain time.
+                                .when(!text_hint, |el| el.min_w(px(30.0)))
+                                // Fixed height so swapping the time text for the
+                                // archive glyph never resizes the slot.
+                                .h(px(14.0))
                                 .flex_none()
-                                .text_color(theme.text_muted)
-                                .into_any_element()
-                            } else if let Some(pill) = pill {
-                                pill
-                            } else {
-                                div()
-                                    .whitespace_nowrap()
-                                    .text_right()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(subline)
-                                    .child(
-                                        compact_jump_label
-                                            .or(mission.as_ref().map(|m| m.count()))
-                                            .unwrap_or(time_ago),
-                                    )
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .aria_label(if show_archive {
+                                    if archived { "Unarchive" } else { "Archive" }
+                                } else {
+                                    "Session time"
+                                })
+                                .when(show_archive, |el| {
+                                    el.role(gpui::Role::Button)
+                                        .cursor_pointer()
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.chat_hover_resync = true;
+                                            this.set_chat_archived(
+                                                archive_id.clone(),
+                                                !archived,
+                                                cx,
+                                            );
+                                        }))
+                                        .tooltip(crate::settings::widgets::text_tooltip_above(
+                                            if archived {
+                                                "Unarchive session"
+                                            } else {
+                                                ShortcutId::ArchiveSession.label()
+                                            },
+                                        ))
+                                })
+                                .child(if show_archive {
+                                    icon(if archived {
+                                        icons::ARCHIVE_UP_MINIMALISTIC
+                                    } else {
+                                        icons::ARCHIVE_MINIMALISTIC
+                                    })
+                                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                    .flex_none()
+                                    .text_color(theme.text_muted)
                                     .into_any_element()
-                            }),
-                    )
+                                } else if let Some(pill) = pill {
+                                    pill
+                                } else {
+                                    div()
+                                        .whitespace_nowrap()
+                                        .text_right()
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .text_color(subline)
+                                        .child(
+                                            compact_jump_label
+                                                .or(mission.as_ref().map(|m| m.count()))
+                                                .unwrap_or(time_ago),
+                                        )
+                                        .into_any_element()
+                                }),
+                        )
                 }),
         )
         // Line 3 is structural, not reserved whitespace: compact states
@@ -13349,6 +13387,7 @@ impl Shell {
                     // Stable invisible spring keeps the optional PR badge
                     // pinned right without changing no-PR paint.
                     .child(div().flex_1().min_w_0())
+                    .children(work_tree_badge("work-tree"))
                     .when_some(change_request, |el, summary| {
                         el.child(if preview {
                             crate::change_requests::pull_request_badge_preview(
@@ -13450,6 +13489,19 @@ impl Shell {
         use zeron_proto::ChatIndicator as Status;
         let row_id = format!("chat-{id}");
         let fade_key = format!("{row_id}-hover");
+        let (work_tree, work_tree_base) = self.chat_work_tree(&id, cx);
+        let work_tree_badge = change_request
+            .is_none()
+            .then(|| {
+                crate::work_tree_badge::chat_badge(
+                    format!("{row_id}-work-tree"),
+                    work_tree.as_ref(),
+                    work_tree_base.as_deref(),
+                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                    theme,
+                )
+            })
+            .flatten();
         let now = Utc::now();
         let worktree;
         let diff;
@@ -14042,6 +14094,7 @@ impl Shell {
                     (None, Some(branch)) => el.child(branch),
                     (None, None) => el.child(div().flex_1().min_w_0()),
                 })
+                .children(work_tree_badge)
                 .when_some(change_request, |el, summary| {
                     el.child(if preview {
                         crate::change_requests::pull_request_badge_preview(
@@ -20551,6 +20604,7 @@ mod tests {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            work_tree: None,
             unsettled_at: None,
         }
     }
@@ -23580,6 +23634,7 @@ mod exit_regressions {
                         previous_harnesses: Vec::new(),
                         delegation: None,
                         settle: None,
+                        work_tree: None,
                         unsettled_at: None,
                         space_id: Some("other".into()),
                         last_seen_at: None,
@@ -24878,6 +24933,7 @@ mod right_tab_mouse_regressions {
                     previous_harnesses: Vec::new(),
                     delegation: None,
                     settle: None,
+                    work_tree: None,
                     unsettled_at: None,
                 };
                 let mut side = source.clone();

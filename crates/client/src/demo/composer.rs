@@ -237,6 +237,7 @@ pub(super) fn continue_in_new_thread(
         forked_from_chat_id: None,
         delegation: None,
         settle: None,
+        work_tree: None,
         unsettled_at: None,
         ..match space {
             Some((space_id, path)) => Chat {
@@ -281,6 +282,7 @@ pub(super) fn create_sidechat(
         forked_from_chat_id: None,
         delegation: None,
         settle: None,
+        work_tree: None,
         unsettled_at: None,
         ..source
     };

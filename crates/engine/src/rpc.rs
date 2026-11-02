@@ -1092,6 +1092,12 @@ enum MutateParams {
     /// fresh harness conversation there (resume is cwd-scoped).
     #[serde(rename_all = "camelCase")]
     SetChatCwd { chat_id: String, cwd: String },
+    #[serde(rename_all = "camelCase")]
+    SetChatWorkTree {
+        chat_id: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
     /// Backdate a chat's activity timestamps (epoch ms) — the sidebar's
     /// relative-time column. Used by tooling/seeds; the doc fold sets these on
     /// real message traffic.
@@ -1859,6 +1865,7 @@ impl EngineRpc {
                 current: p.default_branch.as_deref() == Some(name.as_str()),
                 name,
                 worktree_path: None,
+                ..Default::default()
             })
             .collect();
         RpcReply::value(&refs)
@@ -3247,6 +3254,39 @@ impl EngineRpc {
                 .set_chat_branch(&chat_id, &branch)
                 .map_err(failed)
                 .map(drop),
+            MutateParams::SetChatWorkTree { chat_id, path } => {
+                let work_trees = self
+                    .sessions
+                    .work_trees()
+                    .ok_or_else(|| RpcError::Failed("worktrees unavailable".into()))?;
+                let work_tree = work_trees
+                    .select(&chat_id, path.as_deref())
+                    .await
+                    .map_err(failed)?;
+                let note = match work_tree {
+                    Some(work_tree) => match &work_tree.branch {
+                        Some(branch) => format!(
+                            "This thread now works in {} (branch {branch}).",
+                            work_tree.path
+                        ),
+                        None => format!(
+                            "This thread now works in {} (detached HEAD).",
+                            work_tree.path
+                        ),
+                    },
+                    None => {
+                        let cwd = self
+                            .workspace
+                            .chat(&chat_id)
+                            .map_err(failed)?
+                            .and_then(|chat| chat.cwd)
+                            .unwrap_or_default();
+                        format!("This thread now works in the main checkout {cwd}.")
+                    }
+                };
+                self.sessions.owe_work_tree_note(&chat_id, note);
+                Ok(())
+            }
             MutateParams::SetChatCwd { chat_id, cwd } => {
                 self.voice.retire_chat(&chat_id);
                 self.workspace
@@ -6416,11 +6456,17 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_REFS => {
                 let p: RepoPathParams = parse_params(params)?;
-                let refs = self
+                let repo_path = std::path::Path::new(&p.repo_path);
+                let mut refs = self
                     .repos
-                    .refs(std::path::Path::new(&p.repo_path))
+                    .refs(repo_path)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if let Some(work_trees) = self.sessions.work_trees()
+                    && let Err(error) = work_trees.annotate_refs(repo_path, &mut refs).await
+                {
+                    tracing::debug!(%error, "listRefs: worktree states unavailable");
+                }
                 RpcReply::value(&refs)
             }
             methods::LIST_GIT_HISTORY => {

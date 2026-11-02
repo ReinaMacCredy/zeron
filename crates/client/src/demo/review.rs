@@ -140,6 +140,7 @@ fn child(spec: Child<'_>) -> Chat {
         forked_from_chat_id: None,
         previous_harnesses: Vec::new(),
         settle: None,
+        work_tree: None,
         unsettled_at: None,
         delegation: Some(Delegation {
             delegated_by_chat_id: spec.owner.id.clone(),
