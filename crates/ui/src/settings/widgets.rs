@@ -1,5 +1,5 @@
-//! Shared scaffolding for the settings pages — a centered page column, large
-//! title, small section labels over filled blocks of hairline-split rows,
+//! Shared scaffolding for the settings pages — a page column, large title,
+//! small section labels over filled blocks of hairline-split rows,
 //! badges and small buttons, so every page reads as the same product surface.
 
 use std::rc::Rc;
@@ -324,11 +324,25 @@ pub fn page_column() -> gpui::Div {
         .flex_col()
 }
 
-pub fn settings_page() -> gpui::Div {
-    page_column().pt(px(24.0)).pb(px(56.0))
-}
+/// A settings page's content column: left-aligned beside the nav, under the
+/// page title the settings panel draws above it.
+pub const SETTINGS_PAGE_PAD_LEFT: f32 = 48.0;
+const SETTINGS_PAGE_PAD_RIGHT: f32 = 32.0;
+pub const SETTINGS_PAGE_MAX_WIDTH: f32 = 720.0;
 
-pub const SETTINGS_HEADER_HEIGHT: f32 = 48.0;
+pub fn settings_page() -> gpui::Div {
+    div()
+        .w_full()
+        .max_w(px(SETTINGS_PAGE_MAX_WIDTH
+            + SETTINGS_PAGE_PAD_LEFT
+            + SETTINGS_PAGE_PAD_RIGHT))
+        .pl(px(SETTINGS_PAGE_PAD_LEFT))
+        .pr(px(SETTINGS_PAGE_PAD_RIGHT))
+        .pt(px(20.0))
+        .pb(px(56.0))
+        .flex()
+        .flex_col()
+}
 
 /// Page headline row: a large title, optionally followed by a muted count on
 /// the same baseline. Inset to line up with the section labels.
@@ -501,17 +515,17 @@ pub fn details_label(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div
 
 pub fn section_title(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
     div()
-        .px(px(SECTION_TITLE_INSET))
-        .min_h(px(28.0))
+        .px(px(SECTION_LABEL_INSET))
+        .min_h(px(24.0))
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
         .gap(px(12.0))
-        .text_size(crate::typography::ui_rems(15.0))
-        .line_height(crate::typography::ui_rems(20.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.text)
+        .text_size(crate::typography::ui_rems(12.0))
+        .line_height(crate::typography::ui_rems(16.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_faint)
         .child(label.into())
 }
 
@@ -525,7 +539,7 @@ pub fn section(
         .mt(px(SECTION_GAP))
         .flex()
         .flex_col()
-        .gap(px(10.0))
+        .gap(px(8.0))
         .child(section_title(theme, label))
         .child(block)
 }
@@ -562,8 +576,8 @@ pub fn section_card(theme: &Theme) -> gpui::Div {
 pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
     div()
         .mx(px(16.0))
-        .py(px(12.0))
-        .min_h(px(60.0))
+        .py(px(10.0))
+        .min_h(px(52.0))
         .when(!first, |el| {
             el.border_t_1().border_color(row_divider(theme))
         })
@@ -646,6 +660,19 @@ pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         .text_size(crate::typography::ui_rems(10.5))
         .text_color(theme.text_muted)
         .child(label.into())
+}
+
+pub fn beta_badge(theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .px(px(5.0))
+        .rounded(px(4.0))
+        .bg(theme.wash(0.08))
+        .text_size(crate::typography::ui_rems(10.5))
+        .line_height(crate::typography::ui_rems(15.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+        .child("Beta")
 }
 
 /// Emerald status pill (the Accounts "Active" badge:
@@ -1313,7 +1340,7 @@ pub fn section_tab(
         .on_hover(crate::motion::hover_listener(hover_key))
 }
 
-/// Height of every settings select trigger: centered in a 60px card row.
+/// Height of every settings select trigger: centered in a 52px card row.
 pub const SELECT_HEIGHT: f32 = 32.0;
 /// Menus never shrink below this, so short values still open a readable list.
 const SELECT_MENU_MIN_WIDTH: f32 = 160.0;
