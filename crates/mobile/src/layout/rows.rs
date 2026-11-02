@@ -649,6 +649,7 @@ impl RowBuilder {
                     tools.push(part);
                     if let Some(page) = html_render
                         && call.is_html_render()
+                        && page.url.is_none()
                     {
                         // Outside the work fold, like the desktop: the page stays above the reply.
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
@@ -807,7 +808,7 @@ impl RowBuilder {
             start
         });
         let is_work = |ix: usize, part: &MessagePart| match part {
-            MessagePart::Tool { call, html_render: Some(_), .. } if call.is_html_render() => false,
+            MessagePart::Tool { call, html_render: Some(page), .. } if call.is_html_render() && page.url.is_none() => false,
             MessagePart::Tool { .. } => true,
             MessagePart::Reasoning { text, .. } => !text.trim().is_empty(),
             MessagePart::Text { text, .. } => !text.trim().is_empty() && reply_start.is_none_or(|start| ix < start),
