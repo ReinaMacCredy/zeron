@@ -345,7 +345,7 @@ impl EngineRpc {
         depends_on: Vec<String>,
     ) -> Result<(), RpcError> {
         self.check_context_chats(&context)?;
-        self.check_dependencies(&task_id, &depends_on)?;
+        self.check_dependencies(&task_id, &depends_on, &[])?;
         let now = chrono::Utc::now();
         self.workspace
             .create_task(&Task {
@@ -379,7 +379,8 @@ impl EngineRpc {
         let leads = patch.chat_id.is_some() || patch.mode.is_some() || patch.completed.is_some();
         let _plans = (leads || patch.depends_on.is_some()).then(|| self.plan_writes());
         if let Some(depends_on) = &patch.depends_on {
-            self.check_dependencies(task_id, depends_on)?;
+            let kept = self.task_or_refuse(task_id)?.depends_on;
+            self.check_dependencies(task_id, depends_on, &kept)?;
         }
         if patch.context.is_some() || leads {
             let task = self.task_or_refuse(task_id)?;
@@ -406,12 +407,17 @@ impl EngineRpc {
         }
     }
 
-    fn check_dependencies(&self, task_id: &str, depends_on: &[String]) -> Result<(), RpcError> {
+    fn check_dependencies(
+        &self,
+        task_id: &str,
+        depends_on: &[String],
+        kept: &[String],
+    ) -> Result<(), RpcError> {
         if depends_on.is_empty() {
             return Ok(());
         }
         let tasks = self.workspace.read_tasks().map_err(failed)?;
-        dependency_problem(task_id, depends_on, &tasks)
+        dependency_problem(task_id, depends_on, kept, &tasks)
             .map_or(Ok(()), |problem| Err(refused(&problem)))
     }
 
@@ -1505,12 +1511,17 @@ impl EngineRpc {
     }
 }
 
-fn dependency_problem(task_id: &str, depends_on: &[String], tasks: &[Task]) -> Option<String> {
+fn dependency_problem(
+    task_id: &str,
+    depends_on: &[String],
+    kept: &[String],
+    tasks: &[Task],
+) -> Option<String> {
     for id in depends_on {
         if id == task_id {
             return Some("A task cannot depend on itself".into());
         }
-        if !tasks.iter().any(|task| task.id == *id) {
+        if !kept.contains(id) && !tasks.iter().any(|task| task.id == *id) {
             return Some(format!("dependsOn {id} is not a task"));
         }
     }
@@ -1657,24 +1668,32 @@ mod tests {
         };
         let tasks = [task("a", &[]), task("b", &["a"]), task("c", &["b"])];
         let deps = |ids: &[&str]| -> Vec<String> { ids.iter().map(|id| id.to_string()).collect() };
-        assert_eq!(dependency_problem("new", &deps(&["a", "c"]), &tasks), None);
-        assert_eq!(dependency_problem("a", &deps(&[]), &tasks), None);
         assert_eq!(
-            dependency_problem("a", &deps(&["a"]), &tasks).as_deref(),
+            dependency_problem("new", &deps(&["a", "c"]), &[], &tasks),
+            None
+        );
+        assert_eq!(dependency_problem("a", &deps(&[]), &[], &tasks), None);
+        assert_eq!(
+            dependency_problem("a", &deps(&["a"]), &[], &tasks).as_deref(),
             Some("A task cannot depend on itself")
         );
         assert_eq!(
-            dependency_problem("new", &deps(&["gone"]), &tasks).as_deref(),
+            dependency_problem("new", &deps(&["gone"]), &[], &tasks).as_deref(),
             Some("dependsOn gone is not a task")
         );
         assert_eq!(
-            dependency_problem("a", &deps(&["c"]), &tasks).as_deref(),
+            dependency_problem("a", &deps(&["c"]), &[], &tasks).as_deref(),
             Some("That dependency would make a cycle")
         );
         assert_eq!(
-            dependency_problem("b", &deps(&["a"]), &tasks),
+            dependency_problem("b", &deps(&["a"]), &[], &tasks),
             None,
             "rewriting the same edge is not a cycle"
+        );
+        assert_eq!(
+            dependency_problem("c", &deps(&["gone", "a"]), &deps(&["gone"]), &tasks),
+            None,
+            "a kept dependency on a deleted task does not block the update"
         );
     }
 }
