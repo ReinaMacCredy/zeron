@@ -6,6 +6,7 @@ use std::time::Duration;
 use zeron_proto::{Chat, ChatWorkTree, ToolCall, WorkTreeState};
 
 use crate::EngineError;
+use crate::diff_sync::CheckoutDiffSync;
 use crate::fs_watch::{FsWatch, FsWatchHub};
 use crate::repos::Repos;
 use crate::workspace_host::WorkspaceHost;
@@ -70,7 +71,7 @@ fn in_unlisted_worktree(path: &Path, listing: &[Worktree]) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BranchFacts {
     pub ahead: u32,
-    pub moved_since_creation: Option<bool>,
+    pub made_commits: Option<bool>,
 }
 
 pub(crate) fn classify(
@@ -90,7 +91,7 @@ pub(crate) fn classify(
             commits: facts.ahead,
         };
     }
-    let had_own_commits = facts.moved_since_creation.unwrap_or(matches!(
+    let had_own_commits = facts.made_commits.unwrap_or(matches!(
         previous,
         Some(WorkTreeState::Ahead { .. } | WorkTreeState::Merged)
     ));
@@ -99,6 +100,19 @@ pub(crate) fn classify(
     } else {
         WorkTreeState::Fresh
     }
+}
+
+// Fast-forwards and resets move the ref too; only these subjects record a commit made on it.
+fn made_commits(reflog: &str) -> Option<bool> {
+    if reflog.trim().is_empty() {
+        return None;
+    }
+    Some(reflog.lines().any(|subject| {
+        ["commit", "cherry-pick", "revert"]
+            .iter()
+            .any(|verb| subject.starts_with(verb))
+            || subject.contains(": Merge made by")
+    }))
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -136,6 +150,7 @@ struct Inner {
     refreshing: Mutex<HashMap<PathBuf, bool>>,
     shell_starts: Mutex<HashMap<String, Vec<Worktree>>>,
     base_watches: Mutex<HashMap<PathBuf, Vec<FsWatch>>>,
+    turn_diff: std::sync::OnceLock<CheckoutDiffSync>,
 }
 
 impl WorkTrees {
@@ -149,11 +164,16 @@ impl WorkTrees {
                 refreshing: Mutex::new(HashMap::new()),
                 shell_starts: Mutex::new(HashMap::new()),
                 base_watches: Mutex::new(HashMap::new()),
+                turn_diff: std::sync::OnceLock::new(),
             }),
         };
         let boot = work_trees.clone();
         tokio::spawn(async move { boot.refresh_all().await });
         work_trees
+    }
+
+    pub fn set_turn_diff(&self, turn_diff: CheckoutDiffSync) {
+        let _ = self.inner.turn_diff.set(turn_diff);
     }
 
     pub fn note_tool_call(&self, chat_id: &str, call: &ToolCall, finished: bool) {
@@ -194,7 +214,7 @@ impl WorkTrees {
             .chat(chat_id)?
             .ok_or_else(|| EngineError::Other(format!("no chat {chat_id}")))?;
         let Some(path) = path else {
-            self.inner.workspace.set_chat_work_tree(chat_id, None)?;
+            self.record(&chat, None).await?;
             return Ok(None);
         };
         let main = self
@@ -211,10 +231,39 @@ impl WorkTrees {
         let work_tree = self
             .observe(&listing, &worktree, chat.work_tree.as_ref())
             .await;
+        self.record(&chat, Some(&work_tree)).await?;
+        Ok(Some(work_tree))
+    }
+
+    async fn record(
+        &self,
+        chat: &Chat,
+        work_tree: Option<&ChatWorkTree>,
+    ) -> Result<(), EngineError> {
         self.inner
             .workspace
-            .set_chat_work_tree(chat_id, Some(&work_tree))?;
-        Ok(Some(work_tree))
+            .set_chat_work_tree(&chat.id, work_tree)?;
+        if work_tree.is_some_and(|work_tree| work_tree.removed) {
+            return Ok(());
+        }
+        let Some(source) = work_tree
+            .map(|work_tree| work_tree.path.as_str())
+            .or(chat.cwd.as_deref())
+        else {
+            return Ok(());
+        };
+        let stamped = chat.source_context.as_ref().is_some_and(|context| {
+            context.cwd == source
+                && work_tree.is_none_or(|work_tree| {
+                    work_tree.branch.as_deref() == Some(context.branch.as_str())
+                })
+        });
+        if !stamped && let Some(context) = self.inner.repos.source_context(source).await {
+            self.inner
+                .workspace
+                .set_chat_source_context(&chat.id, &context)?;
+        }
+        Ok(())
     }
 
     pub async fn annotate_refs(
@@ -301,7 +350,7 @@ impl WorkTrees {
         };
         if let Some(worktree) = attributed {
             let own_folder = chat.cwd.as_deref().map(|cwd| canonical(Path::new(cwd)));
-            let current = chat.work_tree.as_ref().filter(|current| !current.removed);
+            let current = chat.live_work_tree();
             let moved =
                 current.is_none_or(|current| canonical(Path::new(&current.path)) != worktree.path);
             if own_folder.as_ref() != Some(&worktree.path) && moved {
@@ -310,9 +359,12 @@ impl WorkTrees {
                     .cloned()
                     .unwrap_or_default();
                 let work_tree = self.observe(&listing, &worktree, None).await;
-                self.inner
-                    .workspace
-                    .set_chat_work_tree(chat_id, Some(&work_tree))?;
+                self.record(&chat, Some(&work_tree)).await?;
+                if let (Some(turn_diff), Some(head)) =
+                    (self.inner.turn_diff.get(), worktree.head.as_deref())
+                {
+                    turn_diff.note_turn_moved(chat_id, &worktree.path, head);
+                }
             }
         }
         let linked = lock(&self.inner.listings)
@@ -324,11 +376,7 @@ impl WorkTrees {
             .watch_chats()
             .borrow()
             .iter()
-            .any(|chat| {
-                chat.work_tree
-                    .as_ref()
-                    .is_some_and(|work_tree| !work_tree.removed)
-            });
+            .any(|chat| chat.live_work_tree().is_some());
         if linked || attributed_anywhere {
             self.refresh_repo(&main).await;
         }
@@ -386,11 +434,7 @@ impl WorkTrees {
                     && self.main_folder(chat).as_deref() == Some(main)
             })
             .collect();
-        let live = chats.iter().any(|chat| {
-            chat.work_tree
-                .as_ref()
-                .is_some_and(|work_tree| !work_tree.removed)
-        });
+        let live = chats.iter().any(|chat| chat.live_work_tree().is_some());
         self.watch_base(main, live).await;
         if chats.is_empty() {
             return Ok(());
@@ -421,9 +465,7 @@ impl WorkTrees {
                 },
             };
             if &next != current {
-                self.inner
-                    .workspace
-                    .set_chat_work_tree(&chat.id, Some(&next))?;
+                self.record(&chat, Some(&next)).await?;
             }
         }
         Ok(())
@@ -498,7 +540,7 @@ impl WorkTrees {
             }
             _ => BranchFacts {
                 ahead: 0,
-                moved_since_creation: Some(false),
+                made_commits: Some(false),
             },
         };
         let path = worktree.path.to_string_lossy().into_owned();
@@ -528,7 +570,7 @@ impl WorkTrees {
             .ok()
             .and_then(|count| count.parse().ok())
             .unwrap_or(0);
-        let moved_since_creation = if ahead > 0 {
+        let committed = if ahead > 0 {
             Some(true)
         } else {
             let reflog = self
@@ -538,30 +580,18 @@ impl WorkTrees {
                     &[
                         "reflog",
                         "show",
-                        "--format=%H %gs",
+                        "--format=%gs",
                         &format!("refs/heads/{branch}"),
                     ],
                     Some(main),
                 )
                 .await
                 .unwrap_or_default();
-            let tip = reflog
-                .lines()
-                .next()
-                .and_then(|line| line.split(' ').next());
-            let created = reflog
-                .lines()
-                .last()
-                .filter(|line| line.contains("branch: Created from"))
-                .and_then(|line| line.split(' ').next());
-            match (tip, created) {
-                (Some(tip), Some(created)) => Some(tip != created),
-                _ => None,
-            }
+            made_commits(&reflog)
         };
         BranchFacts {
             ahead,
-            moved_since_creation,
+            made_commits: committed,
         }
     }
 
@@ -605,10 +635,10 @@ impl WorkTrees {
 mod tests {
     use super::*;
 
-    fn facts(ahead: u32, moved: Option<bool>) -> BranchFacts {
+    fn facts(ahead: u32, made: Option<bool>) -> BranchFacts {
         BranchFacts {
             ahead,
-            moved_since_creation: moved,
+            made_commits: made,
         }
     }
 
@@ -639,7 +669,7 @@ mod tests {
                 Some(ahead)
             ),
             WorkTreeState::Fresh,
-            "a reflog that says the branch never moved beats the memory"
+            "a reflog with no commit of the branch's own beats the memory"
         );
         assert_eq!(
             classify(Some("feat/x"), Some("main"), facts(0, None), Some(ahead)),
@@ -841,6 +871,15 @@ mod tests {
         let x = lab.add_worktree("x");
         lab.tool("one", write(&x.join("a.txt"))).await;
         assert_eq!(lab.work_tree("one").unwrap().state, WorkTreeState::Fresh);
+
+        git(&lab.main, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&x, &["merge", "-q", "--ff-only", "main"]);
+        lab.work_trees.refresh_repo(&lab.main).await;
+        assert_eq!(
+            lab.work_tree("one").unwrap().state,
+            WorkTreeState::Fresh,
+            "a fast-forward to base is not work of the branch's own"
+        );
 
         std::fs::write(x.join("a.txt"), "changed\n").unwrap();
         git(&x, &["commit", "-q", "-am", "change"]);

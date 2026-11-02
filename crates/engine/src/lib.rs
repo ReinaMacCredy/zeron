@@ -482,6 +482,7 @@ impl EngineCore {
         let work_trees = work_trees::WorkTrees::start(repos.clone(), workspace.clone(), &device_id);
         let synced = work_trees.clone();
         diff_sync.set_sync_listener(Arc::new(move |root| synced.note_checkout_changed(root)));
+        work_trees.set_turn_diff(diff_sync.clone());
         sessions.set_work_trees(work_trees);
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         let computer = computer::runtime::ComputerRuntime::start(data_dir);

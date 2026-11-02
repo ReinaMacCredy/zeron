@@ -7060,26 +7060,14 @@ impl DocHost {
     }
 
     async fn capture_source_context(&self, cwd: &str) -> Option<ConversationSourceContext> {
-        let repos = self.inner.repos.get()?;
-        let path = Path::new(cwd);
-        let identity = repos.checkout_identity(path).await.ok()?;
-        let branch = repos.current_branch(path).await.ok()?;
-        let head_sha = repos.head_sha(path).await.ok().flatten();
-        Some(ConversationSourceContext {
-            checkout_id: identity.id,
-            repo_root: identity.root.to_string_lossy().into_owned(),
-            cwd: cwd.to_string(),
-            branch,
-            head_sha,
-            observed_at: chrono::Utc::now(),
-        })
+        self.inner.repos.get()?.source_context(cwd).await
     }
 
     /// Every fresh harness dispatch crosses this boundary, including
     /// steer/input fallbacks and crash recovery. Capture immediately before
-    /// dispatch so the conversation records the checkout the harness will
-    /// actually observe, rather than whichever checkout state was current on
-    /// an earlier turn.
+    /// dispatch so the conversation records the checkout it works in (the
+    /// worktree it moved to, else the run's folder), rather than whichever
+    /// checkout state was current on an earlier turn.
     pub(crate) async fn dispatch_with_source_context(
         &self,
         sessions: &SessionsEngine,
@@ -7088,8 +7076,16 @@ impl DocHost {
         request: zeron_proto::RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
+        let work_tree = self
+            .workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+            .and_then(|chat| {
+                chat.live_work_tree()
+                    .map(|work_tree| work_tree.path.clone())
+            });
+        let source = work_tree.as_deref().unwrap_or(&request.cwd);
         if let Some(workspace) = self.workspace()
-            && let Some(context) = self.capture_source_context(&request.cwd).await
+            && let Some(context) = self.capture_source_context(source).await
             && let Err(err) = workspace.set_chat_source_context(chat_id, &context)
         {
             tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");

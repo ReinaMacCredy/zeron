@@ -3424,11 +3424,7 @@ impl Pickers {
 
     fn session_ref_name(&self, cx: &App) -> Option<String> {
         let chat = self.chat_row(cx)?;
-        match chat
-            .work_tree
-            .as_ref()
-            .filter(|work_tree| !work_tree.removed)
-        {
+        match chat.live_work_tree() {
             Some(work_tree) => work_tree.branch.clone(),
             None => chat.branch.clone(),
         }

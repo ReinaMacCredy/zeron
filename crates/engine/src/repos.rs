@@ -19,9 +19,9 @@ use futures::{StreamExt, stream};
 use sha2::{Digest, Sha256};
 
 use zeron_proto::{
-    DriveEntry, FileSearchMatch, FolderEntry, FolderListing, GitHistoryCommit,
-    GitHistoryComparison, GitHistoryPage, GitHistoryRef, GitHistoryRefKind, HomeFolderMatch,
-    HomeFolderSearchResult, Repo, RepoRef, Worktree,
+    ConversationSourceContext, DriveEntry, FileSearchMatch, FolderEntry, FolderListing,
+    GitHistoryCommit, GitHistoryComparison, GitHistoryPage, GitHistoryRef, GitHistoryRefKind,
+    HomeFolderMatch, HomeFolderSearchResult, Repo, RepoRef, Worktree,
 };
 
 use crate::EngineError;
@@ -400,6 +400,21 @@ impl Repos {
             Err(_) if self.is_repo(path).await => Ok(None),
             Err(err) => Err(err),
         }
+    }
+
+    pub async fn source_context(&self, cwd: &str) -> Option<ConversationSourceContext> {
+        let path = Path::new(cwd);
+        let identity = self.checkout_identity(path).await.ok()?;
+        let branch = self.current_branch(path).await.ok()?;
+        let head_sha = self.head_sha(path).await.ok().flatten();
+        Some(ConversationSourceContext {
+            checkout_id: identity.id,
+            repo_root: identity.root.to_string_lossy().into_owned(),
+            cwd: cwd.to_string(),
+            branch,
+            head_sha,
+            observed_at: chrono::Utc::now(),
+        })
     }
 
     /// Fetch every configured remote without pruning or integrating anything

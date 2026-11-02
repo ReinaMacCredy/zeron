@@ -147,12 +147,16 @@ impl Composer {
         let space = state
             .space_for_chat(chat)
             .filter(|space| space.git_detected)?;
-        let cwd = chat.cwd.clone().unwrap_or_else(|| space.path.clone());
+        let cwd = chat.work_path().unwrap_or(&space.path).to_owned();
+        let branch = match chat.live_work_tree() {
+            Some(work_tree) => work_tree.branch.clone(),
+            None => chat.branch.clone(),
+        };
         Some(Target {
             chat_id: chat.id.clone(),
             worktree: cwd != space.path,
             cwd,
-            branch: chat.branch.clone(),
+            branch,
             harness: chat.config.as_ref().map(|config| config.harness),
         })
     }
