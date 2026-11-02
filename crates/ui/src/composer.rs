@@ -1779,7 +1779,7 @@ impl TextProjection {
                 let pad = MENTION_SIDE_PAD;
                 let display = if link.has_mark() {
                     format!("{pad}{CHIP_ICON_SLOT}{label}{pad}")
-                } else if link.is_invocation() {
+                } else if link.is_invocation() && !(compact && link.kind == ChipKind::Skill) {
                     format!("{pad}{}{label}{pad}", link.prefix())
                 } else {
                     format!("{pad}{CHIP_ICON_SLOT}{label}{CHIP_TRAILING_PAD}")
@@ -17186,7 +17186,7 @@ mod tests {
             assert_eq!(input.projection.mentions.len(), 3);
             for (mention, display) in &input.projection.mentions {
                 let label = &input.projection.display[display.clone()];
-                if mention.is_invocation() {
+                if mention.is_invocation() && mention.kind != ChipKind::Skill {
                     assert!(label.starts_with(&format!("{MENTION_SIDE_PAD}{}", mention.prefix())));
                     assert!(label.ends_with(MENTION_SIDE_PAD));
                 } else {
