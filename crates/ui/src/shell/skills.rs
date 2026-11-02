@@ -84,24 +84,31 @@ impl SkillsPage {
     }
 }
 
-/// Stow links one skill folder into several harness roots; they are one skill.
-fn real_path(path: &str) -> String {
+/// Stow links one skill folder into several harness roots and installers copy
+/// it into others; byte-equal copies under one name are one skill.
+fn identity(name: &str, path: &str) -> String {
+    use std::hash::{Hash, Hasher};
     if native_skill_identity(path) {
         return path.to_string();
     }
-    std::fs::canonicalize(path).map_or_else(
-        |_| path.to_string(),
-        |real| real.to_string_lossy().into_owned(),
-    )
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            format!("{name}\0{:016x}", hasher.finish())
+        }
+        Err(_) => path.to_string(),
+    }
 }
 
 fn group(per_harness: Vec<(HarnessId, Vec<Skill>)>) -> Vec<SkillEntry> {
-    let mut entries: Vec<(String, SkillEntry)> = Vec::new();
+    let mut entries: Vec<SkillEntry> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for (harness, skills) in per_harness {
         for skill in skills {
-            let real = real_path(&skill.path);
-            match entries.iter_mut().find(|(key, _)| *key == real) {
-                Some((_, entry)) => {
+            match index.entry(identity(&skill.name, &skill.path)) {
+                std::collections::hash_map::Entry::Occupied(slot) => {
+                    let entry = &mut entries[*slot.get()];
                     if !entry.harnesses.contains(&harness) {
                         entry.harnesses.push(harness);
                     }
@@ -110,21 +117,20 @@ fn group(per_harness: Vec<(HarnessId, Vec<Skill>)>) -> Vec<SkillEntry> {
                     }
                     entry.commands.extend(skill.command);
                 }
-                None => entries.push((
-                    real,
-                    SkillEntry {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(entries.len());
+                    entries.push(SkillEntry {
                         name: skill.name,
                         path: skill.path.clone(),
                         paths: vec![skill.path],
                         description: skill.description,
                         harnesses: vec![harness],
                         commands: skill.command.into_iter().collect(),
-                    },
-                )),
+                    });
+                }
             }
         }
     }
-    let mut entries: Vec<SkillEntry> = entries.into_iter().map(|(_, entry)| entry).collect();
     entries.sort_by_key(|entry| entry.name.to_lowercase());
     entries
 }
@@ -725,7 +731,7 @@ impl Shell {
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            .child(skill_tile(theme, 36.0))
+            .child(skill_tile(theme, 40.0).rounded_full())
             .child(div().flex_1())
             .child(
                 div()
@@ -778,9 +784,9 @@ impl Shell {
                 .flex_row()
                 .items_center()
                 .gap(px(5.0))
-                .h(px(22.0))
-                .px(px(8.0))
-                .rounded(px(6.0))
+                .h(px(24.0))
+                .px(px(10.0))
+                .rounded_full()
                 .bg(theme.wash(0.06))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted)
@@ -873,20 +879,29 @@ impl Shell {
                 })
                 .child(div().flex_1())
                 .child(
-                    popover::btn_primary(theme, "Try now")
+                    div()
                         .id("skill-try-now")
+                        .role(gpui::Role::Button)
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(6.0))
-                        .rounded_full()
+                        .gap(px(7.0))
+                        .h(px(32.0))
                         .px(px(14.0))
+                        .rounded_full()
+                        .bg(theme.text)
+                        .text_color(theme.on_solid)
+                        .text_size(crate::typography::ui_rems(13.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.9))
                         .on_click(cx.listener(|this, _, _, cx| this.try_skill(cx)))
                         .child(
-                            icon(icons::MAGIC_STICK_3)
+                            icon(icons::PEN_NEW_SQUARE)
                                 .size(px(14.0))
                                 .text_color(theme.on_solid),
-                        ),
+                        )
+                        .child("Try now"),
                 )
         };
 
@@ -901,9 +916,8 @@ impl Shell {
                 div()
                     .mt(px(16.0))
                     .flex()
-                    .flex_row()
-                    .items_baseline()
-                    .gap(px(8.0))
+                    .flex_col()
+                    .gap(px(2.0))
                     .child(
                         div()
                             .min_w_0()
@@ -915,7 +929,6 @@ impl Shell {
                     )
                     .child(
                         div()
-                            .flex_none()
                             .text_size(crate::typography::ui_rems(13.0))
                             .text_color(theme.text_faint)
                             .child("Skill"),
@@ -947,9 +960,12 @@ impl Shell {
                                 .min_w_0()
                                 .truncate()
                                 .ml(px(4.0))
+                                .font_family(theme.font_mono.clone())
                                 .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(theme.text_faint)
-                                .child(SharedString::from(tilde_path(&entry.path))),
+                                .child(SharedString::from(tilde_path(
+                                    entry.path.strip_suffix("/SKILL.md").unwrap_or(&entry.path),
+                                ))),
                         )
                     }),
             )
@@ -1033,20 +1049,23 @@ impl Shell {
             Some(since) => crate::frost::MENU_BLUR * (1.0 - motion::MENU_OUT.progress_since(since)),
             None => crate::frost::MENU_BLUR,
         };
-        let card = crate::frost::frosted(12.0, blur, card);
-        let layer = div().absolute().top(px(56.0)).right(px(52.0));
-        match closing {
+        let card = div().child(crate::frost::frosted(12.0, blur, card));
+        let card = match closing {
             Some(since) => motion::menu_out_toward(
                 "skill-menu-out",
                 -4.0,
                 motion::MENU_OUT.progress_since(since),
-                layer.child(card),
+                card,
             )
             .into_any_element(),
-            None => {
-                motion::menu_in_from("skill-menu-in", -4.0, layer.child(card)).into_any_element()
-            }
-        }
+            None => motion::menu_in_from("skill-menu-in", -4.0, card).into_any_element(),
+        };
+        div()
+            .absolute()
+            .top(px(60.0))
+            .right(px(52.0))
+            .child(card)
+            .into_any_element()
     }
 }
 
