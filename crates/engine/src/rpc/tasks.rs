@@ -376,11 +376,11 @@ impl EngineRpc {
     }
 
     pub(super) fn update_task(&self, task_id: &str, patch: &TaskPatch) -> Result<(), RpcError> {
+        let leads = patch.chat_id.is_some() || patch.mode.is_some() || patch.completed.is_some();
+        let _plans = (leads || patch.depends_on.is_some()).then(|| self.plan_writes());
         if let Some(depends_on) = &patch.depends_on {
             self.check_dependencies(task_id, depends_on)?;
         }
-        let leads = patch.chat_id.is_some() || patch.mode.is_some() || patch.completed.is_some();
-        let _plans = leads.then(|| self.plan_writes());
         if patch.context.is_some() || leads {
             let task = self.task_or_refuse(task_id)?;
             if let Some(context) = &patch.context {
