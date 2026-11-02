@@ -8,6 +8,7 @@ use gpui::{
     div, prelude::*, px,
 };
 
+use crate::composer::mentions::{MentionMenu, MentionMenuEvent, MentionTarget};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
 use crate::motion;
@@ -34,6 +35,9 @@ const PLACEHOLDER: &str = "Jot down an idea…";
 const MENU_WIDTH: f32 = 220.0;
 const MENU_MAX_HEIGHT: f32 = 280.0;
 const MENU_GAP: f32 = 6.0;
+const MENTION_WIDTH: f32 = 480.0;
+const MENTION_MAX_HEIGHT: f32 = 340.0;
+const MENTION_INSET: f32 = 40.0;
 
 #[derive(Default)]
 pub struct Captured {
@@ -123,6 +127,7 @@ pub(crate) struct Capture {
     pub space_id: Option<String>,
     pub due_on: Option<String>,
     pub images: Vec<String>,
+    pub depends_on: Vec<String>,
 }
 
 pub(crate) enum BarEvent {
@@ -138,9 +143,16 @@ pub(crate) struct CaptureToast {
     pub shown: Instant,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Popup {
+    Projects,
+    Mentions,
+}
+
 pub(crate) struct QuickCaptureBar {
     state: Entity<AppState>,
     input: Entity<ComposerInput>,
+    mentions: Entity<MentionMenu>,
     images: Vec<String>,
     uploads: Vec<Task<()>>,
     picking: Option<Task<()>>,
@@ -148,8 +160,8 @@ pub(crate) struct QuickCaptureBar {
     today: bool,
     menu: Option<usize>,
     menu_from_chip: bool,
-    menu_window: Option<WindowHandle<ProjectMenu>>,
-    menu_opening: bool,
+    menu_window: Option<(Popup, WindowHandle<ProjectMenu>)>,
+    menu_opening: Option<Popup>,
     menu_scroll: ScrollHandle,
     chip_bounds: Rc<Cell<Bounds<Pixels>>>,
     saved: Option<Instant>,
@@ -169,19 +181,49 @@ impl Focusable for QuickCaptureBar {
 
 impl QuickCaptureBar {
     pub(crate) fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| ComposerInput::new(PLACEHOLDER, cx).with_text_metrics(16.0, 22.0));
-        let events = cx.subscribe(&input, |bar, _, event: &ComposerInputEvent, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
-                bar.enter(cx);
-            } else if matches!(event, ComposerInputEvent::Edited) {
-                bar.refresh_menu(cx);
-            } else if let Some(staged) = images::pasted(event, cx) {
-                bar.add_images(staged, cx);
-            }
+        let input = cx.new(|cx| {
+            ComposerInput::new(PLACEHOLDER, cx)
+                .with_text_metrics(16.0, 22.0)
+                .with_mentions(state.clone())
+        });
+        let mentions = cx.new(|_| MentionMenu::new(state.clone(), input.clone()));
+        let events = cx.subscribe(
+            &input,
+            |bar, _, event: &ComposerInputEvent, cx| match event {
+                ComposerInputEvent::Submitted => bar.enter(cx),
+                ComposerInputEvent::Edited => {
+                    bar.refresh_menu(cx);
+                    bar.refresh_mentions(cx);
+                }
+                ComposerInputEvent::CursorMoved => bar.refresh_mentions(cx),
+                ComposerInputEvent::MentionNavigate(delta) => {
+                    bar.mentions.update(cx, |menu, cx| menu.step(*delta, cx))
+                }
+                ComposerInputEvent::MentionAccept => {
+                    bar.mentions.update(cx, |menu, cx| menu.accept(cx))
+                }
+                ComposerInputEvent::MentionDismiss => {
+                    bar.mentions.update(cx, |menu, cx| menu.dismiss(cx))
+                }
+                _ => {
+                    if let Some(staged) = images::pasted(event, cx) {
+                        bar.add_images(staged, cx);
+                    }
+                }
+            },
+        );
+        let mention_events = cx.subscribe(&mentions, |bar, menu, _: &MentionMenuEvent, cx| {
+            let menu = menu.read(cx);
+            let (open, selected) = (menu.is_open(), menu.has_selection());
+            bar.input.update(cx, |input, cx| {
+                input.set_mention_controls(open, selected, cx)
+            });
+            cx.notify();
         });
         Self {
             state,
             input,
+            mentions,
             images: Vec::new(),
             uploads: Vec::new(),
             picking: None,
@@ -190,14 +232,14 @@ impl QuickCaptureBar {
             menu: None,
             menu_from_chip: false,
             menu_window: None,
-            menu_opening: false,
+            menu_opening: None,
             menu_scroll: ScrollHandle::new(),
             chip_bounds: Rc::default(),
             saved: None,
             opens: 0,
             seen_active: false,
             activation: None,
-            _subscriptions: vec![events],
+            _subscriptions: vec![events, mention_events],
         }
     }
 
@@ -294,6 +336,51 @@ impl QuickCaptureBar {
         cx.notify();
     }
 
+    fn refresh_mentions(&mut self, cx: &mut Context<Self>) {
+        let input = self.input.read(cx);
+        if input.selecting() {
+            if self.mentions.read(cx).is_open() {
+                self.mentions.update(cx, |menu, cx| menu.reset(None, cx));
+            }
+            return;
+        }
+        let (text, cursor) = (input.text().to_string(), input.cursor_offset());
+        let target = self.mention_target(cx);
+        self.mentions
+            .update(cx, |menu, cx| menu.refresh(&text, cursor, target, cx));
+        if self.mentions.read(cx).is_open() {
+            self.menu = None;
+            self.menu_from_chip = false;
+        }
+    }
+
+    fn mention_target(&self, cx: &App) -> MentionTarget {
+        let state = self.state.read(cx);
+        let space_id = self.space_id(cx);
+        let space = space_id.as_deref().and_then(|id| state.space_row(id));
+        let workspace = space.map(|space| {
+            serde_json::json!({
+                "spaceId": space.id,
+                "targetDeviceId": space.device_id,
+                "cwd": space.path,
+            })
+        });
+        let device = space
+            .map(|space| space.device_id.clone())
+            .or_else(|| state.selected_device.clone());
+        MentionTarget {
+            context: workspace
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            device: device.map(|device| (device, None)),
+            space: space_id,
+            workspace,
+            attachments: Vec::new(),
+            done_tasks: false,
+        }
+    }
+
     fn toggle_menu(&mut self, cx: &mut Context<Self>) {
         if self.menu.is_some() {
             self.menu = None;
@@ -330,7 +417,14 @@ impl QuickCaptureBar {
     pub(crate) fn close_menu(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
         self.menu_from_chip = false;
-        if let Some(handle) = self.menu_window.take() {
+        if self.mentions.read(cx).is_open() {
+            self.mentions.update(cx, |menu, cx| menu.reset(None, cx));
+        }
+        self.close_menu_window(cx);
+    }
+
+    fn close_menu_window(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, handle)) = self.menu_window.take() {
             cx.defer(move |cx| {
                 handle
                     .update(cx, |_, window, _| window.remove_window())
@@ -339,27 +433,53 @@ impl QuickCaptureBar {
         }
     }
 
-    fn menu_shown(&self) -> bool {
-        self.menu_window.is_some() || self.menu_opening
-    }
-
-    fn sync_menu_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match (self.menu.is_some(), self.menu_shown()) {
-            (true, false) => self.open_menu_window(window, cx),
-            (false, true) => self.close_menu(cx),
-            _ => {}
+    fn popup_wanted(&self, cx: &App) -> Option<Popup> {
+        if self.menu.is_some() {
+            Some(Popup::Projects)
+        } else if self.mentions.read(cx).is_open() {
+            Some(Popup::Mentions)
+        } else {
+            None
         }
     }
 
-    fn open_menu_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let chip = self.chip_bounds.get();
-        let anchor = gpui::point(chip.left(), chip.bottom() + px(MENU_GAP));
+    fn popup_shown(&self) -> Option<Popup> {
+        self.menu_window
+            .map(|(popup, _)| popup)
+            .or(self.menu_opening)
+    }
+
+    fn sync_menu_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = self.popup_wanted(cx);
+        if wanted == self.popup_shown() || self.menu_opening.is_some() {
+            return;
+        }
+        self.close_menu_window(cx);
+        if let Some(popup) = wanted {
+            self.open_menu_window(popup, window, cx);
+        }
+    }
+
+    fn open_menu_window(&mut self, popup: Popup, window: &mut Window, cx: &mut Context<Self>) {
+        let (anchor, size) = match popup {
+            Popup::Projects => {
+                let chip = self.chip_bounds.get();
+                (
+                    gpui::point(chip.left(), chip.bottom() + px(MENU_GAP)),
+                    gpui::size(px(MENU_WIDTH), px(MENU_MAX_HEIGHT)),
+                )
+            }
+            Popup::Mentions => (
+                gpui::point(
+                    px(MENTION_INSET),
+                    window.viewport_size().height + px(MENU_GAP),
+                ),
+                gpui::size(px(MENTION_WIDTH), px(MENTION_MAX_HEIGHT)),
+            ),
+        };
         let origin = window.bounds().origin + anchor;
         let options = gpui::WindowOptions {
-            window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::new(
-                origin,
-                gpui::size(px(MENU_WIDTH), px(MENU_MAX_HEIGHT)),
-            ))),
+            window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::new(origin, size))),
             titlebar: None,
             focus: false,
             show: true,
@@ -374,7 +494,7 @@ impl QuickCaptureBar {
         #[cfg(target_os = "macos")]
         let place = macos::place_below(window, anchor);
         let bar = cx.entity();
-        self.menu_opening = true;
+        self.menu_opening = Some(popup);
         // Opening renders the menu at once, and its render reads this bar, so it cannot run inside the bar's update.
         cx.defer(move |cx| {
             let menu_bar = bar.clone();
@@ -394,10 +514,11 @@ impl QuickCaptureBar {
                 })
             });
             bar.update(cx, |bar, cx| {
-                bar.menu_opening = false;
-                bar.menu_window = opened.ok();
-                if bar.menu.is_none() {
-                    bar.close_menu(cx);
+                bar.menu_opening = None;
+                bar.menu_window = opened.ok().map(|handle| (popup, handle));
+                if bar.popup_wanted(cx) != Some(popup) {
+                    bar.close_menu_window(cx);
+                    cx.notify();
                 }
             });
         });
@@ -444,6 +565,16 @@ impl QuickCaptureBar {
         let Some((title, notes)) = split_capture(&text) else {
             return;
         };
+        let tasks = &self.state.read(cx).tasks;
+        let mut depends_on: Vec<String> = Vec::new();
+        for link in zeron_proto::task_mentions::task_mention_links(&text) {
+            if !depends_on.contains(&link.task_id)
+                && tasks.iter().any(|task| task.id == link.task_id)
+            {
+                depends_on.push(link.task_id);
+            }
+        }
+        depends_on.truncate(zeron_doc::TASK_DEPENDS_ON_MAX);
         let due_on = self.today.then(|| {
             chrono::Local::now()
                 .date_naive()
@@ -457,6 +588,7 @@ impl QuickCaptureBar {
             space_id: self.space_id(cx),
             due_on,
             images: std::mem::take(&mut self.images),
+            depends_on,
         };
         self.input.update(cx, |input, cx| input.set_text("", cx));
         self.project = None;
@@ -673,7 +805,7 @@ impl Render for QuickCaptureBar {
         if self.saved.is_some() && fade > 0.0 {
             window.request_animation_frame();
         }
-        if self.menu.is_some() != self.menu_shown() {
+        if self.popup_wanted(cx) != self.popup_shown() {
             cx.defer_in(window, Self::sync_menu_window);
         }
         let card = self.render_card(&theme, cx);
@@ -711,6 +843,22 @@ impl Render for ProjectMenu {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_popup();
         let bar = self.bar.read(cx);
+        if bar.popup_wanted(cx) == Some(Popup::Mentions) {
+            return div()
+                .size_full()
+                .flex()
+                .items_start()
+                .font_family(theme.font_sans.clone())
+                .child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .w(px(MENTION_WIDTH))
+                        .child(fit_panel())
+                        .child(bar.mentions.clone()),
+                )
+                .into_any_element();
+        }
         let (rows, active, scroll) = (bar.menu_rows(cx), bar.menu, bar.menu_scroll.clone());
         div()
             .size_full()
@@ -758,6 +906,7 @@ impl Render for ProjectMenu {
                             })),
                     ),
             )
+            .into_any_element()
     }
 }
 
@@ -946,6 +1095,57 @@ mod tests {
             *events.borrow(),
             ["dismiss", "saved Save carts | for later | true"]
         );
+    }
+
+    #[gpui::test]
+    fn at_inserts_a_task_link_and_the_saved_task_depends_on_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::composer::init(cx, Default::default());
+        });
+        let task = |id: &str, title: &str, done: bool| -> zeron_proto::Task {
+            let mut task: zeron_proto::Task =
+                serde_json::from_value(serde_json::json!({ "id": id, "title": title })).unwrap();
+            task.completed_at = done.then(chrono::Utc::now);
+            task
+        };
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.tasks = vec![
+                task("shipped", "Ship the CLI", true),
+                task("api", "Ship the API", false),
+            ];
+            state
+        });
+        let (bar, cx) = cx.add_window_view(|_, cx| QuickCaptureBar::new(state, cx));
+        bar.update_in(cx, |bar, window, cx| {
+            bar.opened(window, cx);
+            bar.input
+                .update(cx, |input, cx| input.set_text("Write docs @ship", cx));
+        });
+        cx.run_until_parked();
+        let open = bar.read_with(cx, |bar, cx| bar.popup_wanted(cx));
+        assert!(open == Some(Popup::Mentions));
+        cx.simulate_keystrokes("enter");
+        let text = bar.read_with(cx, |bar, cx| bar.input.read(cx).text().to_string());
+        assert_eq!(text, "Write docs [Ship the API](zeron-task:api) ");
+        let saved = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = saved.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&bar, move |_, event: &BarEvent, _| {
+                if let BarEvent::Saved { capture, .. } = event {
+                    sink.borrow_mut().push(capture.clone());
+                }
+            })
+            .detach();
+        });
+        cx.simulate_keystrokes("enter");
+        let saved = saved.borrow();
+        assert_eq!(saved[0].title, "Write docs [Ship the API](zeron-task:api)");
+        assert_eq!(saved[0].depends_on, ["api"]);
     }
 
     #[test]

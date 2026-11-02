@@ -384,7 +384,7 @@ fn at_completion_offers_staged_files_by_name(cx: &mut gpui::TestAppContext) {
     append(&handle, cx, " @note");
     handle
         .update(cx, |composer, _, cx| {
-            let rows = composer.mention_attachment_matches();
+            let rows = composer.mentions.read(cx).attachment_matches();
             assert_eq!(
                 rows.iter()
                     .map(|row| row.label.as_str())
@@ -392,7 +392,7 @@ fn at_completion_offers_staged_files_by_name(cx: &mut gpui::TestAppContext) {
                 ["notes.md"]
             );
             assert!(rows[0].image.is_none());
-            composer.accept_mention(cx);
+            composer.mentions.update(cx, |menu, cx| menu.accept(cx));
         })
         .unwrap();
     cx.run_until_parked();
@@ -462,24 +462,25 @@ fn at_completion_pins_staged_images_above_files_and_filters_them(cx: &mut gpui::
     paste_images(&handle, cx, 2);
     append(&handle, cx, " @");
     handle
-        .read_with(cx, |composer, _| {
-            let matches = composer.mention_attachment_matches();
+        .read_with(cx, |composer, cx| {
+            let menu = composer.mentions.read(cx);
+            let matches = menu.attachment_matches();
             assert_eq!(
                 matches.iter().map(|row| row.index).collect::<Vec<_>>(),
                 vec![1, 2]
             );
-            assert_eq!(composer.mention.active, Some(0));
+            assert_eq!(menu.mention.active, Some(0));
         })
         .unwrap();
     append(&handle, cx, "image2");
     handle
         .update(cx, |composer, _, cx| {
-            let matches = composer.mention_attachment_matches();
+            let matches = composer.mentions.read(cx).attachment_matches();
             assert_eq!(
                 matches.iter().map(|row| row.index).collect::<Vec<_>>(),
                 vec![2]
             );
-            composer.accept_mention(cx);
+            composer.mentions.update(cx, |menu, cx| menu.accept(cx));
         })
         .unwrap();
     cx.run_until_parked();
@@ -507,8 +508,8 @@ fn at_completion_has_no_image_rows_when_nothing_is_staged(cx: &mut gpui::TestApp
         .unwrap();
     cx.run_until_parked();
     handle
-        .read_with(cx, |composer, _| {
-            assert!(composer.mention_attachment_matches().is_empty());
+        .read_with(cx, |composer, cx| {
+            assert!(composer.mentions.read(cx).attachment_matches().is_empty());
         })
         .unwrap();
 }
