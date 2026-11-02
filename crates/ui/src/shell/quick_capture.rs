@@ -494,6 +494,7 @@ impl Shell {
                 .map(|space| space.id.clone()),
             due_on: None,
             images: Vec::new(),
+            depends_on: Vec::new(),
         };
         input.update(cx, |input, cx| input.set_text("", cx));
         self.file_capture(&capture, cx);

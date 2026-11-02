@@ -151,6 +151,7 @@ struct Row {
     linked: Option<Linked>,
     plan: Rollup,
     captured: bool,
+    blocked_by: Vec<(SharedString, bool)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1101,7 +1102,45 @@ impl TasksPage {
         } else if row.task.chat_id.is_some() && row.linked.is_none() {
             fragments.push(div().child("Chat deleted").into_any_element());
         }
+        if !row.blocked_by.is_empty() && row.status != TaskStatus::Done {
+            fragments.push(Self::blocked_by(row, theme));
+        }
         fragments
+    }
+
+    fn blocked_by(row: &Row, theme: &Theme) -> AnyElement {
+        let open = row.blocked_by.iter().any(|(_, done)| !done);
+        div()
+            .debug_selector(|| format!("task-row-blocked-{}", row.task.id))
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .child(if open { "Blocked by" } else { "Depends on" })
+            .children(row.blocked_by.iter().map(|(title, done)| {
+                div()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(3.0))
+                    .when(*done, |el| {
+                        el.child(
+                            icon(icons::CHECK)
+                                .flex_none()
+                                .size(px(11.0))
+                                .text_color(theme.success),
+                        )
+                    })
+                    .child(
+                        div()
+                            .max_w(px(180.0))
+                            .truncate()
+                            .when(*done, |el| el.line_through())
+                            .when(!*done, |el| el.text_color(theme.text))
+                            .child(title.clone()),
+                    )
+            }))
+            .into_any_element()
     }
 
     fn row_content(
@@ -2537,6 +2576,17 @@ fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Ro
             .map(|space| SharedString::from(space.display_name().to_string())),
         linked,
         captured: state.quick_captured.is_new(&task.id),
+        blocked_by: task
+            .depends_on
+            .iter()
+            .filter_map(|id| state.tasks.iter().find(|task| task.id == *id))
+            .map(|dep| {
+                (
+                    SharedString::from(zeron_proto::view::single_line(&dep.title)),
+                    dep.completed_at.is_some(),
+                )
+            })
+            .collect(),
         task: task.clone(),
     }
 }

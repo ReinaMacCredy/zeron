@@ -151,6 +151,9 @@ impl Shell {
         if !capture.images.is_empty() {
             params["images"] = capture.images.clone().into();
         }
+        if !capture.depends_on.is_empty() {
+            params["dependsOn"] = capture.depends_on.clone().into();
+        }
         self.mutate_task_row(params, cx);
     }
 

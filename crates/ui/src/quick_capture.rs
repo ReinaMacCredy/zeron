@@ -127,6 +127,7 @@ pub(crate) struct Capture {
     pub space_id: Option<String>,
     pub due_on: Option<String>,
     pub images: Vec<String>,
+    pub depends_on: Vec<String>,
 }
 
 pub(crate) enum BarEvent {
@@ -564,6 +565,16 @@ impl QuickCaptureBar {
         let Some((title, notes)) = split_capture(&text) else {
             return;
         };
+        let tasks = &self.state.read(cx).tasks;
+        let mut depends_on: Vec<String> = Vec::new();
+        for link in zeron_proto::task_mentions::task_mention_links(&text) {
+            if !depends_on.contains(&link.task_id)
+                && tasks.iter().any(|task| task.id == link.task_id)
+            {
+                depends_on.push(link.task_id);
+            }
+        }
+        depends_on.truncate(zeron_doc::TASK_DEPENDS_ON_MAX);
         let due_on = self.today.then(|| {
             chrono::Local::now()
                 .date_naive()
@@ -577,6 +588,7 @@ impl QuickCaptureBar {
             space_id: self.space_id(cx),
             due_on,
             images: std::mem::take(&mut self.images),
+            depends_on,
         };
         self.input.update(cx, |input, cx| input.set_text("", cx));
         self.project = None;
@@ -1086,7 +1098,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn at_offers_open_tasks_and_enter_inserts_a_task_link(cx: &mut gpui::TestAppContext) {
+    fn at_inserts_a_task_link_and_the_saved_task_depends_on_it(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -1120,6 +1132,20 @@ mod tests {
         cx.simulate_keystrokes("enter");
         let text = bar.read_with(cx, |bar, cx| bar.input.read(cx).text().to_string());
         assert_eq!(text, "Write docs [Ship the API](zeron-task:api) ");
+        let saved = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = saved.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&bar, move |_, event: &BarEvent, _| {
+                if let BarEvent::Saved { capture, .. } = event {
+                    sink.borrow_mut().push(capture.clone());
+                }
+            })
+            .detach();
+        });
+        cx.simulate_keystrokes("enter");
+        let saved = saved.borrow();
+        assert_eq!(saved[0].title, "Write docs [Ship the API](zeron-task:api)");
+        assert_eq!(saved[0].depends_on, ["api"]);
     }
 
     #[test]

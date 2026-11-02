@@ -1163,6 +1163,8 @@ enum MutateParams {
         images: Vec<String>,
         #[serde(default)]
         context: Vec<String>,
+        #[serde(default)]
+        depends_on: Vec<String>,
     },
     #[serde(rename_all = "camelCase")]
     UpdateTask {
@@ -3364,8 +3366,9 @@ impl EngineRpc {
                 order_key,
                 images,
                 context,
+                depends_on,
             } => self.create_task(
-                task_id, title, notes, space_id, due_on, order_key, images, context,
+                task_id, title, notes, space_id, due_on, order_key, images, context, depends_on,
             ),
             MutateParams::UpdateTask {
                 task_id,
