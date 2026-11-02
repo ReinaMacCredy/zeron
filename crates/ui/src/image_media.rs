@@ -277,6 +277,13 @@ fn decode_raster_image_bounded(
         .map_err(|e| e.to_string())?;
     let format = reader.format();
     let (width, height) = reader.into_dimensions().map_err(|e| e.to_string())?;
+    if width.max(height) > MAX_SOURCE_SIDE
+        || u64::from(width) * u64::from(height) > MAX_SOURCE_PIXELS
+    {
+        return Err(format!(
+            "Image is too large to preview ({width} × {height})"
+        ));
+    }
     let target = downscaled_size(width, height);
     // Decode one frame and encode a static PNG so GPUI cannot expand unbounded animation frames.
     let decoded = if target == (width, height) {
@@ -320,6 +327,8 @@ const DOWNSCALED_PIXELS: usize = 6 * 1024 * 1024;
 /// Largest RGBA buffer a source other than a plain PNG decodes into whole
 /// before it is downscaled.
 const FULL_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_SOURCE_SIDE: u32 = 1 << 16;
+const MAX_SOURCE_PIXELS: u64 = 1 << 28;
 
 fn downscaled_size(width: u32, height: u32) -> (u32, u32) {
     if width == 0 || height == 0 {
@@ -605,6 +614,12 @@ mod tests {
             let right = decoded.get_pixel(decoded.width() - 1, decoded.height() - 1);
             assert!(right.0[2] > 200 && right.0[0] < 50, "{mime}");
         }
+        let mut strip = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut strip)
+            .write_image(&[0; 70_000], 70_000, 1, image::ExtendedColorType::L8)
+            .unwrap();
+        let refused = decode_image("image/png", strip).err().unwrap();
+        assert!(refused.contains("too large"), "{refused}");
     }
 
     #[test]
