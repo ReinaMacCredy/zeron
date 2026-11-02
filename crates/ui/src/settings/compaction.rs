@@ -318,7 +318,6 @@ impl CompactionPage {
             return vec![
                 widgets::section(theme, "Compaction", card)
                     .mt_0()
-                    .search_anchor(Target::Page(SettingsSection::Compaction))
                     .into_any_element(),
             ];
         };
