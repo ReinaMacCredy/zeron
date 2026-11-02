@@ -1580,6 +1580,23 @@ impl Shell {
                 })
                 .collect()
         };
+        let work_trees: std::collections::HashMap<
+            String,
+            (zeron_proto::ChatWorkTree, Option<String>),
+        > = {
+            let state = self.state.read(cx);
+            state
+                .chats
+                .iter()
+                .filter_map(|chat| {
+                    let work_tree = chat.work_tree.clone()?;
+                    state
+                        .change_request_for_chat(chat)
+                        .is_none()
+                        .then(|| (chat.id.clone(), (work_tree, chat.branch.clone())))
+                })
+                .collect()
+        };
         let selected = self.selected_tab_id(cx);
         let split = self.split_chat_id().map(str::to_string);
         // Keep the selected tab visible: on selection change, scroll it into
@@ -1834,6 +1851,15 @@ impl Shell {
                             },
                         )
                         .child(div().flex_1().min_w_0().truncate().child(title))
+                        .children(work_trees.get(&id).and_then(|(work_tree, base)| {
+                            crate::work_tree_badge::chat_badge(
+                                format!("session-tab-work-tree-{id}"),
+                                Some(work_tree),
+                                base.as_deref(),
+                                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                &theme,
+                            )
+                        }))
                         .child(trailing);
 
                     if grouped {

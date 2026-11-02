@@ -1187,6 +1187,7 @@ mod checkout_tests {
             name: name.into(),
             current: false,
             worktree_path: None,
+            ..Default::default()
         }
     }
 
@@ -1195,6 +1196,7 @@ mod checkout_tests {
             name: name.into(),
             current: false,
             worktree_path: Some(path.into()),
+            ..Default::default()
         }
     }
 

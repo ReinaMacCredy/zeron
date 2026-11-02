@@ -803,6 +803,7 @@ struct Inner {
     agent_compacted: Mutex<std::collections::HashSet<String>>,
     compact_owed: Mutex<HashMap<String, String>>,
     carry_owed: Mutex<HashMap<String, String>>,
+    work_tree_owed: Mutex<HashMap<String, String>>,
     /// Context size at each chat's last reminder: the mid-turn one waits for it to grow.
     nudged_at: Mutex<HashMap<String, u64>>,
     /// The last message the boundary classifier saw per chat: a steer falling back to dispatch is not judged twice.
@@ -832,6 +833,7 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    work_trees: OnceLock<crate::work_trees::WorkTrees>,
     computer: Mutex<Option<Arc<ComputerRuntime>>>,
     device_hub: Mutex<Option<Arc<crate::device_hub::DeviceHub>>>,
     resume_schedule: OnceLock<crate::resume_schedule::ResumeSchedule>,
@@ -1145,6 +1147,7 @@ impl SessionsEngine {
                 agent_compacted: Mutex::new(std::collections::HashSet::new()),
                 compact_owed: Mutex::new(HashMap::new()),
                 carry_owed: Mutex::new(HashMap::new()),
+                work_tree_owed: Mutex::new(HashMap::new()),
                 nudged_at: Mutex::new(HashMap::new()),
                 boundary_checked: Mutex::new(HashMap::new()),
                 ahead_checked: Mutex::new(HashMap::new()),
@@ -1159,6 +1162,7 @@ impl SessionsEngine {
                 provider_instances: OnceLock::new(),
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                work_trees: OnceLock::new(),
                 computer: Mutex::new(None),
                 device_hub: Mutex::new(None),
                 resume_schedule: OnceLock::new(),
@@ -1305,6 +1309,18 @@ impl SessionsEngine {
 
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
+    }
+
+    pub fn set_work_trees(&self, work_trees: crate::work_trees::WorkTrees) {
+        let _ = self.inner.work_trees.set(work_trees);
+    }
+
+    pub fn work_trees(&self) -> Option<&crate::work_trees::WorkTrees> {
+        self.inner.work_trees.get()
+    }
+
+    pub fn owe_work_tree_note(&self, chat_id: &str, note: String) {
+        lock(&self.inner.work_tree_owed).insert(chat_id.to_string(), note);
     }
 
     fn note_turn_start(&self, chat_id: &str, cwd: &str) {
@@ -5131,6 +5147,7 @@ struct HarnessPrompt {
 struct Owed {
     carry: Option<String>,
     note: Option<String>,
+    work_tree: Option<String>,
     agent_compacted: bool,
 }
 
@@ -5160,6 +5177,10 @@ impl Inner {
         let owed = Owed {
             carry: self.take_carry(chat_id, typed),
             note: self.take_compact_note(chat_id, typed),
+            work_tree: zeron_proto::invocation::leading_command(typed)
+                .is_none()
+                .then(|| lock(&self.work_tree_owed).remove(chat_id))
+                .flatten(),
             agent_compacted: zeron_proto::invocation::leading_command(typed).is_none()
                 && lock(&self.agent_compacted).remove(chat_id),
         };
@@ -5188,6 +5209,11 @@ impl Inner {
         }
         if let Some(note) = owed.note {
             lock(&self.compact_owed)
+                .entry(chat_id.to_string())
+                .or_insert(note);
+        }
+        if let Some(note) = owed.work_tree {
+            lock(&self.work_tree_owed)
                 .entry(chat_id.to_string())
                 .or_insert(note);
         }
@@ -5345,6 +5371,7 @@ impl Inner {
         let findings = self.findings_reminder(chat_id);
         let lines: Vec<&str> = [
             owed.note.as_deref(),
+            owed.work_tree.as_deref(),
             findings.as_deref(),
             reminder.as_deref(),
         ]
@@ -9201,6 +9228,23 @@ async fn drive_run(
                 continue;
             }
             _ => {}
+        }
+        if let Some(work_trees) = inner.work_trees.get() {
+            match &event {
+                AgentEvent::ToolCall { call, .. } => {
+                    work_trees.note_tool_call(&chat_id, call, false);
+                }
+                AgentEvent::ToolResult { id, .. } => {
+                    let call = folded.iter().find_map(|part| match part {
+                        MessagePart::Tool { id: part, call, .. } if part == id => Some(call),
+                        _ => None,
+                    });
+                    if let Some(call) = call {
+                        work_trees.note_tool_call(&chat_id, call, true);
+                    }
+                }
+                _ => {}
+            }
         }
 
         // Startup-crash retry: a run that dies before ever starting (errored

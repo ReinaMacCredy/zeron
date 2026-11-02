@@ -776,6 +776,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 previous_harnesses: Vec::new(),
                 delegation: None,
                 settle: None,
+                work_tree: None,
                 unsettled_at: None,
             })
             .unwrap();
