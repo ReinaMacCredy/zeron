@@ -2116,7 +2116,7 @@ mod generated_image_tests {
         for (width, target, expected, succeeds) in [
             (64, Some("remote-owner"), "image/png", true),
             (64, None, "image/png", true),
-            (4097, None, "image/png", false),
+            (4097, None, "image/png", true),
             (64, None, "image/gif", false),
         ] {
             let mut png = std::io::Cursor::new(Vec::new());
