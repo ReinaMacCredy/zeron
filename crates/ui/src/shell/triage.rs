@@ -6,8 +6,14 @@ use crate::provider_instances::InstanceIcon;
 
 const TRAY_WIDTH: f32 = 450.0;
 const TRAY_RADIUS: f32 = 12.0;
-const ROW_HEIGHT: f32 = 54.0;
-const ROW_INDENT: f32 = 44.0;
+const HEADER_HEIGHT: f32 = 44.0;
+const SECTION_LABEL_HEIGHT: f32 = 26.0;
+const NEED_ROW_HEIGHT: f32 = 56.0;
+const NEED_GAP: f32 = 6.0;
+const TILE: f32 = 30.0;
+const ROW_PAD: f32 = 10.0;
+const ROW_INDENT: f32 = ROW_PAD * 2.0 + TILE;
+const AGENT_ROW_HEIGHT: f32 = 22.0;
 const SHOWN_AGENTS: usize = 2;
 const TICK: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -111,6 +117,7 @@ struct ShownRow {
     title: String,
     meta: String,
     kind: NeedKind,
+    brand: (&'static str, Option<gpui::Hsla>),
 }
 
 struct Exits {
@@ -148,6 +155,7 @@ pub(super) struct TriageTray {
     popup: popover::Popup<()>,
     focus: Option<FocusHandle>,
     rows: Exits,
+    needs_open: Option<crate::motion::Tween>,
     card_rows: Exits,
     card_dim: [Option<crate::motion::Tween>; 3],
     ticker: Option<Task<()>>,
@@ -323,6 +331,7 @@ impl Shell {
     pub(crate) fn open_triage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.triage.popup.get().is_none() {
             self.triage.rows = Exits::default();
+            self.triage.needs_open = None;
         }
         self.triage.popup.open(());
         let focus = self
@@ -503,7 +512,18 @@ impl Shell {
             title: self.need_title(row, cx),
             meta,
             kind: row.kind.clone(),
+            brand: self.chat_brand(&row.chat_id, cx),
         }
+    }
+
+    fn chat_brand(&self, chat_id: &str, cx: &App) -> (&'static str, Option<gpui::Hsla>) {
+        self.state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .map(crate::tasks::chat_brand)
+            .unwrap_or_else(|| crate::pickers::agent_brand_icon(None, None))
     }
 
     fn need_meta(&self, row: &NeedRow, cx: &App) -> String {
@@ -551,10 +571,6 @@ impl Shell {
             .and_then(|chat| self.chat_project(chat, cx))
             .into_iter()
             .collect();
-        parts.push(match row.started {
-            Some(at) => format!("Working {}", elapsed(at)),
-            None => "Working".into(),
-        });
         if let Some(label) = state
             .session_for(&row.chat_id)
             .and_then(|session| zeron_proto::background::ring_label(&session.background_tasks))
@@ -604,14 +620,12 @@ impl Shell {
                 .collect();
             pill_marks(marks)
         };
-        let badge = needs_badge(&needs, &theme);
-        let working = format!("{running} Working");
-        let needing = badge.map(|(_, _, word)| format!("{} {word}", needs.len()));
-        let label = [(running > 0).then(|| working.clone()), needing.clone()]
+        let (needing, working) = pill_label(needs.len(), running);
+        let label = [needing.clone(), working.clone()]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
-            .join(", ");
+            .join(" · ");
         let ring = gpui::Hsla {
             a: 1.0,
             ..theme.surface
@@ -646,23 +660,24 @@ impl Shell {
             .text_size(crate::typography::ui_rems(12.5))
             .text_color(theme.text)
             .whitespace_nowrap()
-            .when(running > 0, |el| {
-                el.child(mark_chips(&marks, ring, &theme))
-                    .child(SharedString::from(working))
-            })
-            .when(running > 0 && badge.is_some(), |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .w(px(1.0))
-                        .h(px(12.0))
-                        .bg(theme.border_strong),
-                )
-            })
-            .when_some(badge.zip(needing), |el, ((glyph, tint, _), text)| {
-                el.child(icons::icon(glyph).size(px(15.0)).text_color(tint))
-                    .child(SharedString::from(text))
-            })
+            .when(running > 0, |el| el.child(mark_chips(&marks, ring, &theme)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .when_some(needing.clone(), |el, text| {
+                        el.child(
+                            div()
+                                .text_color(theme.accent)
+                                .child(SharedString::from(text)),
+                        )
+                    })
+                    .when(needing.is_some() && working.is_some(), |el| {
+                        el.child(div().text_color(theme.text_faint).child("·"))
+                    })
+                    .children(working.map(SharedString::from)),
+            )
             .tooltip(crate::settings::widgets::text_tooltip(format!(
                 "What needs you and what is running · {}",
                 crate::settings::badge_combo(self.settings.keymap.get(ShortcutId::ToggleTray))
@@ -692,63 +707,6 @@ impl Shell {
         )
     }
 
-    fn supervisor_summary(&self, triage: &Triage, cx: &App) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        let titles = |filter: &dyn Fn(&NeedKind) -> bool| -> Vec<String> {
-            triage
-                .needs
-                .iter()
-                .filter(|row| filter(&row.kind))
-                .map(|row| self.need_title(row, cx))
-                .collect()
-        };
-        for title in titles(&|kind| matches!(kind, NeedKind::Asking(None))) {
-            parts.push(format!("{title} asks you."));
-        }
-        match triage.needs.iter().filter(|row| row.kind.waits()).count() {
-            0 => {}
-            1 => parts.push("1 waits in the composer.".into()),
-            n => parts.push(format!("{n} wait in the composer.")),
-        }
-        let failed = titles(&|kind| matches!(kind, NeedKind::Failed));
-        if !failed.is_empty() {
-            parts.push(format!("{} failed.", failed.join(", ")));
-        }
-        let review = titles(&|kind| {
-            matches!(
-                kind,
-                NeedKind::Task {
-                    reason: zeron_proto::NeedsYou::Review,
-                    ..
-                }
-            )
-        });
-        if !review.is_empty() {
-            parts.push(format!("{} ready to review.", review.join(", ")));
-        }
-        let unsent = titles(&|kind| {
-            matches!(
-                kind,
-                NeedKind::Task {
-                    reason: zeron_proto::NeedsYou::NotSent,
-                    ..
-                }
-            )
-        });
-        if !unsent.is_empty() {
-            parts.push(format!("{} not sent.", unsent.join(", ")));
-        }
-        if parts.is_empty() {
-            parts.push("Nothing needs you.".into());
-        }
-        let running = triage.running.len();
-        parts.push(match running {
-            1 => "1 thread is running.".into(),
-            n => format!("{n} threads are running."),
-        });
-        parts.join(" ")
-    }
-
     fn render_triage_tray(
         &mut self,
         triage: &Triage,
@@ -759,7 +717,6 @@ impl Shell {
         let now = crate::motion::now();
         let reduced = crate::motion::reduced_motion(cx);
         let mut animating = false;
-        let unread = !self.state.read(cx).unseen_chat_ids().is_empty();
 
         let shown: Vec<ShownRow> = triage
             .needs
@@ -778,7 +735,8 @@ impl Shell {
             animating = true;
             let t = tween.value_at(now);
             let ghost = div()
-                .h(px(ROW_HEIGHT * t))
+                .flex_none()
+                .h(px((NEED_ROW_HEIGHT + NEED_GAP) * t))
                 .opacity(t)
                 .overflow_hidden()
                 .child(
@@ -788,63 +746,95 @@ impl Shell {
                 .into_any_element();
             need_rows.insert(ix.min(need_rows.len()), ghost);
         }
-        if need_rows.is_empty() {
-            need_rows.push(empty_line(&popup, "Nothing needs you."));
+        let open_to = if need_count > 0 { 1.0 } else { 0.0 };
+        let section = self
+            .triage
+            .needs_open
+            .get_or_insert_with(|| crate::motion::Tween::at(open_to, now));
+        if section.target() != open_to {
+            let spec = if need_count > 0 {
+                crate::motion::SHELF_OPEN
+            } else {
+                crate::motion::SHELF_CLOSE
+            };
+            section.retarget(open_to, spec, reduced, now);
         }
+        let (section_t, section_settled) = (section.value_at(now), section.settled_at(now));
+        animating |= !section_settled;
+        let needs_section = (!need_rows.is_empty() || section_t > 0.0).then(|| {
+            let full = SECTION_LABEL_HEIGHT + (NEED_ROW_HEIGHT + NEED_GAP) * need_rows.len() as f32;
+            div()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .when(!section_settled, |el| {
+                    el.h(px(full * section_t)).opacity(section_t)
+                })
+                .child(section_label(&popup, "Needs you"))
+                .children(need_rows)
+        });
 
         let running_rows: Vec<AnyElement> = triage
             .running
             .iter()
-            .map(|row| self.render_running_row(row, &popup, cx))
+            .map(|row| {
+                let asking = matches!(triage.need(&row.chat_id), Some(NeedKind::Asking(_)));
+                self.render_running_row(row, asking, &popup, cx)
+            })
             .collect();
 
-        let supervisor = div()
+        let (summary, lead) = tray_summary(need_count, triage.running.len());
+        let ask = div()
             .id("triage-supervisor")
             .debug_selector(|| "triage-supervisor".into())
             .role(gpui::Role::Button)
             .aria_label("Open the Supervisor chat")
+            .flex_none()
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .px(px(10.0))
-            .py(px(9.0))
-            .rounded(px(9.0))
+            .gap(px(6.0))
+            .h(px(26.0))
+            .px(px(9.0))
+            .rounded(px(7.0))
+            .bg(popup.wash(0.06))
             .cursor_pointer()
-            .hover(|s| s.bg(popup.wash(0.06)))
-            .child(status_box(
-                icons::LUCIDE_SHIELD,
-                popup.wash(0.06),
-                popup.text_muted,
-            ))
+            .hover(|s| s.bg(popup.wash(0.1)))
+            .text_size(crate::typography::ui_rems(12.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(popup.text)
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Supervisor"),
-                    )
-                    .child(
-                        div()
-                            .mt(px(2.0))
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(popup.text_muted)
-                            .child(SharedString::from(self.supervisor_summary(triage, cx))),
-                    ),
+                icon(icons::LUCIDE_SHIELD)
+                    .size(px(13.0))
+                    .text_color(popup.text_muted),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(popup.text_muted)
-                    .child("Ask ›"),
-            )
+            .child("Ask Supervisor")
             .on_click(cx.listener(|this, _, _, cx| {
                 this.close_triage(cx);
                 this.open_supervisor(cx);
             }));
+        let header = div()
+            .flex_none()
+            .h(px(HEADER_HEIGHT))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(ROW_PAD))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(popup.text_muted)
+                    .child(gpui::StyledText::new(summary).with_highlights([(
+                        0..lead,
+                        gpui::HighlightStyle {
+                            color: Some(popup.text),
+                            font_weight: Some(gpui::FontWeight::SEMIBOLD),
+                            ..Default::default()
+                        },
+                    )])),
+            )
+            .child(ask);
 
         let footer_button = |id: &'static str, glyph: &'static str, label: &'static str| {
             div()
@@ -916,38 +906,20 @@ impl Shell {
             .flex()
             .flex_col()
             .text_size(crate::typography::ui_rems(13.0))
+            .child(header)
             .child(
                 div()
                     .id("triage-tray-scroll")
-                    .max_h(px(
-                        (self.viewport_height - Theme::TITLEBAR_HEIGHT - 120.0).max(240.0)
-                    ))
+                    .max_h(px((self.viewport_height
+                        - Theme::TITLEBAR_HEIGHT
+                        - 120.0
+                        - HEADER_HEIGHT)
+                        .max(240.0)))
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .child(supervisor)
-                    .child(section_heading(
-                        &popup,
-                        "Needs you",
-                        need_count,
-                        popup.accent,
-                        unread.then(|| {
-                            mark_all_read_button(
-                                &popup,
-                                "triage-mark-all-read",
-                                "Mark chats read",
-                                cx,
-                            )
-                        }),
-                    ))
-                    .children(need_rows)
-                    .child(section_heading(
-                        &popup,
-                        "Running",
-                        triage.running.len(),
-                        chat_status_tone(zeron_proto::ChatIndicator::Working, &popup).2,
-                        None,
-                    ))
+                    .children(needs_section)
+                    .child(section_label(&popup, "Running"))
                     .when(running_rows.is_empty(), |el| {
                         el.child(empty_line(&popup, "Nothing running."))
                     })
@@ -983,7 +955,7 @@ impl Shell {
     ) -> AnyElement {
         let key = row.key.clone();
         let (target, kind) = (row.chat_id.clone(), row.kind.clone());
-        let open = popover::btn_primary(theme, "Open")
+        let open = div()
             .id(SharedString::from(format!("triage-open-{key}")))
             .debug_selector({
                 let id = key.clone();
@@ -992,38 +964,55 @@ impl Shell {
             .role(gpui::Role::Button)
             .aria_label(format!("Open {}", row.title))
             .flex_none()
+            .flex()
+            .items_center()
+            .h(px(26.0))
+            .px(px(11.0))
+            .rounded(px(7.0))
+            .bg(theme.accent_strong)
+            .text_size(crate::typography::ui_rems(12.5))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.on_accent)
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.9))
+            .child("Open")
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.close_triage(cx);
                 this.open_need(&target, &kind, cx);
             }));
         let (open_target, open_kind) = (row.chat_id.clone(), row.kind.clone());
-        need_row_shell(row, theme)
-            .id(SharedString::from(format!("triage-need-{key}")))
-            .debug_selector(move || format!("triage-need-{key}"))
-            .role(gpui::Role::Button)
-            .aria_label(row.title.clone())
-            .cursor_pointer()
-            .rounded(px(9.0))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.close_triage(cx);
-                this.open_need(&open_target, &open_kind, cx);
-            }))
-            .child(open)
+        div()
+            .flex_none()
+            .pb(px(NEED_GAP))
+            .child(
+                need_row_shell(row, theme)
+                    .id(SharedString::from(format!("triage-need-{key}")))
+                    .debug_selector(move || format!("triage-need-{key}"))
+                    .role(gpui::Role::Button)
+                    .aria_label(row.title.clone())
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.close_triage(cx);
+                        this.open_need(&open_target, &open_kind, cx);
+                    }))
+                    .child(open),
+            )
             .into_any_element()
     }
 
     fn render_running_row(
         &self,
         row: &RunRow,
+        asking: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let chat_id = row.chat_id.clone();
-        let working = chat_status_tone(zeron_proto::ChatIndicator::Working, theme).2;
         let more = row.agents.len().saturating_sub(SHOWN_AGENTS);
-        let (mark, tint) =
-            crate::pickers::agent_brand_icon(self.state.read(cx).chat_harness(&chat_id), None);
+        let brand = self.chat_brand(&chat_id, cx);
+        let (mark, tint) = brand;
+        let guide_x = ROW_PAD + TILE / 2.0;
         let agents = row
             .agents
             .iter()
@@ -1031,6 +1020,11 @@ impl Shell {
             .enumerate()
             .map(|(ix, (label, started))| {
                 let (parent, agent) = (chat_id.clone(), label.clone());
+                let reach = if ix == 0 {
+                    ROW_PAD - 1.0
+                } else {
+                    AGENT_ROW_HEIGHT / 2.0
+                };
                 div()
                     .id(SharedString::from(format!("triage-agent-{chat_id}-{ix}")))
                     .debug_selector({
@@ -1050,13 +1044,25 @@ impl Shell {
                         this.close_triage(cx);
                         this.open_agent_of(parent.clone(), agent.clone(), cx);
                     }))
+                    .relative()
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .py(px(3.0))
+                    .h(px(AGENT_ROW_HEIGHT))
                     .min_w_0()
                     .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(guide_x - ROW_INDENT))
+                            .top(px(-reach))
+                            .w(px(ROW_INDENT - guide_x - 4.0))
+                            .h(px(reach + AGENT_ROW_HEIGHT / 2.0))
+                            .border_l_1()
+                            .border_b_1()
+                            .rounded_bl(px(5.0))
+                            .border_color(theme.border_strong),
+                    )
                     .child(
                         icon(mark)
                             .size(px(12.0))
@@ -1070,13 +1076,13 @@ impl Shell {
                             .text_color(theme.text)
                             .child(SharedString::from(crate::transcript::single_line(label))),
                     )
-                    .children(
-                        started.map(|at| div().flex_none().child(SharedString::from(elapsed(at)))),
-                    )
+                    .children(started.map(|at| elapsed_label(theme, at)))
             })
             .collect::<Vec<_>>();
         let target = chat_id.clone();
         let title = self.triage_title(&chat_id, cx);
+        let meta = self.running_meta(row, cx);
+        let dot = if asking { theme.accent } else { theme.success };
         div()
             .id(SharedString::from(format!("triage-run-{chat_id}")))
             .debug_selector(move || format!("triage-run-{chat_id}"))
@@ -1093,21 +1099,39 @@ impl Shell {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
-                    .px(px(10.0))
+                    .gap(px(ROW_PAD))
+                    .px(px(ROW_PAD))
                     .py(px(9.0))
-                    .child(status_box(
-                        icons::LUCIDE_PLAY,
-                        working.opacity(0.13),
-                        working,
-                    ))
-                    .child(row_text(theme, title, self.running_meta(row, cx), None)),
+                    .child(mark_tile(theme, brand, Some(dot)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(title)),
+                            )
+                            .when(!meta.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .mt(px(2.0))
+                                        .truncate()
+                                        .text_size(crate::typography::ui_rems(12.0))
+                                        .text_color(theme.text_faint)
+                                        .child(SharedString::from(meta)),
+                                )
+                            }),
+                    )
+                    .children(row.started.map(|at| elapsed_label(theme, at))),
             )
             .when(!row.agents.is_empty(), |el| {
                 el.child(
                     div()
                         .pl(px(ROW_INDENT))
-                        .pr(px(10.0))
+                        .pr(px(ROW_PAD))
                         .pb(px(8.0))
                         .flex()
                         .flex_col()
@@ -1732,25 +1756,54 @@ pub(super) fn mark_all_read_button(
 
 fn elapsed(at: DateTime<Utc>) -> String {
     let secs = Utc::now().signed_duration_since(at).num_seconds().max(0);
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m {:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        _ if secs % 3600 < 60 => format!("{}h", secs / 3600),
+        _ => format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
     }
 }
 
-fn status_box(glyph: &'static str, bg: gpui::Hsla, fg: gpui::Hsla) -> gpui::Div {
+fn elapsed_label(theme: &Theme, at: DateTime<Utc>) -> gpui::Div {
     div()
-        .size(px(24.0))
+        .flex_none()
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_faint)
+        .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
+            "tnum".into(),
+            1,
+        )])))
+        .child(SharedString::from(elapsed(at)))
+}
+
+fn mark_tile(
+    theme: &Theme,
+    (glyph, tint): (&'static str, Option<gpui::Hsla>),
+    dot: Option<gpui::Hsla>,
+) -> gpui::Div {
+    div()
+        .relative()
+        .size(px(TILE))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(7.0))
-        .bg(bg)
-        .child(icon(glyph).size(px(14.0)).text_color(fg))
+        .rounded(px(8.0))
+        .bg(theme.wash(0.05))
+        .child(
+            icon(glyph)
+                .size(px(16.0))
+                .text_color(tint.unwrap_or(theme.text)),
+        )
+        .children(dot.map(|dot| {
+            div()
+                .absolute()
+                .right(px(3.0))
+                .bottom(px(3.0))
+                .size(px(6.0))
+                .rounded_full()
+                .bg(dot)
+        }))
 }
 
 fn row_text(
@@ -1802,32 +1855,32 @@ fn pill_marks(marks: Vec<InstanceIcon>) -> (Vec<InstanceIcon>, usize) {
     (distinct, more)
 }
 
-fn needs_badge(
-    needs: &[&NeedKind],
-    theme: &Theme,
-) -> Option<(&'static str, gpui::Hsla, &'static str)> {
-    if needs.is_empty() {
-        return None;
+fn needs_phrase(needs: usize) -> Option<String> {
+    match needs {
+        0 => None,
+        1 => Some("1 needs you".into()),
+        n => Some(format!("{n} need you")),
     }
-    let failed = |kind: &&NeedKind| matches!(kind, NeedKind::Failed);
-    let asking = |kind: &&NeedKind| matches!(kind, NeedKind::Asking(None));
-    let alert = |tint| (icons::LUCIDE_CIRCLE_ALERT, tint);
-    let ask = (
-        icons::LUCIDE_MESSAGE_CIRCLE_QUESTION,
-        chat_status_tone(zeron_proto::ChatIndicator::AwaitingInput, theme).2,
-    );
-    let ((glyph, tint), word) = if needs.iter().all(failed) {
-        (alert(theme.danger), "Failed")
-    } else if needs.iter().all(asking) {
-        (ask, "Asking")
-    } else if needs.iter().any(failed) {
-        (alert(theme.danger), "Need you")
-    } else if needs.iter().any(asking) {
-        (ask, "Need you")
-    } else {
-        (alert(theme.warning), "Need you")
-    };
-    Some((glyph, tint, word))
+}
+
+fn pill_label(needs: usize, running: usize) -> (Option<String>, Option<String>) {
+    match needs_phrase(needs) {
+        Some(need) => (
+            Some(need),
+            (running > 0).then(|| format!("{running} working")),
+        ),
+        None => (None, (running > 0).then(|| format!("{running} Working"))),
+    }
+}
+
+fn tray_summary(needs: usize, running: usize) -> (String, usize) {
+    let run = (running > 0).then(|| format!("{running} running"));
+    match (needs_phrase(needs), run) {
+        (Some(need), Some(run)) => (format!("{need}, {run}"), need.len()),
+        (Some(need), None) => (format!("{need}, nothing running"), need.len()),
+        (None, Some(run)) => (format!("{run}, nothing needs you"), run.len()),
+        (None, None) => ("Nothing needs you".into(), 0),
+    }
 }
 
 fn mark_chips(
@@ -1887,19 +1940,22 @@ fn mark_chips(
 }
 
 fn need_row_shell(row: &ShownRow, theme: &Theme) -> gpui::Div {
-    let (glyph, tint) = match &row.kind {
-        NeedKind::Failed => (icons::LUCIDE_CIRCLE_ALERT, theme.danger),
-        kind @ NeedKind::Task { .. } => (icons::TASKS, need_tint(kind, theme)),
-        _ => (icons::LUCIDE_MESSAGE_CIRCLE_QUESTION, theme.accent),
+    let tint = match &row.kind {
+        NeedKind::Failed => theme.danger,
+        kind @ NeedKind::Task { .. } => need_tint(kind, theme),
+        _ => theme.accent,
     };
     div()
-        .h(px(ROW_HEIGHT))
+        .h(px(NEED_ROW_HEIGHT))
         .flex()
         .items_center()
-        .gap(px(10.0))
-        .px(px(10.0))
-        .rounded(px(9.0))
-        .child(status_box(glyph, tint.opacity(0.13), tint))
+        .gap(px(ROW_PAD))
+        .px(px(ROW_PAD))
+        .rounded(px(10.0))
+        .bg(theme.accent.opacity(0.08))
+        .border_1()
+        .border_color(theme.accent.opacity(0.18))
+        .child(mark_tile(theme, row.brand, None))
         .child(row_text(
             theme,
             row.title.clone(),
@@ -1908,38 +1964,18 @@ fn need_row_shell(row: &ShownRow, theme: &Theme) -> gpui::Div {
         ))
 }
 
-fn section_heading(
-    theme: &Theme,
-    label: &str,
-    count: usize,
-    tint: gpui::Hsla,
-    action: Option<AnyElement>,
-) -> AnyElement {
+fn section_label(theme: &Theme, label: &'static str) -> AnyElement {
     div()
+        .flex_none()
+        .h(px(SECTION_LABEL_HEIGHT))
         .flex()
-        .items_center()
-        .gap(px(6.0))
-        .px(px(10.0))
-        .pt(px(10.0))
-        .pb(px(4.0))
-        .text_size(crate::typography::ui_rems(10.5))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.text_muted)
-        .child(SharedString::from(popover::tracked_upper(label)))
-        .child(
-            div()
-                .h(px(18.0))
-                .min_w(px(18.0))
-                .px(px(5.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(tint.opacity(0.13))
-                .text_color(tint)
-                .child(SharedString::from(count.to_string())),
-        )
-        .children(action.map(|action| div().ml_auto().child(action)))
+        .items_end()
+        .px(px(ROW_PAD))
+        .pb(px(5.0))
+        .text_size(crate::typography::ui_rems(11.5))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_faint)
+        .child(label)
         .into_any_element()
 }
 
@@ -1979,29 +2015,34 @@ mod tests {
         );
         assert_eq!(more, 2);
 
-        let theme = Theme::default();
-        let task = NeedKind::Task {
-            task_id: "t".into(),
-            title: "t".into(),
-            reason: zeron_proto::NeedsYou::Review,
+        assert_eq!(pill_label(0, 0), (None, None));
+        assert_eq!(pill_label(0, 3), (None, Some("3 Working".into())));
+        assert_eq!(
+            pill_label(1, 2),
+            (Some("1 needs you".into()), Some("2 working".into()))
+        );
+        assert_eq!(pill_label(2, 0), (Some("2 need you".into()), None));
+
+        let summary = |needs, running| {
+            let (text, lead) = tray_summary(needs, running);
+            (text[..lead].to_owned(), text[lead..].to_owned())
         };
-        let ask = NeedKind::Asking(None);
-        let word = |needs: &[&NeedKind]| needs_badge(needs, &theme);
-        let tone = chat_status_tone(zeron_proto::ChatIndicator::AwaitingInput, &theme).2;
-        let alert = icons::LUCIDE_CIRCLE_ALERT;
-        let question = icons::LUCIDE_MESSAGE_CIRCLE_QUESTION;
-        assert_eq!(word(&[]), None);
         assert_eq!(
-            word(&[&NeedKind::Failed, &NeedKind::Failed]),
-            Some((alert, theme.danger, "Failed"))
+            summary(0, 3),
+            ("3 running".into(), ", nothing needs you".into())
         );
-        assert_eq!(word(&[&ask]), Some((question, tone, "Asking")));
+        assert_eq!(summary(1, 2), ("1 needs you".into(), ", 2 running".into()));
         assert_eq!(
-            word(&[&ask, &NeedKind::Failed]),
-            Some((alert, theme.danger, "Need you"))
+            summary(2, 0),
+            ("2 need you".into(), ", nothing running".into())
         );
-        assert_eq!(word(&[&ask, &task]), Some((question, tone, "Need you")));
-        assert_eq!(word(&[&task]), Some((alert, theme.warning, "Need you")));
+        assert_eq!(summary(0, 0), (String::new(), "Nothing needs you".into()));
+
+        let ago = |mins| elapsed(Utc::now() - chrono::TimeDelta::minutes(mins));
+        assert_eq!(
+            [ago(3), ago(43), ago(60), ago(62)],
+            ["3m", "43m", "1h", "1h 2m"]
+        );
     }
 
     #[gpui::test]
@@ -2113,7 +2154,7 @@ mod tests {
             default_harness: zeron_proto::HarnessId::Mock,
         };
         let window = cx.add_window(|_, cx| Shell::new(state, boot, cx));
-        let (needs, asker_meta, mut running, waiting, summary) = window
+        let (needs, asker_meta, mut running, waiting, running_meta) = window
             .update(cx, |shell, _, cx| {
                 let triage = shell.triage(cx);
                 let needs: Vec<String> = triage
@@ -2136,8 +2177,12 @@ mod tests {
                     .iter()
                     .map(|row| row.chat_id.clone())
                     .collect();
-                let summary = shell.supervisor_summary(&triage, cx);
-                (needs, meta, running, waiting, summary)
+                let meta_of_running: Vec<String> = triage
+                    .running
+                    .iter()
+                    .map(|row| shell.running_meta(row, cx))
+                    .collect();
+                (needs, meta, running, waiting, meta_of_running)
             })
             .unwrap();
         running.sort();
@@ -2164,9 +2209,9 @@ mod tests {
             "a delegated child's row names its parent"
         );
         assert_eq!(running, ["lead", "shelled"]);
-        assert_eq!(
-            summary,
-            "asker asks you. 1 waits in the composer. Check it ready to review. Ship it not sent. 2 threads are running."
+        assert!(
+            running_meta.contains(&"1 shell".to_string()),
+            "a running row counts its shells and leaves elapsed time to the right edge: {running_meta:?}"
         );
     }
 }
