@@ -50,7 +50,7 @@ use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
 use crate::settings::billing::BillingPage;
 use crate::settings::cloud::CloudPage;
-use crate::settings::compaction::CompactAheadCard;
+use crate::settings::compaction::{CompactAheadCard, OpenExperimental};
 use crate::settings::computer::ComputerPage;
 use crate::settings::device_hub::DeviceHubPage;
 use crate::settings::devices::DevicesPage;
@@ -9113,6 +9113,13 @@ impl Shell {
                 cx.notify();
             },
         ));
+        cx.subscribe(
+            &page.read(cx).compaction(),
+            |this: &mut Shell, _, _: &OpenExperimental, cx| {
+                this.open_settings(SettingsSection::Experimental, cx)
+            },
+        )
+        .detach();
         self.shortcuts_page = Some(page.clone());
         page
     }

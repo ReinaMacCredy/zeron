@@ -889,7 +889,8 @@ impl Render for DeviceHubPage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::settings_page()
-                                .child(widgets::section(&theme, "Device hub", card).mt_0())
+                                .child(widgets::page_note(&theme, widgets::LAB_NOTE))
+                                .child(widgets::section(&theme, "Device hub", card))
                                 .children(
                                     update_banner.map(|banner| div().mt(px(12.0)).child(banner)),
                                 ),

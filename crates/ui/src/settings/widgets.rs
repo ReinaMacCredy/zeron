@@ -357,6 +357,9 @@ pub fn page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Di
         })
 }
 
+pub const LAB_NOTE: &str =
+    "Experimental and beta features. They may change or go away in a later version.";
+
 pub fn page_note(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
     page_subtitle(theme, copy)
         .mt_0()
