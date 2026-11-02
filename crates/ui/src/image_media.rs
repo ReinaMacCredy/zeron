@@ -272,12 +272,22 @@ fn decode_raster_image_bounded(
     if bytes.len() > max_bytes {
         return Err("Image exceeds preview size limit".into());
     }
-    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+    let reader = image::ImageReader::new(Cursor::new(bytes.as_slice()))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
-    reader.limits(raster_limits());
+    let format = reader.format();
+    let (width, height) = reader.into_dimensions().map_err(|e| e.to_string())?;
+    let target = downscaled_size(width, height);
     // Decode one frame and encode a static PNG so GPUI cannot expand unbounded animation frames.
-    let decoded = reader.decode().map_err(|e| e.to_string())?;
+    let decoded = if target == (width, height) {
+        let mut reader = image::ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?;
+        reader.limits(raster_limits());
+        reader.decode().map_err(|e| e.to_string())?
+    } else {
+        decode_downscaled(&bytes, format, (width, height), target)?
+    };
     // Generated previews retain one bounded 8-bit frame. This keeps each
     // cache entry below the cache budget, including CPU and GPU copies.
     let decoded = if let Some(side) = max_side {
@@ -302,6 +312,112 @@ fn decode_raster_image_bounded(
         svg: None,
         raster_size: None,
     })
+}
+
+/// Most pixels a downscaled raster keeps: under 50 MiB once GPUI holds its
+/// CPU and GPU copies, inside a preview's 64 MiB budget.
+const DOWNSCALED_PIXELS: usize = 6 * 1024 * 1024;
+/// Largest RGBA buffer a source other than a plain PNG decodes into whole
+/// before it is downscaled.
+const FULL_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+
+fn downscaled_size(width: u32, height: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (width, height);
+    }
+    let (w, h) = (width as f32, height as f32);
+    raster_size(w, h, (w, h), 1.0, DOWNSCALED_PIXELS)
+}
+
+fn decode_downscaled(
+    bytes: &[u8],
+    format: Option<image::ImageFormat>,
+    (width, height): (u32, u32),
+    target: (u32, u32),
+) -> Result<image::DynamicImage, String> {
+    if format == Some(image::ImageFormat::Png)
+        && let Some(image) = decode_png_downscaled(bytes, target)?
+    {
+        return Ok(image);
+    }
+    let too_large = || format!("Image is too large to preview ({width} × {height})");
+    if u64::from(width) * u64::from(height) * 4 > FULL_DECODE_BYTES {
+        return Err(too_large());
+    }
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(FULL_DECODE_BYTES * 2);
+    reader.limits(limits);
+    let decoded = reader.decode().map_err(|error| match error {
+        image::ImageError::Limits(_) => too_large(),
+        error => error.to_string(),
+    })?;
+    Ok(decoded.thumbnail(target.0, target.1))
+}
+
+/// Box-filters a non-interlaced PNG to `target` row by row, so the full-size
+/// image never exists in memory. `None` for an interlaced PNG.
+fn decode_png_downscaled(
+    bytes: &[u8],
+    (target_width, target_height): (u32, u32),
+) -> Result<Option<image::DynamicImage>, String> {
+    let mut decoder = png::Decoder::new(Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
+    let info = reader.info();
+    if info.interlaced {
+        return Ok(None);
+    }
+    let (width, height) = (info.width, info.height);
+    let channels = reader.output_color_type().0.samples();
+    let column: Vec<usize> = (0..width)
+        .map(|x| (u64::from(x) * u64::from(target_width) / u64::from(width)) as usize)
+        .collect();
+    let mut per_row = vec![0u64; target_width as usize];
+    for &tx in &column {
+        per_row[tx] += 1;
+    }
+    let mut out = image::RgbaImage::new(target_width, target_height);
+    let mut sums = vec![0u64; target_width as usize * 4];
+    let flush = |out: &mut image::RgbaImage, sums: &mut [u64], ty: u32, rows: u64| {
+        for (tx, pixel) in sums.chunks_exact_mut(4).enumerate() {
+            let count = (per_row[tx] * rows).max(1);
+            let rgba = std::array::from_fn(|c| (pixel[c] / count) as u8);
+            out.put_pixel(tx as u32, ty, image::Rgba(rgba));
+            pixel.fill(0);
+        }
+    };
+    let (mut y, mut ty, mut rows) = (0u32, 0u32, 0u64);
+    while y < height
+        && let Some(row) = reader.next_row().map_err(|e| e.to_string())?
+    {
+        let row_ty = (u64::from(y) * u64::from(target_height) / u64::from(height)) as u32;
+        if row_ty != ty {
+            flush(&mut out, &mut sums, ty, rows);
+            (ty, rows) = (row_ty, 0);
+        }
+        for (x, sample) in row.data().chunks_exact(channels).enumerate() {
+            let rgba = match *sample {
+                [l] => [l, l, l, 255],
+                [l, a] => [l, l, l, a],
+                [r, g, b] => [r, g, b, 255],
+                [r, g, b, a, ..] => [r, g, b, a],
+                [] => [0; 4],
+            };
+            let base = column[x] * 4;
+            for (sum, value) in sums[base..base + 4].iter_mut().zip(rgba) {
+                *sum += u64::from(value);
+            }
+        }
+        rows += 1;
+        y += 1;
+    }
+    if rows > 0 {
+        flush(&mut out, &mut sums, ty, rows);
+    }
+    Ok(Some(image::DynamicImage::ImageRgba8(out)))
 }
 
 #[cfg(test)]
@@ -450,7 +566,44 @@ mod tests {
             image::RgbaImage::new(width, height)
                 .write_to(&mut png, image::ImageFormat::Png)
                 .unwrap();
-            assert!(decode_image("image/png", png.into_inner()).is_err());
+            let media = decode_image("image/png", png.into_inner()).unwrap();
+            assert_eq!(media.width.max(media.height), 4096.0);
+        }
+    }
+
+    #[test]
+    fn large_images_are_downscaled_into_the_preview_budget() {
+        use image::ImageEncoder;
+        let (width, height) = (8696, 5208);
+        let sheet = image::RgbImage::from_fn(width, height, |x, _| {
+            if x < width / 2 {
+                image::Rgb([255, 0, 0])
+            } else {
+                image::Rgb([0, 0, 255])
+            }
+        });
+        let mut jpeg = Cursor::new(Vec::new());
+        sheet.write_to(&mut jpeg, image::ImageFormat::Jpeg).unwrap();
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new_with_quality(
+            &mut png,
+            image::codecs::png::CompressionType::Default,
+            image::codecs::png::FilterType::Sub,
+        )
+        .write_image(&sheet, width, height, image::ExtendedColorType::Rgb8)
+        .unwrap();
+        for (mime, bytes) in [("image/png", png), ("image/jpeg", jpeg.into_inner())] {
+            let media = decode_image(mime, bytes).unwrap();
+            assert!(media.bytes <= 64 * 1024 * 1024, "{mime}");
+            assert!((media.width / media.height - 8696.0 / 5208.0).abs() < 0.01);
+            let decoded = image::load_from_memory(&media.image.bytes)
+                .unwrap()
+                .into_rgba8();
+            assert_eq!(decoded.width() as f32, media.width);
+            let left = decoded.get_pixel(0, 0);
+            assert!(left.0[0] > 200 && left.0[2] < 50, "{mime}");
+            let right = decoded.get_pixel(decoded.width() - 1, decoded.height() - 1);
+            assert!(right.0[2] > 200 && right.0[0] < 50, "{mime}");
         }
     }
 
