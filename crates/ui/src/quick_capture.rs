@@ -386,6 +386,9 @@ impl QuickCaptureBar {
             self.menu = None;
             self.menu_from_chip = false;
         } else {
+            if self.mentions.read(cx).is_open() {
+                self.mentions.update(cx, |menu, cx| menu.dismiss(cx));
+            }
             self.menu_from_chip = true;
             let current = self.space_id(cx);
             let rows = self.menu_rows(cx);
