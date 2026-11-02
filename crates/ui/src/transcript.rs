@@ -11567,11 +11567,12 @@ impl Transcript {
                 self.render_html_files(&row.id, targets, workspace_root.as_deref(), &theme, cx)
             }
             RowKind::HtmlRender {
+                owner,
                 title,
                 height,
                 url: Some(url),
                 ..
-            } => self.render_live_page(&row.id, url, title, *height, window, cx),
+            } => self.render_live_page(&row.id, owner, url, title, *height, window, cx),
             RowKind::HtmlRender {
                 owner,
                 path,
