@@ -466,6 +466,16 @@ impl CheckoutDiffSync {
         let cwd = PathBuf::from(cwd);
         tokio::spawn(async move {
             let Some(inner) = inner.upgrade() else { return };
+            let work_tree = inner
+                .workspace
+                .chat(&chat_id)
+                .ok()
+                .flatten()
+                .and_then(|chat| {
+                    chat.live_work_tree()
+                        .map(|work_tree| PathBuf::from(&work_tree.path))
+                });
+            let cwd = work_tree.unwrap_or(cwd);
             let identity = match inner.repos.checkout_identity(&cwd).await {
                 Ok(identity) => identity,
                 Err(_) => {
@@ -490,6 +500,43 @@ impl CheckoutDiffSync {
                     lock(&inner.turn_trees).remove(&chat_id);
                     tracing::debug!(chat = %chat_id, error = %err,
                         "diff-sync: turn snapshot failed");
+                }
+            }
+        });
+    }
+
+    /// The worktree came after the turn began: its `head` tree stands in for turn start.
+    pub fn note_turn_moved(&self, chat_id: &str, root: &Path, head: &str) {
+        let inner = Arc::downgrade(&self.inner);
+        let chat_id = chat_id.to_string();
+        let root = root.to_path_buf();
+        let head = head.to_string();
+        tokio::spawn(async move {
+            let Some(inner) = inner.upgrade() else { return };
+            let Ok(identity) = inner.repos.checkout_identity(&root).await else {
+                return;
+            };
+            let Some(at) = lock(&inner.turn_trees)
+                .get(&chat_id)
+                .filter(|turn| turn.root != identity.root)
+                .map(|turn| turn.at)
+            else {
+                return;
+            };
+            match turn_snapshot::commit_snapshot(&inner.repos, &identity.root, &head).await {
+                Ok(tree) => {
+                    lock(&inner.turn_trees).insert(
+                        chat_id,
+                        TurnSnapshot {
+                            root: identity.root,
+                            tree,
+                            at,
+                        },
+                    );
+                }
+                Err(err) => {
+                    tracing::debug!(chat = %chat_id, error = %err,
+                        "diff-sync: moved turn snapshot failed");
                 }
             }
         });
@@ -614,12 +661,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
             archived.insert(chat.id);
             continue;
         }
-        let work_tree = chat
-            .work_tree
-            .as_ref()
-            .filter(|work_tree| !work_tree.removed)
-            .map(|work_tree| work_tree.path.clone());
-        let Some(cwd) = work_tree.or_else(|| chat.cwd.clone()) else {
+        let Some(cwd) = chat.work_path().map(str::to_owned) else {
             continue;
         };
         let identity = match resolved.get(&cwd) {

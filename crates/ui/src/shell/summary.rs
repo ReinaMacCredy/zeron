@@ -575,9 +575,7 @@ impl Shell {
         chat: Option<&zeron_proto::Chat>,
         cx: &mut Context<Self>,
     ) -> SidecarSection {
-        let work_tree = chat
-            .and_then(|chat| chat.work_tree.as_ref())
-            .filter(|work_tree| !work_tree.removed);
+        let work_tree = chat.and_then(|chat| chat.live_work_tree());
         let branch = match work_tree {
             Some(work_tree) => work_tree.branch.clone(),
             None => chat.and_then(|chat| {

@@ -520,6 +520,18 @@ impl DelegationDelivery {
 }
 
 impl Chat {
+    pub fn live_work_tree(&self) -> Option<&ChatWorkTree> {
+        self.work_tree
+            .as_ref()
+            .filter(|work_tree| !work_tree.removed)
+    }
+
+    pub fn work_path(&self) -> Option<&str> {
+        self.live_work_tree()
+            .map(|work_tree| work_tree.path.as_str())
+            .or(self.cwd.as_deref())
+    }
+
     pub fn sidechat_expired(&self, now: DateTime<Utc>) -> bool {
         self.sidechat_source_chat_id.is_some()
             && now.signed_duration_since(self.created_at)

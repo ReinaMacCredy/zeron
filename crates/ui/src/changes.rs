@@ -1757,7 +1757,11 @@ impl Changes {
         if let Some(diff) = self.resolved(cx) {
             return Some(diff.cwd);
         }
-        self.state.read(cx).selected_chat_row()?.cwd.clone()
+        self.state
+            .read(cx)
+            .selected_chat_row()?
+            .work_path()
+            .map(str::to_owned)
     }
 
     /// The diff the pane currently displays: the watch stream for the working

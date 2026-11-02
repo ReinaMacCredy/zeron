@@ -359,6 +359,30 @@ async fn write_snapshot(
     })
 }
 
+pub(super) async fn commit_snapshot(
+    repos: &Repos,
+    root: &Path,
+    commit: &str,
+) -> Result<TreeSnapshot, EngineError> {
+    let store = Arc::new(ObjectStore::create(repos, root, None).await?);
+    let index = store.dir.join("index");
+    let tree = format!("{commit}^{{tree}}");
+    let parsed = snapshot_git(root, &store, &index, &["rev-parse", &tree], None)
+        .await
+        .map_err(|e| EngineError::Other(format!("git rev-parse failed: {e}")))?;
+    if !parsed.status.success() {
+        return Err(EngineError::Other(format!(
+            "git rev-parse: {}",
+            String::from_utf8_lossy(&parsed.stderr).trim()
+        )));
+    }
+    Ok(TreeSnapshot {
+        tree: String::from_utf8_lossy(&parsed.stdout).trim().to_string(),
+        store,
+        skipped: Arc::new(Vec::new()),
+    })
+}
+
 async fn snapshot_git(
     root: &Path,
     store: &ObjectStore,
