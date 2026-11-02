@@ -668,6 +668,7 @@ fn mutate(
                     "dueOn": params["dueOn"],
                     "images": params.get("images").cloned().unwrap_or(json!([])),
                     "context": params.get("context").cloned().unwrap_or(json!([])),
+                    "dependsOn": params.get("dependsOn").cloned().unwrap_or(json!([])),
                     "createdAt": now,
                 }),
                 now,
