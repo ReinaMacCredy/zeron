@@ -50,7 +50,7 @@ use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
 use crate::settings::billing::BillingPage;
 use crate::settings::cloud::CloudPage;
-use crate::settings::compaction::{CompactAheadCard, OpenExperimental};
+use crate::settings::compaction::CompactionPage;
 use crate::settings::computer::ComputerPage;
 use crate::settings::device_hub::DeviceHubPage;
 use crate::settings::devices::DevicesPage;
@@ -800,7 +800,8 @@ pub enum SettingsSection {
     Archived,
     Chat,
     Updates,
-    Experimental,
+    /// Idle, agent and ahead-of-time compaction.
+    Compaction,
     Playbooks,
     Account,
 }
@@ -892,6 +893,7 @@ impl SettingsSection {
         SettingsSection::Routing,
         SettingsSection::CodeReview,
         SettingsSection::SourceControl,
+        SettingsSection::Compaction,
         SettingsSection::Tools,
         SettingsSection::Playbooks,
         SettingsSection::Computer,
@@ -903,7 +905,6 @@ impl SettingsSection {
         SettingsSection::Updates,
         SettingsSection::Devices,
         SettingsSection::DeviceHub,
-        SettingsSection::Experimental,
     ];
 
     pub fn group(self) -> SettingsGroup {
@@ -914,15 +915,15 @@ impl SettingsSection {
             Self::Appearance => SettingsGroup::Appearance,
             Self::Notifications => SettingsGroup::Notifications,
             Self::Harnesses => SettingsGroup::Providers,
-            Self::AgentProfiles | Self::Routing | Self::CodeReview | Self::SourceControl => {
-                SettingsGroup::Agents
-            }
+            Self::AgentProfiles
+            | Self::Routing
+            | Self::CodeReview
+            | Self::SourceControl
+            | Self::Compaction => SettingsGroup::Agents,
             Self::Tools | Self::Playbooks => SettingsGroup::ContextTools,
             Self::Computer | Self::Appshots | Self::Voice => SettingsGroup::ThisMac,
             Self::Cloud | Self::Billing => SettingsGroup::Cloud,
-            Self::Updates | Self::Devices | Self::DeviceHub | Self::Experimental => {
-                SettingsGroup::Lab
-            }
+            Self::Updates | Self::Devices | Self::DeviceHub => SettingsGroup::Lab,
             Self::Account => SettingsGroup::Account,
         }
     }
@@ -977,7 +978,7 @@ impl SettingsSection {
             SettingsSection::Archived => "archived",
             SettingsSection::Chat => "chat",
             SettingsSection::Updates => "updates",
-            SettingsSection::Experimental => "experimental",
+            SettingsSection::Compaction => "compaction",
             SettingsSection::Playbooks => "playbooks",
             SettingsSection::Account => "account",
         }
@@ -1007,7 +1008,7 @@ impl SettingsSection {
             "archived" => SettingsSection::Archived,
             "chat" => SettingsSection::Chat,
             "updates" => SettingsSection::Updates,
-            "experimental" => SettingsSection::Experimental,
+            "compaction" | "experimental" => SettingsSection::Compaction,
             "playbooks" | "triage" => SettingsSection::Playbooks,
             "account" => SettingsSection::Account,
             _ => return None,
@@ -1038,9 +1039,40 @@ impl SettingsSection {
             SettingsSection::Archived => "Archived",
             SettingsSection::Chat => "Chat",
             SettingsSection::Updates => "Updates",
-            SettingsSection::Experimental => "Experimental",
+            SettingsSection::Compaction => "Compaction",
             SettingsSection::Playbooks => "Playbooks",
             SettingsSection::Account => "Account",
+        }
+    }
+
+    fn summary(self) -> &'static str {
+        match self {
+            SettingsSection::Devices => "Devices signed in to your account and how they connect.",
+            SettingsSection::Cloud => "Your Cloud device, its providers and GitHub.",
+            SettingsSection::Billing => "Your Cloud plan and credits.",
+            SettingsSection::Harnesses => "The agents Zeron runs, their accounts and updates.",
+            SettingsSection::Tools => "Tools agents can use in every chat.",
+            SettingsSection::AgentProfiles => {
+                "Reusable agent presets with their own model and prompt."
+            }
+            SettingsSection::Routing => "Which harness and model each kind of work goes to.",
+            SettingsSection::CodeReview => "Who reviews changes, and how.",
+            SettingsSection::Appearance => "Theme, fonts, colors and backgrounds.",
+            SettingsSection::Files => "Saving, wrapping and the file tree.",
+            SettingsSection::Notifications => "Sounds and banners for agent activity.",
+            SettingsSection::Voice => "Dictation and Codex voice.",
+            SettingsSection::Shortcuts => "Keyboard shortcuts for every command.",
+            SettingsSection::General => "Switching, predictions, worktrees and commits.",
+            SettingsSection::Appshots => "Show your agent another app's window.",
+            SettingsSection::Computer => "Let agents see and control this computer.",
+            SettingsSection::DeviceHub => "Simulators, emulators and device hosts for agents.",
+            SettingsSection::SourceControl => "Commit messages, pull request chats and Git.",
+            SettingsSection::Archived => "Archived sessions to restore or delete.",
+            SettingsSection::Chat => "How the composer sends and the transcript reads.",
+            SettingsSection::Updates => "Updates for Zeron, agent CLIs and devices.",
+            SettingsSection::Compaction => "When chats are summarized to free their context.",
+            SettingsSection::Playbooks => "Recipes agents can follow.",
+            SettingsSection::Account => "Sign-in and sync.",
         }
     }
 
@@ -1083,6 +1115,7 @@ impl SettingsSection {
             SettingsSection::Updates => &["update", "version", "upgrade"],
             SettingsSection::Playbooks => &["playbook", "recipe", "triage", "debug", "bug"],
             SettingsSection::Account => &["sign in", "sign out", "sync", "email", "login"],
+            SettingsSection::Compaction => &["compact", "context", "summarize"],
             _ => &[],
         }
     }
@@ -1157,46 +1190,6 @@ impl SettingsSection {
                         "api key",
                     ],
                     Some(Target::Setting(SettingId::ShowPredictions)),
-                ),
-                (
-                    "Compact idle chats before the cache expires",
-                    &["compaction", "idle", "prompt cache", "summarize"],
-                    Some(Target::Setting(SettingId::Compaction)),
-                ),
-                (
-                    "Idle threshold",
-                    &["compaction", "idle"],
-                    Some(Target::Setting(SettingId::Compaction)),
-                ),
-                (
-                    "Let agents compact themselves",
-                    &["compaction", "compact tool", "reminder"],
-                    Some(Target::Setting(SettingId::Compaction)),
-                ),
-                (
-                    "Compact new tasks",
-                    &["compaction", "reminder", "classifier"],
-                    Some(Target::Setting(SettingId::Compaction)),
-                ),
-                (
-                    "In tasks",
-                    &["compaction", "lead", "step threads"],
-                    Some(Target::Setting(SettingId::Compaction)),
-                ),
-                (
-                    "Remind at",
-                    &["compaction", "check from", "context", "threshold"],
-                    Some(Target::Setting(SettingId::Compaction)),
-                ),
-                (
-                    "Classifier",
-                    &["compaction", "jev", "typesafe", "openrouter", "api key"],
-                    Some(Target::Setting(SettingId::Compaction)),
-                ),
-                (
-                    "Classifier model",
-                    &["compaction", "jev"],
-                    Some(Target::Setting(SettingId::Compaction)),
                 ),
                 (
                     "Custom worktree location",
@@ -1309,11 +1302,59 @@ impl SettingsSection {
                 ("New playbook", &["template", "create", "recipe"], None),
                 ("Reveal folder", &["finder", "files"], None),
             ],
-            SettingsSection::Experimental => &[(
-                "Compact ahead of time",
-                &["compaction", "background", "summary", "beta"],
-                None,
-            )],
+            SettingsSection::Compaction => &[
+                (
+                    "Compact idle chats before the cache expires",
+                    &["compaction", "idle", "prompt cache", "summarize"],
+                    Some(Target::Setting(SettingId::IdleCompaction)),
+                ),
+                (
+                    "Idle threshold",
+                    &["compaction", "idle"],
+                    Some(Target::Setting(SettingId::IdleThreshold)),
+                ),
+                (
+                    "Let agents compact themselves",
+                    &["compaction", "compact tool", "reminder"],
+                    Some(Target::Setting(SettingId::AgentCompaction)),
+                ),
+                (
+                    "Compact new tasks",
+                    &["compaction", "reminder", "classifier"],
+                    Some(Target::Setting(SettingId::CompactionMode)),
+                ),
+                (
+                    "In tasks",
+                    &["compaction", "lead", "step threads"],
+                    Some(Target::Setting(SettingId::TaskCompaction)),
+                ),
+                (
+                    "Remind at",
+                    &["compaction", "check from", "context", "threshold"],
+                    Some(Target::Setting(SettingId::CompactionNudge)),
+                ),
+                (
+                    "Classifier",
+                    &["compaction", "jev", "typesafe", "openrouter", "api key"],
+                    Some(Target::Setting(SettingId::CompactionClassifier)),
+                ),
+                (
+                    "Classifier model",
+                    &["compaction", "jev"],
+                    Some(Target::Setting(SettingId::CompactionClassifierModel)),
+                ),
+                (
+                    "Compact ahead of time",
+                    &[
+                        "compaction",
+                        "background",
+                        "summary",
+                        "beta",
+                        "experimental",
+                    ],
+                    Some(Target::Setting(SettingId::CompactAhead)),
+                ),
+            ],
             SettingsSection::Updates => &[
                 ("Version", &["check for updates", "restart"], None),
                 ("Automatic updates", &["auto", "install on quit"], None),
@@ -1799,6 +1840,7 @@ struct SettingsHit {
     title: &'static str,
     path: String,
     target: Option<Target>,
+    beta: bool,
 }
 
 fn settings_hits(query: &str, cloud_offered: bool) -> Vec<SettingsHit> {
@@ -1818,6 +1860,7 @@ fn settings_hits(query: &str, cloud_offered: bool) -> Vec<SettingsHit> {
                 title: page.label(),
                 path,
                 target: Some(Target::Page(page)),
+                beta: false,
             });
             continue;
         }
@@ -1830,6 +1873,7 @@ fn settings_hits(query: &str, cloud_offered: bool) -> Vec<SettingsHit> {
                 path.clone()
             },
             target,
+            beta: target.is_some_and(Target::beta),
         }));
     }
     hits
@@ -1873,7 +1917,8 @@ fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<Setti
 }
 
 const SETTINGS_NAV_WIDTH: f32 = 238.0;
-const SETTINGS_SUBTABS_HEIGHT: f32 = 48.0;
+const SETTINGS_TITLE_HEIGHT: f32 = 92.0;
+const SETTINGS_TITLE_TOP: f32 = 36.0;
 const SETTINGS_PANEL_RADIUS: f32 = 14.0;
 const SETTINGS_PANEL_MAX_WIDTH: f32 = 1280.0;
 const SETTINGS_PANEL_MIN_SIDE: f32 = 24.0;
@@ -3645,7 +3690,7 @@ pub struct Shell {
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     computer_page: Option<Entity<ComputerPage>>,
     device_hub_page: Option<Entity<DeviceHubPage>>,
-    experimental_page: Option<Entity<CompactAheadCard>>,
+    compaction_page: Option<Entity<CompactionPage>>,
     tools_page: Option<(Entity<ToolsPage>, Subscription)>,
     pending_computer_guide: Option<Vec<zeron_proto::computer::ComputerPermission>>,
     device_accounts: Entity<crate::account_usage::DeviceAccounts>,
@@ -4422,7 +4467,7 @@ impl Shell {
             shortcuts_page: None,
             computer_page: None,
             device_hub_page: None,
-            experimental_page: None,
+            compaction_page: None,
             tools_page: None,
             pending_computer_guide: None,
             device_accounts,
@@ -9127,13 +9172,6 @@ impl Shell {
                 cx.notify();
             },
         ));
-        cx.subscribe(
-            &page.read(cx).compaction(),
-            |this: &mut Shell, _, _: &OpenExperimental, cx| {
-                this.open_settings(SettingsSection::Experimental, cx)
-            },
-        )
-        .detach();
         self.shortcuts_page = Some(page.clone());
         page
     }
@@ -9412,15 +9450,12 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
-            SettingsSection::Experimental => {
-                if self.experimental_page.is_none() {
-                    let card = self.ensure_shortcuts_page(cx).read(cx).compaction();
-                    self.experimental_page = Some(cx.new(|cx| CompactAheadCard::new(card, cx)));
-                }
-                match &self.experimental_page {
-                    Some(page) => page.clone().into_any_element(),
-                    None => Empty.into_any_element(),
-                }
+            SettingsSection::Compaction => {
+                let state = self.state.clone();
+                self.compaction_page
+                    .get_or_insert_with(|| cx.new(|cx| CompactionPage::new(state, cx)))
+                    .clone()
+                    .into_any_element()
             }
             SettingsSection::DeviceHub => {
                 let state = self.state.clone();
@@ -12055,14 +12090,7 @@ impl Shell {
         }
         let viewport = window.viewport_size();
         let panel = settings_panel_bounds(viewport);
-        let header = settings::widgets::SETTINGS_HEADER_HEIGHT;
-        let subtabs = self.render_settings_subtabs(section, &theme, cx);
-        let page_top = header
-            + if subtabs.is_some() {
-                SETTINGS_SUBTABS_HEIGHT
-            } else {
-                0.0
-            };
+        let page_top = SETTINGS_TITLE_HEIGHT;
         settings::widgets::set_page_pane(
             gpui::Bounds::new(
                 panel.origin + gpui::point(px(SETTINGS_NAV_WIDTH + 1.0), px(page_top)),
@@ -12076,69 +12104,79 @@ impl Shell {
         let nav = self.render_settings_nav(section, &theme, window, cx);
         let outlet = self.settings_outlet(section, window, cx);
         let action = self.settings_header_action(section, &theme, window, cx);
-        let crumb = section.group().label();
         let header_row = div()
             .id("settings-header")
-            .h(px(header))
+            .relative()
+            .h(px(SETTINGS_TITLE_HEIGHT))
             .flex_none()
-            .pl(px(20.0))
-            .pr(px(12.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
-            .border_b_1()
-            .border_color(theme.border)
+            .pt(px(SETTINGS_TITLE_TOP))
+            .pl(px(settings::widgets::SETTINGS_PAGE_PAD_LEFT + 8.0))
+            .pr(px(52.0))
             .child(
                 div()
-                    .min_w_0()
+                    .max_w(px(settings::widgets::SETTINGS_PAGE_MAX_WIDTH - 8.0))
                     .flex()
                     .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .child(div().text_color(theme.text_muted).child("Settings"))
+                    .items_start()
+                    .gap(px(12.0))
                     .child(
-                        icon(icons::ALT_ARROW_RIGHT)
-                            .size(px(14.0))
-                            .text_color(theme.text_faint),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(22.0))
+                                    .line_height(crate::typography::ui_rems(28.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(section.label())),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(13.0))
+                                    .line_height(crate::typography::ui_rems(18.0))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(section.summary())),
+                            ),
                     )
                     .child(
                         div()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(crumb)),
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .children(action),
                     ),
             )
             .child(
                 div()
-                    .ml_auto()
+                    .id("settings-close")
+                    .debug_selector(|| "settings-close".into())
+                    .absolute()
+                    .top(px(12.0))
+                    .right(px(12.0))
+                    .role(gpui::Role::Button)
+                    .aria_label("Close settings")
+                    .tab_index(0)
+                    .size(px(28.0))
                     .flex()
-                    .flex_row()
                     .items_center()
-                    .gap(px(6.0))
-                    .children(action)
+                    .justify_center()
+                    .rounded(px(7.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.glass_hover()))
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
                     .child(
-                        div()
-                            .id("settings-close")
-                            .debug_selector(|| "settings-close".into())
-                            .role(gpui::Role::Button)
-                            .aria_label("Close settings")
-                            .tab_index(0)
-                            .size(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(7.0))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.glass_hover()))
-                            .focus_visible(|s| s.border_2().border_color(theme.accent))
-                            .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
-                            .child(
-                                icon(icons::LUCIDE_X)
-                                    .size(px(16.0))
-                                    .text_color(theme.text_muted),
-                            ),
+                        icon(icons::LUCIDE_X)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
                     ),
             );
         let body = div()
@@ -12214,7 +12252,6 @@ impl Shell {
                     .flex_col()
                     .opacity(self.voice_stage_underlay_opacity(cx))
                     .child(header_row)
-                    .children(subtabs)
                     .child(div().flex_1().min_h_0().child(outlet)),
             )
             .child(
@@ -12349,7 +12386,8 @@ impl Shell {
             .child(trailing)
     }
 
-    /// Roving group tabs; picking one opens its first page.
+    /// The groups as a tree: roving group rows, and the open group's pages
+    /// nested under it. While a query is typed, its results replace the tree.
     fn render_settings_nav(
         &mut self,
         section: SettingsSection,
@@ -12392,6 +12430,84 @@ impl Shell {
             .into_iter()
             .filter(|group| !group.pages(cloud_offered).is_empty())
             .collect();
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (index, group) in groups.iter().copied().enumerate() {
+            let pages = group.pages(cloud_offered);
+            let open = current == group;
+            let nested = pages.len() > 1;
+            let selected = open && !nested;
+            let groups = groups.clone();
+            let key = format!("settings-nav-{}", group.label());
+            let hover_key = format!("{key}-hover");
+            let selection_t = settings::widgets::tab_selection_t(
+                window,
+                format!("{key}-selection"),
+                selected,
+                motion::reduced_motion(cx),
+            );
+            let tab_text = if open {
+                theme.text
+            } else {
+                motion::hover_blend(
+                    &hover_key,
+                    motion::mix(theme.text_muted, theme.text, selection_t),
+                    theme.text,
+                )
+            };
+            let row = settings::widgets::section_tab(
+                theme,
+                selected,
+                selection_t,
+                key.clone(),
+                hover_key,
+            )
+            .when(open, |row| row.text_color(theme.text))
+            .role(gpui::Role::Tab)
+            .aria_label(group.label())
+            .aria_selected(open)
+            .track_focus(&self.settings_nav_focus[index].clone().tab_stop(open))
+            .tab_index(0)
+            .tab_stop(open)
+            .on_key_down(
+                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                    let count = groups.len();
+                    let next = match event.keystroke.key.as_str() {
+                        "up" | "left" => (index + count - 1) % count,
+                        "down" | "right" => (index + 1) % count,
+                        "home" => 0,
+                        "end" => count - 1,
+                        _ => return,
+                    };
+                    this.open_settings_group(groups[next], cx);
+                    window.focus(&this.settings_nav_focus[next], cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .focus_visible(|s| s.border_2().border_color(theme.accent))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| this.open_settings_group(group, cx)))
+            .child(icon(group.icon()).size(px(16.0)).text_color(tab_text))
+            .child(SharedString::from(group.label()))
+            .when(group == SettingsGroup::Lab, |row| {
+                row.child(settings::widgets::beta_badge(theme))
+            })
+            .when(nested, |row| {
+                row.child(
+                    icon(if open {
+                        icons::LUCIDE_CHEVRON_DOWN
+                    } else {
+                        icons::LUCIDE_CHEVRON_RIGHT
+                    })
+                    .ml_auto()
+                    .size(px(14.0))
+                    .text_color(theme.text_faint),
+                )
+            });
+            rows.push(row.into_any_element());
+            if open && nested {
+                rows.push(self.render_settings_nav_pages(section, pages, theme, cx));
+            }
+        }
         settings::widgets::scroll_faded(
             "settings-nav-scroll",
             div()
@@ -12413,81 +12529,64 @@ impl Shell {
                         .flex_col()
                         .gap(px(2.0))
                         .child(self.render_settings_search(theme, &query, cx))
-                        .children(
-                            groups
-                                .clone()
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, group)| {
-                                    let groups = groups.clone();
-                                    let selected = current == group;
-                                    let key = format!("settings-nav-{}", group.label());
-                                    let hover_key = format!("{key}-hover");
-                                    let selection_t = settings::widgets::tab_selection_t(
-                                        window,
-                                        format!("{key}-selection"),
-                                        selected,
-                                        motion::reduced_motion(cx),
-                                    );
-                                    let tab_text = motion::hover_blend(
-                                        &hover_key,
-                                        motion::mix(theme.text_muted, theme.text, selection_t),
-                                        theme.text,
-                                    );
-                                    settings::widgets::section_tab(
-                                        theme,
-                                        selected,
-                                        selection_t,
-                                        key.clone(),
-                                        hover_key,
-                                    )
-                                    .role(gpui::Role::Tab)
-                                    .aria_label(group.label())
-                                    .aria_selected(selected)
-                                    .track_focus(
-                                        &self.settings_nav_focus[index].clone().tab_stop(selected),
-                                    )
-                                    .tab_index(0)
-                                    .tab_stop(selected)
-                                    .on_key_down(cx.listener(
-                                        move |this, event: &gpui::KeyDownEvent, window, cx| {
-                                            let count = groups.len();
-                                            let next = match event.keystroke.key.as_str() {
-                                                "up" | "left" => (index + count - 1) % count,
-                                                "down" | "right" => (index + 1) % count,
-                                                "home" => 0,
-                                                "end" => count - 1,
-                                                _ => return,
-                                            };
-                                            this.open_settings_group(groups[next], cx);
-                                            window.focus(&this.settings_nav_focus[next], cx);
-                                            cx.stop_propagation();
-                                        },
-                                    ))
-                                    .focus_visible(|s| s.border_2().border_color(theme.accent))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_settings_group(group, cx)
-                                    }))
-                                    .child(icon(group.icon()).size(px(16.0)).text_color(tab_text))
-                                    .child(SharedString::from(group.label()))
-                                    .when(
-                                        group == SettingsGroup::Lab,
-                                        |tab| {
-                                            tab.child(
-                                                div()
-                                                    .ml_auto()
-                                                    .text_size(crate::typography::ui_rems(11.0))
-                                                    .text_color(theme.text_faint)
-                                                    .child("Beta"),
-                                            )
-                                        },
-                                    )
-                                }),
-                        ),
+                        .children(rows),
                 ),
         )
         .into_any_element()
+    }
+
+    fn render_settings_nav_pages(
+        &self,
+        section: SettingsSection,
+        pages: Vec<SettingsSection>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .ml(px(Theme::SPACE_SM + 7.5))
+            .pl(px(8.0))
+            .py(px(2.0))
+            .border_l_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .children(pages.into_iter().map(|page| {
+                let current = page == section;
+                div()
+                    .id(SharedString::from(format!(
+                        "settings-nav-page-{}",
+                        page.slug()
+                    )))
+                    .debug_selector(move || format!("settings-nav-page-{}", page.slug()))
+                    .role(gpui::Role::Tab)
+                    .aria_label(page.label())
+                    .aria_selected(current)
+                    .tab_index(0)
+                    .min_h(px(28.0))
+                    .px(px(Theme::SPACE_SM))
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.0))
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .when(current, |row| {
+                        row.bg(theme.wash(0.08))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                    })
+                    .when(!current, |row| {
+                        row.text_color(theme.text_muted)
+                            .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
+                    })
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.clear_settings_search(cx);
+                        this.open_settings(page, cx);
+                    }))
+                    .child(SharedString::from(page.label()))
+            }))
+            .into_any_element()
     }
 
     fn open_settings_group(&mut self, group: SettingsGroup, cx: &mut Context<Self>) {
@@ -12510,42 +12609,6 @@ impl Shell {
         }
     }
 
-    fn render_settings_subtabs(
-        &self,
-        section: SettingsSection,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Div> {
-        let pages = section.group().pages(self.state.read(cx).cloud_offered());
-        if pages.len() < 2 {
-            return None;
-        }
-        let options: Vec<(SettingsSection, &'static str)> =
-            pages.into_iter().map(|page| (page, page.label())).collect();
-        let shell = cx.entity().downgrade();
-        Some(
-            div()
-                .flex_none()
-                .h(px(SETTINGS_SUBTABS_HEIGHT))
-                .px(px(20.0))
-                .flex()
-                .items_center()
-                .border_b_1()
-                .border_color(theme.border)
-                .child(settings::widgets::segmented(
-                    theme,
-                    "settings-subtabs",
-                    &options,
-                    section,
-                    move |page, _, cx| {
-                        shell
-                            .update(cx, |shell, cx| shell.open_settings(page, cx))
-                            .ok();
-                    },
-                )),
-        )
-    }
-
     fn render_settings_hits(
         &self,
         query: &str,
@@ -12565,12 +12628,14 @@ impl Shell {
                 )))
                 .into_any_element();
         }
+        let count = hits.len();
         let rows = hits.into_iter().enumerate().map(|(ix, hit)| {
             let SettingsHit {
                 page,
                 title,
                 path,
                 target,
+                beta,
             } = hit;
             div()
                 .id(("settings-hit", ix))
@@ -12579,9 +12644,7 @@ impl Shell {
                 .aria_label(SharedString::from(format!("{title}, {path}")))
                 .tab_index(0)
                 .flex()
-                .flex_row()
-                .items_start()
-                .gap(px(8.0))
+                .flex_col()
                 .rounded(px(8.0))
                 .px(px(Theme::SPACE_SM))
                 .py(px(6.0))
@@ -12590,46 +12653,56 @@ impl Shell {
                 .hover(|s| s.bg(theme.glass_hover()))
                 .focus_visible(|s| s.bg(crate::theme::glass_selected_bg()))
                 .on_click(cx.listener(move |this, _, window, cx| {
+                    this.clear_settings_search(cx);
                     this.open_settings(page, cx);
                     if let Some(target) = target {
                         settings::search::reveal(target, window);
                     }
                 }))
                 .child(
-                    div().h(px(18.0)).flex().items_center().child(
-                        icon(page.group().icon())
-                            .size(px(16.0))
-                            .text_color(theme.text_muted),
-                    ),
-                )
-                .child(
                     div()
-                        .flex_1()
                         .min_w_0()
                         .flex()
-                        .flex_col()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
                         .child(
                             div()
+                                .min_w_0()
                                 .truncate()
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .line_height(crate::typography::ui_rems(18.0))
                                 .text_color(theme.text)
                                 .child(SharedString::from(title)),
                         )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .line_height(crate::typography::ui_rems(16.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(path)),
-                        ),
+                        .when(beta, |row| row.child(settings::widgets::beta_badge(theme))),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .line_height(crate::typography::ui_rems(16.0))
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(path)),
                 )
         });
         div()
             .flex()
             .flex_col()
             .gap(px(2.0))
+            .child(
+                div()
+                    .px(px(Theme::SPACE_SM))
+                    .pt(px(4.0))
+                    .pb(px(2.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(if count == 1 {
+                        "1 result".to_string()
+                    } else {
+                        format!("{count} results")
+                    })),
+            )
             .children(rows)
             .into_any_element()
     }
@@ -20945,6 +21018,60 @@ mod tests {
             ]
         );
         assert!(row_titles(SettingsSection::Shortcuts, "appshot").is_empty());
+        assert!(row_titles(SettingsSection::General, "compaction").is_empty());
+    }
+
+    #[test]
+    fn settings_hits_land_on_the_page_that_owns_the_row() {
+        let hit = |query: &str| {
+            let hits = settings_hits(query, false);
+            assert_eq!(hits.len(), 1, "{query}");
+            let hit = &hits[0];
+            (hit.page, hit.title, hit.path.clone(), hit.target, hit.beta)
+        };
+        assert_eq!(
+            hit("idle threshold"),
+            (
+                SettingsSection::Compaction,
+                "Idle threshold",
+                "Agents › Compaction".to_string(),
+                Some(Target::Setting(SettingId::IdleThreshold)),
+                false,
+            )
+        );
+        assert_eq!(
+            hit("compact ahead"),
+            (
+                SettingsSection::Compaction,
+                "Compact ahead of time",
+                "Agents › Compaction".to_string(),
+                Some(Target::Setting(SettingId::CompactAhead)),
+                true,
+            )
+        );
+        assert_eq!(
+            hit("credit zeron").0,
+            SettingsSection::General,
+            "General keeps its own rows"
+        );
+        let compaction: Vec<_> = settings_hits("compaction", false)
+            .into_iter()
+            .map(|hit| hit.page)
+            .collect();
+        assert_eq!(compaction.len(), 9);
+        assert!(
+            compaction
+                .iter()
+                .all(|page| *page == SettingsSection::Compaction)
+        );
+        assert_eq!(
+            SettingsGroup::Lab.pages(false),
+            vec![
+                SettingsSection::Updates,
+                SettingsSection::Devices,
+                SettingsSection::DeviceHub
+            ]
+        );
     }
 
     #[test]
@@ -25961,6 +26088,8 @@ mod settings_modal_regressions {
             ("settings/source-control", SettingsSection::SourceControl),
             ("settings/account", SettingsSection::Account),
             ("settings/archived", SettingsSection::Archived),
+            ("settings/compaction", SettingsSection::Compaction),
+            ("settings/experimental", SettingsSection::Compaction),
         ] {
             assert_eq!(
                 settings_open_route(route, remembered),

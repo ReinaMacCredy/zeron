@@ -127,7 +127,6 @@ pub struct ShortcutsPage {
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
     predictions: Entity<crate::settings::predictions::PredictionsCard>,
-    compaction: Entity<crate::settings::compaction::CompactionCard>,
     worktrees: Entity<super::worktrees::WorktreeSettingsCard>,
     _state: Entity<AppState>,
 }
@@ -184,17 +183,9 @@ impl ShortcutsPage {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::predictions::PredictionsCard::new(state, cx))
             },
-            compaction: {
-                let state = state.clone();
-                cx.new(|cx| crate::settings::compaction::CompactionCard::new(state, cx))
-            },
             worktrees: cx.new(|cx| super::worktrees::WorktreeSettingsCard::new(state.clone(), cx)),
             _state: state,
         }
-    }
-
-    pub fn compaction(&self) -> Entity<crate::settings::compaction::CompactionCard> {
-        self.compaction.clone()
     }
 
     pub fn show_appshots(&mut self, appshots: bool) {
@@ -1558,14 +1549,6 @@ impl Render for ShortcutsPage {
                                         "Predictions",
                                         self.predictions.clone(),
                                     ))
-                                    .child(
-                                        widgets::section(
-                                            &theme,
-                                            "Compaction",
-                                            self.compaction.clone(),
-                                        )
-                                        .search_anchor(SettingId::Compaction),
-                                    )
                                     .child(self.worktrees.clone()),
                             ),
                     )

@@ -35,7 +35,7 @@ const BOTTOM_CLEARANCE: f32 = 24.0;
 const LANDING: f32 = 0.3;
 /// The wash: in quickly, held long enough to find, out gently.
 const WASH_IN: MotionSpec = motion::FADE_QUICK;
-const WASH_HOLD: Duration = Duration::from_millis(900);
+const WASH_HOLD: Duration = Duration::from_millis(450);
 const WASH_OUT: MotionSpec = MotionSpec::new(600, motion::EASE);
 /// How far a row's wash reaches past its sides, into its block's inset, and
 /// its corners. A block's wash keeps to the block, under its own corners.
@@ -638,11 +638,11 @@ mod tests {
             Some(1.0)
         );
         assert_eq!(
-            reveal.anchor_at(ROW, row(180.0), true, at(start, 1600)),
+            reveal.anchor_at(ROW, row(180.0), true, at(start, 1150)),
             Some(1.0)
         );
         assert_eq!(
-            reveal.anchor_at(ROW, row(180.0), true, at(start, 1700)),
+            reveal.anchor_at(ROW, row(180.0), true, at(start, 1250)),
             None
         );
     }
