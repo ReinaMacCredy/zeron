@@ -94,7 +94,8 @@ pub(crate) fn hash_query(text: &str) -> Option<(usize, &str)> {
         .chars()
         .next_back()
         .is_none_or(char::is_whitespace);
-    (starts_word && !query.chars().any(char::is_whitespace)).then_some((at, query))
+    (starts_word && !query.chars().any(char::is_whitespace) && !query.contains("]("))
+        .then_some((at, query))
 }
 
 pub(crate) fn project_matches(state: &AppState, query: &str) -> Vec<(String, SharedString)> {
@@ -1055,6 +1056,7 @@ mod tests {
         assert_eq!(hash_query("issue#12"), None);
         assert_eq!(hash_query("#ship it"), None);
         assert_eq!(hash_query("no hash"), None);
+        assert_eq!(hash_query("Do [Ship #api](zeron-task:t)"), None);
     }
 
     #[gpui::test]
