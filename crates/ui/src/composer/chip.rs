@@ -103,6 +103,7 @@ impl ChipKind {
 pub(crate) enum ChipIcon {
     Glyph(&'static str),
     FileTheme(SharedString),
+    Skill,
 }
 
 /// The padding around the label in a chip's display `range`: the side
@@ -238,7 +239,7 @@ pub(crate) fn chip_icon(
     use crate::file_icons::{FileIconIdentity, asset_path};
     match kind {
         ChipKind::Image => ChipIcon::Glyph(crate::icons::GALLERY),
-        ChipKind::Skill => ChipIcon::Glyph(crate::icons::MAGIC_STICK_3),
+        ChipKind::Skill => ChipIcon::Skill,
         ChipKind::Command => ChipIcon::Glyph(crate::icons::COMMAND),
         ChipKind::Thread => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
         ChipKind::Chat => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
@@ -264,10 +265,15 @@ pub(crate) fn paint_chip(
     theme: &Theme,
     cx: &App,
 ) {
+    let skill = matches!(icon, Some(ChipIcon::Skill));
     window.paint_quad(quad(
         chip,
         px(5.0),
-        theme.ink(0.09),
+        if skill {
+            theme.branch_ink().opacity(0.16)
+        } else {
+            theme.ink(0.09)
+        },
         px(0.0),
         gpui::transparent_black(),
         BorderStyle::default(),
@@ -275,6 +281,22 @@ pub(crate) fn paint_chip(
     let Some(icon) = icon else {
         return;
     };
+    if skill {
+        let side = px(CHIP_ICON_SIZE).min(chip.size.height - px(6.0));
+        let bounds = Bounds::new(
+            chip.origin + point(px(4.0), (chip.size.height - side) / 2.0),
+            size(side, side),
+        );
+        let _ = window.paint_svg(
+            bounds,
+            crate::icons::MAGIC_STICK_3.into(),
+            None,
+            gpui::TransformationMatrix::default(),
+            theme.branch_ink(),
+            cx,
+        );
+        return;
+    }
     let well = chip.size.height - px(2.0);
     let well_bounds = Bounds::new(chip.origin + point(px(1.0), px(1.0)), size(well, well));
     window.paint_quad(quad(
@@ -307,6 +329,7 @@ pub(crate) fn paint_chip(
                 let _ = window.paint_image(bounds, Default::default(), image, 0, false);
             }
         }
+        ChipIcon::Skill => {}
     }
 }
 

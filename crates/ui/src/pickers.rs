@@ -3507,6 +3507,22 @@ impl Pickers {
         cx.notify();
     }
 
+    pub(crate) fn ensure_draft_harness(
+        &mut self,
+        allowed: &[HarnessId],
+        cx: &mut Context<Self>,
+    ) -> Option<HarnessId> {
+        if let Some(current) = self
+            .effective_harness(cx)
+            .filter(|harness| allowed.contains(harness))
+        {
+            return Some(current);
+        }
+        let harness = *allowed.first()?;
+        self.pick_harness(harness, cx);
+        Some(harness)
+    }
+
     fn pick_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         if self.harness_is_committed(cx) {
             // An existing chat only browses the tab: its harness changes on a
