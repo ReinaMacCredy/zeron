@@ -311,6 +311,10 @@ pub fn validate(html: &str, title: &str) -> Result<String, PrepareError> {
             html.len()
         )));
     }
+    page_title(title)
+}
+
+fn page_title(title: &str) -> Result<String, PrepareError> {
     let title: String = title.trim().chars().take(MAX_TITLE_CHARS).collect();
     if title.is_empty() {
         return Err(PrepareError::Invalid(
@@ -361,6 +365,18 @@ pub fn publish(
         path: path.to_string_lossy().into_owned(),
         title,
         height: clamp_height(height),
+        url: None,
+    })
+}
+
+/// A running local dev server shown live; nothing is stored.
+pub fn live_page(url: &str, title: &str, height: f64) -> Result<HtmlRenderRef, PrepareError> {
+    let live = zeron_proto::html_render::live_url(url).map_err(PrepareError::Invalid)?;
+    Ok(HtmlRenderRef {
+        path: String::new(),
+        title: page_title(title)?,
+        height: clamp_height(height),
+        url: Some(live.url.to_owned()),
     })
 }
 
@@ -505,6 +521,17 @@ impl PreviewHost {
         appearance: PreviewAppearance,
         inspect: PreviewInspect,
     ) -> PreviewReply {
+        self.request(html, None, width, appearance, inspect).await
+    }
+
+    async fn request(
+        &self,
+        html: String,
+        url: Option<String>,
+        width: u32,
+        appearance: PreviewAppearance,
+        inspect: PreviewInspect,
+    ) -> PreviewReply {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
         {
@@ -513,6 +540,7 @@ impl PreviewHost {
             let request = HtmlPreviewRequest {
                 id: id.clone(),
                 html,
+                url,
                 width,
                 appearance,
                 inspect,
@@ -576,6 +604,26 @@ pub async fn preview(
         .await?;
     preview.missing_images = missing;
     Ok(preview)
+}
+
+/// Lays out a running local dev server the way `html_render` `url` shows it.
+pub async fn preview_url(
+    host: &PreviewHost,
+    url: &str,
+    width: Option<u32>,
+    appearance: Option<PreviewAppearance>,
+    inspect: PreviewInspect,
+) -> Result<HtmlPreview, String> {
+    let live = zeron_proto::html_render::live_url(url)?;
+    inspect.validate()?;
+    host.request(
+        String::new(),
+        Some(live.url.to_owned()),
+        zeron_proto::html_render::preview_width(width),
+        appearance.unwrap_or_default(),
+        inspect,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -892,5 +940,19 @@ mod tests {
             validate("<p>x</p>", &"t".repeat(300)).unwrap().len(),
             MAX_TITLE_CHARS
         );
+        let live = live_page(
+            "http://localhost:5391/?capture=zeron-tray",
+            " Tray ",
+            9_999.0,
+        )
+        .unwrap();
+        assert_eq!(
+            live.url.as_deref(),
+            Some("http://localhost:5391/?capture=zeron-tray")
+        );
+        assert_eq!((live.path.as_str(), live.title.as_str()), ("", "Tray"));
+        assert_eq!(live.height, zeron_proto::html_render::MAX_HEIGHT);
+        assert!(live_page("https://example.com/", "T", 400.0).is_err());
+        assert!(live_page("http://localhost:5391/", " ", 400.0).is_err());
     }
 }

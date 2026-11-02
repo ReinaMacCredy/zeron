@@ -935,6 +935,18 @@ impl ToolCall {
         }
     }
 
+    /// The local dev server an `html_render` call showed instead of a page.
+    pub fn html_render_url(&self) -> Option<&str> {
+        match self {
+            ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. }
+                if self.is_html_render() =>
+            {
+                input.as_ref()?.get("url")?.as_str()
+            }
+            _ => None,
+        }
+    }
+
     pub fn delegate_task_text(&self) -> Option<&str> {
         match self {
             ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. }

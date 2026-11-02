@@ -19,13 +19,17 @@ pub const MIN_PREVIEW_WIDTH: u32 = 240;
 pub const MAX_PREVIEW_WIDTH: u32 = 1600;
 /// The reply column at the default chat width (`TRANSCRIPT_WIDTH_DEFAULT`).
 pub const COLUMN_WIDTH: u32 = 736;
+pub const MAX_URL_BYTES: usize = 2048;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishHtmlRenderParams {
     pub chat_id: String,
     pub run_secret: String,
-    pub html: String,
+    #[serde(default)]
+    pub html: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
     pub title: String,
     pub height: f64,
 }
@@ -47,6 +51,8 @@ pub struct HtmlPreviewParams {
     pub html: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
     #[serde(default)]
     pub width: Option<u32>,
     #[serde(default)]
@@ -118,6 +124,8 @@ impl PreviewInspect {
 pub struct HtmlPreviewRequest {
     pub id: String,
     pub html: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     pub width: u32,
     pub appearance: PreviewAppearance,
     #[serde(flatten)]
@@ -187,10 +195,103 @@ pub fn preview_width(width: Option<u32>) -> u32 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HtmlRenderRef {
     /// The stored page on the device that ran the chat (read back with
-    /// ReadAttachmentChunk, like a generated image).
+    /// ReadAttachmentChunk, like a generated image). Empty for a live `url`.
     pub path: String,
     pub title: String,
     pub height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// What an `html_render` or `html_preview` call shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderSource<'a> {
+    Html(&'a str),
+    Url(&'a str),
+}
+
+pub fn render_source<'a>(
+    html: Option<&'a str>,
+    url: Option<&'a str>,
+) -> Result<RenderSource<'a>, String> {
+    match (html, url) {
+        (Some(html), None) => Ok(RenderSource::Html(html)),
+        (None, Some(url)) => live_url(url).map(|live| RenderSource::Url(live.url)),
+        (Some(_), Some(_)) => Err("give `html` or `url`, not both".into()),
+        (None, None) => Err(
+            "give `html` (a finished page) or `url` (a local dev server you are running)".into(),
+        ),
+    }
+}
+
+/// A local dev server's page, the only kind of `url` a thread shows live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveUrl<'a> {
+    pub url: &'a str,
+    /// `host:port` as the URL spells it.
+    pub server: &'a str,
+    /// `host:port/path` without query or fragment.
+    pub label: &'a str,
+    /// Without IPv6 brackets.
+    pub host: &'a str,
+    pub port: u16,
+}
+
+/// Accepts http(s) on localhost, 127.0.0.1 or [::1] only, any port and path.
+pub fn live_url(url: &str) -> Result<LiveUrl<'_>, String> {
+    let url = url.trim();
+    let refused = || {
+        let shown: String = url.chars().take(200).collect();
+        format!(
+            "`url` takes only a local dev server: http(s)://localhost, 127.0.0.1 or [::1], any port and path, not `{shown}`."
+        )
+    };
+    if url.len() > MAX_URL_BYTES
+        || url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    {
+        return Err(refused());
+    }
+    let (rest, default_port) = match url.split_once("://") {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => (rest, 80),
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("https") => (rest, 443),
+        _ => return Err(refused()),
+    };
+    let server = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let (host, port, bracketed) = match server.strip_prefix('[') {
+        Some(inner) => {
+            let (host, port) = inner.split_once(']').ok_or_else(refused)?;
+            (host, port, true)
+        }
+        None => match server.find(':') {
+            Some(at) => (&server[..at], &server[at..], false),
+            None => (server, "", false),
+        },
+    };
+    let loopback = if bracketed {
+        host == "::1"
+    } else {
+        host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1"
+    };
+    let port = match port.strip_prefix(':') {
+        _ if !loopback => return Err(refused()),
+        None if port.is_empty() => default_port,
+        Some(port) => port
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port > 0)
+            .ok_or_else(refused)?,
+        None => return Err(refused()),
+    };
+    let label = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
+    Ok(LiveUrl {
+        url,
+        server,
+        label: label.trim_end_matches('/'),
+        host,
+        port,
+    })
 }
 
 pub fn clamp_height(height: f64) -> u32 {
@@ -550,6 +651,7 @@ mod tests {
             path: "html/c1/ab.html".into(),
             title: "Chart".into(),
             height: 420,
+            url: None,
         };
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(
@@ -579,6 +681,85 @@ mod tests {
         assert!(scan.contains("<p>x</p>"));
         assert!(scan.ends_with("<p>y</p>"));
         assert!(!scan.contains("var a"));
+    }
+
+    #[test]
+    fn live_urls_are_loopback_dev_servers_only() {
+        for url in [
+            "http://localhost:5391/?capture=zeron-tray",
+            "https://LOCALHOST:8443",
+            "http://127.0.0.1:3000/app/#x",
+            "http://[::1]:5173/",
+            "http://localhost",
+        ] {
+            assert!(live_url(url).is_ok(), "{url}");
+        }
+        let live = live_url(" http://localhost:5391/?capture=zeron-tray ").unwrap();
+        assert_eq!(live.url, "http://localhost:5391/?capture=zeron-tray");
+        assert_eq!(
+            (live.server, live.label),
+            ("localhost:5391", "localhost:5391")
+        );
+        assert_eq!((live.host, live.port), ("localhost", 5391));
+        let v6 = live_url("http://[::1]:5173/app/?q").unwrap();
+        assert_eq!(
+            (v6.host, v6.port, v6.label),
+            ("::1", 5173, "[::1]:5173/app")
+        );
+        assert_eq!(live_url("https://127.0.0.1/").unwrap().port, 443);
+        for url in [
+            "https://example.com/",
+            "http://localhost.example.com:5391/",
+            "http://192.168.1.4:5391/",
+            "http://user@localhost:5391/",
+            "http://localhost:5391@evil.test/",
+            "http://localhost\\@evil.test/",
+            "http://[127.0.0.1]:80/",
+            "http://localhost:0/",
+            "http://localhost:99999/",
+            "http://localhost:/",
+            "file:///etc/passwd",
+            "ftp://localhost/",
+            "localhost:5391",
+            "javascript:alert(1)",
+            "http://local host/",
+        ] {
+            assert!(live_url(url).is_err(), "{url}");
+        }
+        assert!(live_url(&format!("http://localhost/{}", "a".repeat(MAX_URL_BYTES))).is_err());
+    }
+
+    #[test]
+    fn a_render_shows_exactly_one_of_html_or_url() {
+        assert_eq!(
+            render_source(Some("<p>x</p>"), None),
+            Ok(RenderSource::Html("<p>x</p>"))
+        );
+        assert_eq!(
+            render_source(None, Some("http://localhost:5391/")),
+            Ok(RenderSource::Url("http://localhost:5391/"))
+        );
+        assert!(render_source(Some("<p>x</p>"), Some("http://localhost:5391/")).is_err());
+        assert!(render_source(None, None).is_err());
+        assert!(render_source(None, Some("https://example.com/")).is_err());
+    }
+
+    #[test]
+    fn a_live_ref_keeps_its_url_and_old_refs_read_without_one() {
+        let live = HtmlRenderRef {
+            path: String::new(),
+            title: "Tray".into(),
+            height: 600,
+            url: Some("http://localhost:5391/".into()),
+        };
+        let json = serde_json::to_value(&live).unwrap();
+        assert_eq!(json["url"], "http://localhost:5391/");
+        assert_eq!(serde_json::from_value::<HtmlRenderRef>(json).unwrap(), live);
+        let old = serde_json::json!({"path":"p.html","title":"T","height":80});
+        assert_eq!(
+            serde_json::from_value::<HtmlRenderRef>(old).unwrap().url,
+            None
+        );
     }
 
     #[test]

@@ -34,6 +34,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use wry::{WebView, WebViewBuilderExtMacos, WebViewExtMacOS};
+use zeron_proto::html_render::{RenderSource, live_url};
 
 pub(crate) enum InlineEvent {
     Height(f32),
@@ -43,6 +44,7 @@ pub(crate) enum InlineEvent {
     Active,
     Pointer,
     ScrolledInside,
+    Unreachable,
 }
 
 pub(crate) type InlineSender = tokio::sync::mpsc::UnboundedSender<(SharedString, InlineEvent)>;
@@ -54,6 +56,7 @@ const WHEEL_SETTLE: Duration = Duration::from_millis(150);
 struct PolicyState {
     key: SharedString,
     tx: InlineSender,
+    live: bool,
     loaded: Cell<bool>,
     clicked: Arc<AtomicU64>,
     finished: Arc<AtomicBool>,
@@ -102,12 +105,19 @@ define_class!(
                 unsafe { action.targetFrame() }.is_some_and(|frame| unsafe { frame.isMainFrame() });
             let link = unsafe { action.navigationType() } == WKNavigationType::LinkActivated
                 && clicked_recently(&self.ivars().clicked);
-            let allow = page_navigation(&url, main, link, &self.ivars().loaded, |url| {
-                let _ = self
-                    .ivars()
-                    .tx
-                    .send((self.ivars().key.clone(), InlineEvent::OpenLink(url)));
-            });
+            let allow = page_navigation(
+                &url,
+                main,
+                link,
+                self.ivars().live,
+                &self.ivars().loaded,
+                |url| {
+                    let _ = self
+                        .ivars()
+                        .tx
+                        .send((self.ivars().key.clone(), InlineEvent::OpenLink(url)));
+                },
+            );
             decision.call((if allow {
                 WKNavigationActionPolicy::Allow
             } else {
@@ -120,6 +130,21 @@ define_class!(
             state.finished.store(true, Ordering::Release);
             state.stale.store(true, Ordering::Release);
             let _ = state.tx.send((state.key.clone(), InlineEvent::Active));
+        }
+        #[unsafe(method(webView:didFailProvisionalNavigation:withError:))]
+        fn provisional_error(
+            &self,
+            _view: &WKWebView,
+            _navigation: Option<&WKNavigation>,
+            error: &NSError,
+        ) {
+            // -999 and 102 are loads cancelled by a newer one or by this policy.
+            if self.ivars().live && !matches!(error.code(), -999 | 102) {
+                let _ = self
+                    .ivars()
+                    .tx
+                    .send((self.ivars().key.clone(), InlineEvent::Unreachable));
+            }
         }
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
         fn terminated(&self, _view: &WKWebView) {
@@ -134,15 +159,21 @@ define_class!(
 /// The card's page never leaves the thread: its first load is the page
 /// itself; a link the reader clicks opens in their browser; every other
 /// top-level navigation is refused. Embedded frames load, never from disk.
+/// A live dev server page also moves and reloads within local servers.
 fn page_navigation(
     url: &str,
     main_frame: bool,
     link: bool,
+    live: bool,
     loaded: &Cell<bool>,
     open: impl FnOnce(String),
 ) -> bool {
     if !main_frame {
         return !url.starts_with("file:");
+    }
+    if live && live_url(url).is_ok() {
+        loaded.set(true);
+        return true;
     }
     if !loaded.get() {
         loaded.set(true);
@@ -299,9 +330,10 @@ impl InlineWebView {
     pub(crate) fn new(
         window: &Window,
         key: SharedString,
-        html: &str,
+        source: RenderSource<'_>,
         tx: InlineSender,
     ) -> Result<Self, String> {
+        let live = matches!(source, RenderSource::Url(_));
         let mtm = MainThreadMarker::new().ok_or("Pages must be created on the main thread")?;
         window
             .enable_scene_overlay()
@@ -329,7 +361,11 @@ impl InlineWebView {
                 .setJavaScriptCanOpenWindowsAutomatically(false);
             configuration
         };
-        let web = wry::WebViewBuilder::new()
+        let mut builder = wry::WebViewBuilder::new();
+        if live {
+            builder = builder.with_initialization_script(crate::html_render::live_script());
+        }
+        let web = builder
             .with_webview_configuration(configuration)
             .with_visible(false)
             .with_focused(false)
@@ -376,6 +412,7 @@ impl InlineWebView {
             let object = mtm.alloc().set_ivars(PolicyState {
                 key: key.clone(),
                 tx: tx.clone(),
+                live,
                 loaded: Cell::new(false),
                 clicked: clicked.clone(),
                 finished: motion.finished.clone(),
@@ -416,10 +453,11 @@ impl InlineWebView {
             monitor,
             observers,
         }));
-        host.borrow()
-            .web
-            .load_html(html)
-            .map_err(|e| e.to_string())?;
+        match source {
+            RenderSource::Html(html) => host.borrow().web.load_html(html),
+            RenderSource::Url(url) => host.borrow().web.load_url(url),
+        }
+        .map_err(|e| e.to_string())?;
         HOSTS.with(|hosts| hosts.borrow_mut().push(Rc::downgrade(&host)));
         crate::ui_driver::web::register(Rc::downgrade(&host) as _);
         Ok(Self(host))
@@ -462,6 +500,11 @@ impl InlineWebView {
         {
             set_armed(&host.input, &host.key, true, "pointer");
         }
+    }
+
+    /// Not painted in the last presented frame.
+    pub(crate) fn concealed(&self) -> bool {
+        self.0.borrow().concealed.get()
     }
 
     // Not while the page scrolls inside: a late frame there tears from the live page.
@@ -1014,8 +1057,22 @@ mod tests {
 
     fn decide(url: &str, main: bool, link: bool, loaded: &Cell<bool>) -> (bool, Option<String>) {
         let mut opened = None;
-        let allow = page_navigation(url, main, link, loaded, |url| opened = Some(url));
+        let allow = page_navigation(url, main, link, false, loaded, |url| opened = Some(url));
         (allow, opened)
+    }
+
+    #[test]
+    fn a_live_page_moves_only_between_local_servers() {
+        let loaded = Cell::new(false);
+        let mut opened = None;
+        let mut go = |url: &str, link: bool| {
+            page_navigation(url, true, link, true, &loaded, |url| opened = Some(url))
+        };
+        assert!(go("http://localhost:5391/?capture=zeron-tray", false));
+        assert!(go("http://localhost:5391/other", false));
+        assert!(!go("about:blank", false));
+        assert!(!go("https://example.com/", true));
+        assert_eq!(opened.as_deref(), Some("https://example.com/"));
     }
 
     #[test]

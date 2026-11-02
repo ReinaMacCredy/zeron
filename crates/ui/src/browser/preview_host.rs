@@ -17,7 +17,7 @@ use objc2_web_kit::{
 use serde_json::json;
 use zeron_proto::html_render::{
     ConsoleMessage, HtmlPreview, HtmlPreviewRequest, MAX_CAPTURE_HEIGHT, PreviewAppearance,
-    PreviewInspect, PreviewRect, PreviewShot,
+    PreviewInspect, PreviewRect, PreviewShot, RenderSource,
 };
 use zeron_rpc::{RpcError, methods};
 
@@ -64,12 +64,23 @@ pub(crate) fn spawn(engine: EngineHandle, cx: &gpui::App) -> gpui::Task<()> {
                     crate::typography::font_size(cx).pixels(),
                 )
             });
-            let html =
-                crate::html_render::inject_bootstrap(&request.html, &theme, font_size, false);
+            let html;
+            let page = match &request.url {
+                Some(url) => RenderSource::Url(url),
+                None => {
+                    html = crate::html_render::inject_bootstrap(
+                        &request.html,
+                        &theme,
+                        font_size,
+                        false,
+                    );
+                    RenderSource::Html(&html)
+                }
+            };
             let executor = cx.background_executor().clone();
             let timeout = executor.timer(LOAD_TIMEOUT);
-            let _ = reply
-                .send(render(&html, request.width, &request.inspect, &executor, timeout).await);
+            let _ =
+                reply.send(render(page, request.width, &request.inspect, &executor, timeout).await);
         }
     })
     .detach();
@@ -144,6 +155,7 @@ async fn serve(
 }
 
 struct PolicyState {
+    remote: bool,
     loaded: Cell<bool>,
     done: RefCell<Option<futures::channel::oneshot::Sender<Result<(), String>>>>,
 }
@@ -182,7 +194,9 @@ define_class!(
                 .unwrap_or_default();
             let main =
                 unsafe { action.targetFrame() }.is_some_and(|frame| unsafe { frame.isMainFrame() });
-            let allow = if main {
+            let allow = if self.ivars().remote && main {
+                zeron_proto::html_render::live_url(&url).is_ok()
+            } else if main {
                 !self.ivars().loaded.replace(true) && url == PREVIEW_ORIGIN
             } else {
                 !url.starts_with("file:")
@@ -266,11 +280,12 @@ impl Drop for Loaded {
     }
 }
 
-pub(crate) fn load(html: &str, width: u32, height: u32) -> Result<Loaded, String> {
+pub(crate) fn load(page: RenderSource<'_>, width: u32, height: u32) -> Result<Loaded, String> {
     let mtm = MainThreadMarker::new().ok_or("Previews run on the main thread")?;
     let (done, loaded) = futures::channel::oneshot::channel();
     let policy: Retained<Policy> = {
         let object = mtm.alloc().set_ivars(PolicyState {
+            remote: matches!(page, RenderSource::Url(_)),
             loaded: Cell::new(false),
             done: RefCell::new(Some(done)),
         });
@@ -298,8 +313,18 @@ pub(crate) fn load(html: &str, width: u32, height: u32) -> Result<Loaded, String
         );
         view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*policy)));
         view.setUIDelegate(Some(ProtocolObject::from_ref(&*policy)));
-        let origin = objc2_foundation::NSURL::URLWithString(&NSString::from_str(PREVIEW_ORIGIN));
-        view.loadHTMLString_baseURL(&NSString::from_str(html), origin.as_deref());
+        match page {
+            RenderSource::Url(url) => {
+                let url = objc2_foundation::NSURL::URLWithString(&NSString::from_str(url))
+                    .ok_or("The url could not be read.")?;
+                let _ = view.loadRequest(&objc2_foundation::NSURLRequest::requestWithURL(&url));
+            }
+            RenderSource::Html(html) => {
+                let origin =
+                    objc2_foundation::NSURL::URLWithString(&NSString::from_str(PREVIEW_ORIGIN));
+                let _ = view.loadHTMLString_baseURL(&NSString::from_str(html), origin.as_deref());
+            }
+        }
         view
     };
     Ok(Loaded {
@@ -314,13 +339,13 @@ pub(crate) async fn settle(view: &WKWebView) -> Result<(), String> {
 }
 
 async fn render(
-    html: &str,
+    page: RenderSource<'_>,
     width: u32,
     inspect: &PreviewInspect,
     executor: &gpui::BackgroundExecutor,
     timeout: impl std::future::Future<Output = ()>,
 ) -> Result<HtmlPreview, String> {
-    let page = load(html, width, 600)?;
+    let page = load(page, width, 600)?;
     let view = &page.view;
     let work = async {
         page.ready().await?;

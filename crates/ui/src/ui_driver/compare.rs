@@ -471,7 +471,9 @@ async fn mock(
         let theme = crate::theme::Theme::of(cx);
         let font_size = crate::typography::font_size(cx).pixels();
         preview_host::load(
-            &crate::html_render::inject_bootstrap(html, theme, font_size, false),
+            zeron_proto::html_render::RenderSource::Html(&crate::html_render::inject_bootstrap(
+                html, theme, font_size, false,
+            )),
             w,
             h,
         )
