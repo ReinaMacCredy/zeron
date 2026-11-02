@@ -50,6 +50,7 @@ use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
 use crate::settings::billing::BillingPage;
 use crate::settings::cloud::CloudPage;
+use crate::settings::compaction::CompactAheadCard;
 use crate::settings::computer::ComputerPage;
 use crate::settings::device_hub::DeviceHubPage;
 use crate::settings::devices::DevicesPage;
@@ -798,6 +799,7 @@ pub enum SettingsSection {
     Archived,
     Chat,
     Updates,
+    Experimental,
     Playbooks,
     Account,
 }
@@ -811,12 +813,13 @@ pub enum SettingsGroup {
     Agents,
     ContextTools,
     ThisMac,
-    DevicesUpdates,
+    Cloud,
     Account,
+    Lab,
 }
 
 impl SettingsGroup {
-    pub const ALL: [SettingsGroup; 9] = [
+    pub const ALL: [SettingsGroup; 10] = [
         SettingsGroup::General,
         SettingsGroup::Appearance,
         SettingsGroup::Notifications,
@@ -824,8 +827,9 @@ impl SettingsGroup {
         SettingsGroup::Agents,
         SettingsGroup::ContextTools,
         SettingsGroup::ThisMac,
-        SettingsGroup::DevicesUpdates,
+        SettingsGroup::Cloud,
         SettingsGroup::Account,
+        SettingsGroup::Lab,
     ];
 
     pub fn label(self) -> &'static str {
@@ -843,8 +847,9 @@ impl SettingsGroup {
                     "This computer"
                 }
             }
-            SettingsGroup::DevicesUpdates => "Devices & updates",
+            SettingsGroup::Cloud => "Cloud",
             SettingsGroup::Account => "Account",
+            SettingsGroup::Lab => "Lab",
         }
     }
 
@@ -857,8 +862,9 @@ impl SettingsGroup {
             SettingsGroup::Agents => icons::BOT,
             SettingsGroup::ContextTools => icons::LUCIDE_HAMMER,
             SettingsGroup::ThisMac => icons::LAPTOP,
-            SettingsGroup::DevicesUpdates => icons::SMARTPHONE,
+            SettingsGroup::Cloud => icons::CLOUD,
             SettingsGroup::Account => icons::LUCIDE_USER_ROUND,
+            SettingsGroup::Lab => icons::LUCIDE_FLASK_CONICAL,
         }
     }
 
@@ -872,7 +878,7 @@ impl SettingsGroup {
 
 impl SettingsSection {
     /// Every page, grouped in nav order.
-    pub const ALL: [SettingsSection; 23] = [
+    pub const ALL: [SettingsSection; 24] = [
         SettingsSection::General,
         SettingsSection::Chat,
         SettingsSection::Shortcuts,
@@ -890,12 +896,13 @@ impl SettingsSection {
         SettingsSection::Computer,
         SettingsSection::Appshots,
         SettingsSection::Voice,
-        SettingsSection::Updates,
-        SettingsSection::Devices,
-        SettingsSection::DeviceHub,
         SettingsSection::Cloud,
         SettingsSection::Billing,
         SettingsSection::Account,
+        SettingsSection::Updates,
+        SettingsSection::Devices,
+        SettingsSection::DeviceHub,
+        SettingsSection::Experimental,
     ];
 
     pub fn group(self) -> SettingsGroup {
@@ -911,8 +918,9 @@ impl SettingsSection {
             }
             Self::Tools | Self::Playbooks => SettingsGroup::ContextTools,
             Self::Computer | Self::Appshots | Self::Voice => SettingsGroup::ThisMac,
-            Self::Updates | Self::Devices | Self::DeviceHub | Self::Cloud | Self::Billing => {
-                SettingsGroup::DevicesUpdates
+            Self::Cloud | Self::Billing => SettingsGroup::Cloud,
+            Self::Updates | Self::Devices | Self::DeviceHub | Self::Experimental => {
+                SettingsGroup::Lab
             }
             Self::Account => SettingsGroup::Account,
         }
@@ -968,6 +976,7 @@ impl SettingsSection {
             SettingsSection::Archived => "archived",
             SettingsSection::Chat => "chat",
             SettingsSection::Updates => "updates",
+            SettingsSection::Experimental => "experimental",
             SettingsSection::Playbooks => "playbooks",
             SettingsSection::Account => "account",
         }
@@ -997,6 +1006,7 @@ impl SettingsSection {
             "archived" => SettingsSection::Archived,
             "chat" => SettingsSection::Chat,
             "updates" => SettingsSection::Updates,
+            "experimental" => SettingsSection::Experimental,
             "playbooks" | "triage" => SettingsSection::Playbooks,
             "account" => SettingsSection::Account,
             _ => return None,
@@ -1027,6 +1037,7 @@ impl SettingsSection {
             SettingsSection::Archived => "Archived",
             SettingsSection::Chat => "Chat",
             SettingsSection::Updates => "Updates",
+            SettingsSection::Experimental => "Experimental",
             SettingsSection::Playbooks => "Playbooks",
             SettingsSection::Account => "Account",
         }
@@ -1167,11 +1178,6 @@ impl SettingsSection {
                     Some(Target::Setting(SettingId::Compaction)),
                 ),
                 (
-                    "Compact ahead of time",
-                    &["compaction", "background", "summary"],
-                    Some(Target::Setting(SettingId::Compaction)),
-                ),
-                (
                     "In tasks",
                     &["compaction", "lead", "step threads"],
                     Some(Target::Setting(SettingId::Compaction)),
@@ -1302,6 +1308,11 @@ impl SettingsSection {
                 ("New playbook", &["template", "create", "recipe"], None),
                 ("Reveal folder", &["finder", "files"], None),
             ],
+            SettingsSection::Experimental => &[(
+                "Compact ahead of time",
+                &["compaction", "background", "summary", "beta"],
+                None,
+            )],
             SettingsSection::Updates => &[
                 ("Version", &["check for updates", "restart"], None),
                 ("Automatic updates", &["auto", "install on quit"], None),
@@ -3625,6 +3636,7 @@ pub struct Shell {
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     computer_page: Option<Entity<ComputerPage>>,
     device_hub_page: Option<Entity<DeviceHubPage>>,
+    experimental_page: Option<Entity<CompactAheadCard>>,
     tools_page: Option<(Entity<ToolsPage>, Subscription)>,
     pending_computer_guide: Option<Vec<zeron_proto::computer::ComputerPermission>>,
     device_accounts: Entity<crate::account_usage::DeviceAccounts>,
@@ -4397,6 +4409,7 @@ impl Shell {
             shortcuts_page: None,
             computer_page: None,
             device_hub_page: None,
+            experimental_page: None,
             tools_page: None,
             pending_computer_guide: None,
             device_accounts,
@@ -9016,6 +9029,94 @@ impl Shell {
         cx.notify();
     }
 
+    fn ensure_shortcuts_page(&mut self, cx: &mut Context<Self>) -> Entity<ShortcutsPage> {
+        if let Some(page) = &self.shortcuts_page {
+            return page.clone();
+        }
+        let state = self.state.clone();
+        let keymap = self.settings.keymap.clone();
+        let escape_stops_active_agent = self.settings.escape_stops_active_agent;
+        let composer_send_behavior = self.settings.composer_send_behavior;
+        let follow_up_behavior = self.settings.follow_up_behavior;
+        let switcher_window = self.settings.switcher_window;
+        let switcher_limit = self.settings.switcher_limit;
+        let switcher_cycles_tabs = self.settings.switcher_cycles_tabs;
+        let reasoning_shortcut_modifier = self.settings.reasoning_shortcut_modifier;
+        let appshots_enabled = self.settings.appshots_enabled;
+        let appshot_sound_enabled = self.settings.appshot_sound_enabled;
+        let appshot_destination = self.settings.appshot_destination;
+        let page = cx.new(|cx| {
+            ShortcutsPage::new(
+                state,
+                keymap,
+                escape_stops_active_agent,
+                composer_send_behavior,
+                follow_up_behavior,
+                reasoning_shortcut_modifier,
+                switcher_window,
+                switcher_limit,
+                switcher_cycles_tabs,
+                appshots_enabled,
+                appshot_sound_enabled,
+                appshot_destination,
+                cx,
+            )
+        });
+        // Persist + re-apply shortcut preferences whenever the page changes them.
+        self.shortcuts_sub = Some(cx.subscribe(
+            &page,
+            |this: &mut Shell, _, event: &ShortcutsEvent, cx| {
+                match event {
+                    ShortcutsEvent::KeymapChanged(keymap) => {
+                        this.settings.keymap = keymap.clone();
+                    }
+                    ShortcutsEvent::EscapeStopsActiveAgentChanged(enabled) => {
+                        this.settings.escape_stops_active_agent = *enabled;
+                    }
+                    ShortcutsEvent::ComposerSendBehaviorChanged(behavior) => {
+                        this.settings.composer_send_behavior = *behavior;
+                    }
+                    ShortcutsEvent::FollowUpBehaviorChanged(behavior) => {
+                        this.settings.follow_up_behavior = *behavior;
+                    }
+                    ShortcutsEvent::ReasoningShortcutModifierChanged(modifier) => {
+                        this.settings.reasoning_shortcut_modifier = *modifier;
+                    }
+                    ShortcutsEvent::SwitcherWindowChanged(window) => {
+                        this.settings.switcher_window = *window;
+                    }
+                    ShortcutsEvent::SwitcherLimitChanged(limit) => {
+                        this.settings.switcher_limit = *limit;
+                    }
+                    ShortcutsEvent::SwitcherCyclesTabsChanged(enabled) => {
+                        this.settings.switcher_cycles_tabs = *enabled;
+                    }
+                    ShortcutsEvent::AppshotsChanged {
+                        enabled,
+                        sound_enabled,
+                        destination,
+                    } => {
+                        this.settings.appshots_enabled = *enabled;
+                        this.settings.appshot_sound_enabled = *sound_enabled;
+                        crate::appshots::set_capture_sound_enabled(*sound_enabled);
+                        this.settings.appshot_destination = *destination;
+                        crate::appshots::set_enabled(*enabled);
+                    }
+                }
+                apply_keymap(
+                    cx,
+                    &this.settings.keymap,
+                    this.settings.composer_send_behavior,
+                    this.settings.reasoning_shortcut_modifier,
+                );
+                this.schedule_save(cx);
+                cx.notify();
+            },
+        ));
+        self.shortcuts_page = Some(page.clone());
+        page
+    }
+
     /// Lazily create the entity for a settings section and return it renderable.
     fn settings_outlet(
         &mut self,
@@ -9245,107 +9346,20 @@ impl Shell {
             | SettingsSection::General
             | SettingsSection::Chat
             | SettingsSection::Appshots => {
-                if self.shortcuts_page.is_none() {
-                    let state = self.state.clone();
-                    let keymap = self.settings.keymap.clone();
-                    let escape_stops_active_agent = self.settings.escape_stops_active_agent;
-                    let composer_send_behavior = self.settings.composer_send_behavior;
-                    let follow_up_behavior = self.settings.follow_up_behavior;
-                    let switcher_window = self.settings.switcher_window;
-                    let switcher_limit = self.settings.switcher_limit;
-                    let switcher_cycles_tabs = self.settings.switcher_cycles_tabs;
-                    let reasoning_shortcut_modifier = self.settings.reasoning_shortcut_modifier;
-                    let appshots_enabled = self.settings.appshots_enabled;
-                    let appshot_sound_enabled = self.settings.appshot_sound_enabled;
-                    let appshot_destination = self.settings.appshot_destination;
-                    let page = cx.new(|cx| {
-                        ShortcutsPage::new(
-                            state,
-                            keymap,
-                            escape_stops_active_agent,
-                            composer_send_behavior,
-                            follow_up_behavior,
-                            reasoning_shortcut_modifier,
-                            switcher_window,
-                            switcher_limit,
-                            switcher_cycles_tabs,
-                            appshots_enabled,
-                            appshot_sound_enabled,
-                            appshot_destination,
-                            cx,
-                        )
-                    });
-                    // Persist + re-apply shortcut preferences whenever the page changes them.
-                    self.shortcuts_sub = Some(cx.subscribe(
-                        &page,
-                        |this: &mut Shell, _, event: &ShortcutsEvent, cx| {
-                            match event {
-                                ShortcutsEvent::KeymapChanged(keymap) => {
-                                    this.settings.keymap = keymap.clone();
-                                }
-                                ShortcutsEvent::EscapeStopsActiveAgentChanged(enabled) => {
-                                    this.settings.escape_stops_active_agent = *enabled;
-                                }
-                                ShortcutsEvent::ComposerSendBehaviorChanged(behavior) => {
-                                    this.settings.composer_send_behavior = *behavior;
-                                }
-                                ShortcutsEvent::FollowUpBehaviorChanged(behavior) => {
-                                    this.settings.follow_up_behavior = *behavior;
-                                }
-                                ShortcutsEvent::ReasoningShortcutModifierChanged(modifier) => {
-                                    this.settings.reasoning_shortcut_modifier = *modifier;
-                                }
-                                ShortcutsEvent::SwitcherWindowChanged(window) => {
-                                    this.settings.switcher_window = *window;
-                                }
-                                ShortcutsEvent::SwitcherLimitChanged(limit) => {
-                                    this.settings.switcher_limit = *limit;
-                                }
-                                ShortcutsEvent::SwitcherCyclesTabsChanged(enabled) => {
-                                    this.settings.switcher_cycles_tabs = *enabled;
-                                }
-                                ShortcutsEvent::AppshotsChanged {
-                                    enabled,
-                                    sound_enabled,
-                                    destination,
-                                } => {
-                                    this.settings.appshots_enabled = *enabled;
-                                    this.settings.appshot_sound_enabled = *sound_enabled;
-                                    crate::appshots::set_capture_sound_enabled(*sound_enabled);
-                                    this.settings.appshot_destination = *destination;
-                                    crate::appshots::set_enabled(*enabled);
-                                }
-                            }
-                            apply_keymap(
-                                cx,
-                                &this.settings.keymap,
-                                this.settings.composer_send_behavior,
-                                this.settings.reasoning_shortcut_modifier,
-                            );
-                            this.schedule_save(cx);
-                            cx.notify();
-                        },
-                    ));
-                    self.shortcuts_page = Some(page);
-                }
+                let page = self.ensure_shortcuts_page(cx);
                 let keep_focus = self.settings_search.focus_handle(cx).is_focused(window);
-                match &self.shortcuts_page {
-                    Some(page) => {
-                        page.update(cx, |page, _| {
-                            page.show_section(match section {
-                                SettingsSection::Appshots => ShortcutsShown::Appshots,
-                                SettingsSection::General => ShortcutsShown::General,
-                                SettingsSection::Chat => ShortcutsShown::Chat,
-                                _ => ShortcutsShown::Shortcuts,
-                            });
-                            if keep_focus {
-                                page.keep_focus();
-                            }
-                        });
-                        page.clone().into_any_element()
+                page.update(cx, |page, _| {
+                    page.show_section(match section {
+                        SettingsSection::Appshots => ShortcutsShown::Appshots,
+                        SettingsSection::General => ShortcutsShown::General,
+                        SettingsSection::Chat => ShortcutsShown::Chat,
+                        _ => ShortcutsShown::Shortcuts,
+                    });
+                    if keep_focus {
+                        page.keep_focus();
                     }
-                    None => Empty.into_any_element(),
-                }
+                });
+                page.into_any_element()
             }
             SettingsSection::Computer => {
                 let page = match &self.computer_page {
@@ -9374,6 +9388,16 @@ impl Shell {
                 }
                 match &self.tools_page {
                     Some((page, _)) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Experimental => {
+                if self.experimental_page.is_none() {
+                    let card = self.ensure_shortcuts_page(cx).read(cx).compaction();
+                    self.experimental_page = Some(cx.new(|cx| CompactAheadCard::new(card, cx)));
+                }
+                match &self.experimental_page {
+                    Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
             }
@@ -12315,6 +12339,11 @@ impl Shell {
         let query = self.settings_search.read(cx).text().to_string();
         let searching = !query.trim().is_empty();
         let current = (!searching).then(|| section.group());
+        let cloud_offered = self.state.read(cx).cloud_offered();
+        let groups: Vec<SettingsGroup> = SettingsGroup::ALL
+            .into_iter()
+            .filter(|group| !group.pages(cloud_offered).is_empty())
+            .collect();
         settings::widgets::scroll_faded(
             "settings-nav-scroll",
             div()
@@ -12336,62 +12365,79 @@ impl Shell {
                         .flex_col()
                         .gap(px(2.0))
                         .child(self.render_settings_search(theme, &query, cx))
-                        .children(SettingsGroup::ALL.into_iter().enumerate().map(
-                            |(index, group)| {
-                                let selected = current == Some(group);
-                                let tab_stop = selected || (current.is_none() && index == 0);
-                                let key = format!("settings-nav-{}", group.label());
-                                let hover_key = format!("{key}-hover");
-                                let selection_t = settings::widgets::tab_selection_t(
-                                    window,
-                                    format!("{key}-selection"),
-                                    selected,
-                                    motion::reduced_motion(cx),
-                                );
-                                let tab_text = motion::hover_blend(
-                                    &hover_key,
-                                    motion::mix(theme.text_muted, theme.text, selection_t),
-                                    theme.text,
-                                );
-                                settings::widgets::section_tab(
-                                    theme,
-                                    selected,
-                                    selection_t,
-                                    key.clone(),
-                                    hover_key,
-                                )
-                                .role(gpui::Role::Tab)
-                                .aria_label(group.label())
-                                .aria_selected(selected)
-                                .track_focus(
-                                    &self.settings_nav_focus[index].clone().tab_stop(tab_stop),
-                                )
-                                .tab_index(0)
-                                .tab_stop(tab_stop)
-                                .on_key_down(cx.listener(
-                                    move |this, event: &gpui::KeyDownEvent, window, cx| {
-                                        let count = SettingsGroup::ALL.len();
-                                        let next = match event.keystroke.key.as_str() {
-                                            "up" | "left" => (index + count - 1) % count,
-                                            "down" | "right" => (index + 1) % count,
-                                            "home" => 0,
-                                            "end" => count - 1,
-                                            _ => return,
-                                        };
-                                        this.open_settings_group(SettingsGroup::ALL[next], cx);
-                                        window.focus(&this.settings_nav_focus[next], cx);
-                                        cx.stop_propagation();
-                                    },
-                                ))
-                                .focus_visible(|s| s.border_2().border_color(theme.accent))
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open_settings_group(group, cx)
-                                }))
-                                .child(icon(group.icon()).size(px(16.0)).text_color(tab_text))
-                                .child(SharedString::from(group.label()))
-                            },
-                        )),
+                        .children(
+                            groups
+                                .clone()
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, group)| {
+                                    let groups = groups.clone();
+                                    let selected = current == Some(group);
+                                    let tab_stop = selected || (current.is_none() && index == 0);
+                                    let key = format!("settings-nav-{}", group.label());
+                                    let hover_key = format!("{key}-hover");
+                                    let selection_t = settings::widgets::tab_selection_t(
+                                        window,
+                                        format!("{key}-selection"),
+                                        selected,
+                                        motion::reduced_motion(cx),
+                                    );
+                                    let tab_text = motion::hover_blend(
+                                        &hover_key,
+                                        motion::mix(theme.text_muted, theme.text, selection_t),
+                                        theme.text,
+                                    );
+                                    settings::widgets::section_tab(
+                                        theme,
+                                        selected,
+                                        selection_t,
+                                        key.clone(),
+                                        hover_key,
+                                    )
+                                    .role(gpui::Role::Tab)
+                                    .aria_label(group.label())
+                                    .aria_selected(selected)
+                                    .track_focus(
+                                        &self.settings_nav_focus[index].clone().tab_stop(tab_stop),
+                                    )
+                                    .tab_index(0)
+                                    .tab_stop(tab_stop)
+                                    .on_key_down(cx.listener(
+                                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                            let count = groups.len();
+                                            let next = match event.keystroke.key.as_str() {
+                                                "up" | "left" => (index + count - 1) % count,
+                                                "down" | "right" => (index + 1) % count,
+                                                "home" => 0,
+                                                "end" => count - 1,
+                                                _ => return,
+                                            };
+                                            this.open_settings_group(groups[next], cx);
+                                            window.focus(&this.settings_nav_focus[next], cx);
+                                            cx.stop_propagation();
+                                        },
+                                    ))
+                                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_settings_group(group, cx)
+                                    }))
+                                    .child(icon(group.icon()).size(px(16.0)).text_color(tab_text))
+                                    .child(SharedString::from(group.label()))
+                                    .when(
+                                        group == SettingsGroup::Lab,
+                                        |tab| {
+                                            tab.child(
+                                                div()
+                                                    .ml_auto()
+                                                    .text_size(crate::typography::ui_rems(11.0))
+                                                    .text_color(theme.text_faint)
+                                                    .child("Beta"),
+                                            )
+                                        },
+                                    )
+                                }),
+                        ),
                 ),
         )
         .into_any_element()

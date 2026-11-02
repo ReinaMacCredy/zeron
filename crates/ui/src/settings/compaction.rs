@@ -209,14 +209,6 @@ fn row_text(theme: &Theme, title: &'static str, meta: &'static str) -> gpui::Div
         ))
 }
 
-pub(crate) fn experimental_tag(theme: &Theme) -> gpui::Div {
-    div()
-        .flex_none()
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(theme.text_faint)
-        .child("Experimental")
-}
-
 fn switch(
     theme: &Theme,
     on: bool,
@@ -357,10 +349,6 @@ impl Render for CompactionCard {
             missions: !settings.missions,
             ..settings.clone()
         };
-        let ahead_toggled = CompactionSettings {
-            compact_ahead: !settings.compact_ahead,
-            ..settings.clone()
-        };
         let rows: Vec<AnyElement> = vec![
             widgets::card_row(&theme, true)
                 .child(row_text(
@@ -418,30 +406,6 @@ impl Render for CompactionCard {
                     settings.mode,
                     pick_mode,
                 ))
-                .into_any_element(),
-            widgets::card_row(&theme, false)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(160.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(widgets::row_title(&theme, AHEAD_TITLE))
-                                .child(experimental_tag(&theme)),
-                        )
-                        .child(widgets::meta_line(
-                            &theme,
-                            vec![div().child("Claude compacts in place right after a turn. Codex summarizes a copy in the background and swaps it in at the next pause; turns after the copy come back as text.").into_any_element()],
-                        )),
-                )
-                .child(
-                    switch(&theme, settings.compact_ahead, "compact-ahead", AHEAD_TITLE).on_click(
-                        cx.listener(move |this, _, _, cx| this.save(ahead_toggled.clone(), cx)),
-                    ),
-                )
                 .into_any_element(),
             widgets::card_row(&theme, false)
                 .child(row_text(
@@ -520,5 +484,69 @@ impl Render for CompactionCard {
                     widgets::card_row(&theme, false).child(widgets::error_strip(&theme, error)),
                 )
             })
+    }
+}
+
+pub struct CompactAheadCard {
+    card: Entity<CompactionCard>,
+    _card: Subscription,
+}
+
+impl CompactAheadCard {
+    pub fn new(card: Entity<CompactionCard>, cx: &mut Context<Self>) -> Self {
+        let observe = cx.observe(&card, |_, _, cx| cx.notify());
+        Self {
+            card,
+            _card: observe,
+        }
+    }
+}
+
+impl Render for CompactAheadCard {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx).for_settings_surface();
+        let current = self.card.read(cx).current();
+        let row = match current {
+            Some(settings) => {
+                let card = self.card.clone();
+                let toggled = CompactionSettings {
+                    compact_ahead: !settings.compact_ahead,
+                    ..settings.clone()
+                };
+                widgets::card_row(&theme, true)
+                    .child(row_text(
+                        &theme,
+                        AHEAD_TITLE,
+                        "Claude compacts in place right after a turn. Codex summarizes a copy in the background and swaps it in at the next pause; turns after the copy come back as text.",
+                    ))
+                    .child(
+                        switch(&theme, settings.compact_ahead, "compact-ahead", AHEAD_TITLE)
+                            .on_click(move |_, _, cx| {
+                                card.update(cx, |card, cx| card.save(toggled.clone(), cx));
+                            }),
+                    )
+            }
+            None => widgets::card_row(&theme, true).child(
+                div()
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from("Loading…")),
+            ),
+        };
+        div()
+            .id("experimental-page")
+            .size_full()
+            .overflow_y_scroll()
+            .child(
+                widgets::settings_page()
+                    .child(widgets::page_note(
+                        &theme,
+                        "Experimental and beta features. They may change or go away in a later version.",
+                    ))
+                    .child(widgets::section(
+                        &theme,
+                        "Agents",
+                        widgets::section_card(&theme).mt_0().child(row),
+                    )),
+            )
     }
 }
