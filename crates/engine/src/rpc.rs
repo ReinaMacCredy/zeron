@@ -7909,7 +7909,12 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?
                     }
                 };
-                let key = p.html.as_deref().or(p.url.as_deref()).unwrap_or_default();
+                let key = match source {
+                    zeron_proto::html_render::RenderSource::Html(html) => html,
+                    zeron_proto::html_render::RenderSource::Url(_) => {
+                        p.url.as_deref().unwrap_or_default()
+                    }
+                };
                 self.sessions.bind_html_render(&p.chat_id, key, page.clone());
                 RpcReply::value(&serde_json::json!({
                     "htmlRender": page,
@@ -7923,7 +7928,8 @@ impl RpcService for EngineRpc {
                         "html_preview needs this chat's live Zeron run".into(),
                     ));
                 }
-                let preview = match (p.html, p.path, p.url) {
+                let url = p.url.filter(|url| !url.trim().is_empty());
+                let preview = match (p.html, p.path, url) {
                     (None, None, Some(url)) => {
                         crate::html_render::preview_url(
                             &self.html_preview,
