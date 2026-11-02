@@ -312,16 +312,19 @@ final class SessionFlowTests: XCTestCase {
     }
 
     func testFileMentionSuggestions() {
-        let app = launch(["-route", "chat:chat-deploy"])
-        let input = app.textViews["composer-input"]
-        XCTAssertTrue(input.waitForExistence(timeout: 10))
-        input.tap()
-        input.typeText("Look at @lay")
-        let first = app.buttons["mention-0"]
-        XCTAssertTrue(first.waitForExistence(timeout: 5))
-        snapshot(app, "mentions")
-        first.tap()
-        XCTAssertTrue((input.value as? String ?? "").contains("@mod.rs"), "token inserted: \(input.value ?? "")")
+        for route in [["-route", "chat:chat-deploy"], ["-route", "new"]] {
+            let app = launch(route)
+            let input = app.textViews["composer-input"]
+            XCTAssertTrue(input.waitForExistence(timeout: 10))
+            input.tap()
+            input.typeText("Look at @lay")
+            let first = app.buttons["mention-0"]
+            XCTAssertTrue(first.waitForExistence(timeout: 5), "suggestions (\(route))")
+            snapshot(app, "mentions")
+            first.tap()
+            XCTAssertTrue((input.value as? String ?? "").contains("@mod.rs"), "token inserted (\(route)): \(input.value ?? "")")
+            app.terminate()
+        }
     }
 
     func testArchiveWithUndo() {
