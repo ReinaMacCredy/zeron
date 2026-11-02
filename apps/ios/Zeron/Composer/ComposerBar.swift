@@ -364,6 +364,10 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         ])
     }
 
+    func owns(_ view: UIView) -> Bool {
+        view.isDescendant(of: self) || view.isDescendant(of: suggestions)
+    }
+
     // MARK: Resting ↔ card
 
     /// The card is for composing: focused, holding photos, or pinned open
