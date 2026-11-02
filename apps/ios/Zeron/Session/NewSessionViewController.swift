@@ -343,7 +343,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     }
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        touch.view.map { !$0.isDescendant(of: composer) } ?? true
+        touch.view.map { !composer.owns($0) } ?? true
     }
 
     private var project: ProjectOption? { app.projectOptions.first { $0.id == draft.projectId } }
