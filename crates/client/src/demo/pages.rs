@@ -43,6 +43,7 @@ pub(crate) fn part() -> MessagePart {
             path: PATH.into(),
             title: TITLE.into(),
             height: HEIGHT,
+            url: None,
         });
     }
     part

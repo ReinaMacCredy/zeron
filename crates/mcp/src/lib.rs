@@ -486,12 +486,13 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "html_preview",
-            "description": "Lay out an HTML page in Zeron's own web engine and get a PNG screenshot, `contentHeight` at this width, and its console output (log to uncaught exceptions; console.log your own checks). Check a page with it before html_render. Pass `html`, or `path` to an .html file in this thread's folder. `tree` adds the page's elements as UI driver tree lines (refs w1-<n>). `rect` or `select` crops the screenshot. `steps` act on the page in UI driver syntax through the DOM (isTrusted false), with a screenshot and tree after each; a failed step stops the rest. Needs the Zeron app open on this machine. Pages follow html_render's rules.",
+            "description": "Lay out an HTML page in Zeron's own web engine and get a PNG screenshot, `contentHeight` at this width, and its console output (log to uncaught exceptions; console.log your own checks). Check a page with it before html_render. Pass `html`, `path` to an .html file in this thread's folder, or `url` of a local dev server you are running (http(s) on localhost, 127.0.0.1 or [::1]) to check it before showing it with html_render `url`. `tree` adds the page's elements as UI driver tree lines (refs w1-<n>). `rect` or `select` crops the screenshot. `steps` act on the page in UI driver syntax through the DOM (isTrusted false), with a screenshot and tree after each; a failed step stops the rest. Needs the Zeron app open on this machine. Pages follow html_render's rules.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES },
                     "path": { "type": "string" },
+                    "url": { "type": "string", "maxLength": html_render::MAX_URL_BYTES, "description": "A running local dev server's page, such as http://localhost:5173/." },
                     "tree": { "type": "boolean" },
                     "rect": { "type": "object", "properties": { "x": { "type": "number", "minimum": 0 }, "y": { "type": "number", "minimum": 0 }, "w": { "type": "number", "minimum": 1 }, "h": { "type": "number", "minimum": 1 } }, "required": ["x", "y", "w", "h"], "additionalProperties": false, "description": "CSS pixels from the page's top-left." },
                     "select": { "type": "string", "description": "UI driver selector, such as `Button \"Save\"`." },
@@ -506,15 +507,16 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "html_render",
-            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline above your final reply; call it before the reply, which adds only what the page doesn't say. Call it from the main conversation, not a subagent. The frame fits the page's height; a smaller `height` caps it and the rest scrolls. {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::THEME_GUIDE),
+            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline above your final reply; call it before the reply, which adds only what the page doesn't say. Call it from the main conversation, not a subagent. Give exactly one of `html` or `url`. `html` is a finished page you wrote: the frame fits the page's height; a smaller `height` caps it and the rest scrolls. `url` is a local dev server you are running (http(s) on localhost, 127.0.0.1 or [::1], any port and path, such as a Vite preview): the person watches it live in a `height`-tall frame, with animations and hot reloads as they happen, and can click and scroll it; check it first with html_preview `url`. The rules below are for `html` pages. {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::THEME_GUIDE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES },
+                    "url": { "type": "string", "maxLength": html_render::MAX_URL_BYTES, "description": "A running local dev server's page, instead of `html`." },
                     "title": { "type": "string", "maxLength": html_render::MAX_TITLE_CHARS },
                     "height": { "type": "integer", "minimum": html_render::MIN_HEIGHT, "maximum": html_render::MAX_HEIGHT, "description": "CSS pixels." }
                 },
-                "required": ["html", "title", "height"],
+                "required": ["title", "height"],
                 "additionalProperties": false
             },
             "annotations": { "title": "Render HTML", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": true }
@@ -1819,6 +1821,7 @@ impl ThreadTools {
             for key in [
                 "html",
                 "path",
+                "url",
                 "width",
                 "appearance",
                 "tree",
@@ -1890,14 +1893,14 @@ impl ThreadTools {
             .run_secret
             .as_deref()
             .ok_or("html_render needs a live Zeron run")?;
-        let html = args["html"].as_str().ok_or("html must be a string")?;
         let title = args["title"].as_str().ok_or("title must be a string")?;
         let height = args["height"].as_f64().ok_or("height must be a number")?;
-        self.call_engine(
-            methods::PUBLISH_HTML_RENDER,
-            json!({ "chatId": self.chat_id, "runSecret": secret, "html": html, "title": title, "height": height }),
-        )
-        .await
+        let mut params = json!({ "chatId": self.chat_id, "runSecret": secret, "title": title, "height": height });
+        match html_render::render_source(args["html"].as_str(), args["url"].as_str())? {
+            html_render::RenderSource::Html(html) => params["html"] = html.into(),
+            html_render::RenderSource::Url(_) => params["url"] = args["url"].clone(),
+        }
+        self.call_engine(methods::PUBLISH_HTML_RENDER, params).await
     }
 
     async fn show_visual(&self, args: &Value) -> Result<Value, String> {
@@ -5507,6 +5510,14 @@ mod tests {
         assert!(sent[2].get("html").is_none());
         assert_eq!(sent[2]["select"], "Button");
         assert_eq!(sent[2]["steps"], steps);
+        pipe.call(
+            json!(4),
+            "html_preview",
+            json!({ "url": "http://127.0.0.1:5173/" }),
+        )
+        .await;
+        let sent = logged(&rig.calls, methods::HTML_PREVIEW);
+        assert_eq!(sent[3]["url"], "http://127.0.0.1:5173/");
     }
 
     #[tokio::test]
@@ -5539,12 +5550,31 @@ mod tests {
         assert_eq!(sent[0]["runSecret"], "live");
         assert_eq!(sent[0]["html"], "<p>x</p>");
         assert_eq!(sent[0]["height"], 400.0);
-        assert_eq!(
-            rig.tools
-                .call("html_render", &json!({ "title": "T", "height": 400 }))
-                .await,
-            Err("html must be a string".into())
-        );
+        for (args, refused) in [
+            (json!({ "title": "T", "height": 400 }), "give `html`"),
+            (
+                json!({ "html": "<p>x</p>", "url": "http://localhost:5391/", "title": "T", "height": 400 }),
+                "not both",
+            ),
+            (
+                json!({ "url": "https://example.com/", "title": "T", "height": 400 }),
+                "only a local dev server",
+            ),
+        ] {
+            let error = rig.tools.call("html_render", &args).await.unwrap_err();
+            assert!(error.contains(refused), "{error}");
+        }
+        assert_eq!(logged(&rig.calls, methods::PUBLISH_HTML_RENDER).len(), 1);
+        rig.tools
+            .call(
+                "html_render",
+                &json!({ "url": "http://localhost:5391/?capture=zeron-tray", "title": "Tray", "height": 600 }),
+            )
+            .await
+            .unwrap();
+        let sent = logged(&rig.calls, methods::PUBLISH_HTML_RENDER);
+        assert_eq!(sent[1]["url"], "http://localhost:5391/?capture=zeron-tray");
+        assert!(sent[1].get("html").is_none());
         let listed = tool_list();
         let tool = listed
             .as_array()
@@ -5552,11 +5582,23 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "html_render")
             .unwrap();
-        assert_eq!(
-            tool["inputSchema"]["required"],
-            json!(["html", "title", "height"])
+        assert_eq!(tool["inputSchema"]["required"], json!(["title", "height"]));
+        assert_eq!(tool["inputSchema"]["properties"]["url"]["type"], "string");
+        let description = tool["description"].as_str().unwrap();
+        assert!(
+            description.contains("--chart-1")
+                && description.contains("exactly one of `html` or `url`")
         );
-        assert!(tool["description"].as_str().unwrap().contains("--chart-1"));
+        let preview = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "html_preview")
+            .unwrap();
+        assert_eq!(
+            preview["inputSchema"]["properties"]["url"]["type"],
+            "string"
+        );
     }
 
     #[tokio::test]

@@ -7886,15 +7886,28 @@ impl RpcService for EngineRpc {
                         "html_render needs this chat's live Zeron run".into(),
                     ));
                 }
-                let uploads = self.uploads.clone();
-                let (chat_id, html, title, height) = (p.chat_id.clone(), p.html.clone(), p.title, p.height);
-                let page = tokio::task::spawn_blocking(move || {
-                    crate::html_render::publish(&uploads, &chat_id, &html, &title, height)
-                })
-                .await
-                .map_err(|e| RpcError::Failed(e.to_string()))?
-                .map_err(|e| RpcError::Failed(e.to_string()))?;
-                self.sessions.bind_html_render(&p.chat_id, &p.html, page.clone());
+                let source =
+                    zeron_proto::html_render::render_source(p.html.as_deref(), p.url.as_deref())
+                        .map_err(RpcError::BadParams)?;
+                let page = match source {
+                    zeron_proto::html_render::RenderSource::Url(url) => {
+                        crate::html_render::live_page(url, &p.title, p.height)
+                            .map_err(|e| RpcError::Failed(e.to_string()))?
+                    }
+                    zeron_proto::html_render::RenderSource::Html(html) => {
+                        let uploads = self.uploads.clone();
+                        let (chat_id, html, title, height) =
+                            (p.chat_id.clone(), html.to_owned(), p.title.clone(), p.height);
+                        tokio::task::spawn_blocking(move || {
+                            crate::html_render::publish(&uploads, &chat_id, &html, &title, height)
+                        })
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?
+                        .map_err(|e| RpcError::Failed(e.to_string()))?
+                    }
+                };
+                let key = p.html.as_deref().or(p.url.as_deref()).unwrap_or_default();
+                self.sessions.bind_html_render(&p.chat_id, key, page.clone());
                 RpcReply::value(&serde_json::json!({
                     "htmlRender": page,
                     "message": zeron_proto::html_render::RENDERED_MESSAGE,
@@ -7907,23 +7920,43 @@ impl RpcService for EngineRpc {
                         "html_preview needs this chat's live Zeron run".into(),
                     ));
                 }
-                let html = match (p.html, p.path) {
-                    (Some(html), None) => html,
-                    (None, Some(path)) => self.chat_page(&p.chat_id, path).await?,
+                let preview = match (p.html, p.path, p.url) {
+                    (None, None, Some(url)) => {
+                        crate::html_render::preview_url(
+                            &self.html_preview,
+                            &url,
+                            p.width,
+                            p.appearance,
+                            p.inspect,
+                        )
+                        .await
+                    }
+                    (Some(html), None, None) => {
+                        crate::html_render::preview(
+                            &self.html_preview,
+                            html,
+                            p.width,
+                            p.appearance,
+                            p.inspect,
+                        )
+                        .await
+                    }
+                    (None, Some(path), None) => {
+                        crate::html_render::preview(
+                            &self.html_preview,
+                            self.chat_page(&p.chat_id, path).await?,
+                            p.width,
+                            p.appearance,
+                            p.inspect,
+                        )
+                        .await
+                    }
                     _ => {
                         return Err(RpcError::BadParams(
-                            "give `html` or `path`, one of them".into(),
+                            "give `html`, `path` or `url`, one of them".into(),
                         ));
                     }
-                };
-                let preview = crate::html_render::preview(
-                    &self.html_preview,
-                    html,
-                    p.width,
-                    p.appearance,
-                    p.inspect,
-                )
-                .await
+                }
                 .map_err(RpcError::Failed)?;
                 RpcReply::value(&preview)
             }
