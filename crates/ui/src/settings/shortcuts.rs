@@ -193,6 +193,10 @@ impl ShortcutsPage {
         }
     }
 
+    pub fn compaction(&self) -> Entity<crate::settings::compaction::CompactionCard> {
+        self.compaction.clone()
+    }
+
     pub fn show_appshots(&mut self, appshots: bool) {
         self.show_section(if appshots {
             Shown::Appshots
