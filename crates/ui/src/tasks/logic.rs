@@ -134,6 +134,7 @@ mod tests {
             resources: Vec::new(),
             images: Vec::new(),
             context: Vec::new(),
+            depends_on: Vec::new(),
         }
     }
 
