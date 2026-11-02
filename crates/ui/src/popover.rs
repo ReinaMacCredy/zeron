@@ -127,6 +127,10 @@ impl<T> Popup<T> {
         }
     }
 
+    pub fn get_mut(&mut self) -> Option<&mut T> {
+        self.inner.as_mut().map(|(value, _)| value)
+    }
+
     pub fn open_mut(&mut self) -> Option<&mut T> {
         match &mut self.inner {
             Some((value, None)) => Some(value),
@@ -433,20 +437,9 @@ fn pinned_layer(layer: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
-/// Eased exit progress (0..=1) for a [`Popup`] closing instant, computed from
-/// the wall clock at render time. Monotonic by construction — unlike the
-/// animation element's own clock, it can never replay from 0 mid-exit.
+/// Eased exit progress (0..=1) for a [`Popup`] closing instant.
 fn exit_progress(since: std::time::Instant) -> f32 {
-    let total = motion::MENU_OUT
-        .total()
-        .mul_f32(motion::speed_scale())
-        .as_secs_f32();
-    let raw = if total <= 0.0 {
-        1.0
-    } else {
-        (motion::since(since).as_secs_f32() / total).clamp(0.0, 1.0)
-    };
-    motion::MENU_OUT.progress(raw)
+    motion::MENU_OUT.progress_since(since)
 }
 
 /// The frosted card for a popover layer: full blur while open; while exiting

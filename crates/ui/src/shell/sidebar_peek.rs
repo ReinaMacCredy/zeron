@@ -95,8 +95,8 @@ impl Shell {
         let modal = self.rename_space_dialog.is_some()
             || self.delete_confirm.is_some()
             || self.delete_space_confirm.is_some()
-            || self.add_space.is_some()
-            || self.command_palette.is_some()
+            || self.add_space.is_open()
+            || self.command_palette.is_open()
             || self.sync_flow.has_visible_overlay()
             || self.sync_flow == SyncFlow::SignedOutRestartRequired;
         PeekInput {

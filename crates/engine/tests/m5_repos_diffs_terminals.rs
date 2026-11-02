@@ -267,18 +267,33 @@ async fn repository_identity_spans_worktrees_and_clones() {
     assert_eq!(repos.repository_identity(&linked).await.unwrap(), identity);
     git(
         &repo,
-        &["remote", "add", "origin", "git@github-alias:zeronsh/old-name.git"],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github-alias:zeronsh/old-name.git",
+        ],
     )
     .await;
     let clone = temp.path().join("clone");
     git(
         temp.path(),
-        &["clone", "-q", repo.to_str().unwrap(), clone.to_str().unwrap()],
+        &[
+            "clone",
+            "-q",
+            repo.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
     )
     .await;
     git(
         &clone,
-        &["remote", "set-url", "origin", "https://github.com/zeronsh/new-name"],
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/zeronsh/new-name",
+        ],
     )
     .await;
     assert_eq!(repos.repository_identity(&repo).await.unwrap(), identity);
@@ -352,7 +367,12 @@ async fn repository_identity_spans_worktrees_and_clones() {
     .await;
     git(
         &shallow,
-        &["remote", "set-url", "origin", "https://GitHub.com/ZeronSH/Zeron.git"],
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://GitHub.com/ZeronSH/Zeron.git",
+        ],
     )
     .await;
     assert_eq!(
@@ -369,7 +389,12 @@ async fn repository_identity_spans_worktrees_and_clones() {
     assert!(local.starts_with("local:"), "{local}");
     git(
         &empty,
-        &["remote", "add", "upstream", "git@github.com:Anara/Comet.git"],
+        &[
+            "remote",
+            "add",
+            "upstream",
+            "git@github.com:Anara/Comet.git",
+        ],
     )
     .await;
     assert_eq!(
@@ -616,6 +641,87 @@ async fn folder_lister_flags_and_ordering() {
 }
 
 #[tokio::test]
+async fn folder_lister_include_hidden_keeps_dot_folders() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join(".hidden")).expect("hidden dir");
+    std::fs::create_dir_all(tmp.path().join("shown")).expect("dir");
+    let data = tempfile::tempdir().expect("data dir");
+    let repos = test_repos(data.path());
+    let path = Some(tmp.path().to_string_lossy().to_string());
+    let names = |listing: &zeron_proto::FolderListing| {
+        listing
+            .entries
+            .iter()
+            .map(|e| e.name.clone())
+            .collect::<Vec<_>>()
+    };
+    let default = repos.list_folders(path.clone()).await.expect("listing");
+    assert_eq!(names(&default), vec!["shown"]);
+    let hidden = repos
+        .list_folders_including_hidden(path, true)
+        .await
+        .expect("listing");
+    assert_eq!(names(&hidden), vec![".hidden", "shown"]);
+}
+
+#[tokio::test]
+async fn create_folder_creates_one_level_and_rejects_bad_or_taken_names() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data = tempfile::tempdir().expect("data dir");
+    let repos = test_repos(data.path());
+    let parent = tmp.path().to_string_lossy().to_string();
+
+    let path = repos
+        .create_folder(parent.clone(), "  fresh ".into(), false)
+        .await
+        .expect("create");
+    assert_eq!(Path::new(&path), tmp.path().join("fresh"));
+    assert!(Path::new(&path).is_dir());
+    assert!(!Path::new(&path).join(".git").exists());
+
+    let taken = repos
+        .create_folder(parent.clone(), "fresh".into(), false)
+        .await
+        .expect_err("duplicate");
+    assert_eq!(
+        taken.to_string(),
+        "\u{201c}fresh\u{201d} already exists here."
+    );
+
+    for bad in ["", "   ", ".", "..", "a/b", "a\\b"] {
+        let err = repos
+            .create_folder(parent.clone(), bad.into(), false)
+            .await
+            .expect_err(bad);
+        assert!(
+            err.to_string().contains("Folder name") || err.to_string().contains("valid folder"),
+            "{bad:?}: {err}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(tmp.path()).expect("read").count(),
+        1,
+        "bad names create nothing"
+    );
+
+    let missing = repos
+        .create_folder(
+            tmp.path().join("nope").to_string_lossy().to_string(),
+            "x".into(),
+            false,
+        )
+        .await
+        .expect_err("missing parent");
+    assert!(missing.to_string().contains("isn't a folder"), "{missing}");
+
+    let repo = repos
+        .create_folder(parent, "repo".into(), true)
+        .await
+        .expect("create with git init");
+    assert!(Path::new(&repo).join(".git").exists());
+}
+
+#[tokio::test]
 async fn folder_lister_caps_at_500_with_truncated_flag() {
     let tmp = tempfile::tempdir().expect("tempdir");
     for i in 0..510 {
@@ -638,6 +744,7 @@ async fn folder_lister_timeout_path() {
     let err = repos
         .list_folders_with(
             Some(tmp.path().to_string_lossy().to_string()),
+            false,
             Duration::from_millis(50),
             true, // worker never responds
         )
@@ -2343,6 +2450,43 @@ async fn rpc_dispatch_for_m5_methods() {
         folders["path"].as_str(),
         Some(&*tmp.path().to_string_lossy())
     );
+
+    let created = client
+        .call(
+            methods::CREATE_FOLDER,
+            serde_json::json!({
+                "parent": tmp.path().to_string_lossy(),
+                "name": ".made-by-rpc",
+                "gitInit": true,
+            }),
+        )
+        .await
+        .expect("CreateFolder");
+    let created = created["path"].as_str().expect("path");
+    assert!(Path::new(created).join(".git").is_dir());
+    let shown = client
+        .call(
+            methods::LIST_FOLDERS,
+            serde_json::json!({ "path": tmp.path().to_string_lossy(), "includeHidden": true }),
+        )
+        .await
+        .expect("ListFolders includeHidden");
+    let has_made = |listing: &serde_json::Value| {
+        listing["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .any(|e| e["name"] == ".made-by-rpc")
+    };
+    assert!(has_made(&shown));
+    let plain = client
+        .call(
+            methods::LIST_FOLDERS,
+            serde_json::json!({ "path": tmp.path().to_string_lossy() }),
+        )
+        .await
+        .expect("ListFolders");
+    assert!(!has_made(&plain));
 
     // A legacy CreateWorktree caller does not trigger setup, even when one is
     // configured for the project.

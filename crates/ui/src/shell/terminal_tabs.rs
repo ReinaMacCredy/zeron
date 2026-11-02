@@ -230,7 +230,7 @@ impl Shell {
             return;
         };
         self.snapshot_current_chat(cx);
-        self.command_palette = None;
+        self.dismiss_command_palette(cx);
         self.set_voice_stage_open(false, cx);
         let tabs = self.settings.open_tabs.get_or_insert_with(Vec::new);
         if !tabs.contains(&id) {
