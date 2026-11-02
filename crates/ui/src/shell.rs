@@ -8552,6 +8552,11 @@ impl Shell {
         if section == SettingsSection::Tools {
             self.tools_page = None;
         }
+        if section == SettingsSection::Compaction
+            && self.route != Route::Settings(SettingsSection::Compaction)
+        {
+            self.compaction_page = None;
+        }
         if section == SettingsSection::Computer
             && let Some(page) = &self.computer_page
         {
