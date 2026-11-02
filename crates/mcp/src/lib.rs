@@ -403,11 +403,11 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "tasks",
-            "description": "Manage the person's Tasks list (the rail's Tasks page): to-dos, each assignable to a thread whose status it follows (To do, Working, Needs you) until marked done. A `[title](zeron-task:<id>)` link names a task: read it with `list` and that `taskId`, and mark it done with `update` `completed: true` when finished. `list`: open tasks in order (`includeDone` adds done ones; notes cut to 500 characters), or one whole with `taskId`, done or not; `sendError` means the last send to its thread failed. `create`: `title`, optional `notes`, `dueOn` (YYYY-MM-DD), `projectId` (default this chat's project, \"\" for none) and `dependsOn` (ids of tasks it is blocked by; `list` returns it). `update`: `title`, `notes`, `dueOn` (\"\" clears), `completed` or `dependsOn` (replaces the list; [] clears; no unknown ids, itself or cycles). `assign` to `threadId` (default this chat), sending its title and notes there unless `send: false` (the default for this chat); a task has one thread. `unassign`, `delete`. A Task with a plan (`mode` orchestrated) has a lead thread and steps: `list` adds `progress` and `planPending`, and with `taskId` its `plan`, `planDoc`, `context` (threads the lead was given to read) and `steps` (planned, working, needsYou, failed, done or skipped, with `threadId`); a step is done only once its lead marks it. Lead only: `plan` writes `steps` [{title, notes, threadId, role}] and an optional `overview` for `taskId`, replacing unstarted steps and keeping the rest; a step's `threadId` hands it to a thread the lead started (not a sidechat, fork, another chat's thread or one on an open step); replaced steps' images move to the same-titled step or the overview (`imagesMoved`); `resources` replaces the mission's claims (port:<n>, slot:<name>, path:<path in the project>; [] clears) that the Supervisor checks against other missions. `step` marks `stepId` `state` done, skipped or open; run a step with create_thread and its `taskStepId`. `escalate` puts a decision only the person can make in their Needs you list (`title`, `why`, `detail`, one to three `options`) and returns its `itemId` at once; keep working on what does not depend on it, and the choice arrives as a message.",
+            "description": "Manage the person's Tasks list (the rail's Tasks page): to-dos, each assignable to a thread whose status it follows (To do, Working, Needs you) until marked done. A `[title](zeron-task:<id>)` link names a task. Before working on a task you were given, `claim` it: that returns it whole and assigns it to this chat without sending, so its status follows yours; it refuses a done task or one another thread holds. Mark it done with `update` `completed: true` once the work has landed. Use `list` with its `taskId` to read one you will not work on. `list`: open tasks in order (`includeDone` adds done ones; notes cut to 500 characters), or one whole with `taskId`, done or not; `sendError` means the last send to its thread failed. `create`: `title`, optional `notes`, `dueOn` (YYYY-MM-DD), `projectId` (default this chat's project, \"\" for none) and `dependsOn` (ids of tasks it is blocked by; `list` returns it). `update`: `title`, `notes`, `dueOn` (\"\" clears), `completed` or `dependsOn` (replaces the list; [] clears; no unknown ids, itself or cycles). `assign` to `threadId` (default this chat), sending its title and notes there unless `send: false` (the default for this chat); a task has one thread. `unassign`, `delete`. A Task with a plan (`mode` orchestrated) has a lead thread and steps: `list` adds `progress` and `planPending`, and with `taskId` its `plan`, `planDoc`, `context` (threads the lead was given to read) and `steps` (planned, working, needsYou, failed, done or skipped, with `threadId`); a step is done only once its lead marks it. Lead only: `plan` writes `steps` [{title, notes, threadId, role}] and an optional `overview` for `taskId`, replacing unstarted steps and keeping the rest; a step's `threadId` hands it to a thread the lead started (not a sidechat, fork, another chat's thread or one on an open step); replaced steps' images move to the same-titled step or the overview (`imagesMoved`); `resources` replaces the mission's claims (port:<n>, slot:<name>, path:<path in the project>; [] clears) that the Supervisor checks against other missions. `step` marks `stepId` `state` done, skipped or open; run a step with create_thread and its `taskStepId`. `escalate` puts a decision only the person can make in their Needs you list (`title`, `why`, `detail`, one to three `options`) and returns its `itemId` at once; keep working on what does not depend on it, and the choice arrives as a message.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["list", "create", "update", "assign", "unassign", "delete", "plan", "step", "escalate"] },
+                    "action": { "type": "string", "enum": ["list", "claim", "create", "update", "assign", "unassign", "delete", "plan", "step", "escalate"] },
                     "taskId": { "type": "string" },
                     "includeDone": { "type": "boolean" },
                     "title": { "type": "string", "maxLength": 500 },
@@ -2247,6 +2247,43 @@ impl ThreadTools {
                 .await?;
                 Ok(json!({ "taskId": task_id, "threadId": thread_id, "sent": send }))
             }
+            "claim" => {
+                let id = required()?;
+                let tasks: Vec<Task> = self.snapshot(methods::WATCH_TASKS, json!({})).await?;
+                let task = tasks
+                    .iter()
+                    .find(|task| task.id == id)
+                    .ok_or_else(|| format!("no task {id}"))?;
+                if task.completed_at.is_some() {
+                    return Err(format!("task {id} is already done"));
+                }
+                match task.chat_id.as_deref() {
+                    Some(holder) if holder != self.chat_id => {
+                        return Err(format!(
+                            "task {id} is claimed by thread {holder}; leave it unless the person hands it over"
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.call_engine(
+                            methods::MUTATE,
+                            json!({
+                                "op": "assignTask",
+                                "taskId": id,
+                                "chatId": self.chat_id,
+                                "send": false,
+                                "fromChatId": self.chat_id,
+                            }),
+                        )
+                        .await?;
+                    }
+                }
+                let steps = self.step_statuses().await?;
+                let mut row = task_json(task, false);
+                add_plan(&mut row, task, &steps, true);
+                row["threadId"] = json!(self.chat_id);
+                Ok(json!({ "task": row }))
+            }
             "unassign" => {
                 self.update_task_row(required()?, json!({ "chatId": null }))
                     .await
@@ -2358,7 +2395,7 @@ impl ThreadTools {
                 Ok(json!({ "taskId": task_id, "itemId": raised["itemId"] }))
             }
             _ => Err(
-                "action must be list, create, update, assign, unassign, delete, plan, step or escalate"
+                "action must be list, claim, create, update, assign, unassign, delete, plan, step or escalate"
                     .into(),
             ),
         }
@@ -5291,6 +5328,37 @@ mod tests {
             [
                 json!({ "op": "assignTask", "taskId": task_id, "chatId": "b", "send": true, "fromChatId": "a" }),
                 json!({ "op": "assignTask", "taskId": task_id, "chatId": "a", "send": false, "fromChatId": "a" }),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_takes_a_free_task_quietly_and_refuses_one_another_thread_holds() {
+        let mut fixture = fixture();
+        fixture
+            .tasks
+            .push(json!({ "id": "t3", "title": "Loose", "notes": "the whole note" }));
+        fixture.tasks.push(json!({
+            "id": "t4",
+            "title": "Shipped",
+            "completedAt": "2026-11-01T00:00:00Z"
+        }));
+        let rig = rig(fixture);
+        let tools = &rig.tools;
+        let claim = |id: &str| {
+            let args = json!({ "action": "claim", "taskId": id });
+            async move { tools.call("tasks", &args).await }
+        };
+        let free = claim("t3").await.unwrap();
+        assert_eq!(free["task"]["notes"], "the whole note");
+        assert_eq!(free["task"]["threadId"], "a");
+        assert_eq!(claim("t1").await.unwrap()["task"]["id"], "t1");
+        assert!(claim("t2").await.unwrap_err().contains("thread c"));
+        assert!(claim("t4").await.unwrap_err().contains("done"));
+        assert_eq!(
+            logged(&rig.calls, methods::MUTATE),
+            [
+                json!({ "op": "assignTask", "taskId": "t3", "chatId": "a", "send": false, "fromChatId": "a" })
             ]
         );
     }
