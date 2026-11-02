@@ -1917,6 +1917,31 @@ fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<Setti
         .and_then(SettingsSection::from_slug)
 }
 
+fn settings_page_key(section: SettingsSection) -> String {
+    format!("settings-page-{}", section.slug())
+}
+
+/// Whether `old` can fade out under `new`. General, Chat, Shortcuts and
+/// Appshots are one view showing one section at a time, so two of them are
+/// never on screen together; Cloud and Billing are dropped the frame they
+/// are left, which is what stops their polling.
+fn page_can_leave(old: SettingsSection, new: SettingsSection) -> bool {
+    !matches!(old, SettingsSection::Cloud | SettingsSection::Billing) && !shares_page_view(old, new)
+}
+
+fn shares_page_view(a: SettingsSection, b: SettingsSection) -> bool {
+    let shortcuts = |section| {
+        matches!(
+            section,
+            SettingsSection::General
+                | SettingsSection::Chat
+                | SettingsSection::Shortcuts
+                | SettingsSection::Appshots
+        )
+    };
+    shortcuts(a) && shortcuts(b)
+}
+
 const SETTINGS_NAV_WIDTH: f32 = 238.0;
 const SETTINGS_NAV_PAGE_HEIGHT: f32 = 28.0;
 const SETTINGS_TITLE_HEIGHT: f32 = 91.0;
@@ -3709,6 +3734,9 @@ pub struct Shell {
     settings_hits_shown: Vec<(SettingsHit, bool)>,
     /// The results count line, current last, earlier ones fading out.
     settings_hits_heads: Vec<SharedString>,
+    /// The settings page last drawn, and the one fading out under it.
+    settings_page_shown: Option<SettingsSection>,
+    settings_page_leaving: Option<SettingsSection>,
     _settings_search_sub: Subscription,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
@@ -4487,6 +4515,8 @@ impl Shell {
             settings_search,
             settings_hits_shown: Vec::new(),
             settings_hits_heads: Vec::new(),
+            settings_page_shown: None,
+            settings_page_leaving: None,
             _settings_search_sub: settings_search_sub,
             shortcuts_sub: None,
             notifications_sub: None,
@@ -9193,6 +9223,7 @@ impl Shell {
     fn settings_outlet(
         &mut self,
         section: SettingsSection,
+        leaving: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -9419,6 +9450,9 @@ impl Shell {
             | SettingsSection::Chat
             | SettingsSection::Appshots => {
                 let page = self.ensure_shortcuts_page(cx);
+                if leaving {
+                    return page.into_any_element();
+                }
                 let keep_focus = self.settings_search.focus_handle(cx).is_focused(window);
                 page.update(cx, |page, _| {
                     page.show_section(match section {
@@ -9443,6 +9477,9 @@ impl Shell {
                         page
                     }
                 };
+                if leaving {
+                    return page.into_any_element();
+                }
                 page.update(cx, |page, cx| page.set_active(true, cx));
                 if let Some(missing) = self.pending_computer_guide.take() {
                     page.update(cx, |page, cx| page.open_setup_guide(&missing, cx));
@@ -12086,6 +12123,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).for_settings_surface();
+        let opening = self.settings_focus_pending;
         if self.settings_focus_pending {
             self.settings_focus_pending = false;
             self.settings_return_focus = window.focused(cx);
@@ -12115,82 +12153,52 @@ impl Shell {
             cx,
         );
         let nav = self.render_settings_nav(section, &theme, window, cx);
-        let outlet = self.settings_outlet(section, window, cx);
-        let action = self.settings_header_action(section, &theme, window, cx);
-        let header_row = div()
-            .id("settings-header")
-            .relative()
-            .h(px(SETTINGS_TITLE_HEIGHT))
-            .flex_none()
-            .pt(px(SETTINGS_TITLE_TOP))
-            .pl(px(settings::widgets::SETTINGS_PAGE_PAD_LEFT))
-            .pr(px(52.0))
+        let reduced = motion::reduced_motion(cx);
+        let shown = self.settings_page_shown.replace(section);
+        if opening {
+            self.settings_page_leaving = None;
+        } else if let Some(old) = shown.filter(|old| *old != section) {
+            motion::state_seed(&settings_page_key(section), false);
+            self.settings_page_leaving = page_can_leave(old, section).then_some(old);
+        }
+        let legs = [settings::widgets::PAGE_FADE, settings::widgets::PAGE_RISE];
+        let leaving = self
+            .settings_page_leaving
+            .filter(|old| *old != section)
+            .map(|old| {
+                (
+                    old,
+                    motion::staged(&settings_page_key(old), false, &legs, reduced),
+                )
+            })
+            .filter(|(_, staged)| staged.visible());
+        self.settings_page_leaving = leaving.map(|(old, _)| old);
+        let leaving = leaving
+            .map(|(old, staged)| self.render_settings_layer(old, staged, true, &theme, window, cx));
+        let incoming = motion::staged(&settings_page_key(section), true, &legs, reduced);
+        let incoming = self.render_settings_layer(section, incoming, false, &theme, window, cx);
+        let close = div()
+            .id("settings-close")
+            .debug_selector(|| "settings-close".into())
+            .absolute()
+            .top(px(12.0))
+            .right(px(12.0))
+            .role(gpui::Role::Button)
+            .aria_label("Close settings")
+            .tab_index(0)
+            .size(px(28.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(7.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.glass_hover()))
+            .focus_visible(|s| s.border_2().border_color(theme.accent))
+            .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
             .child(
-                div()
-                    .max_w(px(settings::widgets::SETTINGS_PAGE_MAX_WIDTH))
-                    .flex()
-                    .flex_row()
-                    .items_start()
-                    .gap(px(12.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.0))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(crate::typography::ui_rems(22.0))
-                                    .line_height(crate::typography::ui_rems(26.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(section.label())),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(crate::typography::ui_rems(13.0))
-                                    .line_height(crate::typography::ui_rems(17.0))
-                                    .text_color(theme.text_muted)
-                                    .child(SharedString::from(section.summary())),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .children(action),
-                    ),
-            )
-            .child(
-                div()
-                    .id("settings-close")
-                    .debug_selector(|| "settings-close".into())
-                    .absolute()
-                    .top(px(12.0))
-                    .right(px(12.0))
-                    .role(gpui::Role::Button)
-                    .aria_label("Close settings")
-                    .tab_index(0)
-                    .size(px(28.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(7.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.glass_hover()))
-                    .focus_visible(|s| s.border_2().border_color(theme.accent))
-                    .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
-                    .child(
-                        icon(icons::LUCIDE_X)
-                            .size(px(16.0))
-                            .text_color(theme.text_muted),
-                    ),
+                icon(icons::LUCIDE_X)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted),
             );
         let body = div()
             .id("settings-page")
@@ -12263,9 +12271,11 @@ impl Shell {
                     .h_full()
                     .flex()
                     .flex_col()
+                    .relative()
                     .opacity(self.voice_stage_underlay_opacity(cx))
-                    .child(header_row)
-                    .child(div().flex_1().min_h_0().child(outlet)),
+                    .child(close)
+                    .children(leaving)
+                    .child(incoming),
             )
             .child(
                 div()
@@ -12329,6 +12339,97 @@ impl Shell {
             .child(drag)
             .child(panel_el)
             .into_any_element()
+    }
+
+    /// One page as it comes in or leaves: its title block over its body,
+    /// fading and rising together. A leaving page keeps out of a search
+    /// reveal and fires none of its page's open-time effects.
+    fn render_settings_layer(
+        &mut self,
+        section: SettingsSection,
+        staged: motion::Staged,
+        leaving: bool,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let action = if leaving {
+            None
+        } else {
+            self.settings_header_action(section, theme, window, cx)
+        };
+        let outlet = self.settings_outlet(section, leaving, window, cx);
+        let header_row = div()
+            .id("settings-header")
+            .relative()
+            .h(px(SETTINGS_TITLE_HEIGHT))
+            .flex_none()
+            .pt(px(SETTINGS_TITLE_TOP))
+            .pl(px(settings::widgets::SETTINGS_PAGE_PAD_LEFT))
+            .pr(px(52.0))
+            .child(
+                div()
+                    .max_w(px(settings::widgets::SETTINGS_PAGE_MAX_WIDTH))
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(22.0))
+                                    .line_height(crate::typography::ui_rems(26.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(section.label())),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(13.0))
+                                    .line_height(crate::typography::ui_rems(17.0))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(section.summary())),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .children(action),
+                    ),
+            );
+        div()
+            .id(SharedString::from(format!(
+                "settings-layer-{}",
+                section.slug()
+            )))
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(px(
+                settings::widgets::PAGE_RISE_PX * (1.0 - staged.leg(settings::widgets::PAGE_RISE))
+            ))
+            .h_full()
+            .flex()
+            .flex_col()
+            .opacity(staged.leg(settings::widgets::PAGE_FADE))
+            .child(header_row)
+            .child(div().flex_1().min_h_0().child(if leaving {
+                settings::search::muted(outlet).into_any_element()
+            } else {
+                outlet
+            }))
     }
 
     fn render_settings_search(

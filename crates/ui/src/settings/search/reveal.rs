@@ -44,6 +44,8 @@ const WASH_RADIUS: f32 = 8.0;
 
 thread_local! {
     static REVEAL: RefCell<Option<(WindowId, Reveal)>> = const { RefCell::new(None) };
+    /// Inside a [`Muted`] page: its rows and scroll take no part in a reveal.
+    static MUTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -80,6 +82,9 @@ pub fn clear_reveal() {
 
 /// `f` on the reveal under way in `window`, if there is one.
 fn with_reveal<R>(window: &Window, f: impl FnOnce(&mut Reveal) -> R) -> Option<R> {
+    if MUTED.get() {
+        return None;
+    }
     let id = window.window_handle().window_id();
     REVEAL.with_borrow_mut(|slot| match slot {
         Some((asked_in, reveal)) if *asked_in == id => Some(f(reveal)),
@@ -513,6 +518,77 @@ impl Element for PageReveal {
 }
 
 impl IntoElement for PageReveal {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+/// A page leaving the screen while the next one comes in: a reveal belongs
+/// to the page that stays, and the leaving page's scroll must not read as
+/// the user taking the glide back.
+pub fn muted(child: impl IntoElement) -> Muted {
+    Muted {
+        child: child.into_any_element(),
+    }
+}
+
+pub struct Muted {
+    child: AnyElement,
+}
+
+impl Element for Muted {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let outer = MUTED.replace(true);
+        self.child.prepaint(window, cx);
+        MUTED.set(outer);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut (),
+        _prepaint: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+    }
+}
+
+impl IntoElement for Muted {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
