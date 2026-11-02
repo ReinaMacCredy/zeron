@@ -214,7 +214,8 @@ pub fn render_source<'a>(
     html: Option<&'a str>,
     url: Option<&'a str>,
 ) -> Result<RenderSource<'a>, String> {
-    match (html, url) {
+    let given = |text: Option<&'a str>| text.filter(|text| !text.trim().is_empty());
+    match (given(html), given(url)) {
         (Some(html), None) => Ok(RenderSource::Html(html)),
         (None, Some(url)) => live_url(url).map(|live| RenderSource::Url(live.url)),
         (Some(_), Some(_)) => Err("give `html` or `url`, not both".into()),
@@ -744,6 +745,14 @@ mod tests {
         );
         assert!(render_source(Some("<p>x</p>"), Some("http://localhost:5391/")).is_err());
         assert!(render_source(None, None).is_err());
+        assert_eq!(
+            render_source(Some("<p>x</p>"), Some("")),
+            Ok(RenderSource::Html("<p>x</p>"))
+        );
+        assert_eq!(
+            render_source(Some(" "), Some("http://localhost:5391/")),
+            Ok(RenderSource::Url("http://localhost:5391/"))
+        );
         assert!(render_source(None, Some("https://example.com/")).is_err());
     }
 
