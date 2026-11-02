@@ -576,6 +576,7 @@ impl Transcript {
     pub(super) fn render_live_page(
         &mut self,
         row_id: &SharedString,
+        owner: &str,
         url: &SharedString,
         title: &SharedString,
         agent_height: f32,
@@ -586,6 +587,41 @@ impl Transcript {
             return gpui::Empty.into_any_element();
         };
         let theme = Theme::of(cx).clone();
+        let elsewhere = {
+            let state = self.state.read(cx);
+            state
+                .local_device_id
+                .as_deref()
+                .is_some_and(|local| !owner.is_empty() && local != owner)
+                .then(|| {
+                    format!(
+                        "Running on {}",
+                        state.device_name(owner).unwrap_or("another device")
+                    )
+                })
+        };
+        if let Some(elsewhere) = elsewhere {
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .w_full()
+                .child(
+                    div()
+                        .h(px(22.0))
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(live.label.to_owned())),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(clamp_height(agent_height).min(120.0)))
+                        .child(page_placeholder(elsewhere, &theme)),
+                )
+                .into_any_element();
+        }
         self.html_pages
             .used
             .insert(row_id.clone(), self.html_pages.frame);
@@ -1295,7 +1331,7 @@ fn server_answers(url: &str) -> bool {
         })
 }
 
-fn page_placeholder(text: &'static str, theme: &Theme) -> AnyElement {
+fn page_placeholder(text: impl Into<SharedString>, theme: &Theme) -> AnyElement {
     div()
         .size_full()
         .flex()
@@ -1305,7 +1341,7 @@ fn page_placeholder(text: &'static str, theme: &Theme) -> AnyElement {
         .bg(theme.ink(0.035))
         .text_size(crate::typography::ui_rems(12.5))
         .text_color(theme.text_muted)
-        .child(text)
+        .child(text.into())
         .into_any_element()
 }
 
