@@ -1,7 +1,7 @@
 //! The new-thread artwork shown again behind an open conversation, sized and
 //! softened by [`ChatBackground`]. Shared by the shell and the Appearance
 //! preview so both draw the same layer.
-use crate::settings::{ChatBackground, ChatBackgroundPlacement};
+use crate::settings::{ChatBackground, ChatBackgroundPlacement, ShellFrameSidebar};
 use crate::theme::Theme;
 use gpui::{
     AnyElement, Background, Bounds, ContentMask, Corners, Hsla, IntoElement, ParentElement, Pixels,
@@ -11,6 +11,9 @@ use std::{cell::Cell, rc::Rc, sync::Arc};
 
 const TAB_FADE_TOP: f32 = 6.0;
 const TAB_FADE_BOTTOM: f32 = Theme::TITLEBAR_HEIGHT + 46.0;
+const SIDEBAR_GLASS_BLUR: f32 = 24.0;
+const SIDEBAR_GLASS_SHADE: f32 = 0.62;
+const SIDEBAR_DARKER: f32 = 0.42;
 
 pub(crate) type Painted = Rc<Cell<Option<(Bounds<Pixels>, Bounds<Pixels>)>>>;
 
@@ -105,7 +108,14 @@ impl Backdrop {
         .inset_0()
     }
 
-    pub(crate) fn frame(&self, shade: f32, blur: f32, content_left: f32, inset: f32) -> gpui::Div {
+    pub(crate) fn frame(
+        &self,
+        shade: f32,
+        blur: f32,
+        card_left: f32,
+        inset: f32,
+        column: Option<ShellFrameSidebar>,
+    ) -> gpui::Div {
         let frame_painted = Painted::default();
         let (painted, target) = (self.painted.clone(), frame_painted.clone());
         let color = self.scrim_color;
@@ -128,14 +138,38 @@ impl Backdrop {
                 gpui::canvas(
                     |_, _, _| {},
                     move |own, _, window, _| {
-                        if blur > 0.0 {
+                        let pieces = frame_pieces(own, card_left, inset, column.is_some());
+                        let column_blur = match column {
+                            Some(ShellFrameSidebar::Glass) => blur.max(SIDEBAR_GLASS_BLUR),
+                            _ => blur,
+                        };
+                        if blur > 0.0 || column_blur > 0.0 {
                             window.paint_layer(own, |window| {
-                                for piece in frame_pieces(own, content_left, inset) {
-                                    window.paint_backdrop_blur(piece, Default::default(), px(blur));
+                                for &(piece, in_column) in &pieces {
+                                    let radius = if in_column { column_blur } else { blur };
+                                    if radius > 0.0 {
+                                        window.paint_backdrop_blur(
+                                            piece,
+                                            Default::default(),
+                                            px(radius),
+                                        );
+                                    }
                                 }
                             });
                         }
                         window.paint_quad(gpui::fill(own, color.opacity(shade)));
+                        let extra = match column {
+                            Some(ShellFrameSidebar::Darker) => SIDEBAR_DARKER,
+                            Some(ShellFrameSidebar::Glass) => {
+                                1.0 - (1.0 - SIDEBAR_GLASS_SHADE) / (1.0 - shade).max(0.01)
+                            }
+                            _ => 0.0,
+                        };
+                        if extra > 0.0 {
+                            for &(piece, _) in pieces.iter().filter(|(_, in_column)| *in_column) {
+                                window.paint_quad(gpui::fill(piece, color.opacity(extra)));
+                            }
+                        }
                     },
                 )
                 .absolute()
@@ -145,20 +179,62 @@ impl Backdrop {
 }
 
 /// Strips reach under the card by its radius so its rounded corners show frame, not raw art.
-fn frame_pieces(own: Bounds<Pixels>, content_left: f32, inset: f32) -> [Bounds<Pixels>; 4] {
+fn frame_pieces(
+    own: Bounds<Pixels>,
+    card_left: f32,
+    inset: f32,
+    column: bool,
+) -> Vec<(Bounds<Pixels>, bool)> {
     let reach = px(crate::shell::CARD_RADIUS);
     let card_top = own.top() + px(Theme::TITLEBAR_HEIGHT);
-    let card_left = own.left() + px(content_left);
+    let card_left = own.left() + px(card_left);
     let card_right = own.right() - px(inset);
     let card_bottom = own.bottom() - px(inset);
-    [
-        Bounds::from_corners(own.origin, point(own.right(), card_top + reach)),
-        Bounds::from_corners(
-            point(own.left(), card_top),
-            point(card_left + reach, own.bottom()),
+    let gutter = Bounds::from_corners(point(card_right - reach, card_top), own.bottom_right());
+    if !column {
+        return vec![
+            (
+                Bounds::from_corners(own.origin, point(own.right(), card_top + reach)),
+                false,
+            ),
+            (
+                Bounds::from_corners(
+                    point(own.left(), card_top),
+                    point(card_left + reach, own.bottom()),
+                ),
+                false,
+            ),
+            (gutter, false),
+            (
+                Bounds::from_corners(point(own.left(), card_bottom - reach), own.bottom_right()),
+                false,
+            ),
+        ];
+    }
+    vec![
+        (
+            Bounds::from_corners(point(card_left, own.top()), point(own.right(), card_top)),
+            false,
         ),
-        Bounds::from_corners(point(card_right - reach, card_top), own.bottom_right()),
-        Bounds::from_corners(point(own.left(), card_bottom - reach), own.bottom_right()),
+        (gutter, false),
+        (
+            Bounds::from_corners(
+                point(card_left + reach, card_bottom - reach),
+                own.bottom_right(),
+            ),
+            false,
+        ),
+        (
+            Bounds::from_corners(own.origin, point(card_left, own.bottom())),
+            true,
+        ),
+        (
+            Bounds::from_corners(
+                point(card_left, card_top),
+                point(card_left + reach, own.bottom()),
+            ),
+            true,
+        ),
     ]
 }
 
