@@ -321,9 +321,8 @@ fn decode_raster_image_bounded(
     })
 }
 
-/// Most pixels a downscaled raster keeps: under 50 MiB once GPUI holds its
-/// CPU and GPU copies, inside a preview's 64 MiB budget.
-const DOWNSCALED_PIXELS: usize = 6 * 1024 * 1024;
+/// 8 bytes a pixel held by GPUI plus a worst-case PNG stays inside a preview's 64 MiB.
+const DOWNSCALED_PIXELS: usize = 5 * 1024 * 1024;
 /// Largest RGBA buffer a source other than a plain PNG decodes into whole
 /// before it is downscaled.
 const FULL_DECODE_BYTES: u64 = 256 * 1024 * 1024;
