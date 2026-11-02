@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use gpui::{AnyElement, Context, Pixels, ScrollHandle, SharedString, Window, div, prelude::*, px};
 
+use crate::motion::{EASE, EASE_DIM, EASE_OUT, EASE_SETTLE, EASE_TAILWIND, Leg, MotionSpec};
 use crate::popover::{self, MenuScrollbarMetrics, MenuScrollbarState, ScrollRailHost};
 use crate::theme::Theme;
 
@@ -1337,6 +1338,51 @@ pub fn section_tab(
         .bg(crate::motion::hover_blend(&hover_key, base_bg, hover_bg))
         .id(id.into())
         .on_hover(crate::motion::hover_listener(hover_key))
+}
+
+pub const COLLAPSE_HEIGHT: Leg = Leg {
+    enter: MotionSpec::new(460, EASE_TAILWIND),
+    exit: MotionSpec::new(420, EASE_TAILWIND).with_delay(50),
+};
+/// Closing, the content dims before the edge reaches it so the space is
+/// never seen empty; opening, it comes in once the space has mostly opened.
+pub const COLLAPSE_FADE: Leg = Leg {
+    enter: MotionSpec::new(240, EASE_OUT).with_delay(300),
+    exit: MotionSpec::new(420, EASE_DIM),
+};
+pub const NAV_FADE: Leg = Leg::both(MotionSpec::new(200, EASE));
+pub const NAV_RISE: Leg = Leg::both(MotionSpec::new(250, EASE_SETTLE));
+pub const NAV_RISE_PX: f32 = 4.0;
+pub const PAGE_FADE: Leg = Leg::both(MotionSpec::new(200, EASE));
+pub const PAGE_RISE: Leg = Leg::both(MotionSpec::new(300, EASE_SETTLE));
+pub const PAGE_RISE_PX: f32 = 8.0;
+pub const NAV_HIGHLIGHT: MotionSpec = MotionSpec::new(200, EASE);
+pub const HINT_FADE: MotionSpec = MotionSpec::new(150, EASE);
+/// Replaced text: the old fades quickly, the new waits a beat and settles in.
+pub const SWAP_FADE: Leg = Leg {
+    enter: MotionSpec::new(315, EASE_SETTLE).with_delay(135),
+    exit: MotionSpec::new(225, EASE),
+};
+
+/// Opens and closes `content`'s height, `height` when open; `None` once
+/// closed. Rows below move with the edge, and the content is clipped to the
+/// moving space from the top.
+pub fn collapse(
+    key: &str,
+    open: bool,
+    height: Pixels,
+    reduced: bool,
+    content: impl IntoElement,
+) -> Option<gpui::Div> {
+    let staged = crate::motion::staged(key, open, &[COLLAPSE_HEIGHT, COLLAPSE_FADE], reduced);
+    staged.visible().then(|| {
+        div()
+            .flex_none()
+            .h(height * staged.leg(COLLAPSE_HEIGHT))
+            .overflow_hidden()
+            .opacity(staged.leg(COLLAPSE_FADE))
+            .child(content)
+    })
 }
 
 /// Height of every settings select trigger: centered in a 52px card row.
