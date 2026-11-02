@@ -18242,7 +18242,11 @@ mod tests {
         let active = raw.rfind('\n').unwrap() + 1..raw.len();
         let projection = TextProjection::rich(&raw, Some(active), None);
         assert!(projection.display.starts_with("café"));
-        assert!(projection.display.contains("$Bla\u{00A0}Bla"));
+        assert!(
+            projection
+                .display
+                .contains(&format!("{CHIP_ICON_SLOT}Bla\u{00A0}Bla"))
+        );
         assert_eq!(projection.mentions.len(), 1);
         let (link, display) = &projection.mentions[0];
         assert_eq!(projection.raw_to_display(link.range.start), display.start);
