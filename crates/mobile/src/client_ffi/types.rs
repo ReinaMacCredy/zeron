@@ -1185,6 +1185,7 @@ impl From<RepoRef> for zc::rpc::RepoRef {
             name: r.name,
             current: r.current,
             worktree_path: r.worktree_path,
+            ..Default::default()
         }
     }
 }

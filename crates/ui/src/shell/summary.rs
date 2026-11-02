@@ -575,14 +575,20 @@ impl Shell {
         chat: Option<&zeron_proto::Chat>,
         cx: &mut Context<Self>,
     ) -> SidecarSection {
-        let branch = chat.and_then(|chat| {
-            chat.source_context
-                .as_ref()
-                .map(|ctx| ctx.branch.clone())
-                .or_else(|| chat.branch.clone())
-                .filter(|branch| !branch.is_empty())
-        });
-        let head = chat.and_then(|chat| {
+        let work_tree = chat
+            .and_then(|chat| chat.work_tree.as_ref())
+            .filter(|work_tree| !work_tree.removed);
+        let branch = match work_tree {
+            Some(work_tree) => work_tree.branch.clone(),
+            None => chat.and_then(|chat| {
+                chat.source_context
+                    .as_ref()
+                    .map(|ctx| ctx.branch.clone())
+                    .or_else(|| chat.branch.clone())
+                    .filter(|branch| !branch.is_empty())
+            }),
+        };
+        let head = chat.filter(|_| work_tree.is_none()).and_then(|chat| {
             chat.source_context
                 .as_ref()
                 .and_then(|ctx| ctx.head_sha.as_deref())
@@ -596,15 +602,16 @@ impl Shell {
                 state.local_device_id.as_deref() == Some(chat.device_id.as_str())
             });
             let home = local.then(|| std::env::var("HOME").ok()).flatten();
-            let path = chat
-                .and_then(|chat| chat.cwd.as_deref())
+            let path = work_tree
+                .map(|work_tree| work_tree.path.as_str())
+                .or_else(|| chat.and_then(|chat| chat.cwd.as_deref()))
                 .map(|cwd| zeron_proto::claude_panel::tilde(cwd, home.as_deref()));
             let git = chat
                 .and_then(|chat| state.space_for_chat(chat))
                 .is_some_and(|space| space.git_detected);
             (device, path, git)
         };
-        let comparison = match chat.filter(|_| git) {
+        let comparison = match chat.filter(|_| git && work_tree.is_none()) {
             Some(chat) => {
                 let key = format!(
                     "{}@{}",

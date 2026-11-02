@@ -83,6 +83,7 @@ mod turn_clock;
 pub mod uploads;
 pub mod usage;
 pub mod voice;
+pub mod work_trees;
 mod working_tree;
 pub mod workspace_files;
 pub mod workspace_host;
@@ -478,6 +479,10 @@ impl EngineCore {
         sessions.set_turn_listener(Arc::new(move |chat_id, cwd| {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
+        let work_trees = work_trees::WorkTrees::start(repos.clone(), workspace.clone(), &device_id);
+        let synced = work_trees.clone();
+        diff_sync.set_sync_listener(Arc::new(move |root| synced.note_checkout_changed(root)));
+        sessions.set_work_trees(work_trees);
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         let computer = computer::runtime::ComputerRuntime::start(data_dir);
         computer.attach(&sessions);

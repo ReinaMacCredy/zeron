@@ -1518,6 +1518,7 @@ impl DemoHost {
             name: name.into(),
             current,
             worktree_path: worktree.map(str::to_owned),
+            ..Default::default()
         };
         if path.contains("zeron") {
             vec![

@@ -115,6 +115,7 @@ pub mod visuals;
 pub mod voice;
 mod whats_new;
 mod window_capture;
+mod work_tree_badge;
 mod workspace_links;
 
 use std::path::PathBuf;

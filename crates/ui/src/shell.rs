@@ -101,6 +101,7 @@ mod navigation_focus;
 mod navigation_tests;
 mod pane_tools;
 mod panel_layout;
+mod skills;
 #[cfg(test)]
 mod type_to_focus_tests;
 use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_tween};
@@ -1905,6 +1906,7 @@ pub enum Route {
     TaskCenter,
     Supervisor,
     Docs,
+    Skills,
 }
 
 /// Maximum width the right pane may occupy while retaining the conversation
@@ -2074,6 +2076,7 @@ pub enum NavEntry {
     TaskCenter(String),
     Supervisor,
     Docs(Option<&'static str>),
+    Skills,
 }
 
 /// Browser-style navigation history for the titlebar back/forward buttons
@@ -3366,7 +3369,11 @@ impl Render for SidebarPane {
             if shell.whats_new_card_animates(cx) && window.is_window_active() {
                 window.request_animation_frame();
             }
-            shell.render_chat_sidebar(&theme, cx)
+            if matches!(shell.route, Route::Skills) {
+                shell.render_skills_sidebar(&theme, window, cx)
+            } else {
+                shell.render_chat_sidebar(&theme, cx)
+            }
         });
         div().size_full().child(inner).into_any_element()
     }
@@ -3590,6 +3597,7 @@ pub struct Shell {
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     usage_page: Option<Entity<crate::usage::UsagePage>>,
     docs_article: Option<&'static str>,
+    skills: skills::SkillsPage,
     docs_search: Entity<ComposerInput>,
     _docs_search_sub: Subscription,
     inbox_page: Option<(Entity<crate::inbox::InboxPage>, Subscription)>,
@@ -3628,6 +3636,7 @@ pub struct Shell {
     archived_page: Option<Entity<ArchivedPage>>,
     source_control_page: Option<Entity<SourceControlPage>>,
     home_view: Option<Entity<crate::home::HomeView>>,
+    home_raise: Option<WidthTween>,
     new_work_scroll: gpui::ScrollHandle,
     _home_events: Option<Subscription>,
     appearance_page: Option<Entity<AppearancePage>>,
@@ -4168,6 +4177,7 @@ impl Shell {
             Some("inbox") => Route::Inbox,
             Some("tasks") => Route::Tasks,
             Some("supervisor") => Route::Supervisor,
+            Some("skills") => Route::Skills,
             Some(_) if open_task.is_some() => Route::TaskCenter,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
@@ -4226,6 +4236,7 @@ impl Shell {
             Route::TaskCenter => NavEntry::TaskCenter(open_task.clone().unwrap_or_default()),
             Route::Supervisor => NavEntry::Supervisor,
             Route::Docs => NavEntry::Docs(None),
+            Route::Skills => NavEntry::Skills,
         });
         // Parent notifications carry presentation changes (session status,
         // elapsed labels, menus); sibling animation/caret ticks do not.
@@ -4370,6 +4381,7 @@ impl Shell {
             pull_requests_page: None,
             usage_page: None,
             docs_article: None,
+            skills: Default::default(),
             docs_search,
             _docs_search_sub: docs_search_sub,
             inbox_page: None,
@@ -4401,6 +4413,7 @@ impl Shell {
             archived_page: None,
             source_control_page: None,
             home_view: None,
+            home_raise: None,
             new_work_scroll: gpui::ScrollHandle::new(),
             _home_events: None,
             appearance_page: None,
@@ -9017,6 +9030,7 @@ impl Shell {
             NavEntry::TaskCenter(task_id) => self.enter_task_center_route(task_id, cx),
             NavEntry::Supervisor => self.enter_supervisor_route(cx),
             NavEntry::Docs(article) => self.enter_docs_route(article, cx),
+            NavEntry::Skills => self.enter_skills_route(cx),
             NavEntry::Settings(section) => {
                 if !matches!(self.route, Route::Settings(_)) {
                     self.settings_return_route = self.route;
@@ -9793,6 +9807,20 @@ impl Shell {
             None => return false,
         }
         true
+    }
+
+    fn chat_work_tree(
+        &self,
+        chat_id: &str,
+        cx: &App,
+    ) -> (Option<zeron_proto::ChatWorkTree>, Option<String>) {
+        self.state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .map(|chat| (chat.work_tree.clone(), chat.branch.clone()))
+            .unwrap_or_default()
     }
 
     fn set_chat_settled(&mut self, chat_id: String, settled: bool, cx: &mut Context<Self>) {
@@ -12028,11 +12056,7 @@ impl Shell {
         let viewport = window.viewport_size();
         let panel = settings_panel_bounds(viewport);
         let header = settings::widgets::SETTINGS_HEADER_HEIGHT;
-        let query = self.settings_search.read(cx).text().to_string();
-        let searching = !query.trim().is_empty();
-        let subtabs = (!searching)
-            .then(|| self.render_settings_subtabs(section, &theme, cx))
-            .flatten();
+        let subtabs = self.render_settings_subtabs(section, &theme, cx);
         let page_top = header
             + if subtabs.is_some() {
                 SETTINGS_SUBTABS_HEIGHT
@@ -12050,19 +12074,9 @@ impl Shell {
             cx,
         );
         let nav = self.render_settings_nav(section, &theme, window, cx);
-        let outlet = if searching {
-            self.render_settings_results(&query, &theme, cx)
-        } else {
-            self.settings_outlet(section, window, cx)
-        };
-        let action = (!searching)
-            .then(|| self.settings_header_action(section, &theme, window, cx))
-            .flatten();
-        let crumb = if searching {
-            "Search"
-        } else {
-            section.group().label()
-        };
+        let outlet = self.settings_outlet(section, window, cx);
+        let action = self.settings_header_action(section, &theme, window, cx);
+        let crumb = section.group().label();
         let header_row = div()
             .id("settings-header")
             .h(px(header))
@@ -12344,8 +12358,35 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let query = self.settings_search.read(cx).text().to_string();
-        let searching = !query.trim().is_empty();
-        let current = (!searching).then(|| section.group());
+        if !query.trim().is_empty() {
+            let hits = self.render_settings_hits(&query, theme, cx);
+            return settings::widgets::scroll_faded(
+                "settings-nav-scroll",
+                div()
+                    .id("settings-sections")
+                    .role(gpui::Role::List)
+                    .aria_label("Settings search results")
+                    .w_full()
+                    .overflow_y_scroll()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(Theme::SPACE_SM))
+                            .pt(px(Theme::SPACE_MD))
+                            .pb(px(Theme::SPACE_SM))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(self.render_settings_search(theme, &query, cx))
+                            .child(hits),
+                    ),
+            )
+            .into_any_element();
+        }
+        let current = section.group();
         let cloud_offered = self.state.read(cx).cloud_offered();
         let groups: Vec<SettingsGroup> = SettingsGroup::ALL
             .into_iter()
@@ -12379,8 +12420,7 @@ impl Shell {
                                 .enumerate()
                                 .map(|(index, group)| {
                                     let groups = groups.clone();
-                                    let selected = current == Some(group);
-                                    let tab_stop = selected || (current.is_none() && index == 0);
+                                    let selected = current == group;
                                     let key = format!("settings-nav-{}", group.label());
                                     let hover_key = format!("{key}-hover");
                                     let selection_t = settings::widgets::tab_selection_t(
@@ -12405,10 +12445,10 @@ impl Shell {
                                     .aria_label(group.label())
                                     .aria_selected(selected)
                                     .track_focus(
-                                        &self.settings_nav_focus[index].clone().tab_stop(tab_stop),
+                                        &self.settings_nav_focus[index].clone().tab_stop(selected),
                                     )
                                     .tab_index(0)
-                                    .tab_stop(tab_stop)
+                                    .tab_stop(selected)
                                     .on_key_down(cx.listener(
                                         move |this, event: &gpui::KeyDownEvent, window, cx| {
                                             let count = groups.len();
@@ -12506,23 +12546,25 @@ impl Shell {
         )
     }
 
-    fn render_settings_results(
+    fn render_settings_hits(
         &self,
         query: &str,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let hits = settings_hits(query, self.state.read(cx).cloud_offered());
-        let title = if hits.is_empty() {
-            format!("No settings match “{}”", query.trim())
-        } else {
-            format!(
-                "{} result{} for “{}”",
-                hits.len(),
-                if hits.len() == 1 { "" } else { "s" },
-                query.trim()
-            )
-        };
+        if hits.is_empty() {
+            return div()
+                .px(px(Theme::SPACE_SM))
+                .py(px(6.0))
+                .text_size(crate::typography::ui_rems(13.0))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(format!(
+                    "No settings match “{}”",
+                    query.trim()
+                )))
+                .into_any_element();
+        }
         let rows = hits.into_iter().enumerate().map(|(ix, hit)| {
             let SettingsHit {
                 page,
@@ -12530,62 +12572,65 @@ impl Shell {
                 path,
                 target,
             } = hit;
-            let fill = div()
+            div()
                 .id(("settings-hit", ix))
                 .debug_selector(move || format!("settings-hit-{title}"))
                 .role(gpui::Role::Button)
                 .aria_label(SharedString::from(format!("{title}, {path}")))
                 .tab_index(0)
-                .mx(px(6.0))
-                .my(px(4.0))
-                .px(px(10.0))
-                .py(px(8.0))
-                .min_h(px(52.0))
                 .flex()
-                .items_center()
+                .flex_row()
+                .items_start()
+                .gap(px(8.0))
                 .rounded(px(8.0))
+                .px(px(Theme::SPACE_SM))
+                .py(px(6.0))
+                .flex_shrink_0()
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.glass_hover()))
                 .focus_visible(|s| s.bg(crate::theme::glass_selected_bg()))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.clear_settings_search(cx);
                     this.open_settings(page, cx);
                     if let Some(target) = target {
                         settings::search::reveal(target, window);
                     }
                 }))
                 .child(
+                    div().h(px(18.0)).flex().items_center().child(
+                        icon(page.group().icon())
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    ),
+                )
+                .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(settings::widgets::row_title(theme, title))
-                        .child(settings::widgets::meta_line(
-                            theme,
-                            vec![div().child(path).into_any_element()],
-                        )),
-                );
-            div()
-                .flex()
-                .flex_col()
-                .when(ix > 0, |el| {
-                    el.child(
-                        div()
-                            .mx(px(16.0))
-                            .h(px(1.0))
-                            .bg(settings::widgets::row_divider(theme)),
-                    )
-                })
-                .child(fill)
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .line_height(crate::typography::ui_rems(18.0))
+                                .text_color(theme.text)
+                                .child(SharedString::from(title)),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .line_height(crate::typography::ui_rems(16.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(path)),
+                        ),
+                )
         });
         div()
-            .id("settings-search-results")
-            .size_full()
-            .overflow_y_scroll()
-            .child(
-                settings::widgets::settings_page()
-                    .child(settings::widgets::page_header(theme, &title, None))
-                    .child(settings::widgets::section_card(theme).children(rows)),
-            )
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .children(rows)
             .into_any_element()
     }
 
@@ -12638,6 +12683,10 @@ impl Shell {
         // relative time instead. Hovering the ROW swaps the corner for the
         // ARCHIVE button. Compact rows keep status first and elapsed time last;
         // their archive control occupies the remote-icon slot on hover.
+        let branch = match self.chat_work_tree(&id, cx).0 {
+            Some(work_tree) => work_tree.branch.map(SharedString::from),
+            None => branch,
+        };
         if search_query.is_none() && !self.settings.sidebar_compact {
             return self.render_sidebar_card(
                 id,
@@ -12678,6 +12727,21 @@ impl Shell {
             .iter()
             .find(|chat| chat.id == id)
             .map(|chat| chat.device_id.clone());
+        let (work_tree, work_tree_base) = self.chat_work_tree(&id, cx);
+        let has_change_request = change_request.is_some();
+        let work_tree_badge = |key: &str| {
+            (!has_change_request)
+                .then(|| {
+                    crate::work_tree_badge::chat_badge(
+                        format!("{row_id}-{key}"),
+                        work_tree.as_ref(),
+                        work_tree_base.as_deref(),
+                        crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                        theme,
+                    )
+                })
+                .flatten()
+        };
         let compact = search_query.is_none() && (slim || self.settings.sidebar_compact);
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
         let host = self
@@ -13299,93 +13363,98 @@ impl Shell {
                         .then(|| subagent_pill("compact"))
                         .flatten();
                     let archive_id = id.clone();
-                    el.children(change_request.clone().map(|summary| {
-                        if preview {
-                            crate::change_requests::pull_request_badge_preview(
-                                format!("{row_id}-compact-pr").into(),
-                                summary,
-                                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                theme,
-                            )
-                        } else {
-                            crate::change_requests::pull_request_badge(
-                                format!("{row_id}-compact-pr").into(),
-                                summary,
-                                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                pr_device.clone(),
-                                theme,
-                            )
-                        }
-                    }))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("{row_id}-corner")))
-                            .debug_selector({
-                                let id = id.clone();
-                                move || format!("chat-time-{id}")
-                            })
-                            .when(text_hint, |el| {
-                                el.min_w(crate::typography::ui_rems(COMPACT_JUMP_HINT_WIDTH))
-                            })
-                            // A running-subagents pill can be wider than the plain time.
-                            .when(!text_hint, |el| el.min_w(px(30.0)))
-                            // Fixed height so swapping the time text for the
-                            // archive glyph never resizes the slot.
-                            .h(px(14.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_end()
-                            .aria_label(if show_archive {
-                                if archived { "Unarchive" } else { "Archive" }
+                    el.children(work_tree_badge("compact-work-tree"))
+                        .children(change_request.clone().map(|summary| {
+                            if preview {
+                                crate::change_requests::pull_request_badge_preview(
+                                    format!("{row_id}-compact-pr").into(),
+                                    summary,
+                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    theme,
+                                )
                             } else {
-                                "Session time"
-                            })
-                            .when(show_archive, |el| {
-                                el.role(gpui::Role::Button)
-                                    .cursor_pointer()
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.chat_hover_resync = true;
-                                        this.set_chat_archived(archive_id.clone(), !archived, cx);
-                                    }))
-                                    .tooltip(crate::settings::widgets::text_tooltip_above(
-                                        if archived {
-                                            "Unarchive session"
-                                        } else {
-                                            ShortcutId::ArchiveSession.label()
-                                        },
-                                    ))
-                            })
-                            .child(if show_archive {
-                                icon(if archived {
-                                    icons::ARCHIVE_UP_MINIMALISTIC
-                                } else {
-                                    icons::ARCHIVE_MINIMALISTIC
+                                crate::change_requests::pull_request_badge(
+                                    format!("{row_id}-compact-pr").into(),
+                                    summary,
+                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    pr_device.clone(),
+                                    theme,
+                                )
+                            }
+                        }))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("{row_id}-corner")))
+                                .debug_selector({
+                                    let id = id.clone();
+                                    move || format!("chat-time-{id}")
                                 })
-                                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                .when(text_hint, |el| {
+                                    el.min_w(crate::typography::ui_rems(COMPACT_JUMP_HINT_WIDTH))
+                                })
+                                // A running-subagents pill can be wider than the plain time.
+                                .when(!text_hint, |el| el.min_w(px(30.0)))
+                                // Fixed height so swapping the time text for the
+                                // archive glyph never resizes the slot.
+                                .h(px(14.0))
                                 .flex_none()
-                                .text_color(theme.text_muted)
-                                .into_any_element()
-                            } else if let Some(pill) = pill {
-                                pill
-                            } else {
-                                div()
-                                    .whitespace_nowrap()
-                                    .text_right()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(subline)
-                                    .child(
-                                        compact_jump_label
-                                            .or(mission.as_ref().map(|m| m.count()))
-                                            .unwrap_or(time_ago),
-                                    )
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .aria_label(if show_archive {
+                                    if archived { "Unarchive" } else { "Archive" }
+                                } else {
+                                    "Session time"
+                                })
+                                .when(show_archive, |el| {
+                                    el.role(gpui::Role::Button)
+                                        .cursor_pointer()
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.chat_hover_resync = true;
+                                            this.set_chat_archived(
+                                                archive_id.clone(),
+                                                !archived,
+                                                cx,
+                                            );
+                                        }))
+                                        .tooltip(crate::settings::widgets::text_tooltip_above(
+                                            if archived {
+                                                "Unarchive session"
+                                            } else {
+                                                ShortcutId::ArchiveSession.label()
+                                            },
+                                        ))
+                                })
+                                .child(if show_archive {
+                                    icon(if archived {
+                                        icons::ARCHIVE_UP_MINIMALISTIC
+                                    } else {
+                                        icons::ARCHIVE_MINIMALISTIC
+                                    })
+                                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                    .flex_none()
+                                    .text_color(theme.text_muted)
                                     .into_any_element()
-                            }),
-                    )
+                                } else if let Some(pill) = pill {
+                                    pill
+                                } else {
+                                    div()
+                                        .whitespace_nowrap()
+                                        .text_right()
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .text_color(subline)
+                                        .child(
+                                            compact_jump_label
+                                                .or(mission.as_ref().map(|m| m.count()))
+                                                .unwrap_or(time_ago),
+                                        )
+                                        .into_any_element()
+                                }),
+                        )
                 }),
         )
         // Line 3 is structural, not reserved whitespace: compact states
@@ -13434,6 +13503,7 @@ impl Shell {
                     // Stable invisible spring keeps the optional PR badge
                     // pinned right without changing no-PR paint.
                     .child(div().flex_1().min_w_0())
+                    .children(work_tree_badge("work-tree"))
                     .when_some(change_request, |el, summary| {
                         el.child(if preview {
                             crate::change_requests::pull_request_badge_preview(
@@ -13535,6 +13605,19 @@ impl Shell {
         use zeron_proto::ChatIndicator as Status;
         let row_id = format!("chat-{id}");
         let fade_key = format!("{row_id}-hover");
+        let (work_tree, work_tree_base) = self.chat_work_tree(&id, cx);
+        let work_tree_badge = change_request
+            .is_none()
+            .then(|| {
+                crate::work_tree_badge::chat_badge(
+                    format!("{row_id}-work-tree"),
+                    work_tree.as_ref(),
+                    work_tree_base.as_deref(),
+                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                    theme,
+                )
+            })
+            .flatten();
         let now = Utc::now();
         let worktree;
         let diff;
@@ -14127,6 +14210,7 @@ impl Shell {
                     (None, Some(branch)) => el.child(branch),
                     (None, None) => el.child(div().flex_1().min_w_0()),
                 })
+                .children(work_tree_badge)
                 .when_some(change_request, |el, summary| {
                     el.child(if preview {
                         crate::change_requests::pull_request_badge_preview(
@@ -15461,6 +15545,7 @@ impl Shell {
             }
             RailItem::Inbox => matches!(self.route, Route::Inbox),
             RailItem::Tasks => matches!(self.route, Route::Tasks | Route::TaskCenter),
+            RailItem::Skills => matches!(self.route, Route::Skills),
             RailItem::PullRequests => matches!(self.route, Route::PullRequests),
             RailItem::Settings => matches!(self.route, Route::Settings(_)),
         }
@@ -15484,6 +15569,10 @@ impl Shell {
                 self.enter_pull_requests_route(cx);
                 self.nav.push(NavEntry::PullRequests);
                 cx.notify();
+            }
+            RailItem::Skills => {
+                self.settings_focus_pending = false;
+                self.open_skills(cx);
             }
             RailItem::Tasks => {
                 self.settings_focus_pending = false;
@@ -15965,6 +16054,9 @@ impl Shell {
         // path close here; the others remain explicit blockers.
         if self.whats_new_dialog.is_some() && !self.sync_flow.has_visible_overlay() {
             self.close_whats_new(cx);
+            return true;
+        }
+        if self.escape_skill_dialog(cx) {
             return true;
         }
         if self.help_menu.is_open() {
@@ -16593,6 +16685,10 @@ impl Shell {
             overlays.push(dialog);
         }
 
+        if let Some(dialog) = self.render_skill_dialog(viewport, &theme, window, cx) {
+            overlays.push(dialog);
+        }
+
         if let Some(flow) = self.discard_working_tree.clone() {
             let card = match flow {
                 DiscardWorkingTreeFlow::Confirm(_) => {
@@ -16915,6 +17011,10 @@ impl Shell {
             return self.render_docs_page(main_content_width, window, cx);
         }
 
+        if matches!(self.route, Route::Skills) {
+            return self.render_skills_page(main_content_width, cx);
+        }
+
         if matches!(self.route, Route::PullRequests) {
             if let Some((url, device)) = self.pending_pull_request.take() {
                 self.show_pull_request_detail(url, device, window, cx);
@@ -16957,9 +17057,11 @@ impl Shell {
             pickers.set_terminal_open(Some(terminal_open), cx)
         });
         let has_selection = self.state.read(cx).selected_chat.is_some();
+        let home = settings::home_widgets(cx);
+        let home_raised = home.any_visible() && !home.collapsed;
         self.composer_dock
             .borrow_mut()
-            .set_hero_anchor(HOME_HERO_ANCHOR);
+            .set_hero_anchor(if home_raised { HOME_HERO_ANCHOR } else { 0.5 });
         let composer = self.composer.read(cx);
         let hero_floor =
             if composer.config_panel_on_hero(cx) || (composer.waiting_open() && !has_selection) {
@@ -16968,6 +17070,15 @@ impl Shell {
                 0.0
             };
         self.composer_dock.borrow_mut().set_hero_floor(hero_floor);
+        let raise_target = if home_raised { 1.0 } else { 0.0 };
+        self.home_raise = Some(match self.home_raise.take() {
+            Some(tween) if (tween.to - raise_target).abs() > f32::EPSILON => {
+                WidthTween::new(self.eval_tween(Some(tween), tween.to), raise_target)
+            }
+            Some(tween) => tween,
+            None => WidthTween::new(raise_target, raise_target),
+        });
+        let raise = self.eval_tween(self.home_raise, raise_target);
         let transcript_geometry_ready =
             bottom_stack_measurement_matches(self.bottom_stack_has_composer.get(), has_selection);
         let ui_settings = settings::current(cx);
@@ -17064,8 +17175,12 @@ impl Shell {
             let bounds = self.composer.read(cx).surface_bounds();
             let opacity = new_thread_background_opacity(theme.is_frost());
             let full_height = new_thread_background_height(self.viewport_height);
-            let hero_height = match bounds.get() {
-                Some(pill) => full_height.min(f32::from(pill.bottom()) + 24.0),
+            let hero_height = match bounds.get().filter(|_| raise > 0.0) {
+                Some(pill) => motion::lerp(
+                    full_height,
+                    full_height.min(f32::from(pill.bottom()) + 24.0),
+                    raise,
+                ),
                 None => full_height,
             };
             let backdrop = if self.settings.inset_shell && !has_selection {
@@ -20226,6 +20341,7 @@ impl Render for Shell {
                             | Route::Tasks
                             | Route::Supervisor
                             | Route::Docs
+                            | Route::Skills
                     )
                     || (self.route == Route::TaskCenter && !chat_under);
                 // The Pull requests route shares this layout without the
@@ -20711,6 +20827,7 @@ mod tests {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            work_tree: None,
             unsettled_at: None,
         }
     }
@@ -23740,6 +23857,7 @@ mod exit_regressions {
                         previous_harnesses: Vec::new(),
                         delegation: None,
                         settle: None,
+                        work_tree: None,
                         unsettled_at: None,
                         space_id: Some("other".into()),
                         last_seen_at: None,
@@ -25038,6 +25156,7 @@ mod right_tab_mouse_regressions {
                     previous_harnesses: Vec::new(),
                     delegation: None,
                     settle: None,
+                    work_tree: None,
                     unsettled_at: None,
                 };
                 let mut side = source.clone();

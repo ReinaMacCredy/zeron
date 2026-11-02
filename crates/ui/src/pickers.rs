@@ -1367,6 +1367,7 @@ pub struct Pickers {
     switch_task: Option<Task<()>>,
     /// Last mid-session switch failure (shown in the ref popover).
     switch_error: Option<String>,
+    ref_note: Option<String>,
     mutate_task: Option<Task<()>>,
     /// A model pick on a chat with history, parked behind the switch-model
     /// dialog until the user confirms or backs out.
@@ -1768,6 +1769,7 @@ impl Pickers {
             switching: None,
             switch_task: None,
             switch_error: None,
+            ref_note: None,
             mutate_task: None,
             pending_model_switch: None,
             viewed_harness: None,
@@ -2839,6 +2841,7 @@ impl Pickers {
         match kind {
             PickerKind::Branch => {
                 self.switch_error = None; // stale mid-session failures don't linger
+                self.ref_note = None;
                 let handle = self.search.read(cx).focus_handle(cx);
                 self.search.update(cx, |input, cx| {
                     input.set_placeholder("Search refs…", cx);
@@ -3353,10 +3356,8 @@ impl Pickers {
     // ---- selections ----
 
     fn pick_ref(&mut self, row: RepoRef, cx: &mut Context<Self>) {
-        // Refs are fixed at creation: an existing session can never move
-        // (wing's rule — the footer renders read-only labels there, so this
-        // is a belt-and-braces guard).
-        if self.chat_row(cx).is_some() {
+        if let Some(chat) = self.chat_row(cx).cloned() {
+            self.pick_session_ref(chat, row, cx);
             return;
         }
         if self.config.checkout == CheckoutKind::Cloud {
@@ -3385,6 +3386,52 @@ impl Pickers {
         self.record_draft_checkout(cx);
         self.animate_close(cx);
         cx.notify();
+    }
+
+    fn pick_session_ref(&mut self, chat: zeron_proto::Chat, row: RepoRef, cx: &mut Context<Self>) {
+        let path = match (&row.worktree_path, row.current) {
+            (Some(path), _) => Some(path.clone()),
+            (None, true) => None,
+            (None, false) => {
+                self.ref_note = Some(format!("No worktree for {}", row.name));
+                cx.notify();
+                return;
+            }
+        };
+        self.ref_note = None;
+        self.animate_close(cx);
+        cx.notify();
+        if path.is_none() && chat.work_tree.is_none() {
+            return;
+        }
+        let Some(engine) = self.engine(cx) else {
+            return;
+        };
+        let mut params = serde_json::json!({
+            "op": "setChatWorkTree",
+            "chatId": chat.id,
+            "path": path,
+        });
+        if self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str()) {
+            params["targetDeviceId"] = serde_json::Value::String(chat.device_id.clone());
+        }
+        self.mutate_task = Some(cx.spawn(async move |_, _| {
+            if let Err(err) = engine.client().call(methods::MUTATE, params).await {
+                tracing::warn!(error = %err, "setChatWorkTree mutate failed");
+            }
+        }));
+    }
+
+    fn session_ref_name(&self, cx: &App) -> Option<String> {
+        let chat = self.chat_row(cx)?;
+        match chat
+            .work_tree
+            .as_ref()
+            .filter(|work_tree| !work_tree.removed)
+        {
+            Some(work_tree) => work_tree.branch.clone(),
+            None => chat.branch.clone(),
+        }
     }
 
     /// The footer's ref / checkout-kind picks belong to the draft on the
@@ -3505,6 +3552,22 @@ impl Pickers {
         self.record_draft_checkout(cx);
         self.animate_close(cx);
         cx.notify();
+    }
+
+    pub(crate) fn ensure_draft_harness(
+        &mut self,
+        allowed: &[HarnessId],
+        cx: &mut Context<Self>,
+    ) -> Option<HarnessId> {
+        if let Some(current) = self
+            .effective_harness(cx)
+            .filter(|harness| allowed.contains(harness))
+        {
+            return Some(current);
+        }
+        let harness = *allowed.first()?;
+        self.pick_harness(harness, cx);
+        Some(harness)
     }
 
     fn pick_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
@@ -4537,10 +4600,14 @@ impl Pickers {
         };
         let names: Vec<String> = refs.iter().map(|r| r.name.clone()).collect();
         let query = self.search.read(cx).text().to_string();
-        popover::filter_indices(&query, &names)
+        let mut rows: Vec<RepoRef> = popover::filter_indices(&query, &names)
             .into_iter()
             .map(|ix| refs[ix].clone())
-            .collect()
+            .collect();
+        if self.chat_row(cx).is_some() {
+            rows.sort_by_key(|row| row.worktree_path.is_none());
+        }
+        rows
     }
 
     // ---- checkout resolution (the t3code env-mode semantics) ----
@@ -4551,8 +4618,7 @@ impl Pickers {
     fn selected_ref_index(&self, cx: &App) -> usize {
         let rows = self.filtered_ref_rows(cx);
         let selected = self
-            .chat_row(cx)
-            .and_then(|c| c.branch.clone())
+            .session_ref_name(cx)
             .or_else(|| self.config.branch.clone());
         let index = match selected {
             Some(name) => rows.iter().position(|r| r.name == name).unwrap_or(0),
@@ -6245,13 +6311,20 @@ impl Pickers {
                 return None;
             };
             let is_worktree = chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path);
+            let cloud = zeron_proto::is_cloud_device(&chat.device_id, "");
+            let work_tree = chat.work_tree.as_ref().filter(|_| !cloud);
             // A Cloud chat runs on its own machine's clone of the repository.
-            let (icon_path, label) = if zeron_proto::is_cloud_device(&chat.device_id, "") {
-                (crate::icons::CLOUD, "Cloud")
+            let (icon_path, label) = if cloud {
+                (crate::icons::CLOUD, SharedString::from("Cloud"))
+            } else if let Some(work_tree) = work_tree {
+                (
+                    crate::icons::WORKTREE,
+                    SharedString::from(format!("Worktree · {}", work_tree.folder_name())),
+                )
             } else if is_worktree {
-                (crate::icons::WORKTREE, "Worktree")
+                (crate::icons::WORKTREE, SharedString::from("Worktree"))
             } else {
-                (crate::icons::FOLDER, "Local checkout")
+                (crate::icons::FOLDER, SharedString::from("Local checkout"))
             };
             // Keep the same reading order and leading edge as the draft.
             let left = div()
@@ -6259,26 +6332,84 @@ impl Pickers {
                 .flex_row()
                 .items_center()
                 .min_w_0()
-                .child(Self::footer_label(
-                    icon_path,
-                    SharedString::from(label),
-                    &theme,
+                .child(Self::footer_label(icon_path, label, &theme).when(
+                    work_tree.is_some_and(|work_tree| work_tree.removed),
+                    |el| {
+                        el.max_w(px(240.0)).child(
+                            div()
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from("· removed")),
+                        )
+                    },
                 ));
+            let branch_label = match work_tree {
+                Some(work_tree) => work_tree
+                    .branch
+                    .clone()
+                    .map(SharedString::from)
+                    .unwrap_or_else(|| SharedString::from("Detached")),
+                None => chat
+                    .branch
+                    .clone()
+                    .map(SharedString::from)
+                    .unwrap_or_else(|| SharedString::from("No ref")),
+            };
+            let badge = change_request
+                .is_none()
+                .then(|| {
+                    crate::work_tree_badge::chat_badge(
+                        "composer-work-tree",
+                        work_tree,
+                        chat.branch.as_deref(),
+                        crate::change_requests::ChangeRequestBadgeSurface::Composer,
+                        &theme,
+                    )
+                })
+                .flatten();
+            let branch_element = if cloud {
+                Self::footer_faded_label(
+                    "composer-session-branch",
+                    crate::icons::GIT_BRANCH,
+                    branch_label,
+                    &theme,
+                )
+                .into_any_element()
+            } else {
+                let closing = (self.open.closing_since(), self.menu_geometry().below);
+                let mut overlay = (self.mounted_kind() == Some(PickerKind::Branch)).then(|| {
+                    let content = self.render_branch_popover(cx);
+                    (
+                        PickerKind::Branch,
+                        self.popover_frame(PickerKind::Branch, 320.0, content, cx),
+                    )
+                });
+                let chip = self.footer_chip(
+                    PickerKind::Branch,
+                    "composer-session-branch",
+                    crate::icons::GIT_BRANCH,
+                    branch_label,
+                    &theme,
+                    cx,
+                );
+                attach_overlay(
+                    chip,
+                    &mut overlay,
+                    PickerKind::Branch,
+                    "branch-popover",
+                    closing,
+                )
+                .into_any_element()
+            };
             let right = div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(4.0))
                 .min_w_0()
-                .child(Self::footer_faded_label(
-                    "composer-session-branch",
-                    crate::icons::GIT_BRANCH,
-                    chat.branch
-                        .clone()
-                        .map(SharedString::from)
-                        .unwrap_or_else(|| SharedString::from("No ref")),
-                    &theme,
-                ));
+                .child(branch_element)
+                .children(badge);
             // Checkout + branch stay together. PR and usage form the trailing
             // status group, independently of the branch label's length.
             let stats = self.chat_session_stats(cx);
@@ -6625,7 +6756,13 @@ impl Pickers {
         // Existing session: the highlighted row is the SESSION's branch and a
         // pick switches the checkout (see `pick_ref`); a new chat highlights
         // the draft pick.
-        let session_branch = self.chat_row(cx).and_then(|c| c.branch.clone());
+        let session = self.chat_row(cx).is_some();
+        let session_branch = self.session_ref_name(cx);
+        let base = rows
+            .iter()
+            .find(|row| row.current)
+            .map(|row| row.name.clone());
+        let first_branch = rows.iter().position(|row| row.worktree_path.is_none());
         let switching = self.switching.clone();
         let scrollbar = popover::rail(self, "branch-scrollbar", &theme, cx);
         let body: AnyElement = match &self.refs {
@@ -6654,23 +6791,56 @@ impl Pickers {
                             .flex_col()
                             .gap(px(2.0))
                             .max_h(px(self.list_budget(144.0)))
-                            .children(rows.into_iter().take(MAX_REF_ROWS).enumerate().map(
+                            .children(rows.into_iter().take(MAX_REF_ROWS).enumerate().flat_map(
                                 |(ix, row)| {
+                                    let header = session
+                                        .then(|| match (ix == 0, Some(ix) == first_branch) {
+                                            (true, false) => Some("Worktrees"),
+                                            (_, true) => Some("Branches"),
+                                            _ => None,
+                                        })
+                                        .flatten()
+                                        .map(|header| {
+                                            div()
+                                                .px(px(Theme::SPACE_SM))
+                                                .pt(px(if ix == 0 { 2.0 } else { 6.0 }))
+                                                .pb(px(2.0))
+                                                .text_size(crate::typography::ui_rems(11.0))
+                                                .text_color(theme.text_faint)
+                                                .child(SharedString::from(header))
+                                                .into_any_element()
+                                        });
                                     let label: SharedString = row.name.clone().into();
                                     let is_selected =
                                         selected.as_deref() == Some(row.name.as_str());
                                     // Right-aligned muted tag (t3code `text-[10px]
                                     // text-muted-foreground/45`): current beats worktree.
-                                    let tag: Option<&'static str> = if row.current {
-                                        Some("current")
-                                    } else if row.worktree_path.is_some() {
-                                        Some("worktree")
-                                    } else {
-                                        None
+                                    let tag: Option<SharedString> = match (
+                                        session,
+                                        row.current,
+                                        row.worktree_path.as_deref(),
+                                    ) {
+                                        (true, _, Some(path)) => std::path::Path::new(path)
+                                            .file_name()
+                                            .map(|name| name.to_string_lossy().into_owned().into()),
+                                        (true, true, None) => Some("main checkout".into()),
+                                        (false, true, _) => Some("current".into()),
+                                        (false, false, Some(_)) => Some("worktree".into()),
+                                        _ => None,
                                     };
+                                    let badge = row.work_tree_state.and_then(|state| {
+                                        crate::work_tree_badge::badge(
+                                            format!("branch-row-badge-{ix}"),
+                                            state,
+                                            row.dirty_files,
+                                            base.as_deref(),
+                                            crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                            &theme,
+                                        )
+                                    });
                                     let is_switching =
                                         switching.as_deref() == Some(row.name.as_str());
-                                    popover::picker_row(
+                                    let row_el = popover::picker_row(
                                         &theme,
                                         is_selected,
                                         ix == active,
@@ -6682,6 +6852,7 @@ impl Pickers {
                                         this.pick_ref(row.clone(), cx);
                                     }))
                                     .child(div().flex_1().min_w_0().truncate().child(label))
+                                    .children(badge)
                                     .when(is_switching, |el| {
                                         el.child(
                                             div()
@@ -6699,10 +6870,11 @@ impl Pickers {
                                                     .flex_none()
                                                     .text_size(crate::typography::ui_rems(10.0))
                                                     .text_color(theme.text_muted)
-                                                    .child(SharedString::from(tag)),
+                                                    .child(tag),
                                             )
                                         },
-                                    )
+                                    );
+                                    header.into_iter().chain([row_el.into_any_element()])
                                 },
                             )),
                     ))
@@ -6726,6 +6898,18 @@ impl Pickers {
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.danger.opacity(0.9))
                         .child(SharedString::from(error.clone())),
+                ),
+            );
+        }
+        if let Some(note) = &self.ref_note {
+            popover = popover.child(
+                popover::menu_section().child(
+                    div()
+                        .px(px(Theme::SPACE_SM))
+                        .py(px(4.0))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(note.clone())),
                 ),
             );
         }
@@ -11646,6 +11830,7 @@ mod tests {
             name: name.into(),
             current,
             worktree_path: worktree.map(str::to_string),
+            ..Default::default()
         }
     }
 
@@ -13242,6 +13427,7 @@ mod tests {
             previous_harnesses: vec![HarnessId::ClaudeCode, HarnessId::Codex],
             delegation: None,
             settle: None,
+            work_tree: None,
             unsettled_at: None,
             harness_session_harness: Default::default(),
         };
@@ -14164,6 +14350,7 @@ mod tests {
                     previous_harnesses: Vec::new(),
                     delegation: None,
                     settle: None,
+                    work_tree: None,
                     unsettled_at: None,
                     harness_session_harness: Default::default(),
                 }];
@@ -14326,6 +14513,7 @@ mod tests {
                     previous_harnesses: Vec::new(),
                     delegation: None,
                     settle: None,
+                    work_tree: None,
                     unsettled_at: None,
                     harness_session_harness: Default::default(),
                 }];

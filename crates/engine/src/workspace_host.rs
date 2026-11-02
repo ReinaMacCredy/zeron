@@ -1217,6 +1217,7 @@ impl WorkspaceHost {
                 previous_harnesses: Vec::new(),
                 delegation,
                 settle: None,
+                work_tree: None,
                 unsettled_at: None,
             })
         })?;
@@ -1274,6 +1275,7 @@ impl WorkspaceHost {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            work_tree: None,
             unsettled_at: None,
             harness_session_harness: Default::default(),
         };
@@ -1333,6 +1335,7 @@ impl WorkspaceHost {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            work_tree: None,
             unsettled_at: None,
             harness_session_harness: Default::default(),
         };
@@ -1393,6 +1396,7 @@ impl WorkspaceHost {
             previous_harnesses,
             delegation: None,
             settle: None,
+            work_tree: None,
             unsettled_at: None,
             harness_session_harness: Default::default(),
         };
@@ -1832,6 +1836,14 @@ impl WorkspaceHost {
     /// Canonical checkout identity for the chat's cwd (diff grouping key).
     pub fn set_chat_checkout(&self, chat_id: &str, checkout_id: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_checkout(chat_id, checkout_id))?)
+    }
+
+    pub fn set_chat_work_tree(
+        &self,
+        chat_id: &str,
+        work_tree: Option<&zeron_proto::ChatWorkTree>,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_work_tree(chat_id, work_tree))?)
     }
 
     // ── persistence / teardown ──────────────────────────────────────────────

@@ -1806,6 +1806,7 @@ impl Client {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            work_tree: None,
             unsettled_at: None,
         };
         let id = chat.id.clone();

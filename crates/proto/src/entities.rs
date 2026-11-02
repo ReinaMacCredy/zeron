@@ -304,6 +304,39 @@ pub struct Chat {
     /// When the chat last left Settled; anchors it in the Inbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsettled_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_tree: Option<ChatWorkTree>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatWorkTree {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub state: WorkTreeState,
+    #[serde(default)]
+    pub dirty_files: u32,
+    #[serde(default)]
+    pub removed: bool,
+}
+
+impl ChatWorkTree {
+    pub fn folder_name(&self) -> &str {
+        std::path::Path::new(&self.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&self.path)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum WorkTreeState {
+    Detached,
+    Fresh,
+    Ahead { commits: u32 },
+    Merged,
 }
 
 pub const SETTLE_AFTER_DAYS_DEFAULT: u32 = 3;
@@ -1321,7 +1354,7 @@ pub struct Repo {
 /// the repo's current (main-checkout) branch and whether it is materialized
 /// as a linked worktree. Drives the composer's ref picker (`current` /
 /// `worktree` tags) and the checkout-kind selector.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoRef {
     pub name: String,
@@ -1331,6 +1364,14 @@ pub struct RepoRef {
     /// Path of the linked worktree this branch is checked out in, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_tree_state: Option<WorkTreeState>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dirty_files: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Public Git reference attached to a commit in the history graph.
