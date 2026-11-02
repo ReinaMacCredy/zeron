@@ -249,7 +249,7 @@ pub fn live_url(url: &str) -> Result<LiveUrl<'_>, String> {
     if url.len() > MAX_URL_BYTES
         || url
             .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+            .any(|c| !c.is_ascii_graphic() || "\\\"<>{}|^`".contains(c))
     {
         return Err(refused());
     }
@@ -277,12 +277,12 @@ pub fn live_url(url: &str) -> Result<LiveUrl<'_>, String> {
     let port = match port.strip_prefix(':') {
         _ if !loopback => return Err(refused()),
         None if port.is_empty() => default_port,
-        Some(port) => port
+        Some(port) if port.bytes().all(|b| b.is_ascii_digit()) => port
             .parse::<u16>()
             .ok()
             .filter(|port| *port > 0)
             .ok_or_else(refused)?,
-        None => return Err(refused()),
+        _ => return Err(refused()),
     };
     let label = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
     Ok(LiveUrl {
@@ -723,6 +723,9 @@ mod tests {
             "localhost:5391",
             "javascript:alert(1)",
             "http://local host/",
+            "http://localhost:+5173/",
+            "http://localhost:5173/caf\u{e9}",
+            "http://localhost:5173/?q={\"a\":1}",
         ] {
             assert!(live_url(url).is_err(), "{url}");
         }
