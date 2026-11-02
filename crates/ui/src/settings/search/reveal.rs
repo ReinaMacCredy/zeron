@@ -34,13 +34,15 @@ const BOTTOM_CLEARANCE: f32 = 24.0;
 /// How far down the page a row that has to move lands.
 const LANDING: f32 = 0.3;
 /// The wash: in quickly, held long enough to find, out gently.
-const WASH_IN: MotionSpec = motion::FADE_QUICK;
+const WASH_IN: MotionSpec = MotionSpec::new(250, motion::EASE);
 const WASH_HOLD: Duration = Duration::from_millis(450);
-const WASH_OUT: MotionSpec = MotionSpec::new(600, motion::EASE);
-/// How far a row's wash reaches past its sides, into its block's inset, and
-/// its corners. A block's wash keeps to the block, under its own corners.
-const WASH_BLEED: f32 = 8.0;
-const WASH_RADIUS: f32 = 8.0;
+const WASH_OUT: MotionSpec = MotionSpec::new(1200, motion::EASE);
+/// A row's wash sits 3px inside its block's edge, the row's 16px side
+/// inset less 3, and 3px inside the row top and bottom. A block's wash
+/// keeps to the block, under its own corners.
+const WASH_BLEED: f32 = 13.0;
+const WASH_INSET_Y: f32 = 3.0;
+const WASH_RADIUS: f32 = 9.0;
 
 thread_local! {
     static REVEAL: RefCell<Option<(WindowId, Reveal)>> = const { RefCell::new(None) };
@@ -412,16 +414,19 @@ impl Element for AnchoredElement {
         if let Some(strength) = *wash {
             let mut color = Theme::of(cx).accent_wash;
             color.a *= strength;
-            let (bleed, radius) = if self.block {
-                (px(0.0), px(widgets::BLOCK_RADIUS))
+            let (bleed, inset, radius) = if self.block {
+                (px(0.0), px(0.0), px(widgets::BLOCK_RADIUS))
             } else {
-                (px(WASH_BLEED), px(WASH_RADIUS))
+                (px(WASH_BLEED), px(WASH_INSET_Y), px(WASH_RADIUS))
             };
             window.paint_quad(
                 fill(
                     Bounds::new(
-                        point(bounds.left() - bleed, bounds.top()),
-                        size(bounds.size.width + bleed * 2.0, bounds.size.height),
+                        point(bounds.left() - bleed, bounds.top() + inset),
+                        size(
+                            bounds.size.width + bleed * 2.0,
+                            (bounds.size.height - inset * 2.0).max(px(0.0)),
+                        ),
                     ),
                     color,
                 )
@@ -714,11 +719,11 @@ mod tests {
             Some(1.0)
         );
         assert_eq!(
-            reveal.anchor_at(ROW, row(180.0), true, at(start, 1150)),
+            reveal.anchor_at(ROW, row(180.0), true, at(start, 1850)),
             Some(1.0)
         );
         assert_eq!(
-            reveal.anchor_at(ROW, row(180.0), true, at(start, 1250)),
+            reveal.anchor_at(ROW, row(180.0), true, at(start, 1950)),
             None
         );
     }
