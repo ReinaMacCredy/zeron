@@ -48,6 +48,8 @@ struct RawTask {
     images: Vec<String>,
     #[serde(default)]
     context: Vec<String>,
+    #[serde(default)]
+    depends_on: Vec<String>,
 }
 
 pub(super) fn at(ms: i64) -> DateTime<Utc> {
@@ -77,6 +79,7 @@ impl From<RawTask> for Task {
             resources: raw.resources,
             images: raw.images,
             context: raw.context,
+            depends_on: raw.depends_on,
         }
     }
 }
@@ -139,6 +142,25 @@ pub fn check_context(context: &[String]) -> Result<(), DocError> {
     Ok(())
 }
 
+pub const TASK_DEPENDS_ON_MAX: usize = 20;
+
+pub fn check_depends_on(task_id: &str, depends_on: &[String]) -> Result<(), DocError> {
+    if depends_on.len() > TASK_DEPENDS_ON_MAX {
+        return Err(invalid("A task depends on up to 20 tasks"));
+    }
+    if depends_on.iter().any(|id| id == task_id) {
+        return Err(invalid("A task cannot depend on itself"));
+    }
+    if depends_on
+        .iter()
+        .enumerate()
+        .any(|(ix, id)| !valid_row_id(id) || depends_on[..ix].contains(id))
+    {
+        return Err(invalid("Dependencies are distinct task ids"));
+    }
+    Ok(())
+}
+
 fn check_due_on(due_on: Option<&str>) -> Result<(), DocError> {
     match due_on {
         Some(day)
@@ -179,6 +201,7 @@ fn task_fields(task: &Task, title: String, order_key: String) -> BTreeMap<String
         ("resources", json!(task.resources)),
         ("images", json!(task.images)),
         ("context", json!(task.context)),
+        ("dependsOn", json!(task.depends_on)),
     ])
 }
 
@@ -248,6 +271,7 @@ impl RegistryDoc {
         check_notes(&task.notes)?;
         check_images(&task.images)?;
         check_context(&task.context)?;
+        check_depends_on(&task.id, &task.depends_on)?;
         check_due_on(task.due_on.as_deref())?;
         if self.overlay_row(KIND_TASKS, &task.id).is_some() {
             return Ok(false);
@@ -374,6 +398,10 @@ impl RegistryDoc {
         if let Some(context) = &patch.context {
             check_context(context)?;
             set.insert("context".into(), json!(context));
+        }
+        if let Some(depends_on) = &patch.depends_on {
+            check_depends_on(task_id, depends_on)?;
+            set.insert("dependsOn".into(), json!(depends_on));
         }
         set.insert("updatedAt".into(), json!(now.timestamp_millis()));
         let hlc = self.next_hlc();

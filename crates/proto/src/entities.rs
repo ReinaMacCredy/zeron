@@ -743,6 +743,8 @@ pub struct Task {
     pub images: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1097,6 +1099,8 @@ pub struct TaskPatch {
     pub images: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Vec<String>>,
 }
 
 pub fn present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>

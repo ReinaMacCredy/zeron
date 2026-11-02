@@ -342,8 +342,10 @@ impl EngineRpc {
         order_key: Option<String>,
         images: Vec<String>,
         context: Vec<String>,
+        depends_on: Vec<String>,
     ) -> Result<(), RpcError> {
         self.check_context_chats(&context)?;
+        self.check_dependencies(&task_id, &depends_on)?;
         let now = chrono::Utc::now();
         self.workspace
             .create_task(&Task {
@@ -367,12 +369,16 @@ impl EngineRpc {
                 resources: Vec::new(),
                 images,
                 context,
+                depends_on,
             })
             .map_err(failed)
             .map(drop)
     }
 
     pub(super) fn update_task(&self, task_id: &str, patch: &TaskPatch) -> Result<(), RpcError> {
+        if let Some(depends_on) = &patch.depends_on {
+            self.check_dependencies(task_id, depends_on)?;
+        }
         let leads = patch.chat_id.is_some() || patch.mode.is_some() || patch.completed.is_some();
         let _plans = leads.then(|| self.plan_writes());
         if patch.context.is_some() || leads {
@@ -398,6 +404,15 @@ impl EngineRpc {
             true => Ok(()),
             false => Err(refused("Task no longer exists")),
         }
+    }
+
+    fn check_dependencies(&self, task_id: &str, depends_on: &[String]) -> Result<(), RpcError> {
+        if depends_on.is_empty() {
+            return Ok(());
+        }
+        let tasks = self.workspace.read_tasks().map_err(failed)?;
+        dependency_problem(task_id, depends_on, &tasks)
+            .map_or(Ok(()), |problem| Err(refused(&problem)))
     }
 
     /// Held from a plan check to its write, so two calls cannot both pass the check.
@@ -1490,6 +1505,30 @@ impl EngineRpc {
     }
 }
 
+fn dependency_problem(task_id: &str, depends_on: &[String], tasks: &[Task]) -> Option<String> {
+    for id in depends_on {
+        if id == task_id {
+            return Some("A task cannot depend on itself".into());
+        }
+        if !tasks.iter().any(|task| task.id == *id) {
+            return Some(format!("dependsOn {id} is not a task"));
+        }
+    }
+    let mut stack: Vec<&str> = depends_on.iter().map(String::as_str).collect();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = stack.pop() {
+        if id == task_id {
+            return Some("That dependency would make a cycle".into());
+        }
+        if seen.insert(id)
+            && let Some(task) = tasks.iter().find(|task| task.id == id)
+        {
+            stack.extend(task.depends_on.iter().map(String::as_str));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1607,5 +1646,35 @@ mod tests {
         assert!(reorder(&plan, &["a", "x"]).is_err());
         let started = [("s0", false), ("s1", true), ("s2", false)];
         assert!(reorder(&started, &["s2", "s0", "s0", "x"]).is_err());
+    }
+
+    #[test]
+    fn a_dependency_is_a_known_task_other_than_itself_and_closes_no_cycle() {
+        let task = |id: &str, depends_on: &[&str]| -> Task {
+            let mut task: Task = serde_json::from_value(serde_json::json!({ "id": id })).unwrap();
+            task.depends_on = depends_on.iter().map(|id| id.to_string()).collect();
+            task
+        };
+        let tasks = [task("a", &[]), task("b", &["a"]), task("c", &["b"])];
+        let deps = |ids: &[&str]| -> Vec<String> { ids.iter().map(|id| id.to_string()).collect() };
+        assert_eq!(dependency_problem("new", &deps(&["a", "c"]), &tasks), None);
+        assert_eq!(dependency_problem("a", &deps(&[]), &tasks), None);
+        assert_eq!(
+            dependency_problem("a", &deps(&["a"]), &tasks).as_deref(),
+            Some("A task cannot depend on itself")
+        );
+        assert_eq!(
+            dependency_problem("new", &deps(&["gone"]), &tasks).as_deref(),
+            Some("dependsOn gone is not a task")
+        );
+        assert_eq!(
+            dependency_problem("a", &deps(&["c"]), &tasks).as_deref(),
+            Some("That dependency would make a cycle")
+        );
+        assert_eq!(
+            dependency_problem("b", &deps(&["a"]), &tasks),
+            None,
+            "rewriting the same edge is not a cycle"
+        );
     }
 }

@@ -403,7 +403,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "tasks",
-            "description": "Manage the person's Tasks list (the rail's Tasks page): to-dos, each assignable to a thread whose status it follows (To do, Working, Needs you) until marked done. A `[title](zeron-task:<id>)` link names a task: read it with `list` and that `taskId`, and mark it done with `update` `completed: true` when finished. `list`: open tasks in order (`includeDone` adds done ones; notes cut to 500 characters), or one whole with `taskId`, done or not; `sendError` means the last send to its thread failed. `create`: `title`, optional `notes`, `dueOn` (YYYY-MM-DD) and `projectId` (default this chat's project, \"\" for none). `update`: `title`, `notes`, `dueOn` (\"\" clears) or `completed`. `assign` to `threadId` (default this chat), sending its title and notes there unless `send: false` (the default for this chat); a task has one thread. `unassign`, `delete`. A Task with a plan (`mode` orchestrated) has a lead thread and steps: `list` adds `progress` and `planPending`, and with `taskId` its `plan`, `planDoc`, `context` (threads the lead was given to read) and `steps` (planned, working, needsYou, failed, done or skipped, with `threadId`); a step is done only once its lead marks it. Lead only: `plan` writes `steps` [{title, notes, threadId, role}] and an optional `overview` for `taskId`, replacing unstarted steps and keeping the rest; a step's `threadId` hands it to a thread the lead started (not a sidechat, fork, another chat's thread or one on an open step); replaced steps' images move to the same-titled step or the overview (`imagesMoved`); `resources` replaces the mission's claims (port:<n>, slot:<name>, path:<path in the project>; [] clears) that the Supervisor checks against other missions. `step` marks `stepId` `state` done, skipped or open; run a step with create_thread and its `taskStepId`. `escalate` puts a decision only the person can make in their Needs you list (`title`, `why`, `detail`, one to three `options`) and returns its `itemId` at once; keep working on what does not depend on it, and the choice arrives as a message.",
+            "description": "Manage the person's Tasks list (the rail's Tasks page): to-dos, each assignable to a thread whose status it follows (To do, Working, Needs you) until marked done. A `[title](zeron-task:<id>)` link names a task: read it with `list` and that `taskId`, and mark it done with `update` `completed: true` when finished. `list`: open tasks in order (`includeDone` adds done ones; notes cut to 500 characters), or one whole with `taskId`, done or not; `sendError` means the last send to its thread failed. `create`: `title`, optional `notes`, `dueOn` (YYYY-MM-DD), `projectId` (default this chat's project, \"\" for none) and `dependsOn` (ids of tasks it is blocked by; `list` returns it). `update`: `title`, `notes`, `dueOn` (\"\" clears), `completed` or `dependsOn` (replaces the list; [] clears; no unknown ids, itself or cycles). `assign` to `threadId` (default this chat), sending its title and notes there unless `send: false` (the default for this chat); a task has one thread. `unassign`, `delete`. A Task with a plan (`mode` orchestrated) has a lead thread and steps: `list` adds `progress` and `planPending`, and with `taskId` its `plan`, `planDoc`, `context` (threads the lead was given to read) and `steps` (planned, working, needsYou, failed, done or skipped, with `threadId`); a step is done only once its lead marks it. Lead only: `plan` writes `steps` [{title, notes, threadId, role}] and an optional `overview` for `taskId`, replacing unstarted steps and keeping the rest; a step's `threadId` hands it to a thread the lead started (not a sidechat, fork, another chat's thread or one on an open step); replaced steps' images move to the same-titled step or the overview (`imagesMoved`); `resources` replaces the mission's claims (port:<n>, slot:<name>, path:<path in the project>; [] clears) that the Supervisor checks against other missions. `step` marks `stepId` `state` done, skipped or open; run a step with create_thread and its `taskStepId`. `escalate` puts a decision only the person can make in their Needs you list (`title`, `why`, `detail`, one to three `options`) and returns its `itemId` at once; keep working on what does not depend on it, and the choice arrives as a message.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -415,6 +415,11 @@ fn thread_tool_list() -> Value {
                     "dueOn": { "type": "string" },
                     "projectId": { "type": "string" },
                     "completed": { "type": "boolean" },
+                    "dependsOn": {
+                        "type": "array",
+                        "maxItems": zeron_doc::TASK_DEPENDS_ON_MAX,
+                        "items": { "type": "string" }
+                    },
                     "threadId": { "type": "string" },
                     "send": { "type": "boolean" },
                     "steps": {
@@ -2186,6 +2191,7 @@ impl ThreadTools {
                         "notes": args["notes"].as_str().unwrap_or_default(),
                         "spaceId": space_id,
                         "dueOn": args["dueOn"].as_str().filter(|day| !day.is_empty()),
+                        "dependsOn": depends_on(args)?.unwrap_or_default(),
                     }),
                 )
                 .await?;
@@ -2204,8 +2210,13 @@ impl ThreadTools {
                         json!(Some(day).filter(|day| !day.is_empty())),
                     );
                 }
+                if let Some(ids) = depends_on(args)? {
+                    patch.insert("dependsOn".into(), json!(ids));
+                }
                 if patch.is_empty() {
-                    return Err("nothing to update: pass title, notes, dueOn or completed".into());
+                    return Err(
+                        "nothing to update: pass title, notes, dueOn, completed or dependsOn".into(),
+                    );
                 }
                 self.update_task_row(required()?, Value::Object(patch))
                     .await
@@ -3622,6 +3633,20 @@ fn add_plan(row: &mut Value, task: &Task, steps: &[(TaskStep, StepStatus)], whol
     }
 }
 
+fn depends_on(args: &Value) -> Result<Option<Vec<String>>, String> {
+    if args["dependsOn"].is_null() {
+        return Ok(None);
+    }
+    let ids = args["dependsOn"]
+        .as_array()
+        .ok_or("dependsOn is a list of task ids")?
+        .iter()
+        .map(|id| id.as_str().map(str::to_owned))
+        .collect::<Option<Vec<_>>>()
+        .ok_or("dependsOn is a list of task ids")?;
+    Ok(Some(ids))
+}
+
 fn task_json(task: &Task, preview: bool) -> Value {
     let cut = preview && task.notes.chars().count() > LISTED_NOTES_PREVIEW_CHARS;
     let notes: String = if cut {
@@ -3653,6 +3678,9 @@ fn task_json(task: &Task, preview: bool) -> Value {
     }
     if !preview && !task.images.is_empty() {
         row["images"] = json!(task.images);
+    }
+    if !task.depends_on.is_empty() {
+        row["dependsOn"] = json!(task.depends_on);
     }
     row
 }
