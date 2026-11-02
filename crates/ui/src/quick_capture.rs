@@ -495,7 +495,7 @@ impl QuickCaptureBar {
             window_background: gpui::WindowBackgroundAppearance::Blurred,
             ..Default::default()
         };
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(test)))]
         let place = macos::place_below(window, anchor);
         let bar = cx.entity();
         self.menu_opening = Some(popup);
@@ -503,14 +503,14 @@ impl QuickCaptureBar {
         cx.defer(move |cx| {
             let menu_bar = bar.clone();
             let opened = cx.open_window(options, move |window, cx| {
-                #[cfg(target_os = "macos")]
+                #[cfg(all(target_os = "macos", not(test)))]
                 {
                     macos::style_panel(window, 10.0);
                     if let Some(place) = place {
                         place(window);
                     }
                 }
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(all(target_os = "macos", not(test))))]
                 let _ = &window;
                 cx.new(|cx| ProjectMenu {
                     _observe: cx.observe(&menu_bar, |_, _, cx| cx.notify()),
