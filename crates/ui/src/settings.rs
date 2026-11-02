@@ -810,6 +810,12 @@ pub fn device_float_frame(cx: &App) -> Option<crate::device_panel::float::Device
         .and_then(|store| store.current.device_float_frame)
 }
 
+pub fn project_folder_pins(cx: &App, device_id: &str) -> Vec<String> {
+    cx.try_global::<SettingsStore>()
+        .and_then(|store| store.current.project_folder_pins.get(device_id).cloned())
+        .unwrap_or_default()
+}
+
 /// Read the picker preference without cloning the full settings for each model row.
 pub fn compact_model_picker(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()
@@ -1815,6 +1821,9 @@ pub struct UiSettings {
     pub pull_requests_tab: crate::pull_requests::PageTab,
     /// Device-local bookmarks, keyed by provider/repository/PR, never GitHub mutations.
     pub pull_request_stars: Vec<String>,
+    /// Folders pinned in the new-project picker, keyed by device id.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub project_folder_pins: HashMap<String, Vec<String>>,
     /// Save edited workspace files automatically after the configured delay.
     pub files_autosave_enabled: bool,
     /// Idle time before an edited workspace file is saved automatically.
@@ -1975,6 +1984,7 @@ impl Default for UiSettings {
             last_pull_request_device: None,
             pull_requests_tab: crate::pull_requests::PageTab::PullRequests,
             pull_request_stars: Vec::new(),
+            project_folder_pins: HashMap::new(),
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
@@ -2913,6 +2923,7 @@ impl UiSettings {
             last_pull_request_device,
             pull_requests_tab,
             pull_request_stars,
+            project_folder_pins,
         );
         current
     }
@@ -4499,6 +4510,10 @@ mod tests {
             last_pull_request_device: Some("remote-device".into()),
             pull_requests_tab: crate::pull_requests::PageTab::Git,
             pull_request_stars: vec!["https://github.com/acme/zeron/pull/123".into()],
+            project_folder_pins: HashMap::from([(
+                "device-a".into(),
+                vec!["/Users/me/Code".into()],
+            )]),
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
             files_word_wrap: true,

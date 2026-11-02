@@ -20,7 +20,8 @@
 //!   `SelectOrg {organizationId}`
 //! - Repos (§3.5): `ListRepos`, `AddRepo {path}`, `CloneRepo {url}`,
 //!   `CreateRepo {name}`, `ListBranches {repoPath}` (default branch first),
-//!   `ListFolders {path?}`, `CreateWorktree {repoPath, branch}`, `DeleteWorktree
+//!   `ListFolders {path?, includeHidden?}`, `CreateFolder {parent, name, gitInit?}`
+//!   → `{path}`, `CreateWorktree {repoPath, branch}`, `DeleteWorktree
 //!   {repoPath, worktreePath}`; `WatchCheckoutDiffs` → stream of `CheckoutDiff[]`
 //! - Workspace files: lazy directory listing, recursive path search, bounded text
 //!   reads, hash-guarded writes, and a checkout-scoped filesystem change stream.
@@ -628,6 +629,17 @@ struct RunProjectActionParams {
 struct ListFoldersParams {
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    include_hidden: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateFolderParams {
+    parent: String,
+    name: String,
+    #[serde(default)]
+    git_init: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3740,6 +3752,7 @@ fn forwardable(method: &str) -> bool {
             | methods::FETCH_ALL
             | methods::SWITCH_REF
             | methods::LIST_FOLDERS
+            | methods::CREATE_FOLDER
             | methods::GET_WORKTREE_SETTINGS
             | methods::SET_WORKTREE_SETTINGS
             | methods::LIST_DRIVES
@@ -6530,10 +6543,19 @@ impl RpcService for EngineRpc {
                 let p: ListFoldersParams = parse_params(params)?;
                 let listing = self
                     .repos
-                    .list_folders(p.path)
+                    .list_folders_including_hidden(p.path, p.include_hidden)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&listing)
+            }
+            methods::CREATE_FOLDER => {
+                let p: CreateFolderParams = parse_params(params)?;
+                let path = self
+                    .repos
+                    .create_folder(p.parent, p.name, p.git_init)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "path": path }))
             }
             methods::SEARCH_HOME_FOLDERS => {
                 let request: zeron_proto::SearchHomeFoldersRequest = parse_params(params)?;
@@ -8566,6 +8588,8 @@ mod tests {
         assert!(forwardable(methods::SEARCH_WORKSPACE_CONTENT));
         assert!(!is_stream_method(methods::SEARCH_WORKSPACE_CONTENT));
         assert!(forwardable(methods::SEARCH_HOME_FOLDERS));
+        assert!(forwardable(methods::CREATE_FOLDER));
+        assert!(!is_stream_method(methods::CREATE_FOLDER));
         assert!(forwardable(methods::RELEASE_HOME_FOLDER_SEARCH));
         assert!(!is_stream_method(methods::READ_WORKSPACE_FILE));
         assert!(!is_stream_method(methods::WRITE_WORKSPACE_FILE));

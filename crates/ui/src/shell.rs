@@ -3643,10 +3643,10 @@ pub struct Shell {
     delete_space_confirm: Option<String>,
     /// The add-space palette (device tabs + folder search), `Some`
     /// while open.
-    add_space: Option<AddSpaceFlow>,
+    add_space: popover::Popup<AddSpaceFlow>,
     /// The New project palette's collapsed-breadcrumbs (`…`) menu.
     project_crumb_menu: popover::Popup<()>,
-    command_palette: Option<command_palette::CommandPalette>,
+    command_palette: popover::Popup<command_palette::CommandPalette>,
     /// The focus whose workspace search index was last warmed (see `search_warm`).
     search_warm: Option<search_warm::SearchWarm>,
     /// Per chat, the files opened in editor tabs, most recent first.
@@ -4401,9 +4401,9 @@ impl Shell {
             section_menu_focus: cx.focus_handle(),
             section_menu_active: None,
             delete_space_confirm: None,
-            add_space: None,
+            add_space: popover::Popup::default(),
             project_crumb_menu: popover::Popup::default(),
-            command_palette: None,
+            command_palette: popover::Popup::default(),
             search_warm: None,
             recent_files: std::collections::HashMap::new(),
             pending_workspace_command: None,
@@ -7975,7 +7975,7 @@ impl Shell {
     // ---- routes / settings ----
 
     fn set_route(&mut self, route: Route, cx: &mut Context<Self>) {
-        self.command_palette = None;
+        self.dismiss_command_palette(cx);
         self.route_task_slide(route);
         if self.route == Route::Supervisor && route != Route::Supervisor {
             self.leave_supervisor(cx);
@@ -8426,7 +8426,7 @@ impl Shell {
         if section.needs_account() && !self.state.read(cx).cloud_offered() {
             section = SettingsSection::General;
         }
-        self.command_palette = None;
+        self.dismiss_command_palette(cx);
         // Recreate per visit: the page's ListHarnesses load re-probes which
         // CLIs are installed, so installing one shows up on the next open.
         if section == SettingsSection::Harnesses {
@@ -9844,13 +9844,13 @@ impl Shell {
     /// the keys it records before they can dispatch.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
         self.triage_open()
-            || self.command_palette.is_some()
+            || self.command_palette.is_open()
             || self.switcher.is_some()
             || self.branch_modal.is_some()
             || self.voice.read(cx).stage_open
             || self.section_dialog.is_some()
             || self.section_menu.is_some()
-            || self.add_space.is_some()
+            || self.add_space.is_open()
             || self.composer.clone().read(cx).pickers().read(cx).is_open()
             || self.open_side_chat_pickers(cx).is_some()
     }
@@ -15851,7 +15851,7 @@ impl Shell {
             return true;
         }
         // The folded-breadcrumbs menu floats over the palette; it closes first.
-        if self.add_space.is_some() && self.project_crumb_menu.is_open() {
+        if self.add_space.is_open() && self.project_crumb_menu.is_open() {
             self.close_project_crumb_menu(cx);
             return true;
         }
@@ -15859,7 +15859,10 @@ impl Shell {
         if self.add_space_cancel_path_edit(cx) {
             return true;
         }
-        if self.add_space.is_some() {
+        if self.add_space_cancel_new_folder(cx) {
+            return true;
+        }
+        if self.add_space.is_open() {
             self.close_add_space(cx);
             return true;
         }
@@ -15900,7 +15903,7 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
-        if event.keystroke.key == "escape" && self.command_palette.is_some() {
+        if event.keystroke.key == "escape" && self.command_palette.is_open() {
             self.close_command_palette(window, cx);
             cx.stop_propagation();
             return;
@@ -19717,7 +19720,9 @@ impl Render for Shell {
                 if matches!(this.route, Route::Settings(_) | Route::PullRequests) {
                     return;
                 }
-                if this.add_space.is_some() {
+                if this.add_space_offers_new_folder() {
+                    this.add_space_start_new_folder(String::new(), cx);
+                } else if this.add_space.is_open() {
                     this.close_add_space(cx);
                 } else {
                     this.open_add_space(cx);
@@ -22730,7 +22735,7 @@ mod exit_regressions {
                             assert!(matches!(shell.route, Route::Chat));
                             assert!(shell.state.read(cx).selected_chat.is_none());
                         }
-                        WorkspaceCommand::Resume => assert!(shell.command_palette.is_some()),
+                        WorkspaceCommand::Resume => assert!(shell.command_palette.is_open()),
                         WorkspaceCommand::Model => {
                             assert!(shell.composer.read(cx).pickers().read(cx).is_open());
                         }

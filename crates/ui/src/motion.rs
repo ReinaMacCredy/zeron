@@ -520,6 +520,17 @@ impl MotionSpec {
         self.curve.eval(self.curve_input(raw_delta))
     }
 
+    /// Eased progress of a run that began at `since`, off the wall clock and
+    /// honoring [`speed_scale`]. Monotonic, unlike an animation element's own
+    /// clock, which replays from 0 when its id remounts.
+    pub fn progress_since(&self, since: std::time::Instant) -> f32 {
+        let total = self.total().mul_f32(speed_scale()).as_secs_f32();
+        if total <= 0.0 {
+            return 1.0;
+        }
+        self.progress(self::since(since).as_secs_f32() / total)
+    }
+
     pub fn progress_unclamped(&self, raw_delta: f32) -> f32 {
         self.curve.eval_unclamped(self.curve_input(raw_delta))
     }

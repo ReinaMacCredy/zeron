@@ -200,8 +200,8 @@ impl Shell {
     pub(super) fn snapshot_current_chat(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.route, Route::Chat)
             || self.switcher.is_some()
-            || self.command_palette.is_some()
-            || self.add_space.is_some()
+            || self.command_palette.is_open()
+            || self.add_space.is_open()
         {
             return;
         }

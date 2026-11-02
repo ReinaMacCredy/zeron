@@ -1667,8 +1667,62 @@ impl Repos {
     /// (dead mount, permission-gated folder) fails this listing without blocking
     /// anything else; the abandoned task unwinds on its own thread.
     pub async fn list_folders(&self, path: Option<String>) -> Result<FolderListing, EngineError> {
-        self.list_folders_with(path, FOLDER_LIST_TIMEOUT, false)
+        self.list_folders_including_hidden(path, false).await
+    }
+
+    pub async fn list_folders_including_hidden(
+        &self,
+        path: Option<String>,
+        include_hidden: bool,
+    ) -> Result<FolderListing, EngineError> {
+        self.list_folders_with(path, include_hidden, FOLDER_LIST_TIMEOUT, false)
             .await
+    }
+
+    pub async fn create_folder(
+        &self,
+        parent: String,
+        name: String,
+        git_init: bool,
+    ) -> Result<String, EngineError> {
+        let name = name.trim().to_owned();
+        if name.is_empty() {
+            return Err(EngineError::Other("Folder name can't be empty.".into()));
+        }
+        if name == "." || name == ".." {
+            return Err(EngineError::Other(format!(
+                "\u{201c}{name}\u{201d} isn't a valid folder name."
+            )));
+        }
+        if name.contains('/') || name.contains('\\') {
+            return Err(EngineError::Other(
+                "Folder name can't contain / or \\.".into(),
+            ));
+        }
+        if parent.trim().is_empty() {
+            return Err(EngineError::Other(
+                "Choose a folder to create it in.".into(),
+            ));
+        }
+        let parent = absolutize(Path::new(&parent));
+        let worker = disposable_worker("folder-create", move || {
+            create_folder_blocking(&parent, &name)
+        });
+        let created = match tokio::time::timeout(FOLDER_LIST_TIMEOUT, worker).await {
+            Ok(Some(result)) => result?,
+            Ok(None) => return Err(EngineError::Other("folder create worker exited".into())),
+            Err(_) => {
+                return Err(EngineError::Other(
+                    "creating the folder timed out on the device".into(),
+                ));
+            }
+        };
+        if git_init && let Err(error) = self.git(&["init"], Some(&created)).await {
+            return Err(EngineError::Other(format!(
+                "Created the folder, but git init failed: {error}"
+            )));
+        }
+        Ok(folder_browser_path(&created))
     }
 
     // ── SearchHomeFolders ───────────────────────────────────────────────────
@@ -1733,6 +1787,7 @@ impl Repos {
     pub async fn list_folders_with(
         &self,
         path: Option<String>,
+        include_hidden: bool,
         timeout: Duration,
         hang_for_test: bool,
     ) -> Result<FolderListing, EngineError> {
@@ -1749,7 +1804,7 @@ impl Repos {
                     // exit reclaims it) — the caller must hit its timeout.
                     std::thread::sleep(Duration::from_secs(3600));
                 }
-                let _ = tx.send(list_folders_blocking(&target));
+                let _ = tx.send(list_folders_blocking(&target, include_hidden));
             });
         if let Err(err) = spawned {
             return Err(EngineError::Other(format!("folder listing failed: {err}")));
@@ -1797,17 +1852,18 @@ async fn disposable_worker<T: Send + 'static>(
 
 /// The blocking walk: ONE readdir of the target; `is_repo` is a cheap `.git`
 /// existence probe per directory entry.
-fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
+fn list_folders_blocking(
+    target: &Path,
+    include_hidden: bool,
+) -> Result<FolderListing, EngineError> {
     let read = std::fs::read_dir(target).map_err(|e| match e.kind() {
-        std::io::ErrorKind::PermissionDenied => {
-            EngineError::Other("Zeron doesn't have access to this folder on the device.".into())
-        }
+        std::io::ErrorKind::PermissionDenied => no_folder_access(),
         _ => EngineError::Other(format!("could not read that folder: {e}")),
     })?;
     let mut entries: Vec<FolderEntry> = Vec::new();
     for entry in read.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
+        if !include_hidden && name.starts_with('.') {
             continue;
         }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -1831,6 +1887,28 @@ fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
         entries,
         truncated,
     })
+}
+
+fn no_folder_access() -> EngineError {
+    EngineError::Other("Zeron doesn't have access to this folder on the device.".into())
+}
+
+fn create_folder_blocking(parent: &Path, name: &str) -> Result<PathBuf, EngineError> {
+    if !parent.is_dir() {
+        return Err(EngineError::Other(format!(
+            "{} isn't a folder on the device.",
+            folder_browser_path(parent)
+        )));
+    }
+    let created = parent.join(name);
+    std::fs::create_dir(&created).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => {
+            EngineError::Other(format!("\u{201c}{name}\u{201d} already exists here."))
+        }
+        std::io::ErrorKind::PermissionDenied => no_folder_access(),
+        _ => EngineError::Other(format!("could not create that folder: {e}")),
+    })?;
+    Ok(created)
 }
 
 /// The blocking drive walk. Best-effort everywhere: the list is navigation
