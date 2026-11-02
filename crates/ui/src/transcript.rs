@@ -1226,6 +1226,7 @@ pub enum RowKind {
         path: SharedString,
         title: SharedString,
         height: f32,
+        url: Option<SharedString>,
     },
     HtmlFiles {
         targets: Arc<Vec<crate::html_open::HtmlTarget>>,
@@ -11566,10 +11567,17 @@ impl Transcript {
                 self.render_html_files(&row.id, targets, workspace_root.as_deref(), &theme, cx)
             }
             RowKind::HtmlRender {
+                title,
+                height,
+                url: Some(url),
+                ..
+            } => self.render_live_page(&row.id, url, title, *height, window, cx),
+            RowKind::HtmlRender {
                 owner,
                 path,
                 title,
                 height,
+                url: None,
             } => self.render_html_render(&row.id, owner, path, title, *height, window, cx),
             RowKind::Visual { owner, path, title } => {
                 self.render_visual(&row.id, owner, path, title, cx)

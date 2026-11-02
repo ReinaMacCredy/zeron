@@ -3,7 +3,7 @@
 //! the height the page reports.
 use super::*;
 use crate::html_render::{clamp_height, frame_height, overflows, scrolls_inside};
-use zeron_proto::html_render::{page_file_name, source_text};
+use zeron_proto::html_render::{RenderSource, live_url, page_file_name, source_text};
 
 /// Live pages a transcript keeps at once; one scrolled away longest closes
 /// first and reloads when it scrolls back.
@@ -23,8 +23,24 @@ const ACTIVE_LIVE: std::time::Duration = std::time::Duration::from_millis(700);
 #[cfg(target_os = "macos")]
 const POINTER_LIVE: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// A shown live page's server is checked this often, so one that stops
+/// turns into the not-responding state.
+const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[cfg(target_os = "macos")]
 type PageFrame = (Arc<gpui::RenderImage>, f32);
+
+#[cfg(not(target_os = "macos"))]
+const LIVE_ELSEWHERE: &str = "Live previews show on macOS. Open it in your browser to watch.";
+
+/// Whether a live dev server page's server answers.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Reach {
+    Checking,
+    Up,
+    Down,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum SheetView {
@@ -36,9 +52,24 @@ enum SheetView {
 struct Sheet {
     row: SharedString,
     title: SharedString,
+    url: Option<SharedString>,
     view: SheetView,
     #[cfg(target_os = "macos")]
     page: Option<crate::browser::inline::InlineWebView>,
+}
+
+enum SheetSource {
+    Html(Arc<str>),
+    Url(SharedString),
+}
+
+impl SheetSource {
+    fn page(&self) -> RenderSource<'_> {
+        match self {
+            Self::Html(html) => RenderSource::Html(html),
+            Self::Url(url) => RenderSource::Url(url),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -61,6 +92,9 @@ pub(super) struct HtmlPages {
     capped: HashSet<SharedString>,
     crashes: HashMap<SharedString, u8>,
     heights: HashMap<SharedString, f32>,
+    /// Live dev server rows only.
+    reach: HashMap<SharedString, Reach>,
+    probing: HashSet<SharedString>,
     sheet: Option<Sheet>,
     sheet_focus: gpui::FocusHandle,
     style_generations: (u32, u32),
@@ -105,6 +139,8 @@ impl HtmlPages {
             capped: HashSet::new(),
             crashes: HashMap::new(),
             heights: HashMap::new(),
+            reach: HashMap::new(),
+            probing: HashSet::new(),
             sheet: None,
             sheet_focus: cx.focus_handle(),
             viewport: Bounds::default(),
@@ -122,6 +158,18 @@ impl HtmlPages {
             #[cfg(target_os = "macos")]
             _events: events,
         }
+    }
+
+    /// Closes a live page its transcript no longer draws (another chat or
+    /// route), which no render-time sweep would reach.
+    fn unload_hidden(&mut self, row: &SharedString) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.pages.get(row).is_some_and(|page| page.concealed()) {
+            self.pages.remove(row);
+            return true;
+        }
+        let _ = row;
+        false
     }
 
     #[cfg(target_os = "macos")]
@@ -158,13 +206,23 @@ pub(super) fn html_render_row(entry: &SessionMessageEntry, part: &MessagePart) -
     }
     Some(Row {
         id: format!("{}#html-{}", entry.id, part.id()).into(),
-        version: fnv1a(format!("{}\0{}\0{}", page.path, page.title, page.height).as_bytes()),
+        version: fnv1a(
+            format!(
+                "{}\0{}\0{}\0{}",
+                page.path,
+                page.title,
+                page.height,
+                page.url.as_deref().unwrap_or_default()
+            )
+            .as_bytes(),
+        ),
         turn_start: false,
         kind: RowKind::HtmlRender {
             owner: entry.device_id.clone().into(),
             path: page.path.clone().into(),
             title: page.title.clone().into(),
             height: page.height as f32,
+            url: page.url.clone().map(Into::into),
         },
         entry_id: entry.id.clone().into(),
         timestamp: None,
@@ -205,9 +263,18 @@ impl Transcript {
                 let crashes = self.html_pages.crashes.entry(key.clone()).or_default();
                 *crashes += 1;
                 if *crashes >= MAX_CRASHES {
+                    if let Some(reach) = self.html_pages.reach.get_mut(&key) {
+                        *reach = Reach::Down;
+                    }
                     self.html_pages.sources.insert(key, PageSource::Failed);
                 }
                 cx.notify();
+            }
+            InlineEvent::Unreachable => {
+                let row: SharedString = key
+                    .strip_suffix(SHEET_SUFFIX)
+                    .map_or_else(|| key.clone(), |row| row.to_owned().into());
+                self.live_page_down(&row, cx);
             }
             InlineEvent::Frame(image, scale, taken) => {
                 let pages = &mut self.html_pages;
@@ -281,9 +348,14 @@ impl Transcript {
         }
     }
 
+    /// Live pages run their own animations, so one not painted in the last render is closed.
     #[cfg(target_os = "macos")]
     fn release_html_frames(&mut self, window: &mut Window) {
         let pages = &mut self.html_pages;
+        let (frame, reach, used) = (pages.frame, &pages.reach, &pages.used);
+        pages.pages.retain(|key, _| {
+            !reach.contains_key(key) || used.get(key).is_some_and(|at| at + 1 >= frame)
+        });
         let closed: Vec<SharedString> = pages
             .snapshots
             .keys()
@@ -342,6 +414,7 @@ impl Transcript {
             pages.sheet = None;
         }
         pages.heights.retain(|key, _| keep.contains(key));
+        pages.reach.retain(|key, _| keep.contains(key));
         pages.capped.retain(|key| keep.contains(key));
         pages.crashes.retain(|key, _| keep.contains(key));
         pages.sources.retain(|key, source| {
@@ -453,7 +526,7 @@ impl Transcript {
                         let row = row_id.clone();
                         let title = title.clone();
                         move |this, _, window, cx| {
-                            this.open_html_sheet(row.clone(), title.clone(), window, cx)
+                            this.open_html_sheet(row.clone(), title.clone(), None, window, cx)
                         }
                     })),
             );
@@ -466,8 +539,13 @@ impl Transcript {
         let frame = match source {
             PageSource::Ready(html) => {
                 #[cfg(target_os = "macos")]
-                let frame =
-                    frame.child(self.html_page_layer(row_id, &html, height, content, window, cx));
+                let frame = frame.child(self.html_page_layer(
+                    row_id,
+                    RenderSource::Html(&html),
+                    scrolls_inside(height, content),
+                    window,
+                    cx,
+                ));
                 #[cfg(not(target_os = "macos"))]
                 let frame = {
                     let _ = (html, window);
@@ -494,13 +572,243 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// A running local dev server (`html_render` `url`), live in the thread.
+    pub(super) fn render_live_page(
+        &mut self,
+        row_id: &SharedString,
+        url: &SharedString,
+        title: &SharedString,
+        agent_height: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Ok(live) = live_url(url) else {
+            return gpui::Empty.into_any_element();
+        };
+        let theme = Theme::of(cx).clone();
+        self.html_pages
+            .used
+            .insert(row_id.clone(), self.html_pages.frame);
+        let reach = *self
+            .html_pages
+            .reach
+            .entry(row_id.clone())
+            .or_insert(Reach::Checking);
+        if reach != Reach::Down {
+            self.probe_live_page(row_id.clone(), url.clone(), cx);
+        }
+        let height = clamp_height(agent_height);
+        let action = |id: &str, selector: &'static str, icon: &'static str| {
+            div()
+                .id(SharedString::from(format!("{row_id}-{id}")))
+                .debug_selector(move || selector.into())
+                .flex_none()
+                .p(px(4.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .hover(|style| style.bg(crate::theme::ink(0.06)))
+                .child(
+                    crate::icons::icon(icon)
+                        .size(px(13.0))
+                        .text_color(theme.text_faint),
+                )
+        };
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(22.0))
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(theme.text_muted)
+            .child(
+                crate::icons::icon(crate::icons::GLOBE)
+                    .size(px(12.0))
+                    .text_color(theme.text_faint),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(live.label.to_owned())),
+            )
+            .child(
+                action("reload", "live-page-reload", crate::icons::REFRESH).on_click(cx.listener(
+                    {
+                        let (row, url) = (row_id.clone(), url.clone());
+                        move |this, _, _, cx| this.reload_live_page(&row, &url, cx)
+                    },
+                )),
+            )
+            .child(
+                action("open", "live-page-open", crate::icons::ARROW_UP_RIGHT).on_click({
+                    let url = url.clone();
+                    move |_, _, cx| cx.open_url(&url)
+                }),
+            )
+            .child(
+                action("expand", "html-render-expand", crate::icons::EXPAND_ARROWS).on_click(
+                    cx.listener({
+                        let (row, title, url) = (row_id.clone(), title.clone(), url.clone());
+                        move |this, _, window, cx| {
+                            this.open_html_sheet(
+                                row.clone(),
+                                title.clone(),
+                                Some(url.clone()),
+                                window,
+                                cx,
+                            )
+                        }
+                    }),
+                ),
+            );
+        let frame = div()
+            .id(SharedString::from(format!("{row_id}-page")))
+            .debug_selector(|| "html-render-page".into())
+            .relative()
+            .w_full()
+            .h(px(height));
+        let frame = match reach {
+            Reach::Checking => frame,
+            Reach::Down => frame.child(
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(10.0))
+                    .bg(theme.ink(0.035))
+                    .text_size(crate::typography::ui_rems(12.5))
+                    .text_color(theme.text_muted)
+                    .child(format!("{} is not responding", live.server))
+                    .child(
+                        crate::popover::btn_ghost(&theme, "Retry", format!("{row_id}-retry"))
+                            .id(SharedString::from(format!("{row_id}-retry")))
+                            .debug_selector(|| "live-page-retry".into())
+                            .on_click(cx.listener({
+                                let (row, url) = (row_id.clone(), url.clone());
+                                move |this, _, _, cx| this.reload_live_page(&row, &url, cx)
+                            })),
+                    ),
+            ),
+            Reach::Up => {
+                #[cfg(target_os = "macos")]
+                let frame = if self.html_pages.sheet.is_some() {
+                    self.html_pages.pages.remove(row_id);
+                    frame
+                } else {
+                    frame.child(self.html_page_layer(
+                        row_id,
+                        RenderSource::Url(url),
+                        true,
+                        window,
+                        cx,
+                    ))
+                };
+                #[cfg(not(target_os = "macos"))]
+                let frame = {
+                    let _ = window;
+                    frame.child(page_placeholder(LIVE_ELSEWHERE, &theme))
+                };
+                frame
+            }
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .w_full()
+            .child(header)
+            .child(frame)
+            .into_any_element()
+    }
+
+    fn reload_live_page(&mut self, row: &SharedString, url: &SharedString, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        self.html_pages.pages.remove(row);
+        self.html_pages.crashes.remove(row);
+        if let Some(reach @ Reach::Down) = self.html_pages.reach.get_mut(row) {
+            *reach = Reach::Checking;
+        }
+        self.probe_live_page(row.clone(), url.clone(), cx);
+        cx.notify();
+    }
+
+    fn live_page_down(&mut self, row: &SharedString, cx: &mut Context<Self>) {
+        let pages = &mut self.html_pages;
+        let Some(reach) = pages.reach.get_mut(row) else {
+            return;
+        };
+        *reach = Reach::Down;
+        #[cfg(target_os = "macos")]
+        {
+            pages.pages.remove(row);
+            if let Some(sheet) = pages.sheet.as_mut().filter(|sheet| &sheet.row == row) {
+                sheet.page = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Checks the server while its row is shown and answering; a server that
+    /// stops turns the row down until the reader retries.
+    fn probe_live_page(&mut self, row: SharedString, url: SharedString, cx: &mut Context<Self>) {
+        if !self.html_pages.probing.insert(row.clone()) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                let target = url.clone();
+                let up = cx
+                    .background_executor()
+                    .spawn(async move { server_answers(&target) })
+                    .await;
+                let again = this
+                    .update(cx, |this, cx| {
+                        let pages = &mut this.html_pages;
+                        let next = match pages.reach.get(&row) {
+                            None | Some(Reach::Down) => None,
+                            Some(_) if up => Some(Reach::Up),
+                            Some(_) => Some(Reach::Down),
+                        };
+                        match next {
+                            Some(Reach::Down) => this.live_page_down(&row, cx),
+                            Some(next) if pages.reach.insert(row.clone(), next) != Some(next) => {
+                                cx.notify()
+                            }
+                            _ => {}
+                        }
+                        let pages = &mut this.html_pages;
+                        let hidden = pages.unload_hidden(&row);
+                        if hidden {
+                            cx.notify();
+                        }
+                        let shown =
+                            !hidden && pages.used.get(&row).is_some_and(|at| at + 1 >= pages.frame);
+                        let again = next == Some(Reach::Up) && shown;
+                        if !again {
+                            pages.probing.remove(&row);
+                        }
+                        again
+                    })
+                    .unwrap_or(false);
+                if !again {
+                    break;
+                }
+                cx.background_executor().timer(PROBE_INTERVAL).await;
+            }
+        })
+        .detach();
+    }
+
     #[cfg(target_os = "macos")]
     fn html_page_layer(
         &mut self,
         row_id: &SharedString,
-        html: &str,
-        height: f32,
-        content: Option<f32>,
+        source: RenderSource<'_>,
+        scrolls: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -512,10 +820,18 @@ impl Transcript {
                 crate::typography::font_size(cx).pixels(),
                 true,
             );
-            for page in self.html_pages.pages.values() {
-                page.eval(&script);
+            for (key, page) in &self.html_pages.pages {
+                if !self.html_pages.reach.contains_key(key) {
+                    page.eval(&script);
+                }
             }
-            if let Some(page) = self.html_pages.sheet.as_ref().and_then(|s| s.page.as_ref()) {
+            if let Some(page) = self
+                .html_pages
+                .sheet
+                .as_ref()
+                .filter(|sheet| sheet.url.is_none())
+                .and_then(|sheet| sheet.page.as_ref())
+            {
                 page.eval(&script);
             }
         }
@@ -534,16 +850,23 @@ impl Transcript {
             {
                 self.html_pages.pages.remove(&oldest);
             }
-            let html = crate::html_render::inject_bootstrap(
-                html,
-                Theme::of(cx),
-                crate::typography::font_size(cx).pixels(),
-                true,
-            );
+            let html;
+            let source = match source {
+                RenderSource::Html(raw) => {
+                    html = crate::html_render::inject_bootstrap(
+                        raw,
+                        Theme::of(cx),
+                        crate::typography::font_size(cx).pixels(),
+                        true,
+                    );
+                    RenderSource::Html(&html)
+                }
+                url => url,
+            };
             match crate::browser::inline::InlineWebView::new(
                 window,
                 row_id.clone(),
-                &html,
+                source,
                 self.html_pages.tx.clone(),
             ) {
                 Ok(page) => {
@@ -564,7 +887,7 @@ impl Transcript {
                 .into_any_element();
         }
         let page = self.html_pages.pages[row_id].clone();
-        page.set_scrolls(scrolls_inside(height, content));
+        page.set_scrolls(scrolls);
         let top = if self.doc_override.is_some() {
             0.0
         } else {
@@ -689,12 +1012,14 @@ impl Transcript {
         &mut self,
         row: SharedString,
         title: SharedString,
+        url: Option<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.html_pages.sheet = Some(Sheet {
             row,
             title,
+            url,
             view: SheetView::Live,
             #[cfg(target_os = "macos")]
             page: None,
@@ -743,8 +1068,11 @@ impl Transcript {
         let sheet = self.html_pages.sheet.as_ref()?;
         let (row, title, view) = (sheet.row.clone(), sheet.title.clone(), sheet.view);
         let theme = Theme::of(cx).clone();
-        let source = match self.html_pages.sources.get(&row) {
-            Some(PageSource::Ready(html)) => html.clone(),
+        let source = match (&sheet.url, self.html_pages.sources.get(&row)) {
+            (Some(url), _) if self.html_pages.reach.get(&row) == Some(&Reach::Up) => {
+                SheetSource::Url(url.clone())
+            }
+            (None, Some(PageSource::Ready(html))) => SheetSource::Html(html.clone()),
             _ => {
                 self.html_pages.sheet = None;
                 return None;
@@ -793,19 +1121,31 @@ impl Transcript {
                     .text_color(theme.text)
                     .child(title),
             )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(2.0))
-                    .child(segment("Live", "live", SheetView::Live))
-                    .child(segment("Source", "source", SheetView::Source)),
-            )
-            .child(
-                crate::popover::btn_ghost(&theme, "Save .html", "html-sheet-save")
-                    .id("html-sheet-save")
-                    .debug_selector(|| "html-sheet-save".into())
-                    .on_click(cx.listener(|this, _, _, cx| this.save_html_sheet(cx))),
-            )
+            .map(|header| match &source {
+                SheetSource::Html(_) => header
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(2.0))
+                            .child(segment("Live", "live", SheetView::Live))
+                            .child(segment("Source", "source", SheetView::Source)),
+                    )
+                    .child(
+                        crate::popover::btn_ghost(&theme, "Save .html", "html-sheet-save")
+                            .id("html-sheet-save")
+                            .debug_selector(|| "html-sheet-save".into())
+                            .on_click(cx.listener(|this, _, _, cx| this.save_html_sheet(cx))),
+                    ),
+                SheetSource::Url(url) => header.child(
+                    crate::popover::btn_ghost(&theme, "Open in browser", "html-sheet-open")
+                        .id("html-sheet-open")
+                        .debug_selector(|| "html-sheet-open".into())
+                        .on_click({
+                            let url = url.clone();
+                            move |_, _, cx| cx.open_url(&url)
+                        }),
+                ),
+            })
             .child(
                 div()
                     .id("html-sheet-close")
@@ -822,8 +1162,8 @@ impl Transcript {
                     .on_click(cx.listener(|this, _, _, cx| this.close_html_sheet(cx))),
             );
         let body = div().relative().flex_1().min_h_0();
-        let body = match view {
-            SheetView::Source => body.child(
+        let body = match (view, &source) {
+            (SheetView::Source, SheetSource::Html(source)) => body.child(
                 div()
                     .id("html-sheet-source")
                     .debug_selector(|| "html-sheet-source".into())
@@ -833,14 +1173,19 @@ impl Transcript {
                     .font_family(theme.font_mono.clone())
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text)
-                    .child(source_text(&source)),
+                    .child(source_text(source)),
             ),
-            SheetView::Live => {
+            _ => {
                 #[cfg(target_os = "macos")]
-                let body = body.child(self.html_sheet_layer(&row, &source, window, cx));
+                let body = body.child(self.html_sheet_layer(&row, source.page(), window, cx));
                 #[cfg(not(target_os = "macos"))]
                 let body = body.child(page_placeholder(
-                    "Live pages show on macOS. Switch to Source to read the page.",
+                    match &source {
+                        SheetSource::Html(_) => {
+                            "Live pages show on macOS. Switch to Source to read the page."
+                        }
+                        SheetSource::Url(_) => LIVE_ELSEWHERE,
+                    },
                     &theme,
                 ));
                 body
@@ -884,23 +1229,30 @@ impl Transcript {
     fn html_sheet_layer(
         &mut self,
         row: &SharedString,
-        source: &str,
+        source: RenderSource<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key: SharedString = format!("{row}{SHEET_SUFFIX}").into();
         let sheet = self.html_pages.sheet.as_mut().expect("sheet is open");
         if sheet.page.is_none() {
-            let html = crate::html_render::inject_bootstrap(
-                source,
-                Theme::of(cx),
-                crate::typography::font_size(cx).pixels(),
-                true,
-            );
+            let html;
+            let source = match source {
+                RenderSource::Html(raw) => {
+                    html = crate::html_render::inject_bootstrap(
+                        raw,
+                        Theme::of(cx),
+                        crate::typography::font_size(cx).pixels(),
+                        true,
+                    );
+                    RenderSource::Html(&html)
+                }
+                url => url,
+            };
             match crate::browser::inline::InlineWebView::new(
                 window,
                 key.clone(),
-                &html,
+                source,
                 self.html_pages.tx.clone(),
             ) {
                 Ok(page) => {
@@ -925,6 +1277,22 @@ impl Transcript {
             .right(px(16.0))
             .into_any_element()
     }
+}
+
+/// Whether something accepts connections at a live URL's loopback address.
+fn server_answers(url: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let Ok(live) = live_url(url) else {
+        return false;
+    };
+    (live.host, live.port)
+        .to_socket_addrs()
+        .is_ok_and(|mut addresses| {
+            addresses.any(|address| {
+                address.ip().is_loopback()
+                    && std::net::TcpStream::connect_timeout(&address, PROBE_TIMEOUT).is_ok()
+            })
+        })
 }
 
 fn page_placeholder(text: &'static str, theme: &Theme) -> AnyElement {
@@ -995,6 +1363,7 @@ mod tests {
             path: "/u/html/c1/ab.html".into(),
             title: "Chart".into(),
             height: 420,
+            url: None,
         }
     }
 
@@ -1122,6 +1491,7 @@ mod tests {
             path,
             title,
             height,
+            url,
         }) = rows
             .iter()
             .find(|row| matches!(row.kind, RowKind::HtmlRender { .. }))
@@ -1133,6 +1503,35 @@ mod tests {
             (owner.as_ref(), path.as_ref(), title.as_ref(), height),
             ("dev-a", "/u/html/c1/ab.html", "Chart", 420.0)
         );
+        assert_eq!(url, None);
+        let live = zeron_proto::html_render::HtmlRenderRef {
+            path: String::new(),
+            url: Some("http://localhost:5391/?capture=zeron-tray".into()),
+            ..page()
+        };
+        let rows = rows_for_entry(
+            &entry(MessageStatus::Complete, vec![render_part(Some(live))]),
+            false,
+            false,
+            &mut parse,
+        );
+        assert!(rows.iter().any(|row| matches!(
+            &row.kind,
+            RowKind::HtmlRender { url: Some(url), .. } if url.as_ref() == "http://localhost:5391/?capture=zeron-tray"
+        )));
+    }
+
+    #[test]
+    fn a_live_server_answers_only_while_it_listens() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/",
+            listener.local_addr().unwrap().port()
+        );
+        assert!(server_answers(&url));
+        drop(listener);
+        assert!(!server_answers(&url));
+        assert!(!server_answers("https://example.com/"));
     }
 
     #[test]
