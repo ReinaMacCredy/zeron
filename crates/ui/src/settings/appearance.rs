@@ -1362,6 +1362,105 @@ impl AppearancePage {
         rows
     }
 
+    fn render_shell_frame_rows(
+        &mut self,
+        theme: &Theme,
+        frame: crate::settings::ShellFrame,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        use crate::settings::{
+            SHELL_FRAME_BLUR_MAX, SHELL_FRAME_SHADE_MAX, SavePolicy, ShellFrameStyle,
+            update_shell_frame,
+        };
+        let style_controls = ShellFrameStyle::ALL
+            .into_iter()
+            .map(|style| {
+                choice_chip(
+                    theme,
+                    format!("shell-frame-{}", style.label().to_lowercase()),
+                    style.label(),
+                    style == frame.style,
+                )
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    update_shell_frame(SavePolicy::Immediate, cx, |frame| frame.style = style);
+                    cx.notify();
+                }))
+            })
+            .collect::<Vec<_>>();
+        let value_row = |title: &'static str, value: String, control: gpui::Stateful<gpui::Div>| {
+            widgets::card_row(theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .child(widgets::row_title(theme, title))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![div().child(SharedString::from(value)).into_any_element()],
+                        )),
+                )
+                .child(control)
+                .into_any_element()
+        };
+        let mut rows = vec![
+            widgets::card_row(theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(theme, "Window frame"))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![div().child(frame.style.description()).into_any_element()],
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .ml(px(10.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .children(style_controls),
+                )
+                .into_any_element(),
+        ];
+        if frame.style == ShellFrameStyle::Off {
+            return rows;
+        }
+        rows.push(value_row(
+            "Frame shade",
+            format!("{}%", (frame.shade * 100.0).round()),
+            slider(
+                theme,
+                "shell-frame-shade",
+                frame.shade / SHELL_FRAME_SHADE_MAX,
+                |fraction, cx| {
+                    update_shell_frame(SavePolicy::Debounced, cx, |frame| {
+                        frame.shade = fraction * SHELL_FRAME_SHADE_MAX;
+                    });
+                },
+            ),
+        ));
+        if frame.style == ShellFrameStyle::Glass {
+            rows.push(value_row(
+                "Frame blur",
+                format!("{}px", frame.blur),
+                slider(
+                    theme,
+                    "shell-frame-blur",
+                    frame.blur / SHELL_FRAME_BLUR_MAX,
+                    |fraction, cx| {
+                        update_shell_frame(SavePolicy::Debounced, cx, |frame| {
+                            frame.blur = fraction * SHELL_FRAME_BLUR_MAX;
+                        });
+                    },
+                ),
+            ));
+        }
+        rows
+    }
+
     fn render_chat_background_rows(
         &mut self,
         theme: &Theme,
@@ -2295,6 +2394,7 @@ fn chat_background_preview(
             theme.bg,
             fade,
             None,
+            Default::default(),
         ))
         .child(
             div()
@@ -4529,6 +4629,9 @@ impl Render for AppearancePage {
                 .search_anchor(SettingId::InsetCard)
                 .into_any_element(),
         );
+        if inset_shell {
+            settings_rows.extend(self.render_shell_frame_rows(&theme, ui_settings.shell_frame, cx));
+        }
         settings_rows.push(
             widgets::card_row(&theme, false)
                 .child(widgets::row_tile(&theme, icons::WIDGET))

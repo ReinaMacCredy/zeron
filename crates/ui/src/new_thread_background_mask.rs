@@ -207,18 +207,24 @@ pub(crate) fn paint_adjusted(
 pub(crate) fn paint(
     source: Arc<RenderImage>,
     bounds: Bounds<Pixels>,
+    visible: Bounds<Pixels>,
+    corners: Corners<Pixels>,
     composer: Bounds<Pixels>,
     adjustment: NewThreadBackgroundAdjustment,
     cutout: bool,
     window: &mut Window,
 ) {
-    paint_adjusted_with_mask(
+    let Some(fitted) = source_geometry(&source, bounds, adjustment) else {
+        return;
+    };
+    let _ = window.paint_image_fitted_masked(
+        visible,
+        fitted.bounds,
+        corners,
         source,
-        bounds,
-        adjustment,
-        Default::default(),
+        0,
+        false,
         Some(mask(bounds, composer, cutout)),
-        window,
     );
 }
 
@@ -228,6 +234,8 @@ pub(crate) fn paint(
 pub(crate) fn paint_chat(
     source: Arc<RenderImage>,
     bounds: Bounds<Pixels>,
+    visible: Bounds<Pixels>,
+    corners: Corners<Pixels>,
     fade_bottom: bool,
     window: &mut Window,
 ) {
@@ -235,9 +243,9 @@ pub(crate) fn paint_chat(
         return;
     };
     let _ = window.paint_image_fitted_masked(
-        bounds,
+        visible,
         fitted,
-        Default::default(),
+        corners,
         source,
         0,
         false,
@@ -523,6 +531,8 @@ mod tests {
                                     paint(
                                         source,
                                         bounds,
+                                        bounds,
+                                        Default::default(),
                                         composer,
                                         NewThreadBackgroundAdjustment::default(),
                                         true,

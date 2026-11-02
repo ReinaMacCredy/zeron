@@ -356,7 +356,7 @@ const PANE_RESIZE_HITBOX_TOP: f32 = Theme::TITLEBAR_HEIGHT;
 pub(crate) const LINUX_WINDOW_CORNER_RADIUS: f32 = 10.0;
 const CARD_INSET: f32 = 3.0;
 /// The terminal dock rounds its card corners with the window radius.
-const CARD_RADIUS: f32 = LINUX_WINDOW_CORNER_RADIUS;
+pub(crate) const CARD_RADIUS: f32 = LINUX_WINDOW_CORNER_RADIUS;
 const TERMINAL_RESIZE_HITBOX_HEIGHT: f32 = 10.0;
 
 fn stable_panel_content_width(target: f32, transition: Option<(f32, f32)>) -> f32 {
@@ -378,6 +378,7 @@ struct RightChatLayer {
     width: f32,
     height: f32,
     fade: f32,
+    card: crate::chat_background::Card,
 }
 
 fn conversation_width(viewport: f32, sidebar: f32, right: f32) -> f32 {
@@ -2694,6 +2695,7 @@ pub(crate) fn new_thread_background(
     composer_bounds: crate::new_thread_background_mask::SurfaceBounds,
     dissolve: f32,
     opacity: f32,
+    card: crate::chat_background::Card,
 ) -> AnyElement {
     let Some(artwork) = artwork else {
         return Empty.into_any_element();
@@ -2717,6 +2719,7 @@ pub(crate) fn new_thread_background(
             adjustment,
             composer_bounds,
             None,
+            card,
         ))
         .into_any_element()
 }
@@ -2726,12 +2729,14 @@ fn new_thread_background_passes(
     adjustment: settings::NewThreadBackgroundAdjustment,
     composer_bounds: crate::new_thread_background_mask::SurfaceBounds,
     painted: Option<&crate::chat_background::Painted>,
+    card: crate::chat_background::Card,
 ) -> Vec<gpui::Div> {
     [false, true]
         .into_iter()
         .map(|cutout| {
             let artwork = artwork.clone();
             let composer_bounds = composer_bounds.clone();
+            let card = card.clone();
             div()
                 .absolute()
                 .inset_0()
@@ -2744,9 +2749,12 @@ fn new_thread_background_passes(
                     painted,
                     move |_, layer, window| {
                         if let Some(composer) = composer_bounds.get() {
+                            let (layer, visible, corners) = card.place(layer, window);
                             crate::new_thread_background_mask::paint(
                                 artwork.clone(),
                                 layer,
+                                visible,
+                                corners,
                                 composer,
                                 adjustment,
                                 cutout,
@@ -2770,6 +2778,7 @@ fn new_thread_backdrop(
     composer_bounds: crate::new_thread_background_mask::SurfaceBounds,
     tab_shade: f32,
     theme: &Theme,
+    card: crate::chat_background::Card,
 ) -> Option<crate::chat_background::Backdrop> {
     let shown: f32 = frames
         .iter()
@@ -2792,6 +2801,7 @@ fn new_thread_backdrop(
                                 *adjustment,
                                 composer_bounds.clone(),
                                 painted,
+                                card.clone(),
                             ))
                     })
                 }))
@@ -3387,6 +3397,7 @@ pub struct Shell {
     /// blurred image, so sharing one tracker would restart the hero's fade.
     chat_artwork_ready: crate::new_thread_background_effects::FadeIn,
     page_backdrop: Option<crate::chat_background::Backdrop>,
+    card_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
     right_chat_layer: Option<RightChatLayer>,
     /// Session-transient disclosure state, matching the Archived shelf.
     pub(super) pinned_open: bool,
@@ -4222,6 +4233,7 @@ impl Shell {
             new_thread_artwork_ready: Default::default(),
             chat_artwork_ready: Default::default(),
             page_backdrop: None,
+            card_bounds: Default::default(),
             right_chat_layer: None,
             archived_open: true,
             pinned_open: true,
@@ -15485,6 +15497,14 @@ impl Shell {
             .into_any_element()
     }
 
+    pub(super) fn art_card(&self) -> crate::chat_background::Card {
+        crate::chat_background::Card {
+            anchored: self.settings.inset_shell
+                && self.settings.shell_frame.style != crate::settings::ShellFrameStyle::Off,
+            bounds: self.card_bounds.clone(),
+        }
+    }
+
     pub(super) fn rail_wash(&self, theme: &Theme) -> gpui::Hsla {
         if self.settings.inset_shell {
             theme.inset_tones().wash
@@ -15659,11 +15679,18 @@ impl Shell {
             .left(px(self.content_left()))
             .right(px(inset));
         if !self.settings.inset_shell {
+            self.card_bounds.set(None);
             return frame
                 .child(div().absolute().inset_0().child(content))
                 .into_any_element();
         }
+        let card_bounds = self.card_bounds.clone();
         let tones = theme.inset_tones();
+        let shell_frame = self.settings.shell_frame;
+        let framed = self
+            .page_backdrop
+            .clone()
+            .filter(|_| shell_frame.style != crate::settings::ShellFrameStyle::Off);
         let card = || {
             div()
                 .absolute()
@@ -15680,9 +15707,42 @@ impl Shell {
                     .left(px(-self.content_left()))
                     .right(px(-inset))
                     .bottom(px(-inset))
-                    .bg(tones.shell_lift),
+                    .bg(tones.shell_lift)
+                    .when_some(framed.as_ref(), |lift, backdrop| {
+                        let blur = match shell_frame.style {
+                            crate::settings::ShellFrameStyle::Glass => shell_frame.blur,
+                            _ => 0.0,
+                        };
+                        lift.child(backdrop.frame(
+                            shell_frame.shade,
+                            blur,
+                            self.content_left(),
+                            inset,
+                        ))
+                    }),
             )
-            .child(card().rounded(px(CARD_RADIUS)).bg(tones.body))
+            .child(
+                card()
+                    .rounded(px(CARD_RADIUS))
+                    .bg(tones.body)
+                    .child(
+                        gpui::canvas(
+                            move |bounds, _, _| card_bounds.set(Some(bounds)),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .when(framed.is_some(), |card| {
+                        card.shadow(vec![gpui::BoxShadow {
+                            color: gpui::black().opacity(0.35),
+                            offset: gpui::point(px(0.0), px(6.0)),
+                            blur_radius: px(20.0),
+                            spread_radius: px(0.0),
+                            inset: false,
+                        }])
+                    }),
+            )
             .child(card().child(Self::sidebar_tone(
                 tone_width,
                 CARD_RADIUS,
@@ -15700,26 +15760,33 @@ impl Shell {
                         .child(content),
                 ),
             )
-            .when_some(self.page_backdrop.clone(), |frame, backdrop| {
-                let (shade, alpha) = (backdrop.scrim_color, backdrop.tab_shade);
-                frame.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .h(px(Theme::TITLEBAR_HEIGHT))
-                        .child(crate::chat_background::surface(
-                            backdrop,
-                            move |own, _, window| {
-                                window.paint_quad(gpui::fill(own, shade.opacity(alpha)));
-                            },
-                        )),
-                )
-            })
+            .when_some(
+                self.page_backdrop.clone().filter(|_| framed.is_none()),
+                |frame, backdrop| {
+                    let (shade, alpha) = (backdrop.scrim_color, backdrop.tab_shade);
+                    frame.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(Theme::TITLEBAR_HEIGHT))
+                            .child(crate::chat_background::surface(
+                                backdrop,
+                                move |own, _, window| {
+                                    window.paint_quad(gpui::fill(own, shade.opacity(alpha)));
+                                },
+                            )),
+                    )
+                },
+            )
             .child(crate::theme::half_point_border(
                 card().rounded(px(CARD_RADIUS)),
-                tones.edge,
+                if framed.is_some() {
+                    tones.edge.alpha(tones.edge.a * 2.0)
+                } else {
+                    tones.edge
+                },
             ))
             .into_any_element()
     }
@@ -16850,6 +16917,7 @@ impl Shell {
             frame_time,
         );
         let chat_background = ui_settings.chat_background;
+        let card = self.art_card();
         // A disabled chat background never rasterizes its blurred variant.
         let chat_artwork = new_thread_background_setting
             .as_ref()
@@ -16934,6 +17002,7 @@ impl Shell {
                     bounds.clone(),
                     chat_background.tab_shade,
                     theme,
+                    card.clone(),
                 )
             } else {
                 None
@@ -16959,6 +17028,7 @@ impl Shell {
                     bounds.clone(),
                     dock_frame.dissolve(),
                     (1.0 - artwork_frame.mix) * opacity,
+                    card.clone(),
                 ))
                 .child(new_thread_background(
                     artwork_frame.current,
@@ -16968,6 +17038,7 @@ impl Shell {
                     bounds,
                     dock_frame.dissolve(),
                     artwork_frame.mix * opacity,
+                    card.clone(),
                 ))
                 .children(strip)
                 .into_any_element()
@@ -17001,6 +17072,7 @@ impl Shell {
                     width: full_width,
                     height,
                     fade,
+                    card: card.clone(),
                 });
                 let backdrop = (self.settings.inset_shell && has_selection).then(|| {
                     crate::chat_background::Backdrop::chat(
@@ -17009,6 +17081,7 @@ impl Shell {
                         fade,
                         theme.bg,
                         theme.inset_tones().body,
+                        card.clone(),
                     )
                 });
                 let layer = crate::chat_background::layer(
@@ -17019,6 +17092,7 @@ impl Shell {
                     theme.bg,
                     fade,
                     backdrop.as_ref(),
+                    card.clone(),
                 );
                 if backdrop.is_some() {
                     self.page_backdrop = backdrop;
@@ -17827,6 +17901,7 @@ impl Shell {
                     theme.bg,
                     layer.fade,
                     None,
+                    layer.card,
                 ),
             )
         });

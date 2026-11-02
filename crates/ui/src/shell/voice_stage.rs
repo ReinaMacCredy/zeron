@@ -446,6 +446,8 @@ impl Shell {
                                 artwork.clone(),
                                 bounds,
                                 bounds,
+                                Default::default(),
+                                bounds,
                                 adjustment,
                                 false,
                                 window,
