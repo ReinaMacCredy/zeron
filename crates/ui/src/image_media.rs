@@ -323,8 +323,6 @@ fn decode_raster_image_bounded(
 
 /// 8 bytes a pixel held by GPUI plus a worst-case PNG stays inside a preview's 64 MiB.
 const DOWNSCALED_PIXELS: usize = 5 * 1024 * 1024;
-/// Largest RGBA buffer a source other than a plain PNG decodes into whole
-/// before it is downscaled.
 const FULL_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SOURCE_SIDE: u32 = 1 << 16;
 const MAX_SOURCE_PIXELS: u64 = 1 << 28;
@@ -365,8 +363,7 @@ fn decode_downscaled(
     Ok(decoded.thumbnail(target.0, target.1))
 }
 
-/// Box-filters a non-interlaced PNG to `target` row by row, so the full-size
-/// image never exists in memory. `None` for an interlaced PNG.
+/// Row by row, so the full-size image never exists in memory.
 fn decode_png_downscaled(
     bytes: &[u8],
     (target_width, target_height): (u32, u32),

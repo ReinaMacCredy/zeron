@@ -195,7 +195,6 @@ const EDGE_SCRIPT: &str = r#"(function(){var l=-1,e=function(){var s=document.sc
 // Snapshots are taken only while the page reports a change, at most every 250ms.
 const ACTIVITY_SCRIPT: &str = r#"(function(){var t=0;function a(){var n=Date.now();if(n-t<250||!window.ipc)return;t=n;window.ipc.postMessage(JSON.stringify({active:1}));}function w(f){return typeof f==="function"?function(){a();return f.apply(this,arguments);}:f;}var r=window.requestAnimationFrame;window.requestAnimationFrame=function(f){a();return r.call(window,f);};var st=window.setTimeout,si=window.setInterval;window.setTimeout=function(f){var g=[].slice.call(arguments);g[0]=w(f);return st.apply(window,g);};window.setInterval=function(f){var g=[].slice.call(arguments);g[0]=w(f);return si.apply(window,g);};new MutationObserver(a).observe(document.documentElement,{subtree:true,childList:true,attributes:true,characterData:true});["transitionrun","transitionend","animationstart","animationiteration","animationend","input","change","scroll","load"].forEach(function(e){window.addEventListener(e,a,true);});})();"#;
 
-/// A live dev server page reports only its wheel edges and activity; its frame keeps the agent's height.
 #[cfg(target_os = "macos")]
 pub fn live_script() -> String {
     format!("{EDGE_SCRIPT}{ACTIVITY_SCRIPT}")

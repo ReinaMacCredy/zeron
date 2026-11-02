@@ -203,7 +203,6 @@ pub struct HtmlRenderRef {
     pub url: Option<String>,
 }
 
-/// What an `html_render` or `html_preview` call shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderSource<'a> {
     Html(&'a str),
@@ -238,7 +237,6 @@ pub struct LiveUrl<'a> {
     pub port: u16,
 }
 
-/// Accepts http(s) on localhost, 127.0.0.1 or [::1] only, any port and path.
 pub fn live_url(url: &str) -> Result<LiveUrl<'_>, String> {
     let url = url.trim();
     let refused = || {

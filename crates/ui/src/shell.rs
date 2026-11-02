@@ -12391,8 +12391,6 @@ impl Shell {
             .child(trailing)
     }
 
-    /// The groups as a tree: roving group rows, and the open group's pages
-    /// nested under it. While a query is typed, its results replace the tree.
     fn render_settings_nav(
         &mut self,
         section: SettingsSection,
