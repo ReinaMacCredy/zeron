@@ -1252,8 +1252,9 @@ impl FileMentionLink {
         matches!(self.kind, ChipKind::Skill | ChipKind::Command)
     }
 
+    /// Skills are pills here; sent messages keep them in the accent flow.
     fn in_accent_flow(&self) -> bool {
-        self.kind.in_accent_flow()
+        self.kind != ChipKind::Skill && self.kind.in_accent_flow()
     }
 }
 
@@ -4994,7 +4995,7 @@ impl ComposerInput {
         // Inline code: the markdown renderer's recipe (mono font + the
         // spectrum's `code_text`) over the rounded `code_wash` beneath.
         // Thread mentions are plain accent text at medium weight.
-        let (chip_font, chip_color, thread_font, thread_color) = {
+        let (chip_font, chip_color, thread_font, thread_color, skill_color) = {
             let theme = Theme::of(cx);
             let mut thread_font = style.font();
             thread_font.weight = gpui::FontWeight::MEDIUM;
@@ -5003,6 +5004,7 @@ impl ComposerInput {
                 theme.code_text,
                 thread_font,
                 theme.accent,
+                theme.branch_ink(),
             )
         };
         let run_for = |len: usize, underline: bool, code: bool| TextRun {
@@ -5131,6 +5133,12 @@ impl ComposerInput {
                 {
                     run.font = thread_font.clone();
                     run.color = thread_color;
+                } else if chip_link.is_some_and(|(link, range)| {
+                    link.kind == ChipKind::Skill
+                        && !chip_pad_ranges(range).iter().any(|pad| pad.contains(&r[0]))
+                }) {
+                    run.font = thread_font.clone();
+                    run.color = skill_color;
                 } else if chip_range.is_some_and(|range| {
                     chip_pad_ranges(range).iter().any(|pad| pad.contains(&r[0]))
                 }) {
@@ -7780,6 +7788,17 @@ impl Composer {
         self.input.update(cx, |input, cx| input.set_text(text, cx));
         self.sync_draft(cx);
         cx.notify();
+    }
+
+    pub(crate) fn seed_skill(&mut self, key: &str, link: &str, cx: &mut Context<Self>) {
+        if key == self.current_key {
+            let text = format!("{link} {}", self.input.read(cx).text());
+            self.seed_text(text, cx);
+        } else {
+            let mut entry = crate::draft_store::entry(key, cx);
+            entry.prompt = format!("{link} {}", entry.prompt);
+            crate::draft_store::set(key, entry, cx);
+        }
     }
 
     pub(crate) fn seed_playbook(
@@ -10629,6 +10648,17 @@ impl Composer {
             .unwrap_or_default();
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
         self.slash.filtered = crate::popover::filter_indices(&query, &names);
+        let disabled = &crate::settings::current(cx).disabled_skills;
+        if !disabled.is_empty() {
+            self.slash.filtered.retain(|&ix| {
+                !commands.get(ix).is_some_and(|command| match &command.invocation {
+                    zeron_proto::invocation::Invocation::Skill { path, .. } => {
+                        disabled.contains(path)
+                    }
+                    zeron_proto::invocation::Invocation::Command { .. } => false,
+                })
+            });
+        }
         if self.pickers.read(cx).resolved(cx).harness == Some(HarnessId::ClaudeCode) {
             self.slash
                 .filtered
