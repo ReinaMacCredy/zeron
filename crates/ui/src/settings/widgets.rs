@@ -482,8 +482,9 @@ pub fn option_card(
 /// Section labels and page titles sit a little inside the blocks' edge.
 const SECTION_LABEL_INSET: f32 = 8.0;
 const SECTION_TITLE_INSET: f32 = 16.0;
+const SECTION_HEADING_INSET: f32 = 2.0;
 /// Air between one section and the next.
-const SECTION_GAP: f32 = 32.0;
+const SECTION_GAP: f32 = 26.0;
 
 /// The small plain label above a block ("Startup", "Fonts"): sentence case,
 /// muted, never an uppercase eyebrow.
@@ -513,7 +514,7 @@ pub fn details_label(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div
 
 pub fn section_title(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
     div()
-        .px(px(SECTION_LABEL_INSET))
+        .px(px(SECTION_HEADING_INSET))
         .min_h(px(24.0))
         .flex()
         .flex_row()

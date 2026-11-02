@@ -1917,7 +1917,7 @@ fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<Setti
 }
 
 const SETTINGS_NAV_WIDTH: f32 = 238.0;
-const SETTINGS_TITLE_HEIGHT: f32 = 92.0;
+const SETTINGS_TITLE_HEIGHT: f32 = 91.0;
 const SETTINGS_TITLE_TOP: f32 = 36.0;
 const SETTINGS_PANEL_RADIUS: f32 = 14.0;
 const SETTINGS_PANEL_MAX_WIDTH: f32 = 1280.0;
@@ -12115,11 +12115,11 @@ impl Shell {
             .h(px(SETTINGS_TITLE_HEIGHT))
             .flex_none()
             .pt(px(SETTINGS_TITLE_TOP))
-            .pl(px(settings::widgets::SETTINGS_PAGE_PAD_LEFT + 8.0))
+            .pl(px(settings::widgets::SETTINGS_PAGE_PAD_LEFT))
             .pr(px(52.0))
             .child(
                 div()
-                    .max_w(px(settings::widgets::SETTINGS_PAGE_MAX_WIDTH - 8.0))
+                    .max_w(px(settings::widgets::SETTINGS_PAGE_MAX_WIDTH))
                     .flex()
                     .flex_row()
                     .items_start()
@@ -12130,12 +12130,12 @@ impl Shell {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .gap(px(4.0))
+                            .gap(px(6.0))
                             .child(
                                 div()
                                     .truncate()
                                     .text_size(crate::typography::ui_rems(22.0))
-                                    .line_height(crate::typography::ui_rems(28.0))
+                                    .line_height(crate::typography::ui_rems(26.0))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(theme.text)
                                     .child(SharedString::from(section.label())),
@@ -12144,7 +12144,7 @@ impl Shell {
                                 div()
                                     .truncate()
                                     .text_size(crate::typography::ui_rems(13.0))
-                                    .line_height(crate::typography::ui_rems(18.0))
+                                    .line_height(crate::typography::ui_rems(17.0))
                                     .text_color(theme.text_muted)
                                     .child(SharedString::from(section.summary())),
                             ),
