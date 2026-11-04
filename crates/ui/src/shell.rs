@@ -19513,6 +19513,7 @@ fn header_icon_button_with(
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.page_backdrop = None;
+        self.close_blurred_rail_completions(window, cx);
         self.refresh_triage_frame(cx);
         self.sync_waiting(cx);
         self.resolve_pending_child(cx);

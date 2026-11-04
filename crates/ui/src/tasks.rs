@@ -14,6 +14,7 @@ use zeron_proto::{
     ChatIndicator, PlanProgress, StepStatus, TaskPatch, TaskStatus, view::task_thread_status,
 };
 
+use crate::composer::task_completions::TaskCompletions;
 use crate::composer::{ComposerInput, ComposerInputEvent, MentionTab};
 use crate::icons::{self, icon};
 use crate::motion;
@@ -206,6 +207,7 @@ impl Row {
 pub struct TasksPage {
     state: Entity<AppState>,
     add: Entity<ComposerInput>,
+    add_menus: Entity<TaskCompletions>,
     add_images: Vec<String>,
     add_uploads: Vec<gpui::Task<()>>,
     picking: Option<gpui::Task<()>>,
@@ -258,7 +260,11 @@ impl TasksPage {
             ComposerInput::new(ADD_PLACEHOLDER, cx)
                 .with_single_line()
                 .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS)
+                .with_mentions(state.clone())
         });
+        let add_menus =
+            cx.new(|cx| TaskCompletions::in_selected_space(state.clone(), add.clone(), cx));
+        let add_menu_changes = cx.observe(&add_menus, |_, _, cx| cx.notify());
         let add_events = cx.subscribe(&add, |page, _, event: &ComposerInputEvent, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
                 page.submit_add(false, None, cx);
@@ -280,6 +286,7 @@ impl TasksPage {
         let mut page = Self {
             state,
             add,
+            add_menus,
             add_images: Vec::new(),
             add_uploads: Vec::new(),
             picking: None,
@@ -310,6 +317,7 @@ impl TasksPage {
             thread_picker: false,
             _subscriptions: vec![
                 add_events,
+                add_menu_changes,
                 state_changes,
                 settings_changes,
                 card_events,
@@ -1771,7 +1779,9 @@ impl TasksPage {
                 page.add_images(staged, cx);
             }))
             .capture_action(cx.listener(|page, _: &MentionTab, window, cx| {
-                if page.submit_add(true, Some(window), cx) {
+                if !page.add_menus.read(cx).has_selection(cx)
+                    && page.submit_add(true, Some(window), cx)
+                {
                     cx.stop_propagation();
                 }
             }))
@@ -1788,10 +1798,16 @@ impl TasksPage {
             .child(dashed_circle(theme))
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .text_size(ui_rems(13.5))
-                    .child(self.add.clone()),
+                    .child(self.add.clone())
+                    .children(
+                        self.add_menus
+                            .read(cx)
+                            .popup_below("tasks-add-completions", cx),
+                    ),
             )
             .child(
                 div()
@@ -2944,6 +2960,8 @@ pub(crate) fn tasks_view(cx: &gpui::App) -> TasksView {
 
 impl Render for TasksPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.add_menus
+            .update(cx, |menus, cx| menus.close_if_blurred(window, cx));
         let theme = Theme::of(cx).clone();
         self.settle_pending(cx);
         let (mut open, mut done) = self.rows(cx);

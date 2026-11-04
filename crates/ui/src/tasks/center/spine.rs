@@ -931,6 +931,7 @@ impl TaskCenter {
                 div()
                     .id("task-center-edit-title")
                     .debug_selector(|| "task-center-edit-title".into())
+                    .relative()
                     .mt(px(-1.0))
                     .mx(px(-6.0))
                     .px(px(6.0))
@@ -952,6 +953,13 @@ impl TaskCenter {
                         2.0 * TITLE_LINE,
                         cx,
                     ))
+                    .children(editor.and_then(|editor| {
+                        editor
+                            .title_menus
+                            .as_ref()?
+                            .read(cx)
+                            .popup_below("task-center-edit-title-completions", cx)
+                    }))
                     .into_any_element()
             }
             None if running && !reduced => {
@@ -1509,7 +1517,7 @@ impl TaskCenter {
         }
     }
 
-    fn render_ghost(&self, theme: &Theme) -> AnyElement {
+    fn render_ghost(&self, theme: &Theme, cx: &App) -> AnyElement {
         div()
             .id("task-center-add-step")
             .debug_selector(|| "task-center-add-step".into())
@@ -1533,10 +1541,16 @@ impl TaskCenter {
             )
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .text_size(ui_rems(13.0))
-                    .child(self.add.clone()),
+                    .child(self.add.clone())
+                    .children(
+                        self.add_menus
+                            .read(cx)
+                            .popup_below("task-center-add-completions", cx),
+                    ),
             )
             .into_any_element()
     }
@@ -2717,7 +2731,7 @@ impl TaskCenter {
                     None => self.render_tree_lead_card(tree_nodes, reduced, theme, cx),
                 }
             } else if node.id == GHOST {
-                self.render_ghost(theme)
+                self.render_ghost(theme, cx)
             } else if node.id == MARK {
                 Self::render_marker(agents.len(), theme)
             } else if let Some(ix) = shown.iter().position(|(row, ..)| row.step.id == node.id) {

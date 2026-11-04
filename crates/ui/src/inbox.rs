@@ -11,6 +11,7 @@ use zeron_proto::today::{
 use zeron_proto::{Chat, SessionStatus, TodayRun, TodayRunStatus, TodayRuns, TodayRunsRequest};
 use zeron_rpc::methods;
 
+use crate::composer::task_completions::TaskCompletions;
 use crate::composer::{ComposerInput, ComposerInputEvent, MentionTab};
 use crate::icons::{self, icon};
 use crate::settings::widgets;
@@ -47,6 +48,7 @@ pub enum InboxEvent {
 pub struct InboxPage {
     state: Entity<AppState>,
     add_input: Entity<ComposerInput>,
+    add_menus: Entity<TaskCompletions>,
     card: Entity<TaskCard>,
     open_first_card: bool,
     needs: usize,
@@ -72,7 +74,10 @@ impl InboxPage {
                 .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS)
                 .with_text_metrics(13.5, 18.0)
                 .with_accessibility_role(gpui::Role::TextInput)
+                .with_mentions(state.clone())
         });
+        let add_menus =
+            cx.new(|cx| TaskCompletions::in_selected_space(state.clone(), add_input.clone(), cx));
         let ticker = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(TICK).await;
@@ -92,11 +97,13 @@ impl InboxPage {
                 cx.emit(InboxEvent::Card(event.clone()))
             }),
             cx.observe(&card, |_, _, cx| cx.notify()),
+            cx.observe(&add_menus, |_, _, cx| cx.notify()),
             cx.observe(&state, |this, _, cx| this.on_state_changed(cx)),
         ];
         let mut page = Self {
             state,
             add_input,
+            add_menus,
             card,
             open_first_card: std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("task-card"),
             needs: 0,
@@ -646,17 +653,23 @@ impl InboxPage {
             .items_center()
             .gap(px(12.0))
             .capture_action(cx.listener(|page, _: &MentionTab, window, cx| {
-                if page.submit_add(Some(window), cx) {
+                if !page.add_menus.read(cx).has_selection(cx) && page.submit_add(Some(window), cx) {
                     cx.stop_propagation();
                 }
             }))
             .child(crate::tasks::dashed_circle(theme))
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .text_size(ui_rems(13.5))
-                    .child(self.add_input.clone()),
+                    .child(self.add_input.clone())
+                    .children(
+                        self.add_menus
+                            .read(cx)
+                            .popup_below("inbox-add-completions", cx),
+                    ),
             );
         let all_tasks = div()
             .id("inbox-all-tasks")
@@ -858,7 +871,9 @@ impl InboxPage {
 }
 
 impl Render for InboxPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.add_menus
+            .update(cx, |menus, cx| menus.close_if_blurred(window, cx));
         let first = !self.visible();
         self.last_render = Some(Instant::now());
         if first {
