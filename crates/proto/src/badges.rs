@@ -41,6 +41,7 @@ const EXTRACTORS: &[Extractor] = &[
     extract_comment_badge,
     extract_terminal_badge,
     extract_selection_badge,
+    extract_annotation_badge,
 ];
 
 /// Each extractor sees what the previous ones left behind, so two features can
@@ -58,6 +59,9 @@ pub fn split(text: &str) -> (String, Vec<MessageBadge>) {
 }
 
 pub const QUOTE_BLOCK_HEADER: &str = "Selected text from this conversation (quoted):";
+pub const ANNOTATION_BLOCK_HEADER: &str = "Annotations (numbered; each quotes the text the user selected, then the user's comment on it):";
+pub const ANNOTATION_COMMENT_LABEL: &str = "User comment:";
+pub const ANNOTATION_NO_COMMENT: &str = "(none)";
 pub const TERMINAL_BLOCK_HEADER: &str = "Selected text from this chat's terminal (quoted):";
 pub const SELECTION_LOCATION: &str = "Selected text";
 pub const TERMINAL_LOCATION: &str = "Terminal selection";
@@ -82,6 +86,14 @@ pub fn selection_label(count: usize) -> String {
         "1 selection".to_string()
     } else {
         format!("{count} selections")
+    }
+}
+
+pub fn annotation_label(count: usize) -> String {
+    if count == 1 {
+        "1 annotation".to_string()
+    } else {
+        format!("{count} annotations")
     }
 }
 
@@ -174,6 +186,73 @@ fn extract_quotes(
         MessageBadge {
             kind,
             label: selection_label(details.len()),
+            details,
+        },
+    ))
+}
+
+fn unquote(line: &str) -> Option<&str> {
+    line.strip_prefix("> ").or_else(|| line.strip_prefix('>'))
+}
+
+/// One `N. Selected text[ from <file>]:` entry of [`ANNOTATION_BLOCK_HEADER`].
+fn parse_annotation(number: usize, entry: &str) -> Option<BadgeDetail> {
+    let mut lines = entry.lines().peekable();
+    let head = lines
+        .next()?
+        .strip_prefix(&format!("{number}. {SELECTION_LOCATION}"))?
+        .strip_suffix(':')?;
+    let location = match head.strip_prefix(" from ") {
+        Some(path) => format!("{number}. {path}"),
+        None if head.is_empty() => format!("{number}. {SELECTION_LOCATION}"),
+        None => return None,
+    };
+    let mut quoted = Vec::new();
+    while let Some(line) = lines.peek().and_then(|line| unquote(line)) {
+        quoted.push(line);
+        lines.next();
+    }
+    let label = lines.next()?;
+    let mut comment = Vec::new();
+    if label == ANNOTATION_COMMENT_LABEL {
+        comment = lines.map(unquote).collect::<Option<Vec<_>>>()?;
+        if comment.is_empty() {
+            return None;
+        }
+    } else if label != format!("{ANNOTATION_COMMENT_LABEL} {ANNOTATION_NO_COMMENT}")
+        || lines.next().is_some()
+    {
+        return None;
+    }
+    let mut body = quoted.join("\n");
+    if !comment.is_empty() {
+        body = format!(
+            "{body}\n\n{ANNOTATION_COMMENT_LABEL} {}",
+            comment.join("\n")
+        );
+    }
+    Some(BadgeDetail {
+        location,
+        tag: None,
+        body,
+    })
+}
+
+/// Matched only as a whole trailing block whose every entry parses, so a
+/// prompt quoting the header in its body is left alone.
+pub fn extract_annotation_badge(text: &str) -> Option<(String, MessageBadge)> {
+    let marker = format!("\n\n{ANNOTATION_BLOCK_HEADER}\n");
+    let at = text.rfind(&marker)?;
+    let details = text[at + marker.len()..]
+        .split("\n\n")
+        .enumerate()
+        .map(|(ix, entry)| parse_annotation(ix + 1, entry))
+        .collect::<Option<Vec<_>>>()?;
+    Some((
+        text[..at].to_string(),
+        MessageBadge {
+            kind: BadgeKind::Selection,
+            label: annotation_label(details.len()),
             details,
         },
     ))

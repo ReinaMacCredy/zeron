@@ -5,7 +5,8 @@
 //! out for the transcript. There is no second data model.
 
 use crate::badges::{
-    QUOTE_BLOCK_HEADER, SELECTION_LOCATION, TERMINAL_BLOCK_HEADER, TERMINAL_LOCATION,
+    ANNOTATION_BLOCK_HEADER, ANNOTATION_COMMENT_LABEL, ANNOTATION_NO_COMMENT, QUOTE_BLOCK_HEADER,
+    SELECTION_LOCATION, TERMINAL_BLOCK_HEADER, TERMINAL_LOCATION,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +14,10 @@ pub struct Quote {
     pub id: String,
     pub text: String,
     pub terminal: bool,
+    /// `Some` makes this an annotation: numbered, with a comment that may be empty.
+    pub comment: Option<String>,
+    /// The file an annotation's text was selected in.
+    pub source: Option<String>,
 }
 
 impl Quote {
@@ -21,6 +26,16 @@ impl Quote {
             id: uuid::Uuid::new_v4().to_string(),
             text: text.into(),
             terminal: false,
+            comment: None,
+            source: None,
+        }
+    }
+
+    pub fn annotation(text: impl Into<String>, source: Option<String>) -> Self {
+        Self {
+            comment: Some(String::new()),
+            source,
+            ..Self::new(text)
         }
     }
 
@@ -29,7 +44,13 @@ impl Quote {
             id: TERMINAL_QUOTE_ID.to_string(),
             text: text.into(),
             terminal: true,
+            comment: None,
+            source: None,
         }
+    }
+
+    pub fn is_annotation(&self) -> bool {
+        self.comment.is_some()
     }
 
     pub fn location(&self) -> &'static str {
@@ -59,6 +80,24 @@ fn quote_block(text: &str) -> String {
         .join("\n")
 }
 
+fn annotation_entry(number: usize, quote: &Quote) -> String {
+    let source = quote
+        .source
+        .as_deref()
+        .map(|path| format!(" from {path}"))
+        .unwrap_or_default();
+    let comment = quote.comment.as_deref().unwrap_or_default().trim();
+    let comment = if comment.is_empty() {
+        format!("{ANNOTATION_COMMENT_LABEL} {ANNOTATION_NO_COMMENT}")
+    } else {
+        format!("{ANNOTATION_COMMENT_LABEL}\n{}", quote_block(comment))
+    };
+    format!(
+        "{number}. {SELECTION_LOCATION}{source}:\n{}\n{comment}",
+        quote_block(&quote.text)
+    )
+}
+
 pub fn with_quotes(text: &str, quotes: &[Quote]) -> String {
     if quotes.is_empty() {
         return text.to_string();
@@ -69,10 +108,22 @@ pub fn with_quotes(text: &str, quotes: &[Quote]) -> String {
         text
     }
     .to_string();
+    let entries: Vec<String> = quotes
+        .iter()
+        .filter(|q| q.is_annotation())
+        .enumerate()
+        .map(|(ix, q)| annotation_entry(ix + 1, q))
+        .collect();
+    if !entries.is_empty() {
+        out = format!(
+            "{out}\n\n{ANNOTATION_BLOCK_HEADER}\n{}",
+            entries.join("\n\n")
+        );
+    }
     for (terminal, header) in [(false, QUOTE_BLOCK_HEADER), (true, TERMINAL_BLOCK_HEADER)] {
         let blocks: Vec<String> = quotes
             .iter()
-            .filter(|q| q.terminal == terminal)
+            .filter(|q| q.terminal == terminal && !q.is_annotation())
             .map(|q| quote_block(&q.text))
             .collect();
         if !blocks.is_empty() {
@@ -85,7 +136,7 @@ pub fn with_quotes(text: &str, quotes: &[Quote]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::badges::extract_selection_badge;
+    use crate::badges::{extract_annotation_badge, extract_selection_badge};
 
     #[test]
     fn empty_set_leaves_the_prompt_untouched() {
@@ -145,6 +196,91 @@ mod tests {
         assert_eq!(badges[0].details[0].location, TERMINAL_LOCATION);
         assert_eq!(badges[0].details[0].body, "$ make\nerror: boom");
         assert_eq!(badges[1].details[0].body, "why");
+    }
+
+    fn annotation(text: &str, comment: &str, source: Option<&str>) -> Quote {
+        Quote {
+            comment: Some(comment.into()),
+            ..Quote::annotation(text, source.map(str::to_string))
+        }
+    }
+
+    #[test]
+    fn annotations_deliver_quote_and_comment_in_number_order() {
+        let quotes = vec![
+            annotation("first\n\nline", "why?", None),
+            annotation("second", "", Some("docs/plan.md")),
+            annotation("third", "two\nlines", None),
+        ];
+        let sent = with_quotes("look", &quotes);
+        assert_eq!(
+            sent,
+            format!(
+                "look\n\n{ANNOTATION_BLOCK_HEADER}\n\
+                 1. Selected text:\n> first\n>\n> line\nUser comment:\n> why?\n\n\
+                 2. Selected text from docs/plan.md:\n> second\nUser comment: (none)\n\n\
+                 3. Selected text:\n> third\nUser comment:\n> two\n> lines"
+            )
+        );
+        let (rest, badge) = extract_annotation_badge(&sent).expect("badge");
+        assert_eq!(rest, "look");
+        assert_eq!(badge.label, "3 annotations");
+        assert_eq!(badge.details[0].location, "1. Selected text");
+        assert_eq!(badge.details[0].body, "first\n\nline\n\nUser comment: why?");
+        assert_eq!(badge.details[1].location, "2. docs/plan.md");
+        assert_eq!(badge.details[1].body, "second");
+        assert_eq!(badge.details[2].body, "third\n\nUser comment: two\nlines");
+    }
+
+    #[test]
+    fn removing_an_annotation_renumbers_the_rest() {
+        let mut quotes = vec![
+            annotation("a", "", None),
+            annotation("b", "", None),
+            annotation("c", "", None),
+        ];
+        quotes.remove(1);
+        let sent = with_quotes("q", &quotes);
+        assert!(sent.contains("1. Selected text:\n> a"));
+        assert!(sent.contains("2. Selected text:\n> c"));
+        assert!(!sent.contains("3. Selected text"));
+    }
+
+    #[test]
+    fn annotations_ride_beside_plain_and_terminal_quotes() {
+        let quotes = vec![
+            Quote::terminal("$ make"),
+            annotation("note", "fix", None),
+            Quote::new("plain"),
+        ];
+        let (rest, badges) = crate::badges::split(&with_quotes("q", &quotes));
+        assert_eq!(rest, "q");
+        let labels: Vec<_> = badges.iter().map(|badge| badge.label.as_str()).collect();
+        assert_eq!(labels, ["1 selection", "1 selection", "1 annotation"]);
+    }
+
+    #[test]
+    fn a_comment_that_looks_like_the_format_stays_inside_its_entry() {
+        let quotes = vec![annotation(
+            "a\nUser comment:",
+            "(none)\n\n2. Selected text:",
+            None,
+        )];
+        let (rest, badge) = extract_annotation_badge(&with_quotes("q", &quotes)).expect("badge");
+        assert_eq!(rest, "q");
+        assert_eq!(badge.details.len(), 1);
+        assert_eq!(
+            badge.details[0].body,
+            "a\nUser comment:\n\nUser comment: (none)\n\n2. Selected text:"
+        );
+    }
+
+    #[test]
+    fn a_prompt_quoting_the_annotation_header_mid_body_is_left_alone() {
+        let text = format!("{ANNOTATION_BLOCK_HEADER} is what I typed\n\nno entries here");
+        assert!(extract_annotation_badge(&text).is_none());
+        let text = format!("x\n\n{ANNOTATION_BLOCK_HEADER}\nnot an entry");
+        assert!(extract_annotation_badge(&text).is_none());
     }
 
     #[test]
