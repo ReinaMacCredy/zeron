@@ -201,8 +201,15 @@ impl SlashMenu {
         }
     }
 
-    pub(crate) fn token(&self) -> Option<&MentionToken> {
-        self.state.token.as_ref()
+    #[cfg(test)]
+    pub(crate) fn seed_rows(&mut self, rows: Vec<InvocationCandidate>, cx: &mut Context<Self>) {
+        let rows = rows.into_iter().filter(|row| match self.scope {
+            SlashScope::Task => inserts_message_text(row),
+            SlashScope::Chat { .. } => true,
+        });
+        self.cache
+            .insert(self.state.context.clone(), rows.collect());
+        self.refilter(cx);
     }
 
     pub(crate) fn is_open(&self) -> bool {

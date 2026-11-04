@@ -8,7 +8,7 @@ use gpui::{
     div, prelude::*, px,
 };
 
-use crate::composer::mentions::{MentionMenu, MentionMenuEvent, MentionTarget};
+use crate::composer::task_completions::{TaskCompletions, TaskScope};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
 use crate::motion;
@@ -98,6 +98,17 @@ pub(crate) fn hash_query(text: &str) -> Option<(usize, &str)> {
         .then_some((at, query))
 }
 
+pub(crate) fn mentioned_dependencies(text: &str, tasks: &[zeron_proto::Task]) -> Vec<String> {
+    let mut depends_on: Vec<String> = Vec::new();
+    for link in zeron_proto::task_mentions::task_mention_links(text) {
+        if !depends_on.contains(&link.task_id) && tasks.iter().any(|task| task.id == link.task_id) {
+            depends_on.push(link.task_id);
+        }
+    }
+    depends_on.truncate(zeron_doc::TASK_DEPENDS_ON_MAX);
+    depends_on
+}
+
 pub(crate) fn project_matches(state: &AppState, query: &str) -> Vec<(String, SharedString)> {
     let query = query.to_lowercase();
     state
@@ -147,13 +158,13 @@ pub(crate) struct CaptureToast {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Popup {
     Projects,
-    Mentions,
+    Completions,
 }
 
 pub(crate) struct QuickCaptureBar {
     state: Entity<AppState>,
     input: Entity<ComposerInput>,
-    mentions: Entity<MentionMenu>,
+    completions: Entity<TaskCompletions>,
     images: Vec<String>,
     uploads: Vec<Task<()>>,
     picking: Option<Task<()>>,
@@ -187,25 +198,23 @@ impl QuickCaptureBar {
                 .with_text_metrics(16.0, 22.0)
                 .with_mentions(state.clone())
         });
-        let mentions = cx.new(|_| MentionMenu::new(state.clone(), input.clone()));
+        let bar = cx.weak_entity();
+        let completions = cx.new(|cx| {
+            TaskCompletions::new(
+                state.clone(),
+                input.clone(),
+                move |cx| TaskScope {
+                    space_id: bar.upgrade().and_then(|bar| bar.read(cx).space_id(cx)),
+                    agent: None,
+                },
+                cx,
+            )
+        });
         let events = cx.subscribe(
             &input,
             |bar, _, event: &ComposerInputEvent, cx| match event {
                 ComposerInputEvent::Submitted => bar.enter(cx),
-                ComposerInputEvent::Edited => {
-                    bar.refresh_menu(cx);
-                    bar.refresh_mentions(cx);
-                }
-                ComposerInputEvent::CursorMoved => bar.refresh_mentions(cx),
-                ComposerInputEvent::MentionNavigate(delta) => {
-                    bar.mentions.update(cx, |menu, cx| menu.step(*delta, cx))
-                }
-                ComposerInputEvent::MentionAccept => {
-                    bar.mentions.update(cx, |menu, cx| menu.accept(cx))
-                }
-                ComposerInputEvent::MentionDismiss => {
-                    bar.mentions.update(cx, |menu, cx| menu.dismiss(cx))
-                }
+                ComposerInputEvent::Edited => bar.refresh_menu(cx),
                 _ => {
                     if let Some(staged) = images::pasted(event, cx) {
                         bar.add_images(staged, cx);
@@ -213,18 +222,17 @@ impl QuickCaptureBar {
                 }
             },
         );
-        let mention_events = cx.subscribe(&mentions, |bar, menu, _: &MentionMenuEvent, cx| {
-            let menu = menu.read(cx);
-            let (open, selected) = (menu.is_open(), menu.has_selection());
-            bar.input.update(cx, |input, cx| {
-                input.set_mention_controls(open, selected, cx)
-            });
+        let completion_changes = cx.observe(&completions, |bar, completions, cx| {
+            if completions.read(cx).is_open(cx) {
+                bar.menu = None;
+                bar.menu_from_chip = false;
+            }
             cx.notify();
         });
         Self {
             state,
             input,
-            mentions,
+            completions,
             images: Vec::new(),
             uploads: Vec::new(),
             picking: None,
@@ -240,7 +248,7 @@ impl QuickCaptureBar {
             opens: 0,
             seen_active: false,
             activation: None,
-            _subscriptions: vec![events, mention_events],
+            _subscriptions: vec![events, completion_changes],
         }
     }
 
@@ -337,59 +345,12 @@ impl QuickCaptureBar {
         cx.notify();
     }
 
-    fn refresh_mentions(&mut self, cx: &mut Context<Self>) {
-        let input = self.input.read(cx);
-        if input.selecting() {
-            if self.mentions.read(cx).is_open() {
-                self.mentions.update(cx, |menu, cx| menu.reset(None, cx));
-            }
-            return;
-        }
-        let (text, cursor) = (input.text().to_string(), input.cursor_offset());
-        let target = self.mention_target(cx);
-        self.mentions
-            .update(cx, |menu, cx| menu.refresh(&text, cursor, target, cx));
-        if self.mentions.read(cx).is_open() {
-            self.menu = None;
-            self.menu_from_chip = false;
-        }
-    }
-
-    fn mention_target(&self, cx: &App) -> MentionTarget {
-        let state = self.state.read(cx);
-        let space_id = self.space_id(cx);
-        let space = space_id.as_deref().and_then(|id| state.space_row(id));
-        let workspace = space.map(|space| {
-            serde_json::json!({
-                "spaceId": space.id,
-                "targetDeviceId": space.device_id,
-                "cwd": space.path,
-            })
-        });
-        let device = space
-            .map(|space| space.device_id.clone())
-            .or_else(|| state.selected_device.clone());
-        MentionTarget {
-            context: workspace
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-            device: device.map(|device| (device, None)),
-            space: space_id,
-            workspace,
-            attachments: Vec::new(),
-            done_tasks: false,
-        }
-    }
-
     fn toggle_menu(&mut self, cx: &mut Context<Self>) {
         if self.menu.is_some() {
             self.menu = None;
             self.menu_from_chip = false;
         } else {
-            if self.mentions.read(cx).is_open() {
-                self.mentions.update(cx, |menu, cx| menu.dismiss(cx));
-            }
+            self.completions.update(cx, |menus, cx| menus.dismiss(cx));
             self.menu_from_chip = true;
             let current = self.space_id(cx);
             let rows = self.menu_rows(cx);
@@ -421,9 +382,7 @@ impl QuickCaptureBar {
     pub(crate) fn close_menu(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
         self.menu_from_chip = false;
-        if self.mentions.read(cx).is_open() {
-            self.mentions.update(cx, |menu, cx| menu.reset(None, cx));
-        }
+        self.completions.update(cx, |menus, cx| menus.close(cx));
         self.close_menu_window(cx);
     }
 
@@ -440,8 +399,8 @@ impl QuickCaptureBar {
     fn popup_wanted(&self, cx: &App) -> Option<Popup> {
         if self.menu.is_some() {
             Some(Popup::Projects)
-        } else if self.mentions.read(cx).is_open() {
-            Some(Popup::Mentions)
+        } else if self.completions.read(cx).is_open(cx) {
+            Some(Popup::Completions)
         } else {
             None
         }
@@ -473,7 +432,7 @@ impl QuickCaptureBar {
                     gpui::size(px(MENU_WIDTH), px(MENU_MAX_HEIGHT)),
                 )
             }
-            Popup::Mentions => (
+            Popup::Completions => (
                 gpui::point(
                     px(MENTION_INSET),
                     window.viewport_size().height + px(MENU_GAP),
@@ -569,16 +528,7 @@ impl QuickCaptureBar {
         let Some((title, notes)) = split_capture(&text) else {
             return;
         };
-        let tasks = &self.state.read(cx).tasks;
-        let mut depends_on: Vec<String> = Vec::new();
-        for link in zeron_proto::task_mentions::task_mention_links(&text) {
-            if !depends_on.contains(&link.task_id)
-                && tasks.iter().any(|task| task.id == link.task_id)
-            {
-                depends_on.push(link.task_id);
-            }
-        }
-        depends_on.truncate(zeron_doc::TASK_DEPENDS_ON_MAX);
+        let depends_on = mentioned_dependencies(&text, &self.state.read(cx).tasks);
         let due_on = self.today.then(|| {
             chrono::Local::now()
                 .date_naive()
@@ -847,7 +797,7 @@ impl Render for ProjectMenu {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_popup();
         let bar = self.bar.read(cx);
-        if bar.popup_wanted(cx) == Some(Popup::Mentions) {
+        if bar.popup_wanted(cx) == Some(Popup::Completions) {
             return div()
                 .size_full()
                 .flex()
@@ -859,7 +809,7 @@ impl Render for ProjectMenu {
                         .flex_none()
                         .w(px(MENTION_WIDTH))
                         .child(fit_panel())
-                        .child(bar.mentions.clone()),
+                        .children(bar.completions.read(cx).card(cx)),
                 )
                 .into_any_element();
         }
@@ -1133,7 +1083,7 @@ mod tests {
         });
         cx.run_until_parked();
         let open = bar.read_with(cx, |bar, cx| bar.popup_wanted(cx));
-        assert!(open == Some(Popup::Mentions));
+        assert!(open == Some(Popup::Completions));
         cx.simulate_keystrokes("enter");
         let text = bar.read_with(cx, |bar, cx| bar.input.read(cx).text().to_string());
         assert_eq!(text, "Write docs [Ship the API](zeron-task:api) ");
@@ -1151,6 +1101,80 @@ mod tests {
         let saved = saved.borrow();
         assert_eq!(saved[0].title, "Write docs [Ship the API](zeron-task:api)");
         assert_eq!(saved[0].depends_on, ["api"]);
+    }
+
+    fn command(name: &str) -> zeron_proto::command_catalog::InvocationCandidate {
+        zeron_proto::command_catalog::InvocationCandidate {
+            name: name.into(),
+            description: String::new(),
+            input_hint: None,
+            invocation: zeron_proto::invocation::Invocation::Command { name: name.into() },
+            workspace_command: None,
+        }
+    }
+
+    #[gpui::test]
+    fn dollar_and_slash_insert_the_composer_references_into_the_task_text(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::composer::init(cx, Default::default());
+        });
+        let state = cx.new(|_| AppState::new());
+        let (bar, cx) = cx.add_window_view(|_, cx| QuickCaptureBar::new(state, cx));
+        let skill = zeron_proto::invocation::Invocation::Skill {
+            name: "ship".into(),
+            path: "/repo/.claude/skills/ship/SKILL.md".into(),
+            command: None,
+        };
+        let skill_row = zeron_proto::command_catalog::InvocationCandidate {
+            name: "ship".into(),
+            description: String::new(),
+            input_hint: None,
+            invocation: skill.clone(),
+            workspace_command: None,
+        };
+        bar.update_in(cx, |bar, window, cx| {
+            bar.opened(window, cx);
+            bar.input
+                .update(cx, |input, cx| input.set_text("Do $sh", cx));
+        });
+        cx.run_until_parked();
+        bar.update(cx, |bar, cx| {
+            assert!(bar.popup_wanted(cx) == Some(Popup::Completions));
+            bar.completions
+                .update(cx, |menus, cx| menus.seed_slash_rows(vec![skill_row], cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        let text = bar.read_with(cx, |bar, cx| bar.input.read(cx).text().to_string());
+        assert_eq!(text, format!("Do {} ", skill.link()));
+        assert_eq!(
+            split_capture(&text).unwrap().0,
+            format!("Do {}", skill.link())
+        );
+
+        bar.update(cx, |bar, cx| {
+            bar.input
+                .update(cx, |input, cx| input.set_text("Run /", cx));
+        });
+        cx.run_until_parked();
+        bar.update(cx, |bar, cx| {
+            bar.completions.update(cx, |menus, cx| {
+                menus.seed_slash_rows(
+                    vec![command("compact"), command("model"), command("review")],
+                    cx,
+                )
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        let text = bar.read_with(cx, |bar, cx| bar.input.read(cx).text().to_string());
+        assert_eq!(text, "Run /review ");
     }
 
     #[test]

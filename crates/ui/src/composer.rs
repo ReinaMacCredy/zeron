@@ -55,6 +55,7 @@ pub(crate) mod mentions;
 mod review_chip;
 pub(crate) mod slash;
 mod staged_comments;
+pub(crate) mod task_completions;
 pub use chip::ChipKind;
 use chip::*;
 pub(crate) use chip::{
@@ -2039,6 +2040,21 @@ pub(crate) fn sent_mention_display_with(
         })
         .collect();
     Some((projection.display, spans))
+}
+
+pub(crate) fn plain_references(raw: &str) -> String {
+    let Some((display, spans)) = sent_mention_display(raw) else {
+        return raw.to_string();
+    };
+    let mut plain = String::new();
+    let mut at = 0;
+    for span in spans {
+        plain.push_str(&display[at..span.range.start]);
+        plain.push_str(display[span.range.clone()].trim_matches('\u{a0}'));
+        at = span.range.end;
+    }
+    plain.push_str(&display[at..]);
+    plain
 }
 
 /// Direction of the last edit — a run only merges with edits of its own kind.
@@ -7038,7 +7054,7 @@ fn task_matches<'a>(
         .into_iter()
         .map(|task| TaskMatch {
             task_id: task.id.clone(),
-            title: zeron_proto::view::single_line(&task.title),
+            title: zeron_proto::view::single_line(&plain_references(&task.title)),
             space_id: task.space_id.clone(),
         })
         .collect()
