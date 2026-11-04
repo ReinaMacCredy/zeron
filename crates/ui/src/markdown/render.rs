@@ -1517,8 +1517,14 @@ pub(super) fn flat_text_presented_element(
         .map(|original| original.offsets.clone());
     let wash = inline_code_wash(theme);
     let sel_wash = selection_wash(theme);
+    let anchor_key = sel_key.clone();
+    let anchor_layout = layout.clone();
+    let anchor_offsets = offsets.clone();
     let underlay = canvas(
-        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |bounds, window, _| {
+            note_annotation_anchor(&anchor_key, &anchor_layout, anchor_offsets.as_ref());
+            window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
+        },
         move |_, hitbox, window, _| {
             let surface = PAINTING_SURFACE.with(Cell::get);
             for range in &code_ranges {
@@ -1533,6 +1539,7 @@ pub(super) fn flat_text_presented_element(
                     ));
                 }
             }
+            paint_annotation_wash(window, surface, &sel_key, &layout, offsets.as_ref());
             if let Some(range) = super::selection::wash_range(surface, &sel_key) {
                 let range = offsets
                     .as_ref()
@@ -1658,6 +1665,10 @@ fn link_text_element(
     .into_any_element()
 }
 
+/// 17 of a 23 px line in the recording: the annotation wash stops short of the
+/// line's edges, where the selection wash tiles.
+const ANNOTATION_WASH_INSET: f32 = 3.0 / 23.0;
+
 /// Selection tint shared with native inputs and the composer.
 fn selection_wash(theme: &Theme) -> Hsla {
     theme.selection
@@ -1689,6 +1700,7 @@ fn paint_text_selection_with_wash(
     wash: Hsla,
 ) {
     let surface = PAINTING_SURFACE.with(Cell::get);
+    paint_annotation_wash(window, surface, key, layout, None);
     if let Some(range) = super::selection::wash_range(surface, key) {
         for rect in range_rects(layout, &range, 0.0, 0.0) {
             window.paint_quad(quad(
@@ -1732,8 +1744,13 @@ pub(crate) fn selectable_text_element(
 ) -> AnyElement {
     let styled = StyledText::new(text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
+    let anchor_key = key.clone();
+    let anchor_layout = layout.clone();
     let underlay = canvas(
-        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |bounds, window, _| {
+            note_annotation_anchor(&anchor_key, &anchor_layout, None);
+            window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
+        },
         move |_, hitbox, window, _| {
             paint_text_selection_with_wash(window, hitbox, &key, &text, &layout, wash);
         },
@@ -1763,13 +1780,136 @@ struct RegEntry {
     offsets: Option<super::link_presentation::OffsetMap>,
 }
 
+/// A span of text a surface wants marked or tracked for an annotation.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AnnotationMark {
+    pub key: std::sync::Arc<str>,
+    pub range: Range<usize>,
+    /// The wash while the annotation's input is open.
+    pub lit: Option<Hsla>,
+}
+
+/// Text a mark's span lies in, noted while the frame prepaints so an overlay
+/// painted after the list reads this frame's geometry, not the last one's.
+struct AnchorText {
+    layout: gpui::TextLayout,
+    offsets: Option<super::link_presentation::OffsetMap>,
+}
+
 thread_local! {
+    static ANNOTATION_MARKS: RefCell<HashMap<u64, Vec<AnnotationMark>>> =
+        RefCell::new(HashMap::new());
+    static ANNOTATION_ANCHORS: RefCell<HashMap<(u64, std::sync::Arc<str>), AnchorText>> =
+        RefCell::new(HashMap::new());
+    /// The surface currently prepainting; [`PAINTING_SURFACE`]'s prepaint twin.
+    static PREPAINTING_SURFACE: Cell<u64> = const { Cell::new(0) };
     static REGISTRY: RefCell<Vec<RegEntry>> = const { RefCell::new(Vec::new()) };
     /// The surface currently painting: set by its reset canvas, which paints
     /// before any of its text, and stamped onto each entry it registers.
     static PAINTING_SURFACE: Cell<u64> = const { Cell::new(0) };
     /// Surfaces whose reset painted since the latest one's previous reset.
     static PAINTED_SURFACES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Scoped keys are unique across surfaces, and the surface stamp under them is
+/// whatever painted last, so they match on the key alone.
+fn anchor_surface_for(surface: u64, key: &str) -> u64 {
+    if selection_scope(key).is_empty() {
+        surface
+    } else {
+        0
+    }
+}
+
+fn mark_visible_to(owner: u64, surface: u64, key: &str) -> bool {
+    owner == surface || !selection_scope(key).is_empty()
+}
+
+pub(crate) fn publish_annotation_marks(owner: u64, marks: Vec<AnnotationMark>) {
+    ANNOTATION_MARKS.with(|all| {
+        let mut all = all.borrow_mut();
+        if marks.is_empty() {
+            all.remove(&owner);
+        } else {
+            all.insert(owner, marks);
+        }
+    });
+}
+
+pub(crate) fn note_annotation_anchor(
+    key: &std::sync::Arc<str>,
+    layout: &gpui::TextLayout,
+    offsets: Option<&super::link_presentation::OffsetMap>,
+) {
+    let surface = PREPAINTING_SURFACE.with(Cell::get);
+    let wanted = ANNOTATION_MARKS.with(|all| {
+        all.borrow().iter().any(|(owner, marks)| {
+            mark_visible_to(*owner, surface, key) && marks.iter().any(|m| m.key == *key)
+        })
+    });
+    if wanted {
+        ANNOTATION_ANCHORS.with(|anchors| {
+            anchors.borrow_mut().insert(
+                (anchor_surface_for(surface, key), key.clone()),
+                AnchorText {
+                    layout: layout.clone(),
+                    offsets: offsets.cloned(),
+                },
+            );
+        });
+    }
+}
+
+/// The first visual line of `range` in `key`'s text this frame; `None` when
+/// that text is not on screen. Reads no list state.
+pub(crate) fn annotation_anchor_line(
+    surface: u64,
+    key: &std::sync::Arc<str>,
+    range: &Range<usize>,
+) -> Option<Bounds<gpui::Pixels>> {
+    ANNOTATION_ANCHORS.with(|anchors| {
+        let anchors = anchors.borrow();
+        let anchor = anchors.get(&(anchor_surface_for(surface, key), key.clone()))?;
+        let range = anchor
+            .offsets
+            .as_ref()
+            .map_or_else(|| range.clone(), |map| map.displayed_range(range.clone()));
+        range_rects(&anchor.layout, &range, 0.0, 0.0)
+            .into_iter()
+            .next()
+    })
+}
+
+fn paint_annotation_wash(
+    window: &mut Window,
+    surface: u64,
+    key: &str,
+    layout: &gpui::TextLayout,
+    offsets: Option<&super::link_presentation::OffsetMap>,
+) {
+    let lit: Vec<(Range<usize>, Hsla)> = ANNOTATION_MARKS.with(|all| {
+        all.borrow()
+            .iter()
+            .filter(|(owner, _)| mark_visible_to(**owner, surface, key))
+            .flat_map(|(_, marks)| marks.iter())
+            .filter(|mark| mark.key.as_ref() == key)
+            .filter_map(|mark| Some((mark.range.clone(), mark.lit?)))
+            .collect()
+    });
+    for (range, color) in lit {
+        let range = offsets.map_or_else(|| range.clone(), |map| map.displayed_range(range.clone()));
+        let inset = f32::from(layout.line_height()) * ANNOTATION_WASH_INSET;
+        for rect in range_rects(layout, &range, 0.0, inset) {
+            window.paint_quad(quad(
+                rect,
+                px(0.0),
+                color,
+                px(0.0),
+                gpui::transparent_black(),
+                BorderStyle::default(),
+            ));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1855,7 +1995,14 @@ pub fn selection_frame_reset() -> impl IntoElement {
 /// surface's resets passes without it.
 pub fn selection_frame_reset_for(surface: u64) -> impl IntoElement {
     canvas(
-        |_, _, _| (),
+        move |_, _, _| {
+            PREPAINTING_SURFACE.with(|s| s.set(surface));
+            ANNOTATION_ANCHORS.with(|anchors| {
+                anchors
+                    .borrow_mut()
+                    .retain(|(owner, _), _| *owner != surface)
+            });
+        },
         move |_, _, _, _| {
             PAINTING_SURFACE.with(|s| s.set(surface));
             PAINTED_SURFACES.with(|painted| {
@@ -1903,8 +2050,15 @@ pub(crate) fn clear_selection_surface(prefix: &str) {
 }
 
 pub fn selection_surface_reset(prefix: String) -> impl IntoElement {
+    let anchors_prefix = prefix.clone();
     canvas(
-        |_, _, _| (),
+        move |_, _, _| {
+            ANNOTATION_ANCHORS.with(|anchors| {
+                anchors
+                    .borrow_mut()
+                    .retain(|(_, key), _| !key.starts_with(&anchors_prefix))
+            });
+        },
         move |_, _, _, _| REGISTRY.with(|r| r.borrow_mut().retain(|e| !e.key.starts_with(&prefix))),
     )
     .absolute()

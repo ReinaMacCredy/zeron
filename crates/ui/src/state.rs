@@ -929,6 +929,18 @@ const CLOUD_WAKE_GRACE: std::time::Duration = std::time::Duration::from_secs(180
 /// couldn't reach its Cloud machine (it retries every couple of seconds).
 const CLOUD_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// One-shot asks from an annotation surface or the composer's card, taken by
+/// whichever view can act on them.
+#[derive(Default)]
+pub(crate) struct AnnotationRequests {
+    /// `(chat, quote id)`: reopen this annotation's input at its text.
+    pub edit: Option<(String, String)>,
+    /// A file annotation is being edited: its file view must be up.
+    pub open_file: Option<String>,
+    pub focus_composer: Option<String>,
+    pub side_chat: Option<(String, Quote)>,
+}
+
 pub struct AppState {
     pub connection: ConnectionStatus,
     /// Fixed data boundary of the attached engine. Authentication may change
@@ -1069,6 +1081,10 @@ pub struct AppState {
     pub reviews: HashMap<String, crate::review::ChatReview>,
     /// Written by the transcript's "Add to chat", read by the composer.
     quotes: HashMap<String, Vec<Quote>>,
+    /// Where each annotation's text lies on screen, by quote id. A send takes
+    /// the quote but leaves this, so a failed send restores it whole.
+    annotation_anchors: HashMap<String, Vec<crate::annotations::AnchorSpan>>,
+    pub(crate) annotation_requests: AnnotationRequests,
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until
     /// the engine serves it — views degrade gracefully).
     pub local_device_id: Option<String>,
@@ -1286,6 +1302,8 @@ impl AppState {
             review_comment_flushes: HashMap::new(),
             reviews: HashMap::new(),
             quotes: HashMap::new(),
+            annotation_anchors: HashMap::new(),
+            annotation_requests: AnnotationRequests::default(),
             local_device_id: None,
             harness_updates: Vec::new(),
             limit_resumes: BTreeMap::new(),
@@ -1520,7 +1538,41 @@ impl AppState {
         true
     }
 
+    pub(crate) fn add_annotation(
+        &mut self,
+        key: &str,
+        quote: Quote,
+        spans: Vec<crate::annotations::AnchorSpan>,
+    ) {
+        self.annotation_anchors.insert(quote.id.clone(), spans);
+        self.add_quote(key, quote);
+    }
+
+    pub(crate) fn annotation_anchor(&self, id: &str) -> Option<&[crate::annotations::AnchorSpan]> {
+        self.annotation_anchors.get(id).map(Vec::as_slice)
+    }
+
+    pub(crate) fn set_quote_comment(&mut self, key: &str, id: &str, comment: String) {
+        if let Some(quote) = self
+            .quotes
+            .get_mut(key)
+            .and_then(|list| list.iter_mut().find(|quote| quote.id == id))
+        {
+            quote.comment = Some(comment);
+        }
+    }
+
+    pub(crate) fn request_annotation_edit(&mut self, key: &str, id: &str) {
+        self.annotation_requests.open_file = self
+            .quotes(key)
+            .iter()
+            .find(|quote| quote.id == id)
+            .and_then(|quote| quote.source.clone());
+        self.annotation_requests.edit = Some((key.to_string(), id.to_string()));
+    }
+
     pub fn remove_quote(&mut self, key: &str, id: &str) {
+        self.annotation_anchors.remove(id);
         if let Some(list) = self.quotes.get_mut(key) {
             list.retain(|q| q.id != id);
             if list.is_empty() {
@@ -1534,7 +1586,21 @@ impl AppState {
     }
 
     pub fn purge_quotes(&mut self, key: &str) {
-        self.quotes.remove(key);
+        for quote in self.quotes.remove(key).unwrap_or_default() {
+            self.annotation_anchors.remove(&quote.id);
+        }
+    }
+
+    pub(crate) fn remove_annotations(&mut self, key: &str) {
+        let ids: Vec<String> = self
+            .quotes(key)
+            .iter()
+            .filter(|quote| quote.is_annotation())
+            .map(|quote| quote.id.clone())
+            .collect();
+        for id in ids {
+            self.remove_quote(key, &id);
+        }
     }
 
     pub fn begin_review_comment_flush(&mut self, key: &str, source: u64) {

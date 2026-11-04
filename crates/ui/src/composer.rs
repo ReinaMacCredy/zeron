@@ -41,6 +41,7 @@ use crate::settings::{ComposerSendBehavior, FollowUpBehavior, platform_combo};
 use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
+mod annotation_chip;
 mod ask_pill;
 mod claude_cards;
 pub(crate) mod claude_config;
@@ -368,24 +369,62 @@ pub const STRIP_GAP: f32 = 8.0;
 pub const STRIP_PAD_TOP: f32 = 12.0;
 pub const STRIP_PAD_X: f32 = 16.0;
 
-/// Height the wrap strip adds to the pill for `count` staged thumbnails at an
-/// `inner_width` pill content width (0 when empty). Mirrors flex-wrap: as many
-/// 56px thumbs per row as fit with 8px gaps inside the 16px side insets.
-pub fn attachment_strip_height(count: usize, inner_width: f32) -> f32 {
-    if count == 0 {
-        return 0.0;
+const STAGED_BADGE_WIDTH: f32 = 100.0;
+
+/// One tile or chip block in the strip, `(width, height)`.
+pub type StripItem = (f32, f32);
+
+/// The strip's rows at an `inner_width` pill content width, as index ranges
+/// into `items`: as many as fit with 8px gaps inside the 16px side insets, as
+/// flex-wrap would. The strip lays itself out from this, so what it draws and
+/// the height [`attachment_strip_height`] reserves cannot disagree.
+pub fn strip_rows(items: &[StripItem], inner_width: f32) -> Vec<Range<usize>> {
+    let usable = inner_width - 2.0 * STRIP_PAD_X;
+    let mut rows = Vec::new();
+    let mut start = 0;
+    let mut used = 0.0;
+    for (ix, (width, _)) in items.iter().enumerate() {
+        let next = if ix == start {
+            *width
+        } else {
+            used + STRIP_GAP + width
+        };
+        if ix > start && next > usable {
+            rows.push(start..ix);
+            start = ix;
+            used = *width;
+        } else {
+            used = next;
+        }
     }
-    let usable = (inner_width - 2.0 * STRIP_PAD_X).max(STRIP_THUMB);
-    let per_row = (((usable + STRIP_GAP) / (STRIP_THUMB + STRIP_GAP)).floor() as usize).max(1);
-    let rows = count.div_ceil(per_row);
-    STRIP_PAD_TOP + rows as f32 * STRIP_THUMB + (rows - 1) as f32 * STRIP_GAP
+    if start < items.len() {
+        rows.push(start..items.len());
+    }
+    rows
 }
 
-pub fn comment_strip_height(count: usize) -> f32 {
-    if count == 0 {
+/// Height the wrap strip adds to the pill for these items (0 when empty).
+pub fn attachment_strip_height(items: &[StripItem], inner_width: f32) -> f32 {
+    let rows = strip_rows(items, inner_width);
+    if rows.is_empty() {
         return 0.0;
     }
-    STRIP_PAD_TOP + crate::badges::BADGE_HEIGHT
+    let heights: f32 = rows
+        .iter()
+        .map(|row| {
+            items[row.clone()]
+                .iter()
+                .fold(0.0_f32, |tallest, (_, height)| tallest.max(*height))
+        })
+        .sum();
+    STRIP_PAD_TOP + heights + (rows.len() - 1) as f32 * STRIP_GAP
+}
+
+pub fn comment_strip_height(chip_height: f32) -> f32 {
+    if chip_height == 0.0 {
+        return 0.0;
+    }
+    STRIP_PAD_TOP + chip_height
 }
 
 pub const PR_CHIP_HEIGHT: f32 = 22.0;
@@ -3520,6 +3559,38 @@ impl ComposerInput {
         cx.notify();
     }
 
+    pub(crate) fn dictation_active(&self) -> bool {
+        self.dictation.phase.active()
+    }
+
+    /// Press starts, press finishes; what a microphone button does.
+    pub(crate) fn toggle_dictation(&mut self, cx: &mut Context<Self>) {
+        use crate::dictation::Phase;
+        match self.dictation.phase {
+            Phase::Requesting => {
+                self.cancel_dictation();
+                cx.emit(DictationInputEvent::Changed);
+                cx.notify();
+            }
+            Phase::Listening => {
+                self.finish_dictation(false, cx);
+            }
+            // The voice track's Cancel stops transcription.
+            Phase::Finalizing => {}
+            _ if self.marked_range.is_some() => {
+                self.dictation.phase = Phase::Unavailable(
+                    "Finish composing the current character before starting dictation.".into(),
+                );
+                cx.emit(DictationInputEvent::Changed);
+            }
+            _ => {
+                if let Some(service) = crate::dictation::start(cx) {
+                    self.begin_dictation(service, cx);
+                }
+            }
+        }
+    }
+
     pub(crate) fn finish_dictation(&mut self, send: bool, cx: &mut Context<Self>) -> bool {
         if !self.dictation.phase.active() {
             return false;
@@ -6498,6 +6569,7 @@ impl Render for ComposerInput {
 pub struct SidechatStaged {
     pub attachments: Vec<StagedAttachment>,
     pub appshots: Vec<CapturedAppshot>,
+    pub quotes: Vec<crate::quotes::Quote>,
 }
 
 impl std::fmt::Debug for SidechatStaged {
@@ -7226,6 +7298,7 @@ pub struct Composer {
     background: background::BackgroundUi,
     /// Focus once on mount, navigation, or after opening/closing a queue edit.
     pub(crate) focus_pending: bool,
+    annotation_hover: annotation_chip::AnnotationHover,
     prompt_history: Option<PromptHistoryCursor>,
     dictation_hold: Option<DictationHold>,
     /// Live drag over the queue panel: which row, and where it would land.
@@ -7626,6 +7699,7 @@ impl Composer {
             queue_edit_renew_task: None,
             background: Default::default(),
             focus_pending: true,
+            annotation_hover: Default::default(),
             prompt_history: None,
             dictation_hold: None,
             queue_drag: None,
@@ -8841,18 +8915,58 @@ impl Composer {
         )
     }
 
-    fn render_staged_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+    /// The chips' block as one strip item; widths are the labels' usual ones,
+    /// only there to decide whether the block still fits beside the tiles.
+    fn staged_chips_item(&self, cx: &App) -> Option<StripItem> {
+        let quotes = self.staged_quotes(cx);
+        let annotated = quotes.iter().any(|quote| quote.is_annotation());
+        let plain = quotes.iter().any(|quote| !quote.is_annotation());
+        let mut widths = Vec::new();
+        if annotated {
+            widths.push(annotation_chip::ANNOTATION_CHIP_WIDTH);
+        }
+        if !self.staged_comments(cx).is_empty() {
+            widths.push(STAGED_BADGE_WIDTH);
+        }
+        if plain {
+            widths.push(STAGED_BADGE_WIDTH);
+        }
+        if widths.is_empty() {
+            return None;
+        }
+        let height = if annotated {
+            annotation_chip::ANNOTATION_CHIP_HEIGHT
+        } else {
+            crate::badges::BADGE_HEIGHT
+        };
+        let gaps = (widths.len() - 1) as f32 * STRIP_GAP;
+        Some((widths.iter().sum::<f32>() + gaps, height))
+    }
+
+    fn staged_attachment_items(&self, cx: &App) -> Vec<StripItem> {
+        self.tiled_attachments(cx)
+            .iter()
+            .map(|_| (STRIP_THUMB, STRIP_THUMB))
+            .collect()
+    }
+
+    fn render_staged_chip_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let comments = self.staged_comments(cx);
         let quotes = self.staged_quotes(cx);
         if comments.is_empty() && quotes.is_empty() {
             return None;
         }
+        let (annotations, quotes): (Vec<_>, Vec<_>) =
+            quotes.into_iter().partition(|quote| quote.is_annotation());
         let mut row = div()
+            .flex_none()
             .flex()
             .flex_row()
-            .gap(px(STRIP_GAP))
-            .px(px(STRIP_PAD_X))
-            .pt(px(STRIP_PAD_TOP));
+            .items_end()
+            .gap(px(STRIP_GAP));
+        if !annotations.is_empty() {
+            row = row.child(self.render_annotation_chip(&annotations, theme, cx));
+        }
         if !comments.is_empty() {
             row = row.child(self.render_comments_badge(&comments, theme, cx));
         }
@@ -8867,6 +8981,7 @@ impl Composer {
                 .collect();
             let group: SharedString = "composer-quotes".into();
             let key = self.current_key.clone();
+            let ids: Vec<String> = quotes.iter().map(|quote| quote.id.clone()).collect();
             row = row.child(
                 div()
                     .group(group.clone())
@@ -8900,7 +9015,9 @@ impl Composer {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.state.update(cx, |state, cx| {
-                                    state.purge_quotes(&key);
+                                    for id in &ids {
+                                        state.remove_quote(&key, id);
+                                    }
                                     cx.notify();
                                 });
                                 cx.notify();
@@ -8916,29 +9033,37 @@ impl Composer {
         Some(row)
     }
 
-    /// The staged-thumbnail strip (attachment-ui.tsx AttachmentStrip):
-    /// `flex flex-wrap gap-2 px-4 pt-3`, 56px rounded thumbs, a remove button
-    /// revealed on hover, click opens the full-size preview. Attachments with
+    /// The chips on their own strip, when no tiles carry them.
+    fn render_staged_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        if !self.tiled_attachments(cx).is_empty() {
+            return None;
+        }
+        let chips = self.render_staged_chip_row(theme, cx)?;
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .px(px(STRIP_PAD_X))
+                .pt(px(STRIP_PAD_TOP))
+                .child(chips),
+        )
+    }
+
+    /// The staged-tile strip (attachment-ui.tsx AttachmentStrip): tiles with a
+    /// remove button revealed on hover, click opens the full-size preview, and
+    /// the staged chips bottom-aligned beside the last tile. Attachments with
     /// a chip in the draft are left out.
     fn render_attachment_strip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let staged = self.tiled_attachments(cx);
         if staged.is_empty() {
             return None;
         }
-        let mut strip = div()
-            .w_full()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(STRIP_GAP))
-            .px(px(STRIP_PAD_X))
-            .pt(px(STRIP_PAD_TOP));
+        let mut cells: Vec<gpui::AnyElement> = Vec::new();
         for (ix, att) in staged.iter().enumerate() {
             let group: SharedString = format!("composer-att-{}", att.id).into();
             let remove_id = att.id.clone();
             let remove_label: SharedString = format!("Remove {}", att.name).into();
-            strip = strip.child(
+            cells.push(
                 div()
                     .group(group.clone())
                     .flex_none()
@@ -8979,10 +9104,39 @@ impl Composer {
                                     .size(px(14.0))
                                     .text_color(theme.text_muted),
                             ),
-                    )),
+                    ))
+                    .into_any_element(),
             );
         }
-        Some(strip)
+        let mut items = self.staged_attachment_items(cx);
+        if let Some(chips) = self.staged_chips_item(cx)
+            && let Some(row) = self.render_staged_chip_row(theme, cx)
+        {
+            items.push(chips);
+            cells.push(row.into_any_element());
+        }
+        let width =
+            self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) - 2.0 * Theme::SPACE_LG - 2.0;
+        let mut cells = cells.into_iter();
+        let rows = strip_rows(&items, width).into_iter().map(|row| {
+            div()
+                .flex()
+                .flex_row()
+                .items_end()
+                .gap(px(STRIP_GAP))
+                .children(cells.by_ref().take(row.len()).collect::<Vec<_>>())
+        });
+        Some(
+            div()
+                .w_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(STRIP_GAP))
+                .px(px(STRIP_PAD_X))
+                .pt(px(STRIP_PAD_TOP))
+                .children(rows.collect::<Vec<_>>()),
+        )
     }
 
     /// One staged attachment's tile: an image's thumbnail (a click opens the
@@ -9950,6 +10104,7 @@ impl Composer {
         self.failure = None;
         let staged = if carry_staged {
             SidechatStaged {
+                quotes: Vec::new(),
                 attachments: self
                     .attachments
                     .remove(&self.current_key)
@@ -9971,6 +10126,15 @@ impl Composer {
         self.add_staged(staged.attachments, cx);
         for appshot in staged.appshots {
             self.stage_appshot(appshot, cx);
+        }
+        if !staged.quotes.is_empty() {
+            let key = self.current_key.clone();
+            self.state.update(cx, |state, cx| {
+                for quote in staged.quotes {
+                    state.add_quote(&key, quote);
+                }
+                cx.notify();
+            });
         }
     }
 
@@ -10071,6 +10235,19 @@ impl Composer {
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
+        if self
+            .state
+            .read(cx)
+            .annotation_requests
+            .focus_composer
+            .as_deref()
+            == Some(self.current_key.as_str())
+        {
+            self.state.update(cx, |state, _| {
+                state.annotation_requests.focus_composer = None;
+            });
+            self.focus_pending = true;
+        }
         self.sync_asks(cx);
         self.sync_review(cx);
         self.ensure_compaction_kind(cx);
@@ -12366,29 +12543,7 @@ impl Composer {
             return;
         }
         self.input
-            .update(cx, |input, cx| match input.dictation.phase {
-                Phase::Requesting => {
-                    input.cancel_dictation();
-                    cx.emit(DictationInputEvent::Changed);
-                    cx.notify();
-                }
-                Phase::Listening => {
-                    input.finish_dictation(false, cx);
-                }
-                // The voice track's Cancel stops transcription.
-                Phase::Finalizing => {}
-                _ if input.marked_range.is_some() => {
-                    input.dictation.phase = Phase::Unavailable(
-                        "Finish composing the current character before starting dictation.".into(),
-                    );
-                    cx.emit(DictationInputEvent::Changed);
-                }
-                _ => {
-                    if let Some(service) = crate::dictation::start(cx) {
-                        input.begin_dictation(service, cx);
-                    }
-                }
-            });
+            .update(cx, |input, cx| input.toggle_dictation(cx));
         self.focus_pending |= refocus;
         cx.notify();
     }
@@ -13727,16 +13882,24 @@ impl Render for Composer {
         // `morph_t`) animates. Steady state renders exactly the target.
         // Staged attachments add the wrap strip's height to the pill in BOTH
         // modes (attachment-ui.tsx AttachmentStrip sits above the input row).
-        let staged_count = self.tiled_attachments(cx).len();
+        let mut strip_items = self.staged_attachment_items(cx);
         // The input width excludes the inline controls in compact mode.
         // Wrap against the pill's content width in both modes, accounting
         // for the outer container padding and the pill's 1px borders.
         let strip_width_hint =
             self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) - 2.0 * Theme::SPACE_LG - 2.0;
         let appshot_count = self.staged_appshots().len();
-        let strip_h = attachment_strip_height(staged_count, strip_width_hint);
-        let comment_strip_h = comment_strip_height(self.staged_chip_count(cx))
-            + pr_chip_strip_height(self.pr_chips.len())
+        let staged_chips = self.staged_chips_item(cx);
+        let chips_alone = strip_items.is_empty();
+        if !chips_alone {
+            strip_items.extend(staged_chips);
+        }
+        let strip_h = attachment_strip_height(&strip_items, strip_width_hint);
+        let comment_strip_h = comment_strip_height(
+            staged_chips
+                .filter(|_| chips_alone)
+                .map_or(0.0, |(_, height)| height),
+        ) + pr_chip_strip_height(self.pr_chips.len())
             + self.limit_notice_height(cx);
         let base_height = if self.dock_frame.is_some() {
             dock_layout.height(dock_amount)
@@ -14967,8 +15130,20 @@ mod tests {
             handle
                 .read_with(cx, |composer, cx| {
                     assert_eq!(composer.staged().len(), 10);
-                    assert_eq!(attachment_strip_height(10, 698.0 - 34.0), 68.0);
-                    assert_eq!(attachment_strip_height(10, 697.0 - 34.0), 132.0);
+                    assert_eq!(
+                        attachment_strip_height(
+                            &vec![(STRIP_THUMB, STRIP_THUMB); 10],
+                            698.0 - 34.0
+                        ),
+                        68.0
+                    );
+                    assert_eq!(
+                        attachment_strip_height(
+                            &vec![(STRIP_THUMB, STRIP_THUMB); 10],
+                            697.0 - 34.0
+                        ),
+                        132.0
+                    );
                     let surface = composer.surface_bounds.get().unwrap();
                     assert!(
                         (f32::from(surface.size.height) - before).abs() <= 1.0,

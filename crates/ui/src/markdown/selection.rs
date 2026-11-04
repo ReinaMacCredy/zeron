@@ -309,6 +309,18 @@ pub fn selected_text() -> Option<String> {
     Some(join_spans(&sel.spans))
 }
 
+/// The settled selection's non-empty spans, in document order.
+pub(crate) fn selected_spans() -> Vec<Span> {
+    let guard = state().lock().unwrap();
+    guard.as_ref().map_or_else(Vec::new, |sel| {
+        sel.spans
+            .iter()
+            .filter(|span| !span.range.is_empty())
+            .cloned()
+            .collect()
+    })
+}
+
 fn join_spans(spans: &[Span]) -> String {
     spans
         .iter()
