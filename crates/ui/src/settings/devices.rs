@@ -466,7 +466,6 @@ impl Render for DevicesPage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::settings_page()
-                                .child(widgets::page_note(&theme, widgets::LAB_NOTE))
                                 .child(widgets::page_note(
                                     &theme,
                                     devices_subtitle(workspace_scope),

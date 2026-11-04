@@ -28,13 +28,15 @@ pub struct CompactionPage {
     picker: Entity<Pickers>,
     error: Option<String>,
     scroll: widgets::PageScroll,
+    /// Lab > Experimental rather than Agents > Compaction.
+    lab: bool,
     tasks: Vec<Task<()>>,
     _picked: Subscription,
     _state: Subscription,
 }
 
 impl CompactionPage {
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<AppState>, lab: bool, cx: &mut Context<Self>) -> Self {
         let picker = {
             let state = state.clone();
             cx.new(|cx| Pickers::new_for_titles(state, TitleSettings::default(), cx))
@@ -66,6 +68,7 @@ impl CompactionPage {
             picker,
             error: None,
             scroll: widgets::PageScroll::default(),
+            lab,
             tasks: Vec::new(),
             _picked: picked,
             _state: state_sub,
@@ -464,29 +467,6 @@ impl CompactionPage {
                 widgets::card_row(theme, false)
                     .child(row_text(
                         theme,
-                        "Compact new tasks",
-                        if classifier {
-                            "A model reads each message and compacts first when it starts a new task."
-                        } else {
-                            "Each message carries a reminder; the agent decides whether to compact."
-                        },
-                    ))
-                    .child(widgets::segmented(
-                        theme,
-                        "compaction-mode",
-                        &[
-                            (CompactionMode::Threshold, "Reminder"),
-                            (CompactionMode::Classifier, "Classifier"),
-                        ],
-                        settings.mode,
-                        pick_mode,
-                    ))
-                    .search_anchor(SettingId::CompactionMode),
-            )
-            .child(
-                widgets::card_row(theme, false)
-                    .child(row_text(
-                        theme,
                         MISSIONS_TITLE,
                         "Lead and step threads compact by the same rule. Off leaves tasks alone.",
                     ))
@@ -523,30 +503,64 @@ impl CompactionPage {
                     ))
                     .search_anchor(SettingId::CompactionNudge),
             )
-            .children(source_row)
-            .children(detail_row)
-            .when_some(self.error.clone(), |card, error| {
+            .when_some(self.error.clone().filter(|_| !self.lab), |card, error| {
                 card.child(widgets::card_row(theme, false).child(widgets::error_strip(theme, error)))
             });
-        let ahead_card = widgets::section_card(theme).mt_0().child(
-            widgets::card_row(theme, true)
-                .child(row_text_with(
-                    theme,
-                    widgets::row_title(theme, AHEAD_TITLE)
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(widgets::beta_badge(theme)),
-                    "Claude compacts in place right after a turn. Codex summarizes a copy in the background and swaps it in at the next pause; turns after the copy come back as text.",
-                ))
+        if self.lab {
+            let lab_card = widgets::section_card(theme)
+                .mt_0()
                 .child(
-                    switch(theme, settings.compact_ahead, "compact-ahead", AHEAD_TITLE).on_click(
-                        cx.listener(move |this, _, _, cx| this.save(ahead_toggled.clone(), cx)),
-                    ),
+                    widgets::card_row(theme, true)
+                        .child(row_text(
+                            theme,
+                            AHEAD_TITLE,
+                            "Claude compacts in place right after a turn. Codex summarizes a copy in the background and swaps it in at the next pause; turns after the copy come back as text.",
+                        ))
+                        .child(
+                            switch(theme, settings.compact_ahead, "compact-ahead", AHEAD_TITLE)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.save(ahead_toggled.clone(), cx)
+                                })),
+                        )
+                        .search_anchor(SettingId::CompactAhead),
                 )
-                .search_anchor(SettingId::CompactAhead),
-        );
+                .child(
+                    widgets::card_row(theme, false)
+                        .child(row_text(
+                            theme,
+                            "Compact new tasks",
+                            if classifier {
+                                "A model reads each message and compacts first when it starts a new task."
+                            } else {
+                                "Each message carries a reminder; the agent decides whether to compact."
+                            },
+                        ))
+                        .child(widgets::segmented(
+                            theme,
+                            "compaction-mode",
+                            &[
+                                (CompactionMode::Threshold, "Reminder"),
+                                (CompactionMode::Classifier, "Classifier"),
+                            ],
+                            settings.mode,
+                            pick_mode,
+                        ))
+                        .search_anchor(SettingId::CompactionMode),
+                )
+                .children(source_row)
+                .children(detail_row)
+                .when_some(self.error.clone(), |card, error| {
+                    card.child(
+                        widgets::card_row(theme, false).child(widgets::error_strip(theme, error)),
+                    )
+                });
+            return vec![
+                widgets::section(theme, "Compaction", lab_card)
+                    .mt_0()
+                    .search_anchor(Target::Page(SettingsSection::Experimental))
+                    .into_any_element(),
+            ];
+        }
         vec![
             widgets::section(theme, "When idle", idle_card)
                 .mt_0()
@@ -554,7 +568,6 @@ impl CompactionPage {
             widgets::section(theme, "During a chat", agents_card)
                 .search_anchor(Target::Page(SettingsSection::Compaction))
                 .into_any_element(),
-            widgets::section(theme, "Ahead of time", ahead_card).into_any_element(),
         ]
     }
 }

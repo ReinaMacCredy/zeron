@@ -800,8 +800,10 @@ pub enum SettingsSection {
     Archived,
     Chat,
     Updates,
-    /// Idle, agent and ahead-of-time compaction.
+    /// Idle and agent compaction.
     Compaction,
+    /// Lab: compact ahead of time and the compaction classifier.
+    Experimental,
     Playbooks,
     Account,
 }
@@ -815,13 +817,14 @@ pub enum SettingsGroup {
     Agents,
     ContextTools,
     ThisMac,
+    DevicesUpdates,
     Cloud,
     Account,
     Lab,
 }
 
 impl SettingsGroup {
-    pub const ALL: [SettingsGroup; 10] = [
+    pub const ALL: [SettingsGroup; 11] = [
         SettingsGroup::General,
         SettingsGroup::Appearance,
         SettingsGroup::Notifications,
@@ -829,6 +832,7 @@ impl SettingsGroup {
         SettingsGroup::Agents,
         SettingsGroup::ContextTools,
         SettingsGroup::ThisMac,
+        SettingsGroup::DevicesUpdates,
         SettingsGroup::Cloud,
         SettingsGroup::Account,
         SettingsGroup::Lab,
@@ -849,6 +853,7 @@ impl SettingsGroup {
                     "This computer"
                 }
             }
+            SettingsGroup::DevicesUpdates => "Devices & updates",
             SettingsGroup::Cloud => "Cloud",
             SettingsGroup::Account => "Account",
             SettingsGroup::Lab => "Lab",
@@ -864,6 +869,7 @@ impl SettingsGroup {
             SettingsGroup::Agents => icons::BOT,
             SettingsGroup::ContextTools => icons::LUCIDE_HAMMER,
             SettingsGroup::ThisMac => icons::LAPTOP,
+            SettingsGroup::DevicesUpdates => icons::SMARTPHONE,
             SettingsGroup::Cloud => icons::CLOUD,
             SettingsGroup::Account => icons::LUCIDE_USER_ROUND,
             SettingsGroup::Lab => icons::LUCIDE_FLASK_CONICAL,
@@ -880,7 +886,7 @@ impl SettingsGroup {
 
 impl SettingsSection {
     /// Every page, grouped in nav order.
-    pub const ALL: [SettingsSection; 24] = [
+    pub const ALL: [SettingsSection; 25] = [
         SettingsSection::General,
         SettingsSection::Chat,
         SettingsSection::Shortcuts,
@@ -905,6 +911,7 @@ impl SettingsSection {
         SettingsSection::Updates,
         SettingsSection::Devices,
         SettingsSection::DeviceHub,
+        SettingsSection::Experimental,
     ];
 
     pub fn group(self) -> SettingsGroup {
@@ -923,7 +930,8 @@ impl SettingsSection {
             Self::Tools | Self::Playbooks => SettingsGroup::ContextTools,
             Self::Computer | Self::Appshots | Self::Voice => SettingsGroup::ThisMac,
             Self::Cloud | Self::Billing => SettingsGroup::Cloud,
-            Self::Updates | Self::Devices | Self::DeviceHub => SettingsGroup::Lab,
+            Self::Updates | Self::Devices | Self::DeviceHub => SettingsGroup::DevicesUpdates,
+            Self::Experimental => SettingsGroup::Lab,
             Self::Account => SettingsGroup::Account,
         }
     }
@@ -979,6 +987,7 @@ impl SettingsSection {
             SettingsSection::Chat => "chat",
             SettingsSection::Updates => "updates",
             SettingsSection::Compaction => "compaction",
+            SettingsSection::Experimental => "experimental",
             SettingsSection::Playbooks => "playbooks",
             SettingsSection::Account => "account",
         }
@@ -1008,7 +1017,8 @@ impl SettingsSection {
             "archived" => SettingsSection::Archived,
             "chat" => SettingsSection::Chat,
             "updates" => SettingsSection::Updates,
-            "compaction" | "experimental" => SettingsSection::Compaction,
+            "compaction" => SettingsSection::Compaction,
+            "experimental" => SettingsSection::Experimental,
             "playbooks" | "triage" => SettingsSection::Playbooks,
             "account" => SettingsSection::Account,
             _ => return None,
@@ -1040,6 +1050,7 @@ impl SettingsSection {
             SettingsSection::Chat => "Chat",
             SettingsSection::Updates => "Updates",
             SettingsSection::Compaction => "Compaction",
+            SettingsSection::Experimental => "Experimental",
             SettingsSection::Playbooks => "Playbooks",
             SettingsSection::Account => "Account",
         }
@@ -1071,6 +1082,9 @@ impl SettingsSection {
             SettingsSection::Chat => "How the composer sends and the transcript reads.",
             SettingsSection::Updates => "Updates for Zeron, agent CLIs and devices.",
             SettingsSection::Compaction => "When chats are summarized to free their context.",
+            SettingsSection::Experimental => {
+                "Experimental and beta features. They may change or go away in a later version."
+            }
             SettingsSection::Playbooks => "Recipes agents can follow.",
             SettingsSection::Account => "Sign-in and sync.",
         }
@@ -1116,6 +1130,7 @@ impl SettingsSection {
             SettingsSection::Playbooks => &["playbook", "recipe", "triage", "debug", "bug"],
             SettingsSection::Account => &["sign in", "sign out", "sync", "email", "login"],
             SettingsSection::Compaction => &["compact", "context", "summarize"],
+            SettingsSection::Experimental => &["lab", "beta", "experimental", "compact"],
             _ => &[],
         }
     }
@@ -1319,11 +1334,6 @@ impl SettingsSection {
                     Some(Target::Setting(SettingId::AgentCompaction)),
                 ),
                 (
-                    "Compact new tasks",
-                    &["compaction", "reminder", "classifier"],
-                    Some(Target::Setting(SettingId::CompactionMode)),
-                ),
-                (
                     "In tasks",
                     &["compaction", "lead", "step threads"],
                     Some(Target::Setting(SettingId::TaskCompaction)),
@@ -1333,16 +1343,8 @@ impl SettingsSection {
                     &["compaction", "check from", "context", "threshold"],
                     Some(Target::Setting(SettingId::CompactionNudge)),
                 ),
-                (
-                    "Classifier",
-                    &["compaction", "jev", "typesafe", "openrouter", "api key"],
-                    Some(Target::Setting(SettingId::CompactionClassifier)),
-                ),
-                (
-                    "Classifier model",
-                    &["compaction", "jev"],
-                    Some(Target::Setting(SettingId::CompactionClassifierModel)),
-                ),
+            ],
+            SettingsSection::Experimental => &[
                 (
                     "Compact ahead of time",
                     &[
@@ -1353,6 +1355,21 @@ impl SettingsSection {
                         "experimental",
                     ],
                     Some(Target::Setting(SettingId::CompactAhead)),
+                ),
+                (
+                    "Compact new tasks",
+                    &["compaction", "reminder", "classifier"],
+                    Some(Target::Setting(SettingId::CompactionMode)),
+                ),
+                (
+                    "Classifier",
+                    &["compaction", "jev", "typesafe", "openrouter", "api key"],
+                    Some(Target::Setting(SettingId::CompactionClassifier)),
+                ),
+                (
+                    "Classifier model",
+                    &["compaction", "jev"],
+                    Some(Target::Setting(SettingId::CompactionClassifierModel)),
                 ),
             ],
             SettingsSection::Updates => &[
@@ -3816,6 +3833,10 @@ pub struct Shell {
     harness_update_banner_task: Option<Task<()>>,
     /// Independent watches retain device identity across selection changes.
     harness_update_devices: std::collections::BTreeMap<String, harness_updates::DeviceUpdates>,
+    harness_update_expanded: bool,
+    harness_update_transition: Option<WidthTween>,
+    harness_update_geometry: [Option<WidthTween>; 2],
+    harness_update_scroll: settings::widgets::PageScroll,
     /// Open Update-all dialog; the value is its "continue threads" box.
     update_all_dialog: Option<harness_updates::UpdateAllDialog>,
     updates_scroll: settings::widgets::PageScroll,
@@ -3833,10 +3854,6 @@ pub struct Shell {
     /// lifecycle ([`crate::app_update`]) moves. `None` when the app runs
     /// without a desktop checker (tests).
     _app_update_observation: Option<Subscription>,
-    harness_update_expanded: bool,
-    harness_update_transition: Option<WidthTween>,
-    harness_update_geometry: [Option<WidthTween>; 2],
-    harness_update_scroll: settings::widgets::PageScroll,
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
     /// First-run setup in place of the Ready shell; built on first Ready
@@ -4551,6 +4568,10 @@ impl Shell {
             harness_update_seen: std::collections::HashSet::new(),
             harness_update_banner_task: None,
             harness_update_devices: Default::default(),
+            harness_update_expanded: false,
+            harness_update_transition: None,
+            harness_update_geometry: [None; 2],
+            harness_update_scroll: settings::widgets::PageScroll::default(),
             update_all_dialog: None,
             updates_scroll: Default::default(),
             playbooks_scroll: Default::default(),
@@ -4568,10 +4589,6 @@ impl Shell {
             org: None,
             sync_flow: SyncFlow::Idle,
             onboarding: None,
-            harness_update_expanded: false,
-            harness_update_transition: None,
-            harness_update_geometry: [None; 2],
-            harness_update_scroll: settings::widgets::PageScroll::default(),
             files_machine_down: Default::default(),
             onboarding_pending,
             _onboarding_subscriptions: Vec::new(),
@@ -8108,6 +8125,9 @@ impl Shell {
                     .update(cx, |input, cx| input.set_text("", cx));
             }
         }
+        let sidebar_pin_flips = self.settings.sidebar_collapsed
+            && matches!(self.route, Route::Skills) != matches!(route, Route::Skills);
+        let sidebar_from = self.sidebar_now();
         let was_pull_requests = matches!(self.route, Route::PullRequests);
         let will_show_pull_requests = matches!(route, Route::PullRequests);
         if was_pull_requests && !will_show_pull_requests {
@@ -8116,6 +8136,9 @@ impl Shell {
             }
         }
         self.route = route;
+        if sidebar_pin_flips {
+            self.sidebar_tween = Some(self.panel_tween(sidebar_from, self.sidebar_target()));
+        }
         if !was_pull_requests && will_show_pull_requests {
             if let Some(page) = self.pull_requests_page.as_ref().cloned() {
                 page.update(cx, |page, cx| page.on_visible(cx));
@@ -8133,9 +8156,6 @@ impl Shell {
     }
 
     /// A sidebar-level notice (a failed mutation, a copied link) as a toast.
-        let sidebar_pin_flips = self.settings.sidebar_collapsed
-            && matches!(self.route, Route::Skills) != matches!(route, Route::Skills);
-        let sidebar_from = self.sidebar_now();
     /// The latest message is kept so a pin-write failure can be matched later.
     pub(super) fn show_notice(
         &mut self,
@@ -8144,9 +8164,6 @@ impl Shell {
         cx: &mut App,
     ) {
         let message = message.into();
-        if sidebar_pin_flips {
-            self.sidebar_tween = Some(self.panel_tween(sidebar_from, self.sidebar_target()));
-        }
         self.sidebar_notice = Some(message.clone());
         crate::toast::show(cx, kind, message);
     }
@@ -8571,8 +8588,10 @@ impl Shell {
         if section == SettingsSection::Tools {
             self.tools_page = None;
         }
-        if section == SettingsSection::Compaction
-            && self.route != Route::Settings(SettingsSection::Compaction)
+        if matches!(
+            section,
+            SettingsSection::Compaction | SettingsSection::Experimental
+        ) && self.route != Route::Settings(section)
         {
             self.compaction_page = None;
         }
@@ -9474,10 +9493,11 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
-            SettingsSection::Compaction => {
+            SettingsSection::Compaction | SettingsSection::Experimental => {
                 let state = self.state.clone();
+                let lab = section == SettingsSection::Experimental;
                 self.compaction_page
-                    .get_or_insert_with(|| cx.new(|cx| CompactionPage::new(state, cx)))
+                    .get_or_insert_with(|| cx.new(|cx| CompactionPage::new(state, lab, cx)))
                     .clone()
                     .into_any_element()
             }
@@ -16173,6 +16193,10 @@ impl Shell {
         {
             return true;
         }
+        if self.harness_update_expanded {
+            self.set_harness_updates_expanded(false, cx);
+            return true;
+        }
         if self.chat_rename.is_some() {
             self.finish_rename_chat(false, cx);
             return true;
@@ -16191,10 +16215,6 @@ impl Shell {
             && update.read(cx).prompt().is_some()
         {
             update.update(cx, |update, cx| update.dismiss_prompt(cx));
-            return true;
-        }
-        if self.harness_update_expanded {
-            self.set_harness_updates_expanded(false, cx);
             return true;
         }
         // The folded-breadcrumbs menu floats over the palette; it closes first.
@@ -17460,10 +17480,19 @@ impl Shell {
         } else {
             dock_frame.selectors()
         } * self.composer_dock.borrow().opacity();
+        if has_selection {
+            self.set_harness_updates_expanded(false, cx);
+        }
+        let harness_update_card = if chip_opacity > 0.001 && (!has_selection || dock_frame.active) {
+            self.render_harness_update_card(window, main_content_width, cx)
+        } else {
+            None
+        };
         let home_grid = self.render_home_grid(
             has_selection && !dock_frame.active,
             has_selection,
             chip_opacity,
+            harness_update_card.is_some(),
             window,
             cx,
         );
@@ -17480,19 +17509,10 @@ impl Shell {
             Some((strip, band)) => (Some(strip), band),
             None => (None, 0.0),
         };
-        if has_selection {
-            self.set_harness_updates_expanded(false, cx);
-        }
-        let harness_update_card = if chip_opacity > 0.001 && (!has_selection || dock_frame.active) {
-            self.render_harness_update_card(window, main_content_width, cx)
-        } else {
-            None
-        };
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
-            harness_update_card.is_some(),
                 this.capture_navigation_focus(false, false, window, cx);
             }))
             .on_key_down(|event, _, cx| navigation_focus::copy_transcript_selection(event, cx))
@@ -17599,26 +17619,6 @@ impl Shell {
                     crate::terminal::dock::above_terminal(grid, terminal_geometry.clone()),
                 ))
             })
-            // The glass chrome stack, floating over the transcript's bottom:
-            // reserved status strip (h-6, the WorkingIndicator — the composer
-            // below never shifts), composer, terminal dock. A paint-time
-            // canvas measures the stack for next frame's fade inset and
-            // transcript clearance. The flex_1 spacer has no id/listeners, so
-            // pointer + wheel events over it fall through to the list below.
-            .child(div().flex_1().min_h_0())
-            .child({
-                let measured = self.bottom_stack.clone();
-                let measured_has_composer = self.bottom_stack_has_composer.clone();
-                let contains_composer = has_selection;
-                let composer = self.composer.clone();
-                div()
-                    .flex_none()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        gpui::canvas(
-                            move |bounds, window, cx| {
             .when_some(harness_update_card, |column, chip| {
                 // Home notices stay anchored to the window bottom, behind the
                 // dock. Clip paint and hitboxes at the same measured terminal
@@ -17649,6 +17649,26 @@ impl Shell {
                         )),
                 )
             })
+            // The glass chrome stack, floating over the transcript's bottom:
+            // reserved status strip (h-6, the WorkingIndicator — the composer
+            // below never shifts), composer, terminal dock. A paint-time
+            // canvas measures the stack for next frame's fade inset and
+            // transcript clearance. The flex_1 spacer has no id/listeners, so
+            // pointer + wheel events over it fall through to the list below.
+            .child(div().flex_1().min_h_0())
+            .child({
+                let measured = self.bottom_stack.clone();
+                let measured_has_composer = self.bottom_stack_has_composer.clone();
+                let contains_composer = has_selection;
+                let composer = self.composer.clone();
+                div()
+                    .flex_none()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        gpui::canvas(
+                            move |bounds, window, cx| {
                                 // Reserve the destination footprint, never the animated height.
                                 let next_height = f32::from(bounds.size.height)
                                     + composer.read(cx).dock_clearance_correction();
@@ -17705,6 +17725,7 @@ impl Shell {
         settled_in_chat: bool,
         has_selection: bool,
         opacity: f32,
+        notice_below: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -17725,7 +17746,6 @@ impl Shell {
                             crate::home::HomeEvent::OpenPullRequest(url) => {
                                 crate::pull_request_detail::open_on_device(url, None, window, cx)
                             }
-        notice_below: bool,
                         },
                     ));
                     self.home_view = Some(home.clone());
@@ -21112,9 +21132,9 @@ mod tests {
         assert_eq!(
             hit("compact ahead"),
             (
-                SettingsSection::Compaction,
+                SettingsSection::Experimental,
                 "Compact ahead of time",
-                "Agents › Compaction".to_string(),
+                "Lab › Experimental".to_string(),
                 Some(Target::Setting(SettingId::CompactAhead)),
                 true,
             )
@@ -21129,13 +21149,18 @@ mod tests {
             .map(|hit| hit.page)
             .collect();
         assert_eq!(compaction.len(), 9);
-        assert!(
-            compaction
-                .iter()
-                .all(|page| *page == SettingsSection::Compaction)
-        );
+        assert!(compaction.iter().all(|page| {
+            matches!(
+                page,
+                SettingsSection::Compaction | SettingsSection::Experimental
+            )
+        }));
         assert_eq!(
             SettingsGroup::Lab.pages(false),
+            vec![SettingsSection::Experimental]
+        );
+        assert_eq!(
+            SettingsGroup::DevicesUpdates.pages(false),
             vec![
                 SettingsSection::Updates,
                 SettingsSection::Devices,
@@ -26159,7 +26184,7 @@ mod settings_modal_regressions {
             ("settings/account", SettingsSection::Account),
             ("settings/archived", SettingsSection::Archived),
             ("settings/compaction", SettingsSection::Compaction),
-            ("settings/experimental", SettingsSection::Compaction),
+            ("settings/experimental", SettingsSection::Experimental),
         ] {
             assert_eq!(
                 settings_open_route(route, remembered),
@@ -26381,13 +26406,15 @@ mod settings_modal_regressions {
             shell.debug_gate = Some(GatePhase::Ready);
             shell.splash = SplashPhase::Gone;
         });
-        // Routing and Compaction draw their rows only once the engine answers.
+        // Routing and the compaction pages draw their rows only once the engine answers.
         let sections = SettingsSection::ALL.into_iter().filter(|section| {
             section.visible_in_nav()
                 && !section.needs_account()
                 && !matches!(
                     section,
-                    SettingsSection::Routing | SettingsSection::Compaction
+                    SettingsSection::Routing
+                        | SettingsSection::Compaction
+                        | SettingsSection::Experimental
                 )
         });
         let indexed: Vec<Target> = SettingsSection::ALL
