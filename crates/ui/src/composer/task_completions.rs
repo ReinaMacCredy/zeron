@@ -8,7 +8,6 @@ use super::slash::{self, SlashMenu, SlashMenuEvent, SlashScope, SlashTarget};
 use super::{ComposerInput, ComposerInputEvent, invocation_token, slash_token};
 use crate::pickers::Pickers;
 use crate::popover;
-use crate::settings::composer::ComposerDefaults;
 use crate::state::AppState;
 
 const WIDTH: f32 = 420.0;
@@ -27,8 +26,8 @@ pub(crate) struct TaskCompletions {
     mentions: Entity<MentionMenu>,
     slash: Entity<SlashMenu>,
     scope: Box<dyn Fn(&App) -> TaskScope>,
-    /// Read when a `/` or `$` token opens; the file is not worth a read per keystroke.
-    default_harness: Option<HarnessId>,
+    /// Made when a `/` or `$` token first opens; it fetches the harness list.
+    default_agent: Option<(Entity<Pickers>, Subscription)>,
     _subscriptions: [Subscription; 3],
 }
 
@@ -96,7 +95,7 @@ impl TaskCompletions {
             mentions,
             slash,
             scope: Box::new(scope),
-            default_harness: None,
+            default_agent: None,
             _subscriptions: [input_events, mention_events, slash_events],
         }
     }
@@ -193,22 +192,34 @@ impl TaskCompletions {
         cx.notify();
     }
 
-    fn harness(&mut self, scope: &TaskScope, cx: &App) -> Option<HarnessId> {
-        if let Some(agent) = &scope.agent {
-            return agent.read(cx).resolved(cx).harness;
-        }
-        if !self.slash.read(cx).is_open() {
-            self.default_harness = self
-                .app
-                .read(cx)
-                .data_dir
-                .as_deref()
-                .and_then(|dir| ComposerDefaults::load(dir).harness);
-        }
-        self.default_harness
+    fn harness(&mut self, scope: &TaskScope, cx: &mut Context<Self>) -> Option<HarnessId> {
+        let agent = match &scope.agent {
+            Some(agent) => agent.clone(),
+            None => self.default_agent(cx),
+        };
+        agent.read(cx).resolved(cx).harness
     }
 
-    fn slash_target(&mut self, scope: &TaskScope, cx: &App) -> SlashTarget {
+    fn default_agent(&mut self, cx: &mut Context<Self>) -> Entity<Pickers> {
+        if let Some((agent, _)) = &self.default_agent {
+            return agent.clone();
+        }
+        let app = self.app.clone();
+        let agent = cx.new(|cx| {
+            let mut agent = Pickers::new_for_tasks(app, cx);
+            agent.ensure_harnesses(false, cx);
+            agent
+        });
+        let changes = cx.observe(&agent, |this, _, cx| {
+            if this.slash.read(cx).is_open() {
+                this.refresh(cx);
+            }
+        });
+        self.default_agent = Some((agent.clone(), changes));
+        agent
+    }
+
+    fn slash_target(&mut self, scope: &TaskScope, cx: &mut Context<Self>) -> SlashTarget {
         let harness = self.harness(scope, cx);
         let app = self.app.read(cx);
         let space_id = scope.space_id.as_deref();

@@ -3308,6 +3308,11 @@ mod tests {
         cx.simulate_keystrokes("tab");
         let text = page.read_with(cx, |page, cx| page.add.read(cx).text().to_string());
         assert_eq!(text, "");
+        cx.run_until_parked();
+        page.update_in(cx, |page, window, cx| {
+            let notes = page.card.read(cx).open.as_ref().unwrap().notes.clone();
+            assert!(notes.focus_handle(cx).is_focused(window));
+        });
     }
 
     #[gpui::test]
