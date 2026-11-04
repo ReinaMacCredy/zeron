@@ -502,14 +502,14 @@ impl Shell {
     }
 
     fn submit_rail_capture(&mut self, input: &Entity<ComposerInput>, cx: &mut Context<Self>) {
-        let Some((title, _)) = qc::split_capture(input.read(cx).text()) else {
+        let Some((title, notes)) = qc::split_capture(input.read(cx).text()) else {
             return;
         };
         let capture = Capture {
             task_id: uuid::Uuid::new_v4().to_string(),
             depends_on: qc::mentioned_dependencies(&title, &self.state.read(cx).tasks),
             title: title.clone(),
-            notes: String::new(),
+            notes,
             space_id: self
                 .state
                 .read(cx)
