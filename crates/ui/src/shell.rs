@@ -3833,6 +3833,10 @@ pub struct Shell {
     /// lifecycle ([`crate::app_update`]) moves. `None` when the app runs
     /// without a desktop checker (tests).
     _app_update_observation: Option<Subscription>,
+    harness_update_expanded: bool,
+    harness_update_transition: Option<WidthTween>,
+    harness_update_geometry: [Option<WidthTween>; 2],
+    harness_update_scroll: settings::widgets::PageScroll,
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
     /// First-run setup in place of the Ready shell; built on first Ready
@@ -4564,6 +4568,10 @@ impl Shell {
             org: None,
             sync_flow: SyncFlow::Idle,
             onboarding: None,
+            harness_update_expanded: false,
+            harness_update_transition: None,
+            harness_update_geometry: [None; 2],
+            harness_update_scroll: settings::widgets::PageScroll::default(),
             files_machine_down: Default::default(),
             onboarding_pending,
             _onboarding_subscriptions: Vec::new(),
@@ -16185,6 +16193,10 @@ impl Shell {
             update.update(cx, |update, cx| update.dismiss_prompt(cx));
             return true;
         }
+        if self.harness_update_expanded {
+            self.set_harness_updates_expanded(false, cx);
+            return true;
+        }
         // The folded-breadcrumbs menu floats over the palette; it closes first.
         if self.add_space.is_open() && self.project_crumb_menu.is_open() {
             self.close_project_crumb_menu(cx);
@@ -17468,10 +17480,19 @@ impl Shell {
             Some((strip, band)) => (Some(strip), band),
             None => (None, 0.0),
         };
+        if has_selection {
+            self.set_harness_updates_expanded(false, cx);
+        }
+        let harness_update_card = if chip_opacity > 0.001 && (!has_selection || dock_frame.active) {
+            self.render_harness_update_card(window, main_content_width, cx)
+        } else {
+            None
+        };
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+            harness_update_card.is_some(),
                 this.capture_navigation_focus(false, false, window, cx);
             }))
             .on_key_down(|event, _, cx| navigation_focus::copy_transcript_selection(event, cx))
@@ -17598,6 +17619,36 @@ impl Shell {
                     .child(
                         gpui::canvas(
                             move |bounds, window, cx| {
+            .when_some(harness_update_card, |column, chip| {
+                // Home notices stay anchored to the window bottom, behind the
+                // dock. Clip paint and hitboxes at the same measured terminal
+                // edge as the transcript, including during open/close motion;
+                // draw order alone would show them through the terminal glass.
+                column.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(crate::terminal::dock::above_terminal(
+                            div().size_full().overflow_hidden().child(
+                                div().relative().w_full().h(px(self.viewport_height)).child(
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .right_0()
+                                        .bottom(px(24.0 - 8.0 * (1.0 - chip_opacity)))
+                                        .opacity(chip_opacity)
+                                        .flex()
+                                        .justify_center()
+                                        .child(chip)
+                                        .when(has_selection, |el| {
+                                            el.child(div().absolute().inset_0().occlude())
+                                        }),
+                                ),
+                            ),
+                            terminal_geometry.clone(),
+                        )),
+                )
+            })
                                 // Reserve the destination footprint, never the animated height.
                                 let next_height = f32::from(bounds.size.height)
                                     + composer.read(cx).dock_clearance_correction();
@@ -17674,6 +17725,7 @@ impl Shell {
                             crate::home::HomeEvent::OpenPullRequest(url) => {
                                 crate::pull_request_detail::open_on_device(url, None, window, cx)
                             }
+        notice_below: bool,
                         },
                     ));
                     self.home_view = Some(home.clone());
@@ -17703,7 +17755,7 @@ impl Shell {
                             .overflow_y_scroll()
                             .track_scroll(&self.new_work_scroll)
                             .child(
-                                div().pb(px(48.0)).child(
+                                div().pb(px(if notice_below { 96.0 } else { 48.0 })).child(
                                     div()
                                         .id("home-panel")
                                         .w(pill.size.width)
