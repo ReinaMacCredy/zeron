@@ -153,19 +153,38 @@ pub fn invocation_detail(description: &str, input_hint: Option<&str>) -> String 
 /// Agent commands that read or change a live session (its context, model,
 /// usage, name or queue) rather than putting text into a message.
 const SESSION_COMMANDS: &[&str] = &[
+    "__remote-workflow",
+    "advisor",
+    "agents",
+    "auto-mode-setup",
     "autocompact",
     "clear",
     "config",
     "context",
     "cost",
+    "debug",
+    "design-consent",
+    "design-revoke",
+    "effort",
     "export",
+    "extra-usage",
+    "fast",
     "follow-up",
+    "heapdump",
+    "import",
+    "list-agents",
     "mcp",
     "model",
     "name",
+    "output-style",
+    "recap",
+    "reload-skills",
+    "rename",
     "session",
     "steering",
     "usage",
+    "usage-credits",
+    "workflow-launch-exec",
 ];
 
 /// A task's text becomes a later chat's first message, so only entries that
@@ -668,7 +687,12 @@ mod tests {
             invocation_candidates(
                 with_zeron_commands(
                     Some(HarnessId::ClaudeCode),
-                    vec![command("review"), command("init"), command("model")],
+                    vec![
+                        command("review"),
+                        command("init"),
+                        command("model"),
+                        command("fast"),
+                    ],
                 ),
                 vec![skill],
             ),
