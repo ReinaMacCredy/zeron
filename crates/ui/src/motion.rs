@@ -1221,6 +1221,7 @@ pub fn hover_blend(key: &str, rest: Hsla, hover: Hsla) -> Hsla {
 struct StateEntry {
     tween: Tween,
     seen: u64,
+    drew_unsettled: bool,
 }
 
 /// Per-key state-morph store. Pure core (explicit `now`) — unit-testable.
@@ -1249,6 +1250,7 @@ impl StateMorphs {
                 StateEntry {
                     tween: Tween::at(target, now),
                     seen: frame,
+                    drew_unsettled: false,
                 },
             );
             return target;
@@ -1257,11 +1259,13 @@ impl StateMorphs {
             entry.tween.retarget(target, spec, reduced, now);
         }
         entry.seen = frame;
+        entry.drew_unsettled |= !entry.tween.settled_at(now);
         entry.tween.value_at(now)
     }
 
     /// Once-per-frame bookkeeping: prune unmounted entries and report whether
-    /// any morph is still mid-flight (→ keep frames coming).
+    /// any morph is still mid-flight or drew a non-final value this frame
+    /// (→ keep frames coming, so its final value always reaches the screen).
     pub fn tick_at(&mut self, now: Instant) -> bool {
         self.frame += 1;
         let frame = self.frame;
@@ -1270,7 +1274,8 @@ impl StateMorphs {
             if entry.seen + 1 < frame {
                 return false;
             }
-            active |= !entry.tween.settled_at(now);
+            active |= entry.drew_unsettled || !entry.tween.settled_at(now);
+            entry.drew_unsettled = false;
             true
         });
         active
@@ -1287,6 +1292,7 @@ impl StateMorphs {
             .or_insert_with(|| StateEntry {
                 tween: Tween::at(if on { 1.0 } else { 0.0 }, now),
                 seen,
+                drew_unsettled: false,
             });
     }
 }
@@ -2054,6 +2060,7 @@ mod tests {
             (at_flip - mid).abs() < 1e-4,
             "continuity: {mid} vs {at_flip}"
         );
+        assert!(morphs.tick_at(ms(80)));
         assert_eq!(morph(&mut morphs, true, ms(400)), 1.0);
         assert!(!morphs.tick_at(ms(400)));
 
@@ -2063,9 +2070,18 @@ mod tests {
             0.0
         );
 
+        // A frame that read mid-flight and ticks after the landing still asks
+        // for one more frame to draw the final value, then stops.
+        morph(&mut morphs, true, ms(510));
+        let late = morph(&mut morphs, true, ms(520));
+        assert!(late > 0.0 && late < 1.0, "mid-flight: {late}");
+        assert!(morphs.tick_at(ms(1000)));
+        assert_eq!(morph(&mut morphs, true, ms(1001)), 1.0);
+        assert!(!morphs.tick_at(ms(1002)));
+
         // Unread for a full frame: pruned (a remount snaps again).
-        morphs.tick_at(ms(600));
-        morphs.tick_at(ms(700));
+        morphs.tick_at(ms(1100));
+        morphs.tick_at(ms(1200));
         assert!(morphs.entries.is_empty());
     }
 
