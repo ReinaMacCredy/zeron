@@ -34,16 +34,18 @@ const BOTTOM_CLEARANCE: f32 = 24.0;
 /// How far down the page a row that has to move lands.
 const LANDING: f32 = 0.3;
 /// The wash: in quickly, held long enough to find, out gently.
-const WASH_IN: MotionSpec = motion::FADE_QUICK;
+const WASH_IN: MotionSpec = MotionSpec::new(250, motion::EASE);
 const WASH_HOLD: Duration = Duration::from_millis(450);
-const WASH_OUT: MotionSpec = MotionSpec::new(600, motion::EASE);
+const WASH_OUT: MotionSpec = MotionSpec::new(1200, motion::EASE);
 /// How far a row's wash reaches past its sides, into its block's inset, and
 /// its corners. A block's wash keeps to the block, under its own corners.
-const WASH_BLEED: f32 = 8.0;
-const WASH_RADIUS: f32 = 8.0;
+const WASH_BLEED: f32 = 13.0;
+const WASH_INSET_Y: f32 = 3.0;
+const WASH_RADIUS: f32 = 9.0;
 
 thread_local! {
     static REVEAL: RefCell<Option<(WindowId, Reveal)>> = const { RefCell::new(None) };
+    static MUTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -80,6 +82,9 @@ pub fn clear_reveal() {
 
 /// `f` on the reveal under way in `window`, if there is one.
 fn with_reveal<R>(window: &Window, f: impl FnOnce(&mut Reveal) -> R) -> Option<R> {
+    if MUTED.get() {
+        return None;
+    }
     let id = window.window_handle().window_id();
     REVEAL.with_borrow_mut(|slot| match slot {
         Some((asked_in, reveal)) if *asked_in == id => Some(f(reveal)),
@@ -407,16 +412,19 @@ impl Element for AnchoredElement {
         if let Some(strength) = *wash {
             let mut color = Theme::of(cx).accent_wash;
             color.a *= strength;
-            let (bleed, radius) = if self.block {
-                (px(0.0), px(widgets::BLOCK_RADIUS))
+            let (bleed, inset, radius) = if self.block {
+                (px(0.0), px(0.0), px(widgets::BLOCK_RADIUS))
             } else {
-                (px(WASH_BLEED), px(WASH_RADIUS))
+                (px(WASH_BLEED), px(WASH_INSET_Y), px(WASH_RADIUS))
             };
             window.paint_quad(
                 fill(
                     Bounds::new(
-                        point(bounds.left() - bleed, bounds.top()),
-                        size(bounds.size.width + bleed * 2.0, bounds.size.height),
+                        point(bounds.left() - bleed, bounds.top() + inset),
+                        size(
+                            bounds.size.width + bleed * 2.0,
+                            (bounds.size.height - inset * 2.0).max(px(0.0)),
+                        ),
                     ),
                     color,
                 )
@@ -513,6 +521,75 @@ impl Element for PageReveal {
 }
 
 impl IntoElement for PageReveal {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+/// A leaving page's scroll must not read as the user taking the reveal's glide back.
+pub fn muted(child: impl IntoElement) -> Muted {
+    Muted {
+        child: child.into_any_element(),
+    }
+}
+
+pub struct Muted {
+    child: AnyElement,
+}
+
+impl Element for Muted {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let outer = MUTED.replace(true);
+        self.child.prepaint(window, cx);
+        MUTED.set(outer);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut (),
+        _prepaint: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+    }
+}
+
+impl IntoElement for Muted {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
@@ -638,11 +715,11 @@ mod tests {
             Some(1.0)
         );
         assert_eq!(
-            reveal.anchor_at(ROW, row(180.0), true, at(start, 1150)),
+            reveal.anchor_at(ROW, row(180.0), true, at(start, 1850)),
             Some(1.0)
         );
         assert_eq!(
-            reveal.anchor_at(ROW, row(180.0), true, at(start, 1250)),
+            reveal.anchor_at(ROW, row(180.0), true, at(start, 1950)),
             None
         );
     }

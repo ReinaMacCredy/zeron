@@ -479,6 +479,8 @@ pub const EASE_IN: CubicBezier = CubicBezier::new(0.42, 0.0, 1.0, 1.0);
 pub const EASE_IN_SHARP: CubicBezier = CubicBezier::new(0.4, 0.0, 1.0, 1.0);
 pub const EASE_DRAWER: CubicBezier = CubicBezier::new(0.32, 0.72, 0.0, 1.0);
 pub const LINEAR: CubicBezier = CubicBezier::new(0.0, 0.0, 1.0, 1.0);
+pub const EASE_SETTLE: CubicBezier = CubicBezier::new(0.25, 0.8, 0.25, 1.0);
+pub const EASE_DIM: CubicBezier = CubicBezier::new(0.0, 0.8, 0.5, 1.0);
 
 // ---------------------------------------------------------------------------
 // Motion specs (the catalog)
@@ -1217,6 +1219,8 @@ pub fn hover_blend(key: &str, rest: Hsla, hover: Hsla) -> Hsla {
 struct StateEntry {
     tween: Tween,
     seen: u64,
+    /// Read before landing and ticked after it: the final value still needs a frame.
+    drew_unsettled: bool,
 }
 
 /// Per-key state-morph store. Pure core (explicit `now`) — unit-testable.
@@ -1245,6 +1249,7 @@ impl StateMorphs {
                 StateEntry {
                     tween: Tween::at(target, now),
                     seen: frame,
+                    drew_unsettled: false,
                 },
             );
             return target;
@@ -1253,6 +1258,7 @@ impl StateMorphs {
             entry.tween.retarget(target, spec, reduced, now);
         }
         entry.seen = frame;
+        entry.drew_unsettled |= !entry.tween.settled_at(now);
         entry.tween.value_at(now)
     }
 
@@ -1266,15 +1272,97 @@ impl StateMorphs {
             if entry.seen + 1 < frame {
                 return false;
             }
-            active |= !entry.tween.settled_at(now);
+            active |= entry.drew_unsettled || !entry.tween.settled_at(now);
+            entry.drew_unsettled = false;
             true
         });
         active
     }
 }
 
+impl StateMorphs {
+    pub fn seed_at(&mut self, key: &str, on: bool, now: Instant) {
+        let seen = self.frame;
+        self.entries
+            .entry(key.to_string())
+            .or_insert_with(|| StateEntry {
+                tween: Tween::at(if on { 1.0 } else { 0.0 }, now),
+                seen,
+                drew_unsettled: false,
+            });
+    }
+}
+
 thread_local! {
     static STATE_MORPHS: RefCell<StateMorphs> = RefCell::new(StateMorphs::default());
+}
+
+pub fn state_seed(key: &str, on: bool) {
+    STATE_MORPHS.with(|morphs| morphs.borrow_mut().seed_at(key, on, now()));
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Leg {
+    pub enter: MotionSpec,
+    pub exit: MotionSpec,
+}
+
+impl Leg {
+    pub const fn both(spec: MotionSpec) -> Self {
+        Self {
+            enter: spec,
+            exit: spec,
+        }
+    }
+
+    fn spec(&self, shown: bool) -> MotionSpec {
+        if shown { self.enter } else { self.exit }
+    }
+
+    pub fn at(&self, run: f32, shown: bool, span_ms: u64) -> f32 {
+        let spec = self.spec(shown);
+        let total = (spec.delay_ms + spec.duration_ms) as f32;
+        let travelled = if shown { run } else { 1.0 - run };
+        let progress = if total <= 0.0 {
+            1.0
+        } else {
+            spec.progress(travelled * span_ms as f32 / total)
+        };
+        if shown { progress } else { 1.0 - progress }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Staged {
+    run: f32,
+    shown: bool,
+    span_ms: u64,
+}
+
+impl Staged {
+    pub fn leg(&self, leg: Leg) -> f32 {
+        leg.at(self.run, self.shown, self.span_ms)
+    }
+
+    pub fn visible(&self) -> bool {
+        self.shown || self.run > 0.001
+    }
+}
+
+pub fn staged(key: &str, shown: bool, legs: &[Leg], reduced: bool) -> Staged {
+    let span_ms = legs
+        .iter()
+        .map(|leg| {
+            let spec = leg.spec(shown);
+            spec.delay_ms + spec.duration_ms
+        })
+        .max()
+        .unwrap_or(0);
+    Staged {
+        run: state_t(key, shown, MotionSpec::new(span_ms, LINEAR), reduced),
+        shown,
+        span_ms,
+    }
 }
 
 /// Morph progress (0..1) of `key` toward `on` this frame.
@@ -1959,6 +2047,7 @@ mod tests {
             (at_flip - mid).abs() < 1e-4,
             "continuity: {mid} vs {at_flip}"
         );
+        assert!(morphs.tick_at(ms(80)));
         assert_eq!(morph(&mut morphs, true, ms(400)), 1.0);
         assert!(!morphs.tick_at(ms(400)));
 
@@ -1968,9 +2057,16 @@ mod tests {
             0.0
         );
 
+        morph(&mut morphs, true, ms(510));
+        let late = morph(&mut morphs, true, ms(520));
+        assert!(late > 0.0 && late < 1.0, "mid-flight: {late}");
+        assert!(morphs.tick_at(ms(1000)));
+        assert_eq!(morph(&mut morphs, true, ms(1001)), 1.0);
+        assert!(!morphs.tick_at(ms(1002)));
+
         // Unread for a full frame: pruned (a remount snaps again).
-        morphs.tick_at(ms(600));
-        morphs.tick_at(ms(700));
+        morphs.tick_at(ms(1100));
+        morphs.tick_at(ms(1200));
         assert!(morphs.entries.is_empty());
     }
 

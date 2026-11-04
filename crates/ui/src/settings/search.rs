@@ -5,7 +5,7 @@
 
 mod reveal;
 
-pub use reveal::{PageReveal, SearchAnchor, clear_reveal, page_reveal, pending, reveal};
+pub use reveal::{PageReveal, SearchAnchor, clear_reveal, muted, page_reveal, pending, reveal};
 #[cfg(test)]
 pub(crate) use reveal::{lit, take_anchored};
 

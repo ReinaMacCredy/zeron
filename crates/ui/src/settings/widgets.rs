@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use gpui::{AnyElement, Context, Pixels, ScrollHandle, SharedString, Window, div, prelude::*, px};
 
+use crate::motion::{EASE, EASE_DIM, EASE_OUT, EASE_SETTLE, EASE_TAILWIND, Leg, MotionSpec};
 use crate::popover::{self, MenuScrollbarMetrics, MenuScrollbarState, ScrollRailHost};
 use crate::theme::Theme;
 
@@ -479,8 +480,9 @@ pub fn option_card(
 /// Section labels and page titles sit a little inside the blocks' edge.
 const SECTION_LABEL_INSET: f32 = 8.0;
 const SECTION_TITLE_INSET: f32 = 16.0;
+const SECTION_HEADING_INSET: f32 = 2.0;
 /// Air between one section and the next.
-const SECTION_GAP: f32 = 32.0;
+const SECTION_GAP: f32 = 26.0;
 
 /// The small plain label above a block ("Startup", "Fonts"): sentence case,
 /// muted, never an uppercase eyebrow.
@@ -510,7 +512,7 @@ pub fn details_label(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div
 
 pub fn section_title(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
     div()
-        .px(px(SECTION_LABEL_INSET))
+        .px(px(SECTION_HEADING_INSET))
         .min_h(px(24.0))
         .flex()
         .flex_row()
@@ -1333,6 +1335,46 @@ pub fn section_tab(
         .bg(crate::motion::hover_blend(&hover_key, base_bg, hover_bg))
         .id(id.into())
         .on_hover(crate::motion::hover_listener(hover_key))
+}
+
+pub const COLLAPSE_HEIGHT: Leg = Leg {
+    enter: MotionSpec::new(460, EASE_TAILWIND),
+    exit: MotionSpec::new(420, EASE_TAILWIND).with_delay(50),
+};
+/// Closing dims before the edge reaches the content, so the space is never seen empty.
+pub const COLLAPSE_FADE: Leg = Leg {
+    enter: MotionSpec::new(240, EASE_OUT).with_delay(300),
+    exit: MotionSpec::new(420, EASE_DIM),
+};
+pub const NAV_FADE: Leg = Leg::both(MotionSpec::new(200, EASE));
+pub const NAV_RISE: Leg = Leg::both(MotionSpec::new(250, EASE_SETTLE));
+pub const NAV_RISE_PX: f32 = 4.0;
+pub const PAGE_FADE: Leg = Leg::both(MotionSpec::new(200, EASE));
+pub const PAGE_RISE: Leg = Leg::both(MotionSpec::new(300, EASE_SETTLE));
+pub const PAGE_RISE_PX: f32 = 8.0;
+pub const NAV_HIGHLIGHT: MotionSpec = MotionSpec::new(200, EASE);
+pub const HINT_FADE: MotionSpec = MotionSpec::new(150, EASE);
+pub const SWAP_FADE: Leg = Leg {
+    enter: MotionSpec::new(315, EASE_SETTLE).with_delay(135),
+    exit: MotionSpec::new(225, EASE),
+};
+
+pub fn collapse(
+    key: &str,
+    open: bool,
+    height: Pixels,
+    reduced: bool,
+    content: impl IntoElement,
+) -> Option<gpui::Div> {
+    let staged = crate::motion::staged(key, open, &[COLLAPSE_HEIGHT, COLLAPSE_FADE], reduced);
+    staged.visible().then(|| {
+        div()
+            .flex_none()
+            .h(height * staged.leg(COLLAPSE_HEIGHT))
+            .overflow_hidden()
+            .opacity(staged.leg(COLLAPSE_FADE))
+            .child(content)
+    })
 }
 
 /// Height of every settings select trigger: centered in a 52px card row.
