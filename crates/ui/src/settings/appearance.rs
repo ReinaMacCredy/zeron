@@ -1369,8 +1369,8 @@ impl AppearancePage {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         use crate::settings::{
-            SHELL_FRAME_BLUR_MAX, SHELL_FRAME_SHADE_MAX, SavePolicy, ShellFrameSidebar,
-            ShellFrameStyle, update_shell_frame,
+            SHELL_FRAME_BLUR_MAX, SHELL_FRAME_SHADE_MAX, SavePolicy, ShellFrameBlend,
+            ShellFrameSidebar, ShellFrameStyle, update_shell_frame,
         };
         let style_controls = ShellFrameStyle::ALL
             .into_iter()
@@ -1455,6 +1455,28 @@ impl AppearancePage {
             frame.sidebar.description(),
             sidebar_controls,
         ));
+        if frame.sidebar != ShellFrameSidebar::Plain {
+            let blend_controls = ShellFrameBlend::ALL
+                .into_iter()
+                .map(|blend| {
+                    choice_chip(
+                        theme,
+                        format!("shell-frame-blend-{}", blend.label().to_lowercase()),
+                        blend.label(),
+                        blend == frame.blend,
+                    )
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        update_shell_frame(SavePolicy::Immediate, cx, |frame| frame.blend = blend);
+                        cx.notify();
+                    }))
+                })
+                .collect::<Vec<_>>();
+            rows.push(choice_row(
+                "Sidebar blend",
+                frame.blend.description(),
+                blend_controls,
+            ));
+        }
         rows.push(value_row(
             "Frame shade",
             format!("{}%", (frame.shade * 100.0).round()),

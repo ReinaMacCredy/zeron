@@ -1506,6 +1506,11 @@ impl SettingsSection {
                     Some(Target::Setting(SettingId::InsetCard)),
                 ),
                 (
+                    "Sidebar blend",
+                    &["sidebar", "tab bar", "whole frame", "fade", "seam"],
+                    Some(Target::Setting(SettingId::InsetCard)),
+                ),
+                (
                     "Frame shade",
                     &["rail", "tab bar", "darken"],
                     Some(Target::Setting(SettingId::InsetCard)),
@@ -11420,7 +11425,10 @@ impl Shell {
     /// sidebar.
     pub(super) fn titlebar_seam_divider(&self, cx: &App) -> Option<AnyElement> {
         let reveal = self.sidebar_reveal();
-        (reveal > 0.01).then(|| {
+        let framed = self.settings.inset_shell
+            && self.settings.shell_frame.style != crate::settings::ShellFrameStyle::Off
+            && self.page_backdrop.is_some();
+        (reveal > 0.01 && !framed).then(|| {
             div()
                 .absolute()
                 .left(px(self.sidebar_edge()))
@@ -15958,7 +15966,8 @@ impl Shell {
                             blur,
                             self.content_left() + card_left,
                             inset,
-                            sidebar_out.then_some(shell_frame.sidebar),
+                            shell_frame.sidebar,
+                            shell_frame.blend,
                         ))
                     }),
             )

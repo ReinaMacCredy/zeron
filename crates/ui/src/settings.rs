@@ -320,6 +320,32 @@ impl ShellFrameSidebar {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ShellFrameBlend {
+    #[default]
+    Whole,
+    Fade,
+}
+
+impl ShellFrameBlend {
+    pub const ALL: [Self; 2] = [Self::Whole, Self::Fade];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Whole => "Whole frame",
+            Self::Fade => "Fade",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Whole => "The sidebar look covers the tab bar too, so the frame is one surface.",
+            Self::Fade => "The sidebar look fades out across the start of the tab bar.",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ShellFrame {
@@ -327,6 +353,7 @@ pub struct ShellFrame {
     pub shade: f32,
     pub blur: f32,
     pub sidebar: ShellFrameSidebar,
+    pub blend: ShellFrameBlend,
 }
 
 impl Default for ShellFrame {
@@ -336,6 +363,7 @@ impl Default for ShellFrame {
             shade: 0.58,
             blur: 28.0,
             sidebar: ShellFrameSidebar::Glass,
+            blend: ShellFrameBlend::Whole,
         }
     }
 }

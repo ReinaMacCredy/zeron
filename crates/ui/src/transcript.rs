@@ -12403,7 +12403,19 @@ impl Transcript {
             && self.compact_fold_total(row_id, ix) > 0.0
         {
             self.settle_close.remove(row_id);
-            self.toggle_fold(row_id.clone(), 0.0, false, cx);
+            // Rows render inside the list's RefCell borrow, and a toggle can
+            // sync rows, which reads the ListState back: run it after layout.
+            if self.folds.get(row_id).and_then(|fold| fold.open) == Some(true) {
+                let row_id = row_id.clone();
+                let this = cx.weak_entity();
+                cx.defer(move |cx| {
+                    this.update(cx, |this: &mut Transcript, cx| {
+                        this.toggle_fold(row_id, 0.0, false, cx);
+                        cx.notify();
+                    })
+                    .ok();
+                });
+            }
         }
         let mut fold = self.folds.get(row_id).copied().unwrap_or_default();
         let file_opener = self.tool_file_opener(cx);
@@ -17368,11 +17380,87 @@ mod tests {
                     &Theme::dark(),
                     cx,
                 );
-                assert_eq!(this.folds[&work].open, Some(false));
-                assert!(this.folds[&work].toggled_at.is_some());
+                assert_eq!(this.folds[&work].open, Some(true));
                 assert!(this.settle_close.is_empty());
             });
         });
+    }
+
+    fn settle_work_fold_in_window(
+        cx: &mut gpui::TestAppContext,
+        user_closes_first: bool,
+    ) -> (Option<bool>, bool) {
+        struct Root(Entity<Transcript>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let parts = vec![
+            tool_part("call-a", "pwd"),
+            text_part("reply", "All set."),
+            tool_part("call-b", "ls"),
+        ];
+        let (state, transcript) = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = vec![assistant("turn", MessageStatus::Streaming, parts.clone())];
+                state.transcript_revision += 1;
+            });
+            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+            (state, transcript)
+        });
+        transcript.update(cx, |this, cx| {
+            this.rail_enabled = false;
+            this.sync(cx);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Root(transcript.clone()));
+        let frame = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear();
+            });
+        };
+        frame(cx);
+        state.update(cx, |state, _| {
+            let mut done = assistant("turn", MessageStatus::Complete, parts);
+            done.duration_ms = Some(5_000);
+            state.transcript = vec![done];
+            state.transcript_revision += 1;
+        });
+        let work: SharedString = "turn#work".into();
+        transcript.update(cx, |this, cx| {
+            this.sync(cx);
+            assert!(this.settle_close.contains(&work));
+            if user_closes_first {
+                this.toggle_fold(work.clone(), 0.0, false, cx);
+            }
+        });
+        for _ in 0..4 {
+            frame(cx);
+        }
+        transcript.read_with(cx, |this, _| {
+            (
+                this.folds.get(&work).and_then(|fold| fold.open),
+                this.settle_close.is_empty(),
+            )
+        })
+    }
+
+    #[gpui::test]
+    fn a_settled_work_fold_closes_after_the_list_lays_it_out(cx: &mut gpui::TestAppContext) {
+        assert_eq!(settle_work_fold_in_window(cx, false), (Some(false), true));
+    }
+
+    #[gpui::test]
+    fn a_work_fold_the_user_closed_while_settling_stays_closed(cx: &mut gpui::TestAppContext) {
+        assert_eq!(settle_work_fold_in_window(cx, true), (Some(false), true));
     }
 
     #[test]
