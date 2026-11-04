@@ -157,10 +157,71 @@ fn image_at(
     None
 }
 
+// Strips keep small copies under their own key: a full-size screenshot counts
+// about 50 MB against the 64 MB cache, so a few on one page evict each other
+// and blink through Loading forever.
+fn thumb_key(path: &str) -> String {
+    // No slash, so the attachment cache's upload alias never reads it as a file name.
+    format!("task-thumb:{}", path.replace('/', ":"))
+}
+
+fn thumb_at(
+    state: &Entity<AppState>,
+    path: &str,
+    cx: &mut App,
+) -> Option<attachments::CachedAttachmentImage> {
+    let (engine, device) = {
+        let state = state.read(cx);
+        (state.engine().cloned(), device(state))
+    };
+    let key = thumb_key(path);
+    if let AttachmentSnapshot::Loaded(image) = attachments::attachment_snapshot(&device, &key) {
+        return Some(image);
+    }
+    if attachments::begin_load(&device, &key) {
+        let path = path.to_string();
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let staged = match attachments::attachment_snapshot(&device, &path) {
+                AttachmentSnapshot::Loaded(image) => Some(image.image),
+                _ => None,
+            };
+            let source = match (staged, engine) {
+                (Some(image), _) => Some(image),
+                (None, Some(engine)) => attachments::read_attachment_image(
+                    &engine,
+                    cx.background_executor(),
+                    None,
+                    &path,
+                    None,
+                )
+                .await
+                .map(|loaded| loaded.image),
+                (None, None) => None,
+            };
+            let thumb = match source {
+                Some(source) => {
+                    cx.background_executor()
+                        .spawn(async move { attachments::queue_thumbnail_image(&source) })
+                        .await
+                }
+                None => None,
+            };
+            let key = thumb_key(&path);
+            match thumb {
+                Some(thumb) => attachments::store_loaded(&device, &key, "".into(), thumb),
+                None => attachments::store_error(&device, &key),
+            }
+            cx.update(|cx| cx.refresh_windows());
+        })
+        .detach();
+    }
+    None
+}
+
 fn missing(state: &Entity<AppState>, path: &str, cx: &App) -> bool {
     let device = device(state.read(cx));
     matches!(
-        attachments::attachment_snapshot(&device, path),
+        attachments::attachment_snapshot(&device, &thumb_key(path)),
         AttachmentSnapshot::Error { .. }
     )
 }
@@ -183,7 +244,7 @@ pub(crate) fn strip<V: 'static>(
         .items_center()
         .gap(px(if large { 8.0 } else { 4.0 }));
     for (ix, path) in paths.iter().enumerate() {
-        let image = image_at(state, path, cx);
+        let image = thumb_at(state, path, cx);
         let name = path.rsplit('/').next().unwrap_or(path).to_string();
         let selector = format!("{key}-image-{ix}");
         let group = SharedString::from(selector.clone());
