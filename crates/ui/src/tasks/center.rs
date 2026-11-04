@@ -2390,6 +2390,108 @@ impl TaskCenter {
 mod tests {
     use super::*;
 
+    #[gpui::test]
+    fn the_add_row_and_the_step_editor_pick_a_highlighted_row_before_acting(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            let mut spine = crate::settings::UiSettings::default();
+            spine.tree_view = crate::settings::TreeView::Spine;
+            crate::settings::init(spine, dir.path(), cx);
+            crate::composer::init(cx, Default::default());
+        });
+        cx.executor().allow_parking();
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.tasks = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "orch", "title": "Build it", "orderKey": "a", "chatId": "lead",
+                    "mode": "orchestrated",
+                }))
+                .unwrap(),
+            ];
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "lead", "title": "lead", "deviceId": "mac", "archived": false,
+                    "createdAt": "2026-10-18T00:00:00Z",
+                }))
+                .unwrap(),
+            ];
+            state.task_steps = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "s1", "taskId": "orch", "title": "s1", "orderKey": "1",
+                }))
+                .unwrap(),
+            ];
+        });
+        let row = zeron_proto::command_catalog::InvocationCandidate {
+            name: "ship".into(),
+            description: String::new(),
+            input_hint: None,
+            invocation: zeron_proto::invocation::Invocation::Skill {
+                name: "ship".into(),
+                path: "/repo/.claude/skills/ship/SKILL.md".into(),
+                command: None,
+            },
+            workspace_command: None,
+        };
+        let link = row.invocation.link();
+        let (center, cx) = cx.add_window_view(|_, cx| TaskCenter::new(state, "orch".into(), cx));
+
+        center.update_in(cx, |center, window, cx| {
+            window.focus(&center.add.focus_handle(cx), cx);
+            center
+                .add
+                .update(cx, |input, cx| input.set_text("Do $sh", cx));
+        });
+        cx.run_until_parked();
+        center.update(cx, |center, cx| {
+            let rows = vec![row.clone()];
+            center
+                .add_menus
+                .update(cx, |menus, cx| menus.seed_slash_rows(rows, cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        center.read_with(cx, |center, cx| {
+            assert_eq!(center.add.read(cx).text(), format!("Do {link} "));
+            assert!(center.draft.added.is_empty(), "the pick adds no step");
+        });
+        cx.simulate_keystrokes("enter");
+        center.read_with(cx, |center, cx| {
+            assert_eq!(center.draft.added[0].1.title, format!("Do {link}"));
+        });
+
+        center.update_in(cx, |center, window, cx| {
+            center.start_edit(EditTarget::Step("s1".into()), window, cx);
+            let body = center.editor.as_ref().unwrap().body.clone();
+            window.focus(&body.focus_handle(cx), cx);
+            body.update(cx, |input, cx| input.set_text("Then $sh", cx));
+        });
+        cx.run_until_parked();
+        center.update(cx, |center, cx| {
+            let rows = vec![row.clone()];
+            let menus = center.editor.as_ref().unwrap().body_menus.clone();
+            menus.update(cx, |menus, cx| menus.seed_slash_rows(rows, cx));
+        });
+        cx.run_until_parked();
+        let body = |center: &Entity<TaskCenter>, cx: &mut gpui::VisualTestContext| {
+            center.read_with(cx, |center, cx| {
+                let body = &center.editor.as_ref().unwrap().body;
+                body.read(cx).text().to_string()
+            })
+        };
+        cx.simulate_keystrokes("enter");
+        assert_eq!(body(&center, cx), format!("Then {link} "));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(body(&center, cx), format!("Then {link} \n"));
+    }
+
     #[test]
     fn a_planned_step_drops_only_below_the_last_started_one() {
         use Slot::*;
