@@ -74,17 +74,32 @@ impl Captured {
 
 pub(crate) fn split_capture(text: &str) -> Option<(String, String)> {
     let mut lines = text.trim().lines();
-    let title: String = lines
-        .next()?
-        .trim()
-        .chars()
-        .take(zeron_doc::TASK_TITLE_MAX_CHARS)
-        .collect();
-    if title.is_empty() {
+    let first = lines.next()?.trim();
+    if first.is_empty() {
         return None;
     }
-    let notes = lines.collect::<Vec<_>>().join("\n").trim().to_string();
-    Some((title, notes))
+    let rest = lines.collect::<Vec<_>>().join("\n");
+    let cut = title_end(first);
+    if cut == 0 {
+        let label: String = crate::composer::plain_references(first)
+            .chars()
+            .take(zeron_doc::TASK_TITLE_MAX_CHARS)
+            .collect();
+        return Some((label, format!("{first}\n{rest}").trim().to_string()));
+    }
+    let notes = format!("{}\n{rest}", &first[cut..]).trim().to_string();
+    Some((first[..cut].trim_end().to_string(), notes))
+}
+
+fn title_end(line: &str) -> usize {
+    let Some((limit, _)) = line.char_indices().nth(zeron_doc::TASK_TITLE_MAX_CHARS) else {
+        return line.len();
+    };
+    let head = &line[..limit];
+    match head.rfind('[') {
+        Some(open) if !head[open..].contains(')') => open,
+        _ => limit,
+    }
 }
 
 pub(crate) fn hash_query(text: &str) -> Option<(usize, &str)> {
@@ -997,6 +1012,10 @@ mod tests {
             split_capture("One line"),
             Some(("One line".into(), String::new()))
         );
+        let long = format!("Do {} [Ship](zeron-task:api) then", "x".repeat(490));
+        let (title, notes) = split_capture(&long).unwrap();
+        assert_eq!(title, format!("Do {}", "x".repeat(490)));
+        assert_eq!(notes, "[Ship](zeron-task:api) then");
     }
 
     #[test]

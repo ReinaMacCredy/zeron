@@ -3282,6 +3282,33 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_reference_that_would_overflow_the_title_is_refused_whole(cx: &mut gpui::TestAppContext) {
+        let _dir = init(cx);
+        cx.update(|cx| crate::composer::init(cx, Default::default()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| state.tasks = vec![task("plain", false)]);
+        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state, cx));
+        let typed = format!("{} $sh", "x".repeat(zeron_doc::TASK_TITLE_MAX_CHARS - 10));
+        card.update_in(cx, |card, window, cx| {
+            card.open("plain".into(), None, CardFocus::Title, Some(window), cx);
+            let input = card.open.as_ref().unwrap().title.clone();
+            input.update(cx, |input, cx| input.set_text(typed.clone(), cx));
+        });
+        cx.run_until_parked();
+        card.update(cx, |card, cx| {
+            let menus = card.open.as_ref().unwrap().title_menus.clone();
+            menus.update(cx, |menus, cx| menus.seed_slash_rows(vec![skill_row()], cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        card.read_with(cx, |card, cx| {
+            let open = card.open.as_ref().unwrap();
+            assert_eq!(open.title.read(cx).text(), typed);
+            assert!(!open.title_menus.read(cx).is_open(cx));
+        });
+    }
+
+    #[gpui::test]
     fn tab_in_the_add_row_picks_a_highlighted_row_and_only_then_opens_the_task(
         cx: &mut gpui::TestAppContext,
     ) {

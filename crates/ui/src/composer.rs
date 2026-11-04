@@ -2042,6 +2042,29 @@ pub(crate) fn sent_mention_display_with(
     Some((projection.display, spans))
 }
 
+/// A reference cut to an input's limit would be a broken link, so it does not go in at all.
+pub(crate) fn reference_refused(
+    input: &Entity<ComposerInput>,
+    range: &Range<usize>,
+    link: &str,
+    cx: &mut App,
+) -> bool {
+    let input = input.read(cx);
+    let Some(max) = input.max_chars else {
+        return false;
+    };
+    let kept = input.content.chars().count() - input.content[range.clone()].chars().count();
+    let refused = kept + link.chars().count() + 1 > max;
+    if refused {
+        crate::toast::show(
+            cx,
+            crate::toast::ToastKind::Error,
+            "No room for that reference here. Links count toward the length limit.",
+        );
+    }
+    refused
+}
+
 pub(crate) fn plain_references(raw: &str) -> String {
     let Some((display, spans)) = sent_mention_display(raw) else {
         return raw.to_string();

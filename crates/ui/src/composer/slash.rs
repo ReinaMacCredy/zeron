@@ -584,6 +584,10 @@ impl SlashMenu {
         } else {
             invocation_insertion(&candidate.invocation, delivery_supported)
         };
+        if super::reference_refused(&self.input, &range, &insertion, cx) {
+            self.dismiss(cx);
+            return;
+        }
         self.input.update(cx, |input, cx| {
             input.replace_plain_token(range, &insertion, cx)
         });
