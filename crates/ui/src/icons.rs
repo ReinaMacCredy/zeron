@@ -340,6 +340,8 @@ icon_assets![
     (LUCIDE_FLASK_CONICAL, "lucide-flask-conical"),
     (LUCIDE_PICTURE_IN_PICTURE_2, "lucide-picture-in-picture-2"),
     (LUCIDE_BOX, "lucide-box"),
+    (LUCIDE_LAPTOP, "lucide-laptop"),
+    (LUCIDE_CHEVRONS_LEFT, "lucide-chevrons-left"),
     (LUCIDE_PANEL_RIGHT, "lucide-panel-right"),
     (LUCIDE_CIRCLE_DOT_DASHED, "lucide-circle-dot-dashed"),
     (LUCIDE_CIRCLE_ALERT, "lucide-circle-alert"),

@@ -43,9 +43,9 @@ impl SidecarPart {
 
     fn icon(self) -> &'static str {
         match self {
-            Self::Workspace => icons::ASTRA_LAPTOP,
-            Self::Beside => icons::CHAT_ROUND_LINE,
-            Self::Actions => icons::ACTION_BUILD,
+            Self::Workspace => icons::LUCIDE_LAPTOP,
+            Self::Beside => icons::LUCIDE_MESSAGE_SQUARE,
+            Self::Actions => icons::LUCIDE_BOX,
         }
     }
 
@@ -1382,7 +1382,7 @@ impl Shell {
                         })
                         .tooltip_show_delay(Duration::from_millis(260))
                 })
-                .child(icon(glyph).size(px(17.0)).text_color(if on {
+                .child(icon(glyph).size(px(15.0)).text_color(if on {
                     theme.text
                 } else {
                     theme.text_muted
@@ -1390,7 +1390,7 @@ impl Shell {
         };
         let mut expand = rail_button(
             "sidecar-expand".into(),
-            icons::ASTRA_CHEVRONS_LEFT,
+            icons::LUCIDE_CHEVRONS_LEFT,
             "Expand the Sidecar".into(),
             false,
         );
