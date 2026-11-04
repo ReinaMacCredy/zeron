@@ -924,13 +924,14 @@ impl TaskCenter {
         let edits = editable && tag != Some(Tag::Removed);
         let struck = row.status == StepStatus::Skipped || tag == Some(Tag::Removed);
         let running = status == Status::Running;
-        let title_text = SharedString::from(row.step.title.clone());
+        let title_text = SharedString::from(crate::composer::plain_references(&row.step.title));
         let title = match editor.and_then(|editor| editor.title.clone()) {
             Some(input) => {
                 let focused = input.focus_handle(cx).is_focused(window);
                 div()
                     .id("task-center-edit-title")
                     .debug_selector(|| "task-center-edit-title".into())
+                    .relative()
                     .mt(px(-1.0))
                     .mx(px(-6.0))
                     .px(px(6.0))
@@ -952,6 +953,13 @@ impl TaskCenter {
                         2.0 * TITLE_LINE,
                         cx,
                     ))
+                    .children(editor.and_then(|editor| {
+                        editor
+                            .title_menus
+                            .as_ref()?
+                            .read(cx)
+                            .popup_below("task-center-edit-title-completions", cx)
+                    }))
                     .into_any_element()
             }
             None if running && !reduced => {
@@ -1467,7 +1475,11 @@ impl TaskCenter {
             remove: removable,
         };
         let select_id = step_id.clone();
-        let aria = format!("Step {}: {}", index + 1, row.step.title);
+        let aria = format!(
+            "Step {}: {}",
+            index + 1,
+            crate::composer::plain_references(&row.step.title)
+        );
         let editing = editor.is_some();
         let card = self
             .card(selected, theme)
@@ -1509,7 +1521,7 @@ impl TaskCenter {
         }
     }
 
-    fn render_ghost(&self, theme: &Theme) -> AnyElement {
+    fn render_ghost(&self, theme: &Theme, cx: &App) -> AnyElement {
         div()
             .id("task-center-add-step")
             .debug_selector(|| "task-center-add-step".into())
@@ -1533,10 +1545,16 @@ impl TaskCenter {
             )
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .text_size(ui_rems(13.0))
-                    .child(self.add.clone()),
+                    .child(self.add.clone())
+                    .children(
+                        self.add_menus
+                            .read(cx)
+                            .popup_below("task-center-add-completions", cx),
+                    ),
             )
             .into_any_element()
     }
@@ -2076,7 +2094,9 @@ impl TaskCenter {
                                             .text_size(ui_rems(18.0))
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .text_color(theme.text)
-                                            .child(SharedString::from(task.title.clone())),
+                                            .child(SharedString::from(
+                                                crate::composer::plain_references(&task.title),
+                                            )),
                                     )
                                     .when(mission, |el| el.child(self.kind_badge(theme, now))),
                             )
@@ -2322,7 +2342,7 @@ impl TaskCenter {
             status: lead_status,
             word: lead_word,
             name: "Lead".into(),
-            title: task.title.clone(),
+            title: crate::composer::plain_references(&task.title),
             text: (plan.phase(task) == super::super::PlanPhase::PlanReady)
                 .then(|| "Plan ready: approve to start running the steps.".to_string()),
             asks: self.ask_count(lead_chat.as_deref()),
@@ -2340,7 +2360,7 @@ impl TaskCenter {
                 status,
                 word,
                 name: format!("Step {}", ix + 1),
-                title: row.step.title.clone(),
+                title: crate::composer::plain_references(&row.step.title),
                 text: text.map(|text| crate::transcript::single_line(&text)),
                 asks: self.ask_count(row.step.chat_id.as_deref()),
             }
@@ -2717,7 +2737,7 @@ impl TaskCenter {
                     None => self.render_tree_lead_card(tree_nodes, reduced, theme, cx),
                 }
             } else if node.id == GHOST {
-                self.render_ghost(theme)
+                self.render_ghost(theme, cx)
             } else if node.id == MARK {
                 Self::render_marker(agents.len(), theme)
             } else if let Some(ix) = shown.iter().position(|(row, ..)| row.step.id == node.id) {

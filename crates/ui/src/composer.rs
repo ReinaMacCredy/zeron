@@ -53,7 +53,9 @@ mod chip;
 mod limit_notice;
 pub(crate) mod mentions;
 mod review_chip;
+pub(crate) mod slash;
 mod staged_comments;
+pub(crate) mod task_completions;
 pub use chip::ChipKind;
 use chip::*;
 pub(crate) use chip::{
@@ -2038,6 +2040,44 @@ pub(crate) fn sent_mention_display_with(
         })
         .collect();
     Some((projection.display, spans))
+}
+
+/// A reference cut to an input's limit would be a broken link, so it does not go in at all.
+pub(crate) fn reference_refused(
+    input: &Entity<ComposerInput>,
+    range: &Range<usize>,
+    link: &str,
+    cx: &mut App,
+) -> bool {
+    let input = input.read(cx);
+    let Some(max) = input.max_chars else {
+        return false;
+    };
+    let kept = input.content.chars().count() - input.content[range.clone()].chars().count();
+    let refused = kept + link.chars().count() + 1 > max;
+    if refused {
+        crate::toast::show(
+            cx,
+            crate::toast::ToastKind::Error,
+            "No room for that reference here. Links count toward the length limit.",
+        );
+    }
+    refused
+}
+
+pub(crate) fn plain_references(raw: &str) -> String {
+    let Some((display, spans)) = sent_mention_display(raw) else {
+        return raw.to_string();
+    };
+    let mut plain = String::new();
+    let mut at = 0;
+    for span in spans {
+        plain.push_str(&display[at..span.range.start]);
+        plain.push_str(display[span.range.clone()].trim_matches('\u{a0}'));
+        at = span.range.end;
+    }
+    plain.push_str(&display[at..]);
+    plain
 }
 
 /// Direction of the last edit — a run only merges with edits of its own kind.
@@ -6790,13 +6830,11 @@ fn invocation_token(text: &str, cursor: usize, prefix: char) -> Option<MentionTo
 
 use zeron_proto::app_commands::{
     COMPACT_COMMAND, COMPACT_NEEDS_CHAT, COMPUTER_USE_COMMAND, SIDECHAT_NEEDS_CHAT, compact_focus,
-    sidechat_prompt, terminal_only_command,
+    sidechat_prompt,
 };
 pub use zeron_proto::command_catalog::WorkspaceCommand;
 use zeron_proto::command_catalog::{
-    CatalogFailure, InvocationCandidate, catalog_empty_message, catalog_error_message,
-    compaction_unsupported, invocation_candidates, invocation_detail, invocation_insertion,
-    skill_display_name, with_workspace_commands, with_zeron_commands, workspace_command_for_text,
+    compaction_unsupported, invocation_candidates, skill_display_name, workspace_command_for_text,
     zeron_owned_command,
 };
 use zeron_proto::compaction::{
@@ -6915,29 +6953,6 @@ fn references_require_update(text: &str, supported: bool) -> bool {
     !supported
         && (!zeron_proto::invocation::invocation_links(text).is_empty()
             || !zeron_proto::file_mentions::file_mention_links(text).is_empty())
-}
-
-/// Slash-command completion state: like [`FileMentionState`] but the
-/// candidate list is scoped to device, harness and workspace, then filtered
-/// locally per keystroke. Commands and skills share focus and keyboard handling.
-#[derive(Debug, Clone, Default)]
-struct SlashState {
-    token: Option<MentionToken>,
-    /// Indices into the cached command list, filter-ranked for the query.
-    filtered: Vec<usize>,
-    active: Option<usize>,
-    /// Harness the popup is showing commands for (cache key).
-    harness: Option<HarnessId>,
-    /// Shared identity for the command and skill catalogs. Switching trigger
-    /// characters should not invalidate another catalog for the same provider.
-    catalog_context: String,
-    context: String,
-    skill: bool,
-    supported: bool,
-    request: u64,
-    loading: bool,
-    error: Option<SharedString>,
-    dismissed: Option<(Range<usize>, String)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -7062,7 +7077,7 @@ fn task_matches<'a>(
         .into_iter()
         .map(|task| TaskMatch {
             task_id: task.id.clone(),
-            title: zeron_proto::view::single_line(&task.title),
+            title: zeron_proto::view::single_line(&plain_references(&task.title)),
             space_id: task.space_id.clone(),
         })
         .collect()
@@ -7082,86 +7097,6 @@ fn mention_error_message(err: &RpcError) -> SharedString {
             "File search failed".into()
         }
     }
-}
-
-const SLASH_PREFETCH_DELAY: Duration = Duration::from_millis(400);
-
-fn slash_context(
-    skill: bool,
-    include_skills: bool,
-    commands_allowed: bool,
-    catalog_context: &str,
-) -> String {
-    format!(
-        "{}:{include_skills}:{commands_allowed}:{catalog_context}",
-        if skill { "skill" } else { "command" },
-    )
-}
-
-async fn fetch_invocation_catalog(
-    engine: crate::state::EngineHandle,
-    params: serde_json::Value,
-    harness: Option<HarnessId>,
-    skill: bool,
-    include_skills: bool,
-    commands_allowed: bool,
-) -> Result<(Vec<InvocationCandidate>, bool, Option<SharedString>), RpcError> {
-    let commands = async {
-        if skill || !commands_allowed {
-            return Ok(Vec::new());
-        }
-        let value = engine
-            .client()
-            .call(methods::LIST_COMMANDS, params.clone())
-            .await?;
-        serde_json::from_value::<Vec<SlashCommand>>(value)
-            .map(|commands| with_zeron_commands(harness, commands))
-            .map_err(|e| RpcError::Failed(e.to_string()))
-    };
-    let skills = async {
-        // Even separated slash menus need this metadata to exclude
-        // provider commands that are actually skill aliases.
-        let value = engine
-            .client()
-            .call(methods::LIST_SKILLS, params.clone())
-            .await?;
-        serde_json::from_value::<Option<Vec<zeron_proto::invocation::Skill>>>(value)
-            .map_err(|e| RpcError::Failed(e.to_string()))
-    };
-    let (commands, skills) = futures::join!(commands, skills);
-    merge_invocation_results(commands, skills, skill).map(|(mut rows, supported, warning)| {
-        if !include_skills {
-            rows.retain(|row| row.invocation.prefix() == '/');
-        }
-        (rows, supported, warning)
-    })
-}
-
-fn merge_invocation_results(
-    commands: Result<Vec<SlashCommand>, RpcError>,
-    skills: Result<Option<Vec<zeron_proto::invocation::Skill>>, RpcError>,
-    skill_only: bool,
-) -> Result<(Vec<InvocationCandidate>, bool, Option<SharedString>), RpcError> {
-    zeron_proto::command_catalog::merge_invocation_results(commands, skills, skill_only).map(
-        |(rows, supported, warning)| {
-            (
-                rows,
-                supported,
-                warning.map(|(error, skill)| slash_error_message(&error, skill)),
-            )
-        },
-    )
-}
-
-fn slash_error_message(err: &RpcError, skill: bool) -> SharedString {
-    let failure = match err {
-        RpcError::UnknownMethod(_) => CatalogFailure::OutdatedEngine,
-        RpcError::Transport(_) | RpcError::Closed => CatalogFailure::Unreachable,
-        RpcError::BadParams(_) | RpcError::Capability(_) | RpcError::Failed(_) => {
-            CatalogFailure::Failed
-        }
-    };
-    catalog_error_message(failure, skill).into()
 }
 
 struct PromptHistoryCursor {
@@ -7236,12 +7171,7 @@ pub struct Composer {
     /// In-flight file-picker prompt (paperclip).
     picker_task: Option<Task<()>>,
     mentions: Entity<mentions::MentionMenu>,
-    slash_task: Option<Task<()>>,
-    slash_prefetch: Option<(String, Task<()>)>,
-    slash: SlashState,
-    /// Advertised invocations for the current device/harness/workspace.
-    /// Invalidated on context changes; filtering stays local while typing.
-    slash_cache: HashMap<String, Vec<InvocationCandidate>>,
+    slash: Entity<slash::SlashMenu>,
     /// How each harness compacts (`native` / `slash` / `none`), cached like
     /// the command list; `compaction_probed` holds the ids already asked for.
     compaction_cache: HashMap<HarnessId, zeron_proto::CompactionKind>,
@@ -7249,11 +7179,6 @@ pub struct Composer {
     /// The `CompactChat` call in flight; the chat it belongs to lives on
     /// `AppState::compacting_chat`, which the transcript's trailer reads too.
     compact_task: Option<Task<()>>,
-    /// Slash-popup row scroll — the stack overflows into a wheel/keyboard-
-    /// scrollable list once it outgrows the card.
-    slash_scroll: gpui::ScrollHandle,
-    /// The slash popup's floating rail; the mention popup keeps its own.
-    popup_bar: crate::popover::MenuScrollbarState,
     pub(crate) current_key: String,
     sending: bool,
     /// Armed immediately before a blank-canvas send selects its minted chat.
@@ -7393,6 +7318,7 @@ pub struct Composer {
     _picker_focus: Subscription,
     _input_events: Subscription,
     _mention_events: Subscription,
+    _slash_events: Subscription,
     _dictation_events: Subscription,
     dictation_activation: Option<Subscription>,
     dictation_blur: Option<Subscription>,
@@ -7538,22 +7464,22 @@ impl Composer {
             // completion key routing; they are mutually exclusive by token
             // shape (`/`, `$`, or `@` at a token boundary).
             ComposerInputEvent::MentionNavigate(delta) => {
-                if this.slash.token.is_some() {
-                    this.move_slash(*delta, cx)
+                if this.slash.read(cx).is_open() {
+                    this.slash.update(cx, |menu, cx| menu.step(*delta, cx))
                 } else {
                     this.mentions.update(cx, |menu, cx| menu.step(*delta, cx))
                 }
             }
             ComposerInputEvent::MentionAccept => {
-                if this.slash.token.is_some() {
+                if this.slash.read(cx).is_open() {
                     this.accept_slash(cx)
                 } else {
                     this.mentions.update(cx, |menu, cx| menu.accept(cx))
                 }
             }
             ComposerInputEvent::MentionDismiss => {
-                if this.slash.token.is_some() {
-                    this.dismiss_slash(cx)
+                if this.slash.read(cx).is_open() {
+                    this.slash.update(cx, |menu, cx| menu.dismiss(cx))
                 } else {
                     this.mentions.update(cx, |menu, cx| menu.dismiss(cx))
                 }
@@ -7619,6 +7545,17 @@ impl Composer {
                 cx.notify();
             },
         );
+        let slash = cx.new(|_| slash::SlashMenu::new(state.clone(), input.clone()));
+        let slash_events = cx.subscribe(
+            &slash,
+            |this: &mut Self, _, event: &slash::SlashMenuEvent, cx| match event {
+                slash::SlashMenuEvent::Changed => {
+                    this.sync_mention_controls(cx);
+                    cx.notify();
+                }
+                slash::SlashMenuEvent::Accept => this.accept_slash(cx),
+            },
+        );
         let ask_input = cx.new(|cx| ComposerInput::new(ask_pill::PLACEHOLDER, cx));
         let ask_input_events =
             cx.subscribe(&ask_input, |this: &mut Self, _, event, cx| match event {
@@ -7648,15 +7585,10 @@ impl Composer {
             preview_focus_pending: false,
             picker_task: None,
             mentions,
-            slash_task: None,
-            slash_prefetch: None,
-            slash: SlashState::default(),
-            slash_cache: HashMap::new(),
+            slash,
             compaction_cache: HashMap::new(),
             compaction_probed: HashSet::new(),
             compact_task: None,
-            slash_scroll: gpui::ScrollHandle::new(),
-            popup_bar: crate::popover::MenuScrollbarState::default(),
             current_key,
             sending: false,
             launching_new_chat: false,
@@ -7743,6 +7675,7 @@ impl Composer {
             _picker_focus: picker_focus,
             _input_events: input_events,
             _mention_events: mention_events,
+            _slash_events: slash_events,
             _dictation_events: dictation_events,
             dictation_activation: None,
             dictation_blur: None,
@@ -7941,7 +7874,7 @@ impl Composer {
             || self.wizard.is_some()
             || self.editing_queued.is_some()
             || self.mentions.read(cx).is_open()
-            || self.slash.token.is_some()
+            || self.slash.read(cx).is_open()
         {
             return None;
         }
@@ -9407,10 +9340,10 @@ impl Composer {
     }
 
     fn sync_mention_controls(&mut self, cx: &mut Context<Self>) {
-        let mentions = self.mentions.read(cx);
-        let open = mentions.is_open() || self.slash.token.is_some();
-        let has_selection = if self.slash.token.is_some() {
-            self.slash.active.is_some()
+        let (mentions, slash) = (self.mentions.read(cx), self.slash.read(cx));
+        let open = mentions.is_open() || slash.is_open();
+        let has_selection = if slash.is_open() {
+            slash.has_selection()
         } else {
             mentions.has_selection()
         };
@@ -9498,9 +9431,6 @@ impl Composer {
 
     fn completion_connection_context(&self, cx: &App) -> String {
         let state = self.state.read(cx);
-        let engine = state
-            .engine()
-            .map(|engine| engine.client() as *const _ as usize);
         let target = self
             .bound_chat_row(cx)
             .map(|chat| chat.device_id.clone())
@@ -9510,13 +9440,7 @@ impl Composer {
                     .map(|space| space.device_id.clone())
             })
             .or_else(|| state.effective_device_id());
-        let online = target
-            .as_deref()
-            .is_none_or(|device| state.device_online(device, chrono::Utc::now()));
-        format!(
-            "{engine:?}:{:?}:{:?}:{online}",
-            state.connection, state.connectivity.state
-        )
+        slash::connection_context(state, target.as_deref())
     }
 
     fn resolve_pasted_references(
@@ -9667,7 +9591,8 @@ impl Composer {
             if mentions.is_open() || mentions.is_searching() {
                 self.reset_mention(None, cx);
             }
-            if self.slash.token.is_some() || self.slash_task.is_some() {
+            let slash = self.slash.read(cx);
+            if slash.is_open() || slash.is_fetching() {
                 self.reset_slash(None, cx);
             }
             return;
@@ -9677,7 +9602,7 @@ impl Composer {
             if self.mentions.read(cx).is_open() {
                 self.reset_mention(None, cx);
             }
-            if self.slash.token.is_some() {
+            if self.slash.read(cx).is_open() {
                 self.reset_slash(None, cx);
             }
             return;
@@ -9729,305 +9654,36 @@ impl Composer {
 
     // ---- slash commands ---------------------------------------------------
 
+    fn slash_target(&self, cx: &App) -> slash::SlashTarget {
+        slash::SlashTarget {
+            harness: self.pickers.read(cx).resolved(cx).harness,
+            params: self.catalog_params(cx),
+            connection: self.completion_connection_context(cx),
+            scope: slash::SlashScope::Chat {
+                in_chat: self.state.read(cx).selected_chat.is_some(),
+            },
+            blocked_compact: self.unsupported_compaction(cx),
+        }
+    }
+
     /// Track the `/` token on every edit: open/refresh the popup, fetch the
     /// harness's command list on each open, filter locally per keystroke.
     fn update_slash(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
-        let harness = self.pickers.read(cx).resolved(cx).harness;
-        let preferences =
-            crate::settings::current(cx).skill_completion(harness.unwrap_or(HarnessId::Codex));
-        let (token, skill, include_skills, commands_allowed) =
-            completion_trigger(text, cursor, preferences);
-        if token.is_none() {
-            // Leaving a token must not replace the catalog identity with the
-            // idle (commands_allowed=false) context and evict the warm cache.
-            self.reset_slash(None, cx);
-            return;
-        }
-        let params = self.catalog_params(cx);
-        let catalog_context = format!(
-            "{preferences:?}:{}:{params}",
-            self.completion_connection_context(cx),
-        );
-        let context = slash_context(skill, include_skills, commands_allowed, &catalog_context);
-        let context_changed = self.slash.context != context;
-        if !context_changed
-            && token.as_ref().is_some_and(|token| {
-                self.slash.dismissed.as_ref().is_some_and(|(range, value)| {
-                    token.range == *range && text.get(range.clone()) == Some(value.as_str())
-                })
-            })
-        {
-            return;
-        }
-        if !context_changed && token == self.slash.token {
-            return;
-        }
-        let refresh_catalog = context_changed || self.slash.token.is_none();
-        self.slash.dismissed = None;
-        if context_changed {
-            self.slash.request = self.slash.request.wrapping_add(1);
-            self.slash_task = None;
-            self.slash.loading = false;
-            if self.slash.catalog_context != catalog_context {
-                self.slash_cache.clear();
-            } else if self.slash.error.is_some() || !self.slash.supported {
-                self.slash_cache.remove(&self.slash.context);
-            }
-        }
-        self.slash.catalog_context = catalog_context;
-        self.slash.context = context.clone();
-        self.slash.harness = harness;
-        self.slash.skill = skill;
-        if context_changed {
-            self.slash.supported = true;
-        }
-        self.slash.token = token;
-        if context_changed {
-            self.slash.error = None;
-        }
-        if harness.is_none() && !skill && commands_allowed {
-            self.slash_cache.insert(
-                context.clone(),
-                with_workspace_commands(vec![], self.state.read(cx).selected_chat.is_some()),
-            );
-        }
-        if harness.is_none()
-            || (self.slash_cache.contains_key(&context) && !refresh_catalog)
-            || self.slash.loading
-        {
-            self.refilter_slash(cx);
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            if !skill && commands_allowed {
-                self.slash_cache.insert(
-                    context,
-                    with_workspace_commands(vec![], self.state.read(cx).selected_chat.is_some()),
-                );
-                self.slash.error = Some("Agent command discovery requires a connection".into());
-                self.refilter_slash(cx);
-            }
-            return;
-        };
-        self.slash.request = self.slash.request.wrapping_add(1);
-        let request = self.slash.request;
-        self.slash.loading = true;
-        self.slash.error = None;
-        self.refilter_slash(cx);
-        self.slash_task = Some(cx.spawn(async move |this, cx| {
-            let result = fetch_invocation_catalog(
-                engine,
-                params,
-                harness,
-                skill,
-                include_skills,
-                commands_allowed,
-            )
-            .await;
-            this.update(cx, |composer, cx| {
-                if composer.slash.request != request || composer.slash.context != context {
-                    return;
-                }
-                composer.slash.loading = false;
-                let decoded = result.map(|(candidates, supported, warning)| {
-                    composer.slash.supported = supported;
-                    composer.slash.error = warning;
-                    candidates
-                });
-                match decoded {
-                    Ok(candidates) => {
-                        let candidates = if !skill && commands_allowed {
-                            with_workspace_commands(
-                                candidates,
-                                composer.state.read(cx).selected_chat.is_some(),
-                            )
-                        } else {
-                            candidates
-                        };
-                        composer.slash_cache.insert(context, candidates);
-                    }
-                    Err(err) => {
-                        composer.slash_cache.remove(&context);
-                        composer.slash.error = Some(slash_error_message(&err, skill));
-                        if !skill && commands_allowed {
-                            composer.slash_cache.insert(
-                                context,
-                                with_workspace_commands(
-                                    vec![],
-                                    composer.state.read(cx).selected_chat.is_some(),
-                                ),
-                            );
-                        }
-                    }
-                }
-                composer.refilter_slash(cx);
-            })
-            .ok();
-        }));
-        cx.notify();
+        let target = self.slash_target(cx);
+        self.slash
+            .update(cx, |menu, cx| menu.refresh(text, cursor, target, cx));
     }
 
     fn prefetch_slash_catalog(&mut self, cx: &mut Context<Self>) {
-        if self.slash.token.is_some() {
+        if self.slash.read(cx).is_open() {
             return;
         }
-        let Some(harness) = self.pickers.read(cx).resolved(cx).harness else {
-            return;
-        };
-        let preferences = crate::settings::current(cx).skill_completion(harness);
-        let params = self.catalog_params(cx);
-        let catalog_context = format!(
-            "{preferences:?}:{}:{params}",
-            self.completion_connection_context(cx),
-        );
-        if self.slash.catalog_context == catalog_context
-            || self
-                .slash_prefetch
-                .as_ref()
-                .is_some_and(|(pending, _)| *pending == catalog_context)
-        {
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let triggers: Vec<_> = ["/", "$"]
-            .into_iter()
-            .filter_map(|trigger| {
-                let (token, skill, include_skills, commands_allowed) =
-                    completion_trigger(trigger, 1, preferences);
-                token.map(|_| (skill, include_skills, commands_allowed))
-            })
-            .collect();
-        let context = catalog_context.clone();
-        let task = cx.spawn(async move |this, cx| {
-            // Clicking through chats replaces this task before any agent is spawned.
-            cx.background_executor().timer(SLASH_PREFETCH_DELAY).await;
-            let results = futures::future::join_all(triggers.iter().map(
-                |&(skill, include_skills, commands_allowed)| {
-                    fetch_invocation_catalog(
-                        engine.clone(),
-                        params.clone(),
-                        Some(harness),
-                        skill,
-                        include_skills,
-                        commands_allowed,
-                    )
-                },
-            ))
-            .await;
-            this.update(cx, |composer, cx| {
-                if composer
-                    .slash_prefetch
-                    .take_if(|(pending, _)| *pending == context)
-                    .is_none()
-                    || composer.slash.token.is_some()
-                {
-                    return;
-                }
-                if composer.slash.catalog_context != context {
-                    composer.slash_cache.clear();
-                    composer.slash.catalog_context = context.clone();
-                }
-                let chat_selected = composer.state.read(cx).selected_chat.is_some();
-                for ((skill, include_skills, commands_allowed), result) in
-                    triggers.into_iter().zip(results)
-                {
-                    let Ok((candidates, _, _)) = result else {
-                        continue;
-                    };
-                    let candidates = if !skill && commands_allowed {
-                        with_workspace_commands(candidates, chat_selected)
-                    } else {
-                        candidates
-                    };
-                    composer.slash_cache.insert(
-                        slash_context(skill, include_skills, commands_allowed, &context),
-                        candidates,
-                    );
-                }
-            })
-            .ok();
-        });
-        self.slash_prefetch = Some((catalog_context, task));
-    }
-
-    /// Re-rank the cached list for the current query (pure local filter).
-    fn refilter_slash(&mut self, cx: &mut Context<Self>) {
-        let query = self
-            .slash
-            .token
-            .as_ref()
-            .map(|t| t.query.clone())
-            .unwrap_or_default();
-        let commands = self
-            .slash_cache
-            .get(&self.slash.context)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
-        self.slash.filtered = crate::popover::filter_indices(&query, &names);
-        let disabled = &crate::settings::current(cx).disabled_skills;
-        if !disabled.is_empty() {
-            self.slash.filtered.retain(|&ix| {
-                !commands.get(ix).is_some_and(|command| match &command.invocation {
-                    zeron_proto::invocation::Invocation::Skill { path, .. } => {
-                        disabled.contains(path)
-                    }
-                    zeron_proto::invocation::Invocation::Command { .. } => false,
-                })
-            });
-        }
-        if self.pickers.read(cx).resolved(cx).harness == Some(HarnessId::ClaudeCode) {
-            self.slash
-                .filtered
-                .sort_by_key(|&ix| commands.get(ix).is_some_and(terminal_only_command));
-        }
-        self.slash.active = (!self.slash.filtered.is_empty()).then_some(0);
-        // A fresh query/reopen restarts the row stack at the top.
-        crate::popover::reset_menu_scroll(&self.slash_scroll, &mut self.popup_bar);
-        self.sync_mention_controls(cx);
-        cx.notify();
-    }
-
-    fn move_slash(&mut self, delta: isize, cx: &mut Context<Self>) {
-        self.slash.active =
-            crate::popover::menu_step(self.slash.active, self.slash.filtered.len(), delta);
-        if let Some(active) = self.slash.active {
-            // Keep the keyboard cursor visible in the scrolled row stack.
-            self.slash_scroll.scroll_to_item(active);
-        }
-        self.sync_mention_controls(cx);
-        cx.notify();
-    }
-
-    fn dismiss_slash(&mut self, cx: &mut Context<Self>) {
-        let dismissed = self.slash.token.as_ref().and_then(|token| {
-            self.input
-                .read(cx)
-                .text()
-                .get(token.range.clone())
-                .map(|text| (token.range.clone(), text.to_string()))
-        });
-        self.reset_slash(dismissed, cx);
-        cx.notify();
+        let target = self.slash_target(cx);
+        self.slash.update(cx, |menu, cx| menu.prefetch(target, cx));
     }
 
     fn accept_slash(&mut self, cx: &mut Context<Self>) {
-        let Some(token) = self.slash.token.clone() else {
-            return;
-        };
-        let Some(command) = self
-            .slash
-            .active
-            .and_then(|active| self.slash.filtered.get(active))
-            .and_then(|&ix| {
-                self.slash_cache
-                    .get(&self.slash.context)
-                    .and_then(|c| c.get(ix))
-            })
-            .cloned()
-        else {
+        let Some((range, command)) = self.slash.read(cx).selected() else {
             return;
         };
         // A command the harness cannot run is shown, not offered.
@@ -10035,16 +9691,14 @@ impl Composer {
             return;
         }
         if let Some(action) = command.workspace_command {
-            self.execute_workspace_command(action, token.range, cx);
+            self.execute_workspace_command(action, range, cx);
             return;
         }
         let draft = self.input.read(cx).text();
         let alone = draft
-            .get(..token.range.start)
+            .get(..range.start)
             .is_some_and(|t| t.trim().is_empty())
-            && draft
-                .get(token.range.end..)
-                .is_some_and(|t| t.trim().is_empty());
+            && draft.get(range.end..).is_some_and(|t| t.trim().is_empty());
         if alone
             && command.name == zeron_proto::app_commands::CONFIG_COMMAND
             && self.pickers.read(cx).resolved(cx).harness == Some(HarnessId::ClaudeCode)
@@ -10055,35 +9709,14 @@ impl Composer {
             self.open_config_panel(cx);
             return;
         }
-        let insertion = if zeron_owned_command(&command.name) {
-            format!("/{}", command.name)
-        } else {
-            invocation_insertion(&command.invocation, self.reference_delivery_supported(cx))
-        };
-        self.input.update(cx, |input, cx| {
-            input.replace_plain_token(token.range, &insertion, cx)
-        });
-        self.reset_slash(None, cx);
+        let supported = self.reference_delivery_supported(cx);
+        self.slash
+            .update(cx, |menu, cx| menu.insert(range, &command, supported, cx));
         cx.notify();
     }
 
-    /// Tear down the slash completion (mirrors [`Self::reset_mention`]).
     fn reset_slash(&mut self, dismissed: Option<(Range<usize>, String)>, cx: &mut Context<Self>) {
-        // Partial discovery is useful now, but reopening must retry the failed provider call.
-        if self.slash.error.is_some() {
-            self.slash_cache.remove(&self.slash.context);
-        }
-        let request = self.slash.request.wrapping_add(1);
-        self.slash_task = None;
-        self.slash = SlashState {
-            request,
-            dismissed,
-            harness: self.slash.harness,
-            catalog_context: self.slash.catalog_context.clone(),
-            context: self.slash.context.clone(),
-            supported: self.slash.supported,
-            ..SlashState::default()
-        };
+        self.slash.update(cx, |menu, cx| menu.reset(dismissed, cx));
         self.sync_mention_controls(cx);
     }
 
@@ -10137,6 +9770,10 @@ impl Composer {
                         composer
                             .compaction_cache
                             .insert(harness, capabilities.compaction);
+                        let blocked = composer.unsupported_compaction(cx);
+                        composer
+                            .slash
+                            .update(cx, |menu, cx| menu.set_blocked_compact(blocked, cx));
                         composer.state.update(cx, |state, _| {
                             state
                                 .harness_branching
@@ -10422,167 +10059,15 @@ impl Composer {
         )
     }
 
-    fn render_slash_popup(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let theme = &theme.for_popup();
-        // Only while a slash token is active.
-        self.slash.token.as_ref()?;
-        let commands = self
-            .slash_cache
-            .get(&self.slash.context)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        // Full pill width at the mention card's height budget — both composer
-        // completions share the same surface shape.
-        let mut card = crate::popover::completion_card(theme)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    window.focus(&this.input.focus_handle(cx), cx);
-                }),
-            )
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_slash(cx)));
-        if let Some(error) = self.slash.error.clone() {
-            card = card.child(
-                div()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.danger_muted)
-                    .child(error),
-            );
-        }
-        if self.slash.loading && commands.is_empty() {
-            card = card.child(crate::popover::skeleton_rows(
-                "slash-loading",
-                theme,
-                3,
-                cx.entity_id(),
-                cx,
-            ));
-        } else if self.slash.filtered.is_empty() && self.slash.error.is_none() {
-            card = card.child(
-                div()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child(catalog_empty_message(
-                        self.slash.skill,
-                        self.slash.supported,
-                        commands.is_empty(),
-                        crate::settings::current(cx)
-                            .skill_completion(self.slash.harness.unwrap_or(HarnessId::Codex))
-                            .separate_from_slash,
-                    )),
-            );
-        } else {
-            let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.slash.filtered.len());
-            let unsupported = self.unsupported_compaction(cx);
-            let claude = self.pickers.read(cx).resolved(cx).harness == Some(HarnessId::ClaudeCode);
-            for (row_ix, &cmd_ix) in self.slash.filtered.iter().enumerate() {
-                let Some(command) = commands.get(cmd_ix) else {
-                    continue;
-                };
-                let selected = self.slash.active == Some(row_ix);
-                let name: SharedString = if command.invocation.prefix() == '$' {
-                    skill_display_name(&command.name)
-                } else {
-                    format!("/{}", command.name)
-                }
-                .into();
-                // The reason replaces the description rather than hiding the
-                // row: the entry exists on every harness, so its absence
-                // would read as a bug.
-                let blocked = (command.name == COMPACT_COMMAND)
-                    .then(|| unsupported.clone())
-                    .flatten();
-                let description: SharedString = match blocked {
-                    Some(reason) => reason,
-                    None => invocation_detail(&command.description, command.input_hint.as_deref())
-                        .into(),
-                };
-                let disabled = command.name == COMPACT_COMMAND && unsupported.is_some();
-                let terminal = claude && terminal_only_command(command);
-                rows.push(
-                    crate::popover::menu_row(theme, selected, format!("slash-result-{row_ix}"))
-                        .id(("slash-result", row_ix))
-                        .when(disabled, |row| row.opacity(0.45))
-                        .when(terminal, |row| row.opacity(0.55))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.slash.active = Some(row_ix);
-                            this.accept_slash(cx);
-                        }))
-                        .child(crate::popover::completion_row_content(
-                            theme,
-                            crate::icons::icon(if command.invocation.prefix() == '$' {
-                                crate::icons::MAGIC_STICK_3
-                            } else {
-                                crate::icons::COMMAND
-                            })
-                            .size(px(16.0))
-                            .text_color(theme.text_muted)
-                            .into_any_element(),
-                            name,
-                            description,
-                        ))
-                        .when(terminal, |row| {
-                            row.child(
-                                div()
-                                    .flex_none()
-                                    .px(px(6.0))
-                                    .rounded(px(4.0))
-                                    .bg(crate::theme::ink(0.06))
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .text_color(theme.text_muted)
-                                    .child("Terminal"),
-                            )
-                        })
-                        .into_any_element(),
-                );
-            }
-            // Overflowing rows wheel-scroll inside a bounded viewport; the
-            // floating rail mirrors the model-list scrollbar treatment.
-            card = card.child(
-                crate::popover::menu_scroll_host("slash-scroll-host")
-                    .on_hover(cx.listener(Self::on_popup_list_hover))
-                    .child(crate::popover::completion_list(
-                        "slash-list",
-                        &self.slash_scroll,
-                        rows,
-                    ))
-                    .children(crate::popover::rail(self, "slash-scrollbar", theme, cx)),
-            );
-        }
+    fn render_slash_popup(&self, cx: &App) -> Option<gpui::AnyElement> {
         // Full pill width above the composer, matching the file-mention popup.
-        Some(crate::popover::full_width_menu_above(
-            "slash-popup",
-            card.into_any_element(),
-            None,
-        ))
-    }
-
-    /// The popup whose rows a scrollbar drag is moving — the tokens are
-    /// mutually exclusive, so at most one exists.
-    fn active_popup_scroll(&self) -> Option<gpui::ScrollHandle> {
-        self.slash
-            .token
-            .is_some()
-            .then(|| self.slash_scroll.clone())
-    }
-
-    fn on_popup_list_hover(
-        &mut self,
-        hovered: &bool,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.popup_bar.set_list_hovered(*hovered) {
-            cx.notify();
-        }
+        self.slash.read(cx).is_open().then(|| {
+            crate::popover::full_width_menu_above(
+                "slash-popup",
+                self.slash.clone().into_any_element(),
+                None,
+            )
+        })
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
@@ -11036,13 +10521,14 @@ impl Composer {
         // Leading indentation distinguishes literal Markdown from native commands
         // and skill invocations. Only the empty-content check may trim the draft.
         let text = self.input.read(cx).text().to_string();
-        if let Some(action) = self.slash_cache.get(&self.slash.context).and_then(|rows| {
-            workspace_command_for_text(
-                self.input.read(cx).text(),
-                rows.iter()
-                    .map(|row| (row.name.as_str(), row.workspace_command)),
-            )
-        }) {
+        if let Some(action) = workspace_command_for_text(
+            self.input.read(cx).text(),
+            self.slash
+                .read(cx)
+                .rows()
+                .iter()
+                .map(|row| (row.name.as_str(), row.workspace_command)),
+        ) {
             self.execute_workspace_command(action, 0..self.input.read(cx).text().len(), cx);
             return;
         }
@@ -13578,15 +13064,13 @@ impl Composer {
                     .when(!blocked || explains, |el| {
                         el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
-                    .tooltip(crate::settings::widgets::text_tooltip(
-                        if explains {
-                            "Out of Cloud credits"
-                        } else if mode == SendButtonMode::Queue {
-                            "Queue message"
-                        } else {
-                            "Send message"
-                        },
-                    ))
+                    .tooltip(crate::settings::widgets::text_tooltip(if explains {
+                        "Out of Cloud credits"
+                    } else if mode == SendButtonMode::Queue {
+                        "Queue message"
+                    } else {
+                        "Send message"
+                    }))
                     .into_any_element()
             }
         }
@@ -13642,19 +13126,6 @@ pub(crate) fn send_circle(
                 .size(px(14.0))
                 .text_color(theme.bg),
         )
-}
-
-/// The completion popups' floating rails run through
-/// [`crate::popover::rail`]: the shared `popup_bar` state plus whichever
-/// popup's rows are mounted — see [`Composer::active_popup_scroll`].
-impl crate::popover::ScrollRailHost for Composer {
-    fn rail_bar(&mut self) -> &mut crate::popover::MenuScrollbarState {
-        &mut self.popup_bar
-    }
-
-    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
-        self.active_popup_scroll()
-    }
 }
 
 /// Focus lands on the prompt input (window-level focus fallbacks — e.g. after
@@ -13775,7 +13246,7 @@ impl Render for Composer {
         {
             self.reset_mention(None, cx);
         }
-        if self.slash.token.is_some()
+        if self.slash.read(cx).is_open()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
         {
             self.reset_slash(None, cx);
@@ -14211,7 +13682,7 @@ impl Render for Composer {
         let container = container.on_action(cx.listener(|this, _: &OutdentList, _, cx| {
             if !this.plan_available(cx)
                 || this.mentions.read(cx).is_open()
-                || this.slash.token.is_some()
+                || this.slash.read(cx).is_open()
             {
                 return cx.propagate();
             }
@@ -14225,7 +13696,7 @@ impl Render for Composer {
             el.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape"
                     && !this.mentions.read(cx).is_open()
-                    && this.slash.token.is_none()
+                    && !this.slash.read(cx).is_open()
                     && this.cancel_queue_edit(cx)
                 {
                     cx.stop_propagation();
@@ -14888,7 +14359,7 @@ impl Render for Composer {
                     None,
                 )
             }))
-            .children(self.render_slash_popup(&theme, cx));
+            .children(self.render_slash_popup(cx));
         // Restore the original chip-only selector treatment: destination at
         // the top-right, no surrounding surface. Cancel the column gap as the
         // row collapses so the pill never jumps at the route boundary.
@@ -15097,7 +14568,14 @@ mod attachment_chip_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_proto::app_commands::terminal_only_command;
+    use zeron_proto::command_catalog::{InvocationCandidate, invocation_insertion};
     use zeron_proto::task_mentions::task_mention_link;
+
+    fn slash_rows<'a>(composer: &'a Composer, cx: &'a App) -> &'a [InvocationCandidate] {
+        let menu = composer.slash.read(cx);
+        &menu.cache[&menu.state.context]
+    }
 
     #[test]
     fn only_claude_terminal_commands_are_tagged_terminal() {
@@ -16075,7 +15553,7 @@ mod tests {
                         .input
                         .update(cx, |input, cx| input.set_text(draft, cx));
                     composer.update_slash(draft, cursor, cx);
-                    assert!(composer.slash.token.is_some());
+                    assert!(composer.slash.read(cx).state.token.is_some());
                     composer.accept_slash(cx);
                     let expected = draft.replace("/model ", "").replace("/model", "");
                     assert_eq!(composer.input.read(cx).text(), expected);
@@ -16103,17 +15581,20 @@ mod tests {
                         .input
                         .update(cx, |input, cx| input.set_text(draft, cx));
                     composer.update_slash(draft, "café /rev".len(), cx);
-                    composer.slash_cache.insert(
-                        composer.slash.context.clone(),
-                        vec![InvocationCandidate {
-                            name: "review".into(),
-                            description: String::new(),
-                            input_hint: None,
-                            workspace_command: None,
-                            invocation: invocation.clone(),
-                        }],
-                    );
-                    composer.refilter_slash(cx);
+                    composer.slash.update(cx, |menu, _| {
+                        let context = menu.state.context.clone();
+                        menu.cache.insert(
+                            context,
+                            vec![InvocationCandidate {
+                                name: "review".into(),
+                                description: String::new(),
+                                input_hint: None,
+                                workspace_command: None,
+                                invocation: invocation.clone(),
+                            }],
+                        );
+                    });
+                    composer.slash.update(cx, |menu, cx| menu.refilter(cx));
                     composer.accept_slash(cx);
                     assert_eq!(
                         composer.input.read(cx).text(),
@@ -17077,11 +16558,11 @@ mod tests {
                         assert!(mention.error.is_none());
                         assert_eq!(mention.results[0].path, "README.md");
                     } else {
-                        assert!(!composer.slash.loading);
-                        assert!(composer.slash.error.is_none());
+                        assert!(!composer.slash.read(cx).state.loading);
+                        assert!(composer.slash.read(cx).state.error.is_none());
                         let expected = if trigger == "$" { "review" } else { "compact" };
                         assert!(
-                            composer.slash_cache[&composer.slash.context]
+                            slash_rows(composer, cx)
                                 .iter()
                                 .any(|row| row.name == expected)
                         );
@@ -17982,7 +17463,7 @@ mod tests {
         state.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
         assert!(catalog_frames(&mut requests).is_empty(), "debounced");
-        cx.executor().advance_clock(SLASH_PREFETCH_DELAY);
+        cx.executor().advance_clock(slash::PREFETCH_DELAY);
         cx.run_until_parked();
         let frames = catalog_frames(&mut requests);
         assert!(!frames.is_empty());
@@ -18010,11 +17491,13 @@ mod tests {
                 .input
                 .update(cx, |input, cx| input.set_text("/", cx));
         });
-        composer.read_with(cx, |composer, _| {
-            let rows = composer.slash_cache.get(&composer.slash.context).unwrap();
+        composer.read_with(cx, |composer, cx| {
+            let rows = slash_rows(composer, cx);
             assert!(
                 composer
                     .slash
+                    .read(cx)
+                    .state
                     .filtered
                     .iter()
                     .any(|&index| rows[index].name == "review"),
@@ -18143,18 +17626,20 @@ mod tests {
         };
         respond(current, "current-command");
         cx.run_until_parked();
-        let visible_names = |composer: &Composer| {
-            let rows = composer.slash_cache.get(&composer.slash.context).unwrap();
+        let visible_names = |composer: &Composer, cx: &App| {
+            let rows = slash_rows(composer, cx);
             composer
                 .slash
+                .read(cx)
+                .state
                 .filtered
                 .iter()
                 .map(|&index| rows[index].name.clone())
                 .collect::<Vec<_>>()
         };
-        let current_names = composer.read_with(cx, |composer, _| {
-            assert!(!composer.slash.loading);
-            let names = visible_names(composer);
+        let current_names = composer.read_with(cx, |composer, cx| {
+            assert!(!composer.slash.read(cx).state.loading);
+            let names = visible_names(composer, cx);
             assert!(names.iter().any(|name| name == "current-command"));
             assert!(
                 !names.iter().any(|name| name.ends_with("-skill")),
@@ -18166,9 +17651,12 @@ mod tests {
         delayed.reverse();
         respond(delayed, "stale-command");
         cx.run_until_parked();
-        composer.read_with(cx, |composer, _| {
-            assert_eq!(visible_names(composer), current_names);
-            assert_eq!(composer.slash.harness, Some(HarnessId::Opencode));
+        composer.read_with(cx, |composer, cx| {
+            assert_eq!(visible_names(composer, cx), current_names);
+            assert_eq!(
+                composer.slash.read(cx).state.harness,
+                Some(HarnessId::Opencode)
+            );
         });
 
         // Acceptance, ordinary prose and changing trigger characters must all
@@ -18196,9 +17684,12 @@ mod tests {
                 composer.reset_slash(None, cx);
                 composer.update_slash("ordinary prose ", 15, cx);
                 composer.update_slash(token, token.len(), cx);
-                assert!(composer.slash.loading, "each open refreshes the catalog");
                 assert!(
-                    visible_names(composer).contains(&names[kind]),
+                    composer.slash.read(cx).state.loading,
+                    "each open refreshes the catalog"
+                );
+                assert!(
+                    visible_names(composer, cx).contains(&names[kind]),
                     "warm rows stay visible"
                 );
                 let query = format!("{token}refreshed");
@@ -18228,11 +17719,11 @@ mod tests {
             } else {
                 fresh
             };
-            composer.read_with(cx, |composer, _| {
-                assert!(!composer.slash.loading);
-                assert_eq!(visible_names(composer), [expected.clone()]);
+            composer.read_with(cx, |composer, cx| {
+                assert!(!composer.slash.read(cx).state.loading);
+                assert_eq!(visible_names(composer, cx), [expected.clone()]);
                 assert!(
-                    !composer.slash_cache[&composer.slash.context]
+                    !slash_rows(composer, cx)
                         .iter()
                         .any(|row| row.name == names[kind]),
                     "removed catalog entries must disappear"
@@ -18256,15 +17747,15 @@ mod tests {
                     .input
                     .update(cx, |input, cx| input.set_text("/model", cx));
                 composer.on_input_edited(cx);
-                let old_context = composer.slash.context.clone();
-                let old_request = composer.slash.request;
+                let old_context = composer.slash.read(cx).state.context.clone();
+                let old_request = composer.slash.read(cx).state.request;
                 composer.state.update(cx, |state, _| {
                     state.connection = crate::state::ConnectionStatus::Ready
                 });
                 composer.on_state_changed(cx);
-                assert_ne!(composer.slash.context, old_context);
-                assert!(composer.slash.request > old_request);
-                assert!(composer.slash.token.is_some());
+                assert_ne!(composer.slash.read(cx).state.context, old_context);
+                assert!(composer.slash.read(cx).state.request > old_request);
+                assert!(composer.slash.read(cx).state.token.is_some());
                 let context = composer.completion_connection_context(cx);
                 let (out, _server) = tokio::sync::mpsc::channel(4);
                 let (_incoming, inbound) = tokio::sync::mpsc::channel(4);
@@ -18312,7 +17803,7 @@ mod tests {
         cx.run_until_parked();
         handle
             .update(cx, |composer, window, cx| {
-                assert!(composer.slash.token.is_none());
+                assert!(composer.slash.read(cx).state.token.is_none());
                 composer
                     .input
                     .update(cx, |input, cx| input.unmark_text(window, cx));
@@ -18320,7 +17811,9 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         handle
-            .read_with(cx, |composer, _| assert!(composer.slash.token.is_some()))
+            .read_with(cx, |composer, cx| {
+                assert!(composer.slash.read(cx).state.token.is_some())
+            })
             .unwrap();
     }
 
@@ -18389,14 +17882,18 @@ mod tests {
                     .input
                     .update(cx, |input, cx| input.set_text("/review", cx));
                 composer.on_input_edited(cx);
-                composer
-                    .slash_cache
-                    .insert(composer.slash.context.clone(), vec![]);
+                composer.slash.update(cx, |menu, _| {
+                    let context = menu.state.context.clone();
+                    menu.cache.insert(context, vec![]);
+                });
             })
             .unwrap();
         let (context, request) = handle
-            .read_with(cx, |composer, _| {
-                (composer.slash.context.clone(), composer.slash.request)
+            .read_with(cx, |composer, cx| {
+                (
+                    composer.slash.read(cx).state.context.clone(),
+                    composer.slash.read(cx).state.request,
+                )
             })
             .unwrap();
         cx.update(|cx| {
@@ -18406,21 +17903,26 @@ mod tests {
         });
         cx.run_until_parked();
         handle
-            .read_with(cx, |composer, _| {
-                assert_ne!(composer.slash.context, context);
+            .read_with(cx, |composer, cx| {
+                assert_ne!(composer.slash.read(cx).state.context, context);
                 assert!(
-                    composer.slash.request > request,
+                    composer.slash.read(cx).state.request > request,
                     "late responses must be rejected"
                 );
-                assert!(!composer.slash_cache.contains_key(&context));
+                assert!(!composer.slash.read(cx).cache.contains_key(&context));
                 assert!(
                     composer
-                        .slash_cache
+                        .slash
+                        .read(cx)
+                        .cache
                         .values()
                         .flatten()
                         .all(|row| row.workspace_command.is_some())
                 );
-                assert_eq!(composer.slash.token.as_ref().unwrap().query, "review");
+                assert_eq!(
+                    composer.slash.read(cx).state.token.as_ref().unwrap().query,
+                    "review"
+                );
             })
             .unwrap();
     }
@@ -18694,7 +18196,7 @@ mod tests {
                     "```\n/review",
                 ] {
                     composer.update_slash(text, text.len(), cx);
-                    assert!(composer.slash.token.is_none(), "{text}");
+                    assert!(composer.slash.read(cx).state.token.is_none(), "{text}");
                 }
                 for text in [
                     "/review",
@@ -18705,14 +18207,17 @@ mod tests {
                     "first\n/review",
                 ] {
                     composer.update_slash(text, text.len(), cx);
-                    assert!(composer.slash.token.is_some(), "{text}");
+                    assert!(composer.slash.read(cx).state.token.is_some(), "{text}");
                 }
-                composer
-                    .slash_cache
-                    .insert(composer.slash.context.clone(), vec![]);
-                composer.slash.error = Some("Skills unavailable".into());
+                composer.slash.update(cx, |menu, _| {
+                    let context = menu.state.context.clone();
+                    menu.cache.insert(context, vec![]);
+                });
+                composer.slash.update(cx, |menu, _| {
+                    menu.state.error = Some("Skills unavailable".into())
+                });
                 composer.reset_slash(None, cx);
-                assert!(composer.slash_cache.is_empty());
+                assert!(composer.slash.read(cx).cache.is_empty());
             })
             .unwrap();
     }

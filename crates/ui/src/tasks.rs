@@ -14,6 +14,7 @@ use zeron_proto::{
     ChatIndicator, PlanProgress, StepStatus, TaskPatch, TaskStatus, view::task_thread_status,
 };
 
+use crate::composer::task_completions::TaskCompletions;
 use crate::composer::{ComposerInput, ComposerInputEvent, MentionTab};
 use crate::icons::{self, icon};
 use crate::motion;
@@ -206,6 +207,7 @@ impl Row {
 pub struct TasksPage {
     state: Entity<AppState>,
     add: Entity<ComposerInput>,
+    add_menus: Entity<TaskCompletions>,
     add_images: Vec<String>,
     add_uploads: Vec<gpui::Task<()>>,
     picking: Option<gpui::Task<()>>,
@@ -258,7 +260,11 @@ impl TasksPage {
             ComposerInput::new(ADD_PLACEHOLDER, cx)
                 .with_single_line()
                 .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS)
+                .with_mentions(state.clone())
         });
+        let add_menus =
+            cx.new(|cx| TaskCompletions::in_selected_space(state.clone(), add.clone(), cx));
+        let add_menu_changes = cx.observe(&add_menus, |_, _, cx| cx.notify());
         let add_events = cx.subscribe(&add, |page, _, event: &ComposerInputEvent, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
                 page.submit_add(false, None, cx);
@@ -280,6 +286,7 @@ impl TasksPage {
         let mut page = Self {
             state,
             add,
+            add_menus,
             add_images: Vec::new(),
             add_uploads: Vec::new(),
             picking: None,
@@ -310,6 +317,7 @@ impl TasksPage {
             thread_picker: false,
             _subscriptions: vec![
                 add_events,
+                add_menu_changes,
                 state_changes,
                 settings_changes,
                 card_events,
@@ -1182,7 +1190,9 @@ impl TasksPage {
                                     .line_height(ui_rems(18.0))
                                     .text_color(if done { theme.text_muted } else { theme.text })
                                     .when(done, |el| el.line_through())
-                                    .child(SharedString::from(row.task.title.clone())),
+                                    .child(SharedString::from(crate::composer::plain_references(
+                                        &row.task.title,
+                                    ))),
                             )
                             .when(row.captured, |el| el.child(new_tag(theme))),
                     )
@@ -1343,7 +1353,7 @@ impl TasksPage {
         let pick_id = task_id.clone();
         let drag = TaskDrag {
             task_id: task_id.clone(),
-            title: SharedString::from(row.task.title.clone()),
+            title: SharedString::from(crate::composer::plain_references(&row.task.title)),
             status: row.status,
         };
         let faint = theme.text_faint;
@@ -1771,7 +1781,9 @@ impl TasksPage {
                 page.add_images(staged, cx);
             }))
             .capture_action(cx.listener(|page, _: &MentionTab, window, cx| {
-                if page.submit_add(true, Some(window), cx) {
+                if !page.add_menus.read(cx).has_selection(cx)
+                    && page.submit_add(true, Some(window), cx)
+                {
                     cx.stop_propagation();
                 }
             }))
@@ -1788,10 +1800,16 @@ impl TasksPage {
             .child(dashed_circle(theme))
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .text_size(ui_rems(13.5))
-                    .child(self.add.clone()),
+                    .child(self.add.clone())
+                    .children(
+                        self.add_menus
+                            .read(cx)
+                            .popup_below("tasks-add-completions", cx),
+                    ),
             )
             .child(
                 div()
@@ -2135,7 +2153,7 @@ impl TasksPage {
         let selected = self.card.read(cx).task_id() == Some(task_id.as_str());
         let drag = TaskDrag {
             task_id: task_id.clone(),
-            title: SharedString::from(row.task.title.clone()),
+            title: SharedString::from(crate::composer::plain_references(&row.task.title)),
             status: row.status,
         };
         let open_id = task_id.clone();
@@ -2168,7 +2186,7 @@ impl TasksPage {
 
     fn card_visual(row: &Row, selected: bool, theme: &Theme) -> gpui::Div {
         let task_id = row.task.id.clone();
-        let title = SharedString::from(row.task.title.clone());
+        let title = SharedString::from(crate::composer::plain_references(&row.task.title));
         let orchestrated = row.orchestrated();
         let working = row.status == TaskStatus::Working;
         let bar = orchestrated.then(|| Self::step_bar(row, theme));
@@ -2582,7 +2600,9 @@ fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Ro
             .filter_map(|id| state.tasks.iter().find(|task| task.id == *id))
             .map(|dep| {
                 (
-                    SharedString::from(zeron_proto::view::single_line(&dep.title)),
+                    SharedString::from(zeron_proto::view::single_line(
+                        &crate::composer::plain_references(&dep.title),
+                    )),
                     dep.completed_at.is_some(),
                 )
             })
@@ -2624,7 +2644,9 @@ pub(crate) fn gathered_tasks(state: &AppState, chat_id: &str, now: DateTime<Utc>
         .into_iter()
         .map(|task| Gathered {
             id: task.id.clone(),
-            title: SharedString::from(zeron_proto::view::single_line(&task.title)),
+            title: SharedString::from(zeron_proto::view::single_line(
+                &crate::composer::plain_references(&task.title),
+            )),
             status: rollup(state, task, now).status,
         })
         .collect()
@@ -2944,6 +2966,8 @@ pub(crate) fn tasks_view(cx: &gpui::App) -> TasksView {
 
 impl Render for TasksPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.add_menus
+            .update(cx, |menus, cx| menus.close_if_blurred(window, cx));
         let theme = Theme::of(cx).clone();
         self.settle_pending(cx);
         let (mut open, mut done) = self.rows(cx);

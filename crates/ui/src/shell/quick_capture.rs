@@ -1,4 +1,5 @@
 use super::*;
+use crate::composer::task_completions::TaskCompletions;
 use crate::quick_capture::{
     self as qc, BarEvent, Capture, CaptureToast, QuickCaptureBar, ToastPanel,
 };
@@ -15,6 +16,7 @@ pub(super) struct Host {
     toast: Option<CaptureToast>,
     rail: popover::Popup<()>,
     pub(super) rail_input: Option<Entity<ComposerInput>>,
+    rail_completions: Option<Entity<TaskCompletions>>,
     rail_added: Vec<SharedString>,
     subscriptions: Vec<Subscription>,
 }
@@ -126,7 +128,7 @@ impl Shell {
         self.close_bar_window(cx);
         let toast = CaptureToast {
             task_id: capture.task_id.clone(),
-            title: capture.title.clone().into(),
+            title: crate::composer::plain_references(&capture.title).into(),
             shown: motion::now(),
         };
         if open {
@@ -358,6 +360,11 @@ impl Shell {
                 state.selected_space_row().map(|space| space.id.as_str()),
             );
             let added = self.quick_capture.rail_added.clone();
+            let completions = self
+                .quick_capture
+                .rail_completions
+                .as_ref()
+                .and_then(|menus| menus.read(cx).popup_below("rail-capture-completions", cx));
             let card = div()
                 .id("rail-quick-capture-popover")
                 .debug_selector(|| "rail-quick-capture-popover".into())
@@ -372,7 +379,13 @@ impl Shell {
                 .shadow_lg()
                 .text_color(popup_theme.text)
                 .text_size(ui_rems(13.0))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_rail_capture(cx)))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    let menus = this.quick_capture.rail_completions.as_ref();
+                    // A pick lands outside this card; the menu dismisses itself on a real miss.
+                    if !menus.is_some_and(|menus| menus.read(cx).is_open(cx)) {
+                        this.close_rail_capture(cx);
+                    }
+                }))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                     if event.keystroke.key == "escape" {
                         cx.stop_propagation();
@@ -381,6 +394,7 @@ impl Shell {
                 }))
                 .child(
                     div()
+                        .relative()
                         .h(px(32.0))
                         .px(px(10.0))
                         .flex()
@@ -389,7 +403,8 @@ impl Shell {
                         .border_1()
                         .border_color(popup_theme.accent.opacity(0.7))
                         .bg(popup_theme.text.opacity(0.04))
-                        .child(div().flex_1().min_w_0().child(input)),
+                        .child(div().flex_1().min_w_0().child(input))
+                        .children(completions),
                 )
                 .child(
                     div()
@@ -458,17 +473,24 @@ impl Shell {
         let input = match &self.quick_capture.rail_input {
             Some(input) => input.clone(),
             None => {
+                let state = self.state.clone();
                 let input = cx.new(|cx| {
                     ComposerInput::new("New idea…  Enter to save", cx)
                         .with_single_line()
                         .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS)
+                        .with_mentions(state.clone())
                 });
+                let menus =
+                    cx.new(|cx| TaskCompletions::in_selected_space(state, input.clone(), cx));
+                let menu_changes = cx.observe(&menus, |_, _, cx| cx.notify());
                 let events = cx.subscribe(&input, |this, input, event: &ComposerInputEvent, cx| {
                     if matches!(event, ComposerInputEvent::Submitted) {
                         this.submit_rail_capture(&input, cx);
                     }
                 });
                 self.quick_capture.subscriptions.push(events);
+                self.quick_capture.subscriptions.push(menu_changes);
+                self.quick_capture.rail_completions = Some(menus);
                 self.quick_capture.rail_input = Some(input.clone());
                 input
             }
@@ -480,13 +502,14 @@ impl Shell {
     }
 
     fn submit_rail_capture(&mut self, input: &Entity<ComposerInput>, cx: &mut Context<Self>) {
-        let Some((title, _)) = qc::split_capture(input.read(cx).text()) else {
+        let Some((title, notes)) = qc::split_capture(input.read(cx).text()) else {
             return;
         };
         let capture = Capture {
             task_id: uuid::Uuid::new_v4().to_string(),
+            depends_on: qc::mentioned_dependencies(&title, &self.state.read(cx).tasks),
             title: title.clone(),
-            notes: String::new(),
+            notes,
             space_id: self
                 .state
                 .read(cx)
@@ -494,15 +517,29 @@ impl Shell {
                 .map(|space| space.id.clone()),
             due_on: None,
             images: Vec::new(),
-            depends_on: Vec::new(),
         };
         input.update(cx, |input, cx| input.set_text("", cx));
         self.file_capture(&capture, cx);
-        self.quick_capture.rail_added.push(title.into());
+        self.quick_capture
+            .rail_added
+            .push(crate::composer::plain_references(&title).into());
         cx.notify();
     }
 
+    pub(super) fn close_blurred_rail_completions(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(menus) = &self.quick_capture.rail_completions {
+            menus.update(cx, |menus, cx| menus.close_if_blurred(window, cx));
+        }
+    }
+
     pub(super) fn close_rail_capture(&mut self, cx: &mut Context<Self>) {
+        if let Some(menus) = &self.quick_capture.rail_completions {
+            menus.update(cx, |menus, cx| menus.close(cx));
+        }
         if self.quick_capture.rail.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.quick_capture.rail);
             cx.notify();

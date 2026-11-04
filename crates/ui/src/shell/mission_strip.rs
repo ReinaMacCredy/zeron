@@ -420,7 +420,7 @@ impl Shell {
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(if done { theme.text_muted } else { theme.accent })
                     .when(done, |el| el.line_through())
-                    .child(task.title.clone())
+                    .child(crate::composer::plain_references(&task.title))
                     .on_click(cx.listener(move |shell, _: &gpui::ClickEvent, window, cx| {
                         shell.open_task(open_id.clone(), window, cx)
                     })),

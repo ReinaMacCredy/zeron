@@ -1598,11 +1598,10 @@ impl SupervisorPage {
                     .any(|declared| declared.key == resource.key)
             });
             let title = |id: &str| {
-                state
-                    .tasks
-                    .iter()
-                    .find(|task| task.id == id)
-                    .map_or_else(|| format!("task {id}"), |task| task.title.clone())
+                state.tasks.iter().find(|task| task.id == id).map_or_else(
+                    || format!("task {id}"),
+                    |task| crate::composer::plain_references(&task.title),
+                )
             };
             let names = |ids: &[String]| {
                 ids.iter()

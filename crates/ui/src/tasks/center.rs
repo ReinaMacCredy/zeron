@@ -19,6 +19,7 @@ use super::images::{self, ImageGallery};
 use super::morph::{self, Key, Painted};
 use super::{Rollup, StepRow, chat_brand, linked_chat, rollup, step_chat};
 use crate::attachments;
+use crate::composer::task_completions::{TaskCompletions, TaskScope};
 use crate::composer::{Composer, ComposerInput, ComposerInputEvent, Submit};
 use crate::icons::{self, icon};
 use crate::markdown::render::{MD_LINE_HEIGHT, MD_TEXT_SIZE};
@@ -282,7 +283,9 @@ enum EditTarget {
 struct Editor {
     target: EditTarget,
     title: Option<Entity<ComposerInput>>,
+    title_menus: Option<Entity<TaskCompletions>>,
     body: Entity<ComposerInput>,
+    body_menus: Entity<TaskCompletions>,
     images: Vec<String>,
     started: bool,
     from: f32,
@@ -389,6 +392,7 @@ pub struct TaskCenter {
     editor: Option<Editor>,
     leaving: Option<Leave>,
     add: Entity<ComposerInput>,
+    add_menus: Entity<TaskCompletions>,
     live: Option<LiveThread>,
     tree: super::tree::TreeMotion,
     stats: super::tree::StatsCache,
@@ -437,7 +441,10 @@ impl TaskCenter {
             ComposerInput::new("Add a step", cx)
                 .with_single_line()
                 .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS)
+                .with_mentions(state.clone())
         });
+        let add_menus = Self::completions(&state, &add, cx);
+        let add_menu_changes = cx.observe(&add_menus, |_, _, cx| cx.notify());
         let add_events = cx.subscribe(&add, |center, _, event: &ComposerInputEvent, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
                 center.add_step(cx);
@@ -461,6 +468,7 @@ impl TaskCenter {
             editor: None,
             leaving: None,
             add,
+            add_menus,
             live: None,
             tree: super::tree::TreeMotion::solid(),
             stats: Default::default(),
@@ -488,7 +496,12 @@ impl TaskCenter {
             outline: None,
             runs: Default::default(),
             views: Default::default(),
-            _subscriptions: vec![add_events, state_changes, settings_changes],
+            _subscriptions: vec![
+                add_events,
+                add_menu_changes,
+                state_changes,
+                settings_changes,
+            ],
         }
     }
 
@@ -540,6 +553,29 @@ impl TaskCenter {
 
     /// The page key is a task id from before trees, or a root chat id; a key that names a
     /// task keeps that task even once it is done.
+    fn completions(
+        state: &Entity<AppState>,
+        input: &Entity<ComposerInput>,
+        cx: &mut Context<Self>,
+    ) -> Entity<TaskCompletions> {
+        let center = cx.weak_entity();
+        let (state, input) = (state.clone(), input.clone());
+        cx.new(|cx| {
+            TaskCompletions::new(
+                state,
+                input,
+                move |cx| TaskScope {
+                    space_id: center.upgrade().and_then(|center| {
+                        let center = center.read(cx);
+                        center.resolve(center.state.read(cx)).1?.space_id.clone()
+                    }),
+                    agent: None,
+                },
+                cx,
+            )
+        })
+    }
+
     pub(crate) fn resolve<'a>(
         &self,
         state: &'a AppState,
@@ -672,12 +708,14 @@ impl TaskCenter {
         let Some(text) = self.shown_text(&target, cx) else {
             return;
         };
+        let state = self.state.clone();
         let title = matches!(target, EditTarget::Step(_)).then(|| {
             cx.new(|cx| {
                 let mut input = ComposerInput::new("Step title", cx)
                     .with_wrapping()
                     .with_text_metrics(13.0, TITLE_LINE)
-                    .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS);
+                    .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS)
+                    .with_mentions(state.clone());
                 input.set_text(text.title.clone(), cx);
                 input
             })
@@ -687,8 +725,9 @@ impl TaskCenter {
             EditTarget::Step(_) => "What this step builds, where, and how to tell it is done",
         };
         let body = cx.new(|cx| {
-            let mut input =
-                ComposerInput::new(placeholder, cx).with_max_chars(zeron_doc::TASK_NOTES_MAX_CHARS);
+            let mut input = ComposerInput::new(placeholder, cx)
+                .with_max_chars(zeron_doc::TASK_NOTES_MAX_CHARS)
+                .with_mentions(state.clone());
             if matches!(target, EditTarget::Step(_)) {
                 input = input.with_text_metrics(MD_TEXT_SIZE, MD_LINE_HEIGHT);
             }
@@ -698,6 +737,10 @@ impl TaskCenter {
             }
             input
         });
+        let title_menus = title
+            .as_ref()
+            .map(|title| Self::completions(&state, title, cx));
+        let body_menus = Self::completions(&state, &body, cx);
         let mut subscriptions: Vec<Subscription> = title
             .iter()
             .map(|title| {
@@ -717,6 +760,9 @@ impl TaskCenter {
                 }
             }),
         );
+        for menus in title_menus.iter().chain([&body_menus]) {
+            subscriptions.push(cx.observe(menus, |_, _, cx| cx.notify()));
+        }
         let started = match &target {
             EditTarget::Overview => false,
             EditTarget::Step(id) => self.task_and_plan(cx).is_some_and(|(_, plan)| {
@@ -756,7 +802,9 @@ impl TaskCenter {
         self.editor = Some(Editor {
             target,
             title,
+            title_menus,
             body,
+            body_menus,
             images: text.images,
             started,
             from,
@@ -1589,13 +1637,15 @@ impl TaskCenter {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let body = editor.body.clone();
+        let menus = editor.body_menus.clone();
         div()
             .id("task-center-edit-body")
             .debug_selector(|| "task-center-edit-body".into())
+            .relative()
             .text_size(ui_rems(MD_TEXT_SIZE))
             .text_color(theme.text)
             .capture_action(cx.listener(move |_, _: &Submit, window, cx| {
-                if body.focus_handle(cx).is_focused(window) {
+                if body.focus_handle(cx).is_focused(window) && !menus.read(cx).has_selection(cx) {
                     cx.stop_propagation();
                     body.update(cx, |input, cx| {
                         input.replace_text_in_range(None, "\n", window, cx)
@@ -1608,6 +1658,12 @@ impl TaskCenter {
                 260.0,
                 cx,
             ))
+            .children(
+                editor
+                    .body_menus
+                    .read(cx)
+                    .popup_below("task-center-edit-body-completions", cx),
+            )
             .into_any_element()
     }
 
@@ -1881,7 +1937,7 @@ impl TaskCenter {
         });
         let (title, sub) = match step {
             Some((row, label)) if !step_has_thread => (
-                row.step.title.clone(),
+                crate::composer::plain_references(&row.step.title),
                 format!("{label} has not started · messages go to the lead"),
             ),
             Some((_, label)) => (
@@ -1895,7 +1951,7 @@ impl TaskCenter {
                 live_chat
                     .as_ref()
                     .map(|(_, title, _)| title.clone())
-                    .unwrap_or_else(|| task.title.clone()),
+                    .unwrap_or_else(|| crate::composer::plain_references(&task.title)),
                 "Lead".into(),
             ),
         };
@@ -2160,6 +2216,13 @@ impl TaskCenter {
 impl Render for TaskCenter {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.pop_dismissed = None;
+        let editing = self
+            .editor
+            .iter()
+            .flat_map(|editor| editor.title_menus.iter().chain([&editor.body_menus]));
+        for menus in editing.chain([&self.add_menus]) {
+            menus.update(cx, |menus, cx| menus.close_if_blurred(window, cx));
+        }
         let theme = Theme::of(cx).clone();
         let found = self.task_and_plan(cx);
         let Some((task, plan)) = found else {
@@ -2326,6 +2389,108 @@ impl TaskCenter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn the_add_row_and_the_step_editor_pick_a_highlighted_row_before_acting(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            let mut spine = crate::settings::UiSettings::default();
+            spine.tree_view = crate::settings::TreeView::Spine;
+            crate::settings::init(spine, dir.path(), cx);
+            crate::composer::init(cx, Default::default());
+        });
+        cx.executor().allow_parking();
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.tasks = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "orch", "title": "Build it", "orderKey": "a", "chatId": "lead",
+                    "mode": "orchestrated",
+                }))
+                .unwrap(),
+            ];
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "lead", "title": "lead", "deviceId": "mac", "archived": false,
+                    "createdAt": "2026-10-18T00:00:00Z",
+                }))
+                .unwrap(),
+            ];
+            state.task_steps = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "s1", "taskId": "orch", "title": "s1", "orderKey": "1",
+                }))
+                .unwrap(),
+            ];
+        });
+        let row = zeron_proto::command_catalog::InvocationCandidate {
+            name: "ship".into(),
+            description: String::new(),
+            input_hint: None,
+            invocation: zeron_proto::invocation::Invocation::Skill {
+                name: "ship".into(),
+                path: "/repo/.claude/skills/ship/SKILL.md".into(),
+                command: None,
+            },
+            workspace_command: None,
+        };
+        let link = row.invocation.link();
+        let (center, cx) = cx.add_window_view(|_, cx| TaskCenter::new(state, "orch".into(), cx));
+
+        center.update_in(cx, |center, window, cx| {
+            window.focus(&center.add.focus_handle(cx), cx);
+            center
+                .add
+                .update(cx, |input, cx| input.set_text("Do $sh", cx));
+        });
+        cx.run_until_parked();
+        center.update(cx, |center, cx| {
+            let rows = vec![row.clone()];
+            center
+                .add_menus
+                .update(cx, |menus, cx| menus.seed_slash_rows(rows, cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        center.read_with(cx, |center, cx| {
+            assert_eq!(center.add.read(cx).text(), format!("Do {link} "));
+            assert!(center.draft.added.is_empty(), "the pick adds no step");
+        });
+        cx.simulate_keystrokes("enter");
+        center.read_with(cx, |center, cx| {
+            assert_eq!(center.draft.added[0].1.title, format!("Do {link}"));
+        });
+
+        center.update_in(cx, |center, window, cx| {
+            center.start_edit(EditTarget::Step("s1".into()), window, cx);
+            let body = center.editor.as_ref().unwrap().body.clone();
+            window.focus(&body.focus_handle(cx), cx);
+            body.update(cx, |input, cx| input.set_text("Then $sh", cx));
+        });
+        cx.run_until_parked();
+        center.update(cx, |center, cx| {
+            let rows = vec![row.clone()];
+            let menus = center.editor.as_ref().unwrap().body_menus.clone();
+            menus.update(cx, |menus, cx| menus.seed_slash_rows(rows, cx));
+        });
+        cx.run_until_parked();
+        let body = |center: &Entity<TaskCenter>, cx: &mut gpui::VisualTestContext| {
+            center.read_with(cx, |center, cx| {
+                let body = &center.editor.as_ref().unwrap().body;
+                body.read(cx).text().to_string()
+            })
+        };
+        cx.simulate_keystrokes("enter");
+        assert_eq!(body(&center, cx), format!("Then {link} "));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(body(&center, cx), format!("Then {link} \n"));
+    }
 
     #[test]
     fn a_planned_step_drops_only_below_the_last_started_one() {

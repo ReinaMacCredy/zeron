@@ -13,6 +13,7 @@ use zeron_proto::{ChatConfig, ChatIndicator, TaskPatch, TaskStatus};
 use super::images::{self, ImageGallery};
 use super::logic::{self, DuePick};
 use super::{Row, SAVE_DEBOUNCE, START_PENDING, linked_chat, patched, row_for};
+use crate::composer::task_completions::{TaskCompletions, TaskScope};
 use crate::composer::{ComposerInput, ComposerInputEvent, Submit};
 use crate::icons::{self, icon};
 use crate::motion::{self, MotionSpec, Tween};
@@ -100,6 +101,8 @@ struct Open {
     task_id: String,
     title: Entity<ComposerInput>,
     notes: Entity<ComposerInput>,
+    title_menus: Entity<TaskCompletions>,
+    notes_menus: Entity<TaskCompletions>,
     saved_title: String,
     saved_notes: String,
     stored: (String, String),
@@ -119,7 +122,7 @@ struct Open {
     reads: Entity<ComposerInput>,
     reads_hidden: bool,
     context: Vec<String>,
-    _subscriptions: [Subscription; 4],
+    _subscriptions: [Subscription; 6],
 }
 
 struct Fields {
@@ -305,19 +308,24 @@ impl TaskCard {
             .collect();
         self.menu = popover::Popup::default();
         self.fetch_tool_settings(cx);
+        let state = self.state.clone();
         let title_input = cx.new(|cx| {
             let mut input = ComposerInput::new("Task title", cx)
                 .with_single_line()
-                .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS);
+                .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS)
+                .with_mentions(state.clone());
             input.set_text(saved_title.clone(), cx);
             input
         });
         let notes_input = cx.new(|cx| {
             let mut input = ComposerInput::new("Add a note", cx)
-                .with_max_chars(zeron_doc::TASK_NOTES_MAX_CHARS);
+                .with_max_chars(zeron_doc::TASK_NOTES_MAX_CHARS)
+                .with_mentions(state.clone());
             input.set_text(saved_notes.clone(), cx);
             input
         });
+        let title_menus = self.completions(&title_input, cx);
+        let notes_menus = self.completions(&notes_input, cx);
         let edits = |card: &mut Self,
                      _: Entity<ComposerInput>,
                      event: &ComposerInputEvent,
@@ -340,6 +348,8 @@ impl TaskCard {
         let assign_input = thread_input("@ a chat to give this task to", cx);
         let reads_input = thread_input("@ chats the lead reads first", cx);
         let subscriptions = [
+            cx.observe(&title_menus, |_, _, cx| cx.notify()),
+            cx.observe(&notes_menus, |_, _, cx| cx.notify()),
             cx.subscribe(&title_input, edits),
             cx.subscribe(&notes_input, edits),
             cx.subscribe(&assign_input, |card: &mut Self, _, event, cx| {
@@ -393,6 +403,8 @@ impl TaskCard {
             folder: None,
             tab: HandOff::NewChat,
             plan_first: !context.is_empty(),
+            title_menus,
+            notes_menus,
             assign: assign_input,
             assign_pick: None,
             assign_hidden: false,
@@ -740,6 +752,47 @@ impl TaskCard {
             orchestrate,
         });
         cx.notify();
+    }
+
+    fn completions(
+        &self,
+        input: &Entity<ComposerInput>,
+        cx: &mut Context<Self>,
+    ) -> Entity<TaskCompletions> {
+        let card = cx.weak_entity();
+        let (state, input) = (self.state.clone(), input.clone());
+        cx.new(|cx| {
+            TaskCompletions::new(
+                state,
+                input,
+                move |cx| {
+                    card.upgrade().map_or(
+                        TaskScope {
+                            space_id: None,
+                            agent: None,
+                        },
+                        |card| card.read(cx).completion_scope(cx),
+                    )
+                },
+                cx,
+            )
+        })
+    }
+
+    fn completion_scope(&self, cx: &App) -> TaskScope {
+        let saved = self.open.as_ref().and_then(|open| {
+            let tasks = &self.state.read(cx).tasks;
+            let task = tasks.iter().find(|task| task.id == open.task_id)?;
+            task.space_id.clone()
+        });
+        TaskScope {
+            space_id: self
+                .open
+                .as_ref()
+                .and_then(|open| open.run_in.clone())
+                .unwrap_or(saved),
+            agent: Some(self.agent.clone()),
+        }
     }
 
     fn assign_matches(&self, cx: &Context<Self>) -> Vec<crate::composer::ThreadMatch> {
@@ -2139,6 +2192,17 @@ impl TaskCard {
         } = fields;
         let status = row.map_or(TaskStatus::ToDo, |row| row.status);
         let done = status == TaskStatus::Done;
+        let open = self.open.as_ref().filter(|open| open.task_id == task_id);
+        let title_popup = open.and_then(|open| {
+            open.title_menus
+                .read(cx)
+                .popup_below("task-card-title-completions", cx)
+        });
+        let notes_popup = open.and_then(|open| {
+            open.notes_menus
+                .read(cx)
+                .popup_below("task-card-notes-completions", cx)
+        });
         let close = div()
             .id("task-card-close")
             .debug_selector(|| "task-card-close".into())
@@ -2191,30 +2255,36 @@ impl TaskCard {
             .gap(px(4.0))
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .text_size(ui_rems(15.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(title),
+                    .child(title)
+                    .children(title_popup),
             )
             .child(menu_button)
             .child(close);
         let note = div()
             .id("task-card-notes")
             .debug_selector(|| "task-card-notes".into())
+            .relative()
             .text_size(ui_rems(13.0))
             .capture_action(cx.listener(|card, _: &Submit, window, cx| {
                 let Some(open) = card.open.as_ref() else {
                     return;
                 };
-                if open.notes.focus_handle(cx).is_focused(window) {
+                if open.notes.focus_handle(cx).is_focused(window)
+                    && !open.notes_menus.read(cx).has_selection(cx)
+                {
                     cx.stop_propagation();
                     open.notes.update(cx, |input, cx| {
                         input.replace_text_in_range(None, "\n", window, cx)
                     });
                 }
             }))
-            .child(crate::composer::growing_field(notes, 20.0, 220.0, cx));
+            .child(crate::composer::growing_field(notes, 20.0, 220.0, cx))
+            .children(notes_popup);
         let saved = self
             .open
             .as_ref()
@@ -2545,6 +2615,11 @@ pub(super) fn context_chip(
 
 impl Render for TaskCard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(open) = &self.open {
+            for menus in [&open.title_menus, &open.notes_menus] {
+                menus.update(cx, |menus, cx| menus.close_if_blurred(window, cx));
+            }
+        }
         let now = motion::now();
         let expired = self.leaving.as_ref().is_some_and(|leaving| {
             leaving
@@ -2991,7 +3066,8 @@ mod tests {
             let away = cx.debug_bounds("task-center-header").unwrap().center();
             cx.simulate_click(away, gpui::Modifiers::none());
             std::thread::sleep(crate::motion::MENU_OUT.total());
-            cx.executor().advance_clock(std::time::Duration::from_secs(1));
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(1));
             cx.run_until_parked();
         };
         menu(cx, "s3", "task-center-menu-up");
@@ -3133,7 +3209,13 @@ mod tests {
         cx.run_until_parked();
         let notes = |card: &Entity<TaskCard>, cx: &mut gpui::VisualTestContext| {
             card.read_with(cx, |card, cx| {
-                card.open.as_ref().unwrap().notes.read(cx).text().to_string()
+                card.open
+                    .as_ref()
+                    .unwrap()
+                    .notes
+                    .read(cx)
+                    .text()
+                    .to_string()
             })
         };
         card.update(cx, |card, cx| {
@@ -3150,6 +3232,114 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(notes(&card, cx), "from the inbox");
+    }
+
+    fn skill_row() -> zeron_proto::command_catalog::InvocationCandidate {
+        zeron_proto::command_catalog::InvocationCandidate {
+            name: "ship".into(),
+            description: String::new(),
+            input_hint: None,
+            invocation: zeron_proto::invocation::Invocation::Skill {
+                name: "ship".into(),
+                path: "/repo/.claude/skills/ship/SKILL.md".into(),
+                command: None,
+            },
+            workspace_command: None,
+        }
+    }
+
+    #[gpui::test]
+    fn enter_in_the_notes_picks_a_highlighted_row_and_only_then_breaks_the_line(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _dir = init(cx);
+        cx.update(|cx| crate::composer::init(cx, Default::default()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| state.tasks = vec![task("plain", false)]);
+        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state, cx));
+        card.update_in(cx, |card, window, cx| {
+            card.open("plain".into(), None, CardFocus::Notes, Some(window), cx);
+            let input = card.open.as_ref().unwrap().notes.clone();
+            input.update(cx, |input, cx| input.set_text("Do $sh", cx));
+        });
+        cx.run_until_parked();
+        card.update(cx, |card, cx| {
+            let menus = card.open.as_ref().unwrap().notes_menus.clone();
+            menus.update(cx, |menus, cx| menus.seed_slash_rows(vec![skill_row()], cx));
+        });
+        cx.run_until_parked();
+        let notes = |card: &Entity<TaskCard>, cx: &mut gpui::VisualTestContext| {
+            card.read_with(cx, |card, cx| {
+                let open = card.open.as_ref().unwrap();
+                open.notes.read(cx).text().to_string()
+            })
+        };
+        cx.simulate_keystrokes("enter");
+        let link = skill_row().invocation.link();
+        assert_eq!(notes(&card, cx), format!("Do {link} "));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(notes(&card, cx), format!("Do {link} \n"));
+    }
+
+    #[gpui::test]
+    fn a_reference_that_would_overflow_the_title_is_refused_whole(cx: &mut gpui::TestAppContext) {
+        let _dir = init(cx);
+        cx.update(|cx| crate::composer::init(cx, Default::default()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| state.tasks = vec![task("plain", false)]);
+        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state, cx));
+        let typed = format!("{} $sh", "x".repeat(zeron_doc::TASK_TITLE_MAX_CHARS - 10));
+        card.update_in(cx, |card, window, cx| {
+            card.open("plain".into(), None, CardFocus::Title, Some(window), cx);
+            let input = card.open.as_ref().unwrap().title.clone();
+            input.update(cx, |input, cx| input.set_text(typed.clone(), cx));
+        });
+        cx.run_until_parked();
+        card.update(cx, |card, cx| {
+            let menus = card.open.as_ref().unwrap().title_menus.clone();
+            menus.update(cx, |menus, cx| menus.seed_slash_rows(vec![skill_row()], cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        card.read_with(cx, |card, cx| {
+            let open = card.open.as_ref().unwrap();
+            assert_eq!(open.title.read(cx).text(), typed);
+            assert!(!open.title_menus.read(cx).is_open(cx));
+        });
+    }
+
+    #[gpui::test]
+    fn tab_in_the_add_row_picks_a_highlighted_row_and_only_then_opens_the_task(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _dir = init(cx);
+        cx.update(|cx| crate::composer::init(cx, Default::default()));
+        let state = cx.new(|_| AppState::new());
+        let (page, cx) = cx.add_window_view(|_, cx| super::super::TasksPage::new(state, cx));
+        cx.run_until_parked();
+        page.update_in(cx, |page, window, cx| {
+            window.focus(&page.add.focus_handle(cx), cx);
+            page.add
+                .update(cx, |input, cx| input.set_text("Do $sh", cx));
+        });
+        cx.run_until_parked();
+        page.update(cx, |page, cx| {
+            page.add_menus
+                .update(cx, |menus, cx| menus.seed_slash_rows(vec![skill_row()], cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("tab");
+        let link = skill_row().invocation.link();
+        let text = page.read_with(cx, |page, cx| page.add.read(cx).text().to_string());
+        assert_eq!(text, format!("Do {link} "));
+        cx.simulate_keystrokes("tab");
+        let text = page.read_with(cx, |page, cx| page.add.read(cx).text().to_string());
+        assert_eq!(text, "");
+        cx.run_until_parked();
+        page.update_in(cx, |page, window, cx| {
+            let notes = page.card.read(cx).open.as_ref().unwrap().notes.clone();
+            assert!(notes.focus_handle(cx).is_focused(window));
+        });
     }
 
     #[gpui::test]

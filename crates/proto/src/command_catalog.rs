@@ -150,6 +150,57 @@ pub fn invocation_detail(description: &str, input_hint: Option<&str>) -> String 
     }
 }
 
+/// Agent commands that read or change a live session (its context, model,
+/// usage, name or queue) rather than putting text into a message.
+const SESSION_COMMANDS: &[&str] = &[
+    "__remote-workflow",
+    "advisor",
+    "agents",
+    "auto-mode-setup",
+    "autocompact",
+    "clear",
+    "config",
+    "context",
+    "cost",
+    "debug",
+    "design-consent",
+    "design-revoke",
+    "effort",
+    "export",
+    "extra-usage",
+    "fast",
+    "follow-up",
+    "heapdump",
+    "import",
+    "list-agents",
+    "mcp",
+    "model",
+    "name",
+    "output-style",
+    "recap",
+    "reload-skills",
+    "rename",
+    "session",
+    "steering",
+    "usage",
+    "usage-credits",
+    "workflow-launch-exec",
+];
+
+/// A task's text becomes a later chat's first message, so only entries that
+/// put text into that message belong in a task's `/` and `$` menus.
+pub fn inserts_message_text(candidate: &InvocationCandidate) -> bool {
+    match &candidate.invocation {
+        Invocation::Skill { .. } => true,
+        Invocation::Command { name } => {
+            candidate.workspace_command.is_none()
+                && !zeron_owned_command(name)
+                && !crate::app_commands::terminal_only_command(candidate)
+                && !SESSION_COMMANDS.contains(&name.as_str())
+        }
+    }
+}
+
 pub fn invocation_insertion(invocation: &Invocation, supported: bool) -> String {
     if !supported && matches!(invocation, Invocation::Command { .. }) {
         invocation.prompt_text()
@@ -615,6 +666,44 @@ mod tests {
         );
         assert!(zeron_owned_command(COMPACT_COMMAND));
         assert!(!zeron_owned_command("model"));
+    }
+
+    #[test]
+    fn task_text_keeps_only_entries_that_insert_message_text() {
+        let command = |name: &str| SlashCommand {
+            name: name.into(),
+            description: String::new(),
+            input_hint: None,
+            kind: SlashCommandKind::BuiltIn,
+        };
+        let skill = Skill {
+            name: "ship".into(),
+            description: String::new(),
+            path: "/repo/.claude/skills/ship/SKILL.md".into(),
+            enabled: true,
+            command: None,
+        };
+        let rows = with_workspace_commands(
+            invocation_candidates(
+                with_zeron_commands(
+                    Some(HarnessId::ClaudeCode),
+                    vec![
+                        command("review"),
+                        command("init"),
+                        command("model"),
+                        command("fast"),
+                    ],
+                ),
+                vec![skill],
+            ),
+            true,
+        );
+        let kept: Vec<&str> = rows
+            .iter()
+            .filter(|row| inserts_message_text(row))
+            .map(|row| row.name.as_str())
+            .collect();
+        assert_eq!(kept, ["review", "init", "ship"]);
     }
 
     #[test]

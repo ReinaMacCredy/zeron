@@ -369,6 +369,10 @@ impl MentionMenu {
         } else {
             return;
         };
+        if super::reference_refused(&self.input, &token.range, &link, cx) {
+            self.dismiss(cx);
+            return;
+        }
         self.input.update(cx, |input, cx| {
             input.replace_mention_link(token.range, &link, cx)
         });

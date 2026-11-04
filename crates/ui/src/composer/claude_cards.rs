@@ -94,12 +94,10 @@ impl Composer {
         if self.pickers.read(cx).resolved(cx).harness != Some(HarnessId::ClaudeCode) {
             return None;
         }
-        let rows = self.slash_cache.get(&self.slash.context);
+        let rows = self.slash.read(cx).rows();
         claude_card_command(plain, |name| {
-            rows.is_some_and(|rows| {
-                rows.iter().any(|row| {
-                    matches!(&row.invocation, Invocation::Skill { name: skill, .. } if skill == name)
-                })
+            rows.iter().any(|row| {
+                matches!(&row.invocation, Invocation::Skill { name: skill, .. } if skill == name)
             })
         })
     }
