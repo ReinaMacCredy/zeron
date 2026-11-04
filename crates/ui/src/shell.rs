@@ -5348,9 +5348,9 @@ impl Shell {
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        // The settings sidebar is pinned; flipping the flag here would only
-        // change what the chat route shows after Back.
-        if matches!(self.route, Route::Settings(_)) {
+        // The settings and skills sidebars are pinned; flipping the flag here
+        // would only change what the chat route shows after Back.
+        if matches!(self.route, Route::Settings(_) | Route::Skills) {
             return;
         }
         if !self.settings.sidebar_collapsed
@@ -8125,6 +8125,9 @@ impl Shell {
     }
 
     /// A sidebar-level notice (a failed mutation, a copied link) as a toast.
+        let sidebar_pin_flips = self.settings.sidebar_collapsed
+            && matches!(self.route, Route::Skills) != matches!(route, Route::Skills);
+        let sidebar_from = self.sidebar_now();
     /// The latest message is kept so a pin-write failure can be matched later.
     pub(super) fn show_notice(
         &mut self,
@@ -8133,6 +8136,9 @@ impl Shell {
         cx: &mut App,
     ) {
         let message = message.into();
+        if sidebar_pin_flips {
+            self.sidebar_tween = Some(self.panel_tween(sidebar_from, self.sidebar_target()));
+        }
         self.sidebar_notice = Some(message.clone());
         crate::toast::show(cx, kind, message);
     }

@@ -148,7 +148,7 @@ impl Shell {
     }
 
     pub(super) fn sidebar_pinned_open(&self) -> bool {
-        !self.settings.sidebar_collapsed || matches!(self.route, Route::Settings(_))
+        !self.settings.sidebar_collapsed || matches!(self.route, Route::Settings(_) | Route::Skills)
     }
 
     pub(super) fn sync_layout_key(&mut self, cx: &App) {
