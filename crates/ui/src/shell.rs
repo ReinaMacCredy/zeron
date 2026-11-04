@@ -3737,6 +3737,7 @@ pub struct Shell {
     computer_page: Option<Entity<ComputerPage>>,
     device_hub_page: Option<Entity<DeviceHubPage>>,
     compaction_page: Option<Entity<CompactionPage>>,
+    experimental_page: Option<Entity<CompactionPage>>,
     tools_page: Option<(Entity<ToolsPage>, Subscription)>,
     pending_computer_guide: Option<Vec<zeron_proto::computer::ComputerPermission>>,
     device_accounts: Entity<crate::account_usage::DeviceAccounts>,
@@ -4522,6 +4523,7 @@ impl Shell {
             computer_page: None,
             device_hub_page: None,
             compaction_page: None,
+            experimental_page: None,
             tools_page: None,
             pending_computer_guide: None,
             device_accounts,
@@ -8620,12 +8622,12 @@ impl Shell {
         if section == SettingsSection::Tools {
             self.tools_page = None;
         }
-        if matches!(
-            section,
-            SettingsSection::Compaction | SettingsSection::Experimental
-        ) && self.route != Route::Settings(section)
-        {
-            self.compaction_page = None;
+        if self.route != Route::Settings(section) {
+            match section {
+                SettingsSection::Compaction => self.compaction_page = None,
+                SettingsSection::Experimental => self.experimental_page = None,
+                _ => {}
+            }
         }
         if section == SettingsSection::Computer
             && let Some(page) = &self.computer_page
@@ -9535,8 +9537,12 @@ impl Shell {
             SettingsSection::Compaction | SettingsSection::Experimental => {
                 let state = self.state.clone();
                 let lab = section == SettingsSection::Experimental;
-                self.compaction_page
-                    .get_or_insert_with(|| cx.new(|cx| CompactionPage::new(state, lab, cx)))
+                let page = if lab {
+                    &mut self.experimental_page
+                } else {
+                    &mut self.compaction_page
+                };
+                page.get_or_insert_with(|| cx.new(|cx| CompactionPage::new(state, lab, cx)))
                     .clone()
                     .into_any_element()
             }
