@@ -128,7 +128,7 @@ impl Shell {
         self.close_bar_window(cx);
         let toast = CaptureToast {
             task_id: capture.task_id.clone(),
-            title: capture.title.clone().into(),
+            title: crate::composer::plain_references(&capture.title).into(),
             shown: motion::now(),
         };
         if open {
@@ -520,7 +520,9 @@ impl Shell {
         };
         input.update(cx, |input, cx| input.set_text("", cx));
         self.file_capture(&capture, cx);
-        self.quick_capture.rail_added.push(title.into());
+        self.quick_capture
+            .rail_added
+            .push(crate::composer::plain_references(&title).into());
         cx.notify();
     }
 

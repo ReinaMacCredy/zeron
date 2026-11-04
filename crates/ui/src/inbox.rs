@@ -618,7 +618,9 @@ impl InboxPage {
                                     .text_size(ui_rems(13.5))
                                     .text_color(if done { theme.text_muted } else { theme.text })
                                     .when(done, |el| el.line_through())
-                                    .child(SharedString::from(task.title.clone())),
+                                    .child(SharedString::from(crate::composer::plain_references(
+                                        &task.title,
+                                    ))),
                             )
                             .children(meta.map(|meta| {
                                 div()

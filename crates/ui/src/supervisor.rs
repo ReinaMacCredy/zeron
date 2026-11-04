@@ -391,7 +391,7 @@ fn step_name(state: &AppState, task_id: &str, step_id: &str, now: DateTime<Utc>)
     Some(format!(
         "{} · {}",
         plan.step_label(step_id)?,
-        row.step.title
+        crate::composer::plain_references(&row.step.title)
     ))
 }
 
@@ -3481,12 +3481,12 @@ impl SupervisorPage {
             Some(row) => format!(
                 "Brief · {} · {}",
                 plan.step_label(&row.step.id).unwrap_or_default(),
-                row.step.title
+                crate::composer::plain_references(&row.step.title)
             ),
             None if removed => "Brief · A removed step".into(),
             None => "Brief · Lead".into(),
         };
-        let mut meta = vec![task.title.clone()];
+        let mut meta = vec![crate::composer::plain_references(&task.title)];
         if let Some(model) = chat
             .as_ref()
             .and_then(|chat| crate::tasks::chat_model_label(chat, cx))
@@ -3536,7 +3536,7 @@ impl SupervisorPage {
                     .text_size(ui_rems(13.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(task.title.clone()),
+                    .child(crate::composer::plain_references(&task.title)),
             )
             .when(!task.notes.trim().is_empty(), |el| {
                 el.child(TaskCenter::markdown(

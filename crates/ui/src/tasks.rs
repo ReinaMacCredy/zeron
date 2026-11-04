@@ -1190,7 +1190,9 @@ impl TasksPage {
                                     .line_height(ui_rems(18.0))
                                     .text_color(if done { theme.text_muted } else { theme.text })
                                     .when(done, |el| el.line_through())
-                                    .child(SharedString::from(row.task.title.clone())),
+                                    .child(SharedString::from(crate::composer::plain_references(
+                                        &row.task.title,
+                                    ))),
                             )
                             .when(row.captured, |el| el.child(new_tag(theme))),
                     )
@@ -1351,7 +1353,7 @@ impl TasksPage {
         let pick_id = task_id.clone();
         let drag = TaskDrag {
             task_id: task_id.clone(),
-            title: SharedString::from(row.task.title.clone()),
+            title: SharedString::from(crate::composer::plain_references(&row.task.title)),
             status: row.status,
         };
         let faint = theme.text_faint;
@@ -2151,7 +2153,7 @@ impl TasksPage {
         let selected = self.card.read(cx).task_id() == Some(task_id.as_str());
         let drag = TaskDrag {
             task_id: task_id.clone(),
-            title: SharedString::from(row.task.title.clone()),
+            title: SharedString::from(crate::composer::plain_references(&row.task.title)),
             status: row.status,
         };
         let open_id = task_id.clone();
@@ -2184,7 +2186,7 @@ impl TasksPage {
 
     fn card_visual(row: &Row, selected: bool, theme: &Theme) -> gpui::Div {
         let task_id = row.task.id.clone();
-        let title = SharedString::from(row.task.title.clone());
+        let title = SharedString::from(crate::composer::plain_references(&row.task.title));
         let orchestrated = row.orchestrated();
         let working = row.status == TaskStatus::Working;
         let bar = orchestrated.then(|| Self::step_bar(row, theme));
@@ -2598,7 +2600,9 @@ fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Ro
             .filter_map(|id| state.tasks.iter().find(|task| task.id == *id))
             .map(|dep| {
                 (
-                    SharedString::from(zeron_proto::view::single_line(&dep.title)),
+                    SharedString::from(zeron_proto::view::single_line(
+                        &crate::composer::plain_references(&dep.title),
+                    )),
                     dep.completed_at.is_some(),
                 )
             })
@@ -2640,7 +2644,9 @@ pub(crate) fn gathered_tasks(state: &AppState, chat_id: &str, now: DateTime<Utc>
         .into_iter()
         .map(|task| Gathered {
             id: task.id.clone(),
-            title: SharedString::from(zeron_proto::view::single_line(&task.title)),
+            title: SharedString::from(zeron_proto::view::single_line(
+                &crate::composer::plain_references(&task.title),
+            )),
             status: rollup(state, task, now).status,
         })
         .collect()

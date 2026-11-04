@@ -211,7 +211,7 @@ impl Shell {
                     chat_id: task.chat_id.clone().unwrap_or_default(),
                     kind: NeedKind::Task {
                         task_id: task.id.clone(),
-                        title: task.title.clone(),
+                        title: crate::composer::plain_references(&task.title),
                         reason,
                     },
                 });
@@ -224,7 +224,7 @@ impl Shell {
                 let steps = plan
                     .steps
                     .iter()
-                    .map(|row| row.step.title.clone())
+                    .map(|row| crate::composer::plain_references(&row.step.title))
                     .collect();
                 plans.insert(chat.id.clone(), (task.id.clone(), steps));
             }

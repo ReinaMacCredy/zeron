@@ -1937,7 +1937,7 @@ impl TaskCenter {
         });
         let (title, sub) = match step {
             Some((row, label)) if !step_has_thread => (
-                row.step.title.clone(),
+                crate::composer::plain_references(&row.step.title),
                 format!("{label} has not started · messages go to the lead"),
             ),
             Some((_, label)) => (
@@ -1951,7 +1951,7 @@ impl TaskCenter {
                 live_chat
                     .as_ref()
                     .map(|(_, title, _)| title.clone())
-                    .unwrap_or_else(|| task.title.clone()),
+                    .unwrap_or_else(|| crate::composer::plain_references(&task.title)),
                 "Lead".into(),
             ),
         };
