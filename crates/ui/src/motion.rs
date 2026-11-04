@@ -479,9 +479,7 @@ pub const EASE_IN: CubicBezier = CubicBezier::new(0.42, 0.0, 1.0, 1.0);
 pub const EASE_IN_SHARP: CubicBezier = CubicBezier::new(0.4, 0.0, 1.0, 1.0);
 pub const EASE_DRAWER: CubicBezier = CubicBezier::new(0.32, 0.72, 0.0, 1.0);
 pub const LINEAR: CubicBezier = CubicBezier::new(0.0, 0.0, 1.0, 1.0);
-/// CSS `cubic-bezier(0.25, 0.8, 0.25, 1)`: a quick start that settles softly.
 pub const EASE_SETTLE: CubicBezier = CubicBezier::new(0.25, 0.8, 0.25, 1.0);
-/// CSS `cubic-bezier(0, 0.8, 0.5, 1)`: most of the way at once, then a long tail.
 pub const EASE_DIM: CubicBezier = CubicBezier::new(0.0, 0.8, 0.5, 1.0);
 
 // ---------------------------------------------------------------------------
@@ -1221,6 +1219,7 @@ pub fn hover_blend(key: &str, rest: Hsla, hover: Hsla) -> Hsla {
 struct StateEntry {
     tween: Tween,
     seen: u64,
+    /// Read before landing and ticked after it: the final value still needs a frame.
     drew_unsettled: bool,
 }
 
@@ -1264,8 +1263,7 @@ impl StateMorphs {
     }
 
     /// Once-per-frame bookkeeping: prune unmounted entries and report whether
-    /// any morph is still mid-flight or drew a non-final value this frame
-    /// (→ keep frames coming, so its final value always reaches the screen).
+    /// any morph is still mid-flight (→ keep frames coming).
     pub fn tick_at(&mut self, now: Instant) -> bool {
         self.frame += 1;
         let frame = self.frame;
@@ -1283,8 +1281,6 @@ impl StateMorphs {
 }
 
 impl StateMorphs {
-    /// Start `key` settled at `on` unless it is already live, so its next
-    /// read toward the other state animates instead of snapping.
     pub fn seed_at(&mut self, key: &str, on: bool, now: Instant) {
         let seen = self.frame;
         self.entries
@@ -1301,15 +1297,10 @@ thread_local! {
     static STATE_MORPHS: RefCell<StateMorphs> = RefCell::new(StateMorphs::default());
 }
 
-/// [`StateMorphs::seed_at`] on the frame's store: an element mounting into
-/// view seeds itself hidden, then reads `on` like any other morph.
 pub fn state_seed(key: &str, on: bool) {
     STATE_MORPHS.with(|morphs| morphs.borrow_mut().seed_at(key, on, now()));
 }
 
-/// One property of a CSS `transition` on a shown flag: its own timing in and
-/// out, as `transition: opacity 0.2s ease, transform 0.25s ...` gives each
-/// property its own.
 #[derive(Debug, Clone, Copy)]
 pub struct Leg {
     pub enter: MotionSpec,
@@ -1328,8 +1319,6 @@ impl Leg {
         if shown { self.enter } else { self.exit }
     }
 
-    /// How shown (0..1) this property is at `run`, the linear 0..1 tween
-    /// toward `shown` that spans `span_ms`.
     pub fn at(&self, run: f32, shown: bool, span_ms: u64) -> f32 {
         let spec = self.spec(shown);
         let total = (spec.delay_ms + spec.duration_ms) as f32;
@@ -1343,7 +1332,6 @@ impl Leg {
     }
 }
 
-/// A shown flag morphing through several [`Leg`]s off one [`state_t`] clock.
 #[derive(Debug, Clone, Copy)]
 pub struct Staged {
     run: f32,
@@ -1356,7 +1344,6 @@ impl Staged {
         leg.at(self.run, self.shown, self.span_ms)
     }
 
-    /// Shown, or still on its way out.
     pub fn visible(&self) -> bool {
         self.shown || self.run > 0.001
     }
@@ -2070,8 +2057,6 @@ mod tests {
             0.0
         );
 
-        // A frame that read mid-flight and ticks after the landing still asks
-        // for one more frame to draw the final value, then stops.
         morph(&mut morphs, true, ms(510));
         let late = morph(&mut morphs, true, ms(520));
         assert!(late > 0.0 && late < 1.0, "mid-flight: {late}");

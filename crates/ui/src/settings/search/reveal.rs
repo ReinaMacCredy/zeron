@@ -37,16 +37,14 @@ const LANDING: f32 = 0.3;
 const WASH_IN: MotionSpec = MotionSpec::new(250, motion::EASE);
 const WASH_HOLD: Duration = Duration::from_millis(450);
 const WASH_OUT: MotionSpec = MotionSpec::new(1200, motion::EASE);
-/// A row's wash sits 3px inside its block's edge, the row's 16px side
-/// inset less 3, and 3px inside the row top and bottom. A block's wash
-/// keeps to the block, under its own corners.
+/// How far a row's wash reaches past its sides, into its block's inset, and
+/// its corners. A block's wash keeps to the block, under its own corners.
 const WASH_BLEED: f32 = 13.0;
 const WASH_INSET_Y: f32 = 3.0;
 const WASH_RADIUS: f32 = 9.0;
 
 thread_local! {
     static REVEAL: RefCell<Option<(WindowId, Reveal)>> = const { RefCell::new(None) };
-    /// Inside a [`Muted`] page: its rows and scroll take no part in a reveal.
     static MUTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -530,9 +528,7 @@ impl IntoElement for PageReveal {
     }
 }
 
-/// A page leaving the screen while the next one comes in: a reveal belongs
-/// to the page that stays, and the leaving page's scroll must not read as
-/// the user taking the glide back.
+/// A leaving page's scroll must not read as the user taking the reveal's glide back.
 pub fn muted(child: impl IntoElement) -> Muted {
     Muted {
         child: child.into_any_element(),

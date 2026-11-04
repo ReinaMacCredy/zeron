@@ -1921,10 +1921,7 @@ fn settings_page_key(section: SettingsSection) -> String {
     format!("settings-page-{}", section.slug())
 }
 
-/// Whether `old` can fade out under `new`. General, Chat, Shortcuts and
-/// Appshots are one view showing one section at a time, so two of them are
-/// never on screen together; Cloud and Billing are dropped the frame they
-/// are left, which is what stops their polling.
+/// Cloud and Billing stop polling only by dropping the frame they are left.
 fn page_can_leave(old: SettingsSection, new: SettingsSection) -> bool {
     !matches!(old, SettingsSection::Cloud | SettingsSection::Billing) && !shares_page_view(old, new)
 }
@@ -3730,11 +3727,8 @@ pub struct Shell {
     harnesses_sub: Option<Subscription>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
-    /// Search results on screen, matching or on their way out, in order.
     settings_hits_shown: Vec<(SettingsHit, bool)>,
-    /// The results count line, current last, earlier ones fading out.
     settings_hits_heads: Vec<SharedString>,
-    /// The settings page last drawn, and the one fading out under it.
     settings_page_shown: Option<SettingsSection>,
     settings_page_leaving: Option<SettingsSection>,
     _settings_search_sub: Subscription,
@@ -12341,9 +12335,6 @@ impl Shell {
             .into_any_element()
     }
 
-    /// One page as it comes in or leaves: its title block over its body,
-    /// fading and rising together. A leaving page keeps out of a search
-    /// reveal and fires none of its page's open-time effects.
     fn render_settings_layer(
         &mut self,
         section: SettingsSection,
@@ -12517,8 +12508,6 @@ impl Shell {
             .child(trailing)
     }
 
-    /// The search field over two stacked lists, the section tree and the
-    /// search results, which crossfade as a query starts and clears.
     fn render_settings_nav(
         &mut self,
         section: SettingsSection,
@@ -12698,8 +12687,7 @@ impl Shell {
             rows.push(row.into_any_element());
             if nested {
                 let count = pages.len() as f32;
-                // The list's own top gap rides inside it, so a closed list
-                // leaves no gap behind.
+                // The top gap rides inside the list, so a closed list leaves none behind.
                 let height = SETTINGS_NAV_PAGE_HEIGHT * count + 2.0 * (count - 1.0) + 6.0;
                 let list = div()
                     .pt(px(2.0))
@@ -12823,9 +12811,6 @@ impl Shell {
         }
     }
 
-    /// The results for `query`, or with `None` the last results as they
-    /// leave. Hits that stop matching close out of the list and new ones open
-    /// into it, and the count crossfades.
     fn render_settings_hits(
         &mut self,
         query: Option<&str>,

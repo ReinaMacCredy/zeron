@@ -1344,8 +1344,7 @@ pub const COLLAPSE_HEIGHT: Leg = Leg {
     enter: MotionSpec::new(460, EASE_TAILWIND),
     exit: MotionSpec::new(420, EASE_TAILWIND).with_delay(50),
 };
-/// Closing, the content dims before the edge reaches it so the space is
-/// never seen empty; opening, it comes in once the space has mostly opened.
+/// Closing dims before the edge reaches the content, so the space is never seen empty.
 pub const COLLAPSE_FADE: Leg = Leg {
     enter: MotionSpec::new(240, EASE_OUT).with_delay(300),
     exit: MotionSpec::new(420, EASE_DIM),
@@ -1358,15 +1357,11 @@ pub const PAGE_RISE: Leg = Leg::both(MotionSpec::new(300, EASE_SETTLE));
 pub const PAGE_RISE_PX: f32 = 8.0;
 pub const NAV_HIGHLIGHT: MotionSpec = MotionSpec::new(200, EASE);
 pub const HINT_FADE: MotionSpec = MotionSpec::new(150, EASE);
-/// Replaced text: the old fades quickly, the new waits a beat and settles in.
 pub const SWAP_FADE: Leg = Leg {
     enter: MotionSpec::new(315, EASE_SETTLE).with_delay(135),
     exit: MotionSpec::new(225, EASE),
 };
 
-/// Opens and closes `content`'s height, `height` when open; `None` once
-/// closed. Rows below move with the edge, and the content is clipped to the
-/// moving space from the top.
 pub fn collapse(
     key: &str,
     open: bool,
