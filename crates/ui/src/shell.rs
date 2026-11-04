@@ -12885,7 +12885,9 @@ impl Shell {
             if staged.visible() {
                 heads.push(
                     div()
-                        .when(*label != head, |el| el.absolute().top(px(4.0)).left_0())
+                        .when(*label != head, |el| {
+                            el.absolute().top(px(4.0)).left(px(Theme::SPACE_SM))
+                        })
                         .opacity(staged.leg(settings::widgets::SWAP_FADE))
                         .child(label.clone()),
                 );
