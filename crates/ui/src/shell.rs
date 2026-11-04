@@ -21396,7 +21396,7 @@ mod tests {
             (
                 SettingsSection::Experimental,
                 "Compact ahead of time",
-                "Lab › Experimental".to_string(),
+                "Lab".to_string(),
                 Some(Target::Setting(SettingId::CompactAhead)),
                 true,
             )
