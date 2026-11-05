@@ -363,8 +363,10 @@ fn input_drag_scroll_delta(
 }
 
 /// Staged-attachment strip metrics (zeron attachment-ui.tsx AttachmentStrip:
-/// `flex flex-wrap gap-2 px-4 pt-3`, `size-14` thumbs).
+/// `flex flex-wrap gap-2 px-4 pt-3`, `size-14` thumbs for files).
 pub const STRIP_THUMB: f32 = 56.0;
+/// An image's live preview tile.
+pub const STRIP_IMAGE_TILE: f32 = 120.0;
 pub const STRIP_GAP: f32 = 8.0;
 pub const STRIP_PAD_TOP: f32 = 12.0;
 pub const STRIP_PAD_X: f32 = 16.0;
@@ -8051,7 +8053,9 @@ impl Composer {
             .collect();
         self.staged()
             .iter()
-            .filter(|att| att.mention.is_none_or(|index| !chipped.contains(&index)))
+            .filter(|att| {
+                att.image().is_some() || att.mention.is_none_or(|index| !chipped.contains(&index))
+            })
             .collect()
     }
 
@@ -8946,7 +8950,14 @@ impl Composer {
     fn staged_attachment_items(&self, cx: &App) -> Vec<StripItem> {
         self.tiled_attachments(cx)
             .iter()
-            .map(|_| (STRIP_THUMB, STRIP_THUMB))
+            .map(|att| {
+                let side = if att.image().is_some() {
+                    STRIP_IMAGE_TILE
+                } else {
+                    STRIP_THUMB
+                };
+                (side, side)
+            })
             .collect()
     }
 
@@ -9147,10 +9158,16 @@ impl Composer {
         ix: usize,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let side = if att.image().is_some() {
+            STRIP_IMAGE_TILE
+        } else {
+            STRIP_THUMB
+        };
+        let radius = if att.image().is_some() { 12.0 } else { 8.0 };
         let frame = div()
             .id(("composer-att-thumb", ix))
-            .size(px(STRIP_THUMB))
-            .rounded(px(8.0))
+            .size(px(side))
+            .rounded(px(radius))
             .overflow_hidden()
             .border_1()
             .border_color(crate::theme::hairline(0.10));
@@ -9197,12 +9214,12 @@ impl Composer {
                     // (gpui f8d8a90 repoint), so size_full let a tall photo
                     // grow past the frame — the rectangular overflow clip
                     // then squared the bottom corners (2026-08-19 report).
-                    // 56−2 = frame minus its 1px borders.
-                    .w(px(STRIP_THUMB - 2.0))
-                    .h(px(STRIP_THUMB - 2.0))
+                    // Minus 2 = frame minus its 1px borders.
+                    .w(px(side - 2.0))
+                    .h(px(side - 2.0))
                     // Own radii — the frame's rounding only clips
-                    // rectangularly (7 = 8 - border).
-                    .rounded(px(7.0))
+                    // rectangularly.
+                    .rounded(px(radius - 1.0))
                     .object_fit(ObjectFit::Cover),
             )
             .into_any_element()

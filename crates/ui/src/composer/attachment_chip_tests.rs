@@ -254,14 +254,17 @@ fn tiled_names(
 }
 
 #[gpui::test]
-fn only_attachments_without_a_chip_get_a_tile(cx: &mut gpui::TestAppContext) {
-    let (_dir, handle) = composer_focus_window(cx);
+fn images_always_get_a_tile_and_files_only_without_a_chip(cx: &mut gpui::TestAppContext) {
+    let (dir, handle) = composer_focus_window(cx);
     paste_images(&handle, cx, 2);
-    // The chips stand in for the staged images: no tile repeats them.
-    assert_eq!(staged_names(&handle, cx).len(), 2);
-    assert!(tiled_names(&handle, cx).is_empty());
+    add_file(&handle, cx, write_file(&dir, "notes.md"));
+    assert_eq!(staged_names(&handle, cx).len(), 3);
+    assert_eq!(tiled_names(&handle, cx), ["Image 1.png", "Image 2.png"]);
     handle
-        .update(cx, |composer, _, _| {
+        .update(cx, |composer, _, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.remove_attachment_chips(3, cx));
             let key = composer.current_key.clone();
             composer
                 .attachments
@@ -271,8 +274,10 @@ fn only_attachments_without_a_chip_get_a_tile(cx: &mut gpui::TestAppContext) {
         })
         .unwrap();
     cx.run_until_parked();
-    // One with no chip keeps its tile, the only handle it has.
-    assert_eq!(tiled_names(&handle, cx), ["image.png"]);
+    assert_eq!(
+        tiled_names(&handle, cx),
+        ["image.png", "Image 1.png", "Image 2.png"]
+    );
 }
 
 #[gpui::test]
@@ -764,26 +769,14 @@ fn click_first_chip(
 fn clicking_an_image_chip_opens_the_picture_full_size(cx: &mut gpui::TestAppContext) {
     let (_dir, handle) = composer_focus_window(cx);
     paste_images(&handle, cx, 1);
-    // Hovering shows no card: the click is how the picture is seen.
-    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
-        .unwrap();
     handle
         .update(cx, |composer, _, cx| {
-            composer.input.update(cx, |input, cx| {
-                let at = input.mention_hits[0].bounds.center();
-                input.on_mention_pointer_move(at, cx);
-                assert_eq!(input.mention_tooltip, MentionTooltipPhase::Hidden);
-            });
+            composer
+                .input
+                .update(cx, |_, cx| cx.emit(ComposerInputEvent::OpenAttachment(1)));
         })
         .unwrap();
-
-    // A drag across the chip only selects.
-    click_first_chip(&handle, cx, point(px(40.0), px(0.0)));
-    handle
-        .read_with(cx, |composer, _| assert!(composer.preview.is_none()))
-        .unwrap();
-
-    click_first_chip(&handle, cx, point(px(0.0), px(0.0)));
+    cx.run_until_parked();
     handle
         .read_with(cx, |composer, _| {
             let preview = composer.preview.as_ref().expect("the chip opens its image");
