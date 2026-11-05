@@ -52,6 +52,10 @@ export type Props = {
 	-- Where the actions' width is kept (a named state of the caller's, so it
 	-- outlives a reload of the scripts); its own otherwise.
 	read actions_width: State<number>?,
+	read nav_left: ((closed_up: number) -> number)?,
+	read wordmark: (() -> number)?,
+	read new_tab: (() -> number)?,
+	read on_new_tab: (() -> ())?,
 }
 
 -- Zeron's metrics. The bar: 38 tall, its row padded 4 at the top, so its
@@ -178,7 +182,7 @@ end
 -- start from (`at` as it stands then), never a function (an animated style
 -- runs its node's functions again each frame). With motion reduced they
 -- land at once.
-local function follow(target: any, at: { [string]: (full: boolean) -> number }, settle: { duration: number, ease: string }?)
+local function follow(target: any, at: { [string]: (full: boolean) -> number }, settle: { duration: number, ease: string }?, unseen: (() -> boolean)?)
 	local moving = window_state("full_screen_transition")
 	-- Where they stand, and whether full screen's move is held for its slide.
 	local last: { [string]: number }? = nil
@@ -186,7 +190,7 @@ local function follow(target: any, at: { [string]: (full: boolean) -> number }, 
 	local function go(to: { [string]: number }, timing: { duration: number, ease: string }?)
 		local from = last :: { [string]: number }
 		last = to
-		if timing == nil or motion.reduced_now() then
+		if timing == nil or motion.reduced_now() or (unseen and unseen()) then
 			anime.utils.set(target, to :: any)
 			return
 		end
@@ -316,6 +320,12 @@ local function control(label: Label, glyph: Node, enabled: (() -> boolean)?, on_
 	}
 end
 
+local function nav_closed_up_at(full: boolean, tracked: boolean?): number
+	local m = island.metrics()
+	return toggle_in(full, tracked) + m.control + m.group
+end
+local nav_closed_up = ui.state("ds_title_bar_nav", nav_closed_up_at(full_screen_now(), false))
+
 local TitleBar = ui.component(function(props: Props): Node
 	local m = island.metrics()
 	local CONTROL, GROUP_GAP, CONTROL_GAP = m.control, m.group, m.gap
@@ -439,10 +449,66 @@ local TitleBar = ui.component(function(props: Props): Node
 					end
 				end
 			),
-			ui.div { w = GROUP_GAP, shrink = 0 },
+			if props.wordmark
+				then ui.show(function(): boolean
+					return (props.wordmark :: () -> number)() > 0
+				end, ui.text {
+					id = "titlebar-wordmark",
+					"Zeron",
+					absolute = true,
+					left = ui.raw(CONTROL + 10, "Zeron's gap after the toggle"),
+					top = ui.raw((CONTROL - 20) / 2, "centred on the row"),
+					h = 20,
+					pointer_events = "none",
+					text_size = ui.raw(14, "Zeron's wordmark"),
+					weight = "$font.weight.semibold",
+					opacity = props.wordmark,
+				})
+				else nil,
+		}
+	)
+	local nav_ref = ui.ref()
+	follow(nav_ref, {
+		top = function(): number
+			return middle() - CONTROL / 2
+		end,
+	})
+	-- (With the sidebar open, Back and Forward stand past its edge: nothing shows this
+	-- move, and sliding it would run what reads it every frame.)
+	follow(nav_closed_up, {
+		value = function(full: boolean): number
+			return nav_closed_up_at(full, true)
+		end,
+	}, nil, function(): boolean
+		return props.nav_left ~= nil and props.nav_left(0) > CONTROL + nav_closed_up_at(false, false)
+	end)
+	table.insert(
+		bar,
+		ui.row {
+			id = "titlebar-nav",
+			ref = nav_ref,
+			absolute = true,
+			left = function(): number
+				local closed_up = nav_closed_up:get()
+				return if props.nav_left then props.nav_left(closed_up) else closed_up
+			end,
+			top = middle(false) - CONTROL / 2,
+			items = "center",
+			pointer_events = "auto",
+			window_drag = true,
 			control(locale.t("common.back"), Icon { name = "arrow-left", size = 16 }, props.can_back, props.on_back),
 			ui.div { w = CONTROL_GAP, shrink = 0 },
 			control(locale.t("ds.title_bar.forward"), Icon { name = "arrow-right", size = 16 }, props.can_forward, props.on_forward),
+			if props.new_tab
+				then ui.show(function(): boolean
+					return (props.new_tab :: () -> number)() > 0
+				end, ui.div {
+					id = "titlebar-new-tab",
+					ml = ui.raw(CONTROL_GAP, "the island's gap between its controls"),
+					opacity = props.new_tab,
+					control(locale.t("ds.title_bar.new_tab"), Icon { name = "plus", size = 16 }, nil, props.on_new_tab),
+				})
+				else nil,
 		}
 	)
 	if props.actions then
@@ -558,6 +624,9 @@ local function last_control_end(): number
 	local start = toggle_in(full_screen(), true)
 	return start + controls_w(start) - controls_tail(start)
 end
+local function nav_base(): number
+	return nav_closed_up:get()
+end
 
 -- `window_buttons_right()`, `actions_right()`, `middle()`: where the
 -- window's own buttons and the page's controls stand on the bar, and its
@@ -566,6 +635,7 @@ local M = setmetatable({
 	control = control,
 	controls_end = controls_end,
 	last_control_end = last_control_end,
+	nav_base = nav_base,
 	window_buttons_right = window_buttons_right,
 	actions_right = actions_right,
 	middle = middle,

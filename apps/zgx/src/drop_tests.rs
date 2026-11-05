@@ -340,18 +340,16 @@ fn the_columns_move_as_zerons_do() {
     assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
 
-/// The sidebar's view options (its ⋯ at its top right) keep their place
-/// as it folds and comes back, its edge clipping them there: they never
-/// slide under the title bar's controls or the window's buttons.
 #[test]
-fn the_sidebars_view_options_never_pass_under_the_title_bars_controls() {
+fn the_sidebars_view_options_ride_its_end_and_never_cross_the_toggle() {
     let mut app = mount();
     app.frames(30);
-    let fwd = app.bounds("#titlebar >> role:button \"Forward\"");
-    let controls_end = fwd.x + fwd.width;
+    let toggle = app.bounds("#titlebar >> role:button \"Toggle sidebar\"");
+    let toggle_end = toggle.x + toggle.width;
     let target = zgx_script::driver::parse("role:button \"Sidebar view options\"").unwrap();
     let mut faults = Vec::new();
-    let mut open_x: Option<f32> = None;
+    let open_x = app.bounds("role:button \"Sidebar view options\"").x;
+    let mut least = open_x;
     for what in ["closing", "opening", "closing again", "opening again"] {
         assert!(app.host.run_command("shell.toggle_sidebar"));
         for f in 1..=20 {
@@ -364,22 +362,42 @@ fn the_sidebars_view_options_never_pass_under_the_title_bars_controls() {
                 continue;
             }
             let x = scene.transformed_bounds(id).x;
-            let x0 = *open_x.get_or_insert(x);
-            // (It goes with the window's 5-point gap before the sidebar's card as that
-            // closes, no further.)
-            if (x - x0).abs() > 5.5 {
-                faults.push(format!("{what}, frame {f}: the ⋯ moved, {x0} → {x}"));
-            }
-            if let Some(shows) = scene.visible_bounds(id)
-                && shows.width > 0.
-                && shows.x < controls_end
-            {
-                faults.push(format!("{what}, frame {f}: the ⋯ shows at {:.0}..{:.0}, under the controls (to {controls_end})", shows.x, shows.x + shows.width));
+            least = least.min(x);
+            if x < toggle_end {
+                faults.push(format!("{what}, frame {f}: the ⋯ at {x} crosses the toggle (to {toggle_end})"));
             }
         }
         app.frames(30);
     }
     assert!(faults.is_empty(), "{}", faults.join("\n"));
+    assert!(least < open_x - 50., "the ⋯ stayed at {open_x} as the sidebar folded (least {least})");
+    assert_eq!(app.bounds("role:button \"Sidebar view options\"").x, open_x, "the ⋯ back with the sidebar");
+}
+
+#[test]
+fn the_panels_edge_run_into_its_limit_gives_a_little_and_comes_back() {
+    let mut app = mount();
+    app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    app.frames(20);
+    app.click("#titlebar >> role:button \"Panel\"");
+    app.frames(40);
+    let seam = app.bounds("\"Resize files\"");
+    let (x, y, button) = (seam.x + seam.width / 2., seam.y + seam.height / 2., PointerButton::Primary);
+    app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x, y }, Modifiers::default());
+    app.ui.dispatch_with_modifiers(InputEvent::PointerDown { x, y, button }, Modifiers::default());
+    app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x: 2., y }, Modifiers::default());
+    let target = zgx_script::driver::parse("#shell-files").unwrap();
+    let mut xs = Vec::new();
+    for _ in 0..40 {
+        app.frame();
+        app.ui.prepare_frame();
+        let found = zgx_script::driver::find_all(&app.ui, &app.handle, &target).unwrap_or_default();
+        xs.push(app.ui.scene.borrow().transformed_bounds(found[0]).x);
+    }
+    app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x: 2., y, button }, Modifiers::default());
+    let rest = *xs.last().unwrap();
+    let most = xs.iter().fold(0_f32, |m, x| m.max((x - rest).abs()));
+    assert!(most >= 1. && most <= 5.5, "the panel's place frame by frame: {xs:?}");
 }
 
 /// Nothing slides under the title bar's Panel toggle on any frame as the panel

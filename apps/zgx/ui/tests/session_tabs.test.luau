@@ -1,7 +1,7 @@
--- The sessions' tabs on the top bar: they start just past the sidebar's "…" (with
--- the sidebar shut, past Back and Forward), and the one showing is never left in
--- the overflow. And a new chat's page stays a card with the sidebar closed. On
--- the shell in ui/shell_fixture.luau.
+-- The sessions' tabs on the top bar: they start past Back and Forward (over the page
+-- with the sidebar open, closed up on its toggle with it shut), each chat opened keeps
+-- its tab, and the one showing is never left in the overflow. And a new chat's page
+-- stays a card with the sidebar closed. On the shell in ui/shell_fixture.luau.
 
 local CHATS = { "Fix the build", "Write the docs", "Tidy the tests", "Ship the release", "Answer the review" }
 local IDS = { "a1", "a2", "a3", "b1", "b2" }
@@ -42,20 +42,36 @@ local function in_view(app: any, id: string)
 	expect(tab.x + tab.w <= room.x + room.w + 0.5).to_be(true)
 end
 
-test("the tabs start past the sidebar's menu, and past Back and Forward with it shut", function()
+test("Back and Forward stand over the page, the tabs past them, closing up on the toggle with the sidebar shut", function()
 	local app = all_open()
-	local menu = box(app, 'role:button "Sidebar view options"')
+	local page = box(app, "#shell-page")
+	local back, forward = box(app, '#titlebar >> role:button "Back"'), box(app, '#titlebar >> role:button "Forward"')
+	expect(back.x >= page.x).to_be(true)
 	local open_x = box(app, "#session-tabs").x
-	expect(open_x >= menu.x + menu.w).to_be(true)
-	-- (All the way left: over the sidebar, not from the page's card.)
-	expect(open_x < box(app, "#shell-page").x).to_be(true)
+	expect(open_x >= forward.x + forward.w).to_be(true)
+	expect(app:has("#titlebar-wordmark")).to_be(true)
+	expect(app:has("#titlebar-new-tab")).to_be(false)
+	-- The sidebar's "…" at its end, by them.
+	local dots = box(app, 'role:button "Sidebar view options"')
+	expect(dots.x + dots.w < back.x).to_be(true)
+	expect(back.x - (dots.x + dots.w) < 24).to_be(true)
 
 	app:click('#titlebar >> "Toggle sidebar"')
 	app:frames(60)
-	local forward = box(app, '#titlebar >> "Forward"')
+	local toggle = box(app, '#titlebar >> role:button "Toggle sidebar"')
+	back = box(app, '#titlebar >> role:button "Back"')
+	expect(back.x - (toggle.x + toggle.w) < 16).to_be(true)
+	expect(app:has("#titlebar-wordmark")).to_be(false)
+	-- (Shut, New tab comes past Forward, and the tabs past that.)
+	local plus = box(app, '#titlebar >> role:button "New tab"')
 	local shut_x = box(app, "#session-tabs").x
-	expect(shut_x >= forward.x + forward.w).to_be(true)
+	expect(shut_x >= plus.x + plus.w).to_be(true)
 	expect(shut_x < open_x).to_be(true)
+	app:click('#titlebar >> role:button "New tab"')
+	app:frames(30)
+	expect(app:state("shell_route_path")).to_be("/")
+	app:frames(60)
+	expect(app:has("#titlebar-new-tab")).to_be(false)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -261,6 +277,10 @@ local function tabs_shown(app: any): { [string]: boolean }
 	return out
 end
 
+local function route_has(app: any, id: string): boolean
+	return tostring(app:state("shell_route_path")):find(id, 1, true) ~= nil
+end
+
 local function choose(app: any, tab: string, item: string)
 	app:right_click(`#session-tab-{tab}`)
 	expect(app:wait(`role:menuitem "{item}"`, { timeout_ms = 5000 })).to_be(true)
@@ -271,15 +291,15 @@ end
 test("a chat tab's menu has the panel tabs' choices", function()
 	local app = all_open()
 	app:right_click("#session-tab-a2")
-	for _, item in { "Close Tab", "Close Other Tabs", "Close Tabs to the Left", "Close Tabs to the Right" } do
+	for _, item in { "Close tab", "Close others", "Close to the left", "Close to the right" } do
 		expect(app:wait(`role:menuitem "{item}"`, { timeout_ms = 5000 })).to_be(true)
 	end
 	expect(app:error()).to_be_nil()
 end)
 
-test("Close Tab closes that tab, and the chat showing stays if it was another", function()
+test("Close tab closes that tab, and the chat showing stays if it was another", function()
 	local app = all_open()
-	choose(app, "a2", "Close Tab")
+	choose(app, "a2", "Close tab")
 	local now = tabs_shown(app)
 	expect(now.a2).to_be_nil()
 	expect(now.a1).to_be(true)
@@ -287,9 +307,9 @@ test("Close Tab closes that tab, and the chat showing stays if it was another", 
 	expect(app:error()).to_be_nil()
 end)
 
-test("Close Other Tabs leaves that tab, and goes to it when the chat showing was closed", function()
+test("Close others leaves that tab, and goes to it when the chat showing was closed", function()
 	local app = all_open()
-	choose(app, "a2", "Close Other Tabs")
+	choose(app, "a2", "Close others")
 	local now = tabs_shown(app)
 	expect(now.a2).to_be(true)
 	for _, id in { "a1", "a3", "b1", "b2" } do
@@ -299,10 +319,10 @@ test("Close Other Tabs leaves that tab, and goes to it when the chat showing was
 	expect(app:error()).to_be_nil()
 end)
 
-test("Close Tabs to the Left and to the Right close only that side", function()
+test("Close to the left and to the right close only that side", function()
 	local app = all_open()
 	-- (b2 shows, to the right: left of a3 goes, and the chat showing stays.)
-	choose(app, "a3", "Close Tabs to the Left")
+	choose(app, "a3", "Close to the left")
 	local now = tabs_shown(app)
 	expect(now.a1).to_be_nil()
 	expect(now.a2).to_be_nil()
@@ -310,7 +330,7 @@ test("Close Tabs to the Left and to the Right close only that side", function()
 	expect(now.b2).to_be(true)
 	expect(tostring(app:state("shell_route_path")):find("b2", 1, true) ~= nil).to_be(true)
 	-- (Right of a3 takes the chat showing with it: a3 opens.)
-	choose(app, "a3", "Close Tabs to the Right")
+	choose(app, "a3", "Close to the right")
 	now = tabs_shown(app)
 	expect(now.a3).to_be(true)
 	expect(now.b1).to_be_nil()
@@ -325,12 +345,12 @@ test("a tab still opens its chat on a click, and reorders by a drag, with its me
 	app:frames(20)
 	expect(tostring(app:state("shell_route_path")):find("a1", 1, true) ~= nil).to_be(true)
 	expect(box(app, "#session-tab-a1").x < box(app, "#session-tab-a2").x).to_be(true)
-	-- (To the tab past the next: it passes the next one's middle on the way.
-	-- Dropped on a tab's own middle, it stays before that tab.)
+	-- (It takes the slot under the pointer, those between closing up.)
 	app:drag("#session-tab-a1", "#session-tab-a3")
 	app:frames(40)
-	expect(box(app, "#session-tab-a2").x < box(app, "#session-tab-a1").x).to_be(true)
-	expect(box(app, "#session-tab-a1").x < box(app, "#session-tab-a3").x).to_be(true)
+	expect(box(app, "#session-tab-a2").x < box(app, "#session-tab-a3").x).to_be(true)
+	expect(box(app, "#session-tab-a3").x < box(app, "#session-tab-a1").x).to_be(true)
+	expect(app:has("#session-tabs-band")).to_be(false)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -349,35 +369,48 @@ local function letter(app: any, tab: string, at: number): string?
 	return line:match('"(.-)"')
 end
 
-test("a chat alone has one tab, replaced as you navigate, until chats are composed", function()
+test("each chat opened keeps its tab, in the order opened; opened again, it goes to that tab", function()
 	local app = mount("shell_fixture.luau")
 	app:resize(1400, 800)
 	app:frames(30)
 	open(app, "Fix the build")
-	expect(tabs_shown(app).a1).to_be(true)
 	open(app, "Write the docs")
-	local now = tabs_shown(app)
-	expect(now.a1).to_be_nil()
-	expect(now.a2).to_be(true)
-	-- Composed: its tab stays, and the next chat alone has one beside it.
-	split(app, { "a1", "a2" })
 	open(app, "Ship the release")
-	now = tabs_shown(app)
+	local now = tabs_shown(app)
 	expect(now.a1).to_be(true)
+	expect(now.a2).to_be(true)
 	expect(now.b1).to_be(true)
-	-- That one's replaced, where it stands; the composed one's left alone.
-	local at = box(app, "#session-tab-b1").x
-	open(app, "Tidy the tests")
-	app:frames(30)
-	now = tabs_shown(app)
-	expect(now.a1).to_be(true)
-	expect(now.b1).to_be_nil()
-	expect(now.a3).to_be(true)
-	expect(box(app, "#session-tab-a3").x).to_be(at)
+	expect(box(app, "#session-tab-a1").x < box(app, "#session-tab-a2").x).to_be(true)
+	expect(box(app, "#session-tab-a2").x < box(app, "#session-tab-b1").x).to_be(true)
+	open(app, "Fix the build")
+	expect(#(app:state("inset_split_trees") :: any)).to_be(3)
+	expect(route_has(app, "a1")).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
-test("a tab left with one chat is the tab for a chat alone, and ⌘W on it goes to a new chat", function()
+test("closing a tab goes to the next, else the one before, the last to a new chat; never the window", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 800)
+	app:frames(30)
+	open(app, "Fix the build")
+	open(app, "Write the docs")
+	open(app, "Ship the release")
+	open(app, "Write the docs")
+	app:command("shell.close")
+	app:frames(40)
+	expect(route_has(app, "b1")).to_be(true)
+	app:command("shell.close")
+	app:frames(40)
+	expect(route_has(app, "a1")).to_be(true)
+	app:command("shell.close")
+	app:frames(40)
+	expect(app:state("shell_route_path")).to_be("/")
+	expect(#(app:state("inset_split_trees") :: any)).to_be(0)
+	expect(app:has("#session-tab-draft")).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("a split's pane closed leaves the tab with the other chat", function()
 	local app = mount("shell_fixture.luau")
 	app:resize(1400, 800)
 	app:frames(30)
@@ -387,19 +420,45 @@ test("a tab left with one chat is the tab for a chat alone, and ⌘W on it goes 
 	app:frames(40)
 	expect(#(app:state("inset_split_trees") :: any)).to_be(1)
 	expect(app:state("shell_route_path") ~= "/").to_be(true)
-	-- With a split there to go to, still a new chat.
-	app:set_state("inset_split_trees", {
-		{ kind = "leaf", id = "a1", key = "solo" },
-		{ kind = "row", key = "pair", children = { { kind = "leaf", id = "a3" }, { kind = "leaf", id = "b1" } } },
-	})
+	expect(app:error()).to_be_nil()
+end)
+
+test("the new chat's page is a tab of its own, last; closed, it goes to the tab before", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 800)
 	app:frames(30)
+	expect(app:has("#session-tab-draft")).to_be(true)
 	open(app, "Fix the build")
+	app:frames(30)
+	expect(app:has("#session-tab-draft")).to_be(false)
+	expect(tabs_shown(app).a1).to_be(true)
+	app:click("#rail-new-chat")
+	app:frames(30)
+	expect(box(app, "#session-tab-a1").x < box(app, "#session-tab-draft").x).to_be(true)
+	expect(tabs_shown(app).a1).to_be(true)
 	app:command("shell.close")
 	app:frames(40)
-	expect(app:state("shell_route_path")).to_be("/")
+	expect(route_has(app, "a1")).to_be(true)
+	expect(app:has("#session-tab-draft")).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
+
+test("Close idle tabs closes the tabs with nothing going on, not the one showing", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 800)
+	app:frames(30)
+	-- (Fix the build is at work; Ship the release awaits you; the rest, neither.)
+	open(app, "Fix the build")
+	open(app, "Write the docs")
+	open(app, "Tidy the tests")
+	open(app, "Ship the release")
+	choose(app, "a3", "Close idle tabs")
 	local now = tabs_shown(app)
-	expect(now.solo).to_be_nil()
-	expect(now.pair).to_be(true)
+	expect(now.a1).to_be(true)
+	expect(now.b1).to_be(true)
+	expect(now.a2).to_be_nil()
+	expect(now.a3).to_be_nil()
+	expect(route_has(app, "b1")).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -417,7 +476,7 @@ test("a tab's panes stack, three at most, the pane focused at the far left", fun
 	-- (The pane focused at the far left, the others behind it to the right.)
 	expect(middle.x > front.x).to_be(true)
 	expect(back.x > middle.x).to_be(true)
-	expect(front.x < box(app, "#session-tab-a1").x + 8).to_be(true)
+	expect(front.x < box(app, "#session-tab-a1").x + 12).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -438,10 +497,6 @@ test("the pane focused comes to the front of the stack, the one before it behind
 	expect(letter(app, "a1", 2)).to_be("A")
 	expect(app:error()).to_be_nil()
 end)
-
-local function route_has(app: any, id: string): boolean
-	return tostring(app:state("shell_route_path")):find(id, 1, true) ~= nil
-end
 
 local function panes_of(app: any, key: string): { string }
 	for _, t in app:state("inset_split_trees") :: any do
@@ -485,7 +540,7 @@ test("a chat kept in two tabs stays in the first", function()
 	expect(app:error()).to_be_nil()
 end)
 
-test("a closed split's tab stays closed: a chat of its opened again takes the tab for a chat alone", function()
+test("a closed split's tab stays closed: a chat of its opened again has a tab of its own", function()
 	local app = all_open()
 	app:set_state("inset_split_trees", {
 		{ kind = "row", key = "both", children = { { kind = "leaf", id = "a1" }, { kind = "leaf", id = "b1" } } },
@@ -493,15 +548,15 @@ test("a closed split's tab stays closed: a chat of its opened again takes the ta
 	})
 	app:frames(30)
 	open(app, "Write the docs")
-	choose(app, "both", "Close Tab")
+	choose(app, "both", "Close tab")
 	expect(tabs_shown(app).both).to_be_nil()
 	open(app, "Fix the build")
 	app:frames(30)
 	expect(tabs_shown(app).both).to_be_nil()
 	local kept = app:state("inset_split_trees") :: any
-	expect(#kept).to_be(1)
-	expect(kept[1].kind).to_be("leaf")
-	expect(kept[1].id).to_be("a1")
+	expect(#kept).to_be(2)
+	expect(kept[2].kind).to_be("leaf")
+	expect(kept[2].id).to_be("a1")
 	-- Nor is the other chat kept anywhere.
 	expect(app:has("#split-pane-b1")).to_be(false)
 	expect(app:error()).to_be_nil()
@@ -514,11 +569,11 @@ test("tabs kept from before keep their order, a split where its first chat stood
 	app:set_state("inset_split_trees", { { kind = "row", children = { { kind = "leaf", id = "a2" }, { kind = "leaf", id = "a3" } } } })
 	app:set_state("shell_session_tabs", { "a1", "a2", "b1", "a3" })
 	app:frames(30)
-	-- (Of the chats alone, one tab: the last.)
 	local kept = app:state("inset_split_trees") :: any
-	expect(#kept).to_be(2)
-	expect(kept[1].kind).to_be("row")
-	expect(kept[2].id).to_be("b1")
+	expect(#kept).to_be(3)
+	expect(kept[1].id).to_be("a1")
+	expect(kept[2].kind).to_be("row")
+	expect(kept[3].id).to_be("b1")
 	expect(#(app:state("shell_session_tabs") :: any)).to_be(0)
 	expect(app:error()).to_be_nil()
 end)
@@ -550,7 +605,7 @@ test("a tab's corner says a chat awaits you over one at work, and its × comes u
 	expect(app:error()).to_be_nil()
 end)
 
-test("a chat opened with no tab replaces the tab for a chat alone", function()
+test("a chat opened with no tab gets one at the end", function()
 	local app = mount("shell_fixture.luau")
 	app:resize(1400, 800)
 	app:frames(30)
@@ -558,8 +613,8 @@ test("a chat opened with no tab replaces the tab for a chat alone", function()
 	open(app, "Write the docs")
 	open(app, "Tidy the tests")
 	local kept = app:state("inset_split_trees") :: any
-	expect(#kept).to_be(1)
-	expect(kept[1].id).to_be("a3")
+	expect(#kept).to_be(3)
+	expect(kept[3].id).to_be("a3")
 	expect(app:error()).to_be_nil()
 end)
 
@@ -588,7 +643,7 @@ test("a chat in another tab goes to that tab, replacing nothing", function()
 	expect(app:error()).to_be_nil()
 end)
 
-test("from a new chat's page a chat opened replaces the tab for a chat alone too", function()
+test("from a new chat's page a chat opened gets a tab, the others kept", function()
 	local app = mount("shell_fixture.luau")
 	app:resize(1400, 800)
 	app:frames(30)
@@ -598,8 +653,8 @@ test("from a new chat's page a chat opened replaces the tab for a chat alone too
 	open(app, "Write the docs")
 	app:frames(30)
 	local kept = app:state("inset_split_trees") :: any
-	expect(#kept).to_be(1)
-	expect(kept[1].id).to_be("a2")
+	expect(#kept).to_be(2)
+	expect(kept[2].id).to_be("a2")
 	expect(app:error()).to_be_nil()
 end)
 
@@ -615,5 +670,237 @@ test("a split turned from a row to a column has a divider that goes up and down"
 	app:frames(30)
 	expect(app:wait("#split-divider-col:/1", { timeout_ms = 2000 })).to_be(true)
 	expect(app:wait("#split-divider-row:/1", { timeout_ms = 200 })).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
+
+test("a chat starting a run gets its tab back; closed, it stays closed till the next", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 800)
+	app:frames(30)
+	open(app, "Write the docs")
+	expect(tabs_shown(app).a3).to_be_nil()
+	app:command("start_a3")
+	app:frames(30)
+	expect(tabs_shown(app).a3).to_be(true)
+	expect(route_has(app, "a2")).to_be(true)
+	choose(app, "a3", "Close tab")
+	expect(tabs_shown(app).a3).to_be_nil()
+	-- (Still at it, and another chat moving: closed.)
+	app:command("finish")
+	app:frames(30)
+	expect(tabs_shown(app).a3).to_be_nil()
+	app:command("finish_a3")
+	app:frames(30)
+	expect(tabs_shown(app).a3).to_be_nil()
+	app:command("start_a3")
+	app:frames(30)
+	expect(tabs_shown(app).a3).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("a chat in its own work tree wears how far ahead it is, or that it's in", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 800)
+	app:frames(30)
+	open(app, "Fix the build")
+	expect(app:has("#session-tab-a1-tree")).to_be(false)
+	app:command("tree_ahead")
+	app:frames(10)
+	expect(app:tree("#session-tab-a1-tree"):find("3 commits not in fix/build", 1, true) ~= nil).to_be(true)
+	app:command("tree_merged")
+	app:frames(10)
+	expect(app:tree("#session-tab-a1-tree"):find("In fix/build, 1 uncommitted file", 1, true) ~= nil).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("the panel's seam double-clicked goes back to the columns split equally", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 800)
+	app:frames(30)
+	open(app, "Fix the build")
+	local function width(of: string): number
+		local line = app:tree(of):match("[^\n]+") :: string
+		return tonumber(line:match(" ([%d%.]+)x[%d%.]+")) :: number
+	end
+	app:click('#titlebar >> role:button "Panel"')
+	app:frames(40)
+	local panel = width("#shell-files")
+	app:set_state("shell_files_width", 820)
+	app:frames(40)
+	expect(width("#shell-files") ~= panel).to_be(true)
+	app:double_click('role:slider "Resize files"')
+	app:frames(40)
+	expect(width("#shell-files")).to_be(panel)
+	expect(app:error()).to_be_nil()
+end)
+
+local function focused_in(app: any, target: string): boolean
+	return app:tree(target):find(" focused", 1, true) ~= nil
+end
+
+test("a step back lands in the composer", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 800)
+	app:frames(30)
+	open(app, "Fix the build")
+	open(app, "Write the docs")
+	app:click('#titlebar >> role:button "Back"')
+	app:frames(30)
+	expect(route_has(app, "a1")).to_be(true)
+	expect(focused_in(app, "#chat-composer")).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("leaving settings puts the keyboard back in the composer", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 800)
+	app:frames(30)
+	open(app, "Fix the build")
+	app:command("shell.settings")
+	app:frames(20)
+	app:key("escape")
+	app:frames(30)
+	expect(focused_in(app, "#chat-composer")).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+local function tab_ids(app: any): { string }
+	local out: { string } = {}
+	for _, t in app:state("inset_split_trees") :: any do
+		table.insert(out, t.key or t.id or "")
+	end
+	return out
+end
+local function shell_with(titles: { string }): any
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 800)
+	app:frames(30)
+	for _, title in titles do
+		open(app, title)
+	end
+	return app
+end
+
+test("chats heard before the live states don't reopen a closed tab on a launch", function()
+	local app = shell_with({ "Fix the build", "Tidy the tests" })
+	app:command("start_a3")
+	app:frames(5)
+	app:click('#session-tab-a1')
+	app:frames(20)
+	choose(app, "a3", "Close tab")
+	app:frames(20)
+	expect(app:has("#session-tab-a3")).to_be(false)
+	-- As a launch: nothing seen yet, the chats first, their live states after.
+	app:set_state("shell_tabs_statuses", {})
+	app:command("chats_before_live")
+	app:frames(5)
+	app:command("live_arrives")
+	app:frames(20)
+	expect(app:has("#session-tab-a3")).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
+
+test("a run gone quiet and back doesn't reopen a closed tab; a run after it does", function()
+	local app = shell_with({ "Fix the build", "Tidy the tests" })
+	app:command("start_a3")
+	app:frames(5)
+	app:click('#session-tab-a1')
+	app:frames(20)
+	choose(app, "a3", "Close tab")
+	app:frames(20)
+	app:command("stale_a3")
+	app:frames(5)
+	app:command("start_a3")
+	app:frames(20)
+	expect(app:has("#session-tab-a3")).to_be(false)
+	app:command("finish_a3")
+	app:frames(5)
+	app:command("start_a3")
+	app:frames(20)
+	expect(app:has("#session-tab-a3")).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("the chat showing deleted elsewhere: its tab goes, a new chat in its place, Back never lands on it", function()
+	local app = shell_with({ "Fix the build", "Write the docs" })
+	app:command("gone_a2")
+	app:frames(20)
+	expect(app:state("shell_route_path")).to_be("/")
+	expect(app:has("#session-tab-a2")).to_be(false)
+	for _ = 1, 3 do
+		if app:state("shell_route_path"):find("a2", 1, true) then
+			break
+		end
+		app:click('#titlebar >> role:button "Back"')
+		app:frames(10)
+	end
+	expect(app:state("shell_route_path"):find("a2", 1, true)).to_be_nil()
+	expect(app:error()).to_be_nil()
+end)
+
+test("a chat behind in the history deleted elsewhere: a step back passes it", function()
+	local app = shell_with({ "Fix the build", "Write the docs" })
+	app:command("gone_a1")
+	app:frames(20)
+	expect(#(app:state("shell_route_history") :: any).entries).to_be(2)
+	app:click('#titlebar >> role:button "Back"')
+	app:frames(20)
+	expect(app:state("shell_route_path")).to_be("/")
+	expect(app:error()).to_be_nil()
+end)
+
+test("a split's chat deleted: the tab keeps the rest, alone as a chat's own", function()
+	local app = shell_with({ "Fix the build" })
+	app:set_state("inset_split_trees", { { kind = "row", key = "pair", children = { { kind = "leaf", id = "a1" }, { kind = "leaf", id = "a2" } } } })
+	app:frames(20)
+	app:command("gone_a2")
+	app:frames(20)
+	local kept = app:state("inset_split_trees") :: any
+	expect(#kept).to_be(1)
+	expect(kept[1].kind).to_be("leaf")
+	expect(kept[1].id).to_be("a1")
+	expect(app:error()).to_be_nil()
+end)
+
+test("a split with all its chats deleted leaves the store", function()
+	local app = shell_with({ "Fix the build" })
+	app:set_state("inset_split_trees", { { kind = "leaf", id = "a1" }, { kind = "row", key = "both", children = { { kind = "leaf", id = "a2" }, { kind = "leaf", id = "a3" } } } })
+	app:frames(20)
+	app:command("gone_a2")
+	app:command("gone_a3")
+	app:frames(20)
+	expect(#tab_ids(app)).to_be(1)
+	expect(app:error()).to_be_nil()
+end)
+
+test("dragging a divider after a deleted chat changed the tree's shape works", function()
+	local app = shell_with({ "Write the docs" })
+	app:set_state("inset_split_trees", { { kind = "row", key = "t", children = {
+		{ kind = "leaf", id = "a1" },
+		{ kind = "col", children = { { kind = "leaf", id = "a2" }, { kind = "leaf", id = "a3" }, { kind = "leaf", id = "b1" } } },
+	} } })
+	app:frames(20)
+	app:command("gone_a1")
+	app:frames(20)
+	app:drag("#split-divider-col:/2", "#split-pane-a2")
+	app:frames(10)
+	expect(app:error()).to_be_nil()
+end)
+
+test("a plain navigation to where Forward would go plays no slide", function()
+	local app = shell_with({ "Fix the build", "Write the docs", "Fix the build" })
+	app:click('#titlebar >> role:button "Back"')
+	app:frames(30)
+	local seq = (app:state("shell_route_stepped") :: any).seq
+	open(app, "Fix the build")
+	expect((app:state("shell_route_stepped") :: any).seq).to_be(seq)
+	local h = app:state("shell_route_history") :: any
+	expect(h.at).to_be(#h.entries)
+	-- A real step forward does.
+	app:click('#titlebar >> role:button "Back"')
+	app:frames(30)
+	app:click('#titlebar >> role:button "Forward"')
+	app:frames(30)
+	expect((app:state("shell_route_stepped") :: any).seq).to_be(seq + 2)
 	expect(app:error()).to_be_nil()
 end)

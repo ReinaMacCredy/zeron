@@ -24,6 +24,10 @@ export type Props = {
 	caption_over_art: boolean?,
 	-- A new chat's page has a panel too (v3's).
 	panel_on_home: boolean?,
+	-- v2's window has none of them.
+	nav_left: ((closed_up: number) -> number)?,
+	wordmark: (() -> number)?,
+	new_tab: (() -> number)?,
 }
 
 -- Production's "corner card" glyph (icons.rs `corner_card_glyph`): the
@@ -171,6 +175,12 @@ return function(props: Props): Node
 		ds.TitleBar {
 			collapsed = props.collapsed,
 			on_toggle = fit.toggle_sidebar,
+			nav_left = props.nav_left,
+			wordmark = props.wordmark,
+			new_tab = props.new_tab,
+			on_new_tab = function()
+				route.new_chat()
+			end,
 			-- (No glass behind the window's buttons and the controls: they stand on
 			-- the top bar, over nothing but the window.)
 			island = function(): boolean

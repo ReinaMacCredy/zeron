@@ -16,6 +16,8 @@ local sessions = require("@account/sessions")
 -- (Its start as it is, a new chat: not the launch's jump to the latest
 -- session, which its tests drive themselves.)
 require("@app/screens/shell/route").launched:set(true)
+-- (No tabs from what's going on as it starts: its tests open their own.)
+require("@app/screens/shell/tab_rules").seeded:set(true)
 local actions = require("@screens/onboarding/actions")
 local store = require("@app/screens/chat/store")
 -- The host's chats, as the engine has them: one record a chat (its session,
@@ -258,6 +260,7 @@ local function publish()
 		places = { pinned = table.clone(model.places.pinned), sections = sections },
 		places_ready = true,
 		connection = (model :: any).connection,
+		live = (model :: any).live,
 		-- Side chats, by their session (`side_chats`).
 		children = (model :: any).children,
 	} :: any)
@@ -979,6 +982,102 @@ ui.command {
 	end,
 }
 -- A chat beside each of the five, to compose tabs from (tests/session_tabs).
+-- A chat's work tree moving on: ahead of its base, then in it with a file left over.
+ui.command {
+	id = "tree_ahead",
+	title = "Fix the build is ahead",
+	run = function()
+		find("a1").tree = { kind = "ahead", commits = 3, dirty = 0 }
+		publish()
+	end,
+}
+ui.command {
+	id = "tree_merged",
+	title = "Fix the build is merged",
+	run = function()
+		find("a1").tree = { kind = "merged", commits = 0, dirty = 1 }
+		publish()
+	end,
+}
+-- A chat with no tab starting a run, finishing, and starting another.
+-- A chat deleted on another device; one gone quiet; what a launch hears first.
+for _, id in { "a1", "a2", "a3", "b1", "b2", "p1", "p2" } do
+	ui.command {
+		id = `gone_{id}`,
+		title = `{id} is deleted elsewhere`,
+		run = function()
+			for i, c in model.chats do
+				if c.id == id then
+					table.remove(model.chats, i)
+					break
+				end
+			end
+			publish()
+		end,
+	}
+	ui.command {
+		id = `quiet_{id}`,
+		title = `{id} has nothing going on`,
+		run = function()
+			find(id).status = nil
+			publish()
+		end,
+	}
+	ui.command {
+		id = `old_{id}`,
+		title = `{id} was last used long ago`,
+		run = function()
+			find(id).updated = NOW - 9 * DAY
+			publish()
+		end,
+	}
+end
+ui.command {
+	id = "stale_a3",
+	title = "Tidy the tests goes quiet",
+	run = function()
+		find("a3").status = nil
+		find("a3").stale = true
+		publish()
+	end,
+}
+ui.command {
+	id = "chats_before_live",
+	title = "Chats heard, live states not yet",
+	run = function()
+		(model :: any).live = false
+		for _, c in model.chats do
+			c.status = nil
+		end
+		publish()
+	end,
+}
+ui.command {
+	id = "live_arrives",
+	title = "Live states heard: Tidy the tests is working",
+	run = function()
+		(model :: any).live = true
+		find("a3").status = "working"
+		publish()
+	end,
+}
+ui.command {
+	id = "start_a3",
+	title = "Tidy the tests starts working",
+	run = function()
+		find("a3").status = "working"
+		find("a3").stale = nil
+		publish()
+	end,
+}
+ui.command {
+	id = "finish_a3",
+	title = "Tidy the tests finishes",
+	run = function()
+		find("a3").status = nil
+		publish()
+	end,
+}
 ui.command {
 	id = "partner_chats",
 	title = "Five more chats",

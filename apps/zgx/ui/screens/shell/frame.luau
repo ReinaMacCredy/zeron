@@ -22,7 +22,8 @@ local SCRIM_FULL = { angle = 180, stops = { { 0, "#0000001a" }, { 0.45, "#000000
 local TAB_FADE = { angle = 180, stops = { "#000f", "#0000" } }
 
 M.page_art = ui.computed(function(): string?
-	if route.current:get().name == "plugin" or appearance.showing:get() ~= "image" then
+	local page = route.current:get().name
+	if page == "plugin" or page == "settings" or appearance.showing:get() ~= "image" then
 		return nil
 	end
 	local name = route.chat:get().name

@@ -68,10 +68,11 @@ end
 -- The two sides mirrored, with `expand` (its name as it stands now) in `scope`.
 local function expect_mirrored(app: any, scope: string, expand: string)
 	local toggle = must(app, "#titlebar", '"Toggle sidebar"')
-	local back = must(app, "#titlebar", '"Back"')
 	local panel = must(app, "#titlebar", '"Panel"')
 	local arrows = must(app, scope, expand)
-	expect(gap(arrows, panel)).to_be(gap(toggle, back))
+	-- (Back's off the toggle by as much, closed up; with the sidebar open it stands over
+	-- the page.)
+	expect(gap(arrows, panel)).to_be(8)
 	expect(arrows.y).to_be(panel.y)
 	expect(arrows.y).to_be(toggle.y)
 	expect(arrows.w).to_be(panel.w)

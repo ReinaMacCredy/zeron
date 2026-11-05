@@ -152,6 +152,21 @@ M.SNAPPY = { open = 250, close = 200, zoom = 200, ease = "out(4)" }
 -- cubic-bezier(0.4, 0, 0.2, 1)): what the pointer lights fades in at once
 -- and out as it leaves, from wherever it stood. `hover()` is it for
 -- `ui.tween`, at once with motion reduced.
+local BOUNCE_MS, BOUNCE_OUT, BOUNCE_BY = 220, 0.32, 5
+function M.edge_bounce(state: any, sign: number)
+	if M.reduced_now() then
+		return
+	end
+	anime.animate(state, {
+		value = sign * BOUNCE_BY,
+		duration = BOUNCE_MS * BOUNCE_OUT,
+		ease = "inOut(2)",
+		onComplete = function()
+			anime.animate(state, { value = 0, duration = BOUNCE_MS * (1 - BOUNCE_OUT), ease = "inOut(2)" })
+		end,
+	})
+end
+
 M.HOVER_MS, M.HOVER_EASE = 150, "cubicBezier(.4,0,.2,1)"
 function M.hover(): TweenOptions
 	return { duration = M.ms(M.HOVER_MS), ease = M.HOVER_EASE }

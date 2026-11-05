@@ -29,6 +29,7 @@ local view = require("@app/screens/shell/view")
 local fit = require("@app/screens/shell/fit")
 local motion = require("@ds/motion")
 local boundary = require("@app/screens/shell/boundary")
+local top_bar = require("@app/screens/shell/top_bar")
 local locale = require("@ds/locale")
 local ds_session_row = require("@ds/session_row")
 
@@ -1344,6 +1345,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 		top = props.top,
 		card = not props.island,
 		card_x = rail.W + 5,
+		options_x = if props.island then nil else top_bar.options_x,
 		card_bg = function(): string
 			local frame: any = boundary.load("@app/screens/shell/frame")
 			return if frame and frame.framed:get() then "#00000000" else "$zeron.inset.bg"

@@ -655,9 +655,8 @@ function M.setup()
 		ui.theme.tokens {
 			zeron = {
 				inset = {
-					-- A card lifted off the window, lighter than it: the
-					-- theme's raised surface.
-					bg = if dark then "alpha({text.primary}, 0.035)" else "alpha({background}, 0.55)",
+					-- (Lifted by its edge, not its tone: Zeron's, 13 on 17 dark, 255 on 245 light.)
+					bg = if dark then "{zeron.window}" else "over({zeron.window}, {surface.raised})",
 					framed_bg = if dark then "{zeron.window}" else "over({zeron.window}, {surface.raised})",
 					-- A pane with focus a touch brighter than the cards round it.
 					active = if dark then "alpha({text.primary}, 0.06)" else "alpha({background}, 0.85)",

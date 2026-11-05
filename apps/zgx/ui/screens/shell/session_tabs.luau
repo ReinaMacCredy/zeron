@@ -1,41 +1,56 @@
--- The tabs on the top bar over the page (`splits` keeps them): one for each two chats
--- or more composed together, and one for a chat alone, which navigating replaces. Each
--- shows its panes' tiles stacked (three at most) with the pane focused last in front,
--- and its title. A chat dragged onto one joins it. A click goes there, a
--- drag reorders them, its × closes the tab, and a split with it (the sessions go on,
--- in the sidebar).
 --
---   session_tabs.Strip { left = fn, right = fn }
 
 local ds = require("@ds")
 local ContextMenu = require("@ds/context_menu")
 local SessionRow = require("@ds/session_row")
 local motion = require("@ds/motion")
+local status = require("@ds/status")
 local look = require("@app/screens/shell/project_look")
 local route = require("@app/screens/shell/route")
 local sessions = require("@account/sessions")
 local splits = require("@app/screens/shell/split")
+local appearance = require("@app/screens/shell/appearance")
+local folder = require("@app/screens/shell/folder_tab")
+local chat_shared = require("@app/screens/chat/shared")
+require("@app/screens/shell/tab_rules")
 
 local M = {}
 
-local TAB_H, SLOT, LABEL_MAX, TILE = 28, 20, 160, 20
+local TAB_H, SLOT, TILE = 32, 24, 20
+local TAB_MAX, TAB_MIN, TAB_GAP = 216, 144, 4
+local TITLE_SIZE = ui.raw(12, "Zeron's tab title, at any text size")
+local BAR, LIFT = 42, 30
+local DROP = (BAR - TAB_H) / 2
+local THUMB_W, THUMB_H = 150, 92
 local SLIDE = { duration = 150, ease = "out(3)" }
 local FADE, FADE_RATE = 36, 12
 -- A tab's stacked tiles, as a fanned hand of cards: at most this many, and for each
 -- place how far along it stands and how far it's turned. Alone, a tile stands square.
 local STACK = 3
 local FAN = { { x = 0, turn = -3 }, { x = 6, turn = 3 }, { x = 10, turn = 7 } }
+local DRAFT = "draft"
 
--- Each tab's node, for its width (`Strip` keeps the one showing in view).
-local tab_refs: { [string]: any } = {}
+local rows = splits.tree.steady(function(): { [string]: any }
+	local out: { [string]: any } = {}
+	for _, c in sessions.now:get().chats do
+		out[c.id] = {
+			id = c.id,
+			title = c.title,
+			status = c.status,
+			agent = c.agent,
+			harness = c.harness,
+			agent_icon = (c :: any).agent_icon,
+			project = c.project,
+			branch = c.branch,
+			tree = (c :: any).tree,
+			pr = (c :: any).pr,
+		}
+	end
+	return out
+end)
 
 local function chat_of(id: string): any
-	for _, c in sessions.now:get().chats do
-		if c.id == id then
-			return c
-		end
-	end
-	return nil
+	return rows:get()[id]
 end
 local function project_of(c: any): any
 	if not c or not c.project then
@@ -54,10 +69,11 @@ local recent = ui.persist("shell_session_tabs_recent", {} :: { string })
 
 -- The tabs with a chat still there, by key. (`splits` keeps them.)
 local shown = ui.computed(function(): { string }
+	local live = rows:get()
 	local out: { string } = {}
 	for _, key in splits.tabs:get() do
 		for _, id in splits.panes(key) do
-			if chat_of(id) then
+			if live[id] then
 				table.insert(out, key)
 				break
 			end
@@ -65,6 +81,49 @@ local shown = ui.computed(function(): { string }
 	end
 	return out
 end)
+M.shown = shown
+M.recent = recent
+M.DRAFT = DRAFT
+
+local function draft_held(): boolean
+	local d = chat_shared.draft_of("")
+	return d.text ~= "" or #d.cargo > 0
+end
+local draft_put_away = ui.state("shell_session_tabs_draft_away", false)
+local draft_shows = ui.computed(function(): boolean
+	local name = route.chat:get().name
+	return name == "home" or (draft_held() and not draft_put_away:get())
+end)
+M.draft_shows = draft_shows
+ui.effect(function()
+	if route.chat:get().name == "home" and draft_put_away:peek() then
+		draft_put_away:set(false)
+	end
+end)
+
+local function selected_key(): string?
+	local name = route.current:get().name
+	if name == "session" then
+		return splits.current_key()
+	end
+	return if name == "home" then DRAFT else nil
+end
+
+type Drag = { key: string, w: number, order: { string }, grab: number?, out: boolean }
+local drag = ui.state("shell_session_tab_drag", nil :: Drag?)
+local rider_x = ui.state("shell_session_tab_rider", 0)
+local slot_w = ui.state("shell_session_tab_slot", 0)
+-- (The rider isn't hovered: the pointer's its own.)
+local rider_hover = ui.state("shell_session_tab_rider_hover", false)
+local landed = false
+-- (Frozen for a drag, or the strip would shrink as the slot closes.)
+local tab_w = ui.state("shell_session_tab_w", TAB_MAX)
+local function inset(): boolean
+	return appearance.inset_card:get()
+end
+local function pad(): number
+	return if inset() then folder.FLARE else 0
+end
 
 -- A tab's panes, as many as show (`STACK`), the one focused last first: the ones
 -- focused in that order, then the rest as they stand in the split.
@@ -84,15 +143,12 @@ local function stack_of(key: string): { string }
 	return out
 end
 
--- What a tab's corner says: of its chats, any awaiting a person first, else any
--- at work (the sidebar's order of what's most pressing).
-local TAB_STATES = { approval = true, input = true, working = true, connecting = true }
 local function tab_state(key: string): string?
 	local best: string? = nil
 	for _, id in splits.panes(key) do
 		local c = chat_of(id)
 		local kind = if c then c.status else nil
-		if kind and TAB_STATES[kind] and (not best or SessionRow.URGENCY[kind] < SessionRow.URGENCY[best]) then
+		if kind and SessionRow.URGENCY[kind] and (not best or SessionRow.URGENCY[kind] < SessionRow.URGENCY[best]) then
 			best = kind
 		end
 	end
@@ -103,6 +159,7 @@ end
 local function face(key: string): string
 	return stack_of(key)[1] or splits.panes(key)[1] or key
 end
+M.face = face
 
 -- A chat a drag carries, for the tabs: not a tab of them being moved.
 local function carried(payload: any): string?
@@ -130,28 +187,51 @@ ui.effect(function()
 	end
 end)
 
-local function close(key: string)
-	local before = shown:peek()
-	local at = table.find(before, key)
-	local alone = #splits.panes(key) == 1
-	local was_showing = splits.current_key() == key
-	splits.close_tabs({ key })
-	if was_showing then
-		-- The one beside it, else a new chat. (A chat alone: always a new chat.)
-		local after = shown:peek()
-		local next_key = if at and not alone then after[math.min(at, #after)] else nil
-		if next_key then
-			route.open_session(face(next_key))
-		else
-			route.new_chat()
-		end
+local function neighbour(key: string): string?
+	local list = shown:peek()
+	local at = table.find(list, key)
+	if not at then
+		return nil
+	end
+	return list[at + 1] or (if draft_shows:peek() then DRAFT else nil) or list[at - 1]
+end
+
+local function go_to(key: string?)
+	if key == DRAFT or not key then
+		route.new_chat()
+	else
+		route.open_session(face(key))
 	end
 end
 
--- The tab showing closed, or the chat alone (⌘W): true if there was one.
+local function close(key: string)
+	local was_showing = route.current:peek().name == "session" and splits.current_key() == key
+	local next_key = if was_showing then neighbour(key) else nil
+	splits.close_tabs({ key })
+	if was_showing then
+		go_to(next_key)
+	end
+end
+
+local function close_draft()
+	local list = shown:peek()
+	local last = list[#list]
+	if draft_held() and last then
+		draft_put_away:set(true)
+	end
+	if last and route.current:peek().name == "home" then
+		route.open_session(face(last))
+	end
+end
+
 function M.close_showing(): boolean
+	local name = route.current:peek().name
+	if name == "home" then
+		close_draft()
+		return true
+	end
 	local key = splits.current_key()
-	if not key then
+	if name ~= "session" or not key then
 		return false
 	end
 	close(key)
@@ -164,10 +244,10 @@ local function close_many(list: { string }, keep: string)
 	if #list == 0 then
 		return
 	end
-	local was_showing = table.find(list, splits.current_key() or "") ~= nil
+	local was_showing = route.current:peek().name == "session" and table.find(list, splits.current_key() or "") ~= nil
 	splits.close_tabs(list)
 	if was_showing then
-		route.open_session(face(keep))
+		go_to(keep)
 	end
 end
 
@@ -179,6 +259,19 @@ local function others(id: string, side: string?): { string }
 	for i, other in list do
 		if other ~= id and (side == nil or (side == "left" and i < me) or (side == "right" and i > me)) then
 			table.insert(out, other)
+		end
+	end
+	return out
+end
+
+local function idle_tabs(): { string }
+	local showing = selected_key()
+	local out: { string } = {}
+	for _, key in shown:peek() do
+		local panes = splits.panes(key)
+		local c = rows:peek()[panes[1] or ""]
+		if key ~= showing and #panes == 1 and c and not c.status then
+			table.insert(out, key)
 		end
 	end
 	return out
@@ -284,221 +377,410 @@ local function title(id: string): string
 	return if c then c.title else ""
 end
 
+local function lead(id: string, hovered: any): Node
+	local function chat(): any
+		return chat_of(face(id))
+	end
+	return ui.presence(function(): string
+		if #stack_of(id) >= 2 then
+			return "stack"
+		end
+		local c = chat()
+		if c and (c.status == "working" or c.status == "connecting") then
+			return c.status
+		end
+		return if hovered:get() then "grip" else "mark"
+	end, function(which: string): Node
+		if which == "stack" then
+			return tile(id)
+		elseif which == "grip" then
+			return ui.div { color = "$text.secondary", ds.Icon { name = "drag-handle", size = 14 } }
+		elseif which == "mark" then
+			return SessionRow.mark(function(): any
+				return chat() or {}
+			end, function(): boolean
+				return true
+			end)
+		end
+		return ui.div { id = `session-tab-{id}-state`, SessionRow.state(which :: any) }
+	end, { shrink = 0, w = 16, h = 16, items = "center", justify = "center" })
+end
+
+local function pen(shows: () -> boolean): Node
+	return ui.show(shows, ui.div { shrink = 0, color = "$warning", ds.Icon { name = "pen", size = 13 } })
+end
+
+local function close_button(on_click: () -> ()): Node
+	return ds.IconButton {
+		label = ui.t("shell.tabs.close"),
+		tooltip = false,
+		size = "sm",
+		tone = "quiet",
+		w = SLOT,
+		h = SLOT,
+		rounded = "$radius.sm",
+		on_click = on_click,
+		ds.Icon { name = "close", size = 14 },
+	}
+end
+
+local function corner(id: string, hovered: any, active: () -> boolean): Node
+	return ui.row {
+		w = SLOT,
+		h = SLOT,
+		shrink = 0,
+		items = "center",
+		justify = "center",
+		ui.presence(function(): string
+			if hovered:get() then
+				return "close"
+			end
+			local state = tab_state(id)
+			if #splits.panes(id) >= 2 then
+				return state or (if active() then "close" else "")
+			end
+			if active() then
+				return "close"
+			end
+			return if state and state ~= "working" and state ~= "connecting" then `dot:{state}` else ""
+		end, function(which: string): Node
+			if which == "" then
+				return ui.div {}
+			elseif which == "close" then
+				return close_button(function()
+					close(id)
+				end)
+			end
+			local dot = string.match(which, "^dot:(.+)$")
+			if dot then
+				return ui.div { id = `session-tab-{id}-state`, status.StatusDot { kind = dot :: any, size = 6 } }
+			end
+			return ui.div { id = `session-tab-{id}-state`, SessionRow.state(which :: any) }
+		end, { shrink = 0 }),
+	}
+end
+
+local function tree_badge(id: string): Node
+	local function tree(): any
+		local panes = splits.panes(id)
+		local c = if #panes == 1 then chat_of(panes[1]) else nil
+		return if c and not c.pr then c.tree else nil
+	end
+	return ui.presence(function(): string
+		local t = tree()
+		return if t then `{t.kind}:{t.commits}:{t.dirty}` else ""
+	end, function(key: string): Node
+		if key == "" then
+			return ui.div {}
+		end
+		local kind, commits, dirty = string.match(key, "^(%a+):(%d+):(%d+)$")
+		local ahead = kind == "ahead"
+		local c = chat_of(face(id))
+		local base = (c and c.branch) or ui.t("shell.tabs.tree.base"):get()
+		local tip = if ahead
+			then ui.t("shell.tabs.tree.ahead", { n = tonumber(commits), base = base }):get()
+			else ui.t("shell.tabs.tree.merged", { dirty = tonumber(dirty), base = base }):get()
+		local hue = if ahead then "$text.secondary" else "$zeron.pr.merged"
+		return ui.row {
+			id = `session-tab-{id}-tree`,
+			shrink = 0,
+			h = 16,
+			ml = ui.raw(8, "Zeron's tab's gaps"),
+			px = "$space.1",
+			gap = ui.raw(3, "Zeron's badge's gap"),
+			items = "center",
+			rounded = "$radius.sm",
+			color = hue,
+			tooltip = tip,
+			label = tip,
+			ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, rounded = "$radius.sm", bg = hue, opacity = 0.08 },
+			ds.Icon { name = if ahead then "arrow-up" else "check", size = 10 },
+			if ahead then ui.text { commits, literal = true, tabular = true, font = "$font.mono", text_size = ui.raw(10, "Zeron's badge") } else nil,
+			if not ahead and tonumber(dirty) ~= 0 then ui.div { w = 5, h = 5, rounded = "$radius.full", shrink = 0, bg = "$warning" } else nil,
+		}
+	end, { shrink = 0 })
+end
+
+local function face_row(id: string, hovered: any, active: () -> boolean): { any }
+	return {
+		lead(id, hovered),
+		pen(function(): boolean
+			return #splits.panes(id) == 1 and chat_shared.draft_of(face(id)).text ~= ""
+		end),
+		-- (Together: an empty badge would take a gap from the title.)
+		ui.row {
+			grow = 1,
+			min_w = 0,
+			items = "center",
+			ds.FadeText {
+				function(): string
+					return title(id)
+				end,
+				grow = 1,
+				min_w = 0,
+				text_size = TITLE_SIZE,
+			},
+			tree_badge(id),
+		},
+		corner(id, hovered, active),
+	}
+end
+
+local function tab_box(props: { [any]: any }, active: () -> boolean, washed: () -> boolean): { [any]: any }
+	props.h = TAB_H
+	props.shrink = 0
+	props.pl = ui.raw(10, "Zeron's tab's start")
+	props.pr = ui.raw(4, "Zeron's tab's end")
+	props.gap = ui.raw(8, "Zeron's tab's gaps")
+	props.items = "center"
+	props.rounded = "$radius.md"
+	props.cursor = "pointer"
+	props.bg = function(): string
+		if active() then
+			return if inset() then "#00000000" else "$zeron.selected.bg"
+		end
+		return if washed() then "$hover" else "#00000000"
+	end
+	props.border = 1
+	props.border_color = function(): string
+		return if active() and not inset() then "$zeron.selected.ring" else "#00000000"
+	end
+	props.color = function(): string
+		return if active() or washed() then "$text.primary" else "$text.secondary"
+	end
+	return props
+end
+
+local function menu_items(id: string): { any }
+	local list = shown:peek()
+	local at = table.find(list, id) or 0
+	local items: { any } = {
+		{ label = ui.t("shell.tabs.close"):get(), icon = "close-thin", on_select = function()
+			close(id)
+		end },
+	}
+	if #list > 1 then
+		table.insert(items, { label = ui.t("shell.tabs.close_others"):get(), on_select = function()
+			close_many(others(id), id)
+		end })
+	end
+	if at < #list then
+		table.insert(items, { label = ui.t("shell.tabs.close_right"):get(), on_select = function()
+			close_many(others(id, "right"), id)
+		end })
+	end
+	if at > 1 then
+		table.insert(items, { label = ui.t("shell.tabs.close_left"):get(), on_select = function()
+			close_many(others(id, "left"), id)
+		end })
+	end
+	local idle = idle_tabs()
+	if #idle > 0 then
+		table.insert(items, { label = ui.t("shell.tabs.close_idle"):get(), on_select = function()
+			close_many(idle, id)
+		end })
+	end
+	return items
+end
+
+local function lifted_card(id: string): Node
+	local function line(part: number): Node
+		return ui.div { h = 4, w = `{part * 100}%`, rounded = ui.raw(2, "Zeron's skeleton line"), bg = "$hover" }
+	end
+	return ui.column {
+		w = THUMB_W,
+		h = THUMB_H,
+		overflow = "hidden",
+		rounded = "$radius.lg",
+		bg = "$zeron.menu.solid",
+		border = 1,
+		border_color = "$border",
+		shadow = "$shadow.lg",
+		px = ui.raw(10, "Zeron's card's sides"),
+		ui.row {
+			h = 24,
+			shrink = 0,
+			gap = "$zeron.space.tight",
+			items = "center",
+			color = "$text.primary",
+			ds.FadeText { title(id), grow = 1, min_w = 0, text_size = TITLE_SIZE },
+		},
+		ui.column { gap = ui.raw(6, "Zeron's lines' gap"), line(0.9), line(0.7), line(0.82), line(0.5) },
+	}
+end
+
+local function slot_left(at: number): number
+	return pad() + (at - 1) * (tab_w:get() + TAB_GAP)
+end
+
 local Tab = ui.component(function(props: { chat: string }): Node
 	local id = props.chat
 	local hovered = ui.use_state(false)
 	-- A chat held over it, that dropping would bring in.
 	local held = ui.use_state(false)
 	local own = ui.ref()
-	tab_refs[id] = own
-	ui.on_cleanup(function()
-		if tab_refs[id] == own then
-			tab_refs[id] = nil
-		end
-	end)
 	local function active(): boolean
-		local s = route.session:get()
-		return s ~= nil and splits.current_key() == id
+		return selected_key() == id
+	end
+	local function riding(): boolean
+		local d = drag:get()
+		return d ~= nil and d.key == id
+	end
+	local row: { [any]: any } = tab_box({
+		id = `session-tab-{id}`,
+		ref = own,
+		role = "tab",
+		label = function(): string
+			return title(id)
+		end,
+		selected = active,
+		w = function(): number
+			return if riding() then slot_w:get() else tab_w:get()
+		end,
+		opacity = function(): number
+			return if riding() then 0 else 1
+		end,
+		overflow = function(): string
+			return if riding() then "hidden" else "visible"
+		end,
+		on_hover = function(inside: boolean)
+			hovered:set(inside)
+		end,
+		on_click = function()
+			route.open_session(face(id))
+		end,
+		on_aux_click = function(e: any)
+			if e.button == "middle" then
+				close(id)
+			end
+		end,
+		on_drag = function(): any
+			local w = tab_w:peek()
+			local list = shown:peek()
+			rider_x:set(slot_left(table.find(list, id) or 1))
+			slot_w:set(w)
+			landed = false
+			drag:set({ key = id, w = w, order = list, grab = nil, out = false })
+			return { session_tab = id, session = face(id) }
+		end,
+		drag_preview = function(): Node
+			return ui.div {
+				w = THUMB_W,
+				h = THUMB_H,
+				ui.show(function(): boolean
+					local d = drag:get()
+					return d ~= nil and d.out
+				end, lifted_card(id)),
+			}
+		end,
+		drag_preview_anchor = { 0.5, 0 },
+		drag_preview_offset = { 0, -12 },
+		on_drag_end = function()
+			local d = drag:peek()
+			drag:set(nil)
+			if d and not landed then
+				splits.set_order(d.order)
+			end
+		end,
+		on_drag_over = function(payload: any)
+			if type(payload) == "table" and payload.session_tab then
+				return
+			end
+			local chat = carried(payload)
+			if chat then
+				local can = splits.can_join(chat, id)
+				if held:peek() ~= can then
+					held:set(can)
+				end
+			end
+		end,
+		on_drag_leave = function()
+			held:set(false)
+		end,
+		on_drop = function(payload: any)
+			held:set(false)
+			local chat = carried(payload)
+			if chat then
+				splits.join_tab(chat, id)
+			end
+		end,
+		on_drag_spring = function(payload: any): boolean
+			local chat = carried(payload)
+			if not chat or payload.split_pane or not held:peek() or active() then
+				return false
+			end
+			route.open_session(face(id))
+			return true
+		end,
+	}, active, function(): boolean
+		return hovered:get() or held:get()
+	end)
+	-- (Its slot closes to nothing: no padding left holding it open.)
+	row.pl = function(): any
+		return ui.raw(if riding() then 0 else 10, "Zeron's tab's start")
+	end
+	row.pr = function(): any
+		return ui.raw(if riding() then 0 else 4, "Zeron's tab's end")
+	end
+	row.border = function(): number
+		return if riding() then 0 else 1
+	end
+	for _, part in face_row(id, hovered, active) do
+		table.insert(row, part)
 	end
 	return ContextMenu {
 		label = ui.t("panel.tab.actions"),
 		ring = "$radius.lg",
 		shrink = 0,
 		items = function(): { any }
-			return {
-				{ label = ui.t("panel.tab.close"):get(), icon = "close-thin", on_select = function()
-					close(id)
-				end },
-				{ label = ui.t("panel.tab.close_others"):get(), on_select = function()
-					close_many(others(id), id)
-				end },
-				{ label = ui.t("panel.tab.close_left"):get(), on_select = function()
-					close_many(others(id, "left"), id)
-				end },
-				{ label = ui.t("panel.tab.close_right"):get(), on_select = function()
-					close_many(others(id, "right"), id)
-				end },
-			}
+			return menu_items(id)
 		end,
-		ui.row {
-			id = `session-tab-{id}`,
-			ref = own,
-			role = "tab",
-			label = function(): string
-				return title(id)
-			end,
-			selected = active,
-			h = TAB_H,
-			shrink = 0,
-			pl = ui.raw(4, "as far in as the tile is from its top"),
-			pr = ui.raw(4, "the tab's inset"),
-			gap = "$zeron.space.tight",
-			items = "center",
-			rounded = "$radius.lg",
-			cursor = "pointer",
-			bg = function(): string
-				if active() then
-					return "$zeron.selected.flat.bg"
-				end
-				return if hovered:get() or held:get() then "$hover" else "#00000000"
-			end,
-			color = function(): string
-				return if active() or hovered:get() then "$text.primary" else "$text.secondary"
-			end,
-			on_hover = function(inside: boolean)
-				hovered:set(inside)
-			end,
-			on_click = function()
-				route.open_session(face(id))
-			end,
-			on_aux_click = function(e: any)
-				if e.button == "middle" then
-					close(id)
-				end
-			end,
-			-- (`session`, as a sidebar row's: dropped on a pane, it joins the split.)
-			on_drag = function(): any
-				return { session_tab = id, session = face(id) }
-			end,
-			-- The tab as it stands, on the window's colour. (Nothing here eases: a drag's
-			-- preview has no clock for it.)
-			drag_preview = function(): Node
-				local box = own:peek()
-				local count = #stack_of(id)
-				local places: { any } = { relative = true, shrink = 0, h = TILE, w = TILE + FAN[math.clamp(count, 1, STACK)].x }
-				for at = math.min(count, STACK), 1, -1 do
-					local fan = FAN[at]
-					table.insert(places, ui.div {
-						absolute = true,
-						top = 0,
-						left = fan.x,
-						w = TILE,
-						h = TILE,
-						rounded = "$radius.sm",
-						rotate = if count >= 2 then fan.turn else 0,
-						bg = if count >= 2 then "$zeron.menu.solid" else "#00000000",
-						shadow = if count >= 2 and at == 1 then "$shadow.sm" else false,
-						pane_tile(id, at),
-					})
-				end
-				return ui.div {
-					rounded = "$radius.lg",
-					bg = "$background",
-					shadow = "$shadow.sm",
-					ui.row {
-						w = if box then box.width else nil,
-						h = TAB_H,
-						pl = ui.raw(4, "as far in as the tile is from its top"),
-						pr = ui.raw(4, "the tab's inset"),
-						gap = "$zeron.space.tight",
-						items = "center",
-						rounded = "$radius.lg",
-						bg = if active() then "$zeron.selected.flat.bg" else "#00000000",
-						color = if active() then "$text.primary" else "$text.secondary",
-						ui.div(places),
-						ds.FadeText { title(id), max_w = LABEL_MAX, min_w = 0, grow = 1, text_size = "$font.size.sm", weight = "$font.weight.medium" },
-					},
-				}
-			end,
-			on_drag_over = function(payload: any, e: any)
-				local other = if type(payload) == "table" then payload.session_tab else nil
-				if not other then
-					local chat = carried(payload)
-					if not chat then
-						return
-					end
-					-- Dropped on it, the chat joins it.
-					local can = splits.can_join(chat, id)
-					if held:peek() ~= can then
-						held:set(can)
-					end
-					return
-				end
-				if other == id then
-					return
-				end
-				local list = shown:peek()
-				local from, here = table.find(list, other), table.find(list, id)
-				if not from or not here then
-					return
-				end
-				local past_middle = e.local_x > e.w / 2
-				if (from < here and past_middle) or (from > here and not past_middle) then
-					splits.move_tab(other, id)
-				end
-			end,
-			on_drag_leave = function()
-				held:set(false)
-			end,
-			-- (A tab dropped on a tab has moved already. A chat, a sidebar's row or
-			-- a pane's head, joins it.)
-			on_drop = function(payload: any)
-				held:set(false)
-				local chat = carried(payload)
-				if not chat then
-					return
-				end
-				splits.join_tab(chat, id)
-			end,
-			-- A sidebar's chat resting on its middle shows it, so it can go among its
-			-- panes. (Not a pane's: its source would go, ending the drag.)
-			on_drag_spring = function(payload: any): boolean
-				local chat = carried(payload)
-				if not chat or payload.split_pane or not held:peek() or active() then
-					return false
-				end
-				route.open_session(face(id))
-				return true
-			end,
-			tile(id),
-			ds.FadeText {
-				function(): string
-					return title(id)
-				end,
-				max_w = LABEL_MAX,
-				min_w = 0,
-				text_size = "$font.size.sm",
-				weight = "$font.weight.medium",
-			},
-			ui.row {
-				w = SLOT,
-				h = SLOT,
-				shrink = 0,
-				items = "center",
-				justify = "center",
-				-- Its × under the pointer; else whether a chat of it awaits a person or
-				-- is at work.
-				ui.presence(function(): string
-					return if hovered:get() then "close" else tab_state(id) or ""
-				end, function(which: string): Node
-					if which == "" then
-						return ui.div {}
-					end
-					if which ~= "close" then
-						return ui.div { id = `session-tab-{id}-state`, SessionRow.state(which :: any) }
-					end
-					return ds.IconButton {
-						label = "Close tab",
-						tooltip = false,
-						size = "sm",
-						tone = "quiet",
-						w = SLOT,
-						h = SLOT,
-						rounded = "$radius.sm",
-						on_click = function()
-							close(id)
-						end,
-						ds.Icon { name = "close", size = 12 },
-					}
-				end, { shrink = 0 }),
-			},
-		},
+		ui.row(row),
 	}
 end)
 
--- `window_x`: how far the page's room stands from the window's left, followed
--- as the sidebar moves. `start`: where the tabs start in the window.
-function M.Strip(props: { window_x: () -> number, start: () -> number, right: () -> number }): Node
+local DraftTab = ui.component(function(_: {}): Node
+	local hovered = ui.use_state(false)
+	local function active(): boolean
+		return selected_key() == DRAFT
+	end
+	return ui.row(tab_box({
+		id = "session-tab-draft",
+		role = "tab",
+		label = ui.t("shell.tabs.new_session"),
+		selected = active,
+		w = function(): number
+			return tab_w:get()
+		end,
+		on_hover = function(inside: boolean)
+			hovered:set(inside)
+		end,
+		on_click = function()
+			route.new_chat()
+		end,
+		on_aux_click = function(e: any)
+			if e.button == "middle" then
+				close_draft()
+			end
+		end,
+		ui.div { shrink = 0, color = "$warning", ds.Icon { name = "pen", size = 13 } },
+		ds.FadeText { ui.t("shell.tabs.new_session"), grow = 1, min_w = 0, text_size = TITLE_SIZE },
+		ui.row {
+			w = SLOT,
+			h = SLOT,
+			shrink = 0,
+			items = "center",
+			justify = "center",
+			ui.show(function(): boolean
+				return hovered:get() or active()
+			end, close_button(close_draft)),
+		},
+	}, active, function(): boolean
+		return hovered:get()
+	end))
+end)
+
+function M.Strip(props: { window_x: () -> number, start: () -> number, right: () -> number, hidden: (() -> boolean)? }): Node
 	-- Each edge fades in full as soon as tabs run a little past it: a band only
 	-- as wide as the overflow (`fade_overflow`) is a hard edge while that's a
 	-- few points. Over the last few, as the end comes to rest, it goes.
@@ -509,65 +791,106 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		local past = (content.width or 0) - (view.width or 0) - at
 		return { math.clamp(at * FADE_RATE, 0, FADE), math.clamp(past * FADE_RATE, 0, FADE) }
 	end
+	local function slots(): number
+		return #shown:get() + (if draft_shows:get() then 1 else 0)
+	end
+	ui.effect(function()
+		local room = view.width or 0
+		local count = math.max(slots(), 1)
+		if drag:get() or room <= 0 then
+			return
+		end
+		local w = math.clamp((room - pad() * 2 - TAB_GAP * (count - 1)) / count, TAB_MIN, TAB_MAX)
+		if tab_w:peek() ~= w then
+			tab_w:set(w)
+		end
+	end)
+	local function showing_at(): number?
+		local key = selected_key()
+		if key == DRAFT then
+			return #shown:get() + 1
+		end
+		return if key then table.find(shown:get(), key) else nil
+	end
 	-- The tab showing, always clear of the overflow and its fade: as it's opened,
 	-- as tabs come and go, and as the strip's room changes (the panel opening).
 	-- (A person's own scrolling is left alone: this doesn't follow the offset.)
 	ui.effect(function()
-		local s = route.session:get()
-		local list = shown:get()
-		local total = content.width or 0
+		local at_slot = showing_at()
 		local room = view.width or 0
-		if not s or room <= 0 then
+		local w = tab_w:get()
+		if not at_slot or room <= 0 or drag:peek() then
 			return
 		end
-		for _, id in list do
-			local r = tab_refs[id]
-			if not r or (r.width or 0) <= 0 then
-				return
-			end
+		local total = pad() * 2 + slots() * w + (slots() - 1) * TAB_GAP
+		local left = slot_left(at_slot)
+		local right = left + w
+		local at = offset:peek()
+		local want = at
+		if w + 2 * FADE >= room then
+			want = left - (room - w) / 2
+		elseif left - FADE < at then
+			want = left - FADE
+		elseif right + FADE > at + room then
+			want = right + FADE - room
 		end
-		local left = 0
-		-- (The tabs' own gap, the strip's hair.)
-		local gap = (ui.theme.get("zeron.space.hair") :: number?) or 2
-		for _, id in list do
-			local w = tab_refs[id].width
-			if splits.current_key() == id then
-				local right = left + w
-				local at = offset:peek()
-				local want = at
-				if w + 2 * FADE >= room then
-					want = left - (room - w) / 2
-				elseif left - FADE < at then
-					want = left - FADE
-				elseif right + FADE > at + room then
-					want = right + FADE - room
-				end
-				want = math.clamp(want, 0, math.max(0, total - room))
-				if math.abs(want - at) > 0.5 then
-					offset:set(want)
-				end
-				return
-			end
-			left += w + gap
+		want = math.clamp(want, 0, math.max(0, total - room))
+		if math.abs(want - at) > 0.5 then
+			offset:set(want)
 		end
 	end)
-	-- Where they start, eased as the sidebar's "…" before them comes and goes.
-	local start = motion.tween(ui.computed(props.start), motion.sidebar)
+	local start = props.start
+	local function dragging_selected(): boolean
+		local d = drag:get()
+		return d ~= nil and d.key == selected_key()
+	end
+	local function over_band(_: any, e: any)
+		local d = drag:peek()
+		if not d then
+			return
+		end
+		local x = e.x - start() + offset:peek() - pad()
+		local list = shown:peek()
+		local slot = d.w + TAB_GAP
+		if d.grab == nil or d.out then
+			local at = table.find(list, d.key) or 1
+			local again = table.clone(d)
+			again.grab = if d.grab == nil then x - (at - 1) * slot else d.grab
+			again.out = false
+			drag:set(again)
+			d = again
+			anime.animate(slot_w, { value = d.w, duration = SLIDE.duration, ease = SLIDE.ease })
+		end
+		rider_x:set(pad() + math.clamp(x - (d.grab :: number), -6, (#list - 1) * slot + 6))
+		local to = math.clamp(math.floor(x / slot) + 1, 1, #list)
+		if list[to] ~= d.key then
+			splits.move_tab(d.key, list[to])
+		end
+	end
+	local function left_band()
+		local d = drag:peek()
+		if not d or d.out then
+			return
+		end
+		local again = table.clone(d)
+		again.out = true
+		drag:set(again)
+		anime.animate(slot_w, { value = 0, duration = SLIDE.duration, ease = SLIDE.ease })
+	end
 	-- From the window's left whatever the sidebar is doing, so they stay put as
-	-- it moves. (Only the tabs' own part takes the pointer: the sidebar's "…"
-	-- lies under the rest, past the margin.)
+	-- it moves. (Only the tabs' own part takes the pointer.)
 	return ui.row {
 		absolute = true,
 		left = function(): number
 			return -props.window_x()
 		end,
 		right = 0,
-		-- (On the bar's line, wherever the platform has it.)
 		top = function(): number
-			return ui.raw(ds.TitleBar.middle() - 17, "on the top bar's line")
+			return ui.raw(ds.TitleBar.middle() - BAR / 2, "on the top bar's line")
 		end,
-		h = 34,
+		h = BAR + 1,
 		pointer_events = "none",
+		hidden = props.hidden,
 		ui.row {
 			id = "session-tabs",
 			role = "tablist",
@@ -576,8 +899,9 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			grow = 1,
 			min_w = 0,
 			h_full = true,
-			ml = start,
-			items = "center",
+			ml = function(): any
+				return ui.raw(start(), "past what stands before the tabs")
+			end,
 			window_drag = true,
 			pointer_events = "auto",
 			pr = function(): any
@@ -589,12 +913,36 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 				offset = offset,
 				grow = 1,
 				min_w = 0,
-				h = TAB_H,
+				h_full = true,
 				fade_x = bands,
 				ui.row {
 					ref = content,
-					gap = "$zeron.space.hair",
-					items = "center",
+					relative = true,
+					h_full = true,
+					px = function(): any
+						return ui.raw(pad(), "room for a selected tab's flare")
+					end,
+					pt = ui.raw(DROP, "a tab stands on the bar's line"),
+					ui.show(
+						function(): boolean
+							return inset() and showing_at() ~= nil and not dragging_selected()
+						end,
+						folder.Shape {
+							id = "session-tab-folder",
+							art = true,
+							window_x = function(): number
+								return start() - offset:get() + slot_left(showing_at() or 1) - folder.FLARE
+							end,
+							left = function(): number
+								return slot_left(showing_at() or 1) - folder.FLARE
+							end,
+							top = DROP,
+							w = function(): number
+								return tab_w:get() + folder.FLARE * 2
+							end,
+							h = TAB_H + DROP + 1,
+						}
+					),
 					ui.each(shown, function(id: string): Node
 						return Tab { chat = id }
 					end, {
@@ -602,12 +950,91 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 							return id
 						end,
 						direction = "row",
-						gap = "$zeron.space.hair",
+						gap = ui.raw(TAB_GAP, "Zeron's gap between tabs"),
 						animate = motion.layout(SLIDE),
+						enter = if motion.reduced_now() then nil else { opacity = { 0, 1 }, duration = SLIDE.duration, ease = "out(3)" },
+						exit = if motion.reduced_now() then nil else { opacity = 0, duration = 120, ease = "out(3)" },
 					}),
+					ui.show(function(): boolean
+						return draft_shows:get()
+					end, ui.div {
+						ml = function(): any
+							return ui.raw(if #shown:get() > 0 then TAB_GAP else 0, "Zeron's gap between tabs")
+						end,
+						shrink = 0,
+						DraftTab {},
+					}),
+					ui.show(function(): boolean
+						local d = drag:get()
+						return d ~= nil and not d.out
+					end, ui.presence(function(): string
+						local d = drag:get()
+						return if d then d.key else ""
+					end, function(id: string): Node
+						if id == "" then
+							return ui.div {}
+						end
+						local function always(): boolean
+							return true
+						end
+						local rider: { [any]: any } = tab_box({
+							w = function(): number
+								local d = drag:get()
+								return if d then d.w else tab_w:peek()
+							end,
+							overflow = "visible",
+						}, always, function(): boolean
+							return false
+						end)
+						for _, part in face_row(id, rider_hover, always) do
+							table.insert(rider, part)
+						end
+						return ui.div {
+							id = "session-tab-rider",
+							absolute = true,
+							left = function(): number
+								return rider_x:get()
+							end,
+							top = DROP,
+							pointer_events = "none",
+							ui.show(inset, folder.Shape {
+								art = true,
+								window_x = function(): number
+									return start() - offset:get() + rider_x:get() - folder.FLARE
+								end,
+								left = -folder.FLARE,
+								top = 0,
+								w = function(): number
+									local d = drag:get()
+									return (if d then d.w else tab_w:peek()) + folder.FLARE * 2
+								end,
+								h = TAB_H + DROP + 1,
+							}),
+							ui.row(rider),
+						}
+					end)),
 				},
 			},
 		},
+		ui.show(function(): boolean
+			return drag:get() ~= nil
+		end, ui.div {
+			id = "session-tabs-band",
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			h = BAR + LIFT,
+			pointer_events = "auto",
+			drop_when = function(payload: any): boolean
+				return type(payload) == "table" and payload.session_tab ~= nil
+			end,
+			on_drag_over = over_band,
+			on_drag_leave = left_band,
+			on_drop = function()
+				landed = true
+			end,
+		}),
 	}
 end
 

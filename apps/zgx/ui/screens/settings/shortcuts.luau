@@ -105,6 +105,13 @@ do
 			table.insert(rows, { key = `key_{k.id}`, title = title_message(k), section = group_message(k.group), terms = ui.t("settings.shortcuts.row_terms") })
 		end
 	end
+	for _, id in { "window", "limit", "cycles" } do
+		table.insert(rows, {
+			key = `key_switcher_{id}`,
+			title = ui.t(`settings.shortcuts.switcher.{id}.label`),
+			section = ui.t("settings.shortcuts.switcher.section"),
+		})
+	end
 	table.insert(rows, {
 		key = "key_appshot",
 		title = ui.t("settings.shortcuts.appshot.label"),
@@ -239,6 +246,42 @@ local function restore(): Node?
 	})
 end
 
+local function switcher_section(): Node?
+	local ok, switcher = pcall(require, "@app/screens/shell/switcher")
+	if not ok or type(switcher) ~= "table" then
+		return nil
+	end
+	local s = switcher :: any
+	local windows: { any } = {}
+	for _, w in s.WINDOWS do
+		table.insert(windows, { value = w.id, label = if w.hours then w.id else ui.t("settings.shortcuts.switcher.window.all") })
+	end
+	local limits: { any } = { { value = 0, label = ui.t("settings.shortcuts.switcher.limit.none") } }
+	for _, n in { 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 30, 40, 50 } do
+		table.insert(limits, { value = n, label = tostring(n) })
+	end
+	return ds.Settings.Section {
+		title = ui.t("settings.shortcuts.switcher.section") :: any,
+		ds.Settings.Group {
+			search.anchor("key_switcher_window", ds.Settings.Row {
+				label = ui.t("settings.shortcuts.switcher.window.label") :: any,
+				description = ui.t("settings.shortcuts.switcher.window.description") :: any,
+				control = ds.Select { value = s.window, name = ui.t("settings.shortcuts.switcher.window.label"), w = 128, options = windows },
+			}),
+			search.anchor("key_switcher_limit", ds.Settings.Row {
+				label = ui.t("settings.shortcuts.switcher.limit.label") :: any,
+				description = ui.t("settings.shortcuts.switcher.limit.description") :: any,
+				control = ds.Select { value = s.limit, name = ui.t("settings.shortcuts.switcher.limit.label"), w = 128, options = limits },
+			}),
+			search.anchor("key_switcher_cycles", ds.Settings.Row {
+				label = ui.t("settings.shortcuts.switcher.cycles.label") :: any,
+				description = ui.t("settings.shortcuts.switcher.cycles.description") :: any,
+				control = ds.Switch { value = s.cycles_tabs, label = ui.t("settings.shortcuts.switcher.cycles.label") },
+			}),
+		},
+	}
+end
+
 function M.view(): Node
 	local sections: { Node } = {}
 	for _, g in grouped() do
@@ -262,6 +305,10 @@ function M.view(): Node
 	local appshot_section = appshot()
 	if appshot_section then
 		table.insert(sections, appshot_section)
+	end
+	local switcher_rows = switcher_section()
+	if switcher_rows then
+		table.insert(sections, switcher_rows)
 	end
 	if #sections == 0 then
 		table.insert(sections, ds.EmptyState {

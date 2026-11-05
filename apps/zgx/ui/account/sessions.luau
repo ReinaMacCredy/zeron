@@ -52,6 +52,8 @@ export type Chat = {
 	model: string?,
 	-- Its harness's own id for the conversation (a Codex thread's).
 	harness_session: string?,
+	preview: string?,
+	tree: { kind: string, commits: number, dirty: number }?,
 	-- Its subagents streaming now (the sidebar's pill), and its side chats:
 	-- how many, and how many are working.
 	running_subagents: number?,
@@ -109,6 +111,7 @@ M.now = ui.shared("sessions", {
 	archived = {},
 	places = { pinned = {}, sections = {} },
 	places_ready = false,
+	live = false,
 } :: Now)
 
 local function quietly(): (any) -> ()

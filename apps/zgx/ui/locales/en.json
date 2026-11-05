@@ -368,7 +368,8 @@
     },
     "title_bar": {
       "toggle_sidebar": "Toggle sidebar",
-      "forward": "Forward"
+      "forward": "Forward",
+      "new_tab": "New tab"
     },
     "address_line": {
       "checking_label": "Checking the address",
@@ -1515,6 +1516,23 @@
         "terms": "shortcut hotkey screenshot capture",
         "description": "Works while another app is in front. Change it in Appshots.",
         "change": "Change"
+      },
+      "switcher": {
+        "section": "Session switcher",
+        "window": {
+          "label": "Session switcher shows",
+          "description": "Ctrl+Tab offers every session in the sidebar, or only those active within this window. The open session and running tabs are always included.",
+          "all": "All"
+        },
+        "limit": {
+          "label": "Session switcher shows at most",
+          "description": "Cap the number of cards Ctrl+Tab offers, most recently used first. The open session and running tabs are always included.",
+          "none": "All"
+        },
+        "cycles": {
+          "label": "Ctrl+Tab cycles tabs",
+          "description": "Move straight to the next tab instead of opening the switcher."
+        }
       }
     },
     "appshots": {
@@ -2483,7 +2501,8 @@
         "search": "Search",
         "new_project": "New project",
         "app_rail": "The app rail",
-        "frame": "The window frame"
+        "frame": "The window frame",
+        "switcher": "Chat switcher"
       }
     },
     "title_bar": {
@@ -2647,6 +2666,27 @@
           "day": "Daily"
         }
       }
+    },
+    "tabs": {
+      "close": "Close tab",
+      "close_others": "Close others",
+      "close_right": "Close to the right",
+      "close_left": "Close to the left",
+      "close_idle": "Close idle tabs",
+      "new_session": "New session",
+      "tree": {
+        "ahead": "{n, plural, one {# commit not in {base}} other {# commits not in {base}}}",
+        "merged": "{dirty, plural, =0 {In {base}} one {In {base}, # uncommitted file} other {In {base}, # uncommitted files}}",
+        "base": "the base branch"
+      }
+    },
+    "switcher": {
+      "label": "Switch chat",
+      "no_messages": "No messages yet",
+      "working": "Working",
+      "asking": "Asking",
+      "failed": "Failed",
+      "done": "Done"
     }
   },
   "onboarding": {

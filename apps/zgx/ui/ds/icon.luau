@@ -54,6 +54,8 @@ export type Name =
 	| "pull-request-draft"
 	| "search"
 	| "arrow-left"
+	| "chevron-left"
+	| "chevron-right"
 	| "arrow-right"
 	| "laptop"
 	| "list"

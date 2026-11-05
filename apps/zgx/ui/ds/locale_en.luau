@@ -268,6 +268,7 @@ return {
 	["ds.org_list.accept"] = "Accept",
 	["ds.title_bar.toggle_sidebar"] = "Toggle sidebar",
 	["ds.title_bar.forward"] = "Forward",
+	["ds.title_bar.new_tab"] = "New tab",
 	["ds.address_line.checking_label"] = "Checking the address",
 	["ds.address_line.checking"] = "Checking",
 	["ds.address_line.available"] = "Available",

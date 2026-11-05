@@ -26,6 +26,10 @@ local composer_surface = require("@ds/composer_surface")
 local boundary = require("@app/screens/shell/boundary")
 local splits = require("@app/screens/shell/split")
 local session_tabs = require("@app/screens/shell/session_tabs")
+local swipe = require("@app/screens/shell/swipe")
+local top_bar = require("@app/screens/shell/top_bar")
+local refocus = require("@app/screens/shell/refocus")
+local switcher = require("@app/screens/shell/switcher")
 local lanes = require("@app/screens/chat/lanes")
 local LaneTab = require("@app/screens/chat/lane_tab")
 local chat_shared = require("@app/screens/chat/shared")
@@ -223,15 +227,6 @@ return function(props: Props): Node
 	})
 	pane.pointer_events = function(): any
 		return if grouped() then "none" else "auto"
-	end
-	-- A trackpad's swipe between pages (the mouse's back and forward too):
-	-- the history, as the router's own view takes it.
-	pane.on_navigate = function(e)
-		if e.direction == "back" then
-			route.back()
-		else
-			route.forward()
-		end
 	end
 	-- Whether it shows, for what stands over it (screens/shell/art).
 	ui.effect(function()
@@ -971,10 +966,14 @@ return function(props: Props): Node
 	-- Its width asked for (its edge dragged, or keyed): never past what
 	-- leaves the page what it wants; kept as the width it takes with its tree
 	-- docked.
+	local function panel_most(): number
+		return math.max(FILES_MIN, fit.viewport:peek() - sidebar_settled() - fit.page_floor:peek())
+	end
+	local panel_bump = ui.state("shell_panel_bump", 0)
+	local at_limit = 0
 	local function set_width(want: number)
 		local tree = if fit.current:peek().files then TREE else 0
-		local most = math.max(FILES_MIN, fit.viewport:peek() - sidebar_settled() - fit.page_floor:peek())
-		local w = math.clamp(want, FILES_MIN, most)
+		local w = math.clamp(want, FILES_MIN, panel_most())
 		files_w:set(reserve() + w - tree)
 		if not chosen:peek() then
 			chosen:set(true)
@@ -1003,6 +1002,9 @@ return function(props: Props): Node
 	local beside = ui.column {
 		id = "shell-files",
 		hook = "shell.files",
+		x = function(): number
+			return panel_bump:get()
+		end,
 		theme = function(): any
 			return if frame.framed:get() then { ["zeron.inset.bg"] = "$zeron.inset.framed_bg", ["zeron.inset.edge"] = "$zeron.inset.framed_edge" } else nil
 		end,
@@ -1114,12 +1116,24 @@ return function(props: Props): Node
 			end,
 			on_pointer_move = function(e)
 				if resizing then
-					set_width(from_w - (e.x - from_x))
+					local want = from_w - (e.x - from_x)
+					set_width(want)
+					local limit = if want > panel_most() then -1 elseif want < FILES_MIN then 1 else 0
+					if limit ~= 0 and limit ~= at_limit then
+						motion.edge_bounce(panel_bump, limit)
+					end
+					at_limit = limit
 				end
 			end,
 			on_release = function()
 				resizing = false
+				at_limit = 0
 				drag_held:set(nil)
+			end,
+			on_double_click = function()
+				chosen:set(false)
+				local keep = reserve()
+				files_w:set(keep + fit.content_split(math.max(fit.viewport:peek() - sidebar_settled() - keep, 0), fit.page_floor:peek()))
 			end,
 			-- What lights: the gap, as between two panes.
 			ui.div {
@@ -1629,7 +1643,24 @@ return function(props: Props): Node
 	end)
 	-- The page's room: the page's card at the focused chat's place, the
 	-- split's panes under it.
+	local split_ref = ui.ref()
+	switcher.set_column(split_ref)
+	local stepped_seen = route.stepped:peek().seq
+	ui.effect(function()
+		local step = route.stepped:get()
+		if step.seq == stepped_seen then
+			return
+		end
+		stepped_seen = step.seq
+		refocus()
+		if motion.reduced_now() then
+			anime.animate(split_ref, { opacity = { 0, 1 }, duration = 150, ease = "cubicBezier(0.25, 0.1, 0.25, 1)" })
+		else
+			anime.animate(split_ref, { opacity = { 0, 1 }, x = { -step.sign * 32, 0 }, duration = 260, ease = "outQuint" })
+		end
+	end)
 	local split_area = ui.row {
+		ref = split_ref,
 		grow = 1,
 		min_w = 0,
 		h_full = true,
@@ -1709,6 +1740,9 @@ return function(props: Props): Node
 		if art.card_left:peek() ~= left then
 			art.card_left:set(left)
 		end
+		if art.page_left:peek() ~= left - gap then
+			art.page_left:set(left - gap)
+		end
 	end)
 	-- Two cards, the page and its panel, set in from the window's edges and
 	-- the sidebar by the gap, the title bar's line inside them. The window
@@ -1771,21 +1805,28 @@ return function(props: Props): Node
 			else nil,
 		beside,
 		panel_edge,
-		-- The sessions open, along the whole top bar: from just past the sidebar's
-		-- "…" (with it shut, past Back and Forward) to the panel toggle.
+		ui.div {
+			absolute = true,
+			pointer_events = "none",
+			top = ui.raw(TOP_BAR, "under the top bar"),
+			bottom = 0,
+			left = function(): number
+				return art.card_left:get() - art.page_left:get()
+			end,
+			w = function(): number
+				return split_ref.width or 0
+			end,
+			swipe.Pill(),
+		},
 		session_tabs.Strip {
+			hidden = expanded,
 			window_x = function(): number
 				-- (The row ends at the window's right: where it starts is what its
 				-- width leaves, followed as the sidebar moves.)
 				return props.width() - (row_ref.width or props.width())
 			end,
 			start = function(): number
-				local past = ds.TitleBar.last_control_end() + 8
-				if sidebar_settled() <= 0 then
-					return past
-				end
-				local button = (ui.theme.get("zeron.icon_button.md") :: number?) or 24
-				return past + button + 8
+				return top_bar.tabs_start()
 			end,
 			-- (Clear of the panel toggle, and of Expand while the panel's open.)
 			right = function(): number

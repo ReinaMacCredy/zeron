@@ -143,6 +143,7 @@ export type Live<T> = T | State<T> | () -> T
 export type Props = {
 	-- Compact (a line a session) or regular (two).
 	compact: State<boolean>,
+	options_x: (() -> number)?,
 	-- Its view options (the "…" at its top opens them); each its own by
 	-- default. Its rail and it share them when given the same.
 	organize: State<any>?,
@@ -4931,6 +4932,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 			left = function(): number
 				-- (A card's: on the top bar, past Back and Forward, the window's
 				-- gap before the card taken off.)
+				if props.options_x then
+					return ui.raw(props.options_x() - (props.card_x or 5), "at the sidebar's end, on the title bar")
+				end
 				if props.card then
 					-- (`controls_end` holds the row's own 10 past its last control.)
 					return ui.raw(TitleBar.controls_end() - 10 + 8 - (props.card_x or 5), "past the title bar's controls, by its group gap")

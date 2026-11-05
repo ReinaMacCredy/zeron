@@ -43,12 +43,15 @@ fn press(app: &mut TestApp, x: f32, y: f32) -> Option<WindowGesture> {
 
 /// Where the bar's controls showing now are (by their targets).
 fn controls(app: &mut TestApp, targets: &[&str]) -> Vec<Rect> {
+    app.ui.prepare_frame();
+    let scene = app.ui.scene.borrow();
     targets
         .iter()
-        .filter_map(|target| {
-            app.find(target)?;
-            Some(app.bounds(target))
+        .flat_map(|target| {
+            let parsed = zgx_script::driver::parse(target).unwrap();
+            zgx_script::driver::find_all(&app.ui, &app.handle, &parsed).unwrap_or_default()
         })
+        .map(|id| scene.transformed_bounds(id))
         .filter(|b| b.y < STRIP_Y && b.y + b.height > STRIP_Y)
         .collect()
 }
@@ -76,6 +79,7 @@ const BAR: &[&str] = &[
     "role:button \"Toggle sidebar\"",
     "role:button \"Back\"",
     "role:button \"Forward\"",
+    "#titlebar-new-tab",
     "role:button \"Sidebar view options\"",
     "role:button \"Panel\"",
     // The chats' tabs along the bar, and the panel's Expand beside its toggle.
@@ -638,4 +642,59 @@ fn removing_a_project_asks_first() {
         }),
         "its sessions with it"
     );
+}
+
+#[test]
+fn no_picture_of_a_chat_has_what_lay_over_it() {
+    let mut app = mount();
+    let taken: std::rc::Rc<std::cell::Cell<u32>> = std::rc::Rc::default();
+    let count = taken.clone();
+    app.ui.on_snapshot(move |_, _| {
+        count.set(count.get() + 1);
+        Some(std::sync::Arc::new(zgx::image::ImageData::new(1, 1, vec![1u8; 4]).unwrap()))
+    });
+    let open = |app: &mut TestApp, title: &str| {
+        app.click(&format!("#shell-sidebar >> role:button \"{title}\""));
+        // (Off the row, or its card comes up beside it.)
+        app.hover("#shell-page");
+        app.frames(40);
+        // (`ui.now` is the clock's: a chat just landed on isn't pictured.)
+        std::thread::sleep(std::time::Duration::from_millis(320));
+    };
+    open(&mut app, "Fix the build");
+    open(&mut app, "Write the docs");
+    assert_eq!(taken.get(), 1, "the chat left, nothing over it");
+    open(&mut app, "Fix the build");
+    assert_eq!(taken.get(), 2);
+
+    // The switcher: the chat showing as it comes up; landing, none, its cards in the frame.
+    zgx::input::set_held_modifiers(&app.ui.runtime, Modifiers { control: true, ..Modifiers::default() });
+    app.frames(3);
+    assert!(app.host.run_command("shell.next_session"));
+    app.frames(40);
+    assert_eq!(taken.get(), 3, "as the cards come up");
+    zgx::input::set_held_modifiers(&app.ui.runtime, Modifiers::default());
+    app.frames(40);
+    assert_eq!(taken.get(), 3, "landing from the cards");
+
+    // The palette: none as what it runs goes to another chat.
+    let was = taken.get();
+    assert!(app.host.run_command("shell.palette"));
+    app.frames(30);
+    app.type_text("#palette-search", "Write the docs");
+    app.frames(30);
+    app.click("#palette-list >> role:option \"Write the docs\"");
+    app.frames(40);
+    assert_eq!(app.ui.input.focus_scope(), None, "the palette shut");
+    assert_eq!(taken.get(), was, "landing from the palette");
+
+    // A session's card beside the row the pointer rests on.
+    open(&mut app, "Write the docs");
+    let was = taken.get();
+    app.hover("#shell-sidebar >> role:button \"Tidy the tests\"");
+    app.frames(60);
+    assert!(app.find(".session-card").is_some(), "the card shows");
+    assert!(app.host.run_command("shell.next_session"));
+    app.frames(40);
+    assert_eq!(taken.get(), was, "with the card over the page");
 }

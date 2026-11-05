@@ -368,7 +368,8 @@
     },
     "title_bar": {
       "toggle_sidebar": "切换侧边栏",
-      "forward": "前进"
+      "forward": "前进",
+      "new_tab": "新建标签页"
     },
     "address_line": {
       "checking_label": "正在检查地址",
@@ -1515,6 +1516,23 @@
         "terms": "快捷键 截图 捕获 shortcut hotkey screenshot capture",
         "description": "其他 App 位于前台时也可使用。在 Appshots 中更改。",
         "change": "更改"
+      },
+      "switcher": {
+        "section": "会话切换器",
+        "window": {
+          "label": "会话切换器显示",
+          "description": "Ctrl+Tab 提供侧边栏中的所有会话,或仅此时段内活跃的会话。当前打开的会话和运行中的标签页始终包含在内。",
+          "all": "全部"
+        },
+        "limit": {
+          "label": "会话切换器最多显示",
+          "description": "限制 Ctrl+Tab 提供的卡片数量,最近使用的优先。当前打开的会话和运行中的标签页始终包含在内。",
+          "none": "全部"
+        },
+        "cycles": {
+          "label": "Ctrl+Tab 循环切换标签页",
+          "description": "直接转到下一个标签页,而不打开切换器。"
+        }
       }
     },
     "appshots": {
@@ -2483,7 +2501,8 @@
         "search": "搜索",
         "new_project": "新建项目",
         "app_rail": "应用侧栏",
-        "frame": "窗口边框"
+        "frame": "窗口边框",
+        "switcher": "会话切换器"
       }
     },
     "title_bar": {
@@ -2647,6 +2666,27 @@
           "day": "每天"
         }
       }
+    },
+    "tabs": {
+      "close": "关闭标签页",
+      "close_others": "关闭其他",
+      "close_right": "关闭右侧",
+      "close_left": "关闭左侧",
+      "close_idle": "关闭空闲标签页",
+      "new_session": "新建会话",
+      "tree": {
+        "ahead": "{n, plural, other {有 # 个提交不在 {base} 中}}",
+        "merged": "{dirty, plural, =0 {已在 {base} 中} other {已在 {base} 中,# 个文件未提交}}",
+        "base": "基础分支"
+      }
+    },
+    "switcher": {
+      "label": "切换会话",
+      "no_messages": "还没有消息",
+      "working": "运行中",
+      "asking": "等待回答",
+      "failed": "失败",
+      "done": "已完成"
     }
   },
   "onboarding": {

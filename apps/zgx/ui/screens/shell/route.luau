@@ -121,16 +121,13 @@ type History = { entries: { string }, at: number }
 local history = ui.state("shell_route_history", { entries = { kept:peek() }, at = 1 } :: History)
 -- The longest it keeps (the oldest let go first).
 local HISTORY_MAX = 100
--- (Set as the next move replaces where it stands; and while a history is
--- replayed, its moves aren't new ones.)
-local replacing = false
+-- (While a history is replayed, its moves aren't new ones.)
 local replaying = false
 
 -- To route `name` (`replace`: in place of where it is).
 local function go(name: string, params: { [string]: string }?, replace: boolean?)
 	if router then
 		if replace then
-			replacing = true
 			router.replace(name, params)
 		else
 			router.navigate(name, params)
@@ -172,6 +169,10 @@ function M.make()
 	replaying = false
 	made:set(made:peek() + 1)
 end
+M.stepped = ui.state("shell_route_stepped", { seq = 0, sign = 0 })
+local function is_settings(path: string): boolean
+	return parse(path).name == "settings"
+end
 -- Each move the router makes, followed.
 ui.effect(function()
 	local path = here().path
@@ -183,13 +184,16 @@ ui.effect(function()
 	if entries[at] == path then
 		return
 	end
-	if replacing then
-		replacing = false
+	local from = entries[at]
+	local sign = 0
+	if router.last_move == "replace" then
 		entries[at] = path
-	elseif at > 1 and entries[at - 1] == path and router.can_forward:peek() then
+	elseif router.last_move == "back" then
 		at -= 1
-	elseif at < #entries and entries[at + 1] == path then
+		sign = 1
+	elseif router.last_move == "forward" then
 		at += 1
+		sign = -1
 	else
 		-- A new place: past where it stands, what was ahead dropped.
 		for i = #entries, at + 1, -1 do
@@ -203,7 +207,48 @@ ui.effect(function()
 		end
 	end
 	history:set({ entries = entries, at = at })
+	if sign ~= 0 and not is_settings(path) and not is_settings(from) then
+		M.stepped:set({ seq = M.stepped:peek().seq + 1, sign = sign })
+	end
 end)
+-- (Waits till the history stands on where the route went instead.)
+local forgetting = ui.state("shell_route_forgetting", nil :: { string }?)
+ui.effect(function()
+	local gone = forgetting:get()
+	local h = history:get()
+	if not gone or not router or h.entries[h.at] ~= here().path then
+		return
+	end
+	local entries: { string } = {}
+	local stands = 1
+	for i, path in h.entries do
+		local r = parse(path)
+		local dead = i ~= h.at and r.name == "session" and table.find(gone, r.params.id) ~= nil
+		if not dead and entries[#entries] ~= path then
+			table.insert(entries, path)
+		end
+		if i == h.at then
+			stands = #entries
+		end
+	end
+	forgetting:set(nil)
+	if #entries ~= #h.entries then
+		history:set({ entries = entries, at = stands })
+		router.set_history(entries, stands)
+	end
+end)
+function M.forget_sessions(gone: (id: string) -> boolean)
+	local list: { string } = {}
+	for _, path in history:peek().entries do
+		local r = parse(path)
+		if r.name == "session" and gone(r.params.id) then
+			table.insert(list, r.params.id)
+		end
+	end
+	if #list > 0 then
+		forgetting:set(list)
+	end
+end
 -- Its place kept across a reload of the scripts.
 ui.effect(function()
 	local path = here().path

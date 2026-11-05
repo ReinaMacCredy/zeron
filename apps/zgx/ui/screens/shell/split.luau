@@ -493,61 +493,17 @@ ui.effect(function()
 		trees:set(out)
 	end
 end)
--- A chat focused with no tab takes the one tab for a chat alone, in its place, or a
--- new one at the end: navigating replaces it, until chats are composed in it. (As the
--- focus moves, not as the tabs change: a tab just closed, the focus on its way to
--- another, doesn't come back.)
+-- (As the focus moves, not as the tabs change: a tab just closed, the focus on its way to another, doesn't come back.)
 ui.effect(function()
 	local id = M.focused:get()
-	if not id then
+	if not id or M.current:peek() then
 		return
 	end
-	local list = trees:peek()
-	local t = M.current:peek()
-	if not t then
-		local tab = leaf(id)
-		tab.key = fresh_key(id, list)
-		local more: { Node } = {}
-		local placed = false
-		for _, other in list do
-			if #leaves(other) >= 2 then
-				table.insert(more, other)
-			elseif not placed then
-				table.insert(more, tab)
-				placed = true
-			end
-		end
-		if not placed then
-			table.insert(more, tab)
-		end
-		trees:set(more)
-	end
-end)
--- One tab for a chat alone, however it came to be more (a split left with one, tabs
--- kept from before): the focused chat's, else the last.
-ui.effect(function()
-	local list = trees:get()
-	local focused = M.focused:peek()
-	local keep: Node? = nil
-	local alone = 0
-	for _, t in list do
-		if #leaves(t) == 1 then
-			alone += 1
-			if not (keep and focused and holds(keep, focused)) then
-				keep = t
-			end
-		end
-	end
-	if alone <= 1 then
-		return
-	end
-	local out: { Node } = {}
-	for _, t in list do
-		if #leaves(t) >= 2 or t == keep then
-			table.insert(out, t)
-		end
-	end
-	trees:set(out)
+	local list = table.clone(trees:peek())
+	local tab = leaf(id)
+	tab.key = fresh_key(id, list)
+	table.insert(list, tab)
+	trees:set(list)
 end)
 
 -- The tabs open, in their order, by key.
@@ -581,6 +537,81 @@ function M.close_tabs(keys: { string })
 		end
 	end
 	trees:set(list)
+end
+
+function M.add_tabs(ids: { string })
+	local list = trees:peek()
+	local more = list
+	for _, id in ids do
+		local has = false
+		for _, t in more do
+			has = has or holds(t, id)
+		end
+		if not has then
+			if more == list then
+				more = table.clone(list)
+			end
+			local tab = leaf(id)
+			tab.key = fresh_key(id, more)
+			table.insert(more, tab)
+		end
+	end
+	if more ~= list then
+		trees:set(more)
+	end
+end
+
+function M.reconcile(gone: (id: string) -> boolean): boolean
+	local out: { Node } = {}
+	local changed = false
+	local focused = M.focused:peek()
+	local showing_left: string? = nil
+	for _, t in trees:peek() do
+		local rest: Node? = t
+		for _, id in leaves(t) do
+			if gone(id) then
+				rest = without(rest, id)
+				changed = true
+			end
+		end
+		if rest then
+			table.insert(out, if rest == t then t else keyed(rest, key_of(t)))
+			if focused and gone(focused) and holds(t, focused) then
+				showing_left = leaves(rest)[1]
+			end
+		end
+	end
+	if focused and gone(focused) then
+		changed = true
+		ui.batch(function()
+			if showing_left then
+				route.open_session(showing_left)
+			else
+				route.new_chat()
+			end
+			trees:set(out)
+		end)
+	elseif changed then
+		trees:set(out)
+	end
+	return changed
+end
+
+function M.set_order(keys: { string })
+	local list = trees:peek()
+	local out: { Node } = {}
+	for _, key in keys do
+		local t = tab_with_key(list, key)
+		if t then
+			table.insert(out, t)
+		end
+	end
+	for _, t in list do
+		if not table.find(keys, key_of(t)) then
+			table.insert(out, t)
+		end
+	end
+	trees:set(out)
 end
 
 -- A tab moved to where another stands.

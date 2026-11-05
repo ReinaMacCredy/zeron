@@ -72,6 +72,9 @@ const FORWARD: &str = "#titlebar >> role:button \"Forward\"";
 const PANEL: &str = "#titlebar >> role:button \"Panel\"";
 const VIEW: &str = "role:button \"Sidebar view options\"";
 const TAB: &str = "#session-tabs >> role:tab";
+const NEW_TAB: &str = "#titlebar-new-tab";
+// (The bar's 12 past what stands last, the strip's 8 before its first tab.)
+const PAST_NEW_TAB: f32 = 20.;
 
 /// What a press (and release) at `(x, y)` asks of the window.
 fn press(app: &mut TestApp, x: f32, y: f32) -> Option<WindowGesture> {
@@ -123,8 +126,8 @@ fn beside_windows_caption_buttons_zerons_controls_start_at_the_left_on_their_lin
     let tab = app.bounds(TAB);
     assert!(tab.x + tab.width <= panel.x, "the tab {tab:?} runs under the panel's toggle {panel:?}");
 
-    // Collapsed: the tabs start past the controls, as the shipping app's title
-    // did (10 + its 82 of controls + 8), the controls still on the line.
+    // Collapsed: the tabs start past the controls and New tab, the controls still
+    // on the line.
     app.click(TOGGLE);
     app.frames(40);
     let (tab, forward) = (app.bounds(TAB), app.bounds(FORWARD));
@@ -145,8 +148,8 @@ fn beside_windows_caption_buttons_zerons_controls_start_at_the_left_on_their_lin
             assert_eq!(press(&mut app, x, 16.), Some(WindowGesture::Drag), "a press at {x} on the caption buttons' line");
         }
     }
-    let tab = app.bounds(TAB);
-    assert!((tab.x - 100.).abs() <= 1., "the tab {tab:?}");
+    let (tab, new_tab) = (app.bounds(TAB), app.bounds(NEW_TAB));
+    assert!((tab.x - (new_tab.x + new_tab.width + PAST_NEW_TAB)).abs() <= 1., "the tab {tab:?} (New tab {new_tab:?})");
 }
 
 /// The panel's tabs stand in its card, under the caption buttons. What stands on
@@ -182,9 +185,8 @@ fn beside_gnomes_buttons_at_the_right_the_line_stays_and_the_toggle_starts_at_th
     assert!((panel.x + panel.width - (W - 104. - 10.)).abs() <= 0.5, "the panel's toggle {panel:?} isn't the row's padding before the window's buttons");
 }
 
-/// macOS exactly as before: the toggle 88 in beside the lights, the line 21
-/// down, and collapsed, the tabs past the controls (Forward's end, 172) by 8, on
-/// that line.
+/// macOS: the toggle 88 in beside the lights, the line 21 down, and collapsed,
+/// the tabs past the controls and New tab, on that line.
 #[test]
 fn beside_the_traffic_lights_nothing_moves() {
     for (report, when) in [(macos(W), "the lights reported"), (Report { area: None, controls: None }, "nothing reported (full screen)")] {
@@ -196,8 +198,8 @@ fn beside_the_traffic_lights_nothing_moves() {
         on_line(&mut app, MAC_LINE, when);
         app.click(TOGGLE);
         app.frames(40);
-        let (tab, forward) = (app.bounds(TAB), app.bounds(FORWARD));
-        assert!((tab.x - (forward.x + forward.width + 8.)).abs() <= 1., "{when}: the tab {tab:?} (Forward {forward:?})");
+        let (tab, new_tab) = (app.bounds(TAB), app.bounds(NEW_TAB));
+        assert!((tab.x - (new_tab.x + new_tab.width + PAST_NEW_TAB)).abs() <= 1., "{when}: the tab {tab:?} (New tab {new_tab:?})");
         assert!((mid(tab) - MAC_LINE).abs() <= 0.5, "{when}: the tab {tab:?} isn't on the line");
     }
 }

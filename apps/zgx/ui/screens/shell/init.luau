@@ -73,6 +73,9 @@ end
 -- again).
 local seen_told: string? = nil
 
+local top_bar = require("@app/screens/shell/top_bar")
+local refocus = require("@app/screens/shell/refocus")
+
 return function(): Node
 	-- The window's router (screens/shell/route): made with the shell, so
 	-- each load makes it anew where the window was.
@@ -144,26 +147,27 @@ return function(): Node
 		end
 	end
 	-- ⌘W: the panel's active tab, while the panel has the keyboard (as
-	-- × closes it: a file with changes, a busy terminal, ask first). Else
-	-- the window, as Zeron's closes it, and with it the app: what's kept is
-	-- saved as it closes (src/main.rs), the engine and its terminals go on.
-	-- (In a split, else the pane in front: the focused chat out of it, its
-	-- neighbour focused, the last left alone. A chat alone closes the
-	-- window, as it always has.)
+	-- × closes it: a file with changes, a busy terminal, ask first). In a
+	-- split, else the pane in front: the focused chat out of it, its neighbour
+	-- focused, the last left alone. Off the chats, the window, as Zeron's closes
+	-- it, and with it the app: what's kept is saved as it closes (src/main.rs),
+	-- the engine and its terminals go on.
 	runs["shell.close"] = function()
 		local panel: any = boundary.load("@app/screens/panel")
 		if panel and panel.close_focused_tab and (panel.close_focused_tab :: any)() then
 			return
 		end
-		if route.current:peek().name == "session" then
+		local name = route.current:peek().name
+		if name == "session" then
 			local splits: any = boundary.load("@app/screens/shell/split")
 			local focused = if splits then splits.focused:peek() else nil
 			if splits and focused and splits.shown:peek() ~= nil then
 				splits.close(focused)
 				return
 			end
-			-- A chat alone: its tab. (The last gone, a new chat; the window closes from
-			-- there.)
+		end
+		-- (Never the window from the chats: crates/ui shell/tabs.rs `close_focused_tab`.)
+		if name == "session" or name == "home" then
 			local tabs: any = boundary.load("@app/screens/shell/session_tabs")
 			if tabs and tabs.close_showing() then
 				return
@@ -177,6 +181,10 @@ return function(): Node
 		-- (While the panel has the keyboard, its tabs, as Zeron's right pane.)
 		local panel: any = boundary.load("@app/screens/panel")
 		if panel and panel.step_tab and (panel.step_tab :: any)(by) then
+			return
+		end
+		local switcher: any = boundary.load("@app/screens/shell/switcher")
+		if switcher and switcher.step(by) then
 			return
 		end
 		local sidebar: any = boundary.load("@app/screens/shell/sidebar")
@@ -385,18 +393,11 @@ return function(): Node
 	local function in_settings(): boolean
 		return route.current:get().name == "settings"
 	end
-	-- Leaving settings (Esc, Back to chats, a step back), its focus goes
-	-- with it: nothing of the chats lights up for having been next.
 	local was_settings = in_settings()
 	ui.effect(function()
 		local now = in_settings()
 		if was_settings and not now then
-			ui.after(0, function()
-				local el = root:peek()
-				if el then
-					el:blur()
-				end
-			end)
+			refocus()
 		end
 		was_settings = now
 	end)
@@ -428,13 +429,6 @@ return function(): Node
 							return true
 						end
 						return false
-					end,
-					on_navigate = function(e)
-						if e.direction == "back" then
-							route.back()
-						else
-							route.forward()
-						end
 					end,
 					boundary.screen(boundary.named("shell.boundary.screen.settings"), "@app/screens/shell/settings", function(settings): Node
 						return settings.View({ inset = true, collapsed = collapsed :: any })
@@ -515,6 +509,18 @@ return function(): Node
 			end
 			return false
 		end,
+		on_swipe = function(e: any)
+			local swipe: any = boundary.load("@app/screens/shell/swipe")
+			if swipe then
+				swipe.on_swipe(e)
+			end
+		end,
+		on_navigate = function(e: any)
+			local swipe: any = boundary.load("@app/screens/shell/swipe")
+			if swipe then
+				swipe.on_navigate(e)
+			end
+		end,
 		-- Every focus passes here last: the panel's claim on the keyboard
 		-- (for ⌘W) ends when it lands outside the panel.
 		on_focus = function()
@@ -581,6 +587,9 @@ return function(): Node
 						return false
 					end,
 					panel_on_home = true,
+					nav_left = top_bar.nav_left,
+					wordmark = top_bar.reveal,
+					new_tab = top_bar.new_tab,
 				}
 			end, { pass = true }),
 		},
@@ -705,6 +714,9 @@ return function(): Node
 			-- New project's (⌘⇧N, its "New project"s).
 			boundary.screen(boundary.named("shell.boundary.screen.new_project"), "@app/screens/shell/add_project", function(AddProject): Node
 				return AddProject()
+			end),
+			boundary.screen(boundary.named("shell.boundary.screen.switcher"), "@app/screens/shell/switcher", function(switcher): Node
+				return switcher.Overlay()
 			end),
 		},
 	}

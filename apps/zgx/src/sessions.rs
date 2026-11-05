@@ -108,6 +108,8 @@ struct Sessions {
     /// The engine watched (once, for every window).
     watching: Cell<bool>,
     heard: Cell<bool>,
+    /// A chat with no state before the live states come isn't idle, it's unknown.
+    live_heard: Cell<bool>,
     here: RefCell<Option<String>>,
     chats: RefCell<Json>,
     spaces: RefCell<Json>,
@@ -149,6 +151,7 @@ struct Row {
 #[derive(PartialEq)]
 struct RowWith {
     status: Option<&'static str>,
+    stale: bool,
     running_subagents: u32,
     side_chats: usize,
     working_side_chats: u32,
@@ -399,7 +402,8 @@ impl Sessions {
                 }
             }
             Slot::Live => {
-                if !replace_changed(&self.live, item) {
+                let first = !self.live_heard.replace(true);
+                if !replace_changed(&self.live, item) && !first {
                     return;
                 }
             }
@@ -543,6 +547,7 @@ impl Sessions {
             let harness = c["config"]["harness"].as_str();
             let with = RowWith {
                 status,
+                stale: false,
                 running_subagents: 0,
                 side_chats: 0,
                 working_side_chats: 0,
@@ -604,6 +609,7 @@ impl Sessions {
                 let project = c["spaceId"].as_str().filter(|s| known_spaces.contains(s));
                 let with = RowWith {
                     status: status_from(rows.get(id).map_or_else(|| unseen(c), |row| row.unseen), live.get(id)),
+                    stale: live.get(id).is_some_and(|l| l.stale),
                     running_subagents: live.get(id).map_or(0, |l| l.subagents),
                     side_chats: side_chats(id),
                     working_side_chats: working_children.get(id).copied().unwrap_or(0),
@@ -628,6 +634,7 @@ impl Sessions {
                     // looked up by, as the shipping app's sidebar does.
                     ("source_branch", opt(c["sourceContext"]["branch"].as_str())),
                     ("status", with.status.map_or(Value::Nil, Value::from)),
+                    ("stale", Value::Bool(with.stale)),
                     ("updated", Value::from(updated as f64)),
                     ("created", Value::from(created as f64)),
                     ("harness", opt(harness)),
@@ -637,6 +644,18 @@ impl Sessions {
                     ("model", opt(c["config"]["model"].as_str())),
                     // (Its harness's own id for it: the menu's Copy.)
                     ("harness_session", opt(c["harnessSessionId"].as_str())),
+                    ("tree", {
+                        let tree = &c["workTree"];
+                        match tree["state"]["kind"].as_str() {
+                            Some(kind @ ("ahead" | "merged")) if !tree["removed"].as_bool().unwrap_or(false) => Value::record([
+                                ("kind", Value::from(kind)),
+                                ("commits", Value::from(tree["state"]["commits"].as_f64().unwrap_or(0.))),
+                                ("dirty", Value::from(tree["dirtyFiles"].as_f64().unwrap_or(0.))),
+                            ]),
+                            _ => Value::Nil,
+                        }
+                    }),
+                    ("preview", opt(c["lastMessagePreview"].as_str())),
                     // Its subagents streaming now (the sidebar's pill), and
                     // its side chats: how many, how many working.
                     ("running_subagents", Value::from(with.running_subagents as f64)),
@@ -684,6 +703,7 @@ impl Sessions {
                 Value::record([("pinned", ids(&places.pinned)), ("sections", Value::List(sections.into()))]),
             ),
             ("places_ready", Value::Bool(self.places_ready.get())),
+            ("live", Value::Bool(self.live_heard.get())),
             ("connection", connection(&self.connectivity.borrow()).map_or(Value::Nil, Value::from)),
         ])
     }
@@ -1022,6 +1042,8 @@ fn project_name<'a>(name: Option<&'a str>, path: &'a str) -> &'a str {
 /// was interrupted. Several hosts may report one chat: an active state wins.
 struct Live {
     status: String,
+    /// It went quiet while active: not finished, only unheard from.
+    stale: bool,
     interrupted: bool,
     /// Its subagents streaming now (the session row's `runningSubagents`),
     /// none once the row has gone quiet.
@@ -1063,15 +1085,19 @@ fn live_states(value: &Json, now: i64) -> HashMap<String, Live> {
         let updated = row["updatedAt"].as_str().and_then(unix_seconds).unwrap_or(now);
         let mut status = row["status"].as_str().unwrap_or("idle").to_owned();
         // Gone quiet: its engine went with it.
+        let stale = now - updated > STALE_SECS && status != "idle";
         if now - updated > STALE_SECS {
             status = "idle".into();
         }
         let interrupted = row["lastTurnOutcome"]["status"].as_str() == Some("interrupted");
         let subagents = if now - updated > STALE_SECS { 0 } else { row["runningSubagents"].as_u64().unwrap_or(0) as u32 };
-        let entry = out.entry(chat.to_owned()).or_insert(Live { status: "idle".into(), interrupted, subagents: 0 });
+        let entry = out.entry(chat.to_owned()).or_insert(Live { status: "idle".into(), stale: false, interrupted, subagents: 0 });
         entry.subagents = entry.subagents.max(subagents);
+        let stale = stale || entry.stale;
         if entry.status == "idle" {
-            *entry = Live { status, interrupted, subagents: entry.subagents };
+            *entry = Live { status, stale, interrupted, subagents: entry.subagents };
+        } else {
+            entry.stale = stale;
         }
     }
     out
@@ -1458,6 +1484,7 @@ mod tests {
         assert_eq!(status(&seen, live.get("w")), Some("working"));
         assert_eq!(status(&seen, live.get("q")), Some("input"));
         assert_eq!(status(&seen, live.get("old")), None);
+        assert!(live["old"].stale && !live["w"].stale);
         assert_eq!(status(&chat, live.get("old")), Some("done"));
         assert_eq!(status(&seen, None), None);
     }
@@ -1607,6 +1634,24 @@ mod tests {
         s.heard(super::Slot::Chats, chats);
         // (`publish` would have asked to look again at the live state going stale.)
         assert_eq!(s.due.get(), None);
+    }
+
+    #[test]
+    fn the_live_states_count_as_heard_though_they_say_nothing_new() {
+        let s = super::Sessions::default();
+        s.heard(super::Slot::Chats, serde_json::json!([]));
+        assert!(matches!(s.value().field("live"), Some(Value::Bool(false))));
+        let unchanged = s.live.borrow().clone();
+        s.heard(super::Slot::Live, unchanged);
+        assert!(matches!(s.value().field("live"), Some(Value::Bool(true))));
+    }
+
+    #[test]
+    fn a_row_gone_quiet_while_active_says_so() {
+        let v = with_children("2001-01-01T00:00:00Z").value();
+        assert!(matches!(chat(&v, "p").field("stale"), Some(Value::Bool(true))));
+        let v = with_children("2099-01-01T00:00:00Z").value();
+        assert!(matches!(chat(&v, "p").field("stale"), Some(Value::Bool(false))));
     }
 
     #[test]

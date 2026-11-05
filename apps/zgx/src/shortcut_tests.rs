@@ -219,7 +219,7 @@ fn the_shortcuts_reach_their_commands_from_any_focus() {
 
 /// ⌘W: the panel's tab while the panel has the keyboard; else the chat's tab
 /// (a split's focused pane: split_tests), a new chat's page after the last; only
-/// with no chat, the window.
+/// off the chats, the window.
 #[test]
 fn command_w_closes_the_panels_tab_then_the_chats_tab_and_only_then_the_window() {
     let mut w = mount();
@@ -254,14 +254,19 @@ fn command_w_closes_the_panels_tab_then_the_chats_tab_and_only_then_the_window()
     assert!(!w.closed.get(), "⌘W in the composer closed the window, with a chat open");
     assert_eq!(w.route(), "/", "⌘W in the composer closes the chat's tab: its last, a new chat");
     assert!(w.app.find("#session-tabs >> role:tab \"Fix the build\"").is_none(), "the chat's tab is gone");
-    // No chat: the window.
+    // A new chat is a chat's page too: Zeron's never closes the window from there.
     assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
-    assert!(w.closed.get(), "⌘W with no chat didn't close the window");
+    assert!(!w.closed.get(), "⌘W on a new chat closed the window");
+    assert_eq!(w.route(), "/");
     // The chat opened again: its panel's tab was left be.
-    w.closed.set(false);
     w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
     w.app.frames(40);
     assert!(tabs(&mut w), "⌘W in the composer closed the panel's tab");
+    w.app.click("#shell-sidebar >> role:button \"Local\"");
+    w.app.frames(30);
+    assert!(w.app.find("#settings").is_some(), "settings opened");
+    assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
+    assert!(w.closed.get(), "⌘W in settings didn't close the window");
 }
 
 /// ⌘1–9 open the sidebar's sessions as it shows them, top to bottom
