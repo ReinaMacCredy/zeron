@@ -1535,7 +1535,7 @@ return function(props: Props): Node
 		-- view scrolls (a tick on, once the scroll has laid out) and as it's
 		-- laid out. (zgx's visibility event looks again only when layout
 		-- changes, not as a scroll alone moves what shows.)
-		local function judge(): (boolean, boolean)
+		local function judge(build_only: boolean?): (boolean, boolean)
 			local el, view = r:peek(), w.view:peek()
 			if not el or not view or el.y == nil or view.y == nil or el.height == nil or view.height == nil then
 				return false, near:peek()
@@ -1550,6 +1550,11 @@ return function(props: Props): Node
 			local shows = (live ~= nil and live() and last())
 				or holds
 				or (y < top + (view.height :: number) + OVERSCAN and y + (el.height :: number) > top - OVERSCAN)
+			local below = y >= top + (view.height :: number) + OVERSCAN
+			-- zgx loses a removal's damage in the flush that jumps the view past it (zgx-asks/scene-jump-damage).
+			if build_only and near:peek() and not shows then
+				return below, true
+			end
 			if NEAR:peek()[k] ~= shows then
 				NEAR:set_key(k, shows)
 			end
@@ -1557,7 +1562,7 @@ return function(props: Props): Node
 				returning = shows
 				near:set(shows)
 			end
-			return y >= top + (view.height :: number) + OVERSCAN, shows
+			return below, shows
 		end
 		judges[at] = judge
 		local look = look_soon
@@ -1676,7 +1681,7 @@ return function(props: Props): Node
 			-- All the runs judged, from the top, stopping at the first past the
 			-- view's foot once none further on is built.
 			local judged_at = -math.huge
-			local function judge_all()
+			local function judge_all(build_only: boolean?)
 				judged_at = ui.now()
 				local count = #runs:peek()
 				-- (A find's current match further on: its run is judged,
@@ -1686,7 +1691,7 @@ return function(props: Props): Node
 				for at = 1, count do
 					local j = judges[at]
 					if j then
-						local below = j()
+						local below = j(build_only)
 						if below and at >= target then
 							local more = false
 							for later = at + 1, count do
@@ -1712,13 +1717,14 @@ return function(props: Props): Node
 				-- each move runs this again before the tick below comes, and that
 				-- tick goes with it: judged only once the view stopped, the runs
 				-- coming in stayed held and the transcript showed blank through a
-				-- fling. So a pass now as well, a frame apart at most (the boxes as
-				-- last laid out, a frame behind: well within OVERSCAN), and the tick
-				-- for where the view comes to rest.
+				-- fling. So a pass now as well, a frame apart at most, that only
+				-- builds, and the tick for where the view comes to rest.
 				if ui.now() - judged_at >= 8 then
-					judge_all()
+					judge_all(true)
 				end
-				ui.after(0, judge_all)
+				ui.after(0, function()
+					judge_all()
+				end)
 			end)
 			column[1] = ui.each(runs, function(run: any, _i: any, row: State<any>)
 				return windowed(ui.computed(function(): { MarkdownBlock }
