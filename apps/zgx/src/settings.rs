@@ -304,7 +304,43 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 ("name", Value::from(kept.name.as_str())),
                 ("w", Value::from(kept.w as f64)),
                 ("h", Value::from(kept.h as f64)),
+                ("color", kept.color.as_deref().map(Value::from).unwrap_or(Value::Nil)),
             ]))
+        }
+    });
+    host.async_action("wallpaper.folder", |args| {
+        let path = args.field("path").map(text).unwrap_or_default();
+        async move {
+            if !std::path::Path::new(&path).is_absolute() {
+                return Err("not_found".to_string());
+            }
+            let list = off_thread(move || folder_pictures(std::path::Path::new(&path))).await.ok_or("not_found")??;
+            Ok(json_value(&json!(list)))
+        }
+    });
+    host.async_action("wallpaper.color", |args| {
+        let path = args.field("path").map(text).unwrap_or_default();
+        async move {
+            let color = off_thread(move || {
+                let bytes = std::fs::read(&path).ok()?;
+                let image = zgx_gpu::assets::decode_image(&bytes).ok()?;
+                main_color(image.width(), image.height(), image.pixels())
+            })
+            .await
+            .flatten();
+            Ok(color.as_deref().map(Value::from).unwrap_or(Value::Nil))
+        }
+    });
+    host.async_action("wallpaper.blurred", |args| {
+        let path = args.field("path").map(text).unwrap_or_default();
+        let radius = match args.field("radius") {
+            Some(Value::Num(n)) => *n,
+            _ => 0.,
+        };
+        async move {
+            let dir = engine::data_dir().ok_or("failed")?.join(WALLPAPER_DIR);
+            let blurred = off_thread(move || blurred_wallpaper(&path, radius, &dir)).await.ok_or("failed")??;
+            Ok(Value::from(blurred.as_str()))
         }
     });
     host.action("wallpaper.forget", |args| {
@@ -349,6 +385,7 @@ struct KeptWallpaper {
     name: String,
     w: u32,
     h: u32,
+    color: Option<String>,
 }
 
 /// The largest screen here, in pixels (its current mode's, not its
@@ -377,6 +414,47 @@ fn kept_size(w: u32, h: u32, screen: Option<(u32, u32)>) -> Option<(u32, u32)> {
     (scale < 1.).then(|| (((w as f64 * scale).ceil() as u32).max(1), ((h as f64 * scale).ceil() as u32).max(1)))
 }
 
+const WALLPAPER_FORMATS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"];
+
+fn folder_pictures(folder: &std::path::Path) -> Result<Vec<String>, String> {
+    let entries = std::fs::read_dir(folder).map_err(|_| "not_found".to_string())?;
+    let mut out: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let known = path.extension().and_then(|e| e.to_str()).is_some_and(|e| WALLPAPER_FORMATS.contains(&e.to_ascii_lowercase().as_str()));
+            known && path.is_file()
+        })
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+fn main_color(w: u32, h: u32, rgba: &[u8]) -> Option<String> {
+    let full = image::RgbaImage::from_raw(w, h, rgba.to_vec())?;
+    let thumb = image::imageops::thumbnail(&full, 64, 64);
+    let mut bins = vec![(0.0_f64, [0.0_f64; 3]); 4096];
+    for pixel in thumb.pixels() {
+        let [r, g, b, a] = pixel.0;
+        if a < 128 {
+            continue;
+        }
+        let high = f64::from(r.max(g).max(b));
+        let low = f64::from(r.min(g).min(b));
+        let saturation = (high - low) / high.max(1.0);
+        let weight = (0.2 + saturation * saturation) * f64::from(a) / 255.0;
+        let index = ((r as usize >> 4) << 8) | ((g as usize >> 4) << 4) | (b as usize >> 4);
+        let (count, channels) = &mut bins[index];
+        *count += weight;
+        for (sum, channel) in channels.iter_mut().zip([r, g, b]) {
+            *sum += f64::from(channel) * weight;
+        }
+    }
+    let (count, channels) = bins.into_iter().max_by(|a, b| a.0.total_cmp(&b.0))?;
+    (count > 0.0).then(|| format!("#{:02x}{:02x}{:02x}", (channels[0] / count).round() as u8, (channels[1] / count).round() as u8, (channels[2] / count).round() as u8))
+}
+
 /// `path` copied into `dir` under a name of its own (a new name each time,
 /// so nothing cached under the old one shows), once it decodes as a
 /// picture: written beside it, then moved into place. A picture larger than
@@ -391,6 +469,7 @@ fn keep_wallpaper(path: &str, dir: &std::path::Path, screen: Option<(u32, u32)>)
     let bytes = std::fs::read(source).map_err(|_| "failed".to_string())?;
     let image = zgx_gpu::assets::decode_image(&bytes).map_err(|_| "invalid".to_string())?;
     let (mut w, mut h) = (image.width(), image.height());
+    let color = main_color(w, h, image.pixels());
     std::fs::create_dir_all(dir).map_err(|_| "failed".to_string())?;
     let mut ext = source.extension().and_then(|e| e.to_str()).filter(|e| e.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or("png").to_ascii_lowercase();
     let mut bytes = bytes;
@@ -414,7 +493,7 @@ fn keep_wallpaper(path: &str, dir: &std::path::Path, screen: Option<(u32, u32)>)
         return Err("failed".into());
     }
     let name = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    Ok(KeptWallpaper { path: target.to_string_lossy().into_owned(), name, w, h })
+    Ok(KeptWallpaper { path: target.to_string_lossy().into_owned(), name, w, h, color })
 }
 
 /// `keep_wallpaper` for another module's test: its path and size.
@@ -424,11 +503,55 @@ pub(crate) fn keep_wallpaper_for_tests(path: &str, dir: &std::path::Path, screen
     (kept.path, kept.w, kept.h)
 }
 
+const BLURRED_SIDE: u32 = 640;
+
+fn blurred_wallpaper(path: &str, radius: f64, dir: &std::path::Path) -> Result<String, String> {
+    let source = std::path::Path::new(path);
+    if source.parent() != Some(dir) {
+        return Err("invalid".into());
+    }
+    let stem = source.file_stem().and_then(|s| s.to_str()).ok_or("invalid")?;
+    let target = dir.join(format!("{stem}.blur{}.png", radius.round() as u32));
+    if target.is_file() {
+        return Ok(target.to_string_lossy().into_owned());
+    }
+    let bytes = std::fs::read(source).map_err(|_| "not_found".to_string())?;
+    let image = zgx_gpu::assets::decode_image(&bytes).map_err(|_| "invalid".to_string())?;
+    let full = image::RgbaImage::from_raw(image.width(), image.height(), image.pixels().to_vec()).ok_or("invalid")?;
+    let scale = (f64::from(BLURRED_SIDE) / f64::from(full.width().max(full.height()))).min(1.);
+    let (w, h) = (((f64::from(full.width()) * scale).round() as u32).max(1), ((f64::from(full.height()) * scale).round() as u32).max(1));
+    let small = image::imageops::resize(&full, w, h, image::imageops::FilterType::Triangle);
+    let sigma = (radius * f64::from(w) / 1400.).max(0.5) as f32;
+    let blurred = image::imageops::fast_blur(&small, sigma);
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().and_then(|mut writer| writer.write_image_data(blurred.as_raw())).map_err(|_| "failed".to_string())?;
+    }
+    let temp = target.with_extension("png.tmp");
+    if std::fs::write(&temp, &png).and_then(|()| std::fs::rename(&temp, &target)).is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return Err("failed".into());
+    }
+    Ok(target.to_string_lossy().into_owned())
+}
+
 /// A copy `keep_wallpaper` made, removed: only a file directly in `dir`.
 fn forget_wallpaper(path: &str, dir: &std::path::Path) {
     let path = std::path::Path::new(path);
-    if path.parent() == Some(dir) && path.is_file() {
-        let _ = std::fs::remove_file(path);
+    if path.parent() != Some(dir) || !path.is_file() {
+        return;
+    }
+    let _ = std::fs::remove_file(path);
+    let Some(prefix) = path.file_stem().and_then(|s| s.to_str()).map(|stem| format!("{stem}.blur")) else {
+        return;
+    };
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -912,9 +1035,40 @@ mod tests {
         // Forgetting touches only a kept copy: the original stays.
         forget_wallpaper(path.to_str().unwrap(), &kept_dir);
         assert!(path.is_file());
+        let blurred = blurred_wallpaper(&kept.path, 24., &kept_dir).unwrap();
+        assert_eq!(blurred_wallpaper(&kept.path, 24., &kept_dir).unwrap(), blurred);
+        assert_ne!(blurred_wallpaper(&kept.path, 8., &kept_dir).unwrap(), blurred);
+        assert_eq!(blurred_wallpaper(path.to_str().unwrap(), 24., &kept_dir).unwrap_err(), "invalid", "a copy of ours alone");
         forget_wallpaper(&kept.path, &kept_dir);
         assert!(!std::path::Path::new(&kept.path).exists());
+        assert!(!std::path::Path::new(&blurred).exists());
+        assert_eq!(std::fs::read_dir(&kept_dir).unwrap().count(), 0, "no blurred copy stays behind");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_wallpaper_folder_lists_its_pictures_alone() {
+        let dir = std::env::temp_dir().join(format!("zgx-wallpaper-folder-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("inner.png")).unwrap();
+        for name in ["b.JPG", "a.png", "notes.txt", "c.webp"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        let names: Vec<String> = folder_pictures(&dir).unwrap().iter().map(|p| p.rsplit('/').next().unwrap().to_string()).collect();
+        assert_eq!(names, ["a.png", "b.JPG", "c.webp"], "a folder named like a picture isn't one, nor are its neighbours");
+        assert_eq!(folder_pictures(&dir.join("gone")).unwrap_err(), "not_found");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_picture_s_main_colour_favours_its_chromatic_part_and_ignores_transparency() {
+        let mut rgba = Vec::new();
+        for y in 0..64u32 {
+            for _ in 0..64u32 {
+                rgba.extend_from_slice(if y < 40 { &[128, 128, 128, 255] } else if y < 60 { &[30, 130, 220, 255] } else { &[255, 0, 0, 0] });
+            }
+        }
+        assert_eq!(main_color(64, 64, &rgba).as_deref(), Some("#1e82dc"));
+        assert_eq!(main_color(2, 2, &[255, 0, 0, 0].repeat(4)), None, "nothing to see: no colour");
     }
 
     #[test]

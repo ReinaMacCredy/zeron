@@ -1344,6 +1344,10 @@ M.Sidebar = ui.component(function(props: Props): Node
 		top = props.top,
 		card = not props.island,
 		card_x = rail.W + 5,
+		card_bg = function(): string
+			local frame: any = boundary.load("@app/screens/shell/frame")
+			return if frame and frame.framed:get() then "#00000000" else "$zeron.inset.bg"
+		end,
 		no_new_row = not props.island,
 		-- (A device's "+", inside a project's group: on that device too.)
 		on_new = function(project: string?, device: string?)

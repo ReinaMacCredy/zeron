@@ -1,8 +1,9 @@
 -- Settings → Appearance: how Zeron looks on this Mac, the shell's own
 -- look (screens/shell/appearance: the scheme, which setup chose too; a new
--- chat's wallpaper and its effect), the theme each scheme wears (a quick
--- pick; every theme is on the Themes page, screens/themes) and the window's
--- glass (ds.material).
+-- chat's wallpaper and its effect, the frame and the art behind a chat), the
+-- theme each scheme wears (a quick pick; every theme is on the Themes page,
+-- screens/themes) and the window's glass (ds.material). Past Advanced look: all
+-- but the colours and the fonts, as the shipping app's page has it.
 
 local ds = require("@ds")
 local material = require("@ds/material")
@@ -17,6 +18,8 @@ local motion = require("@ds/motion")
 local prefers = require("@ds/prefers")
 local themes = require("@app/screens/themes/state")
 local route = require("@app/screens/shell/route")
+local frame = require("@app/screens/shell/frame")
+local keys = require("@app/screens/shell/keys")
 
 local M = {}
 
@@ -42,6 +45,23 @@ search.index(M.ID, ui.t("settings.appearance.title"), ui.t("settings.appearance.
 	{ key = "wallpaper", title = ui.t("settings.appearance.wallpaper.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.appearance.wallpaper.terms") },
 	{ key = "wallpaper_image", title = ui.t("settings.appearance.wallpaper.image.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.appearance.wallpaper.image.terms") },
 	{ key = "effect", title = ui.t("settings.appearance.effect.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.appearance.effect.terms") },
+	{ key = "match_colors", title = ui.t("settings.appearance.match_colors.label"), terms = ui.t("settings.appearance.match_colors.terms") },
+	{ key = "frost_tint", title = ui.t("settings.appearance.frost.tint.label"), section = ui.t("settings.appearance.material"), terms = ui.t("settings.appearance.frost.tint.terms") },
+	{ key = "frost_dim", title = ui.t("settings.appearance.frost.dim.label"), section = ui.t("settings.appearance.material"), terms = ui.t("settings.appearance.frost.dim.terms") },
+	{ key = "frost_brightness", title = ui.t("settings.appearance.frost.brightness.label"), section = ui.t("settings.appearance.material"), terms = ui.t("settings.appearance.frost.brightness.terms") },
+	{ key = "inset", title = ui.t("settings.appearance.inset.label"), section = ui.t("settings.appearance.material"), terms = ui.t("settings.appearance.inset.terms") },
+	{ key = "frame", title = ui.t("settings.appearance.frame.label"), section = ui.t("settings.appearance.material"), terms = ui.t("settings.appearance.frame.terms") },
+	{ key = "frame_sidebar", title = ui.t("settings.appearance.frame.sidebar.label"), section = ui.t("settings.appearance.material"), terms = ui.t("settings.appearance.frame.sidebar.terms") },
+	{ key = "frame_blend", title = ui.t("settings.appearance.frame.blend.label"), section = ui.t("settings.appearance.material"), terms = ui.t("settings.appearance.frame.blend.terms") },
+	{ key = "frame_shade", title = ui.t("settings.appearance.frame.shade.label"), section = ui.t("settings.appearance.material"), terms = ui.t("settings.appearance.frame.shade.terms") },
+	{ key = "frame_blur", title = ui.t("settings.appearance.frame.blur.label"), section = ui.t("settings.appearance.material"), terms = ui.t("settings.appearance.frame.blur.terms") },
+	{ key = "wallpaper_folder", title = ui.t("settings.appearance.folder.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.appearance.folder.terms") },
+	{ key = "chat_background", title = ui.t("settings.appearance.chat.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.appearance.chat.terms") },
+	{ key = "chat_placement", title = ui.t("settings.appearance.chat.placement.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.appearance.chat.placement.terms") },
+	{ key = "chat_opacity", title = ui.t("settings.appearance.chat.opacity.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.appearance.chat.opacity.terms") },
+	{ key = "chat_blur", title = ui.t("settings.appearance.chat.blur.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.appearance.chat.blur.terms") },
+	{ key = "chat_scrim", title = ui.t("settings.appearance.chat.scrim.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.appearance.chat.scrim.terms") },
+	{ key = "chat_tab_shade", title = ui.t("settings.appearance.chat.tab_shade.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.appearance.chat.tab_shade.terms") },
 })
 
 local function row(key: string, props: any): Node
@@ -110,6 +130,224 @@ local function font_picker(kind: "interface" | "code", value: State<string>, lab
 	}
 end
 
+local function font_gone(kind: "interface" | "code"): { name: string, fallback: string }?
+	local chosen = (if kind == "code" then ds.look.code_font else ds.look.interface_font):get()
+	local list = installed:get()
+	if chosen == "" or list == nil then
+		return nil
+	end
+	for _, font in list do
+		if font.family == chosen then
+			return nil
+		end
+	end
+	local own = ui.theme.get(if kind == "code" then "font.mono" else "font.sans")
+	return { name = chosen, fallback = if type(own) == "string" and own ~= "" then own else (if kind == "code" then "Geist Mono" else "Geist") }
+end
+
+local function font_warning(kind: "interface" | "code", label: string): Node
+	return ui.show(function(): boolean
+		return font_gone(kind) ~= nil
+	end, ui.row {
+		id = `font-missing-{kind}`,
+		w_full = true,
+		pt = "$space.2",
+		ds.Text {
+			function(): string
+				local gone = font_gone(kind)
+				return ui.t("settings.appearance.font_missing", { kind = ui.t(label):get(), name = if gone then gone.name else "", fallback = if gone then gone.fallback else "" }):get()
+			end,
+			text_size = "$font.size.sm",
+			color = "$warning",
+		},
+	})
+end
+
+local function choice(value: State<string>, label: Message, values: { string }, base: string): Node
+	local options = {}
+	for _, v in values do
+		table.insert(options, { value = v, label = ui.t(`{base}.{v}.label`) })
+	end
+	return ds.Segmented { value = value, label = label, options = options :: any }
+end
+
+local function percent(v: number): string
+	return `{math.floor(v * 100 + 0.5)}%`
+end
+
+local function slider_row(key: string, label: string, value: State<number>, opts: { min: number, max: number, step: number, say: (number) -> string, description: string? }): Node
+	return row(key, {
+		label = ui.t(label),
+		description = if opts.description then ui.t(opts.description) else nil,
+		control = ds.Slider {
+			value = value,
+			min = opts.min,
+			max = opts.max,
+			step = opts.step,
+			w = 180,
+			label = ui.t(label):get(),
+			format = opts.say,
+		},
+	})
+end
+
+local function px_said(v: number): string
+	return ui.t("settings.appearance.frame.px", { n = math.floor(v + 0.5) }):get()
+end
+
+local function frame_on(): boolean
+	return appearance.inset_card:get() and appearance.frame_style:get() ~= "off"
+end
+
+local function material_group(): Node
+	local function frosted_dark(): boolean
+		local kind = ui.theme.kind()
+		return material.see_through() and not (kind == "light" or kind == "high-contrast-light")
+	end
+	return ds.Settings.Group { ui.column {
+		w_full = true,
+		row("glass", {
+			label = ui.t("settings.appearance.glass.label"),
+			description = function(): string
+				local v = material.surface:get()
+				if v == "theme" then
+					return ui.t("settings.appearance.glass.helper_theme", { kind = ui.t("settings.appearance.glass.kind_frosted"):get() }):get()
+				end
+				return ui.t(`settings.appearance.glass.helper_{v}`):get()
+			end,
+			control = ds.Select {
+				value = material.surface,
+				name = ui.t("settings.appearance.glass.label"),
+				w = 148,
+				options = function(): { any }
+					local out = {}
+					for _, v in { "theme", "frosted", "opaque" } do
+						table.insert(out, { value = v, label = ui.t(`settings.appearance.glass.{v}`):get() })
+					end
+					return out
+				end,
+			},
+		}),
+		later(frosted_dark, slider_row("frost_tint", "settings.appearance.frost.tint.label", material.frost_tint, { min = material.FROST_TINT_MIN, max = 1, step = 0.01, say = percent })),
+		later(frosted_dark, row("frost_dim", {
+			label = ui.t("settings.appearance.frost.dim.label"),
+			description = ui.t("settings.appearance.frost.dim.description"),
+			control = ds.Switch { value = material.frost_dim, label = ui.t("settings.appearance.frost.dim.label") },
+		})),
+		later(function(): boolean
+			return frosted_dark() and material.frost_dim:get()
+		end, slider_row("frost_brightness", "settings.appearance.frost.brightness.label", material.frost_brightness, { min = material.FROST_BRIGHTNESS_MIN, max = 1, step = 0.01, say = percent })),
+		ds.Settings.Rule(),
+		row("inset", {
+			label = ui.t("settings.appearance.inset.label"),
+			description = ui.t("settings.appearance.inset.description"),
+			control = ds.Switch { value = appearance.inset_card, label = ui.t("settings.appearance.inset.label") },
+		}),
+		later(function(): boolean
+			return appearance.inset_card:get()
+		end, row("frame", {
+			label = ui.t("settings.appearance.frame.label"),
+			description = function(): string
+				return ui.t(`settings.appearance.frame.{appearance.frame_style:get()}.description`):get()
+			end,
+			control = choice(appearance.frame_style, ui.t("settings.appearance.frame.label"), { "off", "dark", "glass" }, "settings.appearance.frame"),
+		})),
+		later(frame_on, row("frame_sidebar", {
+			label = ui.t("settings.appearance.frame.sidebar.label"),
+			description = function(): string
+				return ui.t(`settings.appearance.frame.sidebar.{appearance.frame_sidebar:get()}.description`):get()
+			end,
+			control = choice(appearance.frame_sidebar, ui.t("settings.appearance.frame.sidebar.label"), { "plain", "darker", "glass" }, "settings.appearance.frame.sidebar"),
+		})),
+		later(function(): boolean
+			return frame_on() and appearance.frame_sidebar:get() ~= "plain"
+		end, row("frame_blend", {
+			label = ui.t("settings.appearance.frame.blend.label"),
+			description = function(): string
+				return ui.t(`settings.appearance.frame.blend.{appearance.frame_blend:get()}.description`):get()
+			end,
+			control = choice(appearance.frame_blend, ui.t("settings.appearance.frame.blend.label"), { "whole", "fade" }, "settings.appearance.frame.blend"),
+		})),
+		later(frame_on, slider_row("frame_shade", "settings.appearance.frame.shade.label", appearance.frame_shade, { min = 0, max = 0.8, step = 0.01, say = percent })),
+		later(function(): boolean
+			return frame_on() and appearance.frame_style:get() == "glass"
+		end, slider_row("frame_blur", "settings.appearance.frame.blur.label", appearance.frame_blur, { min = 0, max = 40, step = 1, say = px_said })),
+	} }
+end
+
+local PREVIEW_H = 200
+local function chat_preview(): Node
+	local box = ui.ref()
+	local function line(width: string, alpha: string): Node
+		return ui.div { w = width, h = 7, rounded = "$radius.full", bg = "$text.primary", opacity = tonumber(alpha) }
+	end
+	return ui.div {
+		id = "chat-background-preview",
+		ref = box,
+		role = "img",
+		label = ui.t("settings.appearance.chat.preview"),
+		w_full = true,
+		h = PREVIEW_H,
+		relative = true,
+		overflow = "hidden",
+		rounded = "$radius.lg",
+		border = 1,
+		border_color = "$border",
+		bg = "$zeron.window",
+		frame.Layer {
+			kind = function(): string?
+				return if appearance.image:get() then "chat" else nil
+			end,
+			size = function(): { w: number, h: number }
+				return { w = box.width or 0, h = PREVIEW_H }
+			end,
+		},
+		ui.column {
+			absolute = true,
+			left = "20%",
+			right = "20%",
+			top = "$space.6",
+			gap = "$space.3",
+			aria_hidden = true,
+			line("60%", "0.5"),
+			line("90%", "0.28"),
+			line("75%", "0.28"),
+			line("40%", "0.28"),
+		},
+	}
+end
+
+local function chat_rows(): Node
+	local function on(): boolean
+		return appearance.chat_enabled:get()
+	end
+	return ui.column {
+		w_full = true,
+		ds.Settings.Rule(),
+		row("chat_background", {
+			label = ui.t("settings.appearance.chat.label"),
+			description = ui.t("settings.appearance.chat.description"),
+			control = ds.Switch { value = appearance.chat_enabled, label = ui.t("settings.appearance.chat.label") },
+		}),
+		later(on, ui.div { w_full = true, px = "$space.4", py = "$space.3", chat_preview() }),
+		later(on, row("chat_placement", {
+			label = ui.t("settings.appearance.chat.placement.label"),
+			description = function(): string
+				return ui.t(`settings.appearance.chat.placement.{appearance.chat_placement:get()}.description`):get()
+			end,
+			control = choice(appearance.chat_placement, ui.t("settings.appearance.chat.placement.label"), { "hero", "full" }, "settings.appearance.chat.placement"),
+		})),
+		later(on, slider_row("chat_opacity", "settings.appearance.chat.opacity.label", appearance.chat_opacity, { min = 0, max = 1, step = 0.01, say = percent })),
+		later(on, slider_row("chat_blur", "settings.appearance.chat.blur.label", appearance.chat_blur, { min = 0, max = 48, step = 4, say = px_said })),
+		later(on, row("chat_scrim", {
+			label = ui.t("settings.appearance.chat.scrim.label"),
+			description = ui.t("settings.appearance.chat.scrim.description"),
+			control = ds.Switch { value = appearance.chat_scrim, label = ui.t("settings.appearance.chat.scrim.label") },
+		})),
+		later(on, slider_row("chat_tab_shade", "settings.appearance.chat.tab_shade.label", appearance.chat_tab_shade, { min = 0, max = 1, step = 0.01, say = percent, description = "settings.appearance.chat.tab_shade.description" })),
+	}
+end
+
 -- Your picture, small, at the row's lead (nothing while there's none).
 local THUMB = 36
 local function thumbnail(): Node
@@ -168,6 +406,17 @@ local function adjust_dialog(): Node
 		local p = picture()
 		return if p then ds.wallpaper.cover(p, FRAME_W, FRAME_H) else { left = 0, top = 0, w = 0, h = 0 }
 	end
+	local function zoom_button(label: string, by: number, glyph: string): Node
+		return ds.Button {
+			glyph,
+			label = ui.t(label),
+			tone = "secondary",
+			size = "sm",
+			on_click = function()
+				set_zoom(wallpaper.draft:peek().zoom + by)
+			end,
+		}
+	end
 	return ds.Dialog {
 		open = wallpaper.adjusting,
 		title = ui.t("settings.appearance.wallpaper.adjust.title"),
@@ -220,6 +469,12 @@ local function adjust_dialog(): Node
 						local p = picture()
 						return if p then p.src else ""
 					end,
+					on_load = function()
+						local image = appearance.image:peek()
+						if image then
+							wallpaper.preview_ready:set(image.path)
+						end
+					end,
 					absolute = true,
 					left = function(): number
 						return at().left
@@ -235,6 +490,27 @@ local function adjust_dialog(): Node
 					end,
 					aria_hidden = true,
 				},
+				ui.show(function(): boolean
+					return wallpaper.adjust_blocked() ~= ""
+				end, ui.row {
+					id = "wallpaper-adjust-state",
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = 0,
+					bottom = 0,
+					items = "center",
+					justify = "center",
+					bg = "$zeron.secondary.bg",
+					ds.Text {
+						function(): string
+							local key = wallpaper.adjust_blocked()
+							return if key ~= "" then ui.t(key):get() else ""
+						end,
+						text_size = "$font.size.sm",
+						color = "$text.secondary",
+					},
+				}),
 			},
 			ds.Slider {
 				value = zoom,
@@ -249,6 +525,25 @@ local function adjust_dialog(): Node
 				format = function(v: number): string
 					return `{math.floor(v * 100 + 0.5)}%`
 				end,
+			},
+			ui.row {
+				w = FRAME_W,
+				items = "center",
+				justify = "between",
+				ds.Button {
+					id = "wallpaper-adjust-reset",
+					ui.t("settings.appearance.wallpaper.adjust.reset"),
+					tone = "secondary",
+					size = "sm",
+					on_click = function()
+						wallpaper.draft:set({ x = 0.5, y = 0.5, zoom = 1 })
+					end,
+				},
+				ui.row {
+					gap = "$space.2",
+					zoom_button("settings.appearance.wallpaper.adjust.zoom_out", -0.1, "−"),
+					zoom_button("settings.appearance.wallpaper.adjust.zoom_in", 0.1, "+"),
+				},
 			},
 		},
 	}
@@ -334,7 +629,36 @@ ui.effect(function()
 	end
 end)
 
+local ADVANCED = {
+	glass = true, frost_tint = true, frost_dim = true, frost_brightness = true, inset = true, frame = true, frame_sidebar = true, frame_blend = true, frame_shade = true, frame_blur = true,
+	reduce_motion = true, render_math = true, math_font = true, math_size = true,
+	wallpaper = true, wallpaper_image = true, wallpaper_folder = true, effect = true,
+	chat_background = true, chat_placement = true, chat_opacity = true, chat_blur = true, chat_scrim = true, chat_tab_shade = true,
+}
+local advanced = ui.state("settings_appearance_advanced", false)
+ui.effect(function()
+	if ADVANCED[search.lit:get() :: any] and not advanced:peek() then
+		advanced:set(true)
+	end
+end)
+
+local motion_pick = ui.state("settings_reduce_motion", motion.choice())
+ui.effect(function()
+	local now = motion.choice()
+	if motion_pick:peek() ~= now then
+		motion_pick:set(now)
+	end
+end)
+
 function M.view(): Node
+	if ds.look.interface_font:peek() ~= "" or ds.look.code_font:peek() ~= "" then
+		ask_fonts()
+	end
+	ui.effect(function()
+		if ds.look.wallpaper_colors:get() then
+			wallpaper.ask_color()
+		end
+	end)
 	return ds.Settings.Page {
 		title = ui.t("settings.appearance.title"),
 		description = ui.t("settings.appearance.description"),
@@ -359,30 +683,17 @@ function M.view(): Node
 				row("accent", {
 					label = ui.t("settings.appearance.accent.label"),
 					description = function(): string
+						if ds.look.wallpaper_colors:get() then
+							return ui.t("settings.appearance.accent_wallpaper_on"):get()
+						end
 						return ds.look.find(ds.look.accent:get()).label
 					end,
 					control = ds.AppearancePicker.Accents { value = ds.look.accent },
 				}),
-				row("glass", {
-					label = ui.t("settings.appearance.glass.label"),
-					description = ui.t("settings.appearance.glass.description"),
-					control = ds.Switch { value = material.frosted, label = ui.t("settings.appearance.glass.label") },
-				}),
-			},
-		},
-		-- Every move the app makes asks ds/motion: on, they land at once.
-		ds.Settings.Section {
-			title = ui.t("settings.appearance.motion"),
-			ds.Settings.Group {
-				row("reduce_motion", {
-					label = ui.t("settings.appearance.reduce_motion.label"),
-					description = function(): string
-						if prefers.reduced_motion:get() then
-							return ui.t("settings.appearance.reduce_motion.system_on"):get()
-						end
-						return ui.t("settings.appearance.reduce_motion.description"):get()
-					end,
-					control = ds.Switch { value = motion.reduce, label = ui.t("settings.appearance.reduce_motion.label") },
+				row("match_colors", {
+					label = ui.t("settings.appearance.match_colors.label"),
+					description = ui.t("settings.appearance.match_colors.description"),
+					control = ds.Switch { value = ds.look.wallpaper_colors, label = ui.t("settings.appearance.match_colors.label") },
 				}),
 			},
 		},
@@ -442,65 +753,65 @@ function M.view(): Node
 				row("conversation_width", {
 					label = ui.t("settings.appearance.conversation_width.label"),
 					description = ui.t("settings.appearance.conversation_width.description"),
-					control = ds.Slider {
-						value = prefs.conversation_width,
-						min = prefs.CONVERSATION_WIDTH.min,
-						max = prefs.CONVERSATION_WIDTH.max,
-						step = prefs.CONVERSATION_WIDTH.step,
-						-- (The slider's name joins its value as a string: read as
-						-- the page is built.)
-						label = ui.t("settings.appearance.conversation_width.label"):get(),
-						format = function(v: number): string
-							return ui.t("settings.appearance.pt", { n = math.floor(v) }):get()
-						end,
+					control = ui.row {
+						gap = "$space.2",
+						items = "center",
+						ds.Button {
+							ui.t("settings.appearance.reset"),
+							tone = "secondary",
+							size = "sm",
+							on_click = function()
+								prefs.conversation_width:set(prefs.CONVERSATION_WIDTH.default)
+							end,
+						},
+						ds.Slider {
+							value = prefs.conversation_width,
+							min = prefs.CONVERSATION_WIDTH.min,
+							max = prefs.CONVERSATION_WIDTH.max,
+							step = prefs.CONVERSATION_WIDTH.step,
+							-- (The slider's name joins its value as a string: read as
+							-- the page is built.)
+							label = ui.t("settings.appearance.conversation_width.label"):get(),
+							format = function(v: number): string
+								return ui.t("settings.appearance.pt", { n = math.floor(v) }):get()
+							end,
+						},
 					},
 				}),
-				-- LaTeX in replies (ds/math), as the shipping app's "Render
-				-- math", "Math font" and "Math size" (appearance.rs).
-				row("render_math", {
-					label = ui.t("settings.appearance.render_math.label"),
-					description = ui.t("settings.appearance.render_math.description"),
-					control = ds.Switch { value = math_.render, label = ui.t("settings.appearance.render_math.label") },
-				}),
-				row("math_font", {
-					label = ui.t("settings.appearance.math_font.label"),
-					control = ds.Select {
-						value = math_.face,
-						name = ui.t("settings.appearance.math_font.label"),
-						w = 180,
-						disabled = function(): boolean
-							return not math_.render:get()
+			},
+			font_warning("interface", "settings.appearance.interface_font.label"),
+			font_warning("code", "settings.appearance.code_font.label"),
+		},
+		ds.Settings.Section {
+			ds.Settings.Group {
+				row("advanced_look", {
+					label = ui.t("settings.appearance.advanced.label"),
+					description = ui.t("settings.appearance.advanced.description"),
+					control = ds.IconButton {
+						id = "appearance-advanced",
+						label = ui.t("settings.appearance.advanced.label"),
+						on_click = function()
+							advanced:set(not advanced:peek())
 						end,
-						options = (function(): { any }
-							local out = {}
-							for _, f in math_.FACES do
-								table.insert(out, { value = f.value, label = f.label, description = f.style })
-							end
-							return out
-						end)(),
-					},
-				}),
-				row("math_size", {
-					label = ui.t("settings.appearance.math_size.label"),
-					description = ui.t("settings.appearance.math_size.description"),
-					control = ds.Select {
-						value = math_.size,
-						name = ui.t("settings.appearance.math_size.label"),
-						w = 112,
-						disabled = function(): boolean
-							return not math_.render:get()
-						end,
-						options = (function(): { any }
-							local out = {}
-							for _, n in math_.SIZES do
-								table.insert(out, { value = n, label = `{n}%` })
-							end
-							return out
-						end)(),
+						ui.presence(function(): string
+							return if advanced:get() then "open" else "shut"
+						end, function(which: string): Node
+							return ds.Icon { name = if which == "open" then "alt-arrow-up" else "alt-arrow-down", size = 16 }
+						end),
 					},
 				}),
 			},
 		},
+		ui.show(function(): boolean
+			return advanced:get()
+		end, ui.column {
+			id = "appearance-advanced-rows",
+			w_full = true,
+			gap = "$space.6",
+			ds.Settings.Section {
+				title = ui.t("settings.appearance.material"),
+				material_group(),
+			},
 		-- What a new chat opens on: nothing, your picture (the shipping
 		-- app's one image, screens/settings/wallpaper), or what a plugin
 		-- draws there; and Zeron's effect over it.
@@ -625,10 +936,104 @@ function M.view(): Node
 							end,
 							control = wallpaper.EffectSelect(appearance.effect),
 						})),
+						ds.Settings.Rule(),
+						row("wallpaper_folder", {
+							label = ui.t("settings.appearance.folder.label"),
+							description = function(): string
+								local folder = appearance.folder:get()
+								local name = if folder ~= "" then folder else ui.t("settings.appearance.folder.none"):get()
+								return ui.t("settings.appearance.folder.hint", { folder = name, key = ui.shortcut_text(keys.combo("shell.random_wallpaper")) }):get()
+							end,
+							control = ui.row {
+								gap = "$space.2",
+								items = "center",
+								ds.Button { ui.t("settings.appearance.folder.choose"), tone = "secondary", size = "sm", on_click = wallpaper.choose_folder },
+								ui.show(function(): boolean
+									return appearance.folder:get() ~= ""
+								end, ds.Button { ui.t("settings.appearance.folder.shuffle"), tone = "secondary", size = "sm", on_click = wallpaper.shuffle }),
+							},
+						}),
+						chat_rows(),
 					},
 				},
 			},
 		},
+		ds.Settings.Section {
+			title = ui.t("settings.appearance.motion"),
+			ds.Settings.Group {
+				row("reduce_motion", {
+					label = ui.t("settings.appearance.reduce_motion.label"),
+					description = function(): string
+						local v = motion.choice()
+						if v == "system" then
+							return ui.t(if prefers.reduced_motion:get() then "settings.appearance.reduce_motion.helper_system_on" else "settings.appearance.reduce_motion.helper_system_off"):get()
+						end
+						return ui.t(`settings.appearance.reduce_motion.helper_{v}`):get()
+					end,
+					control = ds.Select {
+						value = motion_pick,
+						name = ui.t("settings.appearance.reduce_motion.label"),
+						w = 128,
+						on_change = motion.choose,
+						options = function(): { any }
+							local out = {}
+							for _, v in { "system", "on", "off" } do
+								table.insert(out, { value = v, label = ui.t(`settings.appearance.reduce_motion.{v}`):get() })
+							end
+							return out
+						end,
+					},
+				}),
+			},
+		},
+		ds.Settings.Section {
+			title = ui.t("settings.appearance.math"),
+			ds.Settings.Group {
+				row("render_math", {
+					label = ui.t("settings.appearance.render_math.label"),
+					description = ui.t("settings.appearance.render_math.description"),
+					control = ds.Switch { value = math_.render, label = ui.t("settings.appearance.render_math.label") },
+				}),
+				row("math_font", {
+					label = ui.t("settings.appearance.math_font.label"),
+					control = ds.Select {
+						value = math_.face,
+						name = ui.t("settings.appearance.math_font.label"),
+						w = 180,
+						disabled = function(): boolean
+							return not math_.render:get()
+						end,
+						options = (function(): { any }
+							local out = {}
+							for _, f in math_.FACES do
+								table.insert(out, { value = f.value, label = f.label, description = f.style })
+							end
+							return out
+						end)(),
+					},
+				}),
+				row("math_size", {
+					label = ui.t("settings.appearance.math_size.label"),
+					description = ui.t("settings.appearance.math_size.description"),
+					control = ds.Select {
+						value = math_.size,
+						name = ui.t("settings.appearance.math_size.label"),
+						w = 112,
+						disabled = function(): boolean
+							return not math_.render:get()
+						end,
+						options = (function(): { any }
+							local out = {}
+							for _, n in math_.SIZES do
+								table.insert(out, { value = n, label = `{n}%` })
+							end
+							return out
+						end)(),
+					},
+				}),
+			},
+		},
+		}),
 		adjust_dialog(),
 	}
 end

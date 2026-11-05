@@ -27,8 +27,13 @@
 local motion = require("@ds/motion")
 local ds = require("@ds")
 local route = require("@app/screens/shell/route")
+local frame = require("@app/screens/shell/frame")
 
 local M = {}
+
+local function card_fill(): string
+	return if frame.framed:get() then "$zeron.inset.framed_bg" else "$zeron.inset.bg"
+end
 
 export type Page = {
 	id: string,
@@ -284,7 +289,7 @@ function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
 			shrink = 0,
 			relative = true,
 			rounded = if inset then "$zeron.inset.radius" else nil,
-			bg = if inset then "$zeron.inset.bg" else nil,
+			bg = if inset then card_fill else nil,
 			overflow = if inset then "hidden" else nil,
 			w = if inset
 				then function(): number
@@ -406,7 +411,7 @@ function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
 				end
 				else nil,
 			rounded = if inset then "$zeron.inset.radius" else nil,
-			bg = if inset then "$zeron.inset.bg" else nil,
+			bg = if inset then card_fill else nil,
 			border = if inset then 1 else nil,
 			border_color = if inset then "$zeron.inset.edge" else nil,
 			overflow = if inset then "hidden" else nil,

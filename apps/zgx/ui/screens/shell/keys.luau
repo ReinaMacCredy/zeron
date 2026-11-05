@@ -58,6 +58,7 @@ for _, k in
 		{ id = "shell.palette", title = "Search", key = "cmd+k", group = "App", menu = "File", reserved = true },
 		{ id = "shell.settings", title = "Settings", key = "cmd+,", group = "App", menu = "File", reserved = true },
 		{ id = "shell.find", title = "Find", key = "cmd+f", group = "App", menu = "Edit" },
+		{ id = "shell.random_wallpaper", title = "Random wallpaper", key = "cmd+u", group = "App", menu = "View" },
 		{ id = "shell.close", title = "Close", key = "cmd+w", group = "App", menu = "File", reserved = true },
 		-- (No key of their own: Settings → Shortcuts can give them one.)
 		{ id = "shell.reload", title = "Reload Zeron", key = "", group = "App", menu = "View" },

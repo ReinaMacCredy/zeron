@@ -45,6 +45,7 @@ local host = require("@app/screens/settings/host")
 local appearance = require("@app/screens/shell/appearance")
 local motion = require("@ds/motion")
 local rail = require("@app/screens/shell/rail")
+local art = require("@app/screens/shell/art")
 
 local TITLE_H = 38
 
@@ -292,6 +293,12 @@ return function(): Node
 	-- engine left running (src/relaunch.rs). Reload interface: every script
 	-- evaluated again in place, as a save does (src/main.rs `serve`).
 	-- (Through settings' host calls, which a fixture answers.)
+	runs["shell.random_wallpaper"] = function()
+		local wallpaper: any = boundary.load("@app/screens/settings/wallpaper")
+		if wallpaper and wallpaper.shuffle then
+			wallpaper.shuffle()
+		end
+	end
 	runs["shell.reload"] = function()
 		host.invoke("app.relaunch")
 	end
@@ -443,6 +450,10 @@ return function(): Node
 		-- (The window's width: the columns fit it.)
 		on_resize = function(size)
 			fit.set_viewport(size.w - rail.W)
+			local win = art.window:peek()
+			if win.w ~= size.w or win.h ~= size.h then
+				art.window:set({ w = size.w, h = size.h })
+			end
 		end,
 		id = "shell",
 		-- The accent chosen (Settings → Appearance, setup's Make it yours), as
@@ -523,6 +534,9 @@ return function(): Node
 			w_full = true,
 			h_full = true,
 			relative = true,
+			boundary.screen(boundary.named("shell.boundary.screen.frame"), "@app/screens/shell/frame", function(frame): Node
+				return frame.View()
+			end, { pass = true }),
 			ui.row {
 				grow = 1,
 				min_h = 0,

@@ -275,6 +275,12 @@ return function(): Node
 	-- engine left running (src/relaunch.rs). Reload interface: every script
 	-- evaluated again in place, as a save does (src/main.rs `serve`).
 	-- (Through settings' host calls, which a fixture answers.)
+	runs["shell.random_wallpaper"] = function()
+		local wallpaper: any = boundary.load("@app/screens/settings/wallpaper")
+		if wallpaper and wallpaper.shuffle then
+			wallpaper.shuffle()
+		end
+	end
 	runs["shell.reload"] = function()
 		host.invoke("app.relaunch")
 	end

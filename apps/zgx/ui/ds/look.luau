@@ -6,6 +6,7 @@
 
 local material = require("@self/material")
 local locale = require("@self/locale")
+local palettes = require("@self/palettes")
 
 local M = {}
 
@@ -38,6 +39,9 @@ M.ACCENTS = {
 } :: { Accent }
 
 M.accent = ui.persist("accent", "default")
+M.inset_card = ui.persist("inset_card", true)
+M.wallpaper_colors = ui.persist("wallpaper_theme_colors", false)
+M.wallpaper_tint = ui.state("wallpaper_tint", nil :: string?)
 
 function M.find(value: string): Accent
 	for _, a in M.ACCENTS do
@@ -144,12 +148,50 @@ function M.code_family(): string
 	return if type(own) == "string" and own ~= "" then own else "mono"
 end
 
+function M.wallpaper_theme(color: string?): { [string]: any }?
+	local c = color or M.wallpaper_tint:get()
+	if not c then
+		return nil
+	end
+	local kind = ui.theme.kind()
+	local dark = not (kind == "light" or kind == "high-contrast-light")
+	local tint = palettes.mix(c, if dark then "#000000" else "#ffffff", if dark then 0.88 else 0.94)
+	local function toward(token: string): string?
+		local v = ui.theme.get(token)
+		return if type(v) == "string" then palettes.mix(v, tint, 0.4) else nil
+	end
+	local window = toward("zeron.window") or tint
+	local accent = palettes.ensure(c, { window }, 3)
+	local out: { [string]: any } = {
+		["zeron.window"] = window,
+		accent = accent,
+		hover = `alpha({accent}, 0.09)`,
+		pressed = `alpha({accent}, 0.15)`,
+		border = `alpha({accent}, 0.14)`,
+		["border.strong"] = `alpha({accent}, 0.3)`,
+	}
+	for _, token in { "text.primary", "text.secondary" } do
+		local v = ui.theme.get(token)
+		if type(v) == "string" then
+			out[token] = palettes.ensure(v, { window }, 4.5)
+		end
+	end
+	return out
+end
+
+local function flush_theme(): { [string]: any }?
+	if M.inset_card:get() then
+		return nil
+	end
+	return { ["zeron.inset.radius"] = 0, ["zeron.inset.inner_radius"] = 0, ["zeron.inset.edge"] = "#00000000" }
+end
+
 -- What the main window wears over its theme (ds/palettes, worn by
--- ds/tokens): the text size, the fonts chosen, and an accent chosen over
--- the theme's own.
+-- ds/tokens): the text size, the fonts chosen, an accent chosen over the
+-- theme's own, a picture's colour over that, and the card's shape.
 function M.window_theme(): { [string]: any }?
 	local out: { [string]: any }? = nil
-	for _, part in { M.text_theme(), M.font_theme(), M.theme() } do
+	for _, part in { M.text_theme(), M.font_theme(), M.theme(), M.wallpaper_theme(), flush_theme() } do
 		if part then
 			out = out or {}
 			for k, v in part do
@@ -164,6 +206,14 @@ function M.window_theme(): { [string]: any }?
 		out = out or {}
 		for k, v in glass do
 			(out :: any)[k] = v
+		end
+	end
+	local tinted = out and out["zeron.window"]
+	if tinted and M.wallpaper_tint:get() then
+		local bg = (out :: any).background or ui.theme.get("background")
+		local alpha = if type(bg) == "string" then string.match(bg, "^#%x%x%x%x%x%x(%x%x)$") else nil
+		if alpha then
+			(out :: any).background = `{tinted}{alpha}`
 		end
 	end
 	return out

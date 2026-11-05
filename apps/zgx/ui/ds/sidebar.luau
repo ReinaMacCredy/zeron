@@ -175,6 +175,7 @@ export type Props = {
 	card: boolean?,
 	-- Where a card's left edge stands from the window's left (5, the window's gap).
 	card_x: number?,
+	card_bg: (() -> string)?,
 	-- No New chat row at the top: a door to it stands elsewhere (the app rail).
 	no_new_row: boolean?,
 	projects: Live<{ Project }>,
@@ -4900,7 +4901,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 				bottom = 5,
 				overflow = "hidden",
 				rounded = "$zeron.inset.radius",
-				bg = "$zeron.inset.bg",
+				bg = props.card_bg or "$zeron.inset.bg",
 				ui.column(body),
 			}
 			else ui.column(body),

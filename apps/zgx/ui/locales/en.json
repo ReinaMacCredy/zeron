@@ -1137,6 +1137,141 @@
       "empty": "No settings match."
     },
     "appearance": {
+      "advanced": {
+        "label": "Advanced look",
+        "description": "Glass, backgrounds, motion and math"
+      },
+      "material": "Material and background",
+      "math": "Math",
+      "frost": {
+        "tint": {
+          "label": "Glass tint",
+          "terms": "frost tint glass opacity dark"
+        },
+        "dim": {
+          "label": "Dim bright backdrops",
+          "description": "Keeps the glass dark over light windows behind Zeron.",
+          "terms": "frost backdrop light windows glass grey"
+        },
+        "brightness": {
+          "label": "Backdrop brightness",
+          "terms": "frost backdrop glass dim"
+        }
+      },
+      "inset": {
+        "label": "Inset card",
+        "description": "Hold the page in a rounded card above the window background.",
+        "terms": "card rounded shell gap window"
+      },
+      "frame": {
+        "label": "Window frame",
+        "terms": "frame artwork rail sidebar tab bar dark glass wallpaper",
+        "off": {
+          "label": "Off",
+          "description": "Only the tab bar shows the artwork."
+        },
+        "dark": {
+          "label": "Dark",
+          "description": "The artwork runs under the tab bar, rail and sidebar, darkened."
+        },
+        "glass": {
+          "label": "Glass",
+          "description": "The artwork runs under the tab bar, rail and sidebar, blurred and darkened."
+        },
+        "sidebar": {
+          "label": "Frame sidebar",
+          "terms": "frame sidebar rail plain darker glass legible",
+          "plain": {
+            "label": "Plain",
+            "description": "The rail and sidebar show the frame as it is."
+          },
+          "darker": {
+            "label": "Darker",
+            "description": "The rail and sidebar are darker than the rest of the frame."
+          },
+          "glass": {
+            "label": "Glass",
+            "description": "The rail and sidebar are always blurred, so text sits on color only."
+          }
+        },
+        "blend": {
+          "label": "Sidebar blend",
+          "terms": "frame sidebar blend seam fade whole tab bar",
+          "whole": {
+            "label": "Whole frame",
+            "description": "The sidebar look covers the tab bar too, so the frame is one surface."
+          },
+          "fade": {
+            "label": "Fade",
+            "description": "The sidebar look fades out across the start of the tab bar."
+          }
+        },
+        "shade": {
+          "label": "Frame shade",
+          "terms": "frame shade dark"
+        },
+        "blur": {
+          "label": "Frame blur",
+          "terms": "frame blur glass"
+        },
+        "px": "{n}px"
+      },
+      "chat": {
+        "label": "Chat background",
+        "description": "Show the artwork behind open conversations.",
+        "terms": "chat conversation thread background artwork wallpaper behind",
+        "preview": "Chat background preview",
+        "placement": {
+          "label": "Placement",
+          "terms": "hero full chat background",
+          "hero": {
+            "label": "Hero",
+            "description": "Same top crop as new threads, fading out below."
+          },
+          "full": {
+            "label": "Full",
+            "description": "Covers the whole conversation column."
+          }
+        },
+        "opacity": {
+          "label": "Opacity",
+          "terms": "chat background opacity tab"
+        },
+        "blur": {
+          "label": "Blur",
+          "terms": "chat background blur"
+        },
+        "scrim": {
+          "label": "Scrim",
+          "description": "Darkens the artwork toward the bottom so text stays readable.",
+          "terms": "chat background scrim readable"
+        },
+        "tab_shade": {
+          "label": "Tab bar shade",
+          "description": "Darkens the tab bar over the artwork so tab titles stay readable.",
+          "terms": "tab bar shade chat background"
+        }
+      },
+      "folder": {
+        "label": "Wallpaper folder",
+        "terms": "folder shuffle random wallpaper rotate",
+        "none": "No folder chosen",
+        "hint": "{folder} · {key} picks a random image",
+        "choose": "Choose folder",
+        "shuffle": "Shuffle",
+        "choose_title": "Choose a Wallpaper Folder",
+        "first": "Choose a wallpaper folder in Appearance first.",
+        "empty": "No readable wallpapers found in this folder. Add images such as PNG or JPEG, or choose another folder.",
+        "unreadable": "Unable to read the wallpaper folder. Choose an accessible folder in Appearance."
+      },
+      "match_colors": {
+        "label": "Match wallpaper colors",
+        "description": "Use wallpaper colors for accents, highlights, and subtle surface tints.",
+        "terms": "wallpaper colors tint accent match"
+      },
+      "accent_wallpaper_on": "Wallpaper colors are enabled; this accent is used when they are off.",
+      "font_missing": "{kind} \"{name}\" isn't available on this device. Using {fallback}.",
+      "reset": "Reset",
       "title": "Appearance",
       "terms": "theme look colors",
       "description": "How Zeron looks on this computer.",
@@ -1167,15 +1302,27 @@
         "terms": "tint highlight swatch colour"
       },
       "reduce_motion": {
+        "system": "System",
+        "on": "On",
+        "off": "Off",
+        "helper_system_on": "Following reduced system motion: moves land at once and fades stay short.",
+        "helper_system_off": "Following the system, which currently allows motion.",
+        "helper_on": "Animations skip straight to their final state.",
+        "helper_off": "Animations play even if the system asks for less motion.",
         "label": "Reduce motion",
-        "terms": "animation accessibility movement fade spring",
-        "system_on": "On while your computer's Reduce motion is on: moves land at once and fades stay short.",
-        "description": "Moves land at once and fades stay short. On whenever your computer's Reduce motion is on."
+        "terms": "animation accessibility movement fade spring"
       },
       "glass": {
-        "label": "Frosted glass",
-        "terms": "glass translucent opaque transparency blur vibrancy material",
-        "description": "The desktop shows through the window. Off, it's solid."
+        "label": "Glass",
+        "theme": "Theme default",
+        "frosted": "Frosted",
+        "opaque": "Opaque",
+        "helper_theme": "Theme default: {kind}",
+        "helper_frosted": "Translucent surfaces",
+        "helper_opaque": "Solid surfaces",
+        "kind_frosted": "frosted",
+        "kind_opaque": "opaque",
+        "terms": "glass translucent opaque transparency blur vibrancy material"
       },
       "font_default": "Default ({name})",
       "font_search": "Search fonts",
@@ -1240,6 +1387,11 @@
           "remove": "Remove"
         },
         "adjust": {
+          "reset": "Reset",
+          "zoom_in": "Zoom in",
+          "zoom_out": "Zoom out",
+          "changed": "Background changed. Close and adjust the new image.",
+          "preparing": "Preparing preview…",
           "title": "Adjust background",
           "body": "Drag the picture to frame it, and zoom in with the slider.",
           "done": "Done",
@@ -2330,7 +2482,8 @@
         "update_watch": "The update watch",
         "search": "Search",
         "new_project": "New project",
-        "app_rail": "The app rail"
+        "app_rail": "The app rail",
+        "frame": "The window frame"
       }
     },
     "title_bar": {
@@ -2367,7 +2520,8 @@
         "shell_find": "Find",
         "shell_close": "Close",
         "shell_reload": "Reload Zeron",
-        "shell_reload_interface": "Reload interface"
+        "shell_reload_interface": "Reload interface",
+        "shell_random_wallpaper": "Random wallpaper"
       },
       "group": {
         "sessions": "Sessions",

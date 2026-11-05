@@ -304,6 +304,8 @@ end
 local function appearance_page(app: any)
 	app:click(`{NAV} >> role:tab "Appearance"`)
 	app:frames(20)
+	app:set_state("settings_appearance_advanced", true)
+	app:frames(10)
 end
 local function plugin_page(app: any, name: string)
 	app:click(`{NAV} >> role:tab "{name}"`)
@@ -339,7 +341,7 @@ test("a plugin's wallpaper is used from its own page, said on Appearance, and ta
 	-- Appearance says where it's from, in one inline row; its picture rows go.
 	appearance_page(app)
 	expect(line(app, "From Parallax scenes.")).never.to_be("")
-	expect(app:count(`{NEW_CHAT} >> .settings-rule`)).to_be(0)
+	expect(app:count(`{NEW_CHAT} >> .settings-rule`)).to_be(2)
 	local words, select = box_of(app, NEW_CHAT, 'text "Wallpaper"'), box_of(app, NEW_CHAT, 'button "Wallpaper"')
 	expect((select :: any).x > (words :: any).x + 300).to_be(true)
 	expect(math.abs((select :: any).y - (words :: any).y) < 24).to_be(true)

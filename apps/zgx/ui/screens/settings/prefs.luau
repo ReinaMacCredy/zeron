@@ -73,7 +73,7 @@ M.CODE_FONT_SIZES = { 11, 12, 13, 14, 15, 16 }
 -- How wide a conversation and its composer go (crates/ui settings.rs
 -- TRANSCRIPT_WIDTH_*: 560 to 1200; the default is the gallery's measure,
 -- `zeron.prose.measure`).
-M.CONVERSATION_WIDTH = { min = 560, max = 1200, step = 20 }
+M.CONVERSATION_WIDTH = { min = 560, max = 1200, step = 20, default = 660 }
 M.conversation_width = ui.persist("settings_conversation_width", 660)
 
 -- The chimes: all of them, then each (each counts only while all are on).

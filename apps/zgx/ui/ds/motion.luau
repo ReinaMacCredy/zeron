@@ -17,18 +17,28 @@ local prefers = require("@self/prefers")
 
 local M = {}
 
--- Reduce motion: the one place every animation asks. On with the system's
--- Reduce motion (macOS) or Zeron's own setting (`M.reduce`, Settings), and
+-- Reduce motion: the one place every animation asks. Zeron's setting, System,
+-- On or Off (`M.reduce` on; `M.follow_system`, System, while it's off), and
 -- then nothing travels: a move lands at once, a fade is a short crossfade,
 -- and what a state change shows is right on the next frame. Tracked: read in
 -- a binding or computed, it follows a change of either.
 M.reduce = ui.persist("motion_reduce", false)
+M.follow_system = ui.persist("motion_follow_system", true)
 function M.reduced(): boolean
-	return M.reduce:get() or prefers.reduced_motion:get()
+	return M.reduce:get() or (M.follow_system:get() and prefers.reduced_motion:get())
 end
 -- The same, untracked (where a move starts: a handler, an effect).
 function M.reduced_now(): boolean
-	return M.reduce:peek() or prefers.reduced_motion:peek()
+	return M.reduce:peek() or (M.follow_system:peek() and prefers.reduced_motion:peek())
+end
+function M.choice(): string
+	return if M.reduce:get() then "on" elseif M.follow_system:get() then "system" else "off"
+end
+function M.choose(value: string)
+	ui.batch(function()
+		M.reduce:set(value == "on")
+		M.follow_system:set(value == "system")
+	end)
 end
 -- The longest a fade runs with motion reduced: a crossfade, not a move.
 M.FADE = 120

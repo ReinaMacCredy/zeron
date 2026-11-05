@@ -21,6 +21,8 @@ local fit = require("@app/screens/shell/fit")
 local sessions = require("@account/sessions")
 local appearance = require("@app/screens/shell/appearance")
 local art = require("@app/screens/shell/art")
+local frame = require("@app/screens/shell/frame")
+local composer_surface = require("@ds/composer_surface")
 local boundary = require("@app/screens/shell/boundary")
 local splits = require("@app/screens/shell/split")
 local session_tabs = require("@app/screens/shell/session_tabs")
@@ -66,6 +68,8 @@ local FILES_MIN, FILES_W = fit.RIGHT_PANE_MIN, 660
 local INSET = (ui.theme.get("zeron.inset.gap") :: number?) or 4
 -- A split pane's ×: its size.
 local CLOSE = 22
+local SEAM_H = 20
+local CARD_LIFT = { y = 6, blur = 20, color = "#00000059" }
 -- Whether the panel's tabs show in groups (screens/panel sets it).
 -- How far up from a split pane's foot a click is on its composer.
 local COMPOSER_ROOM = 130
@@ -188,6 +192,9 @@ return function(props: Props): Node
 	-- (Its edge's room; the edge itself is drawn with the fill, below.)
 	pane.border = 1
 	pane.border_color = "#00000000"
+	pane.shadow = function(): any
+		return if frame.framed:get() and not grouped() then CARD_LIFT else false
+	end
 	-- The card's fill and edge, under all it holds (the fill lighter than the
 	-- window, lifting it), faded by a tween zgx runs as a split starts and ends,
 	-- so no script runs and nothing is laid out as it fades. None in a split:
@@ -204,9 +211,13 @@ return function(props: Props): Node
 		top = ui.raw(-1, "over the card's 1-point edge"),
 		bottom = ui.raw(-1, "over the card's 1-point edge"),
 		pointer_events = "none",
-		bg = "$zeron.inset.bg",
+		bg = function(): string
+			return if frame.framed:get() then "$zeron.inset.framed_bg" else "$zeron.inset.bg"
+		end,
 		border = 1,
-		border_color = "$zeron.inset.edge",
+		border_color = function(): string
+			return if frame.framed:get() then "$zeron.inset.framed_edge" else "$zeron.inset.edge"
+		end,
 		rounded = "$zeron.inset.radius",
 		opacity = card_shown,
 	})
@@ -229,10 +240,47 @@ return function(props: Props): Node
 			art.showing:set(on)
 		end
 	end)
-	-- A new chat's wallpaper: your picture (Settings → Appearance), or what
-	-- a plugin draws in `#new-chat-background` while it's used as the
+	local composer_radius = (ui.theme.get("zeron.composer.radius") :: number?) or 26
+	local function page_origin(): { x: number, y: number }
+		return { x = art.card_left:get() + 1, y = TOP_BAR + 1 }
+	end
+	local function art_left(): number
+		return if frame.framed:get() then 0 else art.card_left:get()
+	end
+	local function hero_shows(): boolean
+		return frame.page_art:get() == "hero"
+	end
+	table.insert(pane, ui.show(hero_shows, frame.Layer {
+		id = "page-art",
+		kind = function(): string?
+			return if hero_shows() then "hero" else nil
+		end,
+		origin = page_origin,
+		left = art_left,
+		cutout = function(): any
+			local _ = composer_surface.moved:get()
+			local el = composer_surface.element
+			local w, h = el and el.width, el and el.height
+			if not el or not el.x or not w or not h then
+				return nil
+			end
+			local hero = frame.hero_height(art.window:get().h)
+			return { x = el.x - art_left(), y = el.y, w = w, h = math.max(el.y + h, hero) - el.y, radius = composer_radius, feather = math.clamp(hero * 0.52, 120, 280), clearance = 8 }
+		end,
+		tab_fade = true,
+	}))
+	table.insert(pane, frame.Layer {
+		id = "page-chat-art",
+		kind = function(): string?
+			return if not grouped() and frame.page_art:get() == "chat" then "chat" else nil
+		end,
+		origin = page_origin,
+		left = art_left,
+		tab_fade = true,
+	})
+	-- What a plugin draws in `#new-chat-background` while it's used as the
 	-- wallpaper (it replaces that box, and reads where the pointer is as
-	-- `pointer`); Zeron's effect over either.
+	-- `pointer`), with Zeron's effect over it.
 	table.insert(
 		pane,
 		ds.Wallpaper {
@@ -243,18 +291,9 @@ return function(props: Props): Node
 			width = props.width,
 			key = function(): string
 				local showing = appearance.showing:get()
-				if showing == "image" then
-					local image = appearance.image:get()
-					-- (Framed again after Adjust: its place is in the key.)
-					return if image then `image:{image.x}:{image.y}:{image.zoom}:{image.path}` else ""
-				end
-				return if showing == "none" then "" else showing
+				return if showing == "none" or showing == "image" then "" else showing
 			end,
 			content = function(key: string): Node
-				local image = appearance.image:peek()
-				if string.find(key, "^image:") and image then
-					return ds.wallpaper.Picture { src = image.path, w = image.w, h = image.h, x = image.x, y = image.y, zoom = image.zoom }
-				end
 				-- Where a plugin draws: nothing of Zeron's own.
 				return ui.div { id = "new-chat-background", absolute = true, left = 0, right = 0, top = 0, bottom = 0 }
 			end,
@@ -964,6 +1003,9 @@ return function(props: Props): Node
 	local beside = ui.column {
 		id = "shell-files",
 		hook = "shell.files",
+		theme = function(): any
+			return if frame.framed:get() then { ["zeron.inset.bg"] = "$zeron.inset.framed_bg", ["zeron.inset.edge"] = "$zeron.inset.framed_edge" } else nil
+		end,
 		w = open_w,
 		shrink = 0,
 		h_full = true,
@@ -1261,12 +1303,21 @@ return function(props: Props): Node
 			overflow = "hidden",
 			-- (The focused pane lifted, the others sunk.)
 			bg = function(): string
+				if frame.framed:get() then
+					return "$zeron.inset.framed_bg"
+				end
 				return if focused() then "$zeron.inset.active" else "$zeron.inset.inactive"
 			end,
 			rounded = "$zeron.inset.radius",
 			border = 1,
 			border_color = function(): string
+				if frame.framed:get() then
+					return "$zeron.inset.framed_edge"
+				end
 				return if focused() then "$zeron.inset.focus_edge" else "$zeron.inset.edge"
+			end,
+			shadow = function(): any
+				return if frame.framed:get() then CARD_LIFT else false
 			end,
 			on_hover = function(inside: boolean)
 				hovered:set(inside)
@@ -1335,6 +1386,19 @@ return function(props: Props): Node
 					end)
 				end
 			end,
+			frame.Layer {
+				kind = function(): string?
+					return if frame.page_art:get() == "chat" then "chat" else nil
+				end,
+				origin = function(): { x: number, y: number }
+					local _ = card_ref.width, art.card_left:get()
+					local el = card_ref:peek()
+					return { x = (if el and el.x then el.x else 0) + 1, y = (if el and el.y then el.y else 0) + 1 }
+				end,
+				left = function(): number
+					return if frame.framed:get() then 0 else art.card_left:get()
+				end,
+			},
 			ui.column((function()
 				local lane: { [any]: any } = {
 					absolute = true,
@@ -1639,6 +1703,13 @@ return function(props: Props): Node
 		},
 	}
 
+	ui.effect(function()
+		local gap = if not appearance.inset_card:get() then 0 elseif fit.current:get().sidebar then INSET else WINDOW_EDGE
+		local left = props.width() - (row_ref.width or props.width()) + gap
+		if art.card_left:peek() ~= left then
+			art.card_left:set(left)
+		end
+	end)
 	-- Two cards, the page and its panel, set in from the window's edges and
 	-- the sidebar by the gap, the title bar's line inside them. The window
 	-- round them, along the title bar's strip (over them, beside them and
@@ -1652,14 +1723,36 @@ return function(props: Props): Node
 		relative = true,
 		pt = ui.raw(TOP_BAR, "room for the top bar"),
 		-- (The window's edges a little more than the gap between cards: the
-		-- same to the eye.)
-		pb = ui.raw(WINDOW_EDGE, "the window's edge"),
+		-- same to the eye. Inset card off, the page runs to them.)
+		pb = function(): number
+			return ui.raw(if appearance.inset_card:get() then WINDOW_EDGE else 0, "the window's edge")
+		end,
 		pl = motion.tween(ui.computed(function(): number
+			if not appearance.inset_card:get() then
+				return 0
+			end
 			return if fit.current:get().sidebar then INSET else WINDOW_EDGE
 		end), motion.sidebar),
-		pr = ui.raw(WINDOW_EDGE, "the window's edge"),
+		pr = function(): number
+			return ui.raw(if appearance.inset_card:get() then WINDOW_EDGE else 0, "the window's edge")
+		end,
 		pointer_events = "none",
 		ui.div { id = "shell-drag", absolute = true, left = 0, right = 0, top = 0, h = TITLE_H, window_drag = true },
+		ui.div {
+			id = "title-seam",
+			absolute = true,
+			left = 0,
+			top = function(): number
+				return ui.raw(ds.TitleBar.middle() - SEAM_H / 2, "on the top bar's line")
+			end,
+			w = 1,
+			h = ui.raw(SEAM_H, "the hairline's height"),
+			pointer_events = "none",
+			bg = "$border",
+			opacity = motion.tween(ui.computed(function(): number
+				return if fit.current:get().sidebar and not shell_view.collapsed:get() and not frame.framed:get() then 1 else 0
+			end), motion.sidebar),
+		},
 		split_area,
 		-- (Settings, in the page's place.)
 		if props.settings

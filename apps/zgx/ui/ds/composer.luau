@@ -32,6 +32,7 @@
 --
 -- `Composer { value = draft, model = model, models = { … }, on_send = … }`.
 
+local composer_surface = require("@self/composer_surface")
 local Button = require("@self/button")
 local Icon = require("@self/icon")
 local control = require("@self/control")
@@ -1735,6 +1736,16 @@ return ui.component(function(props: Props): Node
 		return if type(own) == "string" then own else own:get()
 	end
 
+	if props.toolbar_id then
+		ui.effect(function()
+			local _ = pill.width, pill.height
+			local el = pill:get()
+			if el then
+				composer_surface.element = el
+				composer_surface.moved:set(composer_surface.moved:peek() + 1)
+			end
+		end)
+	end
 	local surface = ui.div {
 		ref = pill,
 		on_resize = measure(pill_w, "w"),

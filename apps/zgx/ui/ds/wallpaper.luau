@@ -13,9 +13,9 @@
 --   }
 --
 -- It fills its box, holding still as its box narrows (it's laid from the
--- box's right edge, `width` wide). Changing what stands in it, or the
--- effect, crossfades (an effect is its layer's shader, given as it is
--- made); `intensity` and `density` change in place.
+-- box's right edge, `width` wide; with `fill`, its box's own width). Changing
+-- what stands in it, or the effect, crossfades (an effect is its layer's
+-- shader, given as it is made); `intensity` and `density` change in place.
 --
 -- `Picture { src, w, h, x, y, zoom }` is a picture laid in it as Zeron lays
 -- its new-thread background: covering the box, `zoom` times that (1 to 4),
@@ -26,6 +26,7 @@
 -- stands in it can follow the pointer (`px`, `py`, 0 to 1, 0.5 at rest).
 
 local effects = require("@self/effects")
+local motion = require("@self/motion")
 
 local M = {}
 
@@ -48,6 +49,9 @@ export type Props = {
 	-- How wide it is laid, from its box's right edge (the window's width,
 	-- so it holds still as a sidebar comes and goes).
 	width: (number | () -> number)?,
+	mask: (() -> { fade: number, reveal: number, cutout: any? })?,
+	fill: boolean?,
+	id: string?,
 }
 
 export type Picture = { src: string, w: number, h: number, x: number?, y: number?, zoom: number? }
@@ -117,14 +121,11 @@ function M.cover(p: Picture, bw: number, bh: number): { left: number, top: numbe
 end
 
 -- A picture filling its box as `cover` lays it (a file that has gone
--- draws nothing).
+-- draws nothing): in shares of the box, so its box resizing runs no script.
 function M.Picture(p: Picture): Node
-	local box = ui.ref()
-	local function at(): { left: number, top: number, w: number, h: number }
-		return M.cover(p, box.width or 0, box.height or 0)
-	end
+	local zoom = math.clamp(p.zoom or 1, M.MIN_ZOOM, M.MAX_ZOOM)
+	local x, y = math.clamp(p.x or 0.5, 0, 1), math.clamp(p.y or 0.5, 0, 1)
 	return ui.div {
-		ref = box,
 		absolute = true,
 		left = 0,
 		right = 0,
@@ -134,25 +135,39 @@ function M.Picture(p: Picture): Node
 		ui.image {
 			src = p.src or "",
 			absolute = true,
-			left = function(): number
-				return at().left
-			end,
-			top = function(): number
-				return at().top
-			end,
-			w = function(): number
-				return at().w
-			end,
-			h = function(): number
-				return at().h
-			end,
+			left = `{(1 - zoom) * x * 100}%`,
+			top = `{(1 - zoom) * y * 100}%`,
+			w = `{zoom * 100}%`,
+			h = `{zoom * 100}%`,
+			fit = "cover",
+			object_position = { x, y },
+			-- (Decoded behind the crossfade, the old picture leaves over nothing.)
+			decode = "sync",
 			aria_hidden = true,
 		},
 	}
 end
 
--- How long art takes to fade in over what it replaces.
-local FADE = 320
+-- How long art takes to fade in over what it replaces (`motion.rs`).
+local FADE = 180
+
+local ART_MASK = ui.layer_shader([[
+fn layer(input:LayerInput)->vec4<f32> {
+ let r=input.params[0];
+ let m=input.params[1];
+ let h=input.params[2].x;
+ var f=1.;
+ if h>0. { f=smoothstep(0.,h,h-input.p.y); }
+ var cut=1.;
+ if r.z>0. {
+  let q=abs(input.p-(r.xy+r.zw*.5))-r.zw*.5+vec2(m.x);
+  let d=length(max(q,vec2(0.)))+min(max(q.x,q.y),0.)-m.x;
+  cut=smoothstep(0.,m.y,d-m.z);
+ }
+ let a=1.-(1.-min(cut,f))*(1.-m.w*f);
+ return vec4(input.color.rgb,input.color.a*a);
+}
+]])
 
 function M.Wallpaper(props: Props): Node
 	local box = ui.ref()
@@ -181,6 +196,21 @@ function M.Wallpaper(props: Props): Node
 	local function threshold(): number
 		return M.DENSITY[read(props.density, "medium")] or 0.22
 	end
+	if props.mask then
+		local mask = props.mask
+		ui.effect(function()
+			local m = mask()
+			local el = box:get()
+			if el then
+				local c = m.cutout or { x = 0, y = 0, w = 0, h = 0, radius = 0, feather = 0, clearance = 0 }
+				anime.utils.set(el, {
+					layerParam0 = c.x, layerParam1 = c.y, layerParam2 = c.w, layerParam3 = c.h,
+					layerParam4 = c.radius, layerParam5 = c.feather, layerParam6 = c.clearance, layerParam7 = m.reveal,
+					layerParam8 = m.fade,
+				})
+			end
+		end)
+	end
 	-- What stands in it and its effect, made again as either changes (the
 	-- shader is fixed as it's made), crossfading: the new fades in over the
 	-- old as the old fades out. What stands there is built straight in the
@@ -202,7 +232,7 @@ function M.Wallpaper(props: Props): Node
 			overflow = "hidden",
 			provide = props.provide,
 			fade = function()
-				return { 0, if read(props.faded, true) then (box.height or 0) else 0 }
+				return { 0, if not props.mask and read(props.faded, true) then (box.height or 0) else 0 }
 			end,
 			-- (Named, for tests.)
 			id = "wallpaper-layer",
@@ -211,10 +241,11 @@ function M.Wallpaper(props: Props): Node
 			-- (and its layer) only as wide as what shows of it.
 			ui.div {
 				absolute = true,
+				left = if props.fill then 0 else nil,
 				right = 0,
 				top = 0,
 				bottom = 0,
-				w = props.width or 820,
+				w = if props.fill then nil else (props.width or 820),
 				props.content(w or ""),
 			},
 		}
@@ -247,16 +278,19 @@ function M.Wallpaper(props: Props): Node
 		return ui.div(scene)
 	end, {
 		ref = box,
+		id = props.id,
 		absolute = true,
 		left = 0,
 		right = 0,
 		top = 0,
 		bottom = 0,
 		pointer_events = "none",
+		layer_shader = if props.mask then ART_MASK else nil,
+		layer_params = if props.mask then { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } } else nil,
 		-- The new art fades in as itself (the box the effect already draws
 		-- through, not a box of its own inside it) over the old leaving.
-		enter = { opacity = { 0, 1 }, duration = FADE, ease = "out(3)" },
-		exit = { opacity = 0, duration = FADE, ease = "out(3)" },
+		enter = motion.transition({ opacity = { 0, 1 }, duration = FADE, ease = "out(3)" }),
+		exit = motion.transition({ opacity = 0, duration = FADE, ease = "out(3)" }),
 	})
 end
 

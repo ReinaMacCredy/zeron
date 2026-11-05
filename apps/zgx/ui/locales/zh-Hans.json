@@ -1137,6 +1137,141 @@
       "empty": "没有匹配的设置。"
     },
     "appearance": {
+      "advanced": {
+        "label": "高级外观",
+        "description": "玻璃、背景、动效和数学公式"
+      },
+      "material": "材质和背景",
+      "math": "数学公式",
+      "frost": {
+        "tint": {
+          "label": "玻璃色调",
+          "terms": "frost tint glass opacity dark 磨砂 色调 玻璃"
+        },
+        "dim": {
+          "label": "调暗明亮背景",
+          "description": "在 Zeron 后面有浅色窗口时，保持玻璃为深色。",
+          "terms": "frost backdrop light windows glass grey 背景 浅色 调暗"
+        },
+        "brightness": {
+          "label": "背景亮度",
+          "terms": "frost backdrop glass dim 背景 亮度"
+        }
+      },
+      "inset": {
+        "label": "内嵌卡片",
+        "description": "让页面位于窗口背景之上的圆角卡片中。",
+        "terms": "card rounded shell gap window 卡片 圆角 内嵌"
+      },
+      "frame": {
+        "label": "窗口边框",
+        "terms": "frame artwork rail sidebar tab bar dark glass wallpaper 边框 图片 侧栏 标签栏",
+        "off": {
+          "label": "关闭",
+          "description": "只有标签栏显示图片。"
+        },
+        "dark": {
+          "label": "深色",
+          "description": "图片延伸到标签栏、应用侧栏和边栏下方，并变暗。"
+        },
+        "glass": {
+          "label": "玻璃",
+          "description": "图片延伸到标签栏、应用侧栏和边栏下方，并模糊和变暗。"
+        },
+        "sidebar": {
+          "label": "边框侧栏",
+          "terms": "frame sidebar rail plain darker glass legible 边栏 文字",
+          "plain": {
+            "label": "普通",
+            "description": "应用侧栏和边栏直接显示边框。"
+          },
+          "darker": {
+            "label": "更深",
+            "description": "应用侧栏和边栏比边框其余部分更深。"
+          },
+          "glass": {
+            "label": "玻璃",
+            "description": "应用侧栏和边栏始终模糊，让文字只落在颜色上。"
+          }
+        },
+        "blend": {
+          "label": "边栏过渡",
+          "terms": "frame sidebar blend seam fade whole tab bar 过渡 接缝",
+          "whole": {
+            "label": "整个边框",
+            "description": "边栏的外观也覆盖标签栏，让边框成为一个整体。"
+          },
+          "fade": {
+            "label": "渐隐",
+            "description": "边栏的外观在标签栏起始处逐渐消失。"
+          }
+        },
+        "shade": {
+          "label": "边框暗度",
+          "terms": "frame shade dark 暗度"
+        },
+        "blur": {
+          "label": "边框模糊",
+          "terms": "frame blur glass 模糊"
+        },
+        "px": "{n}px"
+      },
+      "chat": {
+        "label": "聊天背景",
+        "description": "在打开的对话后面显示图片。",
+        "terms": "chat conversation thread background artwork wallpaper behind 聊天 背景 图片",
+        "preview": "聊天背景预览",
+        "placement": {
+          "label": "位置",
+          "terms": "hero full chat background 位置",
+          "hero": {
+            "label": "顶部",
+            "description": "与新对话相同的顶部裁剪，向下渐隐。"
+          },
+          "full": {
+            "label": "全部",
+            "description": "覆盖整个对话栏。"
+          }
+        },
+        "opacity": {
+          "label": "不透明度",
+          "terms": "chat background opacity tab 不透明度"
+        },
+        "blur": {
+          "label": "模糊",
+          "terms": "chat background blur 模糊"
+        },
+        "scrim": {
+          "label": "遮罩",
+          "description": "让图片向底部变暗，保持文字清晰可读。",
+          "terms": "chat background scrim readable 遮罩"
+        },
+        "tab_shade": {
+          "label": "标签栏暗度",
+          "description": "让图片上的标签栏变暗，保持标签标题清晰可读。",
+          "terms": "tab bar shade chat background 标签栏 暗度"
+        }
+      },
+      "folder": {
+        "label": "壁纸文件夹",
+        "terms": "folder shuffle random wallpaper rotate 文件夹 随机 壁纸",
+        "none": "未选择文件夹",
+        "hint": "{folder} · 按 {key} 随机选一张图片",
+        "choose": "选择文件夹",
+        "shuffle": "随机",
+        "choose_title": "选择壁纸文件夹",
+        "first": "请先在外观中选择壁纸文件夹。",
+        "empty": "这个文件夹里没有可读取的壁纸。请添加 PNG 或 JPEG 等图片，或选择其他文件夹。",
+        "unreadable": "无法读取壁纸文件夹。请在外观中选择可访问的文件夹。"
+      },
+      "match_colors": {
+        "label": "匹配壁纸颜色",
+        "description": "用壁纸的颜色作为强调色、高亮和淡淡的界面色调。",
+        "terms": "wallpaper colors tint accent match 壁纸 颜色 匹配"
+      },
+      "accent_wallpaper_on": "已启用壁纸颜色；关闭后使用这个强调色。",
+      "font_missing": "{kind}“{name}”在这台设备上不可用。正在使用 {fallback}。",
+      "reset": "重置",
       "title": "外观",
       "terms": "主题 外观 颜色 theme look colors",
       "description": "此电脑上 Zeron 的外观。",
@@ -1167,15 +1302,27 @@
         "terms": "色调 高亮 颜色 tint highlight swatch colour"
       },
       "reduce_motion": {
+        "system": "跟随系统",
+        "on": "开启",
+        "off": "关闭",
+        "helper_system_on": "正在跟随系统减少动态效果：移动立即到位，淡入淡出保持简短。",
+        "helper_system_off": "正在跟随系统，系统目前允许动态效果。",
+        "helper_on": "动画直接跳到最终状态。",
+        "helper_off": "即使系统要求减少动态效果，动画也会播放。",
         "label": "减弱动态效果",
-        "terms": "动画 辅助功能 动态 淡入淡出 animation accessibility movement fade spring",
-        "system_on": "电脑的“减弱动态效果”开启时启用：移动立即完成，淡入淡出时间缩短。",
-        "description": "移动立即完成，淡入淡出时间缩短。电脑的“减弱动态效果”开启时始终启用。"
+        "terms": "动画 辅助功能 动态 淡入淡出 animation accessibility movement fade spring"
       },
       "glass": {
-        "label": "毛玻璃",
-        "terms": "玻璃 半透明 不透明 透明 模糊 材质 glass translucent opaque transparency blur vibrancy material",
-        "description": "透过窗口显示桌面。关闭时窗口不透明。"
+        "label": "玻璃",
+        "theme": "主题默认",
+        "frosted": "磨砂",
+        "opaque": "不透明",
+        "helper_theme": "主题默认：{kind}",
+        "helper_frosted": "半透明表面",
+        "helper_opaque": "纯色表面",
+        "kind_frosted": "磨砂",
+        "kind_opaque": "不透明",
+        "terms": "玻璃 半透明 不透明 透明 模糊 材质 glass translucent opaque transparency blur vibrancy material"
       },
       "font_default": "默认（{name}）",
       "font_search": "搜索字体",
@@ -1240,6 +1387,11 @@
           "remove": "移除"
         },
         "adjust": {
+          "reset": "重置",
+          "zoom_in": "放大",
+          "zoom_out": "缩小",
+          "changed": "背景已更换。请关闭后调整新图片。",
+          "preparing": "正在准备预览…",
           "title": "调整背景",
           "body": "拖动图片调整取景，用滑块放大。",
           "done": "完成",
@@ -2330,7 +2482,8 @@
         "update_watch": "更新监视器",
         "search": "搜索",
         "new_project": "新建项目",
-        "app_rail": "应用侧栏"
+        "app_rail": "应用侧栏",
+        "frame": "窗口边框"
       }
     },
     "title_bar": {
@@ -2367,7 +2520,8 @@
         "shell_find": "查找",
         "shell_close": "关闭",
         "shell_reload": "重新启动 Zeron",
-        "shell_reload_interface": "重新加载界面"
+        "shell_reload_interface": "重新加载界面",
+        "shell_random_wallpaper": "随机壁纸"
       },
       "group": {
         "sessions": "会话",

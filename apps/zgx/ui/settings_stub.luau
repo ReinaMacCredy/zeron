@@ -355,7 +355,29 @@ local answers: { [string]: (arg: any) -> any } = {
 	-- so a headless host can draw it), 512 square.
 	["wallpaper.keep"] = function(arg: any)
 		local name = string.match(arg.path, "[^/]+$") or arg.path
-		return settled({ path = arg.path, name = name, w = 512, h = 512 })
+		if string.find(name, "damaged", 1, true) then
+			return settled(nil, "invalid")
+		end
+		return settled({ path = arg.path, name = name, w = 512, h = 512, color = "#3366cc" })
+	end,
+	["wallpaper.folder"] = function(arg: any)
+		if arg.path == "/missing" then
+			return settled(nil, "not_found")
+		end
+		local out = {}
+		for i = 1, 6 do
+			table.insert(out, `{arg.path}/w{i}.png`)
+		end
+		if arg.path == "/damaged" then
+			out = { "/damaged/damaged.png", "/damaged/fine.png" }
+		end
+		return settled(out)
+	end,
+	["wallpaper.color"] = function()
+		return settled("#3366cc")
+	end,
+	["wallpaper.blurred"] = function(arg: any)
+		return settled(arg.path)
 	end,
 }
 

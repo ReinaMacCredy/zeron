@@ -2,7 +2,10 @@
 -- platform's frosted material) or opaque (solid colours throughout). One
 -- setting for the whole app, kept across launches.
 --
--- `material.frosted` is the setting (what Settings → Appearance switches).
+-- `material.surface` is the setting (Settings → Appearance's Glass): "theme",
+-- "frosted" or "opaque"; `material.frosted` what it comes to, which a switch
+-- elsewhere (the palette's) may set, making that the choice. No theme of Zeron's
+-- asks for a solid window, so a theme's default is frosted.
 -- What draws reads `material.see_through()`: frosted, unless the system
 -- asks for no transparency (macOS's Reduce transparency; Windows'
 -- Transparency effects off, which the host reports, src/transparency.rs),
@@ -15,6 +18,24 @@ local glass_tint = require("@self/glass_tint")
 local M = {}
 
 M.frosted = ui.persist("frosted", true)
+M.surface = ui.persist("surface", if M.frosted:peek() then "frosted" else "opaque")
+ui.effect(function()
+	local on = M.surface:get() ~= "opaque"
+	if M.frosted:peek() ~= on then
+		M.frosted:set(on)
+	end
+end)
+ui.effect(function()
+	local on = M.frosted:get()
+	if (M.surface:peek() ~= "opaque") ~= on then
+		M.surface:set(if on then "frosted" else "opaque")
+	end
+end)
+
+M.frost_tint = ui.persist("frost_tint", 0.8)
+M.frost_dim = ui.persist("frost_dim_backdrop", true)
+M.frost_brightness = ui.persist("frost_backdrop_brightness", 0.3)
+M.FROST_TINT_MIN, M.FROST_BRIGHTNESS_MIN = 0.5, 0.1
 
 -- How much the desktop blurs behind the window's glass, in points, where
 -- the app can tell (Hyprland, by its blur settings: src/desktop_blur.rs);
@@ -26,13 +47,19 @@ M.blur = ui.shared("window.blur", nil :: number?)
 -- and not as a sharp picture (ds/glass_tint); nil where the theme's own
 -- suits.
 function M.glass_theme(): { [string]: any }?
-	local keep = glass_tint.clarity(M.blur:get())
-	if keep >= 1 then
+	local tint = ui.theme.get("glass.tint")
+	if tint == nil then
 		return nil
 	end
-	local tint = ui.theme.get("glass.tint")
-	local thicker = if tint == nil then nil else glass_tint.thicker(tostring(tint), keep)
-	return if thicker then { background = thicker } else nil
+	local own = tostring(tint)
+	local kind = ui.theme.kind()
+	if not (kind == "light" or kind == "high-contrast-light") then
+		local tuned = glass_tint.tuned(own, M.frost_tint:get(), if M.frost_dim:get() then M.frost_brightness:get() else nil)
+		own = tuned or own
+	end
+	local keep = glass_tint.clarity(M.blur:get())
+	local out = if keep >= 1 then own else glass_tint.thicker(own, keep)
+	return if out and out ~= tostring(tint) then { background = out } else nil
 end
 
 -- Windows' Transparency effects off (zgx reports macOS's alone, as

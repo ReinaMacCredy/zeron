@@ -31,4 +31,20 @@ function M.thicker(tint: string, keep: number): string?
 	return string.format("#%s%02x", rgb, math.floor(thick * 255 + 0.5))
 end
 
+function M.tuned(tint: string, coverage: number, dim: number?): string?
+	local r, g, b = string.match(tint, "^#(%x%x)(%x%x)(%x%x)")
+	if not r then
+		return nil
+	end
+	local alpha = if dim then 1 - (1 - coverage) * dim else coverage
+	local scale = coverage / math.max(alpha, 0.001)
+	if not dim then
+		scale = 1
+	end
+	local function ch(hex: string): number
+		return math.floor((tonumber(hex, 16) :: number) * scale + 0.5)
+	end
+	return string.format("#%02x%02x%02x%02x", ch(r), ch(g), ch(b), math.floor(alpha * 255 + 0.5))
+end
+
 return M

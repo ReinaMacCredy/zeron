@@ -7,4 +7,6 @@
 
 return {
 	showing = ui.state("shell_art_showing", false),
+	window = ui.state("shell_art_window", { w = 1240, h = 800 }),
+	card_left = ui.state("shell_art_card_left", 0),
 }

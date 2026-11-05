@@ -41,6 +41,8 @@ function M.setup()
 				bg = "{surface.raised}",
 				edge = "{border.subtle}",
 				edge_hover = "{border.strong}",
+				framed_edge = "alpha({border.subtle}, 2)",
+				framed_bg = "over({zeron.window}, {surface.raised})",
 				-- Split chats (screens/shell/split): what lies over a pane
 				-- that isn't focused (lighter under the pointer), the focused
 				-- one's edge, and where a chat dragged over the panes lands.
@@ -656,6 +658,7 @@ function M.setup()
 					-- A card lifted off the window, lighter than it: the
 					-- theme's raised surface.
 					bg = if dark then "alpha({text.primary}, 0.035)" else "alpha({background}, 0.55)",
+					framed_bg = if dark then "{zeron.window}" else "over({zeron.window}, {surface.raised})",
 					-- A pane with focus a touch brighter than the cards round it.
 					active = if dark then "alpha({text.primary}, 0.06)" else "alpha({background}, 0.85)",
 					inactive = if dark then "alpha({text.primary}, 0.035)" else "alpha({background}, 0.55)",
