@@ -6282,6 +6282,7 @@ impl RpcService for EngineRpc {
                     if !crate::source_control::valid_comment_body(&p.body) {
                         return Err(RpcError::BadParams("Comment must contain 1–60000 bytes".into()));
                     }
+                    self.github.may_write_thread(&p.url, &p.thread, false).await.map_err(action_rpc_error)?;
                     let comment = self
                         .github
                         .reply_in_review_thread(&p.url, &p.thread, &p.body)
@@ -6290,6 +6291,7 @@ impl RpcService for EngineRpc {
                     return RpcReply::value(&comment);
                 }
                 let resolved = p.resolved.ok_or_else(|| RpcError::BadParams("resolved: true or false".into()))?;
+                self.github.may_write_thread(&p.url, &p.thread, true).await.map_err(action_rpc_error)?;
                 let now = self
                     .github
                     .set_review_thread_resolved(&p.url, &p.thread, resolved)

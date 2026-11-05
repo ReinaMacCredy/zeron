@@ -3661,7 +3661,11 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
 }
 
 fn turned_off(name: &str) -> Value {
-    let text = format!("{name} is turned off in Zeron's Settings > Tools.");
+    let text = if name == "terminal" || ZERON_COMPUTER_TOOL_NAMES.contains(&name) {
+        format!("{name} is off for this chat: it needs full access, and its switch on in Zeron's Settings > Tools.")
+    } else {
+        format!("{name} is turned off in Zeron's Settings > Tools.")
+    };
     json!({ "content": [{ "type": "text", "text": text }], "isError": true })
 }
 
@@ -6472,10 +6476,8 @@ mod tests {
             assert!(!listed.contains(&switch), "{switch} listed");
             let reply = pipe.call(json!(7), name, args).await;
             assert_eq!(reply["result"]["isError"], true, "{switch}");
-            assert_eq!(
-                reply["result"]["content"][0]["text"],
-                format!("{switch} is turned off in Zeron's Settings > Tools.")
-            );
+            let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.starts_with(switch) && text.ends_with("Settings > Tools."), "{text}");
         }
         assert!(logged(&fake, methods::COMPUTER_ACTION).is_empty());
         assert!(logged(&fake, methods::DEVICE_TOOL_SCREENSHOT).is_empty());

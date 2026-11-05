@@ -11,6 +11,8 @@
 //!   either would step around the supervision the person chose for the chat.
 //! - A tool switched off in Settings or for the chat is refused here as well
 //!   as hidden from the listing.
+//! - A project Action runs outside the chat's sandbox, on a click or when a
+//!   worktree is made, so saving one takes full access, in its own project.
 //! - A run it starts in a chat runs as that chat is set (its harness,
 //!   sandbox, access, plan mode and folder), never as the request says.
 //! - Approving a question another chat asks (an approval to run a command,
@@ -83,6 +85,26 @@ fn tool_switch(method: &str, params: &Value) -> Option<&'static str> {
         methods::DEVICE_TOOL_OPEN => "device_open",
         methods::DEVICE_TOOL_SCREENSHOT => "device_screenshot",
         methods::DEVICE_TOOL_CLOSE => "device_close",
+        methods::NEW_PLUGIN => "create_plugin",
+        methods::LIST_PLUGINS => "list_plugins",
+        methods::PLUGIN_STATUS => "plugin_status",
+        methods::INSTALL_PLUGIN => "install_plugin",
+        methods::CHECK_PLUGIN_UPDATES => "update_plugin",
+        methods::DESCRIBE_ELEMENTS => "describe_elements",
+        methods::LIST_TEMPLATES => "list_templates",
+        methods::CREATE_TEMPLATE => "create_template",
+        methods::USE_TEMPLATE => "use_template",
+        methods::TEMPLATE_STATUS => "template_status",
+        methods::DELETE_TEMPLATE => "delete_template",
+        methods::DESCRIBE_APP => "describe_app",
+        methods::EXPORT_TEMPLATE => "export_template",
+        methods::IMPORT_TEMPLATE => "import_template",
+        methods::LIST_THEMES => "list_themes",
+        methods::GET_THEME => "get_theme",
+        methods::CREATE_THEME => "create_theme",
+        methods::UPDATE_THEME => "update_theme",
+        methods::DELETE_THEME => "delete_theme",
+        methods::USE_THEME => "use_theme",
         methods::MUTATE => match params["op"].as_str()? {
             "renameChat" => "set_thread_title",
             "setChatArchived" => "set_thread_archived",
@@ -149,10 +171,23 @@ impl EngineRpc {
         let disabled: std::collections::BTreeSet<&str> = state.disabled.iter().map(String::as_str).collect();
         let off = match tool_switch(method, &params) {
             Some(tool) => disabled.contains(tool).then_some(tool),
-            None => (is_computer(method) && !group_live(ToolGroup::Computer, &disabled)).then_some("computer"),
+            None if is_computer(method) => (!group_live(ToolGroup::Computer, &disabled)).then_some("computer"),
+            None if method == methods::CALL_PLUGIN_TOOL => (!group_live(ToolGroup::Plugins, &disabled)).then_some("plugins"),
+            None => None,
         };
         if let Some(tool) = off {
             return Err(refused(format!("The {tool} tool is switched off for this chat: the person turns it on in Zeron")));
+        }
+        if matches!(method, methods::UPSERT_PROJECT_ACTION | methods::DELETE_PROJECT_ACTION) {
+            if !self.chat_in_full_access(chat.as_deref()) {
+                return Err(refused(
+                    "This chat isn't in full access, so it can't change the project's Actions: a saved Action runs outside this chat's sandbox. Tell the person, who can change the chat's access in Zeron",
+                ));
+            }
+            let own = chat.as_deref().and_then(|id| self.workspace.chat(id).ok().flatten()).and_then(|c| c.space_id);
+            if own.as_deref() != params["spaceId"].as_str() {
+                return Err(refused("An agent changes only its own project's Actions"));
+            }
         }
         if method == methods::UPSERT_AGENT_PROFILE {
             params["byAgent"] = json!(true);
@@ -462,6 +497,35 @@ mod tests {
         core.registry.set_tool_settings(settings);
         assert!(gate(agent("careful"), methods::MUTATE, task.clone()).await.is_err());
         assert!(gate(Caller::Local, methods::MUTATE, task).await.is_ok());
+
+        // A saved Action runs outside the sandbox: full access, own project.
+        core.workspace.create_space("home", &core.device_id, "/project", None, false).unwrap();
+        rpc.handle(
+            methods::MUTATE,
+            json!({"op":"createChat", "chatId":"owner", "spaceId":"home",
+                "config":{"harness":"codex","sandbox":"workspace-write","access":"full-access"}}),
+        )
+        .await
+        .unwrap();
+        let action = json!({"spaceId":"home", "action":{"name":"x", "command":"id", "runOnWorktreeCreate":true}});
+        for method in [methods::UPSERT_PROJECT_ACTION, methods::DELETE_PROJECT_ACTION] {
+            assert!(gate(agent("careful"), method, action.clone()).await.is_err(), "{method}");
+            assert!(gate(agent("bold"), method, action.clone()).await.is_err(), "{method}");
+            assert!(gate(agent("owner"), method, action.clone()).await.is_ok(), "{method}");
+        }
+
+        // Plugin tools follow their switches, each one and the whole group.
+        assert!(gate(agent("careful"), methods::LIST_THEMES, json!({})).await.is_ok());
+        assert!(gate(agent("careful"), methods::CALL_PLUGIN_TOOL, json!({})).await.is_ok());
+        let mut settings = core.registry.tool_settings();
+        settings.set_tool("list_themes", false);
+        core.registry.set_tool_settings(settings);
+        assert!(gate(agent("careful"), methods::LIST_THEMES, json!({})).await.is_err());
+        assert!(gate(agent("careful"), methods::CALL_PLUGIN_TOOL, json!({})).await.is_ok());
+        let mut settings = core.registry.tool_settings();
+        settings.set_group(zeron_proto::tools::ToolGroup::Plugins, false);
+        core.registry.set_tool_settings(settings);
+        assert!(gate(agent("careful"), methods::CALL_PLUGIN_TOOL, json!({})).await.is_err());
 
         // No proven chat: capped at the least, and it approves nothing.
         let unbound = || Caller::Agent { chat: None };

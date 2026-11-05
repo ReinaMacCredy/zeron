@@ -520,8 +520,8 @@ impl GitHubCli {
         body: &str,
     ) -> Result<(), ActionError> {
         body_text(body, "A reply cannot be empty.")?;
+        self.may_write_thread(url, thread, false).await?;
         let target = Target::parse(url)?;
-        self.thread_in_scope(&target, thread).await?;
         self.graphql_write(
             "mutation($threadId:ID!,$body:String!) { addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}) { comment { id } } }",
             json!({ "threadId": thread, "body": body }),
@@ -537,15 +537,8 @@ impl GitHubCli {
         thread: &str,
         resolved: bool,
     ) -> Result<(), ActionError> {
+        self.may_write_thread(url, thread, true).await?;
         let target = Target::parse(url)?;
-        let controls = self.controls(&target).await?;
-        if !(controls.can_write || controls.did_author) {
-            return Err(ActionError::Refused(
-                "Resolving a conversation needs write access or authorship of this pull request."
-                    .into(),
-            ));
-        }
-        self.thread_in_scope(&target, thread).await?;
         self.graphql_write(
             if resolved {
                 "mutation($threadId:ID!) { resolveReviewThread(input:{threadId:$threadId}) { thread { isResolved } } }"
@@ -557,6 +550,27 @@ impl GitHubCli {
         .await?;
         self.forget(&target, false).await;
         Ok(())
+    }
+
+    /// What every write to a review thread clears first, the fork's RPCs and
+    /// upstream's (`ReplyChangeRequestThread`, `ResolveChangeRequestThread`).
+    pub async fn may_write_thread(
+        &self,
+        url: &str,
+        thread: &str,
+        resolving: bool,
+    ) -> Result<(), ActionError> {
+        let target = Target::parse(url)?;
+        if resolving {
+            let controls = self.controls(&target).await?;
+            if !(controls.can_write || controls.did_author) {
+                return Err(ActionError::Refused(
+                    "Resolving a conversation needs write access or authorship of this pull request."
+                        .into(),
+                ));
+            }
+        }
+        self.thread_in_scope(&target, thread).await
     }
 
     async fn thread_in_scope(&self, target: &Target, thread: &str) -> Result<(), ActionError> {
