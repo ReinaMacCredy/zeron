@@ -2711,6 +2711,7 @@
       "edit_conflict": "队列中的消息已更改：你的编辑未保存",
       "edit_not_saved": "你的编辑未保存",
       "didnt_send": "消息未发送",
+      "didnt_send_why": "消息未发送：{reason}",
       "starting_cloud": "正在启动 Cloud 设备…",
       "starting": "正在开始对话…",
       "didnt_start": "对话未能开始",

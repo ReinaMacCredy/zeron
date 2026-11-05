@@ -2711,6 +2711,7 @@
       "edit_conflict": "The queued message changed meanwhile: your edit wasn't saved",
       "edit_not_saved": "Your edit wasn't saved",
       "didnt_send": "Your message didn't send",
+      "didnt_send_why": "Your message didn't send: {reason}",
       "starting_cloud": "Starting a Cloud machine…",
       "starting": "Starting the chat…",
       "didnt_start": "The chat didn't start",
