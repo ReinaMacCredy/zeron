@@ -18,7 +18,18 @@ impl Drop for Child {
         let _ = self.0.wait();
     }
 }
-const HTTP_SERVER: &str = "import http.server,socketserver; socketserver.TCPServer(('127.0.0.1',0),http.server.SimpleHTTPRequestHandler).serve_forever()";
+/// A launcher's whole process group: killing the launcher alone orphans the
+/// server it started.
+#[cfg(unix)]
+struct Group(std::process::Child);
+#[cfg(unix)]
+impl Drop for Group {
+    fn drop(&mut self) {
+        unsafe { libc::killpg(self.0.id() as i32, libc::SIGKILL) };
+        let _ = self.0.wait();
+    }
+}
+const HTTP_SERVER: &str = "import signal; signal.alarm(120); import http.server,socketserver; socketserver.TCPServer(('127.0.0.1',0),http.server.SimpleHTTPRequestHandler).serve_forever()";
 fn scope(chats: &[(&str, &Path)]) -> Scope {
     Scope {
         chats: chats
@@ -57,7 +68,7 @@ fn launch_from(cwd: &Path, http: bool, origin: Option<String>) -> Child {
         command
             .current_dir(cwd)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap(),
     )
@@ -180,7 +191,7 @@ async fn a_discovered_server_is_probed_once_not_every_cycle() {
             .env(ORIGIN_ENV, chat_origin(&chat))
             .current_dir(&app)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap(),
     );
@@ -260,7 +271,7 @@ c.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK'
             .env(ORIGIN_ENV, chat_origin(&chat))
             .current_dir(&app)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap(),
     );
@@ -333,6 +344,7 @@ c.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK'
 #[cfg(unix)]
 #[tokio::test]
 async fn backgrounded_scrubbed_terminal_and_out_of_tree_servers_stay_attributed() {
+    use std::os::unix::process::CommandExt;
     let _serial = SERIAL.lock().await;
     let chat = unique("chat");
     let terminal = unique("terminal");
@@ -353,16 +365,21 @@ async fn backgrounded_scrubbed_terminal_and_out_of_tree_servers_stay_attributed(
     .to_owned();
     let pidfile = temp.path().join("daemon.pid");
     // A double fork: the server's parent exits at once, so it is reparented.
-    let status = std::process::Command::new("sh")
-        .args([
-            "-c",
-            &format!("( {python} -c \"{HTTP_SERVER}\" >/dev/null 2>&1 & echo $! > {pidfile:?} ) &"),
-        ])
-        .env(ORIGIN_ENV, chat_origin(&chat))
-        .current_dir(&app)
-        .status()
-        .unwrap();
-    assert!(status.success());
+    let mut daemon_launcher = Group(
+        std::process::Command::new("sh")
+            .args([
+                "-c",
+                &format!(
+                    "( {python} -c \"{HTTP_SERVER}\" >/dev/null 2>&1 & echo $! > {pidfile:?} ) &"
+                ),
+            ])
+            .env(ORIGIN_ENV, chat_origin(&chat))
+            .current_dir(&app)
+            .process_group(0)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(daemon_launcher.0.wait().unwrap().success());
     let daemon: u32 = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(pid) = std::fs::read_to_string(&pidfile)
@@ -376,20 +393,19 @@ async fn backgrounded_scrubbed_terminal_and_out_of_tree_servers_stay_attributed(
     })
     .await
     .expect("daemon did not start");
-    struct Kill(u32);
-    impl Drop for Kill {
-        fn drop(&mut self) {
-            unsafe { libc::kill(self.0 as i32, libc::SIGKILL) };
-        }
-    }
-    let _daemon = Kill(daemon);
-    // A marked shell that stays alive around a server with no environment.
-    let _scrubbed = Child(
-        std::process::Command::new("sh")
-            .args(["-c", &format!("env -i {python} -c \"{HTTP_SERVER}\"; true")])
+    // macOS hides a platform binary's environment (`sh`, `zsh`, `env`) from KERN_PROCARGS2, so only a non-system launcher's marker is readable.
+    let _scrubbed = Group(
+        std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import subprocess,sys; subprocess.call(['env','-i',sys.executable,'-c',sys.argv[1]])",
+                HTTP_SERVER,
+            ])
             .env(ORIGIN_ENV, chat_origin(&chat))
             .current_dir(&app)
             .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
             .spawn()
             .unwrap(),
     );
