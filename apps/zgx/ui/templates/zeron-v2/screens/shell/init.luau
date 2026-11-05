@@ -133,8 +133,11 @@ return function(): Node
 	runs["shell.settings"] = function()
 		route.settings()
 	end
+	-- (Pinned on Settings: it would only change what the chats show after Back, shell.rs `toggle_sidebar`.)
 	runs["shell.toggle_sidebar"] = function()
-		fit.toggle_sidebar()
+		if route.current:peek().name ~= "settings" then
+			fit.toggle_sidebar()
+		end
 	end
 	runs["shell.toggle_files"] = function()
 		local name = route.current:peek().name
@@ -431,6 +434,11 @@ return function(): Node
 				sidebar.key_pressed(string.match(e.key, "^[1-9]$") ~= nil and not (e.shift or e.alt or (e.ctrl and e.meta)))
 			end
 			if e.key == "Escape" and not (e.shift or e.cmd or e.alt or e.ctrl) then
+				-- (A press on the bar's muted controls leaves the keyboard nowhere.)
+				if route.current:peek().name == "settings" then
+					route.leave_settings()
+					return true
+				end
 				local store: any = boundary.load("@app/screens/chat/store")
 				return store ~= nil and store.escape ~= nil and (store.escape :: any)() == true
 			end

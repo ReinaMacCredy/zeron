@@ -175,6 +175,10 @@ return function(props: Props): Node
 		ds.TitleBar {
 			collapsed = props.collapsed,
 			on_toggle = fit.toggle_sidebar,
+			-- (As Zeron's, under Settings' scrim: it stays, muted, showing the chats' state.)
+			can_toggle = function(): boolean
+				return route.current:get().name ~= "settings"
+			end,
 			nav_left = props.nav_left,
 			wordmark = props.wordmark,
 			new_tab = props.new_tab,

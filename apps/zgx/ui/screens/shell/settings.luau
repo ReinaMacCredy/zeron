@@ -24,7 +24,6 @@
 -- `settings.title_of(id, fallback)`: a page's title in the locale shown, a
 -- string read now (`title` stays the English it's kept and compared by).
 
-local motion = require("@ds/motion")
 local ds = require("@ds")
 local route = require("@app/screens/shell/route")
 local frame = require("@app/screens/shell/frame")
@@ -197,6 +196,13 @@ function M.title_of(id: string, fallback: string?): string
 	return title_of(id, if page then page.title else (fallback or id))
 end
 
+-- The list's width, tracked: the sidebar's, dragged in either.
+function M.list_w(): number
+	local fit: any = require("@app/screens/shell/fit")
+	local sidebar: any = require("@app/screens/shell/sidebar")
+	return math.clamp(sidebar.width:get(), fit.SIDEBAR_MIN, fit.SIDEBAR_MAX)
+end
+
 -- Settings, a page of its own over the whole window: its pages listed
 -- down the window's full height (the window's buttons in the list's top
 -- strip, as a macOS sidebar has them), "Back to chats" at the list's head,
@@ -204,33 +210,9 @@ end
 -- settings window (demos/example_kit `settings`). Esc, ⌘[ and Back to
 -- chats go back where the chats were, as they were.
 -- `inset`: under the top bar, its tabs still there, the list and the page each a card
--- as the chats' sidebar and page are (v3). `collapsed`, the chats' sidebar's: the list
--- folds with it, by the title bar's toggle.
-function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
+-- as the chats' sidebar and page are (v3). Pinned, as Zeron's (shell.rs `sidebar_pinned_open`).
+function M.View(props: { inset: boolean? }?): Node
 	local inset = props ~= nil and props.inset == true
-	local collapsed = if props then props.collapsed else nil
-	-- How open the list is, 0 to 1: its width follows this and the width dragged, at
-	-- once, and what it holds stays at its width, the edge clipping it.
-	local list_open = ui.use_state(if collapsed and collapsed:peek() then 0 else 1)
-	if collapsed then
-		local was = collapsed:peek()
-		ui.effect(function()
-			local now = collapsed:get()
-			if now ~= was then
-				was = now
-				anime.animate(list_open, motion.params({
-					value = if now then 0 else 1,
-					duration = motion.sidebar.duration,
-					ease = motion.sidebar.ease,
-				}) :: any)
-			end
-		end)
-	end
-	local function list_w(): number
-		local fit: any = require("@app/screens/shell/fit")
-		local sidebar: any = require("@app/screens/shell/sidebar")
-		return math.clamp(sidebar.width:get(), fit.SIDEBAR_MIN, fit.SIDEBAR_MAX)
-	end
 	-- Where the page is scrolled, as the view has it: `M.scroll` as it was,
 	-- put back until a layout keeps it. (A view made again, the scripts
 	-- reloaded, lays the page out before its rows have come; its scroll,
@@ -279,7 +261,13 @@ function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
 		min_h = 0,
 		-- (In the page's place: its row has the edges, but for the 1 more the sidebar
 		-- stands from the window than the page does from it.)
-		pl = if inset then ui.raw(1, "as far in as the sidebar") else nil,
+		pl = if inset
+			then function(): number
+				local fit: any = require("@app/screens/shell/fit")
+				local appearance: any = require("@app/screens/shell/appearance")
+				return ui.raw(if appearance.inset_card:get() and fit.current:get().sidebar then 1 else 0, "as far in as the sidebar")
+			end
+			else nil,
 		-- The pages (the design system's list of them; a page added later
 		-- joins it in place), and what plugins add under them.
 		ui.div {
@@ -293,19 +281,10 @@ function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
 			overflow = if inset then "hidden" else nil,
 			w = if inset
 				then function(): number
-					return ui.raw(list_open:get() * list_w(), "the list's width, folding")
+					return ui.raw(M.list_w(), "the list's width")
 				end
 				else nil,
-			mr = if inset
-				then function(): number
-					return ui.raw(list_open:get() * 4, "the window's gap between cards, closing with the list")
-				end
-				else nil,
-			hidden = if inset
-				then function(): boolean
-					return list_open:get() <= 0
-				end
-				else nil,
+			mr = if inset then ui.raw(4, "the window's gap between cards") else nil,
 			ds.Settings.Nav {
 				card = inset,
 				value = ui.computed(function(): string?

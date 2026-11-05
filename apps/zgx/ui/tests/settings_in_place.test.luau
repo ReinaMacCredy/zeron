@@ -1146,3 +1146,83 @@ test("the wallpaper's rows stand inline in one card, a hairline only between the
 	expect(app:count(`{NEW_CHAT} >> .settings-rule`)).to_be(2)
 	expect(app:state("shell_wallpaper_image")).never.to_be_nil()
 end)
+
+-- A node's box (its first line in the tree under `scope`), as text to compare.
+local function box(app: any, scope: string): string
+	local line: string = (app:tree(scope) :: string):match("[^\n]+") or ""
+	return line:match(" (%-?[%d.]+,%-?[%d.]+ [%d.]+x[%d.]+)") or `no {scope}`
+end
+
+local TOGGLE = '#titlebar >> role:button "Toggle sidebar"'
+
+test("the sidebar's toggle and the window's fit never reach Settings' list", function()
+	local app = open()
+	local shown = box(app, NAV)
+	local function holds(when: string, collapsed: boolean)
+		expect(`{when}: {box(app, NAV)}`).to_be(`{when}: {shown}`)
+		expect(`{when}: folded {app:state("shell_collapsed")}`).to_be(`{when}: folded {collapsed}`)
+	end
+	-- Neither of the toggle's ways folds it, or the chats' sidebar behind it.
+	app:command("shell.toggle_sidebar")
+	app:frames(40)
+	holds("the command, open", false)
+	app:click(TOGGLE)
+	app:frames(40)
+	holds("the button, open", false)
+	-- (That press left the keyboard nowhere: Esc still goes back.)
+	app:key("Escape")
+	app:frames(20)
+	expect(app:state("shell_route_path")).never.to_contain("settings")
+	expect(box(app, "#shell-sidebar")).never.to_contain(" 0x")
+	-- Folded before Settings opens: the list as it was, and folded still after.
+	app:command("shell.toggle_sidebar")
+	app:frames(40)
+	app:command("shell.settings")
+	app:frames(20)
+	holds("folded first", true)
+	app:command("shell.toggle_sidebar")
+	app:click(TOGGLE)
+	app:frames(40)
+	holds("the toggle, folded", true)
+	app:key("Escape")
+	app:frames(40)
+	expect(app:state("shell_collapsed")).to_be(true)
+	expect(box(app, "#shell-sidebar")).to_contain(" 0x")
+	-- The window too narrow for it all: the list stays as it is, the page narrows.
+	app:command("shell.toggle_sidebar")
+	app:frames(40)
+	app:command("shell.settings")
+	app:frames(20)
+	app:resize(500, 900)
+	app:frames(30)
+	local x, y, w = shown:match("(%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
+	expect(box(app, NAV)).to_contain(`{x},{y} {w}x`)
+end)
+
+test("the bar stands still going into Settings and out of it, frame by frame", function()
+	local app = open()
+	local function bar(): string
+		return `nav {box(app, "#titlebar-nav")} tabs {box(app, "#session-tabs")} toggle {box(app, TOGGLE)}`
+	end
+	for _, state in { "open", "folded" } do
+		app:key("Escape")
+		app:frames(30)
+		if state == "folded" then
+			app:command("shell.toggle_sidebar")
+			app:frames(40)
+		end
+		local chats = bar()
+		app:command("shell.settings")
+		for i = 1, 6 do
+			app:frames(1)
+			expect(`{state} in {i}: {bar()}`).to_be(`{state} in {i}: {chats}`)
+		end
+		app:key("Escape")
+		for i = 1, 6 do
+			app:frames(1)
+			expect(`{state} out {i}: {bar()}`).to_be(`{state} out {i}: {chats}`)
+		end
+		app:command("shell.settings")
+		app:frames(10)
+	end
+end)

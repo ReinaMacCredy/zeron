@@ -30,6 +30,7 @@ export type Props = {
 	-- Its sidebar toggle pressed: the caller's (a sidebar hidden for room
 	-- comes back rather than closing). Else it flips `collapsed`.
 	read on_toggle: (() -> ())?,
+	read can_toggle: (() -> boolean)?,
 	read can_back: (() -> boolean)?,
 	read can_forward: (() -> boolean)?,
 	read on_back: (() -> ())?,
@@ -71,6 +72,7 @@ local LIGHT, LIGHT_FIRST, LIGHT_PITCH = 14, 21, 23
 -- the theme's island (`zeron.island`), read as the bar is built; its row
 -- runs 10 past its last control (Zeron's `TITLEBAR_CLUSTER_PAD`).
 local TOGGLE_IN, ROW_PAD = 88, 10
+local TOGGLE_MUTED = 0.45
 -- On macOS the toggle stands this far past the traffic lights' right edge
 -- (`ui.window.controls`: 12 in and 60 across in zgx's inset title bar, so
 -- 88 in, as ever). In full screen macOS hides them, and the controls take
@@ -434,13 +436,19 @@ local TitleBar = ui.component(function(props: Props): Node
 			window_drag = true,
 			control(
 				locale.t("ds.title_bar.toggle_sidebar"),
-				SidebarIcon {
-					open = ui.computed(function(): boolean
-						return not collapsed:get()
-					end) :: any,
-					size = 16,
+				-- (Its glyph draws in its own ink: no disabled colour reaches it.)
+				ui.div {
+					opacity = function(): number
+						return if props.can_toggle == nil or props.can_toggle() then 1 else TOGGLE_MUTED
+					end,
+					SidebarIcon {
+						open = ui.computed(function(): boolean
+							return not collapsed:get()
+						end) :: any,
+						size = 16,
+					},
 				},
-				nil,
+				props.can_toggle,
 				function()
 					if props.on_toggle then
 						props.on_toggle()

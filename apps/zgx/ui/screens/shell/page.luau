@@ -831,9 +831,9 @@ return function(props: Props): Node
 			local room: number = (row_ref.width or 0) - 2 * INSET
 			-- (Settings' list stands where the sidebar does, in this row: as beside the
 			-- sidebar, the panel has what's past it.)
-			if away() and not shell_view.collapsed:get() then
-				local sidebar: any = require("@app/screens/shell/sidebar")
-				room -= math.clamp(sidebar.width:get(), fit.SIDEBAR_MIN, fit.SIDEBAR_MAX) + 6
+			if away() then
+				local settings: any = require("@app/screens/shell/settings")
+				room -= settings.list_w() + 6
 			end
 			if room > 0 then
 				return room
@@ -1775,7 +1775,7 @@ return function(props: Props): Node
 		ui.div {
 			id = "title-seam",
 			absolute = true,
-			left = 0,
+			left = top_bar.list_past,
 			top = function(): number
 				return ui.raw(ds.TitleBar.middle() - SEAM_H / 2, "on the top bar's line")
 			end,

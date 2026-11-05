@@ -6,10 +6,12 @@ local route = require("@app/screens/shell/route")
 local view = require("@app/screens/shell/view")
 local fit = require("@app/screens/shell/fit")
 local art = require("@app/screens/shell/art")
+local rail = require("@app/screens/shell/rail")
 
 local M = {}
 
 local CONTROL, GAP, PAST_NAV, PAST_EDGE = 24, 2, 12, 8
+local LIST_IN = 5
 
 -- (Read by what's beside it, which a `motion.tween` binding can't be.)
 local function sliding(key: string, to: () -> number): State<number>
@@ -44,12 +46,26 @@ function M.new_tab(): number
 	return (1 - reveal:get()) * room:get()
 end
 
+-- (On Settings the sidebar's column is gone and `art.page_left` falls back to the rail: past the list, the bar stays put.)
+function M.list_past(): number
+	if route.current:get().name ~= "settings" or not fit.current:get().sidebar or view.collapsed:get() then
+		return 0
+	end
+	local settings: any = require("@app/screens/shell/settings")
+	return settings.list_w() + LIST_IN
+end
+
+local function page_edge(): number
+	local past = M.list_past()
+	return if past > 0 then rail.W + past else art.page_left:get()
+end
+
 function M.nav_left(closed_up: number): number
-	return math.max(closed_up, art.page_left:get() + PAST_EDGE)
+	return math.max(closed_up, page_edge() + PAST_EDGE)
 end
 
 function M.options_x(): number
-	return math.max(art.page_left:get() - PAST_EDGE - CONTROL, ds.TitleBar.nav_base())
+	return math.max(page_edge() - PAST_EDGE - CONTROL, ds.TitleBar.nav_base())
 end
 
 function M.tabs_start(): number
