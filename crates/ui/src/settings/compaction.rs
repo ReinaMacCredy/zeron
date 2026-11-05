@@ -3,7 +3,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use zeron_engine::jev::{CompactionSettingsState, CompactionSettingsUpdate};
 use zeron_engine::registry::{CompactionMode, CompactionSettings, JevSource, TitleSettings};
-use zeron_proto::tools::{ToolSettings, ToolSettingsState};
+use zeron_proto::tools::{ToolGroup, ToolSettings, ToolSettingsState};
 use zeron_rpc::methods;
 
 use crate::pickers::{Pickers, TitleModelPicked};
@@ -164,11 +164,11 @@ impl CompactionPage {
         );
     }
 
-    fn save_full_token(&mut self, on: bool, cx: &mut Context<Self>) {
+    fn save_tools(&mut self, change: impl FnOnce(&mut ToolSettings), cx: &mut Context<Self>) {
         let Some(mut tools) = self.tools.ready().map(|state| state.settings.clone()) else {
             return;
         };
-        tools.agents_use_full_token = on;
+        change(&mut tools);
         let params = serde_json::to_value::<ToolSettings>(tools).unwrap_or_default();
         self.call(
             methods::SET_TOOL_SETTINGS,
@@ -582,8 +582,30 @@ impl CompactionPage {
                     .child(
                         switch(theme, full_token, "agents-full-token", "Agents use the full token")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.save_full_token(!full_token, cx)
+                                this.save_tools(|tools| tools.agents_use_full_token = !full_token, cx)
                             })),
+                    ),
+            );
+            let app_api = self
+                .tools
+                .ready()
+                .is_none_or(|state| state.settings.group_on(ToolGroup::UiDriver));
+            let app_api_card = widgets::section_card(theme).mt_0().child(
+                widgets::card_row(theme, false)
+                    .child(row_text(
+                        theme,
+                        "App API",
+                        "Lets agents read and drive Zeron's windows, including text you are typing, with app_inspect and app_drive. The zeron app command in a shell is not affected.",
+                    ))
+                    .child(
+                        switch(theme, app_api, "app-api", "App API").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.save_tools(
+                                    |tools| tools.set_group(ToolGroup::UiDriver, !app_api),
+                                    cx,
+                                )
+                            },
+                        )),
                     ),
             );
             let beta = zeron_beta_app();
@@ -626,7 +648,17 @@ impl CompactionPage {
                     .mt_0()
                     .search_anchor(Target::Page(SettingsSection::Experimental))
                     .into_any_element(),
-                widgets::section(theme, "Agent access", token_card).into_any_element(),
+                widgets::section(
+                    theme,
+                    "Agent access",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(token_card)
+                        .child(app_api_card),
+                )
+                .into_any_element(),
                 widgets::section(theme, "New interface", beta_card).into_any_element(),
             ];
         }

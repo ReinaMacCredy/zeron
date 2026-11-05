@@ -1,6 +1,6 @@
 use zeron_proto::tools::{
-    HarnessToolInventory, TOOL_GROUPS, ToolGroup, ToolSettingsState, rules_on, set_rules,
-    set_zeron_group, tool_group, unlisted_rules, zeron_rule, zeron_unlocked,
+    HarnessToolInventory, TOOL_GROUPS, ToolGroup, ToolSettingsState, listed_tool_groups, rules_on,
+    set_rules, set_zeron_group, tool_group, unlisted_rules, zeron_rule, zeron_unlocked,
 };
 use zeron_proto::{AgentProfile, HarnessId};
 use zeron_rpc::methods;
@@ -83,8 +83,7 @@ fn tools_page(
             Some(format!("Settings > Tools unavailable: {error}")),
         ),
     };
-    let zeron = TOOL_GROUPS
-        .iter()
+    let zeron = listed_tool_groups()
         .map(|info| {
             let unlocked = zeron_unlocked(info, &ceiling);
             let live = rules_on(disabled, &unlocked);

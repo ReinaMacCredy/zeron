@@ -2845,7 +2845,7 @@ const COMPETING_BUNDLED_PLUGINS: [&str; 4] = [
 // Their destructiveHint makes Codex ask on every call, and Zeron refuses elicitations it does not route.
 const PREAPPROVED_ZERON_TOOLS: [&str; 1] = ["device"];
 // Driving a Dev bundle can click its Approve buttons, so only a Full chat skips the ask.
-const UI_DRIVE_TOOL: &str = "ui_driver_drive";
+const UI_DRIVE_TOOL: &str = "app_drive";
 
 /// Compact one thread: resume it, ask the app server to compact, then read
 /// notifications until it says so. Deliberately NOT [`run_session`] — no turn
@@ -3408,7 +3408,7 @@ fn handle_server_request(
             } else {
                 let question = crate::approval::question(
                     "Approve UI drive",
-                    "Codex wants to drive a Zeron Dev app's UI with `ui_driver_drive`, which can \
+                    "Codex wants to drive a Zeron Dev app's UI with `app_drive`, which can \
                      click its buttons. Allow it?",
                 );
                 let Some(permit) = slot() else { return };
@@ -4074,9 +4074,9 @@ mod tests {
             assert_eq!(approval(params, "device"), "approve");
         }
         for params in [&on, &off, &auto] {
-            assert!(approval(params, "ui_driver_drive").is_null());
+            assert!(approval(params, "app_drive").is_null());
         }
-        assert_eq!(approval(&full, "ui_driver_drive"), "approve");
+        assert_eq!(approval(&full, "app_drive"), "approve");
         assert_eq!(
             off["config"]["mcp_servers.zeron.command"],
             "/opt/zeron/zeron"

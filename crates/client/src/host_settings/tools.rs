@@ -1,4 +1,4 @@
-use zeron_proto::tools::{TOOL_GROUPS, ToolGroup, ToolSettings, ToolSettingsState};
+use zeron_proto::tools::{ToolGroup, ToolSettings, ToolSettingsState, listed_tool_groups};
 use zeron_rpc::methods;
 
 use super::{Page, Row, RowKind, Section};
@@ -53,16 +53,12 @@ fn group_key(group: ToolGroup) -> String {
 }
 
 pub(super) fn counts(state: &ToolSettingsState) -> (usize, usize) {
-    let total: usize = TOOL_GROUPS.iter().map(|info| info.tools().len()).sum();
+    let total: usize = listed_tool_groups().map(|info| info.tools().len()).sum();
     (total.saturating_sub(state.disabled.len()), total)
 }
 
 fn edit(settings: &mut ToolSettings, action: &str, on: bool) -> bool {
-    let switchable = || {
-        TOOL_GROUPS
-            .iter()
-            .filter(|info| own_switch(info.group).is_none())
-    };
+    let switchable = || listed_tool_groups().filter(|info| own_switch(info.group).is_none());
     match action {
         "all-on" | "all-off" => {
             let on = action == "all-on";
@@ -96,7 +92,7 @@ pub(super) fn build(state: &ToolSettingsState) -> Page {
     let summary = if live == total {
         format!(
             "Agents on this Mac can call all {total} Zeron tools across {} groups.",
-            TOOL_GROUPS.len()
+            listed_tool_groups().count()
         )
     } else if live > 0 {
         "A call to a tool you turn off is refused right away.".to_owned()
@@ -125,7 +121,7 @@ pub(super) fn build(state: &ToolSettingsState) -> Page {
             ),
         ],
     }];
-    for info in TOOL_GROUPS {
+    for info in listed_tool_groups() {
         let tools = info.tools();
         let live = tools
             .iter()

@@ -17,7 +17,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use zeron_proto::ui_driver::socket_path;
 use zeron_proto::ui_driver::{
-    UiDriverBuild, UiDriverDescriptor, UiDriverEndpoint, descriptor_path, run_dir,
+    UiDriverBuild, UiDriverDescriptor, UiDriverEndpoint, UiDriverProtocol, descriptor_path, run_dir,
 };
 
 const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
@@ -193,6 +193,7 @@ fn listen(
         input: cfg!(debug_assertions),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         started_at: chrono::Utc::now(),
+        protocol: UiDriverProtocol::Native,
     };
     let descriptor = descriptor_path(dir, pid);
     let tmp = descriptor.with_extension("json.tmp");

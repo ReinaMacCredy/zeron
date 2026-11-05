@@ -135,14 +135,14 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
     },
     ToolGroupInfo {
         group: ToolGroup::UiDriver,
-        title: "UI driver",
-        summary: "Read a running Zeron app's UI and drive a Zeron Dev build.",
+        title: "App API",
+        summary: "Private: read a running Zeron app's UI and drive a development build.",
         tools: &[
-            tool("ui_driver", "Inspect a running Zeron app's UI."),
+            tool("app_inspect", "Inspect a running Zeron app's UI."),
             needs(
-                "ui_driver_drive",
+                "app_drive",
                 "Click, type and change a Zeron Dev build's UI, never the app serving the chat.",
-                "ui_driver",
+                "app_inspect",
             ),
         ],
     },
@@ -313,6 +313,13 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
         ],
     },
 ];
+
+/// The groups Settings lists: the App API is private, for testing and running Zeron itself.
+pub fn listed_tool_groups() -> impl Iterator<Item = &'static ToolGroupInfo> {
+    TOOL_GROUPS
+        .iter()
+        .filter(|info| info.group != ToolGroup::UiDriver)
+}
 
 impl ToolGroupInfo {
     pub fn tools(&self) -> Vec<ToolInfo> {

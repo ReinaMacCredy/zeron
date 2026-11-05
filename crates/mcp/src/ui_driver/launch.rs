@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
-use zeron_proto::ui_driver::UiDriverDescriptor;
+use zeron_proto::ui_driver::{UiDriverDescriptor, UiDriverProtocol, run_dir};
 
 use super::list_in;
 
@@ -13,6 +13,7 @@ const NUMBERS: std::ops::RangeInclusive<u16> = 60..=99;
 const SCENARIO_N: u16 = 80;
 const RELEASE_ID: &str = "sh.zeron.app";
 const SCRIPT: &str = "scripts/run-macos-dev.sh";
+const ZGX_SCRIPT: &str = "scripts/run-zgx-dev.sh";
 const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL: Duration = Duration::from_millis(500);
@@ -22,6 +23,7 @@ const TAIL_LINES: usize = 40;
 struct Launch {
     n: Option<u16>,
     mock: bool,
+    zgx: bool,
     name: Option<String>,
     app_args: Vec<String>,
 }
@@ -31,6 +33,7 @@ impl Launch {
         let mut launch = Launch {
             n: None,
             mock: false,
+            zgx: false,
             name: None,
             app_args: Vec::new(),
         };
@@ -52,6 +55,7 @@ impl Launch {
                     );
                 }
                 ("mock", Value::Bool(mock)) => launch.mock = *mock,
+                ("zgx", Value::Bool(zgx)) => launch.zgx = *zgx,
                 ("name", Value::String(name)) if !name.trim().is_empty() && !name.contains('/') => {
                     launch.name = Some(name.trim().to_owned());
                 }
@@ -64,7 +68,7 @@ impl Launch {
                 }
                 (key, value) => {
                     return Err(format!(
-                        "`launch` takes n, mock, name and appArgs, not `{key}`: {value}"
+                        "`launch` takes n, mock, zgx, name and appArgs, not `{key}`: {value}"
                     ));
                 }
             }
@@ -93,8 +97,13 @@ pub(super) async fn launch(
             .ok_or("every Dev number from 60 to 99 is in use")?,
     };
     let port = PORT_BASE + n;
-    let root = target.join(format!("macos-dev{n}"));
-    let name = launch.name.unwrap_or_else(|| format!("Zeron Dev {n}"));
+    let (script, folder, default_name) = if launch.zgx {
+        (ZGX_SCRIPT, "zgx-dev", "Zeron Beta Dev")
+    } else {
+        (SCRIPT, "macos-dev", "Zeron Dev")
+    };
+    let root = target.join(format!("{folder}{n}"));
+    let name = launch.name.unwrap_or_else(|| format!("{default_name} {n}"));
     let bundle_id = format!("{RELEASE_ID}.dev{n}");
     std::fs::create_dir_all(&root).map_err(|error| format!("{}: {error}", root.display()))?;
     let root = std::fs::canonicalize(&root).unwrap_or(root);
@@ -106,7 +115,7 @@ pub(super) async fn launch(
         .map_err(|error| format!("{}: {error}", log_path.display()))?;
     let mut command = Command::new("bash");
     command
-        .arg(checkout.join(SCRIPT))
+        .arg(checkout.join(script))
         .args(&launch.app_args)
         .current_dir(&checkout)
         .env("ZERON_DEV_ROOT", &root)
@@ -124,7 +133,7 @@ pub(super) async fn launch(
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut child = command
         .spawn()
-        .map_err(|error| format!("bash {}: {error}", checkout.join(SCRIPT).display()))?;
+        .map_err(|error| format!("bash {}: {error}", checkout.join(script).display()))?;
     eprintln!(
         "launch: building and opening {name} (port {port}); log {}",
         log_path.display()
@@ -139,13 +148,13 @@ pub(super) async fn launch(
                 "port": app.ipc_port,
                 "root": root,
                 "log": log_path,
-                "bundleId": bundle_id,
+                "bundleId": (!launch.zgx).then_some(&bundle_id),
             }));
         }
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
             stop_group(child.id());
             return Err(format!(
-                "{SCRIPT} exited ({status}) before {name} came up; the end of {}:\n{}",
+                "{script} exited ({status}) before {name} came up; the end of {}:\n{}",
                 log_path.display(),
                 tail(&log_path, TAIL_LINES)
             ));
@@ -175,11 +184,15 @@ pub(super) async fn quit(dir: &Path, app: &UiDriverDescriptor) -> Result<Value, 
     let bundle = app.bundle_path.as_deref();
     if app.ipc_port == STABLE_PORT
         || bundle.is_some_and(|bundle| bundle.starts_with("/Applications"))
+        || run_dir().parent() == Some(app.data_dir.as_path())
     {
         return Err(format!(
             "`quit` never quits {} (pid {}, port {}): it hosts the running sessions",
             app.label, app.pid, app.ipc_port
         ));
+    }
+    if app.protocol == UiDriverProtocol::Zgx {
+        return quit_zgx(dir, app).await;
     }
     let bundle = bundle.ok_or_else(|| {
         format!(
@@ -218,6 +231,45 @@ pub(super) async fn quit(dir: &Path, app: &UiDriverDescriptor) -> Result<Value, 
         tokio::time::sleep(POLL).await;
     }
     Ok(json!({ "quit": app.label, "pid": app.pid, "bundleId": id }))
+}
+
+async fn quit_zgx(dir: &Path, app: &UiDriverDescriptor) -> Result<Value, String> {
+    let engine = std::fs::read_to_string(app.data_dir.join("engine.lock"))
+        .ok()
+        .and_then(|pid| pid.trim().parse::<u32>().ok());
+    terminate(app.pid)?;
+    let started = Instant::now();
+    while list_in(dir).iter().any(|live| live.pid == app.pid) {
+        if started.elapsed() >= QUIT_TIMEOUT {
+            return Err(format!(
+                "{} (pid {}) is still running {} s after SIGTERM",
+                app.label,
+                app.pid,
+                QUIT_TIMEOUT.as_secs()
+            ));
+        }
+        tokio::time::sleep(POLL).await;
+    }
+    if let Some(engine) = engine {
+        terminate(engine)?;
+    }
+    Ok(json!({ "quit": app.label, "pid": app.pid, "engine": engine }))
+}
+
+#[cfg(unix)]
+fn terminate(pid: u32) -> Result<(), String> {
+    // SAFETY: signals one pid read from the app's own descriptor or engine lock.
+    let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0;
+    let error = std::io::Error::last_os_error();
+    if sent || error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(format!("SIGTERM to pid {pid}: {error}"))
+}
+
+#[cfg(not(unix))]
+fn terminate(pid: u32) -> Result<(), String> {
+    Err(format!("`quit` cannot stop pid {pid} on this platform"))
 }
 
 #[cfg(unix)]
@@ -263,26 +315,28 @@ fn taken(
     if own_port == Some(port) {
         return Some(format!("port {port} serves this chat"));
     }
-    let root = target.join(format!("macos-dev{n}"));
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
     let label = format!("Zeron Dev {n}");
-    if let Some(app) = live
-        .iter()
-        .find(|app| app.label == label || app.ipc_port == port || inside(app, &root))
-    {
-        return Some(format!(
-            "{} (pid {}) runs on port {}",
-            app.label, app.pid, app.ipc_port
-        ));
-    }
-    let pattern = format!("{}/", root.display());
-    if Command::new("pgrep")
-        .args(["-f", &pattern])
-        .stdout(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-    {
-        return Some(format!("a process runs from {}", root.display()));
+    for folder in ["macos-dev", "zgx-dev"] {
+        let root = target.join(format!("{folder}{n}"));
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        if let Some(app) = live
+            .iter()
+            .find(|app| app.label == label || app.ipc_port == port || inside(app, &root))
+        {
+            return Some(format!(
+                "{} (pid {}) runs on port {}",
+                app.label, app.pid, app.ipc_port
+            ));
+        }
+        let pattern = format!("{}/", root.display());
+        if Command::new("pgrep")
+            .args(["-f", &pattern])
+            .stdout(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return Some(format!("a process runs from {}", root.display()));
+        }
     }
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     if std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok()
@@ -294,11 +348,10 @@ fn taken(
 }
 
 fn inside(app: &UiDriverDescriptor, root: &Path) -> bool {
-    app.bundle_path.as_deref().is_some_and(|bundle| {
-        std::fs::canonicalize(bundle)
-            .unwrap_or_else(|_| bundle.to_path_buf())
-            .starts_with(root)
-    })
+    let home = app.bundle_path.as_deref().unwrap_or(&app.data_dir);
+    std::fs::canonicalize(home)
+        .unwrap_or_else(|_| home.to_path_buf())
+        .starts_with(root)
 }
 
 fn output(command: &mut Command) -> Result<String, String> {
@@ -338,9 +391,10 @@ mod tests {
     #[test]
     fn launch_arguments_are_checked_before_anything_spawns() {
         let launch = Launch::parse(&args(json!({
-            "action": "launch", "n": 63, "mock": true, "name": "Zeron Dev 63", "appArgs": ["--x"]
+            "action": "launch", "n": 63, "mock": true, "zgx": true, "name": "Zeron Dev 63", "appArgs": ["--x"]
         })))
         .unwrap();
+        assert!(launch.zgx);
         assert_eq!(
             (
                 launch.n,
@@ -378,6 +432,7 @@ mod tests {
             input: true,
             version: "0.0.0".into(),
             started_at: chrono::Utc::now(),
+            protocol: UiDriverProtocol::Native,
         }];
         assert!(taken(61, target, &live, None).unwrap().contains("pid 7"));
         assert!(taken(62, target, &live, None).unwrap().contains("pid 7"));

@@ -1,4 +1,5 @@
 mod launch;
+mod zgx;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,12 +10,12 @@ use serde_json::{Map, Value, json};
 use zeron_proto::html_render::{CURRENT_FOLDER, workspace_page};
 use zeron_proto::ui_driver::{
     DRAG_STEPS, DRIVE_ACTIONS, MAX_DRIVE_STEPS, MAX_WAIT_MS, OBSERVE_ACTIONS, PROCESS_ACTIONS,
-    STEP_CAP_MS, UiDriverBuild, UiDriverDescriptor, UiDriverEndpoint, descriptor_pid, run_dir,
-    socket_path,
+    STEP_CAP_MS, UiDriverBuild, UiDriverDescriptor, UiDriverEndpoint, UiDriverProtocol,
+    ZGX_DRIVE_COMMANDS, ZGX_INSPECT_COMMANDS, descriptor_pid, run_dir, socket_path,
 };
 
-pub const TOOL: &str = "ui_driver";
-pub const DRIVE_TOOL: &str = "ui_driver_drive";
+pub const TOOL: &str = "app_inspect";
+pub const DRIVE_TOOL: &str = "app_drive";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLY_SLACK: Duration = Duration::from_secs(10);
@@ -38,7 +39,7 @@ impl Tool {
 
     fn admits(self, action: &str, args: &Map<String, Value>) -> Result<(), String> {
         let during = args.get("during").is_some_and(|during| !during.is_null());
-        let drives = DRIVE_ACTIONS.contains(&action);
+        let drives = DRIVE_ACTIONS.contains(&action) || ZGX_DRIVE_COMMANDS.contains(&action);
         let process = PROCESS_ACTIONS.contains(&action);
         match self {
             Tool::Observe if process => Err(format!(
@@ -49,12 +50,13 @@ impl Tool {
                 if during { "during" } else { action }
             )),
             Tool::Observe if args.get("path").is_some_and(|path| !path.is_null()) => Err(format!(
-                "{TOOL} never writes where the caller picks, so `{action}` takes no `path`: a snapshot is saved under ~/.zeron/run/shots and returned inline, or by path with `inline: false`; a recording is saved under ~/.zeron/run/recordings and its path returned. `zeron ui snapshot` and `zeron ui record` take `path`."
+                "{TOOL} never writes where the caller picks, so `{action}` takes no `path`: a snapshot is saved under ~/.zeron/run/shots and returned inline, or by path with `inline: false`; a recording is saved under ~/.zeron/run/recordings and its path returned. `zeron app snapshot` and `zeron app record` take `path`."
             )),
             Tool::Drive if !drives && !process && !(during && RECORDERS.contains(&action)) => {
                 Err(format!(
-                    "{DRIVE_TOOL} takes a drive action ({}), `launch` or `quit`, or `frames` or `track` with `during`; call {TOOL} for `{action}`",
-                    DRIVE_ACTIONS.join(", ")
+                    "{DRIVE_TOOL} takes a drive action ({}, {}), `launch` or `quit`, or `frames` or `track` with `during`; call {TOOL} for `{action}`",
+                    DRIVE_ACTIONS.join(", "),
+                    ZGX_DRIVE_COMMANDS.join(", ")
                 ))
             }
             _ => Ok(()),
@@ -72,10 +74,11 @@ fn fields() -> Vec<(&'static [Tool], &'static str, Value)> {
                 "y": { "type": "number" },
                 "ref": { "type": "string" },
                 "select": { "type": "string" },
-                "nth": { "type": "integer" }
+                "nth": { "type": "integer" },
+                "node": { "type": "string" }
             },
             "additionalProperties": false,
-            "description": format!("Drag {which}: a window point {{\"x\": 10, \"y\": 20}}, or an element {{\"ref\": \"e12\"}} or {{\"select\": \"Button \\\"Send\\\"\", \"nth\": 0}}. The server also takes [x, y].")
+            "description": format!("Drag {which}: a window point {{\"x\": 10, \"y\": 20}}, or an element {{\"ref\": \"e12\"}} or {{\"select\": \"Button \\\"Send\\\"\", \"nth\": 0}}, or on a zgx app {{\"node\": \"#done\"}}. The server also takes [x, y].")
         })
     };
     let (observe, drive, both) = (
@@ -85,10 +88,11 @@ fn fields() -> Vec<(&'static [Tool], &'static str, Value)> {
     );
     [
         (observe, "target", field("string", "A pid or label from `list` (exact, or a unique substring such as `dev`), a socket path, or `self`. Defaults to the app serving this chat.")),
-        (drive, "target", field("string", "The Zeron Dev bundle to drive or `quit`: a pid or label from `ui_driver` `list` (exact, or a unique substring such as `dev`), or a socket path. Never the app serving this chat. `launch` takes none.")),
+        (drive, "target", field("string", "The Zeron Dev bundle to drive or `quit`: a pid or label from `app_inspect` `list` (exact, or a unique substring such as `dev`), or a socket path. Never the app serving this chat. `launch` takes none.")),
         (both, "window", field("integer", "Window id from `state`. Defaults to the frontmost window.")),
         (drive, "x", field("number", "Window point in logical pixels.")),
         (drive, "y", field("number", "Window point in logical pixels.")),
+        (both, "node", field("string", "On a zgx app, the node a command acts on: `#id`, `\"Name\"`, `role:button`, `@12` from `tree`, `a >> b`, `\"Copy\"[2]`. A zgx app takes this instead of `ref`, `select`, `x` and `y`.")),
         (both, "ref", field("string", "Element ref from `tree`, such as `e12`.")),
         (both, "select", field("string", "Selector: `#e12`, `Role`, `Role \"label\"` or `\"label\"`. An exact label match beats a substring match, which beats value, then placeholder or description.")),
         (both, "nth", field("integer", "Which match of `select` when several match.")),
@@ -98,8 +102,10 @@ fn fields() -> Vec<(&'static [Tool], &'static str, Value)> {
         (drive, "name", field("string", "gpui action name, for `action`; for `launch`, the bundle's app name (default `Zeron Dev <n>`).")),
         (drive, "n", field("integer", "For `launch`: the Dev number 60-99, which sets target/macos-dev<n> and port 49800+n. Defaults to the lowest free one.")),
         (drive, "mock", field("boolean", "For `launch`: run the app with the mock harness (ZERON_HARNESS=mock).")),
+        (drive, "zgx", field("boolean", "For `launch`: start apps/zgx on its own engine, port and data instead of a gpui Dev bundle.")),
         (drive, "appArgs", json!({ "type": "array", "items": { "type": "string" }, "description": "For `launch`: arguments passed to the app." })),
-        (drive, "args", field("object", "Arguments of the gpui action, for `action`.")),
+        (drive, "args", field("object", "Arguments of the gpui action, for `action`; on a zgx app, the command's other fields as `zgx inspect` names them, such as {\"id\": \"new\"} for `command`.")),
+        (observe, "args", field("object", "On a zgx app, the command's other fields as `zgx inspect` names them, such as {\"n\": 5, \"since\": \"mark\"} for `frames`.")),
         (observe, "rect", field("object", "Crop of a snapshot, or the region `compare` checks, in window points: {x, y, w, h}.")),
         (observe, "html", field("string", "For `compare`: the approved mockup page. It is laid out in the target app's own web engine at the region's size and current theme, and its nodes are matched to the native ones by role and label.")),
         (observe, "path", field("string", "For `compare`, instead of `html`: the mockup as an .html or .htm file in this chat's folder, relative to it or absolute, read the way html_preview reads `path`.")),
@@ -111,8 +117,8 @@ fn fields() -> Vec<(&'static [Tool], &'static str, Value)> {
         (drive, "holdMs", field("integer", "For `drag`: how long to hold the button at `to` before releasing.")),
         (drive, "do", field("string", "For `press`: the accessibility action to perform, such as click (default), focus, setValue, increment, decrement, expand, collapse, showContextMenu or scrollIntoView. For `clock`: pause, resume or advance.")),
         (drive, "value", field("string", "For `press` with `do: setValue`: the new value.")),
-        (observe, "do", json!({ "type": "string", "enum": ["start", "stop"], "description": "For `record`: start taps the window's real clicks, keys, typing and scrolls; stop writes them as a `zeron ui scenario` file under ~/.zeron/run/recordings and returns {path, steps, fallbacks, redacted}. Text typed into a key, token, secret, password or API field is written as `<redacted>`. Never records the app serving this chat; ask the user to run `zeron ui record` there." })),
-        (observe, "includeDriven", field("boolean", "For `record` start, debug builds only: also record input that `ui_driver_drive` injects.")),
+        (observe, "do", json!({ "type": "string", "enum": ["start", "stop"], "description": "For `record`: start taps the window's real clicks, keys, typing and scrolls; stop writes them as a `zeron app scenario` file under ~/.zeron/run/recordings and returns {path, steps, fallbacks, redacted}. Text typed into a key, token, secret, password or API field is written as `<redacted>`. Never records the app serving this chat; ask the user to run `zeron app record` there." })),
+        (observe, "includeDriven", field("boolean", "For `record` start, debug builds only: also record input that `app_drive` injects.")),
         (observe, "full", field("boolean", "For `tree`: show every node, without hoisting unnamed containers.")),
         (drive, "during", field("object", "For `frames` and `track`, required: a drive request such as {\"action\": \"click\", \"select\": \"Button \\\"Settings\\\"\"} that runs once recording has started.")),
         (both, "jumpPx", field("number", "For `track`: a per-frame move larger than this counts as a jump. Defaults to 40.")),
@@ -143,21 +149,33 @@ fn fields() -> Vec<(&'static [Tool], &'static str, Value)> {
 
 fn actions(tool: Tool) -> Vec<&'static str> {
     match tool {
-        Tool::Observe => std::iter::once(&"list")
-            .chain(OBSERVE_ACTIONS)
-            .copied()
-            .collect(),
-        Tool::Drive => DRIVE_ACTIONS
-            .iter()
-            .chain(RECORDERS)
-            .chain(PROCESS_ACTIONS)
-            .copied()
-            .collect(),
+        Tool::Observe => unique(
+            std::iter::once(&"list")
+                .chain(OBSERVE_ACTIONS)
+                .chain(ZGX_INSPECT_COMMANDS),
+        ),
+        Tool::Drive => unique(
+            DRIVE_ACTIONS
+                .iter()
+                .chain(ZGX_DRIVE_COMMANDS)
+                .chain(RECORDERS)
+                .chain(PROCESS_ACTIONS),
+        ),
     }
 }
 
+fn unique(names: impl Iterator<Item = &'static &'static str>) -> Vec<&'static str> {
+    let mut seen = Vec::new();
+    for name in names {
+        if !seen.contains(name) {
+            seen.push(*name);
+        }
+    }
+    seen
+}
+
 pub fn reference() -> String {
-    let mut out = String::from("# ui_driver and ui_driver_drive\n");
+    let mut out = format!("# {TOOL} and {DRIVE_TOOL}\n");
     for tool in [Tool::Observe, Tool::Drive] {
         let name = if tool == Tool::Observe {
             TOOL
@@ -204,12 +222,12 @@ pub fn tool(tool: Tool) -> Value {
         Tool::Observe => (
             TOOL,
             "Inspect the Zeron UI",
-            "Read a running Zeron app's UI from inside it. Never clicks or types: ui_driver_drive does, in Zeron Dev bundles. `list` the apps; omit `target` for the app serving this chat. Prefer `tree` (cheap text lines, each with a `ref`; filter with `query`) over a `snapshot` PNG. Name an element by `ref` or `select` (`Button \"New chat\"` or `\"label\"`, plus `nth`). `wait` instead of sleeping; `frames` and `track` measure motion; `compare` checks against a mockup. Field details: docs tool, read id ui_driver.",
+            "Read a running Zeron app's UI from inside it. Private, for testing and running Zeron itself. Never clicks or types: app_drive does. `list` the apps; omit `target` for the app serving this chat. Prefer `tree` (cheap text lines, each with a `ref`; filter with `query`) over a `snapshot` PNG. Name an element by `ref` or `select` (`Button \"New chat\"` or `\"label\"`, plus `nth`). `wait` instead of sleeping; `frames` and `track` measure motion; `compare` checks against a mockup. Field details: docs tool, read id app_inspect.",
         ),
         Tool::Drive => (
             DRIVE_TOOL,
             "Drive the Zeron UI",
-            "Drive a Zeron Dev bundle's UI as a person would: click, drag, scroll, keys, type, accessibility `press`, gpui `action`, `set` theme, size or motion, `clock`, `launch` and `quit`. Refuses the app serving this chat: `target` is a Dev bundle's label or pid from ui_driver `list`. Address an element by `ref` or `select` from ui_driver, else `x`,`y` window points; it first waits up to 1 s for the element to settle (`unsettled: true` if not). Replies after the next frame. `frames` or `track` with `during` measure the transition it starts. Field details: docs tool, read id ui_driver.",
+            "Drive a Zeron Dev bundle's UI as a person would: click, drag, scroll, keys, type, accessibility `press`, gpui `action`, `set` theme, size or motion, `clock`, `launch` and `quit`. Refuses the app serving this chat: `target` is a Dev bundle's label or pid from app_inspect `list`. Address an element by `ref` or `select` from app_inspect, else `x`,`y` window points; it first waits up to 1 s for the element to settle (`unsettled: true` if not). Replies after the next frame. `frames` or `track` with `during` measure the transition it starts. Field details: docs tool, read id app_inspect.",
         ),
     };
     json!({
@@ -341,7 +359,7 @@ async fn run_in(
     }
     if tool.is_some() && action == "record" && own_port == Some(app.ipc_port) {
         return Err(format!(
-            "{TOOL} does not record {} (pid {}): it serves this chat's engine on port {}, so a recording would capture what the user types here. Ask the user to run `zeron ui record` themselves, or pass a Zeron Dev bundle as `target`.\n{}",
+            "{TOOL} does not record {} (pid {}): it serves this chat's engine on port {}, so a recording would capture what the user types here. Ask the user to run `zeron app record` themselves, or pass a Zeron Dev bundle as `target`.\n{}",
             app.label,
             app.pid,
             app.ipc_port,
@@ -372,7 +390,7 @@ fn compare_page(path: &str) -> Result<String, String> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     workspace_page(&cwd, home.as_deref(), CURRENT_FOLDER, path).map_err(|error| {
         format!(
-            "`zeron ui compare` reads `path` from {}: {error}",
+            "`zeron app compare` reads `path` from {}: {error}",
             cwd.display()
         )
     })
@@ -459,7 +477,7 @@ pub fn select<'a>(
         }
         (Some("self"), None) => {
             return Err(format!(
-                "`self` is the app serving a chat, which only the ui_driver tool knows; pass a pid or label\n{}",
+                "`self` is the app serving a chat, which only the {TOOL} tool knows; pass a pid or label\n{}",
                 targets(live)
             ));
         }
@@ -568,6 +586,9 @@ pub async fn request(
     app: &UiDriverDescriptor,
     mut request: Map<String, Value>,
 ) -> Result<Value, String> {
+    if app.protocol == UiDriverProtocol::Zgx {
+        return zgx::request(app, request).await;
+    }
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     let timeout = reply_timeout(&request);
     request.insert("id".into(), json!(NEXT_ID.fetch_add(1, Ordering::Relaxed)));
@@ -667,6 +688,7 @@ mod tests {
             input: build == UiDriverBuild::Debug,
             version: "0.0.0".into(),
             started_at: Utc.timestamp_opt(started, 0).unwrap(),
+            protocol: UiDriverProtocol::Native,
         }
     }
 
@@ -978,7 +1000,7 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(
-                error.starts_with("ui_driver_drive does not drive Zeron Dev 7"),
+                error.starts_with("app_drive does not drive Zeron Dev 7"),
                 "{error}"
             );
         }
@@ -986,10 +1008,7 @@ mod tests {
         let error = run_in(dir.path(), &quit, Some(27654), Some(Tool::Drive))
             .await
             .unwrap_err();
-        assert!(
-            error.starts_with("ui_driver_drive does not drive"),
-            "{error}"
-        );
+        assert!(error.starts_with("app_drive does not drive"), "{error}");
         let error = run_in(dir.path(), &quit, None, None).await.unwrap_err();
         assert!(
             error.starts_with("`quit` never quits Zeron Dev 7"),
@@ -1007,8 +1026,8 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(
-                error.starts_with("ui_driver does not record Zeron Dev 7")
-                    && error.contains("`zeron ui record`"),
+                error.starts_with("app_inspect does not record Zeron Dev 7")
+                    && error.contains("`zeron app record`"),
                 "{error}"
             );
         }
@@ -1020,6 +1039,49 @@ mod tests {
         let requests = server.await.unwrap();
         assert_eq!(requests[0]["action"], "click");
         assert_eq!(requests[1]["action"], "state");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_zgx_app_gets_its_own_wire_and_the_drive_tool_still_refuses_the_callers_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut zgx_app = app(
+            std::process::id(),
+            "Zeron Beta Dev 61",
+            UiDriverBuild::Release,
+            49861,
+            1,
+        );
+        let socket = dir.path().join("inspect.sock");
+        zgx_app.endpoint = UiDriverEndpoint::Unix {
+            socket: socket.clone(),
+        };
+        zgx_app.protocol = UiDriverProtocol::Zgx;
+        std::fs::write(
+            descriptor_path(dir.path(), zgx_app.pid),
+            serde_json::to_vec(&zgx_app).unwrap(),
+        )
+        .unwrap();
+        let server = answering(
+            &socket,
+            &[
+                r#"{"ok":true,"text":"pressed","data":null}"#,
+                r#"{"ok":false,"error":"no node matches"}"#,
+            ],
+        );
+        let click = json!({ "action": "click", "node": "\"Send\"", "target": "Beta Dev 61" });
+
+        let refused = run_in(dir.path(), &click, Some(49861), Some(Tool::Drive)).await;
+        assert!(refused.unwrap_err().starts_with("app_drive does not drive"),);
+        let observed = run_in(dir.path(), &click, Some(49900), Some(Tool::Observe)).await;
+        assert!(observed.unwrap_err().contains("drives the UI"));
+
+        let driven = run_in(dir.path(), &click, Some(49900), Some(Tool::Drive)).await;
+        assert_eq!(driven, Ok(json!("pressed")));
+        let failed = run_in(dir.path(), &click, None, None).await;
+        assert_eq!(failed, Err("no node matches".into()));
+        let requests = server.await.unwrap();
+        assert_eq!(requests[0], json!({ "cmd": "click", "target": "\"Send\"" }));
     }
 
     #[test]

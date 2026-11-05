@@ -6,8 +6,8 @@ use gpui::{
 };
 use zeron_engine::registry::HarnessDescriptor;
 use zeron_proto::tools::{
-    HarnessToolInventory, TOOL_GROUPS, ToolGroup, ToolSettingsState, rules_on, set_rules,
-    set_zeron_group, tool_group, unlisted_rules, zeron_rule, zeron_unlocked,
+    HarnessToolInventory, TOOL_GROUPS, ToolGroup, ToolSettingsState, listed_tool_groups, rules_on,
+    set_rules, set_zeron_group, tool_group, unlisted_rules, zeron_rule, zeron_unlocked,
 };
 use zeron_proto::{AgentProfile, AgentProfileDraft, HarnessId, Model, ReasoningLevel};
 use zeron_rpc::methods;
@@ -1046,7 +1046,7 @@ impl AgentProfilesPage {
                 format!("Settings > Tools unavailable: {error}"),
             ));
         }
-        for info in TOOL_GROUPS {
+        for info in listed_tool_groups() {
             let group = info.group;
             let unlocked = zeron_unlocked(info, &ceiling);
             let locked = unlocked.is_empty();

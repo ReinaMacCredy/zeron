@@ -54,6 +54,7 @@ fn run_ui(command: UiCommand) -> anyhow::Result<()> {
         out,
         n,
         mock,
+        zgx,
         name,
         path,
         app_args,
@@ -63,7 +64,7 @@ fn run_ui(command: UiCommand) -> anyhow::Result<()> {
         .build()?;
     if action == "scenario" {
         let file = args.ok_or_else(|| {
-            anyhow::anyhow!("usage: zeron ui scenario <file.json> [--target <t>] [--out <dir>]")
+            anyhow::anyhow!("usage: zeron app scenario <file.json> [--target <t>] [--out <dir>]")
         })?;
         match runtime.block_on(ui_scenario::run(
             std::path::Path::new(&file),
@@ -84,6 +85,9 @@ fn run_ui(command: UiCommand) -> anyhow::Result<()> {
     }
     if mock {
         flags.insert("mock".into(), true.into());
+    }
+    if zgx {
+        flags.insert("zgx".into(), true.into());
     }
     if let Some(name) = name {
         flags.insert("name".into(), name.into());

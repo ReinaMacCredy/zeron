@@ -1,4 +1,49 @@
-# UI driver: verify and debug Zeron UI changes as an agent
+# App API: verify, debug and run Zeron as an agent
+
+Private: this is how we test and orchestrate our own app. The tools stay out of Settings > Tools,
+the public Docs and `zeron --help`. Internally the code still says `ui_driver`.
+
+| Name | Was | What |
+|---|---|---|
+| `app_inspect` | `ui_driver` | reads an app, never changes it |
+| `app_drive` | `ui_driver_drive` | clicks, types, launches and quits, never the app serving its chat |
+| `zeron app` | `zeron ui` (still works, hidden) | both, from a shell, without the refusals that protect a chat |
+
+## The zgx app
+
+`zeron app launch --zgx --mock` builds and starts `apps/zgx` through `scripts/run-zgx-dev.sh`:
+number N from 60 to 99, engine port 49800+N, everything under `target/zgx-dev<N>` (data, engine
+home, a copy of the engine), edge dead, label `Zeron Beta Dev <N>`. `zeron app quit --target <t>`
+sends SIGTERM to the app, then to the engine named in `<data>/engine.lock`. Neither ever touches
+port 27654 or `~/.zeron`.
+
+A zgx window that serves devtools (`--inspect`, never a beta build) writes the same
+`~/.zeron/run/ui-<pid>.json` as a gpui app, with `"protocol": "zgx"` and its inspect socket, so
+`zeron app list` shows both kinds and `--target` picks one the same way. The client then speaks
+`zgx inspect`'s wire (one JSON line each way) instead of the gpui driver's:
+
+- Actions are `zgx inspect`'s commands. Reading: `tree`, `node`, `find`, `state`, `errors`,
+  `elements`, `contributions`, `lint`, `frames`, `reloads`, `memory`, `wait`, `sleep`, `snapshot`,
+  `mark`, `record`, `windows`, `help`. Acting: `click`, `hover`, `right-click`, `drag`, `type`,
+  `key`, `scroll`, `command`, `set`, `search`, `zoom`, `switch`, `replay`. Anything else is refused
+  before it reaches the app.
+- `node` names the node (`#id`, `"Name"`, `role:button`, `@12`, `a >> b`, `"Copy"[2]`), since
+  `target` already names the app. `ref`, `select`, `x` and `y` are refused.
+- Replies are the command's text; `{"json":true}` gives its data instead. A snapshot is copied to
+  `~/.zeron/run/shots`, or to `--path`, and renders even on a locked Mac.
+
+```sh
+zeron app launch --zgx --mock
+zeron app tree --target "Beta Dev 61"
+zeron app type '{"node":"role:textbox","text":"hello"}' --target "Beta Dev 61"
+zeron app snapshot '{"node":"#messages"}' --target "Beta Dev 61" --path /abs/shot.png
+zeron app frames '{"n":5}' --target "Beta Dev 61"
+```
+
+The full command guide is `docs/agents/inspect.md` in the zgx repository. Not on zgx until a port
+needs them: `clock`, `compare`, `audit`, `track`, scenario files. The rest of this page is the gpui
+app's.
+
 
 Every headed Zeron process has an in-process UI driver. It reads the window as text, acts on
 elements, waits for the UI to change, measures animation frames, takes snapshots, compares a
@@ -16,9 +61,9 @@ for testing computer use itself.
 
 | Level | Actions | Builds | MCP tool |
 |---|---|---|---|
-| Observe | `state`, `tree`, `snapshot`, `wait`, `frames`, `track`, `audit`, `record`, `compare` | every build, the stable app included | `ui_driver` |
-| Drive | `click`, `move`, `drag`, `scroll`, `key`, `type`, `press`, `action`, `set`, `clock`, plus `during` on `frames`/`track` | debug builds only (Zeron Dev bundles) | `ui_driver_drive` |
-| Process | `launch`, `quit` | run by the client on macOS, never sent to an app | `ui_driver_drive`; `ui_driver` refuses them |
+| Observe | `state`, `tree`, `snapshot`, `wait`, `frames`, `track`, `audit`, `record`, `compare` | every build, the stable app included | `app_inspect` |
+| Drive | `click`, `move`, `drag`, `scroll`, `key`, `type`, `press`, `action`, `set`, `clock`, plus `during` on `frames`/`track` | debug builds only (Zeron Dev bundles) | `app_drive` |
+| Process | `launch`, `quit` | run by the client on macOS, never sent to an app | `app_drive`; `app_inspect` refuses them |
 
 Drive code is compiled out of release builds. A release build answers a drive request with:
 `click` drives the UI and exists only in debug builds (Zeron Dev bundles); this build is
@@ -36,30 +81,31 @@ takes no `target`; `quit` needs one.
 What each level exposes:
 
 - Observe reads what the app's windows show, text field values included (a key typed into
-  the Add provider form is in `tree` and in a `snapshot`), to any chat that has the `ui_driver`
-  tool on. Turn the tool off in Settings > Tools to withhold it.
-- Observe changes no app state, so `ui_driver` is annotated read-only, but it has local
+  the Add provider form is in `tree` and in a `snapshot`), to any chat that has the `app_inspect`
+  tool on.
+- Observe changes no app state, so `app_inspect` is annotated read-only, but it has local
   effects: `snapshot` and `compare` write a PNG under `~/.zeron/run/shots` and `record` a
   scenario file under `~/.zeron/run/recordings`, which nothing prunes; `frames` and `track`
   turn on the frame trace while they record; a tree read keeps the window's accessibility tree
   on for 60 s, and a running `record` keeps it on until `stop`.
 - `record` taps the person's real clicks, keys, typing and scrolls in that app, so
-  `ui_driver` refuses to record the app that serves the calling chat: a recording there would
+  `app_inspect` refuses to record the app that serves the calling chat: a recording there would
   capture what the person types into this chat. That refusal names the way out: the person
-  runs `zeron ui record` in their own shell, or the agent records a Dev bundle. The CLI has no
+  runs `zeron app record` in their own shell, or the agent records a Dev bundle. The CLI has no
   such check, because it is the owner's path. Text typed into a field that looks secret is
   written as `<redacted>` in every build (see Recording a session).
 - Drive in a Dev bundle goes around the chat permission gates of that bundle: an agent can click
   Approve on a pending request there, or type into its terminal panel. Keep Dev bundles on test
   data.
-- `ui_driver_drive` refuses the app that serves the calling chat (any app whose `ipcPort` is the
-  chat's engine port), so a chat cannot approve its own requests through the tool. `zeron ui`
+- `app_drive` refuses the app that serves the calling chat (any app whose `ipcPort` is the
+  chat's engine port), so a chat cannot approve its own requests through the tool. `zeron app`
   and the raw socket have no such check: an agent with a shell can still reach its own app.
-  Turn `ui_driver_drive` off in Settings > Tools to keep reading without driving; turning
-  `ui_driver` off turns both off.
-- `ui_driver_drive` carries a destructive hint, so a Codex chat at Ask or Auto asks the person
+  Settings > Lab has an App API switch for both tools; it leaves `zeron app` alone. A
+  `disabledTools` entry in the harness prefs also turns one off, and turning `app_inspect` off
+  turns both off.
+- `app_drive` carries a destructive hint, so a Codex chat at Ask or Auto asks the person
   before every call ("Approve UI drive"). A Codex chat at Full gets the tool pre-approved in its
-  thread config (`mcp_servers.zeron.tools.ui_driver_drive.approval_mode = "approve"`), so it
+  thread config (`mcp_servers.zeron.tools.app_drive.approval_mode = "approve"`), so it
   drives without asking. The `device` tool is pre-approved in every mode.
 
 ## Reaching a target
@@ -81,19 +127,19 @@ the client prunes any descriptor whose pid is gone or whose endpoint refuses.
 
 Two clients share one implementation (`crates/mcp/src/ui_driver.rs`):
 
-- CLI: `zeron ui list`, `zeron ui <action> ['<json args>'] [--target <t>]`, and
-  `zeron ui scenario <file.json> [--target <t>] [--out <dir>]`. `zeron` is not on PATH in a
+- CLI: `zeron app list`, `zeron app <action> ['<json args>'] [--target <t>]`, and
+  `zeron app scenario <file.json> [--target <t>] [--out <dir>]`. `zeron` is not on PATH in a
   checkout. Run `cargo build -p zeron` once, then call `$CARGO_TARGET_DIR/debug/zeron` (or
   `target/debug/zeron`). Any build of the CLI can talk to any app. Text replies (`tree`, `compare`) print
   raw and everything else prints as pretty JSON. Errors go to stderr with exit code 1.
-- MCP tools in `zeron mcp` (Settings > Tools, Workspace group): `ui_driver` takes `list` and the
-  observe actions, `ui_driver_drive` the drive actions, `launch` and `quit`, plus `frames` and
+- MCP tools in `zeron mcp`: `app_inspect` takes `list` and the
+  observe actions, `app_drive` the drive actions, `launch` and `quit`, plus `frames` and
   `track` with `during`. Each refuses the other's actions with an error that names the right
   tool. The arguments are the CLI JSON plus `"action"` and an optional `"target"`. `snapshot`
   also returns the PNG as an image block unless `"inline": false`; `compare` returns its report
   as text.
 
-`zeron ui list` prints the live descriptors: `pid`, `socket` (or `driverPort` and `token` on
+`zeron app list` prints the live descriptors: `pid`, `socket` (or `driverPort` and `token` on
 Windows), `label`, `bundlePath`, `dataDir`, `ipcPort`, `build` (`debug`|`release`), `input`
 (true when drive actions exist), `version`, `startedAt`. The label is the `.app` folder name
 (`Zeron Dev 7`, `Zeron Scenario`), or `Zeron` outside a bundle. Errors name a Windows endpoint
@@ -111,8 +157,8 @@ as `127.0.0.1:<port>` and never print its token.
 | any other text | an exact case-insensitive label, else a case-insensitive substring that matches one app |
 
 Every miss or ambiguity error ends with `live targets (pid label build ipcPort):` and one line
-per app. An agent that omits `target` reaches the app serving its own chat: `ui_driver`
-observes it and `ui_driver_drive` refuses it. To drive, pass the label or pid of a Dev bundle
+per app. An agent that omits `target` reaches the app serving its own chat: `app_inspect`
+observes it and `app_drive` refuses it. To drive, pass the label or pid of a Dev bundle
 that runs its own engine port.
 
 The wire format is newline-delimited JSON over the connection, after the token line on Windows:
@@ -131,12 +177,12 @@ another drive in the same app to finish, then fails with `another drive is still
 
 ### `launch` and `quit` (first choice)
 
-`zeron ui launch` (or `ui_driver_drive` with `"action":"launch"`) picks a free Dev number, builds
+`zeron app launch` (or `app_drive` with `"action":"launch"`) picks a free Dev number, builds
 and opens that bundle with `scripts/run-macos-dev.sh`, and returns once the new bundle's driver
 is live:
 
 ```sh
-target/debug/zeron ui launch --mock
+target/debug/zeron app launch --mock
 {"action":"launch","mock":true}
 ```
 
@@ -167,9 +213,9 @@ target/debug/zeron ui launch --mock
   `ZERON_DEV_APP_NAME`, `ZERON_DEV_BUNDLE_ID` and `ZERON_DEV_IPC_PORT` from N and drops
   `ZERON_DEV_DATA_DIR`, so the data lives in `<root>/data`. The other variables in the table
   below, `ZERON_DEV_PROFILE` among them, and the passthrough list reach the script as set, so
-  `ZERON_DEV_PROFILE=release zeron ui launch` launches a release Dev bundle.
+  `ZERON_DEV_PROFILE=release zeron app launch` launches a release Dev bundle.
 
-`zeron ui quit --target "Zeron Dev 63"` (or `"action":"quit"` with a `target`) asks the bundle to
+`zeron app quit --target "Zeron Dev 63"` (or `"action":"quit"` with a `target`) asks the bundle to
 quit through its bundle id and waits up to 20 s for its descriptor to go:
 `{"quit":"Zeron Dev 63","pid":48233,"bundleId":"sh.zeron.app.dev63"}`. It refuses the app on
 port 27654 or under `/Applications` (`` `quit` never quits ... it hosts the running sessions ``),
@@ -179,7 +225,7 @@ an app outside a bundle, and any bundle whose id is the release `sh.zeron.app`.
 
 `scripts/run-macos-dev.sh` builds `zeron`, assembles and signs an isolated bundle, and opens it
 through LaunchServices with `open -W`, which blocks until the app quits. Run it in the
-background and poll `zeron ui list` until the label shows up (the first build can take minutes).
+background and poll `zeron app list` until the label shows up (the first build can take minutes).
 
 | Variable | Default | Use |
 |---|---|---|
@@ -205,8 +251,8 @@ mkdir -p target/macos-dev7
 ZERON_DEV_ROOT=target/macos-dev7 ZERON_DEV_APP_NAME="Zeron Dev 7" \
 ZERON_DEV_BUNDLE_ID=sh.zeron.app.dev7 ZERON_DEV_IPC_PORT=49787 ZERON_HARNESS=mock \
   scripts/run-macos-dev.sh > target/macos-dev7/launch.log 2>&1 &
-target/debug/zeron ui list                 # repeat until "Zeron Dev 7" is listed
-target/debug/zeron ui state --target "Zeron Dev 7"
+target/debug/zeron app list                 # repeat until "Zeron Dev 7" is listed
+target/debug/zeron app state --target "Zeron Dev 7"
 osascript -e 'tell application id "sh.zeron.app.dev7" to quit'   # prints -128, still quits
 ```
 
@@ -226,11 +272,11 @@ Rules:
 The examples below use a shell helper bound to the bundle from the previous section:
 
 ```sh
-zui() { target/debug/zeron ui "$@" --target "Zeron Dev 7"; }
+zui() { target/debug/zeron app "$@" --target "Zeron Dev 7"; }
 ```
 
-Under each example, the second line is the same request as tool arguments, for `ui_driver`
-(observe) or `ui_driver_drive` (drive). Every
+Under each example, the second line is the same request as tool arguments, for `app_inspect`
+(observe) or `app_drive` (drive). Every
 action also takes `window` (a window id from `state`; the default is the frontmost Shell window).
 
 ### Observe
@@ -239,13 +285,13 @@ action also takes `window` (a window id from `state`; the default is the frontmo
 |---|---|---|
 | `state` | none | `pid, build, input, windows[{id,title,kind,size{w,h},active,a11yForced}], route{kind,section,selectedChat}, frames{count,lastDrawAgoMs}, motionScale, theme{mode,appearance}, clock{paused,virtualMs}` |
 | `tree` | `query`, `root` (ref), `depth`, `full` (false), `json` (false) | text lines, or `{window,title,size,focus,total,nodes[...]}` |
-| `snapshot` | `rect {x,y,w,h}` in points, `native` (false: 1 pixel per point; true: the display's backing scale, so a 1320x880 window on Retina comes out 2640x1760, with `rect` still in points), `path` (`zeron ui` only, so the read-only `ui_driver` tool never writes where the caller picks; absolute, ending in `.png`, not an existing link or folder; default `~/.zeron/run/shots/<pid>-<n>.png`) | `{path,width,height,stale?}` |
+| `snapshot` | `rect {x,y,w,h}` in points, `native` (false: 1 pixel per point; true: the display's backing scale, so a 1320x880 window on Retina comes out 2640x1760, with `rect` still in points), `path` (`zeron app` only, so the read-only `app_inspect` tool never writes where the caller picks; absolute, ending in `.png`, not an existing link or folder; default `~/.zeron/run/shots/<pid>-<n>.png`) | `{path,width,height,stale?}` |
 | `wait` | `for`, plus the fields below | depends on `for` |
 | `frames` | `ms` (1000, max 10000), `during` | `{frames,fps,intervalsMs{p50,p95,max},longFrames[{atMs,gapMs}],firstFrameAtMs,lastFrameAtMs,drawMs?,during?}` |
 | `track` | `ref` or `select`+`nth`, `ms` (800, max 5000), `jumpPx` (40), `during` | `{samples[[tMs,x,y,w,h]],framesSampled,missingFrames,jumps[{atMs,from,to,delta}],settledAtMs,reresolved,ref,node,framesDrawn,readMs,during?}` |
 | `audit` | none | `{counts{nodes,interactive,tabStops,unlabeledInteractive},issues[{ref,rule,role,label?,bounds?,view?,source?}]}` |
-| `record` | `do` (`start` or `stop`); with `start`, `includeDriven` (false, debug builds only); with `stop`, `path` (`zeron ui` only; absolute, ending in `.json`; default `~/.zeron/run/recordings/<pid>-<n>.json`) | start: `{recording,window,includeDriven}`; stop: `{path,steps,fallbacks,redacted}` |
-| `compare` | `html` (the mockup page) or `path` (an `.html` or `.htm` file: in the current folder for `zeron ui`, in the chat's folder for `ui_driver`), one region (`rect`, `ref`, or `select`+`nth`), `width` (the region's), `threshold` (4 pt), `json` (false) | text lines, or `{matched,moved,missing,extra,uncheckedText?,region,pixel{ratio,path},stale?}` |
+| `record` | `do` (`start` or `stop`); with `start`, `includeDriven` (false, debug builds only); with `stop`, `path` (`zeron app` only; absolute, ending in `.json`; default `~/.zeron/run/recordings/<pid>-<n>.json`) | start: `{recording,window,includeDriven}`; stop: `{path,steps,fallbacks,redacted}` |
+| `compare` | `html` (the mockup page) or `path` (an `.html` or `.htm` file: in the current folder for `zeron app`, in the chat's folder for `app_inspect`), one region (`rect`, `ref`, or `select`+`nth`), `width` (the region's), `threshold` (4 pt), `json` (false) | text lines, or `{matched,moved,missing,extra,uncheckedText?,region,pixel{ratio,path},stale?}` |
 
 `route.kind` is one of `newChat`, `chat`, `pullRequests`, `usage`, `inbox`, `settings` (with
 `section`, such as `"General"`), `terminal`, `tasks`, `taskCenter`, `supervisor`, `docs`.
@@ -554,14 +600,14 @@ only, and it cannot see an element that has no node at all.
 ### Recording a session: `record`
 
 `record start` taps the window's real clicks, drags, scrolls, keys and typing; `record stop`
-writes them as a scenario file that `zeron ui scenario` replays (recipe h).
+writes them as a scenario file that `zeron app scenario` replays (recipe h).
 
 ```sh
-zeron ui record start --target "Zeron Dev 7"     # {"recording":true,"window":...,"includeDriven":false}
+zeron app record start --target "Zeron Dev 7"     # {"recording":true,"window":...,"includeDriven":false}
 # the person reproduces the bug in that window
-zeron ui record stop --path /abs/out/bug.json --target "Zeron Dev 7"
+zeron app record stop --path /abs/out/bug.json --target "Zeron Dev 7"
 # {"path":"/abs/out/bug.json","steps":6,"fallbacks":0,"redacted":0}
-zeron ui scenario /abs/out/bug.json --target "Zeron Dev 7"
+zeron app scenario /abs/out/bug.json --target "Zeron Dev 7"
 ```
 
 - Steps name elements the way `select` does (`{"ui":"click","select":"Button \"Settings\""}`),
@@ -583,7 +629,7 @@ zeron ui scenario /abs/out/bug.json --target "Zeron Dev 7"
   `` a recording is already running; `record {"do":"stop"}` first ``, and `stop` with none
   running errors with `` no recording is running; `record {"do":"start"}` first ``. A `stop`
   whose write fails keeps recording, so stop again with another `path`.
-- `ui_driver` refuses to record the app serving the calling chat (see Two levels); the CLI is
+- `app_inspect` refuses to record the app serving the calling chat (see Two levels); the CLI is
   the owner's path for that.
 
 ### Checking a build against its mockup: `compare`
@@ -616,8 +662,8 @@ compare 679x575 at @470,137: 14 matched, 1 moved, 1 missing, 1 extra (threshold 
   not against zero.
 - `json: true` returns the lists as objects with both rects and the deltas.
 - macOS only; elsewhere it errors with `` `compare` is only implemented on macOS ``.
-- The mockup comes as `html` or as `path`, not both. `zeron ui compare` reads `path` from the
-  current folder, never outside it. The `ui_driver` tool reads it from the chat's folder by
+- The mockup comes as `html` or as `path`, not both. `zeron app compare` reads `path` from the
+  current folder, never outside it. The `app_inspect` tool reads it from the chat's folder by
   `html_preview`'s rule (a chat in the home folder is refused) and only inside a live Zeron run,
   so the page never passes through the agent's context; otherwise pass `html`.
 
@@ -657,7 +703,7 @@ build will be:
 
 ### (a) Verify a layout or copy change
 
-1. Launch your Dev bundle: `zeron ui launch --mock` returns its label once it is up.
+1. Launch your Dev bundle: `zeron app launch --mock` returns its label once it is up.
 2. Navigate: `zui click '{"select":"Button \"Settings\""}'`, then
    `zui wait '{"for":"idle"}'`.
 3. Check the copy and position as text: `zui tree '{"query":"compact"}'`. The line gives
@@ -752,7 +798,7 @@ of these keys:
 | Step | Effect |
 |---|---|
 | `{"engine": "<RPC method>", "params"?: {...}, "first"?: bool, "save"?: "n"}` | Calls the target's engine at `ws://127.0.0.1:<ipcPort>` over one connection per run. With `first`, it subscribes and keeps the first item, e.g. `WatchDocMessages {chatId}` returns `{reset: [entries]}`. A scenario with an engine step refuses a release-build target. |
-| `{"ui": "<driver action>", ...args, "save"?: "n"}` | Sends one driver request, as `zeron ui <action>` would. |
+| `{"ui": "<driver action>", ...args, "save"?: "n"}` | Sends one driver request, as `zeron app <action>` would. |
 | `{"assert": {"select": "Role \"label\"", "nth"?: n, "exists"?: bool}}` | `true` waits for a match (`wait for:select`); `false` waits for none (`wait for:gone`, which ignores `nth`). |
 | `{"assert": {"text": "substring", "exists"?: bool}}` | `true` waits for a label, value or description that contains it; `false` waits until none does (`wait for:gone` with `text`). |
 | `{"assert": {"saved": "n.path", "equals": json}}` | Compares a saved value. `"contains": "s"` searches its text instead (a JSON value is searched as compact JSON). |
@@ -781,7 +827,7 @@ bundle unless you pass `--keep`. Each run works in `target/ui-scenario/<name>/` 
 previous run's folder to the Trash. It refuses to start while a `Zeron Scenario` app is still
 running (quit one kept with `--keep` first) or while a live app's data dir lies in that folder,
 and it only stops a pid whose executable is inside the scenario bundle. Against an app that is
-already running, use `zeron ui scenario <file> --target <t> --out <dir>`; without `--out` the
+already running, use `zeron app scenario <file> --target <t> --out <dir>`; without `--out` the
 report goes to `~/.zeron/run/scenarios/<name>-<time>/`.
 
 Reading the report: the last stdout line is `PASS n/n` or `FAIL k/n: step <i> <name>: <error>`
@@ -800,7 +846,7 @@ those as findings. Open the snapshots: a step can pass while the screen is wrong
 2. Launch the build, open the screen, and find the region's node:
    `zui tree '{"query":"settings"}'`.
 3. `zui compare '{"select":"Group \"Settings\"","path":"mockups/general.html"}'` from the
-   folder that holds `mockups/`. From the `ui_driver` tool, `path` is relative to the chat's
+   folder that holds `mockups/`. From the `app_inspect` tool, `path` is relative to the chat's
    folder.
 4. Read `moved` first: each line gives `dx`/`dy`/`dw`/`dh` in points and both rects. Then
    `missing` and `extra`: a label that differs by a word (`Classify` against `Classifier`)
@@ -832,13 +878,13 @@ settling, so snapshot after `advance` instead of waiting for idle.
 
 ### (h) Hand a bug over by recording
 
-1. The person runs `zeron ui record start --target <app>` in their own shell (or you start it
-   on a Dev bundle), reproduces the bug, and runs `zeron ui record stop --path /abs/bug.json`.
+1. The person runs `zeron app record start --target <app>` in their own shell (or you start it
+   on a Dev bundle), reproduces the bug, and runs `zeron app record stop --path /abs/bug.json`.
 2. Read the file: it is a scenario, one step per click, drag, scroll, key or typed run, with
    a `wait` before a step whose screen changed. Check `fallbacks` and the `x,y fallback`
    names; replace a fallback with a selector if you can, since a raw point depends on the
    window size.
-3. Replay it on a Dev bundle: `zeron ui scenario /abs/bug.json --target "Zeron Dev 7"`. Add
+3. Replay it on a Dev bundle: `zeron app scenario /abs/bug.json --target "Zeron Dev 7"`. Add
    `assert` and `snapshot` steps at the point the bug shows, so the file becomes the bug's
    repro and, after the fix, its check.
 4. Secret fields arrive as `<redacted>`; put test values in before you replay.
@@ -847,9 +893,9 @@ settling, so snapshot after `advance` instead of waiting for idle.
 
 A lead agent can hand a QA pass to a child agent that acts only as a user would. Give the child:
 
-1. this guide (`docs/ui-driver.md`) and nothing about the implementation;
-2. the target label (`Zeron Dev 7`) and the rule that it acts only through `zeron ui` or the
-   `ui_driver` and `ui_driver_drive` tools with that `target`, never by editing code, never
+1. this guide (`docs/app-api.md`) and nothing about the implementation;
+2. the target label (`Zeron Dev 7`) and the rule that it acts only through `zeron app` or the
+   `app_inspect` and `app_drive` tools with that `target`, never by editing code, never
    through computer use, and
    never against `/Applications/Zeron.app`;
 3. the goal as a user story ("open Settings, turn on Compact mode, confirm the sidebar
@@ -911,13 +957,13 @@ The lead then checks the claims against the excerpts and snapshots, not against 
 
 | Symptom | Cause and fix |
 |---|---|
-| `zeron ui list` prints `[]` | No live app serves the driver. The bundle is still building (check its launch log), it crashed (stale descriptors are pruned by pid), or the app's build predates the driver. |
+| `zeron app list` prints `[]` | No live app serves the driver. The bundle is still building (check its launch log), it crashed (stale descriptors are pruned by pid), or the app's build predates the driver. |
 | `no running Zeron app serves the UI driver: ... has no live ui-<pid>.json` | Same as above, reported at target selection. |
 | `N Zeron apps match ...` | Several apps are live; pass `--target` with the pid or exact label from the listed targets. |
 | `` `click` drives the UI and exists only in debug builds `` | You reached a release build. Target a Dev bundle. |
-| `` `click` drives the UI, which ui_driver never does `` | Drive actions and `during` go through `ui_driver_drive`, with a Dev bundle as `target`. |
-| `` ui_driver_drive takes a drive action ... `` | The action only observes; call `ui_driver`. |
-| `` ui_driver_drive does not drive <label> (pid n): it serves this chat's engine `` | You omitted `target` or named the app that serves your chat. Target a Dev bundle that runs its own engine. |
+| `` `click` drives the UI, which app_inspect never does `` | Drive actions and `during` go through `app_drive`, with a Dev bundle as `target`. |
+| `` app_drive takes a drive action ... `` | The action only observes; call `app_inspect`. |
+| `` app_drive does not drive <label> (pid n): it serves this chat's engine `` | You omitted `target` or named the app that serves your chat. Target a Dev bundle that runs its own engine. |
 | `` `<sel>` matches N elements `` | Narrow with a role, use the exact label, or pass `nth`. |
 | `no element matches ...; near:` | Read the near list or `tree` with `query`; the element may lack a node. |
 | `... is outside the WxH window; scroll it into view first` | Scroll its container (`scroll` with `select` on the scroll area), then retry. |
@@ -925,24 +971,24 @@ The lead then checks the claims against the excerpts and snapshots, not against 
 | `<label> (pid n) did not answer within N s` | The main thread is blocked, or a drive call waited behind another long drive. Check `state` from a second call. The timed-out drive stops when the app sees the connection close, so a retry does not repeat it. |
 | `` `timeoutMs` must be at most 60000 ms `` | Waits are capped at 60 s. Wait on an element or for `idle` in steps instead of one long wait. |
 | `` `text` must not be empty `` | A `text` or `gone` wait (or a scenario `text` assert) got `""`, which every node contains. Pass the text to wait for. |
-| `user rejected MCP tool call` on `ui_driver_drive` in a Codex chat | The person answered No to "Approve UI drive" (the chat is at Ask or Auto). Ask them, or drive from a chat at Full. |
+| `user rejected MCP tool call` on `app_drive` in a Codex chat | The person answered No to "Approve UI drive" (the chat is at Ask or Auto). Ask them, or drive from a chat at Full. |
 | `the window drew no frame after the accessibility tree was enabled` | The window is minimized or fully hidden, so gpui does not draw. Bring it back on screen and retry. |
 | `give one of ref, select, or x and y` | The request mixed target kinds, or gave `x` without `y` or `nth` without `select`. |
 | `` `path` must end in .png `` / `is not a regular file` | Snapshot paths are absolute `.png` files; pick a new file name, not a link or folder. |
-| `` ui_driver never writes where the caller picks, so ... takes no `path` `` | Drop `path`: the tool saves a snapshot under `~/.zeron/run/shots` and returns the PNG, or its path with `inline: false`, and a recording under `~/.zeron/run/recordings`. Only `zeron ui snapshot` and `zeron ui record` take `path`. |
+| `` app_inspect never writes where the caller picks, so ... takes no `path` `` | Drop `path`: the tool saves a snapshot under `~/.zeron/run/shots` and returns the PNG, or its path with `inline: false`, and a recording under `~/.zeron/run/recordings`. Only `zeron app snapshot` and `zeron app record` take `path`. |
 | `` `<sel>` is disabled: <line> `` | `click`, `press` or `type` named a control that reads `disabled`. Bring the UI to the state that enables it (pick an answer before Submit), or check that it should be disabled. |
-| `` `launch` starts or quits a Zeron Dev bundle, which ui_driver never does `` | `launch` and `quit` go through `ui_driver_drive` or `zeron ui`. |
+| `` `launch` starts or quits a Zeron Dev bundle, which app_inspect never does `` | `launch` and `quit` go through `app_drive` or `zeron app`. |
 | `Zeron Dev <N> is not free: <why>` / `every Dev number from 60 to 99 is in use` | Omit `n` to take the lowest free number, or quit a bundle you no longer need. |
 | `<script> exited (...) before <name> came up` | The build or the bundle failed; the error ends with the last 40 lines of `<root>/launch.log`. |
 | `` `quit` never quits ... it hosts the running sessions `` | `quit` stops Dev bundles only, never the stable app or the release bundle id. |
-| `ui_driver does not record <label> (pid n): it serves this chat's engine` | Ask the person to run `zeron ui record` themselves, or record a Dev bundle. |
+| `app_inspect does not record <label> (pid n): it serves this chat's engine` | Ask the person to run `zeron app record` themselves, or record a Dev bundle. |
 | `` a recording is already running `` / `` no recording is running `` | One recording per app: stop the running one first, or start one before `stop`. |
 | `` the clock is running; send `clock` with `do: pause` first `` | `advance` works on a paused clock only. |
 | `a web page takes plain left clicks only` | Right, middle and modifier clicks do not reach a page; use `press` with a DOM action, or a plain click. |
 | `(x, y) is not on the live part of page w<n>: ...` | App chrome covers that part of the page; scroll the page (`scroll` on the page) until the element is in view. |
-| `the UI driver refused this connection: its first line must be the token ...` | Windows only: the client did not send the descriptor's `token` first. Use `zeron ui` or the tools, or send the token line before the request. |
+| `the UI driver refused this connection: its first line must be the token ...` | Windows only: the client did not send the descriptor's `token` first. Use `zeron app` or the tools, or send the token line before the request. |
 | `` `snapshot` cannot read window pixels under Wayland `` | Run Zeron under X11 or Xwayland (unset `WAYLAND_DISPLAY`). |
 | `` `compare` is only implemented on macOS `` | Compare on a Mac build. |
-| `` ui_driver `compare` reads `path` only in a live Zeron run; pass `html` `` | The tool runs outside a Zeron chat, so it has no chat folder to read from. Pass the page as `html`, or run `zeron ui compare` from the mockup's folder. |
+| `` app_inspect `compare` reads `path` only in a live Zeron run; pass `html` `` | The tool runs outside a Zeron chat, so it has no chat folder to read from. Pass the page as `html`, or run `zeron app compare` from the mockup's folder. |
 | `` give `html` or `path`, one of them `` | `compare` got both; drop one. |
 | Little Snitch prompts for an unsigned dev binary | Expected for `target/debug` and ad-hoc signed bundles; allow the rule for any process with no code requirement, or the prompt returns after each rebuild. |

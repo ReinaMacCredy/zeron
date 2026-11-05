@@ -11,7 +11,7 @@ const MAX_QUERY_CHARS: usize = 200;
 pub fn tool() -> Value {
     json!({
         "name": TOOL,
-        "description": "Read Zeron's own Docs and release notes, and answer how Zeron works from them, not from memory. `search` a few words for article ids with snippets; `read` an `id` for its markdown, including the tool references show_visual and ui_driver; `list` every article; `whatsNew` for release notes, or one release with `version`. Quote the zeron://docs/<id> and zeron://settings/<slug> links articles use.",
+        "description": "Read Zeron's own Docs and release notes, and answer how Zeron works from them, not from memory. `search` a few words for article ids with snippets; `read` an `id` for its markdown, including the tool references show_visual and app_inspect; `list` every article; `whatsNew` for release notes, or one release with `version`. Quote the zeron://docs/<id> and zeron://settings/<slug> links articles use.",
         "inputSchema": {
             "type": "object",
             "properties": {

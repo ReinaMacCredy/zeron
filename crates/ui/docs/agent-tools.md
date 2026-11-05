@@ -8,7 +8,6 @@ The tools come in seven groups, the same ones you see in Settings > Context & to
 | --- | --- |
 | **Threads** | List, read, and rename your chats, start a new chat, message another chat, wait for or watch chats, stop a chat's turn, archive or settle chats, and answer another chat's pending question. |
 | **Questions, terminal, actions and tasks** | Ask you questions and wait for the answers, use this chat's terminals in the terminal panel, manage the project's Actions menu, write and assign tasks on your Tasks list, plan a Task's steps, change this chat's auto-compact window, compact its own context, and read these Docs and the release notes to answer how Zeron works. |
-| **UI driver** | Read a running Zeron app's UI, including the HTML pages inside it, compare a screen against its mockup, and record your clicks as a replayable script. With a separate tool, start and quit Zeron Dev builds and drive their UI, including stepping animations frame by frame. |
 | **Delegation** | Run child agents on any installed provider and model, check on or cancel them, start a code review, report what it did about review findings, and manage agent profiles when you ask. |
 | **Pages and visuals** | Show live HTML pages and native charts, tables, and mockups inline in the thread. |
 | **Device hub** | Open iOS Simulators and Android Emulators in the Device panel, take screenshots of them, and close them. |
@@ -31,8 +30,7 @@ Each tool has its own switch in Settings > Context & tools > Tools, under its gr
 | | `project_actions` | Manage the project's saved Actions. See [Projects and worktrees](zeron://docs/projects). |
 | | `tasks` | Write, update, and assign tasks, and plan a Task's steps. See [Tasks](zeron://docs/tasks). |
 | | `context_settings`, `compact` | Read the chat's context settings and set its auto-compact window, and compact its own context. See [Compaction and context](zeron://docs/compaction). |
-| | `docs` | Read these Docs and the release notes to answer how Zeron works, and the full references for `show_visual` and the UI driver. |
-| **UI driver** | `ui_driver`, `ui_driver_drive` | Read a running Zeron app's UI, compare it against a mockup and record a session; start, quit and drive a Zeron Dev build. |
+| | `docs` | Read these Docs and the release notes to answer how Zeron works and the full reference for `show_visual`. |
 | **Delegation** | `list_projects`, `orchestrator_capabilities` | Look up your projects, the agents installed on this device, and their models: a short list per agent (the models in use plus the first eight), with a count of the rest and a search for any of them. |
 | | `delegate_task`, `task_status`, `task_cancel` | Start a child agent, read how it is doing, and stop it. See [Delegation and subagents](zeron://docs/delegation). |
 | | `review_changes`, `resolve_findings` | Start a code review, and report what it did about each finding. See [Code review](zeron://docs/review). |
@@ -53,8 +51,7 @@ The Supervisor's own chat also gets `supervisor`, which acts on Tasks within the
 - `terminal`, `computer` and saving project Actions work only in a chat at **Full access**. In a chat at **Supervised** or **Auto-accept edits** the call is refused and says so.
 - If a tool you need is refused, **Agents use the full token** in [Settings > Lab](zeron://settings/experimental) gives new runs everything the app can reach, with no question to you. It is off by default. This key limits what the tools do; a determined shell command in a chat without an OS sandbox can still read the app's own key on disk.
 - Project actions only touch the project of the chat that calls them.
-- The UI driving tool only drives Zeron Dev builds, and never the app that serves the agent's own chat. Reading the UI works in every build and includes text typed into fields. The reading tool never records the app that serves the agent's own chat; to record there, run `zeron ui record` yourself. A recording writes text typed into key, API, token, secret or password fields as `<redacted>`. Starting and quitting builds never touches the Zeron app in Applications. Turning the reading tool off turns the driving tool off too.
-- In a Codex chat, the `device` tool runs without asking for approval. Driving the UI runs without asking only when the chat is at **Full access**; at **Supervised** or **Auto-accept edits**, you approve each call.
+- In a Codex chat, the `device` tool runs without asking for approval.
 - An agent can answer another chat's permission request only when its own chat runs at **Full access**.
 - A child agent, or a profile an agent applies, never gets a higher access mode than the chat that started it.
 - A question from an agent waits up to 25 minutes for your answer.

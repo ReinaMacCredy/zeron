@@ -28,6 +28,7 @@
 mod about;
 mod acp_registry;
 mod agents;
+mod app_api;
 mod appshots;
 mod auth;
 mod chat;
@@ -201,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             zeron_cli::Launch::Window { open_url: url } => open_url = url,
             zeron_cli::Launch::Engine(_) => unreachable!("the helper runs the engine's commands"),
             zeron_cli::Launch::Ui(_) | zeron_cli::Launch::Triage { .. } => {
-                return Err("`zeron ui` and `zeron triage` are the gpui app's".into());
+                return Err("`zeron app` and `zeron triage` are the gpui app's".into());
             }
             #[cfg(target_os = "linux")]
             zeron_cli::Launch::Appshot => return Err("Appshots from the command line aren't in this app yet".into()),
@@ -823,7 +824,8 @@ fn serve_with(
         match zgx_script::inspect::serve(session, entry, move |task| tasks.spawn(task)) {
             Ok(server) => {
                 eprintln!("zeron-zgx: devtools for {entry} at {}", server.path().display());
-                Some(server)
+                let published = app_api::publish(server.path());
+                Some((server, published))
             }
             Err(error) => {
                 eprintln!("zeron-zgx: devtools: {error}");

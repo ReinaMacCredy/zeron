@@ -42,7 +42,7 @@ APP="$BASE/bundle/$APP_NAME.app"
 ZERON="$CARGO_TARGET_DIR/debug/zeron"
 
 live_apps() {
-  "$ZERON" ui list 2>/dev/null | jq -r '.[] | [.pid, (.bundlePath // "-"), .dataDir] | @tsv' || true
+  "$ZERON" app list 2>/dev/null | jq -r '.[] | [.pid, (.bundlePath // "-"), .dataDir] | @tsv' || true
 }
 
 same_bundle() {
@@ -150,7 +150,7 @@ done
 
 echo "scenario $NAME: driving pid $PID, report $WORK/report" >&2
 set +e
-"$ZERON" ui scenario "$SCENARIO" --target "$PID" --out "$WORK/report"
+"$ZERON" app scenario "$SCENARIO" --target "$PID" --out "$WORK/report"
 CODE=$?
 set -e
 echo "report: $WORK/report/report.md" >&2

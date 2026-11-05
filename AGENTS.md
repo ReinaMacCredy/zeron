@@ -36,10 +36,11 @@ worktree.
   (see `scripts/run-macos-dev.sh`), never in `/Applications/Zeron.app`, which
   hosts the running sessions. Pick an `N` no other bundle uses and set
   `ZERON_DEV_ROOT`, `ZERON_DEV_APP_NAME`, `ZERON_DEV_BUNDLE_ID` and
-  `ZERON_DEV_IPC_PORT` from it (`docs/ui-driver.md`, "Launching a Dev
+  `ZERON_DEV_IPC_PORT` from it (`docs/app-api.md`, "Launching a Dev
   bundle to drive"); the defaults are shared by every checkout. Inspect and
-  drive it with `zeron ui` or the `ui_driver` and `ui_driver_drive` tools
-  (`docs/ui-driver.md`), not computer use.
+  drive it with `zeron app` or the `app_inspect` and `app_drive` tools
+  (`docs/app-api.md`), not computer use. `zeron app launch --zgx --mock` does
+  the same for the zgx app.
 
 ## Finishing a worktree: merge gate, then clean up
 

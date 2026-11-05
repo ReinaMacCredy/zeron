@@ -92,11 +92,12 @@ enum Command {
         #[arg(long)]
         port: Option<u16>,
     },
-    /// Inspect and drive a running Zeron app through its UI driver:
-    /// `zeron ui list`, `zeron ui <action> ['<json args>'] [--target <t>]`,
-    /// `zeron ui scenario <file.json> [--target <t>] [--out <dir>]`,
-    /// `zeron ui launch [--n N] [--mock] [--name <app>] [-- <app args>]`, `zeron ui quit --target <t>`,
-    /// or `zeron ui record start|stop [--path <file.json>] --target <t>`.
+    /// Inspect and drive a running Zeron app through its private API:
+    /// `zeron app list`, `zeron app <action> ['<json args>'] [--target <t>]`,
+    /// `zeron app scenario <file.json> [--target <t>] [--out <dir>]`,
+    /// `zeron app launch [--n N] [--mock] [--zgx] [--name <app>] [-- <app args>]`, `zeron app quit --target <t>`,
+    /// or `zeron app record start|stop [--path <file.json>] --target <t>`.
+    #[command(name = "app", alias = "ui", hide = true)]
     Ui(UiCommand),
     /// Make, sign, check and list plugins (through the running Zeron).
     Plugin {
@@ -131,14 +132,14 @@ enum Command {
     },
 }
 
-/// `zeron ui`: run by the `zeron` binary, which links the UI driver client.
+/// `zeron app`: run by the `zeron` binary, which links the UI driver client.
 #[derive(clap::Args)]
 pub struct UiCommand {
     /// `list`, `scenario`, `launch`, `quit`, `record`, or a driver action such as state, tree, snapshot, wait, click or key.
     pub action: String,
     /// The action's arguments as one JSON object, such as '{"keys":"cmd-k"}'; for `scenario`, the scenario file; for `record`, `start` or `stop`.
     pub args: Option<String>,
-    /// A pid or label from `zeron ui list` (exact, or a unique substring), or a socket path.
+    /// A pid or label from `zeron app list` (exact, or a unique substring), or a socket path.
     #[arg(long)]
     pub target: Option<String>,
     /// For `scenario`: the report directory (default ~/.zeron/run/scenarios/<name>-<time>).
@@ -150,7 +151,10 @@ pub struct UiCommand {
     /// For `launch`: run the app with the mock harness.
     #[arg(long)]
     pub mock: bool,
-    /// For `launch`: the app name (default `Zeron Dev <N>`).
+    /// For `launch`: start apps/zgx instead of a gpui Dev bundle.
+    #[arg(long)]
+    pub zgx: bool,
+    /// For `launch`: the app name (default `Zeron Dev <N>`, or `Zeron Beta Dev <N>` with `--zgx`).
     #[arg(long)]
     pub name: Option<String>,
     /// For `snapshot` and `record stop`: the absolute file to write; for `compare`: the mockup .html file in the current folder.
@@ -256,7 +260,7 @@ pub enum Launch {
     Engine(EngineCommand),
     /// No subcommand: open the window, on a conversation URL if one was given.
     Window { open_url: Option<String> },
-    /// `zeron ui`, for a binary that links the UI driver client.
+    /// `zeron app`, for a binary that links the UI driver client.
     Ui(UiCommand),
     /// `zeron triage`, for a binary that links the engine's triage playbook.
     Triage { dry_run: bool },
@@ -512,7 +516,13 @@ mod tests {
         ] {
             assert!(parse(args).unwrap().runs_engine(), "{args:?}");
         }
-        for args in [&["update", "--check"][..], &["daemon", "status"], &["ui", "list"], &["triage"]] {
+        for args in [
+            &["update", "--check"][..],
+            &["daemon", "status"],
+            &["ui", "list"],
+            &["app", "list"],
+            &["triage"],
+        ] {
             assert!(!parse(args).unwrap().runs_engine(), "{args:?}");
         }
         assert!(parse(&[]).is_none());
@@ -528,6 +538,12 @@ mod tests {
                 "{help}"
             );
         }
+        assert!(
+            !help
+                .lines()
+                .any(|line| line.trim_start().starts_with("app")),
+            "{help}"
+        );
     }
 
     #[test]

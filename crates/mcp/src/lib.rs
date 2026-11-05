@@ -496,7 +496,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "html_preview",
-            "description": "Lay out an HTML page in Zeron's own web engine and get a PNG screenshot, `contentHeight` at this width, and its console output (log to uncaught exceptions; console.log your own checks). Check a page with it before html_render. Pass `html`, `path` to an .html file in this thread's folder, or `url` of a local dev server you are running (http(s) on localhost, 127.0.0.1 or [::1]) to check it before showing it with html_render `url`. `tree` adds the page's elements as UI driver tree lines (refs w1-<n>). `rect` or `select` crops the screenshot. `steps` act on the page in UI driver syntax through the DOM (isTrusted false), with a screenshot and tree after each; a failed step stops the rest. Needs the Zeron app open on this machine. Pages follow html_render's rules.",
+            "description": "Lay out an HTML page in Zeron's own web engine and get a PNG screenshot, `contentHeight` at this width, and its console output (log to uncaught exceptions; console.log your own checks). Check a page with it before html_render. Pass `html`, `path` to an .html file in this thread's folder, or `url` of a local dev server you are running (http(s) on localhost, 127.0.0.1 or [::1]) to check it before showing it with html_render `url`. `tree` adds the page's elements as app_inspect tree lines (refs w1-<n>). `rect` or `select` crops the screenshot. `steps` act on the page in app_inspect syntax through the DOM (isTrusted false), with a screenshot and tree after each; a failed step stops the rest. Needs the Zeron app open on this machine. Pages follow html_render's rules.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -505,7 +505,7 @@ fn thread_tool_list() -> Value {
                     "url": { "type": "string", "maxLength": html_render::MAX_URL_BYTES, "description": "A running local dev server's page, such as http://localhost:5173/." },
                     "tree": { "type": "boolean" },
                     "rect": { "type": "object", "properties": { "x": { "type": "number", "minimum": 0 }, "y": { "type": "number", "minimum": 0 }, "w": { "type": "number", "minimum": 1 }, "h": { "type": "number", "minimum": 1 } }, "required": ["x", "y", "w", "h"], "additionalProperties": false, "description": "CSS pixels from the page's top-left." },
-                    "select": { "type": "string", "description": "UI driver selector, such as `Button \"Save\"`." },
+                    "select": { "type": "string", "description": "app_inspect selector, such as `Button \"Save\"`." },
                     "nth": { "type": "integer", "minimum": 0, "description": "Which match of `select`, 0-based." },
                     "steps": { "type": "array", "maxItems": html_render::MAX_PREVIEW_STEPS, "items": { "type": "object", "properties": { "action": { "type": "string", "enum": ["click", "type", "key", "wait"] } }, "required": ["action"] }, "description": "In order: {action:\"click\", select|ref, nth?}, {action:\"type\", text, select|ref?}, {action:\"key\", keys:\"enter\"}, {action:\"wait\", for:\"ms\", ms} or for:\"select\"|\"text\"|\"gone\" as in ui_driver wait." },
                     "width": { "type": "integer", "minimum": html_render::MIN_PREVIEW_WIDTH, "maximum": html_render::MAX_PREVIEW_WIDTH, "description": format!("CSS pixels; default {}, the reply column; about 390 for phones.", html_render::COLUMN_WIDTH) },
@@ -721,7 +721,7 @@ impl ThreadTools {
         let secret = self
             .run_secret
             .as_deref()
-            .ok_or("ui_driver `compare` reads `path` only in a live Zeron run; pass `html`")?;
+            .ok_or("app_inspect `compare` reads `path` only in a live Zeron run; pass `html`")?;
         let page = self
             .call_engine(
                 methods::READ_WORKSPACE_PAGE,
@@ -3791,8 +3791,8 @@ mod tests {
         "request_secret",
         "terminal",
         "project_actions",
-        "ui_driver",
-        "ui_driver_drive",
+        "app_inspect",
+        "app_drive",
         "tasks",
         "agent_profiles",
         "context_settings",

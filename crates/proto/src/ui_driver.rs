@@ -12,6 +12,43 @@ pub const DRIVE_ACTIONS: &[&str] = &[
 
 pub const PROCESS_ACTIONS: &[&str] = &["launch", "quit"];
 
+pub const ZGX_INSPECT_COMMANDS: &[&str] = &[
+    "help",
+    "windows",
+    "tree",
+    "node",
+    "find",
+    "state",
+    "errors",
+    "elements",
+    "contributions",
+    "lint",
+    "frames",
+    "reloads",
+    "memory",
+    "wait",
+    "sleep",
+    "snapshot",
+    "mark",
+    "record",
+];
+
+pub const ZGX_DRIVE_COMMANDS: &[&str] = &[
+    "click",
+    "hover",
+    "right-click",
+    "drag",
+    "type",
+    "key",
+    "scroll",
+    "command",
+    "set",
+    "search",
+    "zoom",
+    "switch",
+    "replay",
+];
+
 pub const MAX_WAIT_MS: u64 = 60_000;
 
 pub const STEP_CAP_MS: u64 = 100;
@@ -25,6 +62,14 @@ pub const DRAG_STEPS: u32 = 12;
 pub enum UiDriverBuild {
     Debug,
     Release,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiDriverProtocol {
+    #[default]
+    Native,
+    Zgx,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,6 +108,8 @@ pub struct UiDriverDescriptor {
     pub input: bool,
     pub version: String,
     pub started_at: DateTime<Utc>,
+    #[serde(default)]
+    pub protocol: UiDriverProtocol,
 }
 
 pub fn run_dir() -> PathBuf {
@@ -110,6 +157,7 @@ mod tests {
             input: true,
             version: "0.1.0".into(),
             started_at: DateTime::from_timestamp(0, 0).unwrap(),
+            protocol: UiDriverProtocol::Native,
         };
         let json = serde_json::to_value(&unix).unwrap();
         assert_eq!(json["socket"], "/run/ui-7.sock");
@@ -124,7 +172,7 @@ mod tests {
                 port: 51234,
                 token: "abc".into(),
             },
-            ..unix
+            ..unix.clone()
         };
         let json = serde_json::to_value(&loopback).unwrap();
         assert_eq!(
@@ -137,5 +185,14 @@ mod tests {
             loopback
         );
         assert_eq!(loopback.endpoint.to_string(), "127.0.0.1:51234");
+
+        let mut older = serde_json::to_value(&unix).unwrap();
+        older.as_object_mut().unwrap().remove("protocol");
+        assert_eq!(
+            serde_json::from_value::<UiDriverDescriptor>(older)
+                .unwrap()
+                .protocol,
+            UiDriverProtocol::Native
+        );
     }
 }

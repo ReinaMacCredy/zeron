@@ -1802,8 +1802,7 @@ impl SettingsSection {
 
     fn search_rows(self) -> Vec<SettingsSearchRow> {
         if self == SettingsSection::Tools {
-            return zeron_proto::tools::TOOL_GROUPS
-                .iter()
+            return zeron_proto::tools::listed_tool_groups()
                 .map(|info| (info.title, &[] as &'static [&'static str], None))
                 .chain(self.rows().iter().copied())
                 .collect();

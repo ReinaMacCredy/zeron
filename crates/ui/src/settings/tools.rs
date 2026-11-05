@@ -5,7 +5,7 @@ use gpui::{
     div, prelude::*, px,
 };
 use zeron_proto::tools::{
-    ReceivedCount, TOOL_GROUPS, ToolGroup, ToolGroupInfo, ToolSettings, ToolSettingsState,
+    ReceivedCount, ToolGroup, ToolGroupInfo, ToolSettings, ToolSettingsState, listed_tool_groups,
 };
 use zeron_rpc::methods;
 
@@ -244,14 +244,14 @@ impl ToolsPage {
     fn turn_all(&mut self, on: bool, cx: &mut Context<Self>) {
         if on {
             self.edit(cx, |settings| {
-                for info in TOOL_GROUPS {
+                for info in listed_tool_groups() {
                     for tool in info.tools() {
                         settings.set_tool(tool.name, true);
                     }
                 }
             });
         }
-        let groups: Vec<ToolGroup> = TOOL_GROUPS.iter().map(|info| info.group).collect();
+        let groups: Vec<ToolGroup> = listed_tool_groups().map(|info| info.group).collect();
         self.set_groups(&groups, on, cx);
     }
 
@@ -276,7 +276,7 @@ impl ToolsPage {
                 "Every tool is live".to_string(),
                 format!(
                     "Agents on this engine can call all {total} Zeron tools across {} groups.",
-                    TOOL_GROUPS.len()
+                    listed_tool_groups().count()
                 ),
             )
         } else if live > 0 {
@@ -657,18 +657,16 @@ impl Render for ToolsPage {
         match self.settings.ready().cloned() {
             Some(settings) => {
                 let disabled = self.disabled(&settings, cx);
-                let counts: Vec<ReceivedCount> = TOOL_GROUPS
-                    .iter()
+                let counts: Vec<ReceivedCount> = listed_tool_groups()
                     .map(|info| info.received(&disabled))
                     .collect();
                 let total: usize = counts.iter().map(|count| count.tools).sum();
                 let live: usize = counts.iter().map(|count| count.live_tools).sum();
-                let states: Vec<GroupState> = TOOL_GROUPS
-                    .iter()
+                let states: Vec<GroupState> = listed_tool_groups()
                     .map(|info| self.group_state(&settings, info, &disabled, cx))
                     .collect();
                 let all_live = states.iter().all(|state| *state == GroupState::On);
-                let switches: usize = TOOL_GROUPS.iter().map(|info| info.tools().len()).sum();
+                let switches: usize = listed_tool_groups().map(|info| info.tools().len()).sum();
                 let any_switch = (!disabled.is_empty(), disabled.len() < switches);
                 let animate = self.wires.is_some();
                 let mut wires = self.wires.unwrap_or_default();
@@ -700,7 +698,7 @@ impl Render for ToolsPage {
                     })
                     .child(self.hero(&theme, wires, live, total, all_live, any_switch, cx));
                 let mut groups = widgets::section_card(&theme).mt_0();
-                for (index, info) in TOOL_GROUPS.iter().enumerate() {
+                for (index, info) in listed_tool_groups().enumerate() {
                     groups = groups.child(self.group_card(
                         &theme,
                         info,

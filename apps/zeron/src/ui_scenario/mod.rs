@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use zeron_proto::ui_driver::{UiDriverBuild, UiDriverDescriptor, run_dir};
+use zeron_proto::ui_driver::{UiDriverBuild, UiDriverDescriptor, UiDriverProtocol, run_dir};
 
 use zeron_mcp::ui_driver;
 
@@ -101,6 +101,12 @@ pub async fn run(file: &Path, target: Option<&str>, out: Option<PathBuf>) -> Res
     let scenario = parse_scenario(&value)?;
     let live = ui_driver::list();
     let app = ui_driver::select(&live, target.or(scenario.target.as_deref()), None)?.clone();
+    if app.protocol == UiDriverProtocol::Zgx {
+        return Err(format!(
+            "{} (pid {}) is a zgx app: scenarios run on gpui builds only",
+            app.label, app.pid
+        ));
+    }
     if app.build != UiDriverBuild::Debug
         && scenario
             .steps
