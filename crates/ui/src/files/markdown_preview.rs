@@ -198,6 +198,8 @@ pub(super) struct MarkdownPreview {
     suspended: bool,
     selection_pointer: Option<gpui::Point<gpui::Pixels>>,
     selection_task: Option<Task<()>>,
+    annotations: Option<gpui::Entity<crate::annotations::AnnotationLayer>>,
+    _annotation_events: Option<gpui::Subscription>,
     diagrams: HashMap<String, Result<crate::image_media::MediaImage, String>>,
     diagram_task: Option<Task<()>>,
     diagram_style: u32,
@@ -295,6 +297,51 @@ impl MarkdownPreview {
             self.zoom_render = Some(next);
         }
     }
+    pub(super) fn set_annotation_target(
+        &mut self,
+        state: gpui::Entity<crate::state::AppState>,
+        chat: String,
+        cx: &mut Context<Self>,
+    ) {
+        let surface = cx.entity_id().as_u64();
+        let (scope, source) = (self.scope.clone(), self.path.clone());
+        let layer = self.annotations.get_or_insert_with(|| {
+            cx.new(|cx| {
+                crate::annotations::AnnotationLayer::new(state, surface, scope, Some(source), cx)
+            })
+        });
+        let layer = layer.clone();
+        let host = crate::annotations::Host {
+            column: crate::annotations::Column {
+                pad_left: 24.0,
+                pad_right: 24.0,
+                max_width: MAX_PREVIEW_CONTENT_WIDTH,
+            },
+            top_inset: 0.0,
+            bottom_inset: 0.0,
+        };
+        layer.update(cx, |layer, cx| layer.set_host(Some(chat), host, cx));
+        if self._annotation_events.is_none() {
+            self._annotation_events =
+                Some(cx.subscribe(&layer, |view: &mut Self, _, event, cx| {
+                    use crate::annotations::AnnotationEvent;
+                    match event {
+                        AnnotationEvent::RevealRow(key) => {
+                            let row = key
+                                .strip_prefix(view.scope.as_str())
+                                .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+                                .and_then(|ix| ix.parse::<usize>().ok());
+                            if let Some(row) = row {
+                                view.list.scroll_to_reveal_item(row);
+                            }
+                        }
+                        AnnotationEvent::ScrollBy(delta) => view.list.scroll_by(px(*delta)),
+                    }
+                    cx.notify();
+                }));
+        }
+    }
+
     pub(super) fn set_comments(
         &mut self,
         owner: gpui::WeakEntity<super::FilesSurface>,
@@ -429,6 +476,8 @@ impl MarkdownPreview {
             suspended: false,
             selection_pointer: None,
             selection_task: None,
+            annotations: None,
+            _annotation_events: None,
             diagrams: HashMap::new(),
             diagram_task: None,
             diagram_style: 0,
@@ -1355,6 +1404,7 @@ impl Render for MarkdownPreview {
         }
         let mut root = div()
             .id("markdown-file-preview")
+            .relative()
             .size_full()
             .min_w_0()
             .min_h_0()
@@ -1375,6 +1425,9 @@ impl Render for MarkdownPreview {
                         crate::markdown::selection::end_active_drag();
                         view.selection_task = None;
                         view.selection_pointer = None;
+                        if let Some(layer) = &view.annotations {
+                            layer.update(cx, |layer, cx| layer.settle_selection(cx));
+                        }
                         cx.notify();
                     }
                 }),
@@ -1414,7 +1467,8 @@ impl Render for MarkdownPreview {
                     // clips at the viewport edge, directly below the toolbar.
                     .py(px(PREVIEW_VERTICAL_PADDING))
                     .with_sizing_behavior(ListSizingBehavior::Auto),
-            );
+            )
+            .children(self.annotations.clone());
         if let Some(preview) = &self.preview_image {
             let weak = cx.weak_entity();
             let display_size = self

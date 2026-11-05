@@ -4804,6 +4804,7 @@ impl Shell {
         {
             self.voice.update(cx, |voice, cx| voice.cancel(cx));
         }
+        self.take_annotation_requests(state, cx);
         self.prune_file_explorers(cx);
         self.prune_canvas_browsers(cx);
         self.prune_device_shell(cx);
@@ -7130,6 +7131,7 @@ impl Shell {
         if prompt.is_none()
             && staged.attachments.is_empty()
             && staged.appshots.is_empty()
+            && staged.quotes.is_empty()
             && self.sidechat_showing(&source_chat_id, cx)
         {
             self.set_surfaces_open(false, cx);
@@ -7150,6 +7152,42 @@ impl Shell {
         match reopen {
             Some(chat) => self.open_sidechat_in_right_pane(&chat, None, staged, cx),
             None => self.create_sidechat(source_chat_id, prompt, staged, cx),
+        }
+    }
+
+    fn take_annotation_requests(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
+        let requests = &state.read(cx).annotation_requests;
+        if requests.side_chat.is_none() && requests.open_file.is_none() {
+            return;
+        }
+        let (ask, file) = state.update(cx, |state, _| {
+            (
+                state.annotation_requests.side_chat.take(),
+                state.annotation_requests.open_file.take(),
+            )
+        });
+        if let Some((chat_id, quote)) = ask {
+            let source = state
+                .read(cx)
+                .chats
+                .iter()
+                .find(|chat| chat.id == chat_id)
+                .and_then(|chat| chat.sidechat_source_chat_id.clone())
+                .unwrap_or(chat_id);
+            self.open_sidechat(
+                source,
+                None,
+                SidechatStaged {
+                    quotes: vec![quote],
+                    ..SidechatStaged::default()
+                },
+                cx,
+            );
+        }
+        if let Some(path) = file {
+            self.defer_in_active_window(cx, move |this, window, cx| {
+                this.add_file_surface(path, window, cx);
+            });
         }
     }
 
@@ -21964,7 +22002,10 @@ mod tests {
             let inner = width - 2.0 * Theme::SPACE_LG - 2.0;
             for (count, expected_height) in [(3, 68.0), (60, 1284.0), (120, 2564.0)] {
                 assert_eq!(
-                    crate::composer::attachment_strip_height(count, inner),
+                    crate::composer::attachment_strip_height(
+                        &vec![(crate::composer::STRIP_THUMB, crate::composer::STRIP_THUMB); count],
+                        inner
+                    ),
                     expected_height
                 );
             }
@@ -25684,7 +25725,7 @@ mod right_tab_mouse_regressions {
                     )),
                     mention: None,
                 }],
-                appshots: Vec::new(),
+                ..SidechatStaged::default()
             };
             let chat = shell.state.read(cx).chats[1].clone();
             shell.open_sidechat_in_right_pane(&chat, Some("compare".into()), staged, cx);

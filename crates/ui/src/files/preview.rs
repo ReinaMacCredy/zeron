@@ -2686,7 +2686,11 @@ impl FilesSurface {
             .filter(|comment| Some(&comment.id) != editing_id)
             .collect();
         let owner = cx.weak_entity();
-        view.update(cx, |view, cx| view.set_comments(owner, comments, draft, cx));
+        let (state, chat) = (self.state.clone(), self.chat_id.clone());
+        view.update(cx, |view, cx| {
+            view.set_comments(owner, comments, draft, cx);
+            view.set_annotation_target(state, chat, cx);
+        });
     }
 
     fn render_document_body(
