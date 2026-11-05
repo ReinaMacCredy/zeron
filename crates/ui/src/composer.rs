@@ -15141,17 +15141,17 @@ mod tests {
                     assert_eq!(composer.staged().len(), 10);
                     assert_eq!(
                         attachment_strip_height(
-                            &vec![(STRIP_THUMB, STRIP_THUMB); 10],
+                            &vec![(STRIP_IMAGE_TILE, STRIP_IMAGE_TILE); 10],
                             698.0 - 34.0
                         ),
-                        68.0
+                        260.0
                     );
                     assert_eq!(
                         attachment_strip_height(
-                            &vec![(STRIP_THUMB, STRIP_THUMB); 10],
+                            &vec![(STRIP_IMAGE_TILE, STRIP_IMAGE_TILE); 10],
                             697.0 - 34.0
                         ),
-                        132.0
+                        388.0
                     );
                     let surface = composer.surface_bounds.get().unwrap();
                     assert!(
@@ -15163,7 +15163,7 @@ mod tests {
                     assert!(composer.height_morph.is_none());
                     assert!(
                         (composer.last_rendered_height + composer.dock_clearance_correction
-                            - (COMPACT_TOTAL_HEIGHT + 132.0))
+                            - (COMPACT_TOTAL_HEIGHT + 388.0))
                             .abs()
                             < 0.1,
                         "transcript clearance must reserve the destination height"
