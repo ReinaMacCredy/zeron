@@ -1849,15 +1849,15 @@ impl EngineRpc {
             path: Option<String>,
         }
         let p: Params = parse_params(params)?;
-        let harness = self.discovery_harness(p.chat_id.as_deref(), p.harness)?;
         let root = self
             .catalog_root(&FileSearchParams {
                 query: String::new(),
-                chat_id: p.chat_id,
+                chat_id: p.chat_id.clone(),
                 space_id: p.space_id,
                 path: p.path,
             })
             .await?;
+        let harness = self.discovery_harness(p.chat_id.as_deref(), p.harness)?;
         Ok((harness, root))
     }
 
