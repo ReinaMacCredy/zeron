@@ -29,6 +29,7 @@ const ACTION_SIZE: f32 = 27.0;
 const BADGE_SIZE: f32 = 30.0;
 const BADGE_TAIL_RADIUS: f32 = 4.0;
 const BADGE_OVER_LINE: f32 = 28.5;
+const BADGE_STEP_GAP: f32 = 2.0;
 const TIP_HEIGHT: f32 = 32.0;
 const TIP_RADIUS: f32 = 11.0;
 const TIP_GAP: f32 = 11.5;
@@ -895,16 +896,21 @@ impl Overlay {
         line: Bounds<Pixels>,
         item: Size<Pixels>,
         bounds: Bounds<Pixels>,
+        badge_left: f32,
     ) -> gpui::Point<Pixels> {
         let (width, height) = (f32::from(item.width), f32::from(item.height));
-        let badge_left = self.host.column.right(bounds) - BADGE_SIZE;
         let badge_top = f32::from(line.top()) - BADGE_OVER_LINE;
         match place {
             Place::OverLine(gap) => {
                 let x = f32::from(line.left()) + f32::from(line.size.width) / 2.0 - width / 2.0;
-                let y = f32::from(line.top()) - gap - height;
+                let above = f32::from(line.top()) - gap - height;
                 let top = f32::from(bounds.top()) + self.host.top_inset + EDGE_MARGIN;
-                point(px(Self::clamp_x(x, width, bounds)), px(y.max(top)))
+                let y = if above < top {
+                    f32::from(line.bottom()) + gap
+                } else {
+                    above
+                };
+                point(px(Self::clamp_x(x, width, bounds)), px(y))
             }
             Place::Badge => point(px(badge_left), px(badge_top)),
             Place::OverBadge => point(
@@ -989,6 +995,8 @@ impl Element for Overlay {
         cx: &mut App,
     ) -> Vec<bool> {
         let mut items = std::mem::take(&mut self.items);
+        let mut badges: Vec<(f32, f32)> = Vec::new();
+        let mut badge_left = 0.0;
         let shown = window.with_content_mask(Some(ContentMask { bounds }), |window| {
             items
                 .iter_mut()
@@ -1015,7 +1023,18 @@ impl Element for Overlay {
                             self.emit(AnnotationEvent::ScrollBy(delta), cx);
                         }
                     }
-                    let origin = self.origin(&item.place, line, measured, bounds);
+                    if matches!(item.place, Place::Badge) {
+                        let top = f32::from(line.top());
+                        badge_left = self.host.column.right(bounds) - BADGE_SIZE;
+                        while badges
+                            .iter()
+                            .any(|&(x, y)| x == badge_left && (y - top).abs() < BADGE_SIZE / 2.0)
+                        {
+                            badge_left -= BADGE_SIZE + BADGE_STEP_GAP;
+                        }
+                        badges.push((badge_left, top));
+                    }
+                    let origin = self.origin(&item.place, line, measured, bounds, badge_left);
                     item.element.prepaint_at(origin, window, cx);
                     true
                 })
