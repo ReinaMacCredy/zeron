@@ -2051,7 +2051,7 @@ async fn a_copy_compacts_beside_the_live_thread_and_swaps_in_at_idle() {
         entry_text(swapped),
         "Compacted in the background, later turns carried over · 22.8k → 3.0k tokens"
     );
-    assert_eq!(plan(&core), None);
+    wait_for(|| plan(&core).is_none(), "the swap clears its plan").await;
 
     core.doc_host
         .queue_command(CHAT, run_payload("msg-3", &tmp.path().to_string_lossy()))
