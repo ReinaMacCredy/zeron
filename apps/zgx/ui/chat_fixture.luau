@@ -78,6 +78,21 @@ local function note(what: string)
 	table.insert(said, what)
 	calls:set(table.concat(said, ","))
 end
+-- (The composer's accounts: `agents.on_device` set by a test, what's asked of
+-- the host noted.)
+do
+	local stub_agents = require("@account/agents") :: any
+	stub_agents.watch_device = function(key: string)
+		note(`watch_device:{key}`)
+	end
+	stub_agents.refresh_device = function(key: string)
+		note(`refresh_device:{key}`)
+	end
+	stub_agents.switch_on = function(key: string, id: string, account: string): any
+		note(`switch_on:{key}:{id}:{account}`)
+		return { after = function(_: any, done: (any) -> ()) done(nil) end }
+	end
+end
 
 local function publish(id: string, patch: { [string]: any }?)
 	local s = table.clone(META[id] or {})
@@ -462,6 +477,18 @@ ui.command {
 	end,
 }
 
+-- Messages from other chats, as the host gives them: one from a chat that's
+-- listed, one from a chat that isn't, one with a long title (tests/chat_sender).
+ui.command {
+	id = "messages_from_chats",
+	title = "Other chats send messages",
+	run = function()
+		store.messages:push { id = "from1", role = "user", text = "The layout pass is done.", at = "Sep 8, 5:00 PM", copy = "The layout pass is done.", sender = { chat = "s2", title = "Old title" } }
+		store.messages:push { id = "from2", role = "user", text = "Waiting on you.", at = "Sep 8, 5:01 PM", copy = "Waiting on you.", sender = { chat = "gone", title = "Gone chat" } }
+		store.messages:push { id = "from3", role = "user", text = "And a word from far away.", at = "Sep 8, 5:02 PM", copy = "And a word from far away.", sender = { chat = "gone2", title = string.rep("A very long chat title ", 12) } }
+	end,
+}
+
 -- The theme, for captures in both.
 ui.command { id = "theme_light", title = "Light theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-light") end }
 ui.command { id = "theme_dark", title = "Dark theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-dark") end }
@@ -569,7 +596,7 @@ ui.command { id = "learn_icons", title = "Hear of the registry icons", run = fun
 	agent_icons:set(ICONS)
 end }
 
--- The shell's sessions: one project, two chats, this Mac.
+-- The shell's sessions: one project, two chats, this computer.
 local function seed()
 	local chats: { any } = {}
 	for id, m in META do
@@ -581,7 +608,7 @@ local function seed()
 	sessions.now:set(({
 		state = "ready",
 		here = "mac",
-		-- This Mac; a box that's up (seen a moment ago); one gone quiet.
+		-- This computer; a box that's up (seen a moment ago); one gone quiet.
 		devices = {
 			{ id = "mac", name = "MacBook Pro", platform = "macos", here = true, online = true },
 			-- (Its beat a day ahead: up however long the fixture runs.)

@@ -12,6 +12,9 @@
 local Quote = require("@ds/quote")
 local Annotation = require("@ds/annotation")
 local sessions = require("@account/sessions")
+local agents = require("@account/agents")
+local locale = require("@ds/locale")
+local toast = require("@ds/toast")
 local ChatLinks = require("@app/screens/chat/chat_links")
 
 local M = {}
@@ -367,6 +370,45 @@ function M.mention_chat(id: string)
 	M.cargo:push { id = chip_id("chat"), kind = "chat", name = ChatLinks.title(title), chat = id, mark = mark }
 end
 
+-- A chat as it's listed now, for what says who sent a message: its title (its
+-- short id, untitled) and its agent's mark. Nil for one that isn't listed.
+function M.chat_of(id: string): { title: string, mark: string? }?
+	local now = sessions.now:get()
+	local found: any = nil
+	for _, c in now.chats do
+		if c.id == id then
+			found = c
+			break
+		end
+	end
+	if not found then
+		for _, c in now.archived or {} do
+			if c.id == id then
+				found = c
+				break
+			end
+		end
+	end
+	if not found then
+		for _, list in now.children or {} do
+			for _, c in list do
+				if c.id == id then
+					found = c
+					break
+				end
+			end
+			if found then
+				break
+			end
+		end
+	end
+	if not found then
+		return nil
+	end
+	local title = string.match(string.gsub(found.title or "", "%s+", " "), "^%s*(.-)%s*$") or ""
+	return { title = if title ~= "" then title else string.sub(id, 1, 8), mark = found.agent }
+end
+
 -- A chat chip's text as it goes.
 function M.chat_link(title: string, id: string): string
 	return ChatLinks.link(title, id) or ""
@@ -624,6 +666,104 @@ function M.renumber(list: { any }): { any }
 		table.insert(out, item)
 	end
 	return out
+end
+
+-- Which of `sessions`' devices is this one.
+local here_device = ui.computed(function(): string?
+	for _, d in sessions.now:get().devices or {} do
+		if d.here then
+			return d.id
+		end
+	end
+	return nil
+end)
+
+-- The accounts' key for a device: "" for this one, whose engine answers
+-- for itself.
+local function account_key(device: string?): string
+	return if device == nil or device == here_device:get() then "" else device
+end
+
+-- Models of Cursor's own pool (Composer, Grok), not the third-party one.
+local CURSOR_OWN = { "default", "auto", "composer", "vega", "grok", "cursor-grok" }
+local function cursor_pool(model: string): string
+	for _, prefix in CURSOR_OWN do
+		if model == prefix or string.find(model, `^{prefix}[%-%.]`) then
+			return "Cursor"
+		end
+	end
+	return "Other"
+end
+
+-- What the ring reads: the fuller window; for Cursor, the pool the model
+-- draws from, if that's reported. Nil: nothing reported.
+local function account_used(account: any, harness: string, model: string): number?
+	if harness == "cursor" then
+		local id = string.match(model, "^[^/]+/(.+)$") or model
+		local pool = cursor_pool(id)
+		for _, w in account.windows do
+			if w.label == pool then
+				return w.used
+			end
+		end
+	end
+	local most: number? = nil
+	for _, w in account.windows do
+		most = if most then math.max(most, w.used) else w.used
+	end
+	return most
+end
+
+-- An account's windows in words, or why it has none to show: one not in use
+-- says what's wrong with it, as a signed-out one's old figures would mislead.
+local function account_detail(account: any): string
+	if account.error and (not account.active or #account.windows == 0) then
+		return account.error
+	end
+	local parts: { string } = {}
+	for _, w in account.windows do
+		table.insert(parts, `{w.label} {math.floor(w.used * 100 + 0.5)}%`)
+	end
+	return table.concat(parts, " · ")
+end
+
+-- The composer's accounts on `device` (ds.ModelPicker's `accounts`,
+-- `on_account`, `on_accounts_open`), whichever computer it is: asked for as
+-- it's first seen.
+function M.model_accounts(device: () -> string?): any
+	ui.effect(function()
+		agents.watch_device(account_key(device()))
+	end)
+	return {
+		accounts = function(harness: string, model: string): { any }?
+			local on = agents.on_device:get()[account_key(device())]
+			local list = on and on[harness]
+			if not list then
+				return nil
+			end
+			local out = table.create(#list)
+			for i, a in list do
+				out[i] = {
+					id = a.id,
+					email = a.email,
+					plan = a.plan,
+					active = a.active,
+					can_switch = a.can_switch,
+					used = account_used(a, harness, model),
+					detail = account_detail(a),
+				}
+			end
+			return out
+		end,
+		on_account = function(harness: string, id: string)
+			agents.switch_on(account_key(device()), harness, id):after(function() end, function()
+				toast.show { title = locale.s("chat.composer.account_not_switched"), tone = "warning" }
+			end)
+		end,
+		on_accounts_open = function()
+			agents.refresh_device(account_key(device()))
+		end,
+	}
 end
 
 return M

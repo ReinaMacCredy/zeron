@@ -778,12 +778,7 @@ local function Composer(): Node
 			-- the prompt is there once, whoever adds it first.
 			local mid = store.new_id()
 			T.send(function()
-				local here = false
-				for _, m in store.messages:peek() do
-					if m.id == mid then
-						here = true
-					end
-				end
+				local here = store.messages:index_of("id", mid) ~= nil
 				if not here then
 					store.messages:push {
 						id = mid,
@@ -921,6 +916,9 @@ local function Composer(): Node
 			end
 		end, function() end)
 	end)
+	local accounts = shared.model_accounts(function(): string?
+		return device:get()
+	end)
 	local function branch_fixed(): ds.ComposerFixed?
 		local s = open()
 		if not s then
@@ -972,6 +970,9 @@ local function Composer(): Node
 			models = function(): { ds.Model }
 				return store.catalog:get().models
 			end,
+			accounts = accounts.accounts,
+			on_account = accounts.on_account,
+			on_accounts_open = accounts.on_accounts_open,
 			-- What its context holds (the ring shows once a window is
 			-- reported, its card saying the numbers).
 			usage = function(): ds.ComposerUsage?

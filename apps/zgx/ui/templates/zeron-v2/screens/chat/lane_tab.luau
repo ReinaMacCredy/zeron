@@ -21,6 +21,7 @@ local Dock = require("@app/screens/chat/dock")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
 local LinkMenu = require("@app/screens/chat/link_menu")
+local Shared = require("@app/screens/chat/shared")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
 
@@ -167,10 +168,17 @@ local function composer(chat: string, view: any, name: string): Node
 			checkout = "local",
 			branch = row.branch,
 		}
-		project:set(place.project)
-		device:set(place.device)
+		-- (Started elsewhere, the panel home's group "+": that project or
+		-- device instead, its branch the project's own. The seed stays the
+		-- parent's, so the send carries the place.)
+		local at = lanes.starts:peek()[chat]
+		local start_project = if at and at.project then at.project elseif at and at.device and at.device ~= place.device then nil else place.project
+		local start_device = if at and at.device then at.device else place.device
+		local moved = start_project ~= place.project or start_device ~= place.device
+		project:set(start_project)
+		device:set(start_device)
 		checkout:set(place.checkout)
-		branch:set(place.branch)
+		branch:set(if moved then nil else place.branch)
 		seed:set(place)
 	end)
 	local where = Where.bind {
@@ -254,6 +262,11 @@ local function composer(chat: string, view: any, name: string): Node
 		end
 		return where.plan() :: any
 	end
+	local accounts = if split
+		then Shared.model_accounts(function(): string?
+			return device:get()
+		end)
+		else nil
 	return ds.Composer {
 		value = draft,
 		-- (ds.Composer's placeholder is a string: read as the tab is made.)
@@ -272,6 +285,10 @@ local function composer(chat: string, view: any, name: string): Node
 		models = function(): { any }
 			return store.catalog:get().models
 		end,
+		-- (A split's pane is a chat of its own; a side chat has none, as Zeron's.)
+		accounts = if accounts then accounts.accounts else nil,
+		on_account = if accounts then accounts.on_account else nil,
+		on_accounts_open = if accounts then accounts.on_accounts_open else nil,
 		-- What its context holds: the chat page's ring and card, from the
 		-- side chat's own numbers (once it has run and they're reported).
 		usage = function(): any
@@ -312,12 +329,7 @@ local function composer(chat: string, view: any, name: string): Node
 			req.message_id = mid
 			local sent: any = nil
 			T.send(function()
-				local here = false
-				for _, m in view.messages:peek() do
-					if m.id == mid then
-						here = true
-					end
-				end
+				local here = view.messages:index_of("id", mid) ~= nil
 				if not here then
 					-- (On its way from this moment: the line under it says so.)
 					view.messages:push { id = mid, role = "user", text = words, waiting = "sending" }
@@ -465,6 +477,14 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		on_retry = function(message: string)
 			store.retry(chat, message)
 		end,
+		-- (A split's pane: the keys stay with this chat, in the window's composer.)
+		on_jump = if split
+			then function()
+				ui.after(0, function()
+					Shared.focus:add(1)
+				end)
+			end
+			else nil,
 		pictures = pictures,
 		sent_pictures = sent_pictures,
 		on_open_subagent = function(sub: any)
@@ -474,6 +494,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			end
 		end,
 		open_link = open_link,
+		chat_of = Shared.chat_of,
 		link_menu = LinkMenu(open_link, function(): any
 			return view.session:peek()
 		end),
