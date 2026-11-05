@@ -478,7 +478,12 @@ impl Chats {
         let rpc = rpc.clone();
         engine::get().spawn(async move {
             if let Ok(answer) = rpc.call("LocalDevice", json!({})).await {
-                *me.here.borrow_mut() = answer["deviceId"].as_str().map(Into::into);
+                let here = answer["deviceId"].as_str().map(String::from);
+                // A composer that named this device before the answer came took it for another's.
+                if here.is_some() && me.remote.borrow().as_ref().map(|r| &r.device) == here.as_ref() {
+                    me.remote.borrow_mut().take();
+                }
+                *me.here.borrow_mut() = here;
             }
             // Every composer needs it: looked up once a connection is there.
             me.load_catalog(false).await;
@@ -621,7 +626,7 @@ impl Chats {
                     Ok(list) => {
                         me.models
                             .borrow_mut()
-                            .insert(id, list.as_array().cloned().unwrap_or_default());
+                            .insert(id, listed_models(&list));
                     }
                     Err(error) => eprintln!("zeron-zgx: chat: {id}'s models didn't list: {error}"),
                 }
@@ -717,7 +722,7 @@ impl Chats {
                     };
                     match list {
                         Ok(list) => {
-                            r.models.insert(id, list.as_array().cloned().unwrap_or_default());
+                            r.models.insert(id, listed_models(&list));
                         }
                         Err(error) => eprintln!("zeron-zgx: chat: {id}'s models on {device} didn't list: {error}"),
                     }
@@ -805,6 +810,11 @@ pub(crate) fn made(params: &Json) {
 /// `chat.catalog`: the agents with models listed, each model as the picker
 /// takes it; ready once any agent's models are in (more may follow), or all
 /// have answered (`done`). (`device`: whose, when it isn't this one.)
+// The fork's engine answers a catalog (`{models, newIds, announceIds}`), upstream's a bare list.
+fn listed_models(reply: &Json) -> Vec<Json> {
+    reply["models"].as_array().or(reply.as_array()).cloned().unwrap_or_default()
+}
+
 fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, device: Option<&str>) -> Value {
     let any = by.values().any(|l| !l.is_empty());
     let state = if any || done { "ready" } else { "looking" };

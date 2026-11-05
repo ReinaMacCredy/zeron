@@ -143,7 +143,8 @@ impl Desktop {
         Some(Rc::new(Self {
             install,
             blocker,
-            automatic: zeron_update::desktop_auto_update_enabled(),
+            // The fork's feed carries the gpui app, never this one's.
+            automatic: false,
             edge,
             data_dir,
             checker,
