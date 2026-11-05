@@ -1986,6 +1986,18 @@ async fn request_secret_saves_a_private_file_and_the_value_stays_out_of_the_chat
     )
     .await;
 
+    let refused = client
+        .call(
+            methods::QUEUE_COMMAND,
+            json!({ "chatId": CHAT, "command": {
+                "kind": "respondInput",
+                "requestId": request_id,
+                "answers": [{ "questionId": "secret", "labels": [FAKE_SECRET] }],
+            } }),
+        )
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+
     rig.command(
         "phone",
         SessionCommandPayload::RespondInput {

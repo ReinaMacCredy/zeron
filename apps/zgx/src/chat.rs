@@ -461,6 +461,7 @@ impl Chats {
         let weak = Rc::downgrade(self);
         watches.push(rpc.watch("WatchChats", json!({}), move |item| {
             let Some(me) = weak.upgrade() else { return };
+            let item = crate::sessions::with_parents(item);
             let mut by = HashMap::new();
             for c in item.as_array().into_iter().flatten() {
                 if let Some(id) = c["id"].as_str() {
@@ -620,7 +621,7 @@ impl Chats {
             let (me, left) = (self.clone(), left.clone());
             engine::get().spawn(async move {
                 match engine::get()
-                    .call("ListModels", json!({ "harness": id, "force": again }))
+                    .call("ListModels", json!({ "harness": id, "force": again, "announce": false }))
                     .await
                 {
                     Ok(list) => {
@@ -712,7 +713,7 @@ impl Chats {
             let (me, left, device) = (self.clone(), left.clone(), device.clone());
             engine::get().spawn(async move {
                 let list = engine::get()
-                    .call("ListModels", json!({ "harness": id, "targetDeviceId": device }))
+                    .call("ListModels", json!({ "harness": id, "targetDeviceId": device, "announce": false }))
                     .await;
                 left.set(left.get() - 1);
                 {
@@ -1373,14 +1374,21 @@ impl View {
             self.mark_failed(&message_id, None);
             return Err("missing");
         }
-        if fresh {
-            engine::get()
-                .call("Mutate", json!({ "op": "setChatConfig", "chatId": id, "config": config }))
-                .await
-                .map_err(|e| {
-                    eprintln!("zeron-zgx: chat: a new chat's config wasn't set: {e}");
-                    engine::outcome(&e)
-                })?;
+        // Another agent goes first, as the shipping app's picker does: the
+        // engine answers a switch by ending the live turn, which would be
+        // this run's.
+        let switching = !fresh && chat["config"]["harness"] != config["harness"];
+        if fresh || switching {
+            let mut params = json!({ "op": "setChatConfig", "chatId": id, "config": config });
+            // (Its divider, with the conversation handed over.)
+            if switching {
+                params["note"] = json!({ "text": format!("Switched to {}", config["harness"].as_str().unwrap_or_default()) });
+            }
+            if let Err(e) = engine::get().call("Mutate", params).await {
+                eprintln!("zeron-zgx: chat: a chat's config wasn't set: {e}");
+                self.mark_failed(&message_id, None);
+                return Err(engine::outcome(&e));
+            }
         }
         let field = |key: &str| req.field(key).map(text).filter(|s| !s.is_empty());
         let cwd = field("cwd")
@@ -1415,6 +1423,9 @@ impl View {
         }
         let run = json!({ "kind": "run", "messageId": message_id, "request": request });
         let sent = command(&id, run.clone()).await;
+        if sent.is_ok() {
+            self.expect_delivery(&id, &message_id, &run);
+        }
         if sent.is_err() {
             // Not delivered: the prompt stays, failed, to send again.
             self.mark_failed(&message_id, Some(run));
@@ -1428,7 +1439,7 @@ impl View {
                 c["config"] = config.clone();
             }
             chats.publish_views();
-            if let Err(e) = engine::get()
+            if !switching && let Err(e) = engine::get()
                 .call("Mutate", json!({ "op": "setChatConfig", "chatId": id, "config": config }))
                 .await
             {
@@ -1449,6 +1460,24 @@ impl View {
             p.retry = retry;
         }
         self.publish_messages();
+    }
+
+    /// A command the engine took can still be rejected at its drain (a
+    /// worktree off a repo with no commits), and the wire doesn't say so:
+    /// past the grace the prompt reads failed, as the shipping app's "Not
+    /// delivered" does. (A host elsewhere may only be away: left sending.)
+    fn expect_delivery(self: &Rc<Self>, chat: &str, message_id: &str, run: &Json) {
+        let chats = CHATS.with(Rc::clone);
+        if chats.chat(chat).is_some_and(|c| chats.target(&c).is_some()) {
+            return;
+        }
+        let (me, message_id, run) = (Rc::downgrade(self), message_id.to_owned(), run.clone());
+        engine::get().spawn(async move {
+            zgx::timer::sleep(std::time::Duration::from_secs_f64(SEND_GRACE_SECONDS)).await;
+            if let Some(me) = me.upgrade() {
+                me.mark_failed(&message_id, Some(run));
+            }
+        });
     }
 
     /// A failed prompt sent again (its run as it was), sending meanwhile.
@@ -1473,7 +1502,9 @@ impl View {
             return Err("failed");
         };
         let sent = command(&id, run.clone()).await;
-        if sent.is_err() {
+        if sent.is_ok() {
+            self.expect_delivery(&id, &message_id, &run);
+        } else {
             self.mark_failed(&message_id, Some(run));
         }
         self.publish_messages();
@@ -1492,6 +1523,19 @@ impl View {
                 .map(|p| p["questions"].as_array().cloned().unwrap_or_default())
                 .ok_or("missing")?
         };
+        // A secret goes in its own card in the Zeron app, never through a
+        // command: those stay in the chat's doc, which syncs.
+        if questions.iter().any(is_secret) {
+            if decision != "deny" {
+                return Err("failed");
+            }
+            engine::get()
+                .call("AnswerSecret", json!({ "chatId": id, "requestId": request }))
+                .await
+                .map_err(|e| engine::outcome(&e))?;
+            self.publish_session();
+            return Ok(());
+        }
         let answers: Vec<Json> = match decision.as_str() {
             // The engine allows once: Yes is all it takes.
             "once" | "always" => single(&questions, "Yes"),
@@ -1867,6 +1911,13 @@ fn merged_config(config: &Json, args: &Value) -> Json {
     }
     if let Some(harness) = field("harness") {
         c["harness"] = json!(harness);
+    }
+    // An instance runs on its own agent, and a profile was picked for it.
+    if c["harness"] != config["harness"]
+        && let Some(map) = c.as_object_mut()
+    {
+        map.remove("instanceId");
+        map.remove("profileId");
     }
     if let Some(effort) = field("effort") {
         c["reasoning"] = json!(effort);
@@ -2426,6 +2477,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .filter_map(|p| p["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
+            let text = handback_quotes(&text).unwrap_or(text);
             let (words, mut paths) = split_attachments(&text);
             // (An Appshot's context isn't what the person said: its picture
             // says which app instead.)
@@ -2508,7 +2560,9 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .find(|p| p["kind"].as_str() == Some("switch"))?;
+                .find(|p| p["kind"].as_str() == Some("switch"))
+                .cloned()
+                .or_else(|| handoff_switch(entry))?;
             let side = |name: &str, harness: &str| {
                 let mark = part[harness].as_str().and_then(switch_mark);
                 (
@@ -2530,6 +2584,52 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+/// A finished delegation's wake, its quoted reply as a markdown quote
+/// (crates/proto `handback_quotes`; zgx doesn't link crates/proto).
+fn handback_quotes(text: &str) -> Option<String> {
+    let handback = |line: &str| line.starts_with("Delegated task ") || line.starts_with("Step \"");
+    if !text.contains("<agent-response>") || !text.lines().any(handback) {
+        return None;
+    }
+    let mut quoted = false;
+    let lines: Vec<String> = text
+        .lines()
+        .filter_map(|line| match line {
+            "<agent-response>" => {
+                quoted = true;
+                None
+            }
+            "</agent-response>" => {
+                quoted = false;
+                None
+            }
+            "" if quoted => Some(">".to_owned()),
+            _ if quoted => Some(format!("> {line}")),
+            _ => Some(line.to_owned()),
+        })
+        .collect();
+    Some(lines.join("\n"))
+}
+
+/// The fork's seam for an agent change: a `handoff` part, read as the
+/// `switch` part this page draws.
+fn handoff_switch(entry: &Json) -> Option<Json> {
+    let part = entry["parts"].as_array()?.iter().find(|p| p["kind"].as_str() == Some("handoff"))?;
+    let route = &part["route"];
+    let from = route["fromHarness"].as_str()?;
+    if !route["sourceChatId"].is_null() {
+        return None;
+    }
+    let to = part["harness"].as_str().unwrap_or_default();
+    let name = |model: &Json, harness: &str| model.as_str().filter(|m| !m.is_empty()).unwrap_or(harness).to_owned();
+    Some(json!({
+        "from": name(&route["fromModel"], from),
+        "to": name(&route["toModel"], to),
+        "fromHarness": from,
+        "toHarness": to,
+    }))
 }
 
 /// A switch side's mark: its agent's, the mock drawn as Claude, as the
@@ -3228,6 +3328,10 @@ fn single(questions: &[Json], label: &str) -> Vec<Json> {
 
 /// What the composer shows of a question: an approval (what it would do),
 /// or the page of questions not yet answered.
+fn is_secret(question: &Json) -> bool {
+    question["kind"]["type"].as_str() == Some("secret")
+}
+
 fn ask_value(part: &Json, answered: usize) -> Option<Value> {
     let request = part["requestId"].as_str()?;
     let questions = part["questions"].as_array()?;
@@ -3254,6 +3358,24 @@ fn ask_value(part: &Json, answered: usize) -> Option<Value> {
     }
     let page = answered.min(questions.len().saturating_sub(1));
     let q = questions.get(page)?;
+    if is_secret(q) {
+        let asked = q["question"].as_str().unwrap_or_default();
+        let words = format!("{asked}\n\nThe Zeron app's own card takes this secret: it isn't typed here.");
+        return Some(Value::record([
+            ("request", Value::from(request)),
+            ("kind", Value::from("question")),
+            (
+                "question",
+                Value::record([
+                    ("text", Value::from(words.as_str())),
+                    ("options", Value::List(Vec::new().into())),
+                    ("multi", Value::Bool(false)),
+                    ("page", Value::Num(1.)),
+                    ("pages", Value::Num(1.)),
+                ]),
+            ),
+        ]));
+    }
     let options: Vec<Value> = q["options"]
         .as_array()
         .into_iter()
@@ -3428,7 +3550,7 @@ fn todos(entries: &[Json]) -> Value {
 
 /// How long a sent prompt reads "sending" with no turn to show for it, as
 /// the shipping app's grace before it calls a send undelivered.
-const SEND_GRACE_SECONDS: f64 = 60.;
+const SEND_GRACE_SECONDS: f64 = 120.;
 
 /// A record with more fields (or some replaced).
 fn with_fields<const N: usize>(record: Value, extra: [(&str, Value); N]) -> Value {
@@ -4079,6 +4201,12 @@ mod tests {
         let other = merged_config(&chat, &Value::record([("model", Value::from("gpt")), ("harness", Value::from("codex"))]));
         assert!(runs_otherwise(&chat, &other));
         assert_eq!(other["harness"], json!("codex"));
+        // An instance or profile belongs to the agent it was picked on.
+        let bound = json!({ "harness": "claude-code", "model": "sonnet", "instanceId": "work", "profileId": "lead" });
+        let moved = merged_config(&bound, &Value::record([("harness", Value::from("codex"))]));
+        assert!(moved.get("instanceId").is_none() && moved.get("profileId").is_none());
+        let stayed = merged_config(&bound, &Value::record([("model", Value::from("opus"))]));
+        assert_eq!(stayed["instanceId"], json!("work"));
         let effort = merged_config(&chat, &Value::record([("effort", Value::from("high"))]));
         assert!(runs_otherwise(&chat, &effort));
         // A model's options (Devin Fusion's lead and sidekick), picked

@@ -3902,6 +3902,17 @@ impl DocHost {
         Ok(id)
     }
 
+    /// Whether the chat's open question `request_id` asks for a secret.
+    pub(crate) fn input_is_secret(&self, chat_id: &str, request_id: &str) -> bool {
+        let Ok(entries) = self.open(chat_id).and_then(|handle| Ok(handle.doc.read_entries()?)) else {
+            return false;
+        };
+        entries.iter().flat_map(|e| &e.parts).any(|part| {
+            matches!(part, MessagePart::Input { request_id: rid, questions, resolved: false, .. }
+                if rid == request_id && questions.iter().any(UserInputQuestion::is_secret))
+        })
+    }
+
     /// A send revives an archived chat on every device (best-effort).
     fn unarchive_on_send(&self, chat_id: &str) {
         let Some(workspace) = self.workspace() else {

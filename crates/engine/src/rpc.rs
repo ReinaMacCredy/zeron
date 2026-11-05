@@ -127,6 +127,14 @@ struct ListModelsParams {
     force: bool,
     #[serde(default)]
     instance_id: Option<String>,
+    /// A listing that isn't showing the person news (zgx's sweep beside the
+    /// main app) leaves the new-model toast for the one that is.
+    #[serde(default = "default_true")]
+    announce: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -1813,7 +1821,7 @@ impl EngineRpc {
         .await
         .map_err(|e| RpcError::Failed(e.to_string()))?;
         // The seen-models record is per driver; an instance's models must not mark them seen.
-        if p.instance_id.is_some() {
+        if p.instance_id.is_some() || !p.announce {
             return RpcReply::value(&zeron_proto::ModelCatalog {
                 models,
                 new_ids: Vec::new(),
@@ -5177,6 +5185,14 @@ impl RpcService for EngineRpc {
                 if p.from_chat_id.is_some() && zeron_proto::supervisor::is_supervisor_chat(&p.chat_id) {
                     return Err(RpcError::Failed(supervisor::PERSON_ONLY.into()));
                 }
+                // Before the write: a command stays in the chat's doc, which syncs.
+                if let SessionCommandPayload::RespondInput { request_id, .. } = &p.command
+                    && self.doc_host.input_is_secret(&p.chat_id, request_id)
+                {
+                    return Err(RpcError::Failed(
+                        "a secret is entered in its own card on the Mac".into(),
+                    ));
+                }
                 let respond = match &p.command {
                     SessionCommandPayload::Interrupt { .. } => {
                         supervisor::refuse_supervisor(p.from_chat_id.as_deref(), supervisor::NO_INTERRUPT)?;
@@ -5268,7 +5284,7 @@ impl RpcService for EngineRpc {
                     /// Where the fork hangs in the tree. Defaults to the
                     /// source; a side chat's own fork button passes the
                     /// side chat's parent so the copy lists as a sibling.
-                    #[serde(default)]
+                    #[serde(default, alias = "parentChatId")]
                     created_by_chat_id: Option<String>,
                     #[serde(default)]
                     entry_id: Option<String>,

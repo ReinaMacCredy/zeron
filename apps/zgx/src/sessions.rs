@@ -80,6 +80,8 @@ const STALE_SECS: i64 = 45;
 const ONLINE_SECS: i64 = 70;
 /// The id prefix of a voice call's hidden orchestrator chat.
 const ORCHESTRATOR: &str = "voice-orchestrator-";
+/// The Supervisor's chats (crates/proto `supervisor`): the Zeron app's own.
+const SUPERVISOR: &str = "supervisor-";
 
 type Outcome = &'static str;
 
@@ -293,7 +295,7 @@ impl Sessions {
     fn heard(&self, slot: Slot, item: Json) {
         match slot {
             Slot::Chats => {
-                *self.chats.borrow_mut() = item;
+                *self.chats.borrow_mut() = with_parents(item);
                 self.heard.set(true);
             }
             Slot::Spaces => *self.spaces.borrow_mut() = item,
@@ -468,7 +470,7 @@ impl Sessions {
         // orchestrator are another's).
         let row = |c: &Json| -> Option<Value> {
                 let id = c["id"].as_str()?;
-                if id.starts_with(ORCHESTRATOR) || !c["parentChatId"].is_null() {
+                if id.starts_with(ORCHESTRATOR) || id.starts_with(SUPERVISOR) || !c["parentChatId"].is_null() {
                     return None;
                 }
                 let created = c["createdAt"].as_str().and_then(unix_seconds).unwrap_or(0);
@@ -604,7 +606,30 @@ impl Sessions {
                 None => return Err("offline"),
             }
         }
-        self.mutate(params.clone()).await?;
+        // A side chat where its parent is, made as the Zeron app makes it, so
+        // that app lists it as one. (One of a side chat stays under it: the
+        // engine has no side chats of side chats.)
+        let moved = ["project", "device", "branch", "cwd"].iter().any(|key| field(key).is_some())
+            || args.field("no_project").is_some_and(Value::truthy);
+        let source = field("parent").filter(|parent| {
+            !moved && self.chats.borrow().as_array().into_iter().flatten().any(|c| {
+                c["id"].as_str() == Some(parent) && c["sidechatSourceChatId"].is_null()
+            })
+        });
+        match source {
+            Some(source) => {
+                engine::get()
+                    .call("CreateSidechat", json!({ "sourceChatId": source, "chatId": id }))
+                    .await
+                    .map_err(|error| fail(&error))?;
+                if !params["config"].is_null() {
+                    self.mutate(json!({ "op": "setChatConfig", "chatId": id, "config": params["config"] })).await?;
+                }
+            }
+            None => {
+                self.mutate(params.clone()).await?;
+            }
+        }
         // Known to the chat's sender at once (a side chat's first message
         // follows straight away, before the engine's list has it).
         crate::chat::made(&params);
@@ -790,6 +815,23 @@ fn cloud_words(error: &str) -> String {
 /// An id a caller may give a chat: letters, digits and dashes, 8 to 64.
 fn plain_id(id: &str) -> bool {
     (8..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// The engine's rows with the one parent link this app reads: the fork names
+/// a child by how it came to be. (A fork alone stays top-level: `ForkChat`
+/// makes a sibling, and `ForkSideChat` also sets `createdByChatId`.)
+pub(crate) fn with_parents(mut chats: Json) -> Json {
+    for chat in chats.as_array_mut().into_iter().flatten() {
+        let parent = [&chat["delegation"]["delegatedByChatId"], &chat["sidechatSourceChatId"], &chat["createdByChatId"]]
+            .into_iter()
+            .find_map(|link| link.as_str().filter(|id| !id.is_empty()).map(str::to_owned));
+        if let Some(parent) = parent
+            && chat["parentChatId"].is_null()
+        {
+            chat["parentChatId"] = Json::from(parent);
+        }
+    }
+    chats
 }
 
 /// Where a side chat of `parent` is made (the shipping app's
@@ -1331,6 +1373,18 @@ mod tests {
         assert_eq!(id.len(), 36);
         assert_eq!(&id[14..15], "4");
         assert_ne!(id, new_id());
+    }
+
+    #[test]
+    fn a_child_is_linked_however_the_engine_names_it_and_a_fork_is_not() {
+        let rows = super::with_parents(serde_json::json!([
+            { "id": "delegated", "delegation": { "delegatedByChatId": "p" } },
+            { "id": "side", "sidechatSourceChatId": "p" },
+            { "id": "opened", "createdByChatId": "p" },
+            { "id": "fork", "forkedFromChatId": "p" },
+        ]));
+        let parent = |ix: usize| rows[ix]["parentChatId"].as_str();
+        assert_eq!((parent(0), parent(1), parent(2), parent(3)), (Some("p"), Some("p"), Some("p"), None));
     }
 
     /// Chats (a parent, two side chats, one working, one archived) and
