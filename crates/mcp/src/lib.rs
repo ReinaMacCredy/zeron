@@ -764,9 +764,7 @@ impl ThreadTools {
                 tool["name"].as_str().is_none_or(|name| {
                     match zeron_proto::tools::action_labels(name) {
                         Some(labels) => !labels.iter().all(|label| disabled.contains(*label)),
-                        None => {
-                            !disabled.contains(name) && !plugins::switched_off(name, &disabled)
-                        }
+                        None => !disabled.contains(name) && !plugins::switched_off(name, &disabled),
                     }
                 })
             });
@@ -3618,12 +3616,9 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
             }
             let disabled = tools.tool_settings().await;
             let switch = zeron_proto::tools::action_label(name, &args).unwrap_or(name);
-            if disabled
-                .as_ref()
-                .is_some_and(|disabled| {
-                    disabled.contains(switch) || plugins::switched_off(name, disabled)
-                })
-            {
+            if disabled.as_ref().is_some_and(|disabled| {
+                disabled.contains(switch) || plugins::switched_off(name, disabled)
+            }) {
                 return Some(ok(id, turned_off(switch)));
             }
             if name == "device" && args["action"] == "screenshot" {
