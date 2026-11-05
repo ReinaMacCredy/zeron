@@ -4,8 +4,13 @@
 //! - A chat it creates never runs with more access than its own: the new
 //!   chat's sandbox and access mode are capped at the creating chat's,
 //!   silently (Zeron's MCP tool says so in its reply). Cloud children too.
-//! - Of `Mutate`, only what its tools do: create, rename and archive chats.
-//!   Never `setChatConfig` (raising a chat's access) or deleting.
+//! - Of `Mutate`, only what its tools do: create, rename, archive and settle
+//!   chats, its tasks, and its own chat's config, never with more access or
+//!   tools than that chat has. Never deleting a chat.
+//! - Terminals and the computer are for a chat in full access only: reaching
+//!   either would step around the supervision the person chose for the chat.
+//! - A tool switched off in Settings or for the chat is refused here as well
+//!   as hidden from the listing.
 //! - A run it starts in a chat runs as that chat is set (its harness,
 //!   sandbox, access, plan mode and folder), never as the request says.
 //! - Approving a question another chat asks (an approval to run a command,
@@ -15,12 +20,14 @@
 //! - What it writes into a chat carries Zeron's header naming the sending
 //!   chat, built here; a header in the text can't claim another chat.
 //!
-//! The calling chat is the one its MCP server names (`x-zeron-chat`): the
-//! engine sets that server's environment, so a sandboxed agent can't change
-//! it. A server with no chat (one someone configured by hand) is capped by
-//! nothing but still can't forge a header.
+//! The calling chat is the one its connection proved with `BindRun`
+//! (`rpc/caller.rs`), whose secret only that run's MCP server holds. A
+//! connection that proved none gets the least. This bounds the tools, not a
+//! shell: an agent's shell that can read `ipc-token` and dial the port is
+//! already the person.
 
 use serde_json::{Value, json};
+use zeron_proto::tools::{ToolGroup, group_live};
 use zeron_proto::{AccessMode, Chat, SandboxLevel, agent_messages, cap_access};
 use zeron_rpc::{Caller, RpcError, methods};
 
@@ -48,6 +55,58 @@ fn refused(message: impl Into<String>) -> RpcError {
     RpcError::Failed(message.into())
 }
 
+const LEAST: (SandboxLevel, AccessMode) = (SandboxLevel::ReadOnly, AccessMode::Supervised);
+
+/// The tool whose switch governs this call.
+fn tool_switch(method: &str, params: &Value) -> Option<&'static str> {
+    Some(match method {
+        methods::CREATE_THREAD => "create_thread",
+        methods::SEND_THREAD_MESSAGE | methods::QUEUE_MESSAGE => "send_message_to_thread",
+        methods::SET_THREAD_WATCHES => "watch_threads",
+        methods::GET_THREAD_SUMMARY => "read_thread",
+        methods::DELEGATE_TASK => "delegate_task",
+        methods::TASK_STATUS => "task_status",
+        methods::TASK_CANCEL => "task_cancel",
+        methods::START_REVIEW => "review_changes",
+        methods::RESOLVE_REVIEW_FINDINGS => "resolve_findings",
+        methods::LIST_AGENT_PROFILES | methods::UPSERT_AGENT_PROFILE | methods::DELETE_AGENT_PROFILE => "agent_profiles",
+        methods::ASK_USER => "ask_user",
+        methods::REQUEST_SECRET => "request_secret",
+        methods::LIST_TERMINALS | methods::OPEN_TERMINAL | methods::READ_TERMINAL | methods::SEND_TERMINAL_INPUT => "terminal",
+        methods::LIST_PROJECT_ACTIONS | methods::UPSERT_PROJECT_ACTION | methods::DELETE_PROJECT_ACTION => "project_actions",
+        methods::REQUEST_COMPACT => "compact",
+        methods::HTML_PREVIEW => "html_preview",
+        methods::PUBLISH_HTML_RENDER | methods::READ_WORKSPACE_PAGE => "html_render",
+        methods::PUBLISH_VISUAL => "show_visual",
+        methods::PUBLISH_IMAGE => "show_image",
+        methods::DEVICE_TOOL_LIST => "device_list",
+        methods::DEVICE_TOOL_OPEN => "device_open",
+        methods::DEVICE_TOOL_SCREENSHOT => "device_screenshot",
+        methods::DEVICE_TOOL_CLOSE => "device_close",
+        methods::MUTATE => match params["op"].as_str()? {
+            "renameChat" => "set_thread_title",
+            "setChatArchived" => "set_thread_archived",
+            "setChatSettled" => "set_thread_settled",
+            "createTask" | "assignTask" | "deleteTask" | "escalateTask" | "planSteps" | "updateTask" | "updateTaskStep" => "tasks",
+            _ => return None,
+        },
+        methods::QUEUE_COMMAND => match params["command"]["kind"].as_str()? {
+            "interrupt" => "interrupt_thread",
+            "respondInput" => "respond_to_input",
+            _ => "send_message_to_thread",
+        },
+        _ => return None,
+    })
+}
+
+fn is_computer(method: &str) -> bool {
+    matches!(method, methods::COMPUTER_ACTION | methods::CANCEL_COMPUTER_ACTION | methods::GET_COMPUTER_CATALOG)
+}
+
+fn is_terminal(method: &str) -> bool {
+    matches!(method, methods::LIST_TERMINALS | methods::OPEN_TERMINAL | methods::READ_TERMINAL | methods::SEND_TERMINAL_INPUT)
+}
+
 impl EngineRpc {
     fn calling(&self, chat_id: &str, chats: &[Chat]) -> Calling {
         let chat = chats.iter().find(|c| c.id == chat_id);
@@ -58,7 +117,7 @@ impl EngineRpc {
             Some(match chat.and_then(|c| c.config.as_ref()) {
                 Some(config) => (config.sandbox, config.access),
                 None if chat.is_some() => (SandboxLevel::WorkspaceWrite, AccessMode::FullAccess),
-                None => (SandboxLevel::ReadOnly, AccessMode::Supervised),
+                None => LEAST,
             })
         };
         Calling {
@@ -68,17 +127,47 @@ impl EngineRpc {
         }
     }
 
+    /// Whether a chat is in full access: terminals and the computer need it.
+    /// Zeron's voice orchestrator is the person speaking.
+    pub(super) fn chat_in_full_access(&self, chat: Option<&str>) -> bool {
+        let chats = self.workspace.read_chats().unwrap_or_default();
+        chat.is_some_and(|id| self.calling(id, &chats).ceiling.is_none_or(|(_, access)| access == AccessMode::FullAccess))
+    }
+
     /// `params` as an agent may send them for `method`, or why not. Every
     /// other caller's pass untouched.
     pub(super) fn agent_gate(&self, method: &str, mut params: Value) -> Result<Value, RpcError> {
         let Caller::Agent { chat } = zeron_rpc::caller() else {
             return Ok(params);
         };
+        if (is_terminal(method) || is_computer(method)) && !self.chat_in_full_access(chat.as_deref()) {
+            return Err(refused(
+                "This chat isn't in full access, so it can't use the terminal or the computer: tell the person, who can change the chat's access in Zeron",
+            ));
+        }
+        let state = self.tool_settings_state(chat.as_deref());
+        let disabled: std::collections::BTreeSet<&str> = state.disabled.iter().map(String::as_str).collect();
+        let off = match tool_switch(method, &params) {
+            Some(tool) => disabled.contains(tool).then_some(tool),
+            None => (is_computer(method) && !group_live(ToolGroup::Computer, &disabled)).then_some("computer"),
+        };
+        if let Some(tool) = off {
+            return Err(refused(format!("The {tool} tool is switched off for this chat: the person turns it on in Zeron")));
+        }
+        if method == methods::UPSERT_AGENT_PROFILE {
+            params["byAgent"] = json!(true);
+            return Ok(params);
+        }
         if !matches!(method, methods::MUTATE | methods::QUEUE_MESSAGE | methods::QUEUE_COMMAND) {
             return Ok(params);
         }
         let chats = self.workspace.read_chats().unwrap_or_default();
         let calling = chat.as_deref().map(|id| self.calling(id, &chats));
+        // No proven chat: the least, never the most.
+        let ceiling = match &calling {
+            Some(calling) => calling.ceiling,
+            None => Some(LEAST),
+        };
         let attributed = |target: &str, text: &str| {
             agent_messages::attributed(
                 calling.as_ref().map(|c| (c.id.as_str(), c.label.as_str())),
@@ -92,7 +181,7 @@ impl EngineRpc {
                     let Some(config) = params.get_mut("config").filter(|c| c.is_object()) else {
                         return Err(refused("An agent's new chat names its config (harness, sandbox, access)"));
                     };
-                    if let Some((max_sandbox, max_access)) = calling.as_ref().and_then(|c| c.ceiling) {
+                    if let Some((max_sandbox, max_access)) = ceiling {
                         let sandbox = serde_json::from_value(config["sandbox"].clone())
                             .unwrap_or(SandboxLevel::DangerFullAccess);
                         let access = serde_json::from_value(config["access"].clone()).unwrap_or_default();
@@ -106,9 +195,41 @@ impl EngineRpc {
                     }
                     Ok(params)
                 }
-                "renameChat" | "setChatArchived" | "markChatSeen" => Ok(params),
+                "renameChat" | "setChatArchived" | "setChatSettled" | "markChatSeen" | "createTask" | "assignTask"
+                | "deleteTask" | "escalateTask" | "planSteps" | "updateTask" | "updateTaskStep" => Ok(params),
+                "setChatConfig" => {
+                    let Some(calling) = calling.as_ref().filter(|c| Some(c.id.as_str()) == params["chatId"].as_str()) else {
+                        return Err(refused("An agent changes only its own chat's config"));
+                    };
+                    let Some(config) = params.get_mut("config").filter(|c| c.is_object()) else {
+                        return Err(refused("setChatConfig needs a config"));
+                    };
+                    if let Some((max_sandbox, max_access)) = calling.ceiling {
+                        let sandbox = serde_json::from_value(config["sandbox"].clone())
+                            .unwrap_or(SandboxLevel::DangerFullAccess);
+                        let access = serde_json::from_value(config["access"].clone()).unwrap_or_default();
+                        let (sandbox, access, _) = cap_access((sandbox, access), (max_sandbox, max_access));
+                        config["sandbox"] = json!(sandbox);
+                        config["access"] = json!(access);
+                    }
+                    // A tool off for this chat stays off.
+                    let held = chats
+                        .iter()
+                        .find(|c| c.id == calling.id)
+                        .and_then(|c| c.config.as_ref())
+                        .map(|c| c.disabled_tools.clone())
+                        .unwrap_or_default();
+                    let mut tools: Vec<String> = serde_json::from_value(config["disabledTools"].clone()).unwrap_or_default();
+                    for tool in held {
+                        if !tools.contains(&tool) {
+                            tools.push(tool);
+                        }
+                    }
+                    config["disabledTools"] = json!(tools);
+                    Ok(params)
+                }
                 op => Err(refused(format!(
-                    "An agent can't {op}: only create, rename or archive chats (the person changes the rest in Zeron)"
+                    "An agent can't {op}: only chats and tasks its tools handle (the person changes the rest in Zeron)"
                 ))),
             },
             methods::QUEUE_MESSAGE => {
@@ -140,10 +261,7 @@ impl EngineRpc {
                             // A chat set up before configs (or not here yet):
                             // no more than the agent's own.
                             None => {
-                                let ceiling = calling
-                                    .as_ref()
-                                    .and_then(|c| c.ceiling)
-                                    .unwrap_or((SandboxLevel::DangerFullAccess, AccessMode::FullAccess));
+                                let ceiling = ceiling.unwrap_or((SandboxLevel::DangerFullAccess, AccessMode::FullAccess));
                                 let sandbox = serde_json::from_value(request["sandbox"].clone())
                                     .unwrap_or(SandboxLevel::DangerFullAccess);
                                 let access = serde_json::from_value(request["access"].clone()).unwrap_or_default();
@@ -168,9 +286,7 @@ impl EngineRpc {
                                 .flatten()
                                 .any(|l| l.as_str().is_some_and(|l| l.trim().eq_ignore_ascii_case("yes")))
                         });
-                        let full = calling.as_ref().is_none_or(|c| {
-                            c.ceiling.is_none_or(|(_, access)| access == AccessMode::FullAccess)
-                        });
+                        let full = ceiling.is_none_or(|(_, access)| access == AccessMode::FullAccess);
                         if approves && !full {
                             return Err(refused(
                                 "This chat isn't in full access, so it can't approve what another chat asks: tell the person, who answers it in that chat",
@@ -282,21 +398,81 @@ mod tests {
         core.sessions.shutdown().await;
     }
 
-    /// An agent can't raise a chat's access after the fact, nor delete.
+    /// An agent can't raise a chat's access after the fact, turn a tool back
+    /// on, touch another chat's config, nor delete.
     #[tokio::test]
-    async fn an_agent_cannot_change_a_chats_config() {
+    async fn an_agent_cannot_raise_a_chats_config() {
         let (_temp, core) = core().await;
         chat(&core, "careful", "Careful", "read-only", "supervised").await;
+        chat(&core, "other", "Other", "read-only", "supervised").await;
         let rpc = core.rpc_service();
+        rpc.handle(
+            methods::MUTATE,
+            json!({"op":"setChatConfig", "chatId":"careful",
+                "config":{"harness":"codex","sandbox":"read-only","access":"supervised","disabledTools":["mcp__zeron__tasks"]}}),
+        )
+        .await
+        .unwrap();
+        with_caller(
+            agent("careful"),
+            rpc.handle(
+                methods::MUTATE,
+                json!({"op":"setChatConfig", "chatId":"careful",
+                    "config":{"harness":"claude-code","sandbox":"danger-full-access","access":"full-access","disabledTools":[]}}),
+            ),
+        )
+        .await
+        .unwrap();
+        let config = core.workspace.chat("careful").unwrap().unwrap().config.unwrap();
+        assert_eq!(config.sandbox, zeron_proto::SandboxLevel::ReadOnly);
+        assert_eq!(config.access, zeron_proto::AccessMode::Supervised);
+        assert_eq!(config.harness, HarnessId::ClaudeCode);
+        assert_eq!(config.disabled_tools, ["mcp__zeron__tasks"]);
         for op in [
-            json!({"op":"setChatConfig", "chatId":"careful", "config":{"harness":"codex","sandbox":"danger-full-access"}}),
+            json!({"op":"setChatConfig", "chatId":"other", "config":{"harness":"codex"}}),
             json!({"op":"deleteChat", "chatId":"careful"}),
         ] {
             let refused = with_caller(agent("careful"), rpc.handle(methods::MUTATE, op.clone())).await;
             assert!(refused.is_err(), "{op}");
         }
-        let config = core.workspace.chat("careful").unwrap().unwrap().config.unwrap();
-        assert_eq!(config.sandbox, zeron_proto::SandboxLevel::ReadOnly);
+        core.sessions.shutdown().await;
+    }
+
+    /// Terminals and the computer are for a full-access chat, and a tool
+    /// switched off is refused at the engine, not only hidden.
+    #[tokio::test]
+    async fn an_agents_tools_follow_its_access_and_the_switches() {
+        let (_temp, core) = core().await;
+        chat(&core, "careful", "Careful", "workspace-write", "supervised").await;
+        chat(&core, "bold", "Bold", "workspace-write", "full-access").await;
+        let rpc = core.rpc_service();
+        let gate = |who: Caller, method: &'static str, params: Value| {
+            let rpc = rpc.clone();
+            async move { with_caller(who, async move { rpc.agent_gate(method, params) }).await }
+        };
+        for method in [methods::OPEN_TERMINAL, methods::COMPUTER_ACTION] {
+            assert!(gate(agent("careful"), method, json!({})).await.is_err(), "{method}");
+            assert!(gate(Caller::Agent { chat: None }, method, json!({})).await.is_err(), "{method}");
+            assert!(gate(agent("bold"), method, json!({})).await.is_ok(), "{method}");
+        }
+        let task = json!({"op":"createTask", "title":"x"});
+        assert!(gate(agent("careful"), methods::MUTATE, task.clone()).await.is_ok());
+        let mut settings = core.registry.tool_settings();
+        settings.set_tool("tasks", false);
+        core.registry.set_tool_settings(settings);
+        assert!(gate(agent("careful"), methods::MUTATE, task.clone()).await.is_err());
+        assert!(gate(Caller::Local, methods::MUTATE, task).await.is_ok());
+
+        // No proven chat: capped at the least, and it approves nothing.
+        let unbound = || Caller::Agent { chat: None };
+        let made = gate(unbound(), methods::MUTATE,
+            json!({"op":"createChat", "chatId":"x", "config":{"harness":"codex","sandbox":"danger-full-access"}}))
+            .await
+            .unwrap();
+        assert_eq!(made["config"]["sandbox"], "read-only");
+        let yes = json!({"chatId":"child", "command":{"kind":"respondInput", "requestId":"r",
+            "answers":[{"questionId":"q", "labels":["Yes"]}]}});
+        assert!(gate(unbound(), methods::QUEUE_COMMAND, yes).await.is_err());
         core.sessions.shutdown().await;
     }
 

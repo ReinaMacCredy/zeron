@@ -931,10 +931,14 @@ impl Inner {
             ));
         }
         // A path, never the token: some harnesses put this env on a command line.
-        if let Some(path) = lock(&self.ipc_token_file)
-            .as_ref()
-            .and_then(|path| path.to_str())
-        {
+        let token_file = lock(&self.ipc_token_file).clone().map(|path| {
+            if self.registry.tool_settings().agents_use_full_token {
+                path.with_file_name(zeron_rpc::ipc_auth::TOKEN_FILE_NAME)
+            } else {
+                path
+            }
+        });
+        if let Some(path) = token_file.as_deref().and_then(|path| path.to_str()) {
             env.push((zeron_rpc::ipc_auth::TOKEN_FILE_ENV.into(), path.into()));
         }
         Some(zeron_harness::ToolServer {
@@ -1186,7 +1190,7 @@ impl SessionsEngine {
         self.inner.voice.clone()
     }
 
-    /// Record where the served port's bearer lives (`{data_dir}/ipc-token`).
+    /// Record where the agent-scoped bearer lives (`{data_dir}/ipc-token-agent`).
     /// The injected MCP server gets `ZERON_IPC_TOKEN_FILE` and reads the file
     /// at dial time, so it follows token rotation across engine restarts.
     pub fn set_ipc_token_file(&self, path: std::path::PathBuf) {

@@ -267,6 +267,8 @@ pub fn tool_group(group: ToolGroup) -> &'static ToolGroupInfo {
 pub struct ToolSettings {
     pub disabled_tools: Vec<String>,
     pub disabled_groups: Vec<ToolGroup>,
+    /// Lab: runs started after this is on get the full IPC token.
+    pub agents_use_full_token: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -763,7 +765,7 @@ mod tests {
         settings.set_group(ToolGroup::Delegation, false);
         assert_eq!(
             serde_json::to_value(&settings).unwrap(),
-            serde_json::json!({ "disabledTools": ["terminal"], "disabledGroups": ["delegation"] })
+            serde_json::json!({ "disabledTools": ["terminal"], "disabledGroups": ["delegation"], "agentsUseFullToken": false })
         );
         assert_eq!(
             serde_json::from_value::<ToolSettings>(serde_json::json!({})).unwrap(),

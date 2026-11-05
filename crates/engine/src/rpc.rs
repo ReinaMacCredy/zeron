@@ -4645,7 +4645,17 @@ impl RpcService for EngineRpc {
                 } else {
                     parse_params(params)?
                 };
-                RpcReply::value(&self.tool_settings_state(p.chat_id.as_deref()))
+                let mut state = self.tool_settings_state(p.chat_id.as_deref());
+                if let zeron_rpc::Caller::Agent { chat } = zeron_rpc::caller()
+                    && !self.chat_in_full_access(chat.as_deref())
+                {
+                    state.disabled.extend(
+                        std::iter::once("terminal")
+                            .chain(zeron_proto::computer::ZERON_COMPUTER_TOOL_NAMES.iter().copied())
+                            .map(str::to_owned),
+                    );
+                }
+                RpcReply::value(&state)
             }
             methods::SET_TOOL_SETTINGS => {
                 let p: zeron_proto::tools::ToolSettings = parse_params(params)?;

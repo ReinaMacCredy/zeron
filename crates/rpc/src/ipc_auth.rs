@@ -17,8 +17,11 @@
 //! (`ipc-token`) is the app's and the CLI's; the agent-scoped token
 //! (`ipc-token-agent`) is what the engine hands the `zeron mcp` servers it
 //! injects into agents' runs, and the server answers it only the methods
-//! [`crate::agent_allowed`] lists. A client given `$ZERON_IPC_TOKEN_FILE`
-//! uses that file alone: it never falls back to the full token.
+//! [`crate::agent_allowed`] and [`crate::fork_agent_allowed`] list, unless the
+//! person turned on Lab's "Agents use the full token". A client given
+//! `$ZERON_IPC_TOKEN_FILE` uses that file alone: it never falls back to the
+//! full token. Neither file stops a shell that can read them and dial the
+//! port: Codex's sandboxes allow the read, and workspace-write allows the dial.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

@@ -885,6 +885,14 @@ struct HeadlessRpc {
 
 #[async_trait]
 impl RpcService for HeadlessRpc {
+    fn connection(&self) -> Option<Arc<dyn RpcService>> {
+        Some(Arc::new(HeadlessRpc {
+            inner: self.inner.connection().unwrap_or_else(|| self.inner.clone()),
+            doc_host: self.doc_host.clone(),
+            stop_tx: self.stop_tx.clone(),
+        }))
+    }
+
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         if method == methods::QUIESCE_FOR_SLEEP {
             // Local IPC only (never relayed): a Cloud sleep's last check.
@@ -1443,11 +1451,10 @@ impl Engine {
             stop_tx,
         });
         let server = serve_ipc(config.ipc_port, &config.data_dir, service).await?;
-        // Full token: the fork's MCP tools use methods outside `agent_allowed`.
         runtime
             .core()
             .sessions
-            .set_ipc_token_file(zeron_rpc::ipc_auth::token_path(&config.data_dir));
+            .set_ipc_token_file(zeron_rpc::ipc_auth::agent_token_path(&config.data_dir));
 
         tokio::select! {
             result = shutdown_signal() => result?,

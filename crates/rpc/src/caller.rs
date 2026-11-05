@@ -8,7 +8,8 @@
 //! - [`Caller::Agent`]: a `zeron mcp` server the engine injected into an
 //!   agent's run, holding the agent-scoped token
 //!   (`{data_dir}/ipc-token-agent`). It reaches only what the MCP tools need
-//!   ([`crate::agent_allowed`]); nothing that grants power.
+//!   ([`crate::agent_allowed`], [`crate::fork_agent_allowed`]); nothing that
+//!   grants power.
 //! - [`Caller::Peer`]: another device, through the device-room relay
 //!   ([`crate::peer_refused`] keeps decisions and credentials local).
 //!
@@ -24,8 +25,9 @@ use std::future::Future;
 pub enum Caller {
     /// Full-token local IPC (the app, the CLI) or an in-process client.
     Local,
-    /// Local IPC with the agent-scoped token. `chat` is the chat the MCP
-    /// server says it serves (`x-zeron-chat`): claimed, for the record only.
+    /// Local IPC with the agent-scoped token. Reaching the engine's dispatch,
+    /// `chat` is the chat the connection proved with `BindRun`; at the guard
+    /// it's the `x-zeron-chat` claim, for the record only.
     Agent { chat: Option<String> },
     /// Another device through the device-room relay. The relay doesn't say
     /// which device yet, so `device` is `None` until it does.

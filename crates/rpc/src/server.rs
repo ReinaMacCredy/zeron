@@ -185,8 +185,15 @@ pub(crate) struct AgentGuard {
 
 #[async_trait::async_trait]
 impl RpcService for AgentGuard {
+    fn connection(&self) -> Option<Arc<dyn RpcService>> {
+        Some(Arc::new(AgentGuard {
+            inner: self.inner.connection().unwrap_or_else(|| self.inner.clone()),
+            chat: self.chat.clone(),
+        }))
+    }
+
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<crate::RpcReply, RpcError> {
-        if !crate::agent_allowed(method) {
+        if !crate::agent_allowed(method) && !crate::fork_agent_allowed(method) {
             tracing::warn!(method, chat = ?self.chat, "rpc: refused an agent's call outside its scope");
             return Err(RpcError::Failed(format!(
                 "{method} isn't open to agents: only the person can do that, in Zeron"

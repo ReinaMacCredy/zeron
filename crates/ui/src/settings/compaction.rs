@@ -164,6 +164,20 @@ impl CompactionPage {
         );
     }
 
+    fn save_full_token(&mut self, on: bool, cx: &mut Context<Self>) {
+        let Some(mut tools) = self.tools.ready().map(|state| state.settings.clone()) else {
+            return;
+        };
+        tools.agents_use_full_token = on;
+        let params = serde_json::to_value::<ToolSettings>(tools).unwrap_or_default();
+        self.call(
+            methods::SET_TOOL_SETTINGS,
+            params,
+            |card| &mut card.tools,
+            cx,
+        );
+    }
+
     fn call<T: DeserializeOwned + 'static>(
         &mut self,
         method: &'static str,
@@ -554,11 +568,30 @@ impl CompactionPage {
                         widgets::card_row(theme, false).child(widgets::error_strip(theme, error)),
                     )
                 });
+            let full_token = self
+                .tools
+                .ready()
+                .is_some_and(|state| state.settings.agents_use_full_token);
+            let token_card = widgets::section_card(theme).mt_0().child(
+                widgets::card_row(theme, false)
+                    .child(row_text(
+                        theme,
+                        "Agents use the full token",
+                        "New runs reach everything the app can, including allowing plugins and signing in, with no question to you. Only turn this on if a tool you need is refused.",
+                    ))
+                    .child(
+                        switch(theme, full_token, "agents-full-token", "Agents use the full token")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.save_full_token(!full_token, cx)
+                            })),
+                    ),
+            );
             return vec![
                 widgets::section(theme, "Compaction", lab_card)
                     .mt_0()
                     .search_anchor(Target::Page(SettingsSection::Experimental))
                     .into_any_element(),
+                widgets::section(theme, "Agent access", token_card).into_any_element(),
             ];
         }
         vec![

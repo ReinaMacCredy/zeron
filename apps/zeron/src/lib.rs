@@ -96,7 +96,7 @@ async fn mcp_cli(chat: String, ipc_port: u16) -> anyhow::Result<()> {
     // A run the headless engine revives at boot can start before the engine binds its port.
     let mut attempts = 0;
     let client = loop {
-        match zeron_rpc::connect_ipc(ipc_port, Some(&paths::data_dir())).await {
+        match zeron_rpc::connect_ipc_as_agent(ipc_port, Some(&paths::data_dir())).await {
             Ok(client) => break client,
             Err(e) if attempts >= 40 => {
                 anyhow::bail!("no engine listening on 127.0.0.1:{ipc_port} ({e})")
@@ -139,7 +139,7 @@ async fn hook_cli(chat: String, ipc_port: u16) -> anyhow::Result<()> {
     {
         return Ok(());
     }
-    let client = zeron_rpc::connect_ipc(ipc_port, Some(&paths::data_dir()))
+    let client = zeron_rpc::connect_ipc_as_agent(ipc_port, Some(&paths::data_dir()))
         .await
         .map_err(|e| anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e})"))?;
     let reply = client

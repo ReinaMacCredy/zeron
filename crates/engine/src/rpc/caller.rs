@@ -77,6 +77,13 @@ impl RpcService for ConnectionRpc {
             return RpcReply::value(&serde_json::json!({}));
         }
         self.check(&params)?;
+        if matches!(zeron_rpc::caller(), zeron_rpc::Caller::Agent { .. }) {
+            // Only BindRun proves a chat; the handshake's header is a claim anyone holding the token can write.
+            let caller = zeron_rpc::Caller::Agent {
+                chat: self.bound().map(|(chat, _)| chat),
+            };
+            return zeron_rpc::with_caller(caller, self.rpc.handle(method, params)).await;
+        }
         self.rpc.handle(method, params).await
     }
 }

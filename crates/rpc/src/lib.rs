@@ -989,6 +989,60 @@ pub fn agent_allowed(method: &str) -> bool {
     )
 }
 
+/// What the fork's thread tools reach beyond [`agent_allowed`], kept apart so
+/// upstream's list merges clean. The engine's agent gate still decides each
+/// call (`crates/engine/src/rpc/agent_gate.rs`): terminals and the computer
+/// only for a full-access chat, every tool behind its Settings switch.
+pub fn fork_agent_allowed(method: &str) -> bool {
+    matches!(
+        method,
+        methods::ASK_USER
+            | methods::BIND_RUN
+            | methods::CANCEL_COMPUTER_ACTION
+            | methods::COMPUTER_ACTION
+            | methods::CREATE_THREAD
+            | methods::DELEGATE_TASK
+            | methods::DELETE_AGENT_PROFILE
+            | methods::DELETE_PROJECT_ACTION
+            | methods::DEVICE_TOOL_CLOSE
+            | methods::DEVICE_TOOL_LIST
+            | methods::DEVICE_TOOL_OPEN
+            | methods::DEVICE_TOOL_SCREENSHOT
+            | methods::GET_COMPUTER_CATALOG
+            | methods::GET_DELEGATION_SETTINGS
+            | methods::GET_SIDEBAR_SETTINGS
+            | methods::GET_THREAD_SUMMARY
+            | methods::GET_TOOL_SETTINGS
+            | methods::HTML_PREVIEW
+            | methods::LIST_AGENT_PROFILES
+            | methods::LIST_PROJECT_ACTIONS
+            | methods::LIST_TERMINALS
+            | methods::MID_TURN_NUDGE
+            | methods::OPEN_TERMINAL
+            | methods::PREVIEW_ROUTES
+            | methods::PUBLISH_HTML_RENDER
+            | methods::READ_TERMINAL
+            | methods::READ_WORKSPACE_PAGE
+            | methods::REQUEST_COMPACT
+            | methods::REQUEST_SECRET
+            | methods::RESOLVE_REVIEW_FINDINGS
+            | methods::SEND_TERMINAL_INPUT
+            | methods::SEND_THREAD_MESSAGE
+            | methods::SET_THREAD_WATCHES
+            | methods::START_REVIEW
+            | methods::SUPERVISOR_ACT
+            | methods::TAKE_THREAD_MESSAGES
+            | methods::TASK_CANCEL
+            | methods::TASK_STATUS
+            | methods::TASK_WAKE_ALWAYS
+            | methods::UPSERT_AGENT_PROFILE
+            | methods::UPSERT_PROJECT_ACTION
+            | methods::WATCH_QUEUE
+            | methods::WATCH_TASKS
+            | methods::WATCH_TASK_STEPS
+    )
+}
+
 pub use zeron_proto::capability_errors;
 
 #[derive(Debug, thiserror::Error)]
@@ -1566,7 +1620,6 @@ mod tests {
             methods::SET_PLUGIN_OFF,
             methods::REMOVE_PLUGIN,
             methods::SET_BUILTIN_PLUGINS,
-            methods::OPEN_TERMINAL,
             methods::WRITE_TERMINAL,
             methods::WRITE_WORKSPACE_FILE,
             methods::EXPORT_PLUGIN,

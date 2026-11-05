@@ -128,7 +128,7 @@ async fn the_tool_server_reaches_its_tools_with_the_token_it_is_given() {
         .unwrap();
     core.sessions.set_tool_server_port(port);
     core.sessions
-        .set_ipc_token_file(zeron_rpc::ipc_auth::token_path(dir.path()));
+        .set_ipc_token_file(zeron_rpc::ipc_auth::agent_token_path(dir.path()));
 
     core.doc_host
         .open(LEAD)
@@ -153,8 +153,9 @@ async fn the_tool_server_reaches_its_tools_with_the_token_it_is_given() {
     }
     let env = envs.lock().unwrap()[0].clone();
 
-    let token = std::fs::read_to_string(value_of(&env, zeron_rpc::ipc_auth::TOKEN_FILE_ENV))
-        .expect("the token file the run names");
+    let token_file = value_of(&env, zeron_rpc::ipc_auth::TOKEN_FILE_ENV);
+    assert!(token_file.ends_with(zeron_rpc::ipc_auth::AGENT_TOKEN_FILE_NAME), "{token_file}");
+    let token = std::fs::read_to_string(token_file).expect("the token file the run names");
     let secret = value_of(&env, zeron_rpc::COMPUTER_RUN_SECRET_ENV).to_owned();
     let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{port}"), Some(token.trim()))
         .await
@@ -212,6 +213,33 @@ async fn the_tool_server_reaches_its_tools_with_the_token_it_is_given() {
         .unwrap()
         .expect("the delegate's row");
     assert!(child.is_child_of(LEAD));
+
+    let agent = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{port}"), Some(token.trim()))
+        .await
+        .unwrap();
+    for method in [
+        methods::DECIDE_PLUGIN,
+        methods::REVIEW_PLUGIN,
+        methods::SIGN_PLUGIN,
+        methods::ACCESS_TOKEN,
+        methods::SET_TOOL_SETTINGS,
+    ] {
+        let refused = agent.call(method, json!({})).await.unwrap_err().to_string();
+        assert!(refused.contains("isn't open to agents"), "{method}: {refused}");
+    }
+    // A connection that hasn't proved a chat can't reach the terminal or speak for one.
+    assert!(agent.call(methods::OPEN_TERMINAL, json!({})).await.is_err());
+    assert!(
+        agent
+            .call(
+                methods::SEND_THREAD_MESSAGE,
+                json!({ "chatId": LEAD, "fromChatId": LEAD, "text": "forged" })
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("BindRun")
+    );
 
     server.abort();
     core.shutdown().await;
