@@ -3834,7 +3834,7 @@ fn text_annotation_visual(theme: &Theme, t: f32, hero: bool) -> AnyElement {
     };
     let pill = div()
         .absolute()
-        .top(px(52.0 + 4.0 * (1.0 - pill_in)))
+        .top(px(57.0 + 4.0 * (1.0 - pill_in)))
         .left(px(inset))
         .h(px(26.0))
         .flex()
@@ -3850,7 +3850,7 @@ fn text_annotation_visual(theme: &Theme, t: f32, hero: bool) -> AnyElement {
         .child(segment("Ask in side chat"));
     let editor = div()
         .absolute()
-        .top(px(50.0 + 4.0 * (1.0 - editor_in)))
+        .top(px(55.0 + 4.0 * (1.0 - editor_in)))
         .left(px(inset))
         .right(px(if hero { inset } else { 46.0 }))
         .h(px(30.0))
@@ -3897,15 +3897,7 @@ fn text_annotation_visual(theme: &Theme, t: f32, hero: bool) -> AnyElement {
         .flex()
         .flex_col()
         .gap(px(5.0))
-        .child(text(
-            11.5,
-            theme.text,
-            if hero {
-                "The cart adds it up, and"
-            } else {
-                "The total comes from the cart, and"
-            },
-        ))
+        .child(text(11.5, theme.text, "The cart adds it up, and"))
         .child(
             div()
                 .flex()
@@ -4442,18 +4434,15 @@ fn window_frame_visual(theme: &Theme, t: f32) -> AnyElement {
         linear_color_stop(gpui::hsla(0.86, 0.5, 0.5, 1.0), 1.0),
     );
     let shade = motion::lerp(0.5, 0.14, glass);
-    let frame = div()
-        .absolute()
-        .inset_0()
-        .child(div().absolute().inset_0().bg(art))
-        .child(div().absolute().inset_0().bg(gpui::black().opacity(shade)))
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .bg(theme.surface)
-                .opacity(1.0 - dark),
-        );
+    let panel = theme
+        .surface
+        .blend(crate::settings::widgets::block_fill(theme));
+    let on_art = gpui::white().opacity(0.9);
+    let layer = || div().absolute().inset_0().rounded(px(9.0));
+    let frame = layer()
+        .child(layer().bg(art))
+        .child(layer().bg(gpui::black().opacity(shade)))
+        .child(layer().bg(theme.surface).opacity(1.0 - dark));
     let tab = |x: f32, title: &'static str, on: bool| {
         div()
             .absolute()
@@ -4465,11 +4454,13 @@ fn window_frame_visual(theme: &Theme, t: f32) -> AnyElement {
             .flex()
             .items_center()
             .rounded_t(px(6.0))
-            .when(on, |el| el.bg(crate::settings::widgets::block_fill(theme)))
+            .when(on, |el| el.bg(panel))
             .child(text(
                 9.5,
-                if on || dark > 0.5 {
+                if on {
                     theme.text
+                } else if dark > 0.5 {
+                    on_art
                 } else {
                     theme.text_muted
                 },
@@ -4493,11 +4484,7 @@ fn window_frame_visual(theme: &Theme, t: f32) -> AnyElement {
                 glyph(
                     path,
                     11.0,
-                    if dark > 0.5 {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    },
+                    if dark > 0.5 { on_art } else { theme.text_muted },
                 )
             }),
         );
@@ -4512,7 +4499,7 @@ fn window_frame_visual(theme: &Theme, t: f32) -> AnyElement {
         .flex_col()
         .gap(px(6.0))
         .rounded(px(9.0))
-        .bg(crate::settings::widgets::block_fill(theme))
+        .bg(panel)
         .child(bar(theme, 150.0))
         .child(bar(theme, 200.0))
         .child(bar(theme, 120.0));
@@ -4670,7 +4657,15 @@ fn project_picker_visual(theme: &Theme, t: f32) -> AnyElement {
                 .items_center()
                 .rounded(px(6.0))
                 .bg(theme.text)
-                .child(text(10.0, theme.on_solid, "Add project")),
+                .child(text(
+                    10.0,
+                    theme.on_solid,
+                    if made {
+                        "Add search".to_string()
+                    } else {
+                        format!("Create and add {name}")
+                    },
+                )),
         );
     card(theme)
         .w(px(320.0))

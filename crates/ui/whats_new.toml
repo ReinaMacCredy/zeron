@@ -50,7 +50,7 @@ visual = "window-frame"
 [[entry.features]]
 id = "project-picker"
 title = "A New project picker with pins and New folder"
-description = "The picker keeps your pinned and recent folders in a rail beside the browser. Create a folder in place, with git init if you want it, show hidden folders, or drop a folder from Finder. After Add project you are back in the composer."
+description = "The picker keeps your pinned and recent folders in a rail beside the browser. Create a folder in place, with git init if you want it, show hidden folders, or drop a folder from Finder. After you add it you are back in the composer."
 details = "The picker and Cmd+K now fade and rise in, and fade and sink out."
 visual = "project-picker"
 

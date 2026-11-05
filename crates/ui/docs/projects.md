@@ -6,7 +6,7 @@ Click the folder button at the top of the sidebar (tooltip **New project**), pre
 
 ![A device's locations in the New project picker](projects-add.jpg)
 
-Pick a device, a location (**Home** or a drive), then folders. With only one device (and no Zeron Cloud device), the picker opens straight on that device's **Home** folders; go back to reach its other locations. Type to filter, press Enter to open a folder, and Left to go back up. With the folder you want open, click **Add project** or press Cmd+Enter; **Cancel** closes the picker, and adding a project returns you to the composer.
+Pick a device, a location (**Home** or a drive), then folders. With only one device (and no Zeron Cloud device), the picker opens straight on that device's **Home** folders; go back to reach its other locations. Type to filter, press Enter to open a folder, and Left to go back up. With the folder you want open, click the button that names it, such as **Add shop**, or press Cmd+Enter; **Cancel** closes the picker, and adding a project returns you to the composer.
 
 A rail beside the folders lists **Pinned** and **Recent** folders; click one to go there. **New folder** creates a folder where you are; turn on **git init** beside its name to start it as a repository. **Show hidden folders** lists dot folders too. You can also drop a folder from Finder onto the picker.
 
