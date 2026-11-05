@@ -127,7 +127,23 @@ enum Screen {
     Fixture(String),
 }
 
+/// A launch from Finder gets launchd's 256 open files, and the scripts' watcher
+/// holds one for each script the window loads: past it, the window can't load.
+#[cfg(unix)]
+fn raise_open_files() {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: both calls only read or write `limit`.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < 10240 {
+            limit.rlim_cur = limit.rlim_max.min(10240);
+            libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    raise_open_files();
     // A terminal tab's bridge (src/terminal.rs): this binary, run by zgx's
     // terminal, passing a shell's bytes to and from the engine.
     let argv: Vec<String> = std::env::args().collect();
@@ -236,7 +252,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // Signed in on an earlier run: no intro, setup at once, where sign-in
     // leads (src/auth.rs). Asking for `intro` still plays it.
-    if matches!(screen, Screen::Intro) && !asked_for_intro && auth::session_exists() {
+    if matches!(screen, Screen::Intro) && !asked_for_intro && (auth::session_exists() || (cfg!(feature = "beta") && finished_in_zeron_app())) {
         screen = Screen::Onboarding;
         // Setup finished on this Mac before: the main window.
         if onboarded() {
