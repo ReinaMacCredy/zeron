@@ -17,8 +17,7 @@ const CARD_LINE_HEIGHT: f32 = 18.5;
 const NUMBER_WIDTH: f32 = 17.5;
 const ROW_ICON: f32 = 16.0;
 
-/// The pointer is on the chip or on its card; moving between the two keeps the
-/// card up, since both report in one dispatch before the next render.
+/// Both report in one dispatch before the next render, so crossing between them keeps the card up.
 #[derive(Default)]
 pub(crate) struct AnnotationHover {
     chip: bool,
@@ -141,12 +140,7 @@ impl Composer {
         popup: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let label = |text: String| {
-            div()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(popup.text_muted)
-                .child(text)
-        };
+        let label = |text: String| div().text_color(popup.text_muted).child(text);
         let comment = quote.comment.clone().unwrap_or_default();
         let selected = match &quote.source {
             Some(path) => format!("Selected text from {path}:"),

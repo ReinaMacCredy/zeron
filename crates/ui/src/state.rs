@@ -929,13 +929,9 @@ const CLOUD_WAKE_GRACE: std::time::Duration = std::time::Duration::from_secs(180
 /// couldn't reach its Cloud machine (it retries every couple of seconds).
 const CLOUD_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(8);
 
-/// One-shot asks from an annotation surface or the composer's card, taken by
-/// whichever view can act on them.
 #[derive(Default)]
 pub(crate) struct AnnotationRequests {
-    /// `(chat, quote id)`: reopen this annotation's input at its text.
     pub edit: Option<(String, String)>,
-    /// A file annotation is being edited: its file view must be up.
     pub open_file: Option<String>,
     pub focus_composer: Option<String>,
     pub side_chat: Option<(String, Quote)>,
@@ -1081,8 +1077,7 @@ pub struct AppState {
     pub reviews: HashMap<String, crate::review::ChatReview>,
     /// Written by the transcript's "Add to chat", read by the composer.
     quotes: HashMap<String, Vec<Quote>>,
-    /// Where each annotation's text lies on screen, by quote id. A send takes
-    /// the quote but leaves this, so a failed send restores it whole.
+    /// A send takes the quote but leaves this, so a failed send restores it whole.
     annotation_anchors: HashMap<String, Vec<crate::annotations::AnchorSpan>>,
     pub(crate) annotation_requests: AnnotationRequests,
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until

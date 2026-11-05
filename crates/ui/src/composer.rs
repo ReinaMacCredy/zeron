@@ -365,7 +365,6 @@ fn input_drag_scroll_delta(
 /// Staged-attachment strip metrics (zeron attachment-ui.tsx AttachmentStrip:
 /// `flex flex-wrap gap-2 px-4 pt-3`, `size-14` thumbs for files).
 pub const STRIP_THUMB: f32 = 56.0;
-/// An image's live preview tile.
 pub const STRIP_IMAGE_TILE: f32 = 120.0;
 pub const STRIP_GAP: f32 = 8.0;
 pub const STRIP_PAD_TOP: f32 = 12.0;
@@ -373,13 +372,8 @@ pub const STRIP_PAD_X: f32 = 16.0;
 
 const STAGED_BADGE_WIDTH: f32 = 100.0;
 
-/// One tile or chip block in the strip, `(width, height)`.
 pub type StripItem = (f32, f32);
 
-/// The strip's rows at an `inner_width` pill content width, as index ranges
-/// into `items`: as many as fit with 8px gaps inside the 16px side insets, as
-/// flex-wrap would. The strip lays itself out from this, so what it draws and
-/// the height [`attachment_strip_height`] reserves cannot disagree.
 pub fn strip_rows(items: &[StripItem], inner_width: f32) -> Vec<Range<usize>> {
     let usable = inner_width - 2.0 * STRIP_PAD_X;
     let mut rows = Vec::new();
@@ -3565,7 +3559,6 @@ impl ComposerInput {
         self.dictation.phase.active()
     }
 
-    /// Press starts, press finishes; what a microphone button does.
     pub(crate) fn toggle_dictation(&mut self, cx: &mut Context<Self>) {
         use crate::dictation::Phase;
         match self.dictation.phase {
@@ -8921,8 +8914,6 @@ impl Composer {
         )
     }
 
-    /// The chips' block as one strip item; widths are the labels' usual ones,
-    /// only there to decide whether the block still fits beside the tiles.
     fn staged_chips_item(&self, cx: &App) -> Option<StripItem> {
         let quotes = self.staged_quotes(cx);
         let annotated = quotes.iter().any(|quote| quote.is_annotation());
@@ -9046,7 +9037,6 @@ impl Composer {
         Some(row)
     }
 
-    /// The chips on their own strip, when no tiles carry them.
     fn render_staged_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
         if !self.tiled_attachments(cx).is_empty() {
             return None;

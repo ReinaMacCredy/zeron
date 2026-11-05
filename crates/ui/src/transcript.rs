@@ -6398,8 +6398,7 @@ impl Transcript {
             cx.write_to_primary(ClipboardItem::new_string(_text));
         }
         if was_selecting {
-            // The anchor element's own mouse-up usually ends the drag before
-            // this bubbles here, so the layer reads the settled selection.
+            // The anchor's own mouse-up usually ended the drag before this bubbles here.
             self.annotations
                 .update(cx, |layer, cx| layer.settle_selection(cx));
             self.last_scroll_distance = self.distance_from_bottom();

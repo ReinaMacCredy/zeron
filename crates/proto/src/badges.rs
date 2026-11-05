@@ -195,7 +195,6 @@ fn unquote(line: &str) -> Option<&str> {
     line.strip_prefix("> ").or_else(|| line.strip_prefix('>'))
 }
 
-/// One `N. Selected text[ from <file>]:` entry of [`ANNOTATION_BLOCK_HEADER`].
 fn parse_annotation(number: usize, entry: &str) -> Option<BadgeDetail> {
     let mut lines = entry.lines().peekable();
     let head = lines
@@ -238,8 +237,7 @@ fn parse_annotation(number: usize, entry: &str) -> Option<BadgeDetail> {
     })
 }
 
-/// Matched only as a whole trailing block whose every entry parses, so a
-/// prompt quoting the header in its body is left alone.
+/// Only a whole trailing block counts, so a prompt quoting the header in its body stays text.
 pub fn extract_annotation_badge(text: &str) -> Option<(String, MessageBadge)> {
     let marker = format!("\n\n{ANNOTATION_BLOCK_HEADER}\n");
     let at = text.rfind(&marker)?;

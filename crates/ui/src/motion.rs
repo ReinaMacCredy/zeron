@@ -572,7 +572,7 @@ pub const WALLPAPER_CROSSFADE: MotionSpec =
 pub const MENU_IN: MotionSpec = MotionSpec::new(140, EASE);
 /// Popover-out: 0.1s — quicker than the entrance (exits should get out of the
 /// way; matches the Radix convention of a shorter close than open).
-/// The annotation input: 125 ms in the Codex recording, from the card's first frame to settled.
+/// 125 ms in the recording, from the card's first frame to settled.
 pub const ANNOTATION_EDITOR_IN: MotionSpec = MotionSpec::new(125, EASE_OUT);
 pub const MENU_OUT: MotionSpec = MotionSpec::new(100, EASE);
 /// Dialog-in: 0.18s (scale 0.96→1 approximated).

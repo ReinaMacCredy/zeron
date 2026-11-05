@@ -7153,7 +7153,6 @@ impl Shell {
         }
     }
 
-    /// "Ask in side chat" and a file annotation's pencil need the shell.
     fn take_annotation_requests(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         let requests = &state.read(cx).annotation_requests;
         if requests.side_chat.is_none() && requests.open_file.is_none() {

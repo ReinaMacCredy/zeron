@@ -14,9 +14,7 @@ pub struct Quote {
     pub id: String,
     pub text: String,
     pub terminal: bool,
-    /// `Some` makes this an annotation: numbered, with a comment that may be empty.
     pub comment: Option<String>,
-    /// The file an annotation's text was selected in.
     pub source: Option<String>,
 }
 

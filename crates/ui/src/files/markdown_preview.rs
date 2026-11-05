@@ -297,7 +297,6 @@ impl MarkdownPreview {
             self.zoom_render = Some(next);
         }
     }
-    /// Text selected here goes to `chat` as annotations naming this file.
     pub(super) fn set_annotation_target(
         &mut self,
         state: gpui::Entity<crate::state::AppState>,

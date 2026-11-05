@@ -1665,8 +1665,7 @@ fn link_text_element(
     .into_any_element()
 }
 
-/// 17 of a 23 px line in the recording: the annotation wash stops short of the
-/// line's edges, where the selection wash tiles.
+/// 17 of a 23 px line in the recording.
 const ANNOTATION_WASH_INSET: f32 = 3.0 / 23.0;
 
 /// Selection tint shared with native inputs and the composer.
@@ -1780,17 +1779,14 @@ struct RegEntry {
     offsets: Option<super::link_presentation::OffsetMap>,
 }
 
-/// A span of text a surface wants marked or tracked for an annotation.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AnnotationMark {
     pub key: std::sync::Arc<str>,
     pub range: Range<usize>,
-    /// The wash while the annotation's input is open.
     pub lit: Option<Hsla>,
 }
 
-/// Text a mark's span lies in, noted while the frame prepaints so an overlay
-/// painted after the list reads this frame's geometry, not the last one's.
+/// Noted during prepaint so an overlay after the list reads this frame's geometry, not the last one's.
 struct AnchorText {
     layout: gpui::TextLayout,
     offsets: Option<super::link_presentation::OffsetMap>,
@@ -1801,7 +1797,6 @@ thread_local! {
         RefCell::new(HashMap::new());
     static ANNOTATION_ANCHORS: RefCell<HashMap<(u64, std::sync::Arc<str>), AnchorText>> =
         RefCell::new(HashMap::new());
-    /// The surface currently prepainting; [`PAINTING_SURFACE`]'s prepaint twin.
     static PREPAINTING_SURFACE: Cell<u64> = const { Cell::new(0) };
     static REGISTRY: RefCell<Vec<RegEntry>> = const { RefCell::new(Vec::new()) };
     /// The surface currently painting: set by its reset canvas, which paints
@@ -1811,8 +1806,7 @@ thread_local! {
     static PAINTED_SURFACES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Scoped keys are unique across surfaces, and the surface stamp under them is
-/// whatever painted last, so they match on the key alone.
+/// The surface stamp under scoped keys is whatever painted last, so they match on the key alone.
 fn anchor_surface_for(surface: u64, key: &str) -> u64 {
     if selection_scope(key).is_empty() {
         surface
@@ -1860,8 +1854,6 @@ pub(crate) fn note_annotation_anchor(
     }
 }
 
-/// The first visual line of `range` in `key`'s text this frame; `None` when
-/// that text is not on screen. Reads no list state.
 pub(crate) fn annotation_anchor_line(
     surface: u64,
     key: &std::sync::Arc<str>,

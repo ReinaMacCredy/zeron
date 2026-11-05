@@ -1,12 +1,3 @@
-//! Text annotations over a rendered text surface (a transcript or a Markdown
-//! file view): the selection pill, the comment input, the blue highlight, and
-//! the numbered margin badges.
-//!
-//! An annotation IS a staged [`Quote`] in `AppState`; this layer only draws it.
-//! The layer sits after the surface's list in the tree, so it reads the text's
-//! geometry during its own prepaint, after the list's: everything stays glued
-//! to the text while scrolling and never reads list state from a row.
-
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
@@ -49,8 +40,6 @@ const COMMENT_LINE_HEIGHT: f32 = 20.0;
 
 pub(crate) const COMMENT_PLACEHOLDER: &str = "Add an optional comment...";
 
-/// One selected span, with the surface's own key prefix stripped so a reopened
-/// file view finds its annotations again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AnchorSpan {
     pub key: String,
@@ -65,7 +54,6 @@ pub(crate) struct Column {
 }
 
 impl Column {
-    /// The right edge of the centered text column inside `bounds`.
     fn right(&self, bounds: Bounds<Pixels>) -> f32 {
         let left = f32::from(bounds.left()) + self.pad_left;
         let right = f32::from(bounds.right()) - self.pad_right;
@@ -74,7 +62,6 @@ impl Column {
     }
 }
 
-/// Where the host's text may be seen, in the layer's own bounds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Host {
     pub column: Column,
@@ -84,9 +71,7 @@ pub(crate) struct Host {
 
 #[derive(Clone, Debug)]
 pub(crate) enum AnnotationEvent {
-    /// The anchor's row is not rendered: bring it into view.
     RevealRow(Arc<str>),
-    /// Move the viewport by this much so the anchor and its input both show.
     ScrollBy(f32),
 }
 
@@ -130,8 +115,7 @@ pub(crate) struct AnnotationLayer {
 
 impl EventEmitter<AnnotationEvent> for AnnotationLayer {}
 
-/// The accent, deep enough to carry white as the recording's badge does; a
-/// preset's `accent_strong` can be light enough that it wants dark text.
+/// A preset's `accent_strong` can be light enough that it wants dark text; the badge carries white.
 fn deep_accent(theme: &Theme) -> gpui::Hsla {
     let mut color = theme.accent_strong;
     color.l = color.l.min(0.56);
@@ -139,7 +123,6 @@ fn deep_accent(theme: &Theme) -> gpui::Hsla {
     color
 }
 
-/// One step off the page and opaque, as the recording's floating surfaces are.
 /// Frost's translucent popover tint lands almost on the page color here.
 pub(crate) fn surface_fill(theme: &Theme) -> gpui::Hsla {
     crate::theme::flatten(theme.ink(0.08), theme.bg)
@@ -208,7 +191,6 @@ impl AnnotationLayer {
         }
     }
 
-    /// A selection just settled on this surface: offer the pill.
     pub(crate) fn settle_selection(&mut self, cx: &mut Context<Self>) {
         self.pending = None;
         self.pinned_tip = None;
@@ -310,7 +292,6 @@ impl AnnotationLayer {
         cx.notify();
     }
 
-    /// Keep what was typed: the check, Save, Enter, or a press elsewhere.
     fn commit_editor(&mut self, focus_composer: bool, cx: &mut Context<Self>) {
         let (Some(editor), Some(chat)) = (self.editor.take(), self.chat.clone()) else {
             return;
@@ -326,8 +307,6 @@ impl AnnotationLayer {
         cx.notify();
     }
 
-    /// Cancel leaves an edit's comment as it was, its tooltip up as in the
-    /// recording. Escape on a new annotation drops it: nothing was saved yet.
     fn cancel_editor(&mut self, cx: &mut Context<Self>) {
         let (Some(editor), Some(chat)) = (self.editor.take(), self.chat.clone()) else {
             return;
@@ -354,8 +333,6 @@ impl AnnotationLayer {
         cx.notify();
     }
 
-    /// The card's pencil asks through `AppState`: the composer does not know
-    /// which surface drew its annotation.
     fn take_edit_request(&mut self, cx: &mut Context<Self>) {
         let Some(chat) = self.chat.clone() else {
             return;
@@ -884,11 +861,8 @@ impl Render for AnnotationLayer {
 }
 
 enum Place {
-    /// Centered on the anchor's first line, this far above it.
     OverLine(f32),
-    /// At the column's right edge, just over the anchor's first line.
     Badge,
-    /// Centered above where the badge sits.
     OverBadge,
 }
 
@@ -900,6 +874,7 @@ struct Item {
     element: AnyElement,
 }
 
+// Follows the list in the tree, so prepaint reads this frame's text geometry without touching list state.
 struct Overlay {
     surface: u64,
     host: Host,
@@ -943,7 +918,6 @@ impl Overlay {
         }
     }
 
-    /// How far to scroll so the line and what floats over it both show.
     fn reveal_delta(&self, line: Bounds<Pixels>, over: f32, bounds: Bounds<Pixels>) -> f32 {
         let top_limit = f32::from(bounds.top()) + self.host.top_inset + EDGE_MARGIN;
         let bottom_limit = f32::from(bounds.bottom()) - self.host.bottom_inset - EDGE_MARGIN;
