@@ -381,8 +381,8 @@ fn staged_names(composer: &Entity<Composer>, cx: &App) -> Vec<String> {
 }
 
 /// A mixed drop from outside the app lands in the conversation it is released
-/// over, main or side chat: the archive and the image are staged with chips in
-/// that draft, the oversize file is linked by its path with a chip of its own,
+/// over, main or side chat: the archive is staged with a chip in that draft and
+/// the image as its tile, the oversize file is linked by its path with a chip of its own,
 /// and the folder is named in that composer's error notice. Composers not yet
 /// dropped on stay untouched.
 #[gpui::test]
@@ -429,9 +429,8 @@ fn external_file_drops_stage_files_link_oversize_files_and_refuse_folders(cx: &m
             assert_eq!(
                 text(&dropped, cx),
                 format!(
-                    "{} {} {} ",
+                    "{} {} ",
                     attachment_mention_link(1, Some("notes.zip")),
-                    attachment_mention_link(2, None),
                     attachment_mention_link(3, Some("huge.bin"))
                 ),
                 "target={target:?}"

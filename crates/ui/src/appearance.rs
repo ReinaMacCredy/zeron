@@ -259,7 +259,9 @@ pub fn apply(cx: &mut App) {
     let Some(state) = cx.try_global::<AppearanceState>() else {
         return;
     };
-    sync_ns_appearance(state.mode);
+    // AppKit notifies the window synchronously, and its callback can't take App while it's held.
+    let mode = state.mode;
+    cx.spawn(async move |_| sync_ns_appearance(mode)).detach();
     let wanted = resolve(state.mode, state.system);
     let accent = state.accent;
     let surface = state.surface;

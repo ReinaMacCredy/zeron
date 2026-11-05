@@ -17,6 +17,7 @@ pub mod agent_profiles;
 pub mod app_menus;
 mod app_rail;
 pub mod app_update;
+pub(crate) mod annotations;
 pub mod appearance;
 pub mod appshots;
 mod asset_http;
