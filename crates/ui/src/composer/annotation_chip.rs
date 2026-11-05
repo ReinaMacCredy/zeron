@@ -16,6 +16,7 @@ const CARD_TEXT_SIZE: f32 = 13.0;
 const CARD_LINE_HEIGHT: f32 = 18.5;
 const NUMBER_WIDTH: f32 = 17.5;
 const ROW_ICON: f32 = 16.0;
+const BODY_RIGHT_INSET: f32 = 59.5;
 
 /// Both report in one dispatch before the next render, so crossing between them keeps the card up.
 #[derive(Default)]
@@ -129,7 +130,7 @@ impl Composer {
             .child(
                 crate::icons::icon(icon)
                     .size(px(ROW_ICON))
-                    .text_color(popup.text_muted),
+                    .text_color(popup.text_faint),
             )
     }
 
@@ -140,7 +141,7 @@ impl Composer {
         popup: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let label = |text: String| div().text_color(popup.text_muted).child(text);
+        let label = |text: String| div().text_color(popup.text_faint).child(text);
         let comment = quote.comment.clone().unwrap_or_default();
         let selected = match &quote.source {
             Some(path) => format!("Selected text from {path}:"),
@@ -188,7 +189,7 @@ impl Composer {
                 div()
                     .flex_none()
                     .w(px(NUMBER_WIDTH))
-                    .text_color(popup.text_muted)
+                    .text_color(popup.text_faint)
                     .child(format!("{number}.")),
             )
             .child(
@@ -217,14 +218,14 @@ impl Composer {
                     )
                     .child(
                         div()
-                            .pr(px(20.0))
+                            .pr(px(BODY_RIGHT_INSET))
                             .child(SharedString::from(quote.text.clone())),
                     )
                     .when(!comment.is_empty(), |el| {
                         el.child(div().mt(px(5.0)).child(label("User comment:".to_string())))
                             .child(
                                 div()
-                                    .pr(px(20.0))
+                                    .pr(px(BODY_RIGHT_INSET))
                                     .child(SharedString::from(comment.clone())),
                             )
                     }),
