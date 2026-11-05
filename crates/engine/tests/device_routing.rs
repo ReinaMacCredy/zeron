@@ -1772,7 +1772,7 @@ async fn workspace_file_surface_proxies_over_the_relay() {
         )
         .await
         .expect("remote watch");
-    let baseline = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+    let baseline = tokio::time::timeout(Duration::from_secs(30), stream.recv())
         .await
         .expect("baseline timeout")
         .expect("watch alive");

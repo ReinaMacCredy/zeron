@@ -39,6 +39,9 @@ async fn init_repo(path: &Path) {
     git(path, &["commit", "-m", "initial"]).await;
 }
 
+/// The baseline waits on the watcher's start: an FSEvents stream took up to 4.6 s on a busy Mac.
+const WATCH_BASELINE: Duration = Duration::from_secs(30);
+
 fn assemble(data_dir: &Path, device_id: &str) -> EngineCore {
     std::fs::create_dir_all(data_dir).expect("data dir");
     std::fs::write(data_dir.join("device-id"), device_id).expect("device id");
@@ -138,7 +141,7 @@ async fn workspace_file_rpcs_list_search_read_write_and_watch() {
         )
         .await
         .expect("watch subscribe");
-    let baseline = tokio::time::timeout(Duration::from_secs(3), watch.recv())
+    let baseline = tokio::time::timeout(WATCH_BASELINE, watch.recv())
         .await
         .expect("baseline timeout")
         .expect("watch alive");
@@ -413,7 +416,7 @@ async fn projectless_files_use_the_chat_directory_without_a_space() {
         )
         .await
         .expect("projectless watch");
-    let baseline = tokio::time::timeout(Duration::from_secs(3), watch.recv())
+    let baseline = tokio::time::timeout(WATCH_BASELINE, watch.recv())
         .await
         .expect("baseline timeout")
         .expect("watch alive");
