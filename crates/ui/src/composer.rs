@@ -8640,10 +8640,11 @@ impl Composer {
         draft.next
     }
 
-    /// Add newly staged files to a draft. Each is numbered and mentioned at the
-    /// caret as one edit: images read "Image 1", "Image 2", ...; other files
-    /// keep their name. A file the editor cannot take a chip for, or that was
-    /// staged for a draft the user has since left, stays a plain attachment.
+    /// Add newly staged files to a draft. Each is numbered. An image shows as
+    /// its tile, named "Image 1", "Image 2", ..., and `@` can mention it. Other
+    /// files keep their name and are mentioned at the caret as one edit. A file
+    /// the editor cannot take a chip for, or that was staged for a draft the
+    /// user has since left, stays a plain attachment.
     fn adopt_staged_attachments(
         &mut self,
         key: String,
@@ -8659,35 +8660,35 @@ impl Composer {
         let mut indices = Vec::with_capacity(staged.len());
         for att in &mut staged {
             let index = self.next_attachment_index(&key, &text);
-            let file_name = match att.image() {
-                Some(image) => {
-                    att.name = attachments::ensure_extension(
-                        &zeron_proto::attachment_mentions::image_label(index),
-                        image.format,
-                    );
-                    None
-                }
-                None => {
-                    if att.is_pasted_text() {
-                        att.name = zeron_proto::attachment_mentions::pasted_text_label(index);
-                    }
-                    Some(att.name.as_str())
-                }
-            };
+            if let Some(image) = att.image() {
+                att.name = attachments::ensure_extension(
+                    &zeron_proto::attachment_mentions::image_label(index),
+                    image.format,
+                );
+                att.mention = Some(index);
+                continue;
+            }
+            if att.is_pasted_text() {
+                att.name = zeron_proto::attachment_mentions::pasted_text_label(index);
+            }
             links.push(zeron_proto::attachment_mentions::attachment_mention_link(
-                index, file_name,
+                index,
+                Some(att.name.as_str()),
             ));
-            indices.push(index);
+            indices.push((att.id.clone(), index));
         }
         // Chips are inserted before the attachments join the draft, so a
         // draft that cannot take them (read-only, composing) keeps the files
         // and their original names.
-        let mentioned = self
-            .input
-            .update(cx, |input, cx| input.insert_reference(&links.join(" "), cx));
+        let mentioned = !links.is_empty()
+            && self
+                .input
+                .update(cx, |input, cx| input.insert_reference(&links.join(" "), cx));
         if mentioned {
-            for (att, index) in staged.iter_mut().zip(indices) {
-                att.mention = Some(index);
+            for (id, index) in indices {
+                if let Some(att) = staged.iter_mut().find(|att| att.id == id) {
+                    att.mention = Some(index);
+                }
             }
         }
         self.attachments.entry(key).or_default().extend(staged);
@@ -8723,12 +8724,13 @@ impl Composer {
             let (restored, mut stash): (Vec<_>, Vec<_>) = std::mem::take(&mut draft.unstaged)
                 .into_iter()
                 .partition(is_mentioned);
+            // An image's tile is its handle, so losing a chip leaves it staged.
             let (mut kept, dropped): (Vec<_>, Vec<_>) = self
                 .attachments
                 .remove(&key)
                 .unwrap_or_default()
                 .into_iter()
-                .partition(is_mentioned);
+                .partition(|att| att.image().is_some() || is_mentioned(att));
             let changed = !restored.is_empty() || !dropped.is_empty();
             kept.extend(restored);
             kept.sort_by_key(|att| att.mention.unwrap_or(0));
