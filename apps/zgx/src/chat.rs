@@ -2851,13 +2851,16 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
         // moves to another agent): `[mark] From → [mark] To` over the prompt
         // that switched, as the shipping app's `switch_marker`.
         "system" => {
-            let part = entry["parts"]
+            let Some(part) = entry["parts"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .find(|p| p["kind"].as_str() == Some("switch"))
                 .cloned()
-                .or_else(|| handoff_switch(entry))?;
+                .or_else(|| handoff_switch(entry))
+            else {
+                return system_row(entry, id);
+            };
             let side = |name: &str, harness: &str| {
                 let mark = part[harness].as_str().and_then(switch_mark);
                 (
@@ -2879,6 +2882,110 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+fn system_row(entry: &Json, id: &str) -> Option<Value> {
+    use zeron_proto::computer::cards::{ComputerNotice, computer_notice, revoked_label};
+    let parts = entry["parts"].as_array()?;
+    let part = |kind: &str| parts.iter().find(|p| p["kind"].as_str() == Some(kind));
+    let texts: Vec<&str> = parts.iter().filter(|p| p["kind"].as_str() == Some("text")).filter_map(|p| p["text"].as_str()).collect();
+    let text = texts.first().copied().unwrap_or_default();
+    let hint = texts.get(1).copied();
+    let row = |line: &str, words: &str, hint: Option<&str>, title: Option<&str>| {
+        Some(Value::record([
+            ("id", Value::from(id)),
+            ("role", Value::from("system")),
+            ("line", Value::from(line)),
+            ("text", Value::from(words)),
+            ("hint", hint.map_or(Value::Nil, Value::from)),
+            ("title", title.map_or(Value::Nil, Value::from)),
+        ]))
+    };
+    if part("classifier").is_some() {
+        return row("classifier", text, None, None);
+    }
+    if part("compaction").is_some() {
+        return row("compaction", text, None, None);
+    }
+    if let Some(fork) = part("fork") {
+        return row("fork", "", None, Some(&single_line(fork["sourceTitle"].as_str().unwrap_or_default())));
+    }
+    if let Some(handoff) = part("handoff") {
+        return row("handoff", "", None, handoff["route"]["sourceTitle"].as_str());
+    }
+    if zeron_proto::claude_config::CommandCard::from_note(text, texts.last().copied()).is_some() {
+        return row("claude_command", text, None, None);
+    }
+    if text.starts_with(zeron_proto::claude_panel::SUMMARY_PREFIX) {
+        return row("claude_config", text, None, None);
+    }
+    match computer_notice(text) {
+        Some(ComputerNotice::Disclosure) => return None,
+        Some(ComputerNotice::Revoked) => return row("computer_notice", &revoked_label(text, hint), hint, None),
+        Some(_) => return row("computer_notice", text, hint, None),
+        None => {}
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    row("divider", text, hint, None)
+}
+
+fn line_block(part: &Json) -> Option<Value> {
+    let id = part["id"].as_str().unwrap_or_default();
+    let block = |line: &str, fields: Vec<(&'static str, Value)>| {
+        let mut all = vec![("id", Value::from(id)), ("kind", Value::from("line")), ("line", Value::from(line))];
+        all.extend(fields);
+        Some(Value::record(all))
+    };
+    match part["kind"].as_str()? {
+        "fork" => block("fork", vec![("title", Value::from(single_line(part["sourceTitle"].as_str().unwrap_or_default()).as_str()))]),
+        "switch" => block(
+            "switch",
+            vec![
+                ("from", Value::from(single_line(part["from"].as_str().unwrap_or_default()).as_str())),
+                ("to", Value::from(single_line(part["to"].as_str().unwrap_or_default()).as_str())),
+            ],
+        ),
+        "input" => {
+            use zeron_proto::view::{InputOutcome, input_header, input_outcome};
+            let questions: Vec<zeron_proto::UserInputQuestion> = serde_json::from_value(part["questions"].clone()).ok()?;
+            let header = input_header(&questions);
+            // Only that one was asked for: whatever came back isn't the transcript's.
+            if questions.iter().any(zeron_proto::UserInputQuestion::is_secret) {
+                return block("secret", vec![("title", Value::from(header.as_str()))]);
+            }
+            let answers: Option<Vec<zeron_proto::UserInputAnswer>> = serde_json::from_value(part["answers"].clone()).ok();
+            let said = |line: &zeron_proto::view::AnswerLine| format!("{} → {}", line.label, line.answer);
+            let text = match input_outcome(&questions, part["resolved"].as_bool() == Some(true), answers.as_deref()) {
+                InputOutcome::Pending => return block("input", vec![("title", Value::from(header.as_str()))]),
+                InputOutcome::Unrecorded => header,
+                InputOutcome::Closed(line) => said(&line),
+                InputOutcome::Answered(lines) => lines.iter().map(said).collect::<Vec<_>>().join(" · "),
+            };
+            block("input", vec![("text", Value::from(text.as_str()))])
+        }
+        _ => None,
+    }
+}
+
+fn denied_block(part: &Json, earlier: &[&Json]) -> Option<Value> {
+    use zeron_proto::computer::cards::{COMPUTER_DENIED_TITLE, is_control_denied};
+    let denied = |p: &Json| {
+        is_control_denied(p["isError"].as_bool() == Some(true), p["output"].as_str())
+            .then(|| crate::tool_details::computer_tool_of(p))
+            .flatten()
+    };
+    let tool = denied(part)?;
+    if earlier.iter().any(|p| denied(p) == Some(tool)) {
+        return None;
+    }
+    Some(Value::record([
+        ("id", Value::from(format!("{}-denied", part["id"].as_str().unwrap_or_default()).as_str())),
+        ("kind", Value::from("line")),
+        ("line", Value::from("computer_notice")),
+        ("text", Value::from(COMPUTER_DENIED_TITLE)),
+    ]))
 }
 
 /// A finished delegation's wake, its quoted reply as a markdown quote
@@ -3026,17 +3133,21 @@ fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
                 }
             }
             Some("tool") => {
-                if group.first().is_some_and(|head| is_agent(head) != is_agent(part)) {
+                if group.first().is_some_and(|head| genus(head) != genus(part)) {
                     flush(&mut out, &mut group, group_last);
                 }
                 group.push(part);
                 group_last = ix;
+                if let Some(denied) = denied_block(part, &parts[..ix]) {
+                    flush(&mut out, &mut group, group_last);
+                    out.push(denied);
+                }
             }
             Some("reasoning") => {
                 if part["text"].as_str().unwrap_or_default().trim().is_empty() {
                     continue;
                 }
-                if group.first().is_some_and(|head| is_agent(head)) {
+                if group.first().is_some_and(|head| genus(head) != Genus::Other) {
                     flush(&mut out, &mut group, group_last);
                 }
                 group.push(part);
@@ -3054,7 +3165,10 @@ fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
                 let words = match kind {
                     Some("text") => part["text"].as_str().unwrap_or_default().to_owned(),
                     Some("error") => format!("> {}", part["message"].as_str().unwrap_or_default()),
-                    _ => continue,
+                    _ => {
+                        out.extend(line_block(part));
+                        continue;
+                    }
                 };
                 if words.trim().is_empty() {
                     continue;
@@ -3143,6 +3257,8 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
                 out.push(work.clone());
                 placed = true;
             }
+            let earlier: Vec<&Json> = parts[..ix].iter().collect();
+            out.extend(denied_block(part, &earlier));
             continue;
         }
         let words = match part["kind"].as_str() {
@@ -3156,7 +3272,10 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
                 out.extend(display_failed_block(part, &parts[ix + 1..]));
                 continue;
             }
-            _ => continue,
+            _ => {
+                out.extend(line_block(part));
+                continue;
+            }
         };
         if words.trim().is_empty() {
             continue;
@@ -3325,17 +3444,47 @@ fn is_agent(part: &Json) -> bool {
     part["kind"].as_str() == Some("tool") && name.is_some_and(|n| n == "Agent" || n.starts_with("Agent: "))
 }
 
+#[derive(PartialEq)]
+enum Genus {
+    Agent,
+    Computer,
+    Other,
+}
+
+fn genus(part: &Json) -> Genus {
+    if is_agent(part) {
+        Genus::Agent
+    } else if crate::tool_details::computer_tool_of(part).is_some() {
+        Genus::Computer
+    } else {
+        Genus::Other
+    }
+}
+
 /// A group's line, as the shipping app writes it (crates/ui transcript.rs
 /// `tool_group_summary` over crates/proto view.rs's): its thinking, then
 /// what its tools did, then how many failed; the first letter raised.
 fn group_summary(group: &[&Json]) -> String {
     let thoughts = group.iter().filter(|p| p["kind"].as_str() == Some("reasoning")).count();
-    let calls: Vec<&&Json> = group.iter().filter(|p| p["kind"].as_str() == Some("tool")).collect();
+    let computers: Vec<crate::tool_details::ComputerRow> = group.iter().filter_map(|p| crate::tool_details::computer_row(p)).collect();
+    let calls: Vec<&&Json> = group
+        .iter()
+        .filter(|p| p["kind"].as_str() == Some("tool") && crate::tool_details::computer_tool_of(p).is_none())
+        .collect();
     let mut segments: Vec<String> = Vec::new();
     match thoughts {
         0 => {}
         1 => segments.push("thought process".into()),
         n => segments.push(format!("thought {n} times")),
+    }
+    if !computers.is_empty() {
+        let mut apps: Vec<&str> = Vec::new();
+        for app in computers.iter().filter_map(|c| c.app.as_deref()) {
+            if !apps.contains(&app) {
+                apps.push(app);
+            }
+        }
+        segments.push(zeron_proto::computer::presentation::computer_group_segment(&apps, computers.len()));
     }
     if !calls.is_empty() {
         let (mut commands, mut reads, mut searches, mut fetches, mut todos, mut other, mut failed) =
@@ -3406,7 +3555,7 @@ fn group_summary(group: &[&Json]) -> String {
 }
 
 /// A part as ds/activity's tool: its kind, what it did, to what.
-fn tool(part: &Json) -> Option<Value> {
+pub(crate) fn tool(part: &Json) -> Option<Value> {
     tool_live(part, false)
 }
 
@@ -3438,6 +3587,9 @@ fn tool_live(part: &Json, live: bool) -> Option<Value> {
             ]));
         }
         "tool" => {
+            if let Some(computer) = crate::tool_details::computer_row(part) {
+                return Some(computer_tool(id, part, computer));
+            }
             let call = &part["call"];
             let s = |k: &str| call[k].as_str().map(str::to_owned);
             match call["kind"].as_str().unwrap_or_default() {
@@ -3511,6 +3663,26 @@ fn tool_live(part: &Json, live: bool) -> Option<Value> {
         fields.push(("removed", Value::Num(sum("deletions"))));
     }
     Some(Value::record(fields))
+}
+
+fn computer_tool(id: &str, part: &Json, computer: crate::tool_details::ComputerRow) -> Value {
+    let mut fields = vec![
+        ("id", Value::from(id)),
+        ("kind", Value::from("exec")),
+        ("verb", Value::from(computer.label.as_str())),
+    ];
+    if !computer.rows.is_empty() {
+        fields.push(("call", Value::from(computer.rows.join("\n").as_str())));
+    }
+    if part["isError"].as_bool() == Some(true) {
+        fields.push(("failed", Value::Bool(true)));
+    }
+    if !computer.actions.is_empty() {
+        fields.push(("output", Value::from(computer.actions.join("\n").as_str())));
+    } else if !computer.hidden {
+        fields.extend(crate::tool_details::tool_fields(part));
+    }
+    Value::record(fields)
 }
 
 /// How many lines of a call the opened row shows, and how long a line may
@@ -4509,6 +4681,59 @@ mod tests {
         // Out of step: a length that doesn't add up.
         let wrong = json!({ "upsert": [], "remove": [], "append": [{ "entry": "a", "part": "t0", "text": "!", "len": 9 }], "count": 2 });
         assert!(apply(&mut entries, &wrong).is_err());
+    }
+
+    #[test]
+    fn a_system_entry_reaches_the_transcript_as_a_typed_line() {
+        let entry = |parts: Json| json!({ "id": "s", "role": "system", "parts": parts });
+        let text = |id: &str, words: &str| json!({ "kind": "text", "id": id, "text": words });
+        let field = |m: &Value, k: &str| m.field(k).map(crate::auth::text).unwrap_or_default();
+        let classified = message(&entry(json!([text("t0", "Classifier: same task"), { "kind": "classifier", "id": "c", "record": { "verdict": "continue" } }])), None).unwrap();
+        assert_eq!((field(&classified, "role").as_str(), field(&classified, "line").as_str()), ("system", "classifier"));
+        let compacted = message(&entry(json!([text("t0", "Compacted · 212.0k → 40.0k tokens"), { "kind": "compaction", "id": "c", "record": { "preTokens": 212000 } }])), None).unwrap();
+        assert_eq!((field(&compacted, "line").as_str(), field(&compacted, "text").as_str()), ("compaction", "Compacted · 212.0k → 40.0k tokens"));
+        let fork = message(&entry(json!([{ "kind": "fork", "id": "f", "sourceChatId": "c1", "sourceTitle": "Old\nchat" }])), None).unwrap();
+        assert_eq!((field(&fork, "line").as_str(), field(&fork, "title").as_str()), ("fork", "Old chat"));
+        let continued = message(&entry(json!([{ "kind": "handoff", "id": "h", "harness": "codex", "text": "packet", "route": { "fromHarness": "codex", "sourceChatId": "c1", "sourceTitle": "Old" } }])), None).unwrap();
+        assert_eq!((field(&continued, "line").as_str(), field(&continued, "title").as_str(), field(&continued, "text").as_str()), ("handoff", "Old", ""));
+        let card = message(&entry(json!([text("t0", "Claude Code /context"), text("t1", r#"{"command":"/context","text":"12%"}"#)])), None).unwrap();
+        assert_eq!((field(&card, "line").as_str(), field(&card, "hint").as_str()), ("claude_command", ""));
+        let summary = format!("{}model opus", zeron_proto::claude_panel::SUMMARY_PREFIX);
+        assert_eq!(field(&message(&entry(json!([text("t0", &summary)])), None).unwrap(), "line"), "claude_config");
+        let note = message(&entry(json!([text("t0", "Resumed"), text("t1", "Why it did")])), None).unwrap();
+        assert_eq!((field(&note, "line").as_str(), field(&note, "hint").as_str()), ("divider", "Why it did"));
+        let revoked = message(&entry(json!([text("t0", zeron_proto::computer::cards::COMPUTER_SETUP_NOTE)])), None).unwrap();
+        assert_eq!(field(&revoked, "line"), "computer_notice");
+        let disclosure = entry(json!([text("t0", zeron_proto::computer::cards::COMPUTER_CONTROL_ON_DISCLOSURE)]));
+        assert!(message(&disclosure, None).is_none(), "the disclosure has no row, as in the shipping app");
+        assert!(message(&entry(json!([])), None).is_none());
+        let seam = entry(json!([{ "kind": "switch", "id": "x", "from": "A", "to": "B" }]));
+        assert_eq!(field(&message(&seam, None).unwrap(), "role"), "switch", "a seam is still a seam");
+    }
+
+    #[test]
+    fn a_reply_s_question_and_denied_call_are_lines_and_a_secret_stays_out() {
+        let reply = |parts: Json| json!({ "id": "a", "role": "assistant", "status": "complete", "parts": parts });
+        let asked = |kind: Json, resolved: bool, labels: Json| {
+            json!({ "kind": "input", "id": "i", "requestId": "r", "resolved": resolved,
+                "questions": [{ "id": "q", "header": "Pick", "question": "Which?", "options": ["A"], "kind": kind }],
+                "answers": [{ "questionId": "q", "labels": labels }] })
+        };
+        let lines = |part: Json| blocks(&reply(json!([part]))).list().to_vec();
+        let answered = lines(asked(Json::Null, true, json!(["A"])));
+        assert_eq!(answered[0].field("line"), Some(&Value::from("input")));
+        assert_eq!(answered[0].field("text"), Some(&Value::from("Pick → A")));
+        let secret = lines(asked(json!({ "type": "secret" }), true, json!(["hunter2-secret"])));
+        assert_eq!(secret[0].field("line"), Some(&Value::from("secret")));
+        assert!(!format!("{:?}", secret[0]).contains("hunter2"));
+        let denied = |id: &str| json!({ "kind": "tool", "id": id, "resolved": true, "isError": true, "output": "capability_denied",
+            "call": { "kind": "mcp", "server": "zeron", "tool": "computer_click", "input": {} } });
+        let shown = blocks(&reply(json!([denied("c1"), denied("c2")])));
+        let kinds: Vec<String> = shown.list().iter().map(|b| crate::auth::text(b.field("kind").unwrap())).collect();
+        assert_eq!(kinds, ["tools", "line", "tools"], "one notice for the tool, however often it's turned away");
+        for dropped in ["handoff", "classifier", "compaction"] {
+            assert!(lines(json!({ "kind": dropped, "id": "p" })).is_empty(), "{dropped}");
+        }
     }
 
     #[test]

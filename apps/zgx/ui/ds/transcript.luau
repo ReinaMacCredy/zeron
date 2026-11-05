@@ -65,7 +65,7 @@ export type Message = {
 	id: string,
 	-- A person's, a reply, or the seam where the chat moved to another
 	-- agent (`[mark] From → [mark] To` over the prompt that moved it).
-	role: "user" | "assistant" | "switch",
+	role: "user" | "assistant" | "switch" | "system",
 	text: string,
 	-- A person's: what came with it.
 	attachments: { UserMessage.Attachment }?,
@@ -101,6 +101,9 @@ export type Message = {
 	to: string?,
 	from_mark: Mark.Name?,
 	to_mark: Mark.Name?,
+	line: string?,
+	title: string?,
+	hint: string?,
 	-- A person's that another chat sent: which, and its title when it was sent.
 	sender: { chat: string, title: string }?,
 }
@@ -191,8 +194,9 @@ export type Draft = { id: string, text: string, part: string?, part_text: string
 -- its own blocks, opened.
 export type Block = {
 	id: string,
-	kind: "text" | "tools" | "work" | "visual" | "display_failed" | "images",
+	kind: "text" | "tools" | "work" | "visual" | "display_failed" | "images" | "line",
 	text: string?,
+	line: string?,
 	-- Pictures an agent showed (`show_image`, a generated image), one after
 	-- another: each a path on the chat's host and its name (ds/reply_picture).
 	images: { { id: string, path: string, name: string? } }?,
@@ -366,6 +370,48 @@ local function seam(m: Message): Node
 			},
 			switch_side(m.to, m.to_mark),
 		},
+	}
+end
+
+local function line_words(x: any): string
+	local title = x.title or ""
+	if x.line == "fork" then
+		return locale.s("ds.transcript.forked_from", { title = title })
+	elseif x.line == "handoff" then
+		return if x.title then locale.s("ds.transcript.continued_from", { title = title }) else locale.s("ds.transcript.context_handoff")
+	elseif x.line == "switch" then
+		return locale.s("ds.transcript.switched", { from = x.from or "?", to = x.to or "?" })
+	elseif x.line == "secret" then
+		return locale.s("ds.transcript.secret_requested", { title = title })
+	elseif x.line == "input" and not x.text then
+		return locale.s("ds.transcript.awaiting_answer", { title = title })
+	end
+	return x.text or ""
+end
+
+local function line_row(hint: string?, now: () -> any): Node
+	local function rule(): Node
+		return ui.div { grow = 1, min_w = 12, h = 1, bg = "$border.subtle", aria_hidden = true }
+	end
+	return ui.row {
+		class = "transcript-line",
+		w_full = true,
+		gap = "$space.2",
+		items = "center",
+		selectable = false,
+		tooltip = hint,
+		rule(),
+		ui.text {
+			function(): string
+				return line_words(now())
+			end,
+			literal = true,
+			truncate = true,
+			min_w = 0,
+			text_size = "$font.size.xs",
+			color = "$text.tertiary",
+		},
+		rule(),
 	}
 end
 
@@ -615,6 +661,11 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 					else "ds.transcript.display_failed"),
 				reason = ReplyPicture.plain(b.text),
 			}
+		end
+		if b.kind == "line" then
+			return line_row(nil, function(): any
+				return brow:get()
+			end)
 		end
 		-- Its words: the draft's while this is the text being written.
 		local function words(): string
@@ -1090,7 +1141,7 @@ local function Transcript(props: Props): Node
 			local el = r.inner:peek()
 			if el and el.x and el.y and el.width and el.height then
 				if x >= el.x and x < el.x + el.width and y >= el.y and y < el.y + el.height then
-					return if r.m.role == "switch" then "" else id
+					return if r.m.role == "switch" or r.m.role == "system" then "" else id
 				end
 			end
 		end
@@ -1598,7 +1649,7 @@ local function Transcript(props: Props): Node
 				max_w = measure,
 				min_w = 0,
 				-- Anywhere on a message shows its lane (Zeron's entry hover).
-				on_hover = if m.role == "switch"
+				on_hover = if m.role == "switch" or m.role == "system"
 					then nil
 					else function(inside: boolean)
 						if inside then
@@ -1608,6 +1659,9 @@ local function Transcript(props: Props): Node
 						end
 					end,
 				if m.role == "switch" then seam(m)
+					elseif m.role == "system" then line_row(m.hint, function(): any
+						return state:get()
+					end)
 					elseif mine then ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the

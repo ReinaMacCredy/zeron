@@ -29,6 +29,8 @@
 //! and new numbers, its text.
 
 use serde_json::{Value as Json, json};
+use zeron_proto::ToolCall;
+use zeron_proto::computer::presentation as computer;
 use zgx_script::{ScriptHost, Value};
 
 use crate::engine;
@@ -228,6 +230,63 @@ fn diff_lines(old: &str, new: &str) -> (Vec<Line>, usize, usize) {
     (out, added, removed)
 }
 
+pub struct ComputerRow {
+    pub label: String,
+    pub rows: Vec<String>,
+    pub actions: Vec<String>,
+    pub hidden: bool,
+    pub app: Option<String>,
+}
+
+fn decoded_call(part: &Json) -> Option<ToolCall> {
+    let call = &part["call"];
+    if part["kind"].as_str() != Some("tool") || !matches!(call["kind"].as_str(), Some("mcp" | "unknown")) {
+        return None;
+    }
+    serde_json::from_value(call.clone()).ok()
+}
+
+pub fn computer_tool_of(part: &Json) -> Option<&'static str> {
+    Some(computer::computer_call(&decoded_call(part)?)?.tool)
+}
+
+pub fn computer_row(part: &Json) -> Option<ComputerRow> {
+    let call = decoded_call(part)?;
+    let found = computer::computer_call(&call)?;
+    let output = part["output"].as_str();
+    let app = computer::computer_call_app(found.tool, found.args, output);
+    let done = part["resolved"].as_bool() == Some(true);
+    let label = withheld_label(found.tool, app.as_deref(), done)
+        .unwrap_or_else(|| computer::computer_action_label(found.tool, found.args, app.as_deref(), done));
+    Some(ComputerRow {
+        label,
+        rows: computer::computer_call_rows(found.tool, found.args),
+        actions: computer::computer_call_js_actions(&found, output).iter().map(action_line).collect(),
+        // A script's output can hold what it typed or read from the clipboard.
+        hidden: found.tool == "computer" || computer::computer_output_hidden(found.tool, found.args),
+        app,
+    })
+}
+
+// crates/proto's `computer_action_label` quotes the typed text in these three, which can be a credential.
+fn withheld_label(tool: &str, app: Option<&str>, done: bool) -> Option<String> {
+    let app = app.unwrap_or("App");
+    let pick = |running: &str, finished: &str| if done { finished } else { running }.to_owned();
+    match tool {
+        "computer_type_text" | "computer_browser_type" => Some(format!("{} text in {app}", pick("Typing", "Typed"))),
+        "computer_set_value" => Some(format!("{} a value in {app}", pick("Setting", "Set"))),
+        _ => None,
+    }
+}
+
+fn action_line(action: &computer::ComputerJsAction) -> String {
+    match withheld_label(action.tool, action.app.as_deref(), true) {
+        Some(label) if action.count > 1 => format!("{label} ×{}", action.count),
+        Some(label) => label,
+        None => computer::computer_js_action_label(action, true),
+    }
+}
+
 /// What a tool part carries for its row to open to, beyond its line: its
 /// output's summary, its files' counts, the sidecar's refs, and an older
 /// doc's diff itself.
@@ -325,6 +384,90 @@ mod tests {
         assert_eq!(names, vec!["output", "output_ref", "output_bytes", "diff_ref", "stats"]);
         let old = json!({ "diff": { "path": "a.txt", "oldText": "a\n", "newText": "b\n" } });
         assert_eq!(tool_fields(&old).into_iter().map(|(k, _)| k).collect::<Vec<_>>(), vec!["diff"]);
+    }
+
+    const SECRET: &str = "hunter2-secret";
+
+    fn computer_part(tool: &str, input: Json, output: Option<&str>) -> Json {
+        let mut part = json!({
+            "kind": "tool",
+            "id": "c1",
+            "resolved": true,
+            "isError": false,
+            "call": { "kind": "mcp", "server": "zeron", "tool": tool, "input": input },
+        });
+        if let Some(output) = output {
+            part["output"] = json!(output);
+            part["outputRef"] = json!("chat/c1");
+            part["outputBytes"] = json!(4096);
+        }
+        part
+    }
+
+    #[test]
+    fn a_computer_row_never_carries_what_was_typed_or_copied() {
+        let script_output = json!({
+            "appName": "Notes",
+            "actions": [
+                { "tool": "type_text", "detail": SECRET },
+                { "tool": "set_value", "detail": SECRET },
+                { "tool": "browser_type", "detail": SECRET },
+                { "tool": "click", "n": 2 },
+            ],
+        })
+        .to_string();
+        let wrapped = json!({
+            "kind": "tool",
+            "id": "c1",
+            "resolved": true,
+            "output": SECRET,
+            "call": {
+                "kind": "unknown",
+                "name": "Calling MCP tool",
+                "input": { "_toolName": "mcp__zeron__computer_type_text", "arguments": { "text": SECRET } },
+            },
+        });
+        let parts = [
+            computer_part("computer_type_text", json!({ "text": SECRET, "label": "Password", "app_name": "Notes" }), Some(SECRET)),
+            computer_part("computer_set_value", json!({ "value": SECRET }), Some(SECRET)),
+            computer_part("computer_browser_type", json!({ "text": SECRET }), Some(SECRET)),
+            computer_part("computer_paste", json!({ "text": SECRET }), Some(SECRET)),
+            computer_part("computer_write_clipboard", json!({ "text": SECRET }), Some(SECRET)),
+            computer_part("computer_read_clipboard", json!({}), Some(SECRET)),
+            computer_part("computer_inspect", json!({ "tool": "computer_read_clipboard" }), Some(SECRET)),
+            computer_part("computer_run", json!({ "steps": [{ "type": "type_text", "text": SECRET }] }), Some(SECRET)),
+            computer_part("computer", json!({ "title": "Sign in", "code": format!("await cua.type('{SECRET}')") }), Some(&script_output)),
+            computer_part("computer", json!({ "code": format!("await cua.type('{SECRET}')") }), Some(SECRET)),
+            computer_part("computer", json!({ "actions": [{ "tool": "type_text", "detail": SECRET }] }), None),
+            wrapped,
+        ];
+        for part in parts {
+            let row = crate::chat::tool(&part).unwrap();
+            let drawn = format!("{row:?}");
+            assert!(!drawn.contains(SECRET), "{part}: {drawn}");
+            assert!(row.field("output_ref").is_none(), "{part}: its whole output stays closed");
+        }
+    }
+
+    #[test]
+    fn a_computer_row_is_named_and_opens_as_the_shipping_app_s() {
+        let typed = computer_row(&computer_part("computer_type_text", json!({ "text": SECRET, "label": "Password", "app_name": "Notes" }), None)).unwrap();
+        assert_eq!(typed.label, "Typed text in Notes");
+        assert_eq!(typed.rows, vec!["Target: Password"]);
+        let script = computer_part(
+            "computer",
+            json!({ "title": "Add 12 and 30 in Calculator" }),
+            Some(r#"{"appName":"Calculator","actions":[{"tool":"click","n":3},{"tool":"type_text","detail":"12+30"}]}"#),
+        );
+        let script = computer_row(&script).unwrap();
+        assert_eq!(script.label, "Add 12 and 30 in Calculator");
+        assert_eq!(script.actions, ["Clicked in Calculator ×3", "Typed text in Calculator"]);
+        let screenshot = computer_part("computer_screenshot", json!({ "app_name": "Notes" }), Some("a window"));
+        let row = crate::chat::tool(&screenshot).unwrap();
+        assert_eq!(row.field("verb"), Some(&Value::from("Looked at Notes")));
+        assert_eq!(row.field("output"), Some(&Value::from("a window")), "an ordinary look still opens");
+        let other = json!({ "kind": "tool", "id": "m", "call": { "kind": "mcp", "server": "other", "tool": "computer_type_text", "input": {} } });
+        assert!(computer_row(&other).is_none(), "another server's tool of that name is its own");
     }
 
     #[test]
