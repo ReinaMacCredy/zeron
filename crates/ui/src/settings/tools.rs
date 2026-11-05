@@ -613,6 +613,7 @@ fn group_icon(group: ToolGroup) -> &'static str {
         ToolGroup::Pages => icons::GLOBE,
         ToolGroup::Devices => icons::SMARTPHONE,
         ToolGroup::Computer => icons::COMPUTER_CURSOR,
+        ToolGroup::Plugins => icons::WIDGET,
     }
 }
 

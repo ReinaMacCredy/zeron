@@ -14,6 +14,7 @@ pub enum ToolGroup {
     Pages,
     Devices,
     Computer,
+    Plugins,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +239,78 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
         title: "Computer",
         summary: "Desktop and browser control on this Mac.",
         tools: &[],
+    },
+    ToolGroupInfo {
+        group: ToolGroup::Plugins,
+        title: "Plugins, templates and themes",
+        summary: "Make and install plugins, rewrite Zeron's interface with templates and change its colours. A plugin's own tools follow this switch.",
+        tools: &[
+            tool(
+                "create_plugin",
+                "Create a plugin on this device, signed as the person's, to edit live.",
+            ),
+            tool(
+                "list_plugins",
+                "List the plugins on this device with their status and who made them.",
+            ),
+            tool(
+                "plugin_status",
+                "See where a plugin's UI landed and why it may not show, with an optional picture.",
+            ),
+            tool(
+                "install_plugin",
+                "Install a signed plugin from a file or link; the person still allows it.",
+            ),
+            tool(
+                "update_plugin",
+                "Check for a newer version of an installed plugin; the person installs it.",
+            ),
+            tool(
+                "describe_elements",
+                "List the named elements of Zeron's window a plugin can place its nodes on.",
+            ),
+            tool(
+                "list_templates",
+                "List the templates on this device and which one is in use.",
+            ),
+            tool(
+                "create_template",
+                "Make a template: a whole copy of Zeron's interface to rewrite.",
+            ),
+            tool(
+                "use_template",
+                "Run Zeron's window with a template, as a preview until the person keeps it.",
+            ),
+            tool(
+                "template_status",
+                "See a template's errors, out-of-date files and what it inherits.",
+            ),
+            tool("delete_template", "Set a template aside."),
+            tool(
+                "describe_app",
+                "Map what Zeron's interface is made of, to find your way in a template.",
+            ),
+            tool(
+                "export_template",
+                "Save a template as one signed file in Zeron's exports folder.",
+            ),
+            tool(
+                "import_template",
+                "Install a signed template from a file or link; someone else's waits for the person.",
+            ),
+            tool(
+                "list_themes",
+                "List every theme Zeron's window can wear and what it wears now.",
+            ),
+            tool("get_theme", "Read a theme's colours."),
+            tool(
+                "create_theme",
+                "Make a theme from palettes or a VS Code colour theme.",
+            ),
+            tool("update_theme", "Change one of the person's own themes."),
+            tool("delete_theme", "Delete one of the person's own themes."),
+            tool("use_theme", "Wear a theme in Zeron's window, at once."),
+        ],
     },
 ];
 

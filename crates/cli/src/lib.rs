@@ -99,7 +99,6 @@ enum Command {
     /// or `zeron ui record start|stop [--path <file.json>] --target <t>`.
     Ui(UiCommand),
     /// Make, sign, check and list plugins (through the running Zeron).
-    #[command(hide = true)]
     Plugin {
         #[command(subcommand)]
         command: PluginCommand,
@@ -107,7 +106,6 @@ enum Command {
     /// List, make, use and delete templates: whole replacements of Zeron's
     /// interface (through the running Zeron). `zeron template use zeron`
     /// puts Zeron's own back.
-    #[command(hide = true)]
     Template {
         #[command(subcommand)]
         command: TemplateCommand,
@@ -518,6 +516,18 @@ mod tests {
             assert!(!parse(args).unwrap().runs_engine(), "{args:?}");
         }
         assert!(parse(&[]).is_none());
+    }
+
+    #[test]
+    fn plugin_and_template_show_in_help() {
+        let help = help_for("0.0.0", &[]);
+        for command in ["plugin", "template"] {
+            assert!(
+                help.lines()
+                    .any(|line| line.trim_start().starts_with(command)),
+                "{help}"
+            );
+        }
     }
 
     #[test]

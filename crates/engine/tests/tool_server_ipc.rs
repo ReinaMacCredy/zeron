@@ -241,6 +241,44 @@ async fn the_tool_server_reaches_its_tools_with_the_token_it_is_given() {
             .contains("BindRun")
     );
 
+    let plugins = tools
+        .call("list_plugins", &json!({}))
+        .await
+        .expect("list_plugins");
+    assert!(plugins["plugins"].is_array(), "{plugins}");
+    let dark = json!({
+        "background": "#14181f", "raised": "#232a35", "text": "#d8dee9", "muted": "#a3acb9",
+        "faint": "#7c8594", "accent": "#7aa2f7", "danger": "#f7768e", "warning": "#e0af68",
+        "success": "#9ece6a",
+        "syntax": [
+            "#5c6773", "#c792ea", "#c3e88d", "#f78c6c", "#ffcb6b", "#82aaff",
+            "#d8dee9", "#d8dee9", "#a3acb9", "#f7768e", "#ffcb6b", "#f7768e"
+        ],
+    });
+    let made = tools
+        .call("create_theme", &json!({ "name": "Ink", "dark": dark }))
+        .await
+        .expect("create_theme");
+    let theme_id = made["id"].as_str().expect("theme id");
+    let listed_theme_ids = async || {
+        let listed = tools
+            .call("list_themes", &json!({}))
+            .await
+            .expect("list_themes");
+        listed["themes"]
+            .as_array()
+            .expect("themes")
+            .iter()
+            .map(|theme| theme["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert!(listed_theme_ids().await.iter().any(|id| id == theme_id));
+    tools
+        .call("delete_theme", &json!({ "id": theme_id }))
+        .await
+        .expect("delete_theme");
+    assert!(!listed_theme_ids().await.iter().any(|id| id == theme_id));
+
     server.abort();
     core.shutdown().await;
 }

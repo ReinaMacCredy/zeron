@@ -13,7 +13,7 @@
 
 #![recursion_limit = "256"]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -34,6 +34,8 @@ use zeron_proto::{
 use zeron_rpc::{RpcClient, methods};
 
 mod docs;
+mod plugins;
+mod themes;
 pub mod ui_driver;
 mod visual;
 
@@ -65,6 +67,7 @@ pub struct ThreadTools {
     computer_calls: Mutex<HashSet<String>>,
     ui_driver_calls: Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>,
     ipc_port: Option<u16>,
+    advertised_plugin_tools: Mutex<Option<BTreeSet<String>>>,
 }
 
 /// `ReasoningLevel`'s serde names, spelled out so the schema can list them.
@@ -96,6 +99,8 @@ pub fn tool_list() -> Value {
                 list.insert(at + 1, tool);
             }
         }
+        list.extend(plugins::tools());
+        list.extend(themes::tools());
     }
     tools
 }
@@ -645,6 +650,7 @@ impl ThreadTools {
             computer_calls: Mutex::new(HashSet::new()),
             ui_driver_calls: Mutex::new(HashMap::new()),
             ipc_port: None,
+            advertised_plugin_tools: Mutex::new(None),
         }
     }
 
@@ -753,11 +759,14 @@ impl ThreadTools {
             tools.extend(catalog.iter().cloned());
         }
         if let Some(list) = tools.as_array_mut() {
+            self.add_plugin_tools(list).await;
             list.retain(|tool| {
                 tool["name"].as_str().is_none_or(|name| {
                     match zeron_proto::tools::action_labels(name) {
                         Some(labels) => !labels.iter().all(|label| disabled.contains(*label)),
-                        None => !disabled.contains(name),
+                        None => {
+                            !disabled.contains(name) && !plugins::switched_off(name, &disabled)
+                        }
                     }
                 })
             });
@@ -847,6 +856,29 @@ impl ThreadTools {
             "task_status" => self.task_status(args).await,
             "task_cancel" => self.task_cancel(args).await,
             "supervisor" => self.supervisor(args).await,
+            plugins::CREATE_PLUGIN => self.create_plugin(args).await,
+            plugins::LIST_PLUGINS => self.list_plugins().await,
+            plugins::PLUGIN_STATUS => self.plugin_status(args).await,
+            plugins::INSTALL_PLUGIN => self.install_plugin(args).await,
+            plugins::UPDATE_PLUGIN => self.update_plugin(args).await,
+            plugins::DESCRIBE_ELEMENTS => self.describe_elements().await,
+            plugins::LIST_TEMPLATES => self.list_templates().await,
+            plugins::CREATE_TEMPLATE => self.create_template(args).await,
+            plugins::USE_TEMPLATE => self.use_template(args).await,
+            plugins::TEMPLATE_STATUS => self.template_status(args).await,
+            plugins::DELETE_TEMPLATE => self.delete_template(args).await,
+            plugins::DESCRIBE_APP => self.describe_app().await,
+            plugins::EXPORT_TEMPLATE => self.export_template(args).await,
+            plugins::IMPORT_TEMPLATE => self.import_template(args).await,
+            themes::LIST_THEMES => self.theme(methods::LIST_THEMES, args).await,
+            themes::GET_THEME => self.theme(methods::GET_THEME, args).await,
+            themes::CREATE_THEME => self.create_theme(args).await,
+            themes::UPDATE_THEME => self.theme(methods::UPDATE_THEME, args).await,
+            themes::DELETE_THEME => self.theme(methods::DELETE_THEME, args).await,
+            themes::USE_THEME => self.theme(methods::USE_THEME, args).await,
+            plugin if plugins::is_plugin_tool_name(plugin) => {
+                self.call_plugin_tool(plugin, args).await
+            }
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -3506,6 +3538,10 @@ where
     let mut lines = reader.lines();
     let mut in_flight: FuturesUnordered<Pin<Box<dyn Future<Output = Option<Value>> + Send + '_>>> =
         FuturesUnordered::new();
+    let (changed_tx, mut changed) = tokio::sync::mpsc::channel(1);
+    let watch = tools.watch_plugin_tools(changed_tx);
+    tokio::pin!(watch);
+    let mut watching = true;
     loop {
         let response = tokio::select! {
             line = lines.next_line() => {
@@ -3528,6 +3564,11 @@ where
                 Some(response) => response,
                 None => continue,
             },
+            () = &mut watch, if watching => {
+                watching = false;
+                continue;
+            }
+            Some(()) = changed.recv() => plugins::list_changed_notification(),
         };
         let mut line = response.to_string();
         line.push('\n');
@@ -3557,7 +3598,7 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
             id,
             json!({
                 "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL_VERSION),
-                "capabilities": { "tools": {} },
+                "capabilities": { "tools": { "listChanged": true } },
                 "serverInfo": { "name": "zeron", "version": env!("CARGO_PKG_VERSION") },
             }),
         ),
@@ -3579,7 +3620,9 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
             let switch = zeron_proto::tools::action_label(name, &args).unwrap_or(name);
             if disabled
                 .as_ref()
-                .is_some_and(|disabled| disabled.contains(switch))
+                .is_some_and(|disabled| {
+                    disabled.contains(switch) || plugins::switched_off(name, disabled)
+                })
             {
                 return Some(ok(id, turned_off(switch)));
             }
@@ -3735,7 +3778,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 32] = [
+    const THREAD_TOOLS: [&str; 52] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -3768,6 +3811,26 @@ mod tests {
         "resolve_findings",
         "task_status",
         "task_cancel",
+        "create_plugin",
+        "list_plugins",
+        "plugin_status",
+        "install_plugin",
+        "update_plugin",
+        "describe_elements",
+        "list_templates",
+        "create_template",
+        "use_template",
+        "template_status",
+        "delete_template",
+        "describe_app",
+        "export_template",
+        "import_template",
+        "list_themes",
+        "get_theme",
+        "create_theme",
+        "update_theme",
+        "delete_theme",
+        "use_theme",
     ];
 
     fn chat(id: &str, space: Option<&str>, archived: bool, created_by: Option<&str>) -> Value {
@@ -6709,7 +6772,10 @@ mod tests {
         pipe.send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }))
             .await;
         let init = pipe.recv().await;
-        assert_eq!(init["result"]["capabilities"], json!({ "tools": {} }));
+        assert_eq!(
+            init["result"]["capabilities"],
+            json!({ "tools": { "listChanged": true } })
+        );
         assert!(init["result"].get("instructions").is_none());
         let reply = pipe
             .call(
