@@ -2126,9 +2126,7 @@ pub fn rows_for_entry(
                     .as_ref()
                     .map(|computer| computer_call_js_actions(computer, output.as_deref()))
                     .unwrap_or_default();
-                let detail = if output_hidden {
-                    None
-                } else if !js_actions.is_empty() {
+                let detail = if !js_actions.is_empty() {
                     Some(ToolDetail::Output {
                         lines: js_actions
                             .iter()
@@ -2136,6 +2134,8 @@ pub fn rows_for_entry(
                             .collect(),
                         truncated_by: 0,
                     })
+                } else if output_hidden {
+                    None
                 } else {
                     tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
                 };

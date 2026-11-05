@@ -1420,8 +1420,8 @@ fn computer_tools_take_the_desktop_label_and_never_repeat_arguments_in_detail() 
     let frame = w.pass();
     let d = frame.display(1).unwrap();
     assert!(d.text.starts_with("Used the desktop · 1 action"), "{}", d.text);
-    assert!(d.text.contains(&format!("Typed text \u{201c}{secret}\u{201d} in App")), "{}", d.text);
-    assert_eq!(d.text.matches(secret).count(), 1, "the detail rows never repeat it: {}", d.text);
+    assert!(d.text.contains("Typed text in App"), "{}", d.text);
+    assert!(!d.text.contains(secret), "neither the label nor the detail rows carry it: {}", d.text);
 }
 
 #[test]

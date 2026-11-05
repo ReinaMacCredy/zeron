@@ -685,12 +685,15 @@ pub fn computer_call_rows(tool: &str, args: Option<&Map<String, Value>>) -> Vec<
     rows
 }
 
-pub const ACTION_DETAIL_MAX: usize = 48;
 pub const JS_TITLE_MAX: usize = 80;
 const FALLBACK_APP: &str = "App";
 
-pub fn computer_action_detail(text: &str) -> String {
-    truncate(text, ACTION_DETAIL_MAX)
+/// The others' `detail` is what was typed, copied or searched for, which can be a credential.
+pub fn computer_action_keeps_detail(tool: &str) -> bool {
+    matches!(
+        tool.strip_prefix("computer_").unwrap_or(tool),
+        "scroll" | "perform_action" | "press_key" | "browser_press" | "browser_navigate"
+    )
 }
 
 pub fn computer_action_label(
@@ -709,12 +712,6 @@ pub fn computer_action_label(
         .filter(|app| !app.is_empty())
         .unwrap_or(FALLBACK_APP);
     let pick = |running: &str, finished: &str| if done { finished } else { running }.to_owned();
-    let quoted = |key: &str| {
-        args.get(key)
-            .and_then(Value::as_str)
-            .map(computer_action_detail)
-            .unwrap_or_default()
-    };
     match tool {
         "computer" => text(args, "title").map_or_else(
             || pick("Using the computer", "Used the computer"),
@@ -732,11 +729,9 @@ pub fn computer_action_label(
         | "computer_get_screen_size"
         | "computer_get_cursor_position"
         | "computer_browser_state" => format!("{} at {app}", pick("Looking", "Looked")),
-        "computer_type_text" | "computer_browser_type" => format!(
-            "{} text “{}” in {app}",
-            pick("Typing", "Typed"),
-            quoted("text")
-        ),
+        "computer_type_text" | "computer_browser_type" => {
+            format!("{} text in {app}", pick("Typing", "Typed"))
+        }
         "computer_scroll" => {
             let direction = describe_payload("computer_scroll", args);
             let direction = if direction.is_empty() {
@@ -746,11 +741,7 @@ pub fn computer_action_label(
             };
             format!("{} {direction} in {app}", pick("Scrolling", "Scrolled"))
         }
-        "computer_set_value" => format!(
-            "{} to “{}” in {app}",
-            pick("Setting", "Set"),
-            quoted("value")
-        ),
+        "computer_set_value" => format!("{} a value in {app}", pick("Setting", "Set")),
         "computer_press_key" | "computer_browser_press" => {
             format!("{} key in {app}", pick("Pressing", "Pressed"))
         }
@@ -876,7 +867,9 @@ const TEXT_OUTPUT_TOOLS: [&str; 6] = [
 /// A clipboard read's output is the clipboard itself; a typing result echoes what was typed.
 pub fn computer_output_hidden(tool: &str, args: Option<&Map<String, Value>>) -> bool {
     let carries_text = |tool: &str| TEXT_OUTPUT_TOOLS.contains(&tool);
-    carries_text(tool)
+    // A script's output can hold what it typed or read from the clipboard.
+    tool == "computer"
+        || carries_text(tool)
         || args
             .and_then(|args| inspect_delegate(tool, args))
             .is_some_and(|(selected, _)| carries_text(selected))
@@ -1114,6 +1107,7 @@ mod tests {
     #[test]
     fn clipboard_reads_hide_their_output() {
         assert!(computer_output_hidden("computer_read_clipboard", None));
+        assert!(computer_output_hidden("computer", None));
         let inspect = json!({ "tool": "computer_read_clipboard" });
         assert!(computer_output_hidden(
             "computer_inspect",
@@ -1214,8 +1208,8 @@ mod tests {
             (
                 "computer_type_text",
                 json!({ "text": "12 × 4" }),
-                "Typing text “12 × 4” in Calculator",
-                "Typed text “12 × 4” in Calculator",
+                "Typing text in Calculator",
+                "Typed text in Calculator",
             ),
             (
                 "computer_scroll",
@@ -1232,8 +1226,8 @@ mod tests {
             (
                 "computer_set_value",
                 json!({ "value": "42" }),
-                "Setting to “42” in Calculator",
-                "Set to “42” in Calculator",
+                "Setting a value in Calculator",
+                "Set a value in Calculator",
             ),
             (
                 "computer_press_key",
@@ -1277,27 +1271,6 @@ mod tests {
             label("computer_launch_app", json!({ "app": "Safari" }), true),
             "Open Safari",
             "tools without a Codex pair keep the redacted summary"
-        );
-    }
-
-    #[test]
-    fn typed_detail_is_whitespace_collapsed_and_cut_at_48_characters() {
-        let long = "one  two\nthree\tfour five six seven eight nine ten eleven twelve";
-        let detail = computer_action_detail(long);
-        assert_eq!(detail.chars().count(), 48);
-        assert!(detail.ends_with('…'));
-        assert_eq!(detail, "one two three four five six seven eight nine te…");
-        assert_eq!(computer_action_detail(" short   text "), "short text");
-        let exactly = "a".repeat(48);
-        assert_eq!(computer_action_detail(&exactly), exactly, "48 fits uncut");
-        assert_eq!(
-            computer_action_label(
-                "computer_type_text",
-                json!({ "text": long }).as_object(),
-                Some("Notes"),
-                false
-            ),
-            format!("Typing text “{detail}” in Notes")
         );
     }
 
@@ -1385,9 +1358,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "Clicked in Calculator ×3",
-                "Typed text “12+30” in Calculator",
+                "Typed text in Calculator",
                 "Scrolled down in Safari",
-                "Set to “Ada” in Calculator",
+                "Set a value in Calculator",
             ]
         );
         for broken in [

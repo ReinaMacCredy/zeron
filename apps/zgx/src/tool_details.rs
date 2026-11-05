@@ -256,35 +256,17 @@ pub fn computer_row(part: &Json) -> Option<ComputerRow> {
     let output = part["output"].as_str();
     let app = computer::computer_call_app(found.tool, found.args, output);
     let done = part["resolved"].as_bool() == Some(true);
-    let label = withheld_label(found.tool, app.as_deref(), done)
-        .unwrap_or_else(|| computer::computer_action_label(found.tool, found.args, app.as_deref(), done));
+    let label = computer::computer_action_label(found.tool, found.args, app.as_deref(), done);
     Some(ComputerRow {
         label,
         rows: computer::computer_call_rows(found.tool, found.args),
-        actions: computer::computer_call_js_actions(&found, output).iter().map(action_line).collect(),
-        // A script's output can hold what it typed or read from the clipboard.
-        hidden: found.tool == "computer" || computer::computer_output_hidden(found.tool, found.args),
+        actions: computer::computer_call_js_actions(&found, output)
+            .iter()
+            .map(|action| computer::computer_js_action_label(action, true))
+            .collect(),
+        hidden: computer::computer_output_hidden(found.tool, found.args),
         app,
     })
-}
-
-// crates/proto's `computer_action_label` quotes the typed text in these three, which can be a credential.
-fn withheld_label(tool: &str, app: Option<&str>, done: bool) -> Option<String> {
-    let app = app.unwrap_or("App");
-    let pick = |running: &str, finished: &str| if done { finished } else { running }.to_owned();
-    match tool {
-        "computer_type_text" | "computer_browser_type" => Some(format!("{} text in {app}", pick("Typing", "Typed"))),
-        "computer_set_value" => Some(format!("{} a value in {app}", pick("Setting", "Set"))),
-        _ => None,
-    }
-}
-
-fn action_line(action: &computer::ComputerJsAction) -> String {
-    match withheld_label(action.tool, action.app.as_deref(), true) {
-        Some(label) if action.count > 1 => format!("{label} ×{}", action.count),
-        Some(label) => label,
-        None => computer::computer_js_action_label(action, true),
-    }
 }
 
 /// What a tool part carries for its row to open to, beyond its line: its

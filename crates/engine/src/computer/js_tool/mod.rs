@@ -92,7 +92,15 @@ fn action_summary(actions: &[Value]) -> Option<String> {
         {
             key["app"] = json!(app);
         }
-        if let Some(detail) = action.get("detail").and_then(Value::as_str) {
+        let tool = action
+            .get("tool")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if let Some(detail) = action
+            .get("detail")
+            .and_then(Value::as_str)
+            .filter(|_| zeron_proto::computer::presentation::computer_action_keeps_detail(tool))
+        {
             let short = if detail.chars().count() > 24 {
                 format!("{}…", detail.chars().take(23).collect::<String>())
             } else {

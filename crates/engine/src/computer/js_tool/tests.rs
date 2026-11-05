@@ -620,7 +620,7 @@ async fn a_successful_result_leads_with_a_short_action_summary_and_has_no_struct
         json!({ "appName": "Calculator", "actions": [
             { "tool": "get_state" },
             { "tool": "click", "n": 3 },
-            { "tool": "type_text", "detail": "hello world" }
+            { "tool": "type_text" }
         ] })
     );
 }
@@ -628,7 +628,7 @@ async fn a_successful_result_leads_with_a_short_action_summary_and_has_no_struct
 #[test]
 fn a_long_action_list_stays_within_the_doc_summary_limit() {
     let actions: Vec<Value> = (0..40)
-        .map(|n| json!({ "tool": "type_text", "app": "TextEdit", "detail": format!("line {n} of a long letter") }))
+        .map(|n| json!({ "tool": "press_key", "app": "TextEdit", "detail": format!("key {n} of a long run") }))
         .collect();
     let summary = super::action_summary(&actions).unwrap();
     assert!(summary.chars().count() <= 160, "{summary}");

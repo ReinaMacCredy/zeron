@@ -1171,10 +1171,27 @@ fn computer_badge(call: &ToolCall) -> Option<serde_json::Value> {
     if let Some(app) = input.get("app").and_then(serde_json::Value::as_str) {
         kept.insert("app".into(), app.into());
     }
-    if let Some(actions) = input.get("actions").filter(|value| value.is_array()) {
-        kept.insert("actions".into(), actions.clone());
+    if let Some(actions) = input.get("actions").and_then(storable_actions) {
+        kept.insert("actions".into(), actions);
     }
     (!kept.is_empty()).then(|| serde_json::Value::Object(kept))
+}
+
+fn storable_actions(actions: &serde_json::Value) -> Option<serde_json::Value> {
+    let mut actions = actions.as_array()?.clone();
+    for action in actions
+        .iter_mut()
+        .filter_map(serde_json::Value::as_object_mut)
+    {
+        let tool = action
+            .get("tool")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !zeron_proto::computer::presentation::computer_action_keeps_detail(tool) {
+            action.remove("detail");
+        }
+    }
+    Some(actions.into())
 }
 
 fn stamp_computer_summary(call: &mut ToolCall, output: &str) {
@@ -1200,8 +1217,8 @@ fn stamp_computer_summary(call: &mut ToolCall, output: &str) {
     if let Some(app) = summary.get("appName").and_then(serde_json::Value::as_str) {
         fields.insert("app".into(), app.into());
     }
-    if let Some(actions) = summary.get("actions").filter(|value| value.is_array()) {
-        fields.insert("actions".into(), actions.clone());
+    if let Some(actions) = summary.get("actions").and_then(storable_actions) {
+        fields.insert("actions".into(), actions);
     }
 }
 
