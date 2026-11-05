@@ -25,8 +25,9 @@ pub const SWITCHES: &[&str] = &[
 /// The switches scripts/smoke.sh drives a release build with (as it does
 /// `--inspect`): read by any build but the beta, which ignores its
 /// arguments too. `ZERON_ZGX_UI` runs other scripts as the app's;
-/// `ZERON_ZGX_NO_BROWSER` hands the sign-in page to a file.
-pub const SMOKE_SWITCHES: &[&str] = &["ZERON_ZGX_UI", "ZERON_ZGX_NO_BROWSER"];
+/// `ZERON_ZGX_NO_BROWSER` hands the sign-in page to a file;
+/// `ZERON_ZGX_SHELL_RUN_DIR` also gets the descriptor, as a Dev's `HOME` isn't the shell's.
+pub const SMOKE_SWITCHES: &[&str] = &["ZERON_ZGX_UI", "ZERON_ZGX_NO_BROWSER", "ZERON_ZGX_SHELL_RUN_DIR"];
 
 /// Whether this build reads `SWITCHES`.
 pub const ON: bool = cfg!(debug_assertions);

@@ -455,11 +455,71 @@ fn alive(app: &UiDriverDescriptor) -> bool {
     };
     match connected {
         Ok(()) => true,
-        Err(error) => !matches!(
-            error.kind(),
-            ErrorKind::ConnectionRefused | ErrorKind::NotFound
-        ),
+        // macOS also refuses a unix connect while the app's accept queue is full.
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::ConnectionRefused | ErrorKind::NotFound
+            ) =>
+        {
+            !cfg!(windows) && !pid_taken_since(app)
+        }
+        Err(_) => true,
     }
+}
+
+/// `quit` must not signal a process that took a dead app's pid.
+fn pid_taken_since(app: &UiDriverDescriptor) -> bool {
+    const CLOCK_SLACK_SECS: i64 = 5;
+    // Another user's process: this user's app can't hold that pid any more.
+    #[cfg(unix)]
+    // SAFETY: signal 0 delivers nothing; kill only reports whether it may signal the pid.
+    if unsafe { libc::kill(app.pid as libc::pid_t, 0) } != 0 {
+        return true;
+    }
+    process_start_secs(app.pid)
+        .is_some_and(|start| start > app.started_at.timestamp() + CLOCK_SLACK_SECS)
+}
+
+#[cfg(target_os = "macos")]
+fn process_start_secs(pid: u32) -> Option<i64> {
+    // SAFETY: proc_bsdinfo is plain data; proc_pidinfo writes at most `size` bytes into it.
+    unsafe {
+        let mut info: libc::proc_bsdinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let written = libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        );
+        (written == size).then_some(info.pbi_start_tvsec as i64)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_start_secs(pid: u32) -> Option<i64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let ticks: i64 = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()?;
+    let boot: i64 = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime ")?.trim().parse().ok())?;
+    // SAFETY: sysconf only reads a system constant.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (hz > 0).then(|| boot + ticks / hz as i64)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_start_secs(_pid: u32) -> Option<i64> {
+    None
 }
 
 pub fn select<'a>(
@@ -1100,6 +1160,26 @@ mod tests {
         assert_eq!(select(&live, None, None).map(|app| app.pid), Ok(200));
         let error = pick(None, None).unwrap_err();
         assert!(error.starts_with("4 Zeron apps match;"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_live_app_whose_socket_refuses_stays_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = std::process::id();
+        let mut live = app(pid, "Zeron Beta Dev 7", UiDriverBuild::Release, 49872, 0);
+        live.started_at = chrono::Utc::now();
+        live.endpoint = UiDriverEndpoint::Unix {
+            socket: socket_path(dir.path(), pid),
+        };
+        let path = descriptor_path(dir.path(), pid);
+        std::fs::write(&path, serde_json::to_vec(&live).unwrap()).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(socket_path(dir.path(), pid)).unwrap());
+
+        let listed: Vec<u32> = list_in(dir.path()).iter().map(|app| app.pid).collect();
+
+        assert_eq!(listed, [pid]);
+        assert!(path.exists());
     }
 
     #[tokio::test]

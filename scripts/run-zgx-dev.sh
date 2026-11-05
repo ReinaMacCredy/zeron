@@ -31,7 +31,10 @@ if [[ "${ZERON_HARNESS:-}" == mock ]]; then
 fi
 [[ $# -gt 0 ]] || set -- main
 
+# Script state, template trust, zooms and caches all follow HOME, inside zgx.
 exec env "${CLEAN_ENV[@]}" \
+  HOME="$DEV_ROOT/home" \
+  ZERON_ZGX_SHELL_RUN_DIR="$HOME/.zeron/run" \
   ZERON_DEV_APP_NAME="$NAME" \
   ZERON_ZGX_ENGINE_PORT="$PORT" \
   ZERON_ZGX_ENGINE_DATA="$DEV_ROOT/data" \

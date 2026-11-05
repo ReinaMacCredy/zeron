@@ -12,15 +12,19 @@ the public Docs and `zeron --help`. Internally the code still says `ui_driver`.
 ## The zgx app
 
 `zeron app launch --zgx --mock` builds and starts `apps/zgx` through `scripts/run-zgx-dev.sh`:
-number N from 60 to 99, engine port 49800+N, everything under `target/zgx-dev<N>` (data, engine
-home, a copy of the engine), edge dead, label `Zeron Beta Dev <N>`. `zeron app quit --target <t>`
-sends SIGTERM to the app, then to the engine named in `<data>/engine.lock`. Neither ever touches
-port 27654 or `~/.zeron`.
+number N from 60 to 99, engine port 49800+N, everything under `target/zgx-dev<N>` (data, a copy of
+the engine, and `home`, the `HOME` of both the engine and the app, so a Dev's script state, template
+trust, zooms and caches are its own), edge dead, label `Zeron Beta Dev <N>`.
+`zeron app quit --target <t>` sends SIGTERM to the app, then to the engine named in
+`<data>/engine.lock`. Neither ever touches port 27654; of `~/.zeron` a Dev writes only its own
+descriptor in `~/.zeron/run`.
 
 A zgx window that serves devtools (`--inspect`, never a beta build) writes the same
 `~/.zeron/run/ui-<pid>.json` as a gpui app, with `"protocol": "zgx"` and its inspect socket, so
-`zeron app list` shows both kinds and `--target` picks one the same way. The client then speaks
-`zgx inspect`'s wire (one JSON line each way) instead of the gpui driver's:
+`zeron app list` shows both kinds and `--target` picks one the same way. On a Dev that file sits in
+both run folders: the Dev's own home's, where a chat's `app_inspect` and `app_drive` look, and the
+real home's, where `zeron app` from a shell looks. The client then speaks `zgx inspect`'s wire (one
+JSON line each way) instead of the gpui driver's:
 
 - Actions are `zgx inspect`'s commands. Reading: `tree`, `node`, `find`, `state`, `errors`,
   `elements`, `contributions`, `lint`, `frames`, `reloads`, `memory`, `wait`, `sleep`, `snapshot`,
@@ -124,7 +128,10 @@ Each process writes a descriptor `~/.zeron/run/ui-<pid>.json` and listens for th
   unset.
 
 A clean quit removes the descriptor and the socket. A crash, SIGTERM or SIGKILL leaves them, and
-the client prunes any descriptor whose pid is gone or whose endpoint refuses.
+the client removes a descriptor only when its process is gone: the pid no longer exists, or a later
+process took the pid and the endpoint refuses. A live app whose endpoint refuses for a moment stays
+listed, and a request to it fails with the connect error. On Windows, which has no pid check here,
+a refused endpoint still removes the descriptor.
 
 Two clients share one implementation (`crates/mcp/src/ui_driver.rs`):
 
@@ -151,7 +158,7 @@ as `127.0.0.1:<port>` and never print its token.
 | Target | Picks |
 |---|---|
 | omitted, MCP tool | the app serving this chat (same engine `ipcPort`), release first, then the earliest started |
-| `self` | the same as omitted; the CLI refuses it, because only the tool knows its port |
+| `self` | the app serving this chat, picked the same way, but it counts as naming the app, so a chat at Full access can `app_drive` it; the CLI refuses it, because only the tool knows its port |
 | omitted, CLI | the only live app; with two or more it errors |
 | all digits | that pid |
 | contains `/` | that exact unix socket path |
