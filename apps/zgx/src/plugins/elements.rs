@@ -34,7 +34,7 @@ pub const ELEMENTS: &[Element] = &[
     e(".session-row", "a sidebar row", "A session's row in the sidebar.", &["session"]),
     e(".session-title", "a sidebar row", "A session row's title.", &[]),
     e(".section-header", "the sidebar", "A project's, device's or section's header in the sidebar.", &["project"]),
-    e("#sidebar-actions", "the sidebar", "New chat and Search, at the sidebar's top.", &[]),
+    e("#sidebar-actions", "the sidebar", "Search and plugins' pages, at the sidebar's top.", &[]),
     e("#titlebar", "the title bar", "The title bar.", &[]),
     e("#titlebar-actions", "the title bar", "The title bar's actions, at its end.", &[]),
     e("#rail", "the sidebar's rail", "The collapsed sidebar's rail.", &[]),

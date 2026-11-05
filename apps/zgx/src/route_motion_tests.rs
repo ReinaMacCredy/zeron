@@ -57,7 +57,7 @@ fn a_new_chat_and_a_session_switch_the_composer_at_once() {
     assert!((app.opacity("chat-composer-dock") - 1.0).abs() < 0.01, "the composer shows, docked");
 
     // To a new chat: mid-page from the first frame, never faded.
-    app.click("#shell-sidebar >> role:button \"New chat\"");
+    app.click("#app-rail >> role:button \"New chat\"");
     let seen = watch(&mut app, 60);
     let hero = app.bounds("chat-composer").y;
     assert!(hero < docked - 50., "it stands mid-page on a new chat ({hero} vs {docked})");

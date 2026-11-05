@@ -44,6 +44,7 @@ local host = require("@app/screens/settings/host")
 -- (The look chosen, applied as it loads.)
 local appearance = require("@app/screens/shell/appearance")
 local motion = require("@ds/motion")
+local rail = require("@app/screens/shell/rail")
 
 local TITLE_H = 38
 
@@ -441,7 +442,7 @@ return function(): Node
 		ref = root,
 		-- (The window's width: the columns fit it.)
 		on_resize = function(size)
-			fit.set_viewport(size.w)
+			fit.set_viewport(size.w - rail.W)
 		end,
 		id = "shell",
 		-- The accent chosen (Settings → Appearance, setup's Make it yours), as
@@ -526,6 +527,9 @@ return function(): Node
 				grow = 1,
 				min_h = 0,
 				w_full = true,
+				boundary.screen(boundary.named("shell.boundary.screen.app_rail"), "@app/screens/shell/rail", function(r): Node
+					return r.Rail()
+				end, { pass = true }),
 				-- (Settings stand in its place and the page's, under the top bar.)
 				ui.div {
 					h_full = true,

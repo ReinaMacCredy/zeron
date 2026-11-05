@@ -2221,7 +2221,6 @@
         "reconnecting": "正在重新连接…"
       },
       "update_notice": "更新通知",
-      "star": "在 GitHub 上加星标",
       "copied": "已拷贝{what}",
       "menu": {
         "sections": "分区",
@@ -2330,7 +2329,8 @@
         "settings": "设置",
         "update_watch": "更新监视器",
         "search": "搜索",
-        "new_project": "新建项目"
+        "new_project": "新建项目",
+        "app_rail": "应用侧栏"
       }
     },
     "title_bar": {
@@ -2470,6 +2470,29 @@
       "on_device": "在 {device} 上",
       "from_github": "来自 GitHub",
       "add_cloud_project": "添加项目"
+    },
+    "rail": {
+      "label": "应用侧栏",
+      "with_key": "{label} · {key}",
+      "close_settings": "关闭设置",
+      "help": "帮助",
+      "help_shortcuts": "键盘快捷键",
+      "help_star": "在 GitHub 上为 Zeron 加星",
+      "usage": {
+        "loading": "正在加载用量…",
+        "none": "没有报告套餐用量",
+        "limit": "用量：已达上限",
+        "line": "用量：{name} · {windows}",
+        "title": "用量",
+        "used": "已用",
+        "limit_reached": "已达上限",
+        "open_page": "点击圆环打开用量页面",
+        "window": {
+          "session": "5 小时",
+          "week": "每周",
+          "day": "每天"
+        }
+      }
     }
   },
   "onboarding": {
@@ -2986,7 +3009,6 @@
       "out_of_date": "Zeron 引擎版本过旧",
       "restart_tip": "Zeron 已在后台更新。重新启动引擎会结束其中正在运行的任务。",
       "theirs_tip": "引擎是在此 App 外启动的：请在那里重新启动以更新。",
-      "short": "引擎已过期",
       "old": "此版本 Zeron 需要更新的引擎",
       "old_tip": "引擎版本低于此版本的要求。打开“关于与更新”即可回到稳定版。",
       "short_old": "需要更新的引擎"

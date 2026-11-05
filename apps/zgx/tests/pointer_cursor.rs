@@ -45,7 +45,7 @@ fn every_resize_edge_shows_its_cursor_alone_and_in_a_split() {
     use zgx::input::{InputEvent, Modifiers, PointerButton};
     let ui = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui");
     let mut app = TestApp::new(|runtime| ScriptHost::new(runtime, ui.join("shell_fixture.luau")));
-    app.ui.scene.borrow_mut().resize(1400., 860.);
+    app.ui.scene.borrow_mut().resize(1400. + 46., 860.);
     app.frames(60);
     app.click("#shell-sidebar >> role:button \"Fix the build\"");
     app.frames(20);

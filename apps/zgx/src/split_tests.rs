@@ -23,6 +23,7 @@ use crate::plugins::{live, official, preview};
 
 const W: f32 = 1400.;
 const H: f32 = 860.;
+const RAIL: f32 = 46.;
 
 fn ui() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui")
@@ -853,7 +854,7 @@ fn the_side_opened_wins_in_a_split() {
     const SIDEBAR: &str = "#titlebar >> role:button \"Toggle sidebar\"";
     for (ids, least) in [(&["a1", "a2"][..], 288.), (&["a1", "a2", "a3"][..], 230.)] {
         let mut app = mount(&scratch(&format!("wins-{}", ids.len())));
-        app.ui.scene.borrow_mut().resize(1100., H);
+        app.ui.scene.borrow_mut().resize(1100. + RAIL, H);
         app.frames(30);
         app.host.set_state("screens/shell/split.luau::inset_split_trees", row(ids)).unwrap();
         open(&mut app, "Fix the build");
@@ -1252,7 +1253,7 @@ fn a_new_chat_s_page_stays_a_card_as_the_sidebar_folds() {
     sample(&mut app, "at rest");
     app.click("#titlebar >> role:button \"Toggle sidebar\"");
     sample(&mut app, "folding");
-    assert_eq!(app.bounds("shell-page").width, W - 10., "the window's edge each side of it");
+    assert_eq!(app.bounds("shell-page").width, W - RAIL - 10., "the window's edge each side of it, beside the rail");
     app.click("#titlebar >> role:button \"Toggle sidebar\"");
     sample(&mut app, "coming back");
 }
@@ -1491,7 +1492,7 @@ fn what_is_being_read_stands_still_at_every_frame_of_a_drag() {
     for (panes, room) in [(1usize, 1000f32), (2, 1400.), (4, 2000.)] {
         const IDS: [&str; 4] = ["a1", "a2", "a3", "b1"];
         let mut app = mount(&scratch(&format!("edge-frames-{panes}")));
-        app.ui.scene.borrow_mut().resize(room, H);
+        app.ui.scene.borrow_mut().resize(room + RAIL, H);
         app.frames(10);
         long_chats(&app, &IDS, None);
         if panes > 1 {

@@ -140,6 +140,8 @@ export type Name =
 	| "paperclip"
 	| "restart"
 	| "scissors"
+	| "lucide-circle-help"
+	| "usage-chart"
 
 -- `name` may be a function: the icon follows it (a checkout's folder or
 -- worktree).

@@ -19,21 +19,40 @@ export type Props = {
 	avatar: (() -> string?)?,
 	on_user: () -> (),
 	user_open: () -> boolean,
-	on_settings: () -> (),
-	settings_open: () -> boolean,
+	-- Settings' button beside you (none where a door to them stands elsewhere).
+	on_settings: (() -> ())?,
+	settings_open: (() -> boolean)?,
 }
 
 -- A sidebar row's height (ds/sidebar's SLOT).
 local SLOT = 30
 
 return function(props: Props): Node
-	local on = ui.use_state(props.settings_open())
-	ui.effect(function()
-		local v = props.settings_open()
-		if on:peek() ~= v then
-			on:set(v)
-		end
-	end)
+	local settings: Node? = nil
+	if props.on_settings and props.settings_open then
+		local on_settings, settings_open = props.on_settings, props.settings_open
+		local on = ui.use_state(settings_open())
+		ui.effect(function()
+			local v = settings_open()
+			if on:peek() ~= v then
+				on:set(v)
+			end
+		end)
+		settings = ToggleButton {
+			on = on,
+			-- (ToggleButton's label is its tooltip: a string.)
+			label = locale.s("ds.account_row.settings"),
+			icon = "settings",
+			tone = "quiet",
+			w = SLOT,
+			h = SLOT,
+			rounded = "$radius.lg",
+			shrink = 0,
+			on_change = function()
+				on_settings()
+			end,
+		}
+	end
 	return ui.row {
 		w_full = true,
 		gap = "$zeron.list.gap",
@@ -81,19 +100,6 @@ return function(props: Props): Node
 				color = "$text.primary",
 			},
 		},
-		ToggleButton {
-			on = on,
-			-- (ToggleButton's label is its tooltip: a string.)
-			label = locale.s("ds.account_row.settings"),
-			icon = "settings",
-			tone = "quiet",
-			w = SLOT,
-			h = SLOT,
-			rounded = "$radius.lg",
-			shrink = 0,
-			on_change = function()
-				props.on_settings()
-			end,
-		},
+		settings,
 	}
 end

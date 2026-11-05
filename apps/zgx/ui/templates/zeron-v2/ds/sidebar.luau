@@ -173,6 +173,8 @@ export type Props = {
 	-- from a device's header inside a project's (or a project's inside a
 	-- device's), on that device too (its name, as the sessions have it).
 	on_new: ((project: string?, device: string?) -> ())?,
+	-- No New chat row at the top: a door to it stands elsewhere (the app rail).
+	no_new_row: boolean?,
 	on_search: (() -> ())?,
 	-- Plugins' pages ("pages.add"), each a row under Search: `{ plugin, id,
 	-- title, icon? }` as a state of a list, and what choosing one does.
@@ -1992,20 +1994,22 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		w_full = true,
 		gap = "$zeron.list.gap",
 		shrink = 0,
-		row {
-			name = function(): string
-				return locale.s("ds.sidebar.new_chat")
-			end,
-			lead = Icon { name = "plus", size = 16 },
-			words = line(label(function(): string
-				return locale.s("ds.sidebar.new_chat")
-			end, nil, "$font.weight.medium"), hint(ui.shortcut_text("cmd+n"))),
-			on_click = function()
-				if props.on_new then
-					props.on_new(nil)
-				end
-			end,
-		},
+		if props.no_new_row
+			then nil
+			else row {
+				name = function(): string
+					return locale.s("ds.sidebar.new_chat")
+				end,
+				lead = Icon { name = "plus", size = 16 },
+				words = line(label(function(): string
+					return locale.s("ds.sidebar.new_chat")
+				end, nil, "$font.weight.medium"), hint(ui.shortcut_text("cmd+n"))),
+				on_click = function()
+					if props.on_new then
+						props.on_new(nil)
+					end
+				end,
+			},
 		row {
 			name = function(): string
 				return locale.s("ds.sidebar.search")

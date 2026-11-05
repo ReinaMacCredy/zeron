@@ -163,8 +163,8 @@ test("choosing a session moves the route; back and forward move the choice", fun
 	app:frames(10)
 	expect(app:state("shell_route_path")).to_be("/session/a1")
 
-	-- New chat, from the sidebar's top: no step back to a session chosen.
-	app:click(`{SIDE} >> role:button "New chat"`)
+	-- New chat, from the rail: no step back to a session chosen.
+	app:click("#rail-new-chat")
 	app:frames(10)
 	expect(app:state("shell_route_path")).to_be("/")
 	expect(app:state("shell_selected")).to_be_nil()
@@ -516,7 +516,16 @@ test("the title bar's strip moves the window everywhere but its controls", funct
 	-- Over the sidebar's head, then the window round the page's card (over
 	-- it, beside it) and the card's own head, edge to edge across the
 	-- window.
+	-- (A click lands at its middle, under "…" at its usual width: widened, that's the gap past "…".)
+	local dots_x, dots_w = span(app, `{SIDE} >> role:button "Sidebar view options"`)
+	local tabs_x = span(app, "#session-tabs-scroll")
+	local head_x = span(app, "#sidebar-drag")
+	local gap_middle = ((dots_x :: number) + (dots_w :: number) + (tabs_x :: number)) / 2
+	app:set_state("shell_sidebar_width", 2 * (gap_middle - (head_x :: number)))
+	app:frames(20)
 	bare("#sidebar-drag")
+	app:set_state("shell_sidebar_width", 256)
+	app:frames(20)
 	-- (The window's strip runs under the tabs along the top bar.)
 	expect(app:has("#shell-drag")).to_be(true)
 	local sx, sw = span(app, "#sidebar-drag")
@@ -538,11 +547,11 @@ test("the title bar's strip moves the window everywhere but its controls", funct
 	app:click('#titlebar >> role:button "Back"')
 	app:frames(10)
 	expect(app:state("shell_route_path")).to_be("/")
-	-- Collapsed: the page's strip runs from the window's edge.
+	-- Collapsed: the page's strip runs from the app rail's edge (the rail moves the window too).
 	app:click('#titlebar >> role:button "Toggle sidebar"')
 	app:frames(40)
 	local cx = span(app, "#shell-drag")
-	expect(cx).to_be(0)
+	expect(cx).to_be(46)
 	app:click('#titlebar >> role:button "Toggle sidebar"')
 	app:frames(40)
 	-- Settings, under the top bar: its strip is the bar's.
@@ -589,7 +598,7 @@ test("each session owns its panel, open or closed; a new chat shows none; the wi
 	expect(open_panel(app, "b1")).to_be(false)
 	expect(open_panel(app, "a1")).to_be(true)
 	-- A new chat has its own, closed, and its toggle is there.
-	app:click(`{SIDE} >> role:button "New chat"`)
+	app:click("#rail-new-chat")
 	app:frames(40)
 	expect(shown()).to_be(false)
 	expect(app:has('#titlebar >> role:button "Panel"')).to_be(true)
@@ -628,21 +637,14 @@ test("the composer is made once: the sessions arriving, changing and growing lea
 	app:frames(20)
 	app:key("Escape")
 	app:frames(30)
-	app:click(`{SIDE} >> role:button "New chat"`)
+	app:click("#rail-new-chat")
 	app:frames(30)
 	expect(`field @{field()}`).to_be(`field @{first}`)
 end)
 
-test("signed out, the foot says Local; Star on GitHub shows over it until put away", function()
+test("signed out, the foot says Local", function()
 	local app = open()
 	expect(app:has(`{SIDE} >> "Local"`)).to_be(true)
-	expect(app:has(`{SIDE} >> #star-banner`)).to_be(true)
-	-- (Over you at the foot.)
-	expect(top_of(app, SIDE, "Star on GitHub") < top_of(app, SIDE, "Local")).to_be(true)
-	app:click(`#star-banner >> role:button "Dismiss"`)
-	app:frames(20)
-	expect(app:has(`{SIDE} >> #star-banner`)).to_be(false)
-	expect(app:state("shell_star_banner_dismissed")).to_be(true)
 end)
 
 -- A node's rectangle (its first line in the tree under `scope`): x, y, w, h.
@@ -659,8 +661,8 @@ test("collapsed, the sidebar folds away entirely: no rail, the page the window's
 	app:frames(20)
 	app:command("shell.toggle_sidebar")
 	app:frames(40)
-	-- (A page is a card, the window's edge round it, a new chat's too.)
-	local EDGE = 5
+	-- (A page is a card, the window's edge round it, a new chat's too, beside the app rail.)
+	local EDGE, RAIL = 5, 46
 	local function alone(when: string, page_w: number)
 		expect(app:has("#shell-rail")).to_be(false)
 		local _, _, sw = rect(app, SIDE)
@@ -668,11 +670,11 @@ test("collapsed, the sidebar folds away entirely: no rail, the page the window's
 		local _, _, pw = rect(app, "#shell-page")
 		expect(`{when}: page {pw}`).to_be(`{when}: page {page_w}`)
 	end
-	alone("a session", 1200 - 2 * EDGE)
+	alone("a session", 1200 - RAIL - 2 * EDGE)
 	-- A new chat, and back: still nothing in the sidebar's place.
 	app:command("shell.new_chat")
 	app:frames(40)
-	alone("a new chat", 1200 - 2 * EDGE)
+	alone("a new chat", 1200 - RAIL - 2 * EDGE)
 	app:command("shell.toggle_sidebar")
 	app:frames(40)
 	local _, _, open_w = rect(app, SIDE)
@@ -955,21 +957,16 @@ test("the palette's In Files lists lines found in the session's files, with thei
 	expect(list:find('"Files"', 1, true) < list:find('"In Files"', 1, true)).to_be(true)
 end)
 
--- At the sidebar's foot: you open your profile, chosen while it's open;
--- settings' own button beside you opens them, on while they're open, and a
--- press again leaves them. The settings window has the same foot.
-test("the foot's you opens your profile, and its settings button toggles settings", function()
+-- At the sidebar's foot: you open your profile. Settings' own door is the rail's.
+test("the foot's you opens your profile, and only the rail has settings' button", function()
 	local app = open()
 	app:frames(20)
-	-- Settings' button (a toggle): open, on, then off again.
-	expect(app:tree("#shell-sidebar")).to_contain('checkbox "Settings"')
-	app:click('#shell-sidebar >> role:checkbox "Settings"')
+	expect(app:tree("#shell-sidebar")).never.to_contain('checkbox "Settings"')
+	app:command("shell.settings")
 	app:frames(20)
-	expect(app:has("#settings-nav")).to_be(true)
-	expect(app:tree("#settings-nav")).to_contain('checkbox "Settings"')
-	expect(app:tree("#settings-nav")).never.to_contain('"Settings" 0')
-	expect(app:tree("#settings-nav")).never.to_contain('"Settings" unchecked')
-	app:click('#settings-nav >> role:checkbox "Settings"')
+	expect(app:tree("#settings-nav")).never.to_contain('checkbox "Settings"')
+	app:command("shell.settings")
+	app:key("Escape")
 	app:frames(20)
 	expect(app:has("#settings-nav")).to_be(false)
 	-- You: your profile.
@@ -983,9 +980,9 @@ test("the foot's you opens your profile, and its settings button toggles setting
 	expect(err == nil or string.find(err, "WebP is not supported", 1, true) ~= nil).to_be(true)
 end)
 
--- Searching settings puts its results where the pages were; you and
--- settings' button stay at the list's foot, where they always are.
-test("a settings search keeps the foot's you and settings at the foot", function()
+-- Searching settings puts its results where the pages were; you stay at the
+-- list's foot, where you always are.
+test("a settings search keeps the foot's you at the foot", function()
 	local app = open()
 	app:resize(1200, 800)
 	app:command("shell.settings")

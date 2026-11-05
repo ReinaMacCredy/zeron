@@ -1,4 +1,5 @@
--- The engine-update chip (screens/engine/update) over a made-up host:
+-- The engine's update (screens/engine/update) as the app rail's entry and the
+-- sidebar foot's chip say it, over a made-up host:
 -- `engine.update` as the test sets it, the restart noted in
 -- `test_engine_restarts`, the sessions' chats as `test_engine_chats` says.
 -- Driven by tests/engine_update.test.luau.
@@ -7,6 +8,7 @@ ui.theme.strict("warn")
 local ds = require("@ds")
 ds.setup()
 local Update = require("@app/screens/engine/update")
+local rail = require("@app/screens/shell/rail")
 local sessions = require("@account/sessions") :: any
 
 local restarts = ui.state("test_engine_restarts", 0)
@@ -22,9 +24,13 @@ ui.effect(function()
 	sessions.now:set({ state = "ready", chats = chats:get(), archived = {}, devices = {}, projects = {} })
 end)
 
-return ui.column {
-	w = 240,
-	p = "$space.2",
-	Update.Watch(),
-	Update.Notice(),
+return ui.row {
+	h_full = true,
+	rail.Rail(),
+	ui.column {
+		w = 240,
+		p = "$space.2",
+		Update.Watch(),
+		Update.Notice(),
+	},
 }

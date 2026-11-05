@@ -173,6 +173,10 @@ export type Props = {
 	selected: State<string?>,
 	pinned: Live<{ Session }>?,
 	card: boolean?,
+	-- Where a card's left edge stands from the window's left (5, the window's gap).
+	card_x: number?,
+	-- No New chat row at the top: a door to it stands elsewhere (the app rail).
+	no_new_row: boolean?,
 	projects: Live<{ Project }>,
 	-- (A state or a function for an account that arrives or changes.)
 	user: Live<User>?,
@@ -2016,20 +2020,22 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		w_full = true,
 		gap = "$zeron.list.gap",
 		shrink = 0,
-		row {
-			name = function(): string
-				return locale.s("ds.sidebar.new_chat")
-			end,
-			lead = Icon { name = "plus", size = 16 },
-			words = line(label(function(): string
-				return locale.s("ds.sidebar.new_chat")
-			end, nil, "$font.weight.medium"), hint(ui.shortcut_text("cmd+n"))),
-			on_click = function()
-				if props.on_new then
-					props.on_new(nil)
-				end
-			end,
-		},
+		if props.no_new_row
+			then nil
+			else row {
+				name = function(): string
+					return locale.s("ds.sidebar.new_chat")
+				end,
+				lead = Icon { name = "plus", size = 16 },
+				words = line(label(function(): string
+					return locale.s("ds.sidebar.new_chat")
+				end, nil, "$font.weight.medium"), hint(ui.shortcut_text("cmd+n"))),
+				on_click = function()
+					if props.on_new then
+						props.on_new(nil)
+					end
+				end,
+			},
 		row {
 			name = function(): string
 				return locale.s("ds.sidebar.search")
@@ -4926,7 +4932,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 				-- gap before the card taken off.)
 				if props.card then
 					-- (`controls_end` holds the row's own 10 past its last control.)
-					return ui.raw(TitleBar.controls_end() - 10 + 8 - 5, "past the title bar's controls, by its group gap")
+					return ui.raw(TitleBar.controls_end() - 10 + 8 - (props.card_x or 5), "past the title bar's controls, by its group gap")
 				end
 				local button = (ui.theme.get("zeron.icon_button.md") :: number?) or 24
 				return room() - PAD - button

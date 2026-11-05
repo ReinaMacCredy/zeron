@@ -269,8 +269,8 @@ end
 
 test("Profile, too narrow for two columns, centres the card over groups at the page's measure", function()
 	local app = open("Account")
-	-- The narrowest main window (760 wide).
-	app:resize(760, 900)
+	-- The narrowest main window: 760 wide beside the app rail's 46.
+	app:resize(760 + 46, 900)
 	app:frames(30)
 	local cx, cy, cw = box(app, "#setting-card")
 	local gx, gy, gw = box(app, "#setting-photo")

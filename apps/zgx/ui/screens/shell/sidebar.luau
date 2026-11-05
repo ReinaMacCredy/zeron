@@ -24,11 +24,11 @@ local auth = require("@account/auth")
 local PrivateText = require("@ds/private_text")
 local status = require("@ds/status")
 local route = require("@app/screens/shell/route")
+local rail = require("@app/screens/shell/rail")
 local view = require("@app/screens/shell/view")
 local fit = require("@app/screens/shell/fit")
 local motion = require("@ds/motion")
 local boundary = require("@app/screens/shell/boundary")
-local control = require("@ds/control")
 local locale = require("@ds/locale")
 local ds_session_row = require("@ds/session_row")
 
@@ -671,13 +671,6 @@ local function user(): User
 	return { name = locale.s("shell.sidebar.local") }
 end
 
--- What stands over you at the foot: the engine's update notice (C's
--- screens/engine/update: nothing unless this app's engine is out of date
--- and busy, or someone else's is; mounted always, as an idle engine of
--- ours is restarted from it), then Star on GitHub. (The list's gap between
--- them only while the notice says something: an empty one is no height and
--- takes no gap.)
-local star: () -> Node
 -- What the connection line says (production's connection pill: no
 -- surface, a faint caption; the amber dot when offline or a change wasn't
 -- saved, the working ring while reconnecting). Healthy: nothing.
@@ -726,85 +719,17 @@ local function connection_line(): Node
 	)
 end
 
+-- An engine too old for this interface: why the app can't work, and the way
+-- back to Stable. The rail's Update entry has the rest.
 local function foot_notes(): Node
-	local notice_h = ui.use_state(0)
 	return ui.column {
 		w_full = true,
 		shrink = 0,
 		connection_line(),
-		ui.div {
-			w_full = true,
-			on_resize = function(size)
-				if notice_h:peek() ~= size.h then
-					notice_h:set(size.h)
-				end
-			end,
-			boundary.screen(boundary.named("shell.boundary.screen.update_notice"), "@app/screens/engine/update", function(update): Node
-				return update.Notice()
-			end, { pass = true }),
-		},
-		ui.div {
-			w_full = true,
-			mt = function(): any
-				return if notice_h:get() > 0 then "$zeron.list.gap" else 0
-			end,
-			star(),
-		},
+		boundary.screen(boundary.named("shell.boundary.screen.update_notice"), "@app/screens/engine/update", function(update): Node
+			return update.Notice()
+		end, { pass = true }),
 	}
-end
-
--- "Star on GitHub", over you at the foot, until it's put away (its × or
--- following it), and then never again on this Mac: Zeron's, to where its
--- landing page links.
-local REPO = "https://github.com/zeronsh/comet"
-local starred = ui.persist("shell_star_banner_dismissed", false)
-function star(): Node
-	local function away()
-		starred:set(true)
-	end
-	return ui.show(
-		function(): boolean
-			return not starred:get()
-		end,
-		-- A chip of the accent, a row's corner: its × as far from the chip's
-		-- edge at the end as from its top and foot, concentric.
-		ui.row {
-			id = "star-banner",
-			role = "link",
-			label = ui.t("shell.sidebar.star"),
-			w_full = true,
-			-- As tall as a row (you, under it).
-			h = ui.raw(30, "a sidebar row's height (ds/sidebar's SLOT)"),
-			shrink = 0,
-			pl = "$space.2",
-			-- (Its × as far in from the end as from the top: (30 − 22) / 2.)
-			pr = "$space.1",
-			gap = "$zeron.space.tight",
-			items = "center",
-			rounded = "$radius.lg",
-			bg = "$zeron.tone.accent.wash",
-			hover = { bg = "$zeron.tone.accent.edge" },
-			color = "$zeron.tone.accent.ink",
-			cursor = "pointer",
-			on_click = function()
-				ui.invoke("open_url", REPO)
-				away()
-			end,
-			-- A link's menu (ds/links): Open, as the click; Copy link.
-			context_menu = require("@ds/links").outside_menu(function(): string
-				return REPO
-			end, function()
-				ui.invoke("open_url", REPO)
-				away()
-			end),
-			ui.div { shrink = 0, y = 0.5, ds.Icon { name = "star-bold", size = 12 } },
-			ui.text { ui.t("shell.sidebar.star"), grow = 1, min_w = 0, text_size = "$font.size.xs", weight = "$font.weight.medium" },
-			ui.div {
-				theme = { zeron = { icon_button = { radius = control.nest("$radius.lg", "$space.1") } } },
-				ds.IconButton { icon = "close", label = ui.t("common.dismiss"), tooltip = locale.s("common.dismiss"), size = "sm", tone = "quiet", on_click = away },
-			},
-		}
-	)
 end
 
 -- Renaming a session: which, and the name being typed.
@@ -873,10 +798,8 @@ end
 -- What else asks for these (the shell's keys, the palette).
 local M = {}
 
--- You and settings at a sidebar's foot (this one's, and the settings
--- window's: screens/shell/settings): you open your profile, chosen while
--- it's open; settings' own button is a toggle, on while a page of theirs
--- other than your profile is open, a click again leaving them.
+-- You at a sidebar's foot (this one's, and the settings window's:
+-- screens/shell/settings): you open your profile, chosen while it's open.
 M.user = user
 M.account = {
 	on_user = function()
@@ -885,18 +808,6 @@ M.account = {
 	user_open = function(): boolean
 		local c = route.current:get()
 		return c.name == "settings" and c.page == "profile"
-	end,
-	on_settings = function()
-		local c = route.current:peek()
-		if c.name == "settings" and c.page ~= "profile" then
-			route.leave_settings()
-		else
-			route.settings(if c.name == "settings" then "general" else nil)
-		end
-	end,
-	settings_open = function(): boolean
-		local c = route.current:get()
-		return c.name == "settings" and c.page ~= "profile"
 	end,
 }
 
@@ -1432,6 +1343,8 @@ M.Sidebar = ui.component(function(props: Props): Node
 		user = user,
 		top = props.top,
 		card = not props.island,
+		card_x = rail.W + 5,
+		no_new_row = not props.island,
 		-- (A device's "+", inside a project's group: on that device too.)
 		on_new = function(project: string?, device: string?)
 			route.new_chat(if device then project else checkout_here(project), if device then device_named(device, project) else nil)
@@ -1441,7 +1354,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 		on_unarchive = function(id: string)
 			sessions.unarchive(id)
 		end,
-		pages = ui.shared("plugins.pages", {} :: { any }),
+		pages = rail.sidebar_pages,
 		on_page = function(page: any)
 			route.plugin_page(page.plugin, page.id)
 		end,
@@ -1450,8 +1363,6 @@ M.Sidebar = ui.component(function(props: Props): Node
 		end,
 		on_user = M.account.on_user,
 		user_open = M.account.user_open,
-		on_settings = M.account.on_settings,
-		settings_open = M.account.settings_open,
 		menu = menu,
 		project_menu = project_menu,
 		narrowed = function(): boolean

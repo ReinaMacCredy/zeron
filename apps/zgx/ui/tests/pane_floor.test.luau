@@ -6,6 +6,8 @@
 -- ui/shell_fixture.luau.
 
 local PANE_MIN = require("../screens/shell/fit_policy").PANE_MIN
+-- The app rail stands beside all this: its width on top keeps the room these numbers are about.
+local RAIL = 46
 
 local function box(app: any, target: string): (number, number)
 	local line = app:tree(target):match("[^\n]+") or ""
@@ -48,7 +50,7 @@ end
 -- The shell at `w` wide on Fix the build (a1), in `tree`.
 local function split(w: number, tree: any?): any
 	local app = mount("shell_fixture.luau")
-	app:resize(w, 800)
+	app:resize(w + RAIL, 800)
 	app:frames(30)
 	if tree then
 		app:set_state("inset_split_trees", { tree })
@@ -143,7 +145,7 @@ test("a chat alone goes as it always has: the sidebar stays, or hides for room a
 	expect(sidebar_shows(app)).to_be(true)
 	expect(panel_w(app)).to_be(422)
 	toggle(app)
-	app:resize(880, 800)
+	app:resize(880 + RAIL, 800)
 	app:frames(30)
 	toggle(app)
 	expect(panel_w(app)).to_be(440)
@@ -167,7 +169,7 @@ test("a chat alone in a narrow window: anything opening its panel shows it, as i
 	expect(panel_w(app) <= 1).to_be(true)
 	expect(sidebar_shows(app)).to_be(true)
 	-- With room for both, the sidebar stays.
-	app:resize(1000, 800)
+	app:resize(1000 + RAIL, 800)
 	app:frames(30)
 	app:command("shell.toggle_files_tab")
 	app:frames(60)
@@ -198,7 +200,7 @@ test("the window narrowed: the panel gives its width, then the sidebar hides, th
 	local w, hid_at = 1500, nil :: number?
 	while w > 760 do
 		w -= 20
-		app:resize(w, 800)
+		app:resize(w + RAIL, 800)
 		app:frames(20)
 		expect(`{w}: {panel_w(app) >= 360}`).to_be(`{w}: true`)
 		if panel_w(app) > 360 then
@@ -217,7 +219,7 @@ test("the window narrowed: the panel gives its width, then the sidebar hides, th
 	expect(pane_w(app, "a1") < PANE_MIN).to_be(true)
 	-- Hidden for room, not closed: the room back, the sidebar back.
 	expect(app:state("shell_collapsed")).to_be(false)
-	app:resize(1500, 800)
+	app:resize(1500 + RAIL, 800)
 	app:frames(60)
 	expect(sidebar_shows(app)).to_be(true)
 end)
@@ -227,7 +229,7 @@ test("the window widened beside a split: the panes take it all, the panel keeps 
 	toggle(app)
 	expect(panel_w(app)).to_be(360)
 	local was = pane_w(app, "a1")
-	app:resize(1800, 800)
+	app:resize(1800 + RAIL, 800)
 	app:frames(60)
 	expect(panel_w(app)).to_be(360)
 	expect(pane_w(app, "a1") > was).to_be(true)
@@ -260,10 +262,10 @@ test("the sidebar hidden for room: its toggle shows it, the panel closing, and i
 	expect(sidebar_shows(app)).to_be(true)
 	expect(app:state("shell_collapsed")).to_be(false)
 	-- Asked for here it stays; a narrower window, and it gives way again.
-	app:resize(1000, 800)
+	app:resize(1000 + RAIL, 800)
 	app:frames(30)
 	expect(sidebar_shows(app)).to_be(true)
-	app:resize(900, 800)
+	app:resize(900 + RAIL, 800)
 	app:frames(60)
 	expect(sidebar_shows(app)).to_be(false)
 end)
@@ -308,7 +310,7 @@ test("its edge stops at the panes' least, and its width restored keeps to it", f
 	expect_panes_keep_their_least(app, PAIR, "restored")
 	-- The window wider: it takes back the width dragged (its tree docked now
 	-- too), then the panes grow.
-	app:resize(1900, 800)
+	app:resize(1900 + RAIL, 800)
 	app:frames(40)
 	expect(pane_w(app, "a1") > w).to_be(true)
 end)
@@ -320,7 +322,7 @@ test("beside a split its tree floats, however wide the window: the panel never g
 	app:frames(40)
 	expect_panes_keep_their_least(app, PAIR, "floating")
 	expect(panel_w(app)).to_be(360)
-	app:resize(1800, 800)
+	app:resize(1800 + RAIL, 800)
 	app:frames(40)
 	expect(panel_w(app)).to_be(360)
 	expect_panes_keep_their_least(app, PAIR, "wide")

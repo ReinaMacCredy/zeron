@@ -64,7 +64,7 @@ test("switching to a chat with its panel open or closed lands at once, no step",
 	app:frames(1)
 	expect(panel_width(app)).to_be(open_w)
 	-- A new chat has no panel: gone at once; back to the chat, there at once.
-	app:click('#shell-sidebar >> role:button "New chat"')
+	app:click("#rail-new-chat")
 	app:frames(1)
 	expect(panel_width(app)).to_be(0)
 	show_chat(app, "Fix the build")

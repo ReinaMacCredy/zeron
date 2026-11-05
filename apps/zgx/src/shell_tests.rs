@@ -15,6 +15,7 @@ use zgx_script::{ScriptHost, testing::TestApp};
 
 const W: f32 = 1200.;
 const H: f32 = 800.;
+const RAIL: f32 = 46.;
 /// The middle of the title bar's strip (Zeron's: 38 tall, its controls
 /// centred 21 down).
 const STRIP_Y: f32 = 21.;
@@ -149,14 +150,14 @@ fn the_title_bar_moves_the_window_across_its_width() {
 /// The window's edge round the page's card.
 const EDGE: f32 = 5.;
 
-/// Collapsed, the sidebar is gone and nothing stands in for it: no rail
-/// (screens/shell/view `rail`, off), the sidebar no wider than nothing, the
-/// page the window's width but the window's edge each side, a card, a new
-/// chat's too.
+/// Collapsed, the sidebar is gone and nothing stands in for it: no rail of its
+/// own (screens/shell/view `rail`, off), the sidebar no wider than nothing, the
+/// page what the app rail leaves of the window but the window's edge each side,
+/// a card, a new chat's too.
 fn collapsed_alone(app: &mut TestApp, when: &str) {
     assert!(app.find("#shell-rail").is_none(), "{when}: a rail shows");
     assert_eq!(app.bounds("#shell-sidebar").width, 0., "{when}: the sidebar still shows");
-    let want = W - 2. * EDGE;
+    let want = W - RAIL - 2. * EDGE;
     // (The gap round the card eases with the sidebar's motion: settled.)
     app.wait_until(|app| app.bounds("#shell-page").width == want);
     assert_eq!(app.bounds("#shell-page").width, want, "{when}: the page isn't the window's width");
@@ -317,7 +318,9 @@ fn the_places_plugins_target_are_there() {
     for target in ["#shell", "#shell-sidebar", "#sidebar", "#sidebar-actions", "#titlebar", "#titlebar-actions"] {
         assert!(app.find(target).is_some(), "no {target}:\n{}", app.tree());
     }
-    assert!(app.find("#sidebar-actions >> role:button \"New chat\"").is_some(), "New chat isn't in #sidebar-actions");
+    assert!(app.find("#sidebar-actions >> role:button \"Search\"").is_some(), "Search isn't in #sidebar-actions");
+    assert!(app.find("#sidebar-actions >> role:button \"New chat\"").is_none(), "New chat is the app rail's");
+    assert!(app.find("#app-rail >> role:button \"New chat\"").is_some(), "New chat isn't in #app-rail");
     assert!(app.find("#shell-sidebar >> #sidebar").is_some(), "#sidebar isn't the sidebar's");
     // (The rail is off: none.)
     assert!(app.find("#rail").is_none(), "a rail with the rail off");

@@ -593,7 +593,7 @@ test("from a new chat's page a chat opened replaces the tab for a chat alone too
 	app:resize(1400, 800)
 	app:frames(30)
 	open(app, "Fix the build")
-	app:click('#shell-sidebar >> role:button "New chat"')
+	app:click("#rail-new-chat")
 	app:frames(30)
 	open(app, "Write the docs")
 	app:frames(30)

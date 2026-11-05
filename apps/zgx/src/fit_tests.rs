@@ -16,6 +16,8 @@ const FILES_PANEL_MIN: f32 = 0.0;
 const CHAT_PANEL_MIN: f32 = 300.0;
 // What the sidebar's column has past its limit: the window's edge before its card.
 const SIDEBAR_EDGE: f32 = 5.0;
+// Zeron's policy fits what's beside the app rail (crates/ui shell.rs `content_left`).
+const RAIL: f32 = 46.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct HorizontalPanelFit {
@@ -108,7 +110,7 @@ fn a_resize_walk_shows_the_columns_zerons_policy_shows() {
     let mut drops = Vec::new();
     let widths: Vec<f32> = (48..=180).rev().chain(48..=180).map(|w| w as f32 * 10.).collect();
     for (step, &w) in widths.iter().enumerate() {
-        app.ui.scene.borrow_mut().resize(w, 800.);
+        app.ui.scene.borrow_mut().resize(w + RAIL, 800.);
         // (Settled: a column the fit hides or brings back eases there.)
         app.frames(30);
         let side = app.bounds("#shell-sidebar").width;
@@ -338,11 +340,11 @@ fn a_window_resize_moves_everything_one_way() {
             let mut last: Option<(f32, Vec<Option<f32>>, f32, Option<f32>)> = None;
             let mut changed_at: Option<usize> = None;
             for (frame, &w) in sweep.iter().enumerate() {
-                app.ui.scene.borrow_mut().resize(w, 800.);
+                app.ui.scene.borrow_mut().resize(w + RAIL, 800.);
                 app.frame();
                 let xs: Vec<Option<f32>> = parts.iter().map(|p| x_of(&mut app, p).map(|(x, _)| x)).collect();
                 let side = app.bounds("#shell-sidebar").width;
-                let more = x_of(&mut app, parts[2]).map(|(x, wd)| w - x - wd);
+                let more = x_of(&mut app, parts[2]).map(|(x, wd)| w + RAIL - x - wd);
                 if let Some((lw, lxs, lside, lmore)) = &last {
                     let dw = w - lw;
                     // A column going or coming (the fit changed within its
@@ -452,7 +454,7 @@ fn the_sidebar_opening_takes_only_what_the_chat_needs_from_the_panel() {
     // room beside the sidebar; at 1000, 500, with 444.)
     for (width, keeps) in [(1500., true), (1000., false)] {
         let mut app = mount();
-        app.ui.scene.borrow_mut().resize(width, 800.);
+        app.ui.scene.borrow_mut().resize(width + RAIL, 800.);
         app.frames(30);
         app.click("#shell-sidebar >> role:button \"Fix the build\"");
         app.frames(20);

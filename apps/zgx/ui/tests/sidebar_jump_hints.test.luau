@@ -8,16 +8,16 @@
 
 local SIDE = "#shell-sidebar"
 
--- Whether keys are written macOS's way here: the sidebar's own New chat
--- says (⌘N, or Ctrl+N).
+-- Whether keys are written macOS's way here: the sidebar's own Search
+-- says (⌘K, or Ctrl+K).
 local mac = false
 
 local function open(): any
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 900)
 	app:frames(30)
-	mac = app:has(`{SIDE} >> "⌘N"`)
-	expect(mac or app:has(`{SIDE} >> "Ctrl+N"`)).to_be(true)
+	mac = app:has(`{SIDE} >> "⌘K"`)
+	expect(mac or app:has(`{SIDE} >> "Ctrl+K"`)).to_be(true)
 	return app
 end
 

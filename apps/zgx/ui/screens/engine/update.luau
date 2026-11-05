@@ -1,13 +1,16 @@
 -- An engine older than the one on disk (src/engine_update.rs says, as
 -- shared state `engine.update`: `{ stale, ours }`): one this app started is
 -- started again on its own while nothing runs in it; while something does,
--- a quiet chip offers it ("Restart to update"). One this app didn't start is
--- never touched: the chip says so, and how to update it.
+-- the app rail's Update entry offers it ("Restart to update"). One this app
+-- didn't start is never touched: the entry says so, and how to update it.
 --
 --   Update.Watch()      what starts an idle engine of this app's again:
 --                       mounted once, always (the shell's root), nothing
 --                       drawn
---   Update.Notice()     the chip, above the sidebar's footer (nothing, and
+--   Update.which()      what there is to say: "ours" or "theirs", the rail's
+--                       (screens/shell/rail), "old", Notice's, or ""
+--   Update.restart()    the rail's press on "ours"
+--   Update.Notice()     "old"'s chip, above the sidebar's footer (nothing, and
 --                       no room, when there's nothing to say)
 --
 -- Busy: a chat working or waiting on an answer, or a terminal open in a
@@ -99,67 +102,28 @@ M.Watch = ui.component(function(): Node
 	return ui.div { w = 0, h = 0, absolute = true, pointer_events = "none" }
 end)
 
-M.Notice = ui.component(function(): Node
-	-- Which chip, if any: one this app may restart, or one it may not.
-	local function which(): string
-		-- Not one for this interface.
-		if unsupported() then
-			return "old"
-		end
-		if not stale() or asked:get() then
-			return ""
-		end
-		if not ours() then
-			return "theirs"
-		end
-		return if busy() then "ours" else ""
+-- What there is to say, if anything: one this app may restart, or one it may not.
+function M.which(): string
+	-- Not one for this interface.
+	if unsupported() then
+		return "old"
 	end
-	return ui.presence(which, function(kind: string): Node
-		if kind == "" then
-			return ui.div { h = 0, w_full = true }
-		end
-		if kind == "old" then
-			return M.Old()
-		end
-		local mine = kind == "ours"
-		return ui.row {
-			id = "engine-update",
-			role = if mine then "button" else "status",
-			label = if mine then ui.t("engine.update.restart") else ui.t("engine.update.out_of_date"),
-			-- (A tooltip takes a string: read as the chip is made.)
-			tooltip = if mine then locale.s("engine.update.restart_tip") else locale.s("engine.update.theirs_tip"),
-			w_full = true,
-			-- The sidebar foot's piece, as the Star banner under it is
-			-- (screens/shell/sidebar `star`): a row's height and corner, its
-			-- glyph and words at the banner's sizes and inset; no ×.
-			h = ui.raw(30, "a sidebar row's height (ds/sidebar's SLOT)"),
-			shrink = 0,
-			px = "$space.2",
-			gap = "$zeron.space.tight",
-			items = "center",
-			rounded = "$radius.lg",
-			bg = "$zeron.tone.neutral.wash",
-			hover = if mine then { bg = "$zeron.tone.neutral.edge" } else nil,
-			color = "$zeron.tone.neutral.ink",
-			cursor = if mine then "pointer" else nil,
-			on_click = if mine then restart else nil,
-			-- (An update's arrow while it's ours to restart, else a note.)
-			ui.div { shrink = 0, y = 0.5, Icon { name = if mine then "arrow-up" else "info-circle", size = 12 } },
-			FadeText {
-				if mine then ui.t("engine.update.restart") else ui.t("engine.update.short"),
-				grow = 1,
-				min_w = 0,
-				text_size = "$font.size.xs",
-				weight = "$font.weight.medium",
-			},
-		}
-	end, { w_full = true })
-end)
+	if not stale() or asked:get() then
+		return ""
+	end
+	if not ours() then
+		return "theirs"
+	end
+	return if busy() then "ours" else ""
+end
+M.restart = restart
 
 -- An engine too old for this interface, once restarting didn't bring a newer
 -- one: the way back to Stable is About & updates.
-function M.Old(): Node
-	return ui.row {
+M.Notice = ui.component(function(): Node
+	return ui.show(function(): boolean
+		return M.which() == "old"
+	end, ui.row {
 		id = "engine-update",
 		role = "button",
 		label = ui.t("engine.update.old"),
@@ -191,7 +155,7 @@ function M.Old(): Node
 			text_size = "$font.size.xs",
 			weight = "$font.weight.medium",
 		},
-	}
-end
+	})
+end)
 
 return M

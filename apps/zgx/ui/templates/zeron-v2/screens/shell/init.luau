@@ -39,6 +39,7 @@ local plugin_links = require("@app/screens/shell/plugin_links")
 local MenuAt = require("@ds/menu_at")
 local prefs = require("@app/screens/settings/prefs")
 local fit = require("@app/screens/shell/fit")
+local rail = require("@app/screens/shell/rail")
 local keys = require("@app/screens/shell/keys")
 local host = require("@app/screens/settings/host")
 -- (The look chosen, applied as it loads.)
@@ -386,7 +387,7 @@ return function(): Node
 		ref = root,
 		-- (The window's width: the columns fit it.)
 		on_resize = function(size)
-			fit.set_viewport(size.w)
+			fit.set_viewport(size.w - rail.W)
 		end,
 		id = "shell",
 		-- The accent chosen (Settings → Appearance, setup's Make it yours), as
@@ -472,6 +473,9 @@ return function(): Node
 				grow = 1,
 				min_h = 0,
 				w_full = true,
+				boundary.screen(boundary.named("shell.boundary.screen.app_rail"), "@app/screens/shell/rail", function(r): Node
+					return r.Rail()
+				end, { pass = true }),
 				boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(Sidebar): Node
 					return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = TITLE_H }
 				end),

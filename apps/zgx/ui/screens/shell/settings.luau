@@ -369,8 +369,7 @@ function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
 				head = if head then head() else nil,
 				hide_rows = replaces,
 				foot = ui.slot("settings.nav", { w_full = true, gap = "$zeron.list.gap" }),
-				-- You and settings, as the main sidebar's foot: you open your
-				-- profile; settings' button, on here, closes them.
+				-- You, as the main sidebar's foot: you open your profile.
 				account = (function(): Node?
 					local sidebar: any = require("@app/screens/shell/sidebar")
 					if not sidebar.account then
@@ -388,8 +387,6 @@ function M.View(props: { inset: boolean?, collapsed: State<boolean>? }?): Node
 						end,
 						on_user = sidebar.account.on_user,
 						user_open = sidebar.account.user_open,
-						on_settings = sidebar.account.on_settings,
-						settings_open = sidebar.account.settings_open,
 					}
 				end)(),
 			},

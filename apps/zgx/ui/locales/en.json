@@ -2221,7 +2221,6 @@
         "reconnecting": "Reconnecting…"
       },
       "update_notice": "The update notice",
-      "star": "Star on GitHub",
       "copied": "{what} copied",
       "menu": {
         "sections": "Sections",
@@ -2330,7 +2329,8 @@
         "settings": "Settings",
         "update_watch": "The update watch",
         "search": "Search",
-        "new_project": "New project"
+        "new_project": "New project",
+        "app_rail": "The app rail"
       }
     },
     "title_bar": {
@@ -2470,6 +2470,29 @@
       "on_device": "On {device}",
       "from_github": "From GitHub",
       "add_cloud_project": "Add project"
+    },
+    "rail": {
+      "label": "App rail",
+      "with_key": "{label} · {key}",
+      "close_settings": "Close settings",
+      "help": "Help",
+      "help_shortcuts": "Keyboard shortcuts",
+      "help_star": "Star Zeron on GitHub",
+      "usage": {
+        "loading": "Loading usage…",
+        "none": "No plan usage reported",
+        "limit": "Usage: limit reached",
+        "line": "Usage: {name} · {windows}",
+        "title": "Usage",
+        "used": "used",
+        "limit_reached": "Limit reached",
+        "open_page": "Click the ring for the Usage page",
+        "window": {
+          "session": "5h",
+          "week": "Weekly",
+          "day": "Daily"
+        }
+      }
     }
   },
   "onboarding": {
@@ -2986,7 +3009,6 @@
       "out_of_date": "Zeron's engine is out of date",
       "restart_tip": "Zeron updated in the background. Restarting its engine ends what's running in it.",
       "theirs_tip": "It was started outside this app: restart it there to update it.",
-      "short": "Engine out of date",
       "old": "This Zeron needs a newer engine",
       "old_tip": "Its engine is older than this version needs. Open About & updates to go back to Stable.",
       "short_old": "Needs a newer engine"

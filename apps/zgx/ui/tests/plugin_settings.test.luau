@@ -357,6 +357,8 @@ test("a plugin's wallpaper is used from its own page, said on Appearance, and ta
 	expect(app:state("shell_wallpaper_plugin")).to_be("")
 	expect(app:state("shell_wallpaper")).to_be("none")
 	expect(line(app, "From Parallax scenes")).to_be("")
+	-- (Its layer fading out: past the rail, the tree reads it until it's gone.)
+	app:frames(30)
 	expect(app:has("#new-chat-background")).to_be(false)
 end)
 

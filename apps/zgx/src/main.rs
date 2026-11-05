@@ -1172,7 +1172,7 @@ fn onboarding_window() -> WindowOptions {
 /// The main window: resizable, its frame kept across launches.
 fn main_window() -> WindowOptions {
     placed(WindowOptions {
-        min_size: Some((760., 500.)),
+        min_size: Some((806., 500.)),
         frame_autosave: Some("zeron-zgx-main".into()),
         ..zeron_window(1240., 820.)
     })

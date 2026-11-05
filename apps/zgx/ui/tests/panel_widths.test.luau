@@ -98,7 +98,8 @@ test("a panel narrowed beside its tree never stands under its least as the windo
 	local w = 1400
 	while w > 700 do
 		w -= 25
-		app:resize(w, 800)
+		-- (Beside the app rail's 46.)
+		app:resize(w + 46, 800)
 		app:frames(4)
 		if app:has("#shell-files") then
 			local now = width(app)
