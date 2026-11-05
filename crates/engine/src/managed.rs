@@ -60,6 +60,13 @@ struct ManagedRpc {
 
 #[async_trait]
 impl RpcService for ManagedRpc {
+    fn connection(&self) -> Option<Arc<dyn RpcService>> {
+        Some(Arc::new(ManagedRpc {
+            inner: self.inner.connection().unwrap_or_else(|| self.inner.clone()),
+            stop_tx: self.stop_tx.clone(),
+        }))
+    }
+
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         if method != methods::STOP_ENGINE {
             return self.inner.handle(method, params).await;

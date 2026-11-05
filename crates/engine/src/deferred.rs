@@ -45,10 +45,23 @@ struct DeferredEngineRpc {
     engine_info: EngineInfo,
     state: watch::Receiver<DeferredState>,
     service: Arc<OnceCell<Arc<dyn RpcService>>>,
+    /// One connection's view of the service, once it's assembled. `None` on the
+    /// shared instance the relay calls, which has no connection to bind.
+    connection: Option<OnceCell<Arc<dyn RpcService>>>,
 }
 
 #[async_trait]
 impl RpcService for DeferredEngineRpc {
+    fn connection(&self) -> Option<Arc<dyn RpcService>> {
+        Some(Arc::new(DeferredEngineRpc {
+            auth: self.auth.clone(),
+            engine_info: self.engine_info.clone(),
+            state: self.state.clone(),
+            service: self.service.clone(),
+            connection: Some(OnceCell::new()),
+        }))
+    }
+
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         if method == methods::ENGINE_INFO {
             return RpcReply::value(&self.engine_info);
@@ -76,6 +89,12 @@ impl RpcService for DeferredEngineRpc {
                     let service = self.service.get().ok_or_else(|| {
                         RpcError::Failed("engine became ready without an RPC service".into())
                     })?;
+                    let Some(connection) = &self.connection else {
+                        return service.handle(method, params).await;
+                    };
+                    let service = connection
+                        .get_or_init(|| async { service.connection().unwrap_or_else(|| service.clone()) })
+                        .await;
                     return service.handle(method, params).await;
                 }
                 DeferredState::Failed(message) => return Err(RpcError::Failed(message)),
@@ -145,6 +164,7 @@ impl DeferredEngine {
             engine_info: engine_info.clone(),
             state: state.clone(),
             service: assembled.clone(),
+            connection: None,
         });
         Ok(Self {
             service,
@@ -270,8 +290,44 @@ mod tests {
             },
             state,
             service: Arc::new(OnceCell::new()),
+            connection: None,
         };
         (dir, rpc)
+    }
+
+    /// `BindRun` only means something on a connection's own view of the
+    /// engine, so each layer in front of it must hand that view through.
+    #[tokio::test]
+    async fn a_connection_reaches_the_assembled_engines_own_view() {
+        struct Engine;
+        struct View;
+        #[async_trait]
+        impl RpcService for View {
+            async fn handle(&self, _: &str, _: serde_json::Value) -> Result<RpcReply, RpcError> {
+                RpcReply::value(&"view")
+            }
+        }
+        #[async_trait]
+        impl RpcService for Engine {
+            fn connection(&self) -> Option<Arc<dyn RpcService>> {
+                Some(Arc::new(View))
+            }
+            async fn handle(&self, _: &str, _: serde_json::Value) -> Result<RpcReply, RpcError> {
+                RpcReply::value(&"shared")
+            }
+        }
+        let (_tx, state) = watch::channel(DeferredState::Ready);
+        let (_dir, rpc) = engine(state);
+        rpc.service.set(Arc::new(Engine)).ok().unwrap();
+        let answer = |reply: RpcReply| match reply {
+            RpcReply::Value(value) => value,
+            RpcReply::Stream(_) => panic!("a stream"),
+        };
+        let shared = rpc.handle(methods::MUTATE, serde_json::json!({})).await.ok().unwrap();
+        assert_eq!(answer(shared), "shared");
+        let view = rpc.connection().unwrap();
+        let viewed = view.handle(methods::MUTATE, serde_json::json!({})).await.ok().unwrap();
+        assert_eq!(answer(viewed), "view");
     }
 
     /// The staging pass: signed in with no organization chosen, plugin and
