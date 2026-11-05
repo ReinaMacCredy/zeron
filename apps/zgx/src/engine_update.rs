@@ -15,14 +15,12 @@
 //!   engine.restart     stop the engine this app started; the supervisor
 //!                      starts the one on disk in its place
 //!
-//! Zeron.app's beta manages Zeron.app's own engine, which restarts into its
-//! bundle's by itself (src/engine/manager.rs): no staleness of this app's to
-//! judge there, and `engine.restart` stops it at once. Instead each
-//! connection asks whether the engine serves this interface (its
-//! `zgx-interface-v1` capability, crates/proto): shared `engine.interface`,
-//! `{ supported }`. An older engine (the stable app's from before the beta,
-//! still running) can't: the scripts say so and offer to restart it, or to go
-//! back to Stable (about.channel).
+//! The beta runs beside the Zeron app, on the Zeron app's engine
+//! (src/engine/manager.rs): never this app's to judge or stop, and
+//! `engine.restart` refuses. Instead each connection asks whether the engine
+//! serves this interface (its `zgx-interface-v1` capability, crates/proto):
+//! shared `engine.interface`, `{ supported }`. An older engine can't: the
+//! scripts say so, and updating the Zeron app is what brings a newer one.
 
 use std::cell::{Cell, RefCell};
 use std::time::Duration;
@@ -215,9 +213,7 @@ fn install_restart(host: &ScriptHost) {
             return Err("offline".into());
         };
         if config.follows_bundle() {
-            eprintln!("zeron-zgx: engine: restarting Zeron's engine");
-            engine.stop().await?;
-            return Ok(Value::Nil);
+            return Err("This engine is the Zeron app's: restart it from there.".into());
         }
         let info = rpc.call("EngineInfo", json!({})).await?;
         let running = info["build"].as_str().map(str::to_owned);

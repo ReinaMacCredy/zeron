@@ -118,6 +118,11 @@ impl Desktop {
     /// The app's own updater, in an install that updates itself (a macOS
     /// app bundle); none in a development build.
     fn start() -> Option<Rc<Self>> {
+        // The fork's feed carries the gpui app, which would install over this
+        // bundle, and a beta's channel claim would land in the shared data dir.
+        if cfg!(feature = "beta") {
+            return None;
+        }
         let install = zeron_update::detect_install();
         if !install.supports_desktop_update() {
             return None;

@@ -586,12 +586,48 @@ impl CompactionPage {
                             })),
                     ),
             );
+            let beta = zeron_beta_app();
+            let beta_card = widgets::section_card(theme).mt_0().child(
+                widgets::card_row(theme, false)
+                    .child(row_text(
+                        theme,
+                        "Zeron Beta",
+                        if beta.is_some() {
+                            "The new interface, beside this app on the same engine and chats. It never restarts or updates the engine."
+                        } else {
+                            "The new interface, beside this app on the same engine and chats. Not installed: scripts/package-zgx-beta.sh builds it, for /Applications."
+                        },
+                    ))
+                    .when_some(beta, |row, app| {
+                        row.child(
+                            widgets::text_action(theme, widgets::ActionTone::Quiet, "Open")
+                                .id("open-zeron-beta")
+                                .tab_index(0)
+                                .role(gpui::Role::Button)
+                                .aria_label("Open Zeron Beta")
+                                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                .on_click(move |_, _, _| {
+                                    let mut open = std::process::Command::new("open");
+                                    // `open` drops the environment, and a Dev bundle's Beta must not reach the real engine.
+                                    for key in ["ZERON_DATA_DIR", "ZERON_IPC_PORT"] {
+                                        if let Ok(value) = std::env::var(key) {
+                                            open.arg("--env").arg(format!("{key}={value}"));
+                                        }
+                                    }
+                                    if let Err(error) = open.arg(&app).spawn() {
+                                        tracing::warn!(%error, "could not open Zeron Beta");
+                                    }
+                                }),
+                        )
+                    }),
+            );
             return vec![
                 widgets::section(theme, "Compaction", lab_card)
                     .mt_0()
                     .search_anchor(Target::Page(SettingsSection::Experimental))
                     .into_any_element(),
                 widgets::section(theme, "Agent access", token_card).into_any_element(),
+                widgets::section(theme, "New interface", beta_card).into_any_element(),
             ];
         }
         vec![
@@ -603,6 +639,17 @@ impl CompactionPage {
                 .into_any_element(),
         ]
     }
+}
+
+fn zeron_beta_app() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    [
+        std::path::PathBuf::from("/Applications"),
+        home.join("Applications"),
+    ]
+    .into_iter()
+    .map(|dir| dir.join("Zeron Beta.app"))
+    .find(|app| app.exists())
 }
 
 impl Render for CompactionPage {

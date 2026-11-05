@@ -185,6 +185,11 @@ impl Engine {
     }
 
     fn follow_session(&self) {
+        // The Zeron app's engine: restarting it to follow a session is the
+        // Zeron app's to do, with its terminals and turns in view.
+        if self.config.as_ref().is_ok_and(|c| c.follows_bundle()) {
+            return;
+        }
         let scope = self.scope.borrow().clone();
         if self.restarting.get() || !manager::needs_restart(scope.as_deref(), self.signed_in.get()) {
             return;

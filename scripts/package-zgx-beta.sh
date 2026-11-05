@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Zeron.app's beta: the zgx interface (apps/zgx, built with its `beta`
-# feature) as the Zeron app itself — the same bundle id, name, signing,
-# entitlements and `zeron://` scheme as scripts/package-macos.sh's — with
-# the stable release's own engine inside, so a tester keeps Zeron.app's
-# engine, data and device:
+# Zeron Beta: the zgx interface (apps/zgx, built with its `beta` feature) beside
+# the Zeron app, not in its place: its own bundle id and name, no `zeron://`
+# scheme (the Zeron app keeps its links), and it attaches to the Zeron app's
+# engine and data, never starting or stopping that engine. The engine inside
+# only answers the command line's subcommands:
 #
-#   target/package-beta/Zeron.app
+#   target/package-beta/Zeron Beta.app
 #     Contents/MacOS/zeron           the zgx interface and `zeron`'s command
 #                                    line (crates/cli; the engine's commands
 #                                    run in the helper beside it)
-#     Contents/MacOS/Zeron Engine    the stable release's engine, as signed
+#     Contents/MacOS/Zeron Engine    the helper
 #     Contents/Resources/ui, plugins-builtin, zeron.icns, licenses
 #   target/package-beta/zeron-<beta>-macos-<arch>.dmg
-#   target/package-beta/zeron-<beta>-macos-<arch>-app.tar.gz  (the updater's)
+#   target/package-beta/zeron-<beta>-macos-<arch>-app.tar.gz
 #
 # Usage: BETA_VERSION=0.2.136-beta.1 ZGX_BETA_ENGINE=<engine> scripts/package-zgx-beta.sh
 #   BETA_VERSION        `<workspace version>-beta.<n>`; the workspace version
@@ -43,7 +43,7 @@ NUMBER="${BASH_REMATCH[2]}"
 [[ "$CORE" == "$WORKSPACE" ]] || die "BETA_VERSION $BETA_VERSION isn't a beta of the workspace's $WORKSPACE"
 ARCH="$(uname -m)"
 OUT_DIR="$ROOT/target/package-beta"
-APP="$OUT_DIR/Zeron.app"
+APP="$OUT_DIR/Zeron Beta.app"
 DMG="$OUT_DIR/zeron-$BETA_VERSION-macos-$ARCH.dmg"
 APP_TARBALL="$OUT_DIR/zeron-$BETA_VERSION-macos-$ARCH-app.tar.gz"
 ENTITLEMENTS="$ROOT/dist/macos/Zeron.entitlements"
@@ -103,6 +103,10 @@ install -m 755 "$ENGINE_BIN" "$APP/Contents/MacOS/Zeron Engine"
 # zgx's floor macOS 13 (Ghostty's).
 PLIST="$APP/Contents/Info.plist"
 sed "s/__VERSION__/$CORE/" "$ROOT/dist/macos/Info.plist" >"$PLIST"
+plutil -replace CFBundleIdentifier -string sh.zeron.app.zgx "$PLIST"
+plutil -replace CFBundleName -string "Zeron Beta" "$PLIST"
+plutil -replace CFBundleDisplayName -string "Zeron Beta" "$PLIST"
+plutil -remove CFBundleURLTypes "$PLIST"
 plutil -replace CFBundleVersion -string "$CORE.$NUMBER" "$PLIST"
 plutil -replace ZeronEngineVersion -string "$ENGINE_VERSION" "$PLIST"
 plutil -replace ZeronVersion -string "$BETA_VERSION" "$PLIST"
@@ -136,10 +140,10 @@ rm -rf "$ICONSET"
 # Signed as scripts/package-macos.sh signs Zeron.app: the engine (its
 # identifier), then the bundle.
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
-  codesign --entitlements "$ENTITLEMENTS" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
+  codesign --entitlements "$ENTITLEMENTS" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.app.zgx.engine "$APP/Contents/MacOS/Zeron Engine"
   codesign --entitlements "$ENTITLEMENTS" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
 else
-  codesign --force --entitlements "$ENTITLEMENTS" --sign - --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
+  codesign --force --entitlements "$ENTITLEMENTS" --sign - --identifier sh.zeron.app.zgx.engine "$APP/Contents/MacOS/Zeron Engine"
   codesign --force --entitlements "$ENTITLEMENTS" --sign - "$APP"
 fi
 codesign --verify --strict --verbose=2 "$APP"
@@ -160,8 +164,7 @@ if $NOTARIZE; then
   xcrun stapler staple "$APP"
 fi
 
-# The updater's artifact (crates/update `stage_mac_app` unpacks Zeron.app).
-tar -czf "$APP_TARBALL" -C "$OUT_DIR" Zeron.app
+tar -czf "$APP_TARBALL" -C "$OUT_DIR" "Zeron Beta.app"
 echo "packaged: $APP_TARBALL"
 echo "size: $(du -sh "$APP" | cut -f1) ($(du -sk "$APP" | cut -f1) KB) · interface $(du -h "$APP/Contents/MacOS/zeron" | cut -f1) · engine $(du -h "$APP/Contents/MacOS/Zeron Engine" | cut -f1)"
 
@@ -201,7 +204,7 @@ dmgbuild.build_dmg(
         "window_rect": ((200, 120), (660, 400)),
         "icon_size": 104,
         "text_size": 12,
-        "icon_locations": {"Zeron.app": (165, 195), "Applications": (495, 195)},
+        "icon_locations": {"Zeron Beta.app": (165, 195), "Applications": (495, 195)},
     },
 )
 PY

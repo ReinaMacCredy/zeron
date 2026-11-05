@@ -1,20 +1,13 @@
 //! Which engine this app works through, and keeping it running: the one
 //! place that starts, restarts and refuses engines.
 //!
-//! **Zeron.app's beta** (the `beta` feature: this interface as the Zeron app
-//! itself, scripts/package-zgx-beta.sh) manages Zeron.app's own engine, as
-//! the shipping app does (crates/engine/src/managed.rs, through the same
-//! crates/launch): the bundle's `Contents/MacOS/Zeron Engine`, started
-//! detached with `ZERON_MANAGED_ENGINE` and the bundle as `ZERON_APP`, its
-//! data in `ZERON_DATA_DIR` or ~/.zeron (crates/cli's paths), on
-//! `ZERON_IPC_PORT` or 27654. One already serving that port is used as it is
-//! (the shipping app's, before this one was installed). It signs in against
-//! production only (src/auth.rs), and a staging engine (port 27871,
-//! ~/.zeron-staging) or any other edge is refused. No more devices, no other
-//! data: the same engine as before the beta. When the bundle is replaced by a
-//! newer one, the engine restarts into it by itself once nothing runs
-//! (crates/update `SupersededRestart`, weighing the bundle's
-//! `ZeronEngineVersion`).
+//! **The beta** (the `beta` feature: this interface beside the Zeron app,
+//! scripts/package-zgx-beta.sh) works through the Zeron app's engine: the one
+//! serving `ZERON_IPC_PORT` or 27654, its data in `ZERON_DATA_DIR` or ~/.zeron
+//! (crates/cli's paths). It only ever attaches: the Zeron app starts, restarts
+//! and updates that engine, with its terminals and turns in view, so with
+//! none answering this app waits. A staging engine (port 27871,
+//! ~/.zeron-staging) or any other edge is refused.
 //!
 //! **Development builds** work through a staging engine: the one at
 //! `ZERON_ZGX_ENGINE_PORT` (27871) with its data in `ZERON_ZGX_ENGINE_DATA`
@@ -70,9 +63,8 @@ pub struct Config {
     edge: String,
     client: String,
     callback_port: u16,
-    /// Zeron.app's engine, managed as Zeron.app manages it (the beta): its
-    /// bundle's, started through crates/launch; it restarts into a newer
-    /// bundle by itself.
+    /// The Zeron app's engine (the beta): attached to, never started or
+    /// stopped from here.
     managed: bool,
 }
 
@@ -90,8 +82,8 @@ impl Config {
         if self.spawn { self.bin.as_deref() } else { None }
     }
 
-    /// Whether this is Zeron.app's engine, which follows its bundle by
-    /// itself (no "older than the one on disk" of this app's to judge).
+    /// Whether this is the Zeron app's engine (no "older than the one on
+    /// disk" of this app's to judge, and never this app's to stop).
     pub fn follows_bundle(&self) -> bool {
         self.managed
     }
@@ -171,7 +163,7 @@ impl Config {
             data_dir,
             bin: exe.and_then(zeron_launch::engine_executable),
             home: None,
-            spawn: true,
+            spawn: false,
             edge: edge.into(),
             client: client.into(),
             callback_port,
@@ -261,19 +253,14 @@ impl Spawner {
                 eprintln!(
                     "zeron-zgx: engine: nothing answers on {} and there's no engine to start: {}",
                     config.describe(),
-                    if config.managed {
-                        "this app has no Zeron Engine beside it"
-                    } else {
-                        "build one (`cargo build -p zeron --bin zeron-engine` at the repository's root) \
-                         or set ZERON_ZGX_ENGINE_BIN"
-                    }
+                    "build one (`cargo build -p zeron --bin zeron-engine` at the repository's root) \
+                     or set ZERON_ZGX_ENGINE_BIN"
                 );
             }
             return false;
         };
         self.last = Some(Instant::now());
-        let started = if config.managed { launch(config) } else { spawn(config, bin) };
-        match started {
+        match spawn(config, bin) {
             Ok(()) => {
                 eprintln!("zeron-zgx: engine: started {} ({})", bin.display(), config.describe());
                 true
@@ -284,24 +271,6 @@ impl Spawner {
             }
         }
     }
-}
-
-/// Zeron.app's engine, started as Zeron.app starts it (crates/launch).
-fn launch(config: &Config) -> std::io::Result<()> {
-    let exe = std::env::current_exe()?;
-    let child = zeron_launch::launch(
-        &zeron_launch::LaunchConfig {
-            data_dir: config.data_dir.clone(),
-            ipc_port: config.port,
-            edge_url: config.edge.clone(),
-            workos_client_id: Some(config.client.clone()),
-            edge_token: None,
-            org_id: None,
-        },
-        &exe,
-    )?;
-    zeron_launch::reap(child);
-    Ok(())
 }
 
 /// A development engine, detached (its own process group, no inherited
@@ -413,7 +382,7 @@ mod tests {
     /// bundle's engine, production's edge and sign-in; never staging's.
     #[cfg(feature = "beta")]
     #[test]
-    fn a_beta_build_manages_zeron_app_s_engine() {
+    fn a_beta_build_attaches_to_the_zeron_app_s_engine() {
         let dir = std::env::temp_dir().join(format!("zgx-beta-engine-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let macos = dir.join("Zeron.app/Contents/MacOS");
@@ -424,7 +393,7 @@ mod tests {
         let prod = crate::auth::production();
         let beta = config_of(&[], home, Some(&exe), &prod.edge).unwrap();
         assert_eq!((beta.port, beta.data_dir.clone()), (27654, home.join(".zeron")));
-        assert_eq!(beta.startable(), Some(macos.join("Zeron Engine").as_path()));
+        assert_eq!(beta.startable(), None, "never starts one: a restart or an update is the Zeron app's");
         assert_eq!((beta.edge.as_str(), beta.client.as_str(), beta.callback_port), (prod.edge.as_str(), prod.client.as_str(), 27641));
         assert!(beta.follows_bundle());
         // As Zeron.app: ZERON_DATA_DIR and ZERON_IPC_PORT move it; the

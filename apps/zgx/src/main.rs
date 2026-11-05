@@ -110,9 +110,9 @@ use zgx_desktop::{
 };
 use zgx_script::{ScriptHost, Shared, Value};
 
-/// Where `ui.persist` keeps its files: the Zeron app's (the beta), apart from
-/// development builds', which are staging's.
-const APP_ID: &str = if cfg!(feature = "beta") { "zeron" } else { "zeron-zgx" };
+/// Where `ui.persist` keeps its files: the beta's own, beside the Zeron app,
+/// apart from development builds', which are staging's.
+const APP_ID: &str = if cfg!(feature = "beta") { "zeron-beta" } else { "zeron-zgx" };
 
 /// Setup's window, in points: room for a step and its footer, no more.
 const ONBOARDING_SIZE: (f64, f64) = (680., 500.);
@@ -258,7 +258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // delivered to the app as Zeron.app's are (src/links.rs).
     if cfg!(feature = "beta") {
         application = application
-            .application_id("sh.zeron.app")?
+            .application_id("sh.zeron.app.zgx")?
             .on_application_event(|event, _| {
                 if let zgx_desktop::ApplicationEvent::OpenUrls(urls) = event {
                     for url in urls {

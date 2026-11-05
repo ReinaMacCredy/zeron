@@ -14,11 +14,9 @@
 -- panel (starting the engine again ends its shells).
 --
 -- The beta also asks whether the engine serves this interface at all
--- (`engine.interface`: `{ supported }`): an engine from before it (the
--- stable app's, still running) is restarted as a stale one of this app's
--- is, into the bundle's. One that still can't once restarted needs a newer
--- Zeron: the chip says so and opens About & updates, where turning beta off
--- goes back to Stable.
+-- (`engine.interface`: `{ supported }`). It runs beside the Zeron app, whose
+-- engine it never restarts: one that can't serve this needs the Zeron app
+-- updated, and the chip says so.
 
 local sessions = require("@account/sessions")
 local Icon = require("@ds/icon")
@@ -69,7 +67,7 @@ end
 
 local function ours(): boolean
 	local u = update:get()
-	return (u ~= nil and u.ours == true) or unsupported()
+	return u ~= nil and u.ours == true
 end
 
 -- The host's restart (a test stands in for it).
@@ -104,8 +102,8 @@ end)
 M.Notice = ui.component(function(): Node
 	-- Which chip, if any: one this app may restart, or one it may not.
 	local function which(): string
-		-- Restarted, and still not one for this interface.
-		if unsupported() and asked:get() then
+		-- Not one for this interface.
+		if unsupported() then
 			return "old"
 		end
 		if not stale() or asked:get() then
