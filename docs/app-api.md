@@ -6,7 +6,7 @@ the public Docs and `zeron --help`. Internally the code still says `ui_driver`.
 | Name | Was | What |
 |---|---|---|
 | `app_inspect` | `ui_driver` | reads an app, never changes it |
-| `app_drive` | `ui_driver_drive` | clicks, types, launches and quits, never the app serving its chat |
+| `app_drive` | `ui_driver_drive` | clicks, types, launches and quits; the app serving its chat only at Full access, by name |
 | `zeron app` | `zeron ui` (still works, hidden) | both, from a shell, without the refusals that protect a chat |
 
 ## The zgx app
@@ -98,7 +98,8 @@ What each level exposes:
   Approve on a pending request there, or type into its terminal panel. Keep Dev bundles on test
   data.
 - `app_drive` refuses the app that serves the calling chat (any app whose `ipcPort` is the
-  chat's engine port), so a chat cannot approve its own requests through the tool. `zeron app`
+  chat's engine port), so a chat cannot approve its own requests through the tool. A chat at Full
+  access may drive it by naming it as `target`, since it has no requests to approve. `zeron app`
   and the raw socket have no such check: an agent with a shell can still reach its own app.
   Settings > Lab has an App API switch for both tools; it leaves `zeron app` alone. A
   `disabledTools` entry in the harness prefs also turns one off, and turning `app_inspect` off

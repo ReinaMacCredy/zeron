@@ -693,8 +693,14 @@ impl ThreadTools {
             .unwrap()
             .insert(key.clone(), cancel);
         let call = async {
+            let drive_own = tool == ui_driver::Tool::Drive
+                && self.peers().await.is_ok_and(|(caller, _)| {
+                    caller
+                        .config
+                        .is_some_and(|config| config.access == AccessMode::FullAccess)
+                });
             match self.compare_page(tool, args).await {
-                Ok(args) => ui_driver::mcp_result(tool, &args, self.ipc_port).await,
+                Ok(args) => ui_driver::mcp_result(tool, &args, self.ipc_port, drive_own).await,
                 Err(text) => {
                     json!({ "content": [{ "type": "text", "text": text }], "isError": true })
                 }

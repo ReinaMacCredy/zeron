@@ -249,17 +249,19 @@ pub fn tool(tool: Tool) -> Value {
     })
 }
 
-pub async fn mcp_result(tool: Tool, args: &Value, own_port: Option<u16>) -> Value {
+pub async fn mcp_result(tool: Tool, args: &Value, own_port: Option<u16>, drive_own: bool) -> Value {
     let image = args["action"] == "snapshot" && args["inline"] != false;
-    let result = run(args, own_port, Some(tool)).await.and_then(|value| {
-        let mut content = vec![json!({ "type": "text", "text": text(&value) })];
-        if image {
-            content.push(
+    let result = run_in(&run_dir(), args, own_port, Some(tool), drive_own)
+        .await
+        .and_then(|value| {
+            let mut content = vec![json!({ "type": "text", "text": text(&value) })];
+            if image {
+                content.push(
                 json!({ "type": "image", "data": png_base64(&value)?, "mimeType": "image/png" }),
             );
-        }
-        Ok(content)
-    });
+            }
+            Ok(content)
+        });
     match result {
         Ok(content) => json!({ "content": content, "isError": false }),
         Err(message) => {
@@ -295,7 +297,7 @@ pub fn text(value: &Value) -> String {
 }
 
 pub async fn run(args: &Value, own_port: Option<u16>, tool: Option<Tool>) -> Result<Value, String> {
-    run_in(&run_dir(), args, own_port, tool).await
+    run_in(&run_dir(), args, own_port, tool, false).await
 }
 
 async fn run_in(
@@ -303,6 +305,7 @@ async fn run_in(
     args: &Value,
     own_port: Option<u16>,
     tool: Option<Tool>,
+    drive_own: bool,
 ) -> Result<Value, String> {
     let mut args = match args {
         Value::Object(args) => args.clone(),
@@ -348,9 +351,12 @@ async fn run_in(
         return serde_json::to_value(live).map_err(|error| error.to_string());
     }
     let app = select(&live, target.as_deref(), own_port)?;
-    if tool == Some(Tool::Drive) && own_port == Some(app.ipc_port) {
+    if tool == Some(Tool::Drive)
+        && own_port == Some(app.ipc_port)
+        && !(drive_own && target.is_some())
+    {
         return Err(format!(
-            "{DRIVE_TOOL} does not drive {} (pid {}): it serves this chat's engine on port {}, so its input could approve this chat's own requests. Pass a Zeron Dev bundle with its own engine as `target`.\n{}",
+            "{DRIVE_TOOL} does not drive {} (pid {}): it serves this chat's engine on port {}, so its input could approve this chat's own requests. Pass a Zeron Dev bundle with its own engine as `target`; a chat at Full access may name this app as `target`.\n{}",
             app.label,
             app.pid,
             app.ipc_port,
@@ -996,7 +1002,7 @@ mod tests {
         let mut aimed = click.clone();
         aimed["target"] = json!(own.pid);
         for request in [&click, &aimed] {
-            let error = run_in(dir.path(), request, Some(27654), Some(Tool::Drive))
+            let error = run_in(dir.path(), request, Some(27654), Some(Tool::Drive), false)
                 .await
                 .unwrap_err();
             assert!(
@@ -1005,16 +1011,18 @@ mod tests {
             );
         }
         let quit = json!({ "action": "quit", "target": own.pid });
-        let error = run_in(dir.path(), &quit, Some(27654), Some(Tool::Drive))
+        let error = run_in(dir.path(), &quit, Some(27654), Some(Tool::Drive), false)
             .await
             .unwrap_err();
         assert!(error.starts_with("app_drive does not drive"), "{error}");
-        let error = run_in(dir.path(), &quit, None, None).await.unwrap_err();
+        let error = run_in(dir.path(), &quit, None, None, false)
+            .await
+            .unwrap_err();
         assert!(
             error.starts_with("`quit` never quits Zeron Dev 7"),
             "{error}"
         );
-        let error = run_in(dir.path(), &json!({ "action": "quit" }), None, None)
+        let error = run_in(dir.path(), &json!({ "action": "quit" }), None, None, false)
             .await
             .unwrap_err();
         assert!(error.starts_with("`quit` needs a `target`"), "{error}");
@@ -1022,7 +1030,7 @@ mod tests {
         let mut aimed_record = record.clone();
         aimed_record["target"] = json!("Zeron Dev 7");
         for request in [&record, &aimed_record] {
-            let error = run_in(dir.path(), request, Some(27654), Some(Tool::Observe))
+            let error = run_in(dir.path(), request, Some(27654), Some(Tool::Observe), false)
                 .await
                 .unwrap_err();
             assert!(
@@ -1031,10 +1039,12 @@ mod tests {
                 "{error}"
             );
         }
-        let other_chat = run_in(dir.path(), &aimed, Some(49880), Some(Tool::Drive)).await;
+        let unnamed = run_in(dir.path(), &click, Some(27654), Some(Tool::Drive), true).await;
+        assert!(unnamed.unwrap_err().starts_with("app_drive does not drive"));
+        let other_chat = run_in(dir.path(), &aimed, Some(49880), Some(Tool::Drive), false).await;
         assert_eq!(other_chat, Ok(json!("drawn")));
         let state = json!({ "action": "state" });
-        let observed = run_in(dir.path(), &state, Some(27654), Some(Tool::Observe)).await;
+        let observed = run_in(dir.path(), &state, Some(27654), Some(Tool::Observe), false).await;
         assert_eq!(observed, Ok(json!({ "windows": [] })));
         let requests = server.await.unwrap();
         assert_eq!(requests[0]["action"], "click");
@@ -1071,14 +1081,14 @@ mod tests {
         );
         let click = json!({ "action": "click", "node": "\"Send\"", "target": "Beta Dev 61" });
 
-        let refused = run_in(dir.path(), &click, Some(49861), Some(Tool::Drive)).await;
+        let refused = run_in(dir.path(), &click, Some(49861), Some(Tool::Drive), false).await;
         assert!(refused.unwrap_err().starts_with("app_drive does not drive"),);
-        let observed = run_in(dir.path(), &click, Some(49900), Some(Tool::Observe)).await;
+        let observed = run_in(dir.path(), &click, Some(49900), Some(Tool::Observe), false).await;
         assert!(observed.unwrap_err().contains("drives the UI"));
 
-        let driven = run_in(dir.path(), &click, Some(49900), Some(Tool::Drive)).await;
-        assert_eq!(driven, Ok(json!("pressed")));
-        let failed = run_in(dir.path(), &click, None, None).await;
+        let full_access = run_in(dir.path(), &click, Some(49861), Some(Tool::Drive), true).await;
+        assert_eq!(full_access, Ok(json!("pressed")));
+        let failed = run_in(dir.path(), &click, None, None, false).await;
         assert_eq!(failed, Err("no node matches".into()));
         let requests = server.await.unwrap();
         assert_eq!(requests[0], json!({ "cmd": "click", "target": "\"Send\"" }));
