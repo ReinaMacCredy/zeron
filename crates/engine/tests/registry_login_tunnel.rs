@@ -89,6 +89,7 @@ async fn coordinator() -> String {
 
 async fn service(dir: &std::path::Path, device: &str, edge: &str) -> PreviewService {
     let service = PreviewService::new(dir.join(format!("{device}.json")), device.into(), device.into()).unwrap();
+    service.pair_over_loopback();
     service
         .start(
             Arc::new(Scope::default),

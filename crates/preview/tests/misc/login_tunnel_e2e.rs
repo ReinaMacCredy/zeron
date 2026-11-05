@@ -100,6 +100,7 @@ async fn service(dir: &std::path::Path, device: &str, edge: &str) -> PreviewServ
         device.into(),
     )
     .unwrap();
+    service.pair_over_loopback();
     service
         .start(
             Arc::new(Scope::default),

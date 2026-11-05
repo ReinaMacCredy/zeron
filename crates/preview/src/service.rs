@@ -101,6 +101,7 @@ struct Inner {
     /// Redials a refused signaling connection when a sign-in starts.
     signaling_wake: Arc<tokio::sync::Notify>,
     peers: std::sync::OnceLock<Peers>,
+    pair_over_loopback: AtomicBool,
     /// Engine-provided stream services peers may open, by id prefix.
     streams: StreamServices,
 }
@@ -201,8 +202,15 @@ impl PreviewService {
             callback_tunnels: CallbackTunnels::default(),
             signaling_wake,
             peers: std::sync::OnceLock::new(),
+            pair_over_loopback: AtomicBool::new(false),
             streams: StreamServices::default(),
         })))
+    }
+    /// Test seam: pair over loopback, which a host firewall doesn't filter,
+    /// with no STUN. Call before [`Self::start`].
+    #[doc(hidden)]
+    pub fn pair_over_loopback(&self) {
+        self.0.pair_over_loopback.store(true, Ordering::SeqCst);
     }
     /// Serve stream ids starting with `prefix` from `handler` — to peers and
     /// to this device alike. Registering a prefix again replaces its handler.
@@ -304,11 +312,17 @@ impl PreviewService {
             self.0.streams.clone(),
         ));
         let local = mux::local(connector.clone(), self.0.stop.child_token());
-        let (peers, output) = Peers::new(
+        let (mut peers, output) = Peers::new(
             self.0.catalog.device_id().into(),
             connector,
             self.0.stop.child_token(),
         );
+        if self.0.pair_over_loopback.load(Ordering::SeqCst) {
+            peers
+                .set_ice_servers(Vec::new())
+                .and_then(|()| peers.set_udp_addrs(vec!["127.0.0.1:0".into()]))
+                .expect("peers are not shared yet");
+        }
         let _ = self.0.peers.set(peers.clone());
         let router = proxy::Router {
             catalog: self.0.catalog.clone(),
