@@ -1795,6 +1795,42 @@
       "couldnt_change_photo": "无法更改你的头像",
       "couldnt_remove_photo": "无法移除你的头像"
     },
+    "usage": {
+      "title": "用量",
+      "terms": "usage tokens cost spend money dollars price agents 用量 费用 令牌",
+      "description": "此设备上聊天的令牌花费，读取自各智能体自己的会话日志。",
+      "spend": { "title": "令牌用量" },
+      "reading": "正在读取智能体记录…",
+      "failed": "无法读取用量",
+      "sessions": "{n} 个会话",
+      "unpriced": "不包括未知价格模型上的 {n} 次请求",
+      "metric": "显示",
+      "cost": "费用",
+      "tokens": "令牌",
+      "window": "时间范围",
+      "window_1": "过去 24 小时",
+      "window_7": "7 天",
+      "window_30": "30 天",
+      "window_90": "90 天",
+      "refresh": "刷新用量",
+      "empty": "此时间范围内没有活动。",
+      "totals": {
+        "title": "总计",
+        "processed": "已处理令牌",
+        "cached": "缓存输入",
+        "uncached": "未缓存输入",
+        "output": "输出",
+        "savings": "缓存节省"
+      },
+      "breakdown": {
+        "title": "明细",
+        "terms": "breakdown model day hour 明细 模型",
+        "by": "按",
+        "model": "模型",
+        "day": "天",
+        "hour": "小时"
+      }
+    },
     "cloud": {
       "title": "Cloud",
       "terms": "云 沙盒 远程 机器 运行 智能体 仓库 用量 额度 cloud sandboxes remote machines run agents github repositories usage credits",

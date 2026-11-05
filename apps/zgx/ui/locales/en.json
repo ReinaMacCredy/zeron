@@ -1795,6 +1795,42 @@
       "couldnt_change_photo": "Couldn't change your photo",
       "couldnt_remove_photo": "Couldn't remove your photo"
     },
+    "usage": {
+      "title": "Usage",
+      "terms": "usage tokens cost spend money dollars price agents",
+      "description": "Token spend from chats on this device, read from your agents' own session logs.",
+      "spend": { "title": "Token usage" },
+      "reading": "Reading agent transcripts…",
+      "failed": "Couldn't read usage",
+      "sessions": "{n, plural, one {# session} other {# sessions}}",
+      "unpriced": "Excludes {n, plural, one {# request} other {# requests}} on models with no known price",
+      "metric": "Show",
+      "cost": "Cost",
+      "tokens": "Tokens",
+      "window": "Window",
+      "window_1": "Past 24h",
+      "window_7": "7 days",
+      "window_30": "30 days",
+      "window_90": "90 days",
+      "refresh": "Refresh usage",
+      "empty": "No activity in this window.",
+      "totals": {
+        "title": "Totals",
+        "processed": "Processed tokens",
+        "cached": "Cached input",
+        "uncached": "Uncached input",
+        "output": "Output",
+        "savings": "Cache savings"
+      },
+      "breakdown": {
+        "title": "Breakdown",
+        "terms": "breakdown model day hour",
+        "by": "By",
+        "model": "Model",
+        "day": "Day",
+        "hour": "Hour"
+      }
+    },
     "cloud": {
       "title": "Cloud",
       "terms": "cloud sandboxes remote machines run agents github repositories usage credits",

@@ -570,6 +570,7 @@ ui.command {
 -- Cloud, Billing and GitHub for Cloud (Settings → Cloud and → Billing),
 -- the same way: none until `cloud_stub.offer`.
 require("./cloud_stub")
+require("./usage_stub")
 -- The ACP registry's agents (Settings → Providers → Add an agent).
 require("./registry_stub")
 

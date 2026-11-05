@@ -94,6 +94,7 @@ zeron-preview-label = { path = "../../crates/preview-label" }
 # updates and release channel (src/about.rs): the shipping app's crates,
 # with no engine and no GPUI in them.
 zeron-cli = { path = "../../crates/cli" }
+zeron-proto = { path = "../../crates/proto" }
 zeron-launch = { path = "../../crates/launch" }
 # `zeron://` links: a chat's (src/sessions.rs, src/links.rs) and a clicked
 # banner's, the shipping app's formats.

@@ -56,6 +56,7 @@ mod sessions;
 mod settings;
 mod terminal;
 mod tool_details;
+mod usage;
 mod themes;
 mod visuals;
 #[cfg(test)]
@@ -619,6 +620,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         // Cloud and Billing (src/cloud.rs): Settings' pages, the new chat's
         // Cloud choice.
         cloud::install(cx, &host);
+        usage::install(cx, &host);
         // The sessions behind the main window (src/sessions.rs).
         sessions::install(cx, &host);
         // Adding a project, removing one (src/projects.rs).
