@@ -27,6 +27,8 @@ async fn keystroke_echo_over_a_webrtc_link_is_transport_bound() {
     let (mut viewer, mut viewer_out) = Peers::new("device-b".into(), service, stop.clone());
     host.set_ice_servers(Vec::new()).unwrap();
     viewer.set_ice_servers(Vec::new()).unwrap();
+    host.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
+    viewer.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
     let to_viewer = viewer.clone();
     let forward_host = tokio::spawn(async move {
         while let Some(message) = host_out.recv().await {
