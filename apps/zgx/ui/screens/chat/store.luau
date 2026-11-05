@@ -75,7 +75,7 @@ export type Session = {
 	queue: { any }?,
 	todos: { any }?,
 	tasks: { any }?,
-	-- A line about it (a failed send, a run that stopped), or nil.
+	-- A line about it (a failed send, a run that stopped), or nil; `refused` replaces `text`.
 	notice: any?,
 }
 export type Catalog = { state: string, harnesses: { ds.Harness }, models: { ds.Model } }

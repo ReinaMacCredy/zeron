@@ -228,6 +228,60 @@ fn assemble(dir: &std::path::Path, harness: Arc<dyn Harness>) -> EngineCore {
         .expect("engine core assembles")
 }
 
+// The drain's outcome is a command-only commit, which makes no transcript delta.
+#[tokio::test]
+async fn a_rejected_command_reaches_the_transcript_watch_with_its_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let mut frames = client
+        .subscribe(
+            zeron_rpc::methods::WATCH_DOC_MESSAGES,
+            serde_json::json!({"chatId": CHAT}),
+        )
+        .await
+        .unwrap();
+    let opening = tokio::time::timeout(Duration::from_secs(5), frames.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(opening.get("commandRejections").is_none());
+
+    let command = serde_json::to_value(SessionCommandPayload::RespondInput {
+        request_id: "no-such-request".into(),
+        answers: Vec::new(),
+    })
+    .unwrap();
+    let queued = client
+        .call(
+            zeron_rpc::methods::QUEUE_COMMAND,
+            serde_json::json!({"chatId": CHAT, "command": command}),
+        )
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let rejections = loop {
+        let frame = tokio::time::timeout_at(deadline, frames.recv())
+            .await
+            .expect("a frame with the rejection")
+            .expect("stream alive");
+        if let Some(rejections) = frame.get("commandRejections") {
+            break rejections.clone();
+        }
+    };
+    assert_eq!(
+        rejections,
+        serde_json::json!([{"commandId": queued["commandId"], "reason": "no pending input request"}])
+    );
+    core.shutdown().await;
+}
+
 #[tokio::test]
 async fn update_deferred_steering_preserves_the_active_turn_and_queued_prompt() {
     use std::sync::atomic::{AtomicUsize, Ordering};

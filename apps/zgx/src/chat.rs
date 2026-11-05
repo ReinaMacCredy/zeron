@@ -228,6 +228,7 @@ struct Pending {
     waiting: &'static str,
     /// The command that sends it again, once it failed.
     retry: Option<Json>,
+    command: Option<String>,
     /// When it was sent, as its hover strip says.
     at: Option<String>,
 }
@@ -278,6 +279,9 @@ impl Open {
 #[derive(Default)]
 struct Open {
     id: String,
+    /// By command id: a frame can bring these before `QueueCommand`'s answer.
+    rejections: std::collections::HashMap<String, String>,
+    refused: Option<String>,
     /// The transcript's entries, as the engine's doc has them (`Entry`).
     entries: Vec<Entry>,
     /// The plan as the newest settled entry holding one left it, and where
@@ -1261,6 +1265,15 @@ impl View {
     }
 
     fn heard_frame(self: &Rc<Self>, mut frame: Json) {
+        if let Some(rejections) = frame.get("commandRejections").and_then(Json::as_array) {
+            if let Some(open) = self.open.borrow_mut().as_mut() {
+                open.rejections = rejections
+                    .iter()
+                    .filter_map(|r| Some((r["commandId"].as_str()?.to_owned(), r["reason"].as_str().unwrap_or_default().to_owned())))
+                    .collect();
+            }
+            self.fail_rejected();
+        }
         let applied = {
             let mut slot = self.open.borrow_mut();
             let Some(open) = slot.as_mut() else { return };
@@ -1594,6 +1607,7 @@ impl View {
                 paths: local_paths(&req),
                 waiting: "sending",
                 retry: None,
+                command: None,
                 at: stamp(now_seconds()),
             });
         }
@@ -1729,10 +1743,7 @@ impl View {
             });
         }
         let run = json!({ "kind": "run", "messageId": message_id, "request": request });
-        let sent = command(&id, run.clone()).await;
-        if sent.is_ok() {
-            self.expect_delivery(&id, &message_id, &run);
-        }
+        let sent = self.send_run(&id, &message_id, &run).await;
         if sent.is_err() {
             // Not delivered: the prompt stays, failed, to send again.
             self.mark_failed(&message_id, Some(run));
@@ -1769,10 +1780,62 @@ impl View {
         self.publish_messages();
     }
 
+    async fn send_run(self: &Rc<Self>, chat: &str, message_id: &str, run: &Json) -> Result<(), Outcome> {
+        self.set_refused(None);
+        match queue_command(chat, run.clone()).await {
+            Ok(command) => {
+                if let Some(open) = self.open.borrow_mut().as_mut()
+                    && let Some(p) = open.pending.iter_mut().find(|p| p.id == message_id)
+                {
+                    p.command = Some(command);
+                    p.retry = Some(run.clone());
+                }
+                self.fail_rejected();
+                self.expect_delivery(chat, message_id, run);
+                Ok(())
+            }
+            Err((outcome, reason)) => {
+                if outcome == "failed" {
+                    self.set_refused(Some(reason));
+                }
+                Err(outcome)
+            }
+        }
+    }
+
+    fn set_refused(&self, reason: Option<String>) {
+        if let Some(open) = self.open.borrow_mut().as_mut() {
+            open.refused = reason;
+        }
+        self.publish_session();
+    }
+
+    fn fail_rejected(&self) {
+        let reason = {
+            let mut slot = self.open.borrow_mut();
+            let Some(open) = slot.as_mut() else { return };
+            let rejections = std::mem::take(&mut open.rejections);
+            let mut reason = None;
+            for p in open.pending.iter_mut().filter(|p| p.waiting == "sending") {
+                if let Some(why) = p.command.as_ref().and_then(|c| rejections.get(c)) {
+                    p.waiting = "failed";
+                    reason = Some(why.clone());
+                }
+            }
+            open.rejections = rejections;
+            reason
+        };
+        if let Some(reason) = reason {
+            self.set_refused(Some(reason));
+            self.publish_messages();
+        }
+    }
+
     /// A command the engine took can still be rejected at its drain (a
-    /// worktree off a repo with no commits), and the wire doesn't say so:
-    /// past the grace the prompt reads failed, as the shipping app's "Not
-    /// delivered" does. (A host elsewhere may only be away: left sending.)
+    /// worktree off a repo with no commits): `commandRejections` says so, on
+    /// an engine that sends it. On one that doesn't, past the grace the prompt
+    /// reads failed, as the shipping app's "Not delivered" does. (A host
+    /// elsewhere may only be away: left sending.)
     fn expect_delivery(self: &Rc<Self>, chat: &str, message_id: &str, run: &Json) {
         let chats = CHATS.with(Rc::clone);
         if chats.chat(chat).is_some_and(|c| chats.target(&c).is_some()) {
@@ -1796,6 +1859,7 @@ impl View {
             let open = slot.as_mut().filter(|o| o.id == id).ok_or("missing")?;
             let p = open.pending.iter_mut().find(|p| p.id == message_id).ok_or("missing")?;
             p.waiting = "sending";
+            p.command = None;
             p.retry.clone()
         };
         self.publish_messages();
@@ -1808,10 +1872,8 @@ impl View {
             self.publish_messages();
             return Err("failed");
         };
-        let sent = command(&id, run.clone()).await;
-        if sent.is_ok() {
-            self.expect_delivery(&id, &message_id, &run);
-        } else {
+        let sent = self.send_run(&id, &message_id, &run).await;
+        if sent.is_err() {
             self.mark_failed(&message_id, Some(run));
         }
         self.publish_messages();
@@ -2107,13 +2169,17 @@ async fn stop_task(args: Value) -> Result<Value, Outcome> {
 }
 
 async fn command(chat: &str, command: Json) -> Result<(), Outcome> {
+    queue_command(chat, command).await.map(drop).map_err(|(outcome, _)| outcome)
+}
+
+async fn queue_command(chat: &str, command: Json) -> Result<String, (Outcome, String)> {
     engine::get()
         .call("QueueCommand", json!({ "chatId": chat, "command": command }))
         .await
-        .map(|_| ())
+        .map(|taken| taken["commandId"].as_str().unwrap_or_default().to_owned())
         .map_err(|e| {
             eprintln!("zeron-zgx: chat: {} for {chat} wasn't taken: {e}", command["kind"]);
-            engine::outcome(&e)
+            (engine::outcome(&e), e)
         })
 }
 
@@ -4195,6 +4261,9 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     ];
     if let Some(branch) = chat["branch"].as_str() {
         fields.push(("branch", Value::from(branch)));
+    }
+    if let Some(reason) = &open.refused {
+        fields.push(("notice", Value::record([("tone", Value::from("danger")), ("refused", Value::from(reason.as_str()))])));
     }
     Value::record(fields)
 }

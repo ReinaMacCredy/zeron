@@ -32,6 +32,14 @@ pub struct TranscriptUpdate {
     pub replay_baseline: Option<TranscriptBaseline>,
 }
 
+/// Older readers ignore the frame's `commandRejections`; older hosts never send it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandRejection {
+    pub command_id: String,
+    pub reason: String,
+}
+
 /// Compact presentation watermark: stable part ids and text byte lengths.
 /// Keeping the cutoff (rather than a one-frame boolean) lets a viewport
 /// coalesce historical and live updates without animating the history or
@@ -517,6 +525,11 @@ mod context_update_tests {
         assert_eq!(update.context_usage, None);
         assert_eq!(update.session_stats, None);
         assert!(update.replay_baseline.is_none());
+        let with_rejections = serde_json::json!({
+            "reset": [],
+            "commandRejections": [{"commandId": "c", "reason": "r"}],
+        });
+        serde_json::from_value::<TranscriptUpdate>(with_rejections).unwrap();
         let value = serde_json::to_value(TranscriptUpdate {
             frame: TranscriptFrame::reset(&[]),
             replay_baseline: Some(TranscriptBaseline::default()),

@@ -4102,9 +4102,17 @@ fn doc_messages_stream(
             None::<crate::doc_host::TranscriptSnapshot>,
             doc,
             (None, None),
+            Vec::new(),
             zeron_doc::TranscriptBaseline::default(),
         ),
-        |(mut rx, mut prev, doc, mut previous_usage, mut opening_baseline)| async move {
+        |(
+            mut rx,
+            mut prev,
+            doc,
+            mut previous_usage,
+            mut previous_rejections,
+            mut opening_baseline,
+        )| async move {
             loop {
                 if prev.is_some() {
                     rx.changed().await.ok()?;
@@ -4148,18 +4156,38 @@ fn doc_messages_stream(
                 // No-op commits (a second watcher attaching, command-only
                 // changes) produce empty deltas — skip the frame entirely.
                 let usage = (doc.context_usage(), doc.session_stats());
-                if frame.is_empty_delta() && usage == previous_usage && replay_baseline.is_none() {
+                let rejections = doc.command_rejections();
+                let rejected_anew = rejections != previous_rejections;
+                if frame.is_empty_delta()
+                    && usage == previous_usage
+                    && replay_baseline.is_none()
+                    && !rejected_anew
+                {
                     continue;
                 }
                 previous_usage = usage;
-                let value = serde_json::to_value(zeron_doc::TranscriptUpdate {
+                previous_rejections = rejections.clone();
+                let mut value = serde_json::to_value(zeron_doc::TranscriptUpdate {
                     frame,
                     context_usage: usage.0,
                     session_stats: usage.1,
                     replay_baseline,
                 })
                 .ok()?;
-                return Some((value, (rx, prev, doc, previous_usage, opening_baseline)));
+                if rejected_anew {
+                    value["commandRejections"] = serde_json::to_value(&rejections).ok()?;
+                }
+                return Some((
+                    value,
+                    (
+                        rx,
+                        prev,
+                        doc,
+                        previous_usage,
+                        previous_rejections,
+                        opening_baseline,
+                    ),
+                ));
             }
         },
     )

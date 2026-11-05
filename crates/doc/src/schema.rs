@@ -986,6 +986,33 @@ impl SessionDoc {
             .collect())
     }
 
+    /// Field by field: every transcript frame asks, and `read_commands` would copy each prompt.
+    pub fn command_rejections(&self) -> Vec<crate::transcript_delta::CommandRejection> {
+        let field = |map: &LoroMap, key: &str| match map.get(key) {
+            Some(loro::ValueOrContainer::Value(LoroValue::String(value))) => {
+                Some(value.to_string())
+            }
+            _ => None,
+        };
+        let rejected = serde_json::to_value(SessionCommandStatus::Rejected).unwrap_or_default();
+        let commands = self.doc.get_list("commands");
+        (0..commands.len())
+            .filter_map(|i| {
+                let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+                    commands.get(i)
+                else {
+                    return None;
+                };
+                (field(&map, "status").as_deref() == rejected.as_str()).then(|| {
+                    crate::transcript_delta::CommandRejection {
+                        command_id: field(&map, "id").unwrap_or_default(),
+                        reason: field(&map, "resolution").unwrap_or_default(),
+                    }
+                })
+            })
+            .collect()
+    }
+
     /// Append a command entry (rule 1: own entries only, append-only).
     pub fn queue_command(&self, entry: &SessionCommandEntry) -> Result<(), DocError> {
         let commands = self.doc.get_list("commands");

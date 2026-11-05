@@ -417,6 +417,11 @@ local function Composer(): Node
 		end
 		local s = open()
 		if s and s.notice then
+			if s.notice.refused then
+				local said = table.clone(s.notice)
+				said.text = ui.t("chat.composer.didnt_send_why", { reason = s.notice.refused }):get()
+				return said
+			end
 			return s.notice
 		end
 		-- The connection: this device's, then the chat's host.
@@ -748,7 +753,11 @@ local function Composer(): Node
 						end
 					end
 				end, function(e: any)
-					own_notice:set { tone = "danger", key = "chat.composer.didnt_send", dismissable = true }
+					-- (The session's line says why, when the engine did.)
+					local s = store.session:peek()
+					if not (s and s.notice) then
+						own_notice:set { tone = "danger", key = "chat.composer.didnt_send", dismissable = true }
+					end
 					if shared.text:peek() == "" then
 						shared.text:set(text_out)
 					end
