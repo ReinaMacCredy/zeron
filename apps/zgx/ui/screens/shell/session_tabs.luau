@@ -943,18 +943,25 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 							h = TAB_H + DROP + 1,
 						}
 					),
-					ui.each(shown, function(id: string): Node
-						return Tab { chat = id }
-					end, {
-						key = function(id: string): string
-							return id
+					ui.row {
+						-- (An empty `ui.each` still takes 16 points, which the folder behind the tab doesn't count.)
+						w = function(): any
+							return if #shown:get() == 0 then 0 else nil
 						end,
-						direction = "row",
-						gap = ui.raw(TAB_GAP, "Zeron's gap between tabs"),
-						animate = motion.layout(SLIDE),
-						enter = if motion.reduced_now() then nil else { opacity = { 0, 1 }, duration = SLIDE.duration, ease = "out(3)" },
-						exit = if motion.reduced_now() then nil else { opacity = 0, duration = 120, ease = "out(3)" },
-					}),
+						shrink = 0,
+						ui.each(shown, function(id: string): Node
+							return Tab { chat = id }
+						end, {
+							key = function(id: string): string
+								return id
+							end,
+							direction = "row",
+							gap = ui.raw(TAB_GAP, "Zeron's gap between tabs"),
+							animate = motion.layout(SLIDE),
+							enter = if motion.reduced_now() then nil else { opacity = { 0, 1 }, duration = SLIDE.duration, ease = "out(3)" },
+							exit = if motion.reduced_now() then nil else { opacity = 0, duration = 120, ease = "out(3)" },
+						}),
+					},
 					ui.show(function(): boolean
 						return draft_shows:get()
 					end, ui.div {
