@@ -613,11 +613,16 @@ mod tests {
         let recorder = Arc::new(Recorder::default());
         let monitor = EscapeKillSwitchMonitor::start(recorder).unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let started = Instant::now();
         monitor.activate().await;
-        assert!(started.elapsed() < ACTIVATION_WAIT, "{:?}", monitor.state());
+        wait_settled(&monitor).await;
         assert!(settled(&monitor.state()), "{:?}", monitor.state());
         monitor.dispose();
+    }
+
+    /// Past `activate`'s own wait: the first `CGEventTapCreate` in a large ad-hoc signed test binary takes seconds. A thread that never woke still fails here.
+    async fn wait_settled(monitor: &EscapeKillSwitchMonitor) {
+        let mut state = monitor.shared.state.subscribe();
+        let _ = tokio::time::timeout(Duration::from_secs(20), state.wait_for(settled)).await;
     }
 
     #[derive(Default)]
@@ -637,9 +642,8 @@ mod tests {
     async fn the_listener_thread_arms_settles_and_stops_without_the_main_thread() {
         let recorder = Arc::new(Recorder::default());
         let monitor = EscapeKillSwitchMonitor::start(recorder.clone()).unwrap();
-        let started = Instant::now();
         monitor.activate().await;
-        assert!(started.elapsed() < Duration::from_secs(2));
+        wait_settled(&monitor).await;
         let state = monitor.state();
         let expected_error = if input_monitoring_granted() {
             None
