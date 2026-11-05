@@ -1083,7 +1083,6 @@
         "description": "Blurred everywhere, for screen sharing. Click one to see it.",
         "terms": "screen sharing recording blur blurred mosaic private censor redact"
       },
-      "links": "Links",
       "links_in": {
         "external": "Your default browser.",
         "tab": "A browser tab beside the conversation."
@@ -1091,11 +1090,6 @@
       "open_links": {
         "label": "Open links in",
         "terms": "web link url browser tab panel zeron external"
-      },
-      "pull_requests": {
-        "label": "Open pull requests in",
-        "terms": "pr pull request badges board browser github",
-        "native": "Inspect them in Zeron, beside the conversation or the Pull requests board."
       },
       "thread_naming": {
         "label": "Thread naming",
@@ -1135,10 +1129,6 @@
       "send_with": {
         "enter": "Enter",
         "mod_enter": "{key}"
-      },
-      "pull_requests": {
-        "native": "Pull request view",
-        "browser": "In-app browser"
       }
     },
     "search": {

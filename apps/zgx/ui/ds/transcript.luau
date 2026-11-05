@@ -187,7 +187,8 @@ export type TranscriptFind = {
 }
 -- The words being written: the whole reply's (`text`), and, with blocks,
 -- the text block they grow (`part`) and its words alone (`part_text`).
-export type Draft = { id: string, text: string, part: string?, part_text: string? }
+-- (`thought`, `thought_text`: the thought the reply is at, and its words so far.)
+export type Draft = { id: string, text: string, part: string?, part_text: string?, thought: string?, thought_text: string? }
 -- A block of a reply: a text, or a group of tools (its line, and whether
 -- it is open while the reply is written).
 -- In a compact transcript, a reply's work is one group ("work") holding
@@ -223,8 +224,9 @@ local WORD, ACTION, CLEAR, MARGIN, FOOT = 26, 32, 6, 8, 46
 -- How often a shown action looks whether the selection is still there.
 local WATCH = 200
 
--- The room left under the conversation's last row.
-local TAIL = 12
+-- The room left under the conversation's last row, over what floats at its
+-- foot: Zeron's (transcript.rs, the fade band and 8).
+local TAIL = 32
 -- Zeron's gaps over a message (transcript.rs `top_gap_for`): a turn's, and
 -- a prompt's under the switch seam over it.
 local TURN_GAP = 16
@@ -591,6 +593,23 @@ type View = {
 	find: ((key: string) -> any)?,
 }
 
+-- A reply's thought being written, for its row (ds/activity's `thought`): the
+-- draft's words while it's the one the reply is at.
+local function thought_of(m: Message, now: () -> Message, draft: State<Draft>?): Activity.Writing
+	return {
+		words = function(id: string): string?
+			if not (draft and now().streaming) then
+				return nil
+			end
+			local d = draft:get()
+			return if d.id == m.id and d.thought == id then d.thought_text else nil
+		end,
+		seeded = function(): boolean
+			return ui.now() - opened_at < 300
+		end,
+	}
+end
+
 local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, draft: State<Draft>?, view: View?): Node
 	local shown = ui.computed(list)
 	return ui.each(shown, function(b: Block, _i: number, brow: State<Block>): Node
@@ -598,6 +617,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			return Activity {
 				key = `{m.id}:{b.id}`,
 				open_subagent = if view then view.open_subagent else nil,
+				thought = thought_of(m, now, draft),
 				tools = function()
 					return brow:get().tools or {}
 				end,
@@ -758,6 +778,7 @@ local function reply(
 			Activity {
 				key = m.id,
 				open_subagent = if view then view.open_subagent else nil,
+				thought = thought_of(m, now, draft),
 				tools = function()
 					return now().tools or {}
 				end,
@@ -1095,7 +1116,7 @@ local function Transcript(props: Props): Node
 			if not c then
 				return
 			end
-			local m = messages:peek()[c.row]
+			local m = messages:at(c.row)
 			local row = if m then rows[m.id] else nil
 			if row and row.outer:peek() then
 				return
@@ -1719,7 +1740,7 @@ local function Transcript(props: Props): Node
 			key = "id",
 			row = row,
 			row_text = function(i: number): string
-				local m = messages:peek()[i]
+				local m = messages:at(i)
 				return if m then m.text else ""
 			end,
 			offset = offset,
