@@ -1753,6 +1753,7 @@ if (args[0] === "daemon" && args[1] === "stop") {
     async fn device_open_registers_the_session_and_pins_agent_device_to_it() {
         let _serial = PROVISIONING.lock().await;
         let (dir, hub, _) = enabled_hub(HEALTHY).await;
+        hub.use_platforms_for_test(super::super::tests::ios_only());
         let Some(tool) = fake_agent(dir.path()) else {
             return;
         };

@@ -11,7 +11,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use zeron_harness::acp::SignInProgress;
 use zeron_harness::{
-    AcpHarness, CancellationToken, Harness, HarnessError, RunControls, SteerMessage,
+    AcpHarness, CancellationToken, Harness, HarnessError, LaunchOverrides, RunControls,
+    SteerMessage,
 };
 use zeron_proto::{
     AccessMode, AgentEvent, Compaction, DoneStatus, HarnessId, ReasoningLevel, RunRequest,
@@ -2763,11 +2764,16 @@ async fn antigravity_detection_subprocess() {
 
 #[tokio::test]
 async fn all_acp_harnesses_use_project_scoped_session_command_updates() {
+    let home = tempfile::tempdir().unwrap();
     for h in [
         AcpHarness::devin(),
         AcpHarness::grok(),
         AcpHarness::hermes(),
-        AcpHarness::antigravity(),
+        // It also lists the skills of its home.
+        AcpHarness::antigravity().with_launch(LaunchOverrides {
+            home: Some(home.path().to_path_buf()),
+            ..LaunchOverrides::default()
+        }),
     ] {
         let h = h.with_executable(fixture_path());
         for name in ["project-a", "project-b"] {

@@ -287,7 +287,7 @@ And shorten the feature lists."}]}]}
                     .timer(std::time::Duration::from_millis(400))
                     .await;
                 let _ = window.update(cx, |shell, window, cx| {
-                    shell.fixture_open_browser(site, window, cx)
+                    shell.fixture_open_browser_at(site, window, cx)
                 });
             })
             .detach();

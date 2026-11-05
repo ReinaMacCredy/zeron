@@ -272,7 +272,7 @@ async fn film(
     pause(cx, 1500).await;
     action(window, cx, Box::new(shell::ToggleFiles));
     pause(cx, 1500).await;
-    let files_left = WINDOW.0 - settings::FILES_PANEL_DEFAULT;
+    let files_left = WINDOW.0 - 286.0;
     let (tree_x, tree_y0) = xy("ZERON_RIGHT_TREE", (files_left + 60.0, 113.5));
     notes.push_str(&format!("tree row0 click ({tree_x}, {tree_y0})\n"));
     click(window, cx, (tree_x, tree_y0)).await;
@@ -384,7 +384,6 @@ fn main() -> anyhow::Result<()> {
             let mut settings = settings::UiSettings::default();
             settings.sidebar_width = SIDEBAR;
             settings.right_pane_width = RIGHT_PANE;
-            settings.github_star_banner_dismissed = true;
             if !glass {
                 settings.surface = zeron_theme::SurfacePreference::Opaque;
             }

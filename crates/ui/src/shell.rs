@@ -25510,7 +25510,7 @@ impl Shell {
             self.chat_menu.open(ChatMenuState {
                 chat_id: String::new(),
                 tab: Some((self.panel_key(cx), surface)),
-                position: point(px(left + 24.0), px(40.0)),
+                position: gpui::point(px(left + 24.0), px(40.0)),
                 page: ChatMenuPage::Root,
             });
             cx.notify();
@@ -26211,7 +26211,7 @@ impl Shell {
     pub fn fixture_fork_chat(&mut self, cx: &mut Context<Self>) {
         self.create_side_chat(cx);
     }
-    pub fn fixture_open_browser(
+    pub fn fixture_open_browser_at(
         &mut self,
         url: String,
         window: &mut Window,

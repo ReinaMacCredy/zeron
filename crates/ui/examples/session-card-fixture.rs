@@ -99,7 +99,6 @@ fn main() -> anyhow::Result<()> {
         gpui_base::init(cx);
         let mut settings = settings::UiSettings::default();
         settings.sidebar_width = SIDEBAR;
-        settings.github_star_banner_dismissed = true;
         if opaque {
             settings.surface = zeron_theme::SurfacePreference::Opaque;
         }

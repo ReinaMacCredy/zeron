@@ -2153,6 +2153,23 @@ mod tests {
         (origin, requests)
     }
 
+    /// What a machine without the Android SDK detects, whatever this one has.
+    pub(super) fn ios_only() -> Vec<zeron_proto::device_hub::DevicePlatformAvailability> {
+        use zeron_proto::device_hub::{DevicePlatform, DevicePlatformAvailability};
+        vec![
+            DevicePlatformAvailability {
+                platform: DevicePlatform::Ios,
+                available: true,
+                reason: None,
+            },
+            DevicePlatformAvailability {
+                platform: DevicePlatform::Android,
+                available: false,
+                reason: None,
+            },
+        ]
+    }
+
     pub(super) async fn enabled_hub(
         fake: Fake,
     ) -> (tempfile::TempDir, Arc<super::DeviceHub>, String) {
@@ -2507,6 +2524,7 @@ mod tests {
         .unwrap();
         let (origin, requests) = fake_hub().await;
         core.device_hub.attach_hub_for_test(origin);
+        core.device_hub.use_platforms_for_test(ios_only());
         let rpc = core.rpc_service();
         rpc.handle(
             methods::CONFIGURE_DEVICE_HUB,

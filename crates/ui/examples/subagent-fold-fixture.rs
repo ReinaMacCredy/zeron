@@ -34,6 +34,7 @@ fn agent(id: &str, description: &str) -> MessagePart {
         diff: None,
         output_ref: None,
         output_bytes: None,
+        output_lines: None,
         diff_ref: None,
         diff_stats: None,
         subagent_ref: Some(format!("chat--sub--{id}")),

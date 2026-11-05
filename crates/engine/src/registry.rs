@@ -2079,6 +2079,8 @@ mod tests {
                 .env("HOME", home.path())
                 .env("PATH", &bin)
                 .env_remove("ANTIGRAVITY_ACP_EXECUTABLE")
+                .env_remove("ZERON_ADAPTERS_DIR")
+                .env_remove("ZERON_DATA_DIR")
                 .env("ZERON_NO_LOGIN_SHELL", "1")
                 .env("ZERON_TEST_AGY_INSTALLED", installed.to_string())
                 .output()

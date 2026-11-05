@@ -12,7 +12,8 @@ use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
 use zeron_harness::{
-    CancellationToken, ClaudeHarness, Harness, HarnessError, RunControls, SteerMessage,
+    CancellationToken, ClaudeHarness, Harness, HarnessError, LaunchOverrides, RunControls,
+    SteerMessage,
 };
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, RunRequest, SandboxLevel, ToolCall, UserInputAnswer,
@@ -1419,7 +1420,12 @@ async fn shared_skill_colliding_with_builtin_keeps_file_delivery() {
     let path = directory.join("SKILL.md");
     std::fs::write(&path, "---\nname: compact\n---\nCompact JSON fixtures.").unwrap();
 
-    let harness = harness();
+    // A large config of the machine's own would use up discovery's entry budget first.
+    let config = tempfile::tempdir().unwrap();
+    let harness = harness().with_launch(LaunchOverrides {
+        home: Some(config.path().to_path_buf()),
+        ..LaunchOverrides::default()
+    });
     let commands = harness.commands_for(cwd.path()).await.unwrap();
     assert!(commands.iter().any(|command| command.name == "compact"));
     let skill = harness

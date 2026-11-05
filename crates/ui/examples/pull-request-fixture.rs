@@ -85,9 +85,9 @@ fn main() -> anyhow::Result<()> {
         )
     })?;
     let ipc_port = port();
-    let _ipc = runtime.block_on(zeron_engine::serve_ipc(ipc_port, core.rpc_service()))?;
     let data = temp.path().join("ui");
     std::fs::create_dir(&data)?;
+    let _ipc = runtime.block_on(zeron_engine::serve_ipc(ipc_port, &data, core.rpc_service()))?;
     let boot = EngineBootConfig {
         data_dir: data.clone(),
         ipc_port,
