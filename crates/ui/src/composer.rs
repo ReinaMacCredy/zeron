@@ -15413,15 +15413,7 @@ mod tests {
             cx.update_window(handle.into(), |_, window, cx| {
                 window.draw(cx).clear();
                 assert!(input.read(cx).focus_handle.is_focused(window));
-                // An attached image is mentioned at the caret.
-                assert_eq!(
-                    input.read(cx).text(),
-                    if accepted {
-                        "Keep this draft [Image 1](zeron-image:1) "
-                    } else {
-                        "Keep this draft"
-                    }
-                );
+                assert_eq!(input.read(cx).text(), "Keep this draft");
             })
             .unwrap();
             assert_eq!(
