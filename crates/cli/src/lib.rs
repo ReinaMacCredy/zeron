@@ -507,13 +507,14 @@ mod tests {
             &["status"],
             &["sync"],
             &["quiesce"],
-            &["mcp"],
+            &["mcp", "--chat", "c"],
+            &["hook", "--chat", "c"],
             &["plugin", "list"],
             &["template", "list"],
         ] {
             assert!(parse(args).unwrap().runs_engine(), "{args:?}");
         }
-        for args in [&["update", "--check"][..], &["daemon", "status"]] {
+        for args in [&["update", "--check"][..], &["daemon", "status"], &["ui", "list"], &["triage"]] {
             assert!(!parse(args).unwrap().runs_engine(), "{args:?}");
         }
         assert!(parse(&[]).is_none());
