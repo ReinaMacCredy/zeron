@@ -421,7 +421,7 @@ impl EngineCore {
         let restarted = resume_schedule.take_restart(chrono::Utc::now().timestamp_millis());
         let host = doc_host.clone();
         let schedule = resume_schedule.clone();
-        resume_schedule.spawn(move |due| {
+        doc_host.spawn_worker(resume_schedule.clone().run(move |due| {
             let host = host.clone();
             let schedule = schedule.clone();
             async move {
@@ -440,7 +440,7 @@ impl EngineCore {
                     }
                 }
             }
-        });
+        }));
         let host = doc_host.clone();
         tokio::spawn(async move {
             for continuation in restarted {

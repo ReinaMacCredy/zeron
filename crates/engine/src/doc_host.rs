@@ -1349,7 +1349,10 @@ impl DocHost {
     /// Every background task rides the tracker, raced against the shutdown
     /// token: the loops' own exits stay authoritative in normal operation;
     /// the token is the retirement override.
-    fn spawn_worker(&self, fut: impl std::future::Future<Output = ()> + Send + 'static) {
+    pub(crate) fn spawn_worker(
+        &self,
+        fut: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
         let cancel = self.inner.shutdown.clone();
         self.inner.tasks.spawn(async move {
             tokio::select! {

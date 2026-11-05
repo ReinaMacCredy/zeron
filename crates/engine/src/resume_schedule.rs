@@ -420,28 +420,25 @@ impl ResumeSchedule {
         taken
     }
 
-    pub fn spawn<F, Fut>(&self, fire: F)
+    pub async fn run<F, Fut>(self, fire: F)
     where
-        F: Fn(Due) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
+        F: Fn(Due) -> Fut,
+        Fut: std::future::Future<Output = ()>,
     {
-        let schedule = self.clone();
-        tokio::spawn(async move {
-            loop {
-                let now = chrono::Utc::now().timestamp_millis();
-                let (due, next) = schedule.tick(now);
-                for due in due {
-                    fire(due).await;
-                }
-                let nap = next.map_or(MAX_NAP, |at| {
-                    Duration::from_millis(u64::try_from(at - now).unwrap_or(0)).min(MAX_NAP)
-                });
-                tokio::select! {
-                    _ = tokio::time::sleep(nap) => {}
-                    _ = schedule.inner.wake.notified() => {}
-                }
+        loop {
+            let now = chrono::Utc::now().timestamp_millis();
+            let (due, next) = self.tick(now);
+            for due in due {
+                fire(due).await;
             }
-        });
+            let nap = next.map_or(MAX_NAP, |at| {
+                Duration::from_millis(u64::try_from(at - now).unwrap_or(0)).min(MAX_NAP)
+            });
+            tokio::select! {
+                _ = tokio::time::sleep(nap) => {}
+                _ = self.inner.wake.notified() => {}
+            }
+        }
     }
 
     fn tick(&self, now: i64) -> (Vec<Due>, Option<i64>) {
