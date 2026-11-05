@@ -917,7 +917,7 @@ impl HarnessesPage {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let params = self.with_target(serde_json::json!({}));
+        let params = self.with_target(serde_json::json!({ "includeRegistry": true }));
         let update_params = params.clone();
         let supports_updates = self.supports_updates(cx);
 
@@ -1125,6 +1125,7 @@ impl HarnessesPage {
         let params = self.with_target(serde_json::json!({
             "harness": harness,
             "enabled": enabled,
+            "includeRegistry": true,
         }));
         self.error = None;
         self.pending_toggle = Some((harness, enabled));

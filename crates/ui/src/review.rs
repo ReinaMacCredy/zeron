@@ -36,7 +36,10 @@ pub async fn list_models(engine: &crate::state::EngineHandle, harness: HarnessId
 pub async fn reviewer_options(engine: &crate::state::EngineHandle) -> ReviewerOptions {
     let descriptors = engine
         .client()
-        .call_as::<Vec<HarnessDescriptor>>(methods::LIST_HARNESSES, serde_json::json!({}))
+        .call_as::<Vec<HarnessDescriptor>>(
+            methods::LIST_HARNESSES,
+            serde_json::json!({ "includeRegistry": true }),
+        )
         .await
         .map(|list| crate::pickers::offered_harnesses(&list))
         .unwrap_or_default();

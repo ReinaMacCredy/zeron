@@ -158,7 +158,10 @@ impl Shell {
         self.skills.load = Some(cx.spawn(async move |this, cx| {
             let client = engine.client();
             let harnesses = match client
-                .call(methods::LIST_HARNESSES, serde_json::json!({}))
+                .call(
+                    methods::LIST_HARNESSES,
+                    serde_json::json!({ "includeRegistry": true }),
+                )
                 .await
                 .map_err(|error| error.to_string())
                 .and_then(|value| {

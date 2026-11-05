@@ -866,6 +866,8 @@ pub struct SettingsStore {
     /// size).
     math_generation: u64,
     save_task: Option<Task<()>>,
+    /// The zgx app patches keys into the same file when both run on one engine.
+    known_on_disk: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Global for SettingsStore {}
@@ -873,6 +875,29 @@ impl Global for SettingsStore {}
 impl SettingsStore {
     fn snapshot(&self) -> (UiSettings, u64) {
         (self.current.clone(), self.revision)
+    }
+
+    /// Without this, the next save writes this store's stale copy over another writer's key.
+    fn adopt_disk_changes(&mut self) {
+        let Some(disk) = keys_on_disk(&self.data_dir) else {
+            return;
+        };
+        let mine = self.current.saved_keys();
+        let changed: Vec<_> = disk
+            .into_iter()
+            .filter(|(key, value)| {
+                let known = self.known_on_disk.get(key);
+                known != Some(value) && mine.get(key) == known
+            })
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+        let mut merged = mine;
+        merged.extend(changed);
+        if let Ok(adopted) = serde_json::from_value::<UiSettings>(merged.into()) {
+            self.update_current(|current| *current = adopted);
+        }
     }
 
     fn mark_saved(&mut self, revision: u64) -> bool {
@@ -901,9 +926,16 @@ impl SettingsStore {
     }
 }
 
+fn keys_on_disk(data_dir: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let text = std::fs::read_to_string(UiSettings::path(data_dir)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
     let data_dir = data_dir.into();
     crate::dictation::init(data_dir.clone(), cx);
+    // The file, not `settings`: what load migrated must not read as another writer's change.
+    let known_on_disk = keys_on_disk(&data_dir).unwrap_or_else(|| settings.saved_keys());
     cx.set_global(SettingsStore {
         current: settings,
         data_dir: data_dir.into(),
@@ -912,6 +944,7 @@ pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
         code_fences_generation: 0,
         math_generation: 0,
         save_task: None,
+        known_on_disk,
     });
 }
 
@@ -1523,11 +1556,15 @@ fn flush_latest(cx: &mut App) {
     if store.saved_revision == store.revision {
         return;
     }
+    let store = cx.global_mut::<SettingsStore>();
+    store.adopt_disk_changes();
     let (settings, revision) = store.snapshot();
     let data_dir = store.data_dir.clone();
     match settings.save(&data_dir) {
         Ok(()) => {
-            let current = cx.global_mut::<SettingsStore>().mark_saved(revision);
+            let store = cx.global_mut::<SettingsStore>();
+            store.known_on_disk = settings.saved_keys();
+            let current = store.mark_saved(revision);
             debug_assert!(current, "foreground settings write cannot be overtaken");
         }
         Err(err) => tracing::warn!(error = %err, revision, "failed to persist ui settings"),
@@ -3326,6 +3363,14 @@ impl UiSettings {
         std::fs::create_dir_all(data_dir)?;
         let path = Self::path(data_dir);
         let tmp = path.with_extension("json.tmp");
+        let json = self
+            .saved_text()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, &path)
+    }
+
+    fn saved_text(&self) -> serde_json::Result<String> {
         // Flattened, not through `serde_json::Value`, which would widen
         // every `f32` (`1.8` → `1.7999999523162842`).
         #[derive(Serialize)]
@@ -3335,13 +3380,17 @@ impl UiSettings {
             #[serde(rename = "pullRequestDestination")]
             legacy_pull_request_destination: &'static str,
         }
-        let json = serde_json::to_string_pretty(&Saved {
+        serde_json::to_string_pretty(&Saved {
             settings: self,
             legacy_pull_request_destination: self.pull_request_destination.legacy_key(),
         })
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &path)
+    }
+
+    fn saved_keys(&self) -> serde_json::Map<String, serde_json::Value> {
+        self.saved_text()
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
     }
 
     fn migrated(mut self) -> Self {
@@ -3469,6 +3518,57 @@ mod tests {
         let saved = serde_json::to_string(&settings).unwrap();
         let loaded: UiSettings = serde_json::from_str(&saved).unwrap();
         assert!(!loaded.compact_model_picker);
+    }
+
+    /// The zgx app patches notification keys into the file on a shared engine.
+    #[test]
+    fn a_save_keeps_what_another_writer_changed_and_this_store_did_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = UiSettings::default();
+        settings.save(dir.path()).unwrap();
+        let mut store = SettingsStore {
+            known_on_disk: settings.saved_keys(),
+            current: settings,
+            data_dir: dir.path().to_path_buf(),
+            revision: 0,
+            saved_revision: 0,
+            code_fences_generation: 0,
+            math_generation: 0,
+            save_task: None,
+        };
+        let path = UiSettings::path(dir.path());
+        let mut file: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        file["notificationsEnabled"] = false.into();
+        file["sidebarWidth"] = 111.0.into();
+        std::fs::write(&path, file.to_string()).unwrap();
+
+        store.update_current(|current| current.sidebar_width = 300.0);
+        store.adopt_disk_changes();
+
+        assert!(!store.current.notifications_enabled, "theirs is kept");
+        assert_eq!(
+            store.current.sidebar_width, 300.0,
+            "mine wins on the key I changed"
+        );
+        assert!(store.current.notifications_background_only, "untouched");
+    }
+
+    #[gpui::test]
+    fn a_first_save_keeps_what_load_migrated(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut on_disk = UiSettings::default();
+        on_disk.sidebar_width = 111.0;
+        on_disk.save(dir.path()).unwrap();
+        let mut migrated = on_disk.clone();
+        migrated.sidebar_width = 300.0;
+
+        cx.update(|cx| {
+            init(migrated, dir.path(), cx);
+            let store = cx.global_mut::<SettingsStore>();
+            store.adopt_disk_changes();
+            assert_eq!(store.current.sidebar_width, 300.0);
+        });
     }
 
     /// Every build shares `ui-settings.json`, and up to v0.2.122 an unknown
@@ -4830,6 +4930,7 @@ mod tests {
             code_fences_generation: 0,
             math_generation: 0,
             save_task: None,
+            known_on_disk: Default::default(),
         };
 
         store.current.sidebar_width = 300.0;
@@ -4889,6 +4990,7 @@ mod tests {
             code_fences_generation: 0,
             math_generation: 0,
             save_task: None,
+            known_on_disk: Default::default(),
         };
 
         assert!(store.update_current(|settings| settings.sidebar_width = 300.0));
@@ -4914,6 +5016,7 @@ mod tests {
             code_fences_generation: 0,
             math_generation: 0,
             save_task: None,
+            known_on_disk: Default::default(),
         };
 
         assert!(store.update_current(|settings| settings.code_fences_fit_content = true));

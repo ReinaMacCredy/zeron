@@ -2964,6 +2964,7 @@ impl Pickers {
         }
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let mut params = serde_json::Map::new();
+            params.insert("includeRegistry".into(), serde_json::Value::Bool(true));
             if let Some(target) = &target {
                 params.insert(
                     "targetDeviceId".into(),

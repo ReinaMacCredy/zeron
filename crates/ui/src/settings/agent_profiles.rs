@@ -188,7 +188,7 @@ impl AgentProfilesPage {
                     .client()
                     .call_as::<Vec<HarnessDescriptor>>(
                         methods::LIST_HARNESSES,
-                        serde_json::json!({}),
+                        serde_json::json!({ "includeRegistry": true }),
                     )
                     .await;
                 this.update(cx, |page, cx| {
