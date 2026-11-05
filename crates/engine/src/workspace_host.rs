@@ -2082,10 +2082,7 @@ impl WorkspaceHostInner {
     fn persist_snapshot(&self) -> Result<usize, EngineError> {
         // Keep export and disk write serialized: an older background snapshot
         // must not overwrite an acknowledged migration's durable snapshot.
-        let mut doc = lock(&self.reg);
-        if self.config.edge.is_none() {
-            doc.fold_pending();
-        }
+        let doc = lock(&self.reg);
         let bytes = doc.to_bytes()?;
         self.store
             .save_snapshot(REGISTRY_DOC_ID, &bytes)
@@ -2517,7 +2514,7 @@ mod tests {
                 org_id: "test-org".into(),
                 user_id: "test-user".into(),
                 edge: None,
-                local_only: false,
+                local_only: true,
                 settle_after_days: zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
             },
         )
