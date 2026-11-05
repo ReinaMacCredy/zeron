@@ -4619,6 +4619,7 @@ mod tests {
                                     enabled: Some(true),
                                     access_modes: Vec::new(),
                                     supports_plan: false,
+                                    icon: None,
                                 }])
                             }
                             methods::ENSURE_SUPERVISOR => {

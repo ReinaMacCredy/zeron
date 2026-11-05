@@ -108,6 +108,9 @@ impl AppUpdate {
             .supports_desktop_update()
             .then(|| install.desktop_update_blocker())
             .flatten();
+        // The channel (update-channel.json) lives in the data dir, where the
+        // next interface installed here reads it too.
+        zeron_update::channel::set_data_dir(&data_dir);
         let checker = {
             let _runtime = Tokio::handle(cx).enter();
             Updater::spawn_desktop(edge_url.clone())
@@ -158,6 +161,9 @@ impl AppUpdate {
             update_available: true,
             checked_at: None,
             error: None,
+            channel: None,
+            held: None,
+            switch: false,
         });
         let held = match std::env::var("ZERON_UPDATE_PREVIEW").as_deref() {
             Ok("available") => Some(Flow::Idle),
@@ -231,6 +237,18 @@ impl AppUpdate {
             .and_then(|status| status.latest_version.as_deref())
     }
 
+    /// A release the last check found that can't be installed here, and why
+    /// (an older macOS; a beta's engine newer than stable's).
+    pub fn held(&self) -> Option<(&str, &str)> {
+        let status = self.status.as_ref()?;
+        Some((status.latest_version.as_deref()?, status.held.as_deref()?))
+    }
+
+    /// Whether installing [`Self::available`] leaves the beta for stable.
+    pub fn switching(&self) -> bool {
+        self.status.as_ref().is_some_and(|status| status.switch && status.update_available)
+    }
+
     /// Whether this app downloads and installs updates itself right now.
     pub fn self_updating(&self) -> bool {
         self.install.supports_desktop_update() && self.blocker.is_none()
@@ -268,7 +286,9 @@ impl AppUpdate {
             Flow::Ready { version, .. } => Some(version),
             Flow::Idle | Flow::Failed { .. } => None,
         };
-        if current.is_some_and(|version| !zeron_update::version_newer(latest, version)) {
+        // Staged already: unless the offer changed (a newer release, or the
+        // other channel's after a switch, which may be older).
+        if current.is_some_and(|version| version == latest) {
             return;
         }
         self.start_download(cx);
@@ -292,17 +312,7 @@ impl AppUpdate {
             version: version.clone(),
         };
         let stage = Tokio::spawn(cx, async move {
-            // Re-read the manifest so a long-lived status still downloads the
-            // newest release, with that release's checksums.
-            let manifest = zeron_update::fetch_latest(&edge_url).await?;
-            anyhow::ensure!(
-                zeron_update::version_newer(&manifest.version, zeron_update::current_version()),
-                "the release feed no longer offers a newer version"
-            );
-            let staged = install
-                .stage_desktop(&edge_url, &manifest, &data_dir)
-                .await?;
-            anyhow::Ok((manifest.version, staged))
+            zeron_update::desktop::stage_offer(&edge_url, &data_dir, &install).await
         });
         self.download = Some(cx.spawn(async move |this, cx| {
             let outcome = match stage.await {
@@ -408,6 +418,9 @@ impl AppUpdate {
                         update_available: false,
                         checked_at: None,
                         error: None,
+                        channel: None,
+                        held: None,
+                        switch: false,
                     });
                     status.error = Some(message.to_string());
                     this.status = Some(status);

@@ -871,6 +871,7 @@ mod tests {
 
     fn descriptor(id: HarnessId, name: &str, installed: bool) -> HarnessDescriptor {
         HarnessDescriptor {
+            icon: None,
             id,
             name: name.into(),
             supports_steering: false,

@@ -202,7 +202,13 @@ async fn stress_100_interrupted_sessions_recover_without_losing_history_or_repla
     );
     assert_eq!(frame(&mut lines).await["status"], "finished");
     finish(&mut child, stdin).await;
-    for round in 0..100 {
+    // Pull request CI runs two cycles of the seven failure modes
+    // (ZERON_STRESS_ROUNDS=14); the nightly run and local runs do 100.
+    let rounds: usize = std::env::var("ZERON_STRESS_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    for round in 0..rounds {
         let mode = round % 7;
         let prompt = match mode {
             3 => "send-error",
@@ -251,11 +257,11 @@ async fn stress_100_interrupted_sessions_recover_without_losing_history_or_repla
             .unwrap()
             .lines()
             .count(),
-        201,
+        2 * rounds + 1,
         "recovery must not send any unrequested prompts"
     );
     println!(
-        "stress: 100 crashed/disconnected/cancelled/errored sessions, 100 successful same-session recoveries, zero history loss"
+        "stress: {rounds} crashed/disconnected/cancelled/errored sessions, {rounds} successful same-session recoveries, zero history loss"
     );
 }
 
@@ -570,6 +576,37 @@ async fn one_shot_runs_without_tools_settings_or_a_kept_store() {
     assert_eq!(options["tools"], serde_json::json!([]));
     assert_eq!(options["settingSources"], serde_json::json!([]));
     assert!(!fixture.dir.path().join("state").exists());
+}
+
+#[tokio::test]
+async fn plugin_mcp_servers_reach_the_sdk_beside_zeron() {
+    let fixture = SessionFixture::new();
+    let run = serde_json::json!({
+        "op": "run", "prompt": "normal", "cwd": fixture.dir.path(), "resume": null,
+        "mcp": { "name": "zeron", "command": "/opt/zeron", "args": ["mcp"], "env": {} },
+        "extraMcp": [{
+            "name": "plugin-focus", "command": "/data/plugins/.loaded/focus/0123/bin/server",
+            "args": ["--stdio"], "env": { "FOCUS": "1" },
+        }],
+    });
+    let (mut child, stdin, mut lines) = fixture.spawn(run).await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    assert_eq!(frame(&mut lines).await["status"], "finished");
+    finish(&mut child, stdin).await;
+    let options: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.dir.path().join("mcp-options.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(options["mcpServers"]["zeron"]["command"], "/opt/zeron");
+    let plugin = &options["mcpServers"]["plugin-focus"];
+    assert_eq!(plugin["type"], "stdio");
+    assert_eq!(
+        plugin["command"],
+        "/data/plugins/.loaded/focus/0123/bin/server"
+    );
+    assert_eq!(plugin["args"], serde_json::json!(["--stdio"]));
+    assert_eq!(plugin["env"]["FOCUS"], "1");
 }
 
 #[tokio::test]

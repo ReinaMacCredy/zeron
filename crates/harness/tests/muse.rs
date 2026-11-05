@@ -66,6 +66,7 @@ fn request(dir: &Path, scenario: &str, prompt: &str) -> RunRequest {
         forked_at: None,
         computer_control: false,
         disabled_tools: vec![],
+        extra_mcp: Vec::new(),
     }
 }
 

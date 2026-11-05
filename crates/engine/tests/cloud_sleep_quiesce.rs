@@ -152,6 +152,7 @@ fn send(core: &EngineCore, id: &str, prompt: &str) {
                     forked_at: None,
                     computer_control: false,
                     disabled_tools: Vec::new(),
+                    extra_mcp: Vec::new(),
                 },
                 message_id: id.into(),
             },

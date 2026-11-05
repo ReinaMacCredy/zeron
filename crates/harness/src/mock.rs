@@ -431,6 +431,7 @@ impl MockHarness {
                             is_error: false,
                             output: Some("test result: ok. 128 passed; 0 failed".into()),
                             diff: None,
+                            exit_code: None,
                         });
                         send("All 128 tests pass.");
                     } else {
@@ -665,6 +666,7 @@ impl MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        exit_code: None,
                     },
                 ]
             })
@@ -716,6 +718,7 @@ impl MockHarness {
                         is_error: mock_mcp_failed(&preview),
                         output: Some(mock_mcp_text(&preview)),
                         diff: None,
+                        exit_code: None,
                     },
                     AgentEvent::ToolCall {
                         id: "mock-html-render".into(),
@@ -730,6 +733,7 @@ impl MockHarness {
                         is_error: mock_mcp_failed(&result),
                         output: Some(mock_mcp_text(&result)),
                         diff: None,
+                        exit_code: None,
                     },
                 ]
             }
@@ -763,6 +767,7 @@ impl MockHarness {
                         is_error: mock_mcp_failed(&result),
                         output: Some(mock_mcp_text(&result)),
                         diff: None,
+                        exit_code: None,
                     },
                 ]);
             }
@@ -800,6 +805,7 @@ impl MockHarness {
                     is_error: false,
                     output: None,
                     diff: None,
+                    exit_code: None,
                 };
                 let done = AgentEvent::Done {
                     status: DoneStatus::Completed,
@@ -979,6 +985,7 @@ impl MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        exit_code: None,
                     },
                 ]
             })
@@ -1001,6 +1008,7 @@ impl MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        exit_code: None,
                     },
                 ]
             })
@@ -1032,6 +1040,7 @@ impl MockHarness {
                             new_text: "import { verdict } from \"../src/verdict\";\n\ntest(\"a verdict names its finding\", () => {\n  expect(verdict(\"f1\").finding).toBe(\"f1\");\n});\n".into(),
                             line_offset: None,
                         }),
+                        exit_code: None,
                     },
                     AgentEvent::ToolCall {
                         id: "mock-edit".into(),
@@ -1051,6 +1060,7 @@ impl MockHarness {
                             new_text: "export function verdict(finding: string) {\n  return { finding, severity: \"info\" };\n}\n".into(),
                             line_offset: None,
                         }),
+                        exit_code: None,
                     },
                 ]
             })
@@ -1122,6 +1132,7 @@ impl MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        exit_code: None,
                     });
                     events.push(AgentEvent::TextDelta {
                         text: format!("Update {} written.\n\n", active + 1),
@@ -1406,6 +1417,7 @@ fn background_run(
                 is_error: false,
                 output: Some(format!("Command running in background with ID: {id}")),
                 diff: None,
+                exit_code: None,
             });
             listed.push(zeron_proto::BackgroundTask {
                 id: id.into(),

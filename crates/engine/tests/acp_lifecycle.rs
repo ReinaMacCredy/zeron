@@ -74,6 +74,7 @@ async fn quiet_acp_prompt_stays_working_until_response() {
                 computer_control: false,
                 disabled_tools: Vec::new(),
                 env: Default::default(),
+                extra_mcp: Vec::new(),
             },
         },
     );

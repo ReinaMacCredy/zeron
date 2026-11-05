@@ -485,6 +485,8 @@ impl CursorHarness {
             "modelOptions": request.model_options,
             "resume": request.resume,
             "mcp": request.mcp,
+            // The plugins' native servers, beside Zeron's own.
+            "extraMcp": request.extra_mcp,
             "storeDir": lease.as_ref().and_then(|lease| lease.store_dir.as_ref()),
             "oneShot": one_shot,
             "images": images,
@@ -1142,6 +1144,7 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
                             is_error,
                             output: None,
                             diff: None,
+                            exit_code: None,
                         }),
                     ];
                     // A finished task IS the subagent finishing: the SDK has

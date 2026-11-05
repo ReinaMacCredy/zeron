@@ -101,6 +101,7 @@ async fn a_run_is_torn_down_only_once_no_login_refresh_is_in_flight() {
         forked_at: None,
         computer_control: false,
         disabled_tools: vec![],
+        extra_mcp: Vec::new(),
     };
     let (_steer, steering) = tokio::sync::mpsc::channel(1);
     let controls = RunControls {

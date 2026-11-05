@@ -112,6 +112,7 @@ pub(super) async fn act(
             message: None,
             url: None,
             callback_port: None,
+            code: None,
         };
         return Ok(ActionResult {
             page: Some(progress_page(&started, &pending)),
@@ -383,6 +384,7 @@ mod tests {
             message: None,
             url: None,
             callback_port: None,
+            code: None,
         };
         let paste = parse("signin:claude-code:l1:paste:https://claude.ai/x").unwrap();
         let ids: Vec<String> = progress_page(&paste, &pending).sections[0]

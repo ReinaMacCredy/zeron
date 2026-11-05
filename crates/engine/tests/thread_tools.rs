@@ -303,6 +303,7 @@ fn queue_run(core: &EngineCore, chat_id: &str, command_id: &str, message_id: &st
                     mcp: None,
                     disabled_tools: Vec::new(),
                     env: Default::default(),
+                    extra_mcp: Vec::new(),
                 },
                 message_id: message_id.into(),
             },
@@ -2501,6 +2502,7 @@ impl Harness for DelegatingHarness {
                             is_error: false,
                             output: None,
                             diff: None,
+                            exit_code: None,
                         }))
                         .await;
                 }
@@ -3024,6 +3026,7 @@ impl Harness for PublishingHarness {
                     is_error: false,
                     output: None,
                     diff: None,
+                    exit_code: None,
                 },
                 AgentEvent::TextDelta {
                     text: "Bars are tokens per turn.".into(),

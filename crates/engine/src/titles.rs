@@ -307,6 +307,7 @@ pub(crate) async fn run_one_shot(
             computer_control: false,
             disabled_tools: Vec::new(),
             env: Default::default(),
+            extra_mcp: Vec::new(),
         };
         // A Cloud device's credential broker supplies the CLI's login.
         registry
@@ -560,6 +561,7 @@ mod tests {
             computer_control: false,
             disabled_tools: Vec::new(),
             env: Default::default(),
+            extra_mcp: Vec::new(),
         };
         let result = collect_text(&harness, request, None, zeron_harness::TITLE_INSTRUCTIONS).await;
         assert!(

@@ -3837,6 +3837,7 @@ mod tests {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            icon: None,
             created_at: Utc::now() - TimeDelta::minutes(created_minutes_ago),
         }
     }
@@ -4472,6 +4473,7 @@ mod tests {
                 git_checked_at: None,
                 checkout_id: None,
                 repository_id: None,
+                icon: None,
                 created_at: Utc::now(),
             }];
             state.selected_space = Some("project".into());
@@ -4656,6 +4658,7 @@ mod tests {
                 git_checked_at: None,
                 checkout_id: None,
                 repository_id: None,
+                icon: None,
                 created_at: Utc::now(),
             }];
             state.selected_space = Some("project".into());
@@ -4719,6 +4722,7 @@ mod tests {
                 git_checked_at: None,
                 checkout_id: None,
                 repository_id: None,
+                icon: None,
                 created_at: Utc::now(),
             }];
             state.selected_space = Some("project".into());

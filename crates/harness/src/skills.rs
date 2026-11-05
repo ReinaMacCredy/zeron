@@ -131,6 +131,9 @@ fn project_dirs(harness: HarnessId) -> &'static [&'static str] {
         HarnessId::Codex => &[".agents/skills", ".codex/skills"],
         HarnessId::Muse => &[".agents/skills", ".codex/skills", ".claude/skills"],
         HarnessId::Acp | HarnessId::Mock => &[],
+        // The cross-agent convention: what a registry agent loads of its own
+        // isn't known to Zeron.
+        HarnessId::Registry(_) => &[".agents/skills"],
     }
 }
 

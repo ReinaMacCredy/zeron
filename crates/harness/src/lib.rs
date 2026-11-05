@@ -542,6 +542,7 @@ pub trait Harness: Send + Sync {
 }
 
 pub mod acp;
+pub mod acp_registry;
 pub(crate) mod adapter_install;
 pub use adapter_install::{
     ensure_npm_tool, installed_npm_tool, installed_npm_versions, npm_tool_launch,
@@ -553,7 +554,8 @@ pub use background::OutputSource;
 mod catalog;
 mod catalog_failure;
 pub(crate) mod code_signature;
-pub mod redact;
+/// Secret redaction, shared with the doc fold (command output tails).
+pub use zeron_proto::redact;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod agent_ports;
 pub mod claude;
@@ -1042,6 +1044,7 @@ pub(crate) fn one_shot_request(mut request: RunRequest) -> RunRequest {
     request.worktree = None;
     request.attachments.clear();
     request.mcp = None;
+    request.extra_mcp.clear();
     request.model_options.clear();
     request.auto_approve = false;
     request.access = AccessMode::Supervised;

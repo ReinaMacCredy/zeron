@@ -91,6 +91,7 @@ async fn an_approved_device_login_runs_real_turns_and_signs_out() {
         mcp: None,
         disabled_tools: vec![],
         env: env.clone(),
+        extra_mcp: Vec::new(),
     };
     let (steer, steering) = tokio::sync::mpsc::channel(8);
     let controls = RunControls {
@@ -216,6 +217,7 @@ async fn a_real_turn_reports_the_subscriptions_usage() {
         mcp: None,
         disabled_tools: vec![],
         env,
+        extra_mcp: Vec::new(),
     };
     let mut stream = MuseHarness::new()
         .with_executable(std::path::PathBuf::from(bin))

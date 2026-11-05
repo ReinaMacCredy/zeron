@@ -43,8 +43,9 @@ semver = "1"
 chrono.workspace = true
 filetime = "0.2"
 zip.workspace = true
-tar = { version = "0.4", default-features = false }
-flate2 = "1.1"
+# ACP registry builds ship as .tar.gz / .tar.bz2 as well as .zip.
+tar = "0.4"
+flate2 = "1"
 bzip2 = "0.6"
 
 [target.'cfg(unix)'.dependencies]
@@ -55,4 +56,5 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globali
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+zeron-doc.workspace = true
 tempfile.workspace = true

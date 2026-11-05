@@ -139,6 +139,7 @@ fn run_payload(message_id: &str, pending_ref: &str) -> SessionCommandPayload {
             computer_control: false,
             disabled_tools: Vec::new(),
             env: Default::default(),
+            extra_mcp: Vec::new(),
         },
         message_id: message_id.into(),
     }

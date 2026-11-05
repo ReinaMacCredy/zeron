@@ -1144,6 +1144,9 @@ fn refresh_setup_placeholder(st: &mut CoreState, cloud_booting: bool) -> bool {
                     subagent_tail: None,
                     delegate_route: Default::default(),
                     html_render: Default::default(),
+                    exit_code: None,
+                    output_truncated: false,
+                    output_lines: None,
                 }],
                 created_at: created_at + 1,
                 device_id: String::new(),
@@ -1478,6 +1481,7 @@ impl SessionHandle {
                     computer_control: false,
                     disabled_tools: config.map(|c| c.disabled_tools.clone()).unwrap_or_default(),
                     env: Default::default(),
+                    extra_mcp: Vec::new(),
                 };
                 self.core.queue_command(
                     &device_id,

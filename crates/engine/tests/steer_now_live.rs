@@ -159,6 +159,7 @@ async fn steer_now_interrupts_a_streaming_answer() {
                     computer_control: false,
                     disabled_tools: Vec::new(),
                     env: Default::default(),
+                    extra_mcp: Vec::new(),
                 },
             },
         )

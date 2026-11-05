@@ -59,6 +59,7 @@ fn run_request(prompt: &str) -> RunRequest {
         computer_control: false,
         disabled_tools: Vec::new(),
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -228,6 +229,7 @@ async fn park_after_spawn() -> Parked {
         is_error: false,
         output: None,
         diff: None,
+        exit_code: None,
     })
     .unwrap();
     feed.send(done(DoneStatus::Completed)).unwrap();
@@ -392,6 +394,7 @@ async fn task_cancel_tears_down_a_child_parked_on_its_subagents() {
             is_error: false,
             output: None,
             diff: None,
+            exit_code: None,
         },
         done(DoneStatus::Completed),
         tagged(AgentEvent::TextDelta {

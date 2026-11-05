@@ -68,6 +68,7 @@ fn run_request(prompt: &str) -> RunRequest {
         computer_control: false,
         disabled_tools: Vec::new(),
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 
@@ -443,6 +444,7 @@ async fn open_tool_call_never_quiesces() {
             is_error: false,
             output: None,
             diff: None,
+            exit_code: None,
         })
         .unwrap();
     rig.feed.send(text("Build done.")).unwrap();
@@ -483,6 +485,7 @@ async fn stale_tool_echo_stays_parked() {
             is_error: false,
             output: None,
             diff: None,
+            exit_code: None,
         })
         .unwrap();
     rig.feed

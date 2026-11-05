@@ -25,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
         branch: None, forked_at: None, computer_control: false,
         disabled_tools: Vec::new(),
         env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     let mut stream = CursorHarness::new()
         .run(

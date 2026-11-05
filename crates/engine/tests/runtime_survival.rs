@@ -252,6 +252,7 @@ fn request(prompt: &str) -> RunRequest {
         forked_at: None,
         computer_control: false,
         disabled_tools: Vec::new(),
+        extra_mcp: Vec::new(),
     }
 }
 

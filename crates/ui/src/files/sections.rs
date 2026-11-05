@@ -1377,6 +1377,9 @@ mod tests {
             subagent_tail: None,
             html_render: None,
             delegate_route: None,
+            exit_code: None,
+            output_lines: None,
+            output_truncated: false,
         }
     }
 

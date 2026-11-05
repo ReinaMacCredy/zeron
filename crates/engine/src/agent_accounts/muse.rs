@@ -357,6 +357,7 @@ impl AgentAccounts {
                     windows,
                     plan_label,
                     extra_usage: None,
+                    codex_reset_credits: None,
                 }),
                 String::new(),
                 now_ms(),

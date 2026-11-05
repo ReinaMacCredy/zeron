@@ -133,6 +133,7 @@ impl Harness for StallHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        exit_code: None,
                     },
                 ] {
                     let _ = tx.send(Ok(event)).await;
@@ -155,6 +156,7 @@ impl Harness for StallHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        exit_code: None,
                     },
                 ] {
                     let _ = tx.send(Ok(event)).await;
@@ -351,6 +353,7 @@ fn queue_run_on(rig: &Rig, chat_id: &str, prompt: &str, cwd: &str, harness: Opti
                     mcp: None,
                     disabled_tools: Vec::new(),
                     env: Default::default(),
+                    extra_mcp: Vec::new(),
                 },
                 message_id: format!("msg-{chat_id}-{prompt}"),
             },

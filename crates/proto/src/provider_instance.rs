@@ -267,6 +267,7 @@ pub fn driver_name(driver: HarnessId) -> &'static str {
         HarnessId::Acp => "ACP",
         HarnessId::Muse => "Muse Code",
         HarnessId::Mock => "Mock",
+        HarnessId::Registry(agent) => agent.registry_id(),
     }
 }
 
@@ -285,6 +286,7 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
         HarnessId::Acp => "acp",
         HarnessId::Muse => "muse",
         HarnessId::Mock => "mock",
+        HarnessId::Registry(agent) => agent.registry_id(),
     }
 }
 

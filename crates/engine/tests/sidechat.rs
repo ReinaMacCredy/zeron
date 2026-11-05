@@ -199,6 +199,7 @@ fn run_payload(prompt: &str, message_id: &str, cwd: &str) -> SessionCommandPaylo
             mcp: None,
             disabled_tools: Vec::new(),
             env: Default::default(),
+            extra_mcp: Vec::new(),
         },
         message_id: message_id.into(),
     }

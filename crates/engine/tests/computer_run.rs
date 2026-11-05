@@ -285,6 +285,7 @@ fn request(prompt: &str, mode: AccessMode) -> RunRequest {
         mcp: None,
         disabled_tools: Vec::new(),
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 

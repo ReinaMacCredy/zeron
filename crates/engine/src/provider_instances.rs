@@ -346,7 +346,7 @@ pub(crate) fn acp_launch(
             distribution,
         } => {
             let prepared =
-                crate::acp_registry::prepared_launch(data_dir, agent_id, version, *distribution)?
+                crate::provider_acp_registry::prepared_launch(data_dir, agent_id, version, *distribution)?
                     .ok_or_else(|| {
                         EngineError::Other(format!(
                             "Provider instance '{id}': the ACP Registry agent '{agent_id}' is not prepared on this device yet"

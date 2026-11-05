@@ -211,6 +211,7 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
                 computer_control: false,
                 disabled_tools: Vec::new(),
                 env: Default::default(),
+                extra_mcp: Vec::new(),
             },
             Some("side-user".into()),
         )
@@ -522,6 +523,9 @@ async fn a_fork_settles_the_running_subagent_chips_it_copies() {
         subagent_tail: None,
         delegate_route: None,
         html_render: None,
+        exit_code: None,
+        output_truncated: false,
+        output_lines: None,
     };
     core.doc_host
         .open("main")
@@ -658,6 +662,7 @@ async fn side_turn(
                 computer_control: false,
                 disabled_tools: Vec::new(),
                 env: Default::default(),
+                extra_mcp: Vec::new(),
             },
             Some(message_id.into()),
         )
@@ -873,6 +878,7 @@ async fn warm_side_chat_sends_owed_fork_history_once() {
         computer_control: false,
         disabled_tools: Vec::new(),
         env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     let settle = |count: usize| {
         let seen = seen.clone();
@@ -1065,6 +1071,7 @@ async fn orphaned_history_steer_still_owes_the_history() {
         computer_control: false,
         disabled_tools: Vec::new(),
         env: Default::default(),
+        extra_mcp: Vec::new(),
     };
     core.sessions
         .dispatch(
@@ -1192,6 +1199,7 @@ async fn native_subagents_off_reaches_side_chats_and_claimed_chats_too() {
                     computer_control: false,
                     disabled_tools: Vec::new(),
                     env: Default::default(),
+                    extra_mcp: Vec::new(),
                 },
                 Some(format!("{chat}-u1")),
             )

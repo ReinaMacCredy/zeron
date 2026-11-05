@@ -41,6 +41,8 @@ fn agent(id: &str, description: &str) -> MessagePart {
         subagent_tail: None,
         html_render: None,
         delegate_route: None,
+        exit_code: None,
+        output_truncated: false,
     }
 }
 

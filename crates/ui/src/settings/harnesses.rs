@@ -1998,6 +1998,7 @@ mod tests {
                 assert_eq!(page.expanded_harness, None, "nothing to open yet");
                 page.harnesses =
                     super::Loadable::Ready(vec![zeron_engine::registry::HarnessDescriptor {
+                        icon: None,
                         id: zeron_proto::HarnessId::Codex,
                         name: "Codex".into(),
                         supports_steering: false,
@@ -2038,6 +2039,7 @@ mod tests {
             super::HarnessesPage::new(state, cx)
         });
         let descriptor = |id, name: &str| zeron_engine::registry::HarnessDescriptor {
+            icon: None,
             id,
             name: name.into(),
             supports_steering: false,
@@ -2137,6 +2139,7 @@ mod tests {
             page
         });
         let descriptor = |id, name: &str| zeron_engine::registry::HarnessDescriptor {
+            icon: None,
             id,
             name: name.into(),
             supports_steering: false,

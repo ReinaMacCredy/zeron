@@ -5,35 +5,40 @@
 //! It also answers what the engine runs its own executable for: `mcp` and
 //! `hook` (the thread-tools bridge and Claude's PostToolUse hook, each
 //! `--chat <id> --port <port>`) and `--noop-browser` (browser suppression for
-//! agents' sign-in flows).
+//! agents' sign-in flows). And it is the engine helper of an
+//! interface that doesn't link the engine (the zgx app): every `zeron`
+//! subcommand that runs the engine's code (`headless`, `login`, `status`,
+//! `plugin`, …) is handed here with the same arguments, and parsed by the
+//! same command line (`zeron_cli`).
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
+
+use zeron_cli::{Engines, Launch};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("--noop-browser") => Ok(()),
-        Some(bridge @ ("mcp" | "hook")) => {
-            zeron_app::init_logging(false, bridge, true);
-            let chat = flag(&args, "--chat")
-                .ok_or_else(|| anyhow::anyhow!("{bridge} needs --chat <id>"))?;
-            let port = flag(&args, "--port").map(|port| port.parse()).transpose()?;
-            if bridge == "mcp" {
-                zeron_app::run_mcp(chat, port)
-            } else {
-                zeron_app::run_hook(chat, port)
-            }
-        }
         Some("--version" | "-V") => {
             println!("zeron-engine {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        _ => zeron_app::background::run(),
+        // Which build this binary is (`EngineInfo.build` of an engine it
+        // starts): a client compares it with the one running.
+        Some("--build-id") => {
+            println!("{}", zeron_engine::build_id());
+            Ok(())
+        }
+        // How the app starts it: the background engine.
+        None => zeron_app::background::run(),
+        Some(_) => match zeron_cli::run(env!("CARGO_PKG_VERSION"), Engines::InProcess) {
+            Launch::Done(result) => result,
+            Launch::Engine(command) => zeron_app::run_engine_command(command),
+            Launch::Window { .. } | Launch::Ui(_) | Launch::Triage { .. } => {
+                anyhow::bail!("zeron-engine has no window: open the Zeron app")
+            }
+            #[cfg(target_os = "linux")]
+            Launch::Appshot => anyhow::bail!("zeron-engine has no window: open the Zeron app"),
+        },
     }
-}
-
-fn flag(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|arg| arg == name)
-        .and_then(|ix| args.get(ix + 1).cloned())
 }

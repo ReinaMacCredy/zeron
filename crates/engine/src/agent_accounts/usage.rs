@@ -382,6 +382,7 @@ pub(super) fn grok_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnaps
         }],
         plan_label: None,
         extra_usage: None,
+        codex_reset_credits: None,
     })
 }
 
@@ -433,6 +434,7 @@ pub(super) fn devin_usage_snapshot(
             windows,
             plan_label,
             extra_usage: None,
+            codex_reset_credits: None,
         },
         identity,
     ))
@@ -546,6 +548,7 @@ pub(super) fn copilot_usage_snapshot(body: &serde_json::Value) -> Option<UsageSn
         windows,
         plan_label,
         extra_usage: None,
+        codex_reset_credits: None,
     })
 }
 
@@ -576,6 +579,7 @@ pub(super) fn nous_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnaps
         windows,
         plan_label,
         extra_usage: None,
+        codex_reset_credits: None,
     })
 }
 

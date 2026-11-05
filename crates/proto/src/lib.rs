@@ -17,6 +17,11 @@ pub mod capability_errors {
     pub const PULL_REQUESTS_TIMEOUT: &str = "pull_requests.timeout";
     pub const PULL_REQUESTS_DECODE: &str = "pull_requests.decode";
     pub const PULL_REQUESTS_COMMAND_FAILED: &str = "pull_requests.command_failed";
+    /// `ReadToolOutput`: the host's journal doesn't hold that command (an
+    /// old chat, or one whose journal is gone).
+    pub const TOOL_OUTPUT_UNAVAILABLE: &str = "tool_output.unavailable";
+    /// `ReadToolOutput`: the command has no result yet.
+    pub const TOOL_OUTPUT_NOT_FINISHED: &str = "tool_output.not_finished";
 }
 pub mod background;
 pub mod change_request_assessment;
@@ -55,6 +60,7 @@ pub mod preview;
 pub mod program_status;
 pub mod projectless;
 pub mod provider_instance;
+pub mod redact;
 pub mod providers;
 pub mod pull_request;
 pub mod quotes;

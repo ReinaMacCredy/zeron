@@ -163,6 +163,9 @@ fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
         subagent_tail: None,
         delegate_route: None,
         html_render: None,
+        exit_code: None,
+        output_truncated: false,
+        output_lines: None,
     };
     let mut w = worker(390.0);
     w.input = TranscriptInput {
@@ -769,6 +772,9 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
         subagent_tail: None,
         html_render: None,
         delegate_route: None,
+        exit_code: None,
+        output_truncated: false,
+        output_lines: None,
     };
     let spawn = |status: SubagentStatus| spawn_with(status, None);
     let frame_with = |part: MessagePart, harness: Option<zeron_proto::HarnessId>| {
@@ -881,6 +887,9 @@ fn computer_part(id: &str, tool: &str, input: Option<serde_json::Value>, is_erro
         subagent_tail: None,
         html_render: None,
         delegate_route: None,
+        exit_code: None,
+        output_lines: None,
+        output_truncated: false,
     }
 }
 
@@ -2162,6 +2171,9 @@ fn page_rows_sit_outside_the_fold_and_take_the_height_their_page_reports() {
         subagent_tail: None,
         html_render: Some(zeron_proto::html_render::HtmlRenderRef { path: "html/a1/page.html".into(), title: "Mockup".into(), height: 600, url: None }),
         delegate_route: None,
+        exit_code: None,
+        output_lines: None,
+        output_truncated: false,
     };
     view.set_viewport(390.0, 1.0);
     view.set_input(TranscriptInput {

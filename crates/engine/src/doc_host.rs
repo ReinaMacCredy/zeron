@@ -7257,6 +7257,7 @@ impl DocHost {
                 .map(|c| c.disabled_tools.clone())
                 .unwrap_or_default(),
             env: Default::default(),
+            extra_mcp: Vec::new(),
         })
     }
 

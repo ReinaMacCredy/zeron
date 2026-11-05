@@ -165,6 +165,30 @@ fn no_conversation(text: &str) -> bool {
 const SESSION_LOST: &str = "The previous Claude session could not be restored, so this chat \
      continues in a new one without its earlier context.";
 
+/// The inline `--mcp-config` JSON for Zeron's own server plus the plugins'
+/// native servers ([`RunRequest::extra_mcp`]), or `None` when there are none.
+/// Zeron's own server wins a name clash.
+fn mcp_servers_config_arg(
+    mcp: Option<&zeron_proto::McpServer>,
+    extras: &[zeron_proto::McpServer],
+) -> Option<String> {
+    if mcp.is_none() && extras.is_empty() {
+        return None;
+    }
+    let mut servers = serde_json::Map::new();
+    for server in extras.iter().chain(mcp) {
+        servers.insert(
+            server.name.clone(),
+            serde_json::json!({
+                "command": server.command,
+                "args": server.args,
+                "env": server.env,
+            }),
+        );
+    }
+    Some(serde_json::json!({ "mcpServers": servers }).to_string())
+}
+
 /// The `--model` value: the 1M context window is selected via a model-id
 /// suffix (`sonnet[1m]`), exactly how the CLI itself does it.
 fn model_arg(request: &RunRequest) -> Option<String> {
@@ -1184,6 +1208,12 @@ impl Launcher {
             if let Some(guidance) = &server.guidance {
                 cmd.args(["--append-system-prompt", guidance]);
             }
+        }
+        if self.one_shot.is_none()
+            && let Some(config) = mcp_servers_config_arg(None, &request.extra_mcp)
+        {
+            // A repeated flag adds to the first: the CLI loads every config (live-verified 2.1.318).
+            cmd.args(["--mcp-config", &config]);
         }
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
@@ -2458,6 +2488,7 @@ mod tests {
             computer_control: false,
             disabled_tools: Vec::new(),
             env: Default::default(),
+            extra_mcp: Vec::new(),
         };
         let line = |harness: &ClaudeHarness| {
             let cmd = harness.launcher(&exe).command(&request);
@@ -2530,6 +2561,7 @@ mod tests {
                 computer_control: false,
                 disabled_tools: Vec::new(),
                 env: Default::default(),
+                extra_mcp: Vec::new(),
             };
             if let Some(choice) = choice {
                 request
@@ -2590,6 +2622,7 @@ mod tests {
                 computer_control: false,
                 disabled_tools: Vec::new(),
                 env: Default::default(),
+                extra_mcp: Vec::new(),
             }
         };
         let settings = |request: &RunRequest| {
@@ -2659,6 +2692,7 @@ mod tests {
             computer_control: false,
             disabled_tools: tools.iter().map(|t| t.to_string()).collect(),
             env: Default::default(),
+            extra_mcp: Vec::new(),
         };
         let disallowed = |request: &RunRequest| {
             let args = ClaudeHarness::launch_args(request, None);
@@ -2703,6 +2737,7 @@ mod tests {
                 computer_control: false,
                 disabled_tools: Vec::new(),
                 env: Default::default(),
+                extra_mcp: Vec::new(),
             };
             harness
                 .launcher(&exe)
@@ -2830,6 +2865,7 @@ mod tests {
             computer_control: false,
             disabled_tools: Vec::new(),
             env: Default::default(),
+            extra_mcp: Vec::new(),
         };
         let args = |cmd: &Command| -> Vec<String> {
             cmd.as_std()
@@ -2915,6 +2951,7 @@ mod tests {
             computer_control: false,
             disabled_tools: Vec::new(),
             env: Default::default(),
+            extra_mcp: Vec::new(),
         };
         let run = |request: &RunRequest| {
             let cmd = harness.launcher(&exe).command(request);
@@ -3059,6 +3096,7 @@ mod access_tests {
             computer_control: false,
             disabled_tools: Vec::new(),
             env: Default::default(),
+            extra_mcp: Vec::new(),
         }
     }
 
@@ -3192,5 +3230,76 @@ mod resolution_tests {
             PathBuf::from("/cfg")
         );
     }
+    #[test]
+    fn plugin_servers_load_beside_the_tool_server_but_never_on_a_one_shot() {
+        let mut request = access_tests::request(zeron_proto::AccessMode::FullAccess, false);
+        request.extra_mcp = vec![zeron_proto::McpServer {
+            name: "plugin-focus".into(),
+            command: "/data/plugins/server".into(),
+            args: vec![],
+            env: Default::default(),
+        }];
+        let configs = |launcher: &Launcher| -> Vec<String> {
+            let cmd = launcher.command(&request);
+            let args: Vec<String> = cmd
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            args.windows(2)
+                .filter(|pair| pair[0] == "--mcp-config")
+                .map(|pair| pair[1].clone())
+                .collect()
+        };
+        let harness = ClaudeHarness::new();
+        let mut launcher = harness.launcher(std::path::Path::new("claude"));
+        let alone = configs(&launcher);
+        assert_eq!(alone.len(), 1);
+        assert!(alone[0].contains("plugin-focus"));
+        launcher.tool_server = Some(crate::ToolServer {
+            command: "/opt/zeron/zeron".into(),
+            args: vec!["mcp".into()],
+            env: Vec::new(),
+            guidance: None,
+        });
+        let both = configs(&launcher);
+        assert_eq!(both.len(), 2);
+        assert!(both[0].contains("/opt/zeron/zeron") && !both[0].contains("plugin-focus"));
+        assert!(both[1].contains("plugin-focus"));
+        launcher.one_shot = Some("title");
+        let one_shot = configs(&launcher);
+        assert_eq!(one_shot, ["{\"mcpServers\":{}}"]);
+    }
+    #[test]
+    fn mcp_servers_config_arg_adds_plugin_servers_beside_zeron() {
+        let zeron = zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "/opt/zeron/zeron".into(),
+            args: vec!["mcp".into()],
+            env: Default::default(),
+        };
+        let extra = zeron_proto::McpServer {
+            name: "plugin-focus".into(),
+            command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
+            args: vec!["--stdio".into()],
+            env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+        };
+        assert_eq!(mcp_servers_config_arg(None, &[]), None);
+        let both: Value = serde_json::from_str(
+            &mcp_servers_config_arg(Some(&zeron), std::slice::from_ref(&extra)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(both["mcpServers"]["zeron"]["command"], "/opt/zeron/zeron");
+        let plugin = &both["mcpServers"]["plugin-focus"];
+        assert_eq!(
+            plugin["command"],
+            "/data/plugins/.loaded/focus/0123/bin/server"
+        );
+        assert_eq!(plugin["args"], serde_json::json!(["--stdio"]));
+        assert_eq!(plugin["env"]["FOCUS"], "1");
+        let only: Value =
+            serde_json::from_str(&mcp_servers_config_arg(None, &[extra]).unwrap()).unwrap();
+        assert!(only["mcpServers"].get("zeron").is_none());
+        assert!(only["mcpServers"].get("plugin-focus").is_some());
+    }
 }
-

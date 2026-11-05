@@ -420,6 +420,7 @@ mod tests {
             device_id: "dev".into(),
             path: path.to_string_lossy().into_owned(),
             name: None,
+            icon: None,
             git_detected: true,
             git_checked_at: None,
             checkout_id: None,
@@ -537,6 +538,7 @@ mod tests {
             zeron_owned: false,
             origin: None,
             chat_id: None,
+            signing_in: false,
         }
     }
 

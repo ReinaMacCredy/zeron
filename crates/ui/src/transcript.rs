@@ -18413,6 +18413,9 @@ mod tests {
             subagent_tail: None,
             html_render: None,
             delegate_route: None,
+            exit_code: None,
+            output_truncated: false,
+            output_lines: None,
         };
         let entry = assistant(
             "a1",
@@ -20601,6 +20604,9 @@ mod tests {
             subagent_tail: None,
             html_render: None,
             delegate_route: None,
+            exit_code: None,
+            output_truncated: false,
+            output_lines: None,
         }
     }
 
@@ -20633,6 +20639,9 @@ mod tests {
                 subagent_tail: None,
                 html_render: None,
                 delegate_route: None,
+                exit_code: None,
+                output_lines: None,
+                output_truncated: false,
             }
         };
         let entry = assistant(
@@ -20819,6 +20828,9 @@ mod tests {
             subagent_tail: None,
             html_render: None,
             delegate_route: None,
+            exit_code: None,
+            output_truncated: false,
+            output_lines: None,
         }
     }
 
@@ -20911,6 +20923,9 @@ mod tests {
             subagent_tail: None,
             html_render: None,
             delegate_route: None,
+            exit_code: None,
+            output_lines: None,
+            output_truncated: false,
         };
         let entry = assistant(
             "m-del",
@@ -24004,6 +24019,9 @@ mod tests {
             subagent_tail: None,
             html_render: None,
             delegate_route: None,
+            exit_code: None,
+            output_lines: None,
+            output_truncated: false,
         }
     }
 
@@ -25348,6 +25366,9 @@ mod computer_tests {
                 subagent_tail,
                 html_render: None,
                 delegate_route: None,
+                exit_code: None,
+                output_lines: None,
+                output_truncated: false,
             },
             other => other,
         };

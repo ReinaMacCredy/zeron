@@ -11588,6 +11588,7 @@ impl Composer {
                         computer_control: false,
                         disabled_tools: resolved.disabled_tools.clone(),
                         env: Default::default(),
+                        extra_mcp: Vec::new(),
                     },
                     message_id: message_id.clone(),
                 };

@@ -100,6 +100,7 @@ fn request(prompt: &str, cwd: &str) -> RunRequest {
         mcp: None,
         disabled_tools: Vec::new(),
         env: Default::default(),
+        extra_mcp: Vec::new(),
     }
 }
 

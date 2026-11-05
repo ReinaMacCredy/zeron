@@ -15776,13 +15776,24 @@ impl Shell {
                     ],
                 ),
                 Prompt::Result => match update.available() {
-                    None => (
-                        "Zeron is up to date".into(),
-                        format!("Version {current} is the newest release.").into(),
-                        vec![UpdatePromptButton::Close("OK")],
-                    ),
+                    None => match update.held() {
+                        Some((latest, why)) => (
+                            format!("Zeron {latest} can't be installed yet").into(),
+                            why.to_owned().into(),
+                            vec![UpdatePromptButton::Close("OK")],
+                        ),
+                        None => (
+                            "Zeron is up to date".into(),
+                            format!("Version {current} is the newest release.").into(),
+                            vec![UpdatePromptButton::Close("OK")],
+                        ),
+                    },
                     Some(latest) => {
-                        let title: SharedString = format!("Zeron {latest} is available").into();
+                        let title: SharedString = if update.switching() {
+                            format!("Zeron {latest} (Stable) is available").into()
+                        } else {
+                            format!("Zeron {latest} is available").into()
+                        };
                         if let Some(blocker) = update.blocker() {
                             (
                                 title,
@@ -23991,6 +24002,7 @@ mod exit_regressions {
                     git_checked_at: None,
                     checkout_id: None,
                     repository_id: None,
+                    icon: None,
                     created_at: Utc::now(),
                 };
                 shell.state.update(cx, |state, cx| {
@@ -24243,6 +24255,7 @@ mod exit_regressions {
                         checkout_id: None,
                         repository_id: None,
                         github_repo: None,
+                        icon: None,
                         created_at: Utc::now(),
                     }]);
                     // Boot opened an existing project session after loading defaults.
@@ -24313,6 +24326,7 @@ mod exit_regressions {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: Utc::now(),
         };
         window
@@ -24406,6 +24420,7 @@ mod exit_regressions {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: Utc::now(),
         };
         window
@@ -24472,6 +24487,7 @@ mod exit_regressions {
                         checkout_id: None,
                         repository_id: None,
                         github_repo: None,
+                        icon: None,
                         created_at: Utc::now(),
                     }]);
                     state.select_space(Some("repo".into()), cx);
@@ -24866,6 +24882,7 @@ mod exit_regressions {
                         checkout_id: None,
                         repository_id: None,
                         github_repo: None,
+                        icon: None,
                         created_at: Utc::now(),
                     }]);
                 });

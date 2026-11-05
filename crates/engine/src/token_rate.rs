@@ -238,6 +238,7 @@ mod tests {
                 is_error: false,
                 output: None,
                 diff: None,
+                exit_code: None,
             },
             true,
             at(t0, 70_000),
