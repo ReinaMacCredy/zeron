@@ -6,7 +6,7 @@ The Usage page shows how much of each agent plan you have left, and what your ch
 
 Click the usage ring in the rail, type `/usage` in a Claude Code chat, or pick **Open usage** in the Cmd+K palette.
 
-The ring shows the tightest limit window of the agent accounts you use. Hover it for a card with each account's windows, how much of each is used and when the binding one resets; the card is for reading only. At a limit the ring turns red with a **!**.
+The ring shows the tightest limit window of the agent accounts you use, and follows the model you are on. Cursor reports its own percentages, split into Cursor, Grok and Other. Hover it for a card with each account's windows, how much of each is used and when the binding one resets; the card is for reading only. At a limit the ring turns red with a **!**.
 
 ## Plan limits
 

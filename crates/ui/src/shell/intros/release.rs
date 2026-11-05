@@ -27,8 +27,17 @@ const KEEP_AWAKE: &str = "keep-awake";
 const COMPACTION_MORPH: &str = "compaction-morph";
 const SWIPE_DOT: &str = "swipe-dot";
 const TAB_DRAG: &str = "tab-drag";
+const TEXT_ANNOTATION: &str = "text-annotation";
+const TEXT_ANNOTATION_HERO: &str = "text-annotation-hero";
+const SKILLS_PAGE: &str = "skills-page";
+const WORKTREE_FOLLOW: &str = "worktree-follow";
+const TASK_DEPENDS: &str = "task-depends";
+const LIVE_PREVIEW: &str = "live-preview";
+const WINDOW_FRAME: &str = "window-frame";
+const PROJECT_PICKER: &str = "project-picker";
+const SETTINGS_TREE: &str = "settings-tree";
 
-pub(super) const VISUALS: [(&str, f32, f32); 25] = [
+pub(super) const VISUALS: [(&str, f32, f32); 34] = [
     (CLAUDE_CONFIG, 7.0, 3.4),
     (COMMAND_CARDS, 6.6, 4.5),
     (COMPACTION_CARD, 7.6, 5.4),
@@ -54,6 +63,15 @@ pub(super) const VISUALS: [(&str, f32, f32); 25] = [
     (COMPACTION_MORPH, 5.2, 4.2),
     (SWIPE_DOT, 4.2, 1.8),
     (TAB_DRAG, 4.4, 1.8),
+    (TEXT_ANNOTATION, 6.6, 5.2),
+    (TEXT_ANNOTATION_HERO, 6.6, 5.2),
+    (SKILLS_PAGE, 6.0, 4.4),
+    (WORKTREE_FOLLOW, 7.0, 3.6),
+    (TASK_DEPENDS, 7.0, 4.0),
+    (LIVE_PREVIEW, 6.8, 2.4),
+    (WINDOW_FRAME, 5.6, 2.6),
+    (PROJECT_PICKER, 6.0, 4.4),
+    (SETTINGS_TREE, 4.0, 2.4),
 ];
 
 pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyElement {
@@ -83,6 +101,15 @@ pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyEleme
         COMPACTION_MORPH => compaction_morph_visual(theme, t, reduced),
         SWIPE_DOT => swipe_dot_visual(theme, t),
         TAB_DRAG => tab_drag_visual(theme, t),
+        TEXT_ANNOTATION => text_annotation_visual(theme, t, false),
+        TEXT_ANNOTATION_HERO => text_annotation_visual(theme, t, true),
+        SKILLS_PAGE => skills_page_visual(theme, t),
+        WORKTREE_FOLLOW => worktree_follow_visual(theme, t, reduced),
+        TASK_DEPENDS => task_depends_visual(theme, t),
+        LIVE_PREVIEW => live_preview_visual(theme, t),
+        WINDOW_FRAME => window_frame_visual(theme, t),
+        PROJECT_PICKER => project_picker_visual(theme, t),
+        SETTINGS_TREE => settings_tree_visual(theme, t),
         _ => div().into_any_element(),
     }
 }
@@ -3745,5 +3772,1018 @@ fn tab_drag_visual(theme: &Theme, t: f32) -> AnyElement {
                 .child(split_card(false, 0.0))
         })
         .when(split < 1.0, |el| el.child(thumb))
+        .into_any_element()
+}
+
+fn bar(theme: &Theme, width: f32) -> gpui::Div {
+    div()
+        .flex_none()
+        .h(px(6.0))
+        .w(px(width))
+        .rounded_full()
+        .bg(theme.wash(0.1))
+}
+
+fn text_annotation_visual(theme: &Theme, t: f32, hero: bool) -> AnyElement {
+    const SELECT_AT: f32 = 0.4;
+    const PILL_AT: f32 = 1.2;
+    const ADD_AT: f32 = 2.1;
+    const SAVE_AT: f32 = 3.7;
+    let pick = ramp(t, SELECT_AT, 600.0, motion::EASE_OUT);
+    let pill_in =
+        ramp(t, PILL_AT, 180.0, motion::EASE_OUT) * (1.0 - ramp(t, ADD_AT, 120.0, motion::EASE_IN));
+    let editor_in =
+        ramp(t, ADD_AT, 180.0, motion::EASE_OUT) * (1.0 - ramp(t, SAVE_AT, 140.0, motion::EASE_IN));
+    let saved = ramp(t, SAVE_AT, 260.0, motion::EASE_BOUNCE);
+    let comment = typed("Use the real total", t, ADD_AT + 0.25, 0.05);
+    let inset = if hero { 8.0 } else { 38.0 };
+    let badge = div()
+        .absolute()
+        .top(px(-15.0 + 4.0 * (1.0 - saved)))
+        .right(px(-7.0))
+        .size(px(15.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(theme.accent)
+        .opacity(saved.min(1.0))
+        .child(text(9.5, theme.on_solid, "1"));
+    let selected = div()
+        .relative()
+        .flex_none()
+        .child(
+            div()
+                .absolute()
+                .top(px(-1.0))
+                .bottom(px(-1.0))
+                .left_0()
+                .w(relative(pick))
+                .rounded(px(3.0))
+                .bg(theme.accent.opacity(0.24)),
+        )
+        .child(text(11.5, theme.text, "shipping is added at checkout"))
+        .when(saved > 0.0, |el| el.child(badge));
+    let segment = |label: &'static str| {
+        div()
+            .h_full()
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .child(text(11.0, theme.text, label))
+    };
+    let pill = div()
+        .absolute()
+        .top(px(52.0 + 4.0 * (1.0 - pill_in)))
+        .left(px(inset))
+        .h(px(26.0))
+        .flex()
+        .items_center()
+        .rounded(px(13.0))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.surface_raised)
+        .shadow_md()
+        .opacity(pill_in)
+        .child(segment("Add to chat"))
+        .child(div().w(px(1.0)).h_full().bg(theme.border))
+        .child(segment("Ask in side chat"));
+    let editor = div()
+        .absolute()
+        .top(px(50.0 + 4.0 * (1.0 - editor_in)))
+        .left(px(inset))
+        .right(px(if hero { inset } else { 46.0 }))
+        .h(px(30.0))
+        .pl(px(11.0))
+        .pr(px(4.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .rounded(px(15.0))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.surface_raised)
+        .shadow_md()
+        .opacity(editor_in)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .when(comment.is_empty(), |el| {
+                    el.child(clip(11.0, theme.text_faint, "Add an optional comment..."))
+                })
+                .when(!comment.is_empty(), |el| {
+                    el.child(text(11.0, theme.text, comment))
+                        .child(caret(theme, t))
+                }),
+        )
+        .child(
+            div()
+                .flex_none()
+                .size(px(22.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(theme.text)
+                .child(glyph(icons::ARROW_UP, 11.0, theme.on_solid)),
+        );
+    let reply = div()
+        .absolute()
+        .top(px(12.0))
+        .left(px(14.0))
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .child(text(
+            11.5,
+            theme.text,
+            if hero {
+                "The cart adds it up, and"
+            } else {
+                "The total comes from the cart, and"
+            },
+        ))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .child(selected)
+                .child(text(11.5, theme.text, ".")),
+        );
+    let chip = div()
+        .h(px(20.0))
+        .px(px(8.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(theme.border)
+        .opacity(saved.min(1.0))
+        .child(glyph(icons::CHAT_ROUND_LINE, 10.0, theme.text_muted))
+        .child(text(10.5, theme.text, "1 annotation"));
+    let composer = div()
+        .absolute()
+        .left(px(8.0))
+        .right(px(8.0))
+        .bottom(px(8.0))
+        .h(px(32.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(theme.border_strong)
+        .when(saved > 0.0, |el| el.child(chip))
+        .child(clip(11.0, theme.text_faint, "Message"));
+    card(theme)
+        .map(|el| if hero { el.w_full() } else { el.w(px(320.0)) })
+        .h(px(if hero { 88.0 } else { 136.0 }))
+        .relative()
+        .overflow_hidden()
+        .child(reply)
+        .when(pill_in > 0.0, |el| el.child(pill))
+        .when(editor_in > 0.0, |el| el.child(editor))
+        .when(!hero, |el| el.child(composer))
+        .into_any_element()
+}
+
+fn skills_page_visual(theme: &Theme, t: f32) -> AnyElement {
+    const HOVER_AT: f32 = 0.5;
+    const DIALOG_AT: f32 = 1.1;
+    const TRY_AT: f32 = 3.0;
+    let dialog = ramp(t, DIALOG_AT, 220.0, motion::EASE_OUT)
+        * (1.0 - ramp(t, TRY_AT, 160.0, motion::EASE_IN));
+    let used = ramp(t, TRY_AT + 0.15, 220.0, motion::EASE_OUT);
+    let hovered = (HOVER_AT..TRY_AT).contains(&t);
+    let nav = |label: &'static str, on: bool| {
+        div()
+            .h(px(20.0))
+            .px(px(7.0))
+            .flex()
+            .items_center()
+            .rounded(px(5.0))
+            .when(on, |el| el.bg(theme.wash(0.08)))
+            .child(text(
+                10.5,
+                if on { theme.text } else { theme.text_muted },
+                label,
+            ))
+    };
+    let row = |title: &'static str, harness: &'static str, on: bool| {
+        div()
+            .h(px(24.0))
+            .px(px(7.0))
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .rounded(px(6.0))
+            .when(on, |el| el.bg(theme.wash(0.06)))
+            .child(glyph(icons::MAGIC_STICK_3, 11.0, theme.text_muted))
+            .child(clip(11.0, theme.text, title).flex_1())
+            .child(text(9.5, theme.text_faint, harness))
+    };
+    let page = div()
+        .absolute()
+        .top(px(8.0))
+        .left(px(8.0))
+        .right(px(8.0))
+        .flex()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex_none()
+                .w(px(84.0))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(nav("All skills", true))
+                .child(nav("Claude Code", false))
+                .child(nav("Codex", false)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(row("Release notes", "Claude Code", false))
+                .child(row("Shop style", "Codex", hovered))
+                .child(row("Test plan", "Claude Code", false)),
+        );
+    let sheet = card(theme)
+        .absolute()
+        .top(px(10.0 + 6.0 * (1.0 - dialog)))
+        .left(px(70.0))
+        .w(px(180.0))
+        .p(px(10.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .shadow_md()
+        .bg(theme.surface_raised)
+        .opacity(dialog)
+        .child(text(12.0, theme.text, "Shop style").font_weight(gpui::FontWeight::SEMIBOLD))
+        .child(bar(theme, 150.0))
+        .child(bar(theme, 110.0))
+        .child(
+            div()
+                .mt(px(2.0))
+                .h(px(22.0))
+                .w(px(74.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(5.0))
+                .rounded_full()
+                .bg(theme.text)
+                .child(glyph(icons::PEN_NEW_SQUARE, 10.0, theme.on_solid))
+                .child(text(10.5, theme.on_solid, "Try now")),
+        );
+    let skill = div()
+        .h(px(20.0))
+        .px(px(7.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .rounded(px(6.0))
+        .bg(theme.accent.opacity(0.16))
+        .opacity(used)
+        .child(glyph(icons::MAGIC_STICK_3, 10.0, theme.accent))
+        .child(text(10.5, theme.accent, "Shop style"));
+    let composer = div()
+        .absolute()
+        .left(px(8.0))
+        .right(px(8.0))
+        .bottom(px(8.0))
+        .h(px(32.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(theme.border_strong)
+        .when(used > 0.0, |el| el.child(skill))
+        .child(clip(11.0, theme.text_faint, "Message"));
+    card(theme)
+        .w(px(320.0))
+        .h(px(136.0))
+        .relative()
+        .overflow_hidden()
+        .child(page)
+        .child(composer)
+        .when(dialog > 0.0, |el| el.child(sheet))
+        .into_any_element()
+}
+
+fn worktree_follow_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
+    const TOOL_AT: f32 = 0.8;
+    const FOLLOW_AT: f32 = 1.7;
+    const AHEAD_AT: f32 = 2.8;
+    const MERGED_AT: f32 = 4.4;
+    let tool = ramp(t, TOOL_AT, 220.0, motion::EASE_OUT);
+    let follow = ramp(t, FOLLOW_AT, 240.0, motion::EASE_OUT);
+    let ahead = ramp(t, AHEAD_AT, 220.0, motion::EASE_OUT);
+    let merged = t >= MERGED_AT;
+    let (_, _, ok) = chat_status_tone(zeron_proto::ChatIndicator::Completed, theme);
+    let state = |size: f32| {
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .opacity(ahead)
+            .child(if merged {
+                glyph(icons::LUCIDE_GIT_MERGE, size + 1.0, ok).into_any_element()
+            } else {
+                mono(theme, size, theme.text_muted, "\u{2191}2").into_any_element()
+            })
+    };
+    let row = div()
+        .h(px(26.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .rounded(px(7.0))
+        .bg(theme.wash(0.06))
+        .child(if merged {
+            tree_glyph(TreeStatus::Done, 12.0, ok, true)
+        } else {
+            running(theme, reduced)
+        })
+        .child(clip(11.5, theme.text, "Ship the shop").flex_1())
+        .child(state(10.5));
+    let call = div()
+        .h(px(20.0))
+        .flex()
+        .items_center()
+        .opacity(tool)
+        .child(mono(
+            theme,
+            10.0,
+            theme.text_muted,
+            "git worktree add ../shop-search",
+        ));
+    let local = div()
+        .absolute()
+        .left_0()
+        .top_0()
+        .bottom_0()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .opacity(1.0 - follow)
+        .child(glyph(icons::FOLDER, 11.0, theme.text_muted))
+        .child(text(10.5, theme.text_muted, "Local checkout"))
+        .child(mono(theme, 10.0, theme.text_faint, "main"));
+    let moved = div()
+        .absolute()
+        .left_0()
+        .top(px(3.0 * (1.0 - follow)))
+        .bottom_0()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .opacity(follow)
+        .child(glyph(icons::WORKTREE, 11.0, theme.text))
+        .child(text(10.5, theme.text, "Worktree \u{b7} shop-search"))
+        .child(mono(theme, 10.0, theme.text_faint, "zeron/search"))
+        .child(state(10.0));
+    let footer = div()
+        .h(px(24.0))
+        .px(px(8.0))
+        .relative()
+        .border_t_1()
+        .border_color(theme.border)
+        .child(div().relative().size_full().child(local).child(moved));
+    card(theme)
+        .w(px(320.0))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .p(px(8.0))
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(row)
+                .child(div().px(px(8.0)).child(call)),
+        )
+        .child(footer)
+        .into_any_element()
+}
+
+fn task_depends_visual(theme: &Theme, t: f32) -> AnyElement {
+    const TYPE_AT: f32 = 0.3;
+    const MENU_AT: f32 = 1.1;
+    const PICK_AT: f32 = 2.1;
+    const SAVE_AT: f32 = 3.0;
+    const DONE_AT: f32 = 4.6;
+    let menu = ramp(t, MENU_AT, 160.0, motion::EASE_OUT)
+        * (1.0 - ramp(t, PICK_AT, 120.0, motion::EASE_IN));
+    let picked = ramp(t, PICK_AT, 160.0, motion::EASE_OUT);
+    let capture = 1.0 - ramp(t, SAVE_AT, 180.0, motion::EASE_IN);
+    let list = ramp(t, SAVE_AT + 0.1, 240.0, motion::EASE_OUT);
+    let done = t >= DONE_AT;
+    let (_, _, ok) = chat_status_tone(zeron_proto::ChatIndicator::Completed, theme);
+    let title = typed("Ship checkout ", t, TYPE_AT, 0.05);
+    let at_sign = (MENU_AT..PICK_AT).contains(&t);
+    let bar_row = card(theme)
+        .absolute()
+        .top(px(10.0 - 6.0 * (1.0 - capture)))
+        .left(px(10.0))
+        .right(px(10.0))
+        .h(px(36.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .bg(theme.surface_raised)
+        .opacity(capture)
+        .child(text(11.5, theme.text, title))
+        .when(at_sign, |el| el.child(text(11.5, theme.accent, "@")))
+        .when(picked > 0.0, |el| {
+            el.child(
+                div()
+                    .h(px(18.0))
+                    .px(px(5.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(3.0))
+                    .rounded(px(5.0))
+                    .bg(theme.wash(0.08))
+                    .opacity(picked)
+                    .child(todo_circle(theme, 9.0))
+                    .child(text(10.5, theme.text, "Fix login redirect")),
+            )
+        })
+        .when(picked == 0.0, |el| el.child(caret(theme, t)));
+    let option = |label: &'static str, on: bool| {
+        div()
+            .h(px(22.0))
+            .px(px(7.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded(px(5.0))
+            .when(on, |el| el.bg(theme.wash(0.08)))
+            .child(todo_circle(theme, 10.0))
+            .child(clip(10.5, theme.text, label))
+    };
+    let mentions = card(theme)
+        .absolute()
+        .top(px(50.0 + 4.0 * (1.0 - menu)))
+        .left(px(10.0))
+        .w(px(210.0))
+        .p(px(4.0))
+        .flex()
+        .flex_col()
+        .bg(theme.surface_raised)
+        .shadow_md()
+        .opacity(menu)
+        .child(option("Fix login redirect", true))
+        .child(option("Write the release notes", false));
+    let blocker = div()
+        .h(px(16.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .child(text(
+            10.0,
+            theme.text_faint,
+            if done { "Depends on" } else { "Blocked by" },
+        ))
+        .child(if done {
+            glyph(icons::LUCIDE_CHECK, 10.0, ok).into_any_element()
+        } else {
+            todo_circle(theme, 9.0).into_any_element()
+        })
+        .child(
+            text(
+                10.0,
+                if done {
+                    theme.text_faint
+                } else {
+                    theme.text_muted
+                },
+                "Fix login redirect",
+            )
+            .when(done, |el| el.line_through()),
+        );
+    let tasks = div()
+        .absolute()
+        .top(px(10.0 + 6.0 * (1.0 - list)))
+        .left(px(10.0))
+        .right(px(10.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .opacity(list)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .child(todo_circle(theme, 12.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(text(11.5, theme.text, "Ship checkout"))
+                        .child(blocker),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .child(if done {
+                    glyph(icons::LUCIDE_CHECK, 12.0, ok).into_any_element()
+                } else {
+                    todo_circle(theme, 12.0).into_any_element()
+                })
+                .child(
+                    text(
+                        11.5,
+                        if done { theme.text_faint } else { theme.text },
+                        "Fix login redirect",
+                    )
+                    .when(done, |el| el.line_through()),
+                ),
+        );
+    card(theme)
+        .w(px(320.0))
+        .h(px(116.0))
+        .relative()
+        .overflow_hidden()
+        .when(capture > 0.0, |el| el.child(bar_row))
+        .when(menu > 0.0, |el| el.child(mentions))
+        .when(list > 0.0, |el| el.child(tasks))
+        .into_any_element()
+}
+
+fn live_preview_visual(theme: &Theme, t: f32) -> AnyElement {
+    const CLICK_AT: f32 = 1.5;
+    const STOP_AT: f32 = 3.2;
+    const RETRY_AT: f32 = 4.9;
+    let stopped = ramp(t, STOP_AT, 200.0, motion::EASE_OUT)
+        * (1.0 - ramp(t, RETRY_AT, 200.0, motion::EASE_OUT));
+    let added = t >= CLICK_AT;
+    let press = ramp(t, CLICK_AT - 0.08, 80.0, motion::EASE_OUT)
+        * (1.0 - ramp(t, CLICK_AT, 120.0, motion::EASE_OUT));
+    let header = div()
+        .h(px(26.0))
+        .px(px(9.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .border_b_1()
+        .border_color(theme.border)
+        .child(mono(theme, 10.0, theme.text_muted, "localhost:3000").flex_1())
+        .child(glyph(icons::LUCIDE_ROTATE_CW, 11.0, theme.text_muted))
+        .child(glyph(icons::LUCIDE_EXTERNAL_LINK, 11.0, theme.text_muted));
+    let page = div()
+        .absolute()
+        .inset_0()
+        .p(px(11.0))
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .opacity(1.0 - stopped)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .child(
+                    text(11.5, theme.text, "The shop")
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .flex_1(),
+                )
+                .child(text(
+                    10.5,
+                    theme.text_muted,
+                    if added { "Cart 1" } else { "Cart 0" },
+                )),
+        )
+        .child(bar(theme, 180.0))
+        .child(bar(theme, 130.0))
+        .child(
+            div()
+                .mt(px(2.0))
+                .h(px(22.0))
+                .w(px(82.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.0))
+                .bg(theme.accent)
+                .opacity(1.0 - 0.25 * press)
+                .child(text(10.5, theme.on_solid, "Add to cart")),
+        );
+    let refused = div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(7.0))
+        .opacity(stopped)
+        .child(text(
+            11.0,
+            theme.text_muted,
+            "localhost:3000 is not responding",
+        ))
+        .child(
+            div()
+                .h(px(22.0))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .child(text(10.5, theme.text, "Retry")),
+        );
+    card(theme)
+        .w(px(320.0))
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .child(header)
+        .child(
+            div()
+                .relative()
+                .h(px(96.0))
+                .child(page)
+                .when(stopped > 0.0, |el| el.child(refused)),
+        )
+        .into_any_element()
+}
+
+fn window_frame_visual(theme: &Theme, t: f32) -> AnyElement {
+    const MODES: [(&str, f32); 3] = [("Off", 0.0), ("Dark", 1.8), ("Glass", 3.6)];
+    const WIDTH: f32 = 300.0;
+    let dark = ramp(t, MODES[1].1, 320.0, motion::EASE_OUT);
+    let glass = ramp(t, MODES[2].1, 320.0, motion::EASE_OUT);
+    let current = MODES.iter().rposition(|(_, at)| t >= *at).unwrap_or(0);
+    let art = linear_gradient(
+        120.0,
+        linear_color_stop(gpui::hsla(0.58, 0.55, 0.42, 1.0), 0.0),
+        linear_color_stop(gpui::hsla(0.86, 0.5, 0.5, 1.0), 1.0),
+    );
+    let shade = motion::lerp(0.5, 0.14, glass);
+    let frame = div()
+        .absolute()
+        .inset_0()
+        .child(div().absolute().inset_0().bg(art))
+        .child(div().absolute().inset_0().bg(gpui::black().opacity(shade)))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(theme.surface)
+                .opacity(1.0 - dark),
+        );
+    let tab = |x: f32, title: &'static str, on: bool| {
+        div()
+            .absolute()
+            .top(px(5.0))
+            .left(px(x))
+            .w(px(78.0))
+            .h(px(17.0))
+            .px(px(7.0))
+            .flex()
+            .items_center()
+            .rounded_t(px(6.0))
+            .when(on, |el| el.bg(crate::settings::widgets::block_fill(theme)))
+            .child(text(
+                9.5,
+                if on || dark > 0.5 {
+                    theme.text
+                } else {
+                    theme.text_muted
+                },
+                title,
+            ))
+    };
+    let rail = div()
+        .absolute()
+        .top(px(28.0))
+        .left(px(7.0))
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .children(
+            [
+                icons::CHAT_ROUND_LINE,
+                icons::CHECKLIST,
+                icons::MAGIC_STICK_3,
+            ]
+            .map(|path| {
+                glyph(
+                    path,
+                    11.0,
+                    if dark > 0.5 {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    },
+                )
+            }),
+        );
+    let inset = div()
+        .absolute()
+        .top(px(22.0))
+        .left(px(26.0))
+        .right(px(6.0))
+        .bottom(px(6.0))
+        .p(px(9.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .rounded(px(9.0))
+        .bg(crate::settings::widgets::block_fill(theme))
+        .child(bar(theme, 150.0))
+        .child(bar(theme, 200.0))
+        .child(bar(theme, 120.0));
+    let window = div()
+        .relative()
+        .w(px(WIDTH))
+        .h(px(100.0))
+        .overflow_hidden()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(theme.border)
+        .child(frame)
+        .child(tab(26.0, "Ship the shop", true))
+        .child(tab(108.0, "Fix login", false))
+        .child(rail)
+        .child(inset);
+    let options = MODES.iter().enumerate().map(|(ix, (label, _))| {
+        let on = ix == current;
+        div()
+            .h(px(20.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .rounded(px(6.0))
+            .when(on, |el| el.bg(theme.wash(0.1)))
+            .child(text(
+                10.5,
+                if on { theme.text } else { theme.text_muted },
+                *label,
+            ))
+    });
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(8.0))
+        .child(window)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(text(10.5, theme.text_muted, "Window frame"))
+                .child(
+                    div()
+                        .p(px(2.0))
+                        .flex()
+                        .gap(px(2.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(theme.border)
+                        .children(options),
+                ),
+        )
+        .into_any_element()
+}
+
+fn project_picker_visual(theme: &Theme, t: f32) -> AnyElement {
+    const NEW_AT: f32 = 0.8;
+    const MADE_AT: f32 = 2.2;
+    const PIN_AT: f32 = 3.2;
+    let open = ramp(t, NEW_AT, 200.0, motion::EASE_OUT);
+    let made = t >= MADE_AT;
+    let pinned = ramp(t, PIN_AT, 240.0, motion::EASE_OUT);
+    let name = typed("search", t, NEW_AT + 0.3, 0.12);
+    let header = |label: &'static str| {
+        div()
+            .h(px(16.0))
+            .px(px(5.0))
+            .flex()
+            .items_center()
+            .child(text(9.5, theme.text_faint, label))
+    };
+    let rail_row = |label: &'static str| {
+        div()
+            .h(px(20.0))
+            .px(px(5.0))
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .child(glyph(icons::LUCIDE_FOLDER, 10.0, theme.text_muted))
+            .child(clip(10.5, theme.text, label))
+    };
+    let rail = div()
+        .flex_none()
+        .w(px(92.0))
+        .p(px(6.0))
+        .flex()
+        .flex_col()
+        .border_r_1()
+        .border_color(theme.border)
+        .child(header("Pinned"))
+        .child(rail_row("shop"))
+        .when(pinned > 0.0, |el| {
+            el.child(rise(rail_row("search"), t, PIN_AT))
+        })
+        .child(header("Recent"))
+        .child(rail_row("notes"));
+    let folder = |label: &'static str| {
+        div()
+            .h(px(22.0))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(glyph(icons::LUCIDE_FOLDER, 11.0, theme.text_muted))
+            .child(clip(11.0, theme.text, label).flex_1())
+    };
+    let new_row = div()
+        .h(px(24.0 * open))
+        .overflow_hidden()
+        .opacity(open)
+        .child(if made {
+            folder("search")
+                .rounded(px(6.0))
+                .bg(theme.wash(0.08))
+                .child(glyph(
+                    icons::PIN,
+                    10.0,
+                    if pinned > 0.0 {
+                        theme.accent
+                    } else {
+                        theme.text_faint
+                    },
+                ))
+        } else {
+            div()
+                .h(px(22.0))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(theme.accent.opacity(0.6))
+                .child(glyph(icons::LUCIDE_FOLDER_PLUS, 11.0, theme.text_muted))
+                .child(text(11.0, theme.text, name))
+                .child(caret(theme, t))
+        });
+    let footer = div()
+        .h(px(30.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .border_t_1()
+        .border_color(theme.border)
+        .child(glyph(icons::LUCIDE_FOLDER_PLUS, 10.0, theme.text_muted))
+        .child(text(10.0, theme.text_muted, "New folder").flex_1())
+        .child(
+            div()
+                .h(px(20.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .rounded(px(6.0))
+                .bg(theme.text)
+                .child(text(10.0, theme.on_solid, "Add project")),
+        );
+    card(theme)
+        .w(px(320.0))
+        .h(px(128.0))
+        .overflow_hidden()
+        .flex()
+        .child(rail)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex_1()
+                        .p(px(5.0))
+                        .flex()
+                        .flex_col()
+                        .child(new_row)
+                        .child(folder("docs"))
+                        .child(folder("site")),
+                )
+                .child(footer),
+        )
+        .into_any_element()
+}
+
+fn settings_tree_visual(theme: &Theme, t: f32) -> AnyElement {
+    const OPEN_AT: f32 = 0.8;
+    const WIDTH: f32 = 300.0;
+    let open = ramp(t, OPEN_AT, 240.0, motion::EASE_OUT);
+    let page_in = ramp(t, OPEN_AT, 260.0, motion::EASE_OUT);
+    let group = |label: &'static str, path: &'static str, on: bool| {
+        div()
+            .h(px(20.0))
+            .px(px(5.0))
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .child(glyph(
+                path,
+                10.0,
+                if on { theme.text } else { theme.text_muted },
+            ))
+            .child(text(
+                10.5,
+                if on { theme.text } else { theme.text_muted },
+                label,
+            ))
+    };
+    let child = |label: &'static str, on: bool| {
+        div()
+            .h(px(18.0))
+            .px(px(5.0))
+            .flex()
+            .items_center()
+            .rounded(px(5.0))
+            .when(on, |el| el.bg(theme.wash(0.08)))
+            .child(text(
+                10.0,
+                if on { theme.text } else { theme.text_muted },
+                label,
+            ))
+    };
+    let tree = div()
+        .flex_none()
+        .w(px(116.0))
+        .p(px(5.0))
+        .flex()
+        .flex_col()
+        .border_r_1()
+        .border_color(theme.border)
+        .child(group("General", icons::SETTINGS, false))
+        .child(group("Agents", icons::BOT, open > 0.5))
+        .child(
+            div()
+                .ml(px(10.0))
+                .pl(px(6.0))
+                .h(px(40.0 * open))
+                .overflow_hidden()
+                .opacity(open)
+                .border_l_1()
+                .border_color(theme.border)
+                .child(child("Routing", false))
+                .child(child("Compaction", true)),
+        );
+    let page = |title: &'static str, shown: f32, offset: f32| {
+        div()
+            .absolute()
+            .top(px(9.0 + offset))
+            .left(px(10.0))
+            .right(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .opacity(shown)
+            .child(text(11.5, theme.text, title).font_weight(gpui::FontWeight::SEMIBOLD))
+            .child(bar(theme, 130.0))
+            .child(bar(theme, 90.0))
+    };
+    card(theme)
+        .w(px(WIDTH))
+        .h(px(92.0))
+        .overflow_hidden()
+        .flex()
+        .child(tree)
+        .child(
+            div()
+                .flex_1()
+                .relative()
+                .child(page("General", 1.0 - page_in, 0.0))
+                .child(page("Compaction", page_in, 8.0 * (1.0 - page_in))),
+        )
         .into_any_element()
 }

@@ -35,6 +35,8 @@ File an idea without leaving what you are doing:
 - **From any app**: press both Option keys (⌥ + ⌥) on macOS. A bar opens over the app in front, without bringing Zeron forward. Type the idea and press Enter: the task lands at the top of **To do** and the app you were in keeps the keyboard. Shift+Enter starts the notes, **#** and a project name picks the project (the folder chip does too: it opens a list of every project under the chip), **Today** sets the due date, and Cmd+V attaches an image. Cmd+Enter saves and opens the task's card in Zeron. Escape or a click outside closes the bar and keeps what you typed for next time.
 - **Inside Zeron**: click **+** under **Tasks** in the rail. Type and press Enter as many times as you like; the popover lists what you added. Escape, a click outside, or **+** again closes it.
 
+In the bar and every other task title and notes field (the **Tasks** and **Inbox** add rows, the task card, the rail's capture, a plan's step inputs), `@`, `$` and `/` open the composer's menus and a pick lands in the text. Enter or Tab picks the highlighted row first. The `/` menu keeps only the entries that put text into the message.
+
 After a save from the bar, **Added to To do** shows with **Undo**, which deletes the task, and **Open**. Captured tasks start in the project you have selected for New chat and carry a **New** tag, and the Tasks icon in the rail counts them, until you next open Tasks.
 
 The chord is set in [Settings > This Mac > Appshots](zeron://settings/appshots) under **Quick capture to Tasks**: ⌘ + ⌘, ⌥ + ⌥, ⇧ + ⇧ or None. It needs the same Input Monitoring permission as the Appshot chord, and the two cannot share a chord. Linux and Windows have no quick-capture hotkey; use the **+** in the rail.
@@ -42,6 +44,12 @@ The chord is set in [Settings > This Mac > Appshots](zeron://settings/appshots) 
 ![The quick capture bar with the project menu](quick-capture-bar.jpg)
 
 ![The rail's quick capture over Tasks, with New tags](quick-capture.jpg)
+
+## Tasks that depend on others
+
+A task you pick with `@` in Quick capture becomes a dependency of the task you are capturing. The row then reads **Blocked by** and that task's title. Once every dependency is done it reads **Depends on**, with the done ones checked and struck through. A deleted task drops out of the list.
+
+An agent can read and set dependencies with the `tasks` tool, as `dependsOn`. Zeron refuses an unknown task, a task depending on itself, and a cycle.
 
 ## The task card
 

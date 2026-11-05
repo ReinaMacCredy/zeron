@@ -61,6 +61,7 @@ pub const BODIES: &[(&str, &str)] = &[
         "agent-questions",
         include_str!("../../ui/docs/agent-questions.md"),
     ),
+    ("skills", include_str!("../../ui/docs/skills.md")),
     ("agent-tools", include_str!("../../ui/docs/agent-tools.md")),
     ("projects", include_str!("../../ui/docs/projects.md")),
     ("right-pane", include_str!("../../ui/docs/right-pane.md")),

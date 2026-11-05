@@ -32,6 +32,7 @@ With a background set, more rows appear:
 - **Background effect**: **None**, **Dither**, **ASCII**, **Halftone**, or **Scanlines**.
 - **Chat background**: show the artwork behind open conversations (off by default), with **Placement** (**Hero** or **Full**), **Opacity** (20% by default), **Blur** (24 px by default), and **Scrim** to keep text readable. The artwork also shows through the titlebar and the selected tab.
 - **Terminal background**: **Same as chat** (the default), **Custom**, or **Off**. **Custom** gives the terminal its own **Placement**, **Opacity**, **Blur**, and **Scrim**, starting from your chat settings.
+- **Window frame**: run the artwork under the tab bar and rail: **Off**, **Dark**, or **Glass**. While it is on, **Frame shade** sets how much it darkens the artwork, and with **Glass**, **Frame blur** sets the blur. **Frame sidebar** puts the sidebar on the frame too (**Plain**, **Darker**, or **Glass**), and any look but **Plain** adds **Sidebar blend**: **Whole frame** or **Fade** across the tab bar.
 
 ## Motion
 

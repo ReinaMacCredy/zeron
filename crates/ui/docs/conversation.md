@@ -88,11 +88,18 @@ Click an image in the transcript (an attachment, an image the agent made, or a p
 
 Right-click an image for **Copy path** and **Copy image**.
 
-## Quote a reply
+## Annotate a reply
 
 Drag across the transcript to select text; selections can span messages. Double-click selects a word and triple-click a block. Cmd+C copies the selection (Ctrl+C on Windows and Linux).
 
-When you let go, an **Add to chat** pill appears under the selection. Click it to stage the text as a quote. The composer shows a **1 selection** chip (or **N selections**); hover it to see what you picked, and click the × on it to drop all of them. When you send, the quotes go after your message as quoted text. Sending quotes with no text of your own asks the agent to refer to them.
+When you let go, a pill appears at the selection with **Add to chat** and **Ask in side chat**.
+
+- **Add to chat** opens a field, **Add an optional comment...**. Press Enter or the arrow to save it. The text stays highlighted with a numbered badge, which shows your comment when you point at it, and stays on the text as you scroll.
+- **Ask in side chat** opens a [side chat](zeron://docs/side-chat) on that text.
+
+The composer shows a **1 annotation** chip (or **N annotations**). Hover it to see each one, with buttons to edit or remove it, and click the × on the chip to drop them all. When you send, the agent gets each quote with its number, your comment and the file it came from. Sending annotations with no text of your own asks the agent to refer to them.
+
+Text selected in a Markdown file's rendered view, in the [right pane](zeron://docs/right-pane), annotates the same way and names the file.
 
 **Add to chat** works in sidechats and split panes, but not in a read-only subagent transcript. To quote from the terminal, see [Terminal](zeron://docs/terminal).
 

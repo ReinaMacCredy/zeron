@@ -2,6 +2,104 @@
 # must be listed in crates/docs/src/images.rs IMAGES. Order does not matter.
 
 [[entry]]
+version = "0.2.137"
+date = "Nov 5"
+hero_visual = "text-annotation-hero"
+
+[[entry.features]]
+id = "text-annotations"
+title = "Comment on any text in a reply"
+description = "Select text in a reply, or in a Markdown file in the right pane, and a pill offers Add to chat and Ask in side chat. Add to chat opens a comment field; the text stays highlighted with a numbered badge and the composer shows 1 annotation. When you send, the agent gets each quote with your comment and the file it came from."
+details = "Hover the chip to edit or remove one. The comment is optional. Ask in side chat opens a side chat on that text."
+visual = "text-annotation"
+
+[[entry.features]]
+id = "skills-page"
+title = "All your agents' skills on one page"
+description = "Skills in the app rail lists every skill your agents find, with a filter per agent. Click one to read it, turn it off, or uninstall it. Try now starts a message with it, and the composer shows a picked skill as a pill."
+visual = "skills-page"
+
+[[entry.features]]
+id = "worktree-follow"
+title = "Threads follow the worktree their agent moves to"
+description = "When an agent creates or edits a linked git worktree, its thread moves there. The composer footer reads Worktree · and the folder, the Git panel follows, and sidebar rows and tabs show how far ahead the branch is or a merged check."
+details = "Click the branch in the footer to move the thread to another worktree or back to the main checkout. The agent is told on its next turn."
+visual = "worktree-follow"
+
+[[entry.features]]
+id = "task-references"
+title = "Menus in every task input, and tasks that wait on each other"
+description = "@, $ and / work in Quick capture, the Tasks and Inbox add rows, the task card and a plan's steps. A task you pick with @ in Quick capture becomes a dependency: the new task's row says Blocked by and its title, then Depends on with a check once that task is done."
+details = "Agents see and set the same dependencies through the tasks tool. A cycle or an unknown task is refused."
+visual = "task-depends"
+
+[[entry.features]]
+id = "live-preview"
+title = "See your running dev server in the chat"
+description = "An agent can show a page from your local server as a live card in the chat. You can click around in it, reload it, or open it in your browser. If the server stops, the card says so and offers Retry."
+details = "Only localhost, 127.0.0.1 and [::1] addresses. A card from another device says where the page runs."
+visual = "live-preview"
+
+[[entry.features]]
+id = "window-frame"
+title = "Let your artwork run under the tab bar and rail"
+description = "With a background set, Window frame in Settings > Appearance takes the artwork past the chat: Off, Dark or Glass, with Frame shade and, for Glass, Frame blur. Frame sidebar puts the sidebar on the frame too: Plain, Darker or Glass."
+details = "Sidebar blend chooses whether the sidebar's look covers the whole frame or fades across the tab bar."
+visual = "window-frame"
+
+[[entry.features]]
+id = "project-picker"
+title = "A New project picker with pins and New folder"
+description = "The picker keeps your pinned and recent folders in a rail beside the browser. Create a folder in place, with git init if you want it, show hidden folders, or drop a folder from Finder. After Add project you are back in the composer."
+details = "The picker and Cmd+K now fade and rise in, and fade and sink out."
+visual = "project-picker"
+
+[[entry.features]]
+id = "upstream-0-2-133"
+title = "From upstream Zeron: Cursor in your usage"
+description = "The usage ring and Usage page read Cursor's own percentages, show Cursor, Grok and Other, and the ring follows the model you are using."
+
+[[entry.features]]
+id = "upstream-0-2-136"
+title = "From upstream Zeron: quieter pull request watches, and agent tools for themes and plugins"
+description = "Watching pull requests no longer runs git in every project. Agents also get tools for plugins, templates and themes, which you can turn off in Settings > Context & tools > Tools."
+details = "Upstream's new interface comes with this merge as Zeron Beta. See Settings > Lab."
+
+[[entry.improvements]]
+text = "Settings moves to a sidebar tree: a group opens to its pages under a guide line, each page has a title and summary, and changing page crossfades. A search hit shows its path, and picking one glides to the row and flashes it."
+visual = "settings-tree"
+
+[[entry.improvements]]
+text = "Compaction has its own page under Settings > Agents. Settings > Lab holds what is still being tried: Compact ahead of time, the compaction classifier, agent access and Zeron Beta."
+
+[[entry.improvements]]
+text = "Agents now reach Zeron with a limited key, so they cannot allow plugins or sign you in. In a chat below Full access, the terminal and computer tools and saving Actions are refused. If a tool you need is refused, turn on Agents use the full token in Settings > Lab."
+
+[[entry.improvements]]
+text = "A very large image opens as a downscaled preview instead of being refused, and task image strips use small thumbnails so they stop blinking."
+
+[[entry.improvements]]
+text = "Pasted, picked and dropped images show as 120 px previews in the composer, with file chips beside them."
+
+[[entry.improvements]]
+text = "Switching Appearance from Dark to System follows the OS right away."
+
+[[entry.improvements]]
+text = "An agent's compaction no longer stalls at Compaction queued when Compact ahead of time is on, and a message sent during a compaction no longer splits its divider."
+
+[[entry.improvements]]
+text = "Home under New chat is one panel, with Needs you, Running and Recent as columns. The agent updates card is back at the foot of the window."
+
+[[entry.improvements]]
+text = "The titlebar pill reads like \"1 needs you · 2 working\". Its tray says what needs you once, has Ask Supervisor in its header, and shows each running thread's agent mark and time."
+
+[[entry.improvements]]
+text = "Text past the title in the rail's quick capture goes to the task's notes instead of being dropped."
+
+[[entry.improvements]]
+text = "On iPhone, picking an @ suggestion on New thread inserts it instead of closing the list."
+
+[[entry]]
 version = "0.2.132"
 date = "Nov 1"
 hero = "answer-pill.jpg"

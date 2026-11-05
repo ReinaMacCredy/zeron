@@ -11,6 +11,7 @@ The narrow strip on the left switches between Zeron's pages. Hover a button to s
 | **New chat** | [New chat](zeron://docs/new-chat), with a composer and the **Needs you**, **Running** and **Recent** cards. Cmd+N opens it from anywhere. |
 | **Inbox** | The [Inbox](zeron://inbox): the history of what your agents asked, finished and failed today. |
 | **Tasks** | The [Tasks](zeron://tasks) page. A number counts the tasks you captured and have not seen yet. |
+| **Skills** | The [Skills](zeron://docs/skills) page: every skill your agents find. |
 | **Pull requests** | The [Pull requests](zeron://pull-requests) board. |
 
 What needs you right now is not on the rail: questions, plans and decisions wait in the **Waiting** pill above the composer, and the pill on the right of the titlebar counts the rest, with Cmd+I for its tray. See **Needs you and running** below.
@@ -21,7 +22,7 @@ Further down the rail:
 - A microphone button for voice mode, when Codex is installed and turned on in [Settings > Providers](zeron://settings/providers). See [Voice and dictation](zeron://docs/voice).
 - **Help**: these docs, what's new, keyboard shortcuts, **Star Zeron on GitHub**, and **Agent updates** when an agent CLI has one. See [Updates and what's new](zeron://docs/updates).
 - A download button, when an app update is available.
-- **Settings** at the bottom. Cmd+, opens and closes it too. Settings opens as a panel over the app, with eight sections in a list on the left (General, Appearance, Notifications, Providers, Agents, Context & tools, This Mac, Devices & updates), then **Account**, and **Search settings** on top. A section with more than one page shows them as tabs above the page. Press / or Cmd+F to search: each found setting shows its path, such as **Appearance › Advanced look**, and picking one opens its page at that row. The header names the section, for example **Settings › Devices & updates**, and holds that page's actions. **Account** shows who you are signed in as, or **Stored on this device**, with **Enable sync** or **Sign out**. To sync with your other devices, see [Devices](zeron://docs/devices). Close it with the **×**, Escape, or a click outside the panel.
+- **Settings** at the bottom. Cmd+, opens and closes it too. Settings opens as a panel over the app, with a tree on the left (General, Appearance, Notifications, Providers, Agents, Context & tools, This Mac, Devices & updates, then **Account** and **Lab**) and **Search settings** on top. A group with more than one page opens to them under a guide line while you are on one of them. **Lab** holds what is still being tried: compaction experiments, agent access and Zeron Beta. Press / or Cmd+F to search: the tree lists each found setting with its path, such as **Appearance › Advanced look**, and picking one opens its page, glides to that row and flashes it. The header names the section, for example **Settings › Devices & updates**, and holds that page's actions. **Account** shows who you are signed in as, or **Stored on this device**, with **Enable sync** or **Sign out**. To sync with your other devices, see [Devices](zeron://docs/devices). Close it with the **×**, Escape, or a click outside the panel.
 
 ## The sidebar
 
@@ -37,13 +38,13 @@ With the sidebar hidden, move the pointer just right of the app rail and it slid
 
 Questions from other chats, plans waiting for your OK and Supervisor decisions wait in the **? N Waiting** pill above the composer, where you answer them without leaving the chat you are in. See [When an agent asks](zeron://docs/agent-questions).
 
-The pill on the right of the titlebar counts the rest: threads that failed, Tasks whose message did not send or that are ready to review, and the ones running, for example **1 need you · 1 running**. With nothing failed or waiting it reads only the running count, and with nothing at all it is hidden.
+The pill on the right of the titlebar counts the rest: threads that failed, Tasks whose message did not send or that are ready to review, and the ones running, for example **1 needs you · 2 working**. With nothing failed or waiting it reads only the running count, and with nothing at all it is hidden.
 
 Click it or press Cmd+I to open its tray:
 
-- The top row, **Supervisor**, sums up what is going on and opens the [Supervisor](zeron://docs/supervisor) chat.
-- **Needs you** lists each thread that failed and each Task that waits on you. **Open** opens it.
-- **Running** lists each thread that works, with its subagents under it.
+- The header says what needs you and what is running, once, with **Ask Supervisor**, which opens the [Supervisor](zeron://docs/supervisor) chat.
+- **Needs you** lists each thread that failed and each Task that waits on you, and shows only when there is one. **Open** opens it.
+- **Running** lists each thread that works, with its agent's mark, its time on the right and its subagents under it.
 - **History** opens the Inbox and **Tasks** opens Tasks.
 
 Escape, a click outside or Cmd+I closes the tray. Change the shortcut in [Settings > General > Shortcuts](zeron://settings/shortcuts), under **Needs you and running**.

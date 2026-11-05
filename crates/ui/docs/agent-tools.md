@@ -49,6 +49,9 @@ The Supervisor's own chat also gets `supervisor`, which acts on Tasks within the
 
 ## Built-in limits
 
+- Agents reach Zeron with a limited key, not the app's own. They can use the tools on this page, but cannot allow plugins, sign you in or change what a chat may do.
+- `terminal`, `computer` and saving project Actions work only in a chat at **Full access**. In a chat at **Supervised** or **Auto-accept edits** the call is refused and says so.
+- If a tool you need is refused, **Agents use the full token** in [Settings > Lab](zeron://settings/experimental) gives new runs everything the app can reach, with no question to you. It is off by default. This key limits what the tools do; a determined shell command in a chat without an OS sandbox can still read the app's own key on disk.
 - Project actions only touch the project of the chat that calls them.
 - The UI driving tool only drives Zeron Dev builds, and never the app that serves the agent's own chat. Reading the UI works in every build and includes text typed into fields. The reading tool never records the app that serves the agent's own chat; to record there, run `zeron ui record` yourself. A recording writes text typed into key, API, token, secret or password fields as `<redacted>`. Starting and quitting builds never touches the Zeron app in Applications. Turning the reading tool off turns the driving tool off too.
 - In a Codex chat, the `device` tool runs without asking for approval. Driving the UI runs without asking only when the chat is at **Full access**; at **Supervised** or **Auto-accept edits**, you approve each call.

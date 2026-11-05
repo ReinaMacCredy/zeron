@@ -63,6 +63,14 @@ blurb = "Use / commands, $ skills, and @ mentions of files, threads, and tasks."
 actions = ["settings/providers"]
 
 [[article]]
+id = "skills"
+section = "basics"
+title = "Skills"
+icon = "magic-stick-3"
+blurb = "Every skill your agents find: read it, try it, turn it off or uninstall it."
+actions = []
+
+[[article]]
 id = "models-and-effort"
 section = "basics"
 title = "Models and effort"

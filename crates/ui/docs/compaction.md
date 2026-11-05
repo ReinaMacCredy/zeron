@@ -71,9 +71,9 @@ With **Agent model**, a **Same task** answer gets a second look that can only ch
 
 For an agent that cannot compact, a **New task** or **Carry over** answer starts a fresh session instead. The earlier conversation goes along as text, the most recent 24,000 characters of it; tool results and file contents do not.
 
-## Compact ahead of time (Experimental)
+## Compact ahead of time (Lab)
 
-**Compact ahead of time** sits under **Compact new tasks** and is off by default. It moves the compaction off the moment you send: instead of checking your next message, Zeron compacts as soon as a turn ends past the trigger and nothing is queued. The trigger is **Check from**, or 85% of the point where the agent's own CLI would compact by itself, whichever comes first. For Claude that point is the window set in the model picker minus 33K, so a 200K chat triggers at about 142K and a 1M chat with a 400K window at the 150K check, long before 367K.
+**Compact ahead of time** sits in [Settings > Lab](zeron://settings/experimental) above **Compact new tasks** and is off by default. It moves the compaction off the moment you send: instead of checking your next message, Zeron compacts as soon as a turn ends past the trigger and nothing is queued. The trigger is **Check from**, or 85% of the point where the agent's own CLI would compact by itself, whichever comes first. For Claude that point is the window set in the model picker minus 33K, so a 200K chat triggers at about 142K and a 1M chat with a 400K window at the 150K check, long before 367K.
 
 How it compacts depends on the agent:
 
@@ -145,17 +145,22 @@ When the agent wrote a summary, click the divider to read it.
 
 ## Settings
 
-In [Settings > General](zeron://settings/general):
+In [Settings > Agents > Compaction](zeron://settings/compaction):
 
 | Row | Default |
 | --- | --- |
 | **Compact idle chats before the cache expires** | On |
 | **Idle threshold** (100K, 150K, 200K) | 100K |
 | **Let agents compact themselves** | On |
-| **Compact new tasks** (Reminder, Classifier) | Classifier |
-| **Compact ahead of time** (Experimental) | Off |
 | **In tasks** | On |
 | **Check from** or **Remind at** (Off, 100K, 150K, 200K) | 150K |
+
+In [Settings > Lab](zeron://settings/experimental):
+
+| Row | Default |
+| --- | --- |
+| **Compact ahead of time** | Off |
+| **Compact new tasks** (Reminder, Classifier) | Classifier |
 | **Classifier** (Agent model, Jev · TypeSafe, Jev · OpenRouter), Classifier mode only | Agent model |
 | **Classifier model**, with Agent model | Sonnet-class |
 

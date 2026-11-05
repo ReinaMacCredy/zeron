@@ -6,7 +6,9 @@ Click the folder button at the top of the sidebar (tooltip **New project**), pre
 
 ![A device's locations in the New project picker](projects-add.jpg)
 
-Pick a device, a location (**Home** or a drive), then folders. With only one device (and no Zeron Cloud device), the picker opens straight on that device's **Home** folders; go back to reach its other locations. Type to filter, press Enter to open a folder, and Left to go back up. With the folder you want open, click **Add project** or press Cmd+Enter; **Cancel** closes the picker.
+Pick a device, a location (**Home** or a drive), then folders. With only one device (and no Zeron Cloud device), the picker opens straight on that device's **Home** folders; go back to reach its other locations. Type to filter, press Enter to open a folder, and Left to go back up. With the folder you want open, click **Add project** or press Cmd+Enter; **Cancel** closes the picker, and adding a project returns you to the composer.
+
+A rail beside the folders lists **Pinned** and **Recent** folders; click one to go there. **New folder** creates a folder where you are; turn on **git init** beside its name to start it as a repository. **Show hidden folders** lists dot folders too. You can also drop a folder from Finder onto the picker.
 
 ## Rename or remove
 
@@ -23,6 +25,12 @@ In a git project, the checkout chip on the New chat composer offers **Current ch
 Worktrees go in `~/.zeron/worktrees/<repository>/` by default. To change that, open [Settings > General](zeron://settings/general), scroll to **Git**, choose a **Device**, and turn on **Custom worktree location**. Each device keeps its own location, and existing worktrees stay where they are.
 
 With the switch on, click **Browse** to pick the folder; on another device you pick it from a folder list of that device, then **Use this folder**. Turning the switch off keeps the folder for next time, and the reset button (tooltip **Reset to default**) forgets it. When the `ZERON_WORKTREES_DIR` environment variable is set on a device, it decides the location there: the row reads **Set by ZERON_WORKTREES_DIR** and cannot be changed.
+
+### Threads follow their worktree
+
+When an agent creates or edits a linked worktree of the project, its thread moves there. The composer footer reads **Worktree · <folder>** with that branch, the Git panel and diffs follow it, and sidebar rows, tabs and the footer show **↑N** for commits ahead of the base, or a merged check. If the worktree is removed, the footer keeps its folder name beside **· removed**.
+
+Click the branch in the footer to move the thread to another worktree or back to the **main checkout**. The agent is told on its next turn.
 
 **Credit Zeron in commits**, in the same **Git** section, adds `zeronsh[bot]` as a co-author to the commits agents make on that device. It is off by default, and always on for Zeron Cloud.
 

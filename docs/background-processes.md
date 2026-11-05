@@ -3,7 +3,7 @@
 Agents start processes and move on: a dev server, a test watcher, a `tail -f`.
 They keep running after the turn that started them, and until now the only
 sign was a transcript chip saying "running in background". The composer now
-carries a **Background** tray listing what the chat's agent still runs, for how
+carries a shells pill listing what the chat's agent still runs, for how
 long, with each process's latest output and its own Stop.
 
 Screenshots: [`docs/screenshots/background-processes/`](screenshots/background-processes/).
@@ -25,7 +25,7 @@ ends, the list is cleared.
 | Codex | `commandExecution` items still open after their turn ended | `item.command`, without the login-shell wrapper (`/usr/bin/zsh -lc '…'`) | `item/commandExecution/outputDelta`, kept as the last 16 KB per open command (no longer opted out at `initialize`) | `thread/backgroundTerminals/terminate {threadId, processId}`, then the command's `item/completed` (or the existing prune) removes it |
 | Mock | `ZERON_MOCK_BACKGROUND=1` | three scripted processes | each prints its script once, a line every 1.6 s | honored after 250 ms |
 
-Other harnesses publish nothing, and the tray stays hidden for their chats.
+Other harnesses publish nothing, and the pill stays hidden for their chats.
 
 Claude reports background agents in the same roster; they are subagents, shown
 by their spawn chips, and stay out of this list (they still count toward
@@ -53,17 +53,15 @@ Both are relay-forwardable and addressed to the chat's host:
 Hosts and engines that answer them advertise `background-tasks-v1`. A viewport
 offers Stop and output only when the chat's host *and* its own engine (which
 forwards the request) do; otherwise the rows only say what runs. Older peers
-never publish the field, so their chats show no tray at all.
+never publish the field, so their chats show no pill at all.
 
 ## Behaviour
 
-`crates/ui/src/background_tray.rs`, mounted by the composer at the top of its
-tray stack: above the checklist and the queue, one step narrower than the tray
-below it.
+`crates/ui/src/composer/background.rs`: the shells pill above the composer,
+beside the agents pill. Its card opens when you click the pill.
 
-- **Collapsed** (the default): `Background · 3` and the commands, in the mono
-  face, joined with `·`. It is ambient state, so it never opens by itself.
-- **Expanded**: one row per process, oldest first: a still busy-tone dot, the
+- **Pill**: the count of shells. It is ambient state, so it never opens by itself.
+- **Card**: one row per process, oldest first: a still busy-tone dot, the
   command (mono, truncated), the agent's description (faint), how long it has
   run (`12m 34s`), and a Stop button.
 - **Output**: clicking a row opens the tail of its output beneath it (up to 200
@@ -78,9 +76,9 @@ below it.
 
 ## Performance
 
-A collapsed tray costs no frames: there is no animation (the dot is still),
+A closed card costs no frames: there is no animation (the dot is still),
 and its 1 s tick (clocks, plus re-reading the open output) runs only while it is
-expanded and stops when it collapses, empties or the chat changes. Session-row
+open and stops when it closes, empties or the chat changes. Session-row
 writes happen when the set changes, plus the heartbeat the live runtime already
 sends.
 
@@ -91,13 +89,13 @@ cargo test --locked -p zeron-harness background      # BackgroundWork, Claude ro
 cargo test --locked -p zeron-harness --test claude background_shells
 cargo test --locked -p zeron-harness --test codex background
 cargo test --locked -p zeron-doc background_processes
-cargo test --locked -p zeron-ui --lib background_tray -- --test-threads=1
+cargo test --locked -p zeron-ui --lib background -- --test-threads=1
 ```
 
-Live: `ZERON_HARNESS=mock ZERON_MOCK_BACKGROUND=1` fills the tray.
+Live: `ZERON_HARNESS=mock ZERON_MOCK_BACKGROUND=1` fills the pill.
 
 ## Not done
 
-- Mobile (iOS/Android) tray.
+- Mobile (iOS/Android) pill.
 - MCP `get_chat`/`list_chats` don't report background processes yet.
 - Other harnesses (OpenCode, ACP agents, Cursor, Pi) don't report theirs.

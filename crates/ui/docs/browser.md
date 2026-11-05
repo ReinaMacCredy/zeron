@@ -43,4 +43,6 @@ On macOS, when an agent's message links or names an `.html` file, it shows a car
 
 An agent can also publish an HTML page straight into the chat, sized to fit. Click the expand arrow on its header to open it larger, switch between **Live** and **Source**, or click **Save .html** to keep a copy. Press Escape to close it. Live pages show on macOS; elsewhere you read the source.
 
+An agent can also point a card at a server running on your machine, such as `localhost:3000`, instead of sending a page. The card is the running page: you can click and type in it, and its header has the address, reload and **Open in browser**. Only `localhost`, `127.0.0.1` and `[::1]` addresses work. If the server refuses or stops, the card says **localhost:3000 is not responding** with **Retry**. On another device the row says where the page runs.
+
 ![An HTML page in the chat](browser-html-card.jpg)
