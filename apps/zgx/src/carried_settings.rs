@@ -3,7 +3,8 @@
 //! `ui.persist` values. Only what it has no value for yet, so what you've
 //! changed here stays, and a value once carried is its own from then on.
 //!
-//! Pinned chats and sections aren't here: the engine keeps them, for either app.
+//! New project's pinned folders come with it. Pinned chats and sections
+//! aren't here: the engine keeps them, for either app.
 
 use std::path::Path;
 
@@ -11,6 +12,7 @@ use serde_json::{Value as Json, json};
 
 const SIDEBAR: &str = "screens%2Fshell%2Fsidebar.luau%3A%3Ashell_sidebar_";
 const VIEW: &str = "screens%2Fshell%2Fview.luau%3A%3Ashell_";
+const PICKER: &str = "screens%2Fshell%2Fadd_project.luau%3A%3Ashell_add_project_";
 
 /// `settings` (`ui-settings.json`) as files of `ui.persist`, each a name and
 /// its value; only what it says and this app has.
@@ -58,6 +60,9 @@ fn carried(settings: &Json) -> Vec<(String, Json)> {
     }
     if let Some(shut) = settings["sidebarCollapsed"].as_bool() {
         out.push((format!("{VIEW}collapsed.json"), json!(shut)));
+    }
+    if let Some(pins) = settings["projectFolderPins"].as_object().filter(|pins| !pins.is_empty()) {
+        out.push((format!("{PICKER}pins.json"), Json::Object(pins.clone())));
     }
     out
 }
@@ -121,6 +126,18 @@ mod tests {
         assert!(dir.path().join(format!("{VIEW}sidebar_hover.json")).exists());
         // What it doesn't say stays at this app's default.
         assert!(!dir.path().join(format!("{SIDEBAR}show_branch.json")).exists());
+    }
+
+    #[test]
+    fn new_projects_pinned_folders_come_across() {
+        let dir = tempfile::tempdir().unwrap();
+        let pins = json!({ "device-1": ["/code", "/work/zephyr"] });
+        carry_into(dir.path(), &json!({ "projectFolderPins": pins }));
+        let carried = dir.path().join(format!("{PICKER}pins.json"));
+        assert_eq!(serde_json::from_slice::<Json>(&std::fs::read(carried).unwrap()).unwrap(), pins);
+        let none = tempfile::tempdir().unwrap();
+        carry_into(none.path(), &json!({ "projectFolderPins": {} }));
+        assert!(!none.path().join(format!("{PICKER}pins.json")).exists());
     }
 
     #[test]

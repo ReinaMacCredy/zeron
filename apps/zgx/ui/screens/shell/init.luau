@@ -305,9 +305,7 @@ local function sidebar_limit(): number
 		end
 		local add: any = boundary.load("@app/screens/shell/add_project")
 		if add then
-			if add.shown:peek() then
-				add.shown:set(false)
-			else
+			if not add.new_project_key() then
 				add.open()
 			end
 		end

@@ -510,12 +510,78 @@ local function answer(value: any): any
 		end,
 	}
 end
+-- A refusal as a host's reaches a script: no text and no table.
+local function failure(message: string): any
+	local made = newproxy(true)
+	getmetatable(made).__index = { message = message }
+	getmetatable(made).__tostring = function()
+		return message
+	end
+	return made
+end
 local HOMES = { mac = "/Users/me", box = "/home/me" }
-projects_stub.folders = function(device: string, path: string?): any
-	note(`folders:{device}:{path or "~"}`)
+
+-- (`fixture.hold`: the device's answers wait for `fixture.release`.)
+local holding = false
+local held: { () -> () } = {}
+local empty_drive = false
+ui.command {
+	id = "fixture.hold",
+	title = "Hold the device's answers",
+	run = function()
+		holding = true
+	end,
+}
+ui.command {
+	id = "fixture.release",
+	title = "Let the device's answers go",
+	run = function()
+		holding = false
+		local them = held
+		held = {}
+		for _, go in them do
+			go()
+		end
+	end,
+}
+ui.command {
+	id = "fixture.release_last",
+	title = "Let the last answer asked for go first",
+	run = function()
+		local go = table.remove(held)
+		if go then
+			go()
+		end
+	end,
+}
+ui.command {
+	id = "fixture.empty_drive",
+	title = "A drive with nothing on it",
+	run = function()
+		empty_drive = true
+	end,
+}
+local answered_now = answer
+local function answer(value: any): any
+	if not holding then
+		return answered_now(value)
+	end
+	return {
+		after = function(_, ok: (any) -> (), fail: ((any) -> ())?)
+			table.insert(held, function()
+				answered_now(value):after(ok, fail)
+			end)
+		end,
+	}
+end
+projects_stub.folders = function(device: string, path: string?, hidden: boolean?): any
+	note(`folders:{device}:{path or "~"}{if hidden then ":hidden" else ""}`)
 	local at = path or HOMES[device]
+	if at == "/empty" then
+		return answer({ path = at, truncated = false, entries = {} })
+	end
 	if path == "/gone" then
-		return answer({ refused = "No such file or directory (os error 2)" })
+		return answer({ refused = failure("No such file or directory (os error 2)") })
 	end
 	if at == HOMES[device] then
 		return answer({
@@ -544,8 +610,20 @@ projects_stub.folders = function(device: string, path: string?): any
 	end
 	return answer({ path = at, truncated = false, entries = { { name = "zephyr", is_dir = true, is_repo = true } } })
 end
+projects_stub.create_folder = function(device: string, parent: string, name: string, git: boolean): any
+	note(`create_folder:{device}:{parent}:{name}:{git}`)
+	if name == "code" then
+		return answer({ refused = failure("“code” already exists here.") })
+	elseif name == "oldhost" then
+		return answer({ refused = failure("unknown method: CreateFolder") })
+	end
+	return answer(`{parent}/{name}`)
+end
 projects_stub.drives = function(device: string): any
 	note(`drives:{device}`)
+	if empty_drive then
+		return answer({ { name = "Work", path = "/work" }, { name = "Empty", path = "/empty" } })
+	end
 	return answer({ { name = "Work", path = "/work" } })
 end
 -- (Home's index: still scanning at a query's first ask, then two found,
@@ -554,6 +632,9 @@ local searched: { [string]: number } = {}
 projects_stub.search_home = function(device: string, query: string): any
 	note(`search_home:{device}:{query}`)
 	searched[query] = (searched[query] or 0) + 1
+	if query == "indexed" then
+		return answer({ matches = { { path = `{HOMES[device]}/indexed-one`, relative = "indexed-one", is_repo = false } }, indexing = true })
+	end
 	if query == "" or searched[query] == 1 then
 		return answer({ matches = {}, indexing = query ~= "" })
 	end
@@ -572,6 +653,15 @@ end
 projects_stub.clone = function(device: string, url: string, parent: string): any
 	note(`clone:{device}:{url}:{parent}`)
 	local name = string.match(url, "([^/]+)%.git$") or string.match(url, "([^/]+)$") or "repo"
+	if name == "slow" then
+		return {
+			after = function(_, ok: (any) -> ())
+				ui.after(200, function()
+					ok({ path = `{parent}/{name}`, name = name })
+				end)
+			end,
+		}
+	end
 	return answer({ path = `{parent}/{name}`, name = name })
 end
 local made = 0
@@ -853,6 +943,14 @@ ui.command {
 			table.insert(model.archived, 1, c)
 		end
 		model.chats = {}
+		publish()
+	end,
+}
+ui.command {
+	id = "one_device",
+	title = "This computer alone",
+	run = function()
+		model.devices = { model.devices[1] }
 		publish()
 	end,
 }

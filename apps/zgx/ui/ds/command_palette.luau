@@ -106,9 +106,33 @@ export type Item = {
 	run: (() -> ())?,
 	verb: string?,
 	alt: Alt?,
+	aria: string?,
+	detail: string?,
+	tag: (() -> string?)?,
+	quiet: boolean?,
+	strong: boolean?,
+	idle_only: boolean?,
+	inert: boolean?,
+	stay: boolean?,
+	click_selects: boolean?,
+	trail: (() -> Node)?,
+	actions: (() -> Node)?,
+}
+export type Inline = { key: string, after: string?, h: () -> number, build: () -> Node }
+export type Nav = {
+	back: () -> (),
+	up: () -> (),
+	replace: (page: Page) -> (),
+	pop_to: (page: Page) -> (),
+	focus: () -> (),
+	activate: () -> (),
+	current: () -> Item?,
+	set_query: (text: string) -> (),
+	query: () -> string,
+	page: () -> Page,
 }
 -- What a page says with nothing in it, or while it loads.
-export type Note = { title: string, hint: string? }
+export type Note = { title: string, hint: string?, action: { label: string, run: () -> () }? }
 export type Page = {
 	id: string,
 	title: string,
@@ -134,6 +158,33 @@ export type Page = {
 	typed: ((query: string) -> Page?)?,
 	-- Tab: what's typed, completed (a folder's name, its separator after).
 	complete: ((query: string) -> string?)?,
+	on_show: ((nav: Nav) -> ())?,
+	enter: (() -> { Page }?)?,
+	replaces: boolean?,
+	up: (() -> Page?)?,
+	width: number?,
+	view_h: number?,
+	fill: boolean?,
+	metrics: { row: number, gap: number, head: number, head_first: number, inset: number, px: number }?,
+	plain: boolean?,
+	bar: (() -> Node)?,
+	under: (() -> Node)?,
+	rail: (() -> Node)?,
+	foot: (() -> Node)?,
+	over: (() -> Node)?,
+	shortcut: string?,
+	keys: ((e: any) -> boolean)?,
+	ghost: ((query: string) -> string?)?,
+	tail: ((query: string, matched: number, searching: boolean) -> { Item })?,
+	status: ((title: string, query: string) -> string?)?,
+	note: ((query: string) -> Note?)?,
+	inline: (() -> Inline?)?,
+	keys_elsewhere: (() -> boolean)?,
+	on_search_focus: (() -> ())?,
+	refocus: (() -> boolean)?,
+	edit_path: (() -> ())?,
+	file_hover: ((inside: boolean) -> ())?,
+	file_drop: ((files: { any }) -> ())?,
 	-- A root page's own: the scopes (All, Sessions, Commands, Settings),
 	-- Tab and ⌘1–4 moving between them (⌘K's). A root without them is a
 	-- step of its own (New project's devices): its title heads the search
@@ -146,6 +197,7 @@ export type Props = {
 	-- What was used lately, by id, most recent first: listed first while
 	-- nothing is typed, and a little ahead in a search. Its own by default.
 	recent: State<{ string }>?,
+	rises: boolean?,
 }
 
 -- The card's width, and the geometry of what it holds: the search's row,
@@ -158,6 +210,7 @@ local SEARCH_H, SCOPES_H, FOOT_H = 52, 38, 40
 local ROW, SESSION, HEAD, HEAD_FIRST, INSET, SLOT = 36, 52, 32, 26, 6, 18
 -- The list's height at most, and an empty one's.
 local VIEW_MAX, NOTE_H = 440, 196
+local BAR_H = 36
 -- How far the card's top sits from the window's (clear of its title bar,
 -- a little above centre in a window of Zeron's size).
 local TOP = 88
@@ -168,7 +221,7 @@ local BOTTOM_CLEAR, VIEW_MIN = 24, 160
 -- The list's height at most in this window: VIEW_MAX, less whatever the
 -- card would otherwise run past the window's foot. A host that feeds no
 -- window size (a headless test) gets VIEW_MAX.
-local function view_max(): number
+local function view_max(most: number?, chrome: number?): number
 	local window = (ui :: any).window
 	local state = if type(window) == "table" or type(window) == "userdata" then window.size else nil
 	local ok, v = pcall(function(): any
@@ -176,10 +229,10 @@ local function view_max(): number
 	end)
 	local h = if ok and type(v) == "table" and type(v.height) == "number" then v.height else 0
 	if h <= 1 then
-		return VIEW_MAX
+		return most or VIEW_MAX
 	end
-	local room = h - TOP - BOTTOM_CLEAR - SEARCH_H - SCOPES_H - FOOT_H
-	return math.max(VIEW_MIN, math.min(VIEW_MAX, room))
+	local room = h - TOP - BOTTOM_CLEAR - SEARCH_H - (chrome or SCOPES_H) - FOOT_H
+	return math.max(VIEW_MIN, math.min(most or VIEW_MAX, room))
 end
 -- With nothing typed, how many sessions All shows before "Show all"; and
 -- how many recent things.
@@ -187,8 +240,10 @@ local ALL_SESSIONS, RECENT = 6, 5
 -- How things move: the card opening, the list's height, the highlight
 -- sliding between rows.
 local OPEN = { duration = 180, ease = "out(4)" }
+local RISE = 180
 local GROW: TweenOptions = { duration = 140, ease = "out(3)" }
 local SLIDE_MS, SLIDE_EASE = 140, "outQuint"
+local HOVER_FADE = 150
 
 -- Between rows: the theme's list gap (read as the list lays out: the
 -- themes load after this module).
@@ -599,13 +654,16 @@ end
 -- loading row's shape, or "Show all" (into a scope). `key` is its identity:
 -- an item's row follows it as searches reorder the list.
 type Row = {
-	kind: "pad" | "head" | "item" | "more" | "ghost",
+	kind: "pad" | "head" | "item" | "more" | "ghost" | "inline",
 	key: string,
 	h: number,
 	title: string?,
 	count: number?,
 	item: Item?,
 	scope: string?,
+	inline: Inline?,
+	gap: number?,
+	px: any?,
 }
 
 -- A scope's chip: chosen, the menus' selected wash, kept under the pointer
@@ -658,7 +716,7 @@ end
 -- (its search, highlight and scope, given back on the way back).
 type Level = { page: Page, query: string, hi: string?, scope: string }
 
-local Body = ui.component(function(props: Props & { recent_state: State<{ string }> }): Node
+local Body = ui.component(function(props: Props & { recent_state: State<{ string }>, width: State<number> }): Node
 	local open = props.open
 	local recent = props.recent_state
 	local query = ui.use_state("")
@@ -669,6 +727,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 	-- Whether the root has scopes (⌘K's); without, every step is a page.
 	local scoped = props.root.scopes == true
 	local depth = ui.use_state(1)
+	local turn = ui.use_state(0)
 	local hi = ui.use_state(nil :: string?)
 	local offset = ui.use_state(0)
 	-- Pages that load: what each loaded (by page), and whether the one shown
@@ -721,6 +780,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 	ui.effect(function()
 		local q = query:get()
 		depth:get()
+		turn:get()
 		local on = page()
 		if search_cancel then
 			search_cancel()
@@ -769,7 +829,9 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 	local last: { page: Page?, q: string, found: { Item }, list: { Item }? } = { page = nil, q = "", found = {}, list = nil }
 	-- Where the highlight lands as the list changes: on the first row (a new
 	-- search, a new page), or kept where it is (anything else).
-	local last_query, last_depth, last_scope = nil :: string?, 0, ""
+	local last_query, last_page, last_scope = nil :: string?, nil :: Page?, ""
+	local inline_at: number? = nil
+	local inline_now: Inline? = nil
 	-- Set as a page opens or closes: the row to highlight on it.
 	local land: string? = nil
 
@@ -777,6 +839,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		local q = query:get()
 		local sc = scope:get()
 		local d = depth:get()
+		turn:get()
 		local waiting = loading:get()
 		local p = page()
 		local at_root = d == 1
@@ -816,6 +879,8 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 				if archived then
 					continue
 				end
+			elseif item.idle_only then
+				continue
 			else
 				local got, hits = score(item, terms)
 				if not got then
@@ -871,6 +936,13 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			end
 		end
 		last.page, last.q, last.found, last.list = p, q, if #terms > 0 then matched else {}, items
+		if p.tail then
+			for i, item in p.tail(q, #matched, searching:get()) do
+				local fs = 100 - i * 0.01
+				table.insert(found, { item = item, score = fs, order = 2e6 + i, rank = math.floor(fs * 100) * 1e10 })
+				n_all += 1
+			end
+		end
 		hits_of = new_hits
 
 		-- Into sections: with nothing typed, pinned and recent first, then
@@ -892,7 +964,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		end
 		if #terms == 0 then
 			local taken: { [Item]: boolean } = {}
-			if at_root then
+			if at_root and not p.plain then
 				local pinned = section("Pinned", 0)
 				for _, h in found do
 					if h.item.pinned then
@@ -983,8 +1055,12 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 
 		-- Laid out: the rows, their heights and keys; and for each row the
 		-- keys stop at, where it is and where its section's title is.
-		local g = gap()
-		local new_rows: { Row } = { { kind = "pad", key = "pad:top", h = INSET } }
+		local m = p.metrics
+		local g = if m then m.gap else gap()
+		local row_h, inset = if m then m.row else ROW, if m then m.inset else INSET
+		local head_h, head_first = if m then m.head else HEAD, if m then m.head_first else HEAD_FIRST
+		local side: any = if m then m.px else nil
+		local new_rows: { Row } = { { kind = "pad", key = "pad:top", h = inset } }
 		local function add_row(row: Row)
 			table.insert(new_rows, row)
 		end
@@ -993,39 +1069,59 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		local titled = #sections > 0
 		if waiting then
 			-- Loading: the rows' shapes, under what is loading.
-			add_row({ kind = "head", key = "head:loading", h = HEAD_FIRST, title = (p.loading and p.loading.title) or "Loading…" })
+			add_row({ kind = "head", key = "head:loading", h = head_first, title = (p.loading and p.loading.title) or "Loading…", px = side })
 			for i = 1, 5 do
-				add_row({ kind = "ghost", key = `ghost:{i}`, h = ROW + g, count = i })
+				add_row({ kind = "ghost", key = `ghost:{i}`, h = row_h + g, count = i, gap = g, px = side })
 			end
 		end
 		for _, s in sections do
 			if waiting or #s.hits == 0 then
 				continue
 			end
-			if titled then
+			if titled and s.title ~= "" then
 				add_row({
 					kind = "head",
 					key = "head:" .. s.title,
-					h = if #new_rows == 1 then HEAD_FIRST else HEAD,
+					h = if #new_rows == 1 then head_first else head_h,
 					title = s.title,
 					count = s.total,
+					px = side,
 				})
 			end
 			for _, h in s.hits do
 				add_row({
 					kind = "item",
 					key = "item:" .. h.item.id,
-					h = (if h.item.session then SESSION else ROW) + g,
+					h = (if h.item.session then SESSION else row_h) + g,
 					item = h.item,
+					gap = g,
+					px = side,
 				})
 			end
 			if s.more then
-				add_row({ kind = "more", key = "more:" .. s.title, h = ROW + g, count = s.total, scope = s.more, title = s.title })
+				add_row({ kind = "more", key = "more:" .. s.title, h = row_h + g, count = s.total, scope = s.more, title = s.title, gap = g, px = side })
 			end
 		end
-		add_row({ kind = "pad", key = "pad:end", h = INSET })
+		add_row({ kind = "pad", key = "pad:end", h = inset })
 		if #new_rows == 2 then
 			new_rows = {}
+		end
+		local inline = if p.inline and not waiting then p.inline() else nil
+		inline_at, inline_now = nil, inline
+		if inline then
+			local at = 2
+			if inline.after then
+				for i, r in new_rows do
+					if r.key == "item:" .. inline.after then
+						at = i + 1
+					end
+				end
+			end
+			if #new_rows == 0 then
+				new_rows = { { kind = "pad", key = "pad:top", h = inset }, { kind = "pad", key = "pad:end", h = inset } }
+			end
+			table.insert(new_rows, at, { kind = "inline", key = inline.key, h = 0, inline = inline, px = side })
+			inline_at = at
 		end
 		local new_heights = table.create(#new_rows, 0)
 		local new_nav: { string } = {}
@@ -1033,12 +1129,16 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		local new_index: { [string]: number } = {}
 		local new_head: { [string]: number } = {}
 		local y, head_at = 0, nil :: number?
+		local inline_rows = 0
 		for i, r in new_rows do
 			new_heights[i] = r.h
 			new_by_key[r.key] = r
 			new_index[r.key] = i
 			if r.kind == "head" then
 				head_at = i
+			elseif r.kind == "inline" then
+				inline_rows += 1
+				continue
 			elseif r.kind == "item" or r.kind == "more" then
 				table.insert(new_nav, r.key)
 				if head_at then
@@ -1053,10 +1153,12 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		-- The highlight: on the first row for a new search, scope or page (or
 		-- where the page asks it to land); otherwise kept on its row, or the
 		-- first one left.
-		local fresh = q ~= last_query or d ~= last_depth or sc ~= last_scope
-		last_query, last_depth, last_scope = q, d, sc
+		local fresh = q ~= last_query or p ~= last_page or sc ~= last_scope
+		last_query, last_page, last_scope = q, p, sc
 		local now = hi:peek()
-		if fresh or now == nil or new_by_key[now] == nil then
+		if p.keys_elsewhere and p.keys_elsewhere() then
+			hi:set(nil)
+		elseif fresh or now == nil or new_by_key[now] == nil then
 			local want = land
 			if want and new_by_key[want] then
 				land = nil
@@ -1078,7 +1180,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 				files = n_kind.files or 0,
 			})
 			total_h:set(y)
-			shown_rows:set(#new_nav)
+			shown_rows:set(#new_nav + inline_rows)
 			rev:set(rev:peek() + 1)
 		end)
 	end
@@ -1103,11 +1205,22 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 
 	-- The list's height: its rows up to the view (a short list leaves no
 	-- room under it), or an empty one's message.
+	local function page_max(): number
+		depth:get()
+		turn:get()
+		local p = page()
+		return if p.bar then view_max(p.view_h, BAR_H) else view_max(p.view_h)
+	end
 	local function list_h(): number
+		depth:get()
+		turn:get()
+		if page().fill then
+			return page_max()
+		end
 		if shown_rows:get() == 0 and not loading:get() then
 			return NOTE_H
 		end
-		return math.min(view_max(), total_h:get())
+		return math.min(page_max(), total_h:get())
 	end
 	-- Bring the row `key` into view, with the row past it the way the keys
 	-- are moving (`by`), so what comes next always shows clear of the edge's
@@ -1197,10 +1310,20 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			end
 		end)
 	end
+	local nav: Nav
+	local function shown(p: Page)
+		if p.on_show then
+			p.on_show(nav)
+		end
+	end
 	local function push(next: Page)
 		local level = stack[#stack]
-		level.query, level.hi, level.scope = query:peek(), hi:peek(), scope:peek()
-		table.insert(stack, { page = next, query = "", hi = nil, scope = "all" })
+		if next.replaces and level.page.replaces then
+			stack[#stack] = { page = next, query = "", hi = nil, scope = "all" }
+		else
+			level.query, level.hi, level.scope = query:peek(), hi:peek(), scope:peek()
+			table.insert(stack, { page = next, query = "", hi = nil, scope = "all" })
+		end
 		land = nil
 		local function settle()
 			-- Landing on its current choice, if it has one.
@@ -1219,7 +1342,9 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			query:set("")
 			loading:set(waits)
 			depth:set(#stack)
+			turn:set(turn:peek() + 1)
 		end)
+		shown(next)
 		if waits and next.load then
 			next.load(function(items: { Item })
 				loaded[next] = items
@@ -1232,6 +1357,11 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			end)
 		end
 		after_settle()
+		if next.enter then
+			for _, over in next.enter() or {} do
+				push(over)
+			end
+		end
 	end
 	local function back()
 		if #stack < 2 then
@@ -1245,7 +1375,9 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			scope:set(level.scope)
 			loading:set(false)
 			depth:set(#stack)
+			turn:set(turn:peek() + 1)
 		end)
+		shown(level.page)
 		after_settle()
 	end
 
@@ -1266,9 +1398,14 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		if alt then
 			if item.alt then
 				remember(item.id)
-				open:set(false)
+				if not item.stay then
+					open:set(false)
+				end
 				item.alt.run()
 			end
+			return
+		end
+		if item.inert then
 			return
 		end
 		if item.toggle then
@@ -1283,11 +1420,56 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			return
 		end
 		remember(item.id)
-		open:set(false)
+		if not item.stay then
+			open:set(false)
+		end
 		if item.run then
 			item.run()
 		end
 	end
+	nav = {
+		back = back,
+		up = function()
+			local on = page()
+			local parent = if on.up then on.up() else nil
+			if parent then
+				push(parent)
+			else
+				back()
+			end
+		end,
+		replace = push,
+		pop_to = function(p: Page)
+			while #stack > 1 and page() ~= p do
+				back()
+			end
+		end,
+		focus = function()
+			if field then
+				field:focus()
+			end
+		end,
+		activate = function()
+			activate(hi:peek(), false)
+		end,
+		current = function(): Item?
+			rev:get()
+			local k = hi:get()
+			local r = if k then by_key[k] else nil
+			return if r then r.item else nil
+		end,
+		set_query = function(text: string)
+			query:set(text)
+		end,
+		query = function(): string
+			return query:get()
+		end,
+		page = function(): Page
+			depth:get()
+			turn:get()
+			return page()
+		end,
+	}
 	local function current(): Row?
 		rev:get()
 		local k = hi:get()
@@ -1309,6 +1491,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 	ui.effect(function()
 		local q = query:get()
 		depth:get()
+		turn:get()
 		local on = page()
 		local typed = on.typed
 		if q == "" or not typed then
@@ -1336,6 +1519,11 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		if not open:peek() then
 			return false
 		end
+		local edit = page().edit_path
+		if edit then
+			edit()
+			return true
+		end
 		local here = page().path
 		local at = if here then here() else nil
 		if not at then
@@ -1359,6 +1547,10 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 	local function keys(e): boolean
 		local k = e.key
 		local cmd = e.meta == true or e.cmd == true
+		local own = page().keys
+		if own and own(e) then
+			return true
+		end
 		if k == "ArrowDown" or (e.ctrl and (k == "n" or k == "j")) then
 			if cmd then
 				jump(1)
@@ -1447,6 +1639,13 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		return false
 	end
 
+	local function ghost_now(): string?
+		depth:get()
+		turn:get()
+		local q = query:get()
+		local ghost = page().ghost
+		return if ghost and q ~= "" then ghost(q) else nil
+	end
 	-- The search's row: the magnifier in the glyphs' slot (loading, the
 	-- working ring), the pages opened (a chip each, going back to it), the
 	-- field, its text on the labels' line.
@@ -1458,7 +1657,8 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		-- it's the one shown, a way back once another opens over it.)
 		ui.show(
 			function(): boolean
-				return not scoped and depth:get() == 1
+				turn:get()
+				return not scoped and depth:get() == 1 and not page().bar
 			end,
 			ui.text {
 				function(): string
@@ -1475,7 +1675,8 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		ui.each(ui.computed(function(): { string }
 			local out = {}
 			local d = depth:get()
-			if scoped or d > 1 then
+			turn:get()
+			if (scoped or d > 1) and not page().bar then
 				for i = if scoped then 2 else 1, d do
 					table.insert(out, stack[i].page.title)
 				end
@@ -1526,30 +1727,80 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			-- (A root without scopes is a step: its title shows.)
 			return depth:get() > 1 or not scoped
 		end, crumbs),
-		ui.input(EditorMenu.on({
-			id = "palette-search",
-			value = query,
-			label = locale.t("ds.command_palette.search"),
-			placeholder = function(): string
-				depth:get()
-				return page().placeholder or locale.s("ds.command_palette.placeholder")
-			end,
-			placeholder_color = "$text.tertiary",
+		ui.div {
 			grow = 1,
+			min_w = 0,
 			h = 28,
-			px = 0,
-			border = 0,
-			bg = "#00000000",
-			focus = { border = 0, outline = 0 },
-			text_size = "$font.size.lg",
-			on_key = keys,
-			on_mount = function(el)
-				field = el
-				ui.after(0, function()
-					el:focus()
-				end)
-			end,
-		})),
+			relative = true,
+			ui.input(EditorMenu.on({
+				id = "palette-search",
+				value = query,
+				label = locale.t("ds.command_palette.search"),
+				placeholder = function(): string
+					depth:get()
+					turn:get()
+					return page().placeholder or locale.s("ds.command_palette.placeholder")
+				end,
+				placeholder_color = "$text.tertiary",
+				w_full = true,
+				h = 28,
+				px = 0,
+				border = 0,
+				bg = "#00000000",
+				focus = { border = 0, outline = 0 },
+				text_size = "$font.size.lg",
+				on_key = keys,
+				on_focus = function()
+					local told = page().on_search_focus
+					if told then
+						told()
+					end
+				end,
+				on_mount = function(el)
+					field = el
+					ui.after(0, function()
+						el:focus()
+					end)
+				end,
+			})),
+			ui.show(
+				function(): boolean
+					return ghost_now() ~= nil
+				end,
+				ui.row {
+					id = "palette-ghost",
+					absolute = true,
+					left = 0,
+					top = 0,
+					bottom = 0,
+					items = "center",
+					pointer_events = "none",
+					ui.text {
+						function(): string
+							return query:get()
+						end,
+						literal = true,
+						text_size = "$font.size.lg",
+						color = "#00000000",
+					},
+					ui.text {
+						function(): string
+							return ghost_now() or ""
+						end,
+						literal = true,
+						text_size = "$font.size.lg",
+						color = "$text.tertiary",
+					},
+				}
+			),
+		},
+		ui.presence(function(): string?
+			depth:get()
+			turn:get()
+			return page().shortcut
+		end, function(keys_of: string)
+			return Kbd { keys = keys_of, tone = "quiet" }
+		end, { shrink = 0 }),
 	}
 
 	-- The scopes (at the root): each its count, the one chosen in the
@@ -1701,6 +1952,9 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		if r.kind == "pad" then
 			return ui.div { w_full = true, h = r.h }
 		end
+		if r.kind == "inline" then
+			return ui.div { w_full = true, h_full = true, px = r.px or "$space.1", (r.inline :: Inline).build() }
+		end
 		if r.kind == "head" then
 			-- (As tall as its place in the list, which it fills: the same
 			-- title is the first one (shorter) or a later one as a search
@@ -1718,10 +1972,21 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 					end,
 					style = "label",
 					tone = "tertiary",
-					grow = 1,
+					grow = if page().status then nil else 1,
 				},
+				if page().status
+					then ui.text {
+						function(): string
+							local say = page().status
+							return if say then say(r.title or "", query:get()) or "" else ""
+						end,
+						text_size = "$font.size.xs",
+						color = "$text.tertiary",
+						opacity = 0.7,
+					}
+					else nil,
 				-- (A count where it says something: a long section's.)
-				if r.count and r.count > 9
+				if r.count and r.count > 9 and not page().plain
 					then ui.text { count(r.count), text_size = "$font.size.xs", color = "$text.disabled", tabular = true }
 					else nil,
 			}
@@ -1734,7 +1999,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			return ui.div {
 				w_full = true,
 				h = r.h,
-				px = "$space.1",
+				px = r.px or "$space.1",
 				on_mount = function()
 					-- (Still, with motion reduced.)
 					if motion.reduced_now() then
@@ -1746,7 +2011,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 				end,
 				ui.row {
 					w_full = true,
-					h = r.h - gap(),
+					h = r.h - (r.gap or gap()),
 					px = "$space.2",
 					gap = "$space.2",
 					items = "center",
@@ -1760,6 +2025,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		local function lit(): boolean
 			return hi:get() == key
 		end
+		local touched = ui.use_state(false)
 		local content: { Node } = {}
 		local tall = false
 		local label: string? = nil
@@ -1824,7 +2090,45 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 				table.insert(content, ui.column { grow = 1, min_w = 0, gap = "$zeron.space.hair", ui.row(line_row), ui.row(detail_row) })
 			else
 				table.insert(content, glyph(item))
-				table.insert(content, live(item.id, "label", item.label, { text_size = "$font.size.md", color = "$text.primary", grow = 1 }))
+				local name_style: TextStyle = {
+					text_size = "$font.size.md",
+					color = if item.quiet then "$text.secondary" else "$text.primary",
+					weight = if item.strong then "$font.weight.medium" else nil,
+					grow = if item.detail or item.tag then nil else 1,
+				}
+				local name = live(item.id, "label", item.label, name_style)
+				if item.detail or item.tag then
+					local run: { [any]: any } = { grow = 1, min_w = 0, gap = "$space.2", items = "center", overflow = "hidden", ui.div { shrink = 0, name } }
+					if item.detail then
+						table.insert(run, FadeText { item.detail, literal = true, shrink = 1, text_size = "$font.size.md", color = "$text.secondary" })
+					end
+					if item.tag then
+						local says = item.tag
+						table.insert(run, ui.presence(says, function(word: string)
+							return ui.row {
+								h = 17,
+								px = 5,
+								items = "center",
+								rounded = 5,
+								border = 1,
+								border_color = "$border.subtle",
+								ui.text { word, text_size = 11, color = "$text.tertiary" },
+							}
+						end, { shrink = 0 }))
+					end
+					table.insert(content, ui.row(run))
+				else
+					table.insert(content, name)
+				end
+				if item.actions then
+					local actions = item.actions
+					table.insert(content, ui.show(function(): boolean
+						return touched:get()
+					end, ui.div { shrink = 0, actions() }))
+				end
+				if item.trail then
+					table.insert(content, item.trail())
+				end
 				if item.hint then
 					table.insert(content, ui.text { item.hint, shrink = 0, text_size = "$font.size.sm", color = "$text.tertiary" })
 				end
@@ -1839,14 +2143,16 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 					-- (The row takes the click: the switch only shows it.)
 					table.insert(content, ui.div { shrink = 0, scale = 0.75, pointer_events = "none", Switch { value = item.toggle, label = item.label } })
 				end
-				if item.page then
+				if item.page and not item.trail then
 					table.insert(content, Menu.chevron())
 				end
 			end
 		end
+		local browsing = page().plain == true
+		local item_now = r.item
 		local body: { [any]: any } = {
 			w_full = true,
-			h = r.h - gap(),
+			h = r.h - (r.gap or gap()),
 			relative = true,
 			px = "$space.2",
 			py = if tall then "$space.2" else nil,
@@ -1855,23 +2161,48 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			rounded = row_corner,
 			cursor = "pointer",
 			role = "option",
-			label = label,
+			-- (Taking focus and giving it back to the search would end a double click.)
+			focusable = if item_now and item_now.click_selects then false else nil,
+			label = if item_now and item_now.aria then item_now.aria else label,
 			selected = lit,
 			-- Motion alone moves the highlight: rows scrolling under a resting
 			-- pointer leave the keys' place alone.
-			on_pointer_move = function()
-				if hi:peek() ~= key then
-					hi:set(key)
+			on_pointer_move = if browsing
+				then nil
+				else function()
+					if hi:peek() ~= key then
+						hi:set(key)
+					end
+				end,
+			on_hover = if browsing
+				then function(inside: boolean)
+					touched:set(inside)
 				end
-			end,
+				else nil,
 			on_click = function(e)
-				activate(key, e ~= nil and e.meta == true)
+				local p = page()
+				if item_now and item_now.click_selects and not (e ~= nil and e.meta == true) then
+					if not (p.keys_elsewhere and p.keys_elsewhere()) then
+						hi:set(key)
+					end
+				else
+					activate(key, e ~= nil and e.meta == true)
+				end
 				-- (Still open, the keys stay the search's: a row clicked takes
 				-- no focus of its own.)
-				if open:peek() and field then
+				if open:peek() and field and not (p.refocus and p.refocus()) then
 					field:focus()
 				end
 			end,
+			on_press = if item_now and item_now.click_selects
+				then function(e: any)
+					if e.clicks == 2 then
+						ui.after(0, function()
+							activate(key, false)
+						end)
+					end
+				end
+				else nil,
 			-- The highlight, under the row's content: one shared wash with a
 			-- hairline ring, sliding from the row it leaves.
 			ui.presence(function(): string?
@@ -1887,13 +2218,34 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 					bg = "$zeron.menu.selected",
 					border = 1,
 					border_color = "$border.subtle",
+					-- (A press on it wouldn't be on the row a first press found: no double click.)
+					pointer_events = "none",
 				}
-			end, { absolute = true, left = 0, right = 0, top = 0, bottom = 0 }),
+			end, { absolute = true, left = 0, right = 0, top = 0, bottom = 0, pointer_events = "none" }),
 		}
+		if browsing then
+			table.insert(
+				body,
+				ui.presence(function(): string?
+					return if touched:get() and not lit() then "on" else nil
+				end, function()
+					return ui.div { w_full = true, h_full = true, rounded = row_corner, bg = "$zeron.menu.selected", opacity = 0.6, pointer_events = "none" }
+				end, {
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = 0,
+					bottom = 0,
+					pointer_events = "none",
+					enter = motion.transition({ opacity = { 0, 1 }, duration = HOVER_FADE, ease = "outQuad" }),
+					exit = motion.transition({ opacity = { 1, 0 }, duration = HOVER_FADE, ease = "outQuad" }),
+				})
+			)
+		end
 		for _, node in content do
 			table.insert(body, node)
 		end
-		return ui.div { w_full = true, h = r.h, px = "$space.1", ui.row(body) }
+		return ui.div { w_full = true, h = r.h, px = r.px or "$space.1", ui.row(body) }
 	end
 
 	local list = ui.list {
@@ -1904,6 +2256,9 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		offset = offset,
 		heights = function(): { number }
 			rev:get()
+			if inline_at and inline_now then
+				heights[inline_at] = inline_now.h()
+			end
 			return heights
 		end,
 		key = function(i: number): string
@@ -1922,7 +2277,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		fade = function()
 			local total = total_h:get()
 			local o = offset:get()
-			local most = math.max(0, total - math.min(view_max(), total))
+			local most = math.max(0, total - math.min(page_max(), total))
 			return { math.min(o, 20), math.min(math.max(0, most - o), 20) }
 		end,
 	}
@@ -1933,7 +2288,12 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 	local function note(): Note
 		local q = query:get()
 		local d = depth:get()
+		turn:get()
 		local p = page()
+		local says = if p.note then p.note(q) else nil
+		if says then
+			return says
+		end
 		if q == "" then
 			return p.empty or { title = locale.s("ds.command_palette.empty.nothing_yet") }
 		end
@@ -1956,7 +2316,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 	end
 	local empty = ui.column {
 		w_full = true,
-		h = NOTE_H,
+		h = list_h,
 		relative = true,
 		overflow = "hidden",
 		fade = { 24, 24 },
@@ -1996,6 +2356,30 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			wrap = true,
 			max_w = 380,
 		}),
+		ui.presence(function(): string?
+			local act = note().action
+			return if act then act.label else nil
+		end, function(label: string)
+			return ui.button {
+				label = label,
+				h = 24,
+				px = "$space.2",
+				items = "center",
+				rounded = "$radius.lg",
+				bg = "$zeron.secondary.bg",
+				color = "$text.primary",
+				hover = { bg = "$zeron.secondary.hover" },
+				active = { bg = "$zeron.secondary.active" },
+				text_size = "$font.size.sm",
+				on_click = function()
+					local act = note().action
+					if act then
+						act.run()
+					end
+				end,
+				ui.text { label, literal = true },
+			}
+		end),
 	}
 
 	-- The footer, a legend of the keys: what Enter and ⌘Enter do to the
@@ -2063,6 +2447,31 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		legend(Kbd { text = "esc" }, way_out),
 	}
 
+	ui.effect(function()
+		depth:get()
+		turn:get()
+		props.width:set(page().width or W)
+	end)
+	local function browsing_part(field_name: string): () -> string?
+		return function(): string?
+			depth:get()
+			turn:get()
+			return if (page() :: any)[field_name] then field_name else nil
+		end
+	end
+	local function built(field_name: string): () -> Node
+		return function(): Node
+			return (page() :: any)[field_name]()
+		end
+	end
+	if props.root.on_show then
+		props.root.on_show(nav)
+	end
+	if props.root.enter then
+		for _, over in props.root.enter() or {} do
+			push(over)
+		end
+	end
 	return ui.column {
 		id = "command-palette",
 		w_full = true,
@@ -2072,7 +2481,11 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		-- Frosted: the palette's glass over a blur of the page under it.
 		-- Opaque: a solid card.
 		bg = function()
-			return if material.see_through() then "$zeron.palette.tint" else "$zeron.palette.solid"
+			if not material.see_through() then
+				return "$zeron.palette.solid"
+			end
+			local _ = depth:get(), turn:get()
+			return if page().plain then "$zeron.palette.browse" else "$zeron.palette.tint"
 		end,
 		backdrop_blur = function()
 			return if material.see_through() then "$zeron.menu.blur" else 0
@@ -2083,18 +2496,54 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		shadow = "$zeron.menu.shadow",
 		-- Opening: a short scale up and fade in (each time: the card is
 		-- built as the palette opens).
+		relative = true,
 		on_mount = function(el)
-			local opening: ElementParams = { opacity = { 0, 1 }, scale = { 0.97, 1 }, duration = OPEN.duration, ease = OPEN.ease }
+			local opening: ElementParams = if props.rises
+				then { opacity = { 0, 1 }, translateY = { 2, 0 }, duration = RISE, ease = motion.EASE }
+				else { opacity = { 0, 1 }, scale = { 0.97, 1 }, duration = OPEN.duration, ease = OPEN.ease }
 			anime.animate(el, motion.params(opening))
+		end,
+		on_file_hover = function(inside: boolean)
+			local told = page().file_hover
+			if told then
+				told(inside)
+			end
+		end,
+		on_file_drop = function(files: { any })
+			local told = page().file_drop
+			if told then
+				told(files)
+			end
 		end,
 		search,
 		rule(),
+		ui.presence(browsing_part("bar"), function()
+			return ui.column { w_full = true, shrink = 0, ui.row { w_full = true, h = BAR_H, shrink = 0, built("bar")() }, rule() }
+		end, { w_full = true, shrink = 0 }),
+		ui.presence(browsing_part("under"), built("under"), { w_full = true, shrink = 0 }),
 		scope_row,
-		ui.show(function(): boolean
-			return shown_rows:get() > 0 or loading:get()
-		end, list, empty),
+		ui.row {
+			w_full = true,
+			min_h = 0,
+			ui.presence(browsing_part("rail"), function()
+				return ui.div { h = list_h, shrink = 0, built("rail")() }
+			end, { shrink = 0 }),
+			ui.column {
+				grow = 1,
+				min_w = 0,
+				ui.show(function(): boolean
+					return shown_rows:get() > 0 or loading:get()
+				end, list, empty),
+			},
+		},
 		rule(),
-		footer,
+		ui.show(function(): boolean
+			depth:get()
+			turn:get()
+			return page().foot == nil
+		end, footer),
+		ui.presence(browsing_part("foot"), built("foot"), { w_full = true, shrink = 0 }),
+		ui.presence(browsing_part("over"), built("over"), { absolute = true, left = 0, right = 0, top = 0, bottom = 0, pointer_events = "none" }),
 	}
 end)
 
@@ -2103,12 +2552,15 @@ typing_paths = {}
 
 local Palette = ui.component(function(props: Props): Node
 	local recent = props.recent or ui.use_state({} :: { string })
+	local width = ui.use_state(W)
 	return ui.modal {
 		open = props.open,
 		label = locale.t("ds.command_palette.label"),
 		-- Its top held still, so only its foot moves.
 		placement = { x = "center", y = "start", inset = { TOP, 0, 0, 0 } },
-		w = W,
+		w = function(): number
+			return width:get()
+		end,
 		p = 0,
 		gap = 0,
 		-- The card draws its own glass (so it can open with a scale); the
@@ -2116,7 +2568,7 @@ local Palette = ui.component(function(props: Props): Node
 		bg = "#00000000",
 		rounded = "$radius.xl",
 		build = function()
-			return Body { open = props.open, root = props.root, recent_state = recent }
+			return Body { open = props.open, root = props.root, recent_state = recent, width = width, rises = props.rises }
 		end,
 	}
 end)

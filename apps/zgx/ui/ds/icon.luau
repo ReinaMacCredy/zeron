@@ -159,6 +159,12 @@ export type Name =
 	| "lucide-bot"
 	| "lucide-chevron-down"
 	| "usage-chart"
+	| "home"
+	| "hard-drive"
+	| "return"
+	| "lucide-clock"
+	| "lucide-eye"
+	| "lucide-eye-off"
 
 -- `name` may be a function: the icon follows it (a checkout's folder or
 -- worktree).

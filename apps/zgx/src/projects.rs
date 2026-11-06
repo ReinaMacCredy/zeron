@@ -5,9 +5,10 @@
 //! whether that's another one (`remote`), which the engine reaches through
 //! the relay (`targetDeviceId`).
 //!
-//!   projects.folders { device, remote, path? }   `{ path, entries = { { name,
-//!                                                is_dir, is_repo } }, truncated }`
-//!                                                (no `path`: its home)
+//!   projects.folders { device, remote, path?, hidden? } `{ path, entries = { {
+//!                                                name, is_dir, is_repo } }, truncated }`
+//!                                                (no `path`: its home; `hidden`:
+//!                                                dot folders too)
 //!   projects.drives { device, remote }           `{ { name, path } }`
 //!   projects.search_home { device, remote, query } `{ matches = { { path,
 //!                                                relative, is_repo } }, indexing }`
@@ -15,6 +16,10 @@
 //!   projects.release_home { device, remote }     its home search let go
 //!   projects.clone { device, remote, url, parent } the repository's `{ path,
 //!                                                name }`, cloned under `parent`
+//!   projects.create_folder { device, remote, parent, name, git } the new
+//!                                                folder's `path`, `git init` in it
+//!                                                when `git` (an older device: the
+//!                                                engine's "unknown method")
 //!   projects.create { device, path, git, repo? } the new project's id
 //!   projects.delete id                           gone, its sessions with it
 //!
@@ -30,6 +35,9 @@ pub fn install(host: &ScriptHost) {
         let mut params = json!({});
         if let Some(path) = field(&arg, "path") {
             params["path"] = Json::from(path);
+        }
+        if arg.field("hidden").is_some_and(Value::truthy) {
+            params["includeHidden"] = Json::from(true);
         }
         let found = call("ListFolders", params, &arg).await?;
         let entries: Vec<Json> = found["entries"]
@@ -70,6 +78,17 @@ pub fn install(host: &ScriptHost) {
         let parent = field(&arg, "parent").ok_or("Choose where to clone it")?;
         let repo = call("CloneRepo", json!({ "url": url, "parent": parent }), &arg).await?;
         Ok(value(&json!({ "path": repo["path"], "name": repo["name"] })))
+    });
+    host.async_action("projects.create_folder", |arg| async move {
+        crate::plugins::preview::refuse("projects.create_folder")?;
+        let parent = field(&arg, "parent").ok_or("Choose a folder to create it in.")?;
+        let name = field(&arg, "name").ok_or("Type a folder name")?;
+        let mut params = json!({ "parent": parent, "name": name });
+        if arg.field("git").is_some_and(Value::truthy) {
+            params["gitInit"] = Json::from(true);
+        }
+        let made = call("CreateFolder", params, &arg).await?;
+        Ok(value(&made["path"]))
     });
     host.async_action("projects.create", |arg| async move {
         let device = field(&arg, "device").ok_or("Choose a device")?;

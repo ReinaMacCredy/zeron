@@ -217,7 +217,7 @@ function M.setup()
 			-- The command palette's card: in the window over its dimmed page
 			-- (not over the platform's material, as a menu is), so a denser
 			-- glass than a menu's tint over its own blur.
-			palette = { tint = "{surface.overlay}", solid = "{zeron.menu.solid}" },
+			palette = { tint = "{surface.overlay}", solid = "{zeron.menu.solid}", browse = "{zeron.palette.tint}" },
 			-- A transcript, set for reading at length. Prose a step up from
 			-- Zeron's 14 on 22: 15 on 24 (a 1.6 leading) reads easier over a
 			-- long reply on glass. Headings in three real steps, tight above

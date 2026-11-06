@@ -4,13 +4,15 @@
 -- device and whether it's another one (`remote`). Promises; a refusal
 -- carries the engine's own words.
 --
---   projects.folders(device, path?)     { path, entries = { { name, is_dir,
---                                       is_repo } }, truncated } (no path: home)
+--   projects.folders(device, path?, hidden?)  { path, entries = { { name, is_dir,
+--                                       is_repo } }, truncated } (no path: home;
+--                                       hidden: dot folders too)
 --   projects.drives(device)             { { name, path } }
 --   projects.search_home(device, query) { matches = { { path, relative,
 --                                       is_repo } }, indexing }
 --   projects.release_home(device)
 --   projects.clone(device, url, parent) { path, name }
+--   projects.create_folder(device, parent, name, git)  the new folder's path
 --   projects.create(device, path, git)  the new project's id
 --   projects.delete(id)                 gone, and its sessions with it
 --   projects.artwork(project, done)     its repository's own picture, as the
@@ -42,8 +44,11 @@ local function with(device: string, extra: { [string]: any }): { [string]: any }
 	return arg
 end
 
-function M.folders(device: string, path: string?): any
-	return ui.call("projects.folders", with(device, { path = path }))
+function M.folders(device: string, path: string?, hidden: boolean?): any
+	return ui.call("projects.folders", with(device, { path = path, hidden = hidden }))
+end
+function M.create_folder(device: string, parent: string, name: string, git: boolean): any
+	return ui.call("projects.create_folder", with(device, { parent = parent, name = name, git = git }))
 end
 function M.drives(device: string): any
 	return ui.call("projects.drives", on(device))

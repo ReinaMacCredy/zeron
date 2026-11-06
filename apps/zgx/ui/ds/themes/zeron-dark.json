@@ -156,6 +156,7 @@
 			"accent.active": "#83699f",
 			// Menus and dropdowns: a deep charcoal over macOS's popover material
 			// (a light grey frost in dark), so it reads as our dark glass.
+			"palette": { "browse": "#080809e6" },
 			"menu": { "tint": "#111113a6", "solid": "#1c1c1f", "shadow": "0 20 56 0 #00000052", "selected": "#ebebeb17" },
 			// A search's matched letters: the accent's wash firmer than light's
 			// (a faint violet on charcoal all but vanishes).

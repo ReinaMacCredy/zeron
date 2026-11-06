@@ -88,6 +88,7 @@ pub const BLOCKED: &[&str] = &[
     "home.save_action",
     "sessions.delete",
     "projects.clone",
+    "projects.create_folder",
     "projects.delete",
     "github.disconnect",
     "engine.restart",
@@ -691,6 +692,7 @@ return ui.column {{
         for (action, arg) in [
             ("sessions.delete", r#""s1""#),
             ("projects.delete", r#""p1""#),
+            ("projects.create_folder", r#"{ device = "d", parent = "/p", name = "n" }"#),
             ("agents.remove", r#"{ id = "claude", account = "a1" }"#),
             ("agents.sign_out", r#""acp.tool""#),
             ("plugins.set_off", r#"{ id = "focus", off = true }"#),

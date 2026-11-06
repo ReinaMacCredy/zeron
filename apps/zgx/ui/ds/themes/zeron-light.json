@@ -125,6 +125,7 @@
 			// Menus and dropdowns: a faint cool grey over macOS's popover
 			// material (near-opaque white in light), so it reads as frost, not
 			// a white sheet.
+			"palette": { "browse": "#e9e9eae6" },
 			"menu": { "tint": "#eceef273", "solid": "#fbfbfc", "shadow": "0 18 48 0 #0000001c", "selected": "#0000000f" },
 			// The composer: whiter glass than the window, a cool slate
 			// hairline; opaque, white on a soft shadow.
