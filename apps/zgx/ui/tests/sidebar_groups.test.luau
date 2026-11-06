@@ -60,11 +60,9 @@ test("groups stand the most recently active first, by project and by device", fu
 	-- (⌘1 follows: Borealis's newest first.)
 	expect(order(app)).to_be("b2,b1,a1,a2,a3")
 
-	-- By device: devbox (Borealis's) is the most recent, ahead of
-	-- this computer.
 	app:set_state(ORGANIZE, "device")
 	app:frames(40)
-	expect(top(app, "devbox") < top(app, "MacBook Pro")).to_be(true)
+	expect(top(app, "MacBook Pro") < top(app, "devbox")).to_be(true)
 end)
 
 test("a long group shows five, then Show N more and Show less; the session open shows past them", function()

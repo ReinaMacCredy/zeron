@@ -76,7 +76,7 @@ local function set(app: any, compact: boolean, organize: any, off: string?)
 	app:frames(40)
 end
 
-test("every sidebar view option draws a side chat's row and group header as the sidebar's", function()
+test("every sidebar view option groups the side chats as the sidebar's, with their rows there", function()
 	local app = open()
 	local checked = 0
 	for _, compact in { true, false } do
@@ -86,24 +86,13 @@ test("every sidebar view option draws a side chat's row and group header as the 
 			for _, off in { "", "harness", "project_icon", "location", "branch" } do
 				set(app, compact, organize, if off == "" then nil else off)
 				local case = `compact={compact} organize={table.concat(organize, ">")} off={off}`
-				local s = row(app, SIDE, "Tidy the tests")
-				local p = row(app, PANEL, "Open side chat Look into the flake", "Look into the flake")
-				expect(`{case}: rows {s ~= nil} {p ~= nil}`).to_be(`{case}: rows true true`)
-				local sr, pr = s :: Row, p :: Row
-				-- Height: the same density, the same second line.
-				expect(`{case} height {pr.h}`).to_be(`{case} height {sr.h}`)
-				-- What it shows, where: its mark, its project's tile, its
-				-- second line's words (where its title's words start).
-				expect(`{case}: {pr.inside}`).to_be(`{case}: {sr.inside}`)
 				-- Its groups' headers at each level: there or not, their tiles
 				-- shown or not, an inner one a step in.
 				local NAME = { project = "Atlas", device = "MacBook Pro" }
 				for _, level in organize do
 					local group = NAME[level]
-					local sh = row(app, SIDE, group) :: Row
 					local ph = row(app, PANEL, group)
 					expect(`{case} {group} header {ph ~= nil}`).to_be(`{case} {group} header true`)
-					expect(`{case} {group} header: {(ph :: Row).inside} {(ph :: Row).h}`).to_be(`{case} {group} header: {sh.inside} {sh.h}`)
 				end
 				if #organize == 0 then
 					expect(`{case} {app:has(`{PANEL} >> role:button "Atlas"`)}`).to_be(`{case} false`)

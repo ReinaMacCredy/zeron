@@ -9,6 +9,13 @@
 ui.theme.strict("warn")
 local ds = require("@ds")
 ds.setup()
+-- These fixtures' view: compact rows, no archived shelf, no project filter, whatever the defaults.
+do
+	local options = require("@app/screens/shell/sidebar").options
+	options.compact:set(true)
+	options.details.archived:set(false)
+	options.details.project_filter:set(false)
+end
 -- Addresses plain to start (hiding is the app's default): the tests read
 -- them, and private_text's turn hiding on themselves.
 ds.PrivateText.hidden:set(false)
@@ -320,6 +327,26 @@ stub.place = function(p: any)
 	end
 	model.places = p
 	publish()
+end
+stub.warm = function(id: string)
+	note(`warm:{id}`)
+end
+stub.archive_all = function(ids: { string }, _failed: (n: number) -> ())
+	for _, id in ids do
+		stub.archive(id)
+	end
+end
+stub.settle = function(id: string, settled: boolean): any
+	note(`settle:{id}:{settled}`)
+	for _, c in model.chats do
+		if c.id == id then
+			(c :: any).settle = { settled = settled, at = NOW }
+		end
+	end
+	publish()
+	return { after = function(self: any)
+		return self
+	end }
 end
 stub.archive = function(id: string)
 	note(`archive:{id}`)

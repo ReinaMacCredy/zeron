@@ -68,6 +68,24 @@ local OWN = {
 
 -- The box a row's glyph sits in (a tile's size): every name starts at the
 -- same place, with a glyph or without.
+M.held = ui.state("ds_menu_held", 0)
+
+function M.hold_while(open: State<boolean>)
+	local was = false
+	ui.effect(function()
+		local on = open:get()
+		if on ~= was then
+			was = on
+			M.held:set(M.held:peek() + (if on then 1 else -1))
+		end
+	end)
+	ui.on_cleanup(function()
+		if was then
+			M.held:set(M.held:peek() - 1)
+		end
+	end)
+end
+
 function M.glyph(name: Icon.Name | () -> Icon.Name, ink: string?): Node
 	return ui.div {
 		w = "$zeron.menu.glyph.box",

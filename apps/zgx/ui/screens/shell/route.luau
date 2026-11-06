@@ -268,6 +268,7 @@ end
 
 -- The project a new chat starts in (a space id; "none", none).
 local chosen = ui.persist("shell_project", nil :: string?)
+M.chosen = chosen
 
 -- `next`, or `last` where they say the same (so what reads it hears
 -- nothing).

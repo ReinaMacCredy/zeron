@@ -76,7 +76,7 @@ test("a session's state, title and arrival reach its row, every row staying its 
 	app:command("finish")
 	app:frames(20)
 	expect(`fix @{node(app, SIDE, "button", "Fix the build")}`).to_be(`fix @{fix}`)
-	expect(row_text(app, "Fix the build")).to_contain("Completed")
+	expect(row_text(app, "Fix the build")).to_contain("Done")
 
 	-- Renamed on another device: the same row, its new title.
 	app:command("rename_elsewhere")
@@ -251,7 +251,7 @@ test("an approval asked shows on its row, in place", function()
 	expect(docs).never.to_be_nil()
 	app:command("ask")
 	app:frames(20)
-	expect(row_text(app, "Write the docs")).to_contain("Pending Approval")
+	expect(row_text(app, "Write the docs")).to_contain("Approval")
 	expect(`docs @{node(app, SIDE, "button", "Write the docs")}`).to_be(`docs @{docs}`)
 end)
 

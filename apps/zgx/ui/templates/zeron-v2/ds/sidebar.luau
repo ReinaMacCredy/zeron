@@ -1285,6 +1285,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			min_w = 0,
 			items = "center",
 			title,
+			ui.div { class = "session-badges", shrink = 0 },
 		}
 		local body = row {
 			class = "session-row",
@@ -2020,6 +2021,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end), hint(ui.shortcut_text("cmd+k"))),
 			on_click = props.on_search,
 		},
+		if props.head and not is_island then ui.row { w_full = true, justify = "end", props.head } else nil,
 		if props.pages
 			-- (Each page's row follows it: a plugin renaming its page or
 			-- changing its icon shows here in place.)

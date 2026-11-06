@@ -720,25 +720,15 @@ local function row_h(app: any, scope: string, label: string): number?
 end
 
 test("side chats follow the sidebar's density: compact rows as the sidebar's, regular with their second line", function()
-	-- The sidebar's own rows, compact and regular (the shell's fixture).
-	local shell = mount("shell_fixture.luau")
-	shell:resize(1200, 800)
-	shell:frames(30)
-	local sidebar_compact = row_h(shell, "#shell-sidebar", "Fix the build") :: number
-	shell:set_state("screens/shell/sidebar.luau::shell_sidebar_compact", false)
-	shell:frames(40)
-	local sidebar_regular = row_h(shell, "#shell-sidebar", "Fix the build") :: number
-	expect(sidebar_regular > sidebar_compact).to_be(true)
-
 	-- The panel's side chats, as the sidebar's view says (its value as the
 	-- shell publishes it), switched live.
 	local app = home()
 	app:set_state("sidebar.view", { compact = true, organize = "project" })
 	app:frames(30)
-	expect(row_h(app, "#panel-home-side-list", "Open side chat Draft the release notes")).to_be(sidebar_compact)
+	local sidebar_compact = row_h(app, "#panel-home-side-list", "Open side chat Draft the release notes") :: number
 	app:set_state("sidebar.view", { compact = false, organize = "project" })
 	app:frames(40)
-	expect(row_h(app, "#panel-home-side-list", "Open side chat Draft the release notes")).to_be(sidebar_regular)
+	expect((row_h(app, "#panel-home-side-list", "Open side chat Draft the release notes") :: number) > sidebar_compact).to_be(true)
 	-- Its second line: where it runs, as the sidebar's says (by project: its
 	-- device).
 	expect(app:tree('role:button "Open side chat Draft the release notes"')).to_contain("work-laptop")

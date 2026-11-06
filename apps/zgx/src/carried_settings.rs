@@ -25,6 +25,9 @@ fn carried(settings: &Json) -> Vec<(String, Json)> {
         ("sidebarShowPullRequest", "show_pr"),
         ("sidebarShowProjectFilter", "show_project_filter"),
         ("sidebarShowArchived", "show_archived"),
+        ("sidebarShowProjectLabel", "show_location"),
+        ("sidebarWorkingShelf", "show_working"),
+        ("sidebarActiveFirst", "active_first"),
     ] {
         if let Some(on) = settings[from].as_bool() {
             out.push((sidebar(to), json!(on)));
@@ -43,6 +46,15 @@ fn carried(settings: &Json) -> Vec<(String, Json)> {
         Some("byDevice") => out.push((sidebar("organize"), json!(["device"]))),
         Some("inOneList") => out.push((sidebar("organize"), json!([]))),
         _ => {}
+    }
+    if let Some(organization) = settings["sidebarOrganization"].as_str() {
+        out.push((sidebar("inbox"), json!(organization == "inbox")));
+    }
+    if let Some(space) = settings["spaceFilter"].as_str() {
+        out.push((sidebar("project"), json!(space)));
+    }
+    if let Some(on) = settings["sidebarHoverEnabled"].as_bool() {
+        out.push((format!("{VIEW}sidebar_hover.json"), json!(on)));
     }
     if let Some(shut) = settings["sidebarCollapsed"].as_bool() {
         out.push((format!("{VIEW}collapsed.json"), json!(shut)));
@@ -90,6 +102,8 @@ mod tests {
             "sidebarOrganization": "byDevice", "sidebarSort": "created", "sidebarCompact": false,
             "sidebarShowHarness": false, "sidebarShowPullRequest": false, "sidebarWidth": 293.5,
             "sidebarCollapsed": true,
+            "spaceFilter": "space-1",
+            "sidebarHoverEnabled": false, "sidebarShowProjectLabel": false, "sidebarWorkingShelf": true, "sidebarActiveFirst": true,
         });
         carry_into(dir.path(), &settings);
         assert_eq!(read(dir.path(), "organize"), json!(["device"]));
@@ -99,6 +113,12 @@ mod tests {
         assert_eq!(read(dir.path(), "show_pr"), json!(false));
         assert_eq!(read(dir.path(), "width"), json!(293.5));
         assert!(dir.path().join(format!("{VIEW}collapsed.json")).exists());
+        assert_eq!(read(dir.path(), "inbox"), json!(false));
+        assert_eq!(read(dir.path(), "show_location"), json!(false));
+        assert_eq!(read(dir.path(), "show_working"), json!(true));
+        assert_eq!(read(dir.path(), "active_first"), json!(true));
+        assert_eq!(read(dir.path(), "project"), json!("space-1"));
+        assert!(dir.path().join(format!("{VIEW}sidebar_hover.json")).exists());
         // What it doesn't say stays at this app's default.
         assert!(!dir.path().join(format!("{SIDEBAR}show_branch.json")).exists());
     }

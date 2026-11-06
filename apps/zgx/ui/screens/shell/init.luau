@@ -88,7 +88,8 @@ return function(): Node
 	local collapsed = ui.computed(function(): boolean
 		return view.collapsed:get() or not fit.current:get().sidebar
 	end)
-	local function sidebar_limit(): number
+	local HARNESS_NAMES = { ["claude-code"] = "Claude", codex = "Codex", opencode = "OpenCode", gemini = "Gemini", mock = "Mock" }
+local function sidebar_limit(): number
 		return fit.sidebar_room:get()
 	end
 	-- Whether the sidebar's width changing now follows the window at once:
@@ -180,6 +181,9 @@ return function(): Node
 	end
 	-- The next and previous session, in the sidebar's order, round from the
 	-- end (from a new chat, its first or last). (Zeron's, shell/tabs.rs.)
+	local stepping: { string }? = nil
+	local stepped_to: string? = nil
+	local stepped_on: string? = nil
 	local function step(by: number)
 		-- (While the panel has the keyboard, its tabs, as Zeron's right pane.)
 		local panel: any = boundary.load("@app/screens/panel")
@@ -195,9 +199,17 @@ return function(): Node
 		if #ids == 0 then
 			return
 		end
-		local at = table.find(ids, route.current:peek().session or "")
-		local i = if at then (at - 1 + by) % #ids + 1 elseif by > 0 then 1 else #ids
-		route.open_session(ids[i])
+		-- (The list's order moves with the split pair showing: one walk keeps the order it began on, or it circles.)
+		local here = route.current:peek().session
+		local key = sidebar.walk_key()
+		if not (stepping and stepped_to == here and stepped_on == key) then
+			stepping, stepped_on = ids, key
+		end
+		local list = stepping :: { string }
+		local at = table.find(list, here or "")
+		local to = list[if at then (at - 1 + by) % #list + 1 elseif by > 0 then 1 else #list]
+		stepped_to = to
+		route.open_session(to)
 	end
 	runs["shell.next_session"] = function()
 		step(1)
@@ -490,6 +502,10 @@ return function(): Node
 				sidebar.key_pressed(string.match(e.key, "^[1-9]$") ~= nil and not (e.shift or e.alt or (e.ctrl and e.meta)))
 			end
 			if e.key == "Escape" and not (e.shift or e.cmd or e.alt or e.ctrl) then
+				local floating: any = boundary.load("@app/screens/shell/sidebar")
+				if floating and floating.peek_dismiss() then
+					return true
+				end
 				-- (A press on the bar's muted controls leaves the keyboard nowhere.)
 				if route.current:peek().name == "settings" then
 					route.leave_settings()
@@ -518,6 +534,12 @@ return function(): Node
 				return true
 			end
 			return false
+		end,
+		on_press = function()
+			local floating: any = boundary.load("@app/screens/shell/sidebar")
+			if floating then
+				floating.peek_press_outside()
+			end
 		end,
 		on_swipe = function(e: any)
 			local swipe: any = boundary.load("@app/screens/shell/swipe")
@@ -565,6 +587,10 @@ return function(): Node
 					h_full = true,
 					shrink = 0,
 					hidden = in_settings,
+					z = function(): number
+						local sidebar: any = boundary.load("@app/screens/shell/sidebar")
+						return if sidebar and sidebar.peek_mounted:get() then 1 else 0
+					end,
 					-- (One tone with the rail and the window, to the window's top.)
 					theme = { ["zeron.inset.bg"] = "#00000000" },
 					boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(Sidebar): Node
@@ -575,6 +601,9 @@ return function(): Node
 					return Page { files = files, width = window_w, away = in_settings, settings = settings_view }
 				end, { pass = true }),
 			},
+			boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(sidebar): Node
+				return sidebar.PeekEdge()
+			end, { pass = true }),
 			-- The rail, while the sidebar is collapsed: floating over the page at
 			-- the window's bottom left. (Not mounted while `view.rail` is off.)
 			if view.rail
@@ -667,7 +696,7 @@ return function(): Node
 				return ui.div {
 					ref = card,
 					absolute = true,
-					left = at.x + at.w + 10,
+					left = at.x + at.w + 4,
 					-- (Beside the row's top, kept inside the window.)
 					top = function(): number
 						local h = card.height or 0
@@ -679,6 +708,14 @@ return function(): Node
 							local c = chat()
 							return if c then c.title else ""
 						end,
+						project_tile = (function(): Node?
+							local c: any = chat()
+							if not c then
+								return nil
+							end
+							local screen: any = boundary.load("@app/screens/shell/sidebar")
+							return if screen then screen.project_glyph(c.project, 12) else nil
+						end)(),
 						time = function(): number?
 							local c = chat()
 							return if c then c.updated else nil
@@ -705,6 +742,26 @@ return function(): Node
 						branch = function(): string?
 							local c = chat()
 							return if c then c.branch else nil
+						end,
+						model = function(): string?
+							local c: any = chat()
+							if not c or not c.harness then
+								return nil
+							end
+							local name = (HARNESS_NAMES :: any)[c.harness] or c.harness
+							return if c.model then `{name} · {c.model}` else name
+						end,
+						opened_by = function(): string?
+							local c: any = chat()
+							return if c then c.created_by else nil
+						end,
+						subagents = function(): number?
+							local c: any = chat()
+							return if c then c.running_subagents else nil
+						end,
+						failed = function(): boolean
+							local c: any = chat()
+							return c ~= nil and c.status == "failed"
 						end,
 					},
 				}

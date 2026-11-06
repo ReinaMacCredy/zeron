@@ -783,6 +783,7 @@ return ui.component(function(props: Props): Node
 		return ui.column(specimen)
 	end
 	local open = props.open or ui.use_state(false)
+	Menu.hold_while(open)
 	local at = ui.use_state({ x = 0, y = 0 })
 	-- What it shows, built as it opens (plain: entries hold functions,
 	-- which a state cannot).

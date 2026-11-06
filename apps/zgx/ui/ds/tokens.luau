@@ -57,12 +57,10 @@ function M.setup()
 				drop = "alpha({accent}, 0.14)",
 				drop_edge = "alpha({accent}, 0.7)",
 			},
-			-- The app rail with Inset card off and no picture under it (crates/ui's Off tone).
-			rail = { off = "#202020" },
 			-- Between the items of any list (a menu's rows, a sidebar's pages):
 			-- enough that one row's wash (hover, selected) never touches the
 			-- next's, no more.
-			list = { gap = 2 },
+			list = { gap = 2, sidebar_gap = 1 },
 			-- An icon button (ds/icon_button): a glyph alone on a square. Three
 			-- sizes: a row's corner or a bar's tight controls, a title bar's, a
 			-- toolbar's; the glyph at each; and its corner, a button's 8.
@@ -656,7 +654,6 @@ function M.setup()
 		local dark = not (kind == "light" or kind == "high-contrast-light")
 		ui.theme.tokens {
 			zeron = {
-				rail = { off = if dark then "#202020" else "#e8e8ea" },
 				inset = {
 					-- (Lifted by its edge, not its tone: Zeron's, 13 on 17 dark, 255 on 245 light.)
 					bg = if dark then "{zeron.window}" else "over({zeron.window}, {surface.raised})",

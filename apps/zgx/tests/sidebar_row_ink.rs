@@ -1,8 +1,8 @@
 //! The sidebar's words keep the scheme's ink as the scheme switches (Light,
 //! Dark, Light, System, Dark, Light), in every state a row takes: a session
-//! at rest and one under the pointer in `text.secondary`; working, asking,
-//! done (unseen) and selected in `text.primary`; times and the "Projects"
-//! heading in `text.tertiary`; a group's header in `text.primary`. Before zgx
+//! at rest and one under the pointer, working, asking, done (unseen) and
+//! selected in `text.primary` (at rest, an opacity over it); times in
+//! `text.tertiary`; a group's header in `text.secondary`. Before zgx
 //! d81d2c33 (#1439) a style re-run that saw nothing of its own change kept a
 //! text's colour from the first switch: a light theme after a dark one left
 //! the rows at rest in the dark scheme's ink (white on the light sidebar),
@@ -97,18 +97,17 @@ fn sidebar_rows_wear_each_schemes_ink_in_every_state() {
         }
         scheme(&mut app, which);
         let root = app.ui.theme().root().clone();
-        let expect: [(&str, &str, ColorToken); 9] = [
-            ("Write the docs", "at rest", tok::TEXT_SECONDARY),
+        let expect: [(&str, &str, ColorToken); 8] = [
+            ("Write the docs", "at rest", tok::TEXT_PRIMARY),
             (
                 "Answer the review",
                 "under the pointer",
-                tok::TEXT_SECONDARY,
+                tok::TEXT_PRIMARY,
             ),
             ("Tidy the tests", "selected", tok::TEXT_PRIMARY),
             ("Fix the build", fix_the_build, tok::TEXT_PRIMARY),
             ("Ship the release", "asking", tok::TEXT_PRIMARY),
-            ("Borealis", "a group's header", tok::TEXT_PRIMARY),
-            ("Projects", "the heading", tok::TEXT_TERTIARY),
+            ("Borealis", "a group's header", tok::TEXT_SECONDARY),
             ("1h", "a time", tok::TEXT_TERTIARY),
             ("2h", "a time, its row selected", tok::TEXT_TERTIARY),
         ];

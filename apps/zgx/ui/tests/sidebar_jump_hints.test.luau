@@ -16,8 +16,12 @@ local function open(): any
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 900)
 	app:frames(30)
-	mac = app:has(`{SIDE} >> "⌘K"`)
-	expect(mac or app:has(`{SIDE} >> "Ctrl+K"`)).to_be(true)
+	app:set_state("shell_jump_hints", true)
+	app:frames(5)
+	mac = app:has(`{SIDE} >> "⌘1"`)
+	expect(mac or app:has(`{SIDE} >> "Ctrl+1"`)).to_be(true)
+	app:set_state("shell_jump_hints", false)
+	app:frames(5)
 	return app
 end
 
@@ -91,9 +95,9 @@ local function box(app: any, sel: string): (number, number, number, number)
 end
 
 -- A jump's keys take the corner's place, as wide as they need: Ctrl+1 is
--- wider than ⌘1 or a time, and the subagents pill before it gives way,
--- never drawn over; within the row, at the sidebar's width and narrowed.
-test("a jump's keys take the corner's width, the pill beside it never under them", function()
+-- wider than ⌘1 or a time, and the subagents pill gives way, as Zeron's;
+-- within the row, at the sidebar's width and narrowed.
+test("a jump's keys take the corner's width, the pill giving way to them", function()
 	local app = open()
 	app:command("subagents_3")
 	app:frames(30)
@@ -109,10 +113,8 @@ test("a jump's keys take the corner's width, the pill beside it never under them
 		app:frames(4)
 		expect(wears(app, "Fix the build")).to_be(keys(1))
 		local hx, _, hw = box(app, `{row} >> "{keys(1)}"`)
-		local px, _, pw = box(app, pill)
+		expect(app:has(pill)).to_be(false)
 		local rx, _, rw = box(app, row)
-		-- The pill ends before the keys start; the keys end inside the row.
-		expect(`{width}: pill ends {px + pw}, keys start {hx}`).to_be(`{width}: pill ends {px + pw}, keys start {math.max(hx, px + pw)}`)
 		expect(hx + hw <= rx + rw).to_be(true)
 		hold(app, false)
 		app:frames(4)

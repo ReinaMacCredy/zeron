@@ -59,6 +59,12 @@ local M = {}
 -- lines), and how far an icon beside a name sits from its line's middle
 -- (an icon is taller than a name's capitals: centred, it reads low).
 M.SLOT, M.TALL, M.OPTICAL = 30, 46, -0.5
+M.CARD, M.CARD_TWO, M.CARD_SLIM, M.COMPACT = 78, 54, 36, 29
+M.CARD_GAP = 5
+function M.card_title_size(): any
+	local body = (ui.theme.get("font.size.md") :: number?) or 13
+	return ui.raw(math.floor(body * 28 / 13 + 0.5) / 2, "a sidebar card's title, between the body and its next size")
+end
 
 -- The session a row shows, as far as it reads it.
 export type Session = {
@@ -75,6 +81,10 @@ export type Session = {
 	branch: string?,
 	subagents: number?,
 	pr: { number: number, state: string?, title: string? }?,
+	marks: string?,
+	tree_kind: string?,
+	tree_commits: number?,
+	tree_dirty: number?,
 }
 
 function M.line(text: Node, ...: Node?): Node
@@ -122,7 +132,8 @@ end
 
 -- Its harness's mark, faint unless the session asks to be seen; an agent
 -- from the ACP registry's, in its colours; none, a faint dot.
-function M.mark(cur: () -> Session, strong: () -> boolean): Node
+function M.mark(cur: () -> Session, strong: () -> boolean, size: number?): Node
+	local px = size or 14
 	-- (Keyed by the agent and whether its icon is known: built again only
 	-- when either changes.)
 	local function registry(): string
@@ -146,7 +157,7 @@ function M.mark(cur: () -> Session, strong: () -> boolean): Node
 					return ui.div {}
 				end
 				local harness = string.match(key, "^[^%z]+") or key
-				return AgentMark { label = harness, seed = harness, icon = cur().agent_icon, size = 14, bare = true }
+				return AgentMark { label = harness, seed = harness, icon = cur().agent_icon, size = px, bare = true }
 			end)
 		),
 		ui.show(
@@ -157,13 +168,170 @@ function M.mark(cur: () -> Session, strong: () -> boolean): Node
 				name = function(): Mark.Name
 					return (cur().agent or "claude") :: Mark.Name
 				end :: any,
-				size = 14,
+				size = px,
 				bare = true,
 			},
 			ui.show(function(): boolean
 				return registry() == ""
 			end, ui.div { w = 5, h = 5, rounded = "$radius.full", bg = "$text.disabled" })
 		),
+	}
+end
+
+function M.stack(cur: () -> Session, size: number, ink: number): Node
+	local function key(): string
+		return cur().marks or ""
+	end
+	local function always(): boolean
+		return true
+	end
+	return ui.presence(key, function(earlier: string): Node
+		local names = if earlier == "" then {} else string.split(earlier, ",")
+		local step = size * 0.65
+		local parts: { any } = {
+			relative = true,
+			shrink = 0,
+			w = size + step * #names,
+			h = size,
+			opacity = ink,
+		}
+		for i, name in names do
+			table.insert(parts, ui.div { absolute = true, left = step * (i - 1), top = 0, Mark { name = name :: Mark.Name, size = size, bare = true } })
+		end
+		table.insert(parts, ui.div {
+			absolute = true,
+			left = step * #names,
+			top = 0,
+			M.mark(cur, always, size),
+		})
+		return ui.div(parts)
+	end)
+end
+
+function M.tree_badge(cur: () -> Session, base: () -> string?): Node
+	local function key(): string?
+		local c = cur()
+		if c.tree_kind == nil or (c :: any).pr then
+			return nil
+		end
+		return `{c.tree_kind}|{c.tree_commits or 0}|{c.tree_dirty or 0}|{base() or ""}`
+	end
+	return ui.presence(key, function(): Node
+		local c = cur()
+		local ahead = c.tree_kind == "ahead"
+		local on = base() or locale.s("ds.sidebar.tree.base")
+		local dirty = c.tree_dirty or 0
+		local tip = if ahead
+			then locale.s("ds.sidebar.tree.ahead", { n = c.tree_commits or 0, base = on })
+			elseif dirty > 0 then locale.s("ds.sidebar.tree.merged_dirty", { n = dirty, base = on })
+			else locale.s("ds.sidebar.tree.merged", { base = on })
+		local hue = if ahead then "$text.tertiary" else "$zeron.pr.merged"
+		return ui.row {
+			shrink = 0,
+			relative = true,
+			h = 16,
+			px = "$space.1",
+			gap = "$zeron.space.hair",
+			items = "center",
+			rounded = "$radius.sm",
+			tooltip = tip,
+			label = tip,
+			ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, rounded = "$radius.sm", bg = hue, opacity = 0.08 },
+			ui.div { color = hue, opacity = 0.85, Icon { name = if ahead then "arrow-up" else "check", size = 10 } },
+			if ahead
+				then ui.text { tostring(c.tree_commits or 0), text_size = "$font.size.xs", weight = "$font.weight.medium", color = hue, tabular = true, opacity = 0.85 }
+				else nil,
+			if dirty > 0 and not ahead then ui.div { w = 5, h = 5, shrink = 0, rounded = "$radius.full", bg = "$warning" } else nil,
+		}
+	end)
+end
+
+function M.elapsed_label(since: () -> number?, ink: string): Node
+	local tick = ui.use_state(0)
+	local alive = true
+	ui.on_cleanup(function()
+		alive = false
+	end)
+	ui.every(1000, function(): boolean
+		if alive then
+			tick:set(tick:peek() + 1)
+		end
+		return alive
+	end)
+	return ui.text {
+		function(): string
+			tick:get()
+			local at = since()
+			return if at then status.elapsed(math.max(0, os.time() - at)) else ""
+		end,
+		shrink = 0,
+		tabular = true,
+		text_size = "$font.size.xs",
+		color = ink,
+	}
+end
+
+local MONOGRAM: { { string } } = {
+	{ "#94a3b8", "#475569" },
+	{ "#93c5fd", "#2563eb" },
+	{ "#c4b5fd", "#7c3aed" },
+	{ "#fda4af", "#be123c" },
+	{ "#fcd34d", "#a16207" },
+	{ "#6ee7b7", "#047857" },
+	{ "#5eead4", "#0f766e" },
+	{ "#fdba74", "#c2410c" },
+}
+local function fnv(seed: string): number
+	local h = 2166136261
+	for i = 1, #seed do
+		h = bit32.bxor(h, string.byte(seed, i))
+		h = (bit32.lshift(h, 24) + h * 403) % 4294967296
+	end
+	return h
+end
+function M.monogram_tone(seed: string): string
+	local kind = ui.theme.kind()
+	local dark = not (kind == "light" or kind == "high-contrast-light")
+	local pair = MONOGRAM[fnv(seed) % #MONOGRAM + 1]
+	return if dark then pair[1] else pair[2]
+end
+function M.Monogram(props: { name: () -> string, seed: string, size: number, lit: (() -> boolean)? }): Node
+	local tone = M.monogram_tone(props.seed)
+	local function lit(): boolean
+		return props.lit ~= nil and props.lit()
+	end
+	return ui.div {
+		relative = true,
+		w = props.size,
+		h = props.size,
+		shrink = 0,
+		items = "center",
+		justify = "center",
+		rounded = ui.raw(3, "Zeron's monogram's corner"),
+		ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			rounded = ui.raw(3, "Zeron's monogram's corner"),
+			bg = ui.raw(tone, "Zeron's monogram palette, apart from the theme"),
+			opacity = function(): number
+				return if lit() then 0.24 else 0.08
+			end,
+		},
+		ui.text {
+			function(): string
+				return string.upper(string.sub(props.name(), 1, 1))
+			end,
+			text_size = ui.raw(math.max(8, math.floor(props.size * 0.6)), "a monogram's letter, by its tile"),
+			font = "$font.mono",
+			weight = "$font.weight.medium",
+			color = ui.raw(tone, "Zeron's monogram palette, apart from the theme"),
+			opacity = function(): number
+				return if lit() then 1 else 0.85
+			end,
+		},
 	}
 end
 
@@ -873,6 +1041,7 @@ function M.Row(props: RowProps): Node
 					items = "center",
 					title,
 				},
+				ui.div { class = "session-badges", shrink = 0 },
 				M.subagents(function(): number
 					return cur().subagents or 0
 				end),

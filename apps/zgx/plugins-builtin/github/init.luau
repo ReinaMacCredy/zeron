@@ -30,7 +30,7 @@ local Board = require("./board")(zeron, pulls, Viewer)
 require("./notices")(zeron, watch)
 
 zeron.place {
-	at = ".session-title",
+	at = ".session-badges",
 	after = function(): Node
 		local id = zeron.need("session").id
 		local pr = watch.pr(id)

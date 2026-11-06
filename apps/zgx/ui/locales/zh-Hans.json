@@ -118,7 +118,10 @@
     },
     "session_card": {
       "ago": "{when}前",
-      "no_project": "无项目"
+      "no_project": "无项目",
+      "opened_by": "由 {name} 打开",
+      "subagents": "{n} 个子代理运行中",
+      "error": "发生错误"
     },
     "working": {
       "label": "运行中",
@@ -489,13 +492,51 @@
         "keep_active": "折叠时显示活跃会话",
         "devices_first": "设备优先",
         "projects_first": "项目优先",
-        "empty_projects": "空项目"
+        "empty_projects": "空项目",
+        "inbox": "收件箱",
+        "active_first": "活跃优先",
+        "working": "进行中"
       },
       "empty": "暂无会话",
       "resize": "调整侧边栏大小",
       "show_less": "显示更少",
       "empty_projects_word": "空项目",
-      "empty_projects": "{n, plural, other {# 个空项目}}"
+      "empty_projects": "{n, plural, other {# 个空项目}}",
+      "search_in": "搜索 {name}",
+      "filter_by": "按项目筛选",
+      "filter_is": "筛选：{name}",
+      "new_project": "新建项目",
+      "pin_chat": "置顶会话",
+      "unpin_chat": "取消置顶",
+      "settle_thread": "归入已定",
+      "unsettle_thread": "移出已定",
+      "settle_word": "归入",
+      "mark_read": "全部标为已读",
+      "drafts": "草稿",
+      "discard_draft": "丢弃草稿",
+      "draft_in": "{target} 中的草稿",
+      "inbox": "收件箱",
+      "working": "进行中",
+      "settled": "已定",
+      "drop_to_unpin": "拖到这里取消置顶",
+      "by": "来自",
+      "asking": "询问中",
+      "queued": "排队中",
+      "tree": {
+        "ahead": "{n} 个提交不在 {base} 中",
+        "merged": "已在 {base} 中",
+        "merged_dirty": "已在 {base} 中，{n} 个文件未提交",
+        "base": "基础分支"
+      },
+      "work": {
+        "subagents": "{n} 个子代理",
+        "shells": "{n} 个 shell",
+        "tasks": "{n} 个任务"
+      },
+      "new_chat_on": "在 {device} 上新建会话",
+      "edit_section": "编辑分组",
+      "section_hint": "按你的方式整理会话",
+      "create_section": "创建分组"
     },
     "git": {
       "pull_request": "拉取请求",
@@ -1425,6 +1466,10 @@
           "label": "扫描线",
           "description": "添加明显的水平显示扫描线纹理。"
         }
+      },
+      "sidebar_hover": {
+        "label": "悬停显示侧边栏",
+        "description": "指针停在窗口左边缘时显示隐藏的侧边栏。"
       }
     },
     "notifications": {
@@ -2409,7 +2454,9 @@
         "delete": "删除…",
         "rename": "重命名…",
         "remove": "移除…",
-        "edit_project": "编辑项目…"
+        "edit_project": "编辑项目…",
+        "settle": "归入已定",
+        "unsettle": "移出已定"
       },
       "project": {
         "rename_title": "重命名项目",
@@ -2477,7 +2524,18 @@
         "delete_title": "删除会话？",
         "rename_title": "重命名会话",
         "name": "名称",
-        "name_placeholder": "会话名称"
+        "name_placeholder": "会话名称",
+        "will_delete_cloud": "“{title}”及其 Cloud 机器将被删除，且无法撤销。"
+      },
+      "notice": {
+        "not_connected": "引擎未连接，侧边栏未更改。",
+        "unconfirmed": "无法确认侧边栏更改，排队的编辑已取消。",
+        "not_saved": "无法保存侧边栏更改：{why}",
+        "syncing": "侧边栏仍在同步，请稍后再试。",
+        "pins_syncing": "置顶仍在同步",
+        "pin_cap": "最多可置顶 200 个会话",
+        "clear_filter": "清除项目筛选后才能重命名此会话",
+        "archive_failed": "有 {n} 个会话无法归档，请重试。"
       }
     },
     "boundary": {

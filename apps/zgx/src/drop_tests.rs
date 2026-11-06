@@ -194,6 +194,8 @@ fn engine(app: &mut TestApp, frame: usize) {
 #[test]
 fn a_dropped_session_lands_in_one_motion() {
     let mut app = mount();
+    app.click("#shell-sidebar >> role:button \"Tidy the tests\"");
+    app.frames(30);
     assert!(app.host.run_command("hold_echo"));
     let mut faulty = Vec::new();
     let pin = |app: &mut TestApp| middle(app, "#shell-sidebar >> \"Drop here to pin\"");
@@ -240,7 +242,7 @@ fn the_sidebars_headers_keep_their_height_through_a_toggle() {
             if side < 16. {
                 continue;
             }
-            for head in ["Pinned", "Projects"] {
+            for head in ["Pinned", "Borealis"] {
                 let target = zgx_script::driver::parse(&format!("#shell-sidebar >> \"{head}\"")).unwrap();
                 app.ui.prepare_frame();
                 let found = zgx_script::driver::find_all(&app.ui, &app.handle, &target).unwrap_or_default();

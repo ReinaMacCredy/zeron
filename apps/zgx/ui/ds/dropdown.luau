@@ -350,6 +350,7 @@ return ui.component(function(props: Props): Node
 		return given
 	end
 	local open = ui.use_state(false)
+	Menu.hold_while(open)
 	local query = ui.use_state("")
 	local value = props.value
 	-- Opening upward (above its trigger): its far edge, the top, is the one

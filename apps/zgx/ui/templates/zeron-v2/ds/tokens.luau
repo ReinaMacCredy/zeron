@@ -26,8 +26,6 @@ function M.setup()
 			-- 32, 48, 64), for controls: a thumb's inset in its track, a chip's
 			-- padding and gap, a small button's padding.
 			space = { hair = 2, tight = 6, snug = 10 },
-			-- The app rail with Inset card off and no picture under it (crates/ui's Off tone).
-			rail = { off = "#202020" },
 			-- Between the items of any list (a menu's rows, a sidebar's pages):
 			-- enough that one row's wash (hover, selected) never touches the
 			-- next's, no more.
@@ -616,11 +614,6 @@ function M.setup()
 	--   option;
 	-- - a tray's row (and its head), the tray's padding in; a queued
 	--   message's thumbnail, its row's inset in.
-	ui.effect(function()
-		local kind = ui.theme.kind()
-		local dark = not (kind == "light" or kind == "high-contrast-light")
-		ui.theme.tokens { zeron = { rail = { off = if dark then "#202020" else "#e8e8ea" } } }
-	end)
 	local control = require("@self/control")
 	ui.effect(function()
 		local chip = control.nest("$zeron.composer.radius", 1, "$zeron.composer.chip.inset")

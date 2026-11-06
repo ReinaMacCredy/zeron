@@ -109,21 +109,21 @@ local SETTINGS = {
 		organize = {},
 		rows = "Fix the build,Profile on the box,Write the docs,Tidy the tests,Ship the release,Answer the review",
 		order = "a1,a5,a2,a3,b1,b2",
-		second = "Atlas · MacBook Pro · fix/build",
+		second = "Atlas fix/build",
 	},
 	{
 		name = "project",
 		organize = { "project" },
 		rows = "Atlas,Fix the build,Profile on the box,Write the docs,Tidy the tests,Borealis,Ship the release,Answer the review",
 		order = "a1,a5,a2,a3,b1,b2",
-		second = "MacBook Pro · fix/build",
+		second = "fix/build",
 	},
 	{
 		name = "device",
 		organize = { "device" },
 		rows = "MacBook Pro,Fix the build,Write the docs,Tidy the tests,devbox,Profile on the box,Ship the release,Answer the review",
 		order = "a1,a2,a3,a5,b1,b2",
-		second = "Atlas · fix/build",
+		second = "Atlas fix/build",
 	},
 	{
 		name = "project>device",
@@ -238,6 +238,8 @@ test("the view menu: both levels on at once, None off; their handles reorder the
 	local app = open()
 	set(app, { "project" }, true)
 	app:click('role:button "Sidebar view options"')
+	app:frames(20)
+	app:click('.view-submenu >> "Organize"')
 	app:frames(20)
 	expect(menu_rows(app)).to_be("By project,By device")
 	-- Each level's grip stands in its glyph's place: the same column as

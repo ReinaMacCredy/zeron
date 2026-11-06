@@ -118,7 +118,10 @@
     },
     "session_card": {
       "ago": "{when} ago",
-      "no_project": "No project"
+      "no_project": "No project",
+      "opened_by": "Opened by {name}",
+      "subagents": "{n, plural, one {# subagent running} other {# subagents running}}",
+      "error": "Error occurred"
     },
     "working": {
       "label": "Working",
@@ -485,17 +488,55 @@
         "sort": "Sort",
         "show": "Show",
         "compact": "Compact",
-        "create_section": "Create section",
+        "create_section": "Create Section",
         "keep_active": "Active when collapsed",
         "devices_first": "Devices first",
         "projects_first": "Projects first",
-        "empty_projects": "Empty projects"
+        "empty_projects": "Empty projects",
+        "inbox": "Inbox",
+        "active_first": "Active first",
+        "working": "Working"
       },
       "empty": "No sessions yet",
       "resize": "Resize sidebar",
       "show_less": "Show less",
       "empty_projects_word": "Empty",
-      "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}"
+      "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}",
+      "search_in": "Search {name}",
+      "filter_by": "Filter by project",
+      "filter_is": "Filter: {name}",
+      "new_project": "New project",
+      "pin_chat": "Pin chat",
+      "unpin_chat": "Unpin chat",
+      "settle_thread": "Settle thread",
+      "unsettle_thread": "Un-settle thread",
+      "settle_word": "Settle",
+      "mark_read": "Mark chats read",
+      "drafts": "Drafts",
+      "discard_draft": "Discard draft",
+      "draft_in": "Draft in {target}",
+      "inbox": "Inbox",
+      "working": "Working",
+      "settled": "Settled",
+      "drop_to_unpin": "Drop here to unpin",
+      "by": "by",
+      "asking": "Asking",
+      "queued": "Queued",
+      "tree": {
+        "ahead": "{n, plural, one {# commit not in {base}} other {# commits not in {base}}}",
+        "merged": "In {base}",
+        "merged_dirty": "{n, plural, one {In {base}, # uncommitted file} other {In {base}, # uncommitted files}}",
+        "base": "the base branch"
+      },
+      "work": {
+        "subagents": "{n, plural, one {# subagent} other {# subagents}}",
+        "shells": "{n, plural, one {# shell} other {# shells}}",
+        "tasks": "{n, plural, one {# task} other {# tasks}}"
+      },
+      "new_chat_on": "New chat on {device}",
+      "edit_section": "Edit section",
+      "section_hint": "Group sessions however you like",
+      "create_section": "Create section"
     },
     "git": {
       "pull_request": "Pull request",
@@ -1425,6 +1466,10 @@
           "label": "Scanlines",
           "description": "Adds a pronounced horizontal display-line texture."
         }
+      },
+      "sidebar_hover": {
+        "label": "Reveal sidebar on hover",
+        "description": "Show the hidden sidebar when the pointer rests at the window's left edge."
       }
     },
     "notifications": {
@@ -2409,7 +2454,9 @@
         "delete": "Delete…",
         "rename": "Rename…",
         "remove": "Remove…",
-        "edit_project": "Edit project…"
+        "edit_project": "Edit project…",
+        "settle": "Settle",
+        "unsettle": "Unsettle"
       },
       "project": {
         "rename_title": "Rename project",
@@ -2477,7 +2524,18 @@
         "delete_title": "Delete session?",
         "rename_title": "Rename session",
         "name": "Name",
-        "name_placeholder": "Session name"
+        "name_placeholder": "Session name",
+        "will_delete_cloud": "\"{title}\" and its Cloud machine will be deleted. This can't be undone."
+      },
+      "notice": {
+        "not_connected": "Engine not connected. Sidebar was not changed.",
+        "unconfirmed": "Couldn't confirm sidebar changes. Queued edits were cancelled.",
+        "not_saved": "Couldn't save sidebar changes: {why}",
+        "syncing": "Sidebar is still syncing. Try again in a moment.",
+        "pins_syncing": "Pins are still syncing",
+        "pin_cap": "You can pin up to 200 sessions",
+        "clear_filter": "Clear the project filter to rename this session",
+        "archive_failed": "{n, plural, one {Could not archive # session. Try again.} other {Could not archive # sessions. Try again.}}"
       }
     },
     "boundary": {

@@ -123,6 +123,7 @@ const INVOKES: &[&str] = &[
     "sessions.collapse",
     "sessions.places",
     "sessions.seen",
+    "sessions.warm",
     "sound.play",
     "templates.failed",
     "wallpaper.forget",
@@ -577,9 +578,10 @@ fn a_reload_keeps_the_panel_where_it_was_scrolled() {
     let tree = first_under(&mut app, "#files-pane", "tree");
     app.scroll(&tree, 1200.);
     app.frames(20);
-    // (A row well down the tree, as it now stands.)
-    let row = app
-        .tree()
+    // (A row well down the tree, as it now stands: past `tree`'s budget, a long sidebar above it.)
+    let options = zgx_script::driver::TreeOptions { budget: 100_000, ..Default::default() };
+    let (lines, hidden) = zgx_script::driver::tree_lines(&app.ui, &app.handle, None, &options);
+    let row = zgx_script::driver::tree_lines_text(&lines, hidden)
         .lines()
         .filter_map(|l| {
             let t = l.trim_start();

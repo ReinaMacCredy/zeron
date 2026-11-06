@@ -26,6 +26,7 @@
 
 local CommandPalette = require("@ds/command_palette")
 local toast = require("@ds/toast")
+local boundary = require("@app/screens/shell/boundary")
 local locale = require("@ds/locale")
 local sessions = require("@account/sessions")
 local projects = require("@account/projects")
@@ -103,6 +104,10 @@ function M.add(device: string, path: string, git: boolean, repo: string?)
 	projects.create(device, path, git, repo):after(function(id: any)
 		if type(id) == "string" then
 			arriving:set(id)
+			local options: any = boundary.load("@app/screens/shell/sidebar")
+			if options and options.options.project:peek() ~= nil then
+				options.options.project:set(id)
+			end
 		end
 	end, function(err: any)
 		toast.show { title = locale.s("shell.add_project.couldnt_add"), body = says(err, path), tone = "danger" }

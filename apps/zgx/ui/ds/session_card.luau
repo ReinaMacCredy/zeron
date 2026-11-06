@@ -27,31 +27,41 @@ export type Props = {
 	here: boolean? | () -> boolean?,
 	project: string? | () -> string?,
 	branch: string? | () -> string?,
+	model: string? | () -> string?,
+	opened_by: string? | () -> string?,
+	subagents: number? | () -> number?,
+	failed: boolean? | () -> boolean?,
+	project_tile: Node?,
 	-- The session it's of, for what plugins add to it.
 	session: string?,
 }
 
-local W = 284
+local W = 280
 
 local function read<T>(v: T | () -> T): T
 	return if type(v) == "function" then (v :: any)() else v :: T
 end
 
-local function line(icon: Icon.Name | () -> Icon.Name, text: () -> string): Node
+local function line(icon: Icon.Name | () -> Icon.Name, text: () -> string, ink: string?, lead: Node?): Node
 	return ui.row {
 		w_full = true,
-		gap = "$space.2",
+		gap = "$zeron.space.tight",
 		items = "center",
 		ui.div {
 			shrink = 0,
-			color = "$text.tertiary",
-			if type(icon) == "function"
-				then ui.presence(icon :: any, function(name: string): Node
-					return Icon { name = name :: Icon.Name, size = 12 }
-				end)
-				else Icon { name = icon :: Icon.Name, size = 12 },
+			w = 12,
+			h = 12,
+			items = "center",
+			justify = "center",
+			color = ink or "$text.tertiary",
+			lead
+				or if type(icon) == "function"
+					then ui.presence(icon :: any, function(name: string): Node
+						return Icon { name = name :: Icon.Name, size = 12 }
+					end)
+					else Icon { name = icon :: Icon.Name, size = 12 },
 		},
-		ui.text { text, grow = 1, min_w = 0, truncate = true, text_size = "$font.size.xs", color = "$text.secondary" },
+		ui.text { text, grow = 1, min_w = 0, truncate = true, text_size = "$font.size.sm", color = ink or "$text.secondary" },
 	}
 end
 
@@ -69,15 +79,50 @@ return function(props: Props): Node
 				return read(props.title)
 			end,
 			w_full = true,
-			wrap = true,
-			lines = 3,
-			text_size = "$font.size.md",
+			truncate = true,
+			text_size = "$font.size.sm",
 			weight = "$font.weight.medium",
 			color = "$text.primary",
 		},
 		ui.column {
 			w_full = true,
-			gap = "$space.1",
+			pl = "$zeron.space.hair",
+			gap = "$zeron.space.tight",
+			line("folder", function(): string
+				return read(props.project) or locale.s("ds.session_card.no_project")
+			end, nil, props.project_tile),
+			ui.show(function(): boolean
+				return read(props.device) ~= nil
+			end, line(function(): Icon.Name
+				return if read(props.here) then "laptop" else "remote-server"
+			end, function(): string
+				return read(props.device) or ""
+			end)),
+			ui.show(function(): boolean
+				return read(props.branch) ~= nil
+			end, line("git-branch", function(): string
+				return read(props.branch) or ""
+			end)),
+			ui.show(function(): boolean
+				return read(props.model) ~= nil
+			end, line("bot", function(): string
+				return read(props.model) or ""
+			end)),
+			ui.show(function(): boolean
+				return read(props.opened_by) ~= nil
+			end, line("lucide-corner-down-right", function(): string
+				return locale.s("ds.session_card.opened_by", { name = read(props.opened_by) or "" })
+			end)),
+			ui.show(function(): boolean
+				return (read(props.subagents) or 0) > 0
+			end, line("bot", function(): string
+				return locale.s("ds.session_card.subagents", { n = read(props.subagents) or 0 })
+			end)),
+			ui.show(function(): boolean
+				return read(props.failed) == true
+			end, line("lucide-circle-alert", function(): string
+				return locale.s("ds.session_card.error")
+			end, "$danger")),
 			line("clock-circle", function(): string
 				local t = read(props.time)
 				if type(t) ~= "number" then
@@ -86,21 +131,6 @@ return function(props: Props): Node
 				local secs = os.time() - t
 				return if secs < 60 then locale.s("time.just_now") else locale.s("ds.session_card.ago", { when = status.ago(secs) })
 			end),
-			ui.show(function(): boolean
-				return read(props.device) ~= nil
-			end, line(function(): Icon.Name
-				return if read(props.here) then "laptop" else "remote-server"
-			end, function(): string
-				return read(props.device) or ""
-			end)),
-			line("folder", function(): string
-				return read(props.project) or locale.s("ds.session_card.no_project")
-			end),
-			ui.show(function(): boolean
-				return read(props.branch) ~= nil
-			end, line("git-branch", function(): string
-				return read(props.branch) or ""
-			end)),
 			-- Where plugins' rows go, after the details (no size of its own).
 			ui.div { class = "session-card-end", w_full = true, h = 0 },
 		},

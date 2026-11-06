@@ -13,6 +13,9 @@
 //!                    icon? = { emoji?, image?, hue? } } },
 //!     chats = { { id, title, project?, device, branch?, cwd?, status?,
 //!                 updated, created, harness?, agent?, model?,
+//!                 started?, tasks? = { agents, shells, others, held },
+//!                 marks = { earlier harnesses' glyphs }, created_by?, settle? = { settled, at },
+//!                 last_message?, unsettled?,
 //!                 running_subagents, side_chats, working_side_chats } },
 //!     children = { [parent id] = { { id, parent, title, device, status?,
 //!                 updated, created, harness?, agent? } } } (its side chats,
@@ -21,6 +24,8 @@
 //!                collapsed } } },
 //!     archived = { chat, … } (as `chats`, the most recently moved first),
 //!     places_ready,
+//!     settle_after_days,
+//!     place_failed = { n, words } | nil (a change of places the engine refused),
 //!     connection = "unsaved" | "offline" | "reconnecting" | nil }
 //! Every list item carries an `id`, so a page keys its rows by it and they
 //! update in place. `status` is the sidebar's state ("working", "input",
@@ -41,6 +46,8 @@
 //!   sessions.archive(id), sessions.unarchive(id)
 //!   sessions.rename({ id, title })
 //!   sessions.seen(id) (an action)  its finished state seen, on every device
+//!   sessions.warm(id) (an action)  its workspace search made ready on its host
+//!   sessions.settle({ id, settled }) to or from the Settled shelf, on every device
 //!   sessions.places({ pinned, sections }) (an action)
 //!                                  where sessions should be put by hand, as
 //!                                  the sidebar now has them: the changes
@@ -134,6 +141,8 @@ struct Sessions {
     /// Each chat's row as last built, by id: the engine sends the whole list
     /// with any chat's change, and only that chat's row is built again.
     rows: RefCell<HashMap<String, Row>>,
+    settle_after_days: Cell<u32>,
+    place_failed: RefCell<Option<(u32, String)>>,
 }
 
 /// A chat's row for scripts, and what it was built from besides the chat's
@@ -157,6 +166,9 @@ struct RowWith {
     working_side_chats: u32,
     known_project: bool,
     agent_icon: Option<String>,
+    started: Option<i64>,
+    tasks: Tasks,
+    created_by: Option<String>,
 }
 
 /// `slot` holds `item` now; whether that's new.
@@ -263,6 +275,12 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                     *me.here.borrow_mut() = answer["deviceId"].as_str().map(Into::into);
                     me.publish();
                 }
+                if let Ok(answer) = rpc.call("GetSidebarSettings", json!({})).await
+                    && let Some(days) = answer["settleAfterDays"].as_u64()
+                {
+                    me.settle_after_days.set(days as u32);
+                    me.publish();
+                }
             });
         });
     }
@@ -354,6 +372,20 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         engine::get().spawn(async move {
             let _ = a.mutate(params).await;
         });
+    });
+    host.action("sessions.warm", move |id| {
+        let params = json!({ "chatId": text(&id) });
+        engine::get().spawn(async move {
+            let _ = engine::get().call("WarmWorkspaceSearch", params).await;
+        });
+    });
+    let a = s.clone();
+    host.async_action("sessions.settle", move |args| {
+        let a = a.clone();
+        let id = args.field("id").map(text).unwrap_or_default();
+        let settled = args.field("settled").is_some_and(Value::truthy);
+        let params = json!({ "op": "setChatSettled", "chatId": id, "settled": settled });
+        async move { a.mutate(params).await.map_err(String::from) }
     });
     let a = s.clone();
     delete_action(host, a);
@@ -553,6 +585,9 @@ impl Sessions {
                 working_side_chats: 0,
                 known_project: false,
                 agent_icon: harness.and_then(crate::agents::registry_icon),
+                started: None,
+                tasks: Tasks::default(),
+                created_by: None,
             };
             if let Some(row) = rows.get(id).filter(|row| row.with == with) {
                 let row = (row.updated, row.value.clone());
@@ -596,11 +631,12 @@ impl Sessions {
             list.sort_by(|a, b| b.0.total_cmp(&a.0));
         }
         let side_chats = |id: &str| children.iter().find(|(p, _)| p == id).map_or(0, |(_, l)| l.len());
+        let openers = openers(all);
         // A top-level chat as scripts see it (side chats and a voice call's
         // orchestrator are another's).
         let mut row = |c: &Json| -> Option<Value> {
                 let id = c["id"].as_str()?;
-                if id.starts_with(ORCHESTRATOR) || id.starts_with(SUPERVISOR) || !c["parentChatId"].is_null() {
+                if id.starts_with(ORCHESTRATOR) || id.starts_with(SUPERVISOR) || openers.hides(c) {
                     return None;
                 }
                 let harness = c["config"]["harness"].as_str();
@@ -615,6 +651,9 @@ impl Sessions {
                     working_side_chats: working_children.get(id).copied().unwrap_or(0),
                     known_project: project.is_some(),
                     agent_icon: harness.and_then(crate::agents::registry_icon),
+                    started: live.get(id).and_then(|l| l.started),
+                    tasks: live.get(id).map_or_else(Tasks::default, |l| l.tasks),
+                    created_by: c["createdByChatId"].as_str().map(|opener| openers.title(opener).to_owned()),
                 };
                 if let Some(row) = rows.get(id).filter(|row| row.with == with) {
                     return Some(row.value.clone());
@@ -627,7 +666,7 @@ impl Sessions {
                     ("title", Value::from(chat_title(c["title"].as_str()))),
                     ("project", opt(project)),
                     ("device", Value::from(c["deviceId"].as_str().unwrap_or_default())),
-                    ("branch", opt(c["branch"].as_str())),
+                    ("branch", opt(c["workTree"]["branch"].as_str().or(c["branch"].as_str()))),
                     ("cwd", opt(c["cwd"].as_str())),
                     // The branch its latest run started on, as the engine
                     // stamped it (`sourceContext`): what its pull request is
@@ -656,6 +695,19 @@ impl Sessions {
                         }
                     }),
                     ("preview", opt(c["lastMessagePreview"].as_str())),
+                    ("started", with.started.map_or(Value::Nil, |at| Value::from(at as f64))),
+                    ("tasks", with.tasks.value()),
+                    ("marks", earlier_marks(c)),
+                    ("created_by", opt(with.created_by.as_deref())),
+                    ("settle", match c["settle"]["settled"].as_bool() {
+                        Some(settled) => Value::record([
+                            ("settled", Value::Bool(settled)),
+                            ("at", Value::from(c["settle"]["at"].as_str().and_then(unix_seconds).unwrap_or(0) as f64)),
+                        ]),
+                        None => Value::Nil,
+                    }),
+                    ("last_message", c["lastMessageAt"].as_str().and_then(unix_seconds).map_or(Value::Nil, |at| Value::from(at as f64))),
+                    ("unsettled", c["unsettledAt"].as_str().and_then(unix_seconds).map_or(Value::Nil, |at| Value::from(at as f64))),
                     // Its subagents streaming now (the sidebar's pill), and
                     // its side chats: how many, how many working.
                     ("running_subagents", Value::from(with.running_subagents as f64)),
@@ -703,6 +755,10 @@ impl Sessions {
                 Value::record([("pinned", ids(&places.pinned)), ("sections", Value::List(sections.into()))]),
             ),
             ("places_ready", Value::Bool(self.places_ready.get())),
+            ("settle_after_days", Value::from(f64::from(self.settle_after_days.get()))),
+            ("place_failed", self.place_failed.borrow().as_ref().map_or(Value::Nil, |(n, words)| {
+                Value::record([("n", Value::from(f64::from(*n))), ("words", Value::from(words.as_str()))])
+            })),
             ("live", Value::Bool(self.live_heard.get())),
             ("connection", connection(&self.connectivity.borrow()).map_or(Value::Nil, Value::from)),
         ])
@@ -897,6 +953,8 @@ impl Sessions {
                     .await
                 {
                     eprintln!("zeron-zgx: sessions: a sidebar change didn't take: {error}");
+                    let n = me.place_failed.borrow().as_ref().map_or(0, |(n, _)| *n) + 1;
+                    *me.place_failed.borrow_mut() = Some((n, error.to_string()));
                 }
             }
             me.sending.set(false);
@@ -1048,6 +1106,95 @@ struct Live {
     /// Its subagents streaming now (the session row's `runningSubagents`),
     /// none once the row has gone quiet.
     subagents: u32,
+    started: Option<i64>,
+    tasks: Tasks,
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Tasks {
+    agents: u32,
+    shells: u32,
+    others: u32,
+    held: bool,
+}
+
+impl Tasks {
+    fn of(row: &Json) -> Self {
+        let mut tasks = Tasks { held: row["heldBySubagents"].as_bool().unwrap_or(false), ..Tasks::default() };
+        for task in row["backgroundTasks"].as_array().into_iter().flatten() {
+            match task["kind"].as_str() {
+                Some("agent") => tasks.agents += 1,
+                Some("shell") | None => tasks.shells += 1,
+                _ => tasks.others += 1,
+            }
+        }
+        tasks
+    }
+
+    fn value(self) -> Value {
+        if self.agents + self.shells + self.others == 0 {
+            return Value::Nil;
+        }
+        Value::record([
+            ("agents", Value::from(f64::from(self.agents))),
+            ("shells", Value::from(f64::from(self.shells))),
+            ("others", Value::from(f64::from(self.others))),
+            ("held", Value::Bool(self.held)),
+        ])
+    }
+}
+
+struct Openers<'a> {
+    titles: HashMap<&'a str, &'a str>,
+    listed: HashSet<&'a str>,
+    parents: HashMap<&'a str, &'a str>,
+}
+
+fn openers(all: &[Json]) -> Openers<'_> {
+    let mut out = Openers { titles: HashMap::new(), listed: HashSet::new(), parents: HashMap::new() };
+    for c in all {
+        let Some(id) = c["id"].as_str() else { continue };
+        if let Some(title) = c["title"].as_str() {
+            out.titles.insert(id, title);
+        }
+        if !c["archived"].as_bool().unwrap_or(false) && !id.starts_with(ORCHESTRATOR) && !id.starts_with(SUPERVISOR) {
+            out.listed.insert(id);
+        }
+        if let Some(parent) = c["parentChatId"].as_str() {
+            out.parents.insert(id, parent);
+        }
+    }
+    out
+}
+
+impl<'a> Openers<'a> {
+    fn title(&self, id: &str) -> &'a str {
+        self.titles.get(id).copied().map(str::trim).filter(|t| !t.is_empty()).unwrap_or("New session")
+    }
+
+    fn nests(&self, id: &str, depth: usize) -> bool {
+        depth < 16 && self.parents.get(id).is_some_and(|parent| self.listed.contains(parent) && !self.nests(parent, depth + 1))
+    }
+
+    fn hides(&self, c: &Json) -> bool {
+        let Some(id) = c["id"].as_str() else { return true };
+        if c["archived"].as_bool().unwrap_or(false) {
+            return !c["parentChatId"].is_null();
+        }
+        self.nests(id, 0)
+    }
+}
+
+fn earlier_marks(c: &Json) -> Value {
+    let current = c["config"]["harness"].as_str();
+    let marks = c["previousHarnesses"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Json::as_str)
+        .filter(|h| Some(*h) != current)
+        .filter_map(|h| crate::agents::glyph(h).map(|g| Value::from(g.as_str())));
+    Value::List(marks.collect::<Vec<_>>().into())
 }
 
 /// When the next live state that shows (not idle, not yet stale) goes
@@ -1080,22 +1227,40 @@ fn next_offline(devices: &Json, here: Option<&str>, now: i64) -> Option<i64> {
 
 fn live_states(value: &Json, now: i64) -> HashMap<String, Live> {
     let mut out: HashMap<String, Live> = HashMap::new();
+    let mut old_errors: HashSet<String> = HashSet::new();
     for row in value.as_array().into_iter().flatten() {
         let Some(chat) = row["chatId"].as_str() else { continue };
         let updated = row["updatedAt"].as_str().and_then(unix_seconds).unwrap_or(now);
         let mut status = row["status"].as_str().unwrap_or("idle").to_owned();
         // Gone quiet: its engine went with it.
-        let stale = now - updated > STALE_SECS && status != "idle";
-        if now - updated > STALE_SECS {
+        let stale = now - updated > STALE_SECS && status != "idle" && status != "errored";
+        if now - updated > STALE_SECS && status != "errored" {
             status = "idle".into();
         }
         let interrupted = row["lastTurnOutcome"]["status"].as_str() == Some("interrupted");
         let subagents = if now - updated > STALE_SECS { 0 } else { row["runningSubagents"].as_u64().unwrap_or(0) as u32 };
-        let entry = out.entry(chat.to_owned()).or_insert(Live { status: "idle".into(), stale: false, interrupted, subagents: 0 });
+        let quiet = now - updated > STALE_SECS;
+        let started = if quiet { None } else { row["startedAt"].as_str().and_then(unix_seconds) };
+        let tasks = if quiet { Tasks::default() } else { Tasks::of(row) };
+        let entry = out.entry(chat.to_owned()).or_insert(Live {
+            status: "idle".into(),
+            stale: false,
+            interrupted,
+            subagents: 0,
+            started: None,
+            tasks: Tasks::default(),
+        });
         entry.subagents = entry.subagents.max(subagents);
         let stale = stale || entry.stale;
-        if entry.status == "idle" {
-            *entry = Live { status, stale, interrupted, subagents: entry.subagents };
+        // An errored row keeps its word past the quiet window, but never over a live row.
+        let fresh_over_old_error = status != "idle" && !quiet && old_errors.contains(chat);
+        if entry.status == "idle" || fresh_over_old_error {
+            if status == "errored" && quiet {
+                old_errors.insert(chat.to_owned());
+            } else {
+                old_errors.remove(chat);
+            }
+            *entry = Live { status, stale, interrupted, subagents: entry.subagents, started, tasks };
         } else {
             entry.stale = stale;
         }
@@ -1476,6 +1641,9 @@ mod tests {
                 { "chatId": "w", "status": "working", "updatedAt": stamp(now - 5) },
                 { "chatId": "old", "status": "working", "updatedAt": stamp(now - 120) },
                 { "chatId": "q", "status": "awaitingInput", "updatedAt": stamp(now - 5) },
+                { "chatId": "e", "status": "errored", "updatedAt": stamp(now - 120) },
+                { "chatId": "m", "status": "errored", "updatedAt": stamp(now - 120) },
+                { "chatId": "m", "status": "working", "updatedAt": stamp(now - 1) },
             ]),
             now,
         );
@@ -1486,6 +1654,8 @@ mod tests {
         assert_eq!(status(&seen, live.get("old")), None);
         assert!(live["old"].stale && !live["w"].stale);
         assert_eq!(status(&chat, live.get("old")), Some("done"));
+        assert_eq!(status(&chat, live.get("e")), Some("failed"));
+        assert_eq!(status(&chat, live.get("m")), Some("working"));
         assert_eq!(status(&seen, None), None);
     }
 

@@ -26,6 +26,7 @@
 --   sessions.link(id)      its Zeron conversation link: a promise
 --   sessions.collapse(id, folded)  a section of yours folded, everywhere
 --   sessions.seen(id)      its finished state seen, on every device
+--   sessions.settle(id, settled)  off the Inbox, or back on it
 --   sessions.place(places) where sessions are put by hand, as the sidebar
 --                          has them now ({ pinned, sections })
 --
@@ -169,6 +170,30 @@ end
 
 function M.collapse(id: string, folded: boolean)
 	ui.invoke("sessions.collapse", { id = id, collapsed = folded })
+end
+
+function M.archive_all(ids: { string }, failed: (n: number) -> ())
+	local left, lost = #ids, 0
+	local function settled()
+		left -= 1
+		if left == 0 and lost > 0 then
+			failed(lost)
+		end
+	end
+	for _, id in ids do
+		ui.call("sessions.archive", id):after(settled, function()
+			lost += 1
+			settled()
+		end)
+	end
+end
+
+function M.warm(id: string)
+	ui.invoke("sessions.warm", id)
+end
+
+function M.settle(id: string, settled: boolean): any
+	return ui.call("sessions.settle", { id = id, settled = settled })
 end
 
 function M.seen(id: string)

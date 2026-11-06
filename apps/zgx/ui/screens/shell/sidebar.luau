@@ -10,6 +10,7 @@
 -- the session chosen, which is the route's (screens/shell/route).
 
 local ds = require("@ds")
+local ContextMenu = require("@ds/context_menu")
 local sessions = require("@account/sessions")
 local project_calls = require("@account/projects")
 -- The project editor (screens/shell/project_editor, its emoji picker and
@@ -32,6 +33,7 @@ local boundary = require("@app/screens/shell/boundary")
 local top_bar = require("@app/screens/shell/top_bar")
 local locale = require("@ds/locale")
 local ds_session_row = require("@ds/session_row")
+local Glass = require("@ds/glass")
 
 export type Props = {
 	collapsed: State<boolean>,
@@ -49,7 +51,9 @@ export type Props = {
 -- Kept across launches, but the session open (the route's) and the places
 -- (the engine's).
 local shared = {
-	compact = ui.persist("shell_sidebar_compact", true),
+	compact = ui.persist("shell_sidebar_compact", false),
+	inbox = ui.persist("shell_sidebar_inbox", false),
+	active_first = ui.persist("shell_sidebar_active_first", false),
 	-- (One list, "Sessions", as Zeron's; by project is a view option.)
 	-- How it groups, as levels in order (`{ "project", "device" }`: by
 	-- project, then device; none, one list). Kept as one choice before
@@ -67,9 +71,10 @@ local shared = {
 		project_icon = ui.persist("shell_sidebar_show_project_icon", true),
 		location = ui.persist("shell_sidebar_show_location", true),
 		-- (Zeron's "Show archived": off until asked for.)
-		archived = ui.persist("shell_sidebar_show_archived", false),
+		archived = ui.persist("shell_sidebar_show_archived", true),
 		-- (Zeron's project filter over the list: off until asked for.)
-		project_filter = ui.persist("shell_sidebar_show_project_filter", false),
+		project_filter = ui.persist("shell_sidebar_show_project_filter", true),
+		working = ui.persist("shell_sidebar_show_working", false),
 		-- The projects with none but archived sessions, folded into one row
 		-- at the projects' end: listed there (closed until it's opened), or
 		-- not at all.
@@ -88,7 +93,7 @@ local shared = {
 	selected = ui.state("shell_selected", nil :: string?),
 	-- Its view, kept here so a sidebar made again comes back as it was.
 	offset = ui.state("shell_sidebar_offset", 0),
-	folded = ui.persist("shell_sidebar_folded", {} :: { [string]: boolean }),
+	folded = ui.persist("shell_sidebar_folded", { ["group:inbox:working"] = true, ["group:inbox:settled"] = true } :: { [string]: boolean }),
 }
 
 -- Scroll probe (for now: "it jumps back a step every few steps"): the
@@ -172,6 +177,7 @@ ui.effect(function()
 			return
 		else
 			sent = nil
+			ds.toast.show { title = locale.s("shell.sidebar.notice.unconfirmed"), tone = "danger" }
 		end
 	end
 	if not same(theirs, plain(shared.places:peek())) then
@@ -194,6 +200,14 @@ ui.effect(function()
 	end
 	sent, sent_at, last_placed = mine, ui.now(), mine
 	sessions.place(mine)
+end)
+local place_failures = 0
+ui.effect(function()
+	local failed = (sessions.now:get() :: any).place_failed
+	if type(failed) == "table" and failed.n ~= place_failures then
+		place_failures = failed.n
+		ds.toast.show { title = locale.s("shell.sidebar.notice.not_saved", { why = failed.words }), tone = "danger" }
+	end
 end)
 -- Your sections' folds are the engine's, on every device: what it says
 -- folds them here, and folding one here tells it.
@@ -437,6 +451,20 @@ end
 local function oldest_checkout(p: any, all: { any }): any
 	return checkouts_of(p, all)[1]
 end
+-- Whether `project` falls under the filter on `just`: a repository's checkouts are one.
+local function in_filter(project: string?, just: string): boolean
+	local all = sessions.now:peek().projects
+	local mine, theirs = nil :: any, nil :: any
+	for _, p in all do
+		if p.id == project then
+			mine = oldest_checkout(p, all)
+		end
+		if p.id == just then
+			theirs = oldest_checkout(p, all)
+		end
+	end
+	return mine ~= nil and theirs ~= nil and mine.id == theirs.id
+end
 -- Where a new chat in project `id`'s repository starts: its clone on this device,
 -- else `id`.
 local function checkout_here(id: string?): string?
@@ -453,12 +481,85 @@ local function checkout_here(id: string?): string?
 	return id
 end
 
+local composers = ui.shared("chat.composer.drafts", {} :: { [string]: any })
+local unsent_ids = ui.computed(function(): { [string]: boolean }
+	local out: { [string]: boolean } = {}
+	for id, d in composers:get() do
+		if id ~= "" and type(d) == "table" and ((type(d.text) == "string" and d.text ~= "") or (type(d.cargo) == "table" and #d.cargo > 0)) then
+			out[id] = true
+		end
+	end
+	return out
+end)
+
+local function settled_at(c: any, status: string?, days: number, at: number): number?
+	if status == "working" or status == "input" or status == "approval" then
+		return nil
+	end
+	local activity = c.last_message
+	local settle = c.settle
+	if settle and (activity == nil or activity <= settle.at) then
+		return if settle.settled then settle.at else nil
+	end
+	return if activity and activity < at - days * 86400 then activity else nil
+end
+local inbox_marks: { [string]: { working: boolean, since: number? } } = {}
+local function inbox_place(c: any, status: string?, days: number, working_shelf: boolean, at: number): (string, number)
+	local working = status == "working"
+	local mark = inbox_marks[c.id]
+	if not mark then
+		mark = { working = working, since = nil }
+		inbox_marks[c.id] = mark
+	elseif mark.working ~= working then
+		mark.working = working
+		mark.since = at
+	end
+	local settled = settled_at(c, status, days, at)
+	if settled then
+		return "settled", settled
+	end
+	local anchor = math.max(c.created or 0, c.unsettled or 0)
+	if not working_shelf then
+		return "inbox", anchor
+	end
+	local base = math.max(c.last_message or anchor, anchor)
+	if working then
+		return "working", c.started or mark.since or base
+	end
+	return "inbox", math.max(mark.since or base, base)
+end
+local function work_words(tasks: any): string?
+	if tasks == nil then
+		return nil
+	end
+	local parts: { string } = {}
+	if tasks.agents > 0 then
+		table.insert(parts, locale.s("ds.sidebar.work.subagents", { n = tasks.agents }))
+	end
+	if tasks.shells > 0 then
+		table.insert(parts, locale.s("ds.sidebar.work.shells", { n = tasks.shells }))
+	end
+	if tasks.others > 0 then
+		table.insert(parts, locale.s("ds.sidebar.work.tasks", { n = tasks.others }))
+	end
+	return table.concat(parts, " · ")
+end
+
 local projects = ui.computed(function(): { ds.SidebarProject }
 	local now = sessions.now:get()
 	local asked = asks:get()
 	local only = narrow:get()
 	local just = only_project()
 	local names = devices()
+	local unsent = unsent_ids:get()
+	local in_inbox = shared.inbox:get()
+	local working_shelf = shared.details.working:get()
+	local days = if (now :: any).settle_after_days and (now :: any).settle_after_days > 0 then (now :: any).settle_after_days else 3
+	local at = os.time()
+	local paths: { [string]: any } = {}
+	for _, p in now.projects do
+		paths[p.id] = p
+	end
 	local out: { ds.SidebarProject } = {}
 	local by: { [string]: ds.SidebarProject } = {}
 	-- One group for each repository, whichever device its clones are on: it stands
@@ -469,7 +570,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		if not group then
 			local first = oldest_checkout(p, now.projects)
 			local l = route.look(first.id) or { hue = route.hue(first.id) }
-			group = { id = first.id, name = first.name, hue = l.hue, src = l.src, emoji = l.emoji, sessions = {} }
+			group = { id = first.id, name = first.name, hue = l.hue, src = l.src, emoji = l.emoji, mono = (first :: any).icon == nil and l.src == nil and l.emoji == nil, seed = first.path, sessions = {} }
 			table.insert(out, group :: any)
 			if p.repository then
 				of_repository[p.repository] = group :: any
@@ -477,7 +578,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		end
 		by[p.id] = group :: any
 	end
-	local loose: ds.SidebarProject = { id = NO_PROJECT, name = locale.s("shell.sidebar.chats"), icon = "side-chat", sessions = {} }
+	local loose: ds.SidebarProject = { id = NO_PROJECT, name = locale.s("shell.sidebar.chats"), icon = "side-chat", mono = true, mono_name = "Home", seed = "home", sessions = {} }
 	-- (Which have sessions listed, and which archived ones.)
 	-- (By group: a repository isn't empty while any clone of it has a session.)
 	local just_group = if just then by[just] else nil
@@ -514,6 +615,13 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		if only and not only.statuses[status or "idle"] then
 			continue
 		end
+		local room = c :: any
+		local shelf: string?, rank: number? = nil, nil
+		if in_inbox then
+			shelf, rank = inbox_place(room, status, days, working_shelf, at)
+		end
+		local tasks = room.tasks
+		local project = if c.project then paths[c.project] else nil
 		table.insert(group.sessions, kept({
 			id = c.id,
 			title = c.title,
@@ -521,11 +629,27 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			time = c.updated,
 			created = c.created,
 			agent = c.agent :: any,
+			harness = room.harness,
+			agent_icon = room.agent_icon,
 			device = names[c.device] or locale.s("shell.sidebar.unknown_device"),
 			branch = c.branch,
+			base = if room.tree then room.source_branch else nil,
 			-- (Its side chats working count as its subagents do, as its
 			-- lanes' badge counts them: screens/chat/lanes.)
 			subagents = (c.running_subagents or 0) + (c.working_side_chats or 0),
+			started = room.started,
+			ring = if tasks and (tasks.held and status == "working" or status == nil or status == "done") then tasks.agents + tasks.shells + tasks.others else nil,
+			work_label = if tasks and tasks.held and status == "working" then work_words(tasks) else nil,
+			marks = if room.marks and #room.marks > 0 then table.concat(room.marks, ",") else nil,
+			tree_kind = if room.tree then room.tree.kind else nil,
+			tree_commits = if room.tree then room.tree.commits else nil,
+			tree_dirty = if room.tree then room.tree.dirty else nil,
+			worktree = project ~= nil and project.git == true and room.cwd ~= nil and room.cwd ~= project.path,
+			remote = now.here ~= nil and c.device ~= now.here,
+			created_by = room.created_by,
+			unsent = unsent[c.id] == true,
+			shelf = shelf :: any,
+			rank = rank,
 		}) :: any)
 	end
 	if #loose.sessions > 0 then
@@ -547,6 +671,24 @@ end)
 -- The project filter (Zeron's, its view options' "Project filter"): all
 -- projects, or one, searched for, the list narrowed to it.
 local ALL = "::all"
+local function add_a_project()
+	local add: any = boundary.load("@app/screens/shell/add_project")
+	if add then
+		add.open()
+	end
+end
+local function offline(p: any): boolean
+	local now = sessions.now:get()
+	for _, d in now.devices do
+		if d.id == p.device then
+			return not d.online
+		end
+	end
+	return true
+end
+local project_menu_of: (id: string) -> { any }? = function()
+	return nil
+end
 local function project_filter(): Node
 	local chosen = ui.computed(function(): string
 		return only_project() or ALL
@@ -568,11 +710,47 @@ local function project_filter(): Node
 		end,
 		ui.div {
 			id = "sidebar-project-filter",
-			w_full = true,
 			shrink = 0,
 			ds.Dropdown {
 				value = value :: any,
 				icon = "folder",
+				width = 280,
+				wrap_item = function(item: any, row: Node): Node
+					if item.value == ALL then
+						return row
+					end
+					return ContextMenu {
+						label = locale.t("ds.sidebar.session_actions"),
+						w_full = true,
+						items = function()
+							return project_menu_of(item.value) or {}
+						end,
+						row,
+					}
+				end,
+				trigger = function(m: any): Node
+					local function says(): string
+						local id = only_project()
+						for _, p in sessions.now:peek().projects do
+							if p.id == id then
+								return locale.s("ds.sidebar.filter_is", { name = p.name })
+							end
+						end
+						return locale.s("ds.sidebar.filter_by")
+					end
+					return ui.presence(says, function(tip: string): Node
+						return ds.IconButton {
+							icon = "lucide-list-filter",
+							label = tip,
+							tooltip = tip,
+							tone = "quiet",
+							lit = function(): boolean
+								return m.open:get() or only_project() ~= nil
+							end,
+							on_click = m.toggle,
+						}
+					end)
+				end,
 				search = function(): string
 					return locale.s("shell.sidebar.project_filter.search")
 				end,
@@ -581,12 +759,7 @@ local function project_filter(): Node
 					{
 						label = ui.t("shell.sidebar.project_filter.new_project") :: any,
 						icon = "plus",
-						on_click = function()
-							local add: any = boundary.load("@app/screens/shell/add_project")
-							if add then
-								add.open()
-							end
-						end,
+						on_click = add_a_project,
 					},
 				},
 				items = function(): { any }
@@ -599,7 +772,14 @@ local function project_filter(): Node
 						if not seen[first.id] then
 							seen[first.id] = true
 							local l = route.look(first.id) or { hue = route.hue(first.id) }
-							table.insert(out, { value = first.id, label = first.name, hue = l.hue, src = l.src, emoji = l.emoji })
+							table.insert(out, {
+								value = first.id,
+								label = first.name,
+								hue = l.hue,
+								src = l.src,
+								emoji = l.emoji,
+								warn = offline(first),
+							})
 						end
 					end
 					return out
@@ -928,9 +1108,53 @@ local function encoded(v: string): string
 	end))
 end
 
+local function can_place(what: string): boolean
+	local now = sessions.now:peek()
+	if now.state ~= "ready" then
+		ds.toast.show { title = locale.s("shell.sidebar.notice.not_connected"), tone = "danger" }
+		return false
+	end
+	if auth.signed_in:peek() and not now.places_ready then
+		local key = if what == "pinned" then "shell.sidebar.notice.pins_syncing" else "shell.sidebar.notice.syncing"
+		ds.toast.show { title = locale.s(key), tone = "danger" }
+		return false
+	end
+	if what == "pinned" and #shared.places:peek().pinned >= 200 then
+		ds.toast.show { title = locale.s("shell.sidebar.notice.pin_cap"), tone = "danger" }
+		return false
+	end
+	return true
+end
 M.pin = function(id: string)
 	local pinned = table.find(shared.places:peek().pinned, id) ~= nil
+	if not can_place(if pinned then "section" else "pinned") then
+		return
+	end
 	put(id, if pinned then nil else "pinned")
+end
+local function is_settled(c: any): boolean
+	local now = sessions.now:peek() :: any
+	local days = if now.settle_after_days and now.settle_after_days > 0 then now.settle_after_days else 3
+	return settled_at(c, c.status, days, os.time()) ~= nil
+end
+local warmed: string? = nil
+ui.effect(function()
+	local c = route.chat:get() :: any
+	local id = if c.name == "session" then c.session else nil
+	if id ~= warmed then
+		warmed = id
+		if id then
+			-- (Not in the load's own turn: a reload brings the scripts back first, the host's or a fixture's actions after.)
+			ui.after(0, function()
+				sessions.warm(id)
+			end)
+		end
+	end
+end)
+function M.settle(id: string, settled: boolean)
+	sessions.settle(id, settled):after(function() end, function()
+		ds.toast.show { title = locale.s("shell.sidebar.notice.syncing"), tone = "danger" }
+	end)
 end
 
 local function menu(id: string): { any }?
@@ -951,7 +1175,9 @@ local function menu(id: string): { any }?
 			end,
 			-- (Chosen where it is: back to its project.)
 			on_select = function()
-				put(id, if here then nil else s.id)
+				if can_place("section") then
+					put(id, if here then nil else s.id)
+				end
 			end,
 		})
 	end
@@ -960,6 +1186,9 @@ local function menu(id: string): { any }?
 		label = locale.s("shell.sidebar.menu.new_section"),
 		icon = "plus",
 		on_select = function()
+			if not can_place("section") then
+				return
+			end
 			local sid = `section-{os.time()}-{math.random(1, 1e6)}`
 			local now = plain(shared.places:peek())
 			table.insert(now.sections, { id = sid, name = locale.s("shell.sidebar.menu.new_section"), sessions = {} })
@@ -1035,21 +1264,29 @@ local function menu(id: string): { any }?
 				end,
 			},
 		{
+			-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
+			label = locale.s("common.archive"),
+			icon = "archive-minimalistic",
+			on_select = function()
+				M.archive(id)
+			end,
+		},
+		if side or not shared.inbox:peek()
+			then false
+			else {
+				label = locale.s(if is_settled(c) then "shell.sidebar.menu.unsettle" else "shell.sidebar.menu.settle"),
+				icon = if is_settled(c) then "lucide-undo-2" else "lucide-circle-check",
+				on_select = function()
+					M.settle(id, not is_settled(c))
+				end,
+			},
+		{
 			label = locale.s("common.copy"),
 			icon = "copy",
 			submenu = copies,
 		},
 		if side then false else { label = locale.s("shell.sidebar.menu.move_to"), icon = "folder-with-files", submenu = into },
 		{ separator = true },
-		{
-			-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
-			label = locale.s("common.archive"),
-			icon = "archive-minimalistic",
-			disabled = if c.status == "working" then locale.s("shell.sidebar.menu.archive_working") else nil,
-			on_select = function()
-				M.archive(id)
-			end,
-		},
 		{
 			label = locale.s("shell.sidebar.menu.delete"),
 			icon = "trash-bin-minimalistic",
@@ -1133,6 +1370,7 @@ local function project_menu(id: string): { any }?
 		},
 	}
 end
+project_menu_of = project_menu
 local function project_dialogs(): Node
 	-- The checkouts of the project being removed (one, for most).
 	local function acting_checkouts(): { any }
@@ -1269,7 +1507,13 @@ local function delete_dialog(): Node
 		local id = deleting:get()
 		local c = if id then chat(id) else nil
 		local t = if c and c.title ~= "" then (string.gsub(c.title, "%s+", " ")) else locale.s("shell.sidebar.session.new_session")
-		return locale.s("shell.sidebar.session.will_delete", { title = t })
+		local cloud = false
+		for _, d in sessions.now:get().devices do
+			if c and d.id == c.device and (d :: any).cloud then
+				cloud = true
+			end
+		end
+		return locale.s(if cloud then "shell.sidebar.session.will_delete_cloud" else "shell.sidebar.session.will_delete", { title = t })
 	end
 	return ds.Dialog {
 		open = delete_open,
@@ -1323,8 +1567,89 @@ M.Sidebar = ui.component(function(props: Props): Node
 	if not props.island then
 		M.card:set(nil)
 	end
+	local head = if props.island
+		then nil
+		else ui.row {
+			shrink = 0,
+			items = "center",
+			project_filter(),
+			ds.IconButton {
+				icon = "lucide-folder-plus",
+				label = locale.t("ds.sidebar.new_project"),
+				tooltip = locale.s("ds.sidebar.new_project"),
+				tone = "quiet",
+				on_click = add_a_project,
+			},
+		}
 	local bar = ds.Sidebar {
 		compact = shared.compact,
+		inbox = shared.inbox,
+		active_first = shared.active_first,
+		on_pin = M.pin,
+		on_settle = M.settle,
+		on_rename_lost = function(id: string)
+			local c = chat(id)
+			if c then
+				new_title:set(c.title)
+				renaming:set(id)
+				rename_open:set(true)
+			end
+		end,
+		on_archive_all = function(asked: { string })
+			local ids: { string } = {}
+			for _, c in sessions.now:peek().chats do
+				if table.find(asked, c.id) then
+					table.insert(ids, c.id)
+				end
+			end
+			if table.find(ids, route.current:peek().session or "") then
+				route.new_chat()
+			end
+			sessions.archive_all(ids, function(n: number)
+				ds.toast.show { title = locale.s("shell.sidebar.notice.archive_failed", { n = n }), tone = "danger" }
+			end)
+		end,
+		unseen = function(): boolean
+			for _, c in sessions.now:get().chats do
+				if c.status == "done" then
+					return true
+				end
+			end
+			return false
+		end,
+		on_mark_read = function()
+			for _, c in sessions.now:peek().chats do
+				if c.status == "done" then
+					sessions.seen(c.id)
+				end
+			end
+		end,
+		draft = M.draft,
+		on_draft = function()
+			route.new_chat()
+		end,
+		on_discard_draft = M.discard_draft,
+		search_label = function(): string
+			local id = only_project()
+			for _, p in sessions.now:get().projects do
+				if p.id == id then
+					return locale.s("ds.sidebar.search_in", { name = p.name })
+				end
+			end
+			return locale.s("ds.sidebar.search")
+		end,
+		head = head,
+		peek = if props.island then nil else function(): boolean
+			return M.peek_mounted:get()
+		end,
+		can_place = can_place,
+		dim = if props.island then nil else function(): string?
+			local c = route.chat:get()
+			if c.name ~= "home" then
+				return nil
+			end
+			return if c.project ~= "none" and route.project:get() then "loose" else "project"
+		end,
 		organize = shared.organize :: any,
 		organize_order = shared.organize_order,
 		sort = shared.sort :: any,
@@ -1374,9 +1699,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 		narrowed = function(): boolean
 			return narrow:get() ~= nil
 		end,
-		notice = if props.island
-			then nil
-			else ui.column { w_full = true, gap = "$zeron.list.gap", project_filter(), filter_notice() },
+		notice = if props.island then nil else filter_notice(),
 		tip = if props.island then nil else foot_notes(),
 		-- (The rail has no list to scroll, and its own folds.)
 		offset = if props.island then nil else shared.offset,
@@ -1401,16 +1724,54 @@ M.Sidebar = ui.component(function(props: Props): Node
 	if props.island then
 		return bar
 	end
+	local function gap_now(): number
+		return if fit.current:get().sidebar then 5 else 0
+	end
 	return ui.div {
 		id = "shell-sidebar",
 		hook = "shell.sidebar",
 		h_full = true,
 		shrink = 0,
 		relative = true,
+		x = function(): number
+			return M.peek_x(gap_now())
+		end,
+		on_hover = function(inside: boolean)
+			M.peek_over(inside)
+		end,
+		on_press = function()
+			M.peek_press(true)
+		end,
+		on_release = function()
+			M.peek_press(false)
+		end,
+		on_key = function(): boolean?
+			M.peek_key()
+			return nil
+		end,
 		-- (The window's gap before its card, closing with it.)
-		pl = motion.tween(ui.computed(function(): number
-			return if fit.current:get().sidebar then 5 else 0
-		end), motion.sidebar),
+		pl = motion.tween(ui.computed(gap_now), motion.sidebar),
+		ui.show(function(): boolean
+			return M.peek_mounted:get()
+		end, ui.div {
+			absolute = true,
+			left = 0,
+			top = 0,
+			bottom = 0,
+			w = function(): number
+				return M.peek_w() + gap_now() + 12
+			end,
+			ui.div {
+				absolute = true,
+				left = function(): number
+					return gap_now() - 1
+				end,
+				top = 42,
+				bottom = 8,
+				w = M.peek_w,
+				Glass.Panel { kind = "menu", id = "sidebar-peek-panel", w_full = true, h_full = true, pointer_events = "none" },
+			},
+		}),
 		-- (That gap's top moves the window, as the bar beside it does.)
 		ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true },
 		bar,
@@ -1423,9 +1784,21 @@ end)
 -- `Sidebar { … }` builds it; `sidebar.pin(id)`, `sidebar.archive(id)` and
 -- `sidebar.rename(id)` act on a session as its menu does.
 function M.rename(id: string)
-	-- In its row, where the list shows it (as Zeron's); else (folded away,
-	-- filtered out) the dialog.
-	if table.find(M.order:peek(), id) then
+	local just = only_project()
+	local listed = false
+	for _, c in sessions.now:peek().chats do
+		if c.id == id then
+			listed = true
+			if just and not in_filter(c.project, just) then
+				ds.toast.show { title = locale.s("shell.sidebar.notice.clear_filter"), tone = "danger" }
+				return
+			end
+		end
+	end
+	if listed then
+		if view.collapsed:peek() and not M.peek_mounted:peek() then
+			fit.toggle_sidebar()
+		end
 		renaming_row:set(id)
 		return
 	end
@@ -1436,6 +1809,311 @@ function M.rename(id: string)
 		rename_open:set(true)
 	end
 end
+local function draft_key(): any
+	return require("@app/screens/chat/shared")
+end
+local draft_frozen = ui.state("shell_sidebar_draft_frozen", nil :: string?)
+local function draft_target(): string
+	local c = route.chat:get()
+	local p = if c.name ~= "home" or c.project ~= "none" then route.project:get() else nil
+	local folder = if p then p.name else "~"
+	local _, here = devices()
+	return if here then `{folder} @ {here}` else folder
+end
+local function draft_held(): string?
+	local d = draft_key().draft_of("")
+	return if d.text ~= "" or #d.cargo > 0 then d.text else nil
+end
+M.draft = function(): any
+	local at_home = route.chat:get().name == "home"
+	local prompt = if at_home then draft_frozen:get() else draft_held()
+	if prompt == nil then
+		return nil
+	end
+	local just = only_project()
+	if just then
+		local c = route.chat:get()
+		local on: any = if c.name ~= "home" or c.project ~= "none" then route.project:get() else nil
+		if not on or not in_filter(on.id, just) then
+			return nil
+		end
+	end
+	return { id = "home", target = draft_target(), prompt = (string.gsub(prompt, "%s+", " ")), open = at_home }
+end
+do
+	local was_home = route.chat:peek().name == "home"
+	ui.effect(function()
+		local at_home = route.chat:get().name == "home"
+		if at_home == was_home then
+			return
+		end
+		was_home = at_home
+		if at_home then
+			local d = draft_key().draft_peek("")
+			draft_frozen:set(if d.text ~= "" or #d.cargo > 0 then d.text else nil)
+		else
+			draft_frozen:set(nil)
+		end
+	end)
+end
+function M.discard_draft()
+	draft_key().discard_draft_of("")
+	draft_frozen:set(nil)
+end
+
+-- What a walk with the keys holds on (screens/shell/init `step`): the order, less a split pair's moves.
+function M.walk_key(): string
+	local parts: { string } = {}
+	for _, c in sessions.now:peek().chats do
+		table.insert(parts, `{c.id}:{c.updated or ""}`)
+	end
+	local p = shared.places:peek()
+	table.insert(parts, table.concat(p.pinned, ","))
+	for _, sec in p.sections do
+		table.insert(parts, `{sec.id}={table.concat(sec.sessions, ",")}`)
+	end
+	for key in shared.folded:peek() do
+		table.insert(parts, key)
+	end
+	table.sort(parts)
+	table.insert(parts, `{shared.sort:peek()}|{table.concat(ds_session_row.levels(shared.organize:peek()), ">")}|{tostring(shared.inbox:peek())}|{tostring(shared.project:peek())}`)
+	return table.concat(parts, ";")
+end
+function M.project_glyph(project: string?, size: number): Node?
+	local now = sessions.now:peek()
+	for _, p in now.projects do
+		if p.id == project then
+			local first = oldest_checkout(p, now.projects)
+			local l = route.look(first.id) or { hue = route.hue(first.id) }
+			if (first :: any).icon == nil and not l.src and not l.emoji then
+				return ds_session_row.Monogram {
+					name = function(): string
+						return first.name
+					end,
+					seed = first.path or first.id,
+					size = size,
+				}
+			end
+			return ds.Tile { label = first.name, hue = l.hue, src = l.src, emoji = l.emoji, size = size }
+		end
+	end
+	return ds_session_row.Monogram {
+		name = function(): string
+			return "Home"
+		end,
+		seed = "home",
+		size = size,
+	}
+end
+-- Working and Settled fold each launch: crates/ui's `sidebar_collapsed_groups` is in memory.
+local shelves_folded = ui.state("shell_sidebar_shelves_folded", false)
+if not shelves_folded:peek() then
+	shelves_folded:set(true)
+	local f = table.clone(shared.folded:peek())
+	f["group:inbox:working"], f["group:inbox:settled"] = true, true
+	shared.folded:set(f)
+end
+
+local OPEN_MS, CLOSE_MS, SLIDE_MS = 120, 300, 120
+local peek_open = ui.state("shell_sidebar_peek", false)
+local peek_t = ui.state("shell_sidebar_peek_t", 0)
+local peek_edge = ui.state("shell_sidebar_peek_edge", false)
+local peek_inside = ui.state("shell_sidebar_peek_inside", false)
+local peek_handoff = ui.state("shell_sidebar_peek_handoff", false)
+local peek_pressed = ui.state("shell_sidebar_peek_pressed", false)
+local peek_keys = ui.state("shell_sidebar_peek_keys", false)
+local peek_touched = false
+local peek_left = ui.state("shell_sidebar_peek_left", 0)
+local menu_held = require("@app/ds/menu").held
+local split_dragging = ui.shared("split.dragging", false)
+local peek_suppressed = ui.state("shell_sidebar_peek_suppressed", false)
+local peek_pending: boolean? = nil
+local peek_cancel: (() -> ())? = nil
+local peek_going: any = nil
+M.peek_mounted = ui.computed(function(): boolean
+	return peek_open:get() or peek_t:get() > 0 or peek_handoff:get()
+end)
+function M.peek_w(): number
+	local limit = fit.sidebar_room:get()
+	return math.min(shared.width:get(), limit) + 2
+end
+function M.peek_x(gap: number): number
+	if not M.peek_mounted:get() then
+		return 0
+	end
+	if peek_handoff:get() then
+		return peek_left:get()
+	end
+	local w = M.peek_w()
+	return (8 + w) * peek_t:get() - w - gap + 1
+end
+function M.peek_press(down: boolean)
+	if peek_open:peek() and down then
+		peek_touched = true
+		peek_keys:set(false)
+	end
+	if peek_pressed:peek() ~= (down and peek_open:peek()) then
+		peek_pressed:set(down and peek_open:peek())
+	end
+end
+function M.peek_key()
+	if peek_open:peek() then
+		peek_touched = true
+		if not peek_keys:peek() then
+			peek_keys:set(true)
+		end
+	end
+end
+-- (A press anywhere: zgx tells a script of no focus leaving a subtree, so the keys' hold ends here.)
+function M.peek_press_outside()
+	if peek_keys:peek() then
+		peek_keys:set(false)
+	end
+end
+function M.peek_over(inside: boolean)
+	if peek_inside:peek() ~= inside then
+		peek_inside:set(inside)
+	end
+end
+local function peek_set(on: boolean)
+	if peek_open:peek() == on then
+		return
+	end
+	peek_open:set(on)
+	if peek_going then
+		peek_going:cancel()
+	end
+	peek_going = anime.animate(peek_t, motion.params({ value = if on then 1 else 0, duration = SLIDE_MS, ease = "outCubic" }))
+end
+-- (Nil on v2, whose view has no peek.)
+local hover_setting = (view :: any).sidebar_hover
+local function peek_enabled(): boolean
+	local c = route.current:get()
+	return hover_setting ~= nil
+		and hover_setting:get()
+		and view.collapsed:get()
+		and c.name ~= "settings"
+		and ui.window.active:get() ~= false
+		and not view.palette:get()
+		and not delete_open:get()
+		and not rename_open:get()
+		and not project_remove_open:get()
+end
+local function peek_held(): boolean
+	return menu_held:get() > 0 or renaming_row:get() ~= nil or peek_keys:get() or peek_pressed:get()
+end
+local function peek_wanted(): boolean
+	if not peek_enabled() or peek_suppressed:get() then
+		return false
+	end
+	local inside, edge = peek_inside:get(), peek_edge:get()
+	if peek_open:get() then
+		return inside or edge or peek_held() or split_dragging:get()
+	end
+	return not split_dragging:get() and (edge or (peek_t:get() > 0 and inside))
+end
+ui.effect(function()
+	if not peek_edge:get() and not peek_inside:get() and peek_suppressed:peek() then
+		peek_suppressed:set(false)
+	end
+	if peek_handoff:get() then
+		return
+	end
+	local wanted = peek_wanted()
+	local open = peek_open:peek()
+	if not peek_enabled() then
+		if peek_cancel then
+			peek_cancel()
+			peek_cancel, peek_pending = nil, nil
+		end
+		peek_set(false)
+		return
+	end
+	if wanted == open then
+		if peek_cancel then
+			peek_cancel()
+			peek_cancel, peek_pending = nil, nil
+		end
+		return
+	end
+	if wanted and peek_t:peek() > 0 then
+		if peek_cancel then
+			peek_cancel()
+			peek_cancel, peek_pending = nil, nil
+		end
+		peek_set(true)
+		return
+	end
+	if peek_pending == wanted then
+		return
+	end
+	if peek_cancel then
+		peek_cancel()
+	end
+	peek_pending = wanted
+	peek_cancel = ui.after(if wanted then OPEN_MS else CLOSE_MS, function()
+		peek_cancel, peek_pending = nil, nil
+		if peek_wanted() == wanted then
+			peek_set(wanted)
+		end
+	end)
+end)
+local peek_was = view.collapsed:peek()
+ui.effect(function()
+	local shut = view.collapsed:get()
+	if shut == peek_was then
+		return
+	end
+	peek_was = shut
+	peek_suppressed:set(not (not peek_edge:peek() and not peek_inside:peek()))
+	if not shut and peek_t:peek() > 0 then
+		local gap = if fit.current:peek().sidebar then 5 else 0
+		local w = M.peek_w()
+		peek_left:set((8 + w) * peek_t:peek() - w - gap + 1)
+		peek_handoff:set(true)
+		anime.animate(peek_left, motion.params({
+			value = 0,
+			duration = motion.sidebar.duration,
+			onComplete = function()
+				peek_open:set(false)
+				peek_t:set(0)
+				peek_handoff:set(false)
+			end,
+		}))
+	end
+end)
+function M.peek_dismiss(): boolean
+	if not peek_open:peek() or menu_held:peek() > 0 or peek_handoff:peek() then
+		return false
+	end
+	peek_suppressed:set(true)
+	peek_keys:set(false)
+	peek_set(false)
+	if peek_touched then
+		peek_touched = false
+		draft_key().focus:add(1)
+	end
+	return true
+end
+function M.PeekEdge(): Node
+	return ui.div {
+		id = "sidebar-peek-edge",
+		absolute = true,
+		left = rail.W,
+		top = 42,
+		bottom = 0,
+		w = 14,
+		hidden = function(): boolean
+			return not hover_setting or not hover_setting:get() or not view.collapsed:get() or route.current:get().name == "settings"
+		end,
+		on_hover = function(inside: boolean)
+			if peek_edge:peek() ~= inside then
+				peek_edge:set(inside)
+			end
+		end,
+	}
+end
+
 -- Its width, kept: the settings window's list shares it (screens/shell/
 -- settings), so the two sidebars are one width, dragged in either.
 M.width = shared.width

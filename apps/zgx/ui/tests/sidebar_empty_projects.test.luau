@@ -119,6 +119,8 @@ test("Show → Empty projects off lists them nowhere; on, the fold is back as it
 	local app = open()
 	app:click(`{SIDE} >> role:button "Sidebar view options"`)
 	app:frames(20)
+	app:click('.view-submenu >> "Show"')
+	app:frames(20)
 	expect(app:has('role:checkbox "Empty projects"')).to_be(true)
 	app:click('role:checkbox "Empty projects"')
 	app:frames(30)

@@ -602,6 +602,30 @@ function M.draft_of(key: string): { text: string, cargo: { any }, chosen: { [str
 	}
 end
 
+function M.draft_peek(key: string): { text: string, cargo: { any } }
+	if here:peek() == key then
+		return { text = M.text:peek(), cargo = M.cargo:peek() }
+	end
+	local d = kept:peek()[key]
+	return {
+		text = if d and type(d.text) == "string" then d.text else "",
+		cargo = if d and type(d.cargo) == "table" then d.cargo else {},
+	}
+end
+
+function M.discard_draft_of(key: string)
+	if here:peek() == key then
+		M.text:set("")
+		M.cargo:set({})
+		M.quotes:set({})
+		M.chosen:set({})
+		return
+	end
+	local all = table.clone(kept:peek())
+	all[key] = nil
+	kept:set(all)
+end
+
 -- Chat `key`'s draft changed where it's shown by its id (`field`: "text"
 -- or "chosen"): written wherever it is, as `draft_of` reads it.
 function M.set_draft_of(key: string, field: string, value: any)
