@@ -211,27 +211,39 @@ local ROW, SESSION, HEAD, HEAD_FIRST, INSET, SLOT = 36, 52, 32, 26, 6, 18
 -- The list's height at most, and an empty one's.
 local VIEW_MAX, NOTE_H = 440, 196
 local BAR_H = 36
--- How far the card's top sits from the window's (clear of its title bar,
--- a little above centre in a window of Zeron's size).
+-- Where a window of no known size puts the card's top.
 local TOP = 88
--- Kept clear under the card in a short window, and the least the list
--- shrinks to there (about four rows) before the window clips the card.
-local BOTTOM_CLEAR, VIEW_MIN = 24, 160
+-- Kept clear under the card in a short window (a modal's panel stops this
+-- short of the window's height), and the least the list shrinks to there
+-- (about four rows) before the window clips the card.
+local BOTTOM_CLEAR, VIEW_MIN = 32, 160
 
--- The list's height at most in this window: VIEW_MAX, less whatever the
--- card would otherwise run past the window's foot. A host that feeds no
--- window size (a headless test) gets VIEW_MAX.
-local function view_max(most: number?, chrome: number?): number
+local function window_h(): number
 	local window = (ui :: any).window
 	local state = if type(window) == "table" or type(window) == "userdata" then window.size else nil
 	local ok, v = pcall(function(): any
 		return if state ~= nil then state:get() else nil
 	end)
-	local h = if ok and type(v) == "table" and type(v.height) == "number" then v.height else 0
+	return if ok and type(v) == "table" and type(v.height) == "number" then v.height else 0
+end
+-- gpui's `palette_top`, in whole points: a half point draws a soft edge.
+local function card_top(h: number): number
+	local tallest = math.clamp(h - 180, 100, 360) + 120
+	return math.round(math.max((h - tallest) / 2, 60))
+end
+local function top_now(): number
+	local h = window_h()
+	return if h <= 1 then TOP else card_top(h)
+end
+-- The list's height at most in this window: VIEW_MAX, less whatever the
+-- card would otherwise run past the window's foot. A host that feeds no
+-- window size (a headless test) gets VIEW_MAX.
+local function view_max(most: number?, chrome: number?, foot: number?): number
+	local h = window_h()
 	if h <= 1 then
 		return most or VIEW_MAX
 	end
-	local room = h - TOP - BOTTOM_CLEAR - SEARCH_H - (chrome or SCOPES_H) - FOOT_H
+	local room = h - card_top(h) - BOTTOM_CLEAR - SEARCH_H - (chrome or SCOPES_H) - (foot or FOOT_H)
 	return math.max(VIEW_MIN, math.min(most or VIEW_MAX, room))
 end
 -- With nothing typed, how many sessions All shows before "Show all"; and
@@ -1205,11 +1217,12 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 
 	-- The list's height: its rows up to the view (a short list leaves no
 	-- room under it), or an empty one's message.
+	local page_foot = ui.ref()
 	local function page_max(): number
 		depth:get()
 		turn:get()
 		local p = page()
-		return if p.bar then view_max(p.view_h, BAR_H) else view_max(p.view_h)
+		return if p.bar then view_max(p.view_h, BAR_H, page_foot.height) else view_max(p.view_h, nil, page_foot.height)
 	end
 	local function list_h(): number
 		depth:get()
@@ -2542,7 +2555,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			turn:get()
 			return page().foot == nil
 		end, footer),
-		ui.presence(browsing_part("foot"), built("foot"), { w_full = true, shrink = 0 }),
+		ui.presence(browsing_part("foot"), built("foot"), { ref = page_foot, w_full = true, shrink = 0 }),
 		ui.presence(browsing_part("over"), built("over"), { absolute = true, left = 0, right = 0, top = 0, bottom = 0, pointer_events = "none" }),
 	}
 end)
@@ -2556,8 +2569,7 @@ local Palette = ui.component(function(props: Props): Node
 	return ui.modal {
 		open = props.open,
 		label = locale.t("ds.command_palette.label"),
-		-- Its top held still, so only its foot moves.
-		placement = { x = "center", y = "start", inset = { TOP, 0, 0, 0 } },
+		placement = { x = "center", y = "start" },
 		w = function(): number
 			return width:get()
 		end,
@@ -2568,7 +2580,21 @@ local Palette = ui.component(function(props: Props): Node
 		bg = "#00000000",
 		rounded = "$radius.xl",
 		build = function()
-			return Body { open = props.open, root = props.root, recent_state = recent, width = width, rises = props.rises }
+			return ui.column {
+				w_full = true,
+				gap = 0,
+				-- (A modal's placement is fixed when it's built: this follows the window.)
+				ui.div {
+					id = "palette-above",
+					w_full = true,
+					h = top_now,
+					shrink = 0,
+					on_press = function()
+						props.open:set(false)
+					end,
+				},
+				Body { open = props.open, root = props.root, recent_state = recent, width = width, rises = props.rises },
+			}
 		end,
 	}
 end)

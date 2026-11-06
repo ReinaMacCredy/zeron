@@ -959,7 +959,8 @@ local function foot_button(props: { id: string, label: () -> string, enabled: ()
 		gap = "$space.1",
 		items = "center",
 		max_w = 280,
-		shrink = 1,
+		min_w = if props.strong then 0 else nil,
+		shrink = if props.strong then 1 else 0,
 		rounded = "$radius.md",
 		bg = if props.strong then "$zeron.primary.bg" else "#00000000",
 		color = if props.strong then "$zeron.primary.text" else "$text.primary",
@@ -980,7 +981,7 @@ local function foot_button(props: { id: string, label: () -> string, enabled: ()
 				props.run()
 			end
 		end,
-		FadeText { props.label, literal = true, shrink = 1, text_size = "$font.size.xs", color = if props.strong then "$zeron.primary.text" else "$text.primary" },
+		ui.text { props.label, literal = true, truncate = true, min_w = 0, shrink = 1, text_size = "$font.size.xs", color = if props.strong then "$zeron.primary.text" else "$text.primary" },
 		if props.keys then ui.div { shrink = 0, opacity = 0.7, ui.text { (string.gsub(ui.shortcut_text(props.keys), "↩", "Enter")), text_size = "$font.size.xs" } } else nil,
 	}
 end
@@ -1041,11 +1042,13 @@ local function step_foot(): Node
 			return ui.text { text, literal = true, w_full = true, px = "$space.4", py = "$space.2", text_size = "$font.size.xs", color = "$danger" }
 		end, { w_full = true }),
 		ui.row {
-			h = 40,
+			min_h = 40,
 			w_full = true,
 			shrink = 0,
 			px = "$space.3",
+			py = ui.raw(7, "gpui's palette_footer: one row stays 40 tall"),
 			gap = "$space.3",
+			flex_wrap = true,
 			items = "center",
 			ui.presence(function(): string
 				local a = at:get()
@@ -1402,6 +1405,7 @@ local function path_row(): Node
 	}
 end
 local crumb_offset = ui.state("shell_add_project_crumb_offset", 0)
+local CRUMB_FADE = 18
 local function step_bar(): Node
 	local menu_was_open = false
 	ui.effect(function()
@@ -1453,20 +1457,15 @@ local function step_bar(): Node
 				table.insert(parts, path_row())
 				return ui.row(parts)
 			end
+			local view, content = ui.ref(), ui.ref()
 			local parts: { [any]: any } = {
-				id = "project-crumbs",
-				grow = 1,
-				min_w = 0,
+				ref = content,
+				min_w = function(): number
+					return view.width or 0
+				end,
 				h_full = true,
 				gap = 2,
 				items = "center",
-				fade_x = { 18, 18 },
-				offset = crumb_offset,
-				on_mount = function()
-					ui.after(0, function()
-						crumb_offset:set(1e6)
-					end)
-				end,
 			}
 			for _, node in trail_nodes(a, true) do
 				table.insert(parts, node)
@@ -1483,7 +1482,25 @@ local function step_bar(): Node
 					end,
 				})
 			end
-			return ui.scroll_x(parts)
+			return ui.scroll_x {
+				id = "project-crumbs",
+				ref = view,
+				grow = 1,
+				min_w = 0,
+				h_full = true,
+				fade_x = function(): { number }
+					local most = math.max((content.width or 0) - (view.width or 0), 0)
+					local at = math.min(crumb_offset:get(), most)
+					return { math.clamp(at, 0, CRUMB_FADE), math.clamp(most - at, 0, CRUMB_FADE) }
+				end,
+				offset = crumb_offset,
+				on_mount = function()
+					ui.after(0, function()
+						crumb_offset:set(1e6)
+					end)
+				end,
+				ui.row(parts),
+			}
 		end, { grow = 1, min_w = 0, h_full = true }),
 		ui.show(function(): boolean
 			return at:get().step == "folders" and not editing:get()

@@ -57,6 +57,30 @@ test("⌘⇧N opens New project and closes it again, but not over settings", fun
 	expect(shown(app)).to_be(false)
 end)
 
+test("the card's top follows the window: centred at its tallest, never under the title bar", function()
+	local app = open()
+	app:command("shell.new_project")
+	app:frames(20)
+	local function top(height: number): number
+		app:resize(1200, height)
+		app:frames(10)
+		return tonumber(((app:tree("#shell-add-project >> #command-palette") :: string):match(" %-?%d+,(%-?%d+) %d+x%d+"))) or -1
+	end
+	expect(top(949)).to_be(235)
+	expect(top(714)).to_be(117)
+	expect(top(474)).to_be(60)
+end)
+
+test("a press above the card closes it", function()
+	local app = open()
+	app:command("shell.new_project")
+	app:frames(20)
+	expect(shown(app)).to_be(true)
+	app:click("#shell-add-project >> #palette-above")
+	app:frames(20)
+	expect(shown(app)).to_be(false)
+end)
+
 test("the palette's New project slides to its steps in the palette, and back comes back", function()
 	local app = open()
 	app:command("shell.palette")
