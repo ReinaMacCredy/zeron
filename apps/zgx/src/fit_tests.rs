@@ -293,10 +293,9 @@ fn x_of(app: &mut TestApp, selector: &str) -> Option<(f32, f32)> {
 }
 
 /// The most a column's ease moves anything in one 60 Hz frame, past the window's
-/// own step: the sidebar's on Zeron's column motion (CSS ease,
-/// cubic-bezier(.25,.1,.25,1), its steepest about 2.25 times its mean), over
-/// its 261 in its ≈191 ms.
-const EASE_STEP: f32 = 57.0;
+/// own step: the sidebar's on the shell's column motion (260 ms,
+/// cubic-bezier(.2,.8,.2,1), steepest in its first frame), over its 261.
+const EASE_STEP: f32 = 68.0;
 
 /// A window resized continuously moves everything in it one way, with the
 /// window: the panel's edge, its first tab, the file's header and tree and

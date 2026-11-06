@@ -662,7 +662,7 @@ test("collapsed, the sidebar folds away entirely: no rail, the page the window's
 	app:command("shell.toggle_sidebar")
 	app:frames(40)
 	-- (A page is a card, the window's edge round it, a new chat's too, beside the app rail.)
-	local EDGE, RAIL = 5, 46
+	local EDGE, GAP, RAIL = 5, 4, 46
 	local function alone(when: string, page_w: number)
 		expect(app:has("#shell-rail")).to_be(false)
 		local _, _, sw = rect(app, SIDE)
@@ -670,11 +670,11 @@ test("collapsed, the sidebar folds away entirely: no rail, the page the window's
 		local _, _, pw = rect(app, "#shell-page")
 		expect(`{when}: page {pw}`).to_be(`{when}: page {page_w}`)
 	end
-	alone("a session", 1200 - RAIL - 2 * EDGE)
+	alone("a session", 1200 - RAIL - GAP - EDGE)
 	-- A new chat, and back: still nothing in the sidebar's place.
 	app:command("shell.new_chat")
 	app:frames(40)
-	alone("a new chat", 1200 - RAIL - 2 * EDGE)
+	alone("a new chat", 1200 - RAIL - GAP - EDGE)
 	app:command("shell.toggle_sidebar")
 	app:frames(40)
 	local _, _, open_w = rect(app, SIDE)

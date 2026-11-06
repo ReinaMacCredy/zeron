@@ -11,6 +11,7 @@ local sessions = require("@account/sessions")
 local splits = require("@app/screens/shell/split")
 local appearance = require("@app/screens/shell/appearance")
 local folder = require("@app/screens/shell/folder_tab")
+local art = require("@app/screens/shell/art")
 local chat_shared = require("@app/screens/chat/shared")
 require("@app/screens/shell/tab_rules")
 
@@ -118,6 +119,7 @@ local rider_hover = ui.state("shell_session_tab_rider_hover", false)
 local landed = false
 -- (Frozen for a drag, or the strip would shrink as the slot closes.)
 local tab_w = ui.state("shell_session_tab_w", TAB_MAX)
+local SHADE_PARAMS = { "layerParam0", "layerParam1", "layerParam2", "layerParam3", "layerParam4", "layerParam5", "layerParam6", "layerParam8", "layerParam9" }
 local function inset(): boolean
 	return appearance.inset_card:get()
 end
@@ -527,13 +529,31 @@ local function face_row(id: string, hovered: any, active: () -> boolean): { any 
 end
 
 local function tab_box(props: { [any]: any }, active: () -> boolean, washed: () -> boolean): { [any]: any }
-	props.h = TAB_H
+	-- (With Inset card off the selected tab stands on the bar's foot, its head rounded: the locked mockup's.)
+	local function on_foot(): boolean
+		return active() and not inset()
+	end
+	local function head_corner(): any
+		return ui.raw(ui.theme.get(if on_foot() then "radius.lg" else "radius.md") :: number, "a token isn't read on a single corner")
+	end
+	local function foot_corner(): any
+		return ui.raw(if on_foot() then 0 else ui.theme.get("radius.md") :: number, "a token isn't read on a single corner")
+	end
+	props.h = function(): number
+		return if on_foot() then TAB_H + DROP else TAB_H
+	end
+	props.rounded_tl = head_corner
+	props.rounded_tr = head_corner
+	props.rounded_bl = foot_corner
+	props.rounded_br = foot_corner
+	props.border_sides = function(): any
+		return if on_foot() then { 1, 1, 0, 1 } else { 1, 1, 1, 1 }
+	end
 	props.shrink = 0
 	props.pl = ui.raw(10, "Zeron's tab's start")
 	props.pr = ui.raw(4, "Zeron's tab's end")
 	props.gap = ui.raw(8, "Zeron's tab's gaps")
 	props.items = "center"
-	props.rounded = "$radius.md"
 	props.cursor = "pointer"
 	props.bg = function(): string
 		if active() then
@@ -722,8 +742,9 @@ local Tab = ui.component(function(props: { chat: string }): Node
 	row.pr = function(): any
 		return ui.raw(if riding() then 0 else 4, "Zeron's tab's end")
 	end
-	row.border = function(): number
-		return if riding() then 0 else 1
+	local sides = row.border_sides
+	row.border_sides = function(): any
+		return if riding() then { 0, 0, 0, 0 } else sides()
 	end
 	for _, part in face_row(id, hovered, active) do
 		table.insert(row, part)
@@ -844,6 +865,47 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		local d = drag:get()
 		return d ~= nil and d.key == selected_key()
 	end
+	local shade_params: { [string]: number } = {}
+	ui.effect(function()
+		local el = art.shade:get()
+		if not el then
+			shade_params = {}
+			return
+		end
+		local want: { [string]: number } = {}
+		-- (Inset off the shade has no hole: nothing to follow as the tabs move.)
+		if inset() then
+			local at = start()
+			local from = at - offset:get()
+			local here = if props.hidden and props.hidden() then nil else showing_at()
+			local d = drag:get()
+			local fades = bands()
+			if here ~= nil and not dragging_selected() then
+				want.layerParam0 = from + slot_left(here :: number) - folder.FLARE
+				want.layerParam1 = tab_w:get() + folder.FLARE * 2
+			end
+			if d ~= nil and not d.out then
+				want.layerParam2 = from + rider_x:get() - folder.FLARE
+				want.layerParam3 = (d :: Drag).w + folder.FLARE * 2
+			end
+			want.layerParam4 = at
+			want.layerParam5 = at + (view.width or 0)
+			want.layerParam6 = ds.TitleBar.middle() - BAR / 2 + DROP
+			want.layerParam8 = fades[1]
+			want.layerParam9 = fades[2]
+		end
+		local changed: { [string]: number } = {}
+		for _, key in SHADE_PARAMS do
+			local v = want[key] or 0
+			if shade_params[key] ~= v then
+				shade_params[key] = v
+				changed[key] = v
+			end
+		end
+		if next(changed) then
+			anime.utils.set(el, changed)
+		end
+	end)
 	local function over_band(_: any, e: any)
 		local d = drag:peek()
 		if not d then
@@ -891,6 +953,9 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		h = BAR + 1,
 		pointer_events = "none",
 		hidden = props.hidden,
+		theme = function(): any
+			return require("@app/screens/shell/frame").bar_theme()
+		end,
 		ui.row {
 			id = "session-tabs",
 			role = "tablist",
@@ -929,10 +994,6 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 						end,
 						folder.Shape {
 							id = "session-tab-folder",
-							art = true,
-							window_x = function(): number
-								return start() - offset:get() + slot_left(showing_at() or 1) - folder.FLARE
-							end,
 							left = function(): number
 								return slot_left(showing_at() or 1) - folder.FLARE
 							end,
@@ -1005,10 +1066,6 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 							top = DROP,
 							pointer_events = "none",
 							ui.show(inset, folder.Shape {
-								art = true,
-								window_x = function(): number
-									return start() - offset:get() + rider_x:get() - folder.FLARE
-								end,
 								left = -folder.FLARE,
 								top = 0,
 								w = function(): number

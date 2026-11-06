@@ -261,15 +261,12 @@ fn the_sidebars_headers_keep_their_height_through_a_toggle() {
     assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
 
-/// Zeron's column motion (crates/ui `WidthTween::panel`: motion
-/// `PANEL_RESIZE`, CSS `ease`, 180 ms, longer moves stretched by the square
-/// root of the distance over the sidebar's 256 to at most 240 ms): where a
-/// column is `ms` into a move from `from` to `to`.
+/// The shell's column motion (ds/motion `sidebar`, the locked mockup's: 260 ms,
+/// cubic-bezier(.2, .8, .2, 1)): where a column is `ms` into a move from `from`
+/// to `to`.
 fn zerons(from: f32, to: f32, ms: f32) -> f32 {
-    let duration = 180. * ((to - from).abs() / 256.).sqrt().clamp(1., 240. / 180.);
-    let t = (ms / duration).clamp(0., 1.);
-    // cubic-bezier(0.25, 0.1, 0.25, 1): x(s) = t solved by bisection.
-    let (x1, y1, x2, y2) = (0.25_f32, 0.1_f32, 0.25_f32, 1.0_f32);
+    let t = (ms / 260.).clamp(0., 1.);
+    let (x1, y1, x2, y2) = (0.2_f32, 0.8_f32, 0.2_f32, 1.0_f32);
     let at = |a: f32, b: f32, s: f32| 3. * (1. - s) * (1. - s) * s * a + 3. * (1. - s) * s * s * b + s * s * s;
     let (mut lo, mut hi) = (0_f32, 1_f32);
     for _ in 0..40 {
@@ -327,7 +324,8 @@ fn the_columns_move_as_zerons_do() {
         }
         for (i, w) in ws.iter().enumerate().skip(first) {
             let want = curve(from, to, (i - first + 1) as f32 * 1000. / 60.);
-            if (w - want).abs() > 1. {
+            // (A third of a millisecond's clock on the curve's steepest frame.)
+            if (w - want).abs() > 1.5 {
                 faults.push(format!("{what}: frame {} of its move: {w:.1}, its curve's {want:.1} ({from} → {to})", i - first + 1));
             }
         }

@@ -161,7 +161,7 @@ const EDGE: f32 = 5.;
 fn collapsed_alone(app: &mut TestApp, when: &str) {
     assert!(app.find("#shell-rail").is_none(), "{when}: a rail shows");
     assert_eq!(app.bounds("#shell-sidebar").width, 0., "{when}: the sidebar still shows");
-    let want = W - RAIL - 2. * EDGE;
+    let want = W - RAIL - 4. - EDGE;
     // (The gap round the card eases with the sidebar's motion: settled.)
     app.wait_until(|app| app.bounds("#shell-page").width == want);
     assert_eq!(app.bounds("#shell-page").width, want, "{when}: the page isn't the window's width");

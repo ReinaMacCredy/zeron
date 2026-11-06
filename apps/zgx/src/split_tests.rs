@@ -1253,7 +1253,7 @@ fn a_new_chat_s_page_stays_a_card_as_the_sidebar_folds() {
     sample(&mut app, "at rest");
     app.click("#titlebar >> role:button \"Toggle sidebar\"");
     sample(&mut app, "folding");
-    assert_eq!(app.bounds("shell-page").width, W - RAIL - 10., "the window's edge each side of it, beside the rail");
+    assert_eq!(app.bounds("shell-page").width, W - RAIL - 9., "the gap and the window's edge each side of it, beside the rail");
     app.click("#titlebar >> role:button \"Toggle sidebar\"");
     sample(&mut app, "coming back");
 }

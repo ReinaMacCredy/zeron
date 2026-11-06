@@ -22,7 +22,6 @@ local sessions = require("@account/sessions")
 local appearance = require("@app/screens/shell/appearance")
 local art = require("@app/screens/shell/art")
 local frame = require("@app/screens/shell/frame")
-local composer_surface = require("@ds/composer_surface")
 local boundary = require("@app/screens/shell/boundary")
 local splits = require("@app/screens/shell/split")
 local session_tabs = require("@app/screens/shell/session_tabs")
@@ -87,8 +86,7 @@ return function(props: Props): Node
 		return props.away ~= nil and props.away()
 	end
 	local box = ui.ref()
-	local px = ui.state("shell_wallpaper_px", 0.5)
-	local py = ui.state("shell_wallpaper_py", 0.5)
+	local px, py = art.px, art.py
 	-- (The chat route: held while settings shows over the window, so what
 	-- this page shows stays as it was, scroll and all, under it.)
 	local function home(): boolean
@@ -173,7 +171,22 @@ return function(props: Props): Node
 		return 8
 	end
 
-	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, home)
+	-- (A plugin's wallpaper stands in the card's picture, window-sized: where the pointer is, of that.)
+	local pane: ContainerProps = {
+		on_pointer_move = function(e: any)
+			if home() then
+				local win = art.window:peek()
+				px:set(math.clamp(e.x / math.max(win.w, 1), 0, 1))
+				py:set(math.clamp(e.y / math.max(win.h, 1), 0, 1))
+			end
+		end,
+		on_hover = function(inside: boolean)
+			if not inside then
+				px:set(0.5)
+				py:set(0.5)
+			end
+		end,
+	}
 	pane.ref = box
 	pane.id = "shell-page"
 	pane.hook = "shell.page"
@@ -185,46 +198,18 @@ return function(props: Props): Node
 	splits.place(pane, function(): any
 		return if grouped() then box_of(splits.focused:get()) else splits.WHOLE
 	end)
-	-- (A card of its own, its corners clipping the wallpaper. In a split,
-	-- every chat's transcript is its pane's own (each kept as the focus
-	-- moves, so none is made again and none moves): this is only the frame
-	-- of the window's composer, at the focused pane's foot, over that
-	-- pane's card, letting the pointer through to it but for the composer.)
-	-- (Whole corners: the cards' token, which follows the window's own corner
-	-- where the host says it: ds/tokens.)
+	-- (The card behind it is screens/shell/frame's. In a split, every chat's
+	-- transcript is its pane's own (each kept as the focus moves, so none is
+	-- made again and none moves): this is only the frame of the window's
+	-- composer, at the focused pane's foot, over that pane's card, letting the
+	-- pointer through to it but for the composer.)
+	-- (Its foot follows the card's. Its head is the bar's foot, square.)
 	pane.rounded = "$zeron.inset.radius"
-	-- (Its edge's room; the edge itself is drawn with the fill, below.)
+	pane.rounded_tl = 0
+	pane.rounded_tr = 0
+	-- (Its edge's room; the edge itself is the card's.)
 	pane.border = 1
 	pane.border_color = "#00000000"
-	pane.shadow = function(): any
-		return if frame.framed:get() and not grouped() then CARD_LIFT else false
-	end
-	-- The card's fill and edge, under all it holds (the fill lighter than the
-	-- window, lifting it), faded by a tween zgx runs as a split starts and ends,
-	-- so no script runs and nothing is laid out as it fades. None in a split:
-	-- there the panes are the cards.
-	local card_shown = motion.tween(ui.computed(function(): number
-		return if grouped() then 0 else 1
-	end), motion.sidebar)
-	table.insert(pane, ui.div {
-		id = "shell-page-card",
-		absolute = true,
-		-- (Over the card's edge's room too: the whole card.)
-		left = ui.raw(-1, "over the card's 1-point edge"),
-		right = ui.raw(-1, "over the card's 1-point edge"),
-		top = ui.raw(-1, "over the card's 1-point edge"),
-		bottom = ui.raw(-1, "over the card's 1-point edge"),
-		pointer_events = "none",
-		bg = function(): string
-			return if frame.framed:get() then "$zeron.inset.framed_bg" else "$zeron.inset.bg"
-		end,
-		border = 1,
-		border_color = function(): string
-			return if frame.framed:get() then "$zeron.inset.framed_edge" else "$zeron.inset.edge"
-		end,
-		rounded = "$zeron.inset.radius",
-		opacity = card_shown,
-	})
 	pane.pointer_events = function(): any
 		return if grouped() then "none" else "auto"
 	end
@@ -235,72 +220,6 @@ return function(props: Props): Node
 			art.showing:set(on)
 		end
 	end)
-	local composer_radius = (ui.theme.get("zeron.composer.radius") :: number?) or 26
-	local function page_origin(): { x: number, y: number }
-		return { x = art.card_left:get() + 1, y = TOP_BAR + 1 }
-	end
-	local function art_left(): number
-		return if frame.framed:get() then 0 else art.card_left:get()
-	end
-	local function hero_shows(): boolean
-		return frame.page_art:get() == "hero"
-	end
-	table.insert(pane, ui.show(hero_shows, frame.Layer {
-		id = "page-art",
-		kind = function(): string?
-			return if hero_shows() then "hero" else nil
-		end,
-		origin = page_origin,
-		left = art_left,
-		cutout = function(): any
-			local _ = composer_surface.moved:get()
-			local el = composer_surface.element
-			local w, h = el and el.width, el and el.height
-			if not el or not el.x or not w or not h then
-				return nil
-			end
-			local hero = frame.hero_height(art.window:get().h)
-			return { x = el.x - art_left(), y = el.y, w = w, h = math.max(el.y + h, hero) - el.y, radius = composer_radius, feather = math.clamp(hero * 0.52, 120, 280), clearance = 8 }
-		end,
-		tab_fade = true,
-	}))
-	table.insert(pane, frame.Layer {
-		id = "page-chat-art",
-		kind = function(): string?
-			return if not grouped() and frame.page_art:get() == "chat" then "chat" else nil
-		end,
-		origin = page_origin,
-		left = art_left,
-		tab_fade = true,
-	})
-	-- What a plugin draws in `#new-chat-background` while it's used as the
-	-- wallpaper (it replaces that box, and reads where the pointer is as
-	-- `pointer`), with Zeron's effect over it.
-	table.insert(
-		pane,
-		ds.Wallpaper {
-			effect = appearance.effect_now,
-			shown = function(): boolean
-				return home() and not on_plugin()
-			end,
-			width = props.width,
-			key = function(): string
-				local showing = appearance.showing:get()
-				return if showing == "none" or showing == "image" then "" else showing
-			end,
-			content = function(key: string): Node
-				-- Where a plugin draws: nothing of Zeron's own.
-				return ui.div { id = "new-chat-background", absolute = true, left = 0, right = 0, top = 0, bottom = 0 }
-			end,
-			-- (A record, not two numbers: a plugin reading it follows it
-			-- with `zeron.live`, never built again as the pointer moves.)
-			provide = {
-				pointer = ui.computed(function(): { x: number, y: number }
-					return { x = px:get(), y = py:get() }
-				end),
-			},
-		}
-	)
 	table.insert(pane, ui.column {
 		absolute = true,
 		left = 0,
@@ -841,7 +760,11 @@ return function(props: Props): Node
 		end
 		return if shown:get() then rest_w:get() else 0
 	end
-	local open_w = ui.state("shell_files_shown_width", target())
+	-- (The page's card is given this state as its `right`.)
+	local open_w = art.panel_w
+	if open_w:peek() < 0 then
+		open_w:set(target())
+	end
 	-- Opening or closing (the edge revealing what stands at its width):
 	-- its content keeps the width it rests at. Otherwise it fills the panel.
 	-- (The build's own, as the animation is: a reload mid-step starts the
@@ -998,6 +921,32 @@ return function(props: Props): Node
 			return 0
 		end
 		return math.min(INSET, if panel_seen:get() then open_w:get() else 0)
+	end)
+	ui.effect(function()
+		local gap = gap_before:get()
+		if art.panel_gap:peek() ~= gap then
+			art.panel_gap:set(gap)
+		end
+	end)
+	-- (What the tabs leave the panel: where it rests, not where it is on its way, and only as a drag of its edge ends.)
+	local tabs_room = ui.state("shell_files_tabs_room", rest_w:peek())
+	ui.effect(function()
+		local rest = rest_w:get()
+		if drag_held:get() == nil and tabs_room:peek() ~= rest then
+			tabs_room:set(rest)
+		end
+	end)
+	ui.effect(function()
+		local on = expanded()
+		if art.expanded:peek() ~= on then
+			art.expanded:set(on)
+		end
+	end)
+	ui.effect(function()
+		local on = grouped() and not away()
+		if art.split:peek() ~= on then
+			art.split:set(on)
+		end
 	end)
 	local beside = ui.column {
 		id = "shell-files",
@@ -1409,9 +1358,6 @@ return function(props: Props): Node
 					local el = card_ref:peek()
 					return { x = (if el and el.x then el.x else 0) + 1, y = (if el and el.y then el.y else 0) + 1 }
 				end,
-				left = function(): number
-					return if frame.framed:get() then 0 else art.card_left:get()
-				end,
 			},
 			ui.column((function()
 				local lane: { [any]: any } = {
@@ -1735,7 +1681,7 @@ return function(props: Props): Node
 	}
 
 	ui.effect(function()
-		local gap = if not appearance.inset_card:get() then 0 elseif fit.current:get().sidebar then INSET else WINDOW_EDGE
+		local gap = if not appearance.inset_card:get() then 0 elseif away() and not fit.current:get().sidebar then WINDOW_EDGE else INSET
 		local left = props.width() - (row_ref.width or props.width()) + gap
 		if art.card_left:peek() ~= left then
 			art.card_left:set(left)
@@ -1758,18 +1704,19 @@ return function(props: Props): Node
 		pt = ui.raw(TOP_BAR, "room for the top bar"),
 		-- (The window's edges a little more than the gap between cards: the
 		-- same to the eye. Inset card off, the page runs to them.)
-		pb = function(): number
-			return ui.raw(if appearance.inset_card:get() then WINDOW_EDGE else 0, "the window's edge")
-		end,
+		pb = motion.tween(ui.computed(function(): number
+			return if appearance.inset_card:get() then WINDOW_EDGE else 0
+		end), motion.sidebar),
+		-- (Settings' list holds still as the sidebar's column folds behind it, a point narrower than its gap.)
 		pl = motion.tween(ui.computed(function(): number
 			if not appearance.inset_card:get() then
 				return 0
 			end
-			return if fit.current:get().sidebar then INSET else WINDOW_EDGE
+			return if away() and not fit.current:get().sidebar then WINDOW_EDGE else INSET
 		end), motion.sidebar),
-		pr = function(): number
-			return ui.raw(if appearance.inset_card:get() then WINDOW_EDGE else 0, "the window's edge")
-		end,
+		pr = motion.tween(ui.computed(function(): number
+			return if appearance.inset_card:get() then WINDOW_EDGE else 0
+		end), motion.sidebar),
 		pointer_events = "none",
 		ui.div { id = "shell-drag", absolute = true, left = 0, right = 0, top = 0, h = TITLE_H, window_drag = true },
 		ui.div {
@@ -1784,7 +1731,7 @@ return function(props: Props): Node
 			pointer_events = "none",
 			bg = "$border",
 			opacity = motion.tween(ui.computed(function(): number
-				return if fit.current:get().sidebar and not shell_view.collapsed:get() and not frame.framed:get() then 1 else 0
+				return if fit.current:get().sidebar and not shell_view.collapsed:get() and not appearance.inset_card:get() and frame.page_art:get() == nil then 1 else 0
 			end), motion.sidebar),
 		},
 		split_area,
@@ -1831,7 +1778,8 @@ return function(props: Props): Node
 			-- (Clear of the panel toggle, and of Expand while the panel's open.)
 			right = function(): number
 				local toggle = 34 + 8 - 10 + ds.TitleBar.actions_right()
-				return if shown:get() then toggle + EXPAND + 8 else toggle
+				-- (The tabs are the page card's: none over the panel beside it.)
+				return if shown:get() then math.max(toggle + EXPAND + 8, tabs_room:get() + INSET + WINDOW_EDGE) else toggle
 			end,
 		},
 		-- Expand: the panel over the session's chat, and back, on the top bar beside

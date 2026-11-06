@@ -396,7 +396,7 @@ local TitleBar = ui.component(function(props: Props): Node
 			return middle() - (if shown() then ISLAND_TO else ISLAND_FROM) / 2
 		end), motion.sidebar),
 		h = island_h,
-		opacity = ui.tween(here, { duration = 220, ease = "out(3)" }),
+		opacity = ui.tween(here, { duration = if motion.reduced_now() then motion.FADE else 220, ease = "out(3)" }),
 	}
 	island.glass(left_island)
 	table.insert(bar, ui.div(left_island))

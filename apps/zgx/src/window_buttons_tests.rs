@@ -373,7 +373,7 @@ fn the_cards_corner_follows_the_windows() {
     app.click("#shell-sidebar >> role:button \"Fix the build\"");
     app.frames(30);
     let corner = |app: &mut TestApp| {
-        let node = app.find("#shell-page").expect("the page's card");
+        let node = app.find("#shell-page-card").expect("the page's card");
         match app.ui.scene.borrow().kind(node) {
             zgx::scene::NodeKind::Panel { quad, .. } | zgx::scene::NodeKind::Quad(quad) => quad.radius,
             _ => f32::NAN,
@@ -384,7 +384,7 @@ fn the_cards_corner_follows_the_windows() {
     let told = app.host.shared("window.corner_radius", Value::Nil);
     for (window, card) in [(8., 4.), (0., 0.), (8., 4.)] {
         told.set(Value::from(window));
-        app.frames(10);
+        app.frames(30);
         assert_eq!(corner(&mut app), card, "a window's {window} corner");
     }
 }

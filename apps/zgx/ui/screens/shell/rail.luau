@@ -11,10 +11,13 @@ local agents = require("@account/agents")
 local boundary = require("@app/screens/shell/boundary")
 local keys = require("@app/screens/shell/keys")
 local route = require("@app/screens/shell/route")
+local art = require("@app/screens/shell/art")
+local look = require("@ds/look")
 
 local M = {}
 
-M.W = 46
+M.W = art.RAIL_W
+local FILL_FADE, FILL_EASE = 180, "cubicBezier(0, 0, 0.58, 1)"
 
 local BUTTON, GLYPH, GAP, TOP, PAD = 34, 18, 6, 44, 8
 local RING_RADIUS, RING_STROKE, RING_GLYPH = 13, 2.5, 14
@@ -620,6 +623,28 @@ M.Rail = ui.component(function(): Node
 		gap = ui.raw(GAP, "gpui's rail gap"),
 		items = "center",
 		window_drag = true,
+		relative = true,
+		-- (On the picture its icons need every bit of contrast they can get: 3:1 at its brightest.)
+		theme = function(): any
+			return if art.under_rail:get() then { ["text.secondary"] = "$text.primary" } else nil
+		end,
+		ui.presence(function(): string
+			return if motion.reduced() then "reduced" else "moving"
+		end, function(_: string): Node
+			return ui.div {
+				id = "app-rail-fill",
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				pointer_events = "none",
+				bg = "$zeron.rail.off",
+				opacity = ui.tween(ui.computed(function(): number
+					return if not look.inset_card:get() and not art.under_rail:get() then 1 else 0
+				end), { duration = if motion.reduced_now() then motion.FADE else FILL_FADE, ease = FILL_EASE }),
+			}
+		end, { absolute = true, left = 0, right = 0, top = 0, bottom = 0, pointer_events = "none" }),
 	}
 	for _, entry in entries do
 		table.insert(rail, entry)

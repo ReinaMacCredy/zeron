@@ -4,22 +4,69 @@ local appearance = require("@app/screens/shell/appearance")
 local art = require("@app/screens/shell/art")
 local route = require("@app/screens/shell/route")
 local host = require("@app/screens/settings/host")
+local motion = require("@ds/motion")
+local composer_surface = require("@ds/composer_surface")
+local view = require("@app/screens/shell/view")
+local fit = require("@app/screens/shell/fit")
 
 local M = {}
 
 local TOP_BAR = 42
 local HERO_RATIO, HERO_MAX = 0.72, 760
 local TAB_FADE_H = 46
--- (`tab_fade`'s alpha at the top bar's foot, for a shade of 1.)
-local TAB_FADE_START = 0.55 * TAB_FADE_H / (TAB_FADE_H + TOP_BAR - 6)
+local GAP = (ui.theme.get("zeron.inset.gap") :: number?) or 4
+local WINDOW_EDGE = 5
+local CORNER_FADE = { duration = 180, ease = "cubicBezier(0, 0, 0.58, 1)" }
+local RAIL_SCRIM_W = 72
+local COMPOSER_RADIUS = (ui.theme.get("zeron.composer.radius") :: number?) or 26
 local LOOK_BLUR, LOOK_SHADE, LOOK_DARKER = 24, 0.62, 0.42
 local BLUR_STEP = 4
 local BLEND_FADE = 260
+local CARD_LIFT = { y = 6, blur = 20, color = "#00000059" }
 -- Frosted, the picture lets the glass through a little (shell.rs).
 local HERO_FROSTED = 0.84
 local SCRIM_HERO = { angle = 180, stops = { { 0, "#0000001a" }, { 0.45, "#00000066" }, { 1, "#00000000" } } }
 local SCRIM_FULL = { angle = 180, stops = { { 0, "#0000001a" }, { 0.45, "#00000066" }, { 1, "#000000bf" } } }
-local TAB_FADE = { angle = 180, stops = { "#000f", "#0000" } }
+local RAIL_SCRIM = { angle = 90, stops = { { 0, "#000000b8" }, { 1, "#00000000" } } }
+-- (The mockup's 40% of the band's height: its shade starts to go a little above the bar's foot.)
+local BAND_FADE = { angle = 180, stops = { { 0, "#000f" }, { 0.4, "#000f" }, { 1, "#0000" } } }
+
+-- The bar's shade, and crates/ui's `tab_fade` under it, with the selected tab's folder left out of it, so that tab is the card's own picture.
+local BAR_SHADE = ui.layer_shader([[
+fn folder(p: vec2<f32>, x0: f32, w: f32, top: f32, scale: f32) -> f32 {
+	let flare = 8.0;
+	let corner = 8.0;
+	let foot = 37.0;
+	var x = p.x - x0;
+	let y = p.y - top;
+	if (w <= 0.0 || x < 0.0 || x > w || y > foot + 1.0) {
+		return 0.0;
+	}
+	if (x > w * 0.5) {
+		x = w - x;
+	}
+	var edge = 0.0;
+	if (x < flare) {
+		let t = 1.0 - sqrt(max(1.0 - x / flare, 0.0));
+		edge = foot - t * t * flare;
+	} else if (x < flare + corner) {
+		let t = 1.0 - sqrt((x - flare) / corner);
+		edge = t * t * corner;
+	}
+	return clamp((y - edge) * scale + 0.5, 0.0, 1.0);
+}
+fn layer(input: LayerInput) -> vec4<f32> {
+	let a = input.params[0];
+	let b = input.params[1];
+	let c = input.params[2];
+	let y = input.p.y;
+	let fade = 0.55 * clamp((88.0 - y) / 82.0, 0.0, 1.0);
+	let bar = clamp((42.0 - y) * input.scale + 0.5, 0.0, 1.0);
+	var hole = max(folder(input.p, a.x, a.y, b.z, input.scale), folder(input.p, a.z, a.w, b.z, input.scale));
+	hole *= clamp((input.p.x - b.x) / max(c.x, 0.5), 0.0, 1.0) * clamp((b.y - input.p.x) / max(c.y, 0.5), 0.0, 1.0);
+	let v = mix(mix(fade, 1.0, bar), fade, hole);
+	return vec4<f32>(input.color.rgb, input.color.a * v);
+}]])
 
 M.page_art = ui.computed(function(): string?
 	local page = route.current:get().name
@@ -100,13 +147,11 @@ end
 export type LayerProps = {
 	kind: (() -> string?)?,
 	origin: (() -> { x: number, y: number })?,
-	left: (() -> number)?,
 	blur: (() -> number)?,
 	size: (() -> { w: number, h: number })?,
 	cutout: (() -> any)?,
 	scrim: boolean?,
-	tab_fade: boolean?,
-	unfaded: boolean?,
+	unfaded: (boolean | () -> boolean)?,
 	id: string?,
 }
 
@@ -122,8 +167,7 @@ function M.Layer(props: LayerProps): Node
 	end
 	local function place(): { left: number, top: number, w: number, h: number }
 		local win = window()
-		local from = if props.left then props.left() else 0
-		return { left = from - origin().x, top = -origin().y, w = math.max(win.w - from, 0), h = layer_height(kind(), win.h) }
+		return { left = -origin().x, top = -origin().y, w = math.max(win.w, 0), h = layer_height(kind(), win.h) }
 	end
 	-- Snapped, as Zeron's chat blur: a few files, not one for every step of a drag.
 	local function radius(): number
@@ -148,7 +192,8 @@ function M.Layer(props: LayerProps): Node
 		end,
 		content = content_of,
 		faded = function(): boolean
-			return not props.unfaded and not (kind() == "chat" and appearance.chat_placement:get() == "full")
+			local off = if type(props.unfaded) == "function" then props.unfaded() else props.unfaded
+			return not off and not (kind() == "chat" and appearance.chat_placement:get() == "full")
 		end,
 	}
 	if props.cutout then
@@ -188,23 +233,6 @@ function M.Layer(props: LayerProps): Node
 				mask_gradient = if placement == "full" then SCRIM_FULL else SCRIM_HERO,
 			}))
 		end
-	end
-	if props.tab_fade then
-		table.insert(kids, ui.show(function(): boolean
-			return kind() ~= nil
-		end, ui.div {
-			id = "shell-tab-fade",
-			absolute = true,
-			left = 0,
-			right = 0,
-			top = ui.raw(TOP_BAR, "the top bar's foot"),
-			h = ui.raw(TAB_FADE_H, "the tab bar's fade"),
-			bg = "$zeron.window",
-			mask_gradient = TAB_FADE,
-			opacity = function(): number
-				return appearance.chat_tab_shade:get() * TAB_FADE_START
-			end,
-		}))
 	end
 	local box: { [any]: any } = {
 		absolute = true,
@@ -304,49 +332,305 @@ local function framed_view(): Node
 	}
 end
 
-local function band_view(): Node
+local function folded(): boolean
+	return view.collapsed:get() or not fit.current:get().sidebar
+end
+
+-- (In a split or under the expanded panel the picture isn't the page's: it can't run under the rail.)
+function M.art_under_rail(): boolean
+	return not appearance.inset_card:get() and folded() and M.page_art:get() ~= nil and not art.split:get() and not art.expanded:get()
+end
+
+local function plugin_wallpaper(): boolean
+	local showing, page = appearance.showing:get(), route.current:get().name
+	return showing ~= "none" and showing ~= "image" and page ~= "plugin" and page ~= "settings" and route.chat:get().name == "home"
+end
+
+local function shows_art(): boolean
+	return M.page_art:get() ~= nil or plugin_wallpaper()
+end
+
+-- What stands on the bar over the picture: its quieter ink falls under 3:1 on a bright one.
+function M.bar_theme(): any
+	return if shows_art() then { ["text.secondary"] = "$text.primary" } else nil
+end
+
+local function page_x(): number
+	if route.current:get().name == "settings" then
+		local settings: any = require("@app/screens/shell/settings")
+		return art.RAIL_W + WINDOW_EDGE + settings.list_w()
+	end
+	return art.page_left:get()
+end
+
+-- (Over Settings the card stops at the list at once, whatever its tween is still doing: the list has no fill of its own.)
+local function clip_left(): number
+	return if route.current:get().name == "settings" then page_x() else 0
+end
+
+local function moved(f: () -> number): any
+	return motion.tween(ui.computed(f), motion.sidebar)
+end
+
+local function faded_in(f: () -> number): any
+	return ui.tween(ui.computed(f), if motion.reduced_now() then { duration = motion.FADE, ease = CORNER_FADE.ease } else CORNER_FADE)
+end
+
+local function left_gap(): number
+	if appearance.inset_card:get() then
+		return GAP
+	end
+	return if M.art_under_rail() then -art.RAIL_W else 0
+end
+
+local function top_gap(): number
+	return if appearance.inset_card:get() then GAP else 0
+end
+
+local function edge_gap(): number
+	return if appearance.inset_card:get() then WINDOW_EDGE else 0
+end
+
+local function fill_token(): string
+	return if M.framed:get() then "$zeron.inset.framed_bg" else "$zeron.inset.bg"
+end
+
+local function bar_shade(): Node
 	return ui.div {
-		id = "shell-frame",
+		ref = art.shade,
+		id = "shell-bar-shade",
 		absolute = true,
-		left = function(): number
-			return art.card_left:get()
-		end,
+		left = 0,
 		right = 0,
 		top = 0,
-		h = ui.raw(TOP_BAR, "the top bar"),
-		pointer_events = "none",
-		overflow = "hidden",
-		bg = "$zeron.inset.bg",
-		-- (A fade under this clip draws nothing, and the bar sees none of it anyway.)
-		M.Layer {
-			id = "shell-frame-art",
-			unfaded = true,
-			origin = function(): { x: number, y: number }
-				return { x = art.card_left:get(), y = 0 }
+		h = ui.raw(TOP_BAR + TAB_FADE_H, "the top bar and the tab's fade under it"),
+		layer_shader = BAR_SHADE,
+		layer_params = { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } },
+		opacity = faded_in(function(): number
+			return if shows_art() and appearance.inset_card:get() then appearance.chat_tab_shade:get() else 0
+		end),
+		ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, bg = "$zeron.window" },
+	}
+end
+
+-- What the card shows, laid out in the window's own coordinates: it holds still as the card's edges move over it.
+local function card_picture(): Node
+	return ui.div {
+		id = "shell-card-picture",
+		absolute = true,
+		left = function(): number
+			return -page_x()
+		end,
+		ml = moved(function(): number
+			return -left_gap()
+		end),
+		top = moved(function(): number
+			return -top_gap()
+		end),
+		w = function(): number
+			return art.window:get().w
+		end,
+		h = function(): number
+			return art.window:get().h
+		end,
+		ui.show(function(): boolean
+			return M.page_art:get() == "hero"
+		end, M.Layer {
+			id = "page-art",
+			kind = function(): string?
+				return if M.page_art:get() == "hero" then "hero" else nil
 			end,
-			left = function(): number
-				return art.card_left:get()
+			cutout = function(): any
+				local _ = composer_surface.moved:get()
+				local el = composer_surface.element
+				local w, h = el and el.width, el and el.height
+				if not el or not el.x or not w or not h then
+					return nil
+				end
+				local hero = M.hero_height(art.window:get().h)
+				return { x = el.x, y = el.y, w = w, h = math.max(el.y + h, hero) - el.y, radius = COMPOSER_RADIUS, feather = math.clamp(hero * 0.52, 120, 280), clearance = 8 }
+			end,
+		}),
+		M.Layer {
+			id = "page-chat-art",
+			-- (A fade under the bar's clip draws nothing, and the bar sees none of it anyway.)
+			unfaded = function(): boolean
+				return art.split:get()
+			end,
+			kind = function(): string?
+				return if M.page_art:get() == "chat" then "chat" else nil
 			end,
 		},
-		quad(function(): number
-			return if appearance.inset_card:get() then appearance.chat_tab_shade:get() else 0
-		end, "shell-frame-shade"),
+		ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			hidden = function(): boolean
+				return route.current:get().name == "settings"
+			end,
+			ds.Wallpaper {
+				effect = appearance.effect_now,
+				fill = true,
+				shown = function(): boolean
+					return route.chat:get().name == "home" and route.current:get().name ~= "plugin"
+				end,
+				key = function(): string
+					local showing = appearance.showing:get()
+					return if showing == "none" or showing == "image" then "" else showing
+				end,
+				content = function(_key: string): Node
+					return ui.div { id = "new-chat-background", absolute = true, left = 0, right = 0, top = 0, bottom = 0 }
+				end,
+				-- (A record, not two numbers: a plugin reading it follows it with `zeron.live`, never built again as the pointer moves.)
+				provide = {
+					pointer = ui.computed(function(): { x: number, y: number }
+						return { x = art.px:get(), y = art.py:get() }
+					end),
+				},
+			},
+		},
+		bar_shade(),
+		ui.div {
+			id = "shell-band-fade",
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			h = ui.raw(TOP_BAR + TAB_FADE_H, "the top bar and the band's fade under it"),
+			bg = "$zeron.window",
+			mask_gradient = BAND_FADE,
+			opacity = faded_in(function(): number
+				return if shows_art() and not appearance.inset_card:get() then appearance.chat_tab_shade:get() else 0
+			end),
+		},
+		ui.div {
+			id = "shell-rail-scrim",
+			absolute = true,
+			left = 0,
+			top = 0,
+			bottom = 0,
+			w = ui.raw(RAIL_SCRIM_W, "the rail's scrim"),
+			bg = "$zeron.window",
+			mask_gradient = RAIL_SCRIM,
+			opacity = faded_in(function(): number
+				return if M.art_under_rail() then 1 else 0
+			end),
+		},
+	}
+end
+
+local function card_view(): Node
+	local radius = faded_in(function(): number
+		return if appearance.inset_card:get() then (ui.theme.get("zeron.inset.radius") :: number?) or 12 else 0
+	end)
+	local whole = faded_in(function(): number
+		return if art.split:get() then 0 else 1
+	end)
+	return ui.div {
+		id = "shell-page-card",
+		absolute = true,
+		pointer_events = "none",
+		left = function(): number
+			return page_x() - clip_left()
+		end,
+		ml = moved(left_gap),
+		right = art.panel_w,
+		mr = moved(edge_gap),
+		top = moved(top_gap),
+		bottom = moved(edge_gap),
+		rounded = radius,
+		overflow = "hidden",
+		opacity = function(): number
+			return if art.expanded:get() then 0 else 1
+		end,
+		shadow = function(): any
+			return if M.framed:get() and not art.split:get() then CARD_LIFT else false
+		end,
+		ui.div {
+			id = "shell-page-fill",
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			bg = fill_token,
+			opacity = whole,
+		},
+		-- (In a split the panes hold the art under the bar: what's left of it is the bar's.)
+		ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = function(): any
+				return if art.split:get() then nil else 0
+			end,
+			h = function(): any
+				return if art.split:get() then ui.raw(TOP_BAR - top_gap(), "the bar in the card") else nil
+			end,
+			overflow = "hidden",
+			bg = function(): string
+				return if art.split:get() then fill_token() else "#00000000"
+			end,
+			card_picture(),
+		},
+		ui.div {
+			id = "shell-page-edge",
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			rounded = radius,
+			border = 1,
+			border_color = function(): string
+				return if M.framed:get() then "$zeron.inset.framed_edge" else "$border.subtle"
+			end,
+			opacity = faded_in(function(): number
+				return if appearance.inset_card:get() and not art.split:get() then 1 else 0
+			end),
+		},
 	}
 end
 
 function M.View(): Node
 	drawn:set(true)
-	return ui.presence(function(): string
-		if M.page_art:get() == nil then
-			return ""
+	ui.effect(function()
+		local on = M.art_under_rail()
+		if art.under_rail:peek() ~= on then
+			art.under_rail:set(on)
 		end
-		return if M.framed:get() then "frame" else "band"
-	end, function(which: string): Node
-		if which == "" then
-			return ui.div {}
-		end
-		return if which == "band" then band_view() else framed_view()
-	end, { absolute = true, left = 0, right = 0, top = 0, bottom = 0, pointer_events = "none" })
+	end)
+	return ui.div {
+		absolute = true,
+		left = 0,
+		right = 0,
+		top = 0,
+		bottom = 0,
+		pointer_events = "none",
+		ui.presence(function(): string
+			return if M.framed:get() then "frame" else ""
+		end, function(which: string): Node
+			return if which == "frame" then framed_view() else ui.div {}
+		end, { absolute = true, left = 0, right = 0, top = 0, bottom = 0, pointer_events = "none" }),
+		ui.div {
+			absolute = true,
+			left = clip_left,
+			right = art.panel_gap,
+			top = 0,
+			bottom = 0,
+			pointer_events = "none",
+			overflow = "hidden",
+			-- (A tween's timing is fixed as it's made, so a change of Reduce motion makes the card again.)
+			ui.presence(function(): string
+				return if motion.reduced() then "reduced" else "moving"
+			end, function(_: string): Node
+				return card_view()
+			end, { absolute = true, left = 0, right = 0, top = 0, bottom = 0, pointer_events = "none" }),
+		},
+	}
 end
 
 return M

@@ -413,6 +413,8 @@ return function(): Node
 				in_settings,
 				ui.column {
 					id = "shell-settings",
+					-- (They draw on the page's card and the window: nothing of their own under the bar's line.)
+					theme = { ["zeron.inset.bg"] = "#00000000", ["zeron.inset.framed_bg"] = "#00000000", ["zeron.inset.edge"] = "#00000000" },
 					-- Zeron's Settings are no plugin's to change or add to: what you
 					-- allow plugins and templates is decided here (Settings →
 					-- Plugins and Templates). Sealed, with all it holds.
@@ -563,6 +565,8 @@ return function(): Node
 					h_full = true,
 					shrink = 0,
 					hidden = in_settings,
+					-- (One tone with the rail and the window, to the window's top.)
+					theme = { ["zeron.inset.bg"] = "#00000000" },
 					boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(Sidebar): Node
 						return Sidebar { collapsed = collapsed :: any, limit = sidebar_limit, direct = sidebar_direct, top = 42 }
 					end),
@@ -585,21 +589,34 @@ return function(): Node
 					end, { pass = true }),
 				}
 				else nil,
-			boundary.screen(boundary.named("shell.boundary.screen.title_bar"), "@app/screens/shell/title_bar", function(TitleBar): Node
-				-- (A new chat's art is in its card, under the top bar: nothing there for
-				-- the bar's controls to need glass over.)
-				return TitleBar {
-					collapsed = collapsed :: any,
-					files = files,
-					art = function(): boolean
-						return false
-					end,
-					panel_on_home = true,
-					nav_left = top_bar.nav_left,
-					wordmark = top_bar.reveal,
-					new_tab = top_bar.new_tab,
-				}
-			end, { pass = true }),
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				h = 0,
+				overflow = "visible",
+				pointer_events = "none",
+				theme = function(): any
+					local frame: any = boundary.load("@app/screens/shell/frame")
+					return if frame then frame.bar_theme() else nil
+				end,
+				boundary.screen(boundary.named("shell.boundary.screen.title_bar"), "@app/screens/shell/title_bar", function(TitleBar): Node
+					-- (A new chat's art is in its card, under the top bar: nothing there for
+					-- the bar's controls to need glass over.)
+					return TitleBar {
+						collapsed = collapsed :: any,
+						files = files,
+						art = function(): boolean
+							return false
+						end,
+						panel_on_home = true,
+						nav_left = top_bar.nav_left,
+						wordmark = top_bar.reveal,
+						new_tab = top_bar.new_tab,
+					}
+				end, { pass = true }),
+			},
 		},
 		-- A session's card, its row rested on (Zeron's hover card): over the
 		-- window beside the row, one surface of the menus' glass blurring

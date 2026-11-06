@@ -887,6 +887,27 @@ test("dragging a divider after a deleted chat changed the tree's shape works", f
 	expect(app:error()).to_be_nil()
 end)
 
+test("a split's tab has the page's card under Settings", function()
+	local app = shell_with({ "Write the docs" })
+	app:set_state("inset_split_trees", { { kind = "row", key = "t", children = { { kind = "leaf", id = "a1" }, { kind = "leaf", id = "a2" } } } })
+	app:frames(20)
+	expect(app:tree("#shell-page-fill")).to_contain("hidden")
+	app:command("shell.settings")
+	app:frames(20)
+	expect(app:tree("#shell-page-fill")).never.to_contain("hidden")
+end)
+
+test("the tabs take their room as the panel starts to glide, not on each frame of it", function()
+	local app = shell_with({ "Write the docs" })
+	app:command("shell.toggle_files")
+	app:frames(2)
+	local room = box(app, "#session-tabs-scroll").w
+	for i = 1, 20 do
+		app:frames(1)
+		expect(`{i}: {box(app, "#session-tabs-scroll").w}`).to_be(`{i}: {room}`)
+	end
+end)
+
 test("a plain navigation to where Forward would go plays no slide", function()
 	local app = shell_with({ "Fix the build", "Write the docs", "Fix the build" })
 	app:click('#titlebar >> role:button "Back"')

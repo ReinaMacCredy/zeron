@@ -1,12 +1,8 @@
 -- How the window's columns move: the sidebar folding away and back, a
 -- session's panel opening and closing, and what rides with them (the
--- page's title in the strip, the title bar's island). Zeron's own
--- (crates/ui `WidthTween::panel`, motion `PANEL_RESIZE`): the dialog
--- entrance's curve, CSS `ease`, easing into the move and landing softly;
--- 180 ms for the sidebar's width, longer moves taking longer by the square
--- root of how far they go, to at most 240 ms, so a wide panel travels at
--- the sidebar's pace instead of covering twice the distance in the same
--- time. Each column keeps its content at full width while it moves (its
+-- page's title in the strip, the title bar's island): 260 ms on
+-- cubic-bezier(.2,.8,.2,1), as the shell's locked mockup moves (not crates/ui's
+-- 180 ms). Each column keeps its content at full width while it moves (its
 -- edge clips it), so nothing in it lays out again on the way.
 --
 --   local motion = require("@ds/motion")
@@ -131,15 +127,14 @@ function M.panel(to: number): TableParams
 	return { value = to, duration = M.ms(M.PANEL_MS), ease = M.PANEL_EASE }
 end
 
+-- What moves with the sidebar: for `ui.tween`.
+M.sidebar = { duration = 260, ease = "cubicBezier(.2,.8,.2,1)" } :: TweenOptions
+
 -- A column's width from `from` to `to`, for `anime.animate` (its `value`
 -- the width it goes to): at once, with motion reduced.
-function M.column(from: number, to: number): TableParams
-	return { value = to, duration = M.ms(M.duration(to - from)), ease = M.EASE }
+function M.column(_from: number, to: number): TableParams
+	return { value = to, duration = M.ms(M.sidebar.duration), ease = M.sidebar.ease }
 end
-
--- What moves with the sidebar (its own width is the sidebar's default or
--- near it): for `ui.tween`.
-M.sidebar = { duration = M.BASE, ease = M.EASE } :: TweenOptions
 
 -- Snappy: what answers a press at once (the lightbox's picture growing out
 -- of its thumbnail and going back, its zoom). It moves from the press's own
