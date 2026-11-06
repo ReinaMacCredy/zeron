@@ -50,6 +50,8 @@ local function walk(app: any)
 			expect(`{how}: {line} clear of the composer {bottom <= composer}`).to_be(`{how}: {line} clear of the composer true`)
 		end
 	end
+	-- (⇧Tab flips plan mode where the agent has one.)
+	app:command("agent_without_plan")
 	app:click("#chat-composer >> role:textbox")
 	app:frames(5)
 	for i = 1, 14 do
@@ -63,8 +65,9 @@ local function walk(app: any)
 		check(`Tab {i}`)
 	end
 	-- (Every step a row's, none round to the composer's controls, but the
-	-- last Tab: down past the newest row, back to the composer.)
-	expect(seen).to_be(27)
+	-- side chat's tab each way, and the last Tab: down past the newest row,
+	-- back to the composer.)
+	expect(seen).to_be(25)
 end
 
 test("Tab and ⇧Tab through a long chat bring each focused row clear of the title fade and the composer", function()

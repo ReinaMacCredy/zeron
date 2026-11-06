@@ -42,6 +42,7 @@ M.LIST = {
 	-- (The browser tab's own command, screens/panel/browser: listed here so
 	-- Settings shows it and no other takes its key; it acts while a browser
 	-- tab shows.)
+	{ id = "chat.side_chat", title = "Side chat", key = "cmd+;", group = "Panels", menu = "View", elsewhere = true },
 	{ id = "panel.annotate", title = "Annotate Element", key = "cmd+shift+i", group = "Panels", menu = "View", elsewhere = true },
 	{ id = "panel.new_browser_tab", title = "New Browser Tab", key = "cmd+t", group = "Panels", menu = "File", elsewhere = true },
 	{ id = "panel.focus_address", title = "Open Location", key = "cmd+l", group = "Panels", menu = "View", elsewhere = true },

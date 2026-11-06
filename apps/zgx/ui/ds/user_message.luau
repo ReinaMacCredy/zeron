@@ -19,6 +19,7 @@
 
 local Icon = require("@self/icon")
 local Lightbox = require("@self/lightbox")
+local PastedText = require("@self/pasted_text")
 local ReplyPicture = require("@self/reply_picture")
 local Markdown = require("@self/markdown")
 local FadeText = require("@self/fade_text")
@@ -28,7 +29,7 @@ local locale = require("@self/locale")
 -- its name and what it is).
 -- (`appshot`: a picture that is an Appshot, the app it shows and its
 -- window's title: the card says so under it.)
-export type Attachment = { kind: "image" | "file", name: string, src: string?, meta: string?, icon: string?, appshot: { app: string, title: string?, bundle: string? }? }
+export type Attachment = { kind: "image" | "file", name: string, src: string?, path: string?, meta: string?, icon: string?, appshot: { app: string, title: string?, bundle: string? }? }
 -- (`open`: what opens a link in it that isn't the web's, as a file mention.)
 -- (`pictures`: where its pictures' paths show from: a chat on another
 -- device reads them from there, screens/chat/reply_images'
@@ -51,6 +52,8 @@ export type Props = {
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
 	pictures: ReplyPicture.Pictures?,
 	find: any?,
+	-- The chat whose device its files are on, for a pasted text's viewer.
+	session: (() -> string?)?,
 }
 
 -- The messages opened, by id: every bubble's, outside any of them.
@@ -142,8 +145,17 @@ end
 local unnamed = 0
 
 -- A file: its glyph on a small tile, its name over what it is.
-local function chip(a: Attachment): Node
+local function chip(a: Attachment, session: (() -> string?)?): Node
+	local pasted = PastedText.number_of(a.name)
+	local open_pasted = if pasted and a.path
+		then function()
+			(PastedText.opener(a :: any, if session then session() else nil) :: any)()
+		end
+		else nil
+	local name = if pasted then locale.s("ds.pasted_text.title", { n = pasted }) else a.name
 	return ui.row {
+		on_click = open_pasted,
+		cursor = if open_pasted then "pointer" else nil,
 		h = 56,
 		max_w = 260,
 		pl = "$space.3",
@@ -152,7 +164,7 @@ local function chip(a: Attachment): Node
 		items = "center",
 		rounded = "$zeron.prose.thumb.radius",
 		bg = "$zeron.prose.bubble.bg",
-		label = a.name,
+		label = name,
 		ui.row {
 			w = 36,
 			h = 36,
@@ -168,7 +180,7 @@ local function chip(a: Attachment): Node
 			min_w = 0,
 			grow = 1,
 			gap = "$zeron.space.hair",
-			FadeText { a.name, literal = true, text_size = "$font.size.md", color = "$text.primary", weight = "$font.weight.medium" },
+			FadeText { name, literal = true, text_size = "$font.size.md", color = "$text.primary", weight = "$font.weight.medium" },
 			if a.meta
 				then ui.text { a.meta, literal = true, text_size = "$font.size.xs", color = "$text.tertiary" }
 				else nil,
@@ -279,7 +291,7 @@ return ui.component(function(props: Props): Node
 				table.insert(attachments, thumb(a, from, group, images, shown, pictures))
 			end
 		else
-			table.insert(attachments, chip(a))
+			table.insert(attachments, chip(a, props.session))
 		end
 	end
 	return ui.column {

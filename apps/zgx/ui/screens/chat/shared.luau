@@ -48,6 +48,43 @@ M.places = ui.shared("chat.transcript.places", {} :: { [string]: any })
 -- the key of the one shown.
 local kept = ui.shared("chat.composer.drafts", {} :: { [string]: any })
 local here = ui.shared("chat.composer.here", "")
+
+local function cargo_in(key: string): { any }
+	if here:peek() == key then
+		return M.cargo:peek()
+	end
+	local d = kept:peek()[key]
+	return if d and type(d.cargo) == "table" then d.cargo else {}
+end
+
+local function change_kept(key: string, change: (draft: any) -> ())
+	local all = table.clone(kept:peek())
+	local d = table.clone(all[key] or { text = "", cargo = {}, quotes = {} })
+	change(d)
+	all[key] = d
+	kept:set(all)
+end
+
+local function set_cargo_in(key: string, list: { any })
+	if here:peek() == key then
+		M.cargo:set(list)
+		return
+	end
+	change_kept(key, function(d: any)
+		d.cargo = list
+	end)
+end
+
+local function push_cargo(key: string, items: { any })
+	if #items == 0 then
+		return
+	end
+	local list = table.clone(cargo_in(key))
+	for _, item in items do
+		table.insert(list, item)
+	end
+	set_cargo_in(key, list)
+end
 -- Bumped, the composer takes the keys.
 M.focus = ui.state("chat_focus", 0)
 -- The docked composer's height, as laid out.
@@ -59,6 +96,20 @@ local function chip_id(kind: string): string
 	local n = made:peek() + 1
 	made:set(n)
 	return `{kind}{n}`
+end
+
+M.refused = ui.shared("chat.composer.refused", nil :: string?)
+local numbered = ui.shared("chat.composer.numbered", {} :: { [string]: number })
+
+local MAX_ATTACHMENT = 24 * 1024 * 1024
+local PASTE_MIN_CHARS = 5000
+local PASTE_HEAD_BYTES = 4 * 1024
+local PASTE_LABEL_GRAPHEMES = 20
+
+-- (`ui.call` raises on a host too old to have the action.)
+function M.ask(action: string, arg: any): any?
+	local ok, answer = pcall(ui.call, action, arg)
+	return if ok then answer else nil
 end
 
 -- Whether a file's name is a picture the window can draw. (zgx decodes
@@ -89,9 +140,9 @@ function M.show(key: string)
 	end
 	ui.batch(function()
 		local all = table.clone(kept:peek())
-		local text, cargo, quotes, chosen = M.text:peek(), M.cargo:peek(), M.quotes:peek(), M.chosen:peek()
-		if text ~= "" or #cargo > 0 or next(chosen) ~= nil then
-			all[was] = { text = text, cargo = cargo, quotes = quotes, chosen = chosen }
+		local text, cargo, quotes, chosen, refused = M.text:peek(), M.cargo:peek(), M.quotes:peek(), M.chosen:peek(), M.refused:peek()
+		if text ~= "" or #cargo > 0 or next(chosen) ~= nil or refused ~= nil then
+			all[was] = { text = text, cargo = cargo, quotes = quotes, chosen = chosen, refused = refused }
 		else
 			all[was] = nil
 		end
@@ -103,19 +154,89 @@ function M.show(key: string)
 		M.cargo:set(if now then now.cargo else {})
 		M.quotes:set(if now and now.quotes then now.quotes else {})
 		M.chosen:set(if now and now.chosen then now.chosen else {})
+		M.refused:set(if now then now.refused else nil)
 	end)
 end
 
+-- (By the list `take` hands out, so `restore` needs no key from its caller.)
+local taken: { [any]: { key: string, raw: string, quotes: { [string]: string } } } = setmetatable({}, { __mode = "k" }) :: any
+
 -- What was typed and carried, taken for sending (the composer cleared).
-function M.take(): (string, { any })
-	local text = Quote.expand(M.text:peek(), Quote.kept(M.text:peek(), M.quotes:peek()))
-	local cargo = M.cargo:peek()
+function M.take(of: string?): (string, { any })
+	local key = of or here:peek()
+	local mine = here:peek() == key
+	local stored = if mine then nil else kept:peek()[key]
+	local raw = if mine then M.text:peek() else M.draft_peek(key).text
+	local quotes = if mine then M.quotes:peek() elseif stored and stored.quotes then stored.quotes else {}
+	local text = Quote.expand(raw, Quote.kept(raw, quotes))
+	local cargo = table.clone(cargo_in(key))
+	taken[cargo] = { key = key, raw = raw, quotes = quotes }
 	ui.batch(function()
-		M.text:set("")
-		M.cargo:set({})
-		M.quotes:set({})
+		if mine then
+			M.text:set("")
+			M.cargo:set({})
+			M.quotes:set({})
+			M.refused:set(nil)
+		else
+			change_kept(key, function(d: any)
+				d.text, d.cargo, d.quotes, d.refused = "", {}, {}, nil
+			end)
+		end
+		local numbers = table.clone(numbered:peek())
+		numbers[key] = nil
+		numbered:set(numbers)
 	end)
 	return text, cargo
+end
+
+-- (`text` only for a list a reload lost track of: `raw` has no folded comments.)
+function M.restore(text: string, cargo: { any })
+	local from = taken[cargo]
+	local key = if from then from.key else here:peek()
+	local words = if from then from.raw else text
+	local merged = table.clone(cargo)
+	local have: { [string]: boolean } = {}
+	local top = numbered:peek()[key] or 0
+	for _, item in cargo do
+		have[item.id] = true
+		top = math.max(top, item.number or 0)
+	end
+	for _, item in cargo_in(key) do
+		if not have[item.id] then
+			have[item.id] = true
+			top = math.max(top, item.number or 0)
+			table.insert(merged, item)
+		end
+	end
+	merged = M.renumber(merged)
+	local function joined(since: string): string
+		return if since == "" or words == "" then words .. since else `{words}\n\n{since}`
+	end
+	local function quotes_with(since: { [string]: string }?): { [string]: string }
+		local all = table.clone(if from then from.quotes else {})
+		for line, passage in since or {} do
+			all[line] = passage
+		end
+		return all
+	end
+	ui.batch(function()
+		if top > 0 then
+			local numbers = table.clone(numbered:peek())
+			numbers[key] = top
+			numbered:set(numbers)
+		end
+		if here:peek() == key then
+			M.cargo:set(merged)
+			M.quotes:set(quotes_with(M.quotes:peek()))
+			M.text:set(joined(M.text:peek()))
+		else
+			change_kept(key, function(d: any)
+				d.cargo = merged
+				d.quotes = quotes_with(d.quotes)
+				d.text = joined(if type(d.text) == "string" then d.text else "")
+			end)
+		end
+	end)
 end
 
 -- A passage of the transcript, quoted into the draft (its line marks it)
@@ -182,20 +303,335 @@ function M.note_cargo(id: string, note: string)
 	M.cargo:set(list)
 end
 
--- Files picked or dropped: chips, carried with the message.
-function M.attach_files(files: { any })
+local function next_number(key: string): number
+	local top = numbered:peek()[key] or 0
+	for _, item in cargo_in(key) do
+		top = math.max(top, item.number or 0)
+	end
+	return top + 1
+end
+
+local function note_number(key: string, number: number)
+	local numbers = table.clone(numbered:peek())
+	numbers[key] = number
+	numbered:set(numbers)
+end
+
+function M.refuse_in(key: string, why: string?)
+	if here:peek() == key then
+		M.refused:set(why)
+	else
+		change_kept(key, function(d: any)
+			d.refused = why
+		end)
+	end
+end
+local refuse_in = M.refuse_in
+
+-- gpui's `linked_elsewhere_message`: a file over the limit goes by its path,
+-- which only this computer can read.
+function M.linked_elsewhere(cargo: { any }): string?
+	for _, item in cargo do
+		if item.linked then
+			return locale.s("chat.composer.linked_elsewhere", { name = item.name })
+		end
+	end
+	return nil
+end
+
+function M.size_label(bytes: number): string
+	local mb = bytes / (1024 * 1024)
+	return if mb >= 1024 then string.format("%.1f GB", mb / 1024) else string.format("%.0f MB", mb)
+end
+
+local function stage_files(key: string, base: number, files: { any }, stats: { [string]: any }?)
+	local items: { any } = {}
+	local refused: { string } = {}
 	for _, f in files do
 		local name = f.name or f.path or "file"
-		local picture = is_image(name)
-		M.cargo:push {
-			id = chip_id("file"),
-			kind = if picture then "image" else "file",
-			name = name,
-			src = if picture then f.path else nil,
-			path = f.path,
-		}
+		local stat = if stats and f.path then stats[f.path] else nil
+		if stat and not stat.readable then
+			table.insert(refused, locale.s("chat.composer.file_unreadable", { name = name }))
+		elseif stat and not stat.is_file then
+			table.insert(refused, locale.s("chat.composer.not_a_file", { name = name }))
+		else
+			local number = base + #items
+			if stat and stat.size > MAX_ATTACHMENT then
+				table.insert(items, {
+					id = chip_id("file"),
+					kind = "file",
+					name = name,
+					label = `{name} · {M.size_label(stat.size)}`,
+					path = f.path,
+					on_host = true,
+					linked = true,
+					bytes = stat.size,
+					number = number,
+				})
+			else
+				local picture = is_image(name)
+				local ext = if f.clipboard then string.match(string.lower(name), "%.(%a+)$") else nil
+				table.insert(items, {
+					id = chip_id("file"),
+					kind = if picture then "image" else "file",
+					name = if f.clipboard then `Image {number}.{ext}` else name,
+					src = if picture then f.path else nil,
+					path = f.path,
+					number = number,
+				})
+			end
+		end
 	end
-	M.focus:add(1)
+	ui.batch(function()
+		push_cargo(key, items)
+		if #refused > 0 then
+			refuse_in(key, table.concat(refused, " "))
+		end
+	end)
+end
+
+function M.attach_files(files: { any }, of: string?)
+	local key = of or here:peek()
+	refuse_in(key, nil)
+	if not of then
+		M.focus:add(1)
+	end
+	-- (Taken now: a second attach can come before the host answers the first.)
+	local base = next_number(key)
+	note_number(key, base + #files - 1)
+	local paths: { string } = {}
+	for _, f in files do
+		if f.path then
+			table.insert(paths, f.path)
+		end
+	end
+	local asked = if #paths > 0 then M.ask("chat.stat_files", { paths = paths }) else nil
+	if not asked then
+		stage_files(key, base, files, nil)
+		return
+	end
+	asked:after(function(list: any)
+		local stats: { [string]: any } = {}
+		for _, stat in list or {} do
+			stats[stat.path] = stat
+		end
+		stage_files(key, base, files, stats)
+	end, function()
+		stage_files(key, base, files, nil)
+	end)
+end
+
+-- (`$` too: this composer writes a skill so. Four spaces or a tab is code.)
+local function leads_with_command(draft: string): boolean
+	local indent, name = string.match(draft, "^([ \t\r\n]*)[/$](%S+)")
+	if not indent or not name or not string.find(name, "^[%w%-_:.\128-\255]+$") then
+		return false
+	end
+	local last = string.match(indent, "[^\r\n]*$") or ""
+	return #last < 4 and not string.find(last, "\t", 1, true)
+end
+
+local function pastes_as_file(text: string, draft: string): boolean
+	local bytes = #text
+	if bytes < PASTE_MIN_CHARS then
+		return false
+	end
+	-- (A character is 1 to 4 bytes: only a length that could fall either way is counted.)
+	if bytes < PASTE_MIN_CHARS * 4 and (utf8.len(text) or bytes) < PASTE_MIN_CHARS then
+		return false
+	end
+	if leads_with_command(draft) then
+		return false
+	end
+	-- (A plain find: a pattern over 24 MiB outruns a script call's budget.)
+	if bytes > MAX_ATTACHMENT then
+		return true
+	end
+	local at = 1
+	while true do
+		local from = string.find(text, "](zeron-", at, true)
+		if not from then
+			return true
+		end
+		local scheme = string.match(text, "^(%a+):%d+%)", from + 8)
+		if scheme == "attachment" or scheme == "image" then
+			return false
+		end
+		at = from + 8
+	end
+end
+
+-- (zgx has no grapheme call for scripts: marks, joiners, skin tones and tags.)
+local EXTENDING = {
+	{ 0x0300, 0x036F },
+	{ 0x0483, 0x0489 },
+	{ 0x0591, 0x05BD },
+	{ 0x0610, 0x061A },
+	{ 0x064B, 0x065F },
+	{ 0x0E31, 0x0E31 },
+	{ 0x0E34, 0x0E3A },
+	{ 0x0E47, 0x0E4E },
+	{ 0x1AB0, 0x1AFF },
+	{ 0x1DC0, 0x1DFF },
+	{ 0x200D, 0x200D },
+	{ 0x20D0, 0x20FF },
+	{ 0xFE00, 0xFE0F },
+	{ 0xFE20, 0xFE2F },
+	{ 0x1F3FB, 0x1F3FF },
+	{ 0xE0020, 0xE007F },
+	{ 0xE0100, 0xE01EF },
+}
+local function extends(cp: number): boolean
+	for _, range in EXTENDING do
+		if cp >= range[1] and cp <= range[2] then
+			return true
+		end
+	end
+	return false
+end
+
+function M.paste_label(text: string): string?
+	local head = string.sub(text, 1, PASTE_HEAD_BYTES)
+	local valid, bad = utf8.len(head)
+	if not valid then
+		head = string.sub(head, 1, (bad :: number) - 1)
+	end
+	head = string.gsub(head, "\226\128[\168\169]", "\n")
+	for raw in string.gmatch(head, "[^\r\n]+") do
+		local line = string.gsub(raw, "%c", " ")
+		line = string.match(line, "^%s*(.-)%s*$") or ""
+		if line ~= "" then
+			local count, joined, flags = 0, false, 0
+			for pos, cp in utf8.codes(line) do
+				local flag = cp >= 0x1F1E6 and cp <= 0x1F1FF
+				if not (joined or extends(cp) or (flag and flags % 2 == 1)) then
+					count += 1
+					if count > PASTE_LABEL_GRAPHEMES then
+						return (string.match(string.sub(line, 1, pos - 1), "^(.-)%s*$") or "") .. "…"
+					end
+				end
+				joined = cp == 0x200D
+				flags = if flag then flags + 1 else 0
+			end
+			return line
+		end
+	end
+	return nil
+end
+
+function M.paste_text(text: string, of: string?): boolean
+	local key = of or here:peek()
+	if not pastes_as_file(text, M.draft_peek(key).text) then
+		return false
+	end
+	if #text > MAX_ATTACHMENT then
+		refuse_in(key, locale.s("chat.composer.paste_too_large"))
+		return true
+	end
+	local number = next_number(key)
+	local name = `Pasted text {number}.txt`
+	local asked = M.ask("chat.paste_text", { text = text, name = name })
+	if not asked then
+		return false
+	end
+	refuse_in(key, nil)
+	note_number(key, number)
+	if not of then
+		M.focus:add(1)
+	end
+	local label = M.paste_label(text)
+	local bytes = #text
+	asked:after(function(path: any)
+		if type(path) == "string" and path ~= "" then
+			push_cargo(key, { { id = chip_id("paste"), kind = "file", name = name, label = label, path = path, pasted = true, bytes = bytes, number = number } })
+		else
+			M.set_draft_of(key, "text", M.draft_peek(key).text .. text)
+		end
+	end, function()
+		M.set_draft_of(key, "text", M.draft_peek(key).text .. text)
+	end)
+	return true
+end
+
+function M.open_pasted(id: string, insert: ((text: string) -> boolean)?, of: string?)
+	local key = of or here:peek()
+	local item: any = nil
+	for _, it in cargo_in(key) do
+		if it.id == id then
+			item = it
+		end
+	end
+	if not item or not item.path then
+		return
+	end
+	local function unreadable()
+		refuse_in(key, locale.s("chat.composer.file_unreadable", { name = item.name }))
+	end
+	local asked = M.ask("chat.read_text", { path = item.path })
+	if not asked then
+		unreadable()
+		return
+	end
+	asked:after(function(read: any)
+		if type(read) ~= "table" or type(read.text) ~= "string" then
+			unreadable()
+			return
+		end
+		-- (Pressed twice: the first read took it.)
+		local still = false
+		for _, it in cargo_in(key) do
+			still = still or it.id == id
+		end
+		if not still then
+			return
+		end
+		ui.batch(function()
+			M.remove_cargo_of(key, id)
+			if not ((of or here:peek() == key) and insert and insert(read.text)) then
+				M.set_draft_of(key, "text", M.draft_peek(key).text .. read.text)
+			end
+		end)
+		if not of then
+			M.focus:add(1)
+		end
+	end, unreadable)
+end
+
+-- A composer's chips for chat `of` (the window's draft when nil): what's
+-- pasted, picked and dropped. `dropped` runs before a drop is taken.
+function M.cargo_props(of: string?, dropped: (() -> ())?): { [string]: any }
+	return {
+		on_paste_text = function(text: string): boolean
+			return M.paste_text(text, of)
+		end,
+		on_open_pasted = function(id: string, insert: ((text: string) -> boolean)?)
+			M.open_pasted(id, insert, of)
+		end,
+		on_attach = function()
+			ui.open_files({ title = ui.t("chat.composer.attach_files"):get(), multiple = true }):after(function(files: any)
+				if files and #files > 0 then
+					M.attach_files(files, of)
+				end
+			end, function() end)
+		end,
+		on_files = function(files: { any })
+			if dropped then
+				dropped()
+			end
+			M.attach_files(files, of)
+		end,
+		-- A picture pasted (a screenshot): written out by the host, then
+		-- carried as an image, as one dropped is, named as Zeron names
+		-- it (attachments.rs `stage_clipboard_image`).
+		on_paste_image = function(): boolean
+			(require("@app/screens/chat/store") :: any).paste_image():after(function(path: string?)
+				if type(path) == "string" and path ~= "" then
+					M.attach_files({ { name = "image.png", path = path, clipboard = true } }, of)
+				end
+			end, function() end)
+			return true
+		end,
+	}
 end
 
 -- Files of the project (the files pane's, dragged here or its "Add to
@@ -356,6 +792,11 @@ function M.mention_chat(id: string)
 	if not ChatLinks.valid(id) then
 		return
 	end
+	if id == here:peek() then
+		M.refused:set(locale.s("chat.composer.self_mention"))
+		return
+	end
+	M.refused:set(nil)
 	for _, item in M.cargo:peek() do
 		if item.kind == "chat" and item.chat == id then
 			return
@@ -510,19 +951,7 @@ function M.attach_comment(c: {
 		plugin = c.plugin,
 		key = c.key,
 	}
-	local session = c.session
-	if session and session ~= here:peek() then
-		-- Another chat's draft, kept: the chip waits in it.
-		local all = table.clone(kept:peek())
-		local draft = table.clone(all[session] or { text = "", cargo = {}, quotes = {} })
-		local cargo = table.clone(draft.cargo or {})
-		table.insert(cargo, item)
-		draft.cargo = cargo
-		all[session] = draft
-		kept:set(all)
-		return id
-	end
-	M.cargo:push(item)
+	push_cargo(c.session or here:peek(), { item })
 	return id
 end
 
@@ -590,15 +1019,16 @@ end
 -- in a question it's asked. What shows a chat's draft by its id (a split
 -- pane's composer) reads it here, never the chat shown's; `show` moves a
 -- draft between the two in one batch, so it's never read half moved.
-function M.draft_of(key: string): { text: string, cargo: { any }, chosen: { [string]: boolean } }
+function M.draft_of(key: string): { text: string, cargo: { any }, chosen: { [string]: boolean }, refused: string? }
 	if here:get() == key then
-		return { text = M.text:get(), cargo = M.cargo:get(), chosen = M.chosen:get() }
+		return { text = M.text:get(), cargo = M.cargo:get(), chosen = M.chosen:get(), refused = M.refused:get() }
 	end
 	local d = kept:get()[key]
 	return {
 		text = if d and type(d.text) == "string" then d.text else "",
 		cargo = if d and type(d.cargo) == "table" then d.cargo else {},
 		chosen = if d and type(d.chosen) == "table" then d.chosen else {},
+		refused = if d then d.refused else nil,
 	}
 end
 
@@ -614,6 +1044,11 @@ function M.draft_peek(key: string): { text: string, cargo: { any } }
 end
 
 function M.discard_draft_of(key: string)
+	if numbered:peek()[key] then
+		local numbers = table.clone(numbered:peek())
+		numbers[key] = nil
+		numbered:set(numbers)
+	end
 	if here:peek() == key then
 		M.text:set("")
 		M.cargo:set({})

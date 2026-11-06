@@ -629,7 +629,10 @@
       "plan": {
         "mode": "计划模式",
         "hint": "更改前先探索并提出计划。",
-        "short": "计划"
+        "short": "计划",
+        "start": "开始计划",
+        "tip": "计划：智能体只写计划，不做更改（⇧Tab）",
+        "tip_asks": "先计划：智能体制定计划并等待你确认（⇧Tab）"
       },
       "checkout": {
         "label": "检出",
@@ -671,14 +674,17 @@
         "answer_picked": "输入自己的回答，或留空以使用所选选项",
         "answer": "输入自己的回答，或选择上方的选项",
         "instead": "或说明要改做什么…",
-        "default": "想做什么都可以…"
+        "default": "想做什么都可以…",
+        "plan": "描述目标。智能体会写计划，不做更改。",
+        "plan_asks": "描述目标。智能体会写计划并等待你确认。"
       },
       "message": "消息",
       "branch": {
         "label": "分支",
         "no_ref": "无引用",
         "search": "搜索分支…",
-        "fixed": "分支 {name}"
+        "fixed": "分支 {name}",
+        "showing": "显示 {total} 个引用中的 {shown} 个"
       },
       "context": {
         "heading": "上下文窗口",
@@ -690,7 +696,14 @@
         "capacity": "容量 {n} tokens",
         "waiting": "正在等待上下文用量",
         "unreported": "此智能体尚未报告上下文用量"
-      }
+      },
+      "resume": "继续",
+      "side_chat": "侧边对话",
+      "side_chat_tip": "侧边对话 (/btw)：在旁边提问，在右侧窗格打开",
+      "footer_removed": "· 已移除",
+      "notice_error": "错误",
+      "notice_warning": "警告",
+      "notice_copy": "复制消息"
     },
     "markdown": {
       "fit_content": "适合内容",
@@ -778,7 +791,8 @@
       "continued_from": "接续自 {title}",
       "context_handoff": "上下文交接",
       "secret_requested": "已请求密钥：{title}",
-      "awaiting_answer": "{title}：等待你的回答"
+      "awaiting_answer": "{title}：等待你的回答",
+      "resumed": "已继续"
     },
     "user_message": {
       "open_named": "打开 {name}",
@@ -843,7 +857,18 @@
       "show_more": "再显示 {n} 个附件",
       "show_less": "显示更少",
       "more": "另有 {n} 个",
-      "comment_from": "来自 {plugin}"
+      "comment_from": "来自 {plugin}",
+      "pasted_tip": "点击在文本框中显示",
+      "linked_tip": "已链接，未复制：{path}",
+      "captured_app": "已捕获的应用",
+      "remove_appshot": "移除来自 {app} 的 Appshot",
+      "preview_appshot": "预览来自 {app} 的 Appshot",
+      "comment_one": "1 条评论",
+      "comment_many": "{n} 条评论",
+      "comments_show": "{label}，显示列表",
+      "comment_remove": "移除评论 {text}",
+      "comments_clear": "全部清除",
+      "comments_clear_named": "清除所有评论"
     },
     "composer_dock": {
       "fold": "折叠{title}",
@@ -852,16 +877,15 @@
       "send_now": "立即发送",
       "steer": "引导",
       "send_next": "下次发送",
-      "send_now_hint": "立即发送，打断当前轮次",
-      "steer_hint": "引导：在当前轮次中向智能体传话",
-      "send_next_hint": "在下一轮发送",
-      "hint_last": "{what} · {key}",
+      "send_now_hint": "立即发送（中断）",
+      "steer_hint": "引导（当前工作继续运行）",
+      "send_next_hint": "在下一轮发送（此智能体无法在回合中途引导）",
       "save_to_queue": "保存到队列",
       "cancel": "取消",
       "edit": "编辑",
       "remove": "移除",
       "editing": "正在输入框中编辑",
-      "show_steps": "显示{later, select, true {后续} other {之前}}的 {n} 个步骤",
+      "show_steps": "{open, select, true {隐藏} other {显示}}{later, select, true {后面} other {前面}}的 {n} 项",
       "steps": "{later, select, true {后续} other {之前}}的 {n} 个",
       "stop_named": "停止 {name}",
       "stop": "停止",
@@ -874,7 +898,20 @@
       "stop_all": "全部停止",
       "running": "运行中",
       "queued_messages": "队列中的消息",
-      "queued": "已加入队列"
+      "queued": "已加入队列",
+      "waiting_hint": "正在等待提供方能力信息",
+      "steer_all": "全部引导",
+      "steer_all_hint": "将所有排队消息编号合并为一条进行引导",
+      "removing": "正在移除…",
+      "saving": "正在保存…",
+      "needs_review": "需要审核",
+      "attached_images": "请查看附带的图片。",
+      "attached_files": "请查看附带的文件。",
+      "after_compaction": "压缩完成后发送",
+      "rest_label": "{tooltip}；编辑消息可查看全部",
+      "open_named": "打开 {name}",
+      "todo_collapse": "收起待办列表",
+      "todo_expand": "展开待办列表"
     },
     "composer_mentions": {
       "files": "文件",
@@ -886,7 +923,16 @@
         "skills": "技能"
       },
       "none_available": "没有可用的{what}",
-      "none_matching": "没有匹配的{what}"
+      "none_matching": "没有匹配的{what}",
+      "empty": {
+        "commands": "此集成没有可用的斜杠命令",
+        "skills": "此项目没有可用的技能",
+        "files": "没有可用的文件",
+        "files_matching": "没有匹配的文件、会话或任务"
+      },
+      "attached_image": "已附加图片",
+      "attached_file": "已附加文件",
+      "terminal": "终端"
     },
     "model_picker": {
       "starred": "已加星标",
@@ -1086,6 +1132,15 @@
       "cut": "剪切",
       "paste": "粘贴",
       "label": "文本"
+    },
+    "pasted_text": {
+      "viewer": "粘贴的文本",
+      "title": "粘贴的文本 {n}",
+      "failed": "无法加载粘贴的文本",
+      "loading": "正在加载…",
+      "one_line": "1 行",
+      "lines": "{n} 行",
+      "close": "关闭"
     }
   },
   "settings": {
@@ -1157,6 +1212,12 @@
         "terms": "共同作者 署名 机器人 提交消息 co-author coauthor attribution bot commit message",
         "cloud": "Cloud 始终启用",
         "on": "智能体的提交会将 zeronsh[bot] 添加为共同作者"
+      },
+      "follow_up": {
+        "label": "后续消息行为",
+        "terms": "后续 排队 引导 运行中 智能体 消息 follow-up queue steer",
+        "description": "智能体运行时将后续消息排队，或引导当前运行。按 {key} 可让这条消息反向处理。",
+        "description_send_key": "智能体运行时将后续消息排队，或引导当前运行。{key} 是发送键，所以每条消息都遵循此设置。"
       }
     },
     "engine": {
@@ -1171,6 +1232,10 @@
       "send_with": {
         "enter": "Enter",
         "mod_enter": "{key}"
+      },
+      "follow_up": {
+        "queue": "排队",
+        "steer": "引导"
       }
     },
     "search": {
@@ -2599,7 +2664,8 @@
         "shell_close": "关闭",
         "shell_reload": "重新启动 Zeron",
         "shell_reload_interface": "重新加载界面",
-        "shell_random_wallpaper": "随机壁纸"
+        "shell_random_wallpaper": "随机壁纸",
+        "chat_side_chat": "侧边对话"
       },
       "group": {
         "sessions": "会话",
@@ -2981,7 +3047,13 @@
       "untitled": "未命名对话"
     },
     "invocations": {
-      "couldnt_list": "无法列出命令"
+      "couldnt_list": "无法列出命令",
+      "commands_failed": "无法加载此智能体的命令",
+      "skills_failed": "无法加载此智能体的技能",
+      "commands_outdated": "命令需要所选设备上更新的引擎。更新后请重启该设备上的 Zeron。",
+      "skills_outdated": "技能需要所选设备上更新的引擎。更新后请重启该设备上的 Zeron。",
+      "unreachable": "无法连接会话所在的设备",
+      "no_connection": "发现智能体命令需要连接"
     },
     "reply_images": {
       "couldnt_read": "无法读取"
@@ -3028,7 +3100,7 @@
     },
     "composer": {
       "account_not_switched": "无法切换账号",
-      "placeholder": "随便问，用 @ 提及…",
+      "placeholder": "想做什么都可以…",
       "comments": "{n, plural, other {# 条评论}}",
       "edit_conflict": "队列中的消息已更改：你的编辑未保存",
       "edit_not_saved": "你的编辑未保存",
@@ -3042,7 +3114,69 @@
       "edit_unavailable": "暂时无法编辑该消息",
       "couldnt_stop_task": "无法停止该进程",
       "commands_or_skills": "命令或技能",
-      "drop_to_mention": "松开以提及"
+      "drop_to_mention": "松开以提及",
+      "no_project_placeholder": "在想什么？",
+      "engine_not_connected": "引擎未连接",
+      "compact_in_progress": "正在压缩",
+      "compact_wait_turn": "请等待当前回合结束",
+      "compact_needs_chat": "请先开始对话，再压缩其上下文。",
+      "sidechat_needs_chat": "请先开始对话，再打开侧边对话。",
+      "too_large_remote": "附件太大，无法发送到另一台设备（最大 24 MB）。",
+      "linked_elsewhere": "{name} 太大，无法发送到另一台设备（最大 24 MB）。",
+      "too_large": "附件太大（最大 24 MB）。",
+      "unreadable": "无法读取附件。",
+      "upload_failed": "无法上传附件，设备可能已离线。",
+      "stop_failed": "停止失败：{why}",
+      "access_only": "{name} 无法在操作前询问，因此始终以 {mode} 运行。",
+      "terminal_only": "只能在 Claude Code 的终端中运行",
+      "limit": {
+        "reached": "{name} 已达到用量上限。",
+        "resets": "{at}重置。",
+        "unknown": "重置时间未知。",
+        "waiting": "正在等待 {name} 在{at}重置。",
+        "switch_to": "切换到 {model}",
+        "switch": "切换模型",
+        "wait": "等待重置",
+        "cancel": "取消",
+        "agent": "智能体",
+        "at": "于 {time} "
+      },
+      "footer": {
+        "cloud": "云端",
+        "local": "本地检出",
+        "worktree": "工作树",
+        "worktree_folder": "工作树 · {folder}",
+        "detached": "游离",
+        "ahead_one": "有 1 个提交不在 {base} 中",
+        "ahead": "有 {n} 个提交不在 {base} 中",
+        "merged": "已在 {base} 中",
+        "merged_dirty_one": "已在 {base} 中，1 个文件未提交",
+        "merged_dirty": "已在 {base} 中，{n} 个文件未提交",
+        "no_worktree": "{name} 没有工作树",
+        "no_refs": "未找到引用。",
+        "search_refs": "搜索引用…",
+        "section_worktrees": "工作树",
+        "section_branches": "分支",
+        "main_checkout": "主检出",
+        "base_fallback": "基础分支"
+      },
+      "expired": "已于 24 小时后过期。请新建侧边对话继续。",
+      "steer_queues": "此智能体无法在回合中途引导。你的消息会加入队列，并在当前回合结束时发送。",
+      "queue_gone": "该消息已离开队列",
+      "queue_remove_failed": "无法移除该消息",
+      "queue_send_failed": "无法发送该消息：{err}",
+      "queue_reorder_failed": "无法调整队列顺序：{err}",
+      "paste_too_large": "粘贴的文本过大（最大 24 MB）。",
+      "not_a_file": "{name} 不是文件。",
+      "self_mention": "这是当前打开的会话，不能提及自身。",
+      "file_unreadable": "无法读取 {name}。",
+      "credits_out": "云端额度已用完。请添加额度后再发送。",
+      "credits_add": "添加额度",
+      "credits_tip": "云端额度已用完"
+    },
+    "completions": {
+      "search_failed": "文件搜索失败",
+      "search_outdated": "会话所在设备的 Zeron 版本较旧，请更新后再搜索其文件"
     }
   },
   "sidecar": {
@@ -3076,7 +3210,7 @@
     "kind": {
       "agent": "智能体",
       "fork": "分叉",
-      "side_chat": "旁聊"
+      "side_chat": "侧边对话"
     },
     "elapsed": {
       "s": "{n}秒",

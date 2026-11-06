@@ -167,6 +167,16 @@ end
 -- so this module needs no panel to load.
 M.opener = nil :: ((session: string, lane: { kind: string, id: string, title: string, data: any? }) -> ())?
 
+-- Whether a side chat of the session has a tab: the panel's, as `opener`.
+M.side_tab_open = nil :: ((session: string) -> boolean)?
+
+-- The panel closed if a side chat's tab is what it shows: whether it was.
+M.hide_side = nil :: ((session: string) -> boolean)?
+
+-- The side chat's composer takes the keys now, if gpui's `typing_target`
+-- would pick it: the keyboard left in the panel, or the panel expanded.
+M.take_keys = nil :: ((session: string) -> boolean)?
+
 function M.open(session: string, lane: { kind: string, id: string, title: string, data: any? })
 	local opener = M.opener
 	if opener then
@@ -208,6 +218,41 @@ function M.new_side_chat(session: string?, at: { project: string?, device: strin
 	end
 	set_in(M.unsent, id, session)
 	M.open(session, { kind = "side_chat", id = id, title = locale.s("chat.lanes.new_side_chat") })
+end
+
+-- A side chat of `session`: a bare ask toggles one that's showing, else opens
+-- the newest still live, else a new one; with words, always a new one, sent them.
+-- `shown_in`: the session whose panel it opens in, when that isn't `session`'s
+-- (one asked for from a side chat's own composer).
+function M.open_side(session: string, prompt: string?, shown_in: string?)
+	if prompt and prompt ~= "" then
+		local made = M.new_id()
+		set_in(M.unsent, made, session)
+		M.open(shown_in or session, { kind = "side_chat", id = made, title = locale.s("chat.lanes.new_side_chat") })
+		M.send_first(made, prompt)
+		return
+	end
+	if M.hide_side and M.hide_side(shown_in or session) then
+		return
+	end
+	local now = os.time()
+	local newest: any = nil
+	for _, c in M.side(session) do
+		if (c.kind == nil or c.kind == "side_chat") and (c.expires == nil or c.expires > now) then
+			if not newest or (c.created or 0) > (newest.created or 0) then
+				newest = c
+			end
+		end
+	end
+	if newest then
+		M.open(shown_in or session, { kind = "side_chat", id = newest.id, title = newest.title })
+	elseif shown_in then
+		local id = M.new_id()
+		set_in(M.unsent, id, session)
+		M.open(shown_in, { kind = "side_chat", id = id, title = locale.s("chat.lanes.new_side_chat") })
+	else
+		M.new_side_chat(session)
+	end
 end
 
 -- A side chat's first message: the chat made, then the message sent to it

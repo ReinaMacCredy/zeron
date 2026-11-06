@@ -217,6 +217,23 @@ test("a queued message edits in the composer and saves, the draft put back", fun
 	expect(app:text('role:textbox "Message"')).to_be("My own draft")
 end)
 
+test("Enter saving a queued row brings back the draft set aside, as Save does", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s1")
+	app:type('role:textbox "Message"', "My own draft")
+	app:command("queue_one")
+	settle(app)
+	app:hover('role:listitem "1. Queued words"')
+	settle(app)
+	app:click('role:button "Edit"')
+	settle(app)
+	app:key("Enter")
+	settle(app)
+	expect(app:state("calls")).to_contain("queue_finish:s1:q1:commit:Queued words")
+	expect(app:text('role:textbox "Message"')).to_be("My own draft")
+end)
+
 test("opening a session never hands it the new chat's model", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
@@ -621,12 +638,11 @@ test("a project's picture shows as one when the project is on this computer", fu
 		end
 	end
 	expect(here ~= nil and far ~= nil).to_be(true)
-	-- The picture chip is the thumbnail's size (56 wide); the file chip a
-	-- row with its name (wider).
+	-- The picture is a tile of 120; the other a file's tile of 56.
 	local w_here = tonumber(string.match(here :: string, " %-?%d+,%-?%d+ (%d+)x%d+"))
 	local w_far = tonumber(string.match(far :: string, " %-?%d+,%-?%d+ (%d+)x%d+"))
-	expect(w_here).to_be(56)
-	expect((w_far or 0) > 56).to_be(true)
+	expect(w_here).to_be(120)
+	expect(w_far).to_be(56)
 	expect(app:error()).to_be(nil)
 end)
 
@@ -721,10 +737,10 @@ test("a dropped GIF or HEIC is a file chip, with no script error", function()
 		end
 		return 0
 	end
-	-- A picture chip is the thumbnail's 56 wide; a file chip, a wider row.
-	expect(chip_w("zgx.png")).to_be(56)
-	expect(chip_w("spin.gif") > 56).to_be(true)
-	expect(chip_w("photo.heic") > 56).to_be(true)
+	-- A picture is a tile of 120; a file's is 56.
+	expect(chip_w("zgx.png")).to_be(120)
+	expect(chip_w("spin.gif")).to_be(56)
+	expect(chip_w("photo.heic")).to_be(56)
 	expect(app:error()).to_be(nil)
 end)
 
@@ -737,8 +753,7 @@ test("review comments go with the message as Zeron's block", function()
 	open(app, "s2")
 	app:command("leave_comments")
 	settle(app)
-	expect(app:has('#chat-composer >> ~"app.rs:12"')).to_be(true)
-	expect(app:has('#chat-composer >> ~"guide.md:3"')).to_be(true)
+	expect(app:has('#chat-composer >> role:button ~"2 comments"')).to_be(true)
 	app:click('role:textbox "Message"')
 	app:key("Enter")
 	settle(app)
@@ -777,7 +792,7 @@ end)
 -- An existing chat's footer says where it works, live, and opens nothing:
 -- the branch git has checked out in its folder (not the one the chat began
 -- on), with a worktree's icon. Only a new chat picks where to work.
-test("a chat's footer shows its own branch, fixed, not the new chat's picker", function()
+test("a chat's footer says where it works and opens its own branch list, not the new chat's picker", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
 	app:command("go_s2")
@@ -786,11 +801,12 @@ test("a chat's footer shows its own branch, fixed, not the new chat's picker", f
 	app:frames(30)
 	expect(app:state("calls")).to_contain("refs:/tmp/atlas-wt/pr:here")
 	expect(app:wait('~"zeron/readme-pr"', { timeout_ms = 2000 })).to_be(true)
-	-- A worktree's glyph, its project's name before it.
+	-- A worktree's glyph and word (the folder's name once the engine says it's attributed).
 	expect(app:has("#composer-place-lead >> .place-lead-worktree")).to_be(true)
-	expect(app:text("#composer-place-project[1]")).to_be("Atlas")
-	-- No picker: nothing called Branch to open.
+	expect(app:text("#composer-place-label[1]")).to_be("Worktree")
+	-- Its own list, not the new chat's picker.
 	expect(app:has('role:button "Branch"')).to_be(false)
+	expect(app:has("#composer-session-branch")).to_be(true)
 	-- A new chat still has it.
 	app:command("go_home")
 	app:frames(30)

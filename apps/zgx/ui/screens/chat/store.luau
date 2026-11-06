@@ -180,6 +180,12 @@ function M.interrupt(id: string)
 	quietly(ui.call("chat.interrupt", id))
 end
 
+-- The same, a promise: Stop says why it couldn't. (The turn alone: an agent's
+-- sub-agents and background shells go on.)
+function M.stop(id: string): any
+	return ui.call("chat.interrupt", id)
+end
+
 function M.approve(id: string, request: string, scope: string)
 	quietly(ui.call("chat.respond", { id = id, request = request, decision = scope }))
 end
@@ -222,10 +228,14 @@ function M.queue_finish(id: string, item: string, action: string, text: string?)
 	return ui.call("chat.queue_finish", { id = id, item = item, action = action, text = text })
 end
 
-function M.queue(id: string, op: { [string]: any })
+function M.queue(id: string, op: { [string]: any }): any
 	local args = table.clone(op)
 	args.id = id
-	quietly(ui.call("chat.queue", args))
+	return ui.call("chat.queue", args)
+end
+
+function M.steer_all(id: string, items: { string }, message_id: string): any
+	return ui.call("chat.steer_all", { id = id, items = items, message_id = message_id })
 end
 
 -- Words put into the composer's draft (a plugin's `zeron.compose.insert`,
@@ -273,6 +283,10 @@ function M.escape(): boolean
 	end
 	M.interrupt(s.id)
 	return true
+end
+
+function M.set_work_tree(id: string, path: string?): any
+	return ui.call("chat.set_work_tree", { id = id, path = path })
 end
 
 return M

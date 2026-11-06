@@ -629,7 +629,10 @@
       "plan": {
         "mode": "Plan mode",
         "hint": "Explore and propose a plan before changing anything.",
-        "short": "Plan"
+        "short": "Plan",
+        "start": "Start plan",
+        "tip": "Plan: the agent writes a plan and changes nothing (⇧Tab)",
+        "tip_asks": "Plan first: the agent plans and waits for your OK (⇧Tab)"
       },
       "checkout": {
         "label": "Checkout",
@@ -671,14 +674,17 @@
         "answer_picked": "Type your own answer, or leave this blank to use the selected option",
         "answer": "Type your own answer, or pick an option above",
         "instead": "Or say what to do instead…",
-        "default": "Do anything…"
+        "default": "Do anything…",
+        "plan": "Describe the goal. The agent writes a plan and changes nothing.",
+        "plan_asks": "Describe the goal. The agent writes a plan and waits for your OK."
       },
       "message": "Message",
       "branch": {
         "label": "Branch",
         "no_ref": "No ref",
         "search": "Search branches…",
-        "fixed": "Branch {name}"
+        "fixed": "Branch {name}",
+        "showing": "Showing {shown} of {total} refs"
       },
       "context": {
         "heading": "Context window",
@@ -690,7 +696,14 @@
         "capacity": "{n} token capacity",
         "waiting": "Waiting for context usage",
         "unreported": "Context usage not reported by this agent yet"
-      }
+      },
+      "resume": "Resume",
+      "side_chat": "Side chat",
+      "side_chat_tip": "Side chat (/btw): ask on the side, opens in the right pane",
+      "footer_removed": "· removed",
+      "notice_error": "Error",
+      "notice_warning": "Warning",
+      "notice_copy": "Copy message"
     },
     "markdown": {
       "fit_content": "Fit content",
@@ -778,7 +791,8 @@
       "continued_from": "Continued from {title}",
       "context_handoff": "Context handoff",
       "secret_requested": "Secret requested: {title}",
-      "awaiting_answer": "{title}: awaiting your answer"
+      "awaiting_answer": "{title}: awaiting your answer",
+      "resumed": "Resumed"
     },
     "user_message": {
       "open_named": "Open {name}",
@@ -843,7 +857,18 @@
       "show_more": "Show {n} more attachments",
       "show_less": "Show less",
       "more": "+{n} more",
-      "comment_from": "From {plugin}"
+      "comment_from": "From {plugin}",
+      "pasted_tip": "Click to show in text field",
+      "linked_tip": "Linked, not copied: {path}",
+      "captured_app": "Captured app",
+      "remove_appshot": "Remove Appshot from {app}",
+      "preview_appshot": "Preview Appshot from {app}",
+      "comment_one": "1 comment",
+      "comment_many": "{n} comments",
+      "comments_show": "{label}, show list",
+      "comment_remove": "Remove comment {text}",
+      "comments_clear": "Clear all",
+      "comments_clear_named": "Clear all comments"
     },
     "composer_dock": {
       "fold": "Fold {title}",
@@ -852,16 +877,15 @@
       "send_now": "Send now",
       "steer": "Steer",
       "send_next": "Send next",
-      "send_now_hint": "Send now, interrupting the turn",
-      "steer_hint": "Steer: a word to the agent mid-turn",
-      "send_next_hint": "Send at the next turn",
-      "hint_last": "{what} · {key}",
+      "send_now_hint": "Send now (interrupt)",
+      "steer_hint": "Steer (keep current work running)",
+      "send_next_hint": "Send at the next turn (this agent cannot steer mid-turn)",
       "save_to_queue": "Save to queue",
       "cancel": "Cancel",
       "edit": "Edit",
       "remove": "Remove",
       "editing": "Editing in composer",
-      "show_steps": "Show {n} {later, select, true {later} other {earlier}} steps",
+      "show_steps": "{open, select, true {Hide} other {Show}} {n} {later, select, true {later} other {earlier}} items",
       "steps": "{n} {later, select, true {later} other {earlier}}",
       "stop_named": "Stop {name}",
       "stop": "Stop",
@@ -874,7 +898,20 @@
       "stop_all": "Stop all",
       "running": "Running",
       "queued_messages": "Queued messages",
-      "queued": "Queued"
+      "queued": "Queued",
+      "waiting_hint": "Waiting for provider capabilities",
+      "steer_all": "Steer all",
+      "steer_all_hint": "Steer every queued message as one, numbered",
+      "removing": "Removing…",
+      "saving": "Saving…",
+      "needs_review": "Needs review",
+      "attached_images": "See the attached image(s).",
+      "attached_files": "See the attached file(s).",
+      "after_compaction": "Sends after compaction",
+      "rest_label": "{tooltip}; edit message to view all",
+      "open_named": "Open {name}",
+      "todo_collapse": "Collapse todo list",
+      "todo_expand": "Expand todo list"
     },
     "composer_mentions": {
       "files": "Files",
@@ -886,7 +923,16 @@
         "skills": "skills"
       },
       "none_available": "No {what} available",
-      "none_matching": "No matching {what}"
+      "none_matching": "No matching {what}",
+      "empty": {
+        "commands": "No slash commands available in this integration",
+        "skills": "No skills available for this project",
+        "files": "No files available",
+        "files_matching": "No matching files, threads or tasks"
+      },
+      "attached_image": "Attached image",
+      "attached_file": "Attached file",
+      "terminal": "Terminal"
     },
     "model_picker": {
       "starred": "Starred",
@@ -1086,6 +1132,15 @@
       "cut": "Cut",
       "paste": "Paste",
       "label": "Text"
+    },
+    "pasted_text": {
+      "viewer": "Pasted text",
+      "title": "Pasted text {n}",
+      "failed": "Couldn't load the pasted text",
+      "loading": "Loading…",
+      "one_line": "1 line",
+      "lines": "{n} lines",
+      "close": "Close"
     }
   },
   "settings": {
@@ -1157,6 +1212,12 @@
         "terms": "co-author coauthor attribution bot commit message",
         "cloud": "Always on for Cloud",
         "on": "Agents' commits add zeronsh[bot] as a co-author"
+      },
+      "follow_up": {
+        "label": "Follow-up behavior",
+        "terms": "follow-up queue steer running agent message",
+        "description": "Queue follow-ups while the agent runs, or steer the current run. Press {key} to do the opposite for one message.",
+        "description_send_key": "Queue follow-ups while the agent runs, or steer the current run. {key} is the send key, so every message follows this setting."
       }
     },
     "engine": {
@@ -1171,6 +1232,10 @@
       "send_with": {
         "enter": "Enter",
         "mod_enter": "{key}"
+      },
+      "follow_up": {
+        "queue": "Queue",
+        "steer": "Steer"
       }
     },
     "search": {
@@ -2599,7 +2664,8 @@
         "shell_close": "Close",
         "shell_reload": "Reload Zeron",
         "shell_reload_interface": "Reload interface",
-        "shell_random_wallpaper": "Random wallpaper"
+        "shell_random_wallpaper": "Random wallpaper",
+        "chat_side_chat": "Side chat"
       },
       "group": {
         "sessions": "Sessions",
@@ -2981,7 +3047,13 @@
       "untitled": "Untitled chat"
     },
     "invocations": {
-      "couldnt_list": "Commands couldn't be listed"
+      "couldnt_list": "Commands couldn't be listed",
+      "commands_failed": "Couldn't load this agent's commands",
+      "skills_failed": "Couldn't load this agent's skills",
+      "commands_outdated": "Commands require an updated engine on the selected device. Restart that device’s Zeron after updating.",
+      "skills_outdated": "Skills require an updated engine on the selected device. Restart that device’s Zeron after updating.",
+      "unreachable": "The session's device is unreachable",
+      "no_connection": "Agent command discovery requires a connection"
     },
     "reply_images": {
       "couldnt_read": "Couldn't be read"
@@ -3028,7 +3100,7 @@
     },
     "composer": {
       "account_not_switched": "Couldn't switch accounts",
-      "placeholder": "Ask anything, @ to mention…",
+      "placeholder": "Do anything…",
       "comments": "{n, plural, one {# comment} other {# comments}}",
       "edit_conflict": "The queued message changed meanwhile: your edit wasn't saved",
       "edit_not_saved": "Your edit wasn't saved",
@@ -3042,7 +3114,69 @@
       "edit_unavailable": "That message can't be edited now",
       "couldnt_stop_task": "Couldn't stop that process",
       "commands_or_skills": "commands or skills",
-      "drop_to_mention": "Drop to mention"
+      "drop_to_mention": "Drop to mention",
+      "no_project_placeholder": "What's on your mind?",
+      "engine_not_connected": "Engine not connected",
+      "compact_in_progress": "Compaction in progress",
+      "compact_wait_turn": "Wait for the current turn to finish",
+      "compact_needs_chat": "Start a chat before compacting its context.",
+      "sidechat_needs_chat": "Start a chat before opening a sidechat.",
+      "too_large_remote": "An attachment is too large to send to another device (24 MB max).",
+      "linked_elsewhere": "{name} is too large to send to another device (24 MB max).",
+      "too_large": "An attachment is too large (24 MB max).",
+      "unreadable": "An attachment could not be read.",
+      "upload_failed": "Couldn't upload the attachment — the device may be offline.",
+      "stop_failed": "Stop failed: {why}",
+      "access_only": "{name} can't ask before acting, so it always runs with {mode}.",
+      "terminal_only": "Runs only in Claude Code's terminal",
+      "limit": {
+        "reached": "{name} usage limit reached.",
+        "resets": "Resets {at}.",
+        "unknown": "Reset time unknown.",
+        "waiting": "Waiting for the {name} reset {at}.",
+        "switch_to": "Switch to {model}",
+        "switch": "Switch model",
+        "wait": "Wait for reset",
+        "cancel": "Cancel",
+        "agent": "The agent",
+        "at": "at {time}"
+      },
+      "footer": {
+        "cloud": "Cloud",
+        "local": "Local checkout",
+        "worktree": "Worktree",
+        "worktree_folder": "Worktree · {folder}",
+        "detached": "Detached",
+        "ahead_one": "1 commit not in {base}",
+        "ahead": "{n} commits not in {base}",
+        "merged": "In {base}",
+        "merged_dirty_one": "In {base}, 1 uncommitted file",
+        "merged_dirty": "In {base}, {n} uncommitted files",
+        "no_worktree": "No worktree for {name}",
+        "no_refs": "No refs found.",
+        "search_refs": "Search refs…",
+        "section_worktrees": "Worktrees",
+        "section_branches": "Branches",
+        "main_checkout": "main checkout",
+        "base_fallback": "the base branch"
+      },
+      "expired": "Expired after 24 hours. Create a new sidechat to continue.",
+      "steer_queues": "This agent can't be steered mid-turn. Your message will be queued and sent when the current turn finishes.",
+      "queue_gone": "That message had already left the queue",
+      "queue_remove_failed": "Couldn't remove the message",
+      "queue_send_failed": "Couldn't send that message: {err}",
+      "queue_reorder_failed": "Couldn't reorder the queue: {err}",
+      "paste_too_large": "The pasted text is too large (24 MB max).",
+      "not_a_file": "{name} is not a file.",
+      "self_mention": "This is the open thread; it can't mention itself.",
+      "file_unreadable": "{name} could not be read.",
+      "credits_out": "You're out of Cloud credits. Add credits to send.",
+      "credits_add": "Add credits",
+      "credits_tip": "Out of Cloud credits"
+    },
+    "completions": {
+      "search_failed": "File search failed",
+      "search_outdated": "The session's device runs an older zeron — update it to search its files"
     }
   },
   "sidecar": {

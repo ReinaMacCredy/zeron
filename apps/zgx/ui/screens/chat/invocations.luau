@@ -18,8 +18,17 @@
 
 local M = {}
 
-export type Row = { kind: "command" | "skill", name: string, label: string, detail: string, link: string }
-export type Catalog = { state: "loading" | "ready" | "failed", rows: { Row }, warning: string?, error: string? }
+export type Row = {
+	kind: "command" | "skill",
+	name: string,
+	label: string,
+	detail: string,
+	link: string,
+	plain: boolean?,
+	blocked: string?,
+	terminal_only: boolean?,
+}
+export type Catalog = { state: "loading" | "ready" | "failed", rows: { Row }, failed: string?, why: string?, warning: string? }
 export type Target = { chat: string?, space: string?, device: string?, path: string? }
 
 -- Every list, by `harness|device|place`.
@@ -49,6 +58,19 @@ local function put(key: string, catalog: Catalog)
 	CATALOGS:set(now)
 end
 
+local function reason(err: any): string
+	local said = string.lower(tostring(if type(err) == "table" then err.message else err))
+	if string.find(said, "unknown method", 1, true) then
+		return "outdated"
+	end
+	for _, word in { "offline", "transport", "closed", "unreachable", "connect" } do
+		if string.find(said, word, 1, true) then
+			return "unreachable"
+		end
+	end
+	return "other"
+end
+
 -- Reads the list for `harness` at `target` (again, if it has been), the
 -- last one showing until it lands.
 function M.load(harness: string, target: Target)
@@ -60,17 +82,23 @@ function M.load(harness: string, target: Target)
 	if was and was.state == "loading" then
 		return
 	end
-	put(key, { state = "loading", rows = if was then was.rows else {}, warning = if was then was.warning else nil })
+	-- (Read again, a failure said before is said again only if it is again.)
+	put(key, { state = "loading", rows = if was then was.rows else {} })
 	local ok, promise = pcall(M.read, harness, target)
 	if not ok or not promise then
-		put(key, { state = "failed", rows = if was then was.rows else {}, error = ui.t("chat.invocations.couldnt_list"):get() })
+		put(key, { state = "failed", rows = if was then was.rows else {}, failed = "both", why = "no_connection" })
 		return
 	end
 	promise:after(function(got: any)
-		local rows = if type(got) == "table" and type(got.rows) == "table" then got.rows else {}
-		put(key, { state = "ready", rows = rows, warning = if type(got) == "table" then got.warning else nil })
+		local answer = if type(got) == "table" then got else {}
+		put(key, {
+			state = "ready",
+			rows = if type(answer.rows) == "table" then answer.rows else {},
+			failed = if type(answer.failed) == "string" then answer.failed else nil,
+			warning = if type(answer.warning) == "string" then answer.warning else nil,
+		})
 	end, function(err: any)
-		put(key, { state = "failed", rows = if was then was.rows else {}, error = tostring(err) })
+		put(key, { state = "failed", rows = if was then was.rows else {}, failed = "both", why = reason(err) })
 	end)
 end
 
@@ -90,18 +118,44 @@ function M.items(catalog: Catalog?, kind: "command" | "skill"): { any }?
 		return nil
 	end
 	local out = {}
+	local seen: { [string]: boolean } = {}
 	for _, r in catalog.rows do
-		if r.kind == kind then
+		if r.kind == kind and not seen[r.name] then
+			seen[r.name] = true
 			table.insert(out, {
 				value = r.name,
+				key = `{kind}:{r.name}`,
 				label = r.label,
-				detail = if r.detail ~= "" then r.detail else nil,
+				detail = r.blocked or (if r.detail ~= "" then r.detail else nil),
 				icon = if kind == "skill" then "magic-stick" else "command",
-				link = r.link,
+				link = if r.plain then nil else r.link,
+				blocked = r.blocked,
+				terminal_only = r.terminal_only,
 			})
 		end
 	end
 	return out
+end
+
+function M.failed(catalog: Catalog?, kind: "command" | "skill"): string?
+	if not catalog then
+		return nil
+	end
+	if not catalog.failed then
+		return catalog.warning
+	end
+	if catalog.failed ~= "both" and catalog.failed ~= `{kind}s` then
+		return nil
+	end
+	local why = catalog.why
+	if why == "unreachable" then
+		return ui.t("chat.invocations.unreachable"):get()
+	elseif why == "no_connection" then
+		return ui.t("chat.invocations.no_connection"):get()
+	elseif why == "outdated" then
+		return ui.t(if kind == "command" then "chat.invocations.commands_outdated" else "chat.invocations.skills_outdated"):get()
+	end
+	return ui.t(if kind == "command" then "chat.invocations.commands_failed" else "chat.invocations.skills_failed"):get()
 end
 
 -- A row picked (the composer's `on_mention`: the item, then the trigger it

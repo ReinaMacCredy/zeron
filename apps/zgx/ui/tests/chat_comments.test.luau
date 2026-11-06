@@ -1,20 +1,24 @@
 -- A review comment left from the files pane (screens/files/comments calls
--- `shared.attach_comment { path, line, body, root }`): a chip naming its
--- file and line, following it when edits carry it, sent as Zeron's review
--- comments block citing the file within the project.
+-- `shared.attach_comment { path, line, body, root }`): a row of the badge's
+-- menu naming its file and line, following it when edits carry it, sent as
+-- Zeron's review comments block citing the file within the project.
 
-test("a comment from the files pane is a chip at its line, follows a move, and is sent as the review block", function()
+test("a comment from the files pane is listed at its line, follows a move, and is sent as the review block", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
 	app:command("go_s2")
 	app:frames(30)
 	app:command("comment_from_files")
 	app:frames(30)
+	app:click('#chat-composer >> role:button ~"1 comment"')
+	app:frames(30)
 	expect(app:has('~"app.rs:12"')).to_be(true)
 	app:command("comment_moves")
 	app:frames(30)
 	expect(app:has('~"app.rs:14"')).to_be(true)
 	expect(app:has('~"app.rs:12"')).to_be(false)
+	app:key("Escape")
+	app:frames(30)
 	app:type("role:textbox", "Please fix")
 	app:key("Enter")
 	app:frames(30)
@@ -23,28 +27,30 @@ test("a comment from the files pane is a chip at its line, follows a move, and i
 end)
 
 -- Comments a plugin left on a diff (Git's Changes: `zeron.compose_comment`,
--- handed on by screens/plugins): chips naming their file and lines, told
--- back to the plugin while they're carried, gone from it when taken off,
+-- handed on by screens/plugins): rows of the badge's menu naming their file
+-- and lines, told back to the plugin while they're carried, gone from it when taken off,
 -- and sent as Zeron's diff comments block (production's
 -- COMMENT_BLOCK_HEADER): each its file, its lines, its side, its note, the
 -- code under it.
-test("a plugin's comments on a diff are chips, told back while carried, and sent with their file, lines, side and code", function()
+test("a plugin's comments on a diff are listed, told back while carried, and sent with their file, lines, side and code", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
 	app:command("go_s2")
 	app:frames(30)
 	app:command("plugin_diff_comments")
 	app:frames(30)
-	expect(app:has('#chat-composer >> ~"graph.rs:10–12"')).to_be(true)
-	expect(app:has('#chat-composer >> ~"old.rs:4"')).to_be(true)
+	app:click('#chat-composer >> role:button ~"2 comments"')
+	app:frames(30)
+	expect(app:has('~"graph.rs:10–12"')).to_be(true)
+	expect(app:has('~"old.rs:4"')).to_be(true)
 	expect(app:state("test_plugin_comments")).to_be("k1@s2,k2@s2")
 	-- Taken off: no longer the plugin's to mark.
-	app:hover('#chat-composer >> ~"old.rs:4"')
-	app:frames(10)
-	app:click('role:button ~"Remove old.rs:4"')
+	app:click('role:button "Remove comment Why did this go?"')
 	app:frames(30)
-	expect(app:has('#chat-composer >> ~"old.rs:4"')).to_be(false)
+	expect(app:has('~"old.rs:4"')).to_be(false)
 	expect(app:state("test_plugin_comments")).to_be("k1@s2")
+	app:key("Escape")
+	app:frames(30)
 	app:click('role:textbox "Message"')
 	app:key("Enter")
 	app:frames(30)

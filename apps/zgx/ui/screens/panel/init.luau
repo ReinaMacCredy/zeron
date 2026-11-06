@@ -88,6 +88,17 @@ do
 	end
 end
 
+-- Type to focus (screens/chat/typing), if it's there.
+local typing_keys: any = nil
+do
+	local ok, found = pcall(function()
+		return (require :: any)("@app/screens/chat/typing")
+	end)
+	if ok then
+		typing_keys = found
+	end
+end
+
 -- A terminal tab's view (its own module, loaded on its own: one that
 -- fails to load leaves the panel's file tabs working).
 -- What the panel uses of it (screens/panel/terminal's).
@@ -572,6 +583,43 @@ function M.open_lane_tab(session: string, lane: { kind: string, id: string, titl
 end
 if lanes_card then
 	lanes_card.opener = M.open_lane_tab
+	lanes_card.hide_side = function(session: string): boolean
+		local k = state.key(session, nil)
+		if not k or not panel_open() then
+			return false
+		end
+		local s = state.of(k)
+		for _, t in s.tabs do
+			if t.id == s.active and t.kind == "side_chat" then
+				set_panel(false)
+				return true
+			end
+		end
+		return false
+	end
+	lanes_card.take_keys = function(session: string): boolean
+		local k = state.key(session, nil)
+		if not k or not panel_open() then
+			return false
+		end
+		local expanded = shell_view ~= nil and shell_view.expanded ~= nil and shell_view.expanded:peek() == true
+		if focus_in ~= k and not expanded then
+			return false
+		end
+		local s = state.of(k)
+		return s.active ~= nil and state.take_keys_now(k, s.active)
+	end
+	lanes_card.side_tab_open = function(session: string): boolean
+		local k = state.key(session, nil)
+		if k then
+			for _, t in state.of(k).tabs do
+				if t.kind == "side_chat" then
+					return true
+				end
+			end
+		end
+		return false
+	end
 end
 
 -- What a tab's menu has after Close and its kin: a side chat's, the
@@ -1227,7 +1275,7 @@ M.Panel = ui.component(function(props: Props): Node
 	-- finds it as it was).
 	local function body(k: string, tab: Tab): Node
 		if (tab.kind == "side_chat" or tab.kind == "subagent") and Lanes then
-			return Lanes.Tab { tab = tab }
+			return Lanes.Tab { tab = tab, panel_key = k }
 		end
 		if tab.kind == "plugin" then
 			-- What its plugin fills, by selector (`.plugin-tab`): until then,
@@ -1461,6 +1509,9 @@ M.Panel = ui.component(function(props: Props): Node
 		end
 	end)
 	box.on_key = function(e): boolean?
+		if typing_keys then
+			typing_keys.through_control()
+		end
 		local k = key:peek()
 		if not k then
 			return nil

@@ -7,9 +7,11 @@
 //! What scripts see, per window:
 //!   `chat.session`   the open session: { id, state = "loading" | "ready" |
 //!                    "missing" | "offline", title, project, device, harness,
-//!                    model, effort, fast, access, plan, running, context,
-//!                    context_tokens?, context_window?, ask?, queue, todos,
-//!                    tasks }, nil for none
+//!                    model, effort, fast, access, plan, running, steers?,
+//!                    stopped, compacting, prediction?, limit?, work_tree?,
+//!                    context, context_tokens?, context_window?, ask?, queue
+//!                    (rows: { id, text, cargo?, review?, editing?, locked? }),
+//!                    todos, tasks }, nil for none
 //!   `chat.messages`  its transcript as ds/transcript's messages, keyed by id
 //!   `chat.draft`     the reply being written: { id, text }
 //! and for every window, `chat.catalog`: { state, harnesses, models } as
@@ -26,11 +28,20 @@
 //!   chat.open(id?) (an action)    watch that chat, the last one let go
 //!   chat.catalog (an action)      the models, looked up again
 //!   chat.send(req)                run a message, or queue it while a turn runs
+//!                                 (then its queued row's id)
 //!   chat.interrupt(id)
 //!   chat.respond({ id, request, decision = "once" | "always" | "deny" |
 //!                  "answer", values?, text? })
 //!   chat.configure({ id, model?, effort?, fast?, access?, plan? })
 //!   chat.queue({ id, op = "remove" | "send" | "move", item, to? })
+//!                                 ("gone": the row had left the queue)
+//!   chat.steer_all({ id, items, message_id })
+//!   chat.limit({ id, op = "switch" | "wait" | "arm" | "cancel" })
+//!   chat.compact({ id, focus? })  (rejects with the reason, in words)
+//!   chat.set_work_tree({ id, path? })
+//!   chat.prediction_consume({ id })
+//!   chat.read_text({ path, session? })  { text, lines }
+//!   chat.stat_files({ paths })    { { path, size, is_file, readable } }
 //!
 //! The wire (crates/rpc, crates/doc): `WatchDocMessages` (a reset, then
 //! deltas: upserts after an anchor, text appended to a part, removals, the
@@ -42,7 +53,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::{Rc, Weak},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -103,6 +114,9 @@ struct Chats {
     /// what it had rather than reading and building it all again.
     let_go: RefCell<Option<LetGo>>,
     let_go_turn: Cell<u64>,
+    compacting: RefCell<HashSet<String>>,
+    compaction_probed: RefCell<HashSet<String>>,
+    compaction_unsupported: RefCell<HashMap<String, String>>,
 }
 
 /// A transcript's entry. A settled one, built into its row and older than
@@ -216,6 +230,8 @@ struct View {
     /// A finished subagent's transcript, read whole from its uploaded blob
     /// (a lane's): nothing to watch while it stands.
     snapshot: Cell<bool>,
+    // Watching makes the engine predict for that chat, so only the window's selected chat does, as gpui's.
+    predicts: bool,
 }
 
 /// A prompt sent and not yet in the transcript: shown under it meanwhile,
@@ -231,10 +247,22 @@ struct Pending {
     command: Option<String>,
     /// When it was sent, as its hover strip says.
     at: Option<String>,
+    alias: Option<String>,
 }
 
 impl Pending {
     fn value(&self) -> Value {
+        // (Failed, it stays a prompt: its line to send it again is a prompt's.)
+        if self.waiting == "sending" && self.words.trim() == zeron_proto::RESUME_PROMPT {
+            return with_fields(
+                resumed_row(&self.id),
+                [
+                    ("waiting", Value::from(self.waiting)),
+                    ("here", Value::Bool(true)),
+                    ("at", self.at.as_deref().map_or(Value::Nil, Value::from)),
+                ],
+            );
+        }
         // (Its passages as chips, as the sent message shows them.)
         let (words, comments) = split_comments(&self.words);
         let (words, quotes) = split_quotes(&words);
@@ -305,6 +333,8 @@ struct Open {
     /// A queued message being edited here: its lease, held while the
     /// composer has its text.
     editing: Option<Lease>,
+    /// A prompt went and its turn hasn't been seen starting: its entry lands first on a slow session row.
+    awaiting_turn: std::cell::Cell<Option<std::time::Instant>>,
     watches: Vec<Watch>,
     /// Each entry as last published (nil: it shows nothing), by its id, and
     /// the model's name it was built with: a republish builds again only
@@ -326,6 +356,9 @@ struct Open {
     stepping: bool,
     /// This view is the one doing it (another view of the chat waits).
     builds: bool,
+    host_watched: bool,
+    prediction: Option<String>,
+    limit: Option<Json>,
 }
 
 pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
@@ -341,6 +374,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         open: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
+        predicts: true,
     });
     chats.views.borrow_mut().push(Rc::downgrade(&view));
     if chats.views.borrow().len() == 1 {
@@ -410,7 +444,16 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let pick = which.clone();
     host.async_action("chat.send", move |req| {
         let v = pick(&req);
-        async move { crate::plugins::preview::refuse("chat.send")?; v.send(req).await.map(|_| Value::Nil).map_err(String::from) }
+        async move {
+            crate::plugins::preview::refuse("chat.send")?;
+            // gpui: a failed send goes back to the draft and its echo goes, so Retry isn't a second way to send it.
+            let restored = req.field("restores").is_some_and(Value::truthy).then(|| req.field("message_id").map(text)).flatten();
+            let sent = v.send(req).await;
+            if sent.is_err() {
+                v.unshow(&restored);
+            }
+            sent.map(|queued| queued.map_or(Value::Nil, |id| Value::from(id.as_str()))).map_err(String::from)
+        }
     });
     host.async_action("chat.interrupt", move |id| async move {
         command(&text(&id), json!({ "kind": "interrupt" })).await?;
@@ -438,11 +481,40 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let access = args.field("access").is_some();
         async move { if access { crate::plugins::preview::refuse("chat.configure")?; } v.configure(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
-    let v = view.clone();
+    // Shown as the call is made: a chat on another device answers a round trip later.
+    let pick = which.clone();
     host.async_action("chat.queue", move |args| {
-        let v = v.clone();
-        async move { crate::plugins::preview::refuse("chat.queue")?; v.queue_op(args).await.map(|_| Value::Nil).map_err(String::from) }
+        let v = pick(&args);
+        let allowed = crate::plugins::preview::refuse("chat.queue");
+        let shown = if allowed.is_ok() { v.queue_shown(&args) } else { None };
+        async move { allowed?; v.queue_op(args, shown).await.map(|_| Value::Nil).map_err(String::from) }
     });
+    let pick = which.clone();
+    host.async_action("chat.steer_all", move |args| {
+        let v = pick(&args);
+        let allowed = crate::plugins::preview::refuse("chat.steer_all");
+        let shown = if allowed.is_ok() { v.steer_all_shown(&args) } else { None };
+        async move { allowed?; v.steer_all(args, shown).await.map(|_| Value::Nil).map_err(String::from) }
+    });
+    let pick = which.clone();
+    host.async_action("chat.prediction_consume", move |args| {
+        pick(&args).consume_prediction(&args);
+        async move { Ok::<Value, String>(Value::Nil) }
+    });
+    host.async_action("chat.limit", move |args| async move {
+        crate::plugins::preview::refuse("chat.limit")?;
+        limit_op(args).await.map_err(String::from)
+    });
+    host.async_action("chat.compact", move |args| async move {
+        crate::plugins::preview::refuse("chat.compact")?;
+        compact(args).await
+    });
+    host.async_action("chat.set_work_tree", move |args| async move {
+        crate::plugins::preview::refuse("chat.set_work_tree")?;
+        set_work_tree(args).await.map_err(String::from)
+    });
+    host.async_action("chat.read_text", move |args| async move { read_text(args).await.map_err(String::from) });
+    host.async_action("chat.stat_files", move |args| async move { stat_files(args).await.map_err(String::from) });
     let v = view.clone();
     host.async_action("chat.retry", move |args| {
         let v = v.clone();
@@ -492,6 +564,7 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
         open: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
+        predicts: false,
     });
     chats.views.borrow_mut().push(Rc::downgrade(&view));
     let weak = Rc::downgrade(&view);
@@ -531,11 +604,19 @@ fn refs_value(found: &Json) -> Value {
                 if let Some(path) = r["worktreePath"].as_str() {
                     fields.push(("worktree", Value::from(path)));
                 }
+                let (state, commits) = work_tree_state(&r["workTreeState"]);
+                fields.push(("state", state.map_or(Value::Nil, Value::from)));
+                fields.push(("commits", Value::Num(commits)));
+                fields.push(("dirty", Value::Num(r["dirtyFiles"].as_f64().unwrap_or(0.))));
                 Value::record(fields)
             })
             .collect::<Vec<_>>()
             .into(),
     )
+}
+
+fn work_tree_state(state: &Json) -> (Option<&str>, f64) {
+    (state["kind"].as_str(), state["commits"].as_f64().unwrap_or(0.))
 }
 
 // -- every window's -----------------------------------------------------------
@@ -583,6 +664,9 @@ impl Chats {
             }
             *me.chats.borrow_mut() = by;
             me.chats_heard.set(true);
+            for view in me.views() {
+                view.watch_host();
+            }
             me.publish_views();
         }));
         *self.watches.borrow_mut() = watches;
@@ -761,6 +845,10 @@ impl Chats {
             .collect();
         crate::agents::remember_icons(&harnesses);
         *self.harnesses.borrow_mut() = harnesses;
+        for id in &ids {
+            let (me, id) = (self.clone(), id.clone());
+            engine::get().spawn(async move { me.probe_compaction(&id, None).await });
+        }
         if !again {
             self.models.borrow_mut().retain(|id, _| ids.contains(id));
         }
@@ -859,6 +947,10 @@ impl Chats {
             r.harnesses = harnesses;
             r.ready = ids.is_empty();
         }
+        for id in &ids {
+            let (me, id, device) = (self.clone(), id.clone(), device.clone());
+            engine::get().spawn(async move { me.probe_compaction(&id, Some(&device)).await });
+        }
         self.publish_catalog();
         let left = Rc::new(Cell::new(ids.len()));
         for id in ids {
@@ -886,15 +978,43 @@ impl Chats {
         }
     }
 
+    // The engine resolves this without an instance, so `acp` would always fail and be asked again.
+    async fn probe_compaction(self: &Rc<Self>, harness: &str, device: Option<&str>) {
+        let Ok(id) = serde_json::from_value::<zeron_proto::HarnessId>(json!(harness)) else { return };
+        if id == zeron_proto::HarnessId::Acp || !self.compaction_probed.borrow_mut().insert(harness.to_owned()) {
+            return;
+        }
+        let mut params = json!({ "harness": harness });
+        if let Some(device) = device {
+            params["targetDeviceId"] = json!(device);
+        }
+        let answer = engine::get()
+            .call("HarnessCompaction", params)
+            .await
+            .ok()
+            .and_then(|a| serde_json::from_value::<zeron_proto::HarnessCompactionResult>(a).ok());
+        let Some(answer) = answer else {
+            self.compaction_probed.borrow_mut().remove(harness);
+            return;
+        };
+        if answer.compaction == zeron_proto::CompactionKind::None {
+            let reason = zeron_proto::command_catalog::compaction_unsupported(id);
+            self.compaction_unsupported.borrow_mut().insert(harness.to_owned(), reason);
+            self.publish_catalog();
+        }
+    }
+
     fn catalog_value(&self) -> Value {
+        let unsupported = self.compaction_unsupported.borrow();
         if let Some(r) = self.remote.borrow().as_ref() {
-            return catalog_of(&r.harnesses, &r.models, r.ready, Some(&r.device));
+            return catalog_of(&r.harnesses, &r.models, r.ready, Some(&r.device), &unsupported);
         }
         catalog_of(
             &self.harnesses.borrow(),
             &self.models.borrow(),
             self.catalog_state.get() == CatalogState::Ready,
             None,
+            &unsupported,
         )
     }
 
@@ -919,6 +1039,11 @@ impl Chats {
         live && !stale(&s["updatedAt"])
     }
 
+    fn chat_compacting(&self, id: &str) -> bool {
+        self.compacting.borrow().contains(id)
+            || self.sessions.borrow().get(id).is_some_and(|s| s["compacting"].as_bool() == Some(true))
+    }
+
     fn label_of(&self, harness: &str, model: &str) -> Option<String> {
         let find = |by: &HashMap<String, Vec<Json>>| {
             by.get(harness)?
@@ -930,12 +1055,21 @@ impl Chats {
         find(&self.models.borrow()).or_else(|| self.remote.borrow().as_ref().and_then(|r| find(&r.models)))
     }
 
-    fn steers(&self, harness: &str) -> bool {
-        self.harnesses
-            .borrow()
-            .iter()
-            .find(|h| h["id"].as_str() == Some(harness))
-            .is_some_and(|h| h["supportsSteering"].as_bool() == Some(true))
+    fn steers_mid_turn(&self, harness: &str, device: Option<&str>) -> Option<bool> {
+        let read = |list: &[Json]| list.iter().find(|h| h["id"].as_str() == Some(harness)).map(steers_of);
+        let there = || self.remote.borrow().as_ref().filter(|r| Some(r.device.as_str()) == device).and_then(|r| read(&r.harnesses));
+        there().or_else(|| read(&self.harnesses.borrow()))
+    }
+
+    fn offers_plan(&self, harness: &str, device: Option<&str>) -> Option<bool> {
+        let read = |list: &[Json]| list.iter().find(|h| h["id"].as_str() == Some(harness)).map(|h| h["supportsPlan"].as_bool() == Some(true));
+        let there = || self.remote.borrow().as_ref().filter(|r| Some(r.device.as_str()) == device).and_then(|r| read(&r.harnesses));
+        there().or_else(|| read(&self.harnesses.borrow()))
+    }
+
+    fn harness_name(&self, harness: &str) -> Option<String> {
+        let read = |list: &[Json]| list.iter().find(|h| h["id"].as_str() == Some(harness)).and_then(|h| h["name"].as_str().map(Into::into));
+        read(&self.harnesses.borrow()).or_else(|| self.remote.borrow().as_ref().and_then(|r| read(&r.harnesses)))
     }
 
     /// The device to name for a call routed to the chat's host, when that
@@ -960,6 +1094,12 @@ pub(crate) fn made(params: &Json) {
     CHATS.with(|c| c.made(id, row));
 }
 
+pub(crate) async fn compaction_unsupported(harness: &str, device: Option<&str>) -> Option<String> {
+    let chats = CHATS.with(Rc::clone);
+    chats.probe_compaction(harness, device).await;
+    chats.compaction_unsupported.borrow().get(harness).cloned()
+}
+
 /// `chat.catalog`: the agents with models listed, each model as the picker
 /// takes it; ready once any agent's models are in (more may follow), or all
 /// have answered (`done`). (`device`: whose, when it isn't this one.)
@@ -968,7 +1108,11 @@ fn listed_models(reply: &Json) -> Vec<Json> {
     reply["models"].as_array().or(reply.as_array()).cloned().unwrap_or_default()
 }
 
-fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, device: Option<&str>) -> Value {
+fn steers_of(harness: &Json) -> bool {
+    harness["supportsSteering"].as_bool() == Some(true) && harness["steeringMode"].as_str() == Some("step-boundary")
+}
+
+fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, device: Option<&str>, unsupported: &HashMap<String, String>) -> Value {
     let any = by.values().any(|l| !l.is_empty());
     let state = if any || done { "ready" } else { "looking" };
     let mut harnesses = Vec::new();
@@ -984,6 +1128,11 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, devi
             ("mark", Value::from(mark(id).as_str())),
             // An agent added from the ACP registry draws its own icon.
             ("icon", h["icon"].as_str().map_or(Value::Nil, Value::from)),
+            ("access_modes", access_modes_value(&h["accessModes"])),
+            ("supports_plan", Value::Bool(h["supportsPlan"].as_bool() == Some(true))),
+            ("plan_asks", Value::Bool(matches!(id, "claude-code" | "mock"))),
+            ("steers", Value::Bool(steers_of(h))),
+            ("compaction_unsupported", unsupported.get(id).map_or(Value::Nil, |r| Value::from(r.as_str()))),
         ]));
         for m in list {
             models.push(model_value(id, m));
@@ -1004,6 +1153,17 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, devi
 /// reasoning (low to high) and where it starts, whether it has Fast, and
 /// its other options (Devin Fusion's lead and sidekick): each its id, its
 /// name, its choices (id and name) and the one it starts on.
+/// The engine leaves an empty list out: such a harness offers full access alone.
+fn access_modes_value(modes: &Json) -> Value {
+    let named = modes.as_array().into_iter().flatten().filter_map(|m| match m.as_str()? {
+        "supervised" => Some("supervised"),
+        "auto-accept-edits" => Some("edits"),
+        "full-access" => Some("full"),
+        _ => None,
+    });
+    Value::List(named.map(Value::from).collect::<Vec<_>>().into())
+}
+
 fn model_value(harness: &str, m: &Json) -> Value {
     let id = m["id"].as_str().unwrap_or_default();
     let levels: Vec<&str> = m["reasoningLevels"]
@@ -1252,6 +1412,68 @@ impl View {
         });
         if let Some(open) = self.open.borrow_mut().as_mut() {
             open.watches = vec![transcript, queue];
+            open.host_watched = false;
+        }
+        self.watch_host();
+    }
+
+    // Waits for the chat's row to name its host; a stream an old engine refuses just ends, unheard.
+    fn watch_host(self: &Rc<Self>) {
+        if self.snapshot.get() {
+            return;
+        }
+        let Some(rpc) = self.rpc.borrow().clone().filter(|r| !r.is_closed()) else {
+            return;
+        };
+        let Some(id) = self.open.borrow().as_ref().filter(|o| !o.host_watched).map(|o| o.id.clone()) else {
+            return;
+        };
+        let chats = CHATS.with(Rc::clone);
+        let Some(chat) = chats.chat(&id) else { return };
+        let routed = |mut p: Json| {
+            if let Some(t) = chats.target(&chat) {
+                p["targetDeviceId"] = json!(t);
+            }
+            p
+        };
+        let generation = self.generation.get();
+        let weak = Rc::downgrade(self);
+        let chat_id = id.clone();
+        let limit = rpc.watch("WatchLimitResumes", routed(json!({})), move |item| {
+            if let Some(view) = weak.upgrade()
+                && view.generation.get() == generation
+            {
+                if let Some(open) = view.open.borrow_mut().as_mut() {
+                    open.limit = limit_row(&item, &chat_id);
+                }
+                view.publish_session();
+            }
+        });
+        let mut watches = vec![limit];
+        if self.predicts {
+            let weak = Rc::downgrade(self);
+            watches.push(rpc.watch("WatchComposerPrediction", routed(json!({ "chatId": id })), move |item| {
+                if let Some(view) = weak.upgrade()
+                    && view.generation.get() == generation
+                {
+                    if let Some(open) = view.open.borrow_mut().as_mut() {
+                        open.prediction = item["prediction"]["text"].as_str().map(str::to_owned);
+                    }
+                    view.publish_session();
+                }
+            }));
+        }
+        if let Some(open) = self.open.borrow_mut().as_mut() {
+            open.watches.extend(watches);
+            open.host_watched = true;
+        }
+    }
+
+    fn consume_prediction(&self, args: &Value) {
+        let id = args.field("id").map(text).unwrap_or_default();
+        let dropped = self.open.borrow_mut().as_mut().filter(|o| o.id == id).is_some_and(|o| o.prediction.take().is_some());
+        if dropped {
+            self.publish_session();
         }
     }
 
@@ -1322,7 +1544,9 @@ impl View {
             if result.is_ok() {
                 open.heard = true;
                 let ids: Vec<&str> = open.entries.iter().map(|e| &*e.id).collect();
-                open.pending.retain(|p| !ids.contains(&p.id.as_str()));
+                open.pending.retain(|p| {
+                    !ids.contains(&p.id.as_str()) && p.alias.as_deref().is_none_or(|a| !ids.contains(&a))
+                });
             }
             result
         };
@@ -1580,7 +1804,7 @@ impl View {
         self.session.set(value);
     }
 
-    async fn send(self: &Rc<Self>, req: Value) -> Result<(), Outcome> {
+    async fn send(self: &Rc<Self>, req: Value) -> Result<Option<String>, Outcome> {
         let chats = CHATS.with(Rc::clone);
         let id = req.field("session").map(text).filter(|s| !s.is_empty()).ok_or("missing")?;
         let fresh = req.field("fresh").is_some_and(Value::truthy);
@@ -1596,6 +1820,7 @@ impl View {
             .map(text)
             .filter(|s| !s.is_empty())
             .unwrap_or_else(new_id);
+        self.consume_prediction(&Value::record([("id", Value::from(id.as_str()))]));
         // Shown until the transcript has it (the page's own copy kept in
         // step as the list is published again meanwhile), sending.
         if self.open_id().as_deref() == Some(&id)
@@ -1609,6 +1834,7 @@ impl View {
                 retry: None,
                 command: None,
                 at: stamp(now_seconds()),
+                alias: None,
             });
         }
         // What it carries, uploaded to the chat's host.
@@ -1679,13 +1905,22 @@ impl View {
             if !paths.is_empty() {
                 params["attachments"] = json!(paths);
             }
+            if req.field("steer_now").is_some_and(Value::truthy) {
+                params["steerNow"] = json!(true);
+            }
             return engine::get()
                 .call("QueueMessage", params)
                 .await
-                .map(|_| ())
+                .map(|answer| answer["id"].as_str().map(str::to_owned))
                 .map_err(|e| engine::outcome(&e));
         }
-        let config = merged_config(&chat["config"], &req);
+        let mut config = merged_config(&chat["config"], &req);
+        // gpui's `effective_plan`: off on a harness without one, whatever the switch says.
+        if config["harness"].as_str().is_some_and(|h| chats.offers_plan(h, target.as_deref()) == Some(false))
+            && let Some(fields) = config.as_object_mut()
+        {
+            fields.remove("plan");
+        }
         // A chat just made takes the config it was started with. (Never one
         // without an agent: the engine turns that away as bad params, and
         // the chat keeps the config it was made with: a side chat's, its
@@ -1765,7 +2000,7 @@ impl View {
             }
         }
         self.publish_messages();
-        sent
+        sent.map(|()| None)
     }
 
     /// A pending prompt that didn't go: failed, with the command that sends
@@ -1792,6 +2027,7 @@ impl View {
                 }
                 self.fail_rejected();
                 self.expect_delivery(chat, message_id, run);
+                self.expect_turn();
                 Ok(())
             }
             Err((outcome, reason)) => {
@@ -1836,6 +2072,19 @@ impl View {
     /// an engine that sends it. On one that doesn't, past the grace the prompt
     /// reads failed, as the shipping app's "Not delivered" does. (A host
     /// elsewhere may only be away: left sending.)
+    fn expect_turn(self: &Rc<Self>) {
+        if let Some(open) = self.open.borrow().as_ref() {
+            open.awaiting_turn.set(Some(std::time::Instant::now()));
+        }
+        let me = Rc::downgrade(self);
+        engine::get().spawn(async move {
+            zgx::timer::sleep(TURN_START_GRACE).await;
+            if let Some(me) = me.upgrade() {
+                me.publish_session();
+            }
+        });
+    }
+
     fn expect_delivery(self: &Rc<Self>, chat: &str, message_id: &str, run: &Json) {
         let chats = CHATS.with(Rc::clone);
         if chats.chat(chat).is_some_and(|c| chats.target(&c).is_some()) {
@@ -2109,11 +2358,193 @@ impl View {
         }
     }
 
-    async fn queue_op(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
+    // Under the row's id: the engine keeps it through promotion (doc_host `dispatch_queued`).
+    fn queue_shown(&self, args: &Value) -> Option<String> {
+        if args.field("op").map(text).as_deref() != Some("send") {
+            return None;
+        }
+        let chats = CHATS.with(Rc::clone);
+        let id = args.field("id").map(text).unwrap_or_default();
+        let item = args.field("item").map(text).unwrap_or_default();
+        let chat = chats.chat(&id)?;
+        let harness = chat["config"]["harness"].as_str().unwrap_or_default();
+        let steers = chats.steers_mid_turn(harness, chats.target(&chat).as_deref());
+        {
+            let mut slot = self.open.borrow_mut();
+            let open = slot.as_mut().filter(|o| o.id == id)?;
+            let row = open.queue.iter().find(|q| q["id"].as_str() == Some(item.as_str()))?.clone();
+            if !runs_now(&row, chats.running(&id), steers) {
+                return None;
+            }
+            let shown = |e: &Entry| &*e.id == item.as_str();
+            if open.pending.iter().any(|p| p.id == item) || open.entries.iter().any(shown) {
+                return None;
+            }
+            open.pending.push(Pending {
+                id: item.clone(),
+                words: row["text"].as_str().unwrap_or_default().to_owned(),
+                paths: row_paths(&row),
+                waiting: "sending",
+                retry: None,
+                command: None,
+                at: stamp(now_seconds()),
+                alias: None,
+            });
+        }
+        self.publish_messages();
+        Some(item)
+    }
+
+    fn unshow(&self, shown: &Option<String>) {
+        let Some(item) = shown else { return };
+        if let Some(open) = self.open.borrow_mut().as_mut() {
+            open.pending.retain(|p| &p.id != item);
+        }
+        self.publish_messages();
+    }
+
+    fn steer_all_rows(&self, args: &Value) -> Option<SteerAll> {
+        let id = args.field("id").map(text).unwrap_or_default();
+        let items: Vec<String> = args.field("items").map(Value::list).unwrap_or_default().iter().map(text).collect();
+        let slot = self.open.borrow();
+        let open = slot.as_ref().filter(|o| o.id == id)?;
+        let rows: Vec<&Json> = open
+            .queue
+            .iter()
+            .filter(|q| q["id"].as_str().is_some_and(|i| items.iter().any(|x| x == i)))
+            .collect();
+        if rows.len() < 2 {
+            return None;
+        }
+        Some(
+            rows.iter()
+                .filter_map(|q| {
+                    let id = q["id"].as_str()?.to_owned();
+                    Some(SteerRow { id, text: q["text"].as_str().unwrap_or_default().to_owned(), paths: row_paths(q) })
+                })
+                .collect(),
+        )
+    }
+
+    fn steer_all_shown(&self, args: &Value) -> Option<String> {
+        let rows = self.steer_all_rows(args)?;
+        let (words, paths) = whole_of(&rows);
+        let message_id = args.field("message_id").map(text).filter(|s| !s.is_empty())?;
+        if let Some(open) = self.open.borrow_mut().as_mut() {
+            open.pending.push(Pending {
+                id: message_id.clone(),
+                words,
+                paths,
+                waiting: "sending",
+                retry: None,
+                command: None,
+                at: stamp(now_seconds()),
+                alias: None,
+            });
+        }
+        self.publish_messages();
+        Some(message_id)
+    }
+
+    // Rows come off first and only those that came off are sent, so no row's words are in two places.
+    async fn steer_all(self: &Rc<Self>, args: Value, shown: Option<String>) -> Result<(), Outcome> {
+        let chats = CHATS.with(Rc::clone);
+        let id = args.field("id").map(text).unwrap_or_default();
+        let early = |why: Outcome| {
+            self.unshow(&shown);
+            Err(why)
+        };
+        let Some(chat) = chats.chat(&id) else { return early("missing") };
+        let Some(rows) = self.steer_all_rows(&args) else { return early("missing") };
+        let target = chats.target(&chat);
+        let routed = |mut p: Json| {
+            if let Some(t) = &target {
+                p["targetDeviceId"] = json!(t);
+            }
+            p
+        };
+        let mut taken: SteerAll = Vec::new();
+        let mut stopped = None;
+        for row in rows {
+            let params = routed(json!({ "chatId": id, "id": row.id }));
+            match self.row_call(&id, &row.id, "RemoveQueuedMessage", params, "removed", false).await {
+                Ok(true) => taken.push(row),
+                Ok(false) => {}
+                Err(why) => {
+                    eprintln!("zeron-zgx: chat: steer all: a queued row wasn't removed ({why})");
+                    stopped = Some(why);
+                    break;
+                }
+            }
+        }
+        if taken.is_empty() {
+            return early(stopped.unwrap_or("gone"));
+        }
+        let (words, paths) = whole_of(&taken);
+        let mut params = json!({ "chatId": id, "text": words, "holdForTurnEnd": true });
+        if !paths.is_empty() {
+            params["attachments"] = json!(paths);
+        }
+        let shows_whole = |alias: Option<String>| {
+            if let Some(open) = self.open.borrow_mut().as_mut()
+                && let Some(p) = open.pending.iter_mut().find(|p| Some(&p.id) == shown.as_ref())
+            {
+                p.words = words.clone();
+                p.paths = paths.clone();
+                p.alias = alias;
+            }
+        };
+        let whole = match engine::get().call("QueueMessage", params).await {
+            Ok(answer) => answer["id"].as_str().map(str::to_owned),
+            Err(e) => {
+                // The rows are gone from the queue: the transcript's failed row holds their words, to send again.
+                shows_whole(None);
+                if let Some(item) = &shown {
+                    self.mark_failed(item, None);
+                }
+                return Err(engine::outcome(&e));
+            }
+        };
+        let Some(whole) = whole else { return early("failed") };
+        shows_whole(Some(whole.clone()));
+        self.publish_messages();
+        if let Some(why) = stopped {
+            // The rest stayed queued, so what came off stays queued too, as one row.
+            self.unshow(&shown);
+            return Err(why);
+        }
+        let method = queue_send_method(!paths.is_empty());
+        match self.row_call(&id, &whole, method, routed(json!({ "chatId": id, "id": whole })), "sent", true).await {
+            Ok(_) => Ok(()),
+            Err(why) => {
+                self.unshow(&shown);
+                Err(why)
+            }
+        }
+    }
+
+    async fn queue_op(self: &Rc<Self>, args: Value, shown: Option<String>) -> Result<(), Outcome> {
+        let result = self.queue_call(&args).await;
+        if !matches!(result, Ok(true)) {
+            self.unshow(&shown);
+        }
+        match result {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("gone"),
+            Err(why) => Err(why),
+        }
+    }
+
+    async fn queue_call(self: &Rc<Self>, args: &Value) -> Result<bool, Outcome> {
         let chats = CHATS.with(Rc::clone);
         let id = args.field("id").map(text).unwrap_or_default();
         let item = args.field("item").map(text).unwrap_or_default();
         let chat = chats.chat(&id).ok_or("missing")?;
+        let carries = self.open.borrow().as_ref().is_some_and(|o| {
+            o.queue
+                .iter()
+                .any(|q| q["id"].as_str() == Some(item.as_str()) && !row_paths(q).is_empty())
+        });
         let mut params = json!({ "chatId": id, "id": item });
         let target = chats.target(&chat);
         let routed = |mut p: Json| {
@@ -2122,30 +2553,255 @@ impl View {
             }
             p
         };
-        let (method, params) = match args.field("op").map(text).as_deref() {
-            Some("remove") => ("RemoveQueuedMessage", routed(params)),
-            Some("send") => {
-                let harness = chat["config"]["harness"].as_str().unwrap_or_default();
-                let method = if chats.running(&id) && chats.steers(harness) {
-                    "SteerQueuedMessageNow"
-                } else {
-                    "SendQueuedMessageNow"
-                };
-                (method, routed(params))
-            }
+        let (method, said, params) = match args.field("op").map(text).as_deref() {
+            Some("remove") => ("RemoveQueuedMessage", "removed", routed(params)),
+            Some("send") => (queue_send_method(carries), "sent", routed(params)),
             Some("move") => {
                 let to = args.field("to").and_then(Value::as_f64).unwrap_or(1.);
                 params["toIndex"] = json!((to as i64 - 1).max(0));
-                ("MoveQueuedMessage", params)
+                engine::get()
+                    .call("MoveQueuedMessage", params)
+                    .await
+                    .map_err(|e| engine::outcome(&e))?;
+                return Ok(true);
             }
             _ => return Err("failed"),
         };
-        engine::get()
-            .call(method, params)
-            .await
-            .map(|_| ())
-            .map_err(|e| engine::outcome(&e))
+        self.row_call(&id, &item, method, params, said, false).await
     }
+
+    // A row queued a moment ago reaches another device as the doc syncs, so a miss is asked again.
+    // `just_queued`: this row was queued here a moment ago, so not being listed yet doesn't mean it left.
+    async fn row_call(&self, chat: &str, item: &str, method: &str, params: Json, said: &str, just_queued: bool) -> Result<bool, Outcome> {
+        let mut wait = std::time::Duration::from_millis(100);
+        for _ in 0..6 {
+            let answer = engine::get()
+                .call(method, params.clone())
+                .await
+                .map_err(|e| engine::outcome(&e))?;
+            if answer[said].as_bool() != Some(false) {
+                return Ok(true);
+            }
+            let here = self.open.borrow().as_ref().is_some_and(|o| {
+                o.id == chat && o.queue.iter().any(|q| q["id"].as_str() == Some(item))
+            });
+            if !here && !just_queued {
+                return Ok(false);
+            }
+            zgx::timer::sleep(wait).await;
+            wait *= 2;
+        }
+        // Six seconds on, heard here and gone from the list: it ran as the next turn.
+        let here = self.open.borrow().as_ref().is_some_and(|o| {
+            o.id == chat && o.queue.iter().any(|q| q["id"].as_str() == Some(item))
+        });
+        if just_queued && !here {
+            return Ok(false);
+        }
+        eprintln!("zeron-zgx: chat: {method} for {chat}: the host never found queued row {item}");
+        Err("failed")
+    }
+}
+
+// gpui: Steer and Send next never interrupt (the host holds a row for a turn-boundary agent); only files send now.
+fn queue_send_method(carries_files: bool) -> &'static str {
+    if carries_files { "SendQueuedMessageNow" } else { "SteerQueuedMessageNow" }
+}
+
+fn runs_now(row: &Json, running: bool, steers: Option<bool>) -> bool {
+    !row_paths(row).is_empty() || !running || steers == Some(true)
+}
+
+struct SteerRow {
+    id: String,
+    text: String,
+    paths: Vec<String>,
+}
+
+type SteerAll = Vec<SteerRow>;
+
+fn whole_of(rows: &[SteerRow]) -> (String, Vec<String>) {
+    let texts: Vec<String> = rows.iter().map(|r| r.text.clone()).collect();
+    let words = if let [one] = texts.as_slice() { one.trim().to_owned() } else { numbered(&texts) };
+    (words, rows.iter().flat_map(|r| r.paths.clone()).collect())
+}
+
+fn numbered(texts: &[String]) -> String {
+    texts
+        .iter()
+        .enumerate()
+        .map(|(i, t)| format!("{}. {}", i + 1, t.trim()))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn row_paths(row: &Json) -> Vec<String> {
+    row["attachments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_str().map(str::to_owned))
+        .collect()
+}
+
+async fn limit_op(args: Value) -> Result<Value, Outcome> {
+    let id = args.field("id").map(text).unwrap_or_default();
+    let (method, mut params) = match args.field("op").map(text).as_deref() {
+        Some(choice @ ("switch" | "wait")) => ("ResolveLimitOffer", json!({ "chatId": id, "choice": choice })),
+        Some("arm") => ("SetLimitResume", json!({ "chatId": id, "auto": true })),
+        Some("cancel") => ("SetLimitResume", json!({ "chatId": id, "auto": false })),
+        _ => return Err("failed"),
+    };
+    let chats = CHATS.with(Rc::clone);
+    let chat = chats.chat(&id).ok_or("missing")?;
+    if let Some(t) = chats.target(&chat) {
+        params["targetDeviceId"] = json!(t);
+    }
+    engine::get().call(method, params).await.map_err(|e| engine::outcome(&e))?;
+    Ok(Value::Nil)
+}
+
+async fn compact(args: Value) -> Result<Value, String> {
+    use zeron_proto::{app_commands::COMPACT_NEEDS_CHAT, compaction::compact_outcome_notice};
+    let chats = CHATS.with(Rc::clone);
+    let id = args.field("id").map(text).unwrap_or_default();
+    let chat = chats.chat(&id).ok_or(COMPACT_NEEDS_CHAT)?;
+    if chats.chat_compacting(&id) {
+        return Err("Compaction in progress".into());
+    }
+    if chats.running(&id) {
+        return Err("Wait for the current turn to finish".into());
+    }
+    if let Some(reason) = chat["config"]["harness"].as_str().and_then(|h| chats.compaction_unsupported.borrow().get(h).cloned()) {
+        return Err(reason);
+    }
+    let mut params = json!({ "chatId": id });
+    if let Some(t) = chats.target(&chat) {
+        params["targetDeviceId"] = json!(t);
+    }
+    if let Some(focus) = args.field("focus").map(text).filter(|f| !f.is_empty()) {
+        params["focus"] = json!(focus);
+    }
+    chats.compacting.borrow_mut().insert(id.clone());
+    chats.publish_views();
+    let answer = engine::get().call("CompactChat", params).await;
+    chats.compacting.borrow_mut().remove(&id);
+    chats.publish_views();
+    match answer {
+        Ok(reply) => compact_outcome_notice(&reply).map_or(Ok(Value::Nil), Err),
+        Err(why) => Err(format!("Compaction failed: {why}")),
+    }
+}
+
+async fn set_work_tree(args: Value) -> Result<Value, Outcome> {
+    let chats = CHATS.with(Rc::clone);
+    let id = args.field("id").map(text).unwrap_or_default();
+    let chat = chats.chat(&id).ok_or("missing")?;
+    let path = args.field("path").map(text).filter(|p| !p.is_empty());
+    let mut params = json!({ "op": "setChatWorkTree", "chatId": id, "path": path });
+    if let Some(t) = chats.target(&chat) {
+        params["targetDeviceId"] = json!(t);
+    }
+    engine::get().call("Mutate", params).await.map_err(|e| engine::outcome(&e))?;
+    Ok(Value::Nil)
+}
+
+const MAX_READ_TEXT: u64 = 32 * 1024 * 1024;
+const MAX_READ_CHUNKS: usize = 1_000;
+
+async fn read_text(args: Value) -> Result<Value, Outcome> {
+    let path = args.field("path").map(text).filter(|p| !p.is_empty()).ok_or("missing")?;
+    let host = args.field("session").map(text).and_then(|id| host_of(&id));
+    let (words, lines) = match host {
+        Some(host) => {
+            let encoded = read_chunks(&path, &host).await?;
+            off_thread(move || -> Result<(String, usize), Outcome> {
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| "failed")?;
+                Ok(decoded_text(&bytes))
+            })
+            .await
+            .ok_or("failed")??
+        }
+        None => off_thread(move || -> Result<(String, usize), Outcome> {
+            let meta = std::fs::metadata(&path).map_err(|_| "unreadable")?;
+            if !meta.is_file() {
+                return Err("not_file");
+            }
+            if meta.len() > MAX_READ_TEXT {
+                return Err("too_large");
+            }
+            let bytes = std::fs::read(&path).map_err(|_| "unreadable")?;
+            Ok(decoded_text(&bytes))
+        })
+        .await
+        .ok_or("failed")??,
+    };
+    Ok(Value::record([("text", Value::from(words.as_str())), ("lines", Value::Num(lines as f64))]))
+}
+
+fn decoded_text(bytes: &[u8]) -> (String, usize) {
+    let words = String::from_utf8_lossy(bytes).into_owned();
+    let lines = words.lines().count();
+    (words, lines)
+}
+
+async fn read_chunks(path: &str, host: &str) -> Result<String, Outcome> {
+    let most = (MAX_READ_TEXT as usize).div_ceil(3) * 4;
+    let mut encoded = String::new();
+    let mut offset = 0u64;
+    for _ in 0..MAX_READ_CHUNKS {
+        let chunk = engine::get()
+            .call("ReadAttachmentChunk", json!({ "path": path, "offset": offset, "targetDeviceId": host }))
+            .await
+            .map_err(|e| engine::outcome(&e))?;
+        let data = chunk["data"].as_str().ok_or("failed")?;
+        if encoded.len().saturating_add(data.len()) > most {
+            return Err("too_large");
+        }
+        encoded.push_str(data);
+        if chunk["done"].as_bool() == Some(true) {
+            return Ok(encoded);
+        }
+        let next = chunk["nextOffset"].as_u64().ok_or("failed")?;
+        if next <= offset {
+            return Err("failed");
+        }
+        offset = next;
+    }
+    Err("failed")
+}
+
+async fn stat_files(args: Value) -> Result<Value, Outcome> {
+    let paths: Vec<String> = args.field("paths").map(Value::list).unwrap_or_default().iter().map(text).collect();
+    let stats = off_thread(move || {
+        paths
+            .into_iter()
+            .map(|path| {
+                let meta = std::fs::metadata(&path).ok();
+                let readable = std::fs::File::open(&path).is_ok();
+                let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
+                let is_file = meta.is_some_and(|m| m.is_file());
+                (path, size, is_file, readable)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .ok_or("failed")?;
+    Ok(Value::List(
+        stats
+            .into_iter()
+            .map(|(path, size, is_file, readable)| {
+                Value::record([
+                    ("path", Value::from(path.as_str())),
+                    ("size", Value::Num(size as f64)),
+                    ("is_file", Value::Bool(is_file)),
+                    ("readable", Value::Bool(readable)),
+                ])
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    ))
 }
 
 /// A command for a chat (`QueueCommand`): a run, an interrupt, an answer.
@@ -2201,15 +2857,16 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
 async fn upload(path: &str, name: &str, target: Option<&str>) -> Result<String, Outcome> {
     // Read and encoded off the window's thread, and no larger than the cap.
     let owned = path.to_owned();
+    let remote = target.is_some();
     let encoded = off_thread(move || -> Result<String, Outcome> {
-        let meta = std::fs::metadata(&owned).map_err(|_| "failed")?;
+        let meta = std::fs::metadata(&owned).map_err(|_| "unreadable")?;
         if !meta.is_file() {
-            return Err("failed");
+            return Err("not_file");
         }
         if meta.len() > MAX_ATTACHMENT_BYTES {
-            return Err("too_large");
+            return Err(if remote { "too_large_remote" } else { "too_large" });
         }
-        let bytes = std::fs::read(&owned).map_err(|_| "failed")?;
+        let bytes = std::fs::read(&owned).map_err(|_| "unreadable")?;
         Ok(base64(&bytes))
     })
     .await
@@ -2673,6 +3330,7 @@ fn attachments_value(paths: &[String]) -> Value {
                 let mut fields = vec![
                     ("kind", Value::from(if image { "image" } else { "file" })),
                     ("name", Value::from(name)),
+                    ("path", Value::from(p.as_str())),
                 ];
                 if image {
                     fields.push(("src", Value::from(p.as_str())));
@@ -3050,6 +3708,16 @@ fn subagents_of(messages: &[Value]) -> Value {
     Value::List(out.into())
 }
 
+fn resumed_row(id: &str) -> Value {
+    Value::record([
+        ("id", Value::from(id)),
+        ("role", Value::from("system")),
+        ("line", Value::from("resumed")),
+        ("text", Value::from("Resumed")),
+        ("hint", Value::from(zeron_proto::RESUME_PROMPT)),
+    ])
+}
+
 /// An entry as ds/transcript's message; nil for one it doesn't show.
 pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
     let id = entry["id"].as_str()?;
@@ -3063,6 +3731,9 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .filter_map(|p| p["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
+            if text.trim() == zeron_proto::RESUME_PROMPT {
+                return Some(resumed_row(id));
+            }
             let text = handback_quotes(&text).unwrap_or(text);
             // A message from another chat: its routing header is the agent's to
             // read; the transcript shows who sent it, over its words.
@@ -4240,11 +4911,22 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     let session = chats.sessions.borrow().get(&open.id).cloned().unwrap_or(Json::Null);
     let live = chats.running(&open.id);
     let tasks = background_tasks(&session);
+    let steers = chats.steers_mid_turn(harness, chats.target(&chat).as_deref());
+    let sending = open.pending.iter().any(|p| p.waiting == "sending");
+    if live {
+        open.awaiting_turn.set(None);
+    }
+    let awaiting = open.awaiting_turn.get().is_some_and(|at| at.elapsed() < TURN_START_GRACE);
+    let stopped = offers_resume(live, sending, awaiting, open.entries.last().and_then(|e| e.json.as_ref()));
     let queue: Vec<Value> = open
         .queue
         .iter()
         .map(|q| {
             let mut fields = vec![("id", s(&q["id"])), ("text", s(&q["text"]))];
+            let paths = row_paths(q);
+            if !paths.is_empty() {
+                fields.push(("cargo", attachments_value(&paths)));
+            }
             let mine = open.editing.as_ref().is_some_and(|e| q["id"].as_str() == Some(&e.item));
             if mine {
                 fields.push(("editing", Value::Bool(true)));
@@ -4255,6 +4937,9 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
                 if chats.here.borrow().as_deref() != Some(who) {
                     fields.push(("locked", Value::from("Being edited on another device")));
                 }
+            }
+            if gate["kind"].as_str() == Some("reviewRequired") {
+                fields.push(("review", Value::Bool(true)));
             }
             Value::record(fields)
         })
@@ -4275,6 +4960,12 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("access", Value::from(access)),
         ("plan", Value::Bool(config["plan"].as_bool() == Some(true))),
         ("running", Value::Bool(live)),
+        ("steers", steers.map_or(Value::Nil, Value::Bool)),
+        ("stopped", Value::Bool(stopped)),
+        ("compacting", Value::Bool(chats.chat_compacting(&open.id))),
+        ("prediction", open.prediction.as_deref().map_or(Value::Nil, Value::from)),
+        ("limit", open.limit.as_ref().map_or(Value::Nil, |row| limit_value(chats, row))),
+        ("work_tree", work_tree_value(&chat["workTree"])),
         ("context", open.context.map(Value::Num).unwrap_or(Value::Nil)),
         ("context_tokens", open.context_usage.0.map(Value::Num).unwrap_or(Value::Nil)),
         ("context_window", open.context_usage.1.map(Value::Num).unwrap_or(Value::Nil)),
@@ -4290,6 +4981,52 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         fields.push(("notice", Value::record([("tone", Value::from("danger")), ("refused", Value::from(reason.as_str()))])));
     }
     Value::record(fields)
+}
+
+/// `zeron_doc::schema::turn_stopped` on the wire's entry: this app doesn't depend on zeron-doc.
+fn offers_resume(live: bool, sending: bool, awaiting_turn: bool, last: Option<&Json>) -> bool {
+    !live && !sending && !awaiting_turn && last.is_some_and(turn_stopped)
+}
+
+fn turn_stopped(last: &Json) -> bool {
+    let status = last["status"].as_str();
+    last["role"].as_str() == Some("user")
+        || status == Some("aborted")
+        || (status != Some("streaming") && last["parts"].as_array().and_then(|p| p.last()).is_some_and(|p| p["kind"].as_str() == Some("error")))
+}
+
+fn limit_row(frame: &Json, chat: &str) -> Option<Json> {
+    frame["chats"].as_array()?.iter().find(|c| c["chatId"].as_str() == Some(chat)).cloned()
+}
+
+fn limit_value(chats: &Chats, row: &Json) -> Value {
+    let offer = &row["offer"];
+    let to = &offer["to"];
+    let label = to["harness"].as_str().and_then(|harness| {
+        to["model"].as_str().and_then(|model| chats.label_of(harness, model)).or_else(|| chats.harness_name(harness)).or_else(|| Some(harness.to_owned()))
+    });
+    Value::record([
+        ("resets_at", row["resetsAt"].as_f64().map_or(Value::Nil, Value::Num)),
+        ("auto", Value::Bool(row["auto"].as_bool() == Some(true))),
+        ("to_label", label.as_deref().map_or(Value::Nil, Value::from)),
+        ("to", Value::Bool(to.is_object())),
+        ("preselect", offer["preselect"].as_str().map_or(Value::Nil, Value::from)),
+    ])
+}
+
+fn work_tree_value(tree: &Json) -> Value {
+    let Some(path) = tree["path"].as_str() else { return Value::Nil };
+    let (state, commits) = work_tree_state(&tree["state"]);
+    let folder = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path);
+    Value::record([
+        ("path", Value::from(path)),
+        ("folder", Value::from(folder)),
+        ("branch", tree["branch"].as_str().map_or(Value::Nil, Value::from)),
+        ("state", state.map_or(Value::Nil, Value::from)),
+        ("commits", Value::Num(commits)),
+        ("dirty", Value::Num(tree["dirtyFiles"].as_f64().unwrap_or(0.))),
+        ("removed", Value::Bool(tree["removed"].as_bool() == Some(true))),
+    ])
 }
 
 /// The processes the chat's agent left running in the background, oldest
@@ -4358,6 +5095,7 @@ fn todos(open: &Open) -> Value {
 
 /// How long a sent prompt reads "sending" with no turn to show for it, as
 /// the shipping app's grace before it calls a send undelivered.
+const TURN_START_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 const SEND_GRACE_SECONDS: f64 = 120.;
 
 /// A record with more fields (or some replaced).
@@ -4527,6 +5265,78 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_queued_row_is_steered_unless_it_carries_files() {
+        assert_eq!(queue_send_method(false), "SteerQueuedMessageNow");
+        assert_eq!(queue_send_method(true), "SendQueuedMessageNow");
+        let plain = json!({ "id": "r", "text": "hi" });
+        let carrying = json!({ "id": "r", "text": "hi", "attachments": ["/up/a.png"] });
+        assert!(runs_now(&carrying, true, Some(false)));
+        assert!(runs_now(&plain, false, Some(false)));
+        assert!(runs_now(&plain, true, Some(true)));
+        assert!(!runs_now(&plain, true, Some(false)));
+        assert!(!runs_now(&plain, true, None));
+    }
+
+    #[test]
+    fn steering_mid_turn_needs_both_of_the_harness_s_words() {
+        assert!(steers_of(&json!({ "supportsSteering": true, "steeringMode": "step-boundary" })));
+        assert!(!steers_of(&json!({ "supportsSteering": true, "steeringMode": "turn-boundary" })));
+        assert!(!steers_of(&json!({ "supportsSteering": false, "steeringMode": "step-boundary" })));
+    }
+
+    #[test]
+    fn rows_steered_as_one_are_numbered_blocks() {
+        assert_eq!(numbered(&["  first \n".into(), "second".into()]), "1. first\n\n2. second");
+    }
+
+    #[test]
+    fn steer_all_sends_only_the_rows_that_came_off() {
+        let row = |text: &str| SteerRow { id: text.into(), text: text.into(), paths: vec![] };
+        assert_eq!(whole_of(&[row("a"), row("b")]).0, "1. a\n\n2. b");
+        assert_eq!(whole_of(&[row("b")]).0, "b");
+    }
+
+    #[test]
+    fn resume_waits_for_the_turn_a_send_just_started() {
+        let user = json!({ "role": "user" });
+        assert!(offers_resume(false, false, false, Some(&user)));
+        assert!(!offers_resume(false, false, true, Some(&user)));
+        assert!(!offers_resume(true, false, false, Some(&user)));
+        assert!(!offers_resume(false, true, false, Some(&user)));
+    }
+
+    #[test]
+    fn the_resume_prompt_is_a_line_not_a_bubble() {
+        let said = |words: &str| json!({ "id": "u1", "role": "user", "parts": [{ "kind": "text", "text": words }] });
+        let row = message(&said(zeron_proto::RESUME_PROMPT), None).unwrap();
+        assert_eq!(text_of(&row, "role"), "system");
+        assert_eq!(text_of(&row, "line"), "resumed");
+        assert_eq!(text_of(&row, "hint"), zeron_proto::RESUME_PROMPT);
+        assert_eq!(text_of(&message(&said("Resume, then explain."), None).unwrap(), "role"), "user");
+        let pending = |waiting| Pending {
+            id: "p".into(),
+            words: zeron_proto::RESUME_PROMPT.into(),
+            paths: Vec::new(),
+            waiting,
+            retry: None,
+            command: None,
+            at: None,
+            alias: None,
+        };
+        assert_eq!(text_of(&pending("sending").value(), "line"), "resumed");
+        assert_eq!(text_of(&pending("failed").value(), "role"), "user", "its line to send it again is a prompt's");
+    }
+
+    #[test]
+    fn a_turn_stopped_short_is_the_gpui_three() {
+        assert!(turn_stopped(&json!({ "role": "user", "parts": [] })));
+        assert!(turn_stopped(&json!({ "role": "assistant", "status": "aborted", "parts": [] })));
+        assert!(turn_stopped(&json!({ "role": "assistant", "status": "complete", "parts": [{ "kind": "text" }, { "kind": "error" }] })));
+        assert!(!turn_stopped(&json!({ "role": "assistant", "status": "streaming", "parts": [{ "kind": "error" }] })));
+        assert!(!turn_stopped(&json!({ "role": "assistant", "status": "complete", "parts": [{ "kind": "error" }, { "kind": "text" }] })));
+    }
+
     #[test]
     fn a_reset_keeps_what_it_left_as_it_was() {
         let built_of = |ids: &[&str]| -> std::collections::HashMap<Rc<str>, Option<zgx_script::Value>> {

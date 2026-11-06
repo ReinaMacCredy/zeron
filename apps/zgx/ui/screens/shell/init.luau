@@ -512,24 +512,15 @@ local function sidebar_limit(): number
 				local store: any = boundary.load("@app/screens/chat/store")
 				return store ~= nil and store.escape ~= nil and (store.escape :: any)() == true
 			end
-			-- A bare I nothing took, with no text field holding the keyboard,
-			-- on a chat or a new one: into the composer, as vim's insert
-			-- (Escape there gives the keyboard back: ds/composer).
-			if e.key == "i" and not (e.editing or e.shift or e.cmd or e.alt or e.ctrl or e.meta or e["repeat"]) then
-				local name = route.current:peek().name
-				if name == "session" or name == "home" then
-					local shared: any = boundary.load("@app/screens/chat/shared")
-					if shared and shared.focus then
-						shared.focus:add(1)
-						return true
-					end
-				end
-			end
 			-- A bare letter nothing took, with no text field holding the
 			-- keyboard: the panel home's (B, F, T…), while it shows.
 			local panel: any = boundary.load("@app/screens/panel")
 			if panel and panel.home_key and (panel.home_key :: any)(e) == true then
 				return true
+			end
+			local typing: any = boundary.load("@app/screens/chat/typing")
+			if typing then
+				typing.key(e)
 			end
 			return false
 		end,
@@ -798,6 +789,7 @@ local function sidebar_limit(): number
 			boundary.screen(boundary.named("shell.boundary.screen.switcher"), "@app/screens/shell/switcher", function(switcher): Node
 				return switcher.Overlay()
 			end),
+			require("@ds/pasted_text").Host(),
 		},
 	}
 end

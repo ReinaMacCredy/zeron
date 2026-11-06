@@ -276,6 +276,9 @@ local function Session(id: Id?): Node
 							on_attach = shared.attach_quote,
 							pictures = pictures,
 							sent_pictures = sent_pictures,
+							sent_from = function(): string?
+								return which()
+							end,
 							-- A subagent's spawn opens its lane, a panel tab
 							-- (the shipping app's `OpenSubagent`).
 							on_open_subagent = function(sub: any)

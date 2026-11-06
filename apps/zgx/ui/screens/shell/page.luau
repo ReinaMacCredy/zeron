@@ -190,6 +190,13 @@ return function(props: Props): Node
 	}
 	pane.ref = box
 	pane.id = "shell-page"
+	pane.on_key = function(): boolean
+		local typing: any = boundary.load("@app/screens/chat/typing")
+		if typing then
+			typing.through_control()
+		end
+		return false
+	end
 	pane.hook = "shell.page"
 	pane.min_w = 0
 	pane.overflow = "hidden"

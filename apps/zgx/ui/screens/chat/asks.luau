@@ -5,7 +5,7 @@
 -- focused or not) are made from the same, so a chat shows the same in
 -- either, and a pane out of focus is as live as the one in it.
 --
---   local a = Asks.bind { id = fn, session = fn, chosen = state, asked = state }
+--   local a = Asks.bind { id = fn, session = fn, chosen = state, asked = state, notice = fn }
 --   ds.Composer { question = a.question, approval = a.approval, chosen = a.chosen,
 --     on_pick = a.on_pick, on_answer = a.on_answer, …, queue = a.queue, todos = a.todos,
 --     tasks = a.tasks }
@@ -16,6 +16,8 @@
 -- for, and its chat).
 
 local store = require("@app/screens/chat/store")
+local queued = require("@app/screens/chat/queued")
+local Dock = require("@ds/composer_dock")
 
 local M = {}
 
@@ -24,7 +26,26 @@ export type Bind = {
 	session: () -> any,
 	chosen: State<{ [string]: boolean }>,
 	asked: State<any>,
+	notice: ((any) -> ())?,
+	saving: (() -> string?)?,
 }
+
+local DISMISSED = ui.shared("chat.todos.dismissed", {} :: { [string]: string })
+
+local function signature(items: { any }): string
+	local parts: { string } = {}
+	for _, t in items do
+		table.insert(parts, `{t.state}\0{t.text}`)
+	end
+	return table.concat(parts, "\0")
+end
+
+local function reason(err: any): string
+	if type(err) == "table" and err.message then
+		return tostring(err.message)
+	end
+	return tostring(err)
+end
 
 function M.bind(b: Bind): { [string]: any }
 	local ask = ui.computed(function(): store.Ask?
@@ -58,7 +79,96 @@ function M.bind(b: Bind): { [string]: any }
 			return if s and s[key] then s[key] else {}
 		end)
 	end
-	local queue = list("queue")
+	local engine_queue = list("queue")
+	local queue = ui.computed(function(): { any }
+		local s = b.session()
+		local rows = queued.rows(b.id(), engine_queue:get())
+		local saving = if b.saving then b.saving() else nil
+		local compacting = s ~= nil and s.compacting == true
+		if not saving and not compacting then
+			return rows
+		end
+		local out: { any } = {}
+		for i, r in rows do
+			local row = table.clone(r)
+			row.saving = if r.id == saving then true else nil
+			row.after_compaction = if compacting then true else nil
+			out[i] = row
+		end
+		return out
+	end)
+	-- (Only on a list from this session: one not ready has said nothing of its queue.)
+	ui.effect(function()
+		local s = b.session()
+		local id = b.id()
+		if s and s.id == id and s.queue then
+			queued.prune(id, s.queue)
+		end
+	end)
+	local function say(key: string, err: any?)
+		if not b.notice then
+			return
+		end
+		if err == nil then
+			b.notice { tone = "danger", key = key, dismissable = true }
+		else
+			b.notice { tone = "danger", text = ui.t(key, { err = reason(err) }):get(), dismissable = true }
+		end
+	end
+	-- An old host's session has neither: it reads as it always did.
+	local function can_steer(): boolean?
+		local s = b.session()
+		if not s then
+			return false
+		end
+		if s.steers == nil and s.stopped == nil then
+			return s.running == true
+		end
+		return s.steers
+	end
+	-- `from`, the chat it was queued in, as a row's answer can come after a switch.
+	local function send_row(item: string, row: any, from: string?)
+		local id = from or b.id()
+		if not id then
+			return
+		end
+		local s = b.session()
+		local here = s ~= nil and s.id == id
+		if not here then
+			s = nil
+		end
+		local carries = row.cargo ~= nil and #row.cargo > 0
+		local next_turn = s ~= nil and s.running == true and not carries and s.steers == false
+		local p = store.queue(id, { op = "send", item = item }) :: any
+		if not p then
+			queued.unhide(id, { row.id, item })
+			return
+		end
+		if next_turn then
+			-- (Only moved up: a hide from before it was listed lifts.)
+			queued.unhide(id, { row.id, item })
+			queued.front(id, item)
+		else
+			queued.hide(id, { item })
+		end
+		p:after(function()
+			if next_turn then
+				ui.after(queued.LISTED_MS, function()
+					queued.unfront(id, item)
+				end)
+			end
+		end, function(err: any)
+			if next_turn then
+				queued.unfront(id, item)
+			else
+				queued.unhide(id, { row.id, item })
+			end
+			if reason(err) ~= "gone" then
+				say("chat.composer.queue_send_failed", err)
+			end
+		end)
+	end
+	local then_send: { [string]: any } = {}
 	-- Each act is on the chat and the question it was asked about, as they
 	-- are as it's taken.
 	local function on_ask(f: (id: string, request: string) -> ())
@@ -111,26 +221,153 @@ function M.bind(b: Bind): { [string]: any }
 		end,
 		on_deny = on_ask(store.deny),
 		queue = queue,
+		engine_queue = engine_queue,
+		can_steer = can_steer,
 		on_queue_send = function(item: string)
 			local id = b.id()
-			if id then
-				store.queue(id, { op = "send", item = item })
+			if not id then
+				return
 			end
+			local row: any = nil
+			for _, r in queue:peek() do
+				if r.id == item then
+					row = r
+				end
+			end
+			if not row then
+				return
+			end
+			if row.sending then
+				then_send[item] = row
+				queued.hide(id, { item })
+				return
+			end
+			if row.locked or row.review or row.editing or row.removing then
+				return
+			end
+			local s = b.session()
+			local carries = row.cargo ~= nil and #row.cargo > 0
+			if not carries and can_steer() == nil and s and s.running == true then
+				return
+			end
+			send_row(item, row)
+		end,
+		-- Plain rows only: one with files would interrupt, and Steer never does.
+		on_queue_steer_all = function()
+			local id = b.id()
+			local steer_all = (store :: any).steer_all
+			if not id or not steer_all then
+				return
+			end
+			local ids: { string } = {}
+			for _, r in queue:peek() do
+				if Dock.steerable(r) then
+					table.insert(ids, r.id)
+				end
+			end
+			if #ids < 2 then
+				return
+			end
+			local ok, p = pcall(steer_all, id, ids, store.new_id())
+			if not ok or not p then
+				return
+			end
+			queued.hide(id, ids)
+			p:after(function() end, function(err: any)
+				queued.unhide(id, ids)
+				say("chat.composer.queue_send_failed", err)
+			end)
 		end,
 		on_queue_remove = function(item: string)
 			local id = b.id()
-			if id then
-				store.queue(id, { op = "remove", item = item })
+			if not id then
+				return
 			end
+			local p = store.queue(id, { op = "remove", item = item }) :: any
+			if not p then
+				return
+			end
+			queued.removing(id, item, true)
+			p:after(function()
+				queued.hide(id, { item })
+				queued.removing(id, item, false)
+			end, function(err: any)
+				queued.removing(id, item, false)
+				say(if reason(err) == "gone" then "chat.composer.queue_gone" else "chat.composer.queue_remove_failed")
+			end)
 		end,
 		on_queue_reorder = function(from: number, to: number)
 			local id = b.id()
-			local items = queue:peek()
-			if id and items[from] then
-				store.queue(id, { op = "move", item = items[from].id, to = to })
+			local rows = queue:peek()
+			local row = rows[from]
+			if not id or not row or row.sending or row.review or row.locked or row.removing then
+				return
+			end
+			local engine_to = queued.move(id, rows, engine_queue:peek(), from, to)
+			local p = store.queue(id, { op = "move", item = row.id, to = engine_to }) :: any
+			if not p then
+				queued.unmove(id)
+				return
+			end
+			p:after(function()
+				ui.after(queued.LISTED_MS, function()
+					queued.unmove(id)
+				end)
+			end, function(err: any)
+				queued.unmove(id)
+				say("chat.composer.queue_reorder_failed", err)
+			end)
+		end,
+		-- What it hands back goes with the answer: that answer is for the chat
+		-- it was queued in, whichever shows by then.
+		queue_add = function(text: string, cargo: { any }?): any
+			local id = b.id()
+			if not id then
+				return nil
+			end
+			local shown: { any }? = nil
+			if cargo then
+				shown = {}
+				for _, it in cargo do
+					local row = table.clone(it)
+					row.src = it.src or (if it.kind == "image" then it.path else nil)
+					table.insert(shown :: { any }, row)
+				end
+			end
+			return { session = id, row = queued.add(id, engine_queue:peek(), text, shown) }
+		end,
+		queue_added = function(q: any, got: any)
+			local waiting = then_send[q.row]
+			then_send[q.row] = nil
+			if type(got) == "string" then
+				queued.added(q.session, q.row, got)
+				if waiting then
+					send_row(got, waiting, q.session)
+				end
+			else
+				queued.forget(q.session, q.row)
 			end
 		end,
-		todos = list("todos"),
+		queue_failed = function(q: any)
+			then_send[q.row] = nil
+			queued.forget(q.session, q.row)
+		end,
+		todos = ui.computed(function(): { any }
+			local s = b.session()
+			local items = if s and s.todos then s.todos else {}
+			local id = b.id()
+			if id and DISMISSED:get()[id] == signature(items) then
+				return {}
+			end
+			return items
+		end),
+		on_dismiss_todos = function()
+			local id = b.id()
+			local s = b.session()
+			if id and s and s.todos then
+				DISMISSED:set_key(id, signature(s.todos))
+			end
+		end,
 		tasks = list("tasks"),
 	}
 end

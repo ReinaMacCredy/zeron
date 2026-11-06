@@ -51,6 +51,10 @@ export type Item = {
 	-- tile no letter of it (`seed`'s avatar).
 	private: boolean?,
 	tag: string?,
+	-- A heading over it, where a section of the list starts.
+	heading: string?,
+	-- Its glyph's and name's ink, when not the menu's (a warning).
+	ink: string?,
 	warn: boolean?,
 	-- Shown but not to be picked (a device out of reach): dimmed, passed
 	-- over by the keys, its `description` saying why.
@@ -102,6 +106,9 @@ export type Props = {
 	-- Set to whether the panel is open (the caller holding still what it
 	-- hangs from while it is).
 	showing: State<boolean>?,
+	-- At most this many rows of those that match, and the line saying so.
+	cap: number?,
+	cap_words: ((shown: number, total: number) -> string)?,
 	-- Whether `extra` (and its rule) shows; always, by default.
 	extra_when: (() -> boolean)?,
 	-- A row's own control at its end (a star to favourite it), given the
@@ -144,6 +151,8 @@ export type Props = {
 	-- true, that icon is in the accent (a mode on).
 	fold: (() -> number)?,
 	accent: (() -> boolean)?,
+	-- Its ink there, when it isn't the accent (a warning).
+	accent_ink: string?,
 	-- What assistive technology calls it.
 	label: Label?,
 	-- Where the panel opens (zgx's popover placement); below, from the
@@ -376,7 +385,7 @@ return ui.component(function(props: Props): Node
 		return control.text(props.placeholder) or locale.s("ds.dropdown.placeholder")
 	end
 
-	local shown = ui.computed(function(): { Item }
+	local matched = ui.computed(function(): { Item }
 		local q = string.lower(query:get())
 		local out: { Item } = {}
 		local keep = props.filter
@@ -387,6 +396,13 @@ return ui.component(function(props: Props): Node
 		end
 		return out
 	end)
+	local cap = props.cap
+	local shown = if cap
+		then ui.computed(function(): { Item }
+			local all = matched:get()
+			return if #all > cap then table.move(all, 1, cap, 1, {}) else all
+		end)
+		else matched
 
 	-- The highlighted row: an item (by value), or an action ("action:<n>");
 	-- the keys run through the items, then on into the actions, and round. And the
@@ -698,7 +714,7 @@ return ui.component(function(props: Props): Node
 					shrink = 0,
 					-- Two glyphs, so the plain one keeps following the
 					-- trigger's own ink (and its hover).
-					ui.show(accent, ui.div { color = "$accent", glyph() }),
+					ui.show(accent, ui.div { color = props.accent_ink or "$accent", glyph() }),
 					ui.show(function()
 						return not accent()
 					end, glyph()),
@@ -1059,7 +1075,7 @@ return ui.component(function(props: Props): Node
 							tall = item.description ~= nil,
 							opacity = if item.disabled then ui.raw(0.45, "a choice out of reach, dimmed") else nil,
 							cursor = if item.disabled then "default" else nil,
-							tile(item),
+							if item.ink then ui.div { color = item.ink, tile(item) } else tile(item),
 							if item.description
 								then ui.column {
 									grow = 1,
@@ -1080,7 +1096,7 @@ return ui.component(function(props: Props): Node
 											text_size = "$font.size.md",
 											line_height = "$font.line.md",
 											weight = "$font.weight.medium",
-											color = "$text.primary",
+											color = item.ink or "$text.primary",
 										},
 									ui.text {
 										item.description,
@@ -1121,6 +1137,9 @@ return ui.component(function(props: Props): Node
 							r = props.wrap_item(item, r)
 						end
 						if not props.expanded then
+							if item.heading then
+								return ui.column { w_full = true, Menu.Heading { item.heading }, r }
+							end
 							return r
 						end
 						-- Folded, the others are out of sight (the edges of
@@ -1335,6 +1354,19 @@ return ui.component(function(props: Props): Node
 			local rows: { Node } = {}
 			for _, row in browse() do
 				table.insert(rows, row)
+			end
+			if cap and props.cap_words then
+				local words = props.cap_words
+				table.insert(rows, ui.show(function(): boolean
+					return #matched:get() > cap
+				end, ui.text {
+					function(): string
+						return words(cap, #matched:get())
+					end,
+					p = "$space.1",
+					text_size = "$font.size.xs",
+					color = "$text.disabled",
+				}))
 			end
 			if props.extra then
 				local foot = ui.column { w_full = true, rule(), ui.column { w_full = true, p = "$space.1", props.extra } }

@@ -1,45 +1,36 @@
--- What a message carries, as the composer shows it over the draft: a strip
--- of chips, one a thing attached, Zeron's tile strip (composer.rs, the
--- attachment tiles) with each chip saying what it holds. A file is its
--- icon beside its name and what it is ("Rust · 48 KB"); text pasted in
--- whole is a chip too, saying how much ("412 lines · 18 KB"); an element
--- picked on a page is an annotation, a compact chip: its number (the one
--- its mark wears on the page) beside its element, or the note typed for
--- it, on one line; a passage quoted from a conversation is one too
--- (ds/quote), who said it over a short excerpt. An image is its own thumbnail:
--- the chip's height, wide as a window is, so a screenshot shows whole.
+-- What a message carries, as the composer shows it over the draft (Zeron's
+-- strip, composer.rs `render_attachment_strip`): tiles that wrap, bottom
+-- aligned, an image 120 square and a file 56 square, with the row chips
+-- (annotations, quotes, chats) and the one badge for review comments as the
+-- last cells; Appshots over them in a strip of their own that scrolls.
 --
--- Every chip is one height, whatever its state. One still uploading wears
--- a ring where its glyph was (over the thumbnail, on a scrim) and says how
--- far; one that failed says so where its detail was, in the danger's ink,
--- with Retry at its end. Under the pointer (or with the keys) an × hangs
--- at the chip's top-right corner, over its edge (Zeron's tiles'): laid
--- over the chip, taking no room of its own, so no chip moves. The strip
--- keeps room above its first row and the pill's inset keeps room at its
--- end, so a corner's × is never clipped.
+-- A remove disc hangs at a tile's corner under the pointer or the keys,
+-- taking no room. Text pasted whole and a linked file are small chips of a
+-- label, where Zeron has them in the draft's own text.
 --
--- The chip under the pointer is `hovered` (its id), for whatever shows
--- what a chip stands for elsewhere (the page's mark firms).
+-- Past what a short window can hold (Zeron's wrap has no limit and runs the
+-- composer off the top), the strip shows what fits and "+N more".
 --
--- Chips share the draft's left edge and wrap. Past eight, the strip shows
--- six and "+N more", a quiet word that opens the rest; opened, "Show less"
--- stands in its place. A chip arriving scales in; one leaving fades as the
--- others close up.
+-- The chip under the pointer is `hovered` (its id), for whatever shows what
+-- a chip stands for elsewhere (the page's mark firms).
 --
--- `Strip { items = cargo, on_remove = …, on_retry = …, on_open = … }`.
+-- `Strip { items = cargo, on_remove = …, on_retry = …, on_open = …,
+-- on_open_pasted = … }`.
 
 local Icon = require("@self/icon")
 local HoverCard = require("@self/hover_card")
 local Mark = require("@self/mark")
 local FileIcon = require("@self/file_icons")
 local FadeText = require("@self/fade_text")
+local Menu = require("@self/menu")
 local control = require("@self/control")
 local locale = require("@self/locale")
+local motion = require("@self/motion")
 
 local M = {}
 
 -- ("comment": a review comment left on a file.)
-export type Kind = "image" | "file" | "text" | "annotation" | "comment" | "appshot"
+export type Kind = "image" | "file" | "text" | "annotation" | "comment" | "appshot" | "chat"
 export type Item = {
 	id: string,
 	kind: Kind,
@@ -70,28 +61,47 @@ export type Item = {
 	index: number?,
 	note: string?,
 	code: boolean?,
+	path: string?,
+	-- Its number in the draft, for `@` (screens/chat/shared).
+	number: number?,
+	-- What a pasted or linked chip reads.
+	label: string?,
+	pasted: boolean?,
+	linked: boolean?,
 }
 export type Props = {
 	items: State<{ Item }>,
 	on_remove: ((id: string) -> ())?,
 	on_retry: ((id: string) -> ())?,
 	on_open: ((id: string) -> ())?,
+	-- A pasted chip pressed: its text back in the draft.
+	on_open_pasted: ((id: string) -> ())?,
 	-- An image chip as the lightbox's thumbnail (ds/lightbox `source`): the
 	-- props that let its picture grow from the chip and go back into it.
 	source: ((item: Item) -> { [string]: any }?)?,
 }
 
--- How many chips show before the rest fold into "+N more", and how many
--- then.
-local FOLD_PAST, FOLD_TO = 8, 6
+local IMAGE_TILE, IMAGE_RADIUS, FILE_TILE, FILE_RADIUS = 120, 12, 56, 8
+local TILE_ROUND = ui.raw(IMAGE_RADIUS, "Zeron's strip tile")
+local MENU_GAP = "$zeron.space.hair"
+local PAD_TOP = 12
+local SHOT_W, SHOT_H = 208, 128
+-- A row chip's and the badge's width as the fold counts them (Zeron's
+-- STAGED_BADGE_WIDTH).
+local CELL_W = 100
+local BADGE_H, PILL_H = 24, 24
+-- What the window keeps of itself beside the strip before it folds: the
+-- title bar, the draft and its controls, a little of the transcript.
+local WINDOW_KEEPS = 320
 -- The glyph's slot, and the ring in it.
 local SLOT, RING = 18, 18
--- An Appshot's picture in its slot.
-local APPSHOT_W, APPSHOT_H = 36, 26
 -- The ×: its disc, and how far it hangs past the chip's corner.
 local CROSS, CROSS_OUT = 18, 5
+local DISC, DISC_OUT = 18, 6
 -- How the × comes and goes.
 local SWAP: TweenOptions = { duration = 140 }
+-- (The icon set has no link.)
+local LINK = [==[code:<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>]==]
 
 -- The chip under the pointer, by id (nil: none).
 M.hovered = ui.state("composer_cargo_hovered", nil :: string?)
@@ -224,97 +234,6 @@ local function scrim(...: Node): Node
 	}
 end
 
--- An image: its picture cropped to the chip's height, a hairline over its
--- edge (a light picture on a light pill would lose it), the ring or the
--- failure over it, the × at its corner (outside the picture's clip).
-local function image_chip(item: Item, row: State<Item>, props: Props): Node
-	local hovered = ui.use_state(false)
-	local focused = ui.use_state(false)
-	local function lit(): boolean
-		return hovered:get() or focused:get()
-	end
-	local h = n("zeron.composer.chip.h", 40)
-	local w = n("zeron.composer.chip.thumb", 56)
-	local function uploading(): boolean
-		local p = row:get().progress
-		return p ~= nil and p < 1 and row:get().failed == nil
-	end
-	local function failed(): boolean
-		return row:get().failed ~= nil
-	end
-	local remove = props.on_remove
-	local cut = hollow(lit)
-	local lifted = if props.source then props.source(item) else nil
-	return ui.overlay {
-		w = w,
-		h = h,
-		shrink = 0,
-		relative = true,
-		rounded = "$zeron.composer.chip.radius",
-		label = item.name,
-		-- (Opening: with the keys too, and the lightbox's thumbnail.)
-		focusable = props.on_open ~= nil,
-		focus = control.ring,
-		on_mount = if lifted then lifted.on_mount else nil,
-		on_visible = if lifted then lifted.on_visible else nil,
-		opacity = if lifted then lifted.opacity else nil,
-		tooltip = if item.meta then `{item.name} · {item.meta}` else item.name,
-		cursor = if props.on_open then "pointer" else nil,
-		on_click = if props.on_open
-			then function()
-				(props.on_open :: (string) -> ())(item.id)
-			end
-			else nil,
-		on_hover = function(inside: boolean)
-			hovered:set(inside)
-			over(item, inside)
-		end,
-		-- (The picture is the cut layer; the × stands beside it, uncut.)
-		ui.overlay {
-			ref = cut.ref,
-			layer_shader = cut.layer_shader,
-			layer_params = cut.layer_params,
-			w_full = true,
-			h_full = true,
-			rounded = "$zeron.composer.chip.radius",
-			overflow = "hidden",
-			border = 1,
-			border_color = "$zeron.composer.chip.edge",
-			border_over = true,
-			-- (Its file gone since, or not a picture: the gallery's glyph in
-			-- its place, `ui.image`'s `fallback`.)
-			ui.image {
-				src = item.src,
-				fit = "cover",
-				w_full = true,
-				h_full = true,
-				fallback = scrim(ui.div { color = "$text.tertiary", Icon { name = "gallery", size = 16 } }),
-			},
-			ui.show(uploading, scrim(ring(function(): number
-				return row:get().progress or 0
-			end, "$zeron.composer.chip.scrim_ink", "#ffffff4d"))),
-			ui.show(failed, scrim(ui.div { color = "$zeron.tone.danger.ink", Icon { name = "danger-triangle", size = 16 } })),
-		},
-		if remove
-			then cross(item, lit, remove, function(on: boolean)
-				focused:set(on)
-			end)
-			else nil,
-	}
-end
-
--- A file, pasted text, or an annotation: its glyph, its name over what it
--- is. Uploading, the glyph's slot holds the ring and the detail says how
--- far; failed, the slot holds the warning, the detail says so, and Retry
--- stands at the end.
--- An element picked on a page in the browser panel is a row chip as a
--- quoted passage is (one anatomy): the bare annotate glyph; its number
--- (as its mark on the page wears it, renumbered with it as others leave)
--- before the page's address, host and path, never cut short, fading at
--- the chip's edge; under it the note typed for it, else what it says of
--- the element. Under the pointer its mark on the page lights, and a card
--- says what the element is (the shipping app's). Nothing to open: no
--- pointer, no click.
 -- The markup the card shows under the pointer: its first lines (the
 -- shipping app's ANNOTATION_SNIPPET_LINES), an ellipsis past them.
 local CARD_LINES = 4
@@ -439,6 +358,486 @@ local function page_of(url: any): string?
 	return s
 end
 
+local function disc(item: Item, lit: () -> boolean, on_remove: (id: string) -> (), on_lit: (boolean) -> ()): Node
+	local named = locale.s("ds.composer_cargo.remove", { name = item.name })
+	return ui.button {
+		absolute = true,
+		top = -DISC_OUT,
+		right = -DISC_OUT,
+		w = DISC,
+		h = DISC,
+		p = 0,
+		justify = "center",
+		items = "center",
+		rounded = "$radius.full",
+		bg = "$background",
+		shadow = "$shadow.sm",
+		color = "$text.secondary",
+		cursor = "pointer",
+		hover = { bg = "$background", color = "$text.primary" },
+		active = { bg = "$background", color = "$text.primary" },
+		focus = control.ring,
+		label = named,
+		tooltip = named,
+		opacity = function(): number
+			return if lit() then 1 else 0
+		end,
+		on_focus = function()
+			on_lit(true)
+		end,
+		on_blur = function()
+			on_lit(false)
+		end,
+		on_click = function()
+			on_remove(item.id)
+		end,
+		Icon { name = "close-circle", size = 14 },
+	}
+end
+
+local function image_tile(item: Item, row: State<Item>, props: Props): Node
+	local hovered = ui.use_state(false)
+	local focused = ui.use_state(false)
+	local function lit(): boolean
+		return hovered:get() or focused:get()
+	end
+	local function uploading(): boolean
+		local p = row:get().progress
+		return p ~= nil and p < 1 and row:get().failed == nil
+	end
+	local function failed(): boolean
+		return row:get().failed ~= nil
+	end
+	local remove = props.on_remove
+	local lifted = if props.source then props.source(item) else nil
+	return ui.overlay {
+		w = IMAGE_TILE,
+		h = IMAGE_TILE,
+		shrink = 0,
+		relative = true,
+		rounded = TILE_ROUND,
+		label = item.name,
+		-- (Opening: with the keys too, and the lightbox's thumbnail.)
+		focusable = props.on_open ~= nil,
+		focus = control.ring,
+		on_mount = if lifted then lifted.on_mount else nil,
+		on_visible = if lifted then lifted.on_visible else nil,
+		opacity = if lifted then lifted.opacity else nil,
+		tooltip = if item.meta then `{item.name} · {item.meta}` else item.name,
+		cursor = if props.on_open then "pointer" else nil,
+		on_click = if props.on_open
+			then function()
+				(props.on_open :: (string) -> ())(item.id)
+			end
+			else nil,
+		on_hover = function(inside: boolean)
+			hovered:set(inside)
+			over(item, inside)
+		end,
+		ui.overlay {
+			w_full = true,
+			h_full = true,
+			rounded = TILE_ROUND,
+			overflow = "hidden",
+			border = 1,
+			border_color = "$zeron.composer.chip.edge",
+			border_over = true,
+			-- (Its file gone since, or not a picture: the gallery's glyph in
+			-- its place, `ui.image`'s `fallback`.)
+			ui.image {
+				src = item.src,
+				fit = "cover",
+				w_full = true,
+				h_full = true,
+				fallback = scrim(ui.div { color = "$text.tertiary", Icon { name = "gallery", size = 16 } }),
+			},
+			ui.show(uploading, scrim(ring(function(): number
+				return row:get().progress or 0
+			end, "$zeron.composer.chip.scrim_ink", "#ffffff4d"))),
+			ui.show(failed, scrim(ui.div { color = "$zeron.tone.danger.ink", Icon { name = "danger-triangle", size = 16 } })),
+		},
+		if remove
+			then disc(item, lit, remove, function(on: boolean)
+				focused:set(on)
+			end)
+			else nil,
+	}
+end
+
+local function file_tile(item: Item, props: Props): Node
+	local hovered = ui.use_state(false)
+	local focused = ui.use_state(false)
+	local function lit(): boolean
+		return hovered:get() or focused:get()
+	end
+	local remove = props.on_remove
+	return ui.overlay {
+		w = FILE_TILE,
+		h = FILE_TILE,
+		shrink = 0,
+		relative = true,
+		rounded = "$radius.lg",
+		label = item.name,
+		tooltip = if item.meta then `{item.name} · {item.meta}` else item.name,
+		on_hover = function(inside: boolean)
+			hovered:set(inside)
+			over(item, inside)
+		end,
+		ui.column {
+			w_full = true,
+			h_full = true,
+			rounded = "$radius.lg",
+			border = 1,
+			border_color = "$zeron.composer.chip.edge",
+			px = "$space.1",
+			gap = ui.raw(3, "Zeron's file tile"),
+			items = "center",
+			justify = "center",
+			FileIcon { name = item.name, size = 24 },
+			FadeText { item.name, literal = true, max_w = FILE_TILE - 10, fade = 8, text_size = ui.raw(10, "Zeron's file tile"), line_height = ui.raw(12, "Zeron's file tile"), color = "$text.secondary" },
+		},
+		if remove
+			then disc(item, lit, remove, function(on: boolean)
+				focused:set(on)
+			end)
+			else nil,
+	}
+end
+
+-- (Zeron paints these inline in the draft; zgx's text has no chips.)
+local function pill_chip(item: Item, props: Props): Node
+	local hovered = ui.use_state(false)
+	local focused = ui.use_state(false)
+	local function lit(): boolean
+		return hovered:get() or focused:get()
+	end
+	local opens = if item.pasted then props.on_open_pasted else nil
+	local tip = if item.pasted
+		then locale.s("ds.composer_cargo.pasted_tip")
+		else locale.s("ds.composer_cargo.linked_tip", { path = item.path or item.name })
+	local remove = props.on_remove
+	return ui.row {
+		shrink = 0,
+		relative = true,
+		max_w = n("zeron.composer.chip.max", 214),
+		label = item.label or item.name,
+		on_hover = function(inside: boolean)
+			hovered:set(inside)
+			over(item, inside)
+		end,
+		ui.row {
+			h = PILL_H,
+			min_w = 0,
+			pl = "$zeron.space.hair",
+			pr = "$space.2",
+			gap = "$zeron.space.tight",
+			items = "center",
+			rounded = ui.raw(5, "Zeron's chip"),
+			bg = "$zeron.composer.chip.bg",
+			tooltip = tip,
+			tooltip_delay = 420,
+			tooltip_placement = { side = "top", align = "start", offset = 1 },
+			cursor = if opens then "pointer" else nil,
+			on_click = if opens
+				then function()
+					opens(item.id)
+				end
+				else nil,
+			ui.div {
+				w = PILL_H - 4,
+				h = PILL_H - 4,
+				shrink = 0,
+				items = "center",
+				justify = "center",
+				rounded = ui.raw(4, "Zeron's chip well"),
+				bg = "$hover",
+				FileIcon { name = item.name, size = 14 },
+			},
+			FadeText { item.label or item.name, literal = true, grow = 1, min_w = 0, text_size = "$font.size.md", line_height = "$font.line.md", color = "$text.primary" },
+			if item.linked then ui.div { shrink = 0, color = "$text.tertiary", ui.svg { src = LINK, tint = "currentColor", w = 12, h = 12 } } else nil,
+		},
+		if remove
+			then disc(item, lit, remove, function(on: boolean)
+				focused:set(on)
+			end)
+			else nil,
+	}
+end
+
+local function shot_app(item: Item): string
+	local a = item.appshot
+	local app = if a and type(a.app) == "string" then (string.match(a.app, "^%s*(.-)%s*$") or "") else ""
+	return if app ~= "" then app else locale.s("ds.composer_cargo.captured_app")
+end
+local function provenance(app: string, title: string?): string
+	local t = if title then (string.match(title, "^%s*(.-)%s*$") or "") else ""
+	return if t ~= "" and string.lower(t) ~= string.lower(app) then `{t} / {app}` else app
+end
+
+local function appshot_tile(item: Item, props: Props): Node
+	local hovered = ui.use_state(false)
+	local over_x = ui.use_state(false)
+	local app = shot_app(item)
+	local source = provenance(app, item.appshot and item.appshot.title)
+	local lifted = if props.source then props.source(item) else nil
+	local remove = props.on_remove
+	local named = locale.s("ds.composer_cargo.remove_appshot", { app = app })
+	return ui.overlay {
+		w = SHOT_W,
+		h = SHOT_H,
+		shrink = 0,
+		relative = true,
+		rounded = TILE_ROUND,
+		bg = "$surface.raised",
+		label = locale.t("ds.composer_cargo.preview_appshot", { app = app }),
+		tooltip = source,
+		focusable = props.on_open ~= nil,
+		focus = control.ring,
+		cursor = if props.on_open then "pointer" else nil,
+		on_mount = if lifted then lifted.on_mount else nil,
+		on_visible = if lifted then lifted.on_visible else nil,
+		opacity = if lifted then lifted.opacity else nil,
+		on_click = if props.on_open
+			then function()
+				(props.on_open :: (string) -> ())(item.id)
+			end
+			else nil,
+		on_hover = function(inside: boolean)
+			hovered:set(inside)
+			over(item, inside)
+		end,
+		ui.image {
+			src = item.src,
+			absolute = true,
+			left = 4,
+			top = 4,
+			w = SHOT_W - 8,
+			h = SHOT_H - 8,
+			rounded = ui.raw(6, "Zeron's Appshot picture"),
+			fit = "contain",
+		},
+		ui.column {
+			absolute = true,
+			left = 0,
+			right = 0,
+			bottom = 0,
+			h = 68,
+			justify = "end",
+			pointer_events = "none",
+			rounded_bl = ui.raw(11, "inside the tile's edge"),
+			rounded_br = ui.raw(11, "inside the tile's edge"),
+			gradient = { stops = { "#00000000", "#0000008c", "#000000e6" } },
+			ui.row {
+				w_full = true,
+				min_w = 0,
+				px = "$zeron.space.snug",
+				pb = "$space.2",
+				gap = "$space.2",
+				items = "center",
+				if item.icon
+					then ui.image { src = item.icon, w = 20, h = 20, shrink = 0, rounded = ui.raw(5, "Zeron's Appshot source"), fit = "contain", aria_hidden = true }
+					else ui.div {
+						w = 20,
+						h = 20,
+						shrink = 0,
+						items = "center",
+						justify = "center",
+						rounded = ui.raw(5, "Zeron's Appshot source"),
+						bg = ui.raw("#ffffff26", "on the scrim, in both themes"),
+						color = ui.raw("#ffffffd9", "on the scrim, in both themes"),
+						Icon { name = "monitor", size = 12 },
+					},
+				FadeText { source, literal = true, grow = 1, min_w = 0, text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$zeron.composer.chip.scrim_ink" },
+			},
+		},
+		-- (The edge's own layer: a token's alpha can't ease, its opacity can.)
+		ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			rounded = TILE_ROUND,
+			border = 1,
+			border_color = "$border",
+			pointer_events = "none",
+			opacity = ui.tween(ui.computed(function(): number
+				return if hovered:get() then 1 else 0.55
+			end), { duration = 150 }),
+		},
+		if remove
+			then ui.button {
+				absolute = true,
+				top = 4,
+				right = 4,
+				w = 14,
+				h = 14,
+				p = 0,
+				justify = "center",
+				items = "center",
+				rounded = "$radius.full",
+				bg = "$text.primary",
+				shadow = "$shadow.sm",
+				color = "$background",
+				cursor = "pointer",
+				hover = { bg = "$text.primary", color = "$background" },
+				active = { bg = "$text.primary", color = "$background" },
+				focus = control.ring,
+				label = named,
+				tooltip = named,
+				on_hover = function(inside: boolean)
+					over_x:set(inside)
+				end,
+				opacity = ui.tween(ui.computed(function(): number
+					if over_x:get() then
+						return 1
+					end
+					return if hovered:get() then 0.8 else 0.56
+				end), { duration = 150 }),
+				on_click = function()
+					remove(item.id)
+				end,
+				Icon { name = "close", size = 10 },
+			}
+			else nil,
+	}
+end
+
+local function first_line(body: any): string
+	return if type(body) == "string" then (string.match(body, "^%s*([^\n]*)") or "") else ""
+end
+
+local function comments_badge(comments: State<{ Item }>, props: Props): Node
+	local open = ui.use_state(false)
+	local function count_label(): string
+		local count = #comments:get()
+		return if count == 1 then locale.s("ds.composer_cargo.comment_one") else locale.s("ds.composer_cargo.comment_many", { n = count })
+	end
+	local trigger = ui.button {
+		h = BADGE_H,
+		px = "$space.2",
+		gap = "$zeron.space.tight",
+		shrink = 0,
+		items = "center",
+		rounded = "$radius.lg",
+		bg = "$hover",
+		color = "$text.secondary",
+		cursor = "pointer",
+		text_size = "$font.size.sm",
+		weight = "$font.weight.medium",
+		hover = { bg = "$pressed" },
+		active = { bg = "$pressed" },
+		focus = control.ring,
+		expanded = open,
+		label = function(): string
+			return locale.s("ds.composer_cargo.comments_show", { label = count_label() })
+		end,
+		on_click = function()
+			open:set(not open:peek())
+		end,
+		ui.div { opacity = 0.7, Icon { name = "chat-round-line", size = 12 } },
+		ui.text { count_label, literal = true },
+	}
+	ui.effect(function()
+		if #comments:get() == 0 and open:peek() then
+			open:set(false)
+		end
+	end)
+	return ui.popover(Menu.panel {
+		open = open,
+		anchor = trigger,
+		placement = { side = "top", align = "start", offset = 6 },
+		w = 340,
+		build = function(): Node
+			return ui.column {
+				w_full = true,
+				gap = 0,
+				ui.column {
+					w_full = true,
+					p = "$space.1",
+					gap = MENU_GAP,
+					ui.each(comments, function(c: Item): Node
+						-- (Its row follows it: a comment carried to another line.)
+						local function now(): any
+							for _, it in comments:get() do
+								if it.id == c.id then
+									return it
+								end
+							end
+							return c
+						end
+						local function text(): string
+							return first_line(now().body)
+						end
+						return ui.row(Menu.look {
+							gap = "$space.2",
+							tooltip = comment_card(c),
+							tooltip_placement = { side = "right", align = "start", offset = 8 },
+							cursor = "default",
+							-- (Where Zeron's severity dot stands.)
+							ui.div { w = 6, h = 6, shrink = 0 },
+							FadeText { text, literal = true, grow = 1, min_w = 0, text_size = "$font.size.md", color = "$text.secondary" },
+							ui.text { function(): string
+								return now().name
+							end, literal = true, shrink = 0, font = "$font.mono", text_size = ui.raw(10.5, "Zeron's staged comment location"), color = "$text.tertiary" },
+							ui.button {
+								w = 18,
+								h = 18,
+								p = 0,
+								shrink = 0,
+								justify = "center",
+								items = "center",
+								rounded = ui.raw(4, "Zeron's staged comment row"),
+								bg = "#00000000",
+								color = "$text.secondary",
+								cursor = "pointer",
+								hover = { bg = "$hover", color = "$text.primary" },
+								active = { bg = "$pressed", color = "$text.primary" },
+								focus = control.ring,
+								label = function(): string
+									return locale.s("ds.composer_cargo.comment_remove", { text = text() })
+								end,
+								on_click = function()
+									if props.on_remove then
+										props.on_remove(c.id)
+									end
+								end,
+								Icon { name = "close-circle", size = 12 },
+							},
+						})
+					end, {
+						key = function(c: Item): string
+							return c.id
+						end,
+						gap = MENU_GAP,
+					}),
+				},
+				Menu.Rule(),
+				ui.column {
+					w_full = true,
+					p = "$space.1",
+					ui.button(Menu.look {
+						bg = "#00000000",
+						color = "$text.secondary",
+						label = locale.t("ds.composer_cargo.comments_clear_named"),
+						on_click = function()
+							ui.batch(function()
+								for _, c in comments:peek() do
+									if props.on_remove then
+										props.on_remove(c.id)
+									end
+								end
+								open:set(false)
+							end)
+						end,
+						ui.text { locale.t("ds.composer_cargo.comments_clear"), text_size = "$font.size.md" },
+					}),
+				},
+			}
+		end,
+	})
+end
+
 local function row_chip(item: Item, row: State<Item>, props: Props): Node
 	local hovered = ui.use_state(false)
 	local focused = ui.use_state(false)
@@ -459,30 +858,6 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 		glyph = FileIcon { name = item.name, size = glyph_size }
 	elseif item.kind == "annotation" then
 		glyph = Icon { name = "cursor", size = glyph_size - 2 }
-	elseif item.kind == "comment" then
-		glyph = Icon { name = "chat-round-line", size = glyph_size - 2 }
-	elseif item.kind == "appshot" then
-		-- An Appshot: a small picture of the window, its app's icon on its
-		-- corner (the shipping app's tile, at a chip's size).
-		glyph = ui.overlay {
-			w = APPSHOT_W,
-			h = APPSHOT_H,
-			relative = true,
-			ui.overlay {
-				w_full = true,
-				h_full = true,
-				rounded = ui.raw(control.nest("$zeron.composer.chip.radius", (n("zeron.composer.chip.h", 40) - APPSHOT_H) / 2), "concentric with the chip: its corner less the picture's inset"),
-				overflow = "hidden",
-				border = 1,
-				border_color = "$zeron.composer.chip.edge",
-				border_over = true,
-				bg = "$hover",
-				ui.image { src = item.src, fit = "cover", w_full = true, h_full = true },
-			},
-			if item.icon
-				then ui.image { src = item.icon, absolute = true, right = -4, bottom = -4, w = 14, h = 14, fit = "contain", aria_hidden = true }
-				else nil,
-		}
 	elseif item.kind == "chat" then
 		-- Another chat mentioned: its agent's mark, as the sidebar's row.
 		glyph = if item.mark then Mark { name = item.mark, size = glyph_size - 2, bare = true } else Icon { name = "chat-round-line", size = glyph_size - 2 }
@@ -496,8 +871,8 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 	local opens = props.on_open ~= nil and not pick
 	-- The slot: the glyph, or the ring, or the warning.
 	local slot = ui.div {
-		w = if item.kind == "appshot" then APPSHOT_W else SLOT,
-		h = if item.kind == "appshot" then APPSHOT_H else SLOT,
+		w = SLOT,
+		h = SLOT,
 		shrink = 0,
 		items = "center",
 		justify = "center",
@@ -519,7 +894,7 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 		end
 		return now.meta or ""
 	end
-	local card: Node? = if pick then pick_card(item.annotation) elseif item.kind == "comment" then comment_card(item) else nil
+	local card: Node? = if pick then pick_card(item.annotation) else nil
 	local function title(): string
 		local now = row:get()
 		if pick then
@@ -662,33 +1037,130 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 	}
 end
 
+local function is_pill(item: Item): boolean
+	return item.kind == "file" and (item.pasted == true or item.linked == true)
+end
+
+-- A file mid-upload or failed keeps the row that can say so.
+local function is_tile(item: Item): boolean
+	return item.kind == "image" or (item.kind == "file" and not is_pill(item) and item.progress == nil and item.failed == nil)
+end
+
 -- A chip for one thing carried.
 function M.Chip(item: Item, row: State<Item>, props: Props): Node
 	if item.kind == "image" then
-		return image_chip(item, row, props)
+		return image_tile(item, row, props)
+	elseif is_pill(item) then
+		return pill_chip(item, props)
+	elseif is_tile(item) then
+		return file_tile(item, props)
 	end
 	return row_chip(item, row, props)
 end
 
--- The strip: the chips, wrapping; past eight, six and "+N more"; opened,
--- "Show less" where that was.
+local BADGE, FOLD = "\0comments", "\0fold"
+
+local function cell_size(item: Item): (number, number)
+	if item.id == BADGE then
+		return CELL_W, BADGE_H
+	elseif item.kind == "image" then
+		return IMAGE_TILE, IMAGE_TILE
+	elseif is_pill(item) then
+		return CELL_W, PILL_H
+	elseif is_tile(item) then
+		return FILE_TILE, FILE_TILE
+	end
+	return CELL_W, n("zeron.composer.chip.h", 40)
+end
+
+-- (Zeron's `strip_rows` with a limit, so the fold needs no layout.)
+local function fitting(cells: { Item }, wide: number, tall: number): number?
+	local used, row_h, total = 0, 0, PAD_TOP
+	local gap = n("zeron.composer.chip.gap", 8)
+	for i, cell in cells do
+		local w, h = cell_size(cell)
+		if i > 1 and used + gap + w > wide then
+			total += row_h + gap
+			used, row_h = w, h
+		else
+			used = if i == 1 then w else used + gap + w
+			row_h = math.max(row_h, h)
+		end
+		if total + row_h > tall then
+			return math.max(i - 1, 1)
+		end
+	end
+	return nil
+end
+
+local function window_h(): number?
+	local window = (ui :: any).window
+	local state = if type(window) == "table" or type(window) == "userdata" then window.size else nil
+	local ok, size = pcall(function(): any
+		return if state then state:get() else nil
+	end)
+	local h = if ok and type(size) == "table" then size.height else nil
+	return if type(h) == "number" and h > 1 then h else nil
+end
+
 M.Strip = ui.component(function(props: Props): Node
 	local all = props.items
 	local opened = ui.use_state(false)
-	local FOLD = "\0fold"
-	local function folds(): boolean
-		return #all:get() > FOLD_PAST
-	end
-	-- What shows: every chip, or the first few; and the fold's word when
-	-- there is anything to fold.
+	local width = ui.use_state(0)
+	local shots = ui.computed(function(): { Item }
+		local out: { Item } = {}
+		for _, it in all:get() do
+			if it.kind == "appshot" then
+				table.insert(out, it)
+			end
+		end
+		return out
+	end)
+	local comments = ui.computed(function(): { Item }
+		local out: { Item } = {}
+		for _, it in all:get() do
+			if it.kind == "comment" then
+				table.insert(out, it)
+			end
+		end
+		return out
+	end)
+	local cells = ui.computed(function(): { Item }
+		local tiles: { Item } = {}
+		local rows: { Item } = {}
+		local badge = false
+		for _, it in all:get() do
+			if it.kind == "comment" then
+				badge = true
+			elseif it.kind ~= "appshot" then
+				table.insert(if is_tile(it) then tiles else rows, it)
+			end
+		end
+		for _, it in rows do
+			table.insert(tiles, it)
+		end
+		if badge then
+			local cell: Item = { id = BADGE, kind = "comment", name = BADGE }
+			table.insert(tiles, cell)
+		end
+		return tiles
+	end)
+	local fit = ui.computed(function(): number?
+		local wide, high = width:get(), window_h()
+		if wide <= 0 or not high then
+			return nil
+		end
+		return fitting(cells:get(), wide - 2 * n("zeron.composer.chip.inset", 16), math.max(high - WINDOW_KEEPS, IMAGE_TILE + PAD_TOP))
+	end)
 	local shown = ui.computed(function(): { Item }
-		local list = all:get()
-		if not folds() then
+		local list = cells:get()
+		local count = fit:get()
+		if not count then
 			return list
 		end
 		local out: { Item } = {}
 		for i, it in list do
-			if opened:get() or i <= FOLD_TO then
+			if opened:get() or i <= count then
 				table.insert(out, it)
 			end
 		end
@@ -697,11 +1169,10 @@ M.Strip = ui.component(function(props: Props): Node
 		return out
 	end)
 	local function hidden(): number
-		return math.max(0, #all:get() - FOLD_TO)
+		return math.max(0, #cells:get() - (fit:get() or 0))
 	end
-	-- Too few to fold: back to the start.
 	ui.effect(function()
-		if not folds() then
+		if not fit:get() then
 			opened:set(false)
 		end
 	end)
@@ -719,58 +1190,98 @@ M.Strip = ui.component(function(props: Props): Node
 			return item
 		end)
 	end
-	return ui.row {
+	return ui.column {
 		w_full = true,
-		flex_wrap = true,
-		items = "center",
-		gap = "$zeron.composer.chip.gap",
-		px = "$zeron.composer.chip.inset",
-		pt = "$zeron.composer.chip.top",
-		ui.each(shown, function(item: Item): Node
-			if item.id == FOLD then
-				return ui.button {
-					label = function()
-						return if opened:get()
-							then locale.s("ds.composer_cargo.show_fewer")
-							else locale.s("ds.composer_cargo.show_more", { n = hidden() })
-					end,
-					expanded = opened,
-					h = h,
-					px = "$space.2",
-					shrink = 0,
-					rounded = "$zeron.composer.chip.radius",
-					bg = "#00000000",
-					color = "$text.tertiary",
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
-					cursor = "pointer",
-					hover = { bg = "$hover", color = "$text.primary" },
-					active = { bg = "$pressed", color = "$text.primary" },
-					focus = control.ring,
-					on_click = function()
-						opened:set(not opened:peek())
-					end,
-					ui.text {
-						function()
-							return if opened:get() then locale.s("ds.composer_cargo.show_less") else locale.s("ds.composer_cargo.more", { n = hidden() })
-						end,
-						tabular = true,
-					},
-				}
+		on_resize = function(size: Size)
+			if math.abs(width:peek() - size.w) >= 0.5 then
+				width:set(size.w)
 			end
-			return M.Chip(item, follow(item), props)
-		end, {
-			key = function(item: Item): string
-				return item.id
+		end,
+		ui.show(
+			function(): boolean
+				return #shots:get() > 0
 			end,
-			direction = "row",
-			flex_wrap = true,
-			items = "center",
-			gap = "$zeron.composer.chip.gap",
-			animate = { duration = 220, ease = "outCubic" },
-			enter = { opacity = { 0, 1 }, scale = { 0.9, 1 }, duration = 220, ease = "outCubic" },
-			exit = { opacity = 0, scale = 0.9, duration = 140, ease = "outCubic" },
-		}),
+			ui.scroll_x {
+				w_full = true,
+				h = PAD_TOP + SHOT_H,
+				px = "$zeron.composer.chip.inset",
+				pt = "$space.3",
+				ui.each(shots, function(item: Item): Node
+					return appshot_tile(item, props)
+				end, {
+					key = function(item: Item): string
+						return item.id
+					end,
+					direction = "row",
+					gap = "$zeron.composer.chip.gap",
+					animate = { duration = 220, ease = "outCubic" },
+					enter = if motion.reduced_now()
+						then { opacity = { 0, 1 }, duration = 80 }
+						else { opacity = { 0, 1 }, y = { 8, 0 }, duration = 240, ease = "outExpo" },
+					exit = { opacity = 0, duration = 140, ease = "outCubic" },
+				}),
+			}
+		),
+		ui.show(
+			function(): boolean
+				return #cells:get() > 0
+			end,
+			ui.row {
+				w_full = true,
+				flex_wrap = true,
+				items = "end",
+				gap = "$zeron.composer.chip.gap",
+				px = "$zeron.composer.chip.inset",
+				pt = "$space.3",
+				ui.each(shown, function(item: Item): Node
+					if item.id == BADGE then
+						return comments_badge(comments, props)
+					elseif item.id == FOLD then
+						return ui.button {
+							label = function()
+								return if opened:get()
+									then locale.s("ds.composer_cargo.show_fewer")
+									else locale.s("ds.composer_cargo.show_more", { n = hidden() })
+							end,
+							expanded = opened,
+							h = h,
+							px = "$space.2",
+							shrink = 0,
+							rounded = "$zeron.composer.chip.radius",
+							bg = "#00000000",
+							color = "$text.tertiary",
+							text_size = "$font.size.sm",
+							weight = "$font.weight.medium",
+							cursor = "pointer",
+							hover = { bg = "$hover", color = "$text.primary" },
+							active = { bg = "$pressed", color = "$text.primary" },
+							focus = control.ring,
+							on_click = function()
+								opened:set(not opened:peek())
+							end,
+							ui.text {
+								function()
+									return if opened:get() then locale.s("ds.composer_cargo.show_less") else locale.s("ds.composer_cargo.more", { n = hidden() })
+								end,
+								tabular = true,
+							},
+						}
+					end
+					return M.Chip(item, follow(item), props)
+				end, {
+					key = function(item: Item): string
+						return item.id
+					end,
+					direction = "row",
+					flex_wrap = true,
+					items = "end",
+					gap = "$zeron.composer.chip.gap",
+					animate = { duration = 220, ease = "outCubic" },
+					enter = { opacity = { 0, 1 }, scale = { 0.9, 1 }, duration = 220, ease = "outCubic" },
+					exit = { opacity = 0, scale = 0.9, duration = 140, ease = "outCubic" },
+				}),
+			}
+		),
 	}
 end)
 

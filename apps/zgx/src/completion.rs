@@ -6,16 +6,28 @@
 //! `Invocation::link`), which the engine reads at send.
 //!
 //!   chat.invocations { harness, target = { chat? | space?, device?, path? } }
-//!       { rows = { { kind = "command" | "skill", name, label, detail, link } },
-//!         warning? }     or an error when neither list could be had
+//!       { rows = { { kind = "command" | "skill", name, label, detail, link,
+//!                    plain?, terminal_only?, blocked? } },
+//!         failed?, warning? }  the list that couldn't be had ("commands" or
+//!                        "skills") when the other came, and that in words;
+//!                        or an error when neither could be
 //!
-//! Commands come first in the agent's order, then its enabled skills; a
-//! command that is a skill's own alias is left to the skill. Names and paths
-//! the canonical reference couldn't carry are left out.
+//! Zeron's own commands ride the agent's list as the shipping menu has them
+//! (`with_zeron_commands`: /btw, /compact, then its built-ins), then its
+//! enabled skills; a command that is a skill's own alias is left to the skill.
+//! Names and paths the canonical reference couldn't carry are left out. A row
+//! `plain` inserts its `link` as typed (`/name`, which the send reads); one
+//! `terminal_only` runs only in Claude Code's terminal; one `blocked` says why
+//! it can't run, in place of its description.
 
 use std::{cell::RefCell, future::Future, pin::Pin, rc::Rc, task::Poll};
 
 use serde_json::{Map, Value as Json, json};
+use zeron_proto::{
+    HarnessId, SlashCommand,
+    app_commands::{COMPACT_COMMAND, COMPUTER_USE_COMMAND, TERMINAL_ONLY_COMMANDS},
+    command_catalog::{invocation_detail, skill_display_name, with_zeron_commands, zeron_owned_command},
+};
 use zgx_script::{ScriptHost, Value};
 
 use crate::engine;
@@ -49,8 +61,9 @@ async fn invocations(arg: Value, local: Rc<RefCell<Option<String>>>) -> Result<V
         return Err("no agent".into());
     }
     let target = arg.field("target").ok_or("no target")?;
+    let id = serde_json::from_value::<HarnessId>(json!(harness)).ok();
     let mut params = Map::new();
-    params.insert("harness".into(), Json::String(harness));
+    params.insert("harness".into(), Json::String(harness.clone()));
     let chat = text(target.field("chat"));
     let space = text(target.field("space"));
     let path = text(target.field("path"));
@@ -64,19 +77,25 @@ async fn invocations(arg: Value, local: Rc<RefCell<Option<String>>>) -> Result<V
         return Err("no session or project".into());
     }
     let device = text(target.field("device"));
-    if !device.is_empty() && local_device(&local).await.is_none_or(|here| here != device) {
-        params.insert("targetDeviceId".into(), Json::String(device));
+    let elsewhere = !device.is_empty() && local_device(&local).await.is_none_or(|here| here != device);
+    if elsewhere {
+        params.insert("targetDeviceId".into(), Json::String(device.clone()));
     }
     let params = Json::Object(params);
-    let (commands, skills) = join(
-        engine::get().call("ListCommands", params.clone()),
-        engine::get().call("ListSkills", params),
+    let ((commands, skills), unsupported) = join(
+        join(
+            engine::get().call("ListCommands", params.clone()),
+            engine::get().call("ListSkills", params),
+        ),
+        crate::chat::compaction_unsupported(&harness, elsewhere.then_some(device.as_str())),
     )
     .await;
-    let (rows, warning) = merge(commands, skills)?;
+    let (rows, failed) = merge(commands.and_then(|listed| with_zeron(id, listed)), skills)?;
+    let rows = flagged(rows, id, unsupported);
     let mut fields = vec![("rows", Value::List(rows.into_iter().map(row_value).collect::<Vec<_>>().into()))];
-    if let Some(warning) = warning {
-        fields.push(("warning", Value::from(warning.as_str())));
+    if let Some(failed) = failed {
+        fields.push(("failed", Value::from(failed)));
+        fields.push(("warning", Value::from(failed_sentence(failed))));
     }
     Ok(Value::record(fields))
 }
@@ -113,31 +132,73 @@ struct Row {
     label: String,
     detail: String,
     link: String,
+    plain: bool,
+    terminal_only: bool,
+    blocked: Option<String>,
 }
 
 fn row_value(row: Row) -> Value {
-    Value::record([
+    let mut fields = vec![
         ("kind", Value::from(row.kind)),
         ("name", Value::from(row.name.as_str())),
         ("label", Value::from(row.label.as_str())),
         ("detail", Value::from(row.detail.as_str())),
         ("link", Value::from(row.link.as_str())),
-    ])
+    ];
+    if row.plain {
+        fields.push(("plain", Value::Bool(true)));
+    }
+    if row.terminal_only {
+        fields.push(("terminal_only", Value::Bool(true)));
+    }
+    if let Some(reason) = &row.blocked {
+        fields.push(("blocked", Value::from(reason.as_str())));
+    }
+    Value::record(fields)
+}
+
+// `computer-use` is left out until U25: nothing here runs it yet.
+fn with_zeron(harness: Option<HarnessId>, listed: Json) -> Result<Json, String> {
+    let commands: Vec<SlashCommand> = serde_json::from_value(listed).map_err(|e| e.to_string())?;
+    let mut commands = with_zeron_commands(harness, commands);
+    commands.retain(|c| c.name != COMPUTER_USE_COMMAND);
+    serde_json::to_value(commands).map_err(|e| e.to_string())
+}
+
+fn flagged(mut rows: Vec<Row>, harness: Option<HarnessId>, unsupported: Option<String>) -> Vec<Row> {
+    for row in rows.iter_mut().filter(|r| r.kind == "command") {
+        if zeron_owned_command(&row.name) {
+            row.plain = true;
+            row.link = format!("/{}", row.name);
+        }
+        row.terminal_only = harness == Some(HarnessId::ClaudeCode) && TERMINAL_ONLY_COMMANDS.contains(&row.name.as_str());
+        if row.name == COMPACT_COMMAND
+            && let Some(reason) = &unsupported
+        {
+            row.detail = reason.clone();
+            row.blocked = Some(reason.clone());
+        }
+    }
+    rows
+}
+
+fn failed_sentence(failed: &str) -> &'static str {
+    if failed == "skills" { "Skills couldn't be listed" } else { "Commands couldn't be listed" }
 }
 
 /// The shipping composer's `merge_invocation_results`: both lists, or the one
-/// that came with a word about the other, or why neither came.
-fn merge(commands: Result<Json, String>, skills: Result<Json, String>) -> Result<(Vec<Row>, Option<String>), String> {
+/// that came with which one didn't, or why neither came.
+fn merge(commands: Result<Json, String>, skills: Result<Json, String>) -> Result<(Vec<Row>, Option<&'static str>), String> {
     let commands = commands.map(|v| v.as_array().cloned().unwrap_or_default());
     // (`null`: the agent has no skills to list.)
     let skills = skills.map(|v| v.as_array().cloned());
     match (commands, skills) {
         (Ok(commands), Ok(skills)) => Ok((candidates(&commands, &skills.unwrap_or_default()), None)),
         (Ok(commands), Err(_)) if !commands.is_empty() => {
-            Ok((candidates(&commands, &[]), Some("Skills couldn't be listed".into())))
+            Ok((candidates(&commands, &[]), Some("skills")))
         }
         (Err(_), Ok(Some(skills))) if skills.iter().any(|s| s["enabled"].as_bool() == Some(true)) => {
-            Ok((candidates(&[], &skills), Some("Commands couldn't be listed".into())))
+            Ok((candidates(&[], &skills), Some("commands")))
         }
         (Err(error), _) | (_, Err(error)) => Err(error),
     }
@@ -156,23 +217,6 @@ fn valid_command_name(name: &str) -> bool {
 }
 fn native_skill(path: &str) -> bool {
     path.starts_with("opencode-skill:") || path.starts_with("harness-skill:")
-}
-
-/// A skill's name as people read it: its last `:` part, its words
-/// capitalized (`code-review` → "Code Review").
-fn display_name(name: &str) -> String {
-    name.rsplit(':')
-        .next()
-        .unwrap_or(name)
-        .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
-        .filter(|w| !w.is_empty())
-        .map(|w| {
-            let mut chars = w.chars();
-            let first = chars.next().unwrap();
-            first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// `Invocation::link`: `[/name](zeron-invoke:<hex of its JSON>)`.
@@ -201,16 +245,16 @@ fn candidates(commands: &[Json], skills: &[Json]) -> Vec<Row> {
         if !valid_name(name) || aliases.contains(name) {
             continue;
         }
-        let mut detail = c["description"].as_str().unwrap_or("").to_string();
-        if let Some(hint) = c["inputHint"].as_str().filter(|h| !h.is_empty()) {
-            detail = if detail.is_empty() { format!("<{hint}>") } else { format!("{detail} · <{hint}>") };
-        }
+        let hint = c["inputHint"].as_str().filter(|h| !h.is_empty());
         rows.push(Row {
             kind: "command",
             name: name.to_string(),
             label: format!("/{name}"),
-            detail,
+            detail: invocation_detail(c["description"].as_str().unwrap_or(""), hint),
             link: link('/', name, &json!({ "kind": "command", "name": name })),
+            plain: false,
+            terminal_only: false,
+            blocked: None,
         });
     }
     for s in skills {
@@ -227,13 +271,16 @@ fn candidates(commands: &[Json], skills: &[Json]) -> Vec<Row> {
         rows.push(Row {
             kind: "skill",
             name: name.to_string(),
-            label: display_name(name),
+            label: skill_display_name(name),
             detail: if native_skill(path) || description.is_empty() {
                 description.to_string()
             } else {
                 format!("{description} — {path}")
             },
             link: link('$', name, &invocation),
+            plain: false,
+            terminal_only: false,
+            blocked: None,
         });
     }
     rows
@@ -295,8 +342,8 @@ mod tests {
             let read = |m: &str| -> Json {
                 serde_json::from_slice(&std::fs::read(dir.join(format!("{m}-{harness}.json"))).unwrap()).unwrap()
             };
-            let (rows, warning) = merge(Ok(read("ListCommands")), Ok(read("ListSkills"))).unwrap();
-            assert!(warning.is_none());
+            let (rows, failed) = merge(Ok(read("ListCommands")), Ok(read("ListSkills"))).unwrap();
+            assert!(failed.is_none());
             let commands = rows.iter().filter(|r| r.kind == "command").count();
             let skills = rows.iter().filter(|r| r.kind == "skill").count();
             eprintln!("{harness}: {commands} commands, {skills} skills; first {:?}", rows.first().map(|r| (&r.label, &r.detail)));
@@ -312,11 +359,48 @@ mod tests {
     #[test]
     fn one_list_failing_still_shows_the_other() {
         let commands = Ok(json!([{ "name": "review" }]));
-        let (rows, warning) = merge(commands, Err("down".into())).unwrap();
+        let (rows, failed) = merge(commands, Err("down".into())).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(warning.as_deref(), Some("Skills couldn't be listed"));
+        assert_eq!(failed, Some("skills"));
         assert!(merge(Err("down".into()), Ok(Json::Null)).is_err());
-        let (rows, warning) = merge(Ok(json!([])), Ok(Json::Null)).unwrap();
-        assert!(rows.is_empty() && warning.is_none());
+        let (rows, failed) = merge(Ok(json!([])), Ok(Json::Null)).unwrap();
+        assert!(rows.is_empty() && failed.is_none());
+    }
+
+    fn menu(harness: HarnessId, listed: Json, unsupported: Option<&str>) -> Vec<Row> {
+        let commands = with_zeron(Some(harness), listed).unwrap();
+        let (rows, _) = merge(Ok(commands), Ok(Json::Null)).unwrap();
+        flagged(rows, Some(harness), unsupported.map(str::to_owned))
+    }
+
+    #[test]
+    fn the_menu_leads_with_zeron_s_own_and_leaves_computer_use_out() {
+        let listed = json!([
+            { "name": "review", "description": "Review the diff", "inputHint": "branch" },
+            { "name": "computer-use", "description": "native" },
+            { "name": "a-skill", "kind": "skill" },
+        ]);
+        let rows = menu(HarnessId::Codex, listed, None);
+        let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["btw", "compact", "review"]);
+        assert_eq!(rows[0].detail, "Side chat: ask about this chat without touching it \u{b7} <prompt>");
+        assert_eq!(rows[2].detail, "Review the diff \u{b7} <branch>");
+    }
+
+    #[test]
+    fn each_zeron_row_says_how_it_behaves() {
+        let rows = menu(HarnessId::ClaudeCode, json!([{ "name": "review" }]), Some("Claude Code does not support compaction"));
+        let row = |name: &str| rows.iter().find(|r| r.name == name).unwrap();
+        assert!(row("btw").plain && row("compact").plain);
+        assert_eq!(row("btw").link, "/btw", "inserted as typed, for the send to read");
+        assert!(!row("review").plain && row("review").link.contains("zeron-invoke:"));
+        assert_eq!(row("compact").blocked.as_deref(), Some("Claude Code does not support compaction"));
+        assert_eq!(row("compact").detail, "Claude Code does not support compaction");
+        assert!(row("review").blocked.is_none());
+        let terminal = TERMINAL_ONLY_COMMANDS.iter().find(|n| rows.iter().any(|r| r.name == **n)).unwrap();
+        assert!(row(terminal).terminal_only && !row("review").terminal_only);
+        // The same name another agent runs itself isn't Claude's terminal's.
+        let rows = menu(HarnessId::Codex, json!([{ "name": terminal }]), None);
+        assert!(!rows.iter().find(|r| r.name == *terminal).unwrap().terminal_only);
     }
 }

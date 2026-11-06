@@ -6,13 +6,21 @@
 -- `{ from, to, color, weight?, italic?, strike?, bg? }` (bytes from 1, `to`
 -- the last). The markdown itself stays in view, greyed: emphasis markers,
 -- backticks, a heading's `#`s, a list's or quote's marker, fences and rules.
--- Bold, italic, struck and code text take their face. The state is 1 inside
--- a fenced code block, else 0. (A zgx without the richer spans draws the
--- colours alone, and ignores the rest.)
+-- Bold, italic, struck and code text take their face. A fenced code block's
+-- lines take its language's colours (ds/syntax) over the wash. The state is 0
+-- out of a fence, 1 in one with no language it knows, else a number for the
+-- language and where its lexer stands. (A zgx without the richer spans draws
+-- the colours alone, and ignores the rest.)
 --
 -- `newline(text, a, b)` is what Shift+Enter does in a list: the next item's
 -- marker after the break, or, on an empty item, the item undone (outdented
 -- a level). Bytes from 0, as an input's selection gives them.
+
+local function highlighter(language: string): any
+	-- (On the first fence: a bare require of this module has no ds folder to resolve it from.)
+	local ok, syntax = pcall(require, "@ds/syntax")
+	return if ok then (syntax :: any).highlighter(language) else nil
+end
 
 local M = {}
 
@@ -186,6 +194,38 @@ local function runs(marks: { Mark }): { { any } }
 	return out
 end
 
+-- A fence's state, by language and lexer state, the same number each time,
+-- so two lines leaving the same thing compare equal and re-colouring settles.
+local fence_numbers: { [string]: number } = {}
+local fence_states: { { language: string, inner: number } } = {}
+local function fence_state(language: string, inner: number): number
+	local key = `{language}|{inner}`
+	local n = fence_numbers[key]
+	if not n then
+		table.insert(fence_states, { language = language, inner = inner })
+		n = #fence_states + 1
+		fence_numbers[key] = n
+	end
+	return n
+end
+
+local function fenced(line: string, at: { language: string, inner: number }): ({ { any } }, number)
+	local spans, inner = highlighter(at.language)(line, at.inner)
+	local out: { { any } } = {}
+	local from = 1
+	for _, s in spans do
+		if s[1] > from then
+			table.insert(out, { from, s[1] - 1, "$text.primary", bg = CODE_WASH } :: any)
+		end
+		table.insert(out, { s[1], s[2], s[3], bg = CODE_WASH } :: any)
+		from = s[2] + 1
+	end
+	if from <= #line then
+		table.insert(out, { from, #line, "$text.primary", bg = CODE_WASH } :: any)
+	end
+	return out, fence_state(at.language, inner)
+end
+
 function M.highlight(line: string, state: number): ({ { any } }, number)
 	local n = #line
 	local fence = string.match(line, "^%s*```") or string.match(line, "^%s*~~~")
@@ -196,10 +236,15 @@ function M.highlight(line: string, state: number): ({ { any } }, number)
 		if n == 0 then
 			return {}, state
 		end
+		local at = fence_states[state - 1]
+		if at then
+			return fenced(line, at)
+		end
 		return { { 1, n, "$text.primary", bg = CODE_WASH } :: any }, state
 	end
 	if fence then
-		return { { 1, n, MARKER } }, 1
+		local tag = string.match(line, "^%s*[`~]+%s*([%w_+#.-]+)")
+		return { { 1, n, MARKER } }, if tag and highlighter(tag) then fence_state(tag, 0) else 1
 	end
 	if n == 0 then
 		return {}, 0

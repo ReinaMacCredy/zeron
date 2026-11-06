@@ -162,6 +162,8 @@ export type Props = {
 	-- another device reads them from there: screens/chat/reply_images'
 	-- `for_attachments`); without it, each path as it is.
 	sent_pictures: ReplyPicture.Pictures?,
+	-- The chat its messages were sent to (where a sent file is read from).
+	sent_from: (() -> string?)?,
 	-- A link in the conversation that isn't the web's (a file a reply
 	-- names, a prompt's file mention): what opens it. Without it, it's
 	-- styled only.
@@ -377,7 +379,9 @@ end
 
 local function line_words(x: any): string
 	local title = x.title or ""
-	if x.line == "fork" then
+	if x.line == "resumed" then
+		return locale.s("ds.transcript.resumed")
+	elseif x.line == "fork" then
 		return locale.s("ds.transcript.forked_from", { title = title })
 	elseif x.line == "handoff" then
 		return if x.title then locale.s("ds.transcript.continued_from", { title = title }) else locale.s("ds.transcript.context_handoff")
@@ -1703,6 +1707,7 @@ local function Transcript(props: Props): Node
 							open = props.open_link,
 							link_menu = props.link_menu,
 							pictures = props.sent_pictures,
+							session = props.sent_from,
 							find = if find_for then find_for(`{m.id}:u`) else nil,
 						},
 						strip(m, state, hovered),

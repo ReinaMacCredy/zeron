@@ -84,6 +84,13 @@ return function(props: Props): Node
 	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, home)
 	pane.ref = box
 	pane.id = "shell-page"
+	pane.on_key = function(): boolean
+		local typing: any = boundary.load("@app/screens/chat/typing")
+		if typing then
+			typing.through_control()
+		end
+		return false
+	end
 	pane.hook = "shell.page"
 	pane.grow = 1
 	pane.min_w = 0

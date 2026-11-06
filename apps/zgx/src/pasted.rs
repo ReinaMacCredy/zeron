@@ -6,6 +6,8 @@
 //!   chat.paste_image   the clipboard's image as a PNG in this app's own
 //!                      temporary folder: its path, or nil when the
 //!                      clipboard holds no image
+//!   chat.paste_text    { text, name }: a long paste as a text file of that
+//!                      name, in a folder of its own there: its path
 
 use std::{
     cell::RefCell,
@@ -32,7 +34,44 @@ pub fn install(host: &ScriptHost, platform: Rc<RefCell<Option<PlatformService>>>
             Ok(Value::from(path.to_string_lossy().as_ref()))
         }
     });
+    host.async_action("chat.paste_text", move |args| {
+        let words = args.field("text").map(crate::auth::text).unwrap_or_default();
+        let name = args.field("name").map(crate::auth::text).unwrap_or_default();
+        async move {
+            let path = off_thread(move || write_text(&folder(), &name, &words))
+                .await
+                .ok_or("The text couldn't be saved")??;
+            Ok(Value::from(path.to_string_lossy().as_ref()))
+        }
+    });
 }
+
+// A folder of its own: two drafts' "Pasted text 1.txt" stay apart and the file keeps that name.
+fn write_text(dir: &Path, name: &str, words: &str) -> Result<PathBuf, String> {
+    if words.len() as u64 > MAX_TEXT_BYTES {
+        return Err("too_large".into());
+    }
+    let name = Path::new(name).file_name().filter(|n| !n.is_empty()).map_or_else(|| "Pasted text.txt".into(), |n| n.to_owned());
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    let mut n = 0;
+    let own = loop {
+        let own = dir.join(format!("text-{stamp}-{n}"));
+        match std::fs::create_dir(&own) {
+            Ok(()) => break own,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    let path = own.join(name);
+    std::fs::write(&path, words).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+const MAX_TEXT_BYTES: u64 = 24 * 1024 * 1024;
 
 /// Where pasted pictures are kept until they're sent: this app's own folder
 /// in the system's temporary one.
@@ -96,6 +135,11 @@ mod tests {
         assert_eq!((decoded.width(), decoded.height()), (2, 1));
         assert_eq!(&decoded.pixels()[..4], &[255, 0, 0, 255]);
         assert!(write_png(&dir, 2, 2, &pixels).is_err(), "pixels that don't fill it");
+        let text = write_text(&dir, "../../Pasted text 1.txt", "words").expect("written");
+        assert!(text.starts_with(&dir), "a name can't climb out of the folder: {text:?}");
+        assert_eq!(text.file_name().and_then(|n| n.to_str()), Some("Pasted text 1.txt"));
+        assert_ne!(text, write_text(&dir, "Pasted text 1.txt", "more").expect("written again"));
+        assert_eq!(std::fs::read_to_string(&text).unwrap(), "words");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

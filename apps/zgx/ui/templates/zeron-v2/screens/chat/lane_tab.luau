@@ -22,6 +22,11 @@ local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Shared = require("@app/screens/chat/shared")
+local Completions = require("@app/screens/chat/completions")
+local AppCommands = require("@app/screens/chat/app_commands")
+local Outgoing = require("@app/screens/chat/outgoing")
+local PanelState = require("@app/screens/panel/state")
+local ZeronCommands = require("@app/screens/chat/zeron_commands")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
 
@@ -53,13 +58,57 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
-local function composer(chat: string, view: any, name: string): Node
+local function composer(chat: string, view: any, name: string, panel_key: string?, tab_id: string?): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
 	local draft = ui.state(`chat_lane_draft_{chat}`, "")
+	-- (Asked for by the panel, or by keys typed with the panel holding them: the
+	-- field takes them as soon as it's there, as gpui's `focus_pending`.)
+	local field = ui.ref()
+	local take_on_mount = ui.use_state(false)
+	local function take_keys()
+		local el = field:peek()
+		if el then
+			el:focus()
+			local n = #draft:peek()
+			el:set_selection_bytes(n, n)
+		else
+			take_on_mount:set(true)
+		end
+	end
+	ui.effect(function()
+		if take_on_mount:get() and field:get() then
+			take_on_mount:set(false)
+			take_keys()
+		end
+	end)
+	if panel_key and tab_id then
+		ui.on_cleanup(PanelState.focuser(panel_key, tab_id, take_keys))
+	end
+	local carried = ui.use_state({} :: { any })
+	if draft:peek() ~= "" and Shared.draft_peek(chat).text == "" then
+		Shared.set_draft_of(chat, "text", draft:peek())
+	end
+	ui.effect(function()
+		local d = Shared.draft_of(chat)
+		if draft:peek() ~= d.text then
+			draft:set(d.text)
+		end
+		carried:set(d.cargo)
+	end)
+	ui.effect(function()
+		local text = draft:get()
+		if Shared.draft_of(chat).text ~= text then
+			Shared.set_draft_of(chat, "text", text)
+		end
+	end)
 	local session = view.session
 	local notice = ui.use_state(nil :: any)
+	local shown_notice = ui.computed(function(): any
+		local refused = Shared.draft_of(chat).refused
+		return notice:get() or (if refused then { tone = "danger", text = refused, dismissable = true } else nil)
+	end)
 	local running = ui.computed(function(): boolean
 		local s = session:get()
 		return s ~= nil and s.running == true
@@ -267,7 +316,53 @@ local function composer(chat: string, view: any, name: string): Node
 			return device:get()
 		end)
 		else nil
-	return ds.Composer {
+	local completions = Completions.bind {
+		key = `chat_lane_{chat}`,
+		agent = function(): string?
+			return (as_made())
+		end,
+		target = function(): any
+			return { chat = chat }
+		end,
+		in_chat = function(): boolean
+			return true
+		end,
+	}
+	-- A side chat past its day: nothing more goes to it (Zeron's composer.rs).
+	local function expired(): boolean
+		for _, list in sessions.now:get().children or {} do
+			for _, c in list do
+				if c.id == chat then
+					return c.expires ~= nil and c.expires <= os.time()
+				end
+			end
+		end
+		return false
+	end
+	local expired_line = ui.row {
+		id = "expired-sidechat",
+		w_full = true,
+		p = "$space.3",
+		ui.text { ui.t("chat.composer.expired"), grow = 1, wrap = true, text_size = "$font.size.sm", color = "$text.tertiary" },
+	}
+	local cargo_props = Shared.cargo_props(chat)
+	return ui.show(expired, expired_line, ds.Composer {
+		field = field,
+		cargo = carried,
+		on_remove_cargo = function(cid: string)
+			Shared.remove_cargo_of(chat, cid)
+		end,
+		on_paste_text = cargo_props.on_paste_text,
+		on_open_pasted = cargo_props.on_open_pasted,
+		on_attach = cargo_props.on_attach,
+		on_files = cargo_props.on_files,
+		on_paste_image = cargo_props.on_paste_image,
+		mentions = completions.mentions,
+		on_mention = completions.on_mention,
+		mention_enabled = completions.mention_enabled,
+		mention_empty = completions.mention_empty,
+		mention_failed = completions.mention_failed,
+		mention_token = completions.mention_token,
 		value = draft,
 		-- (ds.Composer's placeholder is a string: read as the tab is made.)
 		placeholder = locale.s("chat.lane_tab.placeholder"),
@@ -275,9 +370,10 @@ local function composer(chat: string, view: any, name: string): Node
 		access = access,
 		model = model,
 		effort = effort,
-		notice = notice,
+		notice = shown_notice,
 		on_dismiss_notice = function()
 			notice:set(nil)
+			Shared.refuse_in(chat, nil)
 		end,
 		harnesses = function(): { any }
 			return store.catalog:get().harnesses
@@ -307,17 +403,54 @@ local function composer(chat: string, view: any, name: string): Node
 		branches = where.branches,
 		branches_empty = where.branches_empty,
 		branch_fixed = branch_fixed,
-		on_send = function(text: string)
-			local words = string.match(text, "^%s*(.-)%s*$") or ""
-			if words == "" then
-				return
+		-- As the window's composer sends (screens/chat/composer): `false`, as it
+		-- has dealt with the draft itself.
+		on_send = function(text: string): boolean
+			local say = function(n: any)
+				notice:set(n)
+			end
+			local side = AppCommands.side(text)
+			if side then
+				draft:set("")
+				lanes.open_side(chat, side, route.current:peek().session)
+				return false
+			end
+			local focus = AppCommands.compact(text)
+			if focus then
+				draft:set("")
+				AppCommands.run_compact(chat, session:peek(), running:peek(), focus, function(key: string)
+					say({ tone = "danger", text = locale.s(key), dismissable = true })
+				end, function(why: string)
+					say({ tone = "danger", text = why, dismissable = true })
+				end)
+				return false
+			end
+			local trimmed = string.match(text, "^%s*(.-)%s*$") or ""
+			local zeron = completions.command_of(trimmed)
+			if zeron then
+				draft:set("")
+				ZeronCommands.run(zeron, chat)
+				return false
 			end
 			-- (Nowhere it can start, a project gone: the line says why.)
 			local is_unsent = lanes.unsent:peek()[chat] ~= nil
 			if is_unsent and where.blocked:peek() then
-				notice:set({ tone = "danger", text = where.blocked:peek(), dismissable = true })
-				return
+				say({ tone = "danger", text = where.blocked:peek(), dismissable = true })
+				return false
 			end
+			local s = session:peek()
+			local goes_to = if s and s.device then s.device else device:peek()
+			if goes_to ~= nil and goes_to ~= sessions.now:peek().here then
+				local too_large = Shared.linked_elsewhere(carried:peek())
+				if too_large then
+					say({ tone = "danger", text = too_large, dismissable = true })
+					return false
+				end
+			end
+			-- (What's typed reaches the chat's draft by an effect: this moment's.)
+			Shared.set_draft_of(chat, "text", draft:peek())
+			local typed, cargo = Shared.take(chat)
+			local parts = Outgoing.parts(string.match(typed, "^%s*(.-)%s*$") or "", trimmed, cargo)
 			draft:set("")
 			notice:set(nil)
 			-- As the chat page sends: the prompt joins its transcript as the
@@ -327,35 +460,39 @@ local function composer(chat: string, view: any, name: string): Node
 			local mid = store.new_id()
 			local req = picks()
 			req.message_id = mid
+			req.attachments = parts.attachments
+			req.appshots = parts.appshots
+			req.restores = true
 			local sent: any = nil
 			T.send(function()
 				local here = view.messages:index_of("id", mid) ~= nil
 				if not here then
 					-- (On its way from this moment: the line under it says so.)
-					view.messages:push { id = mid, role = "user", text = words, waiting = "sending" }
+					view.messages:push { id = mid, role = "user", text = parts.words, attachments = parts.shown, waiting = "sending" }
 				end
 			end, mid, name)
 			-- Its first message makes it (New side chat), then sends.
 			if is_unsent then
-				sent = lanes.send_first(chat, words, req, place())
+				sent = lanes.send_first(chat, parts.text, req, place())
 			else
-				req.session, req.text = chat, words
+				req.session, req.text = chat, parts.text
 				sent = store.send(req :: any)
 			end
 			sent:after(function() end, function(err: any)
-				draft:set(words)
+				Shared.restore(parts.text, cargo)
 				local why = if type(err) == "table" and err.message then tostring(err.message) else nil
-				notice:set({
+				say({
 					tone = "danger",
 					text = if is_unsent and why then why else locale.s("chat.lane_tab.didnt_send"),
 					dismissable = true,
 				})
 			end)
+			return false
 		end,
 		on_stop = function()
 			store.interrupt(chat)
 		end,
-	}
+	})
 end
 
 -- A fork's tab while the engine copies it, or once it couldn't: the
@@ -387,7 +524,7 @@ local function forking(chat: string): Node
 	end, { grow = 1, w_full = true })
 end
 
-M.Tab = ui.component(function(props: { tab: any }): Node
+M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 	local tab = props.tab
 	local slot, chat = tab.id, tab.chat
 	local data = tab.data or {}
@@ -487,6 +624,10 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			else nil,
 		pictures = pictures,
 		sent_pictures = sent_pictures,
+		sent_from = function(): string?
+			local s = lane_session()
+			return if s then s.id else nil
+		end,
 		on_open_subagent = function(sub: any)
 			local home = home_session()
 			if home then
@@ -530,7 +671,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 					pb = Dock.page_pad(),
 					ui.column { w_full = true, grow = 1, min_h = 0, relative = true, transcript },
 				},
-				Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`), id = `lane-composer-{slot}` },
+				Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, props.panel_key, slot), id = `lane-composer-{slot}` },
 			}
 		end, { grow = 1, w_full = true, min_h = 0 }),
 	}

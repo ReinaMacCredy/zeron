@@ -21,6 +21,13 @@ export type Item = {
 	file: boolean?,
 	dir: boolean?,
 	icon: Icon.Name?,
+	key: string?,
+	src: string?,
+	heading: string?,
+	attached: boolean?,
+	searched: boolean?,
+	blocked: string?,
+	terminal_only: boolean?,
 }
 -- The items each trigger lists; nil while they load.
 export type Sources = { [string]: { Item }? }
@@ -73,9 +80,13 @@ function M.token(text: string, caret: number): Token?
 	if (trigger == "@" or trigger == "$") and starts(at) then
 		local query = string.sub(before, at + 1)
 		local to = ends(WORD)
-		-- "$12" is money, wherever the caret sits in it.
-		if trigger == "$" and string.match(string.sub(text, at + 1, to), "^%d") then
-			return nil
+		-- "$12" is money and "$HOME" a variable, wherever the caret sits in
+		-- them; "$a/b" a path.
+		if trigger == "$" then
+			local word = string.sub(text, at + 1, to)
+			if string.match(word, "^[%d%u]") or string.find(word, "/", 1, true) then
+				return nil
+			end
 		end
 		if fenced(at) then
 			return nil
@@ -104,6 +115,10 @@ function M.pick(text: string, caret: number, item: Item, sources: Sources): (num
 	if (item :: any).consume then
 		return t.from, t.to, "", ""
 	end
+	if item.attached then
+		local words = if string.sub(text, t.to + 1, t.to + 1) == " " then item.label else `{item.label} `
+		return t.from, t.to, words, item.label
+	end
 	local word = if item.file then M.short(sources[t.trigger] or {}, item) else item.value
 	local token = `{t.trigger}{word}`
 	local after = string.sub(text, t.to + 1, t.to + 1)
@@ -123,7 +138,10 @@ function M.filter(items: { Item }, query: string): { Item }
 	for _, it in items do
 		local label = string.lower(it.label)
 		local value = string.lower(it.value)
-		if string.sub(label, 1, #q) == q or string.sub(value, 1, #q) == q then
+		-- (The host's search is fuzzy: its answers needn't hold the query.)
+		if it.searched then
+			table.insert(holds, it)
+		elseif string.sub(label, 1, #q) == q or string.sub(value, 1, #q) == q then
 			table.insert(starts, it)
 		elseif string.find(label, q, 1, true) or string.find(value, q, 1, true) then
 			table.insert(holds, it)
@@ -133,6 +151,23 @@ function M.filter(items: { Item }, query: string): { Item }
 		table.insert(starts, it)
 	end
 	return starts
+end
+
+function M.attachments(items: { Item }, query: string): { Item }
+	local function plain(s: string): string
+		return string.lower((string.gsub(s, "%s", "")))
+	end
+	local wanted = plain(query)
+	local out: { Item } = {}
+	for _, it in items do
+		if string.find(plain(it.label), wanted, 1, true) then
+			local row = table.clone(it)
+			row.attached = true
+			row.key = `attachment:{it.value}`
+			table.insert(out, row)
+		end
+	end
+	return out
 end
 
 -- The shortest end of a file's path that tells it from the others of its
@@ -167,6 +202,10 @@ end
 -- The draft's highlight: markdown as it is typed, and each token
 -- mentioned in its type. A span's state is the markdown's (a fenced block).
 function M.highlight(line: string, state: number): ({ { any } }, number)
+	-- (A pasted megabyte on one line, shown in the field: plain, as Zeron's past 128 KiB.)
+	if #line > 128 * 1024 then
+		return {}, state
+	end
 	local spans, next = markdown.highlight(line, state)
 	if state ~= 0 then
 		return spans, next
@@ -182,7 +221,7 @@ function M.highlight(line: string, state: number): ({ { any } }, number)
 		local prev = if from > 1 then string.sub(line, from - 1, from - 1) else ""
 		local ok = prev == "" or string.match(prev, "[%s%(%[{>]") ~= nil
 		local trigger = string.sub(token, 1, 1)
-		if ok and trigger == "$" and string.match(token, "^%$%d") then
+		if ok and trigger == "$" and (string.match(token, "^%$[%d%u]") or string.find(token, "/", 2, true)) then
 			ok = false
 		end
 		if ok and trigger == "/" and string.find(token, "/", 2, true) then
@@ -195,7 +234,10 @@ function M.highlight(line: string, state: number): ({ { any } }, number)
 				last -= 1
 			end
 			if last > from then
-				local ink = if trigger == "@" then "$zeron.composer.token.file" else "$zeron.composer.token.action"
+				local ink = if trigger == "@"
+					then "$zeron.composer.token.file"
+					elseif trigger == "$" then "$zeron.composer.token.skill"
+					else "$zeron.composer.token.action"
 				table.insert(spans, { from, from, "$zeron.composer.token.trigger" } :: any)
 				table.insert(spans, { from + 1, last, ink, weight = 500 } :: any)
 			end

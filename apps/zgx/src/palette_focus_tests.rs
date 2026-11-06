@@ -49,7 +49,14 @@ const FIELD: &str = "#palette-search";
 /// Whether the palette shows (its field, not hidden: a closed one may stay
 /// mounted as it leaves).
 fn is_open(app: &mut TestApp) -> bool {
-    app.find(FIELD).is_some() && app.tree().lines().any(|l| l.contains("#palette-search") && !l.contains(" hidden"))
+    if app.find(FIELD).is_none() {
+        return false;
+    }
+    // (`tree` stops at 200 nodes, and the palette comes after a chat's.)
+    app.ui.prepare_frame();
+    let opts = zgx_script::driver::TreeOptions { depth: None, budget: usize::MAX, all: false };
+    let (lines, hidden) = zgx_script::driver::tree_lines(&app.ui, &app.handle, None, &opts);
+    zgx_script::driver::tree_lines_text(&lines, hidden).lines().any(|l| l.contains("#palette-search") && !l.contains(" hidden"))
 }
 
 /// Where focus starts.

@@ -25,6 +25,7 @@ M.TITLE = "General"
 search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"), {
 	{ key = "language", title = ui.t("settings.general.language.label"), terms = ui.t("settings.general.language.terms") },
 	{ key = "send_with", title = ui.t("settings.general.send_with.label"), terms = ui.t("settings.general.send_with.terms") },
+	{ key = "follow_up", title = ui.t("settings.general.follow_up.label"), terms = ui.t("settings.general.follow_up.terms") },
 	{ key = "compact_mode", title = ui.t("settings.general.compact_mode.label"), terms = ui.t("settings.general.compact_mode.terms") },
 	{ key = "escape_stops", title = ui.t("settings.general.escape_stops.label"), terms = ui.t("settings.general.escape_stops.terms") },
 	{ key = "close_panel", title = ui.t("settings.general.close_panel.label"), terms = ui.t("settings.general.close_panel.terms") },
@@ -238,6 +239,15 @@ function M.view(): Node
 							else ui.t("settings.general.send_with.mod_enter"):get()
 					end,
 					control = ds.Select { value = prefs.send_with, name = ui.t("settings.general.send_with.label"), w = 128, options = prefs.SEND_WITH },
+				}),
+				row("follow_up", {
+					label = ui.t("settings.general.follow_up.label"),
+					description = function()
+						return if prefs.send_with:get() == "enter"
+							then ui.t("settings.general.follow_up.description", { key = ui.shortcut_text("cmd+enter") }):get()
+							else ui.t("settings.general.follow_up.description_send_key", { key = ui.shortcut_text("cmd+enter") }):get()
+					end,
+					control = ds.Select { value = prefs.follow_up, name = ui.t("settings.general.follow_up.label"), w = 128, options = prefs.FOLLOW_UP },
 				}),
 				row("compact_mode", {
 					label = ui.t("settings.general.compact_mode.label"),

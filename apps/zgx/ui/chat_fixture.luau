@@ -106,6 +106,54 @@ local function publish(id: string, patch: { [string]: any }?)
 end
 
 local stub = store :: any
+-- The engine says something of the open session: `test_patch`'s fields.
+local test_patch = ui.state("test_patch", {} :: { [string]: any })
+ui.command {
+	id = "patch_open",
+	title = "Patch the open session",
+	run = function()
+		local s = store.session:peek()
+		if s and s.id then
+			publish(s.id, test_patch:peek())
+		end
+	end,
+}
+-- How the draft colours a fenced block (`test_fence`).
+local test_fence = ui.state("test_fence", "")
+ui.command {
+	id = "fence_probe",
+	title = "Colour a fence",
+	run = function()
+		local markdown = require("@ds/markdown_edit")
+		local _, inside = markdown.highlight("```rust", 0)
+		local spans, still = markdown.highlight("fn main() {}", inside)
+		local said = {}
+		for _, s in spans do
+			table.insert(said, s[3])
+			table.insert(said, if (s :: any).bg == "$zeron.code.wash" then "wash:yes" else "wash:no")
+		end
+		local _, closed = markdown.highlight("```", still)
+		local _, unknown = markdown.highlight("```nosuchlanguage", 0)
+		table.insert(said, `closed:{closed}`)
+		table.insert(said, `unknown:{unknown}`)
+		test_fence:set(table.concat(said, ","))
+	end,
+}
+-- An agent with no plan mode (⇧Tab walks the window's controls there).
+ui.command {
+	id = "agent_without_plan",
+	title = "An agent with no plan mode",
+	run = function()
+		local c = store.catalog:peek()
+		local harnesses: { any } = {}
+		for _, h in c.harnesses do
+			local row = table.clone(h)
+			row.supports_plan = false
+			table.insert(harnesses, row)
+		end
+		store.catalog:set { state = "ready", harnesses = harnesses, models = c.models }
+	end,
+}
 -- The open session with a dev server running in the background.
 ui.command {
 	id = "task_running",
@@ -158,8 +206,61 @@ local function settled(value: any): any
 		end,
 	}
 end
+local queue_answers_held = ui.state("fixture_queue_held", false)
+local queue_held: { { act: () -> any, ok: (any) -> (), err: (any) -> () } } = {}
+local function queue_answer(act: () -> any): any
+	if not queue_answers_held:peek() then
+		return settled(act())
+	end
+	local p: any = {}
+	function p.after(_self: any, ok: (any) -> (), err: (any) -> ())
+		table.insert(queue_held, { act = act, ok = ok, err = err })
+	end
+	return p
+end
+ui.command {
+	id = "queue_held",
+	title = "The engine answers the queue later",
+	run = function()
+		queue_answers_held:set(true)
+	end,
+}
+ui.command {
+	id = "engine_answers",
+	title = "The engine answers what the queue asked",
+	run = function()
+		local all = queue_held
+		queue_held = {}
+		for _, h in all do
+			h.ok(h.act())
+		end
+	end,
+}
+ui.command {
+	id = "engine_refuses",
+	title = "The engine refuses what the queue asked",
+	run = function()
+		local all = queue_held
+		queue_held = {}
+		for _, h in all do
+			h.err({ message = "failed" })
+		end
+	end,
+}
+local queued_n = 0
 stub.send = function(req: any)
-	note(`send:{req.session or "new"}:{req.text}`)
+	if req.session and META[req.session] and META[req.session].running and not req.fresh then
+		note(`send:{req.session}:{req.text}{if req.steer_now then "|steer_now" else ""}`)
+		return queue_answer(function()
+			queued_n += 1
+			local id = `eq{queued_n}`
+			local q = table.clone(META[req.session].queue or {})
+			table.insert(q, { id = id, text = req.text })
+			publish(req.session, { queue = q })
+			return id
+		end)
+	end
+	note(`send:{req.session or "new"}:{req.text}{if req.steer_now then "|steer_now" else ""}{if req.queued then "|queued" else ""}`)
 	for _, a in req.attachments or {} do
 		note(`att:{a.path}|{if a.on_host then "host" else "upload"}`)
 	end
@@ -237,6 +338,10 @@ ui.command {
 		end
 	end,
 }
+stub.set_work_tree = function(id: string, path: string?): any
+	note(`move:{id}:{path or "main"}`)
+	return settled(nil)
+end
 stub.refs = function(path: string, device: string?)
 	note(`refs:{path}:{device or "here"}`)
 	return settled(REFS[path] or {})
@@ -250,6 +355,10 @@ ui.command {
 }
 stub.interrupt = function(id: string)
 	note(`interrupt:{id}`)
+end
+stub.stop = function(id: string): any
+	note(`interrupt:{id}`)
+	return settled(nil)
 end
 -- A background process stopped (noted); `stop_fails` makes the next fail.
 local STOP_FAILS = ui.state("fixture_stop_fails", false)
@@ -289,7 +398,32 @@ stub.deny = function(id: string, request: string)
 	note(`deny:{id}:{request}`)
 end
 stub.answer = function() end
-stub.queue = function() end
+stub.queue = function(id: string, op: any): any
+	note(`queue:{id}:{op.op}:{op.item}`)
+	return queue_answer(function()
+		local q = {}
+		for _, r in (META[id] or {}).queue or {} do
+			if r.id ~= op.item then
+				table.insert(q, r)
+			end
+		end
+		publish(id, { queue = q })
+		return nil
+	end)
+end
+stub.steer_all = function(id: string, items: { string }, _message_id: string): any
+	note(`steer_all:{id}:{table.concat(items, ",")}`)
+	return queue_answer(function()
+		local q = {}
+		for _, r in (META[id] or {}).queue or {} do
+			if not table.find(items, r.id) then
+				table.insert(q, r)
+			end
+		end
+		publish(id, { queue = q })
+		return nil
+	end)
+end
 -- One queued message, editable here.
 stub.queue_edit = function(id: string, item: string): any
 	note(`queue_edit:{id}:{item}`)

@@ -193,13 +193,13 @@ function M.setup()
 				-- how far one tucks under the next (and the last under the pill),
 				-- a header's height and a row's.
 				tray = {
-					tint = "{zeron.menu.tint}",
-					solid = "{zeron.menu.solid}",
+					tint = "{zeron.composer.tint}",
+					solid = "{zeron.composer.solid}",
 					edge = "{border}",
 					blur = "{zeron.menu.blur}",
 					radius = 16,
 					step = 16,
-					tuck = 10,
+					tuck = 18,
 					header = 32,
 					row = 32,
 					-- A tray's body never grows past this; past it, it scrolls.

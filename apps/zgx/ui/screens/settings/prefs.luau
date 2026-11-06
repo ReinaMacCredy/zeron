@@ -31,6 +31,7 @@ local PrivateText = require("@ds/private_text")
 local M = {}
 
 M.send_with = ui.persist("settings_send_with", "enter")
+M.follow_up = ui.persist("settings_follow_up", "queue")
 M.escape_stops = ui.persist("settings_escape_stops", false)
 -- Whether closing a panel's last tab closes the panel too (off: it stays
 -- open on its home). Off by default.
@@ -132,6 +133,12 @@ function M.SEND_WITH(): { { value: string, label: string } }
 	return {
 		{ value = "enter", label = ui.t("settings.prefs.send_with.enter"):get() },
 		{ value = "mod_enter", label = ui.t("settings.prefs.send_with.mod_enter", { key = ui.shortcut_text("cmd+enter") }):get() },
+	}
+end
+function M.FOLLOW_UP(): { { value: string, label: string } }
+	return {
+		{ value = "queue", label = ui.t("settings.prefs.follow_up.queue"):get() },
+		{ value = "steer", label = ui.t("settings.prefs.follow_up.steer"):get() },
 	}
 end
 function M.OPEN_LINKS(): { { value: string, label: string } }

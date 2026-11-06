@@ -130,7 +130,7 @@ function M.want_keys(key: string, id: string?)
 		return
 	end
 	local tab = M.find(key, id)
-	if not tab or tab.kind ~= "terminal" then
+	if not tab or not (tab.kind == "terminal" or tab.kind == "side_chat") then
 		return
 	end
 	local k = `{key}\0{id}`
@@ -150,6 +150,17 @@ function M.want_keys(key: string, id: string?)
 			wanted[k] = nil
 		end
 	end)
+end
+
+-- A tab's body takes the keyboard now, if it's a drawn one that can: whether it did.
+function M.take_keys_now(key: string, id: string): boolean
+	local tab = M.find(key, id)
+	local focus = focusers[`{key}\0{id}`]
+	if not tab or tab.kind ~= "side_chat" or not focus then
+		return false
+	end
+	focus()
+	return true
 end
 
 -- A terminal tab's body, drawn: how it takes the keyboard. It takes it now

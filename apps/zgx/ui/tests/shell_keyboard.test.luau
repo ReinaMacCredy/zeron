@@ -11,9 +11,12 @@ end
 
 -- The focused node's line, as the tree says.
 local function focused(app: any): string
-	for line in app:tree():gmatch("[^\n]+") do
-		if line:find(" focused", 1, true) then
-			return line
+	-- (The whole tree stops at 200 nodes, and the title bar comes last.)
+	for _, tree in { app:tree(), app:tree("#titlebar") } do
+		for line in tree:gmatch("[^\n]+") do
+			if line:find(" focused", 1, true) then
+				return line
+			end
 		end
 	end
 	return ""
@@ -102,6 +105,53 @@ test("I with no text field holding the keyboard goes into the composer; Escape t
 	expect(focused(app)).to_contain("textbox")
 	-- Typed into the composer, I is a letter of the draft.
 	app:key("i")
+	app:frames(5)
+	expect(focused(app)).to_contain("textbox")
+end)
+test("a letter with a control of the page focused stays with that control", function()
+	local app = open()
+	app:click('#shell-sidebar >> role:button "Fix the build"')
+	app:frames(30)
+	app:click("role:textbox")
+	app:frames(5)
+	app:key("Escape")
+	app:frames(5)
+	app:key("Tab")
+	app:frames(5)
+	local n = 0
+	while n < 40 and not string.find(focused(app), "composer-plan", 1, true) do
+		app:key("Tab")
+		app:frames(2)
+		n += 1
+	end
+	expect(focused(app)).to_contain("composer-plan")
+	app:key("x")
+	app:frames(5)
+	expect(focused(app)).to_contain("composer-plan")
+end)
+
+test("with nothing holding the keys a letter or Cmd+V goes to the composer; an arrow or another chord doesn't", function()
+	local app = open()
+	app:click('#shell-sidebar >> role:button "Fix the build"')
+	app:frames(30)
+	app:click("role:textbox")
+	app:frames(5)
+	app:key("Escape")
+	app:frames(5)
+	expect(focused(app)).never.to_contain("textbox")
+	app:key("ArrowDown")
+	app:frames(5)
+	expect(focused(app)).never.to_contain("textbox")
+	app:key("cmd+shift+y")
+	app:frames(5)
+	expect(focused(app)).never.to_contain("textbox")
+	app:key("q")
+	app:frames(5)
+	expect(focused(app)).to_contain("textbox")
+	app:key("Escape")
+	app:frames(5)
+	expect(focused(app)).never.to_contain("textbox")
+	app:key("cmd+v")
 	app:frames(5)
 	expect(focused(app)).to_contain("textbox")
 end)

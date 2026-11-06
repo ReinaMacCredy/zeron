@@ -26,6 +26,11 @@ local Quote = require("@ds/quote")
 -- (The chat page's places in its chats, which a split's panes share.)
 local Shared = require("@app/screens/chat/shared")
 local Asks = require("@app/screens/chat/asks")
+local Completions = require("@app/screens/chat/completions")
+local ZeronCommands = require("@app/screens/chat/zeron_commands")
+local AppCommands = require("@app/screens/chat/app_commands")
+local Outgoing = require("@app/screens/chat/outgoing")
+local PanelState = require("@app/screens/panel/state")
 
 -- Two places in a transcript (ds/transcript's `keep`), the same.
 local function same(a: any, b: any): boolean
@@ -76,7 +81,7 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
-local function composer(chat: string, view: any, name: string, split: boolean?, focused: (() -> boolean)?): Node
+local function composer(chat: string, view: any, name: string, split: boolean?, focused: (() -> boolean)?, panel_key: string?, tab_id: string?): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
@@ -85,6 +90,29 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 	-- is shown (screens/chat/shared's drafts), so focused, the chat page's
 	-- composer goes on with the same words.)
 	local draft = ui.state(if split then `chat_split_draft_{chat}` else `chat_lane_draft_{chat}`, "")
+	-- (Asked for by the panel, or by keys typed with the panel holding them: the
+	-- field takes them as soon as it's there, as gpui's `focus_pending`.)
+	local field = ui.ref()
+	local take_on_mount = ui.use_state(false)
+	local function take_keys()
+		local el = field:peek()
+		if el then
+			el:focus()
+			local n = #draft:peek()
+			el:set_selection_bytes(n, n)
+		else
+			take_on_mount:set(true)
+		end
+	end
+	ui.effect(function()
+		if take_on_mount:get() and field:get() then
+			take_on_mount:set(false)
+			take_keys()
+		end
+	end)
+	if panel_key and tab_id then
+		ui.on_cleanup(PanelState.focuser(panel_key, tab_id, take_keys))
+	end
 	-- (A split's pane: its draft's chips, as the chat page keeps them.)
 	local carried = ui.use_state({} :: { any })
 	-- (A split's pane: as the focus comes or goes, its size there at once,
@@ -106,25 +134,29 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 	end
 	-- (A split's pane: the options picked in a question its chat asks.)
 	local chosen = ui.use_state({} :: { [string]: boolean })
+	-- (Words kept from before a side chat's draft lived with the chat's.)
+	if not split and draft:peek() ~= "" and Shared.draft_peek(chat).text == "" then
+		Shared.set_draft_of(chat, "text", draft:peek())
+	end
+	-- (Its chat's draft, by its id: its words, chips and a question's
+	-- picks, one draft per chat (screens/chat/shared), shown here and
+	-- written back as they change, wherever it's kept. Never the focused
+	-- chat's: the focus moving changes nothing this shows.)
+	ui.effect(function()
+		local d = Shared.draft_of(chat)
+		if draft:peek() ~= d.text then
+			draft:set(d.text)
+		end
+		carried:set(d.cargo)
+		chosen:set(d.chosen)
+	end)
+	ui.effect(function()
+		local text = draft:get()
+		if Shared.draft_of(chat).text ~= text then
+			Shared.set_draft_of(chat, "text", text)
+		end
+	end)
 	if split then
-		-- (Its chat's draft, by its id: its words, chips and a question's
-		-- picks, one draft per chat (screens/chat/shared), shown here and
-		-- written back as they change, wherever it's kept. Never the focused
-		-- chat's: the focus moving changes nothing this shows.)
-		ui.effect(function()
-			local d = Shared.draft_of(chat)
-			if draft:peek() ~= d.text then
-				draft:set(d.text)
-			end
-			carried:set(d.cargo)
-			chosen:set(d.chosen)
-		end)
-		ui.effect(function()
-			local text = draft:get()
-			if Shared.draft_of(chat).text ~= text then
-				Shared.set_draft_of(chat, "text", text)
-			end
-		end)
 		ui.effect(function()
 			local picked = chosen:get()
 			if Shared.draft_of(chat).chosen ~= picked then
@@ -134,6 +166,11 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 	end
 	-- (A split's pane: what its chat asks, and its queue, todos and tasks,
 	-- from its own session, as the window's composer shows them.)
+	local notice = ui.use_state(nil :: any)
+	local shown_notice = ui.computed(function(): any
+		local refused = Shared.draft_of(chat).refused
+		return notice:get() or (if refused then { tone = "danger", text = refused, dismissable = true } else nil)
+	end)
 	local asks = if split
 		then Asks.bind {
 			id = function(): string?
@@ -144,11 +181,13 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 			end,
 			chosen = chosen,
 			asked = ui.state(`chat_split_asked_{chat}`, nil :: any),
+			notice = function(n: any)
+				notice:set(n)
+			end,
 		}
 		else nil
 	local tray = ui.state(`chat_split_tray_{chat}`, nil :: any)
 	local session = view.session
-	local notice = ui.use_state(nil :: any)
 	local running = ui.computed(function(): boolean
 		local s = session:get()
 		return s ~= nil and s.running == true
@@ -356,12 +395,67 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 			return device:get()
 		end)
 		else nil
-	return ds.Composer {
+	local queue_pictures = ReplyImages.for_attachments(function(): any
+		local s = session:get()
+		if not s or s.state == "missing" then
+			return nil
+		end
+		return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.now:get().here }
+	end)
+	local completions = Completions.bind {
+		key = if split then `chat_split_{chat}` else `chat_lane_{chat}`,
+		agent = function(): string?
+			return (as_made())
+		end,
+		target = function(): any
+			return { chat = chat }
+		end,
+		in_chat = function(): boolean
+			return true
+		end,
+		attachments = function(): { any }
+			local out = {}
+			for _, a in carried:get() do
+				if a.path then
+					table.insert(out, { value = a.path, label = a.name, src = if a.kind == "image" then a.path else nil, file = a.kind ~= "image" })
+				end
+			end
+			return out
+		end,
+	}
+	-- A side chat past its day: nothing more goes to it (Zeron's composer.rs).
+	local function expired(): boolean
+		if split then
+			return false
+		end
+		for _, list in sessions.now:get().children or {} do
+			for _, c in list do
+				if c.id == chat then
+					return c.expires ~= nil and c.expires <= os.time()
+				end
+			end
+		end
+		return false
+	end
+	local expired_line = ui.row {
+		id = "expired-sidechat",
+		w_full = true,
+		p = "$space.3",
+		ui.text { ui.t("chat.composer.expired"), grow = 1, wrap = true, text_size = "$font.size.sm", color = "$text.tertiary" },
+	}
+	local cargo_props = Shared.cargo_props(chat)
+	return ui.show(expired, expired_line, ds.Composer {
+		field = field,
 		value = draft,
 		snap = if split then snap else nil,
-		cargo = if split then carried else nil,
+		cargo = carried,
 		-- (Its chips' × under the pointer, as the chat page's.)
-		on_remove_cargo = if split then remove_carried else nil,
+		on_remove_cargo = remove_carried,
+		on_paste_text = cargo_props.on_paste_text,
+		on_open_pasted = cargo_props.on_open_pasted,
+		on_attach = cargo_props.on_attach,
+		on_files = cargo_props.on_files,
+		on_paste_image = cargo_props.on_paste_image,
 		-- (ds.Composer's placeholder is a string: read as the tab is made.)
 		-- (A split's pane is a chat of its own: the chat page's words.)
 		placeholder = locale.s(if split then "chat.composer.placeholder" else "chat.lane_tab.placeholder"),
@@ -369,9 +463,10 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 		access = access,
 		model = model,
 		effort = effort,
-		notice = notice,
+		notice = shown_notice,
 		on_dismiss_notice = function()
 			notice:set(nil)
+			Shared.refuse_in(chat, nil)
 		end,
 		harnesses = function(): { any }
 			return store.catalog:get().harnesses
@@ -401,17 +496,54 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 		branches = where.branches,
 		branches_empty = where.branches_empty,
 		branch_fixed = branch_fixed,
-		on_send = function(text: string)
-			local words = string.match(text, "^%s*(.-)%s*$") or ""
-			if words == "" then
-				return
+		-- As the window's composer sends (screens/chat/composer): `false`, as it
+		-- has dealt with the draft itself.
+		on_send = function(text: string): boolean
+			local say = function(n: any)
+				notice:set(n)
+			end
+			local side = AppCommands.side(text)
+			if side then
+				draft:set("")
+				lanes.open_side(chat, side, route.current:peek().session)
+				return false
+			end
+			local focus = AppCommands.compact(text)
+			if focus then
+				draft:set("")
+				AppCommands.run_compact(chat, session:peek(), running:peek(), focus, function(key: string)
+					say({ tone = "danger", text = locale.s(key), dismissable = true })
+				end, function(why: string)
+					say({ tone = "danger", text = why, dismissable = true })
+				end)
+				return false
+			end
+			local trimmed = string.match(text, "^%s*(.-)%s*$") or ""
+			local zeron = completions.command_of(trimmed)
+			if zeron then
+				draft:set("")
+				ZeronCommands.run(zeron, chat)
+				return false
 			end
 			-- (Nowhere it can start, a project gone: the line says why.)
 			local is_unsent = lanes.unsent:peek()[chat] ~= nil
 			if is_unsent and where.blocked:peek() then
-				notice:set({ tone = "danger", text = where.blocked:peek(), dismissable = true })
-				return
+				say({ tone = "danger", text = where.blocked:peek(), dismissable = true })
+				return false
 			end
+			local s = session:peek()
+			local goes_to = if s and s.device then s.device else device:peek()
+			if goes_to ~= nil and goes_to ~= sessions.now:peek().here then
+				local too_large = Shared.linked_elsewhere(carried:peek())
+				if too_large then
+					say({ tone = "danger", text = too_large, dismissable = true })
+					return false
+				end
+			end
+			-- (What's typed reaches the chat's draft by an effect: this moment's.)
+			Shared.set_draft_of(chat, "text", draft:peek())
+			local typed, cargo = Shared.take(chat)
+			local parts = Outgoing.parts(string.match(typed, "^%s*(.-)%s*$") or "", trimmed, cargo)
 			draft:set("")
 			notice:set(nil)
 			-- As the chat page sends: the prompt joins its transcript as the
@@ -421,41 +553,50 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 			local mid = store.new_id()
 			local req = picks()
 			req.message_id = mid
+			req.attachments = parts.attachments
+			req.appshots = parts.appshots
+			req.restores = true
 			local sent: any = nil
 			T.send(function()
 				local here = view.messages:index_of("id", mid) ~= nil
 				if not here then
 					-- (On its way from this moment: the line under it says so.)
-					view.messages:push { id = mid, role = "user", text = words, waiting = "sending" }
+					view.messages:push { id = mid, role = "user", text = parts.words, attachments = parts.shown, waiting = "sending" }
 				end
 			end, mid, name)
 			-- Its first message makes it (New side chat), then sends.
 			if is_unsent then
-				sent = lanes.send_first(chat, words, req, place())
+				sent = lanes.send_first(chat, parts.text, req, place())
 			else
-				req.session, req.text = chat, words
+				req.session, req.text = chat, parts.text
 				sent = store.send(req :: any)
 			end
 			sent:after(function() end, function(err: any)
-				draft:set(words)
+				Shared.restore(parts.text, cargo)
 				local why = if type(err) == "table" and err.message then tostring(err.message) else nil
-				notice:set({
+				say({
 					tone = "danger",
 					text = if is_unsent and why then why else locale.s("chat.lane_tab.didnt_send"),
 					dismissable = true,
 				})
 			end)
+			return false
 		end,
 		on_stop = function()
 			store.interrupt(chat)
 		end,
 		-- (Hidden while focused, its draft shown by the window's composer: only that
 		-- one's menus open, or a trigger typed there opens a second here.)
+		mentions = completions.mentions,
+		on_mention = completions.on_mention,
 		mention_enabled = if split and focused
-			then function(_trigger: string): boolean
-				return not focused()
+			then function(trigger: string): boolean
+				return not focused() and completions.mention_enabled(trigger)
 			end
-			else nil,
+			else completions.mention_enabled,
+		mention_empty = completions.mention_empty,
+		mention_failed = completions.mention_failed,
+		mention_token = completions.mention_token,
 		-- (A split's pane, its chat's own.)
 		question = if asks then asks.question else nil,
 		chosen = if asks then asks.chosen else nil,
@@ -468,10 +609,11 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 		on_approve = if asks then asks.on_approve else nil,
 		on_deny = if asks then asks.on_deny else nil,
 		queue = if asks then asks.queue else nil,
-		can_steer = if asks then function(): boolean
-			return running:get()
-		end else nil,
+		can_steer = if asks then asks.can_steer else nil,
 		on_queue_send = if asks then asks.on_queue_send else nil,
+		on_queue_steer_all = if asks then asks.on_queue_steer_all else nil,
+		queue_pictures = if asks then queue_pictures else nil,
+		on_dismiss_todos = if asks then asks.on_dismiss_todos else nil,
 		on_queue_remove = if asks then asks.on_queue_remove else nil,
 		on_queue_reorder = if asks then asks.on_queue_reorder else nil,
 		todos = if asks then asks.todos else nil,
@@ -482,7 +624,7 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 			end)
 		end else nil,
 		tray = if split then tray else nil,
-	}
+	})
 end
 
 -- A fork's tab while the engine copies it, or once it couldn't: the
@@ -519,7 +661,7 @@ function M.dock_height(slot: string): State<number>
 	return ui.state(`chat_lane_dock_h_{slot}`, Dock.REST)
 end
 
-M.Tab = ui.component(function(props: { tab: any }): Node
+M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 	local tab = props.tab
 	local slot, chat = tab.id, tab.chat
 	local data = tab.data or {}
@@ -700,6 +842,10 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			else nil,
 		pictures = pictures,
 		sent_pictures = sent_pictures,
+		sent_from = function(): string?
+			local s = lane_session()
+			return if s then s.id else nil
+		end,
 		on_open_subagent = function(sub: any)
 			local home = home_session()
 			if home then
@@ -784,7 +930,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 					hidden = function(): boolean
 						return split and focused_now()
 					end,
-					Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, data.split == true, if split then focused_now else nil), id = `lane-composer-{slot}` },
+					Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, data.split == true, if split then focused_now else nil, props.panel_key, slot), id = `lane-composer-{slot}` },
 				},
 			}
 		end, { grow = 1, w_full = true, min_h = 0 }),

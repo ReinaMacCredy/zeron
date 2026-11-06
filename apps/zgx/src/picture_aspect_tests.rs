@@ -58,6 +58,6 @@ fn a_cropped_picture_keeps_its_own_shape_in_every_small_frame() {
     assert_own_shape(&mut app, "aspect-cover-fallback");
     assert_own_shape(&mut app, "aspect-avatar");
     assert_own_shape(&mut app, "\"wide.png\"");
-    assert_own_shape(&mut app, "\"Safari\"");
+    assert_own_shape(&mut app, "\"Preview Appshot from Safari\"");
     assert_own_shape(&mut app, "role:button \"Open wide.png\"");
 }
