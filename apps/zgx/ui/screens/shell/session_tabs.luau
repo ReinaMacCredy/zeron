@@ -9,7 +9,6 @@ local look = require("@app/screens/shell/project_look")
 local route = require("@app/screens/shell/route")
 local sessions = require("@account/sessions")
 local splits = require("@app/screens/shell/split")
-local appearance = require("@app/screens/shell/appearance")
 local folder = require("@app/screens/shell/folder_tab")
 local art = require("@app/screens/shell/art")
 local chat_shared = require("@app/screens/chat/shared")
@@ -120,12 +119,7 @@ local landed = false
 -- (Frozen for a drag, or the strip would shrink as the slot closes.)
 local tab_w = ui.state("shell_session_tab_w", TAB_MAX)
 local SHADE_PARAMS = { "layerParam0", "layerParam1", "layerParam2", "layerParam3", "layerParam4", "layerParam5", "layerParam6", "layerParam8", "layerParam9" }
-local function inset(): boolean
-	return appearance.inset_card:get()
-end
-local function pad(): number
-	return if inset() then folder.FLARE else 0
-end
+local PAD = folder.FLARE
 
 -- A tab's panes, as many as show (`STACK`), the one focused last first: the ones
 -- focused in that order, then the rest as they stand in the split.
@@ -529,26 +523,8 @@ local function face_row(id: string, hovered: any, active: () -> boolean): { any 
 end
 
 local function tab_box(props: { [any]: any }, active: () -> boolean, washed: () -> boolean): { [any]: any }
-	-- (With Inset card off the selected tab stands on the bar's foot, its head rounded: the locked mockup's.)
-	local function on_foot(): boolean
-		return active() and not inset()
-	end
-	local function head_corner(): any
-		return ui.raw(ui.theme.get(if on_foot() then "radius.lg" else "radius.md") :: number, "a token isn't read on a single corner")
-	end
-	local function foot_corner(): any
-		return ui.raw(if on_foot() then 0 else ui.theme.get("radius.md") :: number, "a token isn't read on a single corner")
-	end
-	props.h = function(): number
-		return if on_foot() then TAB_H + DROP else TAB_H
-	end
-	props.rounded_tl = head_corner
-	props.rounded_tr = head_corner
-	props.rounded_bl = foot_corner
-	props.rounded_br = foot_corner
-	props.border_sides = function(): any
-		return if on_foot() then { 1, 1, 0, 1 } else { 1, 1, 1, 1 }
-	end
+	props.h = TAB_H
+	props.rounded = "$radius.md"
 	props.shrink = 0
 	props.pl = ui.raw(10, "Zeron's tab's start")
 	props.pr = ui.raw(4, "Zeron's tab's end")
@@ -556,15 +532,10 @@ local function tab_box(props: { [any]: any }, active: () -> boolean, washed: () 
 	props.items = "center"
 	props.cursor = "pointer"
 	props.bg = function(): string
-		if active() then
-			return if inset() then "#00000000" else "$zeron.selected.bg"
-		end
-		return if washed() then "$hover" else "#00000000"
+		return if washed() and not active() then "$hover" else "#00000000"
 	end
 	props.border = 1
-	props.border_color = function(): string
-		return if active() and not inset() then "$zeron.selected.ring" else "#00000000"
-	end
+	props.border_color = "#00000000"
 	props.color = function(): string
 		return if active() or washed() then "$text.primary" else "$text.secondary"
 	end
@@ -630,7 +601,7 @@ local function lifted_card(id: string): Node
 end
 
 local function slot_left(at: number): number
-	return pad() + (at - 1) * (tab_w:get() + TAB_GAP)
+	return PAD + (at - 1) * (tab_w:get() + TAB_GAP)
 end
 
 local Tab = ui.component(function(props: { chat: string }): Node
@@ -742,9 +713,8 @@ local Tab = ui.component(function(props: { chat: string }): Node
 	row.pr = function(): any
 		return ui.raw(if riding() then 0 else 4, "Zeron's tab's end")
 	end
-	local sides = row.border_sides
-	row.border_sides = function(): any
-		return if riding() then { 0, 0, 0, 0 } else sides()
+	row.border = function(): number
+		return if riding() then 0 else 1
 	end
 	for _, part in face_row(id, hovered, active) do
 		table.insert(row, part)
@@ -821,7 +791,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		if drag:get() or room <= 0 then
 			return
 		end
-		local w = math.clamp((room - pad() * 2 - TAB_GAP * (count - 1)) / count, TAB_MIN, TAB_MAX)
+		local w = math.clamp((room - PAD * 2 - TAB_GAP * (count - 1)) / count, TAB_MIN, TAB_MAX)
 		if tab_w:peek() ~= w then
 			tab_w:set(w)
 		end
@@ -843,7 +813,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		if not at_slot or room <= 0 or drag:peek() then
 			return
 		end
-		local total = pad() * 2 + slots() * w + (slots() - 1) * TAB_GAP
+		local total = PAD * 2 + slots() * w + (slots() - 1) * TAB_GAP
 		local left = slot_left(at_slot)
 		local right = left + w
 		local at = offset:peek()
@@ -873,27 +843,24 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			return
 		end
 		local want: { [string]: number } = {}
-		-- (Inset off the shade has no hole: nothing to follow as the tabs move.)
-		if inset() then
-			local at = start()
-			local from = at - offset:get()
-			local here = if props.hidden and props.hidden() then nil else showing_at()
-			local d = drag:get()
-			local fades = bands()
-			if here ~= nil and not dragging_selected() then
-				want.layerParam0 = from + slot_left(here :: number) - folder.FLARE
-				want.layerParam1 = tab_w:get() + folder.FLARE * 2
-			end
-			if d ~= nil and not d.out then
-				want.layerParam2 = from + rider_x:get() - folder.FLARE
-				want.layerParam3 = (d :: Drag).w + folder.FLARE * 2
-			end
-			want.layerParam4 = at
-			want.layerParam5 = at + (view.width or 0)
-			want.layerParam6 = ds.TitleBar.middle() - BAR / 2 + DROP
-			want.layerParam8 = fades[1]
-			want.layerParam9 = fades[2]
+		local at = start()
+		local from = at - offset:get()
+		local here = if props.hidden and props.hidden() then nil else showing_at()
+		local d = drag:get()
+		local fades = bands()
+		if here ~= nil and not dragging_selected() then
+			want.layerParam0 = from + slot_left(here :: number) - folder.FLARE
+			want.layerParam1 = tab_w:get() + folder.FLARE * 2
 		end
+		if d ~= nil and not d.out then
+			want.layerParam2 = from + rider_x:get() - folder.FLARE
+			want.layerParam3 = (d :: Drag).w + folder.FLARE * 2
+		end
+		want.layerParam4 = at
+		want.layerParam5 = at + (view.width or 0)
+		want.layerParam6 = ds.TitleBar.middle() - BAR / 2 + DROP
+		want.layerParam8 = fades[1]
+		want.layerParam9 = fades[2]
 		local changed: { [string]: number } = {}
 		for _, key in SHADE_PARAMS do
 			local v = want[key] or 0
@@ -911,7 +878,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		if not d then
 			return
 		end
-		local x = e.x - start() + offset:peek() - pad()
+		local x = e.x - start() + offset:peek() - PAD
 		local list = shown:peek()
 		local slot = d.w + TAB_GAP
 		if d.grab == nil or d.out then
@@ -923,7 +890,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			d = again
 			anime.animate(slot_w, { value = d.w, duration = SLIDE.duration, ease = SLIDE.ease })
 		end
-		rider_x:set(pad() + math.clamp(x - (d.grab :: number), -6, (#list - 1) * slot + 6))
+		rider_x:set(PAD + math.clamp(x - (d.grab :: number), -6, (#list - 1) * slot + 6))
 		local to = math.clamp(math.floor(x / slot) + 1, 1, #list)
 		if list[to] ~= d.key then
 			splits.move_tab(d.key, list[to])
@@ -984,13 +951,11 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 					ref = content,
 					relative = true,
 					h_full = true,
-					px = function(): any
-						return ui.raw(pad(), "room for a selected tab's flare")
-					end,
+					px = ui.raw(PAD, "room for a selected tab's flare"),
 					pt = ui.raw(DROP, "a tab stands on the bar's line"),
 					ui.show(
 						function(): boolean
-							return inset() and showing_at() ~= nil and not dragging_selected()
+							return showing_at() ~= nil and not dragging_selected()
 						end,
 						folder.Shape {
 							id = "session-tab-folder",
@@ -1065,7 +1030,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 							end,
 							top = DROP,
 							pointer_events = "none",
-							ui.show(inset, folder.Shape {
+							folder.Shape {
 								left = -folder.FLARE,
 								top = 0,
 								w = function(): number
@@ -1073,7 +1038,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 									return (if d then d.w else tab_w:peek()) + folder.FLARE * 2
 								end,
 								h = TAB_H + DROP + 1,
-							}),
+							},
 							ui.row(rider),
 						}
 					end)),

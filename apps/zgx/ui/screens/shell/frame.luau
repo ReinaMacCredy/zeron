@@ -28,9 +28,6 @@ local HERO_FROSTED = 0.84
 local SCRIM_HERO = { angle = 180, stops = { { 0, "#0000001a" }, { 0.45, "#00000066" }, { 1, "#00000000" } } }
 local SCRIM_FULL = { angle = 180, stops = { { 0, "#0000001a" }, { 0.45, "#00000066" }, { 1, "#000000bf" } } }
 local RAIL_SCRIM = { angle = 90, stops = { { 0, "#000000b8" }, { 1, "#00000000" } } }
--- (The mockup's 40% of the band's height: its shade starts to go a little above the bar's foot.)
-local BAND_FADE = { angle = 180, stops = { { 0, "#000f" }, { 0.4, "#000f" }, { 1, "#0000" } } }
-
 -- The bar's shade, and crates/ui's `tab_fade` under it, with the selected tab's folder left out of it, so that tab is the card's own picture.
 local BAR_SHADE = ui.layer_shader([[
 fn folder(p: vec2<f32>, x0: f32, w: f32, top: f32, scale: f32) -> f32 {
@@ -83,6 +80,10 @@ end)
 local drawn = ui.state("shell_frame_drawn", false)
 M.framed = ui.computed(function(): boolean
 	return drawn:get() and appearance.inset_card:get() and appearance.frame_style:get() ~= "off" and M.page_art:get() ~= nil
+end)
+-- (The selected tab's outline, on the same art with Inset card on or off.)
+M.tab_framed = ui.computed(function(): boolean
+	return drawn:get() and appearance.frame_style:get() ~= "off" and M.page_art:get() ~= nil
 end)
 
 function M.hero_height(vh: number): number
@@ -407,7 +408,7 @@ local function bar_shade(): Node
 		layer_shader = BAR_SHADE,
 		layer_params = { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } },
 		opacity = faded_in(function(): number
-			return if shows_art() and appearance.inset_card:get() then appearance.chat_tab_shade:get() else 0
+			return if shows_art() then appearance.chat_tab_shade:get() else 0
 		end),
 		ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, bg = "$zeron.window" },
 	}
@@ -492,19 +493,6 @@ local function card_picture(): Node
 			},
 		},
 		bar_shade(),
-		ui.div {
-			id = "shell-band-fade",
-			absolute = true,
-			left = 0,
-			right = 0,
-			top = 0,
-			h = ui.raw(TOP_BAR + TAB_FADE_H, "the top bar and the band's fade under it"),
-			bg = "$zeron.window",
-			mask_gradient = BAND_FADE,
-			opacity = faded_in(function(): number
-				return if shows_art() and not appearance.inset_card:get() then appearance.chat_tab_shade:get() else 0
-			end),
-		},
 		ui.div {
 			id = "shell-rail-scrim",
 			absolute = true,

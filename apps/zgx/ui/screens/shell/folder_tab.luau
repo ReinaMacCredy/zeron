@@ -38,7 +38,7 @@ function M.Shape(props: Props): Node
 		h = props.h,
 		pointer_events = "none",
 		draw = function(c: any, w: number, h: number)
-			c:stroke(outline(w, h), if frame.framed:get() then "$zeron.inset.framed_edge" else "$zeron.inset.edge", 0.5)
+			c:stroke(outline(w, h), if frame.tab_framed:get() then "$zeron.inset.framed_edge" else "$zeron.inset.edge", 0.5)
 		end,
 	}
 end
