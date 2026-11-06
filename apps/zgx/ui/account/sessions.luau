@@ -45,6 +45,9 @@ export type Chat = {
 	device: string,
 	branch: string?,
 	cwd: string?,
+	work_path: string?,
+	live_branch: string?,
+	head: string?,
 	status: string?,
 	updated: number,
 	created: number,
@@ -72,6 +75,8 @@ export type Child = {
 	created: number,
 	harness: string?,
 	agent: string?,
+	kind: string?,
+	expires: number?,
 }
 -- `github`: its GitHub repository (`owner/name`), the one a Cloud chat of it
 -- clones.
@@ -89,6 +94,7 @@ export type Places = { pinned: { string }, sections: { Section } }
 export type Now = {
 	state: string,
 	here: string?,
+	home: string?,
 	devices: { Device },
 	projects: { Project },
 	chats: { Chat },

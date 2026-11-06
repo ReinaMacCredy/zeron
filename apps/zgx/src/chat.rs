@@ -3039,6 +3039,9 @@ fn subagents_of(messages: &[Value]) -> Value {
                     ("ref", Value::Str(reference.clone())),
                     ("title", field("title")),
                     ("status", field("status")),
+                    ("model", field("model")),
+                    ("kind", field("kind")),
+                    ("agent", field("agent")),
                     ("at", message.field("started").cloned().unwrap_or(Value::Nil)),
                 ]));
             }
@@ -3689,6 +3692,24 @@ fn elapsed(secs: i64) -> String {
     }
 }
 
+/// The model a spawn names, never its parent's (`ToolCall::subagent_model`).
+fn subagent_model(call: &Json) -> Option<&str> {
+    zeron_proto::SUBAGENT_MODEL_KEYS
+        .iter()
+        .find_map(|key| call["input"][key].as_str())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+}
+
+fn subagent_kind(call: &Json) -> Option<&str> {
+    call["input"]["subagent_type"].as_str().map(str::trim).filter(|kind| !kind.is_empty())
+}
+
+fn subagent_mark(call: &Json) -> Option<String> {
+    let maker = zeron_proto::HarnessId::brand_of(None, subagent_model(call))?;
+    crate::agents::glyph(maker.as_str())
+}
+
 /// A subagent's tab title, as the shipping app's `subagent_tab_title`: the
 /// tool's name, else its description, else its prompt, the "Agent"/"Task"
 /// genus taken off, the first line, at most 40 characters.
@@ -3965,6 +3986,9 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
                 ("ref", Value::from(doc)),
                 ("status", part["subagentStatus"].as_str().map_or(Value::Nil, Value::from)),
                 ("title", Value::from(subagent_title(&part["call"]).as_str())),
+                ("model", subagent_model(&part["call"]).map_or(Value::Nil, Value::from)),
+                ("kind", subagent_kind(&part["call"]).map_or(Value::Nil, Value::from)),
+                ("agent", subagent_mark(&part["call"]).map_or(Value::Nil, |mark| Value::from(mark.as_str()))),
             ]),
         ));
     }
@@ -4289,6 +4313,7 @@ fn background_tasks(session: &Json) -> Vec<Value> {
             let mut fields = vec![
                 ("id", s(&t["id"])),
                 ("kind", Value::from("process")),
+                ("task_kind", s(&t["kind"])),
                 ("name", Value::from(name)),
             ];
             if name != command {
@@ -5169,7 +5194,7 @@ mod tests {
     #[test]
     fn a_transcript_s_subagents_are_listed_once_each_in_order() {
         let tool = |r: &str, title: &str| {
-            Value::record([("id", Value::from(r)), ("subagent", Value::record([("ref", Value::from(r)), ("title", Value::from(title))]))])
+            Value::record([("id", Value::from(r)), ("subagent", Value::record([("ref", Value::from(r)), ("title", Value::from(title)), ("model", Value::from("gpt-5.5"))]))])
         };
         let message = |started: f64, tools: Vec<Value>| {
             Value::record([("started", Value::Num(started)), ("tools", Value::List(tools.into()))])
@@ -5185,6 +5210,18 @@ mod tests {
         assert_eq!(refs, ["a", "b"]);
         assert_eq!(found[0].field("title").map(text).as_deref(), Some("first"));
         assert_eq!(found[1].field("at").and_then(Value::as_f64), Some(2.));
+        assert_eq!(found[1].field("model").map(text).as_deref(), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn a_spawn_names_its_model_kind_and_makers_mark() {
+        let call = serde_json::json!({ "kind": "unknown", "name": "Agent: x", "input": { "modelId": " gpt-5.5 ", "subagent_type": "Explore" } });
+        assert_eq!(super::subagent_model(&call), Some("gpt-5.5"));
+        assert_eq!(super::subagent_kind(&call), Some("Explore"));
+        assert_eq!(super::subagent_mark(&call).as_deref(), crate::agents::glyph("codex").as_deref());
+        let plain = serde_json::json!({ "kind": "unknown", "name": "Agent: x", "input": { "model": "opus" } });
+        assert_eq!(super::subagent_mark(&plain), None);
+        assert_eq!(super::subagent_kind(&plain), None);
     }
 
     #[test]

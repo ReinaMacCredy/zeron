@@ -35,6 +35,9 @@ end
 tapi.command = function(id: string, _device: string?): any
 	return settle(`bridge {id}`)
 end
+tapi.run_report = function(): any
+	return { after = function() end }
+end
 tapi.status = function(_id: string, _device: string?): any
 	return settle({ busy = busy:peek(), exited = false })
 end

@@ -36,6 +36,13 @@ local store = require("@app/screens/chat/store")
 local lanes = require("@app/screens/chat/lanes")
 local split_lanes = ui.state("split_lanes", {} :: { [string]: string })
 local fixture_chats = ui.shared("fixture.chats", {} :: { [string]: any })
+-- (Its subagents as the host says them: this fixture has no host.)
+do
+	local said = ui.shared("chat.subagents", {} :: { any })
+	ui.effect(function()
+		said:set(require("@app/screens/chat/lanes").subagents_of(store.messages:get()))
+	end)
+end
 local open_chat = ui.state("fixture_open_chat", "")
 local function project(view: any, id: string, lane: boolean)
 	local c = fixture_chats:peek()[id]
@@ -105,6 +112,9 @@ tapi.claimed = function(claim: string): any
 end
 tapi.command = function(id: string): any
 	return answered(`bridge {id}`)
+end
+tapi.run_report = function(): any
+	return { after = function() end }
 end
 tapi.status = function(): any
 	return answered({ busy = false, exited = false })
@@ -520,6 +530,29 @@ local function failure(message: string): any
 	return made
 end
 local HOMES = { mac = "/Users/me", box = "/home/me" }
+
+local comparing: { (any) -> () } = {}
+(require("@app/screens/panel/home_api") :: any).comparison = function(): any
+	return {
+		after = function(_, ok: (any) -> (), _fail: ((any) -> ())?)
+			table.insert(comparing, ok)
+		end,
+	}
+end
+ui.command {
+	id = "fixture.comparison_last",
+	title = "Answer the last comparison asked for",
+	run = function()
+		table.remove(comparing)({ base = "origin/main", ahead = 2, behind = 0 })
+	end,
+}
+ui.command {
+	id = "fixture.comparison_first",
+	title = "Answer the first comparison asked for",
+	run = function()
+		table.remove(comparing, 1)({ base = "origin/main", ahead = 9, behind = 0 })
+	end,
+}
 
 -- (`fixture.hold`: the device's answers wait for `fixture.release`.)
 local holding = false

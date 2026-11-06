@@ -68,6 +68,37 @@ function M.close(tab: Tab)
 	end
 end
 
+local watching: { [string]: boolean } = {}
+
+-- Only the action's own report settles its row, and the latest wins, as gpui's `exit_codes`.
+local function watch_run(id: string, terminal: string, device: string?, after: string?, tail: string?)
+	if not after and watching[id] then
+		return
+	end
+	watching[id] = true
+	local function over(unknown: boolean)
+		watching[id] = nil
+		local run = state.runs:peek()[id]
+		if unknown and run and run.code == nil then
+			state.runs:set_key(id, { unknown = true })
+		end
+	end
+	api.run_report(terminal, device, after, tail):after(function(r: any)
+		if not state.runs:peek()[id] then
+			watching[id] = nil
+		elseif r.code ~= nil then
+			state.runs:set_key(id, { code = r.code })
+		end
+		if r.gone or r.exited then
+			over(r.gone)
+		elseif watching[id] then
+			watch_run(id, terminal, device, r.after, r.tail)
+		end
+	end, function()
+		over(true)
+	end)
+end
+
 export type Props = { key: string, tab: string, project: any?, session: any?, [any]: any }
 
 M.Terminal = ui.component(function(props: Props): Node
@@ -83,6 +114,9 @@ M.Terminal = ui.component(function(props: Props): Node
 	-- beat after it's made: nothing is written while it's built.)
 	local t0 = tab()
 	ui.after(0, function()
+	if t0 and t0.terminal and state.runs:peek()[id] then
+		watch_run(id, t0.terminal, t0.device)
+	end
 	if t0 and not t0.command then
 		local target = target_of(props.project, props.session)
 		-- A page's panel (a plugin's board) has no session: its terminal is
@@ -112,18 +146,24 @@ M.Terminal = ui.component(function(props: Props): Node
 				-- terminal, then the bridge attaches to it. (Its id kept with
 				-- the tab first: a reload attaches, never runs it again.)
 				local home_api = require("@app/screens/panel/home_api")
+				state.runs:set_key(id, {})
+				local function never_ran(err: any)
+					state.runs:set_key(id, { code = -1 })
+					fail(err)
+				end
 				home_api.run_action(run.space, run.chat, run.device, run.action):after(function(terminal: string)
 					if not state.find(key, id) then
 						api.close(terminal, run.device):after(function() end, function() end)
 						return
 					end
 					state.set_terminal(key, id, terminal, run.device, nil)
+					watch_run(id, terminal, run.device)
 					api.command(terminal, run.device):after(function(command: string)
 						if state.find(key, id) then
 							state.set_terminal(key, id, terminal, run.device, command)
 						end
-					end, fail)
-				end, fail)
+					end, never_ran)
+				end, never_ran)
 			elseif known then
 				-- (Its engine terminal known, its bridge not running: one
 				-- that attaches.)

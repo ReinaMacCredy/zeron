@@ -13,6 +13,7 @@ return {
 	page_left = ui.state("shell_art_page_left", 0),
 	panel_w = ui.state("shell_files_shown_width", -1),
 	panel_gap = ui.state("shell_art_panel_gap", 0),
+	actions_w = ui.state("shell_titlebar_actions_w", 0),
 	under_rail = ui.state("shell_art_under_rail", false),
 	split = ui.state("shell_art_split", false),
 	expanded = ui.state("shell_art_expanded", false),

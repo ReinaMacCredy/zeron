@@ -17,14 +17,7 @@ return function(zeron: any, Repo: any)
 	-- while the window is: the home shows them at once when it's back).
 	local heard = ui.state("git.branch_totals", {} :: { [string]: any })
 
-	return function(): Node
-		local branch = zeron.live("panel_branch")
-		local panel = zeron.context("panel")
-		local first = branch()
-		local session = first and first.session
-		if type(session) ~= "string" then
-			return ui.div {}
-		end
+	local function counts(branch: () -> any, panel_of: () -> any, id: string, text_size: any, corner: any, gap: any): Node
 		local function slot_of(b: any): string?
 			return if b and b.cwd then `{b.session}|{b.cwd}` else nil
 		end
@@ -63,10 +56,16 @@ return function(zeron: any, Repo: any)
 			end
 			return t
 		end
+		local function open()
+			local b, panel = branch(), panel_of()
+			if panel and b then
+				Repo.open_tab(panel, b.session, "changes", "branch")
+			end
+		end
 		return ui.show(function(): boolean
 			return totals() ~= nil
 		end, ui.row {
-			id = "git-branch-totals",
+			id = id,
 			role = "button",
 			label = function(): string
 				local t = totals() or { adds = 0, dels = 0 }
@@ -78,20 +77,15 @@ return function(zeron: any, Repo: any)
 			shrink = 0,
 			h = 24,
 			px = "$space.1",
-			gap = "$space.1",
+			gap = gap,
 			items = "center",
-			-- (6 in from the row's edge, top and bottom.)
-			rounded = PanelHome.inner(6),
+			rounded = corner,
 			hover = { bg = "$hover" },
 			focus = control.ring,
-			on_click = function()
-				if panel then
-					Repo.open_tab(panel, session, "changes", "branch")
-				end
-			end,
+			on_click = open,
 			on_key = function(e: any): boolean?
-				if (e.key == "Enter" or e.key == " ") and panel then
-					Repo.open_tab(panel, session, "changes", "branch")
+				if e.key == "Enter" or e.key == " " then
+					open()
 					return true
 				end
 				return nil
@@ -104,7 +98,7 @@ return function(zeron: any, Repo: any)
 				literal = true,
 				font = "$font.mono",
 				tabular = true,
-				text_size = "$font.size.xs",
+				text_size = text_size,
 				color = "$zeron.diff.added",
 			},
 			ui.text {
@@ -115,9 +109,38 @@ return function(zeron: any, Repo: any)
 				literal = true,
 				font = "$font.mono",
 				tabular = true,
-				text_size = "$font.size.xs",
+				text_size = text_size,
 				color = "$zeron.diff.removed",
 			},
 		})
 	end
+
+	return {
+		row = function(): Node
+			local branch = zeron.live("panel_branch")
+			local first = branch()
+			if type(first and first.session) ~= "string" then
+				return ui.div {}
+			end
+			local panel = zeron.context("panel")
+			return counts(branch, function(): any
+				return panel
+			end, "git-branch-totals", "$font.size.xs", PanelHome.inner(6), "$space.1")
+		end,
+		toggle = function(): Node
+			-- (The title bar provides no session: the window's page's, read as it changes.)
+			local page = ui.shared("zeron.page_session", nil :: any)
+			local function branch(): any
+				local session = page:get()
+				if type(session) ~= "string" then
+					return nil
+				end
+				local record = zeron.context_of("session", session)
+				return { session = session, device = record.device, cwd = record.cwd, branch = record.branch }
+			end
+			return counts(branch, function(): any
+				return zeron.context("panel")
+			end, "git-toggle-totals", "$font.size.xs", "$radius.md", ui.raw(6, "Zeron's gap in the toggle"))
+		end,
+	}
 end

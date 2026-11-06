@@ -181,6 +181,15 @@ fn replace_changed(slot: &RefCell<Json>, item: Json) -> bool {
     true
 }
 
+/// The branch gpui's Sidecar shows: a live work tree's, else the source context's, else the chat's.
+fn live_branch(c: &Json) -> Option<&str> {
+    let tree = &c["workTree"];
+    if tree.is_object() && !tree["removed"].as_bool().unwrap_or(false) {
+        return tree["branch"].as_str();
+    }
+    c["sourceContext"]["branch"].as_str().or(c["branch"].as_str()).filter(|branch| !branch.is_empty())
+}
+
 /// Drops the rows of chats that aren't in `new`, or aren't the same there.
 fn forget_changed(rows: &mut HashMap<String, Row>, old: &Json, new: &Json) {
     let by_id = |list: &'_ Json| -> HashMap<String, usize> {
@@ -618,6 +627,12 @@ impl Sessions {
                 ("agent", harness.and_then(crate::agents::glyph).map_or(Value::Nil, |g| Value::from(g.as_str()))),
                 // An agent from the ACP registry: its icon, as listed.
                 ("agent_icon", with.agent_icon.as_deref().map_or(Value::Nil, Value::from)),
+                ("kind", Value::from(child_kind(c))),
+                ("expires", if c["sidechatSourceChatId"].is_string() {
+                    Value::from((created + zeron_proto::sidechat::SIDECHAT_LIFETIME_HOURS * 3600) as f64)
+                } else {
+                    Value::Nil
+                }),
             ]);
             let row = (updated as f64, value.clone());
             rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, unseen: unseen(c), with, value });
@@ -668,6 +683,9 @@ impl Sessions {
                     ("device", Value::from(c["deviceId"].as_str().unwrap_or_default())),
                     ("branch", opt(c["workTree"]["branch"].as_str().or(c["branch"].as_str()))),
                     ("cwd", opt(c["cwd"].as_str())),
+                    ("work_path", opt(c["workTree"]["path"].as_str().filter(|_| !c["workTree"]["removed"].as_bool().unwrap_or(false)))),
+                    ("head", opt(c["sourceContext"]["headSha"].as_str())),
+                    ("live_branch", opt(live_branch(c))),
                     // The branch its latest run started on, as the engine
                     // stamped it (`sourceContext`): what its pull request is
                     // looked up by, as the shipping app's sidebar does.
@@ -740,6 +758,7 @@ impl Sessions {
         Value::record([
             ("state", Value::from(state)),
             ("here", here.as_deref().map_or(Value::Nil, Value::from)),
+            ("home", std::env::var("HOME").map_or(Value::Nil, |home| Value::from(home.as_str()))),
             ("devices", Value::List(devices.into())),
             ("projects", Value::List(projects.into())),
             ("chats", Value::List(chats.into())),
@@ -1033,6 +1052,16 @@ fn plain_id(id: &str) -> bool {
 /// The engine's rows with the one parent link this app reads: the fork names
 /// a child by how it came to be. (A fork alone stays top-level: `ForkChat`
 /// makes a sibling, and `ForkSideChat` also sets `createdByChatId`.)
+fn child_kind(chat: &Json) -> &'static str {
+    if chat["sidechatSourceChatId"].is_string() {
+        "side_chat"
+    } else if chat["forkedFromChatId"].is_string() {
+        "fork"
+    } else {
+        "agent"
+    }
+}
+
 pub(crate) fn with_parents(mut chats: Json) -> Json {
     for chat in chats.as_array_mut().into_iter().flatten() {
         let parent = [&chat["delegation"]["delegatedByChatId"], &chat["sidechatSourceChatId"], &chat["createdByChatId"]]
@@ -1541,6 +1570,18 @@ fn unix_seconds(stamp: &str) -> Option<i64> {
 mod tests {
     /// A conversation link's workspace, hashed as production's links.rs
     /// does (so a link copied here opens there, and back).
+    #[test]
+    fn the_sidecar_branch_is_gpuis() {
+        use serde_json::json;
+        let source = json!({ "branch": "feature", "sourceContext": { "branch": "main" } });
+        assert_eq!(super::live_branch(&source), Some("main"));
+        let live = json!({ "branch": "feature", "sourceContext": { "branch": "main" }, "workTree": { "branch": "wt" } });
+        assert_eq!(super::live_branch(&live), Some("wt"));
+        let removed = json!({ "branch": "feature", "workTree": { "branch": "wt", "removed": true } });
+        assert_eq!(super::live_branch(&removed), Some("feature"));
+        assert_eq!(super::live_branch(&json!({ "branch": "" })), None);
+    }
+
     #[test]
     fn conversation_links_match_production() {
         let who = || Some(("u1".to_string(), Some("o1".to_string())));

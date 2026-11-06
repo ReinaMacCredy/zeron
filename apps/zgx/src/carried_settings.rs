@@ -3,7 +3,9 @@
 //! `ui.persist` values. Only what it has no value for yet, so what you've
 //! changed here stays, and a value once carried is its own from then on.
 //!
-//! New project's pinned folders come with it. Pinned chats and sections
+//! The look comes the same way: the card, frame, chat art and its picture, and
+//! the Live state column's fold, each of the frame and the art as a set: one you've touched here isn't
+//! paired with the other app's rest. New project's pinned folders come with it. Pinned chats and sections
 //! aren't here: the engine keeps them, for either app.
 
 use std::path::Path;
@@ -13,6 +15,40 @@ use serde_json::{Value as Json, json};
 const SIDEBAR: &str = "screens%2Fshell%2Fsidebar.luau%3A%3Ashell_sidebar_";
 const VIEW: &str = "screens%2Fshell%2Fview.luau%3A%3Ashell_";
 const PICKER: &str = "screens%2Fshell%2Fadd_project.luau%3A%3Ashell_add_project_";
+const LOOK: &str = "screens%2Fshell%2Fappearance.luau%3A%3Ashell_";
+const SIDECAR_COLLAPSED: &str = "screens%2Fsidecar.luau%3A%3Asidecar_collapsed.json";
+const INSET: &str = "ds%2Flook.luau%3A%3Ainset_card.json";
+const THEME_COLORS: &str = "ds%2Flook.luau%3A%3Awallpaper_theme_colors.json";
+
+fn look(name: &str) -> String {
+    format!("{LOOK}{name}.json")
+}
+
+fn frame_set() -> Vec<String> {
+    let mut set = vec![INSET.to_string()];
+    set.extend(["frame_style", "frame_shade", "frame_blur", "frame_sidebar", "frame_blend"].map(look));
+    set
+}
+
+fn art_set() -> Vec<String> {
+    let mut set = vec![THEME_COLORS.to_string()];
+    set.extend(
+        [
+            "chat_background",
+            "chat_background_placement",
+            "chat_background_opacity",
+            "chat_background_blur",
+            "chat_background_scrim",
+            "chat_background_tab_shade",
+            "wallpaper",
+            "wallpaper_image",
+            "wallpaper_effect",
+            "wallpaper_color",
+        ]
+        .map(look),
+    );
+    set
+}
 
 /// `settings` (`ui-settings.json`) as files of `ui.persist`, each a name and
 /// its value; only what it says and this app has.
@@ -61,17 +97,80 @@ fn carried(settings: &Json) -> Vec<(String, Json)> {
     if let Some(shut) = settings["sidebarCollapsed"].as_bool() {
         out.push((format!("{VIEW}collapsed.json"), json!(shut)));
     }
+    if let Some(shut) = settings["sidecarCollapsed"].as_bool() {
+        out.push((SIDECAR_COLLAPSED.to_string(), json!(shut)));
+    }
+    if let Some(on) = settings["insetShell"].as_bool() {
+        out.push((INSET.to_string(), json!(on)));
+    }
+    if let Some(on) = settings["wallpaperThemeColors"].as_bool() {
+        out.push((THEME_COLORS.to_string(), json!(on)));
+    }
+    for (group, from, to) in [
+        ("shellFrame", "style", "frame_style"),
+        ("shellFrame", "shade", "frame_shade"),
+        ("shellFrame", "blur", "frame_blur"),
+        ("shellFrame", "sidebar", "frame_sidebar"),
+        ("shellFrame", "blend", "frame_blend"),
+        ("chatBackground", "enabled", "chat_background"),
+        ("chatBackground", "placement", "chat_background_placement"),
+        ("chatBackground", "opacity", "chat_background_opacity"),
+        ("chatBackground", "blur", "chat_background_blur"),
+        ("chatBackground", "scrim", "chat_background_scrim"),
+        ("chatBackground", "tabShade", "chat_background_tab_shade"),
+    ] {
+        if !settings[group][from].is_null() {
+            out.push((look(to), settings[group][from].clone()));
+        }
+    }
+    if let Some(effect) = settings["newThreadBackgroundEffect"].as_str() {
+        out.push((look("wallpaper_effect"), json!(effect)));
+    }
+    if let Some(color) = settings["wallpaperColor"].as_str() {
+        out.push((look("wallpaper_color"), json!(color)));
+    }
     if let Some(pins) = settings["projectFolderPins"].as_object().filter(|pins| !pins.is_empty()) {
         out.push((format!("{PICKER}pins.json"), Json::Object(pins.clone())));
     }
     out
 }
 
+/// A copy in this app's own folder: the other app removes its file when it replaces it.
+fn carried_picture(settings: &Json, pictures: &Path) -> Vec<(String, Json)> {
+    let background = &settings["newThreadComposerBackground"];
+    let Some((path, w, h)) = background["path"].as_str().and_then(|picture| crate::settings::keep_wallpaper_at_its_size(picture, pictures)) else {
+        return Vec::new();
+    };
+    let place = &background["adjustment"];
+    vec![
+        (
+            look("wallpaper_image"),
+            json!({
+                "path": path,
+                "name": background["name"],
+                "w": w,
+                "h": h,
+                "x": place["focalX"].as_f64().unwrap_or(0.5),
+                "y": place["focalY"].as_f64().unwrap_or(0.5),
+                "zoom": place["zoom"].as_f64().unwrap_or(1.0),
+            }),
+        ),
+        (look("wallpaper"), json!("image")),
+    ]
+}
+
 /// Writes into `state` (the app window's `ui.persist` folder) what `settings`
 /// says and `state` has no value for. A setting that can't be written is left
 /// at its default.
-fn carry_into(state: &Path, settings: &Json) {
-    let wanted = carried(settings);
+fn carry_into(state: &Path, pictures: &Path, settings: &Json) {
+    let touched = |set: &[String]| set.iter().any(|name| state.join(name).exists());
+    let (frame, art) = (frame_set(), art_set());
+    let (frame_touched, art_touched) = (touched(&frame), touched(&art));
+    let mut wanted = carried(settings);
+    if !art_touched {
+        wanted.extend(carried_picture(settings, pictures));
+    }
+    wanted.retain(|(name, _)| !(frame_touched && frame.contains(name)) && !(art_touched && art.contains(name)));
     if wanted.is_empty() || std::fs::create_dir_all(state).is_err() {
         return;
     }
@@ -89,7 +188,8 @@ pub fn carry(ui_settings: Option<&Path>, state: Option<&Path>) {
     let Some(settings) = std::fs::read(from).ok().and_then(|bytes| serde_json::from_slice::<Json>(&bytes).ok()) else {
         return;
     };
-    carry_into(state, &settings);
+    let pictures = from.parent().unwrap_or(Path::new("")).join(crate::settings::WALLPAPER_DIR);
+    carry_into(state, &pictures, &settings);
 }
 
 #[cfg(test)]
@@ -110,7 +210,7 @@ mod tests {
             "spaceFilter": "space-1",
             "sidebarHoverEnabled": false, "sidebarShowProjectLabel": false, "sidebarWorkingShelf": true, "sidebarActiveFirst": true,
         });
-        carry_into(dir.path(), &settings);
+        carry_into(dir.path(), &dir.path().join("kept"), &settings);
         assert_eq!(read(dir.path(), "organize"), json!(["device"]));
         assert_eq!(read(dir.path(), "sort"), json!("created"));
         assert_eq!(read(dir.path(), "compact"), json!(false));
@@ -132,12 +232,53 @@ mod tests {
     fn new_projects_pinned_folders_come_across() {
         let dir = tempfile::tempdir().unwrap();
         let pins = json!({ "device-1": ["/code", "/work/zephyr"] });
-        carry_into(dir.path(), &json!({ "projectFolderPins": pins }));
+        carry_into(dir.path(), &dir.path().join("kept"), &json!({ "projectFolderPins": pins }));
         let carried = dir.path().join(format!("{PICKER}pins.json"));
         assert_eq!(serde_json::from_slice::<Json>(&std::fs::read(carried).unwrap()).unwrap(), pins);
         let none = tempfile::tempdir().unwrap();
-        carry_into(none.path(), &json!({ "projectFolderPins": {} }));
+        carry_into(none.path(), &none.path().join("kept"), &json!({ "projectFolderPins": {} }));
         assert!(!none.path().join(format!("{PICKER}pins.json")).exists());
+    }
+
+    #[test]
+    fn the_frame_and_the_art_come_across() {
+        let dir = tempfile::tempdir().unwrap();
+        let picture = dir.path().join("art.png");
+        image::RgbaImage::new(4, 3).save(&picture).unwrap();
+        let state = dir.path().join("state");
+        let kept = dir.path().join("kept");
+        carry_into(
+            &state,
+            &kept,
+            &json!({
+                "insetShell": false, "sidecarCollapsed": true, "wallpaperThemeColors": false, "wallpaperColor": "#5948a8",
+                "shellFrame": { "style": "glass", "shade": 0.38 },
+                "chatBackground": { "enabled": true, "tabShade": 0.55 },
+                "newThreadBackgroundEffect": "none",
+                "newThreadComposerBackground": { "path": picture, "name": "art.png", "adjustment": { "focalX": 0.25, "focalY": 0.5, "zoom": 2.0 } },
+            }),
+        );
+        let file = |name: &str| serde_json::from_slice::<Json>(&std::fs::read(state.join(name)).unwrap()).unwrap();
+        assert_eq!(file("ds%2Flook.luau%3A%3Ainset_card.json"), json!(false));
+        assert_eq!(file(SIDECAR_COLLAPSED), json!(true));
+        let look = |name: &str| file(&format!("{LOOK}{name}.json"));
+        assert_eq!(look("frame_style"), json!("glass"));
+        assert_eq!(look("frame_shade"), json!(0.38));
+        assert_eq!(look("chat_background"), json!(true));
+        assert_eq!(look("chat_background_tab_shade"), json!(0.55));
+        assert_eq!(look("wallpaper_effect"), json!("none"));
+        assert_eq!(look("wallpaper_color"), json!("#5948a8"));
+        assert_eq!(look("wallpaper"), json!("image"));
+        let image = look("wallpaper_image");
+        assert_eq!((image["w"].as_u64(), image["h"].as_u64(), image["x"].as_f64(), image["zoom"].as_f64()), (Some(4), Some(3), Some(0.25), Some(2.0)));
+        std::fs::remove_file(&picture).unwrap();
+        let copy = Path::new(image["path"].as_str().unwrap());
+        assert_eq!(copy.parent(), Some(kept.as_path()));
+        assert!(copy.is_file(), "the other app removing its file leaves this one's");
+        // A picture that has gone leaves the wallpaper as it was.
+        let gone = dir.path().join("gone");
+        carry_into(&gone, &kept, &json!({ "newThreadComposerBackground": { "path": "/nowhere.png", "name": "x" } }));
+        assert!(!gone.join(format!("{LOOK}wallpaper.json")).exists());
     }
 
     #[test]
@@ -145,9 +286,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mine = dir.path().join(format!("{SIDEBAR}sort.json"));
         std::fs::write(&mine, "\"updated\"").unwrap();
-        carry_into(dir.path(), &json!({ "sidebarSort": "created", "sidebarCompact": false }));
+        carry_into(dir.path(), &dir.path().join("kept"), &json!({ "sidebarSort": "created", "sidebarCompact": false }));
         assert_eq!(read(dir.path(), "sort"), json!("updated"));
         assert_eq!(read(dir.path(), "compact"), json!(false));
+    }
+
+    #[test]
+    fn a_set_with_anything_of_yours_is_left_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let picture = dir.path().join("art.png");
+        image::RgbaImage::new(4, 3).save(&picture).unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join(look("wallpaper_image")), "{}").unwrap();
+        std::fs::write(state.join(look("frame_style")), "\"glass\"").unwrap();
+        let kept = dir.path().join("kept");
+        carry_into(
+            &state,
+            &kept,
+            &json!({
+                "insetShell": false, "sidebarCompact": false, "newThreadBackgroundEffect": "none", "wallpaperColor": "#5948a8",
+                "newThreadComposerBackground": { "path": picture, "name": "art.png" },
+            }),
+        );
+        for name in [look("wallpaper_effect"), look("wallpaper_color"), look("wallpaper"), INSET.to_string()] {
+            assert!(!state.join(&name).exists(), "{name}");
+        }
+        assert!(!kept.exists(), "no copy for a set left alone");
+        assert_eq!(read(&state, "compact"), json!(false));
     }
 
     #[test]

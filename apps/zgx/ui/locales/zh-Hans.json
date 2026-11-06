@@ -2545,6 +2545,7 @@
       },
       "screen": {
         "update_notice": "更新通知",
+        "sidecar": "侧栏",
         "session_page": "会话页面",
         "new_chat_page": "新建对话页面",
         "composer": "输入框",
@@ -3042,6 +3043,52 @@
       "couldnt_stop_task": "无法停止该进程",
       "commands_or_skills": "命令或技能",
       "drop_to_mention": "松开以提及"
+    }
+  },
+  "sidecar": {
+    "run": {
+      "running": "运行中",
+      "done": "已完成",
+      "failed": "失败"
+    },
+    "live_state": "实时状态",
+    "fold": "折叠侧栏",
+    "expand": "展开侧栏",
+    "workspace": "工作区",
+    "beside": "此会话旁",
+    "actions": "操作",
+    "local": "本机",
+    "no_workspace": "没有工作区",
+    "no_branch": "没有分支",
+    "nothing": "此会话旁没有内容",
+    "running_one": "1 个智能体运行中",
+    "running": "{n} 个智能体运行中",
+    "open": "已打开",
+    "stopped": "已停止",
+    "expired": "已过期",
+    "ago": "{time}前",
+    "more": "还有 {n} 个",
+    "show_fewer": "收起",
+    "previous": "之前的智能体（{n}）",
+    "failed": "{n} 个失败",
+    "stop": "停止",
+    "stop_all": "全部停止",
+    "kind": {
+      "agent": "智能体",
+      "fork": "分叉",
+      "side_chat": "旁聊"
+    },
+    "elapsed": {
+      "s": "{n}秒",
+      "m": "{n}分",
+      "h": "{n}时",
+      "d": "{n}天"
+    },
+    "commit": {
+      "up_to_date": "已是最新",
+      "ahead": "领先 {base} {n} 个提交",
+      "behind": "落后 {base} {n} 个提交",
+      "both": "领先 {ahead}、落后 {behind}（{base}）"
     }
   },
   "panel": {

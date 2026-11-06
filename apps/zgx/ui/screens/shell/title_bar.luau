@@ -12,9 +12,7 @@ local route = require("@app/screens/shell/route")
 local fit = require("@app/screens/shell/fit")
 local boundary = require("@app/screens/shell/boundary")
 local locale = require("@ds/locale")
-
--- The actions' last width, kept across a reload of the scripts.
-local actions_width = ui.state("shell_titlebar_actions_w", 0)
+local art = require("@app/screens/shell/art")
 
 export type Props = {
 	collapsed: State<boolean>,
@@ -199,7 +197,7 @@ return function(props: Props): Node
 			-- the island's glass, the sidebar open or not.)
 			actions_island = props.art,
 			caption_over_art = props.caption_over_art,
-			actions_width = actions_width,
+			actions_width = art.actions_w,
 		},
 	}
 end

@@ -25,8 +25,24 @@ local BLEND_FADE = 260
 local CARD_LIFT = { y = 6, blur = 20, color = "#00000059" }
 -- Frosted, the picture lets the glass through a little (shell.rs).
 local HERO_FROSTED = 0.84
-local SCRIM_HERO = { angle = 180, stops = { { 0, "#0000001a" }, { 0.45, "#00000066" }, { 1, "#00000000" } } }
-local SCRIM_FULL = { angle = 180, stops = { { 0, "#0000001a" }, { 0.45, "#00000066" }, { 1, "#000000bf" } } }
+-- (Plain gradients in the window's tone, not a mask: the second masked scrim in a split, the right pane's, draws opaque.)
+ui.theme.tokens {
+	zeron = {
+		art_scrim = {
+			top = "alpha({zeron.window}, 0.1)",
+			mid = "alpha({zeron.window}, 0.4)",
+			foot = "alpha({zeron.window}, 0.75)",
+			rail = "alpha({zeron.window}, 0.72)",
+			none = "alpha({zeron.window}, 0)",
+		},
+	},
+}
+local function scrim_of(placement: string): any
+	local function at(name: string): any
+		return ui.theme.get(`zeron.art_scrim.{name}`)
+	end
+	return { angle = 180, stops = { { 0, at("top") }, { 0.45, at("mid") }, { 1, at(if placement == "full" then "foot" else "none") } } }
+end
 local RAIL_SCRIM = { angle = 90, stops = { { 0, "#000000b8" }, { 1, "#00000000" } } }
 -- The bar's shade, and crates/ui's `tab_fade` under it, with the selected tab's folder left out of it, so that tab is the card's own picture.
 local BAR_SHADE = ui.layer_shader([[
@@ -230,8 +246,9 @@ function M.Layer(props: LayerProps): Node
 				right = 0,
 				top = 0,
 				bottom = 0,
-				bg = "$zeron.window",
-				mask_gradient = if placement == "full" then SCRIM_FULL else SCRIM_HERO,
+				gradient = function(): any
+					return scrim_of(placement)
+				end,
 			}))
 		end
 	end
@@ -339,7 +356,7 @@ end
 
 -- (In a split or under the expanded panel the picture isn't the page's: it can't run under the rail.)
 function M.art_under_rail(): boolean
-	return not appearance.inset_card:get() and folded() and M.page_art:get() ~= nil and not art.split:get() and not art.expanded:get()
+	return not appearance.inset_card:get() and folded() and M.page_art:get() ~= nil and not art.expanded:get()
 end
 
 local function plugin_wallpaper(): boolean
@@ -564,6 +581,36 @@ local function card_view(): Node
 			end,
 			card_picture(),
 		},
+		ui.show(function(): boolean
+			return M.art_under_rail() and art.split:get()
+		end, ui.div {
+			id = "shell-rail-art",
+			absolute = true,
+			left = 0,
+			top = ui.raw(TOP_BAR, "under the bar"),
+			bottom = 0,
+			w = art.RAIL_W,
+			overflow = "hidden",
+			bg = fill_token,
+			M.Layer {
+				kind = function(): string?
+					return if M.page_art:get() == "chat" then "chat" else nil
+				end,
+				origin = function(): { x: number, y: number }
+					return { x = 0, y = TOP_BAR }
+				end,
+			},
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				gradient = function(): any
+					return { angle = 90, stops = { { 0, ui.theme.get("zeron.art_scrim.rail") }, { 1, ui.theme.get("zeron.art_scrim.none") } } }
+				end,
+			},
+		}),
 		ui.div {
 			id = "shell-page-edge",
 			absolute = true,

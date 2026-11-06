@@ -15,9 +15,10 @@
 //!   home.run_action { space, chat, device?, id }  run in a terminal of the
 //!                                                 chat's: its terminal's id
 //!
+//!   home.comparison { cwd, device? }              { base, ahead, behind }, or nil
+//!
 //! An engine from before actions answers "unsupported" (the home then
 //! leaves the section out); any other refusal is the engine's own words.
-//! (The branch's totals are the Git plugin's: core asks nothing of git.)
 
 use serde_json::{Map, Value as Json, json};
 use zgx_script::{ScriptHost, Value};
@@ -62,6 +63,20 @@ pub fn install(host: &ScriptHost) {
         let terminal = run["terminal"]["id"].as_str().ok_or("The action's terminal didn't open.")?;
         Ok(Value::from(terminal))
     });
+    host.async_action("home.comparison", |arg| async move {
+        let cwd = field(&arg, "cwd").ok_or("no folder")?;
+        let page = call("ListGitHistory", json!({ "cwd": cwd, "cursor": 0, "limit": 1 }), &arg).await?;
+        Ok(comparison_for_script(&page["comparison"]))
+    });
+}
+
+fn comparison_for_script(comparison: &Json) -> Value {
+    let Some(base) = comparison["base"].as_str() else { return Value::Nil };
+    Value::record([
+        ("base", Value::from(base)),
+        ("ahead", Value::Num(comparison["ahead"].as_f64().unwrap_or(0.))),
+        ("behind", Value::Num(comparison["behind"].as_f64().unwrap_or(0.))),
+    ])
 }
 
 /// `method` on the session's device (through the relay when it's another).

@@ -35,7 +35,8 @@ local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
 local store = require("@app/screens/chat/store")
-local api = require("@app/screens/panel/home_api")
+local Actions = require("@app/screens/panel/actions")
+local panel_state = require("@app/screens/panel/state")
 local Previews = require("@app/screens/panel/previews")
 -- Which finished lanes you've seen (their tabs in front).
 local lanes_seen = require("@app/screens/panel/lanes_seen")
@@ -84,21 +85,6 @@ local working_first = ui.persist("panel_home_working_first", false)
 -- Shown whole ("Show less") or not, per session and part (its first few
 -- unless shown whole), as the sidebar's groups keep theirs.
 local whole = ui.state("panel_home_whole", {} :: { [string]: boolean })
-
--- Each project's actions, by device and project: { state = "loading" |
--- "ready" | "saving" | "failed" | "unsupported", snapshot?, message? }
--- (`message` the engine's words; ours are drawn from the state).
-local actions_by = ui.state("panel_home_actions", {} :: { [string]: any })
-
-local ACTION_ICONS = { "play", "test", "lint", "configure", "build", "debug" }
-local function action_icon(icon: string?): Icon.Name
-	for _, n in ACTION_ICONS do
-		if n == icon then
-			return `action-{n}` :: any
-		end
-	end
-	return "action-play"
-end
 
 local function trim(s: string?): string
 	return string.match(s or "", "^%s*(.-)%s*$") or ""
@@ -315,145 +301,11 @@ end
 -- The project's run actions.
 
 local function actions(props: Props, sid: string): Node
-	-- Whose: the session's project, when it's on the session's device.
-	local function context(): { space: string, device: string, slot: string }?
-		local c = chat_of(sid)
-		if not c then
-			return nil
-		end
-		local p = project_of(c.project)
-		if not p or p.device ~= c.device then
-			return nil
-		end
-		return { space = p.id, device = c.device, slot = `{c.device}|{p.id}` }
-	end
-	local ctx = ui.computed(function(): string?
-		local c = context()
-		return if c then c.slot else nil
-	end)
-	local function now(): any
-		local slot = ctx:get()
-		return if slot then actions_by:get()[slot] else nil
-	end
-	local function load(c: { space: string, device: string, slot: string })
-		local was = actions_by:peek()[c.slot]
-		actions_by:set_key(c.slot, { state = "loading", snapshot = if was then was.snapshot else nil })
-		api.actions(c.space, c.device):after(function(snapshot: any)
-			actions_by:set_key(c.slot, { state = "ready", snapshot = snapshot })
-		end, function(err: any)
-			local m = if type(err) == "table" and err.message then tostring(err.message) else tostring(err)
-			local before = actions_by:peek()[c.slot]
-			actions_by:set_key(c.slot, {
-				state = if m == "unsupported" then "unsupported" else "failed",
-				message = m,
-				snapshot = if before then before.snapshot else nil,
-			})
-		end)
-	end
-	-- Loaded once for a project (kept, as the shipping app's cache);
-	-- Retry loads it again.
-	ui.effect(function()
-		local slot = ctx:get()
-		if not slot or actions_by:peek()[slot] then
-			return
-		end
-		local c = context()
-		if c then
-			load(c)
-		end
-	end)
-
-	-- The editor: adding (or importing) one, or editing one.
-	local editing = ui.use_state(false)
-	local deleting = ui.use_state(false)
-	local edit_id = ui.use_state(nil :: string?)
-	local name = ui.use_state("")
-	local command = ui.use_state("")
-	local icon = ui.use_state("play")
-	local setup = ui.use_state(false)
-	local problem = ui.use_state(nil :: string?)
-	local saving = ui.use_state(false)
-	local function edit(a: any?)
-		edit_id:set(if a then a.id else nil)
-		name:set(if a then a.name or "" else "")
-		command:set(if a then a.command or "" else "")
-		icon:set(if a and a.icon then a.icon else "play")
-		setup:set(a ~= nil and a.setup == true)
-		problem:set(nil)
-		saving:set(false)
-		editing:set(true)
-	end
-	local function save()
-		local c = context()
-		if not c or saving:peek() then
-			return
-		end
-		local n, cmd = trim(name:peek()), trim(command:peek())
-		local why: string? = nil
-		if n == "" then
-			why = "name"
-		elseif utf8.len(n) and (utf8.len(n) :: number) > 80 then
-			why = "name_long"
-		elseif cmd == "" then
-			why = "command"
-		elseif #cmd > 16 * 1024 then
-			why = "command_long"
-		end
-		if why then
-			problem:set(locale.s(`panel.home.editor.err_{why}`))
-			return
-		end
-		saving:set(true)
-		problem:set(nil)
-		api.save_action(c.space, c.device, { id = edit_id:peek(), name = n, command = cmd, icon = icon:peek(), setup = setup:peek() }):after(function(snapshot: any)
-			actions_by:set_key(c.slot, { state = "ready", snapshot = snapshot })
-			saving:set(false)
-			editing:set(false)
-		end, function(err: any)
-			saving:set(false)
-			problem:set(if type(err) == "table" and err.message then tostring(err.message) else tostring(err))
-		end)
-	end
-	local function delete()
-		local c = context()
-		local id = edit_id:peek()
-		if not c or not id then
-			return
-		end
-		saving:set(true)
-		api.delete_action(c.space, c.device, id):after(function(snapshot: any)
-			actions_by:set_key(c.slot, { state = "ready", snapshot = snapshot })
-			saving:set(false)
-			editing:set(false)
-		end, function(err: any)
-			saving:set(false)
-			problem:set(if type(err) == "table" and err.message then tostring(err.message) else tostring(err))
-		end)
-	end
-	local function run(a: any)
-		local c = context()
-		local s = now()
-		if not c or not s or s.state ~= "ready" then
-			return
-		end
-		props.open_action(a.name, { space = c.space, device = c.device, chat = sid, action = a.id })
-	end
-
-	-- A row each: the snapshot's actions (keyed by id), then its imports.
-	local list = ui.computed(function(): { any }
-		local s = now()
-		local snap = if s then s.snapshot else nil
-		return if snap then snap.actions or {} else {}
-	end)
-	local imports = ui.computed(function(): { any }
-		local s = now()
-		local snap = if s then s.snapshot else nil
-		return if snap then snap.importable or {} else {}
-	end)
-	local function can_run(): boolean
-		local s = now()
-		return s ~= nil and s.state == "ready"
-	end
+	local bound = Actions.bind(function(): string?
+		return sid
+	end, props.open_action)
+	local now, list, imports, can_run, run, edit = bound.now, bound.list, bound.imports, bound.can_run, bound.run, bound.edit
+	local action_icon = Actions.icon
 	local function action_row(_a: any, _i: State<number>, a: State<any>): Node
 		local gear_ring = PanelHome.inner(6)
 		-- Its gear, as the shipping app's: there under the pointer, or with
@@ -614,104 +466,9 @@ local function actions(props: Props, sid: string): Node
 		}
 	end
 
-	-- The editor's icon choice: the shipping app's six, one chosen.
-	local function icon_choice(n: string): Node
-		local function on(): boolean
-			return icon:get() == n
-		end
-		return ui.button {
-			class = "panel-home-icon-choice",
-			role = "radio",
-			label = locale.t(`panel.home.editor.icon_{n}`),
-			tooltip = locale.s(`panel.home.editor.icon_{n}`),
-			checked = on,
-			w = 34,
-			h = 34,
-			items = "center",
-			justify = "center",
-			rounded = "$radius.lg",
-			cursor = "pointer",
-			bg = function(): string
-				return if on() then "$zeron.selected.flat.bg" else "#00000000"
-			end,
-			color = function(): string
-				return if on() then "$text.primary" else "$text.secondary"
-			end,
-			hover = { bg = "$hover", color = "$text.primary" },
-			focus = require("@ds/control").ring,
-			on_click = function()
-				icon:set(n)
-			end,
-			Icon { name = `action-{n}` :: any, size = 16 },
-		}
-	end
-	local icons: { Node } = {}
-	for _, n in ACTION_ICONS do
-		table.insert(icons, icon_choice(n))
-	end
-
-	local editor = ds.Dialog {
-		open = editing,
-		size = "md",
-		title = function(): string
-			return locale.s(if edit_id:get() then "panel.home.editor.edit_title" else "panel.home.editor.add_title")
-		end,
-		confirm = {
-			label = function(): string
-				return locale.s(if saving:get() then "panel.home.editor.saving" else "panel.home.editor.save")
-			end,
-			keep_open = true,
-			on_click = save,
-		},
-		ds.TextField { value = name, label = locale.t("panel.home.editor.name"), w_full = true, autofocus = true },
-		ds.TextArea { value = command, label = locale.t("panel.home.editor.command"), rows = 3, max_rows = 8, w_full = true, font = "$font.mono" },
-		ui.column {
-			w_full = true,
-			gap = "$space.2",
-			ui.text { locale.t("panel.home.editor.icon"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.secondary" },
-			ui.row { id = "panel-home-icons", role = "radiogroup", label = locale.t("panel.home.editor.icon"), gap = "$space.1", table.unpack(icons) },
-		},
-		ds.Checkbox { value = setup, label = locale.t("panel.home.editor.setup") },
-		ui.show(function(): boolean
-			return problem:get() ~= nil
-		end, ui.text {
-			function(): string
-				return problem:get() or ""
-			end,
-			id = "panel-home-editor-problem",
-			literal = true,
-			wrap = true,
-			text_size = "$font.size.sm",
-			color = "$danger",
-		}),
-		ui.show(function(): boolean
-			return edit_id:get() ~= nil
-		end, ui.row {
-			w_full = true,
-			ds.Button {
-				locale.t("panel.home.editor.delete"),
-				tone = "ghost",
-				size = "sm",
-				color = "$danger",
-				on_click = function()
-					deleting:set(true)
-				end,
-			},
-		}),
-	}
-	local confirm_delete = ds.Dialog {
-		open = deleting,
-		tone = "danger",
-		title = locale.t("panel.home.editor.delete_title") :: any,
-		body = function(): string
-			return locale.s("panel.home.editor.delete_body", { name = trim(name:get()) })
-		end,
-		confirm = { label = locale.t("panel.home.editor.delete_confirm") :: any, on_click = delete },
-	}
-
 	return ui.show(function(): boolean
 		local s = now()
-		return ctx:get() ~= nil and not (s and s.state == "unsupported")
+		return bound.place() ~= nil and not (s and s.state == "unsupported")
 	end, ui.column {
 		id = "panel-home-actions",
 		w_full = true,
@@ -738,12 +495,7 @@ local function actions(props: Props, sid: string): Node
 				icon = "refresh",
 				label = locale.t("panel.home.retry"),
 				tone = "muted",
-				on_click = function()
-					local c = context()
-					if c then
-						load(c)
-					end
-				end,
+				on_click = bound.retry,
 			},
 		}),
 		ui.each(list, action_row, {
@@ -776,7 +528,7 @@ local function actions(props: Props, sid: string): Node
 				edit(nil)
 			end,
 		},
-		ui.div { hook = false, editor, confirm_delete },
+		bound.dialogs,
 	})
 end
 
@@ -784,6 +536,9 @@ end
 -- The session's lanes.
 
 local function lanes(props: Props, sid: string): Node
+	local function in_sidecar(): boolean
+		return panel_state.sidecar_holds:get() == sid
+	end
 	local function fold(part: string): () -> boolean
 		return function(): boolean
 			return folds:get()[`{sid}/{part}`] ~= true
@@ -1146,7 +901,7 @@ local function lanes(props: Props, sid: string): Node
 			}),
 		},
 		part("panel-home-side", "panel-home-side-list", "panel.home.side_chats", "side", function(): { any }
-			return side:get()
+			return if in_sidecar() then {} else side:get()
 		end, function(l: any): string
 			return locale.s("panel.home.open_side", { title = l.title })
 		end, function(l: any)
@@ -1155,7 +910,7 @@ local function lanes(props: Props, sid: string): Node
 			end
 		end, side_menu, nil, false, side_archive, nil, true),
 		part("panel-home-subagents", "panel-home-subagent-list", "panel.home.subagents", "subagents", function(): { any }
-			return subs:get()
+			return if in_sidecar() then {} else subs:get()
 		end, function(l: any): string
 			return locale.s("panel.home.open_subagent", { title = l.title })
 		end, function(l: any)
@@ -1257,8 +1012,15 @@ M.Page = ui.component(function(props: Props): Node
 
 	local parts: { Node } = {}
 	if sid then
-		table.insert(parts, info(sid))
-		table.insert(parts, actions(props, sid))
+		-- (Where it runs and its actions stand in the Sidecar while that shows this session.)
+		table.insert(parts, ui.presence(function(): string
+			return if panel_state.sidecar_holds:get() == sid then "held" else "own"
+		end, function(which: string): Node
+			if which == "held" then
+				return ui.div {}
+			end
+			return ui.column { w_full = true, gap = "$space.5", info(sid), actions(props, sid) }
+		end, { w_full = true }))
 	end
 	table.insert(
 		parts,

@@ -376,7 +376,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
 /// The largest background image taken.
 const WALLPAPER_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Where the kept copies are, in the engine's data folder.
-const WALLPAPER_DIR: &str = "new-chat-backgrounds";
+pub(crate) const WALLPAPER_DIR: &str = "new-chat-backgrounds";
 
 /// A background image kept: its copy, the original's name, its size in pixels.
 #[derive(Debug)]
@@ -494,6 +494,11 @@ fn keep_wallpaper(path: &str, dir: &std::path::Path, screen: Option<(u32, u32)>)
     }
     let name = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     Ok(KeptWallpaper { path: target.to_string_lossy().into_owned(), name, w, h, color })
+}
+
+pub(crate) fn keep_wallpaper_at_its_size(path: &str, dir: &std::path::Path) -> Option<(String, u32, u32)> {
+    let kept = keep_wallpaper(path, dir, None).ok()?;
+    Some((kept.path, kept.w, kept.h))
 }
 
 /// `keep_wallpaper` for another module's test: its path and size.

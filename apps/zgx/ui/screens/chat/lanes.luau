@@ -95,7 +95,7 @@ function M.subagents_of(messages: { any }): { any }
 			local sub = t.subagent
 			if sub and sub.ref and not seen[sub.ref] then
 				seen[sub.ref] = true
-				table.insert(out, { ref = sub.ref, title = sub.title or locale.s("chat.lanes.subagent"), status = sub.status, at = at })
+				table.insert(out, { ref = sub.ref, title = sub.title or locale.s("chat.lanes.subagent"), status = sub.status, at = at, model = sub.model, kind = sub.kind, agent = sub.agent })
 			end
 		end
 	end
@@ -117,7 +117,7 @@ local published = ui.shared("chat.subagents", {} :: { any })
 local subagents = ui.computed(function(): { any }
 	local out: { any } = {}
 	for _, s in published:get() do
-		table.insert(out, { ref = s.ref, title = s.title or locale.s("chat.lanes.subagent"), status = s.status, at = s.at })
+		table.insert(out, { ref = s.ref, title = s.title or locale.s("chat.lanes.subagent"), status = s.status, at = s.at, model = s.model, kind = s.kind, agent = s.agent })
 	end
 	return out
 end)

@@ -7,6 +7,7 @@
 --                                               { id?, name, command, icon, setup }
 --   api.delete_action(space, device?, id)       the same, after
 --   api.run_action(space, chat, device?, id)    its terminal's id
+--   api.comparison(cwd, device?)                { base, ahead, behind }, or nil
 
 local M = {}
 
@@ -42,6 +43,10 @@ end
 
 function M.run_action(space: string, chat: string, device: string?, id: string): any
 	return call("home.run_action", { space = space, chat = chat, device = device, id = id })
+end
+
+function M.comparison(cwd: string, device: string?): any
+	return call("home.comparison", { cwd = cwd, device = device })
 end
 
 return M

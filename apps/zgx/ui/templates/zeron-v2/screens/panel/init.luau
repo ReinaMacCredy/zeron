@@ -358,6 +358,14 @@ function M.find_in_browser(): boolean
 	return true
 end
 
+local focus_panel: (() -> boolean)? = nil
+function M.keyboard_back(): boolean
+	if not focus_in or not focus_panel then
+		return false
+	end
+	return focus_panel()
+end
+
 function M.close_focused_tab(): boolean
 	local k = if shown_key then shown_key() else nil
 	local close_tab = closer
@@ -650,7 +658,17 @@ M.Panel = ui.component(function(props: Props): Node
 		-- it; opened again, it shows its empty page. Only if Settings →
 		-- General says so (off by default: it stays open on its home).
 		local close_with_last = require("@app/screens/settings/prefs").close_panel_with_last_tab:peek() == true
-		if tab and close_with_last and #state.of(k).tabs == 0 then
+		local closing_panel = tab and close_with_last and #state.of(k).tabs == 0
+		-- (Zeron's `restore_right_focus_after_close`; a closing panel's box still takes focus, so the composer's.)
+		if focus_in == k then
+			ui.after(0, function()
+				if closing_panel or not (focus_panel and focus_panel()) then
+					focus_in = nil
+					require("@app/screens/chat/shared").focus:add(1)
+				end
+			end)
+		end
+		if closing_panel then
 			local on_last = props.on_last_closed
 			if on_last then
 				on_last()
@@ -1448,7 +1466,7 @@ M.Panel = ui.component(function(props: Props): Node
 	end
 	ui.on_cleanup(function()
 		if closer == close then
-			closer, shown_key, focus_in = nil, nil, nil
+			closer, shown_key, focus_in, focus_panel = nil, nil, nil, nil
 		end
 	end)
 	box.on_key = function(e): boolean?
@@ -1495,6 +1513,10 @@ M.Panel = ui.component(function(props: Props): Node
 	-- for a moment.)
 	box.ref = box.ref or own
 	measured = box.ref
+	focus_panel = function(): boolean
+		local el = (box.ref :: any):peek()
+		return el ~= nil and key:peek() ~= nil and el:focus() == true
+	end
 	box[#box + 1] = ui.column { w_full = true, shrink = 0, hidden = closed, strip }
 	box[#box + 1] = content
 	box[#box + 1] = question

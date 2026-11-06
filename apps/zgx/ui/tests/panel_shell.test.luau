@@ -120,6 +120,39 @@ local function tab_reaches_panel(app: any, n: number): boolean
 	return false
 end
 
+test("closing a panel tab with the keyboard in the panel keeps it there, not on the composer", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 800)
+	app:frames(30)
+	show_chat(app, "Fix the build")
+	open_files_tab(app)
+	app:click("#panel-strip >> role:tab")
+	app:frames(10)
+	app:key("cmd+w")
+	expect(eventually(app, function(): boolean
+		app:frames(3)
+		return not app:has("#panel-strip >> role:tab")
+	end)).to_be(true)
+	app:frames(10)
+	expect(focused(app):find("#panel-", 1, true) ~= nil).to_be(true)
+end)
+
+test("the last tab closed with the panel set to close with it leaves the keyboard in the composer", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 800)
+	app:frames(30)
+	app:set_state("screens/settings/prefs.luau::settings_close_panel_with_last_tab", true)
+	show_chat(app, "Fix the build")
+	open_files_tab(app)
+	app:click("#panel-strip >> role:tab")
+	app:frames(10)
+	app:key("cmd+w")
+	expect(eventually(app, function(): boolean
+		app:frames(3)
+		return focused(app):find("Message", 1, true) ~= nil
+	end)).to_be(true)
+end)
+
 test("a closed panel leaves nothing to Tab to: its tabs and choices come back as it opens", function()
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 800)

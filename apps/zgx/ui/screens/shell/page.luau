@@ -146,6 +146,7 @@ return function(props: Props): Node
 	local function grouped(): boolean
 		return grouped_now:get()
 	end
+	local split_ref = ui.ref()
 	-- Where a chat's card stands in the page (alone, all of it).
 	local function box_of(id: string?): any
 		local b = if id then splits.shown_frames:get()[id] else nil
@@ -1269,6 +1270,11 @@ return function(props: Props): Node
 				if frame.framed:get() then
 					return "$zeron.inset.framed_bg"
 				end
+				-- (In light the card's own tone, every pane, as Zeron's: a lift over 245 would stand paler than the bar's 253 over it.)
+				local kind = ui.theme.kind()
+				if kind == "light" or kind == "high-contrast-light" then
+					return "$zeron.inset.bg"
+				end
 				return if focused() then "$zeron.inset.active" else "$zeron.inset.inactive"
 			end,
 			rounded = "$zeron.inset.radius",
@@ -1353,10 +1359,16 @@ return function(props: Props): Node
 				kind = function(): string?
 					return if frame.page_art:get() == "chat" then "chat" else nil
 				end,
+				-- (From its box in the page: opening at its final size, its own x stands at the page's edge with no change of width to say when it moves.)
 				origin = function(): { x: number, y: number }
-					local _ = card_ref.width, art.card_left:get()
-					local el = card_ref:peek()
-					return { x = (if el and el.x then el.x else 0) + 1, y = (if el and el.y then el.y else 0) + 1 }
+					local _ = art.card_left:get()
+					local w, h = split_ref.width or 0, split_ref.height or 0
+					local area = split_ref:peek()
+					local b = box_of(id)
+					return {
+						x = (if area and area.x then area.x else 0) + b.left.p * w + b.left.q + 1,
+						y = (if area and area.y then area.y else 0) + b.top.p * h + b.top.q + 1,
+					}
 				end,
 			},
 			ui.column((function()
@@ -1589,7 +1601,7 @@ return function(props: Props): Node
 	end)
 	-- The page's room: the page's card at the focused chat's place, the
 	-- split's panes under it.
-	local split_ref = ui.ref()
+	local sidecar_ref = ui.ref()
 	switcher.set_column(split_ref)
 	local stepped_seen = route.stepped:peek().seq
 	ui.effect(function()
@@ -1599,12 +1611,55 @@ return function(props: Props): Node
 		end
 		stepped_seen = step.seq
 		refocus()
-		if motion.reduced_now() then
-			anime.animate(split_ref, { opacity = { 0, 1 }, duration = 150, ease = "cubicBezier(0.25, 0.1, 0.25, 1)" })
-		else
-			anime.animate(split_ref, { opacity = { 0, 1 }, x = { -step.sign * 32, 0 }, duration = 260, ease = "outQuint" })
+		for _, part in { split_ref, sidecar_ref } do
+			if part:peek() then
+				if motion.reduced_now() then
+					anime.animate(part, { opacity = { 0, 1 }, duration = 150, ease = "cubicBezier(0.25, 0.1, 0.25, 1)" })
+				else
+					anime.animate(part, { opacity = { 0, 1 }, x = { -step.sign * 32, 0 }, duration = 260, ease = "outQuint" })
+				end
+			end
 		end
 	end)
+	local function sidecar_shown(): boolean
+		return in_session() and not on_plugin() and not grouped() and not away() and not expanded()
+	end
+	local sidecar = ui.div {
+		id = "sidecar-slot",
+		shrink = 0,
+		h_full = true,
+		pointer_events = "none",
+		ui.presence(function(): string
+			return if sidecar_shown() then "on" else "off"
+		end, function(which: string): Node
+			if which == "off" then
+				return ui.div {}
+			end
+			return boundary.screen(boundary.named("shell.boundary.screen.sidecar"), "@app/screens/sidecar", function(Sidecar): Node
+				return Sidecar.Column {
+					root_ref = sidecar_ref,
+					session = function(): string?
+						local s = route.session:get()
+						return if s then s.id else nil
+					end,
+					panel_open = function(): boolean
+						return shown:get()
+					end,
+					full_w = function(): number
+						-- (The viewport is already past the app rail; the sidebar's box stands 5 over its share.)
+						local side = sidebar_settled()
+						return fit.viewport:get() - (if side > 0 then side + WINDOW_EDGE else 0) - (if appearance.inset_card:get() then INSET + WINDOW_EDGE else 0)
+					end,
+					close_panel = function()
+						shell_view.set_files(false)
+					end,
+					open_panel = function()
+						shell_view.set_files(true)
+					end,
+				}
+			end)
+		end, { h_full = true }),
+	}
 	local split_area = ui.row {
 		ref = split_ref,
 		grow = 1,
@@ -1735,6 +1790,7 @@ return function(props: Props): Node
 			end), motion.sidebar),
 		},
 		split_area,
+		sidecar,
 		-- (Settings, in the page's place.)
 		if props.settings
 			then ui.column {
@@ -1777,7 +1833,7 @@ return function(props: Props): Node
 			end,
 			-- (Clear of the panel toggle, and of Expand while the panel's open.)
 			right = function(): number
-				local toggle = 34 + 8 - 10 + ds.TitleBar.actions_right()
+				local toggle = 34 + 8 - 10 + ds.TitleBar.actions_right() + math.max(art.actions_w:get() - 24, 0)
 				-- (The tabs are the page card's: none over the panel beside it.)
 				return if shown:get() then math.max(toggle + EXPAND + 8, tabs_room:get() + INSET + WINDOW_EDGE) else toggle
 			end,
@@ -1789,7 +1845,7 @@ return function(props: Props): Node
 		end, ui.div {
 			absolute = true,
 			right = function(): number
-				return ui.raw(24 + 8 + ds.TitleBar.actions_right(), "off the panel toggle")
+				return ui.raw(24 + 8 + ds.TitleBar.actions_right() + math.max(art.actions_w:get() - 24, 0), "off the panel toggle")
 			end,
 			top = function(): number
 				return ds.TitleBar.middle() - EXPAND / 2

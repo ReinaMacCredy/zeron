@@ -6,6 +6,8 @@
 --   api.claimed(claim)             that terminal's id, once it's open
 --   api.command(id, device)        the bridge's command line, for ui.term
 --   api.status(id, device)         { busy, exited }
+--   api.run_report(id, device, after, tail)   a run action's next report:
+--                                  { code?, exited, gone, after, tail }
 --   api.close(id, device)          the engine's terminal ended
 --   api.write(id, device, text)    typed into it, as from the keyboard
 --   api.term(key, options?)        zgx's session for `key` (ui.term)
@@ -23,6 +25,10 @@ end
 
 function M.command(id: string, device: string?): any
 	return ui.call("terminal.command", { id = id, device = device })
+end
+
+function M.run_report(id: string, device: string?, after: string?, tail: string?): any
+	return ui.call("terminal.run_report", { id = id, device = device, after = after, tail = tail })
 end
 
 function M.status(id: string, device: string?): any

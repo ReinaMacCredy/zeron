@@ -78,6 +78,10 @@ function M.key(session: any, project: any, page: any?): string?
 	return nil
 end
 
+M.sidecar_holds = ui.state("sidecar_holding", nil :: string?)
+
+M.runs = ui.state("panel_action_runs", {} :: { [string]: { code: number?, unknown: boolean? } })
+
 -- A session's tabs (tracked).
 function M.of(key: string?): Session
 	if not key then

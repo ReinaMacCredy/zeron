@@ -399,7 +399,17 @@ local function lead(id: string, hovered: any): Node
 			end)
 		end
 		return ui.div { id = `session-tab-{id}-state`, SessionRow.state(which :: any) }
-	end, { shrink = 0, w = 16, h = 16, items = "center", justify = "center" })
+	end, {
+		shrink = 0,
+		-- (Stacked, as wide as its fan: the title starts after it, not under it.)
+		w = function(): number
+			local n = #stack_of(id)
+			return if n >= 2 then TILE + FAN[math.clamp(n, 1, STACK)].x else 16
+		end,
+		h = 16,
+		items = "center",
+		justify = "center",
+	})
 end
 
 local function pen(shows: () -> boolean): Node

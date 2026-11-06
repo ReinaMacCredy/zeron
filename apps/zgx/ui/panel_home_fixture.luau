@@ -182,6 +182,9 @@ end
 tapi.claimed = function(_claim: string): any
 	return settled(true, "term-new")
 end
+tapi.run_report = function(): any
+	return { after = function() end }
+end
 tapi.command = function(id: string, _device: string?): any
 	note(`term:attach:{id}`)
 	return settled(true, `bridge {id}`)

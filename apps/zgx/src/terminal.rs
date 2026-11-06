@@ -37,9 +37,11 @@
 //! (`target` as src/files.rs's: { chat?, space?, device?, root? }).
 
 use std::{
+    cell::RefCell,
     io::Write,
     net::{SocketAddr, TcpStream},
     path::PathBuf,
+    rc::Rc,
     time::Duration,
 };
 #[cfg(not(unix))]
@@ -80,6 +82,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             ("exited", Value::Bool(reply["exited"].as_bool().unwrap_or(false))),
         ]))
     });
+    host.async_action("terminal.run_report", |arg| async move { run_report(arg).await });
     host.async_action("terminal.close", |arg| async move {
         call_for("CloseTerminal", &arg, Map::new()).await?;
         Ok(Value::Nil)
@@ -268,6 +271,146 @@ fn command(arg: Value, device: Option<String>) -> Result<Value, String> {
 
 // ---------------------------------------------------------------------------
 // The bridge: its own process, run by zgx's terminal.
+
+/// The last `COMMAND_EXIT_OSC` status in a run action's output (crates/ui `CommandExit`).
+#[derive(Default)]
+struct RunExit {
+    tail: Vec<u8>,
+}
+
+impl RunExit {
+    fn feed(&mut self, bytes: &[u8]) -> Option<i32> {
+        let prefix = format!("\x1b]{};", zeron_proto::COMMAND_EXIT_OSC).into_bytes();
+        let mut buf = std::mem::take(&mut self.tail);
+        buf.extend_from_slice(bytes);
+        let mut status = None;
+        let mut from = 0;
+        while let Some(at) = buf[from..].windows(prefix.len()).position(|w| w == prefix) {
+            let start = from + at;
+            let body = start + prefix.len();
+            let digits = buf[body..].iter().take_while(|b| b.is_ascii_digit()).count();
+            match buf.get(body + digits) {
+                Some(0x07) if digits > 0 => {
+                    status = std::str::from_utf8(&buf[body..body + digits]).ok().and_then(|code| code.parse().ok()).or(status);
+                    from = body + digits + 1;
+                }
+                None if digits <= 10 => {
+                    self.tail = buf[start..].to_vec();
+                    return status;
+                }
+                _ => from = body,
+            }
+        }
+        let partial = (1..prefix.len()).rev().find(|len| buf.ends_with(&prefix[..*len])).unwrap_or(0);
+        self.tail = buf[buf.len() - partial..].to_vec();
+        status
+    }
+}
+
+#[derive(Default)]
+struct Hearing {
+    scan: RunExit,
+    after: u64,
+    code: Option<i32>,
+    exited: bool,
+    ended: bool,
+    waker: Option<std::task::Waker>,
+}
+
+impl Hearing {
+    fn item(&mut self, item: &Json) {
+        self.after = item["seq"].as_u64().unwrap_or(self.after);
+        match item["type"].as_str() {
+            Some("data") => {
+                let bytes = item["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok());
+                self.code = self.scan.feed(&bytes.unwrap_or_default()).or(self.code);
+            }
+            Some("exit") => {
+                if let Some(code) = item["exitCode"].as_i64() {
+                    self.code = Some(code as i32);
+                    self.exited = true;
+                }
+            }
+            _ => {}
+        }
+        if self.code.is_some() {
+            self.wake();
+        }
+    }
+
+    fn wake(&mut self) {
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+}
+
+/// From a stream of its own: zgx's terminal can't tell a report passed on as OSC 133 from a shell's, and the bridge can die with the action alive.
+async fn run_report(arg: Value) -> Result<Value, String> {
+    let device = crate::files::route_to(opt_text(arg.field("device"))).await;
+    let hearing = Rc::new(RefCell::new(Hearing {
+        after: arg.field("after").map_or(0, |after| crate::auth::text(after).parse().unwrap_or(0)),
+        scan: RunExit { tail: text(arg.field("tail")).into_bytes() },
+        ..Hearing::default()
+    }));
+    let answer = |gone: bool| {
+        let h = hearing.borrow();
+        Ok(Value::record([
+            ("code", h.code.map_or(Value::Nil, |code| Value::from(f64::from(code)))),
+            ("exited", Value::Bool(h.exited)),
+            ("gone", Value::Bool(gone)),
+            ("after", Value::from(h.after.to_string().as_str())),
+            ("tail", Value::from(String::from_utf8_lossy(&h.scan.tail).as_ref())),
+        ]))
+    };
+    let mut wait = Duration::from_secs(1);
+    loop {
+        if let Some(rpc) = engine::get().connection(Duration::from_secs(5)).await {
+            let mut params = Map::new();
+            params.insert("terminalId".into(), Json::String(text(arg.field("id"))));
+            params.insert("afterSeq".into(), json!(hearing.borrow().after));
+            params.insert("hostReplies".into(), Json::Bool(false));
+            if let Some(device) = &device {
+                params.insert("targetDeviceId".into(), Json::String(device.clone()));
+            }
+            hearing.borrow_mut().ended = false;
+            let on_item = {
+                let hearing = hearing.clone();
+                move |item: Json| hearing.borrow_mut().item(&item)
+            };
+            let on_end = {
+                let hearing = hearing.clone();
+                move |_: String| {
+                    let mut h = hearing.borrow_mut();
+                    h.ended = true;
+                    h.wake();
+                }
+            };
+            let _watch = rpc.watch_ending("SubscribeTerminal", Json::Object(params), on_item, on_end);
+            std::future::poll_fn(|cx| {
+                let mut h = hearing.borrow_mut();
+                if h.code.is_some() || h.ended {
+                    return std::task::Poll::Ready(());
+                }
+                h.waker = Some(cx.waker().clone());
+                std::task::Poll::Pending
+            })
+            .await;
+            if hearing.borrow().code.is_some() {
+                return answer(false);
+            }
+        } else if engine::get().config().is_none() {
+            return answer(true);
+        }
+        match call_for("TerminalStatus", &arg, Map::new()).await {
+            Ok(status) if !status["exited"].as_bool().unwrap_or(false) => {}
+            Err(error) if error == "offline" => {}
+            _ => return answer(true),
+        }
+        zgx::timer::sleep(wait).await;
+        wait = (wait * 2).min(Duration::from_secs(30));
+    }
+}
 
 struct Args {
     port: u16,
@@ -712,6 +855,30 @@ pub fn bridge(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_run_report_is_digits_then_bel_split_or_not_and_nothing_else() {
+        let feed = |bytes: &[u8]| super::RunExit::default().feed(bytes);
+        let mut scan = super::RunExit::default();
+        assert_eq!(scan.feed(b"hello \x1b]75"), None);
+        assert_eq!(scan.feed(b"02;1"), None);
+        assert_eq!(scan.feed(b"7\x07 bye"), Some(17));
+        assert_eq!(scan.feed(b"later"), None);
+        assert_eq!(scan.feed(b"\x1b]7502;0\x07\x1b]7502;2\x07"), Some(2));
+        assert_eq!(feed(b"\x1b]7502;\x07"), None);
+        assert_eq!(feed(b"\x1b]7502;abc\x07"), None);
+        assert_eq!(feed(b"\x1b]7502;1\x1b[0m"), None);
+        assert_eq!(feed(b"\x1b]133;D;0\x07"), None);
+        assert_eq!(feed(b"\x1b]7502;99999999999\x07"), None);
+        assert_eq!(feed(b"\x1b]7502;abc\x07\x1b]7502;3\x07"), Some(3));
+        let mut endless = super::RunExit::default();
+        assert_eq!(endless.feed(b"\x1b]7502;"), None);
+        for _ in 0..100 {
+            assert_eq!(endless.feed(&[b'7'; 4096]), None);
+            assert!(endless.tail.len() < 18, "kept {}", endless.tail.len());
+        }
+        assert_eq!(endless.feed(b"\x1b]7502;4\x07"), Some(4));
+    }
+
     use super::{parse, quote, said};
 
     #[test]

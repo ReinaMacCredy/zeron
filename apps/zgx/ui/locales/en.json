@@ -2545,6 +2545,7 @@
       },
       "screen": {
         "update_notice": "The update notice",
+        "sidecar": "The Sidecar",
         "session_page": "The session page",
         "new_chat_page": "The new chat page",
         "composer": "The composer",
@@ -3042,6 +3043,52 @@
       "couldnt_stop_task": "Couldn't stop that process",
       "commands_or_skills": "commands or skills",
       "drop_to_mention": "Drop to mention"
+    }
+  },
+  "sidecar": {
+    "run": {
+      "running": "Running",
+      "done": "Done",
+      "failed": "Failed"
+    },
+    "live_state": "Live state",
+    "fold": "Fold the Sidecar",
+    "expand": "Expand the Sidecar",
+    "workspace": "Workspace",
+    "beside": "Beside this thread",
+    "actions": "Actions",
+    "local": "Local",
+    "no_workspace": "No workspace",
+    "no_branch": "No branch",
+    "nothing": "Nothing beside this thread",
+    "running_one": "1 agent running",
+    "running": "{n} agents running",
+    "open": "Open",
+    "stopped": "Stopped",
+    "expired": "Expired",
+    "ago": "{time} ago",
+    "more": "{n} more",
+    "show_fewer": "Show fewer",
+    "previous": "Previous agents ({n})",
+    "failed": "{n} failed",
+    "stop": "Stop",
+    "stop_all": "Stop all",
+    "kind": {
+      "agent": "Agent",
+      "fork": "Fork",
+      "side_chat": "Side chat"
+    },
+    "elapsed": {
+      "s": "{n}s",
+      "m": "{n}m",
+      "h": "{n}h",
+      "d": "{n}d"
+    },
+    "commit": {
+      "up_to_date": "up to date",
+      "ahead": "{n} ahead of {base}",
+      "behind": "{n} behind {base}",
+      "both": "{ahead} ahead, {behind} behind {base}"
     }
   },
   "panel": {

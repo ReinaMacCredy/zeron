@@ -22,6 +22,8 @@ local function open(): any
 	app:frames(20)
 	app:click('#titlebar >> role:button "Panel"')
 	expect(app:wait("#panel-empty", { timeout_ms = 15000 })).to_be(true)
+	-- (The home whole, as in a split: beside the Live state column it leaves these to it.)
+	app:set_state("sidecar_holding", nil)
 	expect(app:wait(PANEL, { timeout_ms = 15000 })).to_be(true)
 	app:frames(30)
 	return app
