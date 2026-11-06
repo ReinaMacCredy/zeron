@@ -36,28 +36,28 @@ fn overlay_of(app: &TestApp, node: NodeId) -> Option<NodeId> {
     None
 }
 
-const WORK_IN: &str = "role:button \"Device\"";
-const WORK_IN_LINE: &str = "button \"Device\"";
+const BRANCHES: &str = "role:textbox \"Search branches…\"";
+const BRANCHES_LINE: &str = "textbox \"Search branches…\"";
 
 #[test]
 fn a_modal_opening_closes_the_popups_and_draws_over_them() {
     let mut app = mount();
     assert!(app.host.run_command("shell.new_chat"));
     app.frames(30);
-    // A new chat's Work in panel, open.
+    // A new chat's branch list, open.
     app.click("role:button \"Branch\"");
     app.frames(30);
-    assert!(showing(&mut app, WORK_IN, WORK_IN_LINE), "the Work in panel opened");
-    let row = app.find(WORK_IN).unwrap();
+    assert!(showing(&mut app, BRANCHES, BRANCHES_LINE), "the branch list opened");
+    let row = app.find(BRANCHES).unwrap();
     let r = app.ui.scene.borrow().transformed_bounds(row);
     let (x, y) = (r.x + r.width / 2., r.y + r.height / 2.);
 
-    // ⌘K: the palette opens, and the panel has closed first.
+    // ⌘K: the palette opens, and the list has closed first.
     assert!(app.host.run_command("shell.palette"));
     app.frames(30);
     assert!(showing(&mut app, "#palette-search", "#palette-search"), "the palette opened");
-    assert!(!showing(&mut app, WORK_IN, WORK_IN_LINE), "the Work in panel closed as the palette opened");
-    // And where the panel was, the palette (its card or its scrim) is what
+    assert!(!showing(&mut app, BRANCHES, BRANCHES_LINE), "the branch list closed as the palette opened");
+    // And where the list was, the palette (its card or its scrim) is what
     // the pointer meets: nothing floats over it.
     let palette = app.find("#palette-search").unwrap();
     let palette = overlay_of(&app, palette).expect("the palette's overlay");

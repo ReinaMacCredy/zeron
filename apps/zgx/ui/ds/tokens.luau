@@ -16,7 +16,7 @@ function M.setup()
 	-- The app's own editors draw ds/editor_menu.
 	ui.theme.tokens {
 		menu = {
-			bg = "{zeron.menu.tint}",
+			bg = "{zeron.popup.tint}",
 			hover = "{hover}",
 		},
 	}
@@ -118,6 +118,15 @@ function M.setup()
 				width = 232,
 				blur = 30,
 			},
+			-- The browser's overlay in a page.
+			browser_overlay = "#2a2a2f",
+			-- What stands in a popup window of its own (ds/glass `popup`): frosted
+			-- and solid, opaque either way, so its number is the token's.
+			popup = {
+				tint = "{zeron.menu.solid}",
+				solid = "{zeron.menu.solid}",
+				selected = "{zeron.menu.selected}",
+			},
 			-- An island: controls gathered on glass over the page (the title
 			-- bar's at the window's top left as the sidebar goes, the sidebar's
 			-- rail at its bottom left), one look for both, as Zeron's
@@ -143,6 +152,8 @@ function M.setup()
 			composer = {
 				tint = "{surface.raised}",
 				solid = "{surface.overlay}",
+				plan_knob = "{zeron.switch.knob}",
+				plan_glow = "0 10 40 -18 alpha({accent}, 0.3)",
 				edge = "{border}",
 				shadow = "{shadow.lg}",
 				-- Frosted, nothing under it: the glass is its depth.

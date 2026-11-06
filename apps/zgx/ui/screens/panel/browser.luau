@@ -336,7 +336,7 @@ local function page_theme(): { [string]: any }
 	return {
 		accent = colour("accent"),
 		on_accent = colour("accent.text"),
-		surface = colour("popover.bg"),
+		surface = colour("zeron.browser_overlay"),
 		border = colour("border"),
 		text = colour("text.primary"),
 		font = if type(font) == "string" then font else nil,

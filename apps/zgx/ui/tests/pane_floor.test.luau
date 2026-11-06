@@ -425,11 +425,9 @@ test("a split with more panes shown: the sidebar steps aside for room, and isn't
 	expect(app:has("#split-pane-a3")).to_be(true)
 end)
 
-test("a pane's footer with no project keeps Full access while it fits", function()
-	-- (`No ref` alone takes little: the footer doesn't save room for a name it
-	-- doesn't show, and leave a gap where the access mode's words would go.)
+test("a pane's access mode folds to its glyph on one line, as gpui's under its pill's width", function()
 	local app = split(1150, row({ "a1", "a2" }))
-	expect(app:tree('#split-pane-a2 >> role:button "Access"')).to_contain("Full access")
+	expect(app:tree('#split-pane-a2 >> role:button "Access"')).never.to_contain("Full access")
 	local _, access = box(app, '#split-pane-a2 >> role:button "Access"')
-	expect(access > 24).to_be(true)
+	expect(access).to_be(24)
 end)

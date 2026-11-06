@@ -72,7 +72,7 @@ export type Empty = { title: string | Message, hint: (string | Message)? }
 -- The trigger's weight: `filled` (a control on its own, with a chevron),
 -- `ghost` (a chip among a bar's controls: no fill until touched), `chip` (a
 -- footer's small quiet label). Only `filled` shows a chevron.
-export type Tone = "filled" | "ghost" | "chip"
+export type Tone = "filled" | "ghost" | "chip" | "model" | "access"
 export type Props = {
 	value: State<string?>,
 	-- The items: a list, or a state or function of one (items that come
@@ -135,7 +135,7 @@ export type Props = {
 	expanded: (() -> boolean)?,
 	on_expand: (() -> ())?,
 	keep_open: boolean?,
-	on_choose: ((value: string) -> ())?,
+	on_choose: ((value: string) -> boolean?)?,
 	on_escape: (() -> boolean)?,
 	-- At the panel's top, above a rule, and under a rule at its foot: the
 	-- caller's own rows.
@@ -146,6 +146,8 @@ export type Props = {
 	-- The caller's own trigger in place of the chip (a row of another
 	-- panel opening this one beside it, as a submenu).
 	trigger: ((menu: Menu) -> Node)?,
+	-- What the trigger says on hover, once folded to its glyph.
+	tip: (() -> string?)?,
 	-- How far the trigger folds (a footer short of room): 0, all of it; 1,
 	-- without its detail; 2, its leading icon alone. And while `accent` is
 	-- true, that icon is in the accent (a mode on).
@@ -257,6 +259,8 @@ end
 -- Each tone's trigger: its size, its fill and ink at rest, under the pointer
 -- (and open) and pressed, its label's ink (nil: the trigger's own), its
 -- detail's (a step quieter than the label) and its leading icon's size.
+local Tooltip = require("@self/tooltip")
+
 local TRIGGER = {
 	filled = {
 		h = 26,
@@ -302,6 +306,37 @@ local TRIGGER = {
 		color = "$text.tertiary",
 		hover = { bg = "$hover", color = "$text.secondary" },
 		active = { bg = "$pressed", color = "$text.secondary" },
+		label = nil,
+		detail = "$text.disabled",
+		glyph = 12,
+	},
+	-- In the pill, as gpui's: the model's name and its effort a quieter tone.
+	model = {
+		h = 32,
+		px = "$zeron.space.tight",
+		gap = "$zeron.space.tight",
+		rounded = "$radius.lg",
+		text_size = "$font.size.sm",
+		lift = "$zeron.space.hair",
+		bg = "#00000000",
+		color = "$text.primary",
+		hover = { bg = "$hover" },
+		active = { bg = "$pressed" },
+		label = nil,
+		detail = "$text.tertiary",
+		glyph = 16,
+	},
+	access = {
+		h = 24,
+		px = "$zeron.space.tight",
+		gap = ui.raw(5, "gpui's access chip"),
+		rounded = "$radius.md",
+		text_size = "$font.size.xs",
+		lift = "$zeron.space.hair",
+		bg = "#00000000",
+		color = "$text.secondary",
+		hover = { bg = "$hover" },
+		active = { bg = "$pressed" },
 		label = nil,
 		detail = "$text.disabled",
 		glyph = 12,
@@ -503,10 +538,8 @@ return ui.component(function(props: Props): Node
 		-- panel), so the list eases from where it was.
 		ui.batch(function()
 			value:set(v)
-			if props.on_choose then
-				props.on_choose(v)
-			end
-			if not props.keep_open then
+			local stays = props.on_choose ~= nil and props.on_choose(v) == false
+			if not props.keep_open and not stays then
 				open:set(false)
 			end
 		end)
@@ -744,12 +777,15 @@ return ui.component(function(props: Props): Node
 			roll = true,
 			rolls = rolls,
 			color = TRIGGER[tone].detail,
+			-- (Short of room it goes first, the name last.)
+			min_w = 0,
+			shrink = 1000,
 		})
 	end
 	-- The chosen item's name. A chip's is held to a width and, past it, fades
 	-- out at its end rather than cutting to "…" (only while it overflows).
 	local label_node: Node
-	if tone == "chip" then
+	if TRIGGER[tone].lift then
 		local clip, text = ui.ref(), ui.ref()
 		-- A row, so the text keeps its own width inside (a column would
 		-- stretch it to the box's, and nothing would overflow).
@@ -858,7 +894,28 @@ return ui.component(function(props: Props): Node
 		active = trigger_props.active,
 		-- (Open, a press on it closes it, as a menu's trigger does.)
 		on_click = toggle,
-		leading,
+		-- (A trigger's tooltip is fixed once made; this one comes and goes with its fold.)
+		if props.tip
+			then ui.div {
+				relative = true,
+				shrink = 0,
+				leading,
+				ui.show(function(): boolean
+					return (props.tip :: () -> string?)() ~= nil
+				end, ui.div {
+					absolute = true,
+					left = -6,
+					right = -6,
+					top = -6,
+					bottom = -6,
+					tooltip = Tooltip {
+						function(): string
+							return (props.tip :: () -> string?)() or ""
+						end,
+					},
+				}),
+			}
+			else leading,
 		if props.fold
 			then ui.show(function()
 				return (props.fold :: () -> number)() < 2
@@ -1050,7 +1107,7 @@ return ui.component(function(props: Props): Node
 								-- sidebar's row), the highlight (pointer or keys) a
 								-- wash on the rest.
 								if value:get() == item.value then
-									return "$zeron.menu.selected"
+									return "$zeron.popup.selected"
 								end
 								return if hi:get() == item.value then "$hover" else "#00000000"
 							end,

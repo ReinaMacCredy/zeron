@@ -26,7 +26,6 @@ local FileIcon = require("@self/file_icons")
 local FadeText = require("@self/fade_text")
 local Menu = require("@self/menu")
 local Rail = require("@self/rail")
-local material = require("@self/material")
 local motion = require("@self/motion")
 
 local M = {}
@@ -437,7 +436,7 @@ function M.use(opts: Use)
 				rounded = ui.raw(7, "the card's 12 less its edge and inset"),
 				opacity = if item.blocked then 0.45 elseif item.terminal_only then 0.55 else 1,
 				bg = function(): string
-					return if lit() then "$zeron.menu.selected" else "#00000000"
+					return if lit() then "$zeron.popup.selected" else "#00000000"
 				end,
 				cursor = if item.blocked then "default" else "pointer",
 				on_hover = function(inside: boolean)
@@ -453,7 +452,7 @@ function M.use(opts: Use)
 					top = 0,
 					bottom = 0,
 					rounded = ui.raw(7, "the row's corner"),
-					bg = "$zeron.menu.selected",
+					bg = "$zeron.popup.selected",
 					pointer_events = "none",
 					aria_hidden = true,
 					opacity = motion.tween(
@@ -684,9 +683,6 @@ function M.use(opts: Use)
 		anchor = ui.div { ref = top_edge, absolute = true, left = 0, right = 0, top = 0, h = 0, aria_hidden = true },
 		ui.presence(opening, card_body, { w_full = true, min_h = 0, shrink = 1 }),
 	}
-	panel.backdrop_blur = function(): number
-		return if material.menus_see_through() then 16 else 0
-	end
 	local function menu(pill: Node): Node
 		return ui.div {
 			relative = true,

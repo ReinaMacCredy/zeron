@@ -208,6 +208,11 @@ function M.window_theme(): { [string]: any }?
 			(out :: any)[k] = v
 		end
 	end
+	-- (zgx's string tooltips read this, in its popup: what the menus' solid is.)
+	if not material.see_through() then
+		out = out or {}
+		(out :: any)["popover.bg"] = ui.theme.get("zeron.popup.solid")
+	end
 	local tinted = out and out["zeron.window"]
 	if tinted and M.wallpaper_tint:get() then
 		local bg = (out :: any).background or ui.theme.get("background")

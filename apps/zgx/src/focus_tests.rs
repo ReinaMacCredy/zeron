@@ -142,7 +142,7 @@ fn escape_gives_focus_back_without_a_ring() {
     for (what, button, item, opener) in [
         ("the model picker", "Model", "role:option", true),
         ("the access picker", "Access", "role:listbox \"Access\"", true),
-        ("Work in", "Branch", "\"Work in\"", true),
+        ("the branch picker", "Branch", "role:textbox \"Search branches…\"", true),
     ] {
         let target: &'static str = Box::leak(format!("role:button \"{button}\"").into_boxed_str());
         let want: &'static str = Box::leak(format!("button \"{button}\"").into_boxed_str());

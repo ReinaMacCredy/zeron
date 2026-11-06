@@ -1503,7 +1503,10 @@ fn what_is_being_read_stands_still_at_every_frame_of_a_drag() {
         app.frames(30);
         let scope = if panes > 1 { "#split-pane-a1" } else { "#chat-session" };
         let list = format!("{scope} >> #transcript");
-        app.scroll(&list, -2500.);
+        // (From the top: the end's place depends on how tall the pane's composer stands.)
+        app.scroll(&list, -1_000_000.);
+        app.frames(5);
+        app.scroll(&list, 700.);
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(16));
             app.frame();

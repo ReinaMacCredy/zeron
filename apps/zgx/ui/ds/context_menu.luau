@@ -161,7 +161,7 @@ end
 local function glass(props: { [any]: any }): { [any]: any }
 	props.p = 0
 	props.gap = 0
-	return glass_of.style(props, "menu")
+	return glass_of.style(props, "popup")
 end
 
 -- An entry's words as strings, read as its level is built (it opens anew

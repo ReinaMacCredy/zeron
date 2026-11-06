@@ -1040,7 +1040,7 @@ fn a_resize_keeps_the_reading_place() {
     app.scroll("#transcript", 100_000.);
     app.frames(60);
     let last = "\"Reply 30, paragraph 10";
-    let foot = |app: &mut TestApp| place_of(app, last).map_or(i32::MIN, |(y, h)| y + h);
+    let foot = |app: &mut TestApp| end_gap(app, last).unwrap_or(i32::MIN);
     let start = foot(&mut app);
     let mut trace = Vec::new();
     for w in &widths {
@@ -1086,13 +1086,13 @@ fn a_panel_opening_and_closing_keeps_the_reading_place() {
 }
 
 /// Where the list's last line stands against the view's foot: the gap
-/// from the last paragraph's foot to the bottom of what shows of the list
-/// (the list's box less the room held under the composer). Constant while
+/// from the last paragraph's foot to the composer's top (the pill opens out
+/// as a window narrows, and the room held for it with it). Constant while
 /// the view rests on its end.
 fn end_gap(app: &mut TestApp, last: &str) -> Option<i32> {
-    let (top, h) = place_of(app, " #transcript ")?;
+    let (top, _) = place_of(app, " #chat-composer-dock ")?;
     let (y, lh) = place_of(app, last)?;
-    Some(top + h - (y + lh))
+    Some(top - (y + lh))
 }
 
 /// At the end of the conversation, the window shrunk (narrower, shorter,

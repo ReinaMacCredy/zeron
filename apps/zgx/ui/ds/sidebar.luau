@@ -2075,7 +2075,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					},
 				}
 			end,
-		}, "menu"))
+		}, "popup"))
 	end
 
 	-- Whether the session open is one of these.
@@ -5736,7 +5736,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 					gap = 0,
 					rounded = "$radius.lg",
 					Menu.Group(rows :: any),
-				} :: any, "menu"))
+				} :: any, "popup"))
 			end
 			local function organize_says(): string
 				if inbox:get() then
@@ -5790,7 +5790,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 				},
 			}
 		end,
-	}, "menu"))
+	}, "popup"))
 
 	-- Dragging near the list's top or bottom scrolls it, as Zeron's does:
 	-- within 48 of an edge, faster the nearer, up to 12 every 16 ms. Where

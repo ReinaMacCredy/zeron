@@ -150,6 +150,42 @@ test("a pick is the only thing that moves a chat, and the row it's on already mo
 	expect(app:state("calls")).to_contain("move:s2:")
 end)
 
+test("a branch with no worktree says so under its list, which stays open, and moves nothing", function()
+	local app = open()
+	patch(app, { branch = "main" })
+	app:click("#composer-session-branch")
+	app:frames(20)
+	app:click('role:option "release/2.4"')
+	app:frames(10)
+	app:frames(60)
+	expect(app:has('"No worktree for release/2.4"')).to_be(true)
+	expect(string.find(string.match(app:tree('role:option "release/2.4"'), "[^\n]+") or " hidden", " hidden", 1, true)).to_be_nil()
+	expect(app:state("calls")).never.to_contain("move:")
+end)
+
+test("a short draft folds back to one line where the chips' words have folded", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(700, 700)
+	app:command("go_s2")
+	app:frames(40)
+	local function height(): number
+		local line = string.match(app:tree('#chat-composer >> role:textbox "Message"'), "[^\n]+") or ""
+		return tonumber(string.match(line, " %-?%d+,%-?%d+ %d+x(%d+)")) or -1
+	end
+	expect(height()).to_be(22)
+	app:set_state("chat.composer.text", string.rep("a long draft ", 20))
+	app:frames(40)
+	expect(height() > 22).to_be(true)
+	app:set_state("chat.composer.text", "a draft nearly the line's own width")
+	app:frames(40)
+	expect(height()).to_be(22)
+	-- Too narrow to leave the draft its room: opened out with nothing written.
+	app:set_state("chat.composer.text", "")
+	app:resize(480, 700)
+	app:frames(40)
+	expect(height() > 22).to_be(true)
+end)
+
 test("with no project chosen / and @ resolve and /model takes no turn", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(1000, 700)

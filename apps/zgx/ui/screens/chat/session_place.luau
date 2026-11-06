@@ -130,11 +130,14 @@ function M.bind(b: Bind): { [string]: any }
 		end
 		return out
 	end)
-	-- A row taken, only then: the chat moved where it has a worktree; else a word.
-	local function on_pick(name: string)
+	-- A row taken, only then: the chat moved where it has a worktree; else a word
+	-- under the list, which stays open (`false`), as gpui's.
+	local note = ui.state("chat_place_ref_note", nil :: string?)
+	local function on_pick(name: string): boolean?
 		local s = b.open()
+		note:set(nil)
 		if not s or name == b.live_branch() or name == (s.work_tree and s.work_tree.branch) then
-			return
+			return nil
 		end
 		for _, r in refs:peek().list do
 			if r.name == name then
@@ -146,18 +149,24 @@ function M.bind(b: Bind): { [string]: any }
 						end)
 					end
 				else
-					b.notice { tone = "warning", text = ui.t("chat.composer.footer.no_worktree", { name = name }):get(), dismissable = true }
+					note:set(ui.t("chat.composer.footer.no_worktree", { name = name }):get())
+					return false
 				end
-				return
+				return nil
 			end
 		end
+		return nil
 	end
 	return {
 		fixed = fixed,
 		menu = {
 			on_pick = on_pick,
+			note = note,
 			items = items,
-			on_open = load,
+			on_open = function()
+				note:set(nil)
+				load()
+			end,
 			empty = function(query: string): any
 				local state = refs:peek().state
 				if state == "loading" and query == "" then

@@ -641,10 +641,10 @@
         "worktree": "Worktree",
         "worktree_hint": "An isolated copy, on a branch of its own."
       },
-      "work_in": "Work in",
       "project": {
         "label": "Project",
         "search": "Search projects…",
+        "tip": "Where the agent works",
         "none_action": "Don't work in a project",
         "new": "New project",
         "none": "No project"
@@ -898,7 +898,6 @@
       "stop_all": "Stop all",
       "running": "Running",
       "queued_messages": "Queued messages",
-      "queued": "Queued",
       "waiting_hint": "Waiting for provider capabilities",
       "steer_all": "Steer all",
       "steer_all_hint": "Steer every queued message as one, numbered",

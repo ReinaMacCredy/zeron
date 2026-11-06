@@ -12,8 +12,8 @@
 	"tokens": {
 		"background": "#f5f5f7b8",
 		"glass.tint": "#f5f5f7b8",
-		// zgx's own surfaces (its tooltips): white above the pale menus it shows over, opaque, so a tooltip reads as one.
-		"popover.bg": "#ffffff",
+		// zgx's own surfaces (its tooltips): the menus' own tone, as gpui's are.
+		"popover.bg": "#fefefe",
 		"surface": {
 			"sunken": "#0000000d",
 			"base": "#ffffff66",
@@ -127,6 +127,9 @@
 			// a white sheet.
 			"palette": { "browse": "#e9e9eae6" },
 			"menu": { "tint": "#eceef273", "solid": "#fbfbfc", "shadow": "0 18 48 0 #0000001c", "selected": "#0000000f" },
+			// What stands in a popup window: gpui's numbers, frost on and off.
+			"popup": { "tint": "#fefefe", "solid": "#ffffff" },
+			"browser_overlay": "#ffffff",
 			// The composer: whiter glass than the window, a cool slate
 			// hairline; opaque, white on a soft shadow.
 			// Line glyphs a touch heavier than dark's 1.17: dark lines on

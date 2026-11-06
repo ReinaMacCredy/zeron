@@ -1,15 +1,9 @@
--- Zeron's composer, from the design system's parts: a pill holding the
--- draft, + on the left to attach, the microphone and Send on the right;
--- under it a footer of chips the same size: the access mode (with plan
--- mode's switch in its panel) and where it works (a folder or worktree,
--- the project › the branch, its panel choosing the device and checkout too)
--- on the left; on the right the model, and a ring for how much of its
--- context is used (hovered, a card of the numbers). Over a wallpaper (a new
--- chat's art) the pill's glass continues under the footer as a tray, so
--- the chips sit on the composer rather than on the art. The
--- footer keeps to one line: short of room, it folds a step at a time:
--- "Plan" goes, then the access mode's name (leaving its icon, in the accent
--- while plan mode is on), then the branch's, leaving its icon at the left. Its geometry is Zeron's
+-- Zeron's composer, from the design system's parts: a pill holding, on one
+-- line with the draft, the paperclip and plan's switch on its left, and the
+-- access mode, the model and Send on its right; under it a footer of where
+-- it works (a chat's checkout and branch; a new chat's device, branch and
+-- checkout, its project in the pill) and the ring for how much of the
+-- model's context is used. Its geometry is Zeron's
 -- (crates/ui/src/composer.rs): 26-point corners, 28-point round controls,
 -- one 49-point line while the draft fits beside the controls.
 --
@@ -37,10 +31,8 @@ local Button = require("@self/button")
 local Icon = require("@self/icon")
 local control = require("@self/control")
 local FadeText = require("@self/fade_text")
-local Tile = require("@self/tile")
 local Dropdown = require("@self/dropdown")
 local ModelPicker = require("@self/model_picker")
-local Menu = require("@self/menu")
 local IconButton = require("@self/icon_button").IconButton
 local status = require("@self/status")
 local markdown = require("@self/markdown_edit")
@@ -162,10 +154,6 @@ export type Props = {
 	-- one has none), and hovering or focusing it opens a card saying the
 	-- numbers, as Zeron's does (crates/ui/src/context_usage.rs).
 	usage: (() -> Usage?)?,
-	-- The footer stands over a wallpaper (a new chat's art): the pill's glass
-	-- continues under it as a tray, the chips on it rather than on the art,
-	-- easing in and out as the art comes and goes. Without, it stays bare.
-	over_art: (() -> boolean)?,
 	-- Where it works: the device, the checkout ("local" or "worktree") and
 	-- the branch, one chip; its panel lists the branches under rows
 	-- choosing the device and the checkout.
@@ -327,28 +315,24 @@ local TEXT_OPEN_SIDE = 16
 -- much narrower than the line holds, so a width at the boundary cannot
 -- flicker between the two.
 local HYSTERESIS = 32
--- How wide where-it-works stays before the access mode folds: its project's
--- name (to PROJECT_MAX) and BRANCH_KEEP of the branch's, with the chip's
--- own room (its padding, the glyph, the gaps, the chevron); until
--- the name is measured, BRANCH_MIN. And the footer's side padding and gap
--- (snug, space.1).
-local BRANCH_MIN = 156
-local BRANCH_KEEP, PLACE_CHROME = 72, 50
--- The project's name in that chip: at least this much of it stays, and it
--- grows to at most this. The branch's at most, and the sliver of it that
--- stays (fading) once the access mode has folded: the branch gives way
--- first, to that, then the name to its least, then the chip folds to its
--- glyph. (Never a bare "›" with nothing after it.)
-local PROJECT_MIN, PROJECT_MAX, BRANCH_MAX, BRANCH_FLOOR = 44, 140, 180, 36
--- The footer's chips: one height, one corner (the menus' row corner),
--- each lead (a glyph's 12) 6 in all round, and as far from its words.
+-- gpui's fold (composer.rs `CHIP_LABEL_MIN_WIDTH`, `MIN_COMPACT_INPUT_WIDTH`):
+-- on one line, plan's and the access mode's words go below LABELS_LINE (its 720
+-- at gpui's 737 pill: this pill carries 660), and the pill opens out rather
+-- than leave the draft under LINE_ROOM. Opened out they come back, but for
+-- under LABELS_OPEN, where gpui's run under one another. The model takes at
+-- most MODEL_SHARE of the pill, its effort giving way first.
+local LABELS_LINE, LABELS_OPEN = 645, 375
+local LINE_ROOM, LINE_MIN = 200, 490
+local MODEL_SHARE = 0.45
+-- What a chip takes of the name it says.
+local PROJECT_MAX, LABEL_MAX, CHIP_MAX = 180, 160, 280
+local FOOTER_CHIP = 20
+-- The ring's box.
 local CHIP_H, CHIP_RADIUS = 24, "$radius.lg"
 -- Its words lifted a point, as the footer's other chips' are (ds/dropdown's
 -- chip): centred by their capitals, lowercase reads low beside a glyph. (A
 -- margin under them of twice that: their box stays centred, a point up.)
 local LIFT = "$zeron.space.hair"
-type Folded = { level: number, access_at: { [string]: number }, where_icon: number?, model_at: { [string]: number }? }
-local FOOTER_SIDES, FOOTER_GAP = 20, 4
 -- With cargo or a question over the draft, the draft keeps the strip's
 -- `below` over it (the theme's; read as the composer is built) rather than
 -- the open text box's own top.
@@ -377,18 +361,15 @@ local function worded(t: { [string]: any }, words: { [string]: string }): any
 	return out
 end
 
--- The access modes, as Zeron offers them; their icons (Central Icons,
--- centralicons.com, round outlined, radius 2, stroke 1.5) say what each
--- does: it waits for you (a raised hand), edits go through (a pencil with
--- sparkles), nothing is held back (an open padlock). (Made as they're
--- read, in the locale's words.)
+-- The access modes, as Zeron offers them, with its icons (pickers.rs
+-- `permission_icon`). (Made as they're read, in the locale's words.)
 local function ACCESS(): { Dropdown.Item }
 	return {
-	worded({ value = "supervised", icon = "access-supervised" }, {
+	worded({ value = "supervised", icon = "checklist" }, {
 		label = "ds.composer.access.supervised",
 		description = "ds.composer.access.supervised_hint",
 	}),
-	worded({ value = "edits", icon = "access-edits" }, {
+	worded({ value = "edits", icon = "bot" }, {
 		label = "ds.composer.access.edits",
 		description = "ds.composer.access.edits_hint",
 	}),
@@ -418,22 +399,6 @@ local function CHECKOUTS(): { Choice }
 	}
 end
 
--- A menu row, the menus' own: compact, full width, washed under the
--- pointer.
-local function menu_row(props: ContainerProps): Node
-	local row = table.clone(props)
-	Menu.look(row)
-	return ui.row(row)
-end
-
--- A row's glyph, in an item tile's box: the menus'.
-local glyph = Menu.glyph
-
--- A row of the panel's head that opens its choices beside the panel: a
--- dropdown (its search, keys and list) whose trigger is the row, showing
--- the choice made (its icon, its name, a warning, a chevron). A press
--- anywhere else in the panel closes it, as zgx closes any popover on a
--- press outside it.
 -- A list, however it was given (a list, or a state or function of one).
 local function list_of(given: any): any
 	if type(given) == "function" then
@@ -446,94 +411,46 @@ local function list_of(given: any): any
 	return given or {}
 end
 
-local function submenu(
-	label: Message,
-	value: State<string?>,
-	choices: { Choice } | () -> { Choice },
-	fallback: number,
-	-- (A string: Dropdown names its field by it only so.)
-	search: string?,
-	actions: { Dropdown.Action }?,
-	-- Choices named by the row but not listed (one an action picks).
-	unlisted: ({ Choice } | () -> { Choice })?
-): Node
-	local function current(): Choice
-		local v = value:get()
-		local listed = list_of(choices) :: { Choice }
-		for _, list in { listed, list_of(unlisted) :: { Choice } } do
-			for _, c in list do
-				if c.value == v then
-					return c
-				end
-			end
-		end
-		-- (None yet, as a list still coming: a blank row.)
-		return listed[fallback] or listed[1] or { value = "", label = "" }
+-- A chip of where it works, its panel over or under it: a glyph, what it
+-- says, a chevron, washed under the pointer and while open.
+type Chip = { id: string?, label: any, icon: () -> string, says: () -> string, says_id: string?, warn: (() -> boolean)? }
+local function chip_ink(warn: (() -> boolean)?): any
+	if not warn then
+		return "$text.tertiary"
 	end
-	return Dropdown {
-		value = value,
-		items = choices,
-		actions = actions,
-		-- (Dropdown hands its label on, as the trigger's name.)
-		label = label :: any,
-		search = search or false,
-		width = 260,
-		-- Close beside the panel, as a submenu sits: 2 from its edge (the
-		-- row it opens from sits 5 inside it, its inset and border).
-		placement = { side = "right", align = "start", offset = 7 },
-		trigger = function(menu: Dropdown.Menu): Node
-			return menu_row {
-				label = label,
-				bg = function()
-					return if menu.open:get() then "$hover" else "#00000000"
-				end,
-				on_click = menu.toggle,
-				-- The choice's own tile (a project's hue or artwork), else its
-				-- icon: one or the other, following the choice.
-				ui.presence(function(): string
-					local c = current()
-					return if c.hue or c.src or c.emoji then "tile" else "icon"
-				end, function(kind: string): Node
-					if kind == "tile" then
-						return Tile {
-							label = function(): string?
-								return current().label
-							end,
-							hue = function(): string?
-								return current().hue
-							end,
-							src = function(): string?
-								return current().src
-							end,
-							emoji = function(): string?
-								return current().emoji
-							end,
-							size = 18,
-						}
-					end
-					return glyph(function(): Icon.Name
-						return current().icon or "monitor"
-					end)
-				end),
-				FadeText {
-					function()
-						return current().label
-					end,
-					text_size = "$font.size.md",
-					color = "$text.primary",
-					grow = 1,
-				},
-				ui.show(function()
-					return current().warn == true
-				end, ui.div {
-					self = "center",
-					shrink = 0,
-					color = "$warning",
-					Icon { name = "wifi-off", size = 12 },
-				}),
-				Menu.chevron(),
-			}
+	return function(): string
+		return if warn() then "$warning" else "$text.tertiary"
+	end
+end
+local function lead_glyph(icon: () -> string, size: number): Node
+	return ui.presence(icon, function(kind: string): Node
+		-- (Its kind named, for tests: "place-lead-worktree".)
+		return ui.div { class = `place-lead-{kind}`, Icon { name = kind :: Icon.Name, size = size } }
+	end, { shrink = 0, w = size, h = size, items = "center", justify = "center" })
+end
+local function footer_chip(chip: Chip, m: Dropdown.Menu): Node
+	return ui.button {
+		id = chip.id,
+		label = chip.label,
+		h = FOOTER_CHIP,
+		max_w = CHIP_MAX,
+		px = "$space.2",
+		gap = "$zeron.space.tight",
+		items = "center",
+		min_w = 0,
+		rounded = "$radius.md",
+		text_size = "$font.size.sm",
+		weight = "$font.weight.medium",
+		bg = function(): string
+			return if m.open:get() then "$hover" else "#00000000"
 		end,
+		color = chip_ink(chip.warn),
+		hover = { bg = "$hover", color = "$text.secondary" },
+		active = { bg = "$pressed", color = "$text.secondary" },
+		on_click = m.toggle,
+		lead_glyph(chip.icon, 12),
+		FadeText { chip.says, roll = true, id = chip.says_id, mb = LIFT, min_w = 0, shrink = 1, fade = 16 },
+		ui.div { shrink = 0, color = "$text.disabled", aria_hidden = true, Icon { name = "alt-arrow-down", size = 12 } },
 	}
 end
 
@@ -568,93 +485,101 @@ local function on_cloud(device: State<string?>?, devices: any): boolean
 	return false
 end
 
--- The head of where-it-works's panel: "Work in", then the project, the
--- device it runs on and the checkout, each a row opening its choices
--- beside the panel (the project's with "New project" under them).
-local function work_in(
-	project: State<string?>?,
-	projects: ({ Project } | State<{ Project }> | () -> { Project })?,
+-- The project, in a new chat's pill, as gpui's: the folder, its name, its
+-- list with working in none and making one under it.
+local function project_chip(
+	project: State<string?>,
+	projects: ({ Project } | State<{ Project }> | () -> { Project }),
 	on_new_project: (() -> ())?,
-	checkout: State<string?>?,
-	device: State<string?>?,
-	devices: ({ Device } | State<{ Device }> | () -> { Device })?
+	room: () -> number
 ): Node
-	local rows: { Node } = {
-		Menu.Heading { locale.t("ds.composer.work_in") },
+	local function choices(): { Choice }
+		local out: { Choice } = {}
+		for _, p in list_of(projects) :: { Project } do
+			local icon: Icon.Name? = if p.hue or p.src or p.emoji then nil else "folder"
+			table.insert(out, {
+				value = p.value,
+				label = p.label,
+				hue = p.hue,
+				src = p.src,
+				emoji = p.emoji,
+				icon = icon,
+				warn = p.warn,
+				disabled = p.disabled,
+				description = p.description,
+			})
+		end
+		return out
+	end
+	local function says(): string
+		local v = project:get()
+		for _, c in choices() do
+			if c.value == v then
+				return c.label
+			end
+		end
+		return locale.s("ds.composer.project.none")
+	end
+	local function warned(): boolean
+		local v = project:get()
+		for _, c in choices() do
+			if c.value == v then
+				return c.warn == true
+			end
+		end
+		return false
+	end
+	return Dropdown {
+		value = project,
+		items = choices,
+		actions = {
+			worded({
+				icon = "close",
+				on_click = function()
+					project:set(NO_PROJECT)
+				end,
+			}, { label = "ds.composer.project.none_action" }),
+			worded({ icon = "plus", on_click = on_new_project }, { label = "ds.composer.project.new" }),
+		},
+		label = locale.t("ds.composer.project.label") :: any,
+		search = locale.s("ds.composer.project.search"),
+		width = 280,
+		trigger = function(m: Dropdown.Menu): Node
+			return ui.button {
+				label = locale.t("ds.composer.project.label"),
+				h = CONTROL,
+				px = ui.raw(9, "gpui's project chip"),
+				gap = "$zeron.space.tight",
+				items = "center",
+				min_w = 0,
+				rounded = "$radius.lg",
+				text_size = "$font.size.sm",
+				bg = function(): string
+					return if m.open:get() then "$hover" else "#00000000"
+				end,
+				color = chip_ink(warned),
+				hover = { bg = "$hover" },
+				active = { bg = "$pressed" },
+				focus = control.ring,
+				on_click = m.toggle,
+				tooltip = locale.s("ds.composer.project.tip"),
+				ui.div { shrink = 0, class = "place-lead-folder", Icon { name = "folder", size = 14 } },
+				ui.show(function(): boolean
+					return room() > 0
+				end, FadeText {
+					says,
+					roll = true,
+					id = "composer-place-project",
+					mb = LIFT,
+					min_w = 0,
+					max_w = room :: any,
+					shrink = 1,
+					fade = 16,
+				}),
+				ui.div { shrink = 0, color = "$text.tertiary", aria_hidden = true, Icon { name = "alt-arrow-down", size = 12 } },
+			}
+		end,
 	}
-	if project and projects then
-		-- Following the projects as they come and go.
-		local function choices(): { Choice }
-			local out: { Choice } = {}
-			for _, p in list_of(projects) :: { Project } do
-				local icon: Icon.Name? = if p.hue or p.src or p.emoji then nil else "folder"
-				table.insert(out, {
-					value = p.value,
-					label = p.label,
-					hue = p.hue,
-					src = p.src,
-					emoji = p.emoji,
-					icon = icon,
-					warn = p.warn,
-					disabled = p.disabled,
-					description = p.description,
-				})
-			end
-			return out
-		end
-		-- Under the projects, together: working in none, and making one.
-		local p = project
-		table.insert(
-			rows,
-			submenu(locale.t("ds.composer.project.label"), project, choices, 1, locale.s("ds.composer.project.search"), {
-				worded({
-					icon = "close",
-					on_click = function()
-						p:set(NO_PROJECT)
-					end,
-				}, { label = "ds.composer.project.none_action" }),
-				worded({ icon = "plus", on_click = on_new_project }, { label = "ds.composer.project.new" }),
-			}, function(): { Choice }
-				return { worded({ value = NO_PROJECT, icon = "folder" }, { label = "ds.composer.project.none" }) }
-			end)
-		)
-	end
-	if device and devices then
-		-- Following the devices as they come and go; with none, no row.
-		local function choices(): { Choice }
-			local out: { Choice } = {}
-			for _, d in list_of(devices) :: { Device } do
-				local icon: Icon.Name = if d.cloud then "cloud" else "monitor"
-				table.insert(out, {
-					value = d.value,
-					label = d.label,
-					icon = icon,
-					tag = if d.you then locale.s("ds.composer.device.you") else nil,
-					warn = d.offline,
-					description = d.description,
-					disabled = d.disabled,
-				})
-			end
-			return out
-		end
-		table.insert(
-			rows,
-			ui.show(function(): boolean
-				return #choices() > 0
-			end, submenu(locale.t("ds.composer.device.label"), device, choices, 1, locale.s("ds.composer.device.search")))
-		)
-	end
-	if checkout then
-		-- A checkout is a project's: with none, no row; nor on Cloud, whose
-		-- machine checks the repository out on its own.
-		table.insert(
-			rows,
-			ui.show(function(): boolean
-				return (project == nil or project:get() ~= NO_PROJECT) and not on_cloud(device, devices)
-			end, submenu(locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
-		)
-	end
-	return ui.column { w_full = true, table.unpack(rows) }
 end
 
 -- The ring, in a chip-high box of its own, washed under the pointer as the
@@ -692,132 +617,6 @@ local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: (
 	return ui.presence(side, build)
 end
 
--- Where it works, as a line: where it runs (a worktree's glyph, Cloud's,
--- or a folder: a local checkout's, or no project's), the project's name ›
--- the branch. No project: the folder and "No project". The branch gives
--- way first as room runs short, to a sliver, then the name, to
--- PROJECT_MIN; folded, the glyph alone. Its ink is the chip's own (the
--- chevron a step quieter), so the chip's hover lifts all of it.
-type Place = {
-	-- The project (nil: none named), and whether it works in one at all.
-	project: () -> Project?,
-	in_project: () -> boolean,
-	branch: () -> string,
-	-- Where it runs off the branch: "worktree", "cloud", or nil (a local
-	-- checkout).
-	glyph: () -> Icon.Name?,
-	folded: () -> boolean,
-	-- Told the name's own width as it's laid out (the footer's fold reads it).
-	-- What the line takes of the name and the branch: their own widths, or 0
-	-- for one it doesn't show.
-	on_measures: ((name: number, branch: number) -> ())?,
-}
-local function place_line(p: Place): { Child }
-	local function has_project(): boolean
-		return p.project() ~= nil
-	end
-	local function name(): string
-		local pr = p.project()
-		return if pr then pr.label else locale.s("ds.composer.project.none")
-	end
-	local function unfolded(): boolean
-		return not p.folded()
-	end
-	-- The name's and the branch's own widths, measured unseen: each keeps
-	-- its least of itself, or all of a shorter one (never padded out).
-	local natural, branch_natural = ui.ref(), ui.ref()
-	local function branch_min(): number
-		return math.min(BRANCH_FLOOR, math.ceil(branch_natural.width or BRANCH_FLOOR))
-	end
-	if p.on_measures then
-		local on_measures = p.on_measures
-		ui.effect(function()
-			local name_w, branch_w = natural.width, branch_natural.width
-			if name_w and branch_w then
-				on_measures(
-					if has_project() or not p.in_project() then name_w else 0,
-					if p.in_project() then branch_w else 0
-				)
-			end
-		end)
-	end
-	-- What leads: where it runs (a worktree's glyph, Cloud's, or a folder:
-	-- a local checkout's, or no project's).
-	local function lead(): string
-		return if p.in_project() then p.glyph() or "folder" else "folder"
-	end
-	return {
-		ui.text {
-			name,
-			ref = natural,
-			absolute = true,
-			left = 0,
-			top = 0,
-			opacity = 0,
-			pointer_events = "none",
-			aria_hidden = true,
-		},
-		ui.text {
-			p.branch,
-			ref = branch_natural,
-			absolute = true,
-			left = 0,
-			top = 0,
-			opacity = 0,
-			pointer_events = "none",
-			aria_hidden = true,
-		},
-		ui.presence(lead, function(kind: string): Node
-			-- (Its kind named, for tests: "place-lead-worktree".)
-			return ui.div { class = `place-lead-{kind}`, Icon { name = kind :: Icon.Name, size = 12 } }
-		end, { shrink = 0, w = 12, h = 12, items = "center", justify = "center", id = "composer-place-lead" }),
-		ui.show(function(): boolean
-			return unfolded() and (has_project() or not p.in_project())
-		end, FadeText {
-			name,
-			roll = true,
-			id = "composer-place-project",
-			mb = LIFT,
-			min_w = function(): number
-				return math.min(PROJECT_MIN, math.ceil(natural.width or PROJECT_MIN))
-			end :: any,
-			max_w = PROJECT_MAX,
-			shrink = 1,
-			fade = 16,
-		}),
-		ui.show(function(): boolean
-			return unfolded() and p.in_project()
-		end, ui.row {
-			shrink = 1000,
-			-- (Its chevron, its glyph and the branch's sliver: under that it
-			-- doesn't go, the name giving way instead.)
-			min_w = function(): number
-				return (if has_project() then 14 else 0) + branch_min()
-			end :: any,
-			overflow = "hidden",
-			gap = "$space.1",
-			items = "center",
-			ui.show(has_project, ui.div {
-				shrink = 0,
-				color = "$text.disabled",
-				aria_hidden = true,
-				-- (A heavier stroke: at 10 pt the plain one read as a typed "›".)
-				Icon { name = "alt-arrow-right-bold", size = 10 },
-			}),
-			FadeText {
-				p.branch,
-				roll = true,
-				id = "composer-place-branch",
-				mb = LIFT,
-				min_w = branch_min :: any,
-				max_w = BRANCH_MAX,
-				shrink = 1,
-				fade = 16,
-			},
-		}),
-	}
-end
-
 -- An existing chat's footer, as Zeron's: where it works (a word, opening
 -- nothing), the live branch (a chip opening the project's refs), and how a
 -- worktree stands against its base.
@@ -826,14 +625,7 @@ local function refs_cap_words(shown: number, total: number): string
 	return locale.s("ds.composer.branch.showing", { shown = shown, total = total })
 end
 
-local function session_footer(fixed: () -> Fixed?, menu: any, folded: () -> boolean, on_measures: (name: number, branch: number) -> ()): Node
-	local label_natural, branch_natural = ui.ref(), ui.ref()
-	ui.effect(function()
-		local a, b = label_natural.width, branch_natural.width
-		if a and b then
-			on_measures(a, b)
-		end
-	end)
+local function session_footer(fixed: () -> Fixed?, menu: any): Node
 	local function now(): any
 		local f: any = fixed() or {}
 		if f.label then
@@ -848,24 +640,11 @@ local function session_footer(fixed: () -> Fixed?, menu: any, folded: () -> bool
 	local function branch(): string
 		return now().name or locale.s("ds.composer.branch.no_ref")
 	end
-	local function chip_line(menu_open: (() -> boolean)?): { Child }
-		return {
-			ui.div { shrink = 0, Icon { name = "git-branch", size = 12 } },
-			ui.show(function(): boolean
-				return not folded()
-			end, FadeText {
-				branch,
-				roll = true,
-				id = "composer-place-branch",
-				mb = LIFT,
-				min_w = function(): number
-					return math.min(BRANCH_FLOOR, math.ceil(branch_natural.width or BRANCH_FLOOR))
-				end :: any,
-				max_w = BRANCH_MAX,
-				shrink = 1,
-				fade = 16,
-			}),
-		}
+	local function branch_label(): string
+		return locale.s("ds.composer.branch.fixed", { name = branch() })
+	end
+	local function branch_glyph(): string
+		return "git-branch"
 	end
 	local chip: Node
 	if menu then
@@ -873,7 +652,30 @@ local function session_footer(fixed: () -> Fixed?, menu: any, folded: () -> bool
 		local lit = ui.use_state(nil :: string?)
 		chip = Dropdown {
 			value = lit,
-			on_choose = menu.on_pick,
+			on_choose = function(name: string): boolean?
+				local went = menu.on_pick(name)
+				if went == false then
+					lit:set(branch())
+				end
+				return went
+			end,
+			extra = if menu.note
+				then ui.text {
+					function(): string
+						return menu.note:get() or ""
+					end,
+					wrap = true,
+					px = "$space.2",
+					py = "$space.1",
+					text_size = "$font.size.xs",
+					color = "$text.secondary",
+				}
+				else nil,
+			extra_when = if menu.note
+				then function(): boolean
+					return menu.note:get() ~= nil
+				end
+				else nil,
 			label = locale.t("ds.composer.branch.label") :: any,
 			search = menu.search,
 			items = menu.items,
@@ -888,59 +690,35 @@ local function session_footer(fixed: () -> Fixed?, menu: any, folded: () -> bool
 			cap = REFS_SHOWN,
 			cap_words = refs_cap_words,
 			trigger = function(m: Dropdown.Menu): Node
-				return ui.button {
-					id = "composer-session-branch",
-					label = function(): string
-						return locale.s("ds.composer.branch.fixed", { name = branch() })
-					end,
-					h = CHIP_H,
-					px = "$zeron.space.tight",
-					gap = "$zeron.space.tight",
-					items = "center",
-					min_w = 0,
-					rounded = CHIP_RADIUS,
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
-					bg = function(): string
-						return if m.open:get() then "$hover" else "#00000000"
-					end,
-					color = "$text.tertiary",
-					hover = { bg = "$hover", color = "$text.secondary" },
-					active = { bg = "$pressed", color = "$text.secondary" },
-					on_click = m.toggle,
-					table.unpack(chip_line()),
-				}
+				return footer_chip({ id = "composer-session-branch", label = branch_label, icon = branch_glyph, says = branch, says_id = "composer-place-branch" }, m)
 			end,
 		}
 	else
 		chip = ui.row {
-			label = function(): string
-				return locale.s("ds.composer.branch.fixed", { name = branch() })
-			end,
-			h = CHIP_H,
-			px = "$zeron.space.tight",
+			label = branch_label,
+			h = FOOTER_CHIP,
+			px = "$space.2",
 			gap = "$zeron.space.tight",
 			items = "center",
 			min_w = 0,
+			text_size = "$font.size.sm",
+			weight = "$font.weight.medium",
 			color = "$text.tertiary",
-			table.unpack(chip_line()),
+			ui.div { shrink = 0, Icon { name = "git-branch", size = 12 } },
+			FadeText { branch, roll = true, id = "composer-place-branch", mb = LIFT, min_w = 0, shrink = 1, fade = 16 },
 		}
 	end
 	return ui.row {
 		id = "composer-session-footer",
-		h = CHIP_H,
+		h = FOOTER_CHIP,
 		gap = "$space.1",
 		items = "center",
 		min_w = 0,
 		text_size = "$font.size.sm",
 		weight = "$font.weight.medium",
-		ui.text { function(): string
-			return now().label or ""
-		end, ref = label_natural, absolute = true, left = 0, top = 0, opacity = 0, pointer_events = "none", aria_hidden = true },
-		ui.text { branch, ref = branch_natural, absolute = true, left = 0, top = 0, opacity = 0, pointer_events = "none", aria_hidden = true },
 		ui.row {
-			h = CHIP_H,
-			px = "$zeron.space.tight",
+			h = FOOTER_CHIP,
+			px = "$space.2",
 			gap = "$zeron.space.tight",
 			items = "center",
 			min_w = 0,
@@ -951,13 +729,11 @@ local function session_footer(fixed: () -> Fixed?, menu: any, folded: () -> bool
 			end, function(kind: string): Node
 				return ui.div { class = `place-lead-{kind}`, Icon { name = kind :: Icon.Name, size = 12 } }
 			end, { shrink = 0, w = 12, h = 12, items = "center", justify = "center", id = "composer-place-lead" }),
-			ui.show(function(): boolean
-				return not folded()
-			end, FadeText { function(): string
+			FadeText { function(): string
 				return now().label or ""
-			end, id = "composer-place-label", mb = LIFT, max_w = PROJECT_MAX + 20, shrink = 1, fade = 16 }),
+			end, id = "composer-place-label", mb = LIFT, min_w = 0, max_w = LABEL_MAX, shrink = 1, fade = 16 },
 			ui.show(function(): boolean
-				return now().removed == true and not folded()
+				return now().removed == true
 			end, ui.text { locale.t("ds.composer.footer_removed"), shrink = 0, color = "$text.disabled" }),
 		},
 		ui.show(function(): boolean
@@ -965,7 +741,7 @@ local function session_footer(fixed: () -> Fixed?, menu: any, folded: () -> bool
 		end, chip),
 		ui.presence(function(): string?
 			local b = now().badge
-			return if b and not folded() then b.kind else nil
+			return if b then b.kind else nil
 		end, function(kind: string): Node
 			local b = now().badge or {}
 			return ui.row {
@@ -1163,22 +939,6 @@ return ui.component(function(props: Props): Node
 	-- Opened out, the controls' inset: from the theme's corner, as this one
 	-- is built.
 	local INSET_OPEN = open_inset()
-	-- On the tray, the chips' inset from the pill's edge above them, the
-	-- tray's foot and its sides: the pill's own controls' (+ and Send sit
-	-- this far in from its edge, its hairline and INSET_OPEN), so the row
-	-- keeps the pill's spacing and its chips line up with those buttons.
-	local TRAY_INSET = INSET_OPEN + HAIRLINES / 2
-	-- On the tray, the step under the pill and above the tray's foot (one
-	-- token: the footer's margins and the tray's height both read it), and
-	-- how far the tray tucks up behind the pill, its top hidden there.
-	local TRAY_GAP, TRAY_TUCK = "zeron.space.tight", 40
-	local function tray_gap(): number
-		local _ = ui.theme.current:get()
-		return (ui.theme.get(TRAY_GAP) :: number?) or 6
-	end
-	local function tray_h(): number
-		return CHIP_H + tray_gap() * 2 + TRAY_TUCK
-	end
 	local value = props.value
 	local running = props.running
 	local field = props.field or ui.ref()
@@ -1197,34 +957,19 @@ return ui.component(function(props: Props): Node
 	local head_h_seen = kept("head_h", 0)
 	local trailing_seen = kept("trailing_w", 0)
 	local leading_seen = kept("leading_w", 0)
-	local footer_w = kept("footer_w", 0)
-	local right_w = kept("right_w", 0)
-	local model_w = kept("model_w", 0)
-	local access_w = kept("access_w", 0)
-	local where_w = kept("where_w", 0)
-	local name_w = kept("name_w", 0)
-	local branch_w = kept("branch_w", 0)
-	-- (The line has said what it takes: until then, BRANCH_MIN.)
-	local place_known = kept("place_known", false)
-	local folded = kept("fold", { level = 0, access_at = {} } :: Folded)
+	local access_seen = kept("access_w", 0)
+	local actions_seen = kept("actions_w", 0)
+	-- gpui's compact capacity: the draft's room as it last stood on one line and
+	-- the pill's width then. Opened out, the words and the model take more, so
+	-- what is measured there can't say whether the draft fits back on a line.
+	local line_room = kept("line_room", 0)
+	local line_room_w = kept("line_room_w", 0)
 	local function measure(into: State<number>, axis: "w" | "h"): (size: Size, _el: Element) -> ()
 		return function(size: Size, _el: Element)
 			local v = if axis == "w" then size.w else size.h
 			if math.abs(into:peek() - v) >= 0.5 then
 				into:set(v)
 			end
-		end
-	end
-
-	local function place_measures(name: number, branch: number)
-		if math.abs(name_w:peek() - name) >= 0.5 then
-			name_w:set(name)
-		end
-		if math.abs(branch_w:peek() - branch) >= 0.5 then
-			branch_w:set(branch)
-		end
-		if not place_known:peek() then
-			place_known:set(true)
 		end
 	end
 
@@ -1374,12 +1119,18 @@ return ui.component(function(props: Props): Node
 		end
 		local text = value:get()
 		local width = pill_w:get()
-		local tail = trailing_w()
 		local need = line_w:get()
 		if width <= 0 then
 			return false
 		end
-		local room = width - HAIRLINES - (INSET_LINE + leading_w() + TEXT_SIDE) - (TEXT_SIDE + tail + INSET_LINE)
+		if width < LINE_MIN then
+			was_open = true
+			return true
+		end
+		local at = line_room_w:get()
+		local room = if at > 0
+			then line_room:get() + width - at
+			else width - HAIRLINES - (INSET_LINE + leading_w() + TEXT_SIDE) - (TEXT_SIDE + trailing_w() + INSET_LINE)
 		local want
 		if string.find(text, "\n") then
 			want = true
@@ -1392,6 +1143,23 @@ return ui.component(function(props: Props): Node
 		return want
 	end)
 
+	ui.effect(function()
+		local _ = pill_w:get(), leading_seen:get(), trailing_seen:get()
+		-- (Next tick: each side's measure lands on its own, and half of them
+		-- from opened out would read as far less room than there is.)
+		ui.after(0, function()
+			local width, lead, tail = pill_w:peek(), leading_seen:peek(), trailing_seen:peek()
+			if open:peek() or width <= 0 or lead <= 0 or tail <= 0 then
+				return
+			end
+			line_room:set(width - HAIRLINES - (INSET_LINE + lead + TEXT_SIDE) - (TEXT_SIDE + tail + INSET_LINE))
+			line_room_w:set(width)
+		end)
+	end)
+	local labelled = ui.computed(function(): boolean
+		local width = pill_w:get()
+		return width <= 0 or (width >= LABELS_OPEN and (open:get() or width >= LABELS_LINE))
+	end)
 	-- What is over the draft: nothing, or its measured height.
 	local head_h = ui.computed(function(): number
 		if not has_cargo() and not asking() and not has_limit() then
@@ -1476,9 +1244,7 @@ return ui.component(function(props: Props): Node
 		end))
 	end
 
-	-- +, as a secondary button: a fill of its own, so it reads as a control
-	-- beside the draft (the microphone stays ghost). Dictating, it is the
-	-- way out.
+	-- The paperclip. Dictating, it is the way out.
 	local attach = ui.show(dictating, Button {
 		tone = "secondary",
 		shape = "pill",
@@ -1488,16 +1254,17 @@ return ui.component(function(props: Props): Node
 		on_click = props.on_cancel_dictation,
 		Icon { name = "close", size = 16 },
 	}, Button {
-		tone = "secondary",
+		tone = "ghost",
 		shape = "pill",
 		size = "sm",
 		icon = true,
 		label = locale.t("ds.composer.attach"),
 		disabled = disabled,
 		on_click = props.on_attach,
-		Icon { name = "plus", size = 18 },
+		color = "$text.secondary",
+		Icon { name = "paperclip", size = 18 },
 	})
-	-- The plan switch beside +: its word when there's room, the accent as it
+	-- The plan switch beside the paperclip: its word when there's room, the accent as it
 	-- turns on over 300 ms.
 	local function plan_chip(): Node
 		local plan = props.plan :: State<boolean>
@@ -1525,7 +1292,7 @@ return ui.component(function(props: Props): Node
 			relative = true,
 			rounded = ui.raw(8, "gpui's plan chip"),
 			bg = "#00000000",
-			color = ui.tween(on, { from = "$text.tertiary", to = "$accent", duration = PLAN_FLIP.duration, ease = PLAN_FLIP.ease }),
+			color = ui.tween(on, { from = "$text.secondary", to = "$accent", duration = PLAN_FLIP.duration, ease = PLAN_FLIP.ease }),
 			hover = { bg = "$hover" },
 			focus = control.ring,
 			on_click = function()
@@ -1562,12 +1329,12 @@ return ui.component(function(props: Props): Node
 					w = 9,
 					h = 9,
 					rounded = "$radius.full",
-					bg = "$zeron.switch.knob",
+					bg = "$zeron.composer.plan_knob",
 					shadow = "$zeron.switch.knob_lift",
 				},
 			},
 			ui.show(function(): boolean
-				return open:get() or pill_w:get() >= 720
+				return labelled:get()
 			end, ui.text { locale.t("ds.composer.plan.short"), relative = true, shrink = 0, text_size = "$font.size.sm" }),
 		}
 	end
@@ -1582,134 +1349,19 @@ return ui.component(function(props: Props): Node
 		local on = if type(below) == "function" then below() else below == true
 		return if on then "bottom" else "top"
 	end
-	-- The footer folds a step at a time as it runs short of room, the
-	-- fullest that fits: 0, all of it; 1, the model without its effort; 2,
-	-- the access mode without "Plan" too; 3, the access mode's icon alone; 4,
-	-- where it works as its icon too; 5, the model's icon alone. Until 4 where
-	-- it works keeps the project's name and BRANCH_KEEP of the branch's
-	-- (`where_min`, fading past it).
-	--
-	-- Its measures: the footer's width, the right group's, and each chip's.
-	-- A chip's width at each of its folds is kept from when it was last at
-	-- that fold; a fold not yet measured is tried, and measured.
-	--
-	-- Kept (`folded`), so one made again (a reload) starts at the fold it
-	-- was at, its measures known, rather than unfolded until its chips are
-	-- measured again.
-	-- What where-it-works keeps before the access mode folds: the project's
-	-- name (to its most) and some of the branch (none without a project).
-	-- Folded to the access mode's icon (2), it may go further: the branch
-	-- to its sliver, the name to its least.
-	-- What a footer's fold makes of the chips on the left, and of the model.
-	local function left_fold(lv: number): number
-		return math.clamp(lv - 1, 0, 3)
-	end
-	local function model_fold(lv: number): number
-		return if lv == 0 then 0 elseif lv >= 5 then 2 else 1
-	end
-	local function where_min(lv: number): number
-		if not place_known:get() then
-			return BRANCH_MIN
+	-- The model's chip at most: MODEL_SHARE of the pill, and on one line no more
+	-- than leaves the draft its LINE_ROOM; opened out, no more than the row
+	-- holds. Under that its words fade, the effort's first.
+	local model_cap = ui.computed(function(): number
+		local width = pill_w:get()
+		if width <= 0 then
+			return MODEL_SHARE * 1000
 		end
-		local n, b = name_w:get(), branch_w:get()
-		if lv >= 2 then
-			return PLACE_CHROME + math.min(n, PROJECT_MIN) + math.min(b, BRANCH_FLOOR)
-		end
-		return PLACE_CHROME + math.min(n, PROJECT_MAX) + math.min(b, BRANCH_KEEP)
-	end
-	local was = folded:peek()
-	local access_at: { [number]: number } = {}
-	for k, v in was.access_at do
-		access_at[tonumber(k) :: number] = v
-	end
-	local where_icon: number? = was.where_icon
-	local model_at: { [number]: number } = {}
-	for k, v in was.model_at or {} do
-		model_at[tonumber(k) :: number] = v
-	end
-	-- (What the model's chip says: another pick, its other folds measure again.)
-	local model_says: string? = nil
-	local level = was.level
-	-- Bumped a frame after trying a fold not yet measured: its chip may lay
-	-- out no wider or narrower (the access mode without "Plan" when plan
-	-- mode is off), so no measure changes to look again by.
-	local tried = ui.use_state(0)
-	-- (Asked by the fold, started by the effect after it: a timer made in a
-	-- computed lasts only until its next run.)
-	local retry = false
-	local fold = ui.computed(function(): number
-		tried:get()
-		local f, r, m = footer_w:get(), right_w:get(), model_w:get()
-		-- (Not laid out yet: as it was.)
-		if f <= 0 or r <= 0 or m <= 0 then
-			return level
-		end
-		local a = if props.access then access_w:get() else 0
-		local w = if props.branch then where_w:get() else 0
-		if (props.access and a <= 0) or (props.branch and w <= 0) then
-			return level
-		end
-		local says = `{props.model:get()}/{props.effort:get()}`
-		if says ~= model_says then
-			if model_says ~= nil then
-				table.clear(model_at)
-			end
-			model_says = says
-		end
-		access_at[math.min(left_fold(level), 2)] = a
-		-- (Its widest: with no room at all it's squeezed under the icon's width.)
-		if left_fold(level) >= 3 then
-			where_icon = math.max(where_icon or 0, w)
-		end
-		model_at[model_fold(level)] = m
-		-- The footer's room: less its sides, what's on the right but the model,
-		-- and the gaps.
-		local chips = (if props.branch then 1 else 0) + (if props.access then 1 else 0)
-		local room = f - FOOTER_SIDES - FOOTER_GAP * math.max(chips, 1) - (r - m)
-		-- What fold `lv` takes; nil, not yet measured.
-		local function needs(lv: number): number?
-			local left = left_fold(lv)
-			local access_w = access_at[math.min(left, 2)]
-			local where_w = if not props.branch then 0 elseif left >= 3 then where_icon else where_min(left)
-			local chip_w = model_at[model_fold(lv)]
-			if access_w == nil or where_w == nil or chip_w == nil then
-				return nil
-			end
-			return access_w + where_w + chip_w
-		end
-		-- Unfolding needs a little more than folding took, so a width at
-		-- the edge cannot flicker.
-		local next = 5
-		for lv = 0, 4 do
-			local need = needs(lv)
-			if need == nil or need + (if lv < level then 8 else 0) <= room then
-				next = lv
-				break
-			end
-		end
-		if next ~= level and needs(next) == nil then
-			retry = true
-		end
-		level = next
-		return level
-	end)
-	ui.effect(function()
-		local now = fold:get()
-		if retry then
-			retry = false
-			ui.after(16, function()
-				tried:set(tried:peek() + 1)
-			end)
-		end
-		local at: { [string]: number } = {}
-		for k, v in access_at do
-			at[tostring(k)] = v
-		end
-		local chip_at: { [string]: number } = {}
-		for k, v in model_at do
-			chip_at[tostring(k)] = v
-		end
-		folded:set { level = now, access_at = at, where_icon = where_icon, model_at = chip_at }
+		local others = leading_seen:get() + access_seen:get() + actions_seen:get() + 8
+		local room = if open:get()
+			then width - HAIRLINES - INSET_OPEN * 2 - others - 4
+			else width - HAIRLINES - INSET_LINE * 2 - TEXT_SIDE * 2 - others - LINE_ROOM
+		return math.max(CONTROL, math.min(MODEL_SHARE * width, room))
 	end)
 
 	local model = ui.presence(side, function(at: string): Node
@@ -1726,20 +1378,31 @@ return ui.component(function(props: Props): Node
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
 			showing = props.model_open,
-			fold = function(): number
-				return model_fold(fold:get())
-			end,
+			tone = "model",
 		}
-	end)
+	end, { min_w = 0, shrink = 1 })
 
 	-- The access mode: its icon and name; with plan mode on, "Plan" after it
 	-- and the icon in the accent (all that tells of it, folded).
 	local access: Node? = nil
 	if props.access then
+		local mode = props.access
+		local function access_tip(): string?
+			if labelled:get() then
+				return nil
+			end
+			for _, item in ACCESS() do
+				if item.value == mode:get() then
+					return item.label
+				end
+			end
+			return nil
+		end
 		access = Dropdown {
-			fold = function()
-				return math.min(left_fold(fold:get()), 2)
+			fold = function(): number
+				return if labelled:get() then 0 else 2
 			end,
+			tip = access_tip,
 			value = props.access,
 			accent = function(): boolean
 				return (props.access :: State<string?>):get() == "full"
@@ -1758,7 +1421,7 @@ return ui.component(function(props: Props): Node
 				end
 				return out
 			end,
-			tone = "chip",
+			tone = "access",
 			label = locale.t("ds.composer.access.label") :: any,
 			search = false,
 			width = 300,
@@ -1779,10 +1442,10 @@ return ui.component(function(props: Props): Node
 					return (props.access_note :: () -> string?)() ~= nil
 				end
 				else nil,
-			placement = { side = "bottom", align = "start", offset = 6 },
+			placement = { side = "bottom", align = "end", offset = 6 },
 		}
 	end
-	local mic = ui.show(dictating, Button {
+	local mic = if props.on_dictate == nil then nil else ui.show(dictating, Button {
 		tone = "accent",
 		shape = "pill",
 		size = "sm",
@@ -1818,9 +1481,7 @@ return ui.component(function(props: Props): Node
 		opacity = function(): number
 			return if send_blocked() then 0.35 else 1
 		end,
-		disabled = function()
-			return disabled() or not (has_text() or has_cargo())
-		end,
+		disabled = disabled,
 		on_click = function()
 			send()
 		end,
@@ -2587,14 +2248,26 @@ return ui.component(function(props: Props): Node
 				on_resize = measure(leading_seen, "w"),
 				gap = "$space.1",
 				items = "center",
-				ui.show(function()
-					return not asking()
-				end, attach),
-				if props.plan
-					then ui.show(function(): boolean
-						return available() and not asking() and not dictating()
-					end, plan_chip())
-					else nil,
+				ui.row {
+					hook = "chat.composer.toolbar.start",
+					gap = "$space.1",
+					items = "center",
+					ui.show(function()
+						return not asking()
+					end, attach),
+					if props.project and props.projects
+						then ui.show(function(): boolean
+							return not asking() and not dictating() and not (props.branch_fixed and props.branch_fixed() ~= nil)
+						end, project_chip(props.project, props.projects :: any, props.on_new_project, function(): number
+							return if labelled:get() then math.min(PROJECT_MAX, pill_w:get() * 0.25) else 0
+						end))
+						else nil,
+					if props.plan
+						then ui.show(function(): boolean
+							return available() and not asking() and not dictating()
+						end, plan_chip())
+						else nil,
+				},
 			},
 		},
 		voice_track(),
@@ -2609,9 +2282,28 @@ return ui.component(function(props: Props): Node
 			gap = "$space.2",
 			ui.show(asking, ask_controls()),
 			ui.show(function()
+				return not asking() and not dictating()
+			end, ui.row {
+				hook = "chat.composer.toolbar.end",
+				items = "center",
+				min_w = 0,
+				-- (Out of plugins' reach: it says what the agent may do unasked.)
+				if access then ui.div { on_resize = measure(access_seen, "w"), shrink = 0, hook = false, access } else nil,
+				ui.row {
+					items = "center",
+					min_w = 0,
+					max_w = function(): number
+						return model_cap:get()
+					end :: any,
+					model,
+				},
+			}),
+			ui.show(function()
 				return not asking()
 			end, ui.row {
+				on_resize = measure(actions_seen, "w"),
 				items = "center",
+				shrink = 0,
 				gap = "$space.2",
 				mic,
 				ui.show(stopping, stop_button),
@@ -2638,52 +2330,75 @@ return ui.component(function(props: Props): Node
 	}
 
 	local footer: Node? = nil
-	-- (Whether the footer sits on its tray: set as it's made, read by the
-	-- tray behind the pill.)
-	local footer_on_tray: (() -> boolean)? = nil
 	do
 		local left: { Child } = {}
-		local over_art = props.over_art
-		-- Over art, the footer sits on a tray (the pill's glass under it).
-		local function on_tray(): boolean
-			return over_art ~= nil and over_art()
+		local fixed = props.branch_fixed
+		local function new_chat(): boolean
+			return not (fixed and fixed() ~= nil)
 		end
-		footer_on_tray = on_tray
-		-- The access mode first, then where it works.
-		if access then
-			-- (Out of plugins' reach: it says what the agent may do unasked.)
-			table.insert(left, ui.div { on_resize = measure(access_w, "w"), shrink = 0, hook = false, access })
+		local project = props.project
+		local function in_project(): boolean
+			return project == nil or project:get() ~= NO_PROJECT
 		end
-		if props.branch then
-			local checkout = props.checkout
-			-- Built for each chip it heads (a node lives in one place).
-			local function head_node(): Node?
-				return if checkout or props.device or props.project
-					then work_in(props.project, props.projects :: any, props.on_new_project, checkout, props.device, props.devices :: any)
-					else nil
-			end
-			-- In a project, its refs: the branch chip, its search and its
-			-- branches. With none, no refs to pick: the chip says so (a folder,
-			-- "No project"), and opens on where to work alone. One dropdown
-			-- either way, so its panel stays open as the project changes.
-			local project = props.project
-			local function in_project(): boolean
-				return project == nil or project:get() ~= NO_PROJECT
-			end
-			-- The project chosen, as the projects list it (nil: none, or
-			-- none named: a caller with no projects).
-			local function chosen_project(): Project?
-				if not project or not props.projects or not in_project() then
-					return nil
+		local draft: { Child } = {}
+		-- A new chat's, as gpui's: the device, then the branch and the checkout, a
+		-- project's alone. (Cloud's machine checks the repository out itself.)
+		if props.device and props.devices then
+			local device = props.device :: State<string?>
+			local devices = props.devices
+			local function choices(): { Choice }
+				local out: { Choice } = {}
+				for _, d in list_of(devices) :: { Device } do
+					local icon: Icon.Name = if d.cloud then "cloud" else "monitor"
+					table.insert(out, {
+						value = d.value,
+						label = d.label,
+						icon = icon,
+						tag = if d.you then locale.s("ds.composer.device.you") else nil,
+						warn = d.offline,
+						description = d.description,
+						disabled = d.disabled,
+					})
 				end
-				local v = project:get()
-				for _, pr in list_of(props.projects) :: { Project } do
-					if pr.value == v then
-						return pr
+				return out
+			end
+			local function chosen(): Choice?
+				local v = device:get()
+				for _, c in choices() do
+					if c.value == v then
+						return c
 					end
 				end
-				return nil
+				return choices()[1]
 			end
+			table.insert(draft, ui.show(function(): boolean
+				return #choices() > 0
+			end, Dropdown {
+				value = device,
+				items = choices,
+				label = locale.t("ds.composer.device.label") :: any,
+				search = locale.s("ds.composer.device.search"),
+				width = 260,
+				trigger = function(m: Dropdown.Menu): Node
+					return footer_chip({
+						label = locale.t("ds.composer.device.label"),
+						icon = function(): string
+							local c = chosen()
+							return if c and c.icon then c.icon else "monitor"
+						end,
+						says = function(): string
+							local c = chosen()
+							return if c then c.label else ""
+						end,
+						warn = function(): boolean
+							local c = chosen()
+							return c ~= nil and c.warn == true
+						end,
+					}, m)
+				end,
+			}))
+		end
+		if props.branch then
 			-- The branch's name as its row has it, else as it is (its list
 			-- still coming), else "No ref".
 			local branch_state = props.branch :: State<string?>
@@ -2696,18 +2411,7 @@ return ui.component(function(props: Props): Node
 				end
 				return v or locale.s("ds.composer.branch.no_ref")
 			end
-			-- Where it runs off the branch: Cloud's machine, a worktree, or
-			-- (nil) the project's own checkout.
-			local function runs_in(): Icon.Name?
-				if on_cloud(props.device, props.devices) then
-					return "cloud"
-				end
-				return if checkout and checkout:get() == "local" then nil else "worktree"
-			end
-			local function folded(): boolean
-				return left_fold(fold:get()) >= 3
-			end
-			local picker = Dropdown {
+			table.insert(draft, ui.show(in_project, Dropdown {
 				value = props.branch,
 				label = locale.t("ds.composer.branch.label") :: any,
 				-- (A string: Dropdown names its field by it only so.)
@@ -2716,80 +2420,69 @@ return ui.component(function(props: Props): Node
 				empty = props.branches_empty,
 				cap = REFS_SHOWN,
 				cap_words = refs_cap_words,
-				list_when = in_project,
-				width = 280,
-				head = head_node(),
-				-- The chip: [tile] project › [glyph] branch, washed under the
-				-- pointer and while its panel is open, as a chip is.
-				trigger = function(menu: Dropdown.Menu): Node
-					return ui.button {
+				width = 320,
+				trigger = function(m: Dropdown.Menu): Node
+					return footer_chip({
 						label = locale.t("ds.composer.branch.label"),
-						h = CHIP_H,
-						px = "$zeron.space.tight",
-						gap = "$zeron.space.tight",
-						items = "center",
-						min_w = 0,
-						rounded = CHIP_RADIUS,
-						text_size = "$font.size.sm",
-						weight = "$font.weight.medium",
-						bg = function(): string
-							return if menu.open:get() then "$hover" else "#00000000"
+						icon = function(): string
+							return "git-branch"
 						end,
-						color = "$text.tertiary",
-						hover = { bg = "$hover", color = "$text.secondary" },
-						active = { bg = "$pressed", color = "$text.secondary" },
-						on_click = menu.toggle,
-						table.unpack(place_line {
-							project = chosen_project,
-							in_project = in_project,
-							branch = branch_name,
-							glyph = runs_in,
-							folded = folded,
-							on_measures = place_measures,
-						}),
-					}
+						says = branch_name,
+						says_id = "composer-place-branch",
+					}, m)
 				end,
-			}
-			-- An existing chat's: where it works, said (Zeron's footer label),
-			-- its branch, which opens its refs, and how its worktree stands.
-			local fixed = props.branch_fixed
-			local static: Node? = if fixed then session_footer(fixed, props.branch_menu, folded, place_measures) else nil
-			table.insert(
-				left,
-				ui.row {
-					on_resize = measure(where_w, "w"),
-					min_w = 0,
-					if static
-						then ui.show(function(): boolean
-							return (fixed :: any)() ~= nil
-						end, static, picker)
-						else picker,
-				}
-			)
+			}))
+		end
+		if props.checkout then
+			local checkout = props.checkout :: State<string?>
+			local function kind(): Choice
+				local v = checkout:get()
+				local all = CHECKOUTS()
+				for _, c in all do
+					if c.value == v then
+						return c
+					end
+				end
+				return all[2]
+			end
+			table.insert(draft, ui.show(function(): boolean
+				return in_project() and not on_cloud(props.device, props.devices)
+			end, Dropdown {
+				value = checkout,
+				items = CHECKOUTS,
+				label = locale.t("ds.composer.checkout.label") :: any,
+				search = false,
+				width = 260,
+				trigger = function(m: Dropdown.Menu): Node
+					return footer_chip({
+						label = locale.t("ds.composer.checkout.label"),
+						icon = function(): string
+							return kind().icon or "folder"
+						end,
+						says = function(): string
+							return kind().label
+						end,
+					}, m)
+				end,
+			}))
+		end
+		local draft_row = ui.row { gap = "$space.1", items = "center", min_w = 0, table.unpack(draft) }
+		if fixed then
+			table.insert(left, ui.show(function(): boolean
+				return not new_chat()
+			end, session_footer(fixed, props.branch_menu), ui.show(new_chat, draft_row)))
+		else
+			table.insert(left, draft_row)
 		end
 		footer = ui.row {
 			id = props.toolbar_id,
-			on_resize = measure(footer_w, "w"),
 			h = 24,
-			-- On the tray: a tight step under the pill and above the tray's
-			-- foot (the pill's full control inset read too airy there), and
-			-- the pill's controls' inset from its sides, lined up with + and
-			-- Send.
-			mt = function(): any
-				return if on_tray() then `${TRAY_GAP}` else "$space.2"
-			end :: any,
-			mb = function(): any
-				return if on_tray() then `${TRAY_GAP}` else 0
-			end :: any,
-			px = function(): any
-				return if on_tray() then ui.raw(TRAY_INSET, "the pill's controls' inset") else "$zeron.space.snug"
-			end :: any,
+			mt = "$space.2",
+			px = "$zeron.space.snug",
 			items = "center",
 			gap = "$space.1",
-			-- Clipped: past every fold, it gives way under the right group
-			-- rather than running beneath it.
+			-- Clipped: its chips give way under what stays on the right.
 			ui.row {
-				hook = "chat.composer.toolbar.start",
 				gap = "$space.1",
 				items = "center",
 				min_w = 0,
@@ -2798,11 +2491,9 @@ return ui.component(function(props: Props): Node
 				table.unpack(left),
 			},
 			ui.row {
-				hook = "chat.composer.toolbar.end",
-				on_resize = measure(right_w, "w"),
 				items = "center",
 				shrink = 0,
-				ui.row { on_resize = measure(model_w, "w"), items = "center", shrink = 0, model },
+				gap = "$space.1",
 				if props.usage
 					then ui.show(function(): boolean
 						local u = (props.usage :: () -> Usage?)()
@@ -2956,48 +2647,6 @@ return ui.component(function(props: Props): Node
 		opacity = function(): number
 			return if disabled() then (ui.theme.get("zeron.disabled") :: number?) or 0.4 else 1
 		end,
-		-- The tray (over a wallpaper): the pill's glass continued under the
-		-- footer, tucked behind the pill (its top hidden under it, its sides
-		-- the pill's), so the chips sit on the composer's surface rather than
-		-- on the art. They sit as far in from its sides as the pill's own
-		-- controls sit in it (TRAY_INSET), a tight step (TRAY_GAP) below the
-		-- pill and above its foot; its height is theirs (tray_h), its corner
-		-- the trays'.
-		ui.presence(function(): string?
-			return if footer_on_tray and footer_on_tray() then "tray" else nil
-		end, function(): Node
-			return ui.div {
-				class = "composer-tray",
-				absolute = true,
-				left = 0,
-				right = 0,
-				bottom = 0,
-				h = tray_h,
-				pointer_events = "none",
-				-- Its corner at its foot only, its top square, and no edge of
-				-- its own anywhere: it is the pill's glass continued (the pill
-				-- keeps its edge). A rounded top, or a hairline, showed a second
-				-- curve against the pill's own.
-				rounded = "$zeron.composer.tray.radius",
-				rounded_tl = 0,
-				rounded_tr = 0,
-				bg = function(): string
-					return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
-				end,
-				backdrop_blur = function(): number
-					return if material.see_through() then 16 else 0
-				end,
-			}
-		end, {
-			absolute = true,
-			left = 0,
-			right = 0,
-			bottom = 0,
-			h = tray_h,
-			pointer_events = "none",
-			enter = { opacity = { 0, 1 }, duration = 220, ease = "out(3)" },
-			exit = { opacity = 0, duration = 160 },
-		}),
 		side_tab(),
 		trays,
 		caption_line(),
@@ -3016,6 +2665,19 @@ return ui.component(function(props: Props): Node
 				pointer_events = "none",
 				opacity = ui.tween(ui.computed(function(): number
 					return if plan_on() then 0.14 else 0
+				end), { duration = 300, ease = motion.EASE }),
+			},
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				rounded = "$zeron.composer.radius",
+				shadow = "$zeron.composer.plan_glow",
+				pointer_events = "none",
+				opacity = ui.tween(ui.computed(function(): number
+					return if plan_on() then 1 else 0
 				end), { duration = 300, ease = motion.EASE }),
 			},
 			surface,

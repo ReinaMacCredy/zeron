@@ -4,7 +4,7 @@
 //! A `tooltip = …` that builds a node builds it through the hover card
 //! (`HoverCard.Card`, `HoverCard.Tip`, or what is made of them: `Tooltip`,
 //! `context_usage.Card`). The hover card's frame is the menus' glass
-//! (`glass.style(…, "menu")`, as ds/menu's panels are), so a hover card and
+//! (`glass.style(…, "popup")`, as ds/menu's panels are), so a hover card and
 //! a picker's menu are one material; the files built on it paint no fill,
 //! edge, shadow or blur of their own round it. (zgx b75d8e74f finds a popup's
 //! card through its clear layer: no second rim, AppKit's material under it.
@@ -119,8 +119,8 @@ fn a_hover_card_wears_the_menus_surface_and_nothing_else_frames_it() {
     // The frame: the menus' glass, as ds/menu's panels take it.
     let frame = std::fs::read_to_string(root.join("ds/hover_card.luau")).expect("ds/hover_card.luau");
     let code: String = frame.lines().map(code).collect::<Vec<_>>().join("\n");
-    if !code.contains("glass.style(") || !code.contains("\"menu\"") {
-        wrong.push("ds/hover_card.luau: its frame isn't the menus' glass (`glass.style(props, \"menu\")`)".to_owned());
+    if !code.contains("glass.style(") || !code.contains("\"popup\"") {
+        wrong.push("ds/hover_card.luau: its frame isn't the menus' glass (`glass.style(props, \"popup\")`)".to_owned());
     }
     for needle in ["bg =", "border =", "shadow =", "backdrop_blur =", "rounded ="] {
         for (n, line) in frame.lines().enumerate() {

@@ -309,7 +309,8 @@ function M.tokens(p: Palette): ({ [string]: any }?, { Fix })
 		["zeron.window"] = bg,
 		background = tint,
 		["glass.tint"] = tint,
-		["popover.bg"] = pick(M.mix(raised, card, 0.25), card),
+		["popover.bg"] = bg,
+		["zeron.browser_overlay"] = pick(M.mix(raised, card, 0.25), card),
 		["surface.sunken"] = pick(a(M.mix(shell, BLACK, 0.45), 0.76), a(text, 0.05)),
 		["surface.base"] = pick(a(text, 0.03), a(card, 0.4)),
 		["surface.raised"] = pick(a(text, 0.06), a(card, 0.78)),
@@ -350,6 +351,8 @@ function M.tokens(p: Palette): ({ [string]: any }?, { Fix })
 		["zeron.segmented.thumb"] = pick(a(text, 0.14), a(card, 0.55)),
 		["zeron.menu.tint"] = a(shell, pick(0.65, 0.45)),
 		["zeron.menu.solid"] = menu,
+		["zeron.popup.tint"] = bg,
+		["zeron.popup.solid"] = menu,
 		["zeron.menu.selected"] = a(text, pick(0.09, 0.06)),
 		-- The composer: the chrome's glass, opaque the card's.
 		["zeron.composer.tint"] = pick(a(shell, 0.35), a(card, 0.55)),

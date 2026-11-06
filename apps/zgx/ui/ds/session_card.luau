@@ -1,7 +1,7 @@
 -- A session's card, as Zeron's hover card (crates/ui shell/session_hover_card.rs):
 -- its title (three lines at most), how long ago it moved, where it runs
 -- (this device's glyph, or a remote one), its project and its branch. One
--- surface, the menus' glass (ds/glass): what floats over the page. It takes
+-- surface, the pill's tone (ds/glass): what floats over the page. It takes
 -- no pointer; whoever places it shows and hides it (the sidebar, on a rest).
 --
 --   SessionCard { title = fn, time = fn, device = fn, here = fn,
@@ -67,7 +67,7 @@ end
 
 return function(props: Props): Node
 	return Glass.Panel {
-		kind = "menu",
+		kind = "surface",
 		class = "session-card",
 		provide = if props.session then { session = props.session } else nil,
 		w = W,

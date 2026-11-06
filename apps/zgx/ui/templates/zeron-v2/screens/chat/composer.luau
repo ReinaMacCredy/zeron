@@ -22,7 +22,6 @@ local prefs = require("@app/screens/settings/prefs")
 local store = require("@app/screens/chat/store")
 local route = require("@app/screens/shell/route")
 local cloud = require("@account/cloud")
-local art = require("@app/screens/shell/art")
 local shared = require("@app/screens/chat/shared")
 local sessions = require("@account/sessions")
 local LinkNotice = require("@app/screens/chat/link_notice")
@@ -1127,14 +1126,9 @@ local function Composer(): Node
 				end
 				return { tokens = s.context_tokens, window = s.context_window }
 			end,
-			-- A new chat stands over its wallpaper (Settings → Appearance):
-			-- the footer's chips take their backing.
-			over_art = function(): boolean
-				return shown_new() and art.showing:get()
-			end,
 			project = project,
 			projects = where.projects,
-			-- (Work in's "New project": the shell's New project palette.)
+			-- (The shell's New project palette.)
 			on_new_project = function()
 				local add: any = require("@app/screens/shell/boundary").load("@app/screens/shell/add_project")
 				if add then

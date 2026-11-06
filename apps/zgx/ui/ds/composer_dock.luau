@@ -6,12 +6,12 @@
 -- person will act on soonest: the queue (their own words, sent next), what
 -- is running (now), the plan (the whole).
 --
--- One tray is open at a time. The others fold to their header, a line
--- that still says what matters: "Todo 3/7 · Porting the queue's reorder",
--- "Running 2 · cargo test · 2m 14s", "Queued 2 · Then run the tests…".
--- Opening one folds the rest; a tray whose work is done folds itself (the
--- plan once every step is done and the turn is idle). A queue or plan that
--- arrives while nothing is open, opens; what is running stays folded.
+-- The queue's rows stand stacked, no head of their own, as gpui's. Of the
+-- others one is open at a time; the other folds to its header, a line that
+-- still says what matters: "Todo 3/7 · Porting the queue's reorder",
+-- "Running 2 · cargo test · 2m 14s". A tray whose work is done folds itself
+-- (the plan once every step is done and the turn is idle). A plan that arrives
+-- while nothing is open, opens; what is running stays folded.
 --
 --   Dock { queue = queued, todos = plan, tasks = running, open = tray, … }
 --
@@ -1031,7 +1031,7 @@ M.Dock = ui.component(function(props: Props): Node
 	local todos_chosen = false
 	ui.effect(function()
 		local now = open:get()
-		if now == "queue" and not has_queue() then
+		if now == "queue" then
 			open:set(nil)
 		elseif now == "todos" and not has_todos() then
 			open:set(nil)
@@ -1042,16 +1042,15 @@ M.Dock = ui.component(function(props: Props): Node
 	-- What is running doesn't: it stays folded to its header ("Running 3 ·
 	-- cargo test · 2m") until opened, as a session can hold a score of
 	-- processes for hours. Opened, it stays open while any run.
-	local seen = { queue = false, working = false, finished = false, settled = false }
+	local seen = { working = false, finished = false, settled = false }
 	ui.effect(function()
-		local q = has_queue()
 		local done = finished()
 		local working = has_todos() and not done
 		local settled = done and not live()
-		local arrived: Tray? = if q and not seen.queue then "queue" elseif working and not seen.working and not todos_chosen then "todos" else nil
+		local arrived: Tray? = if working and not seen.working and not todos_chosen then "todos" else nil
 		local into_settled = settled and not seen.settled
 		local into_finished = done and not seen.finished
-		seen.queue, seen.working, seen.finished, seen.settled = q, working, done, settled
+		seen.working, seen.finished, seen.settled = working, done, settled
 		if into_settled then
 			todos_chosen = false
 		end
@@ -1320,10 +1319,6 @@ M.Dock = ui.component(function(props: Props): Node
 	-- The queue.
 	if props.queue then
 		local queue = props.queue
-		local function summary(): string
-			local first = queue:get()[1]
-			return if first then (string.gsub(first.text, "%s+", " ")) else ""
-		end
 		local body = ui.column {
 			w_full = true,
 			role = "list",
@@ -1366,7 +1361,9 @@ M.Dock = ui.component(function(props: Props): Node
 				end,
 			}),
 		}
-		local trail: { Node } = {}
+		-- Rows stacked with no head of their own, always open, as gpui's. Steer all
+		-- (upstream #1150, not gpui's) stands over them while it can do something.
+		local steer_all: Node? = nil
 		if props.on_queue_steer_all then
 			local function can_steer_all(): boolean
 				local s = props.can_steer
@@ -1382,34 +1379,31 @@ M.Dock = ui.component(function(props: Props): Node
 				end
 				return n >= 2
 			end
-			table.insert(trail, ui.show(can_steer_all, Button {
-				locale.t("ds.composer_dock.steer_all"),
-				size = "xs",
-				tone = "ghost",
-				h = 24,
-				px = "$space.2",
-				text_size = SMALL,
-				tooltip = locale.s("ds.composer_dock.steer_all_hint"),
-				tooltip_delay = 350,
-				on_click = function()
-					(props.on_queue_steer_all :: () -> ())()
-				end,
-			}))
+			steer_all = ui.show(can_steer_all, ui.row {
+				w_full = true,
+				justify = "end",
+				Button {
+					locale.t("ds.composer_dock.steer_all"),
+					size = "xs",
+					tone = "ghost",
+					h = 24,
+					px = "$space.2",
+					text_size = SMALL,
+					tooltip = locale.s("ds.composer_dock.steer_all_hint"),
+					tooltip_delay = 350,
+					on_click = function()
+						(props.on_queue_steer_all :: () -> ())()
+					end,
+				},
+			})
 		end
 		table.insert(
 			trays,
 			ui.show(
 				has_queue,
-				tray(queue_level, head({
-					id = "queue",
-					glyph = Icon { name = "list", size = 14 },
-					title = "ds.composer_dock.queued",
-					count = function()
-						return tostring(#queue:get())
-					end,
-					summary = summary,
-					trail = trail,
-				}, open, geometry.header), body, opened("queue"), geometry, "queue")
+				tray(queue_level, steer_all, body, function(): boolean
+					return true
+				end, geometry, "queue")
 			)
 		)
 	end

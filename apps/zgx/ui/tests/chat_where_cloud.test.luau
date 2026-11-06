@@ -29,15 +29,7 @@ local function home(app: any)
 	settle(app)
 end
 
-local function panel(app: any)
-	if not showing(app, 'role:button "Device"') then
-		app:click('role:button "Branch"')
-		settle(app)
-	end
-end
-
 local function open_row(app: any, row: string)
-	panel(app)
 	app:click(`role:button "{row}"`)
 	settle(app)
 end
@@ -52,7 +44,7 @@ local function chosen(app: any, row: string): string
 	rested(app)
 	local words = {}
 	for line in app:tree(`role:button "{row}"`):gmatch("[^\n]+") do
-		local t = line:match('text "([^"]*)"')
+		local t = if line:match('button "') then nil else line:match('"([^"]*)"')
 		if t then
 			table.insert(words, t)
 		end
@@ -62,12 +54,11 @@ end
 
 local function chip(app: any): string
 	rested(app)
-	-- (The chip: [tile] project › branch. The branch, in a project; else
-	-- what stands in its place, "No project".)
-	if app:has('role:button "Branch" >> #composer-place-branch') then
+	-- (The branch's chip, in a project; else the project's, "No project".)
+	if showing(app, 'role:button "Branch"') then
 		return app:text('role:button "Branch" >> #composer-place-branch[1]')
 	end
-	return app:text('role:button "Branch" >> #composer-place-project[1]')
+	return app:text("#composer-place-project[1]")
 end
 local function close(app: any)
 	app:key("Escape")
@@ -108,8 +99,9 @@ test("on Cloud, the branches are GitHub's and there's no checkout to choose", fu
 	expect(chosen(app, "Project")).to_contain("Atlas")
 	expect(cloud_calls(app)).to_contain("cloud.branches:acme/atlas")
 	expect(chip(app)).to_be("main")
-	panel(app)
 	expect(showing(app, 'role:button "Checkout"')).to_be(false)
+	app:click('role:button "Branch"')
+	settle(app)
 	expect(app:has('role:option "main Default"')).to_be(true)
 	expect(app:has('role:option "release/3.0"')).to_be(true)
 	-- On Cloud, the projects are those it can open.
@@ -123,7 +115,6 @@ test("on Cloud, the branches are GitHub's and there's no checkout to choose", fu
 	-- And back to this computer: its checkout again, git's branches.
 	pick_in(app, "Device", "MacBook Pro")
 	expect(chosen(app, "Project")).to_contain("Atlas")
-	panel(app)
 	expect(showing(app, 'role:button "Checkout"')).to_be(true)
 end)
 

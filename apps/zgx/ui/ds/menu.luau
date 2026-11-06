@@ -333,7 +333,7 @@ function M.Panel(props: ContainerProps): Node
 	local p = table.clone(props)
 	p.p = p.p or 0
 	p.gap = p.gap or 0
-	glass.style(p, "menu")
+	glass.style(p, "popup")
 	return ui.column(p)
 end
 
@@ -342,7 +342,7 @@ end
 function M.panel(props: { [any]: any }): { [any]: any }
 	props.p = props.p or 0
 	props.gap = props.gap or 0
-	return glass.style(props, "menu")
+	return glass.style(props, "popup")
 end
 
 return M

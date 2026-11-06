@@ -272,6 +272,9 @@ local function footer_words(app: any): string
 	for t in app:tree(".side-chat-tab"):gmatch('text "([^"]*)"') do
 		table.insert(out, t)
 	end
+	for t in app:tree(".side-chat-tab"):gmatch('#composer%-place%-[%w]+ "([^"]*)"') do
+		table.insert(out, t)
+	end
 	return table.concat(out)
 end
 
@@ -285,12 +288,16 @@ test("a new side chat's footer is the chat page's: access, where it works, the m
 	expect(app:has('.side-chat-tab >> role:button "Branch"')).to_be(true)
 	expect(footer_words(app)).to_contain("atlas")
 	expect(footer_words(app)).to_contain("main")
-	-- In the chat page's order: access, place, then the model.
-	local function x(target: string): number
-		return tonumber((app:tree(target):match(" (%-?%d+),%-?%d+ %d+x%d+"))) or -1
+	-- As the chat page's: access then the model in the pill, the place under it.
+	local function at(target: string): (number, number)
+		local x, y = app:tree(target):match(" (%-?%d+),(%-?%d+) %d+x%d+")
+		return tonumber(x) or -1, tonumber(y) or -1
 	end
-	local a, b, m = x('.side-chat-tab >> role:button "Access"'), x('.side-chat-tab >> role:button "Branch"'), x('.side-chat-tab >> role:button "Model"')
-	expect(a < b and b < m).to_be(true)
+	local ax, ay = at('.side-chat-tab >> role:button "Access"')
+	local mx = at('.side-chat-tab >> role:button "Model"')
+	local _, by = at('.side-chat-tab >> role:button "Branch"')
+	expect(ax < mx).to_be(true)
+	expect(by > ay).to_be(true)
 	-- Sent as it stands: made where its parent is (no place of its own), with
 	-- the parent's access.
 	app:type('.side-chat-tab >> role:textbox', "hi")
