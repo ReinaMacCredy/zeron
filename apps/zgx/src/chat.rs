@@ -98,6 +98,8 @@ struct Chats {
     harnesses: RefCell<Vec<Json>>,
     /// Models by harness, as the engine lists them.
     models: RefCell<HashMap<String, Vec<Json>>>,
+    // What stopped an agent's models listing, for its row in the picker.
+    model_errors: RefCell<HashMap<String, String>>,
     catalog: RefCell<Vec<Shared>>,
     catalog_state: Cell<CatalogState>,
     views: RefCell<Vec<Weak<View>>>,
@@ -986,6 +988,17 @@ impl Chats {
             .iter()
             .filter_map(|h| h["id"].as_str().map(Into::into))
             .collect();
+        let seeded = if mock { mock_catalog() } else { None };
+        let mut harnesses = harnesses;
+        let mut ids = ids;
+        if let Some(seed) = &seeded {
+            for h in seed["harnesses"].as_array().into_iter().flatten() {
+                let Some(id) = h["id"].as_str() else { continue };
+                ids.retain(|x| x != id);
+                harnesses.retain(|x| x["id"].as_str() != Some(id));
+                harnesses.push(h.clone());
+            }
+        }
         crate::agents::remember_icons(&harnesses);
         *self.harnesses.borrow_mut() = harnesses;
         for id in &ids {
@@ -994,6 +1007,14 @@ impl Chats {
         }
         if !again {
             self.models.borrow_mut().retain(|id, _| ids.contains(id));
+        }
+        if let Some(seed) = &seeded {
+            for (id, list) in seed["models"].as_object().into_iter().flatten() {
+                self.models.borrow_mut().insert(id.clone(), listed_models(&json!({ "models": list, "newIds": seed["newIds"] })));
+            }
+            for (id, error) in seed["errors"].as_object().into_iter().flatten() {
+                self.model_errors.borrow_mut().insert(id.clone(), error.as_str().unwrap_or_default().to_owned());
+            }
         }
         let left = Rc::new(Cell::new(ids.len()));
         if ids.is_empty() {
@@ -1008,11 +1029,15 @@ impl Chats {
                     .await
                 {
                     Ok(list) => {
+                        me.model_errors.borrow_mut().remove(&id);
                         me.models
                             .borrow_mut()
                             .insert(id, listed_models(&list));
                     }
-                    Err(error) => eprintln!("zeron-zgx: chat: {id}'s models didn't list: {error}"),
+                    Err(error) => {
+                        eprintln!("zeron-zgx: chat: {id}'s models didn't list: {error}");
+                        me.model_errors.borrow_mut().insert(id, error.to_string());
+                    }
                 }
                 left.set(left.get() - 1);
                 if left.get() == 0 {
@@ -1150,7 +1175,7 @@ impl Chats {
     fn catalog_value(&self) -> Value {
         let unsupported = self.compaction_unsupported.borrow();
         if let Some(r) = self.remote.borrow().as_ref() {
-            return catalog_of(&r.harnesses, &r.models, r.ready, Some(&r.device), &unsupported);
+            return catalog_of(&r.harnesses, &r.models, r.ready, Some(&r.device), &unsupported, &HashMap::new());
         }
         catalog_of(
             &self.harnesses.borrow(),
@@ -1158,6 +1183,7 @@ impl Chats {
             self.catalog_state.get() == CatalogState::Ready,
             None,
             &unsupported,
+            &self.model_errors.borrow(),
         )
     }
 
@@ -1254,14 +1280,60 @@ pub(crate) async fn compaction_unsupported(harness: &str, device: Option<&str>) 
 /// have answered (`done`). (`device`: whose, when it isn't this one.)
 // The fork's engine answers a catalog (`{models, newIds, announceIds}`), upstream's a bare list.
 fn listed_models(reply: &Json) -> Vec<Json> {
-    reply["models"].as_array().or(reply.as_array()).cloned().unwrap_or_default()
+    let mut models = reply["models"].as_array().or(reply.as_array()).cloned().unwrap_or_default();
+    if let Some(new) = reply["newIds"].as_array() {
+        for m in &mut models {
+            if new.contains(&m["id"]) {
+                m["isNew"] = json!(true);
+            }
+        }
+    }
+    models
+}
+
+/// Every agent the picker has a tab for, in the catalog's order, those with no
+/// models yet saying why: still coming, or what stopped them.
+fn tabs_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, errors: &HashMap<String, String>, done: bool) -> Value {
+    let tabs: Vec<Value> = listed
+        .iter()
+        .map(|h| {
+            let id = h["id"].as_str().unwrap_or_default();
+            let error = errors.get(id);
+            let state = if by.get(id).is_some_and(|l| !l.is_empty()) {
+                "ready"
+            } else if error.is_some() {
+                "error"
+            } else if done {
+                "ready"
+            } else {
+                "loading"
+            };
+            Value::record([
+                ("id", Value::from(id)),
+                ("label", Value::from(h["name"].as_str().unwrap_or(id))),
+                ("mark", Value::from(mark(id).as_str())),
+                ("icon", h["icon"].as_str().map_or(Value::Nil, Value::from)),
+                ("state", Value::from(state)),
+                ("error", error.map_or(Value::Nil, |e| Value::from(e.as_str()))),
+            ])
+        })
+        .collect();
+    Value::List(tabs.into())
+}
+
+/// A dev catalog for the picker's proofs, from `ZERON_ZGX_MOCK_CATALOG` (a JSON
+/// file: `harnesses` as the engine lists them, `models` by agent, `errors` by
+/// agent) on a mock Dev. Its agents are listed, never run.
+fn mock_catalog() -> Option<Json> {
+    let path = std::env::var("ZERON_ZGX_MOCK_CATALOG").ok()?;
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
 fn steers_of(harness: &Json) -> bool {
     harness["supportsSteering"].as_bool() == Some(true) && harness["steeringMode"].as_str() == Some("step-boundary")
 }
 
-fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, device: Option<&str>, unsupported: &HashMap<String, String>) -> Value {
+fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, device: Option<&str>, unsupported: &HashMap<String, String>, errors: &HashMap<String, String>) -> Value {
     let any = by.values().any(|l| !l.is_empty());
     let state = if any || done { "ready" } else { "looking" };
     let mut harnesses = Vec::new();
@@ -1291,6 +1363,7 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, devi
         ("state", Value::from(state)),
         ("harnesses", Value::List(harnesses.into())),
         ("models", Value::List(models.into())),
+        ("tabs", tabs_of(listed, by, errors, done)),
     ];
     if let Some(device) = device {
         fields.push(("device", Value::from(device)));
@@ -1328,7 +1401,7 @@ fn model_value(harness: &str, m: &Json) -> Value {
     let start = ["high", "medium"]
         .into_iter()
         .find(|l| levels.contains(l))
-        .or(levels.last().copied());
+        .or(levels.first().copied());
     let fast = fast_option(m);
     let options: Vec<Value> = m["options"]
         .as_array()
@@ -1375,6 +1448,12 @@ fn model_value(harness: &str, m: &Json) -> Value {
         ("harness", Value::from(harness)),
         ("fast", Value::Bool(fast.is_some())),
     ];
+    if let Some(description) = m["description"].as_str().filter(|d| !d.trim().is_empty()) {
+        fields.push(("description", Value::from(description)));
+    }
+    if m["isNew"].as_bool() == Some(true) {
+        fields.push(("new", Value::Bool(true)));
+    }
     if !efforts.is_empty() {
         fields.push(("efforts", Value::List(efforts.into())));
     }
@@ -1430,6 +1509,14 @@ fn options_value(options: &Json) -> Value {
         .filter_map(|(k, v)| v.as_str().map(|s| (k.as_str(), Value::from(s))))
         .collect();
     Value::record(fields)
+}
+
+/// A provider switch's transcript divider, as gpui's `provider_switch_prompt`.
+fn provider_note(from: &str, to: &str) -> Json {
+    json!({
+        "text": format!("Provider changed from {from} to {to}."),
+        "hint": format!("{from} session closed. The messages above were handed to {to} as text on the next turn; {from}'s tool results and file state were not carried."),
+    })
 }
 
 fn effort_label(level: &str) -> &str {
@@ -2116,7 +2203,12 @@ impl View {
             let mut params = json!({ "op": "setChatConfig", "chatId": id, "config": config });
             // (Its divider, with the conversation handed over.)
             if switching {
-                params["note"] = json!({ "text": format!("Switched to {}", config["harness"].as_str().unwrap_or_default()) });
+                let name = |h: &Json| {
+                    let id = h.as_str().unwrap_or_default();
+                    chats.harness_name(id).unwrap_or_else(|| id.to_owned())
+                };
+                let (from, to) = (name(&chat["config"]["harness"]), name(&config["harness"]));
+                params["note"] = provider_note(&from, &to);
             }
             if let Err(e) = engine::get().call("Mutate", params).await {
                 eprintln!("zeron-zgx: chat: a chat's config wasn't set: {e}");
@@ -2345,11 +2437,12 @@ impl View {
             c["config"] = config.clone();
         }
         chats.publish_views();
-        engine::get()
-            .call("Mutate", json!({ "op": "setChatConfig", "chatId": id, "config": config }))
-            .await
-            .map(|_| ())
-            .map_err(|e| engine::outcome(&e))
+        let mut params = json!({ "op": "setChatConfig", "chatId": id, "config": config });
+        // The switch's divider, as the dialog worded it.
+        if let Some(note) = args.field("note").map(text).filter(|t| !t.is_empty()) {
+            params["note"] = json!({ "text": note, "hint": args.field("note_hint").map(text) });
+        }
+        engine::get().call("Mutate", params).await.map(|_| ()).map_err(|e| engine::outcome(&e))
     }
 
     /// A queued message's text, taken to be edited here: the lease asked
