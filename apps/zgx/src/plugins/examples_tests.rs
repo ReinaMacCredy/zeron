@@ -413,6 +413,33 @@ fn refresh_until(app: &mut TestApp, done: impl Fn(&mut TestApp) -> bool) -> bool
 }
 
 #[test]
+fn github_s_pull_request_stands_in_the_composer_s_footer() {
+    let items = vec![builtin("github")];
+    let github = world(json!({ "viewer": "ada", "repository": "zeronsh/zgx", "branches": { "fix/build": branch_pr(1264, "OPEN", json!({})) } }));
+    let (mut app, heard) = shell_with(items.clone(), github.clone());
+    assert_eq!(app.error(), None, "the shell with GitHub failed");
+    publish_records(&app, &items);
+    app.frames(10);
+    let say_project = |app: &TestApp, project: &str| {
+        app.host.shared("fixture.chats", json_value(&json!({}))).set(json_value(&json!({ "a1": { "session": { "id": "a1", "state": "ready", "project": project } } })));
+    };
+    say_project(&app, "atlas");
+    app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    app.frames(20);
+    assert!(refresh_until(&mut app, |app| app.target("#composer-toolbar >> .github-pr-badge").is_ok()), "{}", app.tree());
+    say_project(&app, "no-git-here");
+    assert!(app.wait_until(|app| !app.target("#composer-toolbar >> .github-pr-badge").is_ok()), "{}", app.tree());
+    say_project(&app, "atlas");
+    assert!(app.wait_until(|app| app.target("#composer-toolbar >> .github-pr-badge").is_ok()), "{}", app.tree());
+    app.click("#composer-toolbar >> .github-pr-badge");
+    app.frames(5);
+    let heard = heard.borrow();
+    let (_, tab) = heard.iter().find(|(k, _)| k == "plugin.github.open_tab").expect("a tab asked for");
+    let tab: serde_json::Value = serde_json::from_str(tab).unwrap();
+    assert_eq!((tab["kind"].as_str(), tab["data"]["number"].as_f64()), (Some("github-pr"), Some(1264.)));
+}
+
+#[test]
 fn github_shows_each_session_s_pull_request_beside_its_title() {
     let items = vec![builtin("github")];
     let github = world(json!({ "viewer": "ada", "repository": "zeronsh/zgx", "branches": {} }));

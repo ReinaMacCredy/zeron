@@ -134,6 +134,8 @@ function M.view(slot: string): any
 			session = ui.shared(`chat.lane.{slot}.session`, nil :: any),
 			messages = ui.shared(`chat.lane.{slot}.messages`, {} :: { any }),
 			draft = ui.shared(`chat.lane.{slot}.draft`, { id = "", text = "" } :: any),
+			stats = ui.shared(`chat.lane.{slot}.stats`, nil :: any),
+			token_rate = ui.shared(`chat.lane.{slot}.token_rate`, nil :: number?),
 		}
 	end
 	return views[slot]
@@ -141,6 +143,11 @@ end
 
 -- Watch `id` in `slot` (none: let it go). A finished subagent (`frozen`,
 -- under `chat`) is read from its upload first, as the shipping app does.
+-- (A host older than this has no such action: its lanes just keep their streams.)
+function M.on_screen(slot: string, shown: boolean)
+	pcall(ui.invoke, "chat.lane_on_screen", { slot = slot, shown = shown })
+end
+
 function M.watch(slot: string, id: string?, frozen: boolean?, chat: string?)
 	ui.invoke("chat.open_lane", {
 		slot = slot,

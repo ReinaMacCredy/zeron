@@ -116,6 +116,37 @@
       "expand_finished": "展开 {n} 个已完成的子智能体",
       "finished": "{n} 个已完成"
     },
+    "session_stats": {
+      "heading": "会话统计",
+      "turns": "{n, plural, other {{count} 轮}}",
+      "steps": "{n, plural, other {{count} 步}}",
+      "chip": "{turns} {steps}",
+      "tail": "· {n} tok/s",
+      "tok_s": "{n} tok/s",
+      "cold": "已过期",
+      "refreshing": "刷新中 · {tier}",
+      "left": "剩余 {left} · {tier}",
+      "expired": "{ago}前已过期",
+      "cost_heading": "会话费用",
+      "no_price": "暂无已知价格",
+      "tokens": "{n} tokens",
+      "legend": {
+        "input": "输入",
+        "cache_read": "缓存读取",
+        "cache_write": "缓存写入",
+        "output": "输出"
+      },
+      "excludes": "{n, plural, other {不含 {count} 轮无已知价格的模型}}",
+      "estimated": "按公开 API 价格估算",
+      "llm": "LLM 用时",
+      "tool": "工具用时",
+      "ttft": "平均首字时间 (TTFT)",
+      "tps": "每秒 token 数 (TPS)",
+      "ttl": "缓存 TTL",
+      "hit": "缓存命中率",
+      "hit_value": "{n}%",
+      "missing": "—"
+    },
     "session_card": {
       "ago": "{when}前",
       "no_project": "无项目",
@@ -127,6 +158,11 @@
       "label": "运行中",
       "sending": "正在发送…",
       "word": "{word}…",
+      "queued": "已排队，将自动发送",
+      "starting_cloud": "正在启动 Cloud 机器",
+      "waking_cloud": "正在唤醒 Cloud 机器",
+      "consulting": "正在咨询顾问",
+      "rate": "· {n} tok/s",
       "words": {
         "zeroning": "归零",
         "thinking": "思考",
@@ -697,6 +733,7 @@
         "waiting": "正在等待上下文用量",
         "unreported": "此智能体尚未报告上下文用量"
       },
+      "terminal": "终端",
       "resume": "继续",
       "side_chat": "侧边对话",
       "side_chat_tip": "侧边对话 (/btw)：在旁边提问，在右侧窗格打开",

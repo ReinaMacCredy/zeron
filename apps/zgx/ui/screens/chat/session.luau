@@ -30,6 +30,7 @@ local pictures = ReplyImages.for_session(function(): any
 end)
 -- The pictures sent with its messages: on another device, read from there.
 local sessions = require("@account/sessions")
+local LinkNotice = require("@app/screens/chat/link_notice")
 local sent_pictures = ReplyImages.for_attachments(function(): any
 	local s = store.session:get()
 	if not s or s.state == "missing" then
@@ -294,6 +295,14 @@ local function Session(id: Id?): Node
 							end),
 							-- ⌘F's find (screens/chat/find): its matches marked.
 							find = Find.marks(),
+							working = {
+								rate = function(): number?
+									return store.token_rate:get()
+								end,
+								says = function(sending: boolean): string?
+									return LinkNotice.working_says(sending, sessions.now:get(), store.session:get())
+								end,
+							},
 						}
 					end),
 					Find.Bar(),

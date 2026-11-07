@@ -116,6 +116,37 @@
       "expand_finished": "Expand {n} finished subagents",
       "finished": "{n} finished"
     },
+    "session_stats": {
+      "heading": "Session statistics",
+      "turns": "{n, plural, one {1 turn} other {{count} turns}}",
+      "steps": "{n, plural, one {1 step} other {{count} steps}}",
+      "chip": "{turns} {steps}",
+      "tail": "· {n} tok/s",
+      "tok_s": "{n} tok/s",
+      "cold": "cold",
+      "refreshing": "Refreshing · {tier}",
+      "left": "{left} left · {tier}",
+      "expired": "Expired {ago} ago",
+      "cost_heading": "Session cost",
+      "no_price": "No known price",
+      "tokens": "{n} tokens",
+      "legend": {
+        "input": "Input",
+        "cache_read": "Cache read",
+        "cache_write": "Cache write",
+        "output": "Output"
+      },
+      "excludes": "{n, plural, one {Excludes 1 turn on a model with no known price} other {Excludes {count} turns on a model with no known price}}",
+      "estimated": "Estimated from public API prices",
+      "llm": "LLM time",
+      "tool": "Tool time",
+      "ttft": "Avg time to first token (TTFT)",
+      "tps": "Tokens per second (TPS)",
+      "ttl": "Cache TTL",
+      "hit": "Cache hit rate",
+      "hit_value": "{n}%",
+      "missing": "—"
+    },
     "session_card": {
       "ago": "{when} ago",
       "no_project": "No project",
@@ -127,6 +158,11 @@
       "label": "Working",
       "sending": "Sending…",
       "word": "{word}…",
+      "queued": "Queued — will send automatically",
+      "starting_cloud": "Starting a Cloud machine",
+      "waking_cloud": "Waking the Cloud machine",
+      "consulting": "Consulting advisor",
+      "rate": "· {n} tok/s",
       "words": {
         "zeroning": "Zeroning",
         "thinking": "Thinking",
@@ -697,6 +733,7 @@
         "waiting": "Waiting for context usage",
         "unreported": "Context usage not reported by this agent yet"
       },
+      "terminal": "Terminal",
       "resume": "Resume",
       "side_chat": "Side chat",
       "side_chat_tip": "Side chat (/btw): ask on the side, opens in the right pane",

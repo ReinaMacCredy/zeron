@@ -82,6 +82,7 @@ use crate::engine::{self, rpc::Watch};
 /// A live state older than this belongs to an engine that has gone (the
 /// shipping app's `SESSION_STALE_MS`).
 const STALE_SECS: i64 = 45;
+const SYNC_STALLED_AFTER: Duration = Duration::from_millis(35_000);
 /// A device whose presence beat is older than this is offline (the shipping
 /// app's `device_online`).
 const ONLINE_SECS: i64 = 70;
@@ -124,6 +125,9 @@ struct Sessions {
     live: RefCell<Json>,
     /// The engine's connection, as `WatchConnectivity` last said.
     connectivity: RefCell<Json>,
+    /// When each chat's sync began, for `stalled`.
+    sync_clocks: RefCell<HashMap<String, std::time::Instant>>,
+    stall_wake: Cell<bool>,
     /// Where the engine has sessions put, as its last frame said.
     confirmed: RefCell<Places>,
     places_ready: Cell<bool>,
@@ -273,7 +277,11 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                 let heard = Rc::downgrade(&s);
                 watches.push(rpc.watch(method, json!({}), move |item| {
                     if let Some(s) = heard.upgrade() {
+                        let connectivity = matches!(slot, Slot::Connectivity);
                         s.heard(slot, item);
+                        if connectivity {
+                            s.follow_sync_clocks();
+                        }
                     }
                 }));
             }
@@ -419,6 +427,34 @@ enum Slot {
 }
 
 impl Sessions {
+    fn follow_sync_clocks(self: &Rc<Self>) {
+        let now = std::time::Instant::now();
+        {
+            let c = self.connectivity.borrow();
+            let rows = c["chats"].as_array().map(Vec::as_slice).unwrap_or_default();
+            let mut clocks = self.sync_clocks.borrow_mut();
+            clocks.retain(|id, _| rows.iter().any(|chat| chat["chatId"] == id.as_str() && syncing(chat)));
+            for id in rows.iter().filter(|chat| syncing(chat)).filter_map(|chat| chat["chatId"].as_str()) {
+                clocks.entry(id.to_owned()).or_insert(now);
+            }
+        }
+        let deadline = self.sync_clocks.borrow().values().map(|began| *began + SYNC_STALLED_AFTER).filter(|at| *at > now).min();
+        let Some(deadline) = deadline else { return };
+        if self.stall_wake.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        engine::get().spawn(async move {
+            zgx::timer::sleep(deadline - now).await;
+            let Some(s) = weak.upgrade() else { return };
+            s.stall_wake.set(false);
+            if !stalled(&s.connectivity.borrow(), &s.sync_clocks.borrow(), std::time::Instant::now()).is_empty() {
+                s.publish();
+            }
+            s.follow_sync_clocks();
+        });
+    }
+
     fn heard(&self, slot: Slot, item: Json) {
         match slot {
             Slot::Chats => {
@@ -780,6 +816,7 @@ impl Sessions {
             })),
             ("live", Value::Bool(self.live_heard.get())),
             ("connection", connection(&self.connectivity.borrow()).map_or(Value::Nil, Value::from)),
+            ("stalled", Value::List(stalled(&self.connectivity.borrow(), &self.sync_clocks.borrow(), std::time::Instant::now()).iter().map(|id| Value::from(id.as_str())).collect())),
         ])
     }
 
@@ -1488,6 +1525,28 @@ fn connection(c: &Json) -> Option<&'static str> {
     }
 }
 
+/// gpui's `chat_syncing`.
+fn syncing(chat: &Json) -> bool {
+    chat["deliveryLive"].as_bool() != Some(true) && matches!(chat["syncState"].as_str(), Some("waiting" | "connecting" | "offline"))
+}
+
+/// The chats gpui's `chat_link_at` calls Stalled, or Reconnecting on an older
+/// engine with no per-chat state: a send to one is Queued, not Sending.
+fn stalled(c: &Json, clocks: &HashMap<String, std::time::Instant>, now: std::time::Instant) -> Vec<String> {
+    let Some(rows) = c["chats"].as_array() else { return Vec::new() };
+    rows.iter()
+        .filter(|chat| {
+            let connected = chat["connected"].as_bool() == Some(true);
+            let lasted = |id: &str| clocks.get(id).is_some_and(|began| now.duration_since(*began) >= SYNC_STALLED_AFTER);
+            match chat["syncState"].as_str() {
+                None | Some("unknown") => !connected && chat["deliveryLive"].as_bool() != Some(true),
+                _ => syncing(chat) && !connected && chat["chatId"].as_str().is_some_and(lasted),
+            }
+        })
+        .filter_map(|chat| chat["chatId"].as_str().map(str::to_owned))
+        .collect()
+}
+
 /// The workspace a link opens in, opaque (production's
 /// `links::workspace_locator`): the first 16 hex of SHA-256 over its scope
 /// (as Rust names it: "Local", "Synced", "Development") and, synced, who is
@@ -1592,6 +1651,26 @@ mod tests {
         assert_eq!(super::workspace_locator("synced", None, None), None, "signed out: not knowable");
         assert_eq!(super::workspace_locator("local", None, who()), None);
         assert_eq!(super::conversation_link("c 1/x", "abc"), "zeron://open/chat/c%201%2Fx?workspace=abc");
+    }
+
+    #[test]
+    fn a_stalled_chat_is_gpuis_stall() {
+        use serde_json::{Value as Json, json};
+        use std::{collections::HashMap, time::Instant};
+        let now = Instant::now();
+        let long = now - super::SYNC_STALLED_AFTER;
+        let clocks: HashMap<String, Instant> = [("a", long), ("b", now), ("c", long), ("d", long)].into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
+        let c = json!({ "state": "connected", "chats": [
+            { "chatId": "a", "syncState": "connecting", "connected": false },
+            { "chatId": "b", "syncState": "connecting", "connected": false },
+            { "chatId": "c", "syncState": "waiting", "connected": true },
+            { "chatId": "d", "syncState": "offline", "connected": false, "deliveryLive": true },
+            { "chatId": "e", "syncState": "synced", "connected": false },
+            { "chatId": "f", "connected": false },
+            { "chatId": "g", "connected": true },
+        ] });
+        assert_eq!(super::stalled(&c, &clocks, now), vec!["a".to_owned(), "f".to_owned()]);
+        assert!(super::stalled(&Json::Null, &clocks, now).is_empty());
     }
 
     /// The connection line says what production's pill says, a chat's

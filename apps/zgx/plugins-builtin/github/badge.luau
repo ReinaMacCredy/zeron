@@ -6,9 +6,10 @@
 -- badge brightens (crates/ui/src/change_requests.rs `render_badge_model`).
 -- A click opens its session and the pull request in that chat's panel.
 --
--- No tooltip, on purpose: the session's hover card says its state and title
--- (card_row.luau), as Zeron's sidebar has it, rather than a second card
--- over the first.
+-- No tooltip in the sidebar, on purpose: the session's hover card says its
+-- state and title (card_row.luau), as Zeron's sidebar has it, rather than a
+-- second card over the first. `footer`: the composer's, gpui's bigger badge,
+-- with its tooltip.
 
 local Badge = require("@ds/badge")
 
@@ -16,7 +17,7 @@ export type Pr = { number: number, title: string?, url: string?, state: string? 
 
 local STATES: { [string]: boolean } = { open = true, merged = true, closed = true, draft = true }
 
-return ui.component(function(props: { pr: () -> Pr?, on_open: () -> (), words: any }): Node
+return ui.component(function(props: { pr: () -> Pr?, on_open: () -> (), words: any, footer: boolean? }): Node
 	local hovered = ui.use_state(false)
 	local function state(): string
 		local now = props.pr()
@@ -45,7 +46,8 @@ return ui.component(function(props: { pr: () -> Pr?, on_open: () -> (), words: a
 			return Badge.PullRequest {
 				state = state() :: any,
 				number = if now then now.number else nil,
-				size = "sm",
+				size = if props.footer then "md" else "sm",
+				title = if props.footer and now then now.title else nil,
 				lit = function(): boolean
 					return hovered:get()
 				end,

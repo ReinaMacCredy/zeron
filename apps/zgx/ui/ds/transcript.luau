@@ -504,7 +504,7 @@ end
 -- word and clock, as Zeron's working trailer (transcript.rs); not
 -- delivered, a line to send it again. The reply's own row takes over once
 -- it comes.
-local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?): Node
+local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?, working: any): Node
 	return ui.presence(function(): string?
 		local w = row:get().waiting
 		return if w == "failed" then "failed" elseif w then "waiting" else nil
@@ -542,6 +542,8 @@ local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?
 				sending = function(): boolean
 					return row:get().waiting == "sending"
 				end,
+				says = if working then working.says else nil,
+				rate = if working then working.rate else nil,
 				seed = seed_of(row:peek().id),
 			},
 		}
@@ -825,6 +827,8 @@ local function reply(
 						since = function(): number
 							return now().started or ui.now() / 1000
 						end,
+						says = if view and view.working then view.working.says else nil,
+						rate = if view and view.working then view.working.rate else nil,
 						seed = seed_of(m.id),
 					},
 				}
@@ -1711,9 +1715,9 @@ local function Transcript(props: Props): Node
 							find = if find_for then find_for(`{m.id}:u`) else nil,
 						},
 						strip(m, state, hovered),
-						waiting_line(state, props.on_retry),
+						waiting_line(state, props.on_retry, props.working),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for, working = props.working }),
 			},
 		}
 	end

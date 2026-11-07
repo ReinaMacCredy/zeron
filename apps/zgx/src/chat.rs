@@ -70,6 +70,10 @@ use crate::engine::{
 
 type Outcome = &'static str;
 
+/// As gpui's working row: the words wait this long, so they never flash on a send that goes at once.
+const CLOUD_BOOT_WORD_AFTER: std::time::Duration = std::time::Duration::from_millis(1500);
+const CLOUD_BOOT_POLL: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// A working session the engine hasn't touched for this long has died
 /// with its host (proto/view.rs).
 const STALE_SECONDS: i64 = 45;
@@ -96,6 +100,8 @@ struct Chats {
     catalog_state: Cell<CatalogState>,
     views: RefCell<Vec<Weak<View>>>,
     watches: RefCell<Vec<Watch>>,
+    rates: RefCell<HashMap<String, RateWatch>>,
+    machine_polls: RefCell<std::collections::HashSet<String>>,
     rpc: RefCell<Option<Rpc>>,
     /// What each chat waiting on its person asks: "approval" or
     /// "question", by chat (`chat.asks`, for the sidebar's rows).
@@ -187,8 +193,8 @@ struct LetGo {
     older_todo: Option<(usize, Json)>,
     built: HashMap<Rc<str>, Option<Value>>,
     built_model: Option<Option<String>>,
-    context: Option<f64>,
     context_usage: (Option<f64>, Option<f64>),
+    stats: Option<zeron_proto::SessionStats>,
 }
 
 /// How long a chat let go of is kept for another view to take it.
@@ -223,6 +229,10 @@ struct View {
     /// Its transcript's subagents, so reading them doesn't read a transcript.
     subagents: Shared,
     draft: Shared,
+    stats: Shared,
+    /// The live tok/s: on its own, so a rate moving repaints those digits and no reader of the session.
+    token_rate: Shared,
+    on_screen: Cell<bool>,
     rpc: RefCell<Option<Rpc>>,
     open: RefCell<Option<Open>>,
     /// Moves on every open: an older watch's frames are dropped.
@@ -304,6 +314,11 @@ impl Open {
     }
 }
 
+struct RateWatch {
+    _watch: Watch,
+    rate: Option<f64>,
+}
+
 #[derive(Default)]
 struct Open {
     id: String,
@@ -317,10 +332,12 @@ struct Open {
     older_todo: Option<(usize, Json)>,
     /// A reset has come (the newest entries, at least).
     heard: bool,
-    context: Option<f64>,
     /// What the context holds as the agent last reported it: tokens in it
     /// and the window's size (either may be missing), for the ring's card.
     context_usage: (Option<f64>, Option<f64>),
+    stats: Option<zeron_proto::SessionStats>,
+    machine: Option<zeron_proto::CloudState>,
+    in_flight_seen: bool,
     queue: Vec<Json>,
     /// Sent, not yet in the transcript: shown under it meanwhile.
     pending: Vec<Pending>,
@@ -370,6 +387,9 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         messages: host.shared("chat.messages", Value::List(Rc::from([]))),
         subagents: host.shared("chat.subagents", Value::List(Rc::from([]))),
         draft: host.shared("chat.draft", draft_value("", "")),
+        stats: host.shared("chat.stats", Value::Nil),
+        token_rate: host.shared("chat.token_rate", Value::Nil),
+        on_screen: Cell::new(true),
         rpc: RefCell::default(),
         open: RefCell::default(),
         generation: Cell::new(0),
@@ -418,6 +438,18 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 (Some(id), true) => view.open_frozen(id, args.field("chat").map(text).filter(|s| !s.is_empty())),
                 (id, _) => view.open_chat(id),
             }
+        });
+    }
+    {
+        let (lanes, host) = (lanes.clone(), host.clone());
+        host.clone().action("chat.lane_on_screen", move |args| {
+            let slot = args.field("slot").map(text).unwrap_or_default();
+            if slot.is_empty() {
+                return;
+            }
+            let view = lanes.borrow_mut().entry(slot.clone()).or_insert_with(|| lane_view(&host, &slot)).clone();
+            view.on_screen.set(args.field("shown").is_some_and(Value::truthy));
+            CHATS.with(Rc::clone).follow_rates();
         });
     }
     // The view a call is about: the lane that has its chat open, else the
@@ -560,6 +592,9 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
         messages: host.shared(&format!("chat.lane.{slot}.messages"), Value::List(Rc::from([]))),
         subagents: host.shared(&format!("chat.lane.{slot}.subagents"), Value::List(Rc::from([]))),
         draft: host.shared(&format!("chat.lane.{slot}.draft"), draft_value("", "")),
+        stats: host.shared(&format!("chat.lane.{slot}.stats"), Value::Nil),
+        token_rate: host.shared(&format!("chat.lane.{slot}.token_rate"), Value::Nil),
+        on_screen: Cell::new(false),
         rpc: RefCell::default(),
         open: RefCell::default(),
         generation: Cell::new(0),
@@ -688,6 +723,94 @@ impl Chats {
         });
     }
 
+    fn follow_rates(self: &Rc<Self>) {
+        let views = self.views();
+        let wanted: Vec<String> = views
+            .iter()
+            .filter(|v| !v.snapshot.get() && v.on_screen.get())
+            .filter_map(|v| v.open.borrow().as_ref().filter(|o| o.host_watched).map(|o| o.id.clone()))
+            .collect();
+        self.rates.borrow_mut().retain(|id, _| wanted.contains(id));
+        let rpc = self.rpc.borrow().clone().filter(|r| !r.is_closed());
+        if let Some(rpc) = rpc {
+            for id in wanted {
+                if self.rates.borrow().contains_key(&id) {
+                    continue;
+                }
+                let Some(chat) = self.chat(&id) else { continue };
+                let mut params = json!({ "chatId": id });
+                if let Some(t) = self.target(&chat) {
+                    params["targetDeviceId"] = json!(t);
+                }
+                let (heard, ended) = (Rc::downgrade(self), Rc::downgrade(self));
+                let (heard_id, ended_id) = (id.clone(), id.clone());
+                let watch = rpc.watch_ending(
+                    "WatchTokenRate",
+                    params,
+                    move |item| {
+                        let Some(me) = heard.upgrade() else { return };
+                        let rate = item["rate"].as_f64();
+                        if let Some(row) = me.rates.borrow_mut().get_mut(&heard_id) {
+                            row.rate = rate;
+                        }
+                        me.publish_rate(&heard_id, rate);
+                    },
+                    move |_| {
+                        let Some(me) = ended.upgrade() else { return };
+                        me.rates.borrow_mut().remove(&ended_id);
+                        me.publish_rate(&ended_id, None);
+                    },
+                );
+                self.rates.borrow_mut().insert(id, RateWatch { _watch: watch, rate: None });
+            }
+        }
+        for view in views {
+            let id = view.open_id();
+            let rate = id.as_ref().and_then(|id| self.rates.borrow().get(id).and_then(|r| r.rate));
+            view.token_rate.set(rate.map_or(Value::Nil, Value::Num));
+        }
+    }
+
+    fn follow_machine(self: &Rc<Self>, id: String, device: String) {
+        if !self.machine_polls.borrow_mut().insert(id.clone()) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        engine::get().spawn(async move {
+            zgx::timer::sleep(CLOUD_BOOT_WORD_AFTER).await;
+            loop {
+                let answer = engine::get().call("CloudSessions", json!({})).await.ok();
+                let Some(chats) = weak.upgrade() else { return };
+                let machine = answer.and_then(|a| machine_state(&a, &id, &device));
+                let mut any_waits = false;
+                for view in chats.views() {
+                    let waits = {
+                        let mut slot = view.open.borrow_mut();
+                        let Some(open) = slot.as_mut().filter(|o| o.id == id) else { continue };
+                        let waits = open.pending.iter().any(|p| p.waiting == "sending");
+                        open.machine = machine.filter(|_| waits);
+                        waits
+                    };
+                    any_waits |= waits;
+                    view.publish_session();
+                }
+                if !any_waits {
+                    chats.machine_polls.borrow_mut().remove(&id);
+                    return;
+                }
+                zgx::timer::sleep(CLOUD_BOOT_POLL).await;
+            }
+        });
+    }
+
+    fn publish_rate(&self, id: &str, rate: Option<f64>) {
+        for view in self.views() {
+            if view.open_id().as_deref() == Some(id) {
+                view.token_rate.set(rate.map_or(Value::Nil, Value::Num));
+            }
+        }
+    }
+
     /// Keeps `chat.asks` to the chats waiting on their person: a new one
     /// is looked at (its latest entries) to tell an approval from a
     /// question; one no longer waiting goes.
@@ -765,8 +888,8 @@ impl Chats {
     /// view that's about to open it.
     fn keep_let_go(self: &Rc<Self>, old: Option<Open>) {
         let Some(old) = old.filter(|o| o.heard) else { return };
-        let Open { id, entries, older_todo, built, built_model, context, context_usage, .. } = old;
-        *self.let_go.borrow_mut() = Some(LetGo { id, entries, older_todo, built, built_model, context, context_usage });
+        let Open { id, entries, older_todo, built, built_model, context_usage, stats, .. } = old;
+        *self.let_go.borrow_mut() = Some(LetGo { id, entries, older_todo, built, built_model, context_usage, stats });
         let turn = self.let_go_turn.get() + 1;
         self.let_go_turn.set(turn);
         let me = self.clone();
@@ -791,8 +914,8 @@ impl Chats {
             entries: held.entries,
             older_todo: held.older_todo,
             heard: true,
-            context: held.context,
             context_usage: held.context_usage,
+            stats: held.stats,
             built: held.built,
             built_model: held.built_model,
             has_whole: true,
@@ -1037,6 +1160,12 @@ impl Chats {
         let Some(s) = sessions.get(id) else { return false };
         let live = matches!(s["status"].as_str(), Some("working" | "awaitingInput"));
         live && !stale(&s["updatedAt"])
+    }
+
+    /// gpui's `turn_in_flight`: a parked turn, held only by its subagents, is not one.
+    fn turn_in_flight(&self, open: &Open) -> bool {
+        let held = self.sessions.borrow().get(&open.id).is_some_and(|s| s["heldBySubagents"].as_bool() == Some(true));
+        open.pending.iter().any(|p| p.waiting == "sending") || (self.running(&open.id) && !held)
     }
 
     fn chat_compacting(&self, id: &str) -> bool {
@@ -1330,6 +1459,8 @@ impl View {
         self.draft.set(draft_value("", ""));
         self.subscribe();
         self.publish_session();
+        self.publish_stats();
+        chats.follow_rates();
         if let Some(id) = self.open_id() {
             // Its finished state seen, as the shipping app marks it.
             engine::get().spawn(async move {
@@ -1352,6 +1483,8 @@ impl View {
         self.subagents.set(Value::List(Rc::from([])));
         self.draft.set(draft_value("", ""));
         self.publish_session();
+        self.publish_stats();
+        CHATS.with(Rc::clone).follow_rates();
         let generation = self.generation.get();
         let weak = Rc::downgrade(self);
         let blob = blob_ref(chat.as_deref(), &id);
@@ -1467,6 +1600,7 @@ impl View {
             open.watches.extend(watches);
             open.host_watched = true;
         }
+        chats.follow_rates();
     }
 
     fn consume_prediction(&self, args: &Value) {
@@ -1496,14 +1630,23 @@ impl View {
             }
             self.fail_rejected();
         }
-        let applied = {
+        let stats_moved = {
             let mut slot = self.open.borrow_mut();
             let Some(open) = slot.as_mut() else { return };
             if let Some(usage) = frame.get("contextUsage").filter(|u| !u.is_null()) {
-                let (tokens, window) = (usage["tokens"].as_f64(), usage["window"].as_f64());
-                open.context = tokens.zip(window).filter(|(_, w)| *w > 0.).map(|(t, w)| (t / w).min(1.));
-                open.context_usage = (tokens, window);
+                open.context_usage = (usage["tokens"].as_f64(), usage["window"].as_f64());
             }
+            let stats = stats_of(&frame);
+            let moved = open.stats != stats;
+            open.stats = stats;
+            moved
+        };
+        if stats_moved {
+            self.publish_stats();
+        }
+        let applied = {
+            let mut slot = self.open.borrow_mut();
+            let Some(open) = slot.as_mut() else { return };
             // (Opened with all its rows: not down to the newest few, until
             // the engine's whole copy comes.)
             if open.has_whole {
@@ -1772,6 +1915,13 @@ impl View {
         self.messages.set(Value::List(list.into()));
         self.publish_draft();
         self.after_model_moved();
+        let in_flight_moved = self.open.borrow_mut().as_mut().is_some_and(|open| {
+            let now = chats.turn_in_flight(open);
+            std::mem::replace(&mut open.in_flight_seen, now) != now
+        });
+        if in_flight_moved {
+            self.publish_session();
+        }
     }
 
     /// The whole copy asked for again, if the model moved (`Open::model_moved`):
@@ -1802,6 +1952,11 @@ impl View {
             }
         };
         self.session.set(value);
+    }
+
+    fn publish_stats(&self) {
+        let stats = self.open.borrow().as_ref().and_then(|o| o.stats);
+        self.stats.set(stats.as_ref().map_or(Value::Nil, stats_value));
     }
 
     async fn send(self: &Rc<Self>, req: Value) -> Result<Option<String>, Outcome> {
@@ -1836,6 +1991,9 @@ impl View {
                 at: stamp(now_seconds()),
                 alias: None,
             });
+        }
+        if let Some(device) = chat["deviceId"].as_str().filter(|d| zeron_proto::is_cloud_device(d, "")) {
+            chats.follow_machine(id.clone(), device.to_owned());
         }
         // What it carries, uploaded to the chat's host.
         let mut paths = Vec::new();
@@ -2111,6 +2269,10 @@ impl View {
             p.command = None;
             p.retry.clone()
         };
+        let chats = CHATS.with(Rc::clone);
+        if let Some(device) = chats.chat(&id).and_then(|c| c["deviceId"].as_str().map(str::to_owned)).filter(|d| zeron_proto::is_cloud_device(d, "")) {
+            chats.follow_machine(id.clone(), device);
+        }
         self.publish_messages();
         let Some(run) = run else {
             // It never got as far as a run (an upload failed): the composer
@@ -4944,6 +5106,8 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
             Value::record(fields)
         })
         .collect();
+    let (context_tokens, reported_window) = open.context_usage;
+    let context_window = chat_budget(config).or(reported_window);
     let mut fields = vec![
         ("id", Value::from(open.id.as_str())),
         ("state", Value::from(state)),
@@ -4960,15 +5124,18 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("access", Value::from(access)),
         ("plan", Value::Bool(config["plan"].as_bool() == Some(true))),
         ("running", Value::Bool(live)),
+        ("in_flight", Value::Bool(chats.turn_in_flight(open))),
         ("steers", steers.map_or(Value::Nil, Value::Bool)),
         ("stopped", Value::Bool(stopped)),
         ("compacting", Value::Bool(chats.chat_compacting(&open.id))),
         ("prediction", open.prediction.as_deref().map_or(Value::Nil, Value::from)),
         ("limit", open.limit.as_ref().map_or(Value::Nil, |row| limit_value(chats, row))),
         ("work_tree", work_tree_value(&chat["workTree"])),
-        ("context", open.context.map(Value::Num).unwrap_or(Value::Nil)),
-        ("context_tokens", open.context_usage.0.map(Value::Num).unwrap_or(Value::Nil)),
-        ("context_window", open.context_usage.1.map(Value::Num).unwrap_or(Value::Nil)),
+        ("context", context_tokens.zip(context_window).filter(|(_, w)| *w > 0.).map_or(Value::Nil, |(t, w)| Value::Num((t / w).min(1.)))),
+        ("context_tokens", context_tokens.map_or(Value::Nil, Value::Num)),
+        ("context_window", context_window.map_or(Value::Nil, Value::Num)),
+        ("consulting", Value::Bool(open.entries.last().and_then(|e| e.json.as_ref()).is_some_and(consulting_advisor))),
+        ("machine", booting_word(open.machine).map_or(Value::Nil, Value::from)),
         ("ask", ask),
         ("queue", Value::List(queue.into())),
         ("todos", todos(open)),
@@ -4981,6 +5148,84 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         fields.push(("notice", Value::record([("tone", Value::from("danger")), ("refused", Value::from(reason.as_str()))])));
     }
     Value::record(fields)
+}
+
+/// A chat's own picks (200K, an auto-compact window) are its budget: Claude reports the model's whole window.
+fn chat_budget(config: &Json) -> Option<f64> {
+    if config["modelOptions"].as_object().is_none_or(serde_json::Map::is_empty) {
+        return None;
+    }
+    let config: zeron_proto::ChatConfig = serde_json::from_value(config.clone()).ok()?;
+    zeron_proto::model_options::chat_budget(&config).map(|b| b as f64)
+}
+
+fn consulting_advisor(last: &Json) -> bool {
+    last["status"].as_str() == Some("streaming")
+        && last["parts"].as_array().is_some_and(|parts| {
+            parts.iter().any(|p| {
+                p["kind"].as_str() == Some("tool")
+                    && p["resolved"].as_bool() != Some(true)
+                    && p["call"]["kind"].as_str() == Some("unknown")
+                    && p["call"]["name"].as_str() == Some(zeron_proto::ADVISOR_TOOL_NAME)
+            })
+        })
+}
+
+fn machine_state(answer: &Json, chat: &str, device: &str) -> Option<zeron_proto::CloudState> {
+    let sessions = answer["sessions"].as_array()?;
+    let row = sessions
+        .iter()
+        .find(|s| s["chatId"].as_str() == Some(chat))
+        .or_else(|| sessions.iter().find(|s| s["deviceId"].as_str() == Some(device)))?;
+    serde_json::from_value(row["state"].clone()).ok()
+}
+
+fn booting_word(machine: Option<zeron_proto::CloudState>) -> Option<&'static str> {
+    use zeron_proto::CloudState as S;
+    match machine? {
+        S::Provisioning => Some("starting"),
+        S::Starting | S::Sleeping | S::Stopping => Some("waking"),
+        _ => None,
+    }
+}
+
+fn stats_of(frame: &Json) -> Option<zeron_proto::SessionStats> {
+    serde_json::from_value(frame.get("sessionStats")?.clone()).ok()
+}
+
+fn stats_value(stats: &zeron_proto::SessionStats) -> Value {
+    use zeron_proto::stats_view::{cost_headline, duration, token_split};
+    use zeron_proto::usage::format_tokens;
+    let priced = stats.cost_usd().is_some();
+    let split: Vec<Value> = token_split(stats)
+        .into_iter()
+        .map(|(label, n)| {
+            Value::record([
+                ("label", Value::from(label)),
+                ("n", Value::Num(n as f64)),
+                ("tokens", Value::from(format_tokens(n).as_str())),
+            ])
+        })
+        .collect();
+    let opt = |v: Option<String>| v.map_or(Value::Nil, |v| Value::from(v.as_str()));
+    Value::record([
+        ("turns", Value::Num(stats.turns as f64)),
+        ("steps", Value::Num(stats.steps as f64)),
+        ("llm", Value::from(duration(stats.llm_ms).as_str())),
+        ("tool", Value::from(duration(stats.tool_ms).as_str())),
+        ("ttft", opt(stats.avg_ttft_ms().map(duration))),
+        ("tps", opt(stats.tokens_per_second().map(|t| format!("{t:.0}")))),
+        ("hit", opt(stats.cache_hit_rate().map(|r| format!("{:.0}", r * 100.0)))),
+        ("cache_ttl", stats.cache_ttl_secs.map_or(Value::Nil, |t| Value::Num(f64::from(t)))),
+        ("cache_touched", stats.cache_touched_at.map_or(Value::Nil, |t| Value::Num(t as f64))),
+        ("headline", opt(cost_headline(stats))),
+        ("priced", Value::Bool(priced)),
+        ("unpriced", Value::Num(if priced { stats.unpriced_turns as f64 } else { 0. })),
+        ("estimated", Value::Bool(priced && stats.cost_estimated)),
+        ("total", Value::from(format_tokens(stats.total_tokens()).as_str())),
+        ("total_n", Value::Num(stats.total_tokens() as f64)),
+        ("split", Value::List(split.into())),
+    ])
 }
 
 /// `zeron_doc::schema::turn_stopped` on the wire's entry: this app doesn't depend on zeron-doc.
@@ -5719,7 +5964,17 @@ mod tests {
         // The window's height (the root's box): what lies wholly above or
         // below it isn't seen, and moves no one sees.
         let window = tree.lines().next().and_then(top_and_height).map_or(f32::MAX, |(_, h)| h);
+        let mut clock = None;
         tree.lines()
+            // (The elapsed digits split into glyphs while a second rolls, on the clock.)
+            .filter(|line| {
+                let depth = line.len() - line.trim_start().len();
+                if clock.is_some_and(|at| depth > at) {
+                    return false;
+                }
+                clock = line.contains("#working-clock").then_some(depth);
+                clock.is_none()
+            })
             // (The transcript's scrollbar shows only while it scrolls, and
             // goes once the view rests, on the clock: the frames here don't
             // run that clock, so it is still out from opening the session.)
@@ -6407,6 +6662,227 @@ mod tests {
         // Failed, then shown on another try: the stumble isn't drawn.
         let retried = blocks(&reply(vec![mcp("s1", true), mcp("s2", false), image("i1", "a.png")]));
         assert_eq!(kinds(&retried), ["images"]);
+    }
+
+    #[test]
+    fn stats_value_says_what_stats_view_says() {
+        use zeron_proto::stats_view::{cost_headline, stats_rows, token_split};
+        let stats = zeron_proto::SessionStats {
+            turns: 86,
+            steps: 1903,
+            llm_ms: 172 * 60_000 + 14_000,
+            tool_ms: 13_400,
+            ttft_ms: 2_400,
+            ttft_count: 2,
+            output_tokens: 137_000,
+            usage_llm_ms: 1_000_000,
+            input_tokens: 5,
+            cache_read_tokens: 90,
+            cache_write_tokens: 5,
+            cache_ttl_secs: Some(3600),
+            cache_touched_at: Some(1_000_000),
+            unpriced_turns: 4,
+            cost_micros: 12_840_000,
+            cost_estimated: true,
+            ..Default::default()
+        };
+        let v = stats_value(&stats);
+        let said = |k: &str| v.field(k).map(text).unwrap_or_default();
+        let rows = stats_rows(&stats, None);
+        assert_eq!(said("llm"), rows[0].1);
+        assert_eq!(said("tool"), rows[1].1);
+        assert_eq!(said("ttft"), rows[2].1);
+        assert_eq!(format!("{} tok/s", said("tps")), rows[3].1);
+        assert_eq!(format!("{}%", said("hit")), rows[4].1);
+        assert_eq!(said("headline"), cost_headline(&stats).unwrap());
+        assert_eq!(v.field("unpriced").and_then(Value::as_f64), Some(4.));
+        let Some(Value::List(split)) = v.field("split") else { panic!("no split") };
+        let labels: Vec<String> = split.iter().map(|p| p.field("label").map(text).unwrap_or_default()).collect();
+        assert_eq!(labels, token_split(&stats).iter().map(|(l, _)| (*l).to_owned()).collect::<Vec<_>>());
+        let none = stats_value(&zeron_proto::SessionStats { input_tokens: 9, unpriced_turns: 5, ..Default::default() });
+        assert_eq!(none.field("priced"), Some(&Value::Bool(false)));
+        assert_eq!(none.field("unpriced").and_then(Value::as_f64), Some(0.));
+    }
+
+    #[test]
+    fn a_chats_picks_set_the_rings_window() {
+        let config = |harness: &str, picks: Json| json!({ "harness": harness, "model": null, "reasoning": null, "modelOptions": picks, "sandbox": "workspace-write" });
+        assert_eq!(chat_budget(&config("claude-code", json!({}))), None);
+        assert_eq!(chat_budget(&config("claude-code", json!({ "autoCompact": "400k" }))), Some(400_000.));
+        assert_eq!(chat_budget(&config("claude-code", json!({ "contextWindow": "200k", "autoCompact": "400k" }))), Some(200_000.));
+        assert_eq!(chat_budget(&config("codex", json!({ "autoCompact": "400k" }))), None);
+        assert_eq!(chat_budget(&Json::Null), None);
+
+        let chats = Chats::default();
+        chats.chats.borrow_mut().insert("c".to_owned(), json!({ "id": "c", "config": config("claude-code", json!({ "autoCompact": "400k" })) }));
+        let open = Open { id: "c".to_owned(), context_usage: (Some(100_000.), Some(1_000_000.)), ..Open::default() };
+        let v = session_value(&chats, &open, false);
+        assert_eq!(v.field("context_window").and_then(Value::as_f64), Some(400_000.));
+        assert_eq!(v.field("context").and_then(Value::as_f64), Some(0.25));
+    }
+
+    #[test]
+    fn an_unresolved_advisor_call_on_a_streaming_entry_is_consulting() {
+        let call = serde_json::to_value(zeron_proto::ToolCall::Unknown { name: zeron_proto::ADVISOR_TOOL_NAME.to_owned(), input: None }).unwrap();
+        let entry = |status: &str, resolved: bool, call: &Json| json!({ "status": status, "parts": [{ "kind": "tool", "id": "a", "resolved": resolved, "call": call }] });
+        assert!(consulting_advisor(&entry("streaming", false, &call)));
+        assert!(!consulting_advisor(&entry("streaming", true, &call)));
+        assert!(!consulting_advisor(&entry("complete", false, &call)));
+        assert!(!consulting_advisor(&entry("streaming", false, &json!({ "kind": "exec", "command": "ls" }))));
+    }
+
+    #[test]
+    fn a_cloud_machine_says_what_the_send_waits_on() {
+        use zeron_proto::CloudState as S;
+        let answer = json!({ "sessions": [
+            { "chatId": "a", "deviceId": "cloud-a", "spaceId": "p", "state": "provisioning" },
+            { "chatId": "b", "deviceId": "cloud-b", "spaceId": "p", "state": "sleeping" },
+            { "chatId": "c", "deviceId": "cloud-c", "spaceId": "p", "state": "ready" },
+        ] });
+        assert_eq!(machine_state(&answer, "a", "x"), Some(S::Provisioning));
+        assert_eq!(machine_state(&answer, "side", "cloud-b"), Some(S::Sleeping));
+        assert_eq!(booting_word(machine_state(&answer, "a", "x")), Some("starting"));
+        assert_eq!(booting_word(machine_state(&answer, "b", "x")), Some("waking"));
+        assert_eq!(booting_word(machine_state(&answer, "c", "x")), None);
+        assert_eq!(booting_word(None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_rate_stream_for_each_chat_on_screen() {
+        let (rpc, sent, _bell) = Rpc::recording();
+        let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/activity_fixture.luau");
+        let mut made: Vec<Rc<View>> = Vec::new();
+        let _app = zgx_script::testing::TestApp::new(|runtime| {
+            let host = ScriptHost::new(runtime, entry);
+            for slot in ["a", "b"] {
+                made.push(Rc::new(View {
+                    session: host.shared(&format!("t.{slot}.session"), Value::Nil),
+                    messages: host.shared(&format!("t.{slot}.messages"), Value::Nil),
+                    subagents: host.shared(&format!("t.{slot}.subagents"), Value::Nil),
+                    draft: host.shared(&format!("t.{slot}.draft"), Value::Nil),
+                    stats: host.shared(&format!("t.{slot}.stats"), Value::Nil),
+                    token_rate: host.shared(&format!("t.{slot}.rate"), Value::Nil),
+                    on_screen: Cell::new(true),
+                    rpc: RefCell::default(),
+                    open: RefCell::default(),
+                    generation: Cell::new(0),
+                    snapshot: Cell::new(false),
+                    predicts: false,
+                }));
+            }
+            host
+        });
+        let chats = Rc::new(Chats::default());
+        *chats.rpc.borrow_mut() = Some(rpc.clone());
+        *chats.here.borrow_mut() = Some("me".to_owned());
+        for id in ["c1", "c2"] {
+            chats.chats.borrow_mut().insert(id.to_owned(), json!({ "id": id, "deviceId": "me" }));
+        }
+        for view in &made {
+            chats.views.borrow_mut().push(Rc::downgrade(view));
+        }
+        let show = |view: &View, id: Option<&str>| {
+            *view.open.borrow_mut() = id.map(|id| Open { id: id.to_owned(), host_watched: true, ..Open::default() });
+        };
+        let frames = |rx: &std::sync::mpsc::Receiver<String>| -> Vec<Json> {
+            rx.try_iter().map(|f| serde_json::from_str(&f).unwrap()).collect()
+        };
+        let rate_of = |view: &View| view.token_rate.get().as_f64();
+        show(&made[0], Some("c1"));
+        show(&made[1], Some("c1"));
+        chats.follow_rates();
+        let opened = frames(&sent);
+        assert_eq!(opened.len(), 1, "{opened:?}");
+        assert_eq!(opened[0]["method"], "WatchTokenRate");
+        assert_eq!(opened[0]["params"]["chatId"], "c1");
+        let c1 = opened[0]["id"].as_u64().unwrap();
+        rpc.heard(json!({ "id": c1, "item": { "rate": 41 } }));
+        assert_eq!((rate_of(&made[0]), rate_of(&made[1])), (Some(41.), Some(41.)));
+        show(&made[1], Some("c2"));
+        chats.follow_rates();
+        let opened = frames(&sent);
+        assert_eq!(opened.len(), 1, "{opened:?}");
+        assert_eq!(opened[0]["params"]["chatId"], "c2");
+        let c2 = opened[0]["id"].as_u64().unwrap();
+        assert_eq!((rate_of(&made[0]), rate_of(&made[1])), (Some(41.), None));
+        rpc.heard(json!({ "id": c1, "item": { "rate": null } }));
+        assert_eq!(rate_of(&made[0]), None);
+        rpc.heard(json!({ "id": c1, "item": { "rate": 12 } }));
+        rpc.heard(json!({ "id": c1, "done": true }));
+        assert_eq!(rate_of(&made[0]), None);
+        assert!(chats.rates.borrow().get("c1").is_none());
+        show(&made[1], None);
+        chats.follow_rates();
+        let closed = frames(&sent);
+        assert!(closed.iter().any(|f| f["id"].as_u64() == Some(c2) && f["cancel"] == true), "{closed:?}");
+        assert!(chats.rates.borrow().get("c2").is_none());
+
+        show(&made[1], Some("c2"));
+        chats.follow_rates();
+        let c2 = frames(&sent)[0]["id"].as_u64().unwrap();
+        made[1].on_screen.set(false);
+        chats.follow_rates();
+        let closed = frames(&sent);
+        assert!(closed.iter().any(|f| f["id"].as_u64() == Some(c2) && f["cancel"] == true), "{closed:?}");
+        assert!(chats.rates.borrow().get("c2").is_none());
+        assert_eq!(rate_of(&made[1]), None);
+        made[1].on_screen.set(true);
+        chats.follow_rates();
+        assert_eq!(frames(&sent)[0]["params"]["chatId"], "c2");
+    }
+
+    #[test]
+    fn the_chips_refreshing_follows_gpuis_turn_in_flight() {
+        let chats = Chats::default();
+        let row = |status: &str, held: bool| json!({ "status": status, "heldBySubagents": held, "updatedAt": now_seconds() * 1000 });
+        let mut open = Open { id: "c".to_owned(), ..Open::default() };
+        let in_flight = |chats: &Chats, open: &Open| chats.turn_in_flight(open);
+        assert!(!in_flight(&chats, &open));
+        chats.sessions.borrow_mut().insert("c".to_owned(), row("working", false));
+        assert!(in_flight(&chats, &open));
+        chats.sessions.borrow_mut().insert("c".to_owned(), row("working", true));
+        assert!(!in_flight(&chats, &open));
+        open.pending.push(Pending { id: "m".to_owned(), words: String::new(), paths: Vec::new(), waiting: "sending", retry: None, command: None, at: None, alias: None });
+        assert!(in_flight(&chats, &open));
+        open.pending[0].waiting = "failed";
+        chats.sessions.borrow_mut().insert("c".to_owned(), row("idle", false));
+        assert!(!in_flight(&chats, &open));
+    }
+
+    #[test]
+    fn a_frame_without_stats_clears_them() {
+        let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/activity_fixture.luau");
+        let mut made = None;
+        let _app = zgx_script::testing::TestApp::new(|runtime| {
+            let host = ScriptHost::new(runtime, entry);
+            made = Some(Rc::new(View {
+                session: host.shared("t.session", Value::Nil),
+                messages: host.shared("t.messages", Value::Nil),
+                subagents: host.shared("t.subagents", Value::Nil),
+                draft: host.shared("t.draft", Value::Nil),
+                stats: host.shared("t.stats", Value::Nil),
+                token_rate: host.shared("t.rate", Value::Nil),
+                on_screen: Cell::new(true),
+                rpc: RefCell::default(),
+                open: RefCell::default(),
+                generation: Cell::new(0),
+                snapshot: Cell::new(false),
+                predicts: false,
+            }));
+            host
+        });
+        let view = made.unwrap();
+        *view.open.borrow_mut() = Some(Open { id: "c".to_owned(), ..Open::default() });
+        let stats = zeron_proto::SessionStats { turns: 2, ..Default::default() };
+        view.heard_frame(json!({ "sessionStats": stats }));
+        assert_eq!(view.stats.get().field("turns").and_then(Value::as_f64), Some(2.));
+        view.heard_frame(json!({ "sessionStats": null }));
+        assert_eq!(view.stats.get(), Value::Nil);
+        view.heard_frame(json!({ "sessionStats": stats }));
+        view.heard_frame(json!({}));
+        assert_eq!(view.stats.get(), Value::Nil);
+        assert!(view.open.borrow().as_ref().unwrap().stats.is_none());
     }
 
     #[test]

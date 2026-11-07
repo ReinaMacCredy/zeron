@@ -627,6 +627,8 @@ function M.setup()
 	--   message's thumbnail, its row's inset in.
 	local control = require("@self/control")
 	ui.effect(function()
+		local kind = ui.theme.kind()
+		local dark = not (kind == "light" or kind == "high-contrast-light")
 		local chip = control.nest("$zeron.composer.radius", 1, "$zeron.composer.chip.inset")
 		local option = control.nest("$zeron.composer.radius", 1, control.nest("$zeron.composer.chip.inset", 8))
 		local tray_row = control.nest("$zeron.composer.tray.radius", 1, "$space.1")
@@ -635,6 +637,8 @@ function M.setup()
 				menu = { row_radius = control.nest("$radius.lg", 1, "$space.1") },
 				tag = { remove_radius = control.nest("$radius.md", 3) },
 				composer = {
+					accent_wash = if dark then "alpha({accent}, 0.45)" else "alpha({accent}, 0.1)",
+					faint = if dark then "#858589" else "#797980",
 					chip = { radius = chip },
 					option = { radius = option, key_radius = control.nest(option, "$space.2") },
 					tray = { row_radius = tray_row, thumb_radius = control.nest(tray_row, "$space.1") },

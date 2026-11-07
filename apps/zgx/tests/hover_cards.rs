@@ -2,8 +2,8 @@
 //! surface.
 //!
 //! A `tooltip = …` that builds a node builds it through the hover card
-//! (`HoverCard.Card`, `HoverCard.Tip`, or what is made of them: `Tooltip`,
-//! `context_usage.Card`). The hover card's frame is the menus' glass
+//! (`HoverCard.Card`, `HoverCard.Tip`, or what is made of them: `Tooltip`).
+//! The hover card's frame is the menus' glass
 //! (`glass.style(…, "popup")`, as ds/menu's panels are), so a hover card and
 //! a picker's menu are one material; the files built on it paint no fill,
 //! edge, shadow or blur of their own round it. (zgx b75d8e74f finds a popup's
@@ -20,11 +20,11 @@ fn ui_dir() -> PathBuf {
 }
 
 /// What a tooltip may be built with: the hover card, and what is made of it.
-const FRAMED: &[&str] = &["HoverCard.Card", "HoverCard.Tip", "Tooltip", "context_usage.Card"];
+const FRAMED: &[&str] = &["HoverCard.Card", "HoverCard.Tip", "Tooltip"];
 
 /// The files built on the hover card's frame: none paints a surface of its
 /// own round it (a fill, an edge, a shadow, a blur, glass).
-const ON_FRAME: &[&str] = &["ds/tooltip.luau", "ds/context_usage.luau"];
+const ON_FRAME: &[&str] = &["ds/tooltip.luau", "ds/context_usage.luau", "ds/session_stats.luau"];
 
 fn luau_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {

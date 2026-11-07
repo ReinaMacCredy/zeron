@@ -59,6 +59,37 @@ zeron.place {
 	end,
 }
 
+zeron.place {
+	at = ".composer-footer-status",
+	after = function(): Node
+		local session = zeron.context("session")
+		local id = if type(session) == "table" then session.id else session
+		if not id then
+			return ui.div {}
+		end
+		local pr = watch.pr(id)
+		local panel = zeron.context("panel")
+		return ui.show(function(): boolean
+			return pr() ~= nil
+		end, Badge {
+			words = zeron,
+			pr = pr,
+			footer = true,
+			on_open = function()
+				local now = pr()
+				if now and panel then
+					panel.open_tab {
+						kind = "github-pr",
+						title = if now.title and now.title ~= "" then now.title else `#{now.number}`,
+						icon = "pull-request",
+						data = { url = now.url, number = now.number, session = id },
+					}
+				end
+			end,
+		})
+	end,
+}
+
 -- The same pull request in the session's hover card, a row under its
 -- branch (Zeron's card), where the badge's state and title are said: the
 -- badge has no tooltip of its own.

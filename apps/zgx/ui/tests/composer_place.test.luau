@@ -116,28 +116,41 @@ test("composer place: each chip has gpui's height, the ring its box", function()
 	expect(model).to_be(32)
 	expect(place).to_be(20)
 	expect(ring).to_be(24)
-	expect(w).to_be(24)
+	expect(w > 24 and w <= 56).to_be(true)
 end)
 
--- A hover card is framed once (ds/hover_card): zgx's layer hugs the card
--- exactly (its box the card's), and one frame paints in it. A card that
--- painted its own shadow, or a second frame round it, shows as a dark rim
--- round a bigger box in the popup's window.
-test("composer place: the context card is framed once, its layer hugging it", function()
+test("composer place: the context card opens on a click and stays", function()
 	local app = mounted()
 	app:hover("#composer-context")
 	rested(app)
-	local function box(sel: string): { number }
-		local first = string.match(app:tree(sel), "[^\n]+") or ""
-		local x, y, w, h = string.match(first, " (%-?%d+),(%-?%d+) (%d+)x(%d+)")
-		return { tonumber(x) or -1, tonumber(y) or -1, tonumber(w) or -1, tonumber(h) or -1 }
-	end
-	local layer = box('role:dialog "Tooltip"')
-	local card = box("#composer-context-card")
-	for i = 1, 4 do
-		expect(math.abs(layer[i] - card[i]) <= 0.5).to_be(true)
-	end
-	expect(app:count('role:dialog "Tooltip" >> .hover-card-frame')).to_be(1)
+	expect(showing(app, "#composer-context-card")).to_be(false)
+	app:click("#composer-context")
+	rested(app)
+	expect(showing(app, "#composer-context-card")).to_be(true)
+	expect(app:text("#composer-context-used")).to_contain("408,389 / 1,000,000 tokens")
+	expect(app:text("#composer-context-left")).to_contain("591,611 tokens remaining")
+	expect(app:count(".composer-context-panel")).to_be(1)
+	expect(app:count(".composer-context-panel >> .composer-context-panel")).to_be(0)
+	expect(app:count(".composer-context-panel >> .hover-card-frame")).to_be(0)
+	app:hover("#composer-context-percent")
+	rested(app)
+	expect(showing(app, "#composer-context-card")).to_be(true)
+	app:click("#composer-context")
+	rested(app)
+	expect(showing(app, "#composer-context-card")).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("composer place: the ring says how full, in its ink's steps", function()
+	local app = mounted()
+	rested(app)
+	expect(app:text("#composer-context-percent")).to_be("41%")
+	app:set_state("test_place_usage", { tokens = 950000, window = 1000000 })
+	rested(app)
+	expect(app:text("#composer-context-percent")).to_be("95%")
+	app:set_state("test_place_usage", { tokens = 1000 })
+	rested(app)
+	expect(app:has("#composer-context")).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
 

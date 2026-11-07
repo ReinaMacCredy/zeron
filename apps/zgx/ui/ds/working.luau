@@ -13,7 +13,19 @@ local RollText = require("@self/roll_text")
 local status = require("@self/status")
 local locale = require("@self/locale")
 
-export type Props = { since: number | () -> number, seed: number?, sending: (() -> boolean)? }
+export type Props = {
+	since: number | () -> number,
+	seed: number?,
+	sending: (() -> boolean)?,
+	says: ((sending: boolean) -> string?)?,
+	rate: (() -> number?)?,
+}
+
+local SAYS: { [string]: string } = {
+	starting = "ds.working.starting_cloud",
+	waking = "ds.working.waking_cloud",
+	consulting = "ds.working.consulting",
+}
 
 -- Zeron's words (transcript.rs, `FLAVOUR_WORDS`, their keys), each held
 -- this long.
@@ -64,6 +76,12 @@ return ui.component(function(props: Props): Node
 	local function seconds(): number
 		return math.max(0, math.floor(now:get() - since()))
 	end
+	local function said(): string?
+		return if props.says then props.says(sending()) else nil
+	end
+	local function rate(): number?
+		return if props.rate and not sending() then props.rate() else nil
+	end
 	return ui.row {
 		h = 26,
 		gap = "$space.2",
@@ -73,22 +91,45 @@ return ui.component(function(props: Props): Node
 		status.StatusIcon { kind = "working", size = 16 },
 		RollText {
 			function(): string
-				if sending() then
+				local say = said()
+				if say == "queued" then
+					return locale.s("ds.working.queued")
+				elseif say and SAYS[say] then
+					return locale.s("ds.working.word", { word = locale.s(SAYS[say]) })
+				elseif sending() then
 					return locale.s("ds.working.sending")
 				end
 				local word = WORDS[(seed + seconds() // ROTATE) % #WORDS + 1]
 				return locale.s("ds.working.word", { word = locale.s(word) })
 			end,
-			text_size = "$font.size.md",
-			color = "$text.secondary",
-		},
-		ui.text {
-			function(): string
-				return if sending() then "" else status.elapsed(seconds())
+			text_size = "$font.size.sm",
+			color = function(): string
+				return if said() == "queued" then "$warning" else "$text.secondary"
 			end,
-			tabular = true,
-			text_size = "$font.size.md",
-			color = "$text.tertiary",
 		},
+		ui.show(function(): boolean
+			return not sending()
+		end, ui.div {
+			id = "working-clock",
+			RollText {
+				function(): string
+					return status.elapsed(seconds())
+				end,
+				tabular = true,
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
+			},
+		}),
+		ui.show(function(): boolean
+			return rate() ~= nil
+		end, ui.text {
+			function(): string
+				return locale.s("ds.working.rate", { n = string.format("%d", rate() or 0) })
+			end,
+			id = "working-rate",
+			tabular = true,
+			text_size = "$font.size.xs",
+			color = "$text.tertiary",
+		}),
 	}
 end)

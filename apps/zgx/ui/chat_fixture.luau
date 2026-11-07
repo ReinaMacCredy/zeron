@@ -776,6 +776,77 @@ for _, c in { { "connection_reconnecting", "reconnecting" }, { "connection_offli
 		end,
 	}
 end
+ui.command {
+	id = "project_no_git",
+	title = "The open chat's project has no git",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.projects = table.clone(now.projects)
+		for i, p in now.projects do
+			if p.id == "atlas" then
+				local without = table.clone(p)
+				without.git = false
+				now.projects[i] = without
+			end
+		end
+		sessions.now:set(now)
+	end,
+}
+ui.command {
+	id = "stalled_words",
+	title = "What a stalled chat's send says",
+	run = function()
+		local LinkNotice = require("@app/screens/chat/link_notice")
+		local base = { here = "mac", devices = {}, stalled = { "far", "near" } }
+		ui.state("test_stalled", ""):set(table.concat({
+			tostring(LinkNotice.working_says(true, base, { id = "far", device = "box" })),
+			tostring(LinkNotice.working_says(true, base, { id = "near", device = "mac" })),
+			tostring(LinkNotice.working_says(true, base, { id = "other", device = "box" })),
+		}, "|"))
+	end,
+}
+for _, r in { { "rate_41", 41 }, { "rate_gone", nil } } do
+	ui.command {
+		id = r[1],
+		title = `The live rate: {r[2] or "gone"}`,
+		run = function()
+			store.token_rate:set(r[2])
+		end,
+	}
+end
+ui.command {
+	id = "stats_say",
+	title = "The session's numbers",
+	run = function()
+		store.stats:set {
+			turns = 3,
+			steps = 7,
+			llm = "13.4s",
+			tool = "2.0s",
+			tps = "137",
+			priced = false,
+			unpriced = 0,
+			estimated = false,
+			total = "0",
+			total_n = 0,
+			split = {},
+		}
+	end,
+}
+for _, w in { { "says_consulting", { consulting = true } }, { "says_starting", { machine = "starting" } }, { "says_waking", { machine = "waking" } }, { "says_nothing", { consulting = false, machine = nil } } } do
+	ui.command {
+		id = w[1],
+		title = `The working row: {w[1]}`,
+		run = function()
+			local s = store.session:peek()
+			if s and s.id then
+				local next_s = table.clone(s) :: any
+				next_s.consulting, next_s.machine = (w[2] :: any).consulting, (w[2] :: any).machine
+				store.session:set(next_s)
+			end
+		end,
+	}
+end
 local made_chats = 0
 local sessions_stub = sessions :: any
 sessions_stub.create = function(req: any)

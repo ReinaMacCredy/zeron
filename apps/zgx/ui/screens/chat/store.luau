@@ -112,6 +112,8 @@ export type Request = {
 M.session = ui.shared("chat.session", nil :: Session?)
 M.messages = ui.shared("chat.messages", {} :: { Message })
 M.draft = ui.shared("chat.draft", { id = "", text = "" } :: Draft)
+M.stats = ui.shared("chat.stats", nil :: any)
+M.token_rate = ui.shared("chat.token_rate", nil :: number?)
 M.catalog = ui.shared("chat.catalog", { state = "looking", harnesses = {}, models = {} } :: Catalog)
 -- A call nothing waits on: its failure lands in the session's notice (the
 -- host sets it), so the script needn't hear it.

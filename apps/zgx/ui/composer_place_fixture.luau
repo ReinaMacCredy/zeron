@@ -162,7 +162,7 @@ return ui.column {
 		end, ui.row {
 			justify = "end",
 			pb = "$space.2",
-			ds.context_usage.Card {
+			ds.context_usage.Body {
 				usage = function(): Composer.Usage?
 					return usage:get()
 				end,

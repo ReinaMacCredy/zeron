@@ -15,6 +15,7 @@ local store = require("@app/screens/chat/store")
 local prefs = require("@app/screens/settings/prefs")
 local locale = require("@ds/locale")
 local sessions = require("@account/sessions")
+local LinkNotice = require("@app/screens/chat/link_notice")
 local route = require("@app/screens/shell/route")
 local Where = require("@app/screens/chat/where")
 local Dock = require("@app/screens/chat/dock")
@@ -487,6 +488,26 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 			end
 			return { tokens = s.context_tokens, window = s.context_window }
 		end,
+		stats = function(): any
+			return view.stats:get()
+		end,
+		working = function(): boolean
+			local s: any = session:get()
+			if s and s.in_flight ~= nil then
+				return s.in_flight
+			end
+			return running:get()
+		end,
+		footer_git = function(): boolean
+			local s = session:get()
+			for _, p in sessions.now:get().projects do
+				if p.id == (if s then s.project else nil) then
+					return p.git == true
+				end
+			end
+			return false
+		end,
+		footer_status = split == true,
 		project = project,
 		projects = where.projects,
 		device = device,
@@ -686,6 +707,9 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 			lanes.watch(slot, chat, data.frozen == true, data.parent)
 		end
 	end)
+	ui.on_cleanup(function()
+		lanes.on_screen(slot, false)
+	end)
 	-- The transcript as the chat page has it (screens/chat/session), its
 	-- composer docked over its foot the same way (screens/chat/dock): the
 	-- send's runway and glide, the working row and the jump-to-latest pill
@@ -860,6 +884,14 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		-- (A split's pane, made again at the place taken up: whether
 		-- that was its end.)
 		was_at_end = if split then anchor:peek() == nil else nil,
+		working = {
+			rate = function(): number?
+				return view.token_rate:get()
+			end,
+			says = function(sending: boolean): string?
+				return LinkNotice.working_says(sending, sessions.now:get(), view.session:get())
+			end,
+		},
 	}
 	end
 	local transcript = if split
@@ -889,6 +921,9 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		id = `lane-{slot}`,
 		class = "lane-tab side-chat-tab",
 		provide = { session = chat },
+		on_visible = function(visible: boolean)
+			lanes.on_screen(slot, visible)
+		end,
 		grow = 1,
 		w_full = true,
 		min_h = 0,

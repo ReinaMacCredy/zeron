@@ -189,6 +189,9 @@ stub_store.interrupt = function(id: string)
 end
 -- The host's lane views: a watched chat says its id in its transcript.
 local stub_lanes = lanes :: any
+stub_lanes.on_screen = function(slot: string, shown: boolean)
+	note(`on_screen:{slot}:{shown}`)
+end
 stub_lanes.watch = function(slot: string, id: string?, frozen: boolean?, _chat: string?)
 	note(`watch:{id or "none"}{if frozen then ":frozen" else ""}`)
 	if id then

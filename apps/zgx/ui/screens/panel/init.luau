@@ -346,6 +346,17 @@ function M.toggle_terminal(): boolean
 	return toggle_kind("terminal")
 end
 
+function M.terminal_shown(): boolean
+	local k = route_key() or (if shown_key then shown_key() else nil)
+	local files = if shell_view then shell_view.files else nil
+	if not k or not files or files:get() ~= true then
+		return false
+	end
+	local s = state.of(k)
+	local active = if s.active then state.find(k, s.active) else nil
+	return active ~= nil and active.kind == "terminal"
+end
+
 -- ⌃Tab / ⌃⇧Tab while the panel has the keyboard: the next or previous tab
 -- (`by` 1 or -1), round. Whether it acted (else the shell steps sessions).
 function M.step_tab(by: number): boolean

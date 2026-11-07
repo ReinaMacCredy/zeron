@@ -70,6 +70,7 @@ export type Name =
 	| "volume-loud"
 	| "moon"
 	| "sun"
+	| "speedometer"
 	| "terminal"
 	| "document"
 	| "file-diff"

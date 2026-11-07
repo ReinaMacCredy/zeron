@@ -454,14 +454,7 @@ local function Composer(): Node
 		end
 		-- The connection: this device's, then the chat's host.
 		local now = sessions.now:get()
-		local host_unreachable, host = false, nil
-		if s and s.device and s.device ~= now.here then
-			for _, d in now.devices or {} do
-				if d.id == s.device then
-					host_unreachable, host = d.online == false, d.name
-				end
-			end
-		end
+		local host_unreachable, host = LinkNotice.host_of(now, s)
 		return LinkNotice.of {
 			connection = now.connection,
 			host_unreachable = host_unreachable,
@@ -1125,6 +1118,38 @@ local function Composer(): Node
 					return nil
 				end
 				return { tokens = s.context_tokens, window = s.context_window }
+			end,
+			stats = function(): any
+				return store.stats:get()
+			end,
+			working = function(): boolean
+				local s: any = open()
+				if s and s.in_flight ~= nil then
+					return s.in_flight
+				end
+				return s ~= nil and s.running == true
+			end,
+			footer_git = function(): boolean
+				local s = open()
+				for _, p in sessions.now:get().projects do
+					if p.id == (if s then s.project else nil) then
+						return p.git == true
+					end
+				end
+				return false
+			end,
+			on_terminal = function()
+				local panel: any = require("@app/screens/shell/boundary").load("@app/screens/panel")
+				if panel and panel.toggle_terminal then
+					panel.toggle_terminal()
+				end
+			end,
+			terminal_open = function(): boolean
+				local panel: any = require("@app/screens/shell/boundary").load("@app/screens/panel")
+				return panel ~= nil and panel.terminal_shown ~= nil and panel.terminal_shown()
+			end,
+			terminal_keys = function(): string
+				return require("@app/screens/shell/keys").combo("shell.toggle_terminal")
 			end,
 			project = project,
 			projects = where.projects,

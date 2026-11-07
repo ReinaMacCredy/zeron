@@ -608,6 +608,27 @@ impl Drop for Watch {
 }
 
 #[cfg(all(test, unix))]
+impl Rpc {
+    pub(crate) fn recording() -> (Rpc, mpsc::Receiver<String>, OwnedFd) {
+        let (heard, bell) = pipe().unwrap();
+        let (tx, rx) = mpsc::channel::<String>();
+        let rpc = Rpc(Rc::new(Inner {
+            tx,
+            bell: Arc::new(bell),
+            frames: Frames(Arc::default()),
+            next_id: Cell::new(1),
+            pending: RefCell::default(),
+            closed: Cell::new(false),
+        }));
+        (rpc, rx, heard)
+    }
+
+    pub(crate) fn heard(&self, frame: Value) {
+        self.route(frame);
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

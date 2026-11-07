@@ -305,6 +305,26 @@ function M.Heading(props: { [any]: any }): Node
 	}
 end
 
+function M.CardHeading(props: { [any]: any }): Node
+	return ui.row {
+		w_full = true,
+		px = "$space.2",
+		pt = "$zeron.space.tight",
+		pb = "$space.1",
+		shrink = 0,
+		ui.text {
+			function(): string
+				local words: any = props[1]
+				return string.upper(if type(words) == "string" then words else words:get())
+			end,
+			text_size = 10,
+			letter_spacing = 0.6,
+			weight = "$font.weight.medium",
+			color = "$text.secondary",
+		},
+	}
+end
+
 -- A rule between groups, edge to edge (the groups inset themselves).
 function M.Rule(_props: { [any]: any }?): Node
 	return ui.div { h = 1, w_full = true, shrink = 0, bg = "$border.subtle", aria_hidden = true }

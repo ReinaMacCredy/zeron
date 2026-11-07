@@ -32,6 +32,31 @@ export type Link = {
 
 export type Notice = { text: string, tone: string?, spinner: boolean? }
 
+function M.host_of(now: any, s: any): (boolean, string?)
+	if s and s.device and s.device ~= now.here then
+		for _, d in now.devices or {} do
+			if d.id == s.device then
+				return d.online == false, d.name
+			end
+		end
+	end
+	return false, nil
+end
+
+function M.working_says(sending: boolean, now: any, s: any): string?
+	if not sending then
+		return if s and s.consulting then "consulting" else nil
+	end
+	local unreachable = M.host_of(now, s)
+	if unreachable or now.connection == "offline" or now.connection == "reconnecting" then
+		return "queued"
+	end
+	if s and s.device ~= now.here and table.find(now.stalled or {}, s.id) then
+		return "queued"
+	end
+	return if s then s.machine else nil
+end
+
 function M.of(link: Link): Notice?
 	local intent = link.intent == true
 	local c = link.connection

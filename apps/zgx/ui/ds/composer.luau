@@ -29,6 +29,8 @@
 local composer_surface = require("@self/composer_surface")
 local Button = require("@self/button")
 local Icon = require("@self/icon")
+local Kbd = require("@self/kbd")
+local Menu = require("@self/menu")
 local control = require("@self/control")
 local FadeText = require("@self/fade_text")
 local Dropdown = require("@self/dropdown")
@@ -46,6 +48,7 @@ local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
 local context_usage = require("@self/context_usage")
+local SessionStats = require("@self/session_stats")
 local motion = require("@self/motion")
 local EditorMenu = require("@self/editor_menu")
 local limit_notice = require("@self/composer_limit")
@@ -160,6 +163,13 @@ export type Props = {
 	device: State<string?>?,
 	devices: ({ Device } | State<{ Device }> | () -> { Device })?,
 	checkout: State<string?>?,
+	stats: (() -> SessionStats.Stats?)?,
+	working: (() -> boolean)?,
+	on_terminal: (() -> ())?,
+	terminal_open: (() -> boolean)?,
+	terminal_keys: (() -> string)?,
+	footer_git: (() -> boolean)?,
+	footer_status: boolean?,
 	branch: State<string?>?,
 	branches: ({ Dropdown.Item } | State<{ Dropdown.Item }> | () -> { Dropdown.Item })?,
 	-- What the branches' list says with none to show (still loading, none
@@ -582,39 +592,115 @@ local function project_chip(
 	}
 end
 
--- The ring, in a chip-high box of its own, washed under the pointer as the
--- chips beside it are. Given what the context holds, it opens the card
--- above (below, with the menus below) as the pointer rests on it or the
--- keys reach it.
 local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: () -> string): Node
-	local function fraction(): number
+	local function known(): number?
 		if usage then
-			return context_usage.fraction(usage()) or 0
+			return context_usage.fraction(usage())
 		end
 		return math.clamp(if type(used) == "function" then used() else used, 0, 1)
 	end
-	local function build(at: string?): Node
-		return ui.row {
-			id = "composer-context",
-			h = CHIP_H,
-			px = "$zeron.space.tight",
-			items = "center",
-			rounded = CHIP_RADIUS,
-			hover = { bg = "$hover" },
-			focusable = usage ~= nil,
-			label = locale.t("ds.composer.context_used"),
-			tooltip = if usage then context_usage.Card { usage = usage } else nil,
-			tooltip_placement = if at then { side = at, align = "end", offset = 8 } else nil,
-			tooltip_delay = 150,
-			context_usage.Ring { fraction = fraction },
-		}
+	local function fraction(): number
+		return known() or 0
 	end
+	local open = ui.use_state(false)
+	local function ink(): string
+		local f = known()
+		return if f then context_usage.ink(f) else "$text.tertiary"
+	end
+	local chip = ui.row {
+		id = "composer-context",
+		h = CHIP_H,
+		px = "$zeron.space.tight",
+		gap = ui.raw(5, "gpui's ring to its percent"),
+		items = "center",
+		shrink = 0,
+		rounded = CHIP_RADIUS,
+		cursor = "pointer",
+		selectable = false,
+		role = "button",
+		expanded = function(): boolean
+			return open:get()
+		end,
+		focus = control.ring,
+		text_size = "$font.size.xs",
+		color = ink,
+		bg = function(): string
+			return if open:get() then "$hover" else "#00000000"
+		end,
+		hover = { bg = "$hover" },
+		focusable = usage ~= nil,
+		label = locale.t("ds.composer.context_used"),
+		on_click = if usage
+			then function()
+				open:set(not open:peek())
+			end
+			else nil,
+		context_usage.Ring { fraction = fraction, footer = true },
+		ui.text {
+			function(): string
+				local f = known()
+				return if f
+					then locale.s("ds.composer.context.percent", { n = string.format("%.0f", f * 100) })
+					else locale.s("ds.session_stats.missing")
+			end,
+			id = "composer-context-percent",
+			tabular = true,
+		},
+	}
 	if not usage then
-		return build(nil)
+		return chip
 	end
 	-- (A placement is read as it's built: one following the composer is
 	-- built again as it changes sides.)
-	return ui.presence(side, build)
+	return ui.presence(side, function(at: string): Node
+		return ui.popover(Menu.panel {
+			class = "composer-context-panel",
+			open = open,
+			anchor = chip,
+			autofocus = false,
+			w = 248,
+			placement = { side = at, align = "end", offset = 6 },
+			build = function(): Node
+				return context_usage.Body { usage = usage }
+			end,
+		})
+	end)
+end
+
+local function terminal_button(run: () -> (), open: (() -> boolean)?, keys: (() -> string)?): Node
+	local function is_open(): boolean
+		return open ~= nil and open()
+	end
+	return ui.button {
+		id = "composer-terminal",
+		label = locale.t("ds.composer.terminal"),
+		checked = is_open,
+		tooltip = Tooltip { locale.t("ds.composer.terminal") },
+		tooltip_placement = { side = "top", align = "end", offset = 6 },
+		h = 20,
+		px = "$space.1",
+		gap = "$zeron.space.tight",
+		shrink = 0,
+		items = "center",
+		rounded = "$radius.md",
+		text_size = "$font.size.sm",
+		weight = "$font.weight.medium",
+		bg = function(): string
+			return if is_open() then "$zeron.composer.accent_wash" else "#00000000"
+		end,
+		color = function(): string
+			return if is_open() then "$accent" else "$text.tertiary"
+		end,
+		hover = { bg = "$hover", color = "$text.primary" },
+		active = { bg = "$pressed", color = "$text.primary" },
+		on_click = run,
+		ui.div { shrink = 0, Icon { name = "terminal", size = 12 } },
+		ui.show(is_open, ui.presence(keys or function(): string
+			return "cmd+j"
+		end, function(combo: string): Node
+			return Kbd { keys = combo, tone = "quiet" }
+		end)),
+	}
 end
 
 -- An existing chat's footer, as Zeron's: where it works (a word, opening
@@ -2474,6 +2560,21 @@ return ui.component(function(props: Props): Node
 		else
 			table.insert(left, draft_row)
 		end
+		local stats, working = props.stats, props.working
+		local function has_git(): boolean
+			return props.footer_git == nil or props.footer_git()
+		end
+		if stats then
+			table.insert(left, ui.show(function(): boolean
+				return not new_chat() and has_git()
+			end, SessionStats.Chip {
+				stats = stats,
+				working = function(): boolean
+					return working ~= nil and working()
+				end,
+				side = side,
+			}))
+		end
 		footer = ui.row {
 			id = props.toolbar_id,
 			h = 24,
@@ -2490,6 +2591,10 @@ return ui.component(function(props: Props): Node
 				overflow = "hidden",
 				table.unpack(left),
 			},
+			-- (Plugins': the GitHub plugin's pull request stands here, as gpui's before the ring.)
+			if props.footer_status ~= false
+				then ui.show(has_git, ui.row { class = "composer-footer-status", items = "center", shrink = 0 })
+				else nil,
 			ui.row {
 				items = "center",
 				shrink = 0,
@@ -2500,6 +2605,11 @@ return ui.component(function(props: Props): Node
 						return u ~= nil and u.window ~= nil and u.window > 0
 					end, ring(0, props.usage, side))
 					elseif props.context then ring(props.context, nil, side)
+					else nil,
+				if props.on_terminal
+					then ui.show(function(): boolean
+						return not new_chat()
+					end, terminal_button(props.on_terminal, props.terminal_open, props.terminal_keys))
 					else nil,
 			},
 		}

@@ -107,6 +107,7 @@ end }
 | `#session-header` | a chat's header (title: `#page-title`) | |
 | `.message` | a message (`.message-user`, `.message-assistant`) | `message` |
 | `#chat-composer` | the message box | |
+| `.composer-footer-status` | the composer's footer, before the context ring (the GitHub plugin's pull request stands here) | `session` |
 | `#new-chat-background` | behind a new chat, under Zeron's effect: replace it (`ui.change`) to offer a wallpaper (see below) | `pointer` |
 | `.file-row`, `.file-tab` | a file's row in the tree, its tab | `file` |
 | `.panel-tab` | a tab of the side panel | `panel` |

@@ -665,6 +665,10 @@ function M.setup()
 		local dark = not (kind == "light" or kind == "high-contrast-light")
 		ui.theme.tokens {
 			zeron = {
+				composer = {
+					accent_wash = if dark then "alpha({accent}, 0.45)" else "alpha({accent}, 0.1)",
+					faint = if dark then "#858589" else "#797980",
+				},
 				inset = {
 					-- (Lifted by its edge, not its tone: Zeron's, 13 on 17 dark, 255 on 245 light.)
 					bg = if dark then "{zeron.window}" else "over({zeron.window}, {surface.raised})",
