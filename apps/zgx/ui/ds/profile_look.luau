@@ -91,6 +91,15 @@ local function access_word(id: string?): string?
 end
 M.access_word = access_word
 
+-- The modes an agent takes (gpui's `offered_access_modes`): every one while
+-- it isn't listed, Full access alone when its catalog names none.
+function M.modes(agent: { access_modes: { string }? }?): { string }
+	if agent == nil or agent.access_modes == nil then
+		return { "supervised", "edits", "full" }
+	end
+	return if #agent.access_modes > 0 then agent.access_modes else { "full" }
+end
+
 -- "Codex · GPT-5.6 · Supervised · X-High · 2 tools off" (gpui's `profile_line`):
 -- only what the profile sets.
 function M.line(p: Profile | Draft, harness_label: string?, model_label: string?): string

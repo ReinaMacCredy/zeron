@@ -11,7 +11,7 @@
 --
 -- Each host action is under `pcall`: a host older than this has none, and
 -- reads as no profiles at all (`profiles.list` stays at its default, the
--- card says nothing more than Save current, which saves nothing).
+-- card says nothing more than Save current, which saves nothing; `absent`).
 
 local store = require("@app/screens/chat/store")
 local model_switch = require("@app/screens/chat/model_switch")
@@ -39,8 +39,9 @@ end
 -- What's asked of the host, each by its action (a fixture stands in for
 -- them as the engine would answer).
 M.host = {
+	-- (Raises on a host without it.)
 	load = function()
-		pcall(ui.invoke, "profiles.load", nil)
+		ui.invoke("profiles.load", nil)
 	end,
 	apply = function(args: any): any
 		return call("chat.apply_profile", args)
@@ -74,8 +75,14 @@ M.host = {
 	end,
 }
 
+-- The host has no profiles at all (older than this): Settings says so
+-- rather than loading for good.
+M.absent = ui.state("profiles_absent", false)
+
 function M.load()
-	M.host.load()
+	if not pcall(M.host.load) and not M.absent:peek() then
+		M.absent:set(true)
+	end
 end
 
 -- Once, from the first composer: a chat's profile shows only once its list
@@ -254,8 +261,11 @@ function M.bind(opts: Opts): ({ [string]: any }, Node)
 		end)
 	end
 	local take, dialog = model_switch.use(`{opts.key}_profile`, {
+		-- (A chat with no model still has its agent, "<agent>/": gpui asks
+		-- whatever the model, pickers/profiles.rs `apply_profile`.)
 		current = function(): string?
-			return opts.picks().model
+			local h = harness()
+			return opts.picks().model or (if h then `{h}/` else nil)
 		end,
 		history = function(): boolean?
 			if not opts.chat() or not opts.committed() then
@@ -324,6 +334,17 @@ function M.bind(opts: Opts): ({ [string]: any }, Node)
 			return M.list:get()
 		end,
 		applied = applied,
+		-- The agent the chat runs on, its mark on the chip's profile half
+		-- (gpui's harness icon there, not the profile's).
+		agent = function(): any?
+			local h = harness()
+			for _, a in store.catalog:get().harnesses do
+				if a.id == h then
+					return a
+				end
+			end
+			return nil
+		end,
 		can_save = function(): boolean
 			return harness() ~= "acp"
 		end,

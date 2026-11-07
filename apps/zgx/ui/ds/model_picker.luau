@@ -681,6 +681,7 @@ return ui.component(function(props: Props): Node
 			ui.show(function(): boolean
 				return profile_dot ~= nil and profile_dot() ~= nil
 			end, ui.div {
+				id = "model-tab-profiles-dot",
 				absolute = true,
 				top = 6,
 				right = 6,

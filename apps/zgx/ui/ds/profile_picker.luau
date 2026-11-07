@@ -551,8 +551,7 @@ return ui.component(function(props: Props): Node
 		return {}
 	end
 	local function modes(d: look.Draft): { string }
-		local a = agent_of(d.harness)
-		return if a and a.access_modes and #a.access_modes > 0 then a.access_modes else { "supervised", "edits", "full" }
+		return look.modes(agent_of(d.harness))
 	end
 	local function level_word(d: look.Draft): string
 		if not d.effort then

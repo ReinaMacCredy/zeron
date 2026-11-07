@@ -2676,7 +2676,8 @@
       "move_down": "Move {name} down",
       "edit": "Edit",
       "loading": "Loading…",
-      "empty": "No profiles yet. Add one to start chats from a saved agent and model."
+      "empty": "No profiles yet. Add one to start chats from a saved agent and model.",
+      "unavailable_host": "This version of Zeron can't keep agent profiles."
     }
   },
   "common": {

@@ -652,9 +652,7 @@ local function form(): Node
 		w = SELECT_W,
 		options = function(): { any }
 			local out = { keep }
-			local a = agent_of(draft().harness)
-			local modes = if a and a.access_modes and #a.access_modes > 0 then a.access_modes else { "supervised", "edits", "full" }
-			for _, m in modes do
+			for _, m in look.modes(agent_of(draft().harness)) do
 				table.insert(out, { value = m, label = look.access_word(m) or m, description = ui.t(`ds.composer.access.{m}_hint`):get() })
 			end
 			return out
@@ -1032,7 +1030,9 @@ function M.view(): Node
 		ds.Settings.Page {
 			title = ui.t("settings.agent_profiles.title"),
 			description = ui.t("settings.agent_profiles.description"),
-			trail = search.anchor("new_profile", ui.row { ds.Button {
+			trail = search.anchor("new_profile", ui.row { ui.show(function(): boolean
+				return not profiles.absent:get()
+			end, ds.Button {
 				id = "profile-new",
 				tone = "primary",
 				size = "sm",
@@ -1040,7 +1040,7 @@ function M.view(): Node
 					M.open_editor(nil, look.blank(default_harness()))
 				end,
 				ui.text { t("new") },
-			} }),
+			}) }),
 			ui.show(function(): boolean
 				return page_error:get() ~= nil
 			end, ui.button {
@@ -1070,12 +1070,17 @@ function M.view(): Node
 					if l.state == "error" then
 						return "error"
 					elseif #l.profiles == 0 then
-						return if l.state == "ready" then "empty" else "loading"
+						if l.state == "ready" then
+							return "empty"
+						end
+						return if profiles.absent:get() then "absent" else "loading"
 					end
 					return "list"
 				end, function(state: string): Node
 					if state == "loading" then
 						return ui.text { t("loading"), id = "agent-profiles-loading", text_size = "$font.size.md", color = "$text.tertiary" }
+					elseif state == "absent" then
+						return ui.text { t("unavailable_host"), id = "agent-profiles-absent", wrap = true, text_size = "$font.size.md", color = "$text.tertiary" }
 					elseif state == "error" then
 						return ui.text {
 							function(): string

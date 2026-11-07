@@ -265,6 +265,31 @@ function M.install(o: { note: (string) -> (), meta: { [string]: any }, publish: 
 			failing:set(true)
 		end,
 	}
+	-- A host older than profiles: no `profiles.load` (it raises, as an
+	-- action a host lacks does), the list never asked for.
+	ui.command {
+		id = "profiles_old_host",
+		title = "A host without profiles",
+		run = function()
+			profiles.host.load = function()
+				error("no host action named `profiles.load`")
+			end
+			profiles.list:set({ state = "idle", profiles = {} })
+		end,
+	}
+	-- An agent whose catalog names no access mode (Full access alone).
+	ui.command {
+		id = "catalog_full_only",
+		title = "An agent with no modes listed",
+		run = function()
+			local c = store.catalog:peek()
+			local harnesses: { any } = table.clone(c.harnesses)
+			local models: { any } = table.clone(c.models)
+			table.insert(harnesses, { id = "fx", label = "Fx", mark = "pi", access_modes = {} })
+			table.insert(models, { value = "fx-1", label = "Fx 1", harness = "fx" })
+			store.catalog:set { state = "ready", harnesses = harnesses, models = models }
+		end,
+	}
 	-- s2 on Planner, as the host says once it's applied.
 	ui.command {
 		id = "s2_on_planner",

@@ -98,8 +98,9 @@ end
 
 local function ask_for(from_value: string?, value: string): Ask
 	local from, to = model_of(from_value), model_of(value)
-	local from_label = if from then from.label else (from_value or "")
-	-- (A profile with no model of its own: its agent, "<agent>/".)
+	-- (An agent alone, "<agent>/": a profile with no model of its own, or a
+	-- chat with none.)
+	local from_label = if from then from.label elseif string.sub(from_value or "", -1) == "/" then agent_name(string.sub(from_value :: string, 1, -2)) else (from_value or "")
 	local to_label = if to then to.label elseif string.sub(value, -1) == "/" then agent_name(string.sub(value, 1, -2)) else value
 	local from_agent = if from then from.harness else string.match(from_value or "", "^([^/]+)/")
 	local to_agent = if to then to.harness else string.match(value, "^([^/]+)/")

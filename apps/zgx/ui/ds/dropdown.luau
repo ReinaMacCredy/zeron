@@ -1405,7 +1405,9 @@ return ui.component(function(props: Props): Node
 				return ui.column {
 					w_full = true,
 					gap = 0,
-					role = "listbox",
+					-- (A listbox is one Tab stop: a form in its head, Tab walking
+					-- it, needs a plain group.)
+					role = if props.tab_inside then "group" else "listbox",
 					label = props.label,
 					focusable = true,
 					focus = { outline = 0 },

@@ -1568,17 +1568,24 @@ return ui.component(function(props: Props): Node
 				hover = { bg = "$hover" },
 				active = { bg = "$pressed" },
 				on_click = menu.toggle,
+				-- (The chat's own agent, as gpui's chip icon; the profile's
+				-- until the catalog lists that.)
 				ui.presence(function(): string
+					local g = profiles and profiles.agent and profiles.agent()
+					if g then
+						return `{g.id}\0{g.mark or ""}\0{g.icon or ""}\0{g.label or g.id}`
+					end
 					local a = applied()
-					return if a then `{a.harness}\0{a.mark or ""}\0{a.icon or ""}` else ""
-				end, function(_key: string): Node
-					local a = applied()
-					if not a then
+					return if a then `{a.harness}\0{a.mark or ""}\0{a.icon or ""}\0{a.name}` else ""
+				end, function(key: string): Node
+					if key == "" then
 						return ui.div {}
 					end
+					local id, mark, icon, label = string.match(key, "^([^%z]*)%z([^%z]*)%z([^%z]*)%z(.*)$")
 					return ui.div {
 						shrink = 0,
-						AgentMark { label = a.name, mark = a.mark, icon = a.icon, seed = a.harness, size = 16, bare = true },
+						class = `profile-half-mark-{(string.gsub(id or "", "[^%w]", "-"))}`,
+						AgentMark { label = label or "", mark = if mark ~= "" then mark else nil, icon = if icon ~= "" then icon else nil, seed = id, size = 16, bare = true },
 					}
 				end, { shrink = 0 }),
 				ui.text {
