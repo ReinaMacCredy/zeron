@@ -1,6 +1,6 @@
 -- The composer, for tests/composer_in_place.test.luau: its notice
 -- (`test_composer_notice`) and its project (`test_composer_project`), set
--- as an app would as they change. Here, beside app.luau, as a mounted
+-- as an app would as they change, and a field of another's beside it. Here, beside app.luau, as a mounted
 -- script loads modules from its own directory down.
 
 ui.theme.strict("warn")
@@ -21,6 +21,9 @@ return ui.column {
 	h_full = true,
 	p = "$space.4",
 	justify = "end",
+	gap = "$space.4",
+	-- Another draft (a pane's beside it), for where focus goes.
+	ui.input { id = "elsewhere", label = "Elsewhere", value = ui.state("test_elsewhere", ""), w = 240 },
 	ds.Composer {
 		value = ui.state("test_composer_draft", ""),
 		model = ui.state("test_composer_model", "sonnet" :: string?),

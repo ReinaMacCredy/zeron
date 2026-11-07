@@ -105,6 +105,8 @@ export type Props = {
 	close_with: State<number>?,
 	-- Set to whether it is open (Dropdown's `showing`).
 	showing: State<boolean>?,
+	-- Set as it closes: whether from outside it (Dropdown's `outside`).
+	outside: State<boolean>?,
 	-- How far its chip folds (Dropdown's `fold`): 1, without the effort; 2, its
 	-- mark alone.
 	fold: (() -> number)?,
@@ -327,12 +329,32 @@ return ui.component(function(props: Props): Node
 			slider_value:set(v)
 		end
 	end)
+	-- Remembered as a new chat picks them, as Zeron's `remember_model` and
+	-- `remember_reasoning`: a chat only looked at teaches nothing.
+	local function remember(level: boolean)
+		local m = current()
+		if not m or committed() then
+			return
+		end
+		if not level and LAST_MODEL:peek()[m.harness] ~= m.value then
+			local now = table.clone(LAST_MODEL:peek())
+			now[m.harness] = m.value
+			LAST_MODEL:set(now)
+		end
+		local e = props.effort:peek()
+		if level and e and LAST_EFFORT:peek()[m.value] ~= e then
+			local now = table.clone(LAST_EFFORT:peek())
+			now[m.value] = e
+			LAST_EFFORT:set(now)
+		end
+	end
 	local function set_level(v: string)
 		local o = effort_option()
 		if o then
 			pick(o, v)
 		else
 			props.effort:set(v)
+			remember(true)
 		end
 	end
 	-- The level shown: the one a drag is over, else the one set.
@@ -362,24 +384,6 @@ return ui.component(function(props: Props): Node
 		props.effort:set(m.effort or m.efforts[1].value)
 	end
 	ui.effect(fit_effort)
-	-- Remembered as they're used.
-	ui.effect(function()
-		local m = current()
-		if not m then
-			return
-		end
-		if LAST_MODEL:peek()[m.harness] ~= m.value then
-			local now = table.clone(LAST_MODEL:peek())
-			now[m.harness] = m.value
-			LAST_MODEL:set(now)
-		end
-		local e = props.effort:get()
-		if e and LAST_EFFORT:peek()[m.value] ~= e then
-			local now = table.clone(LAST_EFFORT:peek())
-			now[m.value] = e
-			LAST_EFFORT:set(now)
-		end
-	end)
 
 	-- The models as the dropdown's items, each in its agent's mark. A model the
 	-- chat runs that the catalog no longer lists has a row of its own, there to
@@ -2297,6 +2301,7 @@ return ui.component(function(props: Props): Node
 					props.effort:set(remembered)
 				end
 				fit_effort()
+				remember(false)
 			end)
 		end,
 		on_key = on_key,
@@ -2314,6 +2319,7 @@ return ui.component(function(props: Props): Node
 		open_with = props.open_with,
 		close_with = props.close_with,
 		showing = props.showing,
+		outside = props.outside,
 		head = ui.column {
 			w_full = true,
 			ui.show(function(): boolean

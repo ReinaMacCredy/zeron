@@ -4087,6 +4087,8 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             };
             let (from, from_mark) = side("from", "fromHarness");
             let (to, to_mark) = side("to", "toHarness");
+            // (Its handoff is text the new agent reads: the picker's switch dialog counts it as history.)
+            let handoff = entry["parts"].as_array().into_iter().flatten().any(|p| p["kind"].as_str() == Some("handoff"));
             Some(Value::record([
                 ("id", Value::from(id)),
                 ("role", Value::from("switch")),
@@ -4095,6 +4097,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("to", to),
                 ("from_mark", from_mark),
                 ("to_mark", to_mark),
+                ("handoff", Value::Bool(handoff)),
             ]))
         }
         _ => None,
@@ -6321,6 +6324,11 @@ mod tests {
         assert!(message(&entry(json!([])), None).is_none());
         let seam = entry(json!([{ "kind": "switch", "id": "x", "from": "A", "to": "B" }]));
         assert_eq!(field(&message(&seam, None).unwrap(), "role"), "switch", "a seam is still a seam");
+        let handed = |m: &Value| matches!(m.field("handoff"), Some(Value::Bool(true)));
+        assert!(!handed(&message(&seam, None).unwrap()), "a bare seam holds nothing to read again");
+        let moved = message(&entry(json!([{ "kind": "handoff", "id": "h", "harness": "codex", "text": "packet", "route": { "fromHarness": "claude-code", "fromModel": "opus" } }])), None).unwrap();
+        assert_eq!(field(&moved, "role"), "switch");
+        assert!(handed(&moved), "a provider switch's handoff is history, as the shipping app's chat_has_history counts it");
     }
 
     #[test]

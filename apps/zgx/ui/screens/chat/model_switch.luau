@@ -1,8 +1,8 @@
 -- Picking another model on a chat with history asks first, as Zeron's picker
 -- does: "Switch model?" (the next response rereads the chat) or "Switch
 -- provider?" (the new agent starts from a text copy of it). Yes lands the pick
--- on the chat, with its divider in the transcript; 1 or Enter says yes, 2 or
--- Escape no.
+-- on the chat, with its divider in the transcript; 1 or Enter says yes (Enter
+-- on a focused option, that option), 2 or Escape no.
 
 local ds = require("@ds")
 local locale = require("@ds/locale")
@@ -82,13 +82,14 @@ local function agent_name(id: string?): string
 end
 
 -- Whether a chat holds anything an agent would read again: more than the
--- transcript's own dividers.
-function M.has_history(messages: { any }, running: boolean?): boolean
-	if running then
+-- transcript's own dividers, a handoff counting (Zeron's `chat_has_history`).
+-- (`loaded` false: its transcript not come yet, which counts too.)
+function M.has_history(messages: { any }, running: boolean?, loaded: boolean?): boolean
+	if running or loaded == false then
 		return true
 	end
 	for _, m in messages do
-		if m.role ~= "system" and m.role ~= "switch" then
+		if (m.role ~= "system" and m.role ~= "switch") or m.line == "handoff" or m.handoff == true then
 			return true
 		end
 	end
@@ -109,9 +110,9 @@ local function ask_for(from_value: string?, value: string): Ask
 			lead = t("provider_lead", { to = to_label }),
 			body = t("provider_body", { from = a, to = b }),
 			yes = t("yes", { to = to_label }),
-			yes_detail = t("provider_yes_detail", { from = from_label }),
-			no = t("provider_no", { from = from_label }),
-			no_detail = t("no_detail", { from = from_label }),
+			yes_detail = t("provider_yes_detail", { from = a }),
+			no = t("provider_no", { from = a }),
+			no_detail = t("no_detail", { from = a }),
 			note = `Provider changed from {a} to {b}.`,
 			note_hint = `{a} session closed. The messages above were handed to {b} as text on the next turn; {a}'s tool results and file state were not carried.`,
 		}
@@ -153,7 +154,8 @@ function M.use(key: string, opts: { current: () -> string?, history: () -> boole
 		if now then
 			answered = false
 		elseif was_open and not answered and opts.back then
-			opts.back()
+			-- (Out of the dialog's own close: the picker opening inside an Escape there hangs.)
+			ui.after(0, opts.back)
 		end
 		was_open = now
 	end)
@@ -191,6 +193,13 @@ function M.use(key: string, opts: { current: () -> string?, history: () -> boole
 		return false
 	end
 	local function option(id: string, number: string, title: () -> string, detail: () -> string, on_click: () -> ()): Node
+		local function own_keys(e: any): boolean
+			if e.key == "Enter" then
+				on_click()
+				return true
+			end
+			return keys(e)
+		end
 		return ui.button {
 			id = id,
 			w_full = true,
@@ -204,7 +213,7 @@ function M.use(key: string, opts: { current: () -> string?, history: () -> boole
 			focus = { bg = "$hover", outline = 0 },
 			label = title,
 			on_click = on_click,
-			on_key = keys,
+			on_key = own_keys,
 			ui.text { number, w = 16, shrink = 0, color = "$text.disabled" },
 			ui.column {
 				grow = 1,

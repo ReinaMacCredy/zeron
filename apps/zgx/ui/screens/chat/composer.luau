@@ -203,13 +203,15 @@ local function Composer(): Node
 				local resolved = shared.resolve_model(s, store.catalog:get())
 				for _, k in FIELDS do
 					local v = (s :: any)[k]
+					-- (None found: none shown, never the chat before's.)
+					local own = (k == "model" or k == "effort") and resolved.model == nil
 					if k == "model" or k == "effort" then
 						v = resolved[k]
 					end
-					if v ~= nil and not equal(locals[k]:peek(), v) then
+					if (v ~= nil or own) and not equal(locals[k]:peek(), v) then
 						locals[k]:set(v)
 					end
-					applied[k] = if v ~= nil then v else locals[k]:peek()
+					applied[k] = if v ~= nil or own then v else locals[k]:peek()
 				end
 				if s.device and device:peek() ~= s.device then
 					device:set(s.device)
@@ -686,13 +688,14 @@ local function Composer(): Node
 			if running:peek() and (prefs.follow_up:peek() == "steer") ~= (opts ~= nil and opts.inverted == true) then
 				req.steer_now = true
 			end
-			-- A chat with no model of its own runs the one its chip shows.
+			-- A chat with no model of its own runs the one its chip shows, of
+			-- its own agent (another's goes through the switch dialog).
 			local opened = open()
 			if opened and (opened :: any).model == nil and not running:peek() then
-				req.model = model:peek()
-				req.effort = effort:peek()
 				for _, m in store.catalog:peek().models do
-					if m.value == req.model then
+					if m.value == model:peek() and m.harness == (opened :: any).harness then
+						req.model = m.value
+						req.effort = effort:peek()
 						req.harness = m.harness
 					end
 				end
@@ -969,7 +972,7 @@ local function Composer(): Node
 			if session_id:peek() == nil then
 				return nil
 			end
-			return model_switch.has_history(store.messages:peek(), running:peek())
+			return model_switch.has_history(store.messages:peek(), running:peek(), open() ~= nil)
 		end,
 		land = function(value: string, ask: model_switch.Ask?)
 			landing = ask

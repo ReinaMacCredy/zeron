@@ -1476,15 +1476,17 @@ return ui.component(function(props: Props): Node
 		return math.max(CONTROL, math.min(MODEL_SHARE * width, room))
 	end)
 
-	-- Closed, the keys go back to the draft, as Zeron's picker gives them back.
+	-- Closed, the keys go back to the draft, as Zeron's picker gives them back;
+	-- closed by a press outside, they stay where it landed (Zeron's `dismiss`).
 	local picker_open = props.model_open or ui.use_state(false)
+	local picker_outside = ui.use_state(false)
 	local picker_was = picker_open:peek()
 	ui.effect(function()
 		local now = picker_open:get()
 		if picker_was and not now then
 			ui.after(0, function()
 				local el = field:peek()
-				if el then
+				if el and not picker_outside:peek() then
 					el:focus()
 				end
 			end)
@@ -1506,6 +1508,7 @@ return ui.component(function(props: Props): Node
 			open_with = props.open_model,
 			close_with = props.model_close,
 			showing = picker_open,
+			outside = picker_outside,
 			committed = props.model_committed,
 			take = props.model_take,
 			looking = props.model_looking,

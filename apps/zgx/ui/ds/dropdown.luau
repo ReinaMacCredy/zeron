@@ -120,6 +120,9 @@ export type Props = {
 	-- Set to whether the panel is open (the caller holding still what it
 	-- hangs from while it is).
 	showing: State<boolean>?,
+	-- Set as it closes: whether that was from outside it (a press elsewhere,
+	-- its trigger gone), not its keys, a pick or its trigger.
+	outside: State<boolean>?,
 	-- At most this many rows of those that match, and the line saying so.
 	cap: number?,
 	cap_words: ((shown: number, total: number) -> string)?,
@@ -395,6 +398,12 @@ return ui.component(function(props: Props): Node
 	end
 	local open = ui.use_state(false)
 	Menu.hold_while(open)
+	-- Closed by its own hand (its keys, a pick, its trigger), not from outside.
+	local own_close = false
+	local function shut()
+		own_close = true
+		open:set(false)
+	end
 	local query = props.query or ui.use_state("")
 	local value = props.value
 	local row_h = props.row_h or ROW
@@ -532,7 +541,7 @@ return ui.component(function(props: Props): Node
 		reveal(math.min(i, math.max(n, 1)))
 	end
 	local function run(n: number)
-		open:set(false)
+		shut()
 		local action = actions[n]
 		if action and action.on_click then
 			action.on_click()
@@ -558,7 +567,7 @@ return ui.component(function(props: Props): Node
 			value:set(v)
 			local stays = props.on_choose ~= nil and props.on_choose(v) == false
 			if not props.keep_open and not stays then
-				open:set(false)
+				shut()
 			end
 		end)
 	end
@@ -792,8 +801,20 @@ return ui.component(function(props: Props): Node
 			local n = asked:get()
 			if n ~= seen then
 				seen = n
-				open:set(false)
+				shut()
 			end
+		end)
+	end
+	if props.outside then
+		local outside = props.outside
+		local was = open:peek()
+		ui.effect(function()
+			local now = open:get()
+			if was and not now then
+				outside:set(not own_close)
+			end
+			own_close = false
+			was = now
 		end)
 	end
 	if props.showing then
@@ -812,7 +833,7 @@ return ui.component(function(props: Props): Node
 	end
 	local function toggle()
 		if open:peek() then
-			open:set(false)
+			shut()
 		else
 			show_panel()
 		end
@@ -890,7 +911,7 @@ return ui.component(function(props: Props): Node
 			local function keys(e): boolean
 				if props.on_key and props.on_key(e, hi:peek(), {
 					close = function()
-						open:set(false)
+						shut()
 					end,
 					choose = choose,
 				}) then
@@ -908,12 +929,17 @@ return ui.component(function(props: Props): Node
 						choose(v)
 					end
 					return true
-				elseif e.key == "Escape" and props.on_escape and props.on_escape() then
-					return true
+				elseif e.key == "Escape" then
+					if props.on_escape and props.on_escape() then
+						return true
+					end
+					-- (The popover's own Escape closes it.)
+					own_close = true
+					return false
 				elseif e.key == "Tab" then
 					-- Tab leaves it, as it leaves a menu: closed, the keys
 					-- back on its trigger, to go on from there.
-					open:set(false)
+					shut()
 					local el = trigger_ref:peek()
 					if el then
 						el:focus()

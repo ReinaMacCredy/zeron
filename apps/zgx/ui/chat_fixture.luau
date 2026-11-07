@@ -958,6 +958,30 @@ ui.command {
 		seed()
 	end,
 }
+-- Sessions holding only a handoff: from another chat (s5), and from another
+-- agent, its seam (s6); and the open session's transcript not come yet.
+ui.command {
+	id = "handed_over",
+	title = "A session holding only a handoff",
+	run = function()
+		META.s5 = { title = "Handed over", project = "atlas", model = "opus", effort = "high", access = "full", plan = false }
+		TRANSCRIPTS.s5 = { { id = "h1", role = "system", line = "handoff", text = "", title = "Long chat" } }
+		META.s6 = { title = "Moved over", project = "atlas", model = "opus", effort = "high", access = "full", plan = false }
+		TRANSCRIPTS.s6 = { { id = "h2", role = "switch", text = "", from = "GPT-5.5", to = "Opus", handoff = true } }
+		seed()
+	end,
+}
+ui.command {
+	id = "transcript_coming",
+	title = "The open session's transcript not come yet",
+	run = function()
+		local s = store.session:peek()
+		if s and s.id then
+			store.messages:set({})
+			publish(s.id, { state = "loading" })
+		end
+	end,
+}
 -- A session of long messages (each folds to five lines).
 do
 	local long_chat = {}

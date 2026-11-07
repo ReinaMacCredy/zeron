@@ -274,7 +274,7 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 			if unsent() or session:peek() == nil then
 				return nil
 			end
-			return model_switch.has_history(view.messages:peek(), running:peek())
+			return model_switch.has_history(view.messages:peek(), running:peek(), (session:peek() :: any).state == "ready")
 		end,
 		land = function(value: string, ask: model_switch.Ask?)
 			landing = ask
