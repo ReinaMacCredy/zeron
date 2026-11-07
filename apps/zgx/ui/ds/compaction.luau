@@ -156,7 +156,11 @@ function M.head(m: any, wait: Wait?, elapsed: number?): Head
 		local title = if meta == nil and (m.text or "") ~= "" then m.text else s("compacted")
 		return { icon = "done", title = title, meta = meta, chevron = has_kept(k), live = false }
 	end
-	local d: Decision = m.decision or { verdict = "failed", by = "stage1", ms = 0, context = 0, input = "", reply = "" }
+	-- (An older engine's row with no record: its own words.)
+	if not m.decision then
+		return { icon = "decision", title = if (m.text or "") ~= "" then m.text else s("classifier"), chevron = false, live = false }
+	end
+	local d: Decision = m.decision
 	local tag, ink = tag_of(d)
 	local context = if k and k.pre then k.pre else d.context
 	if wait and wait.phase == "compacting" and not k and (d.verdict == "new" or d.verdict == "carry") then
