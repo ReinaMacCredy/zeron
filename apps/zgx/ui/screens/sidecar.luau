@@ -660,8 +660,7 @@ local function make_data(props: { session: () -> string?, open_panel: () -> () }
 		return out
 	end
 	local shells = ui.computed(shells_now)
-	-- What Stop all stops: the agents that can stop and the shells, where
-	-- shells can be (the shipping app's `stop_all_background`), for this chat.
+	-- (The shipping app's `stop_all_background`.)
 	local function stoppable(): { agents: { any }, shells: { any } }
 		local s = store.session:get()
 		if not s or s.id ~= session() then

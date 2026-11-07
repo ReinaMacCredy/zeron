@@ -38,10 +38,8 @@ export type Tool = {
 	verb: string,
 	-- A subagent's spawn: the doc it runs in, how it stands, its title.
 	subagent: { ref: string, title: string?, status: string?, agent: string? }?,
-	-- A task delegated to another chat, a thread an agent started: that chat.
 	delegate: { ref: string, title: string? }?,
 	thread: { ref: string, title: string? }?,
-	-- What a spawn was given to run on: its model, else its agent type.
 	tag: string?,
 	target: string?,
 	-- The whole call, when the line says less (a command of many lines, a
@@ -87,9 +85,6 @@ export type Props = {
 	-- A subagent's spawn row (its tool's `subagent`): what opens it (its
 	-- lane). Without it, the row opens its call as any does.
 	open_subagent: ((sub: any) -> ())?,
-	-- The chats a group of agents runs in (ds/transcript_threads), and the
-	-- chat's own agent: a group of spawns, delegates or threads is a column
-	-- of their cards, always open.
 	threads: Threads.Threads?,
 	agent: (() -> any)?,
 	-- A thought being written: `words`, a thought's words as they arrive, by
@@ -115,7 +110,6 @@ local GLYPH: { [Kind]: Icon.Name } = {
 	thought = "chat-round-line",
 }
 
--- The kinds a group of cards holds (a spawn, a delegated task, a thread started).
 local CARDS: { [string]: boolean } = { agent = true, delegate = true, thread = true }
 
 local function card_of(now: () -> any, props: any): Node
@@ -125,8 +119,14 @@ local function card_of(now: () -> any, props: any): Node
 	elseif t.kind == "delegate" then
 		return Threads.Delegate {
 			id = `delegate-{t.id}`,
-			ref = if t.delegate then t.delegate.ref else nil,
-			title = if t.delegate and t.delegate.title then t.delegate.title else t.target,
+			ref = function(): string?
+				local d = now().delegate
+				return if d then d.ref else nil
+			end,
+			title = function(): string?
+				local x = now()
+				return if x.delegate and x.delegate.title then x.delegate.title else x.target
+			end,
 			threads = props.threads,
 		}
 	end
@@ -673,8 +673,7 @@ return ui.component(function(props: Props): Node
 			return false
 		end
 	end
-	-- Spawns, delegates and threads: their cards, always open, no fold (Zeron's
-	-- `tool_group_collapses` is false for them).
+	-- (Zeron's `tool_group_collapses` is false for them.)
 	local all_cards = #tools:peek() > 0
 	for _, t in tools:peek() do
 		all_cards = all_cards and CARDS[t.kind] == true
@@ -698,6 +697,21 @@ return ui.component(function(props: Props): Node
 				end,
 				enter = { opacity = { 0, 1 }, y = { -6, 0 }, duration = 360, ease = "outExpo" },
 			}),
+			if props.threads
+				then Threads.LimitCards {
+					refs = function(): { string }
+						local out: { string } = {}
+						for _, t in tools:get() do
+							local link = if t.kind == "delegate" then t.delegate elseif t.kind == "thread" then t.thread else nil
+							if link and link.ref then
+								table.insert(out, link.ref)
+							end
+						end
+						return out
+					end,
+					threads = props.threads,
+				}
+				else nil,
 		}
 	end
 	-- The rows exist while the tree is open or folding: folded away, they'd

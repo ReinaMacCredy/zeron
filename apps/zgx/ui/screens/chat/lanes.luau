@@ -199,8 +199,6 @@ function M.open_subagent(session: string, sub: any)
 	M.open(session, { kind = "subagent", id = sub.ref, title = sub.title or locale.s("chat.lanes.subagent"), data = { frozen = frozen, parent = session, agent = sub.agent } })
 end
 
--- A chat that's another's child (a side chat, a fork, a thread an agent
--- started, a task it delegated), wherever it's listed: its row.
 function M.child_row(id: string): any
 	for _, list in sessions.now:get().children or {} do
 		for _, c in list do
@@ -212,8 +210,7 @@ function M.child_row(id: string): any
 	return nil
 end
 
--- What the panel says is open in a session's tabs (by chat or doc id), while
--- the panel shows: the panel's, as `opener`.
+-- (The panel's, as `opener`.)
 M.open_ids = nil :: ((session: string) -> { [string]: boolean })?
 
 function M.is_open(session: string?, id: string): boolean
@@ -221,10 +218,7 @@ function M.is_open(session: string?, id: string): boolean
 	return ids ~= nil and ids[id] == true
 end
 
--- A child asked for before it's listed (a thread just started, a delegate
--- just made): it opens as it arrives, for 10 seconds, while its parent is
--- still the open chat (the shipping app's `pending_child`). An agent asked
--- for by its label alone opens as a spawn of that title shows.
+-- The shipping app's `pending_child`: a child asked for before it's listed.
 local PENDING_MS = 10000
 M.pending = ui.state("chat_lanes_pending", nil :: { parent: string, chat: string?, agent: string?, n: number }?)
 local pending_n = 0
@@ -290,8 +284,7 @@ ui.effect(function()
 	resolve_pending()
 end)
 
--- A child of `session` in its panel (the shipping app's `open_child`): at
--- once if it's listed, else as it arrives.
+-- The shipping app's `open_child`.
 function M.open_child(session: string, id: string, title: string?)
 	local c = M.child_row(id)
 	if c then
@@ -301,15 +294,12 @@ function M.open_child(session: string, id: string, title: string?)
 	await(session, { chat = id })
 end
 
--- An agent of `parent` named by its label alone (a list that carries only
--- that): its parent opened, then its spawn's tab (`open_agent_of`).
+-- The shipping app's `open_agent_of`.
 function M.open_agent_of(parent: string, label: string)
 	await(parent, { agent = label })
 end
 
--- Another chat named in this one (a message's sender or recipient): a
--- child opens in its parent's panel, the parent opened first if it isn't
--- the open chat; any other chat opens as itself (`open_thread`).
+-- The shipping app's `open_thread`.
 function M.open_thread(id: string)
 	local c = M.child_row(id)
 	if c and c.parent then

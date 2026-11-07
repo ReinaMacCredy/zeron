@@ -1,31 +1,3 @@
--- The rows that tie a conversation to other chats, as Zeron's transcript
--- draws them (crates/ui/src/transcript.rs, limit_card.rs, route_badge.rs):
---
--- - a subagent's spawn card: bordered, its brand or model mark on a tile,
---   the model or agent type it was given, a spinner while it runs, the
---   danger's ink once it failed, an accent edge while its tab is open, the
---   open arrow (`Spawn`);
--- - a task delegated to another chat: its harness's mark, its title, role
---   and model, how it stands and for how long, the route's badge, the open
---   arrow, and under it a limit card when it hit its usage limit
---   (`Delegate`, `LimitCard`); a native spawn the engine routed is the same
---   chip, not opened (`NativeRoute`);
--- - "Started thread" for a thread an agent started (`Started`);
--- - "Message to [mark] Chat" for a message an agent sent another chat,
---   "Sending to" while it's on its way (dimmed), "Couldn't message" once it
---   failed (`Sent`);
--- - a delegated task's wake ("Delegated task “x” finished", Open subagent)
---   and a peer's message ("From [mark] thread", its time, a hairline), in a
---   person's message's place (`Wake`, `From`).
---
--- Each state reads in words, not only in a colour. Nothing here ticks at
--- rest: a spinner is there only while its run is, a countdown only while it
--- counts.
---
--- What they need of the chat they're in (`Threads`): a child chat as the
--- sidebar lists it, a chat a message names, a delegate's limit, whether a
--- child's tab is open, and what opens a child, a chat, a limit's choice.
-
 local Icon = require("@self/icon")
 local AgentMark = require("@self/agent_mark")
 local FadeText = require("@self/fade_text")
@@ -34,7 +6,7 @@ local locale = require("@self/locale")
 
 local M = {}
 
--- What's given, without the nils between (a table's length can't be trusted past a hole).
+-- (A table's length can't be trusted past a hole.)
 local function nodes(...: any): { Node }
 	local out: { Node } = {}
 	for i = 1, select("#", ...) do
@@ -62,24 +34,18 @@ export type Child = {
 }
 
 export type Threads = {
-	-- A child (or any listed chat) by id, as the sidebar lists it.
 	child: (id: string) -> Child?,
-	-- The chat a message names (its id, a prefix of it, or its title).
 	chat: (key: string) -> { id: string, title: string, mark: string? }?,
-	-- A delegate's usage limit, while it holds an offer (src/chat.rs `limits`).
 	limit: ((id: string) -> any?)?,
-	-- Whether a child's tab is open in this chat's panel.
 	is_open: ((id: string) -> boolean)?,
 	open_child: ((id: string) -> ())?,
 	open_chat: ((id: string) -> ())?,
-	-- A limit's choice, sent for the child ("switch", "wait", "hold").
 	limit_op: ((id: string, op: string) -> ())?,
-	-- The chat's own agent (a native route ran on it).
-	agent: (() -> { label: string?, mark: string?, model: string? }?)?,
+	agent: (() -> { label: string?, mark: string?, model: string?, harness: string? }?)?,
+	model_label: ((harness: string?, model: string) -> string?)?,
 }
 
--- gpui's chip card: 30 high, its header 28, corner 9; the tile 18, corner 5.
-local CARD, HEADER, TILE = 30, 28, 18
+local CARD, TILE = 30, 18
 local TAG_SIZE = 11
 
 local NAMES = { ["claude-code"] = "Claude Code", codex = "Codex", grok = "Grok", cursor = "Cursor", mock = "Mock", opencode = "OpenCode", devin = "Devin", pi = "Pi", hermes = "Hermes", antigravity = "Antigravity", muse = "Muse" }
@@ -90,8 +56,7 @@ function M.harness_name(harness: string?): string
 	return NAMES[harness] or harness
 end
 
--- "4:12 PM" within a day, a weekday within a week, else "Nov 9" (Zeron's
--- `format_reset`, without the "resets").
+-- Zeron's `format_reset`, without the "resets".
 function M.clock(ms: number?): string?
 	if not ms then
 		return nil
@@ -105,7 +70,6 @@ function M.clock(ms: number?): string?
 	return tostring(said)
 end
 
--- "2m", "1h 5m" (Zeron's `limit_duration`).
 function M.duration(ms: number): string
 	local mins = math.max(0, math.floor(ms / 60000))
 	local h, m = math.floor(mins / 60), mins % 60
@@ -115,7 +79,6 @@ function M.duration(ms: number): string
 	return if m == 0 then `{h}h` else `{h}h {m}m`
 end
 
--- "12s", "2m 3s", "1h 4m", "2d 3h" (Zeron's `format_elapsed`).
 function M.elapsed(secs: number): string
 	secs = math.max(0, math.floor(secs))
 	if secs < 60 then
@@ -128,7 +91,6 @@ function M.elapsed(secs: number): string
 	return `{math.floor(secs / 86400)}d {math.floor((secs % 86400) / 3600)}h`
 end
 
--- A route's badge words (Zeron's `badge_label`).
 function M.route_label(route: any): string?
 	if type(route) ~= "table" then
 		return nil
@@ -168,8 +130,15 @@ function M.RouteBadge(props: { route: any, id: string? }): Node?
 	}
 end
 
--- An agent's mark on the chip's quiet tile (Zeron's `agent_brand_icon`: the
--- model's maker first, else the harness, else the bot).
+local function route_key(route: any): string
+	local label = M.route_label(route)
+	return if label then `{route.source}:{label}:{route.role or ""}` else ""
+end
+
+local function read(v: any): any
+	return if type(v) == "function" then v() else v
+end
+
 local function tile(mark: string?, icon: string?, seed: string?, failed: (() -> boolean)?): Node
 	return ui.div {
 		w = TILE,
@@ -205,8 +174,6 @@ local function arrow(): Node
 	}
 end
 
--- The card around a chip: bordered, an accent edge while its tab is open, a
--- press anywhere on it opening it.
 local function card(props: { id: string, label: () -> string, open: (() -> boolean)?, on_open: (() -> ())?, header: { Node } }): Node
 	local opens = props.on_open ~= nil
 	local box: { [any]: any } = {
@@ -232,7 +199,7 @@ local function card(props: { id: string, label: () -> string, open: (() -> boole
 	for i, n in props.header do
 		box[i] = n
 	end
-	-- (Its open state as a node a test can find: an edge's colour isn't.)
+	-- (An edge's colour isn't something a test can find.)
 	if props.open then
 		table.insert(box, ui.show(props.open, ui.div { class = "thread-card-open", absolute = true, w = 0, h = 0, aria_hidden = true }))
 	end
@@ -249,13 +216,7 @@ end
 
 local SPAWN_STATE = { running = "ds.threads.state.running", done = "ds.threads.state.done", failed = "ds.threads.state.failed", stopped = "ds.threads.state.stopped" }
 
--- A subagent's spawn. `now()` is its tool (ds/activity's): `subagent`
--- names its doc, how it stands and its title; `tag`, what it was given to
--- run on.
-function M.Spawn(props: { now: () -> any, threads: Threads?, open_subagent: ((sub: any) -> ())?, agent: (() -> any)? }): Node
-	local function sub(): any
-		return props.now().subagent
-	end
+local function spawn_card(props: { now: () -> any, threads: Threads?, open_subagent: ((sub: any) -> ())?, agent: (() -> any)? }, sub: () -> any, look: () -> (string?, string?)): Node
 	local function state(): string?
 		local s = sub()
 		return if s then s.status else nil
@@ -268,13 +229,7 @@ function M.Spawn(props: { now: () -> any, threads: Threads?, open_subagent: ((su
 		return (if s then s.title else nil) or props.now().target or locale.s("ds.threads.subagent")
 	end
 	local s0 = sub() or {}
-	local mark, icon = s0.agent, nil
-	if not mark and props.agent then
-		local a = props.agent()
-		if a then
-			mark, icon = a.mark, a.icon
-		end
-	end
+	local mark, icon = look()
 	local threads = props.threads
 	local on_open = if props.open_subagent and s0.ref
 		then function()
@@ -330,8 +285,6 @@ function M.Spawn(props: { now: () -> any, threads: Threads?, open_subagent: ((su
 				text_size = ui.raw(TAG_SIZE, "transcript.rs spawn tag"),
 				color = "$text.tertiary",
 			}),
-			-- How it stands, in words: a spinner beside "Running", nothing
-			-- ticking once it's done.
 			ui.text {
 				function(): string
 					local key = SPAWN_STATE[state() or ""]
@@ -352,23 +305,44 @@ function M.Spawn(props: { now: () -> any, threads: Threads?, open_subagent: ((su
 	}
 end
 
+function M.Spawn(props: { now: () -> any, threads: Threads?, open_subagent: ((sub: any) -> ())?, agent: (() -> any)? }): Node
+	local function sub(): any
+		return props.now().subagent
+	end
+	local function look(): (string?, string?)
+		local s = sub()
+		if s and s.agent then
+			return s.agent, nil
+		end
+		local a = if props.agent then props.agent() else nil
+		return if a then a.mark else nil, if a then a.icon else nil
+	end
+	-- (Built again as the engine binds it: it stamps the chat after the call starts.)
+	return ui.presence(function(): string
+		local s = sub()
+		local mark, icon = look()
+		return `{if s and s.ref and props.open_subagent then s.ref else ""}\31{mark or ""}\31{icon or ""}`
+	end, function(): Node
+		return spawn_card(props, sub, look)
+	end, { w_full = true })
+end
+
 local DELEGATION_STATE = { running = "ds.threads.state.running", completed = "ds.threads.state.completed", failed = "ds.threads.state.failed", cancelled = "ds.threads.state.stopped", interrupted = "ds.threads.state.stopped" }
 
--- How a delegate stands, as Zeron's `delegate_state_text` words it:
--- "Running", "Completed in 2m 3s", "Hit usage limit".
+-- Zeron's `delegate_state_text`.
 function M.delegate_state(c: Child?, limited: boolean): string
 	if limited then
 		return locale.s("ds.threads.state.limited")
 	end
 	local status_key = if c then DELEGATION_STATE[c.delegation or ""] else nil
 	local word = if status_key then locale.s(status_key) else locale.s("ds.threads.state.unavailable")
-	if c and c.delegation and c.delegation ~= "running" and c.delegated_at and c.delegated_end then
-		return locale.s("ds.threads.state.after", { state = word, time = M.elapsed(c.delegated_end - c.delegated_at) })
+	-- (Zeron's `delegate_view` counts to now when it has no end.)
+	if c and c.delegation and c.delegation ~= "running" and c.delegated_at then
+		return locale.s("ds.threads.state.after", { state = word, time = M.elapsed((c.delegated_end or os.time()) - c.delegated_at) })
 	end
 	return word
 end
 
--- The model's name as the chip says it: its last part.
 local function model_word(model: string?): string?
 	if not model or model == "" then
 		return nil
@@ -376,16 +350,17 @@ local function model_word(model: string?): string?
 	return string.match(model, "([^/]+)$") or model
 end
 
--- A delegated task: the chat it runs in (`ref`), its title as it's listed
--- now. A native route (`native`) is the same chip on the chat's own agent,
--- with nothing to open.
-function M.Delegate(props: { id: string, ref: string?, title: string?, route: any?, native: boolean?, threads: Threads?, model_label: ((harness: string?, model: string?) -> string?)? }): Node
+export type DelegateProps = { id: string, ref: (string | () -> string?)?, title: (string | () -> string?)?, route: any?, native: boolean?, threads: Threads? }
+
+local function delegate_card(props: DelegateProps, ref: () -> string?): Node
 	local threads = props.threads
 	local function child(): Child?
-		return if props.ref and threads then threads.child(props.ref) else nil
+		local r = ref()
+		return if r and threads then threads.child(r) else nil
 	end
 	local function limit(): any
-		return if props.ref and threads and threads.limit then threads.limit(props.ref) else nil
+		local r = ref()
+		return if r and threads and threads.limit then threads.limit(r) else nil
 	end
 	local function failed(): boolean
 		local c = child()
@@ -393,15 +368,18 @@ function M.Delegate(props: { id: string, ref: string?, title: string?, route: an
 	end
 	local function title(): string
 		local c = child()
-		local t = if c and c.title and c.title ~= "" then c.title else props.title
+		local t = if c and c.title and c.title ~= "" then c.title else read(props.title)
 		return t or locale.s("ds.threads.delegated_task")
 	end
-	local agent = if props.native and threads and threads.agent then threads.agent() else nil
+	local function agent(): any
+		return if props.native and threads and threads.agent then threads.agent() else nil
+	end
 	local c0 = child()
 	local harness = if c0 then c0.harness else nil
 	local function name(): string
 		if props.native then
-			return locale.s("ds.threads.native", { agent = if agent and agent.label then agent.label else locale.s("ds.threads.agent") })
+			local a = agent()
+			return locale.s("ds.threads.native", { agent = if a and a.label then a.label else locale.s("ds.threads.agent") })
 		end
 		local c = child()
 		return M.harness_name(if c then c.harness else harness)
@@ -410,8 +388,10 @@ function M.Delegate(props: { id: string, ref: string?, title: string?, route: an
 		local c = child()
 		local route = props.route or (if c then c.route else nil)
 		local role = if type(route) == "table" then route.role else nil
-		local model = if props.native then (if agent then agent.model else nil) else (if c then c.model else nil)
-		local said = if model and props.model_label then props.model_label(if c then c.harness else nil, model) else nil
+		local a = agent()
+		local model = if props.native then (if a then a.model else nil) else (if c then c.model else nil)
+		local on = if props.native then (if a then a.harness else nil) else (if c then c.harness else nil)
+		local said = if model and threads and threads.model_label then threads.model_label(on, model) else nil
 		said = said or model_word(model)
 		if role and said then
 			return `{role} · {said}`
@@ -425,15 +405,17 @@ function M.Delegate(props: { id: string, ref: string?, title: string?, route: an
 		local c = child()
 		return c ~= nil and c.delegation == "running" and limit() == nil
 	end
-	local open = if not props.native and props.ref and threads and threads.open_child
+	local r0 = ref()
+	local open = if not props.native and r0 and threads and threads.open_child
 		then function()
-			(threads.open_child :: (string) -> ())(props.ref :: string)
+			(threads.open_child :: (string) -> ())(r0 :: string)
 		end
 		else nil
 	local route = props.route or (if c0 then c0.route else nil)
-	local mark = if props.native then (if agent then agent.mark else nil) else (if c0 then c0.mark or c0.agent else nil)
+	local a0 = agent()
+	local mark = if props.native then (if a0 then a0.mark else nil) else (if c0 then c0.mark or c0.agent else nil)
 	local icon = if c0 then c0.agent_icon else nil
-	local chip = card {
+	return card {
 		id = props.id,
 		label = function(): string
 			if props.native then
@@ -442,7 +424,7 @@ function M.Delegate(props: { id: string, ref: string?, title: string?, route: an
 			return `{name()} {title()} {state()}`
 		end,
 		open = function(): boolean
-			return props.ref ~= nil and threads ~= nil and threads.is_open ~= nil and threads.is_open(props.ref)
+			return r0 ~= nil and threads ~= nil and threads.is_open ~= nil and threads.is_open(r0)
 		end,
 		on_open = open,
 		header = nodes(
@@ -499,33 +481,64 @@ function M.Delegate(props: { id: string, ref: string?, title: string?, route: an
 			if open then arrow() else nil
 		),
 	}
-	if props.native or not props.ref then
-		return chip
-	end
-	return ui.column {
-		w_full = true,
-		gap = 0,
-		chip,
-		ui.presence(function(): string?
-			local l = limit()
-			return if l then `limit:{l.act_at or ""}` else nil
-		end, function(): Node
-			return M.LimitCard { child = props.ref :: string, limit = limit, threads = threads :: Threads }
-		end, { w_full = true }),
-	}
 end
 
--- What a choice is called on the wire, and its words.
+function M.Delegate(props: DelegateProps): Node
+	local threads = props.threads
+	local function ref(): string?
+		return read(props.ref)
+	end
+	return ui.presence(function(): string
+		local r = ref()
+		local c = if r and threads then threads.child(r) else nil
+		local a = if props.native and threads and threads.agent then threads.agent() else nil
+		local mark = if props.native then (if a then a.mark else nil) else (if c then c.mark or c.agent else nil)
+		local route = props.route or (if c then c.route else nil)
+		return `{r or ""}\31{if c then c.harness or "" else ""}\31{mark or ""}\31{route_key(route)}\31{if c then c.agent_icon or "" else ""}`
+	end, function(): Node
+		return delegate_card(props, ref)
+	end, { w_full = true })
+end
+
+-- After the group's cards, as Zeron's transcript.rs puts them.
+function M.LimitCards(props: { refs: () -> { string }, threads: Threads }): Node
+	local threads = props.threads
+	local held = ui.computed(function(): { string }
+		local out: { string } = {}
+		if not threads.limit then
+			return out
+		end
+		for _, r in props.refs() do
+			local l = threads.limit(r)
+			if l then
+				table.insert(out, `{r}\31{l.act_at or ""}`)
+			end
+		end
+		return out
+	end)
+	return ui.each(held, function(key: string): Node
+		local r = string.match(key, "^(.-)\31") or key
+		return M.LimitCard {
+			child = r,
+			limit = function(): any
+				return if threads.limit then threads.limit(r) else nil
+			end,
+			threads = threads,
+		}
+	end, {
+		key = function(key: string): string
+			return key
+		end,
+	})
+end
+
 local ACT = { switch = "ds.threads.limit.switch_now", wait = "ds.threads.limit.wait_now" }
 local VERB = { switch = "ds.threads.limit.switching_in", wait = "ds.threads.limit.waiting_in" }
 
--- The choices kept by child (a person's pick outlives the card made again).
+-- (By child: a pick outlives the card made again.)
 local CHOSEN = ui.state("threads_limit_chosen", {} :: { [string]: string })
 
--- A delegate stopped on its usage limit, with an offer: switch to another
--- agent (keeping the transcript) or wait for the reset, the preselected
--- choice acting on its own when the countdown ends, Cancel holding it
--- (Zeron's `limit_card`).
+-- Zeron's `limit_card`.
 function M.LimitCard(props: { child: string, limit: () -> any, threads: Threads }): Node
 	local threads = props.threads
 	local now = ui.use_state(ui.now())
@@ -541,7 +554,6 @@ function M.LimitCard(props: { child: string, limit: () -> any, threads: Threads 
 		local left = at - now:get()
 		return if left > 0 then left else nil
 	end
-	-- (The clock ticks only while it counts down.)
 	local counting = ui.computed(function(): boolean
 		local at = l().act_at
 		return at ~= nil and at > ui.now()
@@ -808,7 +820,6 @@ function M.LimitCard(props: { child: string, limit: () -> any, threads: Threads 
 	}
 end
 
--- "Started thread [title] [route] · Open", a hairline to the edge.
 function M.Started(props: { id: string, ref: string, title: string?, threads: Threads? }): Node
 	local threads = props.threads
 	local function title(): string
@@ -863,9 +874,6 @@ function M.Started(props: { id: string, ref: string, title: string?, threads: Th
 	return ui.row(row)
 end
 
--- A message to another chat, at the reply's left: its state in words (and
--- dimmed while it's on its way), the chat's mark and title as listed now; a
--- click opens it.
 function M.Sent(props: { id: string, now: () -> any, threads: Threads? }): Node
 	local threads = props.threads
 	local function to(): any
@@ -936,8 +944,7 @@ function M.Sent(props: { id: string, now: () -> any, threads: Threads? }): Node
 	}
 end
 
--- A delegated task's wake, in its message's place: what finished, and Open
--- subagent for one task (Zeron's `render_wake_row`).
+-- Zeron's `render_wake_row`.
 function M.Wake(props: { id: string, ids: { string }, threads: Threads? }): Node
 	local threads = props.threads
 	local function kids(): { Child }
@@ -1035,8 +1042,6 @@ function M.Wake(props: { id: string, ids: { string }, threads: Threads? }): Node
 	return ui.row(row)
 end
 
--- A peer's message's caption (thread tools): "From [mark] thread", each
--- sender a way over to it, its time, a hairline (Zeron's C3 rule).
 function M.From(props: { id: string, senders: { string }, clock: string?, threads: Threads? }): Node
 	local threads = props.threads
 	local names: { Node } = {}
@@ -1106,7 +1111,6 @@ function M.From(props: { id: string, senders: { string }, clock: string?, thread
 	return ui.row(row)
 end
 
--- "Auto-continue" over a turn the chat sent itself.
 function M.AutoContinue(): Node
 	return ui.row {
 		class = "auto-continue",

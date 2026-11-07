@@ -1,8 +1,4 @@
--- Threads across chats in the transcript (ds/transcript_threads): a thread an
--- agent started, delegates and their limit card, spawn cards, messages to
--- other chats, a native route, a peer's message, a delegate's wake and the
--- chat's own auto-continue. Each state reads in words. On ui/chat_fixture.luau
--- (`threads_seed`: U21's seed).
+-- On ui/chat_fixture.luau's `threads_seed`.
 
 local function open(): any
 	local app = mount("chat_fixture.luau")
@@ -32,16 +28,14 @@ end)
 test("threads: a delegate says its harness, role and model, route, and how it stands in words", function()
 	local app = open()
 	local tree = app:tree("#transcript")
-	-- Running, on Codex, fallen back from Claude's quota.
 	expect(tree).to_contain("Codex")
 	expect(tree).to_contain("Port the parser")
-	expect(tree).to_contain("builder · gpt-6.1")
+	expect(tree).to_contain("builder · GPT-6.1")
+	expect(tree).to_contain("reviewer · Opus")
 	expect(tree).to_contain("fell back (Claude quota, resets")
 	expect(app:has('role:button "Codex Port the parser Running"')).to_be(true)
-	-- Finished: how long it took.
 	expect(app:has('role:button "Claude Code Review the diff Completed in 2m 3s"')).to_be(true)
 	expect(tree).to_contain("routed")
-	-- On its limit: says so, and its card stands under it.
 	expect(app:has('role:button "Claude Code Run the benchmarks Hit usage limit"')).to_be(true)
 	app:click('role:button "Codex Port the parser Running"')
 	app:frames(10)
@@ -50,10 +44,8 @@ end)
 
 test("threads: a spinner stands only beside what runs", function()
 	local app = open()
-	-- The running delegate and the running spawn; not the finished, failed or limited ones.
 	expect(app:count(".thread-spinner")).to_be(2)
 	expect(app:tree("#transcript")).to_contain("Failed")
-	-- Every run over: no spinner left, each says how it ended.
 	app:command("threads_settle")
 	app:frames(20)
 	expect(app:count(".thread-spinner")).to_be(0)
@@ -114,21 +106,19 @@ test("threads: the limit card offers Switch or Wait, counts down, Cancel holds, 
 	expect(tree).to_contain("Codex · GPT-6.1 · High (keeps transcript)")
 	expect(tree).to_contain("Auto-resumes on Claude Code at reset, as today.")
 	expect(tree).to_contain("Switching in")
-	-- (Its clock is the wall's: a second of it passes.)
 	expect(app:text("#limit-dg-lim-countdown")).to_contain("in 20 s")
 	expect(app:wait("#limit-dg-lim-countdown", { text = "in 19 s", timeout_ms = 3000 })).to_be(true)
 	expect(app:has('role:button "Switch now"')).to_be(true)
 	app:click("#limit-dg-lim-cancel")
 	app:frames(5)
 	expect(calls(app)).to_contain("limit:dg-lim:hold")
-	-- Waiting picked against the countdown's own choice: it holds, and the act is Wait now.
+	-- (Picked against the countdown's own choice: it holds first.)
 	app:click("#limit-dg-lim-wait")
 	app:frames(5)
 	expect(app:has('role:button "Wait now"')).to_be(true)
 	app:click("#limit-dg-lim-act")
 	app:frames(5)
 	expect(calls(app)).to_contain("limit:dg-lim:wait")
-	-- Resolved: the card goes, the chip says how it stands again.
 	app:command("thread_limit_gone")
 	app:frames(20)
 	expect(app:has("#limit-card-dg-lim")).to_be(false)
@@ -144,14 +134,12 @@ test("threads: a child opened from a row leaves the chat where it was; another c
 	local app = open()
 	app:type('role:textbox "Message"', "half a thought")
 	app:frames(10)
-	-- A child: in this chat's panel; the chat, its draft, stay.
 	app:click('role:button "Open thread Write the release notes"')
 	app:frames(20)
 	expect(calls(app)).to_contain("lane:s1:side_chat:th-1")
 	expect(string.find(calls(app), "open:s2", 1, true)).to_be(nil)
 	expect(app:text('role:textbox "Message"')).to_be("half a thought")
-	-- Another chat: opened; coming back (the shell's Back steps the route as
-	-- this does: tests/swipe) finds this one's draft as it was.
+	-- (Back steps the route as this does: tests/swipe.)
 	app:click('role:button "Message to Short chat"')
 	app:frames(30)
 	expect(calls(app)).to_contain("open:s2")
@@ -159,4 +147,35 @@ test("threads: a child opened from a row leaves the chat where it was; another c
 	app:frames(30)
 	expect(app:has('role:button "Message to Short chat"')).to_be(true)
 	expect(app:text('role:textbox "Message"')).to_be("half a thought")
+end)
+
+test("threads: a spawn and delegates bound after their cards are built open, and the limited one gets its card", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(1100, 2000)
+	app:frames(30)
+	app:command("go_s1")
+	app:frames(30)
+	app:command("threads_seed_unbound")
+	app:frames(40)
+	expect(app:has('role:button "Open subagent scan the repo"')).to_be(false)
+	expect(app:has('role:button ~"Port the parser"')).to_be(false)
+	expect(app:has("#delegate-t4 >> .thread-open-arrow")).to_be(false)
+	expect(app:has("#limit-card-dg-lim")).to_be(false)
+	app:command("threads_bind")
+	app:frames(20)
+	expect(app:has('role:button "Codex Port the parser Running"')).to_be(true)
+	expect(app:has('role:button "Claude Code Run the benchmarks Hit usage limit"')).to_be(true)
+	expect(app:has("#delegate-t4 >> .thread-open-arrow")).to_be(true)
+	expect(app:has("#limit-card-dg-lim")).to_be(true)
+	app:click('role:button "Open subagent scan the repo"')
+	app:frames(10)
+	expect(calls(app)).to_contain("lane:s1:subagent:s1--sub--1")
+end)
+
+test("threads: a thread an agent started gets its limit card under its group", function()
+	local app = open()
+	app:command("thread_started_limited")
+	app:frames(20)
+	expect(app:has("#limit-card-th-1")).to_be(true)
+	expect(app:tree("#limit-card-th-1")).to_contain("Claude Code hit its usage limit")
 end)

@@ -890,7 +890,6 @@ function M.chat_of(id: string): { title: string, mark: string? }?
 	return { title = if title ~= "" then title else string.sub(id, 1, 8), mark = found.agent }
 end
 
--- Any chat as it's listed now (a top-level one, a child, an archived one).
 local function listed(id: string): any
 	local now = sessions.now:get()
 	for _, c in now.chats do
@@ -913,8 +912,7 @@ local function listed(id: string): any
 	return nil
 end
 
--- The chat a message names (Zeron's `resolve_chat_key`, as the MCP server
--- reads it): an exact id, else a unique id prefix, else a unique title, any case.
+-- Zeron's `resolve_chat_key`, as the MCP server reads a message's recipient.
 function M.resolve_chat(key: string): { id: string, title: string, mark: string? }?
 	key = string.match(key or "", "^%s*(.-)%s*$") or ""
 	if key == "" then
@@ -941,23 +939,21 @@ function M.resolve_chat(key: string): { id: string, title: string, mark: string?
 		if string.sub(c.id, 1, #key) == key then
 			table.insert(by_prefix, c)
 		end
-		if string.lower(c.title or "") == lower then
+		if string.lower(string.match(c.title or "", "^%s*(.-)%s*$") or "") == lower then
 			table.insert(by_title, c)
 		end
 	end
 	if #by_prefix == 1 then
 		return said(by_prefix[1])
 	end
-	if #by_title == 1 then
+	-- (An ambiguous prefix names nothing: the server refuses it.)
+	if #by_prefix == 0 and #by_title == 1 then
 		return said(by_title[1])
 	end
 	return nil
 end
 
--- What a transcript needs to speak of other chats (ds/transcript_threads):
--- `session()` is the chat it shows, `home()` the one whose panel its
--- children open in; `live()` its session as the host says it (its limits,
--- its agent).
+-- `home()`: the chat whose panel its children open in.
 function M.threads_for(session: () -> string?, home: () -> string?, live: () -> any): any
 	local lanes = require("@app/screens/chat/lanes") :: any
 	return {
@@ -1002,7 +998,15 @@ function M.threads_for(session: () -> string?, home: () -> string?, live: () -> 
 			end
 			local row = listed(s.id)
 			local Threads = require("@ds/transcript_threads") :: any
-			return { label = Threads.harness_name(s.harness), mark = if row then row.mark or row.agent else nil, model = s.model }
+			return { label = Threads.harness_name(s.harness), mark = if row then row.mark or row.agent else nil, model = s.model, harness = s.harness }
+		end,
+		model_label = function(harness: string?, model: string): string?
+			for _, m in (require("@app/screens/chat/store") :: any).catalog:get().models do
+				if m.value == model and (harness == nil or m.harness == harness) then
+					return m.label
+				end
+			end
+			return nil
 		end,
 	}
 end

@@ -168,8 +168,7 @@ function M.use(opts: Use)
 		for _, item in items do
 			table.insert(rows, item)
 		end
-		-- Threads first, under their heading; then the files, under theirs
-		-- (the shipping app's `@`: Threads, then Files).
+		-- (The shipping app's order: Threads, then Files.)
 		local threads = all.threads or {}
 		if #threads == 0 then
 			return rows
@@ -414,8 +413,6 @@ function M.use(opts: Use)
 			end
 		end)
 	end
-	-- A thread's row (the shipping app's): its agent's mark, its title, how it
-	-- stands (Working, Input, Failed, Done: words, in their hue), its project.
 	local function thread_row(item: Item, index: State<number>, lit: () -> boolean, over: State<boolean>): Node
 		local th = (item :: any).thread
 		local st = th.status

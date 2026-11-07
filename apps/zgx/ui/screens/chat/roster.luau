@@ -81,9 +81,7 @@ local function with_nested(sub: any, depth: number, input: any, out: { Row }, to
 	return true
 end
 
--- What Stop all stops (the shipping app's `stoppable_runs`): the agents its
--- harness can stop, and the shells, only where shells can be stopped; never a
--- task of another kind, never a run already over.
+-- The shipping app's `stoppable_runs`.
 function M.stoppable(runs: any, session: any): { agents: { any }, shells: { any } }
 	local agents: { any } = {}
 	for _, r in (if runs then runs.agents else nil) or {} do

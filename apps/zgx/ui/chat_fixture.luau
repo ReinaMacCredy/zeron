@@ -706,13 +706,7 @@ ui.command {
 	end,
 }
 
--- Threads across chats (U21's seed, the engine's mock can't make most of
--- these): s1's children (a thread its agent started, a delegate running on
--- Codex that fell back, one finished, one on its limit with an offer
--- counting down, a side chat, a fork), and its transcript: the thread
--- started, the delegates, two spawns (one running, one failed), messages
--- to other chats (on its way, sent, failed), a native route, a peer's
--- message, a delegate's wake, the chat's own auto-continue.
+-- (The engine's mock can't make most of these rows.)
 local THREAD_NOW = os.time()
 local function thread_children(): { any }
 	return {
@@ -768,27 +762,28 @@ local function thread_transcript(): { any }
 end
 -- The limit's offer: switch to Codex, acting on its own in 20 s.
 local thread_limits = ui.state("test_thread_limits", nil :: any)
-ui.command {
-	id = "threads_seed",
-	title = "Threads across chats",
-	run = function()
-		local now = table.clone(sessions.now:peek() :: any)
-		now.children = table.clone(now.children or {})
-		now.children.s1 = thread_children()
-		sessions.now:set(now)
-		TRANSCRIPTS.s1 = thread_transcript()
-		store.messages:set(thread_transcript())
-		local limits = thread_limits:peek() or { { chat = "dg-lim", resets_at = (THREAD_NOW + 7200) * 1000, auto = true, to = true, to_label = "GPT-6.1", target = "Codex · GPT-6.1 · High", to_mark = "openai", preselect = "switch", act_at = ui.now() + 20000, harness = "Claude Code" } }
-		publish("s1", { limits = limits })
-		local lanes = require("@app/screens/chat/lanes") :: any
-		lanes.opener = function(session: string, lane: any)
-			note(`lane:{session}:{lane.kind}:{lane.id}`)
-		end
-		lanes.open_ids = function(session: string): { [string]: boolean }
-			return if session == "s1" then { ["dg-done"] = true, ["s1--sub--1"] = true } else {}
-		end
-	end,
-}
+local function seed_threads()
+	local now = table.clone(sessions.now:peek() :: any)
+	now.children = table.clone(now.children or {})
+	now.children.s1 = thread_children()
+	sessions.now:set(now)
+	TRANSCRIPTS.s1 = thread_transcript()
+	store.messages:set(thread_transcript())
+	local cat = table.clone(store.catalog:peek())
+	cat.models = table.clone(cat.models)
+	table.insert(cat.models, { value = "gpt-6.1", label = "GPT-6.1", harness = "codex" })
+	store.catalog:set(cat)
+	local limits = thread_limits:peek() or { { chat = "dg-lim", resets_at = (THREAD_NOW + 7200) * 1000, auto = true, to = true, to_label = "GPT-6.1", target = "Codex · GPT-6.1 · High", to_mark = "openai", preselect = "switch", act_at = ui.now() + 20000, harness = "Claude Code" } }
+	publish("s1", { limits = limits })
+	local lanes = require("@app/screens/chat/lanes") :: any
+	lanes.opener = function(session: string, lane: any)
+		note(`lane:{session}:{lane.kind}:{lane.id}`)
+	end
+	lanes.open_ids = function(session: string): { [string]: boolean }
+		return if session == "s1" then { ["dg-done"] = true, ["s1--sub--1"] = true } else {}
+	end
+end
+ui.command { id = "threads_seed", title = "Threads across chats", run = seed_threads }
 -- What the threads' rows sent the host (a limit's choice).
 stub.limit = function(id: string, op: string): any
 	note(`limit:{id}:{op}`)
@@ -814,6 +809,9 @@ ui.command {
 		sessions.now:set(now)
 	end,
 }
+ui.command { id = "thread_started_limited", title = "The started thread hits its limit", run = function()
+	publish("s1", { limits = { { chat = "th-1", resets_at = (THREAD_NOW + 7200) * 1000, auto = true, to = false, harness = "Claude Code" } } })
+end }
 ui.command {
 	id = "thread_limit_gone",
 	title = "The delegate's limit is resolved",
@@ -883,18 +881,43 @@ ui.command {
 		store.messages:set(list)
 	end,
 }
-ui.command {
-	id = "thread_child_arrives",
-	title = "A thread started a moment ago is listed",
-	run = function()
-		local now = table.clone(sessions.now:peek() :: any)
-		now.children = table.clone(now.children or {})
-		local kids = table.clone(now.children.s1 or {})
-		table.insert(kids, { id = "th-late", parent = "s1", title = "Late thread", kind = "agent", created_by = "s1", device = "mac", created = os.time(), updated = os.time() })
-		now.children.s1 = kids
-		sessions.now:set(now)
-	end,
-}
+-- The engine stamps a spawn's and a delegate's chat after their call starts.
+local function thread_tools_bound(bound: boolean)
+	local list = table.clone(store.messages:peek()) :: any
+	for i, m in list do
+		if m.id == "ta1" then
+			local r = table.clone(m)
+			r.blocks = table.clone(r.blocks)
+			for j, b in r.blocks do
+				if b.id == "g:t2" or b.id == "g:t5" then
+					local nb = table.clone(b)
+					nb.tools = table.clone(nb.tools)
+					for k, t in nb.tools do
+						local x = table.clone(t)
+						if x.id == "t2" then
+							x.delegate = if bound then { ref = "dg-run", title = "Port the parser" } else nil
+						elseif x.id == "t4" then
+							x.delegate = if bound then { ref = "dg-lim", title = "Run the benchmarks" } else nil
+						elseif x.id == "t5" then
+							x.subagent = if bound then { ref = "s1--sub--1", title = "scan the repo", status = "running", agent = "claude" } else nil
+						end
+						nb.tools[k] = x
+					end
+					r.blocks[j] = nb
+				end
+			end
+			list[i] = r
+		end
+	end
+	store.messages:set(list)
+end
+ui.command { id = "threads_seed_unbound", title = "Threads, the spawn and delegates not yet bound", run = function()
+	seed_threads()
+	thread_tools_bound(false)
+end }
+ui.command { id = "threads_bind", title = "Spawn and delegates bound", run = function()
+	thread_tools_bound(true)
+end }
 
 -- The theme, for captures in both.
 ui.command { id = "theme_light", title = "Light theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-light") end }

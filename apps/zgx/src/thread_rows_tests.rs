@@ -1,8 +1,4 @@
-//! Threads across chats in the transcript (ui/ds/transcript_threads), mounted
-//! headless on the chat fixture's `threads_seed`: a message on its way to
-//! another chat is dimmed, and not once it lands (the Lua tests can't read an
-//! opacity); a limit's countdown runs script while it counts, and settled
-//! rows run none.
+//! (Here, not in Luau: the Luau tests can't read an opacity or count script calls.)
 
 use zgx_script::{ScriptHost, testing::TestApp};
 
@@ -10,7 +6,7 @@ fn mount() -> TestApp {
     let ui = std::env::var_os("ZERON_ZGX_TEST_UI")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui"));
-    let mut app = TestApp::new(|runtime| ScriptHost::new(runtime, ui.join("chat_fixture.luau")));
+    let app = TestApp::new(|runtime| ScriptHost::new(runtime, ui.join("chat_fixture.luau")));
     app.ui.scene.borrow_mut().resize(1100., 2000.);
     app.frames(30);
     assert_eq!(app.error(), None, "the fixture failed");
@@ -40,13 +36,11 @@ fn a_message_on_its_way_is_dimmed_and_not_once_it_lands() {
 #[test]
 fn rows_at_rest_run_no_script_once_the_countdown_is_gone() {
     let app = mount();
-    // Counting down: its clock ticks once a second.
     app.frames(10);
     let before = app.calls();
     app.frames(130);
     assert!(app.calls() > before, "the countdown ticks while it counts");
-    // Every run over and the limit resolved: nothing ticks. (Running agents
-    // tick the pill row's working dots, U17's: not these rows'.)
+    // (Running agents tick the pill row's dots, U17's: settle them first.)
     assert!(app.host.run_command("threads_settle"));
     app.frames(60);
     let before = app.calls();

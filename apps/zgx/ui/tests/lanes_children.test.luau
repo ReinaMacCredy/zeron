@@ -1,7 +1,4 @@
--- A chat's children in its panel (screens/chat/lanes, lane_tab): one opened
--- by its id at once when listed, else as it arrives (10 seconds at most); an
--- agent by its label alone; a delegated task's chat says whose it is, with
--- Open parent. On ui/lanes_fixture.luau.
+-- On ui/lanes_fixture.luau.
 
 local function open(): any
 	local app = mount("lanes_fixture.luau")
@@ -21,6 +18,9 @@ test("children: a delegated task's chat opens as a tab, saying whose it is, with
 	expect(calls(app)).to_contain("watch:dg-1")
 	expect(app:has("#delegate-owner-dg-1")).to_be(true)
 	expect(app:tree("#delegate-owner-dg-1")).to_contain("Subagent of Parent")
+	app:command("route_away")
+	app:frames(20)
+	expect(app:text("#fixture-route")).to_be("chat-2")
 	app:click('#delegate-owner-dg-1 >> role:button "Open parent"')
 	app:frames(20)
 	expect(app:text("#fixture-route")).to_be("chat-1")
@@ -48,7 +48,6 @@ test("children: one that doesn't arrive within 10 seconds isn't opened later", f
 	local app = open()
 	app:command("open_late")
 	app:frames(20)
-	-- (11 s of frames.)
 	app:frames(660)
 	app:command("late_arrives")
 	app:frames(30)
@@ -68,4 +67,22 @@ test("children: a fork opens as a tab too", function()
 	app:frames(30)
 	expect(calls(app)).to_contain("watch:fork-1")
 	expect(app:has("#delegate-owner-fork-1")).to_be(false)
+end)
+
+test("children: a spawn card's open edge follows its tab and the panel hiding", function()
+	local app = open()
+	app:command("show_cards")
+	app:frames(20)
+	app:command("panel_show")
+	app:frames(10)
+	expect(app:count("#fixture-cards >> .thread-card-open")).to_be(0)
+	app:click('#fixture-cards >> role:button "Open subagent scan the repo"')
+	app:frames(30)
+	expect(app:count("#fixture-cards >> .thread-card-open")).to_be(1)
+	app:command("panel_hide")
+	app:frames(10)
+	expect(app:count("#fixture-cards >> .thread-card-open")).to_be(0)
+	app:command("panel_show")
+	app:frames(10)
+	expect(app:count("#fixture-cards >> .thread-card-open")).to_be(1)
 end)

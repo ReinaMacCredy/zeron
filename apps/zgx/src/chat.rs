@@ -372,7 +372,7 @@ struct Open {
     host_watched: bool,
     prediction: Option<String>,
     limit: Option<Json>,
-    // Other chats' limits with an offer (a delegate's card, under its chip).
+    // (A delegate's limit card stands in its parent's transcript.)
     limits: Vec<Json>,
 }
 
@@ -4076,8 +4076,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             if text.trim() == zeron_proto::RESUME_PROMPT {
                 return Some(resumed_row(id));
             }
-            // A wake from a delegated task, and the threads a step handback
-            // names (the shipping app's `wake_task_ids`, `step_handback_threads`).
+            // The shipping app's `wake_task_ids`, `step_handback_threads`.
             let wake = zeron_proto::transcript::wake_task_ids(&text);
             let steps = zeron_proto::transcript::step_handback_threads(&text);
             let text = handback_quotes(&text).unwrap_or(text);
@@ -4115,7 +4114,6 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("copy", copy_value(&words)),
                 ("sender", sender),
                 ("answers", entry["answersRequestId"].as_str().map_or(Value::Nil, Value::from)),
-                // The thread whose agent sent it (thread tools): a peer's words, not the person's.
                 ("from_chat", entry["fromChatId"].as_str().filter(|f| !f.is_empty()).map_or(Value::Nil, Value::from)),
                 ("wake", wake.map_or(Value::Nil, |ids| Value::List(ids.iter().map(|id| Value::from(id.as_str())).collect::<Vec<_>>().into()))),
                 ("steps", if steps.is_empty() { Value::Nil } else { Value::List(steps.iter().map(|id| Value::from(id.as_str())).collect::<Vec<_>>().into()) }),
@@ -4728,14 +4726,12 @@ fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
         }
         out.extend(images_block(&mut pictures));
         if kind == Some("tool") && !display_tool(part) {
-            // A message to another chat is a line naming it, one a recipient,
-            // out of the tool group (the shipping app's `SentMessage`).
+            // The shipping app's `SentMessage`, out of the tool group.
             if let Some(sent) = sent_blocks(part) {
                 flush(&mut out, &mut group, group_last);
                 out.extend(sent);
                 continue;
             }
-            // A native spawn the engine routed: its delegate chip, unopenable.
             if part["delegateRoute"].is_object() && part["subagentRef"].as_str().is_none_or(str::is_empty) {
                 flush(&mut out, &mut group, group_last);
                 out.push(native_route_block(part));
@@ -4845,8 +4841,7 @@ fn native_route_block(part: &Json) -> Value {
     ])
 }
 
-/// A child's route as its badge says it (the shipping app's `route_badge`):
-/// its source, and for a fallback the short reason and when it resets.
+/// The shipping app's `route_badge`.
 pub(crate) fn route_value(route: &Json) -> Value {
     let Ok(parsed) = serde_json::from_value::<zeron_proto::ChildRoute>(route.clone()) else {
         return Value::Nil;
@@ -5094,9 +5089,7 @@ fn subagent_mark(call: &Json) -> Option<String> {
     crate::agents::glyph(maker.as_str())
 }
 
-/// What a spawn card names its child by (the shipping app's `spawn_tag`): the
-/// model the spawn named, as its maker's catalog labels it, else its agent
-/// type; never the parent's model.
+/// The shipping app's `spawn_tag`: never the parent's model.
 fn spawn_tag(call: &Json) -> Option<String> {
     match subagent_model(call) {
         Some(model) => {
@@ -5155,8 +5148,7 @@ fn call_name(call: &Json) -> Option<&str> {
     }
 }
 
-/// A subagent's call or a delegated task (its own group, as the shipping
-/// app's agent chips): the call itself, never a stray `subagentRef`.
+/// (The call itself, never a stray `subagentRef`.)
 fn is_agent(part: &Json) -> bool {
     part["kind"].as_str() == Some("tool")
         && call_name(&part["call"]).is_some_and(|n| n == "Agent" || n.starts_with("Agent: ") || is_delegate_name(&part["call"], n))
@@ -5173,7 +5165,6 @@ fn is_delegate(part: &Json) -> bool {
     call_name(&part["call"]).is_some_and(|n| is_delegate_name(&part["call"], n))
 }
 
-/// A `create_thread` bound to the thread it started.
 fn is_thread_link(part: &Json) -> bool {
     let call = &part["call"];
     let made = match call["kind"].as_str() {
@@ -5428,7 +5419,6 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
     {
         fields.push(("tag", Value::from(tag.as_str())));
     }
-    // A thread an agent started, or a task it delegated: the chat it runs in.
     if let (Some(child), true) = (bound, kind == "thread" || kind == "delegate") {
         fields.push((
             if kind == "thread" { "thread" } else { "delegate" },
@@ -5879,7 +5869,6 @@ fn limit_row(frame: &Json, chat: &str) -> Option<Json> {
     frame["chats"].as_array()?.iter().find(|c| c["chatId"].as_str() == Some(chat)).cloned()
 }
 
-/// The rows of other chats that hold an offer (a delegate hit its limit).
 fn offered_limits(frame: &Json, chat: &str) -> Vec<Json> {
     frame["chats"].as_array().into_iter().flatten().filter(|c| c["chatId"].as_str() != Some(chat) && c["offer"].is_object()).cloned().collect()
 }
@@ -5890,7 +5879,7 @@ fn limit_value(chats: &Chats, row: &Json) -> Value {
     let label = to["harness"].as_str().and_then(|harness| {
         to["model"].as_str().and_then(|model| chats.label_of(harness, model)).or_else(|| chats.harness_name(harness)).or_else(|| Some(harness.to_owned()))
     });
-    // Whom it would switch to, in full (the shipping app's `target_text`), and its mark.
+    // The shipping app's `target_text`.
     let target = to["harness"].as_str().map(|harness| {
         let mut parts = vec![chats.harness_name(harness).unwrap_or_else(|| harness.to_owned())];
         if let Some(model) = to["model"].as_str() {
@@ -7379,10 +7368,6 @@ mod tests {
         v.field(key).map(text).unwrap_or_default()
     }
 
-    /// Threads across chats, as the engine writes them: a message sent to
-    /// another chat is a line a recipient (on its way, sent, failed), out of
-    /// the tool group; a thread started and a task delegated name their chat
-    /// and group apart from other tools; a native route is a block of its own.
     #[test]
     fn rows_for_threads_across_chats_come_from_the_engine_s_parts() {
         let kinds = |v: &Value| -> Vec<String> { v.list().iter().map(|b| text_of(b, "kind")).collect() };
@@ -7400,7 +7385,6 @@ mod tests {
         assert_eq!(sent[2].field("failed"), Some(&Value::Bool(false)));
         assert_eq!(sent[3].field("failed"), Some(&Value::Bool(true)));
         assert_eq!(sent[3].field("pending"), Some(&Value::Bool(false)), "a failed one isn't on its way");
-        // One a recipient, keyed by its part.
         let many = json!({ "kind": "tool", "id": "m4", "resolved": true,
             "call": { "kind": "mcp", "server": "zeron", "tool": "send_messages", "input": { "requests": [ { "chat": "a", "text": "1" }, { "chat": "b", "text": "2" } ] } } });
         let two = blocks(&reply(vec![many]));
@@ -7410,7 +7394,6 @@ mod tests {
         let other = json!({ "kind": "tool", "id": "m5", "resolved": true, "call": { "kind": "mcp", "server": "slack", "tool": "send_message", "input": { "chat": "a", "text": "1" } } });
         assert_eq!(kinds(&blocks(&reply(vec![other]))), ["tools"]);
 
-        // A thread started, bound to its chat; a task delegated, bound; each its own group.
         let thread = json!({ "kind": "tool", "id": "t1", "resolved": true, "subagentRef": "th-1",
             "call": { "kind": "mcp", "server": "zeron", "tool": "create_thread", "input": { "title": "Write the notes" } } });
         let delegate = json!({ "kind": "tool", "id": "t2", "resolved": true, "subagentRef": "dg-1",
@@ -7434,11 +7417,9 @@ mod tests {
         let row = super::tool(&unbound).unwrap();
         assert_eq!(text_of(&row, "kind"), "delegate");
         assert!(matches!(row.field("delegate"), None | Some(Value::Nil)));
-        // An agent type alone names it so.
         let explore = json!({ "kind": "tool", "id": "t5", "subagentRef": "c--sub--2", "call": { "kind": "unknown", "name": "Agent: look", "input": { "subagent_type": "Explore" } } });
         assert_eq!(text_of(&super::tool(&explore).unwrap(), "tag"), "Explore");
 
-        // A native spawn the engine routed: its block, its route's words.
         let native = json!({ "kind": "tool", "id": "n1", "resolved": true,
             "delegateRoute": { "source": "fell_back", "reason": "claude out of quota", "role": "scout", "resetsAt": 1_800_000_000_000_i64 },
             "call": { "kind": "unknown", "name": "Agent: summarize", "input": { "description": "Summarize the logs" } } });
@@ -7455,8 +7436,6 @@ mod tests {
         assert_eq!(super::route_value(&json!({ "source": "future" })), Value::Nil);
     }
 
-    /// A message another thread's agent sent (thread tools): who sent it, a
-    /// delegated task's wake, the threads a step handback names, its clock.
     #[test]
     fn a_message_from_another_thread_says_whose_and_what_woke() {
         let user = |text: &str, from: Option<&str>| {
@@ -7478,7 +7457,6 @@ mod tests {
         assert!(matches!(mine.field("from_chat"), None | Some(Value::Nil)));
     }
 
-    /// The limit rows of other chats that hold an offer: a delegate's card's.
     #[test]
     fn a_delegate_s_limit_offer_is_published_with_its_countdown() {
         let frame = json!({ "autoResume": true, "chats": [

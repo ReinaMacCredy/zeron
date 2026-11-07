@@ -188,7 +188,6 @@ end
 -- The same table until they change, so a list of every chat can read it without following that chat's session.
 local window = M.window_bind()
 local window_runs = M.runs_of(window)
--- The open chat's runs (the Sidecar's Stop all reads them).
 function M.window_runs(): any
 	return window_runs:get()
 end
@@ -237,7 +236,6 @@ end
 
 M.stoppable_of = Roster.stoppable
 
--- Stop all of them, as `stoppable_of` says.
 function M.stop_all(runs: any, session: any)
 	local all = M.stoppable_of(runs, session)
 	for _, r in all.agents do

@@ -1,7 +1,4 @@
--- The Sidecar's Stop all (screens/sidecar, through screens/chat/roster's
--- `stoppable`): what it stops is the shipping app's `stoppable_runs`, the
--- agents the harness can stop and the shells where shells can be stopped,
--- never every task the session lists.
+-- The shipping app's `stoppable_runs`, never every task the session lists.
 
 local Roster = require("../screens/chat/roster")
 

@@ -764,7 +764,6 @@ impl Sessions {
                 ("mark", brand_mark(harness, c["config"]["model"].as_str()).map_or(Value::Nil, |g| Value::from(g.as_str()))),
                 ("delegation", opt(c["delegation"]["status"].as_str())),
                 ("delegated_at", c["delegation"]["startedAt"].as_str().and_then(unix_seconds).map_or(Value::Nil, |at| Value::from(at as f64))),
-                // When it settled, how it was routed, and who delegated or started it.
                 ("delegated_end", c["delegation"]["completedAt"].as_str().and_then(unix_seconds).map_or(Value::Nil, |at| Value::from(at as f64))),
                 ("route", crate::chat::route_value(&c["delegation"]["route"])),
                 ("delegated_by", opt(c["delegation"]["delegatedByChatId"].as_str())),
@@ -1954,8 +1953,6 @@ mod tests {
         assert_eq!((parent(0), parent(1), parent(2), parent(3)), (Some("p"), Some("p"), Some("p"), None));
     }
 
-    /// A delegated child's row: when it started and settled, its route's
-    /// badge, who delegated it; a thread an agent started names its starter.
     #[test]
     fn a_delegate_s_row_says_how_it_ran_and_whose_it_is() {
         let s = super::Sessions::default();

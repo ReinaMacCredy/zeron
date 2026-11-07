@@ -620,12 +620,12 @@ if lanes_card then
 		local s = state.of(k)
 		return s.active ~= nil and state.take_keys_now(k, s.active)
 	end
-	-- The chats and subagents its lane tabs show, while the panel does (a
-	-- spawn card's or a delegate chip's accent edge).
 	lanes_card.open_ids = function(session: string): { [string]: boolean }
 		local k = state.key(session, nil)
 		local out: { [string]: boolean } = {}
-		if k and panel_open() then
+		-- (Read, not peeked: a card's accent edge follows the panel hiding.)
+		local files = if shell_view then shell_view.files else nil
+		if k and files ~= nil and files:get() == true then
 			for _, t in state.of(k).tabs do
 				if (t.kind == "side_chat" or t.kind == "subagent") and t.chat then
 					out[t.chat] = true

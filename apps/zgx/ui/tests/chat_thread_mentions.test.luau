@@ -1,8 +1,4 @@
--- `@` lists threads (the shipping app's Threads section): this device's,
--- the open one never, searched as typed, each with its mark, title, how it
--- stands and its project, under "Threads" over the files; taken with the
--- keys, it lands as the chat's chip and goes as Zeron's chat link. On
--- ui/chat_fixture.luau.
+-- On ui/chat_fixture.luau.
 
 local function open(): any
 	local app = mount("chat_fixture.luau")
@@ -24,7 +20,6 @@ test("@ threads: listed under Threads, the open chat and another device's left o
 	local tree = app:tree("#mention-panel")
 	-- (Its heading tracked in hair spaces, as the tree escapes them.)
 	expect(tree).to_contain("T\\u{200a}H\\u{200a}R\\u{200a}E\\u{200a}A\\u{200a}D\\u{200a}S")
-	-- How it stands, in words, and its project.
 	expect(app:has('role:option "Long chat Working"')).to_be(true)
 	expect(tree).to_contain("Atlas")
 end)

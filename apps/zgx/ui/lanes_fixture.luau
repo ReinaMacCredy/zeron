@@ -273,9 +273,6 @@ ui.command { id = "many", title = "Many side chats", run = function()
 	end
 	publish()
 end }
--- Children by kind (U21): a task delegated to Codex, opened at once; a
--- thread asked for before it's listed, arriving later or never; an agent
--- asked for by its label alone; a fork.
 ui.command { id = "open_delegate", title = "Open a delegated child", run = function()
 	table.insert(children, { id = "dg-1", parent = "chat-1", title = "Port the parser", kind = "agent", delegation = "running", delegated_by = "chat-1", harness = "codex", mark = "openai", agent = "openai", device = "d", updated = NOW, created = NOW })
 	publish()
@@ -290,6 +287,20 @@ ui.command { id = "late_arrives", title = "The late child is listed", run = func
 end }
 ui.command { id = "open_agent_label", title = "Open an agent by its label", run = function()
 	lanes.open_agent_of("chat-1", "read  the docs")
+end }
+ui.command { id = "route_away", title = "Another chat open", run = function()
+	route.open_session("chat-2")
+end }
+ui.command { id = "panel_hide", title = "Hide the panel", run = function()
+	require("@app/screens/shell/view").set_files(false)
+end }
+ui.command { id = "panel_show", title = "Show the panel", run = function()
+	require("@app/screens/shell/view").set_files(true)
+end }
+-- The spawns as a transcript shows them (cards, with their open state).
+local cards_shown = ui.state("test_lanes_cards", false)
+ui.command { id = "show_cards", title = "Spawn cards", run = function()
+	cards_shown:set(true)
 end }
 ui.command { id = "open_fork", title = "Open a fork", run = function()
 	table.insert(children, { id = "fork-1", parent = "chat-1", title = "Try the other way", kind = "fork", device = "d", updated = NOW, created = NOW })
@@ -380,12 +391,40 @@ return ui.row {
 				end,
 			},
 		},
+		ui.show(
+			cards_shown,
+			ui.column {
+				id = "fixture-cards",
+				w = 320,
+				Activity {
+					key = "fixture-cards",
+					tools = function(): { any }
+						local out = {}
+						for _, t in (store.messages:get()[2] :: any).tools do
+							if t.kind == "agent" then
+								table.insert(out, t)
+							end
+						end
+						return out
+					end,
+					open_subagent = function(sub: any)
+						lanes.open_subagent("chat-1", sub)
+					end,
+					threads = require("@app/screens/chat/shared").threads_for(function(): string?
+						return "chat-1"
+					end, function(): string?
+						return "chat-1"
+					end, function(): any
+						return store.session:get()
+					end),
+				},
+			}
+		),
 	},
 	ui.text {
 		id = "fixture-route",
 		function(): string
-			local r = route.session:get()
-			return if r then r.id else ""
+			return route.chat:get().session or ""
 		end,
 	},
 	ui.text {

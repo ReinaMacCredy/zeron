@@ -30,9 +30,7 @@ end
 -- At most this many threads at once (Zeron's THREAD_MENTION_LIMIT).
 M.THREAD_LIMIT = 6
 
--- Threads whose title holds the query (any case) or whose id starts with it,
--- on `scope.device`, apart from `scope.exclude`; the scope's project first,
--- then the rest, each in the list's order; as `@` rows.
+-- The shipping app's `thread_matches`.
 function M.thread_items(chats: { any }, query: string, scope: { device: string?, project: string?, exclude: string? }, projects: { [string]: string }): { any }
 	local q = string.lower(string.match(query or "", "^%s*(.-)%s*$") or "")
 	local own, other = {}, {}
@@ -82,9 +80,7 @@ function M.bind(b: Bind): { [string]: any }
 		return Invocations.key(b.agent(), b.target())
 	end
 
-	-- The threads `@` can mention (the shipping app's `thread_matches`): this
-	-- device's (where the prompt runs and reads), its project's first, never
-	-- the chat being written in, the first few matching what's typed.
+	-- (This device's only: the prompt runs and reads where it is.)
 	local function threads(): { any }?
 		local t = token:get()
 		if not t or t.trigger ~= "@" then

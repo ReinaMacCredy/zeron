@@ -284,8 +284,6 @@ local function Session(id: Id?): Node
 							end,
 							on_mention = shared.mention,
 							chat_of = shared.chat_of,
-							-- Its threads, delegates and messages to other chats
-							-- (ds/transcript_threads): a child opens in this chat's panel.
 							threads = shared.threads_for(which, which, function(): any
 								return store.session:get()
 							end),

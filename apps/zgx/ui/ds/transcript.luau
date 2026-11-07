@@ -109,9 +109,6 @@ export type Message = {
 	hint: string?,
 	-- A person's that another chat sent: which, and its title when it was sent.
 	sender: { chat: string, title: string }?,
-	-- A person's that another thread's agent sent (thread tools): that
-	-- thread; a delegated task's wake names the tasks (`wake`), a step
-	-- handback the threads it speaks for (`steps`); when it was sent.
 	from_chat: string?,
 	wake: { string }?,
 	steps: { string }?,
@@ -198,9 +195,6 @@ export type Props = {
 	-- A subagent's spawn (an agent row naming its doc): what opens it (a
 	-- lane of its own). Without it, the row opens its call as any does.
 	on_open_subagent: ((sub: { ref: string, title: string?, status: string? }) -> ())?,
-	-- The other chats it speaks of (ds/transcript_threads): a delegate's,
-	-- a thread's, a message's; what opens them. Without it, they read as
-	-- their ids and open nothing.
 	threads: Threads.Threads?,
 }
 export type Anchor = { id: string, dy: number }
@@ -506,10 +500,7 @@ local function sender_line(m: Message, props: Props): Node
 	end, { w_full = true, pb = ui.raw(6, "Zeron's USER_CAPTION_GAP") })
 end
 
--- Whose voice a person's row is (Zeron's user row): the chat's own turn sent
--- to itself ("self", Auto-continue over it), a delegated task's wake ("wake",
--- a line in its place), another thread's agent ("peer", its words as prose
--- under "From"), or the person's.
+-- Zeron's user row: "self", "wake", "peer", or nil for the person's own.
 local function voice_of(m: Message, props: Props): string?
 	local from = m.from_chat
 	if not from then
@@ -755,7 +746,6 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				return brow:get()
 			end)
 		end
-		-- A message the agent sent another chat: one line, its recipient.
 		if b.kind == "sent" then
 			return Threads.Sent {
 				id = `sent-{b.id}`,
@@ -765,7 +755,6 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				threads = if view then view.threads else nil,
 			}
 		end
-		-- A native spawn the engine routed: the delegate chip, on the chat's own agent.
 		if b.kind == "native_route" then
 			return Threads.Delegate { id = `native-{b.id}`, title = (b :: any).title, route = (b :: any).route, native = true, threads = if view then view.threads else nil }
 		end
