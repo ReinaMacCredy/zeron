@@ -24,6 +24,7 @@ local Dock = require("@app/screens/chat/dock")
 local Pills = require("@app/screens/chat/pills")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
+local RowProps = require("@app/screens/chat/row_props")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local boundary = require("@app/screens/shell/boundary")
 -- (The chat page's places in its chats, which a split's panes share.)
@@ -1101,7 +1102,7 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		end,
 	})
 	local function make_transcript(): Node
-		return T.Transcript {
+		return T.Transcript(RowProps.add({
 		-- (Its own glide, runway and place: never the chat page's.)
 		name = `lane.{slot}`,
 		-- (A split's pane reads as the chat page: a little wider than its
@@ -1165,7 +1166,11 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 				return LinkNotice.working_says(sending, sessions.now:get(), view.session:get())
 			end,
 		},
-	}
+	}, function(): string?
+		return chat
+	end, lane_session, function(): any
+		return view.session:peek()
+	end))
 	end
 	local transcript = if split
 		then ui.presence(function(): string

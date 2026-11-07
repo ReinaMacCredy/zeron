@@ -6,6 +6,17 @@ use std::path::{Component, Path, PathBuf};
 thread_local! {
     static ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static CWD: RefCell<Option<String>> = const { RefCell::new(None) };
+    // (While a chat opens, each path is looked at once however many replies name it.)
+    static MEMO: RefCell<Option<std::collections::HashMap<PathBuf, Kind>>> = const { RefCell::new(None) };
+}
+
+/// A chat opening (`true`, kept across its slices) or opened: its looks at files remembered meanwhile.
+pub(crate) fn opening(on: bool) {
+    MEMO.with_borrow_mut(|m| match (on, m.is_some()) {
+        (true, false) => *m = Some(Default::default()),
+        (false, _) => *m = None,
+        _ => {}
+    });
 }
 
 /// The chat being built: its folder, and whether that's on this device (only then probed).
@@ -26,11 +37,20 @@ enum Kind {
 }
 
 fn kind(path: &Path) -> Kind {
-    match std::fs::metadata(path) {
+    if let Some(k) = MEMO.with_borrow(|m| m.as_ref().and_then(|m| m.get(path).copied())) {
+        return k;
+    }
+    let k = match std::fs::metadata(path) {
         Ok(m) if m.is_file() => Kind::File,
         Ok(m) if m.is_dir() => Kind::Dir,
         _ => Kind::Missing,
-    }
+    };
+    MEMO.with_borrow_mut(|m| {
+        if let Some(m) = m {
+            m.insert(path.to_owned(), k);
+        }
+    });
+    k
 }
 
 /// `text` with its file-naming code spans as links, or `None` when none is.
@@ -67,10 +87,11 @@ pub(crate) fn linked_in(text: &str, root: &Path) -> Option<String> {
     for s in &spans {
         out.push_str(&text[at..s.start]);
         let label = label_of(&s.path, &spans);
-        let target = s.path.strip_prefix(root).unwrap_or(&s.path);
+        // (Absolute, as gpui's: the transcript's resolver takes a `file://` name with no `.`, Makefile, which it refuses relative.)
+        let target = root.join(s.path.strip_prefix(root).unwrap_or(&s.path));
         out.push('[');
         out.push_str(&escaped(&label));
-        out.push_str("](");
+        out.push_str("](file://");
         out.push_str(&encoded(&target.to_string_lossy()));
         out.push_str(&s.anchor);
         out.push(')');
@@ -258,7 +279,7 @@ mod tests {
 
     fn tree() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("zgx-code-links-{}", std::process::id()));
-        for f in ["src/parse.rs", "src/ui/lib.rs", "crates/a/lib.rs", "docs/SOURCES.md", "__init__.py"] {
+        for f in ["src/parse.rs", "src/ui/lib.rs", "crates/a/lib.rs", "docs/SOURCES.md", "__init__.py", "Makefile"] {
             let p = dir.join(f);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(&p, "x").unwrap();
@@ -269,13 +290,15 @@ mod tests {
     #[test]
     fn a_code_span_naming_a_file_in_the_folder_becomes_its_link() {
         let root = tree();
-        let text = "See `src/parse.rs:12` and `src/missing.rs`, then all under `docs/`: `SOURCES.md`.\n\n```\n`src/parse.rs`\n```\n`__init__.py` and [`src/parse.rs`](src/parse.rs) and `src/ui/lib.rs` beside `crates/a/lib.rs`, `cat x`.";
+        let text = "See `src/parse.rs:12` and `src/missing.rs`, then all under `docs/`: `SOURCES.md`.\n\n```\n`src/parse.rs`\n```\n`__init__.py` and [`src/parse.rs`](src/parse.rs) and `src/ui/lib.rs` beside `crates/a/lib.rs`, `Makefile:3`, `cat x`.";
         let out = linked_in(text, &root).unwrap();
-        assert!(out.starts_with("See [parse.rs](src/parse.rs:12) and `src/missing.rs`, then all under `docs/`: [SOURCES.md](docs/SOURCES.md)."), "{out}");
+        let at = format!("file://{}", root.display());
+        assert!(out.starts_with(&format!("See [parse.rs]({at}/src/parse.rs:12) and `src/missing.rs`, then all under `docs/`: [SOURCES.md]({at}/docs/SOURCES.md).")), "{out}");
         assert!(out.contains("```\n`src/parse.rs`\n```"), "a fence stays code: {out}");
-        assert!(out.contains("[\\_\\_init\\_\\_.py](__init__.py)"), "{out}");
+        assert!(out.contains(&format!("[\\_\\_init\\_\\_.py]({at}/__init__.py)")), "{out}");
         assert!(out.contains("[`src/parse.rs`](src/parse.rs)"), "a link's own code stays: {out}");
-        assert!(out.contains("[ui/lib.rs](src/ui/lib.rs) beside [a/lib.rs](crates/a/lib.rs)"), "same names told apart: {out}");
+        assert!(out.contains(&format!("[ui/lib.rs]({at}/src/ui/lib.rs) beside [a/lib.rs]({at}/crates/a/lib.rs)")), "same names told apart: {out}");
+        assert!(out.contains(&format!("[Makefile]({at}/Makefile:3)")), "a name with no `.` is absolute, which the transcript opens: {out}");
         assert!(out.ends_with("`cat x`."), "{out}");
         assert_eq!(linked_in("no `such/file.rs` here", &root), None);
         assert_eq!(linked_in("`../parse.rs` `/etc/hosts` `https://x.rs`", &root), None);

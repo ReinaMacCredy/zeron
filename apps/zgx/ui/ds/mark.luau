@@ -36,7 +36,6 @@ local FILES: { [Name]: string } = {
 -- colour of the text around them instead, or they vanish on dark.
 local MONO: { [Name]: boolean } = { openai = true, grok = true, cursor = true, devin = true, hermes = true }
 
-local RegistryMark = require("@self/registry_mark")
 
 -- `bare`: the glyph alone, no tile (inline, beside text: a model's chip),
 -- and then `name` may be a function the glyph follows. (`name` may be a
@@ -61,6 +60,11 @@ local function picture(name: Name, side: number, tint: string?): Node
 		return ui.image { src = src, w = side, h = side, shrink = 0, fit = "contain" }
 	end
 	return ui.svg { src = src, tint = if MONO[name] then tint else nil, w = side, h = side, shrink = 0 }
+end
+
+-- (Loaded as it's drawn: `glyph` and `chip_icon` need nothing of a registry's.)
+local function RegistryMark(props: any): Node
+	return (require("@self/registry_mark") :: any)(props)
 end
 
 local function component(props: Props): Node
@@ -110,7 +114,19 @@ local function glyph(name: string): (string?, boolean)
 	return file(name :: Name), MONO[name :: Name] == true
 end
 
-return setmetatable({ glyph = glyph }, {
+-- A span's icon of a mark at `size`: a one-ink mark in the text's ink. nil for a mark it hasn't.
+local function chip_icon(name: string?, size: number, gap: number): { [string]: any }?
+	local src, mono = nil, false
+	if name then
+		src, mono = glyph(name)
+	end
+	if not src then
+		return nil
+	end
+	return { src = src, size = size, gap = gap, tint = if mono then "currentColor" else nil }
+end
+
+return setmetatable({ glyph = glyph, chip_icon = chip_icon }, {
 	__call = function(_, props: Props): Node
 		return component(props)
 	end,

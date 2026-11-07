@@ -307,63 +307,75 @@ local function strip(m: Message, row: State<Message>, hovered: () -> boolean): N
 			set_copied(false)
 		end)
 	end
-	return ui.row {
-		w_full = true,
-		h = LANE,
-		pt = ui.raw(LANE_TOP, "Zeron's 8 over the lane's 24-point line"),
-		items = "center",
-		justify = if mine then "end" else "start",
-		selectable = false,
-		ui.presence(function(): string?
-			-- (Never while a reply is written: it has no time yet.)
-			local now = row:get()
-			return if hovered() and now.at and not now.streaming then "shown" else nil
-		end, function(): Node
-			return ui.row {
-				class = "message-actions",
-				gap = "$space.2",
-				items = "center",
-				ui.text {
-					function(): string
-						return row:get().at or ""
-					end,
-					text_size = "$font.size.sm",
-					color = "$text.secondary",
-					opacity = ui.raw(0.55, "Zeron's timestamp: the muted ink at 55%"),
-				},
-				ui.show(
-					function(): boolean
-						return row:get().copy ~= nil
-					end,
-					ui.button {
-						label = locale.t("ds.transcript.copy_message"),
-						tooltip = locale.s("ds.transcript.copy_message"),
-						w = 24,
-						h = 24,
-						p = 0,
-						items = "center",
-						justify = "center",
-						rounded = "$radius.md",
-						bg = "#00000000",
+	local function settled(): boolean
+		local now = row:get()
+		return now.at ~= nil and not now.streaming
+	end
+	-- (Settled, the lane is a Tab stop: focus there shows the strip, its Copy the next stop. gpui's has no way by keys.)
+	return ui.presence(function(): string
+		return if settled() then "stop" else "lane"
+	end, function(kind: string): Node
+		return ui.row {
+			w_full = true,
+			h = LANE,
+			pt = ui.raw(LANE_TOP, "Zeron's 8 over the lane's 24-point line"),
+			items = "center",
+			justify = if mine then "end" else "start",
+			selectable = false,
+			focusable = kind == "stop",
+			role = if kind == "stop" then "group" else nil,
+			label = if kind == "stop" then locale.t("ds.transcript.message_actions") else nil,
+			focus = if kind == "stop" then control.ring else nil,
+			ui.presence(function(): string?
+				-- (Never while a reply is written: it has no time yet.)
+				return if hovered() and settled() then "shown" else nil
+			end, function(): Node
+				return ui.row {
+					class = "message-actions",
+					gap = "$space.2",
+					items = "center",
+					ui.text {
+						function(): string
+							return row:get().at or ""
+						end,
+						text_size = "$font.size.sm",
 						color = "$text.secondary",
-						hover = { bg = "$zeron.secondary.bg" },
-						active = { bg = "$zeron.secondary.hover" },
-						focus = control.ring,
-						cursor = "pointer",
-						on_click = copy,
-						Icon {
-							name = function()
-								return if is_copied() then "check" else "copy"
-							end,
-							size = 14,
-						},
-					}
-				),
-				-- Where plugins add a message's actions: beside Copy.
-				ui.row { hook = "chat.message.actions", gap = "$space.2", items = "center" },
-			}
-		end, { enter = { opacity = { 0, 1 }, duration = 150 } }),
-	}
+						opacity = ui.raw(0.55, "Zeron's timestamp: the muted ink at 55%"),
+					},
+					ui.show(
+						function(): boolean
+							return row:get().copy ~= nil
+						end,
+						ui.button {
+							label = locale.t("ds.transcript.copy_message"),
+							tooltip = locale.s("ds.transcript.copy_message"),
+							w = 24,
+							h = 24,
+							p = 0,
+							items = "center",
+							justify = "center",
+							rounded = "$radius.md",
+							bg = "#00000000",
+							color = "$text.secondary",
+							hover = { bg = "$zeron.secondary.bg" },
+							active = { bg = "$zeron.secondary.hover" },
+							focus = control.ring,
+							cursor = "pointer",
+							on_click = copy,
+							Icon {
+								name = function()
+									return if is_copied() then "check" else "copy"
+								end,
+								size = 14,
+							},
+						}
+					),
+					-- Where plugins add a message's actions: beside Copy.
+					ui.row { hook = "chat.message.actions", gap = "$space.2", items = "center" },
+				}
+			end, { enter = { opacity = { 0, 1 }, duration = 150 } }),
+		}
+	end, { w_full = true })
 end
 
 -- Where the chat moved to another agent: `[mark] From → [mark] To`, muted,
@@ -650,6 +662,7 @@ type View = {
 	on_secret: ((request: string, secret: string?) -> any)?,
 	file_link: ((target: string) -> boolean)?,
 	open_file: ((path: string) -> ())?,
+	file_opens: ((path: string) -> boolean)?,
 	on_sign_in: (() -> ())?,
 }
 
@@ -678,6 +691,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				key = `{m.id}:{b.id}`,
 				open_subagent = if view then view.open_subagent else nil,
 				open_file = if view then view.open_file else nil,
+				file_opens = if view then view.file_opens else nil,
 				pictures = if view then view.shown_pictures else nil,
 				threads = if view then view.threads else nil,
 				agent = if view and view.threads then view.threads.agent else nil,
@@ -997,6 +1011,24 @@ local function Transcript(props: Props): Node
 	local at_end = ui.state(`transcript_at_end{kept}`, true)
 	-- A find's: each text's marks, and its current match brought into view
 	-- (its message scrolled to, if it's away; then the block holding it).
+	-- (A tool's file as a link's target, read by the same resolver: absolute as `file://`, relative as a mention.)
+	local function file_target(path: string): string
+		local encoded = string.gsub(path, "[^%w%-%._~/]", function(c: string): string
+			return string.format("%%%02X", string.byte(c))
+		end)
+		return if string.sub(path, 1, 1) == "/" then "file://" .. encoded else "zeron-file:" .. encoded
+	end
+	local open_link, file_link = props.open_link, props.file_link
+	local tool_open = if open_link and file_link
+		then function(path: string)
+			open_link(file_target(path))
+		end
+		else nil
+	local tool_opens = if open_link and file_link
+		then function(path: string): boolean
+			return file_link(file_target(path))
+		end
+		else nil
 	local function chat_mark(chat: string): string?
 		local c = if props.chat_of then props.chat_of(chat) else nil
 		return if c then c.mark else nil
@@ -1587,6 +1619,7 @@ local function Transcript(props: Props): Node
 		end
 		local inner = ui.ref()
 		local outer = ui.ref()
+		local pointer_in, focus_in = false, false
 		local row_w: number? = nil
 		local function washed(): string?
 			return layer.wash(m.id)
@@ -1677,17 +1710,29 @@ local function Transcript(props: Props): Node
 				on_hover = if m.role == "switch" or m.role == "system"
 					then nil
 					else function(inside: boolean)
+						pointer_in = inside
 						if inside then
 							set_hover(m.id)
-						elseif hover:peek() == m.id then
+						elseif hover:peek() == m.id and not focus_in then
 							set_hover("")
 						end
 					end,
-				-- (Focus coming into a message shows its lane too, so its Copy is the next stop.)
+				-- (Focus coming into a message shows its lane too, so its Copy is the next stop; gone with it unless the pointer is there.)
 				on_focus = if m.role == "switch" or m.role == "system"
 					then nil
 					else function()
+						focus_in = true
 						set_hover(m.id)
+					end,
+				on_blur = if m.role == "switch" or m.role == "system"
+					then nil
+					else function()
+						focus_in = false
+						ui.after(0, function()
+							if not focus_in and not pointer_in and hover:peek() == m.id then
+								set_hover("")
+							end
+						end)
 					end,
 				if m.role == "switch" then seam(m)
 					elseif m.role == "system" and (m.line == "classifier" or m.line == "compaction") then Compaction.Divider {
@@ -1771,7 +1816,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry, props.working, props.compaction_wait),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, file_link = props.file_link, open_file = if props.open_link then props.open_link else nil, on_sign_in = props.on_sign_in }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in }),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?

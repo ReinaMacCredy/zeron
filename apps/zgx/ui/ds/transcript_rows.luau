@@ -14,6 +14,9 @@ local function s(key: string, args: { [string]: any }?): string
 	return locale.s(`ds.transcript_rows.{key}`, args)
 end
 
+-- Each request's answer under way or sent, outliving its row (gpui's `SecretCards`): scrolled away and back, a sent card stays sent.
+local SECRETS = ui.state("transcript_secrets", {} :: { [string]: { busy: boolean?, sent: string?, failure: string? } })
+
 function M.line_words(x: any): string
 	local title = x.title or ""
 	if x.line == "resumed" then
@@ -63,16 +66,31 @@ function M.texts(m: any, b: any?): { { key: string, text: string } }
 			end
 		end
 	elseif x.line == "secret" then
-		table.insert(out, { key = `{base}:0`, text = secret_label(x.status) })
-		if x.status == "pending" then
+		local own = if x.request then SECRETS:peek()[x.request] else nil
+		local st = (if own then own.sent else nil) or x.status
+		table.insert(out, { key = `{base}:0`, text = secret_label(st) })
+		if st == "pending" then
 			table.insert(out, { key = `{base}:1`, text = x.title or "" })
 			table.insert(out, { key = `{base}:2`, text = x.reason or "" })
 		end
+	elseif x.line == "claude_command" and x.context then
+		-- (Drawn as ds/compaction_context's card, which marks no find.)
 	elseif x.line == "claude_command" and x.card then
+		-- (As ClaudeCard draws it: the notice's command, a running one's, the model's note, or the answer and its words.)
 		local c = x.card
-		table.insert(out, { key = `{base}:0`, text = c.command or "" })
-		if c.error or (c.text and c.text ~= "") then
-			table.insert(out, { key = `{base}:1`, text = c.error or c.text })
+		local stale = c.pending and c.started and os.time() * 1000 - c.started >= (c.stale_ms or 120000)
+		if c.terminal then
+			table.insert(out, { key = `{base}:0`, text = `/{c.terminal}` })
+		elseif c.pending and not stale then
+			table.insert(out, { key = `{base}:0`, text = c.command or "" })
+		elseif c.command == "/model" and not c.error and not c.pending then
+			table.insert(out, { key = `{base}:1`, text = c.note or s("claude.model_note") })
+		else
+			table.insert(out, { key = `{base}:0`, text = c.command or "" })
+			local body = if stale then s("claude.stale") else (c.error or c.text or "")
+			if body ~= "" then
+				table.insert(out, { key = `{base}:1`, text = body })
+			end
 		end
 	elseif x.line == "error" then
 		table.insert(out, { key = `{base}:0`, text = x.text or "" })
@@ -90,14 +108,22 @@ end
 
 export type Find = (key: string) -> any
 
-local function found(props: { key: string, text: () -> string, find: Find?, [string]: any }): Node
+-- (`lead`: the found words' own style in a paragraph that goes on in `tail`, unfound.)
+local function found(props: { key: string, text: () -> string, find: Find?, lead: { [string]: any }?, tail: string?, [string]: any }): Node
 	local f = if props.find then props.find(props.key) else nil
 	local ref = ui.ref()
 	local style: { [string]: any } = {}
 	for k, v in props :: any do
-		if k ~= "key" and k ~= "text" and k ~= "find" then
+		if k ~= "key" and k ~= "text" and k ~= "find" and k ~= "lead" and k ~= "tail" then
 			style[k] = v
 		end
+	end
+	local function piece(words: string, bg: string?): Node
+		local out: { [any]: any } = { words, literal = true, bg = bg }
+		for k, v in props.lead or {} do
+			out[k] = v
+		end
+		return ui.span(out)
 	end
 	local function now(): (string, string, number)
 		local text = props.text()
@@ -118,15 +144,23 @@ local function found(props: { key: string, text: () -> string, find: Find?, [str
 			out[k] = v
 		end
 		local at = 1
-		for i, m in MarkdownFind.occurrences(text, q) do
+		local hits = MarkdownFind.occurrences(text, q)
+		for i, m in hits do
 			if m[1] > at then
-				table.insert(out, ui.span { string.sub(text, at, m[1] - 1), literal = true })
+				table.insert(out, piece(string.sub(text, at, m[1] - 1)))
 			end
-			table.insert(out, ui.span { string.sub(text, m[1], m[2]), literal = true, bg = if i == cur then "$zeron.editor.match_current" else "$zeron.editor.match" })
+			table.insert(out, piece(string.sub(text, m[1], m[2]), if i == cur then "$zeron.editor.match_current" else "$zeron.editor.match"))
 			at = m[2] + 1
 		end
 		if at <= #text then
-			table.insert(out, ui.span { string.sub(text, at), literal = true })
+			table.insert(out, piece(string.sub(text, at)))
+		end
+		if props.tail then
+			table.insert(out, ui.span { props.tail })
+		end
+		-- (What a find marks, by class: a test or a plugin can tell.)
+		if #hits > 0 then
+			out.class = if cur > 0 then "find-mark find-current" else "find-mark"
 		end
 		if cur > 0 and f and f.reveal then
 			ui.after(0, function()
@@ -324,41 +358,56 @@ local function event_row(icon: string, words: () -> string, tone: () -> string, 
 end
 
 export type SecretProps = { key: string, now: () -> any, find: Find?, on_answer: ((request: string, secret: string?) -> any)? }
+local function secret_set(request: string, patch: { busy: boolean?, sent: string?, failure: string? })
+	local all = table.clone(SECRETS:peek())
+	all[request] = patch
+	SECRETS:set(all)
+end
 M.Secret = ui.component(function(props: SecretProps): Node
 	local value = ui.use_state("")
-	local busy = ui.use_state(false)
-	local sent = ui.use_state(nil :: string?)
-	local failure = ui.use_state(nil :: string?)
-	local function shown(): string
-		return sent:get() or props.now().status or "pending"
+	local function mine(): { busy: boolean?, sent: string?, failure: string? }
+		local b = props.now()
+		return if b.request then SECRETS:get()[b.request] or {} else {}
 	end
+	local function busy(): boolean
+		return mine().busy == true
+	end
+	local function failure(): string?
+		return mine().failure
+	end
+	local function shown(): string
+		return mine().sent or props.now().status or "pending"
+	end
+	-- (Settled from elsewhere, timed out or declined from the composer: what was typed goes.)
+	ui.effect(function()
+		if shown() ~= "pending" and value:peek() ~= "" then
+			value:set("")
+		end
+	end)
 	local function answer(save: boolean)
 		local b = props.now()
+		local request = b.request
 		local secret = if save then string.match(value:peek(), "^%s*(.-)%s*$") else nil
-		if busy:peek() or sent:peek() or not props.on_answer or not b.request or (save and secret == "") then
+		local was = if request then SECRETS:peek()[request] or {} else {}
+		if was.busy or was.sent or not request or (save and secret == "") then
 			return
 		end
-		busy:set(true)
-		failure:set(nil)
-		local p = props.on_answer(b.request, secret)
-		local function done(ok: boolean, why: string?)
-			busy:set(false)
-			if ok then
-				sent:set(if save then "saved" else "declined")
-				value:set("")
-			else
-				failure:set(why or s("secret.failed"))
-			end
+		-- (No way to answer here, or a host without `chat.answer_secret`: it says so, and the buttons stay.)
+		local ok, p = false, nil
+		if props.on_answer then
+			ok, p = pcall(props.on_answer, request, secret)
 		end
-		if p and p.after then
-			p:after(function()
-				done(true)
-			end, function(e: any)
-				done(false, if type(e) == "table" and e.message == "offline" then s("secret.offline") else nil)
-			end)
-		else
-			done(true)
+		if not ok or type(p) ~= "table" or not p.after then
+			secret_set(request, { failure = s("secret.unsupported") })
+			return
 		end
+		secret_set(request, { busy = true })
+		p:after(function()
+			value:set("")
+			secret_set(request, { sent = if save then "saved" else "declined" })
+		end, function(e: any)
+			secret_set(request, { failure = if type(e) == "table" and e.message == "offline" then s("secret.offline") else s("secret.failed") })
+		end)
 	end
 	return ui.presence(function(): string
 		return if shown() == "pending" then "card" else "row"
@@ -376,7 +425,7 @@ M.Secret = ui.component(function(props: SecretProps): Node
 			}
 		end
 		local disabled = function(): boolean
-			return busy:get() or string.match(value:get(), "%S") == nil
+			return busy() or string.match(value:get(), "%S") == nil
 		end
 		return ui.column {
 			class = "transcript-secret",
@@ -420,6 +469,7 @@ M.Secret = ui.component(function(props: SecretProps): Node
 						TextField {
 							value = value,
 							password = true,
+							reveal = false,
 							w_full = true,
 							name = s("secret.field"),
 							placeholder = function(): string
@@ -465,12 +515,12 @@ M.Secret = ui.component(function(props: SecretProps): Node
 						gap = ui.raw(6, "gpui's secret card"),
 						items = "center",
 						color = function(): string
-							return if failure:get() then "$warning" else "$text.secondary"
+							return if failure() then "$warning" else "$text.secondary"
 						end,
 						Icon { name = "shield-check", size = 13 },
 						ui.text {
 							function(): string
-								return failure:get() or s("secret.kept_out")
+								return failure() or s("secret.kept_out")
 							end,
 							wrap = true,
 							min_w = 0,
@@ -490,9 +540,7 @@ M.Secret = ui.component(function(props: SecretProps): Node
 						weight = "$font.weight.medium",
 						text_size = ui.raw(12.5, "gpui's secret card"),
 						focus = control.ring,
-						disabled = function(): boolean
-							return busy:get()
-						end,
+						disabled = busy,
 						on_click = function()
 							answer(false)
 						end,
@@ -545,7 +593,7 @@ local function shell(key: string, children: { Node }): Node
 	return ui.column(out)
 end
 
-local function pending_card(key: string, now: () -> any): Node
+local function pending_card(key: string, now: () -> any, find: Find?): Node
 	local clock = ui.use_state(os.time())
 	ui.every(1000, function()
 		clock:set(os.time())
@@ -558,9 +606,9 @@ local function pending_card(key: string, now: () -> any): Node
 			items = "center",
 			selectable = false,
 			status.StatusIcon { kind = "working", size = 12 },
-			ui.text { function(): string
+			found { key = `{key}:0`, text = function(): string
 				return now().card.command or ""
-			end, literal = true, shrink = 0, font = "$font.mono" },
+			end, find = find, shrink = 0, font = "$font.mono" },
 			ui.text { s("claude.running"), truncate = true, min_w = 0, text_size = ui.raw(12.5, "gpui's Claude card"), color = "$text.secondary" },
 			ui.div { grow = 1 },
 			ui.text { function(): string
@@ -588,14 +636,17 @@ local function notice(key: string, now: () -> any, find: Find?): Node
 		text_size = ui.raw(12.5, "gpui's terminal notice"),
 		color = "$text.secondary",
 		Icon { name = "terminal", size = 15 },
-		ui.rich {
+		found {
+			key = `{key}:0`,
+			text = function(): string
+				return `/{now().card.terminal or ""}`
+			end,
+			find = find,
+			lead = { color = "$text.primary", font = look.code_family() },
+			tail = s("claude.terminal_only"),
 			wrap = true,
 			grow = 1,
 			min_w = 0,
-			ui.span { function(): string
-				return `/{now().card.terminal or ""}`
-			end, literal = true, color = "$text.primary", font = look.code_family() },
-			ui.span { s("claude.terminal_only") },
 		},
 	}
 end
@@ -700,7 +751,7 @@ local function generic_card(key: string, now: () -> any, find: Find?, on_retry: 
 end
 
 -- (The chat's model as it is now wins over the one the card was answered under.)
-local function model_card(key: string, now: () -> any, current: (() -> string?)?, on_model: ((model: string) -> ())?): Node
+local function model_card(key: string, now: () -> any, find: Find?, current: (() -> string?)?, on_model: ((model: string) -> ())?): Node
 	local function selected(): number?
 		local c = now().card
 		local want = (if current then current() else nil) or c.model
@@ -791,10 +842,12 @@ local function model_card(key: string, now: () -> any, current: (() -> string?)?
 					}
 				end),
 			},
-			ui.text {
-				function(): string
+			found {
+				key = `{key}:1`,
+				text = function(): string
 					return now().card.note or s("claude.model_note")
 				end,
+				find = find,
 				wrap = true,
 				text_size = ui.raw(11.5, "gpui's Claude card"),
 				color = "$text.tertiary",
@@ -836,9 +889,9 @@ M.ClaudeCard = ui.component(function(props: { key: string, now: () -> any, find:
 		if kind == "notice" then
 			return notice(props.key, now, props.find)
 		elseif kind == "pending" then
-			return pending_card(props.key, now)
+			return pending_card(props.key, now, props.find)
 		elseif kind == "model" then
-			return model_card(props.key, now, props.current_model, props.on_model)
+			return model_card(props.key, now, props.find, props.current_model, props.on_model)
 		end
 		return generic_card(props.key, now, props.find, props.on_retry, stale)
 	end, { w_full = true })

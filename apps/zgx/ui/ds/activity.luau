@@ -90,8 +90,9 @@ export type Props = {
 	-- A subagent's spawn row (its tool's `subagent`): what opens it (its
 	-- lane). Without it, the row opens its call as any does.
 	open_subagent: ((sub: any) -> ())?,
-	-- A tool's file (Tool `path`): what opens it, a click on its name.
+	-- A tool's file (Tool `path`): what opens it, a click on its name, and whether it opens (only then is its name clickable).
 	open_file: ((path: string) -> ())?,
+	file_opens: ((path: string) -> boolean)?,
 	-- Where a tool's pictures (Tool `images`) are read from; without it, none show.
 	pictures: ReplyPicture.Pictures?,
 	threads: Threads.Threads?,
@@ -465,7 +466,8 @@ local function row(
 	writing: Writing?,
 	group: string?,
 	open_file: ((path: string) -> ())?,
-	pictures: ReplyPicture.Pictures?
+	pictures: ReplyPicture.Pictures?,
+	file_opens: ((path: string) -> boolean)?
 ): Node
 	if now().kind == "thought" then
 		return thought_row(now, below, writing, group)
@@ -500,6 +502,8 @@ local function row(
 	-- isn't known as its row is made.)
 	local OPENS: { [string]: boolean } = { exec = true, read = true, edit = true, write = true, search = true, glob = true, web = true }
 	local opens = has_call() or lane() ~= nil or OPENS[now().kind] == true or has_pictures()
+	local own_file = now().path
+	local name_opens = open_file ~= nil and file_opens ~= nil and own_file ~= nil and file_opens(own_file)
 	return ui.column {
 		w_full = true,
 		relative = true,
@@ -590,9 +594,9 @@ local function row(
 						class = "tool-target",
 						min_w = 0,
 						shrink = 1,
-						-- (Only a name that opens takes the click: elsewhere it's the row's.)
-						cursor = if open_file and now().path then "pointer" else nil,
-						on_click = if open_file and now().path
+						-- (Only a name whose file opens takes the click, as gpui's `opener.opens`: elsewhere it's the row's.)
+						cursor = if name_opens then "pointer" else nil,
+						on_click = if name_opens
 							then function()
 								local path = now().path
 								if path then
@@ -876,7 +880,7 @@ return ui.component(function(props: Props): Node
 						return now:get()
 					end, below_of(t), function(): boolean
 						return live() and last()
-					end, props.open_subagent, props.thought, props.key, props.open_file, props.pictures)
+					end, props.open_subagent, props.thought, props.key, props.open_file, props.pictures, props.file_opens)
 				end, {
 					key = function(t: Tool): string
 						return t.id

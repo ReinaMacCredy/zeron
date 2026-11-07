@@ -806,6 +806,7 @@
     },
     "transcript": {
       "copy_message": "拷贝消息",
+      "message_actions": "消息操作",
       "switched": "已从 {from} 切换到 {to}",
       "message_from": "消息来自",
       "not_delivered": "未送达——重新发送",
@@ -1516,7 +1517,8 @@
         "decline": "拒绝",
         "kept_out": "不会出现在聊天中，存放在一个私密文件里，此智能体的命令可在 24 小时内读取",
         "failed": "密钥未保存，请重试。",
-        "offline": "无法连接 Zeron 引擎。"
+        "offline": "无法连接 Zeron 引擎。",
+        "unsupported": "此版本的 Zeron 无法在此保存密钥。"
       },
       "claude": {
         "running": "正在 Claude Code 中运行…",

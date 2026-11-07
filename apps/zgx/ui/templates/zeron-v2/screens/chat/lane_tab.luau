@@ -23,6 +23,7 @@ local Where = require("@app/screens/chat/where")
 local Dock = require("@app/screens/chat/dock")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
+local RowProps = require("@app/screens/chat/row_props")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Shared = require("@app/screens/chat/shared")
 local Completions = require("@app/screens/chat/completions")
@@ -882,7 +883,7 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 			end
 		end,
 	})
-	local transcript = T.Transcript {
+	local transcript = T.Transcript(RowProps.add({
 		-- (Its own glide, runway and place: never the chat page's.)
 		name = `lane.{slot}`,
 		measure = function(): number
@@ -939,7 +940,11 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 				return LinkNotice.working_says(sending, sessions.now:get(), view.session:get())
 			end,
 		},
-	}
+	}, function(): string?
+		return chat
+	end, lane_session, function(): any
+		return view.session:peek()
+	end))
 	if tab.kind == "subagent" then
 		return ui.column { id = `lane-{slot}`, class = "lane-tab subagent-tab", provide = { session = chat }, grow = 1, w_full = true, min_h = 0, transcript }
 	end

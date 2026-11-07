@@ -23,7 +23,7 @@ fn messages(app: &TestApp) -> Vec<Value> {
 #[test]
 fn a_settled_transcript_of_every_row_kind_runs_no_script_at_rest() {
     let app = mount(1100., 2400.);
-    assert!(app.host.run_command("kinds_turn"), "the fixture has U24's seed");
+    assert!(app.host.run_command("kinds_turn"), "the fixture has its every-row-kind seed");
     app.frames(30);
     let settled: Vec<Value> = messages(&app).into_iter().filter(|m| m.field("id").map(crate::auth::text).as_deref() != Some("ks2")).collect();
     app.host.set_state("chat.messages", Value::List(settled.into())).unwrap();
@@ -116,4 +116,46 @@ fn a_2000_row_chat_opens_and_scrolls() {
         p(&scripts, 0.5),
         scripts.last().copied().unwrap_or_default(),
     );
+}
+
+fn state(app: &TestApp, name: &str) -> String {
+    app.host.states().into_iter().find(|(n, _)| n == name).map(|(_, v)| crate::auth::text(&v)).unwrap_or_default()
+}
+
+#[test]
+fn a_selection_across_a_file_link_reads_and_copies_without_its_glyph_s_joiner() {
+    let mut app = mount(1100., 2400.);
+    assert!(app.host.run_command("kinds_turn"));
+    app.frames(30);
+    let paragraph = app.target("role:text ~\"The parser is\"").expect("the reply's paragraph");
+    assert!(app.ui.select_all_text(paragraph), "its text selects");
+    let read = crate::selected(&app.ui);
+    let text = read.field("text").map(crate::auth::text).unwrap_or_default();
+    assert!(text.contains("The parser is parse.rs and the host main.rs"), "the names read as written: {text:?}");
+    assert!(!text.contains('\u{2060}'), "annotations and side chats read no joiner: {text:?}");
+    assert!(!app.ui.selected_text().contains('\u{2060}') && !app.ui.selected_html().contains('\u{2060}'), "copied, neither has one");
+}
+
+#[test]
+fn a_cmd_click_on_a_file_link_opens_nothing_and_on_a_web_link_goes_to_the_browser() {
+    use zgx::input::{InputEvent, Modifiers, PointerButton};
+    let mut app = mount(1100., 2400.);
+    assert!(app.host.run_command("kinds_turn"));
+    app.frames(30);
+    let cmd = Modifiers { meta: cfg!(target_os = "macos"), control: !cfg!(target_os = "macos"), ..Default::default() };
+    let click = |app: &mut TestApp, target: &str, held: Modifiers| {
+        let (_, bounds) = zgx_script::driver::reach(&app.ui, &app.handle, target).unwrap();
+        let (x, y) = zgx_script::driver::middle(bounds);
+        let button = PointerButton::Primary;
+        app.ui.dispatch_with_modifiers(InputEvent::PointerDown { x, y, button }, held);
+        app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x, y, button }, held);
+        app.ui.input.forget_clicks();
+        app.frames(5);
+    };
+    click(&mut app, "role:link \"parse.rs\"", cmd);
+    click(&mut app, "role:link \"the docs\"", cmd);
+    assert!(!state(&app, "calls").contains("open_file:s2:src/parse.rs"), "{}", state(&app, "calls"));
+    assert_eq!(state(&app, "ds/links.luau::links_last"), "system:https://example.com/a.rs");
+    click(&mut app, "role:link \"parse.rs\"", Modifiers::default());
+    assert!(state(&app, "calls").contains("open_file:s2:src/parse.rs@12"), "a plain click opens it: {}", state(&app, "calls"));
 }

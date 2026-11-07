@@ -28,6 +28,8 @@ export type Props = {
 	icon: Icon.Name?,
 	clearable: boolean?,
 	password: boolean?,
+	-- `false`: a password with no reveal (a secret card's, as gpui's masked input).
+	reveal: boolean?,
 	-- Something of the caller's at its end (a Kbd, a unit, a spinner).
 	trailing: Node?,
 	disabled: Props_disabled,
@@ -204,7 +206,7 @@ return ui.component(function(props: Props): Node
 			end))
 		)
 	end
-	if props.password then
+	if props.password and props.reveal ~= false then
 		table.insert(
 			children,
 			inner(function()
@@ -239,7 +241,7 @@ return ui.component(function(props: Props): Node
 		pl = if props.pl then ui.raw(props.pl, "the room its holder asked for before the icon") else nil,
 		-- Beside a button inside it, the room over and under that button
 		-- (less the frame's edge), so the button sits evenly in the corner.
-		pr = if props.clearable or props.password or props.trailing then ui.raw(side_room(size) - (if props.quiet then 0 else 1), "even with the button's top and foot") else nil,
+		pr = if props.clearable or (props.password and props.reveal ~= false) or props.trailing then ui.raw(side_room(size) - (if props.quiet then 0 else 1), "even with the button's top and foot") else nil,
 		on_click = focus_input,
 		w_full = true,
 		table.unpack(children),

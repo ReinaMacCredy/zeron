@@ -8,6 +8,20 @@
 ui.theme.strict("warn")
 local ds = require("@ds")
 ds.setup()
+-- A picture whose read comes later (`kinds_image_lands`): stubbed before the page reads any.
+local ReplyImages = require("@app/screens/chat/reply_images")
+local image_waits: { (any) -> () } = {}
+local host_read = ReplyImages.read
+ReplyImages.read = function(target: any, path: string): any
+	if path ~= "/work/atlas/late.png" then
+		return host_read(target, path)
+	end
+	return {
+		after = function(_self: any, ok: (any) -> (), _err: any)
+			table.insert(image_waits, ok)
+		end,
+	}
+end
 local store = require("@app/screens/chat/store")
 local route = require("@app/screens/shell/route")
 local chat = require("@app/screens/chat")
@@ -1633,8 +1647,7 @@ ui.command {
 		}
 	end,
 }
--- One of every row kind U24 draws (src/chat.rs writes each in this shape; its
--- Rust tests prove it), in a chat whose folder is /work/atlas.
+-- One of every transcript row kind, as src/chat.rs writes each, in a chat whose folder is /work/atlas.
 local function kinds_messages(): { any }
 	local reply = "The parser is [parse.rs](src/parse.rs:12) and the host [main.rs](/work/atlas/src/main.rs#L40), not [this one](/etc/hosts.conf) nor [the docs](https://example.com/a.rs).\n\n"
 		.. "[chat.rs](src/chat.rs:7)\n\nCargo.toml\n\nversion 1.2"
@@ -1698,8 +1711,7 @@ ui.command {
 		end
 	end,
 }
--- A long chat for the reading place (U24): forty turns, a question waiting
--- in the fifth reply; each changed above the view by the commands after it.
+-- Forty turns for the reading place, each changed above the view by the commands after it.
 ui.command {
 	id = "kinds_long",
 	title = "Forty turns, a question waiting early on",
@@ -1716,8 +1728,7 @@ ui.command {
 		store.messages:set(list)
 	end,
 }
--- A steer landing mid-turn, as the engine writes it: the reply so far
--- settles, the steer's prompt lands, and the reply goes on in a new entry.
+-- A steer as the engine writes it: the reply so far settles, its prompt lands, the reply goes on in a new entry.
 ui.command {
 	id = "kinds_steer",
 	title = "A steer lands mid-turn",
@@ -1738,6 +1749,115 @@ ui.command {
 	run = function()
 		local long = string.rep("A paragraph that grew in while the reader was further down.\n\n", 12)
 		store.messages:set_key({ kinds_at:peek() * 2, "blocks" }, { { id = "t", kind = "text", text = long } })
+	end,
+}
+ui.command {
+	id = "kinds_image_above",
+	title = "A reply above shows a picture still coming",
+	run = function()
+		local n = kinds_at:peek()
+		store.messages:set_key({ n * 2, "blocks" }, { { id = "t", kind = "text", text = `Reply {n} says a line of words.\n\n![late](/work/atlas/late.png)` } })
+	end,
+}
+ui.command {
+	id = "kinds_image_lands",
+	title = "The picture above is read",
+	run = function()
+		local all = image_waits
+		image_waits = {}
+		for _, ok in all do
+			ok({ src = "assets/pictures/wide.png" })
+		end
+	end,
+}
+-- A tool group in the reply above the view, folded; `kinds_fold_above` opens and closes it.
+ui.command {
+	id = "kinds_tools_above",
+	title = "A reply above has its tools",
+	run = function()
+		local n = kinds_at:peek()
+		local tools = {}
+		for i = 1, 6 do
+			table.insert(tools, { id = `kt{i}`, kind = "read", verb = "Read", target = `file{i}.rs`, output = "fn x() {}" })
+		end
+		store.messages:set_key({ n * 2, "blocks" }, {
+			{ id = "t", kind = "text", text = `Reply {n} says a line of words.` },
+			{ id = "g", kind = "tools", summary = "Read 6 files", tools = tools },
+		})
+	end,
+}
+-- A read of a file outside the chat's folder, and links to names with no `.`, in and out of it.
+ui.command {
+	id = "kinds_outside",
+	title = "Files the panel can't open",
+	run = function()
+		local text = "Edit [Makefile](file:///work/atlas/Makefile:3) and not [LICENSE](file:///etc/LICENSE)."
+		store.messages:push {
+			id = "ko1",
+			role = "assistant",
+			text = text,
+			model = "Opus",
+			at = "Sep 8, 1:52 PM",
+			copy = text,
+			blocks = {
+				{ id = "g", kind = "tools", summary = "Read 2 files · outside", tools = {
+					{ id = "ko-r", kind = "read", verb = "Read", target = "hosts.conf", path = "/etc/hosts.conf", output = "127.0.0.1 localhost" },
+					{ id = "ko-s", kind = "skill", verb = "Used", target = "review", path = "/home/me/.claude/skills/review/SKILL.md" },
+				} },
+				{ id = "t", kind = "text", text = text },
+			},
+		}
+	end,
+}
+-- The secret card on a host without `chat.answer_secret`, or one whose chat is gone (no answer comes back).
+ui.command {
+	id = "kinds_old_host",
+	title = "A host without the secret action",
+	run = function()
+		store.answer_secret = function(id: string, request: string, secret: string?): any
+			return ui.call("chat.answer_secret", { id = id, request = request, secret = secret })
+		end
+	end,
+}
+ui.command {
+	id = "kinds_no_answer",
+	title = "The secret's answer goes nowhere",
+	run = function()
+		store.answer_secret = function(): any
+			return nil
+		end
+	end,
+}
+-- The pending secret settled elsewhere (timed out), or asking again; and the chat's rows made again as they're scrolled back.
+ui.command {
+	id = "kinds_secret_timed_out",
+	title = "The secret request times out, or asks again",
+	run = function()
+		for i, m in store.messages:peek() do
+			for j, b in m.blocks or {} do
+				if b.request == "req-1" then
+					store.messages:set_key({ i, "blocks", j, "status" }, if b.status == "pending" then "timedout" else "pending")
+				end
+			end
+		end
+	end,
+}
+local kinds_kept: { any }? = nil
+ui.command {
+	id = "kinds_rows_away",
+	title = "The rows leave",
+	run = function()
+		kinds_kept = store.messages:peek()
+		store.messages:set({})
+	end,
+}
+ui.command {
+	id = "kinds_rows_back",
+	title = "The rows come back",
+	run = function()
+		if kinds_kept then
+			store.messages:set(kinds_kept)
+		end
 	end,
 }
 ui.command {

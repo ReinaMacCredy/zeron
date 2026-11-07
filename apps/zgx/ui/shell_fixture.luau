@@ -299,6 +299,14 @@ local function note(what: string)
 	table.insert(said, what)
 	calls:set(table.concat(said, ","))
 end
+-- A transcript row's answers, in any pane: a secret, a model picked.
+chat_store.answer_secret = function(id: string, request: string, secret: string?): any
+	note(`secret:{id}:{request}:{secret or "declined"}`)
+	return settle(nil)
+end
+chat_store.configure = function(id: string, patch: { [string]: any })
+	note(`configure:{id}:model={patch.model or ""}`)
+end
 
 -- Agent profiles for Settings → Agent profiles (profiles_stub.luau).
 require("./profiles_stub").install {

@@ -64,10 +64,7 @@ local function walk(app: any)
 		app:frames(8)
 		check(`Tab {i}`)
 	end
-	-- (Every step a row's, none round to the composer's controls, but the
-	-- side chat's tab each way, and the last Tab: down past the newest row,
-	-- back to the composer. Going down, a reply focus came into shows its
-	-- lane, its Copy a stop: two more.)
+	-- (Every step a row's (a link, a tool row, a message's lane or its Copy), but the side chat's tab each way and the last Tab, back to the composer.)
 	expect(seen).to_be(27)
 end
 

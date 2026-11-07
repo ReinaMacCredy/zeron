@@ -2010,6 +2010,7 @@ impl View {
         let whole_from = open.entries.len().saturating_sub(WHOLE_TAIL);
         let Open { entries, older_todo, built, .. } = open;
         let started = std::time::Instant::now();
+        code_links::opening(true);
         for (at, entry) in entries.iter_mut().enumerate().rev() {
             if entry.id.is_empty() || built.contains_key(&entry.id) {
                 continue;
@@ -2023,6 +2024,7 @@ impl View {
                 return true;
             }
         }
+        code_links::opening(false);
         false
     }
 
@@ -2035,6 +2037,7 @@ impl View {
             if open.stepping {
                 return;
             }
+            code_links::opening(false);
             let (model, device) = build_context(open, &chats);
             let open_id = open.id.clone();
             let whole_from = open.entries.len().saturating_sub(WHOLE_TAIL);
@@ -5446,10 +5449,13 @@ fn group_summary(group: &[&Json]) -> String {
         .iter()
         .filter(|p| p["kind"].as_str() == Some("tool") && crate::tool_details::computer_tool_of(p).is_none())
         .collect();
-    let parsed: Vec<(zeron_proto::ToolCall, bool)> =
-        calls.iter().filter_map(|p| Some((serde_json::from_value(p["call"].clone()).ok()?, p["isError"].as_bool() == Some(true)))).collect();
-    if thoughts == 0 && !calls.is_empty() && parsed.len() == calls.len() && parsed.iter().all(|(c, _)| zeron_proto::cloud_setup_step(c).is_some()) {
-        return zeron_proto::view::tool_group_summary(&parsed);
+    // (Parsed only for a group of setup steps alone, as the JSON says first.)
+    if thoughts == 0 && !calls.is_empty() && calls.iter().all(|p| p["call"]["input"][zeron_proto::CLOUD_SETUP_KEY].is_string()) {
+        let parsed: Vec<(zeron_proto::ToolCall, bool)> =
+            calls.iter().filter_map(|p| Some((serde_json::from_value(p["call"].clone()).ok()?, p["isError"].as_bool() == Some(true)))).collect();
+        if parsed.len() == calls.len() && parsed.iter().all(|(c, _)| zeron_proto::cloud_setup_step(c).is_some()) {
+            return zeron_proto::view::tool_group_summary(&parsed);
+        }
     }
     let mut segments: Vec<String> = Vec::new();
     match thoughts {
@@ -5590,7 +5596,9 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
             }
             let call = &part["call"];
             let s = |k: &str| call[k].as_str().map(str::to_owned);
-            let parsed: Option<zeron_proto::ToolCall> = serde_json::from_value(call.clone()).ok();
+            // (Parsed once, and only for a kind its JSON doesn't name.)
+            let parsed_once: std::cell::OnceCell<Option<zeron_proto::ToolCall>> = std::cell::OnceCell::new();
+            let parsed = || parsed_once.get_or_init(|| serde_json::from_value(call.clone()).ok()).as_ref();
             match call["kind"].as_str().unwrap_or_default() {
                 "exec" => ("exec", "Ran".into(), s("command")),
                 "readFile" => ("read", "Read".into(), s("path").map(|p| base(&p))),
@@ -5615,9 +5623,9 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
                         ("mcp", "Used".into(), Some(format!("{server}.{}", action.unwrap_or(&tool))))
                     }
                 }
-                _ if parsed.as_ref().is_some_and(zeron_proto::ToolCall::is_advisor) => ("advisor", "Advisor".into(), None),
-                _ if parsed.as_ref().and_then(zeron_proto::cloud_setup_step).is_some() => {
-                    let step = parsed.as_ref().and_then(zeron_proto::cloud_setup_step).unwrap_or_default();
+                _ if parsed().is_some_and(zeron_proto::ToolCall::is_advisor) => ("advisor", "Advisor".into(), None),
+                _ if parsed().and_then(zeron_proto::cloud_setup_step).is_some() => {
+                    let step = parsed().and_then(zeron_proto::cloud_setup_step).unwrap_or_default();
                     (if matches!(step, "clone" | "branch") { "cloud_git" } else { "cloud" }, "Cloud".into(), s("name"))
                 }
                 _ => {
@@ -5626,7 +5634,7 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
                         ("agent", "Ran a subagent".into(), name.strip_prefix("Agent: ").map(Into::into))
                     } else if name == "Wait for agents" {
                         ("wait", "Waited for agents".into(), None)
-                    } else if let Some(skill) = parsed.as_ref().and_then(zeron_proto::ToolCall::skill_name) {
+                    } else if let Some(skill) = parsed().and_then(zeron_proto::ToolCall::skill_name) {
                         ("skill", "Used".into(), Some(skill.to_owned()))
                     } else {
                         ("mcp", "Used".into(), Some(name))

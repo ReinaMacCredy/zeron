@@ -806,6 +806,7 @@
     },
     "transcript": {
       "copy_message": "Copy message",
+      "message_actions": "Message actions",
       "switched": "Switched from {from} to {to}",
       "message_from": "Message from",
       "not_delivered": "Not delivered — send again",
@@ -1516,7 +1517,8 @@
         "decline": "Decline",
         "kept_out": "Kept out of chat, in a private file this agent's commands can read for 24 hours",
         "failed": "The secret wasn't saved. Try again.",
-        "offline": "Zeron's engine can't be reached."
+        "offline": "Zeron's engine can't be reached.",
+        "unsupported": "This version of Zeron can't save the secret here."
       },
       "claude": {
         "running": "Running in Claude Code…",

@@ -403,9 +403,8 @@ local function mention_chip(span: { [any]: any }, target: string, name: string, 
 	span.padding = { 2, 2 }
 	span.radius = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
 	local mark = if chat and ctx and ctx.chat_mark then ctx.chat_mark(string.match(target, "^zeron%-chat:(.*)$") or "") else nil
-	local src, mono = if mark then Mark.glyph(mark) else nil, false
-	span.icon = if chat and src
-		then { src = src, size = 14, gap = 3, tint = if mono then "currentColor" else nil }
+	local own = if chat then Mark.chip_icon(mark, 14, 3) else nil
+	span.icon = if own then own
 		elseif chat then { src = "assets/icons/ui/chat-round-line.svg", size = 14, gap = 3, tint = "currentColor" }
 		else { src = `assets/icons/files/{set}/{FileIcon.of(name, dir)}.svg`, size = 14, gap = 3 }
 end
@@ -497,7 +496,7 @@ local function sole_file(list: { MarkdownRun }, ctx: Ctx?): (string?, boolean)
 				return nil, false
 			end
 			if r.a then
-				if (target and target ~= r.a) or plain ~= "" or string.match(r.a, "^%a[%w+.-]*:") then
+				if (target and target ~= r.a) or plain ~= "" or string.match(r.a, "^zeron%-") then
 					return nil, false
 				end
 				target = r.a
@@ -673,12 +672,20 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 				-- opener takes its click where it takes links (ds/links: its
 				-- browser tab), which keeps the href from opening outside.
 				span.href = target
-				span.on_click = function(): boolean
+				-- (⌘-click: the default browser, as gpui's `LinkAction::External`.)
+				span.on_click = function(keys: any?): boolean
+					if keys and keys.cmd then
+						Links.outside(target)
+						return true
+					end
 					return Links.take(target)
 				end
 			elseif open then
-				span.on_click = function()
-					open(target)
+				-- (⌘-click on a file opens nothing, as gpui's `activate_session_link` refuses External.)
+				span.on_click = function(keys: any?)
+					if not (keys and keys.cmd) or string.match(target, "^zeron%-chat:") then
+						open(target)
+					end
 				end
 			end
 			-- Its menu, by its kind (ds/links), built as it opens.

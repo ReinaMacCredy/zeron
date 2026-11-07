@@ -7,6 +7,7 @@ local FadeText = require("@ds/fade_text")
 local Menu = require("@ds/menu")
 local locale = require("@ds/locale")
 local T = require("@ds/transcript")
+local RowProps = require("@app/screens/chat/row_props")
 local sessions = require("@account/sessions")
 local store = require("@app/screens/chat/store")
 local lanes = require("@app/screens/chat/lanes")
@@ -487,7 +488,7 @@ local Detail = ui.component(function(props: { runs: any, run_id: string, clock: 
 			border = 1,
 			border_sides = { 1, 0, 0, 0 },
 			border_color = "$border",
-			T.Transcript {
+			T.Transcript(RowProps.add({
 				name = "pills.detail",
 				measure = function(): number
 					return DETAIL_W
@@ -496,7 +497,13 @@ local Detail = ui.component(function(props: { runs: any, run_id: string, clock: 
 				draft = view.draft,
 				offset = offset,
 				keep = keep,
-			},
+			}, function(): string?
+				return first.doc
+			end, function(): any
+				return view.session:get()
+			end, function(): any
+				return view.session:peek()
+			end)),
 		},
 		ui.row {
 			gap = ui.raw(14, "background.rs detail footer"),
