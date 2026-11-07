@@ -67,6 +67,7 @@ export type Session = {
 	-- Regular's second line: where it runs and on what.
 	device: string?,
 	branch: string?,
+	fan: { any }?,
 	-- Subagents and side chats working under it (Zeron's "● N" pill beside
 	-- its corner).
 	subagents: number?,
@@ -181,6 +182,7 @@ export type Props = {
 	pages: State<{ any }>?,
 	on_page: ((page: any) -> ())?,
 	on_archive: ((id: string) -> ())?,
+	fan_view: ((s: Session, cur: () -> Session) -> Node)?,
 	-- You, at its foot, chosen (your profile), and whether your profile is
 	-- open (the row shows chosen).
 	on_user: (() -> ())?,
@@ -1332,8 +1334,15 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				line(
 					title,
 					if s.pr then ui.show(details.pr, pr_badge(s.pr)) else nil,
+					if props.fan_view
+						then ui.presence(function(): string
+							return if #(cur().fan or {}) > 0 then "fan" else ""
+						end, function(which: string): Node
+							return if which == "fan" then (props.fan_view :: any)(s, cur) else ui.div { w = 0, h = 0 }
+						end, { shrink = 0 })
+						else nil,
 					subagents_pill(function(): number
-						return cur().subagents or 0
+						return if props.fan_view and #(cur().fan or {}) > 0 then 0 else cur().subagents or 0
 					end),
 					-- Its state (or time) at rest; under the pointer, archive (on
 					-- the shelf, unarchive); ⌘ held alone, its jump's keys.

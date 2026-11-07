@@ -129,6 +129,7 @@ export type Props = {
 	limit: (() -> any)?,
 	-- The tab tucked behind the pill's top right corner.
 	side_tab: any?,
+	pills: Node?,
 	-- A line under the trays, over the pill (an agent that can't be steered).
 	caption: (() -> string?)?,
 	-- Why sending wouldn't do now: the button dimmed and saying so, a press
@@ -243,7 +244,7 @@ export type Props = {
 	chosen: State<{ [string]: boolean }>?,
 	on_pick: ((value: string) -> ())?,
 	on_answer: ((answer: Answer) -> ())?,
-	on_back: (() -> ())?,
+	on_back: ((set_text: (string) -> ()) -> ())?,
 	on_close_question: (() -> ())?,
 	approval: State<ask.Approval?>?,
 	on_approve: ((scope: "once" | "always") -> ())?,
@@ -1111,10 +1112,26 @@ return ui.component(function(props: Props): Node
 				end
 			end
 		end
+		local typed = value:peek()
 		if props.on_answer then
-			props.on_answer({ values = values, text = value:peek() })
+			props.on_answer({
+				values = values,
+				text = typed,
+				keep = function()
+					if value:peek() == "" then
+						value:set(typed)
+					end
+				end,
+			})
 		end
 		value:set("")
+	end
+	local function go_back()
+		if props.on_back then
+			props.on_back(function(text: string)
+				value:set(text)
+			end)
+		end
 	end
 	local function send(opts: { inverted: boolean? }?)
 		local text = value:peek()
@@ -1678,7 +1695,7 @@ return ui.component(function(props: Props): Node
 			ui.show(function()
 				local q = question()
 				return q ~= nil and (q.page or 1) > 1
-			end, Button { locale.t("ds.composer.back"), size = "sm", tone = "ghost", on_click = props.on_back }),
+			end, Button { locale.t("ds.composer.back"), size = "sm", tone = "ghost", on_click = go_back }),
 			ui.show(function()
 				return question() ~= nil
 			end, Button {
@@ -2265,7 +2282,7 @@ return ui.component(function(props: Props): Node
 						end
 						if e.key == "Escape" then
 							if (q.page or 1) > 1 and props.on_back then
-								props.on_back()
+								go_back()
 							elseif not can_answer() and props.on_close_question then
 								props.on_close_question()
 							end
@@ -2729,6 +2746,25 @@ return ui.component(function(props: Props): Node
 			},
 		})
 	end
+	local function pill_row(): Node?
+		if not props.pills then
+			return nil
+		end
+		return ui.row {
+			w_full = true,
+			shrink = 0,
+			pointer_events = "none",
+			h = 28,
+			mb = ui.raw(-28, "its own height"),
+			y = -34,
+			pr = if props.side_tab
+				then function(): any
+					return if (props.side_tab :: any).shown() then ui.raw(112, "clear of the side chat's tab") else 0
+				end :: any
+				else nil,
+			props.pills,
+		}
+	end
 	local function caption_line(): Node?
 		local caption = props.caption
 		if not caption then
@@ -2757,6 +2793,7 @@ return ui.component(function(props: Props): Node
 		opacity = function(): number
 			return if disabled() then (ui.theme.get("zeron.disabled") :: number?) or 0.4 else 1
 		end,
+		pill_row(),
 		side_tab(),
 		trays,
 		caption_line(),

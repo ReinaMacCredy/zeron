@@ -653,6 +653,7 @@
       "position": "{i} of {n}"
     },
     "composer": {
+      "secret_elsewhere": "The Zeron app's own card takes this secret: it isn't typed here.",
       "access": {
         "label": "Access",
         "supervised": "Supervised",
@@ -1177,6 +1178,81 @@
       "one_line": "1 line",
       "lines": "{n} lines",
       "close": "Close"
+    },
+    "pills": {
+      "untitled": "New session",
+      "why": {
+        "offline": "Offline",
+        "signed_out": "Signed out",
+        "failed": "The agent didn't take it",
+        "missing": "The question has gone"
+      },
+      "reasoning": {
+        "minimal": "Minimal",
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "xhigh": "X-High",
+        "max": "Max",
+        "ultra": "Ultra",
+        "ultracode": "Ultracode",
+        "ultrathink": "Ultrathink"
+      },
+      "working": "{n} Working",
+      "done": "✓ {n} Done",
+      "asking": "{n} Asking",
+      "asking_one": "Asking",
+      "state": {
+        "working": "Working",
+        "completed": "Completed",
+        "stopped": "Stopped",
+        "failed": "Failed"
+      },
+      "row": {
+        "completed": "Done",
+        "stopped": "Stopped",
+        "failed": "Failed"
+      },
+      "heading": "{n} of {total} working",
+      "subagents": "Subagents",
+      "previous": "Previous agents ({n})",
+      "stop_all": "Stop all",
+      "close": "Close",
+      "kind": {
+        "agent": "Agent",
+        "fork": "Fork",
+        "side_chat": "Side chat"
+      },
+      "chip": {
+        "thinking": "thinking",
+        "tokens": "tokens",
+        "tools": "tools"
+      },
+      "back": "Back",
+      "show_thinking": "Show thinking",
+      "hide_thinking": "Hide thinking",
+      "copy": "Copy",
+      "open_pane": "Open in pane",
+      "jump": "Jump to latest",
+      "no_output": "No output yet",
+      "shells": "{n} Running",
+      "shells_title": "Background shells",
+      "shells_running": "{n} running",
+      "stopping": "Stopping…",
+      "waiting": "Waiting",
+      "waiting_label": "{n} waiting for you",
+      "waiting_card": "Waiting for you",
+      "question": "Question",
+      "plan": "Plan",
+      "later": "Esc to answer later",
+      "open_thread": "Open thread",
+      "secret": "Open the thread to enter it. It stays out of chat.",
+      "plan_head": "{n, plural, one {Plan · # step} other {Plan · # steps}}",
+      "nothing_runs": "Nothing runs until you approve.",
+      "approve": "Approve",
+      "fan": "{n, plural, one {# agent} other {# agents}}",
+      "fan_asking": "{n, plural, one {# agent} other {# agents}}, {k} asking",
+      "answer_failed": "Answer failed: {err}"
     }
   },
   "settings": {

@@ -1575,6 +1575,19 @@ fn a_dragged_sidebar_edge_builds_no_list() {
     assert!(four - one <= 3 * 45, "{one} script calls a frame with one chat, {four} with four");
 }
 
+/// A chat at rest runs no script: the pill row under every composer ticks only
+/// while a pill shows. (Its 175 ms clock drew no frame, so `frames` never saw it.)
+#[test]
+fn a_chat_at_rest_runs_no_script() {
+    let mut app = mount(&scratch("at-rest"));
+    long_chats(&app, &["a1"], None);
+    open(&mut app, "Fix the build");
+    app.frames(120);
+    let calls = app.calls();
+    app.frames(200);
+    assert_eq!(app.calls() - calls, 0);
+}
+
 /// v2 too: its sidebar's list isn't built again at each frame of the edge
 /// dragged (which woke every row's bindings: 225 script calls a frame, 115 without).
 #[test]

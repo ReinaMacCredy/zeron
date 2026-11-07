@@ -28,6 +28,8 @@ local function take(): boolean
 	return true
 end
 
+M.take = take
+
 -- A key came up through a control of the page or the panel (focus on one, not
 -- parked): gpui's `typing_target` leaves those alone. Nothing focused, a key
 -- reaches the window's root only.

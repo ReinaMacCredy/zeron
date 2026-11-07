@@ -196,20 +196,21 @@ function M.deny(id: string, request: string)
 	quietly(ui.call("chat.respond", { id = id, request = request, decision = "deny" }))
 end
 
--- Back a page in the question being answered: a promise of what was
--- picked on the page shown again (its option values), nil on the first.
+-- Back a page in the question being answered: a promise of what the page
+-- shown again held ({ chosen = its option values, text = its typed words }),
+-- nil on the first.
 function M.question_back(id: string, request: string): any
 	return ui.call("chat.question_back", { id = id, request = request })
 end
 
-function M.answer(id: string, request: string, answer: { values: { string }, text: string })
-	quietly(ui.call("chat.respond", {
+function M.answer(id: string, request: string, answer: { values: { string }, text: string }): any
+	return ui.call("chat.respond", {
 		id = id,
 		request = request,
 		decision = "answer",
 		values = answer.values,
 		text = answer.text,
-	}))
+	})
 end
 
 function M.configure(id: string, patch: { [string]: any })
@@ -260,17 +261,45 @@ function M.stop_task(session: string, task: string): any
 	return ui.call("chat.stop_task", { session = session, task = task })
 end
 
+function M.cancel_delegate(session: string, task: string): any
+	local ok, p = pcall(ui.call, "chat.cancel_delegate", { session = session, task = task })
+	return if ok then p else nil
+end
+
+function M.waiting_answer(args: any): any
+	local ok, p = pcall(ui.call, "chat.waiting_answer", args)
+	return if ok then p else nil
+end
+
+function M.waiting_back(id: string, request: string): any
+	local ok, p = pcall(ui.call, "chat.waiting_back", { id = id, request = request })
+	return if ok then p else nil
+end
+
+function M.roster_watch(docs: { string })
+	pcall(ui.invoke, "chat.roster_watch", { docs = docs })
+end
+
+function M.shell_watch(shells: { any })
+	pcall(ui.invoke, "chat.shell_watch", { shells = shells })
+end
+
 -- The device the composer runs on (nil: this one): `M.catalog` is its
 -- agents and models from now on (src/chat.rs `catalog_on`).
 function M.catalog_on(device: string?)
 	ui.invoke("chat.catalog_on", { device = device })
 end
 
+M.dismiss_cards = nil :: (() -> boolean)?
+
 -- A bare Escape no one else took (a menu, a dialog, a mention list, a
 -- question): with Settings' "Escape stops the agent" on, it stops the
 -- chat shown's running turn, as Zeron's does (settings.rs
 -- `escape_stops_active_agent`). True if it did.
 function M.escape(): boolean
+	if M.dismiss_cards and M.dismiss_cards() then
+		return true
+	end
 	-- Files shown carried over the chat: Escape lets go of them first.
 	if shared.let_go() then
 		return true

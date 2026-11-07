@@ -19,6 +19,7 @@ local LinkNotice = require("@app/screens/chat/link_notice")
 local route = require("@app/screens/shell/route")
 local Where = require("@app/screens/chat/where")
 local Dock = require("@app/screens/chat/dock")
+local Pills = require("@app/screens/chat/pills")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
 local LinkMenu = require("@app/screens/chat/link_menu")
@@ -638,12 +639,24 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 		on_queue_remove = if asks then asks.on_queue_remove else nil,
 		on_queue_reorder = if asks then asks.on_queue_reorder else nil,
 		todos = if asks then asks.todos else nil,
-		tasks = if asks then asks.tasks else nil,
-		on_stop_task = if asks then function(task: string)
-			store.stop_task(chat, task):after(function() end, function()
-				notice:set({ tone = "danger", text = locale.s("chat.composer.couldnt_stop_task"), dismissable = true })
-			end)
-		end else nil,
+		pills = if asks
+			then Pills.Row {
+				id = `composer-pills-{chat}`,
+				keys = take_keys,
+				bind = {
+					id = function(): string?
+						return chat
+					end,
+					session = function(): any
+						return view.session:get()
+					end,
+					subs = function(): { any }
+						return view.subagents:get()
+					end,
+				},
+				tasks = asks.tasks,
+			}
+			else nil,
 		tray = if split then tray else nil,
 	})
 end

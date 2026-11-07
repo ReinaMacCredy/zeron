@@ -35,6 +35,7 @@ local ZeronCommands = require("@app/screens/chat/zeron_commands")
 
 local SessionPlace = require("@app/screens/chat/session_place")
 local Lanes = require("@app/screens/chat/lanes")
+local Pills = require("@app/screens/chat/pills")
 local AppCommands = require("@app/screens/chat/app_commands")
 local Outgoing = require("@app/screens/chat/outgoing")
 local Asks = require("@app/screens/chat/asks")
@@ -73,6 +74,7 @@ local DOCK: SpringOptions = { stiffness = 730, damping = 54 }
 -- composer lines up with the conversation over it (its edges on the
 -- column's).
 local FOOT = require("@app/screens/chat/dock").GAP
+store.dismiss_cards = Pills.dismiss
 
 -- What a new chat starts with: what the last one used.
 local defaults = ui.persist("chat_new_defaults", {
@@ -1050,6 +1052,7 @@ local function Composer(): Node
 				send(RESUME_PROMPT, { resume = true })
 			end,
 			limit = limit,
+			pills = Pills.Row { bind = Pills.window_bind(), tasks = asks.tasks, waiting = true },
 			side_tab = {
 				shown = function(): boolean
 					return session_id:get() ~= nil
@@ -1231,18 +1234,6 @@ local function Composer(): Node
 			on_queue_remove = asks.on_queue_remove,
 			on_queue_reorder = asks.on_queue_reorder,
 			todos = asks.todos,
-			tasks = asks.tasks,
-			-- Stop on a background process: its host stops it, and its row
-			-- goes as the session stops listing it (production's tray).
-			on_stop_task = function(task: string)
-				local id = session_id:peek()
-				if not id then
-					return
-				end
-				store.stop_task(id, task):after(function() end, function()
-					own_notice:set { tone = "danger", key = "chat.composer.couldnt_stop_task", dismissable = true }
-				end)
-			end,
 			question = asks.question,
 			chosen = asks.chosen,
 			on_pick = asks.on_pick,

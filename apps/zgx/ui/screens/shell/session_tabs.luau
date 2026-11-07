@@ -12,6 +12,8 @@ local splits = require("@app/screens/shell/split")
 local folder = require("@app/screens/shell/folder_tab")
 local art = require("@app/screens/shell/art")
 local chat_shared = require("@app/screens/chat/shared")
+local AgentFan = require("@ds/agent_fan")
+local Pills = require("@app/screens/chat/pills")
 require("@app/screens/shell/tab_rules")
 
 local M = {}
@@ -44,6 +46,7 @@ local rows = splits.tree.steady(function(): { [string]: any }
 			branch = c.branch,
 			tree = (c :: any).tree,
 			pr = (c :: any).pr,
+			fan = (c :: any).fan,
 		}
 	end
 	return out
@@ -368,6 +371,70 @@ local function tile(id: string): Node
 	return ui.div(shown_places)
 end
 
+local function project_tile(chat: string): (number) -> Node
+	return function(size: number): Node
+		local function now(): any
+			return project_of(chat_of(chat))
+		end
+		if not now() then
+			return ds.Tile { size = size, inside = ds.Icon { name = "side-chat", size = 14 } }
+		end
+		return ds.Tile {
+			size = size,
+			label = function(): string?
+				local p = now()
+				return if p then p.name else "Chat"
+			end,
+			hue = function(): string?
+				local p = now()
+				return if p then look.of(p).hue else nil
+			end,
+			src = function(): string?
+				local p = now()
+				return if p then look.of(p).src else nil
+			end,
+			emoji = function(): string?
+				local p = now()
+				return if p then look.of(p).emoji else nil
+			end,
+		}
+	end
+end
+
+local function agents_of(id: string): { any }
+	local panes = splits.panes(id)
+	if #panes ~= 1 then
+		return {}
+	end
+	local c = chat_of(panes[1])
+	return Pills.fan_of(panes[1], if c then c.fan else nil) or {}
+end
+
+local function agents_lead(id: string): Node
+	local chat = face(id)
+	local tile_of = project_tile(chat)
+	return Pills.Fan {
+		name = `session-tab-{id}-agents`,
+		chat = chat,
+		size = TILE,
+		lead = tile_of,
+		words = function(): { any }
+			return agents_of(id)
+		end,
+		tiles = function(): { any }
+			local out: { any } = { { key = "project", lead = true } }
+			for i, t in agents_of(id) do
+				if i > AgentFan.MAX - 1 then
+					break
+				end
+				table.insert(out, t)
+			end
+			return out
+		end,
+		place = { side = "bottom", align = "start", offset = 6 },
+	}
+end
+
 local function title(id: string): string
 	local c = chat_of(face(id))
 	return if c then c.title else ""
@@ -381,6 +448,9 @@ local function lead(id: string, hovered: any): Node
 		if #stack_of(id) >= 2 then
 			return "stack"
 		end
+		if #agents_of(id) > 0 then
+			return "agents"
+		end
 		local c = chat()
 		if c and (c.status == "working" or c.status == "connecting") then
 			return c.status
@@ -389,6 +459,8 @@ local function lead(id: string, hovered: any): Node
 	end, function(which: string): Node
 		if which == "stack" then
 			return tile(id)
+		elseif which == "agents" then
+			return agents_lead(id)
 		elseif which == "grip" then
 			return ui.div { color = "$text.secondary", ds.Icon { name = "drag-handle", size = 14 } }
 		elseif which == "mark" then
@@ -404,7 +476,11 @@ local function lead(id: string, hovered: any): Node
 		-- (Stacked, as wide as its fan: the title starts after it, not under it.)
 		w = function(): number
 			local n = #stack_of(id)
-			return if n >= 2 then TILE + FAN[math.clamp(n, 1, STACK)].x else 16
+			if n >= 2 then
+				return TILE + FAN[math.clamp(n, 1, STACK)].x
+			end
+			local agents = #agents_of(id)
+			return if agents > 0 then AgentFan.width(agents + 1, TILE) else 16
 		end,
 		h = 16,
 		items = "center",

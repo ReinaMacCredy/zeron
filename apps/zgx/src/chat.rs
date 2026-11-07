@@ -68,6 +68,8 @@ use crate::engine::{
     rpc::{Rpc, Watch},
 };
 
+mod pills;
+
 type Outcome = &'static str;
 
 /// As gpui's working row: the words wait this long, so they never flash on a send that goes at once.
@@ -107,6 +109,11 @@ struct Chats {
     /// "question", by chat (`chat.asks`, for the sidebar's rows).
     asks: RefCell<HashMap<String, &'static str>>,
     asks_shared: RefCell<Vec<Shared>>,
+    waiting: RefCell<HashMap<String, pills::Waiting>>,
+    pages: RefCell<HashMap<String, pills::Wizard>>,
+    engine_capabilities: RefCell<Vec<String>>,
+    waiting_shared: RefCell<Vec<Shared>>,
+    ask_tries: RefCell<HashMap<String, u32>>,
     /// A look at a waiting chat's latest entries, to tell which, until
     /// its first frame comes.
     ask_looks: RefCell<HashMap<String, Watch>>,
@@ -302,18 +309,6 @@ struct Lease {
     hash: Json,
 }
 
-impl Open {
-    /// Back a page in `request` (being answered here): its last page's
-    /// answer taken off, and what was picked there. None on the first page,
-    /// or for another chat's or request's question.
-    fn back_a_page(&mut self, id: &str, request: &str) -> Option<Vec<String>> {
-        if self.id != id || self.answering.as_deref() != Some(request) {
-            return None;
-        }
-        self.answers.pop().map(|(_, labels)| labels)
-    }
-}
-
 struct RateWatch {
     _watch: Watch,
     rate: Option<f64>,
@@ -344,9 +339,6 @@ struct Open {
     /// The session as last published, to republish the transcript when its
     /// turn starts or ends (the prompt's working line follows it).
     session_seen: Json,
-    /// A question's answers so far, page by page, for the request asked.
-    answers: Vec<(String, Vec<String>)>,
-    answering: Option<String>,
     /// A queued message being edited here: its lease, held while the
     /// composer has its text.
     editing: Option<Lease>,
@@ -382,6 +374,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let chats = CHATS.with(Rc::clone);
     chats.catalog.borrow_mut().push(host.shared("chat.catalog", chats.catalog_value()));
     chats.asks_shared.borrow_mut().push(host.shared("chat.asks", chats.asks_value()));
+    pills::install(host);
     let view = Rc::new(View {
         session: host.shared("chat.session", Value::Nil),
         messages: host.shared("chat.messages", Value::List(Rc::from([]))),
@@ -703,6 +696,7 @@ impl Chats {
                 view.watch_host();
             }
             me.publish_views();
+            me.publish_waiting();
         }));
         *self.watches.borrow_mut() = watches;
         *self.rpc.borrow_mut() = Some(rpc.clone());
@@ -717,6 +711,11 @@ impl Chats {
                     me.remote.borrow_mut().take();
                 }
                 *me.here.borrow_mut() = here;
+            }
+            if let Ok(info) = rpc.call("EngineInfo", json!({})).await {
+                let list = info["capabilities"].as_array().into_iter().flatten().filter_map(Json::as_str).map(str::to_owned).collect();
+                *me.engine_capabilities.borrow_mut() = list;
+                me.publish_views();
             }
             // Every composer needs it: looked up once a connection is there.
             me.load_catalog(false).await;
@@ -830,7 +829,11 @@ impl Chats {
             keep
         });
         self.ask_looks.borrow_mut().retain(|id, _| waiting.contains(id));
-        let rpc = self.rpc.borrow().clone().filter(|r| !r.is_closed());
+        self.ask_tries.borrow_mut().retain(|id, _| waiting.contains(id));
+        let before = self.waiting.borrow().len();
+        self.waiting.borrow_mut().retain(|id, _| waiting.contains(id));
+        self.pages.borrow_mut().retain(|id, _| waiting.contains(id));
+        let waiting_gone = self.waiting.borrow().len() != before;
         for id in waiting {
             if self.asks.borrow().contains_key(&id) || self.ask_looks.borrow().contains_key(&id) {
                 continue;
@@ -838,35 +841,45 @@ impl Chats {
             // The open chat's own transcript says it at once.
             let open = self.views().iter().find_map(|v| {
                 let open = v.open.borrow();
-                open.as_ref().filter(|o| o.id == id && o.heard).map(|o| ask_kind(o.entries.iter().rev().filter_map(|e| e.json.as_ref())))
+                let open = open.as_ref().filter(|o| o.id == id && o.heard)?;
+                let newest = || open.entries.iter().rev().filter_map(|e| e.json.as_ref());
+                self.land_ask(&id, newest());
+                Some(ask_kind(newest()))
             });
             if let Some(kind) = open {
                 self.asks.borrow_mut().insert(id, kind);
                 changed = true;
                 continue;
             }
-            let Some(rpc) = &rpc else { continue };
-            let weak = Rc::downgrade(self);
-            let chat = id.clone();
-            let look = rpc.watch(
-                "WatchDocMessages",
-                json!({ "chatId": id, "openingTail": true }),
-                move |item| {
-                    let Some(me) = weak.upgrade() else { return };
-                    let Some(entries) = item["reset"].as_array() else { return };
-                    let kind = ask_kind(entries.iter().rev());
-                    me.asks.borrow_mut().insert(chat.clone(), kind);
-                    // Seen: let it go (dropped once this callback returns).
-                    let done = me.ask_looks.borrow_mut().remove(&chat);
-                    me.publish_asks();
-                    drop(done);
-                },
-            );
-            self.ask_looks.borrow_mut().insert(id, look);
+            self.look_at_ask(id);
         }
         if changed {
             self.publish_asks();
         }
+        if waiting_gone {
+            self.publish_waiting();
+        }
+    }
+
+    fn look_at_ask(self: &Rc<Self>, id: String) {
+        let Some(rpc) = self.rpc.borrow().clone().filter(|r| !r.is_closed()) else { return };
+        let weak = Rc::downgrade(self);
+        let chat = id.clone();
+        let look = rpc.watch(
+            "WatchDocMessages",
+            json!({ "chatId": id, "openingTail": true }),
+            move |item| {
+                let Some(me) = weak.upgrade() else { return };
+                let Some(entries) = item["reset"].as_array() else { return };
+                let kind = ask_kind(entries.iter().rev());
+                me.asks.borrow_mut().insert(chat.clone(), kind);
+                let done = me.ask_looks.borrow_mut().remove(&chat);
+                me.publish_asks();
+                me.land_ask(&chat, entries.iter().rev());
+                drop(done);
+            },
+        );
+        self.ask_looks.borrow_mut().insert(id, look);
     }
 
     fn asks_value(&self) -> Value {
@@ -921,6 +934,13 @@ impl Chats {
             has_whole: true,
             ..Open::default()
         })
+    }
+
+    fn shells_stoppable(&self, chat: &Json) -> bool {
+        let capability = zeron_proto::capabilities::BACKGROUND_TASKS_V1;
+        let device = chat["deviceId"].as_str();
+        self.engine_capabilities.borrow().iter().any(|c| c == capability)
+            && (device.is_none() || device == self.here.borrow().as_deref() || device.is_some_and(|d| crate::sessions::device_supports(d, capability)))
     }
 
     fn publish_views(&self) {
@@ -2294,7 +2314,6 @@ impl View {
     async fn respond(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
         let id = args.field("id").map(text).unwrap_or_default();
         let request = args.field("request").map(text).unwrap_or_default();
-        let decision = args.field("decision").map(text).unwrap_or_default();
         let questions = {
             let open = self.open.borrow();
             let open = open.as_ref().filter(|o| o.id == id).ok_or("missing")?;
@@ -2305,73 +2324,7 @@ impl View {
         };
         // A secret goes in its own card in the Zeron app, never through a
         // command: those stay in the chat's doc, which syncs.
-        if questions.iter().any(is_secret) {
-            if decision != "deny" {
-                return Err("failed");
-            }
-            engine::get()
-                .call("AnswerSecret", json!({ "chatId": id, "requestId": request }))
-                .await
-                .map_err(|e| engine::outcome(&e))?;
-            self.publish_session();
-            return Ok(());
-        }
-        let answers: Vec<Json> = match decision.as_str() {
-            // The engine allows once: Yes is all it takes.
-            "once" | "always" => single(&questions, "Yes"),
-            "deny" if is_approval(&questions) => single(&questions, "No"),
-            "deny" => Vec::new(),
-            _ => {
-                let mut labels: Vec<String> = args
-                    .field("values")
-                    .map(Value::list)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(text)
-                    .collect();
-                let typed = args.field("text").map(text).unwrap_or_default();
-                if labels.is_empty() && !typed.trim().is_empty() {
-                    labels.push(typed.trim().to_owned());
-                }
-                // A page answered: the next one, until the last.
-                let done = {
-                    let mut slot = self.open.borrow_mut();
-                    let open = slot.as_mut().ok_or("missing")?;
-                    if open.answering.as_deref() != Some(&request) {
-                        open.answering = Some(request.clone());
-                        open.answers.clear();
-                    }
-                    let page = open.answers.len();
-                    let qid = questions.get(page).and_then(|q| q["id"].as_str()).unwrap_or_default();
-                    open.answers.push((qid.to_owned(), labels));
-                    open.answers.len() >= questions.len()
-                };
-                if !done {
-                    self.publish_session();
-                    return Ok(());
-                }
-                let open = self.open.borrow();
-                open.as_ref()
-                    .map(|o| {
-                        o.answers
-                            .iter()
-                            .map(|(q, labels)| json!({ "questionId": q, "labels": labels }))
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            }
-        };
-        let result = command(
-            &id,
-            json!({ "kind": "respondInput", "requestId": request, "answers": answers }),
-        )
-        .await;
-        if let Some(open) = self.open.borrow_mut().as_mut() {
-            open.answers.clear();
-            open.answering = None;
-        }
-        self.publish_session();
-        result
+        CHATS.with(Rc::clone).answer(&id, &request, &questions, &args).await
     }
 
     /// Back a page in the question being answered (the shipping app's
@@ -2379,14 +2332,7 @@ impl View {
     /// again; what was picked there (its labels), for the composer to show
     /// chosen. Nil on the first page.
     fn question_back(&self, args: &Value) -> Value {
-        let id = args.field("id").map(text).unwrap_or_default();
-        let request = args.field("request").map(text).unwrap_or_default();
-        let popped = self.open.borrow_mut().as_mut().and_then(|o| o.back_a_page(&id, &request));
-        let Some(labels) = popped else {
-            return Value::Nil;
-        };
-        self.publish_session();
-        Value::List(labels.iter().map(|l| Value::from(l.as_str())).collect::<Vec<_>>().into())
+        CHATS.with(|c| c.page_back(args))
     }
 
     async fn configure(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
@@ -3846,24 +3792,17 @@ fn entry_text(entry: &Json) -> String {
 /// A transcript's subagents: each spawn that names its doc, once, in the order they
 /// were spawned, with when their turn began (a message's `tools` hold all of its).
 fn subagents_of(messages: &[Value]) -> Value {
+    let prompt = messages.iter().rposition(|m| matches!(m.field("role"), Some(Value::Str(r)) if &**r == "user") && matches!(m.field("answers"), None | Some(Value::Nil)));
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for message in messages {
+    for (at, message) in messages.iter().enumerate() {
         let Some(Value::List(tools)) = message.field("tools") else { continue };
         for tool in tools.iter() {
             let Some(sub) = tool.field("subagent") else { continue };
             let Some(Value::Str(reference)) = sub.field("ref") else { continue };
             if seen.insert(reference.clone()) {
-                let field = |key: &str| sub.field(key).cloned().unwrap_or(Value::Nil);
-                out.push(Value::record([
-                    ("ref", Value::Str(reference.clone())),
-                    ("title", field("title")),
-                    ("status", field("status")),
-                    ("model", field("model")),
-                    ("kind", field("kind")),
-                    ("agent", field("agent")),
-                    ("at", message.field("started").cloned().unwrap_or(Value::Nil)),
-                ]));
+                let started = message.field("started").cloned().unwrap_or(Value::Nil);
+                out.push(pills::subagent_row(sub, tool, started, prompt.is_none_or(|p| at >= p)));
             }
         }
     }
@@ -3930,6 +3869,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
                 ("copy", copy_value(&words)),
                 ("sender", sender),
+                ("answers", entry["answersRequestId"].as_str().map_or(Value::Nil, Value::from)),
             ]))
         }
         "assistant" => {
@@ -4534,6 +4474,13 @@ fn subagent_model(call: &Json) -> Option<&str> {
         .filter(|model| !model.is_empty())
 }
 
+fn subagent_reasoning(call: &Json) -> Option<String> {
+    ["effort", "reasoning_effort", "reasoningEffort", "reasoning"].iter().find_map(|key| {
+        let raw = call["input"][key].as_str()?.trim().to_ascii_lowercase().replace(['-', '_'], "");
+        serde_json::from_value::<zeron_proto::ReasoningLevel>(Json::String(raw.clone())).ok().map(|_| raw)
+    })
+}
+
 fn subagent_kind(call: &Json) -> Option<&str> {
     call["input"]["subagent_type"].as_str().map(str::trim).filter(|kind| !kind.is_empty())
 }
@@ -4822,6 +4769,7 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
                 ("model", subagent_model(&part["call"]).map_or(Value::Nil, Value::from)),
                 ("kind", subagent_kind(&part["call"]).map_or(Value::Nil, Value::from)),
                 ("agent", subagent_mark(&part["call"]).map_or(Value::Nil, |mark| Value::from(mark.as_str()))),
+                ("reasoning", subagent_reasoning(&part["call"]).map_or(Value::Nil, |level| Value::from(level.as_str()))),
             ]),
         ));
     }
@@ -4999,15 +4947,15 @@ fn ask_value(part: &Json, answered: usize) -> Option<Value> {
     let page = answered.min(questions.len().saturating_sub(1));
     let q = questions.get(page)?;
     if is_secret(q) {
-        let asked = q["question"].as_str().unwrap_or_default();
-        let words = format!("{asked}\n\nThe Zeron app's own card takes this secret: it isn't typed here.");
+        let words = q["question"].as_str().unwrap_or_default();
         return Some(Value::record([
             ("request", Value::from(request)),
             ("kind", Value::from("question")),
             (
                 "question",
                 Value::record([
-                    ("text", Value::from(words.as_str())),
+                    ("text", Value::from(words)),
+                    ("secret", Value::Bool(true)),
                     ("options", Value::List(Vec::new().into())),
                     ("multi", Value::Bool(false)),
                     ("page", Value::Num(1.)),
@@ -5068,8 +5016,9 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     };
     let fast = fast_in(&config["modelOptions"]);
     let options = options_value(&config["modelOptions"]);
-    let answered = if open.answering.is_some() { open.answers.len() } else { 0 };
-    let ask = asked(open.entries.iter().rev().filter_map(|e| e.json.as_ref())).and_then(|p| ask_value(p, answered)).unwrap_or(Value::Nil);
+    let ask = asked(open.entries.iter().rev().filter_map(|e| e.json.as_ref()))
+        .and_then(|p| ask_value(p, chats.pages_answered(&open.id, p["requestId"].as_str().unwrap_or_default())))
+        .unwrap_or(Value::Nil);
     let session = chats.sessions.borrow().get(&open.id).cloned().unwrap_or(Json::Null);
     let live = chats.running(&open.id);
     let tasks = background_tasks(&session);
@@ -5140,6 +5089,8 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("queue", Value::List(queue.into())),
         ("todos", todos(open)),
         ("tasks", Value::List(tasks.into())),
+        ("shells_stoppable", Value::Bool(chats.shells_stoppable(&chat))),
+        ("turn_at", turn_started(open).map_or(Value::Nil, Value::Num)),
     ];
     if let Some(branch) = chat["branch"].as_str() {
         fields.push(("branch", Value::from(branch)));
@@ -5148,6 +5099,16 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         fields.push(("notice", Value::record([("tone", Value::from("danger")), ("refused", Value::from(reason.as_str()))])));
     }
     Value::record(fields)
+}
+
+fn turn_started(open: &Open) -> Option<f64> {
+    open.entries
+        .iter()
+        .rev()
+        .filter_map(|e| e.json.as_ref())
+        .find(|e| e["role"].as_str() == Some("user") && e["answersRequestId"].is_null())
+        .and_then(|e| e["createdAt"].as_f64())
+        .map(|ms| ms / 1000.)
 }
 
 /// A chat's own picks (200K, an auto-compact window) are its budget: Claude reports the model's whole window.
@@ -5850,20 +5811,6 @@ mod tests {
     }
 
     #[test]
-    fn back_takes_a_questions_last_page_off_and_gives_its_pick() {
-        let mut open = Open { id: "c".into(), ..Open::default() };
-        assert_eq!(open.back_a_page("c", "q"), None, "nothing answered yet");
-        open.answering = Some("q".into());
-        open.answers = vec![("branch".into(), vec!["fix".into()]), ("who".into(), vec!["ada".into()])];
-        assert_eq!(open.back_a_page("other", "q"), None);
-        assert_eq!(open.back_a_page("c", "r"), None);
-        assert_eq!(open.back_a_page("c", "q"), Some(vec!["ada".to_owned()]));
-        assert_eq!(open.answers.len(), 1, "the page before stays answered");
-        assert_eq!(open.back_a_page("c", "q"), Some(vec!["fix".to_owned()]));
-        assert_eq!(open.back_a_page("c", "q"), None, "on the first page");
-    }
-
-    #[test]
     fn subagent_titles_follow_the_shipping_app() {
         let t = |call: serde_json::Value| super::subagent_title(&call);
         assert_eq!(t(serde_json::json!({ "kind": "unknown", "name": "Agent: scan repo" })), "scan repo");
@@ -6276,6 +6223,42 @@ mod tests {
         assert_eq!(found[0].field("title").map(text).as_deref(), Some("first"));
         assert_eq!(found[1].field("at").and_then(Value::as_f64), Some(2.));
         assert_eq!(found[1].field("model").map(text).as_deref(), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn a_shell_stops_only_where_engine_and_device_both_can() {
+        let chats = Chats::default();
+        *chats.here.borrow_mut() = Some("mac".into());
+        let here = json!({ "deviceId": "mac" });
+        let box_ = json!({ "deviceId": "box" });
+        assert!(!chats.shells_stoppable(&here), "an engine that hasn't said");
+        *chats.engine_capabilities.borrow_mut() = vec![zeron_proto::capabilities::BACKGROUND_TASKS_V1.to_owned()];
+        assert!(chats.shells_stoppable(&here));
+        assert!(!chats.shells_stoppable(&box_), "a device not listed as able");
+    }
+
+    #[test]
+    fn only_the_latest_prompt_s_spawns_are_recent() {
+        let user = |id: &str, answers: Option<&str>| json!({ "id": id, "role": "user", "createdAt": 1000., "answersRequestId": answers, "parts": [{ "kind": "text", "text": "go" }] });
+        let spawn = |id: &str, doc: &str, status: &str| json!({ "id": id, "role": "assistant", "createdAt": 2000., "parts": [
+            { "kind": "tool", "id": format!("t-{doc}"), "subagentRef": doc, "subagentStatus": status, "resolved": status != "running",
+              "call": { "kind": "unknown", "name": "Agent: x", "input": { "description": doc } } },
+        ] });
+        let entries = [
+            user("u1", None),
+            spawn("a1", "old", "done"),
+            user("u2", None),
+            spawn("a2", "now", "running"),
+            user("u3", Some("r1")),
+            spawn("a3", "after-answer", "done"),
+        ];
+        let list: Vec<Value> = entries.iter().filter_map(|e| message(e, None)).collect();
+        let Value::List(found) = subagents_of(&list) else { panic!("a list") };
+        let recent: Vec<(String, bool)> = found
+            .iter()
+            .map(|s| (s.field("ref").map(text).unwrap_or_default(), matches!(s.field("recent"), Some(Value::Bool(true)))))
+            .collect();
+        assert_eq!(recent, [("old".to_owned(), false), ("now".to_owned(), true), ("after-answer".to_owned(), true)]);
     }
 
     #[test]

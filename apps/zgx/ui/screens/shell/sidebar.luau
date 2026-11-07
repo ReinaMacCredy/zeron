@@ -24,6 +24,7 @@ end
 local auth = require("@account/auth")
 local PrivateText = require("@ds/private_text")
 local status = require("@ds/status")
+local Pills = require("@app/screens/chat/pills")
 local route = require("@app/screens/shell/route")
 local rail = require("@app/screens/shell/rail")
 local view = require("@app/screens/shell/view")
@@ -637,6 +638,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			-- (Its side chats working count as its subagents do, as its
 			-- lanes' badge counts them: screens/chat/lanes.)
 			subagents = (c.running_subagents or 0) + (c.working_side_chats or 0),
+			fan = Pills.fan_of(c.id, room.fan),
 			started = room.started,
 			ring = if tasks and (tasks.held and status == "working" or status == nil or status == "done") then tasks.agents + tasks.shells + tasks.others else nil,
 			work_label = if tasks and tasks.held and status == "working" then work_words(tasks) else nil,
@@ -1681,6 +1683,17 @@ M.Sidebar = ui.component(function(props: Props): Node
 			route.new_chat(if device then project else checkout_here(project), if device then device_named(device, project) else nil)
 		end,
 		on_archive = M.archive,
+		fan_view = function(s: any, cur: () -> any): Node
+			return Pills.Fan {
+				name = `sidebar-fan-{s.id}`,
+				chat = s.id,
+				size = 16,
+				tiles = function(): { any }
+					return cur().fan or {}
+				end,
+				place = { side = "right", align = "start", offset = 8 },
+			}
+		end,
 		archived = shelf,
 		on_unarchive = function(id: string)
 			sessions.unarchive(id)

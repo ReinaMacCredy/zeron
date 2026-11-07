@@ -653,6 +653,7 @@
       "position": "第 {i} 张，共 {n} 张"
     },
     "composer": {
+      "secret_elsewhere": "此密钥由 Zeron 应用自己的卡片接收，不在这里输入。",
       "access": {
         "label": "访问权限",
         "supervised": "需批准",
@@ -1177,6 +1178,81 @@
       "one_line": "1 行",
       "lines": "{n} 行",
       "close": "关闭"
+    },
+    "pills": {
+      "untitled": "新会话",
+      "why": {
+        "offline": "离线",
+        "signed_out": "未登录",
+        "failed": "代理未接收",
+        "missing": "问题已不存在"
+      },
+      "reasoning": {
+        "minimal": "最低",
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "xhigh": "超高",
+        "max": "最高",
+        "ultra": "极高",
+        "ultracode": "Ultracode",
+        "ultrathink": "Ultrathink"
+      },
+      "working": "{n} 个运行中",
+      "done": "✓ {n} 个完成",
+      "asking": "{n} 个提问中",
+      "asking_one": "提问中",
+      "state": {
+        "working": "运行中",
+        "completed": "已完成",
+        "stopped": "已停止",
+        "failed": "已失败"
+      },
+      "row": {
+        "completed": "完成",
+        "stopped": "已停止",
+        "failed": "失败"
+      },
+      "heading": "{total} 个中 {n} 个运行中",
+      "subagents": "子代理",
+      "previous": "之前的代理（{n}）",
+      "stop_all": "全部停止",
+      "close": "关闭",
+      "kind": {
+        "agent": "代理",
+        "fork": "分支",
+        "side_chat": "侧边聊天"
+      },
+      "chip": {
+        "thinking": "思考",
+        "tokens": "令牌",
+        "tools": "工具"
+      },
+      "back": "返回",
+      "show_thinking": "显示思考",
+      "hide_thinking": "隐藏思考",
+      "copy": "复制",
+      "open_pane": "在窗格中打开",
+      "jump": "跳到最新",
+      "no_output": "暂无输出",
+      "shells": "{n} 个运行中",
+      "shells_title": "后台 Shell",
+      "shells_running": "{n} 个运行中",
+      "stopping": "正在停止…",
+      "waiting": "等待中",
+      "waiting_label": "{n} 个在等你",
+      "waiting_card": "在等你",
+      "question": "问题",
+      "plan": "计划",
+      "later": "按 Esc 稍后回答",
+      "open_thread": "打开会话",
+      "secret": "请打开会话输入。它不会出现在聊天中。",
+      "plan_head": "{n, plural, other {计划 · # 步}}",
+      "nothing_runs": "批准前不会运行任何内容。",
+      "approve": "批准",
+      "fan": "{n, plural, other {# 个代理}}",
+      "fan_asking": "{n, plural, other {# 个代理}}，{k} 个提问中",
+      "answer_failed": "回答失败：{err}"
     }
   },
   "settings": {

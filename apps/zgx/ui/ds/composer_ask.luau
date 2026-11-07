@@ -224,7 +224,7 @@ M.Question = ui.component(function(props: QuestionProps): Node
 			pb = "$space.2",
 			gap = "$zeron.space.hair",
 			ui.text {
-				q.text,
+				if q.secret then `{q.text}\n\n{locale.s("ds.composer.secret_elsewhere")}` else q.text,
 				wrap = true,
 				text_size = "$font.size.lg",
 				line_height = "$font.line.lg",

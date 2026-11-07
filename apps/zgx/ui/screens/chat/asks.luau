@@ -197,20 +197,33 @@ function M.bind(b: Bind): { [string]: any }
 		on_answer = function(answer: any)
 			local id, a = b.id(), ask:peek()
 			if id and a then
-				store.answer(id, a.request, answer)
+				local picks = b.chosen:peek()
+				b.chosen:set({})
+				store.answer(id, a.request, answer):after(function() end, function(err: any)
+					b.chosen:set(picks)
+					answer.keep()
+					say("ds.pills.answer_failed", err)
+				end)
 			end
 		end,
 		on_close_question = on_ask(store.deny),
 		-- Back a page: it shows again with what was picked on it.
-		on_back = on_ask(function(id: string, request: string)
-			store.question_back(id, request):after(function(picked: any)
+		on_back = function(set_text: (string) -> ())
+			local id, a = b.id(), ask:peek()
+			if not (id and a) then
+				return
+			end
+			store.question_back(id, a.request):after(function(page: any)
 				local now: { [string]: boolean } = {}
-				for _, v in picked or {} do
+				for _, v in if page then page.chosen or page else {} do
 					now[v] = true
 				end
 				b.chosen:set(now)
+				if page and page.text and page.text ~= "" then
+					set_text(page.text)
+				end
 			end, function() end)
-		end),
+		end,
 		-- (The engine allows once, each time it's asked.)
 		can_always = false,
 		on_approve = function(scope: string)

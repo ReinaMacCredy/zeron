@@ -14,6 +14,7 @@ local sessions = require("@account/sessions")
 local art = require("@app/screens/shell/art")
 local store = require("@app/screens/chat/store")
 local lanes = require("@app/screens/chat/lanes")
+local Pills = require("@app/screens/chat/pills")
 local Actions = require("@app/screens/panel/actions")
 local home_api = require("@app/screens/panel/home_api")
 local panel_state = require("@app/screens/panel/state")
@@ -710,7 +711,7 @@ local function make_data(props: { session: () -> string?, open_panel: () -> () }
 				icon = { asset = "astra-terminal" },
 				label = t.detail or t.name or "",
 				value = if t.since then { kind = "dot", since = t.since, color = WORKING } else { kind = "dot", text = locale.s("ds.status.working"), color = WORKING },
-				trail = { icon = "stop", label = locale.s("sidecar.stop"), act = { what = "stop_task", id = t.id } },
+				trail = if (store.session:get() :: any).shells_stoppable ~= false then { icon = "stop", label = locale.s("sidecar.stop"), act = { what = "stop_task", id = t.id } } else nil,
 			})
 		end
 		return out
@@ -992,20 +993,34 @@ local function running_words(n: number): string
 	return if n == 1 then locale.s("sidecar.running_one") else locale.s("sidecar.running", { n = n })
 end
 
-local function heading(part: string, count: (() -> number)?): Node
+local function session_id(): string?
+	local s = store.session:get()
+	return if s then s.id else nil
+end
+
+local function heading(part: string, count: (() -> number)?, fan: Node?): Node
 	return ui.row {
 		w_full = true,
 		h = ui.raw(19, "a Sidecar heading"),
 		px = "$space.2",
 		items = "center",
 		justify = "between",
-		ui.text { locale.t(PARTS[part].heading), min_w = 0, truncate = true, text_size = "$font.size.sm", color = HEADING },
+		ui.row {
+			grow = 1,
+			basis = 0,
+			min_w = 0,
+			gap = "$space.2",
+			items = "center",
+			pr = "$space.2",
+			ui.text { locale.t(PARTS[part].heading), min_w = 0, truncate = true, text_size = "$font.size.sm", color = HEADING },
+			fan,
+		},
 		if count
 			then ui.show(function(): boolean
 				return count() > 0
 			end, ui.text {
 				function(): string
-					return running_words(count())
+					return if fan then locale.s("ds.pills.shells_running", { n = count() }) else running_words(count())
 				end,
 				class = "sidecar-running",
 				literal = true,
@@ -1125,7 +1140,17 @@ local function beside_section(data: any, surface: string, after: (() -> ())?): N
 		shrink = 0,
 		pt = "$space.2",
 		pb = "$space.1",
-		heading("beside", data.running),
+		heading("beside", data.running, ui.show(function(): boolean
+			return Pills.fan_of(session_id(), nil) ~= nil
+		end, Pills.Fan {
+			name = `sidecar-{surface}-fan`,
+			chat = session_id,
+			size = 16,
+			tiles = function(): { any }
+				return Pills.fan_of(session_id(), nil) or {}
+			end,
+			place = { side = "left", align = "start", offset = 8 },
+		})),
 		rows(data.beside, surface, data, after),
 		ui.show(nothing, ui.row {
 			id = `sidecar-{surface}-empty`,

@@ -78,6 +78,7 @@ export type Session = {
 	-- Regular's second line: where it runs and on what.
 	device: string?,
 	branch: string?,
+	fan: { any }?,
 	-- Subagents and side chats working under it (Zeron's "● N" pill beside
 	-- its corner).
 	subagents: number?,
@@ -230,6 +231,7 @@ export type Props = {
 	pages: State<{ any }>?,
 	on_page: ((page: any) -> ())?,
 	on_archive: ((id: string) -> ())?,
+	fan_view: ((s: Session, cur: () -> Session) -> Node)?,
 	-- You, at its foot, chosen (your profile), and whether your profile is
 	-- open (the row shows chosen).
 	on_user: (() -> ())?,
@@ -1667,8 +1669,15 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 							return tostring(cur().ring or 0)
 						end, text_size = "$font.size.xs", color = "$text.tertiary", tabular = true },
 					}),
+					if props.fan_view
+						then ui.presence(function(): string
+							return if #(cur().fan or {}) > 0 then "fan" else ""
+						end, function(which: string): Node
+							return if which == "fan" then (props.fan_view :: any)(s, cur) else ui.div { w = 0, h = 0 }
+						end, { shrink = 0 })
+						else nil,
 					ui.show(function(): boolean
-						return (cur().subagents or 0) > 0
+						return (cur().subagents or 0) > 0 and not (props.fan_view and #(cur().fan or {}) > 0)
 					end, ui.row {
 						shrink = 0,
 						gap = "$zeron.space.hair",
@@ -1808,6 +1817,13 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					return cur().base
 				end),
 				if s.pr then ui.show(details.pr, pr_badge(s.pr)) else nil,
+				if props.fan_view
+					then ui.presence(function(): string
+						return if #(cur().fan or {}) > 0 then "fan" else ""
+					end, function(which: string): Node
+						return if which == "fan" then (props.fan_view :: any)(s, cur) else ui.div { w = 0, h = 0 }
+					end, { shrink = 0 })
+					else nil,
 				ui.row {
 					shrink = 0,
 					min_w = 30,
@@ -1819,6 +1835,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 							return "jump"
 						elseif hovered:get() and not in_flyout then
 							return "archive"
+						elseif props.fan_view and #(cur().fan or {}) > 0 then
+							return "none"
 						elseif (cur().subagents or 0) > 0 then
 							return "subagents"
 						end
@@ -1828,6 +1846,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 							return jump_label()
 						elseif kind == "archive" then
 							return ui.div { absolute = true, right = -4, top = -4, archive_button() }
+						elseif kind == "none" then
+							return ui.div {}
 						elseif kind == "subagents" then
 							return subagents_pill(function(): number
 								return cur().subagents or 0

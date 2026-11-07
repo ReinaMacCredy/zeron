@@ -133,6 +133,7 @@ function M.view(slot: string): any
 		views[slot] = {
 			session = ui.shared(`chat.lane.{slot}.session`, nil :: any),
 			messages = ui.shared(`chat.lane.{slot}.messages`, {} :: { any }),
+			subagents = ui.shared(`chat.lane.{slot}.subagents`, {} :: { any }),
 			draft = ui.shared(`chat.lane.{slot}.draft`, { id = "", text = "" } :: any),
 			stats = ui.shared(`chat.lane.{slot}.stats`, nil :: any),
 			token_rate = ui.shared(`chat.lane.{slot}.token_rate`, nil :: number?),

@@ -529,6 +529,10 @@ local function sidebar_limit(): number
 			if floating then
 				floating.peek_press_outside()
 			end
+			local pills: any = boundary.load("@app/screens/chat/pills")
+			if pills then
+				pills.press_outside()
+			end
 		end,
 		on_swipe = function(e: any)
 			local swipe: any = boundary.load("@app/screens/shell/swipe")

@@ -173,6 +173,96 @@ struct RowWith {
     started: Option<i64>,
     tasks: Tasks,
     created_by: Option<String>,
+    fan: Vec<FanTile>,
+}
+
+struct FanRun {
+    key: String,
+    mark: Option<String>,
+    icon: Option<String>,
+    asking: bool,
+    created: i64,
+}
+
+impl FanRun {
+    fn of_child(c: &Json, status: Option<&str>) -> Option<Self> {
+        let asking = status == Some("input");
+        if !asking && status != Some("working") {
+            return None;
+        }
+        let harness = c["config"]["harness"].as_str();
+        let mark = brand_mark(harness, c["config"]["model"].as_str());
+        let key = mark.clone().or_else(|| harness.map(str::to_owned)).unwrap_or_else(|| "agent".into());
+        Some(FanRun {
+            key,
+            mark,
+            icon: harness.and_then(crate::agents::registry_icon),
+            asking,
+            created: c["createdAt"].as_str().and_then(unix_seconds).unwrap_or(0),
+        })
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct FanTile {
+    key: String,
+    mark: Option<String>,
+    icon: Option<String>,
+    asking: bool,
+    count: u32,
+}
+
+fn brand_mark(harness: Option<&str>, model: Option<&str>) -> Option<String> {
+    zeron_proto::HarnessId::brand_of(None, model)
+        .and_then(|maker| crate::agents::glyph(maker.as_str()))
+        .or_else(|| harness.and_then(crate::agents::glyph))
+}
+
+/// A chat not open says only how many of its own subagents run, so they wear its own provider.
+fn fan_tiles(harness: Option<&str>, model: Option<&str>, native: u32, children: &[FanRun]) -> Vec<FanTile> {
+    let mut runs: Vec<&FanRun> = children.iter().collect();
+    runs.sort_by_key(|run| (std::cmp::Reverse(run.asking), std::cmp::Reverse(run.created)));
+    let mut tiles: Vec<FanTile> = Vec::new();
+    for run in runs {
+        match tiles.iter_mut().find(|t| t.key == run.key) {
+            Some(tile) => {
+                tile.count += 1;
+                tile.asking |= run.asking;
+            }
+            None => tiles.push(FanTile { key: run.key.clone(), mark: run.mark.clone(), icon: run.icon.clone(), asking: run.asking, count: 1 }),
+        }
+    }
+    if native > 0 {
+        let mark = brand_mark(harness, model);
+        let key = mark.clone().or_else(|| harness.map(str::to_owned)).unwrap_or_else(|| "agent".into());
+        match tiles.iter_mut().find(|t| t.key == key) {
+            Some(tile) => tile.count += native,
+            None => tiles.push(FanTile { key, mark, icon: harness.and_then(crate::agents::registry_icon), asking: false, count: native }),
+        }
+    }
+    tiles
+}
+
+fn fan_value(tiles: &[FanTile]) -> Value {
+    if tiles.is_empty() {
+        return Value::Nil;
+    }
+    let opt = |v: &Option<String>| v.as_deref().map_or(Value::Nil, Value::from);
+    Value::List(
+        tiles
+            .iter()
+            .map(|t| {
+                Value::record([
+                    ("key", Value::from(t.key.as_str())),
+                    ("mark", opt(&t.mark)),
+                    ("icon", opt(&t.icon)),
+                    ("asking", Value::Bool(t.asking)),
+                    ("count", Value::from(f64::from(t.count))),
+                ])
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    )
 }
 
 /// `slot` holds `item` now; whether that's new.
@@ -615,11 +705,15 @@ impl Sessions {
         let mut rows = self.rows.borrow_mut();
         let mut children: Vec<(String, Vec<(f64, Value)>)> = Vec::new();
         let mut working_children: HashMap<String, u32> = HashMap::new();
+        let mut fan_children: HashMap<String, Vec<FanRun>> = HashMap::new();
         for c in all.iter().filter(|c| !archived(c)) {
             let (Some(id), Some(parent)) = (c["id"].as_str(), c["parentChatId"].as_str()) else { continue };
             let status = status_from(rows.get(id).map_or_else(|| unseen(c), |row| row.unseen), live.get(id));
             if status == Some("working") {
                 *working_children.entry(parent.to_owned()).or_default() += 1;
+            }
+            if let Some(run) = FanRun::of_child(c, status) {
+                fan_children.entry(parent.to_owned()).or_default().push(run);
             }
             let harness = c["config"]["harness"].as_str();
             let with = RowWith {
@@ -633,6 +727,7 @@ impl Sessions {
                 started: None,
                 tasks: Tasks::default(),
                 created_by: None,
+                fan: Vec::new(),
             };
             if let Some(row) = rows.get(id).filter(|row| row.with == with) {
                 let row = (row.updated, row.value.clone());
@@ -664,6 +759,12 @@ impl Sessions {
                 // An agent from the ACP registry: its icon, as listed.
                 ("agent_icon", with.agent_icon.as_deref().map_or(Value::Nil, Value::from)),
                 ("kind", Value::from(child_kind(c))),
+                ("model", opt(c["config"]["model"].as_str())),
+                ("reasoning", opt(c["config"]["reasoning"].as_str())),
+                ("mark", brand_mark(harness, c["config"]["model"].as_str()).map_or(Value::Nil, |g| Value::from(g.as_str()))),
+                ("delegation", opt(c["delegation"]["status"].as_str())),
+                ("delegated_at", c["delegation"]["startedAt"].as_str().and_then(unix_seconds).map_or(Value::Nil, |at| Value::from(at as f64))),
+                ("last_message", c["lastMessageAt"].as_str().and_then(unix_seconds).map_or(Value::Nil, |at| Value::from(at as f64))),
                 ("expires", if c["sidechatSourceChatId"].is_string() {
                     Value::from((created + zeron_proto::sidechat::SIDECHAT_LIFETIME_HOURS * 3600) as f64)
                 } else {
@@ -705,6 +806,7 @@ impl Sessions {
                     started: live.get(id).and_then(|l| l.started),
                     tasks: live.get(id).map_or_else(Tasks::default, |l| l.tasks),
                     created_by: c["createdByChatId"].as_str().map(|opener| openers.title(opener).to_owned()),
+                    fan: fan_tiles(harness, c["config"]["model"].as_str(), live.get(id).map_or(0, |l| l.subagents), fan_children.get(id).map_or(&[][..], Vec::as_slice)),
                 };
                 if let Some(row) = rows.get(id).filter(|row| row.with == with) {
                     return Some(row.value.clone());
@@ -732,6 +834,7 @@ impl Sessions {
                     ("created", Value::from(created as f64)),
                     ("harness", opt(harness)),
                     ("agent", harness.and_then(crate::agents::glyph).map_or(Value::Nil, |g| Value::from(g.as_str()))),
+                    ("mark", brand_mark(harness, c["config"]["model"].as_str()).map_or(Value::Nil, |g| Value::from(g.as_str()))),
                     // An agent from the ACP registry: its icon, as listed.
                     ("agent_icon", with.agent_icon.as_deref().map_or(Value::Nil, Value::from)),
                     ("model", opt(c["config"]["model"].as_str())),
@@ -767,6 +870,7 @@ impl Sessions {
                     ("running_subagents", Value::from(with.running_subagents as f64)),
                     ("side_chats", Value::from(with.side_chats as f64)),
                     ("working_side_chats", Value::from(with.working_side_chats as f64)),
+                    ("fan", fan_value(&with.fan)),
                 ]);
                 let unseen = unseen(c);
                 rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, unseen, with, value: value.clone() });
@@ -1565,6 +1669,14 @@ fn workspace_locator(scope: &str, device: Option<&str>, signed_in: Option<(Strin
     Some(zeron_notify::links::workspace_locator_of(name, &identity))
 }
 
+pub(crate) fn device_supports(id: &str, capability: &str) -> bool {
+    SESSIONS.with(|s| {
+        s.devices.borrow().as_array().into_iter().flatten().any(|d| {
+            d["id"].as_str() == Some(id) && d["capabilities"].as_array().is_some_and(|c| c.iter().any(|c| c.as_str() == Some(capability)))
+        })
+    })
+}
+
 /// The locator of the workspace the engine has open now (none until it's
 /// knowable): what a conversation link carries, and is checked against
 /// when one is opened (src/links.rs).
@@ -1942,6 +2054,32 @@ mod tests {
         assert!(matches!(chat(&v, "p").field("stale"), Some(Value::Bool(true))));
         let v = with_children("2099-01-01T00:00:00Z").value();
         assert!(matches!(chat(&v, "p").field("stale"), Some(Value::Bool(false))));
+    }
+
+    #[test]
+    fn a_fan_is_one_tile_per_provider_asking_first_then_newest() {
+        let run = |key: &str, asking: bool, created: i64| super::FanRun { key: key.into(), mark: Some(key.into()), icon: None, asking, created };
+        let tiles = super::fan_tiles(
+            Some("claude-code"),
+            None,
+            2,
+            &[run("openai", false, 5), run("grok", false, 9), run("cursor", true, 1), run("openai", false, 7)],
+        );
+        let keys: Vec<&str> = tiles.iter().map(|t| t.key.as_str()).collect();
+        assert_eq!(keys, ["cursor", "grok", "openai", "claude"]);
+        assert!(tiles[0].asking && !tiles[1].asking);
+        assert_eq!(tiles[2].count, 2);
+        assert_eq!(tiles[3].count, 2, "a chat's own subagents wear its provider");
+        assert!(super::fan_tiles(Some("claude-code"), None, 0, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_child_at_work_counts_on_the_fan_by_its_models_maker() {
+        let child = |status| super::FanRun::of_child(&serde_json::json!({ "config": { "harness": "mock", "model": "gpt-5.5" }, "createdAt": "2026-11-01T10:07:00Z" }), status);
+        assert_eq!(child(Some("working")).unwrap().mark.as_deref(), Some("openai"));
+        assert!(child(Some("input")).unwrap().asking);
+        assert!(child(Some("done")).is_none(), "a finished one leaves");
+        assert!(child(None).is_none());
     }
 
     #[test]

@@ -381,6 +381,79 @@ ui.command {
 		STOP_FAILS:set(true)
 	end,
 }
+do
+	local route_seen = ui.state("test_route_session", nil :: string?)
+	ui.effect(function()
+		local now = route.current:get()
+		route_seen:set(if now.name == "session" then now.session else nil)
+	end)
+	local patch_given = ui.state("test_session_patch", nil :: any)
+	ui.command {
+		id = "patch_session",
+		title = "The open session's fields change",
+		run = function()
+			local s = store.session:peek()
+			if s and s.id then
+				publish(s.id, patch_given:peek())
+			end
+		end,
+	}
+	local function mirror(state_name: string, shared_name: string, empty: any)
+		local given = ui.state(state_name, nil :: any)
+		local shared = ui.shared(shared_name, empty)
+		ui.effect(function()
+			local v = given:get()
+			if v ~= nil then
+				shared:set(v)
+			end
+		end)
+	end
+	mirror("test_subs", "chat.subagents", {})
+	mirror("test_waiting", "chat.waiting", {})
+	mirror("test_shell_output", "chat.shell_output", {})
+	mirror("test_usage", "chat.roster_usage", {})
+	;(require("@app/screens/chat/lanes") :: any).watch = function(slot: string, id: string?)
+		note(`lane_watch:{slot}:{id or ""}`)
+	end
+	local host_gone = ui.state("test_host_gone", false)
+	local answer_fails = ui.state("test_answer_fails", false)
+	local function refused(): any
+		return {
+			after = function(_self: any, _ok: any, err: (any) -> ())
+				err({ message = "offline" })
+			end,
+		}
+	end
+	local kids = ui.state("test_children", {} :: { [string]: any })
+	local real_children = sessions.children
+	;(sessions :: any).children = function(id: string?): { any }
+		return kids:get()[id or ""] or real_children(id)
+	end
+	stub.cancel_delegate = function(session: string, task: string): any
+		note(`cancel_delegate:{session}:{task}`)
+		if host_gone:peek() then
+			return nil
+		end
+		return settled(true)
+	end
+	stub.waiting_answer = function(args: any): any
+		note(`waiting_answer:{args.id}:{args.request}:{args.decision or ""}:{table.concat(args.values or {}, "+")}:{args.text or ""}`)
+		if host_gone:peek() then
+			return nil
+		end
+		return if answer_fails:peek() then refused() else settled(nil)
+	end
+	stub.waiting_back = function(id: string, request: string): any
+		note(`waiting_back:{id}:{request}`)
+		return settled({ chosen = {}, text = "" })
+	end
+	stub.roster_watch = function(docs: { string })
+		note(`roster_watch:{#docs}`)
+	end
+	stub.shell_watch = function(shells: { any })
+		note(`shell_watch:{#shells}`)
+	end
+end
 stub.configure = function(id: string, patch: any)
 	local keys = {}
 	for k, v in patch do
@@ -523,6 +596,13 @@ ui.command {
 -- The engine's side: a reply streaming into the open session, word by word.
 local REPLY = "Here is a longer answer, written a few words at a time so the transcript grows in place while you read it. It keeps going for a while."
 local shown = 0
+ui.command {
+	id = "escape_from_composer",
+	title = "Escape reaches the store",
+	run = function()
+		store.escape()
+	end,
+}
 ui.command {
 	id = "start_reply",
 	title = "A reply starts",
@@ -1523,7 +1603,11 @@ ui.command {
 
 -- The shell, as small as can hold the page: the route's page, and the
 -- composer over it.
+local test_fan = ui.state("test_fan", false)
 return ui.overlay {
+	on_press = function()
+		require("@app/screens/chat/pills").press_outside()
+	end,
 	w_full = true,
 	h_full = true,
 	ui.column {
@@ -1546,6 +1630,20 @@ return ui.overlay {
 	require("@ds/menu_at").Host {},
 	-- What's said for a moment, as the shell has it (ds/toast).
 	ds.toast.Host {},
+	ui.show(function(): boolean
+		return test_fan:get()
+	end, ui.div {
+		absolute = true,
+		left = 400,
+		top = 6,
+		require("@app/screens/chat/pills").Fan {
+			name = "test-fan",
+			chat = "s2",
+			tiles = function(): { any }
+				return require("@app/screens/chat/pills").fan_of("s2", { { key = "row", asking = false, count = 2 } }) or {}
+			end,
+		},
+	}),
 	-- In the title bar's strip, what a drag may come from: the files pane's
 	-- files (their paths), and something else (a sidebar section).
 	ui.row {
