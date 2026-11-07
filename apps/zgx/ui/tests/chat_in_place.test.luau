@@ -239,7 +239,9 @@ test("the catalog changing keeps the composer, its draft and the keys", function
 	-- The new agent's model is there to pick.
 	app:click('role:button "Model"')
 	settle(app)
-	expect(app:has('role:tab "Codex"')).to_be(true)
+	app:click("#model-picker-title")
+	settle(app)
+	expect(app:has('role:button "Jump to Codex"')).to_be(true)
 end)
 
 test("a catalog with no agents shows the picker without failing", function()
@@ -254,7 +256,10 @@ test("a catalog with no agents shows the picker without failing", function()
 	app:command("catalog_grows")
 	settle(app)
 	expect(app:error()).to_be_nil()
-	expect(app:has('role:tab "Codex"')).to_be(true)
+	-- Still open, the new agent's model on its list.
+	app:click("#model-picker-title")
+	settle(app)
+	expect(app:has('role:option "GPT-5.5"')).to_be(true)
 end)
 
 -- A node's box, by a pattern on its line: x, y, w, h.

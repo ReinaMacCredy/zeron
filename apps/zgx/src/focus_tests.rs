@@ -139,8 +139,11 @@ fn escape_gives_focus_back_without_a_ring() {
     );
     // The composer's pickers, each clicked open: a press records its button
     // as what had focus (zgx 3c47d763), so Escape gives it back, ringless.
+    // The model picker opens on its panel and gives the keys back to the
+    // draft, as Zeron's does.
+    let model = "role:button \"Model\"";
+    escape("the model picker", nothing, click(model), "#model-picker-title", Some("textbox \"Message\""), &mut f);
     for (what, button, item, opener) in [
-        ("the model picker", "Model", "role:option", true),
         ("the access picker", "Access", "role:listbox \"Access\"", true),
         ("the branch picker", "Branch", "role:textbox \"Search branches…\"", true),
     ] {

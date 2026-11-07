@@ -100,6 +100,8 @@ struct Chats {
     models: RefCell<HashMap<String, Vec<Json>>>,
     // What stopped an agent's models listing, for its row in the picker.
     model_errors: RefCell<HashMap<String, String>>,
+    // Models a listing named new for the first time, each numbered, for the picker's notice.
+    announced: RefCell<Vec<(u32, String, Vec<String>)>>,
     catalog: RefCell<Vec<Shared>>,
     catalog_state: Cell<CatalogState>,
     views: RefCell<Vec<Weak<View>>>,
@@ -1010,7 +1012,9 @@ impl Chats {
         }
         if let Some(seed) = &seeded {
             for (id, list) in seed["models"].as_object().into_iter().flatten() {
-                self.models.borrow_mut().insert(id.clone(), listed_models(&json!({ "models": list, "newIds": seed["newIds"] })));
+                let reply = json!({ "models": list, "newIds": seed["newIds"], "announceIds": seed["announceIds"][id] });
+                self.announce(id, &reply);
+                self.models.borrow_mut().insert(id.clone(), listed_models(&reply));
             }
             for (id, error) in seed["errors"].as_object().into_iter().flatten() {
                 self.model_errors.borrow_mut().insert(id.clone(), error.as_str().unwrap_or_default().to_owned());
@@ -1030,6 +1034,7 @@ impl Chats {
                 {
                     Ok(list) => {
                         me.model_errors.borrow_mut().remove(&id);
+                        me.announce(&id, &list);
                         me.models
                             .borrow_mut()
                             .insert(id, listed_models(&list));
@@ -1046,6 +1051,31 @@ impl Chats {
                 me.publish_catalog();
             });
         }
+    }
+
+    /// Keeps what `reply` names new for the first time (the engine's
+    /// `announceIds`, given once across every window), as Zeron's toast says it:
+    /// the agent's name and the models' names.
+    fn announce(&self, harness: &str, reply: &Json) {
+        let Some(ids) = reply["announceIds"].as_array().filter(|ids| !ids.is_empty()) else { return };
+        let models = reply["models"].as_array().or(reply.as_array()).cloned().unwrap_or_default();
+        let labels = ids
+            .iter()
+            .filter_map(|id| models.iter().find(|m| &m["id"] == id).and_then(|m| m["label"].as_str()).or(id.as_str()))
+            .map(str::to_owned)
+            .collect();
+        let agent = self
+            .harnesses
+            .borrow()
+            .iter()
+            .find(|h| h["id"].as_str() == Some(harness))
+            .and_then(|h| h["name"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| harness.to_owned());
+        let mut announced = self.announced.borrow_mut();
+        let seq = announced.last().map_or(1, |(n, _, _)| n + 1);
+        announced.push((seq, agent, labels));
+        let extra = announced.len().saturating_sub(8);
+        announced.drain(..extra);
     }
 
     fn publish_catalog(&self) {
@@ -1175,7 +1205,7 @@ impl Chats {
     fn catalog_value(&self) -> Value {
         let unsupported = self.compaction_unsupported.borrow();
         if let Some(r) = self.remote.borrow().as_ref() {
-            return catalog_of(&r.harnesses, &r.models, r.ready, Some(&r.device), &unsupported, &HashMap::new());
+            return catalog_of(&r.harnesses, &r.models, r.ready, Some(&r.device), &unsupported, &HashMap::new(), &[]);
         }
         catalog_of(
             &self.harnesses.borrow(),
@@ -1184,6 +1214,7 @@ impl Chats {
             None,
             &unsupported,
             &self.model_errors.borrow(),
+            &self.announced.borrow(),
         )
     }
 
@@ -1322,8 +1353,8 @@ fn tabs_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, errors: &HashMap<St
 }
 
 /// A dev catalog for the picker's proofs, from `ZERON_ZGX_MOCK_CATALOG` (a JSON
-/// file: `harnesses` as the engine lists them, `models` by agent, `errors` by
-/// agent) on a mock Dev. Its agents are listed, never run.
+/// file: `harnesses` as the engine lists them, `models`, `errors` and
+/// `announceIds` by agent, `newIds`) on a mock Dev. Its agents are listed, never run.
 fn mock_catalog() -> Option<Json> {
     let path = std::env::var("ZERON_ZGX_MOCK_CATALOG").ok()?;
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
@@ -1333,7 +1364,15 @@ fn steers_of(harness: &Json) -> bool {
     harness["supportsSteering"].as_bool() == Some(true) && harness["steeringMode"].as_str() == Some("step-boundary")
 }
 
-fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, device: Option<&str>, unsupported: &HashMap<String, String>, errors: &HashMap<String, String>) -> Value {
+fn catalog_of(
+    listed: &[Json],
+    by: &HashMap<String, Vec<Json>>,
+    done: bool,
+    device: Option<&str>,
+    unsupported: &HashMap<String, String>,
+    errors: &HashMap<String, String>,
+    announced: &[(u32, String, Vec<String>)],
+) -> Value {
     let any = by.values().any(|l| !l.is_empty());
     let state = if any || done { "ready" } else { "looking" };
     let mut harnesses = Vec::new();
@@ -1364,6 +1403,19 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, devi
         ("harnesses", Value::List(harnesses.into())),
         ("models", Value::List(models.into())),
         ("tabs", tabs_of(listed, by, errors, done)),
+        (
+            "announced",
+            Value::List(
+                announced
+                    .iter()
+                    .map(|(seq, agent, labels)| {
+                        let models: Vec<Value> = labels.iter().map(|l| Value::from(l.as_str())).collect();
+                        Value::record([("seq", Value::Num(f64::from(*seq))), ("agent", Value::from(agent.as_str())), ("models", Value::List(models.into()))])
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+        ),
     ];
     if let Some(device) = device {
         fields.push(("device", Value::from(device)));
@@ -6466,6 +6518,48 @@ mod tests {
         let claude = json!({ "id": "opus", "options": [{ "id": "fastMode", "label": "Fast", "defaultChoice": "off", "choices": [{ "id": "off", "label": "Off" }, { "id": "on", "label": "On" }] }] });
         assert_eq!(fast_option(&claude), Some(("fastMode".into(), "on".into(), "off".into())));
         assert!(model_value("claude-code", &claude).field("options").is_none());
+    }
+
+    #[test]
+    fn the_picker_has_a_tab_per_agent_and_hears_what_is_new() {
+        let chats = Rc::new(Chats::default());
+        *chats.harnesses.borrow_mut() = vec![json!({ "id": "codex", "name": "Codex" }), json!({ "id": "fx", "name": "Fx" }), json!({ "id": "pi", "name": "Pi" })];
+        let reply = json!({
+            "models": [{ "id": "gpt", "label": "GPT", "description": "Frontier" }, { "id": "sol", "label": "GPT-6 Sol", "description": " " }],
+            "newIds": ["sol"], "announceIds": ["sol"]
+        });
+        chats.announce("codex", &reply);
+        chats.models.borrow_mut().insert("codex".into(), listed_models(&reply));
+        chats.model_errors.borrow_mut().insert("fx".into(), "Not signed in to Fx".into());
+        let catalog = chats.catalog_value();
+        // A tab for each agent, one with no models yet saying why.
+        let tabs = catalog.field("tabs").map(Value::list).unwrap_or_default();
+        let state = |tabs: &[Value], i: usize| tabs[i].field("state").map(text);
+        assert_eq!(tabs.len(), 3);
+        assert_eq!(state(tabs, 0).as_deref(), Some("ready"));
+        assert_eq!(state(tabs, 1).as_deref(), Some("error"));
+        assert_eq!(tabs[1].field("error").map(text).as_deref(), Some("Not signed in to Fx"));
+        assert_eq!(state(tabs, 2).as_deref(), Some("loading"));
+        assert_eq!(catalog.field("harnesses").map(Value::list).map(<[Value]>::len), Some(1));
+        // Each model's line and whether it's new.
+        let models = catalog.field("models").map(Value::list).unwrap_or_default();
+        assert_eq!(models[0].field("description").map(text).as_deref(), Some("Frontier"));
+        assert!(models[0].field("new").is_none());
+        assert!(models[1].field("description").is_none());
+        assert!(matches!(models[1].field("new"), Some(Value::Bool(true))));
+        // Announced once, in Zeron's words: the agent and the models' names.
+        let heard = |chats: &Chats| chats.catalog_value().field("announced").map(Value::list).map(|l| l.to_vec()).unwrap_or_default();
+        let announced = heard(&chats);
+        assert_eq!(announced.len(), 1);
+        assert_eq!(announced[0].field("agent").map(text).as_deref(), Some("Codex"));
+        let names: Vec<String> = announced[0].field("models").map(Value::list).unwrap_or_default().iter().map(text).collect();
+        assert_eq!(names, ["GPT-6 Sol"]);
+        chats.announce("codex", &json!({ "models": [], "newIds": ["sol"], "announceIds": [] }));
+        assert_eq!(heard(&chats).len(), 1);
+        // All answered: an agent with none is listed, empty.
+        chats.catalog_state.set(CatalogState::Ready);
+        let done = chats.catalog_value();
+        assert_eq!(state(done.field("tabs").map(Value::list).unwrap_or_default(), 2).as_deref(), Some("ready"));
     }
 
     #[test]

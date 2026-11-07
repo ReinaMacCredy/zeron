@@ -973,11 +973,8 @@
     },
     "model_picker": {
       "starred": "Starred",
-      "star": "Star",
-      "unstar": "Unstar",
       "fast_mode": "Fast mode",
       "default": "Default",
-      "reasoning": "REASONING",
       "account": "Account",
       "model": "Model",
       "search_starred": "Search starred models…",
@@ -990,7 +987,32 @@
       "not_found": "No models found",
       "not_found_hint": "Nothing in {where} matches “{q}”",
       "where_starred": "starred models",
-      "where_models": "models"
+      "where_models": "models",
+      "star_named": "Add {label} to favorites",
+      "unstar_named": "Remove {label} from favorites",
+      "star_keys": "⌘⇧F on the highlighted model",
+      "fast_on": "Fast mode on · Turn off",
+      "fast_off": "Fast mode off · Turn on",
+      "selected_only": "Selected in this chat; absent from the current model list",
+      "new_badge": "NEW",
+      "to_full": "Switch to full picker",
+      "to_compact": "Switch to compact picker",
+      "loading": "Loading models…",
+      "no_agents": "No agents available",
+      "no_agents_hint": "Enable an installed agent in Settings → Providers, or install an agent CLI.",
+      "select": "Select model",
+      "change_model": "Change model",
+      "jump_to": "Jump to {name}",
+      "back": "Back",
+      "back_esc": "Back · Esc",
+      "reset_effort": "Reset to defaults",
+      "context": "Context",
+      "long_context": "Long context",
+      "window": "{size} window",
+      "compacts_at": "compacts at ~{at}",
+      "context_switching": "Switching to {size} compacts this chat (~{in_use} in use)",
+      "retry": "Retry",
+      "context_selected": "~{in_use} in use; the next message compacts it"
     },
     "effort_slider": {
       "reasoning": "Reasoning"
@@ -3211,6 +3233,23 @@
       }
     },
     "composer": {
+      "switch": {
+        "model_title": "Switch model?",
+        "model_lead": "Your next response will be slower and use more tokens",
+        "body_claude": "This conversation is cached for the current model. Switching to {to} means the full history gets re-read on your next message.",
+        "body_codex": "Changing models mid-conversation will degrade performance. Context may automatically compact.",
+        "body_other": "Changing models mid-conversation may degrade performance. Switching to {to} means the full history gets re-read on your next message.",
+        "yes": "Yes, switch to {to}",
+        "yes_detail": "Applies to this chat only. The change is marked in the transcript.",
+        "no": "No, go back",
+        "no_detail": "Keep {from} for this chat.",
+        "provider_title": "Switch provider?",
+        "provider_lead": "{to} starts from a text copy of this chat",
+        "provider_body": "{to} has never seen this chat. The {from} session is closed; on your next message the conversation so far is handed to {to} as plain text. Tool results, open files and {from}'s cache are not carried over.",
+        "provider_yes_detail": "Same chat, same tab. A divider marks where {from} stopped.",
+        "provider_no": "No, keep {from}",
+        "keys": "1 · 2 choose · ↵ confirm · esc cancel"
+      },
       "account_not_switched": "Couldn't switch accounts",
       "placeholder": "Do anything…",
       "comments": "{n, plural, one {# comment} other {# comments}}",
@@ -3284,7 +3323,10 @@
       "file_unreadable": "{name} could not be read.",
       "credits_out": "You're out of Cloud credits. Add credits to send.",
       "credits_add": "Add credits",
-      "credits_tip": "Out of Cloud credits"
+      "credits_tip": "Out of Cloud credits",
+      "new_models": {
+        "title": "{n, plural, one {New model available} other {New models available}}"
+      }
     },
     "completions": {
       "search_failed": "File search failed",

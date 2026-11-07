@@ -27,10 +27,22 @@ local FIVE: { EffortSlider.Level } = {
 
 local MODELS: { ModelPicker.Model } = {
 	{ value = "sonnet", label = "Sonnet", harness = "claude", efforts = THREE, effort = "medium" },
+	{
+		value = "opus-1m",
+		label = "Opus 1M",
+		harness = "claude",
+		efforts = THREE,
+		effort = "high",
+		options = {
+			{ id = "contextWindow", label = "Context Window", default = "1m", choices = { { id = "200k", label = "200K" }, { id = "1m", label = "1M" } } },
+			{ id = "autoCompact", label = "Auto-compact", default = "auto", choices = { { id = "auto", label = "Auto" }, { id = "300k", label = "300K" }, { id = "400k", label = "400K" }, { id = "600k", label = "600K" }, { id = "800k", label = "800K" } } },
+		},
+	},
 	{ value = "opus", label = "Opus", harness = "claude", efforts = THREE, effort = "high", fast = true },
 	{ value = "gpt", label = "GPT", harness = "codex", efforts = FIVE, effort = "medium" },
-	{ value = "mini", label = "Mini", harness = "codex" },
+	{ value = "mini", label = "Mini", harness = "codex", description = "the anthropic route" },
 	{ value = "adaptive", label = "Adaptive", harness = "devin" },
+	{ value = "cursor-auto", label = "Auto", harness = "devin", options = { { id = "effort", label = "Effort", default = "medium", choices = { { id = "low", label = "Low" }, { id = "medium", label = "Medium" }, { id = "high", label = "High" } } } } },
 	{
 		value = "fusion",
 		label = "Fusion",
@@ -45,19 +57,15 @@ local MODELS: { ModelPicker.Model } = {
 	},
 }
 
--- What the picker's panel, and what opens out with its list, have looked
--- like since a test last set this, sampled each frame: the least opacity
--- the panel had, and how many frames what opens out was part see-through
--- (shown or not, never between) (tests/model_picker_motion.test.luau: never
--- see-through as it opens, opens out, folds or follows its trigger).
-local alpha = ui.state("test_picker_alpha", { panel = 1, fold = 0 })
+-- The least opacity the picker's panel has had since a test last set this,
+-- sampled each frame (tests/model_picker_motion.test.luau: never see-through
+-- as it opens, changes page or follows its trigger).
+local alpha = ui.state("test_picker_alpha", { panel = 1 })
 ui.every(16, function()
 	local now = alpha:peek()
 	local panel = tonumber(anime.utils.get(".dropdown-panel", "opacity")) or 1
-	local fold = tonumber(anime.utils.get(".dropdown-fold", "opacity")) or 1
-	local between = fold > 0 and fold < 1
-	if panel < now.panel or between then
-		alpha:set({ panel = math.min(panel, now.panel), fold = now.fold + (if between then 1 else 0) })
+	if panel < now.panel then
+		alpha:set({ panel = panel })
 	end
 end)
 -- Where the reasoning thumb is drawn (its offset along the groove), each
@@ -69,6 +77,27 @@ ui.every(16, function()
 		thumb:set(x)
 	end
 end)
+-- As a chat with its agent, a pick asked about first; what was asked; what
+-- the chat holds of its context.
+local committed = ui.state("test_picker_committed", false)
+local asking = ui.state("test_picker_asking", false)
+local taken = ui.state("test_picker_taken", nil :: string?)
+local context = ui.state("test_picker_context", nil :: number?)
+-- More of a catalog, for its states: a new model, an agent still listing and
+-- one that failed (`test_picker_more`); how often Retry was asked.
+local more = ui.state("test_picker_more", false)
+local retried = ui.state("test_picker_retried", 0)
+local HARNESSES = {
+	{ id = "claude", label = "Claude", mark = "claude" },
+	{ id = "codex", label = "Codex", mark = "openai" },
+	{ id = "devin", label = "Devin", mark = "devin" },
+}
+local MORE_HARNESSES = table.clone(HARNESSES)
+table.insert(MORE_HARNESSES, { id = "pi", label = "Pi", mark = "pi", state = "loading" })
+table.insert(MORE_HARNESSES, { id = "fx", label = "Fx", mark = "pi", state = "error", error = "Not signed in to Fx" })
+local MORE_MODELS = table.clone(MODELS)
+table.insert(MORE_MODELS, { value = "sol", label = "Sol", harness = "codex", new = true })
+table.insert(MORE_MODELS, { value = "codex-auto", label = "Auto", harness = "codex", description = "Codex picks" })
 -- Room over the picker (its trigger moving, as a composer growing over a
 -- chip moves it).
 local above = ui.state("test_picker_above", 0)
@@ -90,11 +119,24 @@ return ui.column {
 		fast = ui.state("test_picker_fast", false),
 		options = ui.state("test_picker_options", {} :: { [string]: string }),
 		favorites = ui.state("test_picker_favorites", {} :: { [string]: boolean }),
-		harnesses = {
-			{ id = "claude", label = "Claude", mark = "claude" },
-			{ id = "codex", label = "Codex", mark = "openai" },
-			{ id = "devin", label = "Devin", mark = "devin" },
-		},
-		models = MODELS,
+		harnesses = function(): { any }
+			return if more:get() then MORE_HARNESSES else HARNESSES
+		end,
+		models = function(): { ModelPicker.Model }
+			return if more:get() then MORE_MODELS else MODELS
+		end,
+		on_retry = function()
+			retried:set(retried:peek() + 1)
+		end,
+		committed = function(): boolean
+			return committed:get()
+		end,
+		take = function(value: string): boolean
+			taken:set(value)
+			return asking:get()
+		end,
+		context_tokens = function(): number?
+			return context:get()
+		end,
 	},
 }

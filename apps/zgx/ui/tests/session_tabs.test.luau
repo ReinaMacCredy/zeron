@@ -96,7 +96,7 @@ local function page_takes_clicks(app: any)
 	end
 	expect(focused).to_contain("textbox")
 	app:click('#chat-composer-dock >> role:button "Model"')
-	expect(app:wait(".dropdown-fold", { timeout_ms = 5000 })).to_be(true)
+	expect(app:wait(".dropdown-panel", { timeout_ms = 5000 })).to_be(true)
 	app:key("Escape")
 	app:frames(30)
 end

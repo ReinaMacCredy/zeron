@@ -230,8 +230,12 @@ test("a side chat's own model shows in its picker; a changed pick goes with its 
 	expect(app:has('.side-chat-tab >> role:button "Model" >> "GPT-6.1"')).to_be(true)
 	app:click('.side-chat-tab >> role:button "Model"')
 	app:frames(30)
+	app:click("#model-picker-title")
+	app:frames(30)
 	-- (It lists the side chat's agent's models.)
 	expect(app:has('role:option "GPT-6.1 mini"')).to_be(true)
+	app:key("Escape")
+	app:frames(10)
 	app:key("Escape")
 	app:frames(10)
 	-- Another picked (the picker's pick, kept by the chat).

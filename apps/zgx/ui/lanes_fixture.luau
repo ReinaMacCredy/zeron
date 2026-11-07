@@ -184,6 +184,14 @@ end }
 stub_store.refs = function(_path: string, _device: string?): any
 	return settled(true, { { name = "main", current = true }, { name = "feature", current = false } })
 end
+stub_store.configure = function(id: string, patch: any)
+	local keys = {}
+	for k, v in patch do
+		table.insert(keys, `{k}={tostring(v)}`)
+	end
+	table.sort(keys)
+	note(`configure:{id}:{table.concat(keys, ";")}`)
+end
 stub_store.interrupt = function(id: string)
 	note(`stop:{id}`)
 end

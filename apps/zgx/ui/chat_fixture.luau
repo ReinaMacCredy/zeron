@@ -1574,6 +1574,20 @@ ui.command {
 		store.catalog:set { state = "ready", harnesses = harnesses, models = models }
 	end,
 }
+-- The engine naming models new for the first time (src/chat.rs `announce`):
+-- one, then two.
+ui.command {
+	id = "catalog_announces",
+	title = "New models arrive",
+	run = function()
+		local c: any = table.clone(store.catalog:peek())
+		local announced: { any } = table.clone(c.announced or {})
+		local seq = #announced + 1
+		table.insert(announced, { seq = seq, agent = "Codex", models = if seq == 1 then { "GPT-6 Sol" } else { "GPT-6 Sol mini", "GPT-6 Luna" } })
+		c.announced = announced
+		store.catalog:set(c)
+	end,
+}
 ui.command {
 	id = "catalog_empty",
 	title = "No agents",

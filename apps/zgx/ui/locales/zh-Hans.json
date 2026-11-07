@@ -973,11 +973,8 @@
     },
     "model_picker": {
       "starred": "已加星标",
-      "star": "加星标",
-      "unstar": "移除星标",
       "fast_mode": "快速模式",
       "default": "默认",
-      "reasoning": "推理强度",
       "account": "账号",
       "model": "模型",
       "search_starred": "搜索已加星标的模型…",
@@ -990,7 +987,32 @@
       "not_found": "未找到模型",
       "not_found_hint": "{where}中没有与“{q}”匹配的内容",
       "where_starred": "已加星标的模型",
-      "where_models": "模型"
+      "where_models": "模型",
+      "star_named": "将 {label} 加入收藏",
+      "unstar_named": "从收藏中移除 {label}",
+      "star_keys": "对高亮模型按 ⌘⇧F",
+      "fast_on": "快速模式已开 · 关闭",
+      "fast_off": "快速模式已关 · 开启",
+      "selected_only": "此聊天正在使用；当前模型列表中没有它",
+      "new_badge": "新",
+      "to_full": "切换到完整选择器",
+      "to_compact": "切换到紧凑选择器",
+      "loading": "正在加载模型…",
+      "no_agents": "没有可用的代理",
+      "no_agents_hint": "在“设置 → 提供方”中启用已安装的代理，或安装代理的命令行工具。",
+      "select": "选择模型",
+      "change_model": "更换模型",
+      "jump_to": "跳到 {name}",
+      "back": "返回",
+      "back_esc": "返回 · Esc",
+      "reset_effort": "恢复默认",
+      "context": "上下文",
+      "long_context": "长上下文",
+      "window": "{size} 窗口",
+      "compacts_at": "约在 {at} 压缩",
+      "context_switching": "切换到 {size} 会压缩此聊天（已用约 {in_use}）",
+      "retry": "重试",
+      "context_selected": "已用约 {in_use}；下一条消息会压缩它"
     },
     "effort_slider": {
       "reasoning": "推理强度"
@@ -3211,6 +3233,23 @@
       }
     },
     "composer": {
+      "switch": {
+        "model_title": "切换模型？",
+        "model_lead": "下一次回复会更慢，并消耗更多令牌",
+        "body_claude": "此对话已为当前模型缓存。切换到 {to} 后，下一条消息会重新读取完整历史。",
+        "body_codex": "在对话中途更换模型会降低性能。上下文可能会自动压缩。",
+        "body_other": "在对话中途更换模型可能降低性能。切换到 {to} 后，下一条消息会重新读取完整历史。",
+        "yes": "是，切换到 {to}",
+        "yes_detail": "只对此聊天生效。更改会标记在对话记录中。",
+        "no": "否，返回",
+        "no_detail": "此聊天继续使用 {from}。",
+        "provider_title": "切换提供方？",
+        "provider_lead": "{to} 将从此聊天的文本副本开始",
+        "provider_body": "{to} 从未见过此聊天。{from} 的会话会关闭；下一条消息时，目前的对话会以纯文本交给 {to}。工具结果、打开的文件和 {from} 的缓存不会带过去。",
+        "provider_yes_detail": "同一聊天，同一标签页。分隔线会标出 {from} 停在哪里。",
+        "provider_no": "否，继续用 {from}",
+        "keys": "1 · 2 选择 · ↵ 确认 · esc 取消"
+      },
       "account_not_switched": "无法切换账号",
       "placeholder": "想做什么都可以…",
       "comments": "{n, plural, other {# 条评论}}",
@@ -3284,7 +3323,10 @@
       "file_unreadable": "无法读取 {name}。",
       "credits_out": "云端额度已用完。请添加额度后再发送。",
       "credits_add": "添加额度",
-      "credits_tip": "云端额度已用完"
+      "credits_tip": "云端额度已用完",
+      "new_models": {
+        "title": "{n, plural, other {有新模型可用}}"
+      }
     },
     "completions": {
       "search_failed": "文件搜索失败",

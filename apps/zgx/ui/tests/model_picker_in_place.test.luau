@@ -1,10 +1,9 @@
 -- The model picker's reasoning follows the model in place: moving between
--- models that both have levels keeps the slider (its groove, its level's
--- name) the same nodes, its levels the new model's. (It was built again for
--- each model, its field and thumb starting over.) And a model's options
--- (Devin Fusion's lead and sidekick) sit under it, above its reasoning, with
--- no card beside its row. On the picker in
--- ui/picker_fixture.luau.
+-- models that both have levels keeps the slider and its title the same nodes,
+-- its levels the new model's. (It was built again for each model, its field and
+-- thumb starting over.) And a model's options (Devin Fusion's lead and
+-- sidekick) sit under its reasoning, with no card beside its row. On the picker
+-- in ui/picker_fixture.luau.
 
 -- A node's identity, by its kind and label (or text): `@id`.
 local function node(app: any, kind: string?, label: string): string?
@@ -43,21 +42,20 @@ test("moving between models keeps the reasoning slider", function()
 	settle(app)
 	app:click('role:button "Model"')
 	settle(app)
-	local groove = node(app, nil, "REASONING")
-	local title = node(app, "text", "REASONING")
+	local groove = node(app, nil, "Reasoning")
+	local title = app:tree("#model-picker-title"):match("@(%d+)")
 	expect(groove).never.to_be_nil()
 
 	-- Another model with the same levels, then one with five.
 	app:set_state("test_picker_model", "opus")
 	settle(app)
-	expect(`groove @{node(app, nil, "REASONING")}`).to_be(`groove @{groove}`)
-	expect(`title @{node(app, "text", "REASONING")}`).to_be(`title @{title}`)
+	expect(`groove @{node(app, nil, "Reasoning")}`).to_be(`groove @{groove}`)
+	expect(`title @{app:tree("#model-picker-title"):match("@(%d+)")}`).to_be(`title @{title}`)
 	app:set_state("test_picker_model", "gpt")
 	settle(app)
-	expect(`groove @{node(app, nil, "REASONING")}`).to_be(`groove @{groove}`)
+	expect(`groove @{node(app, nil, "Reasoning")}`).to_be(`groove @{groove}`)
 	expect(app:state("test_picker_effort")).to_be("medium")
 	-- Its levels are the new model's: End reaches its fifth.
-	app:click('"REASONING"[2]')
 	app:key("End")
 	settle(app)
 	expect(app:state("test_picker_effort")).to_be("xhigh")
@@ -66,17 +64,17 @@ test("moving between models keeps the reasoning slider", function()
 	-- A model without levels has none; back to one with them, a slider.
 	app:set_state("test_picker_model", "mini")
 	settle(app)
-	expect(node(app, nil, "REASONING")).to_be_nil()
+	expect(line_of(app, '"Reasoning"')).to_be_nil()
 	app:set_state("test_picker_model", "sonnet")
 	settle(app)
-	expect(node(app, nil, "REASONING")).never.to_be_nil()
+	expect(line_of(app, '"Reasoning"')).never.to_be_nil()
 end)
 
--- The chosen model's options sit under it, above its reasoning (Zeron's
--- tray, the lead first): each a row opening its choices beside the panel,
+-- The chosen model's options sit under its reasoning (the lead first): each a
+-- row opening its choices beside the panel,
 -- the choice made shown on it. A pick is kept by option id; the option's
 -- own start is no pick.
-test("a model's options sit under it, above its reasoning, and are picked beside it", function()
+test("a model's options sit under its reasoning, and are picked beside it", function()
 	local app = mount("picker_fixture.luau")
 	app:resize(700, 700)
 	app:set_state("test_picker_model", "fusion")
@@ -85,12 +83,12 @@ test("a model's options sit under it, above its reasoning, and are picked beside
 	settle(app)
 	local lead = line_of(app, 'button "Lead"')
 	local sidekick = line_of(app, 'button "Sidekick"')
-	local reasoning = line_of(app, '"REASONING"')
+	local reasoning = line_of(app, '"Reasoning"')
 	expect(lead).never.to_be_nil()
 	expect(sidekick).never.to_be_nil()
 	expect(reasoning).never.to_be_nil()
 	expect((lead :: number) < (sidekick :: number)).to_be(true)
-	expect((sidekick :: number) < (reasoning :: number)).to_be(true)
+	expect((reasoning :: number) < (lead :: number)).to_be(true)
 	-- The lead's choices open beside the row, its start tagged; a pick.
 	app:click('role:button "Lead"')
 	settle(app)
@@ -109,29 +107,54 @@ test("a model's options sit under it, above its reasoning, and are picked beside
 	app:set_state("test_picker_model", "sonnet")
 	settle(app)
 	expect(line_of(app, 'button "Lead"')).to_be_nil()
-	expect(node(app, nil, "REASONING")).never.to_be_nil()
+	expect(line_of(app, '"Reasoning"')).never.to_be_nil()
 	expect(app:error()).to_be(nil)
 end)
 
--- Devin Fusion has no card beside its row: picked, its options are the
--- tray's rows under it, as any model's are.
+-- An option row opens its choices on hover, as Zeron's do with none open, and
+-- a press on the row then keeps them open (it doesn't toggle them shut).
+test("an option's choices open on hover, and a press keeps them", function()
+	local app = mount("picker_fixture.luau")
+	app:resize(700, 700)
+	app:set_state("test_picker_model", "fusion")
+	settle(app)
+	app:click('role:button "Model"')
+	settle(app)
+	expect(line_of(app, 'option "F Fable 5.1')).to_be_nil()
+	app:hover('role:button "Lead"')
+	settle(app)
+	expect(line_of(app, 'option "F Fable 5.1')).never.to_be_nil()
+	app:click('role:button "Lead"')
+	settle(app)
+	expect(line_of(app, 'option "F Fable 5.1')).never.to_be_nil()
+	-- A second press puts it away, as before.
+	app:click('role:button "Lead"')
+	settle(app)
+	expect(line_of(app, 'option "F Fable 5.1')).to_be_nil()
+	app:click('role:button "Sidekick"')
+	settle(app)
+	expect(line_of(app, 'option "S SWE-2 Medium')).never.to_be_nil()
+	expect(app:error()).to_be(nil)
+end)
+
+-- Devin Fusion has no card beside its row: picked, its options are rows on
+-- the panel, as any model's are.
 test("Fusion is picked like any model, its options then under it", function()
 	local app = mount("picker_fixture.luau")
 	app:resize(700, 700)
 	app:click('role:button "Model"')
 	settle(app)
-	-- Opened out (a press on the chosen model: the layer over its one
-	-- row), on Devin's tab.
-	app:click(".folded")
+	-- The list (a press on the panel's title), at Devin's group.
+	app:click("#model-picker-title")
 	settle(app)
-	app:click('role:tab "Devin"')
+	app:click('role:button "Jump to Devin"')
 	settle(app)
 	-- Resting on Fusion opens nothing beside it.
 	app:hover('role:option ~"Fusion"')
 	app:wait("#a-moment-passes", { timeout_ms = 400 })
 	settle(app)
 	expect(line_of(app, '"Fusion options"')).to_be_nil()
-	-- Picked, its Lead and Sidekick sit under it, above its reasoning.
+	-- Picked, back on the panel, its Lead and Sidekick under its reasoning.
 	app:click('role:option ~"Fusion"')
 	settle(app)
 	expect(app:state("test_picker_model")).to_be("fusion")
@@ -146,7 +169,7 @@ test("Fusion is picked like any model, its options then under it", function()
 	expect(app:error()).to_be(nil)
 end)
 
--- Moving between tabs (opened out) keeps the panel as it is: the same
+-- Moving between the full layout's tabs keeps the panel as it is: the same
 -- panel, the same size every frame, only its list changing. (The list's
 -- window took each tab's height, easing to it: on Wayland a popup that
 -- changes size is a new `xdg_popup`, and the compositor faded each one in
@@ -156,9 +179,10 @@ test("moving between tabs keeps the panel's size, its list changing in place", f
 	local app = mount("picker_fixture.luau")
 	app:resize(600, 700)
 	settle(app)
+	app:set_state("ds/model_picker.luau::model_picker_compact", false)
+	-- (On a chat: the tabs only browse.)
+	app:set_state("test_picker_committed", true)
 	app:click('role:button "Model"')
-	settle(app)
-	app:click(".folded")
 	settle(app)
 	-- The panel: its node and its box, as the tree has it.
 	local function panel(): (string?, string?)
@@ -172,8 +196,8 @@ test("moving between tabs keeps the panel's size, its list changing in place", f
 	end
 	local id, size = panel()
 	expect(id).never.to_be_nil()
-	-- The reasoning (its title and its slider), once.
-	local reasoning = app:count('"REASONING"')
+	-- The reasoning's slider, once.
+	local reasoning = app:count('"Reasoning"')
 	-- Claude's two models, Codex's two, the starred (none), Devin's two:
 	-- frame by frame through each switch, the same panel at the same size.
 	for _, tab in { "Codex", "Starred", "Devin", "Claude" } do
@@ -182,7 +206,7 @@ test("moving between tabs keeps the panel's size, its list changing in place", f
 			app:frames(1)
 			local now_id, now_size = panel()
 			expect(`{tab}: @{now_id} {now_size}`).to_be(`{tab}: @{id} {size}`)
-			expect(app:count('"REASONING"')).to_be(reasoning)
+			expect(app:count('"Reasoning"')).to_be(reasoning)
 		end
 	end
 	-- Its list is the tab's: Claude's models again.
@@ -197,9 +221,10 @@ test("moving between tabs keeps the panel's size, its list changing in place", f
 	end
 	expect(app:has('role:option ~"Sonnet"')).to_be(false)
 	expect(app:error()).to_be(nil)
+	app:set_state("ds/model_picker.luau::model_picker_compact", true)
 end)
 
-test("with no model chosen, the picker opens out rather than folding onto nothing", function()
+test("a model the catalog no longer lists says so, and picking it does nothing", function()
 	local app = mount("picker_fixture.luau")
 	app:resize(900, 700)
 	settle(app)
@@ -207,14 +232,72 @@ test("with no model chosen, the picker opens out rather than folding onto nothin
 	settle(app)
 	app:click('role:button "Model"')
 	settle(app)
-	-- Rows showing, not an empty panel: folded with nothing chosen, every row is out
-	-- of sight.
-	local rows = 0
-	for line in app:tree():gmatch("[^\n]+") do
-		if line:find(" option ", 1, true) and not line:find(" hidden", 1, true) then
-			rows += 1
-		end
-	end
-	expect(rows > 0).to_be(true)
+	expect(app:has('#model-picker-title >> ~"gone-from-the-catalog"')).to_be(true)
+	-- Rows showing, its own among them in the full layout's tab.
+	app:set_state("test_picker_model", "claude/gone")
+	app:set_state("ds/model_picker.luau::model_picker_compact", false)
+	settle(app)
+	expect(app:has('role:option "gone"')).to_be(true)
+	app:click('role:option "gone"')
+	settle(app)
+	expect(app:state("test_picker_model")).to_be("claude/gone")
+	expect(app:has('role:option "Sonnet"')).to_be(true)
 	expect(app:error()).to_be_nil()
+	app:set_state("ds/model_picker.luau::model_picker_compact", true)
+end)
+
+-- The full layout's rows and tabs say how the catalog stands: a model new to
+-- it wears NEW, an agent still listing holds its rows' shapes (no "No models"),
+-- one that failed says why with Retry, which asks again.
+test("a new model wears NEW; a listing agent holds its rows, a failed one says why and retries", function()
+	local app = mount("picker_fixture.luau")
+	app:set_state("test_picker_more", true)
+	app:set_state("test_picker_committed", true)
+	app:set_state("ds/model_picker.luau::model_picker_compact", false)
+	app:resize(700, 760)
+	settle(app)
+	app:click('role:button "Model"')
+	settle(app)
+	app:click('role:tab "Codex"')
+	settle(app)
+	expect(line_of(app, 'option "Sol NEW"')).never.to_be_nil()
+	expect(line_of(app, 'option "GPT')).never.to_be_nil()
+	app:click('role:tab "Pi"')
+	settle(app)
+	expect(line_of(app, '"No models"')).to_be_nil()
+	expect(line_of(app, " option ")).to_be_nil()
+	app:click('role:tab "Fx"')
+	settle(app)
+	expect(line_of(app, '"Not signed in to Fx"')).never.to_be_nil()
+	app:click('role:button "Retry"')
+	settle(app)
+	expect(app:state("test_picker_retried")).to_be(1)
+	expect(app:error()).to_be(nil)
+end)
+
+-- A new chat with stars opens the full layout on them, its rows hinted ⌘1…;
+-- the compact list has no hints, and two rows of one name tell themselves
+-- apart by the description.
+test("a new chat's full list opens on its stars with ⌘ hints; same-named rows say which", function()
+	local app = mount("picker_fixture.luau")
+	app:set_state("test_picker_more", true)
+	app:set_state("test_picker_favorites", { gpt = true })
+	app:set_state("ds/model_picker.luau::model_picker_compact", false)
+	app:resize(700, 760)
+	settle(app)
+	app:click('role:button "Model"')
+	settle(app)
+	expect(line_of(app, 'option "GPT ⌘1"')).never.to_be_nil()
+	expect(line_of(app, 'option "Sonnet')).to_be_nil()
+	app:key("Escape")
+	settle(app)
+	app:set_state("ds/model_picker.luau::model_picker_compact", true)
+	app:click('role:button "Model"')
+	settle(app)
+	app:click("#model-picker-title")
+	settle(app)
+	expect(line_of(app, "⌘")).to_be_nil()
+	expect(line_of(app, 'option "Auto Codex picks"')).never.to_be_nil()
+	expect(line_of(app, 'option "Auto"')).never.to_be_nil()
+	expect(line_of(app, 'option "Mini the anthropic route"')).to_be_nil()
 end)

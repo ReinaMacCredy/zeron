@@ -12,6 +12,7 @@ local ds = require("@ds")
 local T = require("@ds/transcript")
 local lanes = require("@app/screens/chat/lanes")
 local store = require("@app/screens/chat/store")
+local model_switch = require("@app/screens/chat/model_switch")
 local prefs = require("@app/screens/settings/prefs")
 local locale = require("@ds/locale")
 local sessions = require("@account/sessions")
@@ -198,6 +199,8 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 	-- tabs and a reload.)
 	local model = ui.state(`chat_lane_model_{chat}`, nil :: string?)
 	local effort = ui.state(`chat_lane_effort_{chat}`, nil :: string?)
+	local fast = ui.state(`chat_lane_fast_{chat}`, false)
+	local options = ui.state(`chat_lane_options_{chat}`, {} :: { [string]: string })
 	local access = ui.state(`chat_lane_access_{chat}`, nil :: string?)
 	local project = ui.state(`chat_lane_project_{chat}`, nil :: string?)
 	local device = ui.state(`chat_lane_device_{chat}`, nil :: string?)
@@ -278,10 +281,97 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 			access:set(acc)
 		end
 		now.access = acc
-		if now.model ~= was.model or now.effort ~= was.effort or now.access ~= was.access then
+		-- What's kept of a chat that runs: its level, Fast and options, as they
+		-- stand there.
+		local s: any = session:get()
+		if s then
+			local resolved = Shared.resolve_model(s, store.catalog:get())
+			if resolved.effort and (first or effort:peek() == was.effort or effort:peek() == nil) and effort:peek() ~= resolved.effort then
+				effort:set(resolved.effort)
+			end
+			now.effort = resolved.effort or now.effort
+			if (first or fast:peek() == was.fast) and fast:peek() ~= (s.fast == true) then
+				fast:set(s.fast == true)
+			end
+			now.fast = s.fast == true
+			local given = s.options or {}
+			if (first or Shared.same_pick(options:peek(), was.options)) and not Shared.same_pick(options:peek(), given) then
+				options:set(given)
+			end
+			now.options = given
+		end
+		if now.model ~= was.model or now.effort ~= was.effort or now.access ~= was.access or now.fast ~= was.fast or not Shared.same_pick(now.options, was.options) then
 			seeded:set(now)
 		end
 	end)
+	-- A pick on a chat that runs lands on it at once, as the chat page's does
+	-- (a side chat's first message still carries its own).
+	local landing: model_switch.Ask? = nil
+	ui.effect(function()
+		local picked: { [string]: any } = { model = model:get(), effort = effort:get(), fast = fast:get(), options = options:get() }
+		local s: any = session:peek()
+		if unsent() or not s or s.state ~= "ready" then
+			return
+		end
+		local was = seeded:peek()
+		local patch: { [string]: any } = {}
+		local any_change = false
+		for k, v in picked do
+			if v ~= nil and not Shared.same_pick(v, was[k]) and not Shared.same_pick(v, s[k]) then
+				patch[k] = v
+				any_change = true
+			end
+		end
+		if not any_change then
+			return
+		end
+		if patch.model then
+			for _, m in store.catalog:peek().models do
+				if m.value == patch.model then
+					patch.harness = m.harness
+				end
+			end
+		end
+		if landing then
+			patch.note = landing.note
+			patch.note_hint = landing.note_hint
+			landing = nil
+		end
+		store.configure(chat, patch)
+		local now = table.clone(was)
+		for k, v in picked do
+			now[k] = v
+		end
+		seeded:set(now)
+	end)
+	local close_picker = ui.state(`chat_lane_model_close_{chat}`, 0)
+	local open_picker = ui.state(`chat_lane_model_open_{chat}`, 0)
+	local take_model, switch_dialog = model_switch.use(chat, {
+		current = function(): string?
+			return model:peek()
+		end,
+		history = function(): boolean?
+			if unsent() or session:peek() == nil then
+				return nil
+			end
+			return model_switch.has_history(view.messages:peek(), running:peek())
+		end,
+		land = function(value: string, ask: model_switch.Ask?)
+			landing = ask
+			model:set(value)
+			close_picker:set(close_picker:peek() + 1)
+			-- (The keys back to the draft, once the dialog and its modal have gone.)
+			ui.after(350, function()
+				local el = field:peek()
+				if el then
+					el:focus()
+				end
+			end)
+		end,
+		back = function()
+			open_picker:set(open_picker:peek() + 1)
+		end,
+	})
 	-- Before its first message: where it works starts where its parent
 	-- does (once, as the parent is known).
 	ui.effect(function()
@@ -369,7 +459,7 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 	-- What a message goes with: the pick, its agent, the effort, the access.
 	local function picks(): { [string]: any }
 		local m = model:peek()
-		local out: { [string]: any } = { model = m, effort = effort:peek(), access = access:peek() }
+		local out: { [string]: any } = { model = m, effort = effort:peek(), fast = fast:peek(), options = options:peek(), access = access:peek() }
 		for _, c in store.catalog:peek().models do
 			if c.value == m then
 				out.harness = c.harness
@@ -446,7 +536,7 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 		ui.text { ui.t("chat.composer.expired"), grow = 1, wrap = true, text_size = "$font.size.sm", color = "$text.tertiary" },
 	}
 	local cargo_props = Shared.cargo_props(chat)
-	return ui.show(expired, expired_line, ds.Composer {
+	return ui.column { w_full = true, switch_dialog, ui.show(expired, expired_line, ds.Composer {
 		field = field,
 		value = draft,
 		snap = if split then snap else nil,
@@ -465,13 +555,30 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 		access = access,
 		model = model,
 		effort = effort,
+		fast = fast,
+		options = options,
+		model_take = take_model,
+		model_committed = function(): boolean
+			return not unsent() and session:get() ~= nil
+		end,
+		model_looking = function(): boolean
+			return store.catalog:get().state ~= "ready"
+		end,
+		model_retry = store.load_catalog,
+		model_close = close_picker,
+		open_model = open_picker,
+		context_tokens = function(): number?
+			local s: any = session:get()
+			return if s then s.context_tokens else nil
+		end,
 		notice = shown_notice,
 		on_dismiss_notice = function()
 			notice:set(nil)
 			Shared.refuse_in(chat, nil)
 		end,
 		harnesses = function(): { any }
-			return store.catalog:get().harnesses
+			local c: any = store.catalog:get()
+			return c.tabs or c.harnesses
 		end,
 		models = function(): { any }
 			return store.catalog:get().models
@@ -658,7 +765,7 @@ local function composer(chat: string, view: any, name: string, split: boolean?, 
 			}
 			else nil,
 		tray = if split then tray else nil,
-	})
+	}) }
 end
 
 -- A fork's tab while the engine copies it, or once it couldn't: the

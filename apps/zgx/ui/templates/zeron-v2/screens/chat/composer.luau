@@ -20,6 +20,7 @@ local motion = require("@ds/motion")
 local T = require("@ds/transcript")
 local prefs = require("@app/screens/settings/prefs")
 local store = require("@app/screens/chat/store")
+local model_switch = require("@app/screens/chat/model_switch")
 local route = require("@app/screens/shell/route")
 local cloud = require("@account/cloud")
 local shared = require("@app/screens/chat/shared")
@@ -88,9 +89,9 @@ local defaults = ui.persist("chat_new_defaults", {
 })
 
 local FIELDS = { "model", "effort", "fast", "options", "access", "plan" }
--- Those a session takes only with a message sent (shared.picks keeps them
--- meanwhile); the rest change it as they're picked.
-local DRAFTED: { [string]: boolean } = { model = true, effort = true, fast = true, options = true }
+-- Past ds/dialog's leaving and its modal's going (which gives the keys back
+-- to what had them), the draft takes them.
+local DIALOG_OUT = 350
 -- Whether two choices are the same: the options' picks (tables) by their
 -- entries, none and an empty table alike; the rest by value.
 local function equal(a: any, b: any): boolean
@@ -170,6 +171,8 @@ local function Composer(): Node
 	local locals: { [string]: State<any> } =
 		{ model = model, effort = effort, fast = fast, options = options, access = access, plan = plan }
 
+	-- A pick answered yes in the switch dialog: its words for the divider.
+	local landing: model_switch.Ask? = nil
 	-- In: what the session says (or the defaults, arriving on a new chat).
 	-- `applied`: what the choices were set to from the session, so only a
 	-- choice made here goes out to it (a session whose config isn't known,
@@ -198,12 +201,11 @@ local function Composer(): Node
 					project:set(route.current:peek().project)
 				end
 			elseif s then
-				-- (Its own pick, unsent, over what the session runs with.)
-				local pick = shared.picks:peek()[id] or {}
+				local resolved = shared.resolve_model(s, store.catalog:get())
 				for _, k in FIELDS do
 					local v = (s :: any)[k]
-					if DRAFTED[k] and pick[k] ~= nil then
-						v = pick[k]
+					if k == "model" or k == "effort" then
+						v = resolved[k]
 					end
 					if v ~= nil and not equal(locals[k]:peek(), v) then
 						locals[k]:set(v)
@@ -290,39 +292,10 @@ local function Composer(): Node
 		if not s or s.id ~= id or s.state ~= "ready" then
 			return
 		end
-		-- The agent, model and effort: kept as this chat's pick (nothing of
-		-- the session changes until a message goes with them); the pick gone
-		-- once it is what the session runs with again.
-		local pick: { [string]: any } = {}
-		local picking = false
-		for k in DRAFTED do
-			local v = picked[k]
-			local own = (s :: any)[k]
-			-- (Fast off is what a session with none set runs with.)
-			if v ~= nil and not equal(own, v) and not (v == false and own == nil) then
-				pick[k] = v
-				picking = true
-			end
-		end
-		local all = shared.picks:peek()
-		local was_pick = all[id]
-		local same = (was_pick == nil) == not picking
-		if same and was_pick then
-			for k in DRAFTED do
-				if not equal(was_pick[k], pick[k]) then
-					same = false
-				end
-			end
-		end
-		if not same then
-			local next = table.clone(all)
-			next[id] = if picking then pick else nil
-			shared.picks:set(next)
-		end
 		local patch: { [string]: any } = {}
 		local any_change = false
 		for k, v in picked do
-			if not DRAFTED[k] and v ~= nil and applied[k] ~= v and (s :: any)[k] ~= v then
+			if v ~= nil and not equal(applied[k], v) and not equal((s :: any)[k], v) then
 				patch[k] = v
 				applied[k] = v
 				any_change = true
@@ -336,6 +309,12 @@ local function Composer(): Node
 						patch.harness = m.harness
 					end
 				end
+			end
+			-- The switch's divider, when it was asked.
+			if landing then
+				patch.note = landing.note
+				patch.note_hint = landing.note_hint
+				landing = nil
 			end
 			store.configure(id, patch)
 		end
@@ -694,24 +673,19 @@ local function Composer(): Node
 			-- reply's room under it (ds/transcript's send); the engine's copy
 			-- arrives as the same row.
 			-- (While a turn runs it's queued instead: it shows in the queue.)
-			-- The chat's unsent pick goes with it (the run takes that agent,
-			-- model and effort, and the session with them); queued, it waits
-			-- for the turn it will run in.
-			local pick = shared.picks:peek()[id]
 			local req: { [string]: any } = { session = id, text = text_out, attachments = attachments, appshots = parts.appshots, restores = true }
 			pcall(ui.invoke, "chat.prediction_consume", { id = id })
 			if running:peek() and (prefs.follow_up:peek() == "steer") ~= (opts ~= nil and opts.inverted == true) then
 				req.steer_now = true
 			end
-			if pick and not running:peek() then
-				for k, v in pick do
-					req[k] = v
-				end
-				if pick.model then
-					for _, m in store.catalog:peek().models do
-						if m.value == pick.model then
-							req.harness = m.harness
-						end
+			-- A chat with no model of its own runs the one its chip shows.
+			local opened = open()
+			if opened and (opened :: any).model == nil and not running:peek() then
+				req.model = model:peek()
+				req.effort = effort:peek()
+				for _, m in store.catalog:peek().models do
+					if m.value == req.model then
+						req.harness = m.harness
 					end
 				end
 			end
@@ -721,14 +695,6 @@ local function Composer(): Node
 				store.send(req :: any):after(function(got: any)
 					if queued_row then
 						asks.queue_added(queued_row, got)
-					end
-					-- Sent with it: the session has it now; no pick left.
-					if req.model or req.effort or req.fast ~= nil or req.options then
-						local all = table.clone(shared.picks:peek())
-						if all[id] == pick then
-							all[id] = nil
-							shared.picks:set(all)
-						end
 					end
 				end, function(e: any)
 					if queued_row then
@@ -984,6 +950,32 @@ local function Composer(): Node
 	local cargo_props = shared.cargo_props(nil, function()
 		shared.dropping:set({})
 	end)
+	-- A pick on a chat with history asks first; answered yes, it lands on the
+	-- chat with its divider.
+	local close_picker = ui.state("chat_model_close", 0)
+	local take_model, switch_dialog = model_switch.use("page", {
+		current = function(): string?
+			return model:peek()
+		end,
+		history = function(): boolean?
+			if session_id:peek() == nil then
+				return nil
+			end
+			return model_switch.has_history(store.messages:peek(), running:peek())
+		end,
+		land = function(value: string, ask: model_switch.Ask?)
+			landing = ask
+			model:set(value)
+			close_picker:set(close_picker:peek() + 1)
+			-- (The keys back to the draft, once the dialog has gone.)
+			ui.after(DIALOG_OUT, function()
+				shared.focus:add(1)
+			end)
+		end,
+		back = function()
+			shared.open_model:set(shared.open_model:peek() + 1)
+		end,
+	})
 	local function composer(): Node
 		return ds.Composer {
 			-- Its measures, fold and open tray kept across a reload, so it
@@ -992,6 +984,19 @@ local function Composer(): Node
 			toolbar_id = "composer-toolbar",
 			open_model = shared.open_model,
 			model_open = model_open,
+			model_committed = function(): boolean
+				return session_id:get() ~= nil
+			end,
+			model_take = take_model,
+			model_looking = function(): boolean
+				return store.catalog:get().state ~= "ready"
+			end,
+			model_retry = store.load_catalog,
+			model_close = close_picker,
+			context_tokens = function(): number?
+				local s = open()
+				return if s then (s :: any).context_tokens else nil
+			end,
 			tray = TRAY,
 			value = shared.text,
 			placeholder = ui.computed(function(): string
@@ -1105,7 +1110,8 @@ local function Composer(): Node
 			options = options,
 			-- The catalog, followed in place as it comes and changes.
 			harnesses = function(): { ds.Harness }
-				return store.catalog:get().harnesses
+				local c: any = store.catalog:get()
+				return c.tabs or c.harnesses
 			end,
 			models = function(): { ds.Model }
 				return store.catalog:get().models
@@ -1513,6 +1519,7 @@ local function Composer(): Node
 		-- (shell.rs `attachment_drop_overlay`: the scrim, the words in the
 		-- text's ink, at once and gone at once; no accent).
 		DropOverlay { shown = shared.carrying, id = "chat-drop" },
+		switch_dialog,
 		-- (A sidebar session carried: dropped, a mention; production's words.)
 		DropOverlay { shown = shared.carrying_session, id = "chat-drop-mention", label = ui.t("chat.composer.drop_to_mention") :: any },
 	}

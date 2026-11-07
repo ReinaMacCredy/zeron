@@ -281,6 +281,15 @@ export type Props = {
 	open_model: State<number>?,
 	-- Set to whether the model picker is open.
 	model_open: State<boolean>?,
+	-- ds.ModelPicker's: whether the chat has its agent, a pick to ask about
+	-- first, whether the catalog is still coming; what the chat holds of its
+	-- context.
+	model_committed: (() -> boolean)?,
+	model_take: ((value: string) -> boolean)?,
+	model_looking: (() -> boolean)?,
+	model_retry: (() -> ())?,
+	model_close: State<number>?,
+	context_tokens: (() -> number?)?,
 	-- Which of `@`, `/`, `$` open their list (an agent's completion
 	-- settings), and what an empty list says, by trigger.
 	mention_enabled: ((trigger: string) -> boolean)?,
@@ -1467,6 +1476,21 @@ return ui.component(function(props: Props): Node
 		return math.max(CONTROL, math.min(MODEL_SHARE * width, room))
 	end)
 
+	-- Closed, the keys go back to the draft, as Zeron's picker gives them back.
+	local picker_open = props.model_open or ui.use_state(false)
+	local picker_was = picker_open:peek()
+	ui.effect(function()
+		local now = picker_open:get()
+		if picker_was and not now then
+			ui.after(0, function()
+				local el = field:peek()
+				if el then
+					el:focus()
+				end
+			end)
+		end
+		picker_was = now
+	end)
 	local model = ui.presence(side, function(at: string): Node
 		return ModelPicker {
 			model = props.model,
@@ -1480,7 +1504,13 @@ return ui.component(function(props: Props): Node
 			on_accounts_open = props.on_accounts_open,
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
-			showing = props.model_open,
+			close_with = props.model_close,
+			showing = picker_open,
+			committed = props.model_committed,
+			take = props.model_take,
+			looking = props.model_looking,
+			on_retry = props.model_retry,
+			context_tokens = props.context_tokens,
 			tone = "model",
 		}
 	end, { min_w = 0, shrink = 1 })

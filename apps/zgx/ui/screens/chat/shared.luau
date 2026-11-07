@@ -27,11 +27,51 @@ M.text = ui.shared("chat.composer.text", "")
 M.cargo = ui.shared("chat.composer.cargo", {} :: { any })
 M.quotes = ui.shared("chat.composer.quotes", {} :: { [string]: string })
 M.chosen = ui.shared("chat.composer.chosen", {} :: { [string]: boolean })
--- Each session's agent, model, effort and Fast picked in its composer but
--- not yet sent with (`model`, `effort`, `fast`), by session id: part of its
--- draft, as the text is. The session takes them only when a message goes
--- with them.
-M.picks = ui.shared("chat.composer.picks", {} :: { [string]: { [string]: any } })
+-- Whether two of a chat's picks are the same: tables by their entries, none
+-- and off alike.
+function M.same_pick(a: any, b: any): boolean
+	if type(a) == "table" or type(b) == "table" then
+		local x: { [string]: any } = if type(a) == "table" then a else {}
+		local y: { [string]: any } = if type(b) == "table" then b else {}
+		for k, v in x do
+			if y[k] ~= v then
+				return false
+			end
+		end
+		for k, v in y do
+			if x[k] ~= v then
+				return false
+			end
+		end
+		return true
+	end
+	return (a or false) == (b or false)
+end
+
+-- What a chat runs, as its chip shows it: its model, or with none of its own
+-- the first its agent lists (gpui's `default_model`); its level, kept to what
+-- the model offers, else the one it starts on.
+function M.resolve_model(s: any, catalog: any): { model: string?, effort: string? }
+	local value: string? = s.model
+	local found: any = nil
+	for _, m in catalog.models do
+		if (value and m.value == value) or (not value and m.harness == s.harness) then
+			found = m
+			break
+		end
+	end
+	local effort: string? = s.effort
+	if found and found.efforts and #found.efforts > 0 then
+		local has = false
+		for _, l in found.efforts do
+			has = has or l.value == effort
+		end
+		if not has then
+			effort = found.effort or found.efforts[1].value
+		end
+	end
+	return { model = value or (if found then found.value else nil), effort = effort }
+end
 -- (Past the end, as ds/transcript's PAST_END: never `math.huge`, which a
 -- measured list takes as its top.)
 M.offset = ui.shared("chat.transcript.offset", 1e9)

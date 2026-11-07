@@ -166,7 +166,19 @@
 					"done": "{palette.emerald.500}", "failed": "{palette.red.500}", "limited": "{palette.orange.500}"
 				}
 			},
-			"slider": { "tint": 0.3, "ring": 0.45 },
+			"slider": {
+				"tint": 0.3,
+				"ring": 0.45,
+				"rail_top": "#00000013",
+				"rail_foot": "#0000000a",
+				"rail_edge": "#00000014",
+				"rail_inset": "0 1 2 0 #00000014",
+				"rail_drop": "0 0 0 0 #00000000",
+				"thumb_edge": "#0000001c",
+				"thumb_drop": "0 1 2 0 #00000024",
+				"stop_on": "#1b1b1d59",
+				"stop_off": "#1b1b1d47"
+			},
 			// Files carried over a chat: the whole chat dimmed under "Drop to
 			// attach" (Zeron's scrim at two thirds: 0.4 black dark, its light
 			// counterpart light).

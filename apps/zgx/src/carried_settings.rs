@@ -4,7 +4,7 @@
 //! changed here stays, and a value once carried is its own from then on.
 //!
 //! The look comes the same way: the card, frame, chat art and its picture, and
-//! the Live state column's fold, each of the frame and the art as a set: one you've touched here isn't
+//! the Live state column's fold and the model picker's layout, each of the frame and the art as a set: one you've touched here isn't
 //! paired with the other app's rest. New project's pinned folders come with it. Pinned chats and sections
 //! aren't here: the engine keeps them, for either app.
 
@@ -19,6 +19,7 @@ const LOOK: &str = "screens%2Fshell%2Fappearance.luau%3A%3Ashell_";
 const SIDECAR_COLLAPSED: &str = "screens%2Fsidecar.luau%3A%3Asidecar_collapsed.json";
 const INSET: &str = "ds%2Flook.luau%3A%3Ainset_card.json";
 const THEME_COLORS: &str = "ds%2Flook.luau%3A%3Awallpaper_theme_colors.json";
+const MODEL_PICKER_COMPACT: &str = "ds%2Fmodel_picker.luau%3A%3Amodel_picker_compact.json";
 
 fn look(name: &str) -> String {
     format!("{LOOK}{name}.json")
@@ -105,6 +106,9 @@ fn carried(settings: &Json) -> Vec<(String, Json)> {
     }
     if let Some(on) = settings["wallpaperThemeColors"].as_bool() {
         out.push((THEME_COLORS.to_string(), json!(on)));
+    }
+    if let Some(on) = settings["compactModelPicker"].as_bool() {
+        out.push((MODEL_PICKER_COMPACT.to_string(), json!(on)));
     }
     for (group, from, to) in [
         ("shellFrame", "style", "frame_style"),
@@ -209,6 +213,7 @@ mod tests {
             "sidebarCollapsed": true,
             "spaceFilter": "space-1",
             "sidebarHoverEnabled": false, "sidebarShowProjectLabel": false, "sidebarWorkingShelf": true, "sidebarActiveFirst": true,
+            "compactModelPicker": false,
         });
         carry_into(dir.path(), &dir.path().join("kept"), &settings);
         assert_eq!(read(dir.path(), "organize"), json!(["device"]));
@@ -224,6 +229,7 @@ mod tests {
         assert_eq!(read(dir.path(), "active_first"), json!(true));
         assert_eq!(read(dir.path(), "project"), json!("space-1"));
         assert!(dir.path().join(format!("{VIEW}sidebar_hover.json")).exists());
+        assert_eq!(std::fs::read_to_string(dir.path().join(MODEL_PICKER_COMPACT)).unwrap(), "false");
         // What it doesn't say stays at this app's default.
         assert!(!dir.path().join(format!("{SIDEBAR}show_branch.json")).exists());
     }

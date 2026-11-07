@@ -376,7 +376,24 @@ function M.setup()
 			-- A slider's track: an inset groove; and how strongly its fill
 			-- takes the level's colour (its tint and its ring), each theme its
 			-- own.
-			slider = { track = "{surface.sunken}", tint = 0.14, ring = 0.3 },
+			slider = {
+				track = "{surface.sunken}",
+				tint = 0.14,
+				ring = 0.3,
+				rail_top = "#ffffff14",
+				rail_foot = "#ffffff0d",
+				rail_edge = "#ffffff17",
+				rail_inset = "0 1 0 0 #ffffff12",
+				rail_drop = "0 1 2 0 #00000029",
+				thumb_edge = "#0000001f",
+				thumb_drop = "0 1 2 0 #00000038",
+				thumb_light = "0 1 0 0 #ffffffcc",
+				press = "0 2 8 0 #0000001f",
+				accent_wash = "alpha({accent}, 0.16)",
+				warning_wash = "alpha({warning}, 0.18)",
+				stop_on = "#ffffff66",
+				stop_off = "#ededef47",
+			},
 			-- A segmented control's thumb.
 			segmented = { thumb = "{zeron.selected.flat.bg}" },
 			-- A switch: its track (off, and on: translucent, the glass showing

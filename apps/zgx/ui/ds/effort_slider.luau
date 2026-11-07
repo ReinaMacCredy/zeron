@@ -1,28 +1,29 @@
--- A reasoning-effort slider, after Ask's (its model picker's Reasoning bar,
--- Ask.app's kit/slider.luau): a 24-point inset groove, a fill running from
--- its start to a pill thumb, a ghost under the pointer showing where a press
--- would land, a notch at each level between the ends. Pressed, the thumb
--- is under the pointer and follows it as it drags, the level under it
--- shown; let go, the value is that level and the thumb settles on it. With
--- focus, ←/→ (and Home/End) step it.
+-- A reasoning-effort slider, Zeron's form with zgx's fill (locked with Reina,
+-- .maestro/topic/zgx-port/DECISIONS.md): a 28-point full-round rail, a glass
+-- thumb 44 by 32 that keeps its size and lifts on a softer shadow as it's
+-- pressed, a fill running to the thumb's centre plus 14 (always hidden under
+-- it), a ghost under the pointer showing where a press would land, a tick at
+-- each level between the ends. Pressed, the thumb is under the pointer and
+-- follows it as it drags, the level under it shown; let go, the value is that
+-- level and the thumb settles on it. With focus, ←/→ (and Home/End) step it.
 --
--- Its fill is ours: a field of ASCII glyphs in the intro's 5 by 7 font
--- (decode.GLYPHS, ` .-+xXS80#@`), sparse and dim at the start, denser and
--- brighter toward the thumb. Each level has its own colour and its own
--- field (how dense it gets, how much it wanders, how fast it drifts): the
--- harder it thinks, the busier the characters. A level's field mounts with
--- its look and crossfades in (a shader's parameters are given as its node
--- is made; only its ramp's end, which the track's width moves, is set on it
--- after).
+-- Its fill is a field of ASCII glyphs in the intro's 5 by 7 font
+-- (decode.GLYPHS, ` .-+xXS80#@`), sparse and dim at the start, densest at the
+-- thumb's left edge. Each level has its own colour and its own field (how
+-- dense it gets, how much it wanders, how fast it drifts): the harder it
+-- thinks, the busier the characters. A level's field mounts with its look and
+-- crossfades in (a shader's parameters are given as its node is made; only
+-- its ramp's end, which the thumb moves, is set on it after). Fast mode makes
+-- it denser and quicker, with a halo breathing under the thumb in the level's
+-- colour. It all stops with the panel it stands in, and stands still under
+-- reduced motion.
 --
--- `EffortSlider { value = effort, levels = { { value = "low", label = "Low" }, … },
--- title = "REASONING" }`. `levels` may be a function (the levels of a model
--- that changes): the slider follows them in place.
+-- `EffortSlider { value = effort, levels = { { value = "low", label = "Low" }, … } }`.
+-- `levels` may be a function (the levels of a model that changes): the slider
+-- follows them in place.
 
 local motion = require("@self/motion")
 local decode = require("@self/decode")
-local RollText = require("@self/roll_text")
-local prefers = require("@self/prefers")
 local locale = require("@self/locale")
 
 export type Level = { value: string, label: string }
@@ -30,22 +31,36 @@ export type Props = {
 	value: State<string?>,
 	levels: { Level } | () -> { Level },
 	on_change: ((value: string) -> ())?,
-	-- A header over the track: this title, the level's name under it
-	-- (rolling as it changes), and the caller's control at its right (a
-	-- toggle: Fast mode).
-	title: (string | Message)?,
-	accessory: Node?,
+	-- Fast mode on.
+	fast: (() -> boolean)?,
+	-- Set to the level a drag is over, nil at rest (a title retitling as it
+	-- drags).
+	live: State<string?>?,
+	-- Where the keys are while the panel has them (its accent ring).
+	highlighted: (() -> boolean)?,
+	-- A plain track for a choice that isn't reasoning (the context card's):
+	-- the accent's tint, no field, nothing drifting; `none`, while true, no
+	-- fill and no thumb (a value off its track).
+	plain: boolean?,
+	none: (() -> boolean)?,
 	-- What assistive technology calls it.
 	label: Label?,
 	-- `false` inside a panel that keeps the keys for itself.
 	keys: boolean?,
 }
 
--- The groove's height and the thumb's width (Ask's).
-local H, KNOB = 24, 18
+-- Its box, the rail in it, and the thumb (Zeron's compact.rs).
+local H, RAIL, THUMB_W, THUMB_H = 36, 28, 44, 32
+local RAIL_TOP = (H - RAIL) / 2
+-- How far the fill runs past the thumb's centre.
+local PAST = RAIL / 2
 
 -- How often the field redraws as it drifts.
 local FPS = 12
+-- Fast mode's field and the halo's breath (one in a little under two seconds,
+-- as Zeron's phase at full energy).
+local FAST_TO, FAST_WANDER, FAST_DRIFT = 0.12, 0.1, 2.5
+local BREATH_MS = 925
 
 -- A level's look: its colour (a zeron.effort token) and its field: how
 -- dense the glyphs get at the thumb, how far the density wanders, how fast
@@ -118,6 +133,13 @@ fn fill(input:FillInput)->vec4<f32> {
 }
 ]], { fps = FPS })
 
+-- A shadow in a token's colour at `alpha` (a shadow's fields, the colour read
+-- from the theme where it's drawn).
+local function shadow_of(token: string, y: number, blur: number, spread: number, alpha: number): any
+	local hex = string.sub(tostring(ui.theme.get(token) or "#000000"), 1, 7)
+	return ui.raw({ x = 0, y = y, blur = blur, spread = spread, color = `{hex}{string.format("%02x", math.floor(alpha * 255 + 0.5))}` }, "the level's own colour, which no token holds")
+end
+
 return ui.component(function(props: Props): Node
 	local given = props.levels
 	local function levels(): { Level }
@@ -131,11 +153,14 @@ return ui.component(function(props: Props): Node
 	local hover = ui.use_state(-1)
 	local pressed = ui.use_state(false)
 	-- The level a drag is over, until it's let go (nil: no drag): the
-	-- header, the colour and the field follow it as the thumb crosses the
-	-- levels, and the value is set once, as it's let go (setting it is the
-	-- composer's pick and the model chip's label: none of that on each
-	-- step of a drag).
+	-- colour and the field follow it as the thumb crosses the levels, and
+	-- the value is set once, as it's let go (setting it is the composer's
+	-- pick and the model chip's label: none of that on each step of a drag).
 	local live = ui.use_state(nil :: number?)
+	local plain = props.plain == true
+	local function none(): boolean
+		return props.none ~= nil and props.none()
+	end
 
 	local function index(): number
 		local dragged = live:get()
@@ -155,13 +180,15 @@ return ui.component(function(props: Props): Node
 		local l = list[i]
 		return look_of(if l then l.value else "", i, #list)
 	end
-	-- The track inside its 2-point inset.
-	local function inner(): number
-		return math.max((track.width or 200) - 4, KNOB)
+	local function fast(): boolean
+		return props.fast ~= nil and props.fast()
+	end
+	local function width(): number
+		return math.max(track.width or 200, THUMB_W)
 	end
 	-- Whether the track has been laid out (its width known).
 	local function measured(): boolean
-		return (track.width or 0) > KNOB + 4
+		return (track.width or 0) > THUMB_W
 	end
 	-- A level's fraction along the track, and the level nearest a fraction.
 	local function frac(i: number): number
@@ -172,21 +199,26 @@ return ui.component(function(props: Props): Node
 		local n = count()
 		return math.clamp(math.floor(f * (n - 1) + 0.5) + 1, 1, n)
 	end
-	-- Where the thumb centres at fraction `f` (the lowest at the far left,
-	-- the highest at the far right); the fill and the ghost run to it.
+	-- Where the thumb centres at fraction `f`: the stops and the pointer share
+	-- the thumb's half width as their inset.
 	local function spot(f: number): number
-		return 2 + KNOB / 2 + math.floor(f * (inner() - KNOB) + 0.5)
+		return THUMB_W / 2 + math.floor(f * (width() - THUMB_W) + 0.5)
 	end
-	local function edge(f: number): number
-		return spot(f) - 2
+	-- The fill's end, and the field's ramp's (the thumb's left edge: so the
+	-- densest glyphs show).
+	local function fill_end(x: number): number
+		return math.min(width(), x + PAST)
+	end
+	local function ramp_end(x: number): number
+		return math.max(1, x - THUMB_W / 2)
 	end
 	-- The level's fraction under a pointer event.
 	local function at(e: any): number
-		local span = inner() - KNOB
+		local span = width() - THUMB_W
 		if span <= 0 then
 			return 0
 		end
-		return frac(nearest(math.clamp(((e.local_x or 0) - 2 - KNOB / 2) / span, 0, 1)))
+		return frac(nearest(math.clamp(((e.local_x or 0) - THUMB_W / 2) / span, 0, 1)))
 	end
 	-- Each level it lands on, a tap under the trackpad, as the shipping
 	-- app's detents (src/haptics.rs; nothing where the host has none).
@@ -207,16 +239,8 @@ return ui.component(function(props: Props): Node
 			tap()
 		end
 	end
-	local function grown(): boolean
-		return hover:get() >= 0 or pressed:get()
-	end
-	local function grow(a: number, b: number): any
-		return ui.tween(ui.computed(function(): number
-			return if grown() then b else a
-		end), { duration = 160 })
-	end
 
-	-- Where the thumb centres, as drawn (the fill runs to it): held, under
+	-- Where the thumb centres, as drawn (the fill runs from it): held, under
 	-- the pointer, set the moment the pointer moves (the frame it moves,
 	-- nothing easing after it); let go, it settles on its level, and a
 	-- level changed otherwise (the keys, another model) eases it there.
@@ -251,8 +275,14 @@ return ui.component(function(props: Props): Node
 		return math.clamp(e.local_x or 0, spot(0), spot(1))
 	end
 	local function level_at(x: number): number
-		local span = inner() - KNOB
+		local span = width() - THUMB_W
 		return nearest(if span > 0 then (x - spot(0)) / span else 0)
+	end
+	local function say_live(i: number?)
+		if props.live then
+			local l = if i then levels()[i] else nil
+			props.live:set(if l then l.value else nil)
+		end
 	end
 	-- Held: the thumb where the pointer is, the level under it live.
 	local function follow(e: any)
@@ -261,6 +291,7 @@ return ui.component(function(props: Props): Node
 		local i = level_at(x)
 		if i ~= index() then
 			live:set(i)
+			say_live(i)
 			tap()
 		end
 	end
@@ -270,64 +301,111 @@ return ui.component(function(props: Props): Node
 		ui.batch(function()
 			pressed:set(false)
 			live:set(nil)
+			say_live(nil)
 			if i then
 				set(i, true)
 			end
 		end)
 	end
 
-	-- Each look's field, mounted with it and crossfading in, once the track
-	-- has a width. Its ramp ends at the thumb: set on it as the thumb moves
-	-- (a level of the same look, or a new width, keeps the field).
-	local field = ui.presence(function(): string?
+	-- Each look's fill, mounted with it and crossfading in over the last, once
+	-- the track has a width: its tint, its field, its ring. The field's ramp
+	-- ends at the thumb's left edge: set on it as the thumb moves (a level of
+	-- the same look, or a new width, keeps the field).
+	local fill = ui.presence(function(): string?
 		if not measured() then
 			return nil
 		end
-		return look(index()).token
-	end, function(): Node
+		if plain then
+			return "plain"
+		end
+		return look(index()).token .. (if fast() then "+" else "")
+	end, function(key: string): Node
 		local l = look(index())
+		local quick = string.sub(key, -1) == "+"
 		local el = ui.ref()
 		ui.effect(function()
-			local at = pos:get() - 2
+			local ramp = ramp_end(pos:get())
 			local node = el:peek()
 			if node then
-				anime.utils.set(node, { shaderParam11 = at })
+				anime.utils.set(node, { shaderParam11 = ramp })
 			end
 		end)
+		local paint = if plain then "$accent" else ink(l)
+		local to = if quick then math.min(1, l.to + FAST_TO) else l.to
+		local wander = if quick then l.wander + FAST_WANDER else l.wander
+		local drift = if quick then l.drift * FAST_DRIFT else l.drift
 		return ui.div {
-			ref = el,
-			w = inner,
-			h = H - 4,
-			bg_shader = FIELD,
-			-- 5 by 7 point characters, the ramp ending at the thumb.
-			-- (A token: the shader's colour follows the theme.)
-			shader_params = { ink(l), { 1, 0.04, l.to, 1.4 }, { l.wander, l.drift, 3, pos:peek() - 2 }, { 0, 0, 0, 0 } },
-			on_mount = function(node)
-				anime.utils.set(node, { shaderParam11 = pos:peek() - 2 })
-				-- Drifting, unless motion is reduced.
-				if not motion.reduced_now() then
-					anime.animate(node, {
-						shaderTime = { 0, 600 },
-						duration = 600000,
-						loop = true,
-						ease = "linear",
-						frameRate = FPS,
-					})
-				end
-			end,
+			absolute = true,
+			left = 0,
+			top = 0,
+			right = 0,
+			bottom = 0,
+			pointer_events = "none",
+			-- The level's tint.
+			ui.div {
+				absolute = true,
+				left = 0,
+				top = 0,
+				right = 0,
+				bottom = 0,
+				opacity = "$zeron.slider.tint",
+				bg = paint,
+			},
+			if plain
+				then nil
+				else ui.div {
+					ref = el,
+					absolute = true,
+					left = 0,
+					top = 0,
+					w = width,
+					h = RAIL,
+					bg_shader = FIELD,
+					-- 5 by 7 point characters in three rows, the ramp ending at
+					-- the thumb. (A token: the shader's colour follows the theme.)
+					shader_params = { paint, { 1, 0.04, to, 1.4 }, { wander, drift, 3, ramp_end(pos:peek()) }, { 0, 0, 0, 0 } },
+					on_mount = function(node)
+						anime.utils.set(node, { shaderParam11 = ramp_end(pos:peek()) })
+						-- Drifting, unless motion is reduced.
+						if not motion.reduced_now() then
+							anime.animate(node, {
+								shaderTime = { 0, 600 },
+								duration = 600000,
+								loop = true,
+								ease = "linear",
+								frameRate = FPS,
+							})
+						end
+					end,
+				},
+			-- Its ring.
+			ui.div {
+				absolute = true,
+				left = 0,
+				top = 0,
+				right = 0,
+				bottom = 0,
+				rounded = "$radius.full",
+				border = 1,
+				opacity = "$zeron.slider.ring",
+				pointer_events = "none",
+				border_color = paint,
+			},
 		}
 	end, {
 		absolute = true,
 		left = 0,
 		top = 0,
-		w = inner,
-		h = H - 4,
+		right = 0,
+		bottom = 0,
 		enter = { opacity = { 0, 1 }, duration = 220 },
 		exit = { opacity = 0, duration = 220 },
 	})
 
-	-- A notch at each level between the ends, each its place's.
-	local notches = ui.each(
+	-- A tick at each level between the ends, each its place's, lit once the
+	-- front has passed it.
+	local ticks = ui.each(
 		ui.computed(function(): { number }
 			local out: { number } = {}
 			for k = 2, count() - 1 do
@@ -342,8 +420,10 @@ return ui.component(function(props: Props): Node
 				w = 2,
 				h = 6,
 				rounded = "$radius.full",
-				bg = "$border.strong",
 				pointer_events = "none",
+				bg = function()
+					return if not none() and pos:get() >= spot(frac(k)) - 0.5 then "$zeron.slider.stop_on" else "$zeron.slider.stop_off"
+				end,
 				left = function()
 					return spot(frac(k)) - 1
 				end,
@@ -356,19 +436,68 @@ return ui.component(function(props: Props): Node
 		}
 	)
 
+	-- What sits with the thumb, each sized as it is and at its place: a layer
+	-- whose shadow fades in (a shadow can't be eased, its opacity can).
+	local function thumb_layer(p: { [any]: any }): Node
+		p.absolute = true
+		p.left = 0
+		p.top = 0
+		p.w = THUMB_W
+		p.h = THUMB_H
+		p.rounded = "$radius.full"
+		p.pointer_events = "none"
+		return ui.div(p)
+	end
+	-- Fast mode's halo: the level's colour, breathing under the thumb.
+	local function halo(): Node
+		return ui.presence(function(): string?
+			if plain or not fast() then
+				return nil
+			end
+			return look(index()).token
+		end, function(token: string): Node
+			return thumb_layer {
+				class = "effort-halo",
+				shadow = function()
+					return shadow_of(`zeron.effort.{token}`, 1, 10, 0, 0.35)
+				end,
+				on_mount = function(node)
+					if motion.reduced_now() then
+						anime.utils.set(node, { opacity = 0.775 })
+					else
+						anime.animate(node, {
+							opacity = { 0.55, 1 },
+							duration = BREATH_MS,
+							loop = true,
+							alternate = true,
+							ease = "inOutSine",
+							frameRate = FPS,
+						})
+					end
+				end,
+			}
+		end, {
+			absolute = true,
+			left = 0,
+			top = 0,
+			w = THUMB_W,
+			h = THUMB_H,
+			enter = { opacity = { 0, 1 }, duration = 240, ease = "out(3)" },
+			exit = { opacity = 0, duration = 240, ease = "out(3)" },
+		})
+	end
+
 	local keys = props.keys ~= false
-	local groove = ui.div {
+	return ui.div {
 		ref = track,
 		w_full = true,
 		h = H,
 		shrink = 0,
 		relative = true,
-		rounded = "$radius.md",
 		cursor = "pointer",
-		bg = "$zeron.slider.track",
 		-- (zgx has no slider role for a node of the script's own; ui.slider
 		-- is its native one.)
-		label = props.label or props.title or locale.t("ds.effort_slider.reasoning"),
+		label = props.label or locale.t("ds.effort_slider.reasoning"),
 		focusable = keys,
 		on_hover = function(inside: boolean)
 			if not inside then
@@ -403,19 +532,27 @@ return ui.component(function(props: Props): Node
 				return true
 			end
 			else nil,
-		-- The groove's ring.
+		-- The rail: neutral glass.
 		ui.div {
 			absolute = true,
 			left = 0,
-			top = 0,
 			right = 0,
-			bottom = 0,
-			rounded = "$radius.md",
+			top = RAIL_TOP,
+			h = RAIL,
+			rounded = "$radius.full",
+			gradient = function()
+				return {
+					angle = 180,
+					stops = { ui.theme.get("zeron.slider.rail_top"), ui.theme.get("zeron.slider.rail_foot") },
+				}
+			end,
 			border = 1,
-			border_color = "$border",
+			border_color = "$zeron.slider.rail_edge",
+			inset_shadow = "$zeron.slider.rail_inset",
+			shadow = "$zeron.slider.rail_drop",
 			pointer_events = "none",
 		},
-		-- What moves (the ghost, the fill, the notches, the thumb), mounted
+		-- What moves (the ghost, the fill, the ticks, the thumb), mounted
 		-- once the track has its width: built before it, they sprang from a
 		-- stand-in width to their place each time the slider opened.
 		ui.show(measured, ui.div {
@@ -428,12 +565,12 @@ return ui.component(function(props: Props): Node
 			-- The ghost: where a press would land.
 			ui.div {
 				absolute = true,
-				left = 2,
-				top = 2,
-				bottom = 2,
+				left = 0,
+				top = RAIL_TOP,
+				h = RAIL,
 				pointer_events = "none",
 				w = ui.tween(ui.computed(function(): number
-					return edge(math.max(hover:get(), 0))
+					return fill_end(spot(math.max(hover:get(), 0)))
 				end), { duration = 140 }),
 				opacity = ui.tween(ui.computed(function(): number
 					return if hover:get() >= 0 then 1 else 0
@@ -441,137 +578,71 @@ return ui.component(function(props: Props): Node
 				ui.div {
 					w_full = true,
 					h_full = true,
-					rounded = "$radius.sm",
+					rounded = "$radius.full",
 					opacity = 0.1,
 					bg = function()
 						local h = hover:get()
-						return ink(look(if h >= 0 then nearest(h) else index()))
+						return if plain then "$accent" else ink(look(if h >= 0 then nearest(h) else index()))
 					end,
 				},
 			},
 			-- The fill: the field over the level's tint, in its ring.
-			ui.div {
+			ui.show(function(): boolean
+				return not none()
+			end, ui.div {
+				class = "effort-fill",
 				absolute = true,
-				left = 2,
-				top = 2,
-				bottom = 2,
-				rounded = "$radius.sm",
+				left = 0,
+				top = RAIL_TOP,
+				h = RAIL,
+				rounded = "$radius.full",
 				overflow = "hidden",
 				pointer_events = "none",
 				w = function(): number
-					return pos:get() - 2
+					return fill_end(pos:get())
 				end,
-				-- The level's tint.
-				ui.div {
-					absolute = true,
-					left = 0,
-					top = 0,
-					right = 0,
-					bottom = 0,
-					opacity = "$zeron.slider.tint",
-					bg = function()
-						return ink(look(index()))
-					end,
-				},
-				field,
-				-- Its ring.
-				ui.div {
-					absolute = true,
-					left = 0,
-					top = 0,
-					right = 0,
-					bottom = 0,
-					rounded = "$radius.sm",
-					border = 1,
-					opacity = "$zeron.slider.ring",
-					pointer_events = "none",
-					border_color = function()
-						return ink(look(index()))
-					end,
-				},
-			},
-			notches,
-			-- The thumb: a handle as the primary button is drawn, in a ring of the
-			-- level's colour, on the fill's leading edge; a little larger under the
-			-- pointer (sized, not scaled, so its edges stay crisp).
-			ui.div {
+				fill,
+			}),
+			ticks,
+			-- The thumb: a handle of its own in either theme, keeping its size; a
+			-- press lifts it on a softer, wider shadow.
+			ui.show(function(): boolean
+				return not none()
+			end, ui.div {
 				-- (Named for tests: where it is drawn.)
 				class = "effort-thumb",
 				absolute = true,
-				-- (A point wider each side under the pointer, its centre kept.)
-				left = grow(0, -1),
+				left = 0,
 				pointer_events = "none",
 				x = function(): number
-					return pos:get() - KNOB / 2
+					return pos:get() - THUMB_W / 2
 				end,
-				top = grow(1, 0),
-				w = grow(KNOB, KNOB + 2),
-				h = grow(H - 2, H),
-				rounded = "$radius.md",
-				bg = function()
-					return ink(look(index()))
-				end,
-				shadow = "$shadow.sm",
-				ui.div {
-					absolute = true,
-					left = 2,
-					top = 2,
-					w = grow(KNOB - 4, KNOB - 2),
-					h = grow(H - 6, H - 4),
-					rounded = "$radius.sm",
-					bg = "$zeron.primary.bg",
-					ui.div {
-						absolute = true,
-						w = 2,
-						h = 8,
-						rounded = "$radius.full",
-						left = grow(6, 7),
-						top = grow(5, 6),
-						bg = "$zeron.primary.text",
-					},
+				top = (H - THUMB_H) / 2,
+				w = THUMB_W,
+				h = THUMB_H,
+				halo(),
+				thumb_layer {
+					class = "effort-press",
+					shadow = "$zeron.slider.press",
+					opacity = ui.tween(ui.computed(function(): number
+						return if pressed:get() then 1 else 0
+					end), { duration = 120 }),
 				},
-			},
+				if props.highlighted
+					then ui.show(props.highlighted, thumb_layer {
+						shadow = function()
+							return shadow_of("accent", 0, 0, 3, 0.4)
+						end,
+					})
+					else nil,
+				thumb_layer {
+					gradient = { angle = 180, stops = { "#ffffff", "#f6f6f6" } },
+					border = 1,
+					border_color = "$zeron.slider.thumb_edge",
+					inset_shadow = "$zeron.slider.thumb_light",
+					shadow = "$zeron.slider.thumb_drop",
+				},
+			}),
 		}),
-	}
-
-	if not props.title then
-		return groove
-	end
-	-- The header: the title, the level's name under it (left-aligned,
-	-- rolling as it changes), the caller's control at the right.
-	return ui.column {
-		w_full = true,
-		gap = "$space.2",
-		ui.row {
-			w_full = true,
-			-- Inset as a menu row's text is in its row: the title over the
-			-- groove's inside, past its rounded end.
-			px = "$space.2",
-			items = "center",
-			gap = "$space.2",
-			ui.column {
-				grow = 1,
-				min_w = 0,
-				gap = "$zeron.space.hair",
-				ui.text {
-					props.title,
-					font = "$font.mono",
-					text_size = "$font.size.xs",
-					letter_spacing = 1,
-					color = "$text.tertiary",
-				},
-				RollText {
-					function(): string
-						local l = levels()[index()]
-					return if l then l.label else ""
-					end,
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
-					color = "$text.primary",
-				},
-			},
-			props.accessory,
-		},
-		groove,
 	}
 end)

@@ -69,64 +69,120 @@ local function configured(app: any, id: string): boolean
 	return string.find(app:state("calls") or "", `configure:{id}:`, 1, true) ~= nil
 end
 
-test("a model picked in a session waits for a message: nothing of the session changes", function()
-	local app = mount("chat_fixture.luau")
-	app:resize(900, 700)
-	open(app, "s2")
-	expect(app:state("chat_model")).to_be("sonnet")
-	local before = running_with(app)
-	-- Another agent's model, picked and not sent.
-	app:set_state("chat_model", "gpt")
-	settle(app)
-	expect(app:state("chat_model")).to_be("gpt")
-	-- No call, and the session (its agent, so its icon) as it was.
-	expect(configured(app, "s2")).to_be(false)
-	expect(running_with(app)).to_be(before)
-end)
-
-test("a pick goes with the message, and the session takes it then", function()
+test("a model picked in a session lands on it at once", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
 	-- (Codex's models join the catalog.)
 	app:command("catalog_grows")
 	settle(app)
 	open(app, "s2")
+	expect(app:state("chat_model")).to_be("sonnet")
+	-- Another agent's model: the call goes, the agent with it.
 	app:set_state("chat_model", "gpt")
 	settle(app)
-	app:type('role:textbox "Message"', "Try it with GPT")
-	app:key("Enter")
-	settle(app)
-	expect(app:wait('~"Try it with GPT"', { timeout_ms = 1000 })).to_be(true)
-	settle(app)
-	local calls = app:state("calls")
-	expect(calls).to_contain("send:s2:Try it with GPT")
-	expect(calls).to_contain("took:s2:codex|gpt|")
-	expect(running_with(app)).to_be("codex|gpt")
-	-- Through the send, not a change of its own.
-	expect(configured(app, "s2")).to_be(false)
-	-- Taken: no pick left to carry.
-	expect(app:state("chat.composer.picks").s2).to_be(nil)
-end)
-
-test("an unsent pick stays with its chat; picking the session's own again leaves none", function()
-	local app = mount("chat_fixture.luau")
-	app:resize(900, 700)
-	open(app, "s2")
-	app:set_state("chat_model", "gpt")
-	settle(app)
-	-- Another chat shows its own model, not this pick.
+	expect(app:state("chat_model")).to_be("gpt")
+	expect(configured(app, "s2")).to_be(true)
+	expect(app:state("calls")).to_contain("configure:s2:")
+	expect(app:state("calls")).to_contain("harness")
+	-- The chat keeps it: another chat shows its own, and back it's there.
 	open(app, "s1")
 	expect(app:state("chat_model")).to_be("opus")
 	expect(app:state("chat_effort")).to_be("high")
-	-- Back: the pick, still unsent.
+end)
+
+test("what a chat shows on arriving is not written back to it", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
 	open(app, "s2")
-	expect(app:state("chat_model")).to_be("gpt")
-	expect(configured(app, "s2")).to_be(false)
-	-- The session's own model again: nothing kept.
-	app:set_state("chat_model", "sonnet")
+	open(app, "s1")
+	open(app, "s2")
 	settle(app)
-	expect(app:state("chat.composer.picks").s2).to_be(nil)
+	expect(configured(app, "s1")).to_be(false)
 	expect(configured(app, "s2")).to_be(false)
+end)
+
+-- A chat with history asks before a model lands (Zeron's switch dialog): 1 or
+-- Enter says yes, 2 or Escape no, and yes leaves its divider.
+local function asked(app: any): boolean
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find("#model-switch ", 1, true) and not line:find(" hidden", 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+local function shown(app: any, target: string): boolean
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(target .. " ", 1, true) and not line:find(" hidden", 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+test("a pick on a chat with history asks first; yes lands it with its divider", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("catalog_grows")
+	settle(app)
+	open(app, "s1")
+	app:click('#chat-composer >> role:button "Model"')
+	settle(app)
+	app:click("#model-picker-title")
+	settle(app)
+	app:click('role:option "Sonnet"')
+	settle(app)
+	expect(asked(app)).to_be(true)
+	expect(app:has('~"Switch model?"')).to_be(true)
+	expect(app:state("chat_model")).to_be("opus")
+	-- No: nothing changed, and the picker is back.
+	app:key("2")
+	settle(app)
+	expect(asked(app)).to_be(false)
+	expect(app:state("chat_model")).to_be("opus")
+	expect(configured(app, "s1")).to_be(false)
+	expect(shown(app, "#model-picker-title")).to_be(true)
+	-- Another agent's model: the provider's words, and yes.
+	app:click("#model-picker-title")
+	settle(app)
+	app:click('role:option "GPT-5.5"')
+	settle(app)
+	expect(asked(app)).to_be(true)
+	expect(app:has('~"Switch provider?"')).to_be(true)
+	expect(app:has('~"starts from a text copy of this chat"')).to_be(true)
+	app:key("1")
+	settle(app)
+	expect(app:state("chat_model")).to_be("gpt")
+	expect(app:state("calls")).to_contain("note")
+	expect(shown(app, "#model-picker-title")).to_be(false)
+	-- The keys back to the draft once the dialog has gone.
+	app:wait("#a-moment-passes", { timeout_ms = 500 })
+	settle(app)
+	expect(app:tree('role:textbox "Message"')).to_contain(" focused")
+end)
+test("a model new to the engine is told once, in Zeron's words; one already standing isn't", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	settle(app)
+	app:command("catalog_announces")
+	settle(app)
+	local told = app:state("chat_models_announced")
+	expect(told.title).to_be("New model available")
+	expect(told.body).to_be("Codex · GPT-6 Sol")
+	app:command("catalog_announces")
+	settle(app)
+	told = app:state("chat_models_announced")
+	expect(told.title).to_be("New models available")
+	expect(told.body).to_be("Codex · GPT-6 Sol mini, GPT-6 Luna")
+	expect(told.seen).to_be(2)
+	-- A window first looking with them there: another window told them.
+	app:set_state("chat_models_announced", { seen = -1 })
+	app:command("catalog_announces")
+	settle(app)
+	told = app:state("chat_models_announced")
+	expect(told.title).to_be_nil()
+	expect(told.seen).to_be(3)
 end)
 
 test("Stop interrupts the running turn", function()
@@ -245,12 +301,10 @@ test("opening a session never hands it the new chat's model", function()
 	app:command("go_s3")
 	settle(app)
 	expect(app:state("calls")).never.to_contain("configure:s3")
-	-- A choice made there is held for its next message (nothing of the
-	-- session changes until one goes with it).
+	-- A choice made there lands on it.
 	app:set_state("chat_model", "sonnet")
 	settle(app)
-	expect(app:state("calls")).never.to_contain("configure:s3")
-	expect(app:state("chat.composer.picks").s3.model).to_be("sonnet")
+	expect(app:state("calls")).to_contain("configure:s3")
 end)
 
 -- Settings' composer and transcript preferences (screens/settings/prefs).
@@ -570,7 +624,7 @@ local function listed(app: any): boolean
 	return false
 end
 
-test("the model picker opens folded, the list a press away", function()
+test("the model picker opens on its panel, the list a press away", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
 	open(app, "s2")
@@ -578,8 +632,8 @@ test("the model picker opens folded, the list a press away", function()
 	settle(app)
 	expect(listed(app)).to_be(true)
 	expect(searching(app)).to_be(false)
-	-- A press on the chosen model (the layer over its one row) opens it out.
-	app:click(".folded")
+	-- A press on the panel's title goes to the list.
+	app:click("#model-picker-title")
 	settle(app)
 	expect(searching(app)).to_be(true)
 	app:key("Escape")
@@ -587,6 +641,15 @@ test("the model picker opens folded, the list a press away", function()
 	expect(listed(app)).to_be(true)
 	expect(searching(app)).to_be(false)
 	app:key("Escape")
+	settle(app)
+	expect(listed(app)).to_be(false)
+	-- Closed, the keys are the draft's again.
+	expect(app:tree('role:textbox "Message"')).to_contain(" focused")
+	-- A press outside closes it too.
+	app:click('role:button "Model"')
+	settle(app)
+	expect(listed(app)).to_be(true)
+	app:click("#transcript")
 	settle(app)
 	expect(listed(app)).to_be(false)
 end)
@@ -614,8 +677,9 @@ test("a model's options are picked under it in the composer's picker", function(
 	app:key("Enter")
 	settle(app)
 	expect(app:wait('~"Go"', { timeout_ms = 1000 })).to_be(true)
-	-- Sent: the pick went with it (the model's, as a pick of the chat).
-	expect(app:state("calls")).to_contain("took:s2:claude-code|fusion|")
+	-- It landed on the chat as it was picked.
+	expect(app:state("calls")).to_contain("configure:s2:")
+	expect(app:state("calls")).to_contain("model=fusion")
 	expect(app:error()).to_be(nil)
 end)
 
