@@ -810,15 +810,6 @@
       "message_from": "Message from",
       "not_delivered": "Not delivered — send again",
       "reply": "Reply",
-      "you": "You",
-      "agent": "Agent",
-      "several_messages": "Several messages",
-      "two_names": "{first} and {final}",
-      "n_messages": "{n} messages",
-      "mention": "Mention",
-      "attach": "Attach",
-      "mention_hint": "Mention the selection in the draft",
-      "attach_hint": "Attach the selection to the message",
       "conversation": "Conversation",
       "jump_to_latest": "Jump to latest",
       "new_reply": "New reply",
@@ -840,7 +831,12 @@
       "collapse": "Collapse message",
       "expand": "Expand message",
       "show_less": "Show less",
-      "show_more": "Show more"
+      "show_more": "Show more",
+      "annotations": "{n, plural, one {# annotation} other {# annotations}}",
+      "selections": "{n, plural, one {# selection} other {# selections}}",
+      "selected_numbered": "{n}. Selected text",
+      "selected": "Selected text",
+      "user_comment": "User comment: {comment}"
     },
     "reply_picture": {
       "not_a_picture": "Not a picture this can show",
@@ -906,7 +902,17 @@
       "comments_show": "{label}, show list",
       "comment_remove": "Remove comment {text}",
       "comments_clear": "Clear all",
-      "comments_clear_named": "Clear all comments"
+      "comments_clear_named": "Clear all comments",
+      "annotations": "{n, plural, one {# annotation} other {# annotations}}",
+      "selections": "{n, plural, one {# selection} other {# selections}}",
+      "annotations_remove": "Remove annotations",
+      "selections_remove": "Remove selections",
+      "selected": "Selected text:",
+      "selected_from": "Selected text from {path}:",
+      "user_comment": "User comment:",
+      "annotation_edit": "Edit annotation {n}",
+      "annotation_remove": "Remove annotation {n}",
+      "selection_remove": "Remove selection {n}"
     },
     "composer_dock": {
       "fold": "Fold {title}",
@@ -1450,6 +1456,15 @@
       "from": "From",
       "from_label": "Open {title}",
       "auto_continue": "Auto-continue"
+    },
+    "annotation": {
+      "add_to_chat": "Add to chat",
+      "ask_side": "Ask in side chat",
+      "comment": "Comment",
+      "placeholder": "Add an optional comment...",
+      "add": "Add annotation",
+      "delete": "Delete annotation",
+      "badge": "Annotation {n}"
     }
   },
   "settings": {

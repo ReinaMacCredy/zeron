@@ -114,6 +114,8 @@ mod i18n_tests;
 mod visuals_tests;
 #[cfg(test)]
 mod thread_rows_tests;
+#[cfg(test)]
+mod annotation_tests;
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 

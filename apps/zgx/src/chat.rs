@@ -286,13 +286,14 @@ impl Pending {
         }
         // (Its passages as chips, as the sent message shows them.)
         let (words, comments) = split_comments(&self.words);
+        let (words, badges) = quote_badges(&words);
         let (words, quotes) = split_quotes(&words);
         let (words, picks) = split_annotations(&words);
         Value::record([
             ("id", Value::from(self.id.as_str())),
             ("role", Value::from("user")),
             ("text", Value::from(words.as_str())),
-            ("attachments", carried_value(&self.paths, &quotes, &picks, &comments)),
+            ("attachments", carried_value(&self.paths, &quotes, &picks, &comments, &badges)),
             ("waiting", Value::from(self.waiting)),
             // (This device's own copy: its pictures are the files it was
             // sent from, here, which the chat's device never had. The
@@ -3411,9 +3412,56 @@ fn local_paths(req: &Value) -> Vec<String> {
         .collect()
 }
 
-/// The block the composer adds for passages attached from the conversation
-/// (ds/quote.luau `with_quotes`): its header, then `- who, when: words`, a
-/// further line of words set in two.
+/// Text staged on the composer and folded into the prompt as Zeron writes it
+/// (zeron_proto quotes.rs, which ds/quote.luau writes byte for byte): its
+/// plain selections' block, then its annotations', lifted off the words as the
+/// shipping app's badges (zeron_proto badges.rs), so a chat sent from either
+/// app reads the same in both. Each badge a sent message's pill: what it
+/// quotes, by number and file, with its comment.
+fn quote_badges(words: &str) -> (String, Vec<Value>) {
+    use zeron_proto::badges::{ANNOTATION_COMMENT_LABEL, SELECTION_LOCATION, extract_annotation_badge, extract_selection_badge};
+    let mut rest = words.to_owned();
+    let mut out = Vec::new();
+    if let Some((left, badge)) = extract_selection_badge(&rest) {
+        rest = left;
+        let details: Vec<Value> = badge.details.iter().map(|d| Value::record([("text", Value::from(d.body.as_str()))])).collect();
+        out.push(("selections", details));
+    }
+    if let Some((left, badge)) = extract_annotation_badge(&rest) {
+        rest = left;
+        let said = format!("\n\n{ANNOTATION_COMMENT_LABEL} ");
+        let details: Vec<Value> = badge
+            .details
+            .iter()
+            .enumerate()
+            .map(|(ix, d)| {
+                let place = d.location.split_once(". ").map_or("", |(_, place)| place);
+                let (text, comment) = d.body.split_once(&said).map_or((d.body.as_str(), None), |(t, c)| (t, Some(c)));
+                let mut fields = vec![("n", Value::from((ix + 1) as f64)), ("text", Value::from(text))];
+                if place != SELECTION_LOCATION && !place.is_empty() {
+                    fields.push(("path", Value::from(place)));
+                }
+                if let Some(comment) = comment {
+                    fields.push(("comment", Value::from(comment)));
+                }
+                Value::record(fields)
+            })
+            .collect();
+        out.insert(0, ("annotations", details));
+    }
+    if out.is_empty() {
+        return (words.to_owned(), Vec::new());
+    }
+    let badges = out
+        .into_iter()
+        .map(|(badge, details)| Value::record([("kind", Value::from("badge")), ("badge", Value::from(badge)), ("name", Value::from("")), ("details", Value::List(details.into()))]))
+        .collect();
+    (rest, badges)
+}
+
+/// The block an earlier zgx added for passages attached from the conversation:
+/// its header, then `- who, when: words`, a further line of words set in two.
+/// Still read, so a chat sent from it shows its chips.
 const QUOTES_HEADER: &str = "Selected from this conversation:";
 
 /// A prompt's words apart from its attached passages (where each was said,
@@ -3655,9 +3703,10 @@ fn annotation_chip(pick: &Pick) -> Value {
 
 /// The chips a sent prompt carries: its files and pictures, then its
 /// passages, then the elements picked on a page.
-fn carried_value(paths: &[String], quotes: &[(String, String)], picks: &[Pick], comments: &[(String, String)]) -> Value {
+fn carried_value(paths: &[String], quotes: &[(String, String)], picks: &[Pick], comments: &[(String, String)], badges: &[Value]) -> Value {
     let Value::List(files) = attachments_value(paths) else { unreachable!() };
     let mut all: Vec<Value> = files.iter().cloned().collect();
+    all.extend(badges.iter().cloned());
     all.extend(quotes.iter().map(|(place, body)| quote_chip(place, body)));
     all.extend(picks.iter().map(annotation_chip));
     if !comments.is_empty() {
@@ -4092,6 +4141,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             // says which app instead.)
             let (words, shots) = crate::appshots::split_appshots(&words);
             let (words, comments) = split_comments(&words);
+            let (words, badges) = quote_badges(&words);
             let (words, quotes) = split_quotes(&words);
             let (words, picks) = split_annotations(&words);
             for p in entry["parts"].as_array().into_iter().flatten() {
@@ -4109,7 +4159,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("id", Value::from(id)),
                 ("role", Value::from("user")),
                 ("text", Value::from(words.as_str())),
-                ("attachments", crate::appshots::tag_attachments(carried_value(&paths, &quotes, &picks, &comments), &shots)),
+                ("attachments", crate::appshots::tag_attachments(carried_value(&paths, &quotes, &picks, &comments, &badges), &shots)),
                 ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
                 ("copy", copy_value(&words)),
                 ("sender", sender),
@@ -7120,6 +7170,38 @@ mod tests {
         assert_eq!((words.as_str(), quotes.len()), ("", 1));
         let plain = "See: Selected from this conversation: is a header";
         assert_eq!(split_quotes(plain), (plain.to_owned(), Vec::new()));
+    }
+
+    #[test]
+    fn zerons_annotation_and_selection_blocks_show_as_its_badges() {
+        use zeron_proto::quotes::{Quote, with_quotes};
+        let note = |text: &str, comment: &str, source: Option<&str>| Quote { comment: Some(comment.into()), ..Quote::annotation(text, source.map(str::to_owned)) };
+        let sent = with_quotes("look", &[note("first\n\nline", "why?", None), note("second", "", Some("docs/plan.md")), Quote::new("plain")]);
+        let entry = json!({ "id": "u", "role": "user", "createdAt": 1_788_900_000_000_i64,
+            "parts": [{ "id": "t", "kind": "text", "text": sent }] });
+        let shown = message(&entry, None).expect("a prompt shows");
+        assert!(matches!(shown.field("text"), Some(Value::Str(s)) if s.as_ref() == "look"));
+        let Some(Value::List(chips)) = shown.field("attachments") else { panic!("no attachments") };
+        let str_of = |v: Option<&Value>| match v {
+            Some(Value::Str(s)) => Some(s.to_string()),
+            _ => None,
+        };
+        let kinds: Vec<Option<String>> = chips.iter().map(|c| str_of(c.field("badge"))).collect();
+        assert_eq!(kinds, vec![Some("annotations".to_owned()), Some("selections".to_owned())]);
+        let Some(Value::List(notes)) = chips[0].field("details") else { panic!("no details") };
+        assert_eq!(notes.len(), 2);
+        assert_eq!(str_of(notes[0].field("text")).as_deref(), Some("first\n\nline"));
+        assert_eq!(str_of(notes[0].field("comment")).as_deref(), Some("why?"));
+        assert_eq!(str_of(notes[0].field("path")), None);
+        assert_eq!(str_of(notes[1].field("path")).as_deref(), Some("docs/plan.md"));
+        assert_eq!(str_of(notes[1].field("comment")), None);
+        let Some(Value::List(plain)) = chips[1].field("details") else { panic!("no details") };
+        assert_eq!(str_of(plain[0].field("text")).as_deref(), Some("plain"));
+        // Sent with no words: Zeron's line in their place, as it shows there.
+        let (words, badges) = quote_badges(&with_quotes("", &[note("x", "", None)]));
+        assert_eq!((words.as_str(), badges.len()), (zeron_proto::quotes::QUOTE_ONLY_TEXT, 1));
+        let typed = format!("{} is a header I typed", zeron_proto::badges::ANNOTATION_BLOCK_HEADER);
+        assert_eq!(quote_badges(&typed).1.len(), 0);
     }
 
     #[test]

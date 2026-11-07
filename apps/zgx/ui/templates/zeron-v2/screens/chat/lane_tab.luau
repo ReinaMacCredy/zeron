@@ -31,7 +31,6 @@ local Outgoing = require("@app/screens/chat/outgoing")
 local PanelState = require("@app/screens/panel/state")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
 local boundary = require("@app/screens/shell/boundary")
-local Quote = require("@ds/quote")
 
 -- What its tab says, and its icon, as the shipping app's.
 local M = {}
@@ -870,11 +869,19 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 			(panel.open_file :: any)(home, r.path, route.project:peek(), { line = r.line, column = r.column, end_line = r.end_line })
 		end
 	end
-	-- A passage quoted (its menu's Mention, or Attach): into its own draft.
-	local draft = ui.state(`chat_lane_draft_{chat}`, "")
-	local function quote(q: any)
-		draft:set(Quote.add(draft:peek(), Quote.line(q)))
-	end
+	-- Text selected in it, annotated on its own chat's draft, its composer taking the keys after.
+	local annotate = Shared.notes(function(): string?
+		return chat
+	end, nil, {
+		side = function(text: string)
+			lanes.ask_side(data.parent or lanes.unsent:peek()[chat] or chat, text)
+		end,
+		focus = function()
+			if not props.panel_key or not PanelState.take_keys_now(props.panel_key, slot) then
+				Shared.focus:add(1)
+			end
+		end,
+	})
 	local transcript = T.Transcript {
 		-- (Its own glide, runway and place: never the chat page's.)
 		name = `lane.{slot}`,
@@ -889,8 +896,7 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		compact = function(): boolean
 			return prefs.compact_transcript:get()
 		end,
-		on_mention = quote,
-		on_attach = quote,
+		annotate = annotate,
 		on_retry = function(message: string)
 			store.retry(chat, message)
 		end,

@@ -552,50 +552,8 @@ test("a model's name rolls into place: the chip eases once, and nothing moves as
 	end
 end)
 
--- A passage attached from the conversation (the transcript's selection
--- Attach): one chip however often it's attached, sent after the words
--- with who said it and when, and shown on the sent message as a chip.
-
-test("an attached passage goes with the prompt, who said it and when, and shows on the sent message", function()
-	local app = mount("chat_fixture.luau")
-	app:resize(960, 640)
-	open(app, "s6")
-	app:command("attach_passage")
-	-- The same passage again (its menu and its bar both taken): still one.
-	app:command("attach_passage")
-	settle(app)
-	expect(app:count('#chat-composer >> ~"GPT-5.5"')).to_be(1)
-	app:type('role:textbox "Message"', "Why this one?")
-	app:key("Enter")
-	app:wait('"never shown, only waited past"', { timeout_ms = 600 })
-	settle(app)
-	local calls = app:state("calls")
-	expect(calls).to_contain("send:s6:Why this one?\n\nSelected from this conversation:\n- GPT-5.5, Sep 8, 1:43 PM: Layout dominates on both machines")
-	-- Sent: the words in the bubble, the passage a chip by it.
-	expect(app:has('#transcript >> ~"Why this one?"')).to_be(true)
-	expect(app:has('#transcript >> ~"Selected from this conversation"')).to_be(false)
-	expect(app:has('#transcript >> ~"GPT-5.5, Sep 8, 1:43 PM"')).to_be(true)
-	expect(app:has('#chat-composer >> ~"GPT-5.5"')).to_be(false)
-end)
-
-test("an attached passage's × takes it off, and nothing of it is sent", function()
-	local app = mount("chat_fixture.luau")
-	app:resize(960, 640)
-	open(app, "s6")
-	app:command("attach_passage")
-	settle(app)
-	app:hover('#chat-composer >> ~"GPT-5.5"')
-	settle(app)
-	app:click('role:button ~"Remove GPT-5.5"')
-	settle(app)
-	expect(app:has('#chat-composer >> ~"GPT-5.5"')).to_be(false)
-	app:type('role:textbox "Message"', "Plain")
-	app:key("Enter")
-	app:wait('"never shown, only waited past"', { timeout_ms = 600 })
-	settle(app)
-	expect(app:state("calls")).to_contain("send:s6:Plain")
-	expect(app:state("calls")).never.to_contain("Selected from this conversation")
-end)
+-- A passage selected in the conversation: tests/chat_annotations (Zeron's
+-- annotation pill took the old Mention and Attach's place).
 
 -- A tool's line holds to its row: a command of five lines (its newlines
 -- left in, as the host once sent them) is one line in a row one line tall,

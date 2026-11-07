@@ -16,6 +16,18 @@ local Workspace = require("@app/screens/files/workspace")
 local generation = ui.state("test_files_generation", 1)
 local built_generation = generation:peek()
 
+-- Text selected, as the host reads it (`read_selection`, which a fixture has
+-- none of): a test sets `fake_selection` to `{ text, top, bottom }`.
+local SelectionMenu = require("@ds/selection_menu")
+local fake_selection = ui.state("fake_selection", nil :: any)
+SelectionMenu.read = function(): any
+	local s = fake_selection:peek()
+	return if type(s) == "table" and type(s.text) == "string" and string.find(s.text, "%S") then s else nil
+end
+SelectionMenu.clear = function()
+	fake_selection:set(nil)
+end
+
 -- The session open, as the shell's route gives it.
 local session = ui.state("test_files_session", { id = "chat-1", cwd = "/proj" } :: any)
 

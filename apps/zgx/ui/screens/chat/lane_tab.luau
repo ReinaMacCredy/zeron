@@ -26,7 +26,6 @@ local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local boundary = require("@app/screens/shell/boundary")
-local Quote = require("@ds/quote")
 -- (The chat page's places in its chats, which a split's panes share.)
 local Shared = require("@app/screens/chat/shared")
 local Asks = require("@app/screens/chat/asks")
@@ -1087,20 +1086,20 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 			(panel.open_file :: any)(home, r.path, route.project:peek(), { line = r.line, column = r.column, end_line = r.end_line })
 		end
 	end
-	-- A passage quoted (its menu's Mention, or Attach): into its own draft.
-	local draft = ui.state(`chat_lane_draft_{chat}`, "")
-	local function quote(q: any)
-		-- (A split's pane: into its chat's own draft, which the window's
-		-- composer types into once it's focused.)
-		if split then
-			route.open_session(chat)
-			ui.after(0, function()
-				Shared.mention(q)
-			end)
-			return
-		end
-		draft:set(Quote.add(draft:peek(), Quote.line(q)))
-	end
+	-- Text selected in it, annotated on its own chat's draft (a split's
+	-- pane: the window's composer takes the keys after; a side chat's, its own).
+	local annotate = Shared.notes(function(): string?
+		return chat
+	end, nil, {
+		side = function(text: string)
+			lanes.ask_side(data.parent or lanes.unsent:peek()[chat] or chat, text)
+		end,
+		focus = function()
+			if split or not props.panel_key or not PanelState.take_keys_now(props.panel_key, slot) then
+				Shared.focus:add(1)
+			end
+		end,
+	})
 	local function make_transcript(): Node
 		return T.Transcript {
 		-- (Its own glide, runway and place: never the chat page's.)
@@ -1120,8 +1119,7 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		compact = function(): boolean
 			return prefs.compact_transcript:get()
 		end,
-		on_mention = quote,
-		on_attach = quote,
+		annotate = annotate,
 		on_retry = function(message: string)
 			store.retry(chat, message)
 		end,

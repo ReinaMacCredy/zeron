@@ -926,15 +926,35 @@ ui.command { id = "opaque", title = "Opaque surfaces", run = function() require(
 ui.command { id = "frosted", title = "Frosted surfaces", run = function() require("@ds/material").frosted:set(true) end }
 
 -- A passage of a reply attached, as the transcript's selection Attach does.
+-- Text selected in the transcript, as the host reads it (`read_selection`,
+-- which a fixture has none of): a test sets `fake_selection` to `{ text, top,
+-- bottom }`, each line `{ x, y, w, h }` in the window.
+local SelectionMenu = require("@ds/selection_menu")
+local fake_selection = ui.state("fake_selection", nil :: any)
+SelectionMenu.read = function(): any
+	local s = fake_selection:peek()
+	return if type(s) == "table" and type(s.text) == "string" and string.find(s.text, "%S") then s else nil
+end
+SelectionMenu.clear = function()
+	fake_selection:set(nil)
+end
+-- Two annotations staged on s2's rows, with their badges' anchors: one
+-- with a comment of two lines, one with none.
 ui.command {
-	id = "attach_passage",
-	title = "A reply's passage attached",
+	id = "annotations_seed",
+	title = "Two annotations staged on s2",
 	run = function()
-		chat.shared.attach_quote {
-			text = "Layout dominates on both machines, so that is where the work should go first.",
-			who = "GPT-5.5",
-			from = "Sep 8, 1:43 PM",
-		}
+		local a = chat.shared.add_annotation("s2", { text = "What shall we work on?", anchor = { key = "x2", dy = 0, x = 10, w = 150, lh = 20 } })
+		chat.shared.set_comment_of("s2", a, "why this?\nand how")
+		chat.shared.add_annotation("s2", { text = "Hello there", source = "docs/plan.md", anchor = { key = "x1", dy = 0, x = 10, w = 80, lh = 20 } })
+	end,
+}
+-- A plain selection staged with no anchor, as an older draft holds one.
+ui.command {
+	id = "stage_selection",
+	title = "A plain selection staged",
+	run = function()
+		chat.shared.cargo:push { id = "plain1", kind = "quote", name = "Layout", text = "Layout dominates on both machines." }
 	end,
 }
 ui.command {

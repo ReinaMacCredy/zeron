@@ -18,6 +18,7 @@
 -- `UserMessage { id = "…", text = "…" }`.
 
 local Icon = require("@self/icon")
+local HoverCard = require("@self/hover_card")
 local Lightbox = require("@self/lightbox")
 local PastedText = require("@self/pasted_text")
 local ReplyPicture = require("@self/reply_picture")
@@ -29,7 +30,7 @@ local locale = require("@self/locale")
 -- its name and what it is).
 -- (`appshot`: a picture that is an Appshot, the app it shows and its
 -- window's title: the card says so under it.)
-export type Attachment = { kind: "image" | "file", name: string, src: string?, path: string?, meta: string?, icon: string?, appshot: { app: string, title: string?, bundle: string? }? }
+export type Attachment = { kind: "image" | "file" | "badge", name: string, src: string?, path: string?, meta: string?, icon: string?, appshot: { app: string, title: string?, bundle: string? }? }
 -- (`open`: what opens a link in it that isn't the web's, as a file mention.)
 -- (`pictures`: where its pictures' paths show from: a chat on another
 -- device reads them from there, screens/chat/reply_images'
@@ -52,6 +53,8 @@ export type Props = {
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
 	pictures: ReplyPicture.Pictures?,
 	find: any?,
+	-- The text an open annotation input washes in it.
+	wash: (() -> string?)?,
 	-- The chat whose device its files are on, for a pasted text's viewer.
 	session: (() -> string?)?,
 }
@@ -188,6 +191,64 @@ local function chip(a: Attachment, session: (() -> string?)?): Node
 	}
 end
 
+-- What staged text a sent prompt carried, as Zeron's message badge
+-- (crates/ui badges.rs): "N annotations" or "N selections", each quoted in
+-- its card under the pointer: its number and file, the words, the comment.
+local function badge_row(d: any, notes: boolean): Node
+	local head = if notes
+		then (if d.path then `{d.n}. {d.path}` else locale.s("ds.user_message.selected_numbered", { n = d.n }))
+		else locale.s("ds.user_message.selected")
+	return ui.row {
+		w_full = true,
+		gap = "$space.2",
+		p = "$space.2",
+		rounded = ui.raw(6, "Zeron's badge card row"),
+		bg = "$hover",
+		ui.div { w = 2, shrink = 0, rounded = 1, bg = "$text.tertiary", self = "stretch" },
+		ui.column {
+			grow = 1,
+			min_w = 0,
+			gap = "$space.1",
+			ui.text { head, literal = true, truncate = true, font = "$font.mono", text_size = ui.raw(10, "Zeron's badge card location"), color = "$text.tertiary" },
+			ui.text { d.text or "", literal = true, wrap = true, text_size = ui.raw(12, "Zeron's badge card body"), line_height = ui.raw(16, "Zeron's badge card body"), color = "$text.primary" },
+			if notes and d.comment
+				then ui.text { locale.t("ds.user_message.user_comment", { comment = d.comment }), literal = true, wrap = true, text_size = ui.raw(12, "Zeron's badge card body"), line_height = ui.raw(16, "Zeron's badge card body"), color = "$text.primary" }
+				else nil,
+		},
+	}
+end
+
+local function badge(a: any): Node
+	local notes = a.badge == "annotations"
+	local count = #(a.details or {})
+	local label = if notes
+		then locale.s("ds.user_message.annotations", { n = count })
+		else locale.s("ds.user_message.selections", { n = count })
+	local rows: { Node } = {}
+	for _, d in a.details or {} do
+		table.insert(rows, badge_row(d, notes))
+	end
+	return ui.row {
+		class = "message-badge",
+		h = 24,
+		px = "$space.2",
+		gap = ui.raw(6, "Zeron's message badge"),
+		items = "center",
+		shrink = 0,
+		rounded = ui.raw(8, "Zeron's message badge"),
+		bg = "$hover",
+		color = "$text.secondary",
+		label = label,
+		tooltip = if #rows > 0
+			then HoverCard.Card { w = 320, gap = "$space.1", p = "$space.1", table.unpack(rows) }
+			else nil,
+		tooltip_delay = 280,
+		tooltip_placement = { side = "top", align = "end", offset = 6 },
+		ui.div { opacity = 0.7, Icon { name = if notes then "chat-round-line" else "wrap-text", size = 12 } },
+		ui.text { label, literal = true, text_size = ui.raw(12, "Zeron's message badge"), weight = "$font.weight.medium" },
+	}
+end
+
 -- Five lines of the prose's line, and the fade over the last one and a half.
 local LINES = 5
 local FADE_LINES = 1.5
@@ -267,8 +328,11 @@ return ui.component(function(props: Props): Node
 	end
 	local group = `message:{id or `unnamed{unnamed}`}`
 	local shown = 0
+	local badges: { Node } = {}
 	for _, a in props.attachments or {} do
-		if a.kind == "image" and a.src and a.src ~= "" then
+		if (a :: any).kind == "badge" then
+			table.insert(badges, badge(a))
+		elseif a.kind == "image" and a.src and a.src ~= "" then
 			shown += 1
 			local n = shown
 			local function from(): (string, boolean)
@@ -305,6 +369,9 @@ return ui.component(function(props: Props): Node
 		if #attachments > 0
 			then ui.row { selectable = false, max_w = "80%", flex_wrap = true, justify = "end", gap = "$space.2", attachments }
 			else nil,
+		if #badges > 0
+			then ui.row { selectable = false, max_w = "80%", flex_wrap = true, justify = "end", gap = ui.raw(6, "Zeron's message badges"), badges }
+			else nil,
 		if props.text == "" then nil else ui.column {
 			min_w = 0,
 			max_w = "80%",
@@ -331,7 +398,7 @@ return ui.component(function(props: Props): Node
 					ref = body,
 					w_full = true,
 					shrink = 0,
-					Markdown { text = props.text, breaks = true, open = props.open, link_menu = props.link_menu, find = props.find },
+					Markdown { text = props.text, breaks = true, open = props.open, link_menu = props.link_menu, find = props.find, wash = props.wash },
 				},
 			},
 			-- The way to open it: a plain link under the text, at its left

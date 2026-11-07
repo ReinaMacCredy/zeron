@@ -14,7 +14,30 @@ local shared = require("@app/screens/chat/shared")
 
 local M = {}
 
-local function shown(list: { any }, quotes: { Quote.Quote }, picks: { { [string]: any } }, said: { Comments.Comment }): { any }
+-- The badges staged text makes on the sent message (as the host reads them
+-- back, chat.rs `quote_badges`): one for its annotations, one for its plain
+-- selections, each listing what it quotes.
+function M.badges(quotes: { Quote.Staged }): { any }
+	local notes, plain = {}, {}
+	for _, q in quotes do
+		if q.comment ~= nil then
+			local c = string.match(q.comment, "^%s*(.-)%s*$") or ""
+			table.insert(notes, { n = #notes + 1, path = q.source, text = q.text, comment = if c ~= "" then c else nil })
+		else
+			table.insert(plain, { text = q.text })
+		end
+	end
+	local out = {}
+	if #notes > 0 then
+		table.insert(out, { kind = "badge", badge = "annotations", name = "", details = notes })
+	end
+	if #plain > 0 then
+		table.insert(out, { kind = "badge", badge = "selections", name = "", details = plain })
+	end
+	return out
+end
+
+local function shown(list: { any }, quotes: { Quote.Staged }, picks: { { [string]: any } }, said: { Comments.Comment }): { any }
 	local out = {}
 	for _, a in list do
 		table.insert(out, {
@@ -24,10 +47,8 @@ local function shown(list: { any }, quotes: { Quote.Quote }, picks: { { [string]
 			path = a.path,
 		})
 	end
-	-- And each passage it carries, as a chip (as the host's copy shows
-	-- them: chat.rs `split_quotes`).
-	for _, q in quotes do
-		table.insert(out, { kind = "file", icon = "cursor", name = Quote.where(q), meta = Quote.excerpt(q.text) })
+	for _, b in M.badges(quotes) do
+		table.insert(out, b)
 	end
 	-- And each element picked on a page (chat.rs `split_annotations`).
 	for _, chip in Annotation.shown(picks) do
@@ -53,9 +74,9 @@ end
 -- nothing was typed (a prompt sent without being typed).
 function M.parts(typed: string, text: string, carried: { any }): { [string]: any }
 	local attachments = {}
-	-- Passages attached from the conversation: a block after the words
-	-- (Quote.with_quotes), each with who said it and when.
-	local quotes: { Quote.Quote } = {}
+	-- Text selected and staged (annotations, plain selections): Zeron's
+	-- blocks after the words and the tokens (Quote.with_quotes).
+	local quotes: { Quote.Staged } = {}
 	-- Elements picked on a page in the panel's browser: each a token
 	-- after the words (Annotation.with_annotations), which the engine
 	-- expands for the agent.
@@ -70,8 +91,10 @@ function M.parts(typed: string, text: string, carried: { any }): { [string]: any
 			-- (A project's file: on the session's computer already.)
 			-- (An Appshot goes as its picture; what it shows of the app, below.)
 			table.insert(attachments, { kind = if item.kind == "appshot" then "image" else item.kind, path = item.path, name = item.name, rel = item.rel, on_host = item.on_host })
+		elseif item.kind == "quote" then
+			table.insert(quotes, { text = item.text, comment = item.comment, source = item.source })
 		elseif item.kind == "annotation" and item.quote then
-			table.insert(quotes, { text = item.quote, who = item.name, from = item.from })
+			table.insert(quotes, { text = item.quote })
 		elseif item.kind == "annotation" and item.annotation then
 			table.insert(picks, item)
 		elseif item.kind == "chat" and item.chat then
@@ -85,7 +108,7 @@ function M.parts(typed: string, text: string, carried: { any }): { [string]: any
 	local words = Invocations.encode(if typed ~= "" then typed else text)
 	return {
 		words = words,
-		text = Comments.with_comments(Annotation.with_annotations(Quote.with_quotes(words, quotes), picks), comments),
+		text = Comments.with_comments(Quote.with_quotes(Annotation.with_annotations(words, picks), quotes), comments),
 		attachments = attachments,
 		appshots = Appshots.of_cargo(carried),
 		shown = shown(attachments, quotes, picks, comments),

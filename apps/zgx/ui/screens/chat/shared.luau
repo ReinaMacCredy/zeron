@@ -279,30 +279,115 @@ function M.restore(text: string, cargo: { any })
 	end)
 end
 
--- A passage of the transcript, quoted into the draft (its line marks it)
--- or carried as a chip.
-function M.mention(q: Quote.Quote)
-	local line = Quote.line(q)
-	local quotes = table.clone(M.quotes:peek())
-	quotes[line] = q.text
-	ui.batch(function()
-		M.quotes:set(quotes)
-		M.text:set(Quote.add(M.text:peek(), line))
-	end)
-	M.focus:add(1)
+-- Text selected in a transcript or a rendered file, staged on chat `key`'s
+-- draft as Zeron's quotes (crates/ui state.rs `add_annotation`): an
+-- annotation carries a comment (empty until one is written) and, drawn where
+-- it was selected, an anchor for its badge; a quote with no comment is a
+-- plain selection. Numbered among the chat's annotations, in order.
+local function cargo_get(key: string): { any }
+	if here:get() == key then
+		return M.cargo:get()
+	end
+	local d = kept:get()[key]
+	return if d and type(d.cargo) == "table" then d.cargo else {}
 end
 
-function M.attach_quote(q: Quote.Quote)
-	-- The same passage twice (attached again, or its menu and its bar both
-	-- taken) is one chip.
-	for _, item in M.cargo:peek() do
-		if item.kind == "annotation" and item.quote and Quote.same({ text = item.quote, who = item.name, from = item.from }, q) then
-			M.focus:add(1)
-			return
+function M.add_annotation(key: string, q: { text: string, source: string?, anchor: any?, comment: string? }): string
+	local id = chip_id("quote")
+	push_cargo(key, { { id = id, kind = "quote", name = Quote.excerpt(q.text), text = q.text, comment = q.comment or "", source = q.source, anchor = q.anchor } })
+	return id
+end
+
+local function change_quote(key: string, id: string, change: (item: any) -> ())
+	local list = table.clone(cargo_in(key))
+	for i, item in list do
+		if item.id == id then
+			local next_item = table.clone(item)
+			change(next_item)
+			list[i] = next_item
 		end
 	end
-	M.cargo:push(Quote.chip(q, chip_id("quote")))
-	M.focus:add(1)
+	set_cargo_in(key, list)
+end
+
+function M.set_comment_of(key: string, id: string, comment: string)
+	change_quote(key, id, function(item: any)
+		item.comment = string.match(comment, "^%s*(.-)%s*$") or comment
+	end)
+end
+
+-- Chat `key`'s annotations as Zeron numbers them (every one, whatever drew
+-- it), each `{ n, id, text, comment, source, anchor }`: followed.
+function M.annotations_of(key: string): { any }
+	local out: { any } = {}
+	for _, item in cargo_get(key) do
+		if item.kind == "quote" and item.comment ~= nil then
+			table.insert(out, { n = #out + 1, id = item.id, text = item.text, comment = item.comment, source = item.source, anchor = item.anchor })
+		end
+	end
+	return out
+end
+
+-- A chip's pencil (ds/composer_cargo): the annotation `id` of the chat shown,
+-- for the surface that drew it to open its comment again.
+M.editing = ui.shared("chat.annotation.edit", nil :: any)
+
+-- What a transcript or a file's preview needs to annotate for chat `key()`
+-- (ds/annotation_layer's `Notes`): only what `source` drew (nil: the
+-- conversation). `extra.side`: Ask in side chat; `extra.focus`: the
+-- composer that takes the keys after a comment (the chat page's by default).
+function M.notes(key: () -> string?, source: (string | () -> string?)?, extra: { side: ((text: string) -> ())?, focus: (() -> ())? }?): { [string]: any }
+	local x = extra or {}
+	local function from(): string?
+		return if type(source) == "function" then source() else source
+	end
+	return {
+		list = function(): { any }
+			local k = key()
+			if not k then
+				return {}
+			end
+			local here = from()
+			local out: { any } = {}
+			for _, a in M.annotations_of(k) do
+				if a.source == here then
+					table.insert(out, a)
+				end
+			end
+			return out
+		end,
+		add = function(text: string, anchor: any): string?
+			local k = key()
+			return if k then M.add_annotation(k, { text = text, source = from(), anchor = anchor }) else nil
+		end,
+		comment = function(id: string, text: string, focus: boolean)
+			local k = key()
+			if k then
+				M.set_comment_of(k, id, text)
+				if focus then
+					if x.focus then
+						x.focus()
+					else
+						M.focus:add(1)
+					end
+				end
+			end
+		end,
+		remove = function(id: string)
+			local k = key()
+			if k then
+				M.remove_cargo_of(k, id)
+			end
+		end,
+		side = x.side,
+		edit = function(): string?
+			local e = M.editing:get()
+			return if e then e.id else nil
+		end,
+		edited = function()
+			M.editing:set(nil)
+		end,
+	}
 end
 
 -- An element (or a region) picked on a page in the panel's browser

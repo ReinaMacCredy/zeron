@@ -47,6 +47,8 @@ local Math = require("@self/math")
 -- ```mermaid fences drawn as their diagrams (ds/mermaid).
 local Mermaid = require("@self/mermaid")
 local MarkdownFind = require("@self/markdown_find")
+local AnnotationLayer = require("@self/annotation_layer")
+type Wash = { lines: { string }, used: { [string]: boolean }, color: string }
 local locale = require("@self/locale")
 local look = require("@self/look")
 
@@ -108,6 +110,9 @@ export type Props = {
 	-- block (ds/markdown_find counts them the same way). The block holding
 	-- it is built (if windowed) and handed to `reveal` once laid out.
 	find: Find?,
+	-- The text an open annotation input washes here (ds/annotation_layer),
+	-- nil for none: the blocks holding it are made again as it comes and goes.
+	wash: (() -> string?)?,
 	-- A step smaller (a thought's words in the work tree): the prose's small
 	-- size and line, headings at it too, blocks a little closer.
 	small: boolean?,
@@ -261,6 +266,8 @@ type Ctx = {
 	-- A find marking this block (`q` lower case): the current match's place
 	-- in it (0: none), and how many it has counted so far.
 	find: { q: string, cur: number, n: number }?,
+	-- An open annotation's lines to wash, each once (ds/annotation_layer).
+	wash: Wash?,
 	-- Set a step smaller (Props' `small`).
 	small: boolean?,
 	-- The whole text now: a ```mermaid fence reads its end to know whether
@@ -483,11 +490,38 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 	-- A find's matches in the paragraph's words, numbered on from the
 	-- block's count so far; each span cut where one starts or ends.
 	local f = if ctx then ctx.find else nil
-	local marks: { { number } } = if f then MarkdownFind.occurrences(MarkdownFind.words(list), f.q) else {}
+	local found: { { number } } = if f then MarkdownFind.occurrences(MarkdownFind.words(list), f.q) else {}
 	local base = if f then f.n else 0
 	local cur = if f then f.cur else 0
 	if f then
-		f.n += #marks
+		f.n += #found
+	end
+	local marks: { { any } } = {}
+	for i, m in found do
+		table.insert(marks, { m[1], m[2], if base + i == cur then "$zeron.editor.match_current" else "$zeron.editor.match" })
+	end
+	-- An open annotation's text washed where it lies (each of its lines once in the text), clear of a find's marks.
+	local w = if ctx then ctx.wash else nil
+	if w then
+		local said = MarkdownFind.words(list)
+		for _, line in w.lines do
+			if not w.used[line] then
+				local s, e = string.find(said, line, 1, true)
+				local clear = s ~= nil
+				for _, m in found do
+					if s and e and m[1] <= e and m[2] >= s then
+						clear = false
+					end
+				end
+				if s and e and clear then
+					w.used[line] = true
+					table.insert(marks, { s, e, w.color })
+				end
+			end
+		end
+		table.sort(marks, function(a, b)
+			return a[1] < b[1]
+		end)
 	end
 	local pos = 0
 	-- What's still fading in the paragraph (the streaming veil).
@@ -520,8 +554,8 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			return
 		end
 		local at = from
-		for i, m in marks do
-			local s, e = math.max(m[1], from), math.min(m[2], to)
+		for _, m in marks do
+			local s, e = math.max(m[1], from, at), math.min(m[2], to)
 			if s <= e then
 				if s > at then
 					local before = table.clone(span)
@@ -530,7 +564,7 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 				end
 				local hit = table.clone(span)
 				hit[1] = string.sub(text, s - from + 1, e - from + 1)
-				hit.bg = if base + i == cur then "$zeron.editor.match_current" else "$zeron.editor.match"
+				hit.bg = m[3]
 				table.insert(props, ui.span(hit))
 				at = e + 1
 			end
@@ -1431,16 +1465,37 @@ return function(props: Props): Node
 	-- numbered from its first part; holding the current match, handed to
 	-- `reveal` once laid out.
 	local find = props.find
+	local wash = props.wash
+	-- A wash's text as a key's tail ("" for none), and back.
+	local function wash_key(): string
+		local t = if wash then wash() else nil
+		return if t and string.find(t, "%S") then "\1" .. t else ""
+	end
+	local function split_wash(key: string): (string, Wash?)
+		local at = string.find(key, "\1", 1, true)
+		if not at then
+			return key, nil
+		end
+		local lines: { string } = {}
+		for line in string.gmatch(string.sub(key, at + 1) .. "\n", "([^\n]*)\n") do
+			local t = string.match(line, "^%s*(.-)%s*$") or ""
+			if t ~= "" then
+				table.insert(lines, t)
+			end
+		end
+		return string.sub(key, 1, at - 1), { lines = lines, used = {}, color = AnnotationLayer.wash_color() }
+	end
 	-- A top-level block, the `n`th, with a find's marks (`q`: the query, ""
 	-- for none; `k`: the current match's place in it, 0 if it's elsewhere).
 	-- Holding the current match, it's handed to `reveal` once laid out.
-	local function marked(b: MarkdownBlock, n: number, q: string?, k: number): Node
+	local function marked(b: MarkdownBlock, n: number, q: string?, k: number, w: Wash?): Node
 		veil_at(n)
-		if not find or not q or q == "" then
+		if (not find or not q or q == "") and not w then
 			return boxed(block(b, ink,ctx))
 		end
 		local mine: Ctx = if ctx then table.clone(ctx) else { tasks = {} }
-		mine.find = { q = string.lower(q), cur = k, n = 0 }
+		mine.wash = w
+		mine.find = if find and q and q ~= "" then { q = string.lower(q), cur = k, n = 0 } else nil
 		local node = block(b, ink,mine)
 		local reveal = (find :: Find).reveal
 		if k == 0 or not reveal then
@@ -1477,11 +1532,11 @@ return function(props: Props): Node
 		return `|0:0|{q}`
 	end
 	local function top(b: MarkdownBlock, n: number): Node
-		if not find then
+		if not find and not wash then
 			veil_at(n)
 			return boxed(block(b, ink,ctx))
 		end
-		local f = find :: Find
+		local f = find
 		local r = ui.ref()
 		return boxed(ui.div {
 			ref = r,
@@ -1491,19 +1546,21 @@ return function(props: Props): Node
 			-- gives it only as the column's child.)
 			mb = if b.t == "h" then ui.raw(-6, "a heading sits closer to what it heads") else nil,
 			ui.presence(function(): string
-				local q = f.query()
-				if q == "" then
-					return "-"
+				local q = if f then f.query() else ""
+				if q == "" or not f then
+					return "-" .. wash_key()
 				end
 				local c = f.current()
 				local k = if c and c.key == f.key and c.block == n then c.k else 0
-				return `{k}:{q}`
-			end, function(sig: string): Node
+				return `{k}:{q}` .. wash_key()
+			end, function(full: string): Node
+				local sig, w = split_wash(full)
 				local k, q = string.match(sig, "^(%d+):(.*)$")
 				local mine: Ctx = if ctx then table.clone(ctx) else { tasks = {} }
 				mine.find = if q and q ~= "" then { q = string.lower(q), cur = tonumber(k) or 0, n = 0 } else nil
+				mine.wash = w
 				veil_at(n)
-				if mine.find and mine.find.cur > 0 and f.reveal then
+				if f and mine.find and mine.find.cur > 0 and f.reveal then
 					local reveal = f.reveal
 					ui.after(0, function()
 						reveal(r)
@@ -1647,8 +1704,9 @@ return function(props: Props): Node
 			-- (Built, it's made again as a find's marks in it change: the
 			-- query, or the current match coming into it or leaving.)
 			ui.presence(function(): string
-				return if near:get() then "built" .. run_find(at) else "held"
-			end, function(kind: string): Node
+				return if near:get() then "built" .. run_find(at) .. wash_key() else "held"
+			end, function(full: string): Node
+				local kind, w = split_wash(full)
 				if string.sub(kind, 1, 5) == "built" then
 					local cb, ck, q = string.match(kind, "^built|(%d+):(%d+)|(.*)$")
 					local cur_block, cur_k = tonumber(cb) or 0, tonumber(ck) or 0
@@ -1660,7 +1718,7 @@ return function(props: Props): Node
 							return run:get()
 						end), function(b: MarkdownBlock, i: number)
 							local n = (at - 1) * CHUNK + i
-							return marked(b, n, q, if n == cur_block then cur_k else 0)
+							return marked(b, n, q, if n == cur_block then cur_k else 0, w)
 						end),
 					}
 				end
@@ -1794,7 +1852,7 @@ return function(props: Props): Node
 		if ctx and ctx.task then
 			number_tasks(list, ctx.tasks)
 		end
-		if find then
+		if find or wash then
 			local out: { Node } = {}
 			for i, b in list do
 				table.insert(out, top(b, i))

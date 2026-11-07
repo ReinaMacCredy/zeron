@@ -810,15 +810,6 @@
       "message_from": "消息来自",
       "not_delivered": "未送达——重新发送",
       "reply": "回复",
-      "you": "你",
-      "agent": "智能体",
-      "several_messages": "多条消息",
-      "two_names": "{first}和{final}",
-      "n_messages": "{n} 条消息",
-      "mention": "提及",
-      "attach": "附加",
-      "mention_hint": "在草稿中提及所选内容",
-      "attach_hint": "将所选内容附加到消息",
       "conversation": "对话",
       "jump_to_latest": "跳至最新",
       "new_reply": "新回复",
@@ -840,7 +831,12 @@
       "collapse": "收起消息",
       "expand": "展开消息",
       "show_less": "显示更少",
-      "show_more": "显示更多"
+      "show_more": "显示更多",
+      "annotations": "{n} 条标注",
+      "selections": "{n} 处选中内容",
+      "selected_numbered": "{n}. 选中的文本",
+      "selected": "选中的文本",
+      "user_comment": "用户评论：{comment}"
     },
     "reply_picture": {
       "not_a_picture": "不是可显示的图片",
@@ -906,7 +902,17 @@
       "comments_show": "{label}，显示列表",
       "comment_remove": "移除评论 {text}",
       "comments_clear": "全部清除",
-      "comments_clear_named": "清除所有评论"
+      "comments_clear_named": "清除所有评论",
+      "annotations": "{n} 条标注",
+      "selections": "{n} 处选中内容",
+      "annotations_remove": "移除标注",
+      "selections_remove": "移除选中内容",
+      "selected": "选中的文本：",
+      "selected_from": "选自 {path} 的文本：",
+      "user_comment": "用户评论：",
+      "annotation_edit": "编辑标注 {n}",
+      "annotation_remove": "移除标注 {n}",
+      "selection_remove": "移除选中内容 {n}"
     },
     "composer_dock": {
       "fold": "折叠{title}",
@@ -1450,6 +1456,15 @@
       "from": "来自",
       "from_label": "打开 {title}",
       "auto_continue": "自动继续"
+    },
+    "annotation": {
+      "add_to_chat": "添加到聊天",
+      "ask_side": "在侧聊中提问",
+      "comment": "评论",
+      "placeholder": "添加可选评论…",
+      "add": "添加标注",
+      "delete": "删除标注",
+      "badge": "标注 {n}"
     }
   },
   "settings": {

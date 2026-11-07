@@ -108,6 +108,33 @@ local function Session(id: Id?): Node
 			(panel.open_file :: any)(id, r.path, route.project:peek(), { line = r.line, column = r.column, end_line = r.end_line })
 		end
 	end
+	-- A chip's pencil on an annotation selected in a file that no preview
+	-- shows: the file opened in the panel, whose preview takes the edit
+	-- (Zeron's `open_file` request).
+	ui.effect(function()
+		local e = shared.editing:get()
+		if not e then
+			return
+		end
+		ui.after(120, function()
+			local id = which()
+			if shared.editing:peek() ~= e or not id then
+				return
+			end
+			local source: string? = nil
+			for _, a in shared.annotations_of(id) do
+				if a.id == e.id then
+					source = a.source
+				end
+			end
+			local panel: any = boundary.load("@app/screens/panel")
+			if source and panel and panel.open_file then
+				(panel.open_file :: any)(id, source, route.project:peek())
+			else
+				shared.editing:set(nil)
+			end
+		end)
+	end)
 	-- Watch the session the page is on, and let it go as the page goes.
 	ui.effect(function()
 		store.open(which())
@@ -282,7 +309,15 @@ local function Session(id: Id?): Node
 								local s = store.session:get()
 								return if s and s.id == id then s.compaction_wait else nil
 							end,
-							on_mention = shared.mention,
+							-- Text selected in it, annotated on this chat's draft;
+							-- Ask in side chat seeds a side chat of it.
+							annotate = shared.notes(function(): string?
+								return id
+							end, nil, {
+								side = function(text: string)
+									lanes.ask_side(id, text)
+								end,
+							}),
 							chat_of = shared.chat_of,
 							threads = shared.threads_for(which, which, function(): any
 								return store.session:get()
@@ -293,7 +328,6 @@ local function Session(id: Id?): Node
 									store.retry(s, message)
 								end
 							end,
-							on_attach = shared.attach_quote,
 							pictures = pictures,
 							sent_pictures = sent_pictures,
 							sent_from = function(): string?

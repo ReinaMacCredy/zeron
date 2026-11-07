@@ -79,6 +79,14 @@ local function add_to_chat_fn(): ((paths: { string }, root: string?) -> ())?
 	return nil
 end
 local add_to_chat = add_to_chat_fn()
+-- Text selected in a Markdown preview, annotated on the chat the files are its (screens/chat/shared's `notes`).
+local function notes_fn(): ((key: () -> string?, source: any) -> any)?
+	local ok, shared = pcall(function(): any
+		return (require :: any)("@app/screens/chat/shared")
+	end)
+	return if ok and shared and type(shared.notes) == "function" then shared.notes else nil
+end
+local notes_for = notes_fn()
 
 -- How big a file opens (the host's editable limit, as the shipping app).
 local LIMIT = 8 * 1024 * 1024
@@ -483,6 +491,25 @@ local function folder(w: Workspace, v: View, props: Props, here: () -> Where?): 
 			picture = function(path: string, src: string): string?
 				return Workspace.picture(w, path, src)
 			end,
+			annotate = if notes_for
+				then function(path: string): any
+					local root = w.target.root
+					local rel = if root and string.sub(path, 1, #root + 1) == root .. "/" then string.sub(path, #root + 2) else path
+					return (notes_for :: any)(function(): string?
+						return w.target.chat
+					end, rel, {
+						side = function(text: string)
+							local ok, lanes = pcall(function(): any
+								return (require :: any)("@app/screens/chat/lanes")
+							end)
+							local chat = w.target.chat
+							if ok and lanes and chat then
+								lanes.ask_side(chat, text)
+							end
+						end,
+					})
+				end
+				else nil,
 			on_link = function(path: string, target: string)
 				local to = Workspace.relative(path, target)
 				if not to or to == path then

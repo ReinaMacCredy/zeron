@@ -5,8 +5,8 @@
 -- Mentioned, a quote is one line of the draft (`> Opus 5.5: the excerpt…`),
 -- the whole passage kept beside the draft by that line, as a mention keeps
 -- the path its token stands for: delete the line and the passage goes with
--- it. Sending puts the whole passage back (`expand`). Attached, it is a chip:
--- who said it over the excerpt, the passage in its card.
+-- it. Sending puts the whole passage back (`expand`). Text annotated or
+-- selected goes after the prompt in Zeron's own blocks (`with_quotes`).
 
 local M = {}
 
@@ -101,33 +101,60 @@ function M.chip(q: Quote, id: string): { [string]: any }
 	return { id = id, kind = "annotation", name = q.who, meta = M.flat(q.text), quote = q.text, from = q.from }
 end
 
--- What attached passages add to a prompt: a block after the words, as
--- Zeron's review comments go (crates/ui comments.rs `with_comments`): a
--- header, then a line a passage, who said it and when, its words after,
--- each further line set in two. The agent reads whose words and where;
--- the sent message shows them as chips again (`split` on the host's copy).
-M.HEADER = "Selected from this conversation:"
+-- What staged text adds to a prompt, byte for byte as Zeron writes it
+-- (crates/proto quotes.rs `with_quotes`), so either app reads the other's:
+-- annotations (a quote with a comment, even an empty one) numbered under
+-- their header, then plain selections quoted under theirs. `source`: the
+-- file it was selected in.
+export type Staged = { text: string, comment: string?, source: string? }
 
-function M.where(q: Quote): string
-	return if q.from then `{q.who}, {q.from}` else q.who
+M.ANNOTATION_HEADER = "Annotations (numbered; each quotes the text the user selected, then the user's comment on it):"
+M.SELECTION_HEADER = "Selected text from this conversation (quoted):"
+M.ONLY = "Refer to the selected text below."
+
+local function trimmed(s: string): string
+	return string.match(s, "^%s*(.-)%s*$") or s
 end
 
-function M.with_quotes(text: string, quotes: { Quote }): string
+function M.quoted(text: string): string
+	local lines: { string } = {}
+	for line in string.gmatch(trimmed(text) .. "\n", "([^\n]*)\n") do
+		table.insert(lines, if line == "" then ">" else `> {line}`)
+	end
+	return table.concat(lines, "\n")
+end
+
+local function entry(n: number, q: Staged): string
+	local from = if q.source then ` from {q.source}` else ""
+	local comment = trimmed(q.comment or "")
+	local said = if comment == "" then "User comment: (none)" else `User comment:\n{M.quoted(comment)}`
+	return `{n}. Selected text{from}:\n{M.quoted(q.text)}\n{said}`
+end
+
+function M.with_quotes(text: string, quotes: { Staged }): string
 	if #quotes == 0 then
 		return text
 	end
-	local lines: { string } = {}
+	local out = if text == "" then M.ONLY else text
+	local entries: { string } = {}
 	for _, q in quotes do
-		local body = string.gsub(string.gsub(q.text, "%s+$", ""), "\n", "\n  ")
-		table.insert(lines, `- {M.where(q)}: {body}`)
+		if q.comment ~= nil then
+			table.insert(entries, entry(#entries + 1, q))
+		end
 	end
-	local block = `{M.HEADER}\n{table.concat(lines, "\n")}`
-	return if string.find(text, "%S") then `{text}\n\n{block}` else block
-end
-
--- Two quotes the same: the same words, from the same place.
-function M.same(a: Quote, b: Quote): boolean
-	return a.text == b.text and a.who == b.who and a.from == b.from
+	if #entries > 0 then
+		out = `{out}\n\n{M.ANNOTATION_HEADER}\n{table.concat(entries, "\n\n")}`
+	end
+	local plain: { string } = {}
+	for _, q in quotes do
+		if q.comment == nil then
+			table.insert(plain, M.quoted(q.text))
+		end
+	end
+	if #plain > 0 then
+		out = `{out}\n\n{M.SELECTION_HEADER}\n{table.concat(plain, "\n\n")}`
+	end
+	return out
 end
 
 return M

@@ -30,7 +30,7 @@ local motion = require("@self/motion")
 local M = {}
 
 -- ("comment": a review comment left on a file.)
-export type Kind = "image" | "file" | "text" | "annotation" | "comment" | "appshot" | "chat"
+export type Kind = "image" | "file" | "text" | "annotation" | "comment" | "appshot" | "chat" | "quote"
 export type Item = {
 	id: string,
 	kind: Kind,
@@ -51,6 +51,13 @@ export type Item = {
 	html: string?,
 	-- A quoted passage, whole: its card shows it.
 	quote: string?,
+	-- Selected text staged (kind "quote"): its words, its comment (nil: a
+	-- plain selection), the file it was selected in, and where its badge
+	-- stands (none: nothing to edit it in).
+	text: string?,
+	comment: string?,
+	source: string?,
+	anchor: any?,
 	-- An Appshot (screens/chat/appshots): its picture is `src`, its app's
 	-- icon `icon`; what the host writes of it rides in `appshot`.
 	icon: string?,
@@ -838,6 +845,191 @@ local function comments_badge(comments: State<{ Item }>, props: Props): Node
 	})
 end
 
+-- A chip's pencil: the annotation opened again where it was drawn
+-- (screens/chat/shared's `editing`, which the transcript or preview takes).
+local editing = ui.shared("chat.annotation.edit", nil :: any)
+local NOTE_W, NOTE_H, NOTE_CARD_W, NOTE_CARD_H = 130, 32, 385, 420
+
+local function note_action(label: Label, icon: string, act: () -> ()): Node
+	return ui.button {
+		label = label,
+		w = 20,
+		h = 20,
+		p = 0,
+		shrink = 0,
+		items = "center",
+		justify = "center",
+		rounded = ui.raw(4, "Zeron's annotation card action"),
+		bg = "#00000000",
+		color = "$text.tertiary",
+		cursor = "pointer",
+		hover = { bg = "$hover", color = "$text.primary" },
+		active = { bg = "$pressed" },
+		focus = control.ring,
+		on_click = act,
+		Icon { name = icon :: any, size = 16 },
+	}
+end
+
+-- One staged quote in the card: its number, where it was selected, its
+-- words, its comment, and its pencil (only where a badge can take the edit)
+-- and trash.
+local function note_row(item: Item, n: () -> number, notes: boolean, props: Props): Node
+	local faint = "$text.tertiary"
+	local size, line = ui.raw(13, "Zeron's annotation card text"), ui.raw(18.5, "Zeron's annotation card line")
+	local head = if item.source
+		then locale.t("ds.composer_cargo.selected_from", { path = item.source })
+		else locale.t("ds.composer_cargo.selected")
+	local comment = if notes and type(item.comment) == "string" and item.comment ~= "" then item.comment else nil
+	return ui.row {
+		w_full = true,
+		items = "start",
+		ui.text { function(): string
+			return `{n()}.`
+		end, literal = true, w = ui.raw(17.5, "Zeron's annotation number"), shrink = 0, text_size = size, line_height = line, color = faint },
+		ui.column {
+			grow = 1,
+			min_w = 0,
+			gap = 1,
+			ui.row {
+				w_full = true,
+				gap = "$space.2",
+				justify = "between",
+				items = "center",
+				ui.text { head, literal = true, min_w = 0, truncate = true, text_size = size, line_height = line, color = faint },
+				ui.row {
+					shrink = 0,
+					gap = ui.raw(4.5, "Zeron's annotation card actions"),
+					if notes and item.anchor
+						then note_action(function(): string
+							return locale.s("ds.composer_cargo.annotation_edit", { n = n() })
+						end, "pen", function()
+							editing:set { id = item.id }
+						end)
+						else nil,
+					note_action(function(): string
+						return if notes then locale.s("ds.composer_cargo.annotation_remove", { n = n() }) else locale.s("ds.composer_cargo.selection_remove", { n = n() })
+					end, "trash-bin-minimalistic", function()
+						if props.on_remove then
+							props.on_remove(item.id)
+						end
+					end),
+				},
+			},
+			ui.text { item.text or item.quote or "", literal = true, wrap = true, pr = ui.raw(59.5, "Zeron's annotation body inset"), text_size = size, line_height = line, color = "$text.primary" },
+			if comment then ui.text { locale.t("ds.composer_cargo.user_comment"), mt = ui.raw(5, "Zeron's comment label"), text_size = size, line_height = line, color = faint } else nil,
+			if comment then ui.text { comment, literal = true, wrap = true, pr = ui.raw(59.5, "Zeron's annotation body inset"), text_size = size, line_height = line, color = "$text.primary" } else nil,
+		},
+	}
+end
+
+-- Zeron's one chip for all a draft's annotations ("2 annotations"), or for
+-- its plain selections: its × takes them all (shown under the pointer), and
+-- its card, which the pointer can move into, lists each.
+local function quotes_chip(list: State<{ Item }>, notes: boolean, props: Props): Node
+	local hovered = ui.use_state(false)
+	local function label(): string
+		local count = #list:get()
+		return if notes then locale.s("ds.composer_cargo.annotations", { n = count }) else locale.s("ds.composer_cargo.selections", { n = count })
+	end
+	local function number_of(item: Item): () -> number
+		return function(): number
+			for i, it in list:get() do
+				if it.id == item.id then
+					return i
+				end
+			end
+			return 0
+		end
+	end
+	local rows = ui.ref()
+	local card = HoverCard.Card {
+		id = if notes then "composer-annotations-card" else "composer-selections-card",
+		w = NOTE_CARD_W,
+		max_h = NOTE_CARD_H,
+		p = 0,
+		ui.scroll {
+			w_full = true,
+			h = function(): number
+				return math.min(rows.height or 0, NOTE_CARD_H)
+			end,
+			ui.column {
+				ref = rows,
+				w_full = true,
+				pt = ui.raw(13, "Zeron's annotation card"),
+				pb = ui.raw(13, "Zeron's annotation card"),
+				pl = ui.raw(14, "Zeron's annotation card"),
+				pr = ui.raw(14, "Zeron's annotation card"),
+				ui.each(list, function(item: Item): Node
+					return note_row(item, number_of(item), notes, props)
+				end, {
+					key = function(item: Item): string
+						return item.id
+					end,
+					gap = "$space.3",
+				}),
+			},
+		},
+	}
+	return ui.row {
+		id = if notes then "composer-annotations" else "composer-selections",
+		role = "group",
+		label = label,
+		h = NOTE_H,
+		min_w = NOTE_W,
+		shrink = 0,
+		gap = ui.raw(5, "Zeron's annotation chip"),
+		pl = ui.raw(10, "Zeron's annotation chip"),
+		pr = "$space.1",
+		items = "center",
+		rounded = ui.raw(12, "Zeron's annotation chip"),
+		border = 1,
+		border_color = "$border",
+		color = "$text.primary",
+		text_size = ui.raw(13, "Zeron's annotation chip"),
+		tooltip = card,
+		tooltip_interactive = true,
+		tooltip_delay = 0,
+		tooltip_placement = { side = "top", align = "start", offset = 4.5 },
+		on_hover = function(inside: boolean)
+			hovered:set(inside)
+		end,
+		ui.div { color = "$text.secondary", Icon { name = if notes then "chat-round-line" else "wrap-text", size = 12 } },
+		ui.text { label, literal = true, grow = 1 },
+		ui.button {
+			id = if notes then "composer-annotations-remove" else "composer-selections-remove",
+			label = if notes then locale.t("ds.composer_cargo.annotations_remove") else locale.t("ds.composer_cargo.selections_remove"),
+			w = 19,
+			h = 19,
+			p = 0,
+			shrink = 0,
+			items = "center",
+			justify = "center",
+			rounded = "$radius.full",
+			border = 1,
+			border_color = "$background",
+			bg = "$text.primary",
+			color = "$background",
+			cursor = "pointer",
+			hover = { bg = "$text.primary" },
+			focus = control.ring,
+			opacity = ui.tween(ui.computed(function(): number
+				return if hovered:get() then 1 else 0
+			end), SWAP),
+			on_click = function()
+				ui.batch(function()
+					for _, it in list:peek() do
+						if props.on_remove then
+							props.on_remove(it.id)
+						end
+					end
+				end)
+			end,
+			Icon { name = "close", size = 10 },
+		},
+	}
+end
+
 local function row_chip(item: Item, row: State<Item>, props: Props): Node
 	local hovered = ui.use_state(false)
 	local focused = ui.use_state(false)
@@ -1058,11 +1250,13 @@ function M.Chip(item: Item, row: State<Item>, props: Props): Node
 	return row_chip(item, row, props)
 end
 
-local BADGE, FOLD = "\0comments", "\0fold"
+local BADGE, FOLD, NOTES, PLAIN = "\0comments", "\0fold", "\0notes", "\0plain"
 
 local function cell_size(item: Item): (number, number)
 	if item.id == BADGE then
 		return CELL_W, BADGE_H
+	elseif item.id == NOTES or item.id == PLAIN then
+		return NOTE_W, NOTE_H
 	elseif item.kind == "image" then
 		return IMAGE_TILE, IMAGE_TILE
 	elseif is_pill(item) then
@@ -1125,19 +1319,41 @@ M.Strip = ui.component(function(props: Props): Node
 		end
 		return out
 	end)
+	local function quotes_of(notes: boolean): State<{ Item }>
+		return ui.computed(function(): { Item }
+			local out: { Item } = {}
+			for _, it in all:get() do
+				if it.kind == "quote" and (it.comment ~= nil) == notes then
+					table.insert(out, it)
+				end
+			end
+			return out
+		end)
+	end
+	local annotations, selections = quotes_of(true), quotes_of(false)
 	local cells = ui.computed(function(): { Item }
 		local tiles: { Item } = {}
 		local rows: { Item } = {}
 		local badge = false
+		local notes, plain = false, false
 		for _, it in all:get() do
 			if it.kind == "comment" then
 				badge = true
+			elseif it.kind == "quote" then
+				notes = notes or it.comment ~= nil
+				plain = plain or it.comment == nil
 			elseif it.kind ~= "appshot" then
 				table.insert(if is_tile(it) then tiles else rows, it)
 			end
 		end
 		for _, it in rows do
 			table.insert(tiles, it)
+		end
+		if notes then
+			table.insert(tiles, { id = NOTES, kind = "quote", name = NOTES } :: Item)
+		end
+		if plain then
+			table.insert(tiles, { id = PLAIN, kind = "quote", name = PLAIN } :: Item)
 		end
 		if badge then
 			local cell: Item = { id = BADGE, kind = "comment", name = BADGE }
@@ -1236,6 +1452,10 @@ M.Strip = ui.component(function(props: Props): Node
 				ui.each(shown, function(item: Item): Node
 					if item.id == BADGE then
 						return comments_badge(comments, props)
+					elseif item.id == NOTES then
+						return quotes_chip(annotations, true, props)
+					elseif item.id == PLAIN then
+						return quotes_chip(selections, false, props)
 					elseif item.id == FOLD then
 						return ui.button {
 							label = function()

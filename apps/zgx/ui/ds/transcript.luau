@@ -28,12 +28,11 @@
 --
 -- Quoting:
 -- - A selection (one message or several; a code block, a tool's row) offers
---   Mention and Attach under its last line, clear of the text: above its
---   first line if the view has no room below, and at the view's foot if the
---   selection fills it. It goes on a scroll, or when the selection does. zgx
---   gives scripts no selection, so the host reads it (`read_selection`), each
---   time a press lets go in the list. Its context menu (ds/selection_menu)
---   offers the same two.
+--   Zeron's annotation pill over its first line (ds/annotation_layer): Add
+--   to chat opens a comment input there, then a numbered badge marks the
+--   line. zgx gives scripts no selection, so the host reads it
+--   (`read_selection`), each time a press lets go in the list. Its context
+--   menu (ds/selection_menu) offers the same two.
 --
 -- `Transcript { messages = state, offset = state }`; `latest()`
 -- goes to the end (a person sending goes there too, whatever they were
@@ -56,6 +55,7 @@ local glass = require("@self/glass")
 local control = require("@self/control")
 local Quote = require("@self/quote")
 local SelectionMenu = require("@self/selection_menu")
+local AnnotationLayer = require("@self/annotation_layer")
 local Rail = require("@self/rail")
 local motion = require("@self/motion")
 local locale = require("@self/locale")
@@ -128,10 +128,9 @@ export type Props = {
 	-- growing writes here, a small state, rather than into the whole list
 	-- on every word; its message takes the text once it's done.
 	draft: State<Draft>?,
-	-- What a selection's Mention and Attach do with it. With neither, a
-	-- selection offers nothing.
-	on_mention: ((q: Quote.Quote) -> ())?,
-	on_attach: ((q: Quote.Quote) -> ())?,
+	-- A selection's annotations, staged on a chat's draft
+	-- (ds/annotation_layer's `Notes`). None: a selection offers nothing.
+	annotate: any?,
 	-- A prompt that wasn't delivered, sent again (by its id).
 	on_retry: ((id: string) -> ())?,
 	-- "Jump to latest" pressed. (It has the keys, and leaves as the view
@@ -233,13 +232,6 @@ export type Block = {
 
 -- Rows not yet measured: about a short message.
 local ESTIMATE = 96
--- A selection's action: its words' height and its height round them (the
--- bar's even inset and its border, each side), what it keeps from the
--- selection and from the view's edges, and the room the way back to the end
--- takes at the foot.
-local WORD, ACTION, CLEAR, MARGIN, FOOT = 26, 32, 6, 8, 46
--- How often a shown action looks whether the selection is still there.
-local WATCH = 200
 
 -- The room left under the conversation's last row, over what floats at its
 -- foot: Zeron's (transcript.rs, the fade band and 8).
@@ -648,6 +640,9 @@ type View = {
 	threads: Threads.Threads?,
 	-- A message text's find (its key: `<id>:u`, `<id>:<block>`, `<id>:r`).
 	find: ((key: string) -> any)?,
+	-- The text an open annotation input washes in it.
+	wash: (() -> string?)?,
+	working: any?,
 }
 
 -- A reply's thought being written, for its row (ds/activity's `thought`): the
@@ -792,6 +787,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			open = if view then view.open else nil,
 			link_menu = if view then view.link_menu else nil,
 			find = if view and view.find then view.find(`{m.id}:{b.id}`) else nil,
+			wash = if view then view.wash else nil,
 			group = `reply:{m.id}`,
 		}
 	end, {
@@ -873,6 +869,7 @@ local function reply(
 			open = if view then view.open else nil,
 			link_menu = if view then view.link_menu else nil,
 			find = if view and view.find then view.find(`{m.id}:r`) else nil,
+			wash = if view then view.wash else nil,
 			group = `reply:{m.id}`,
 			track = track(m.id),
 		},
@@ -1426,10 +1423,6 @@ local function Transcript(props: Props): Node
 			end
 		end)
 	end)
-	-- The selection the host read, and where its action stands: `y` from
-	-- the view's top, and its right edge, or its left when it stands above.
-	local spot = ui.state(`transcript_spot{kept}`, nil :: any)
-	local read = SelectionMenu.read
 	local function row_at(y: number): any
 		for _, r in rows do
 			local el = r.outer:peek()
@@ -1439,175 +1432,65 @@ local function Transcript(props: Props): Node
 		end
 		return nil
 	end
-	-- Who said it: one name, two, or how many messages it runs across. With
-	-- an end scrolled out of reach, there's no telling how many.
-	local function who(s: any): string
+	-- What a selection quotes: from its first word (a drag begun inside a word still quotes the word).
+	local function text_of(s: any): string
 		local first = if s.top then row_at(s.top.y + s.top.h / 2) else nil
-		local final = if s.bottom then row_at(s.bottom.y + s.bottom.h / 2) else nil
-		local function name(r: any): string
-			return if r.m.role == "user" then locale.s("ds.transcript.you") else r.m.model or locale.s("ds.transcript.agent")
-		end
-		if not first or not final then
-			return locale.s("ds.transcript.several_messages")
-		end
-		if first == final then
-			return name(first)
-		end
-		local span = math.abs(final.index:peek() - first.index:peek()) + 1
-		if span == 2 and name(first) ~= name(final) then
-			return locale.s("ds.transcript.two_names", { first = name(first), final = name(final) })
-		end
-		return locale.s("ds.transcript.n_messages", { n = tostring(span) })
-	end
-	-- Where the action stands for a selection: under its last line, ending
-	-- with it; else over its first, starting with it; else at the view's foot.
-	local function place(s: any): any
-		local el = list:peek()
-		if not el or not el.x or not el.y or not el.width or not el.height then
-			return nil
-		end
-		local b, t = s.bottom or s.top, s.top or s.bottom
-		if not b or not t then
-			return nil
-		end
-		local floor = el.height - foot() - ACTION - (if away:peek() then FOOT else MARGIN)
-		local below = b.y + b.h + CLEAR - el.y
-		if below <= floor then
-			return { y = below, right = b.x + b.w - el.x }
-		end
-		local above = t.y - CLEAR - ACTION - el.y
-		if above >= MARGIN then
-			return { y = above, left = t.x - el.x }
-		end
-		return { y = floor, right = b.x + b.w - el.x }
-	end
-	-- What a selection quotes: from its first word, whoever said it.
-	local function quote_of(s: any): Quote.Quote
-		local first = if s.top then row_at(s.top.y + s.top.h / 2) else nil
-		-- (The message as it is now: a reply written since its row was made
-		-- has its words and its time.)
 		local said: Message? = if first then first.state:peek() else nil
-		local lead = if said then Quote.lead(s.text, said.text) else ""
-		-- Where it was said: its message's time, when it lies in one.
-		local final = if s.bottom then row_at(s.bottom.y + s.bottom.h / 2) else nil
-		local from = if said and first == final then said.at else nil
-		return { text = lead .. s.text, who = who(s), from = from }
+		return (if said then Quote.lead(s.text, said.text) else "") .. s.text
 	end
-	local function settle()
-		local s = read()
-		local at = if s then place(s) else nil
-		if at then
-			local q = quote_of(s)
-			at.text, at.who, at.from, at.offset = q.text, q.who, q.from, offset:peek()
-		end
-		spot:set(at)
-	end
-	local function take(act: ((q: Quote.Quote) -> ())?, q: Quote.Quote?)
-		spot:set(nil)
-		SelectionMenu.clear()
-		if q and act then
-			act(q)
-		end
-	end
-	-- What the bar offers, in the selection's menu (which then stands for it).
-	local function offers(s: any): { any }
-		spot:set(nil)
-		local q = quote_of(s)
-		local out: { any } = {}
-		if props.on_mention then
-			table.insert(out, {
-				label = locale.s("ds.transcript.mention"),
-				icon = "chat-round-line",
-				on_select = function()
-					take(props.on_mention, q)
-				end,
-			})
-		end
-		if props.on_attach then
-			table.insert(out, {
-				label = locale.s("ds.transcript.attach"),
-				icon = "paperclip",
-				on_select = function()
-					take(props.on_attach, q)
-				end,
-			})
-		end
-		return out
-	end
-	-- A scroll takes it away: it no longer stands by what it offers.
-	-- (The offset is read only while there is one: no work a scroll frame
-	-- otherwise.)
-	ui.effect(function()
-		local at = spot:get()
-		if at and math.abs(offset:get() - at.offset) > 1 then
-			spot:set(nil)
-		end
-	end)
-	local Action = ui.component(function(): Node
-		local pill = ui.ref()
-		-- However the selection went (a press elsewhere, a key, its row
-		-- rebuilt), the action goes with it.
-		ui.every(WATCH, function()
-			if read() == nil then
-				spot:set(nil)
-				return false
-			end
-			return true
-		end)
-		local function word(text: Label, label: Label, act: ((q: Quote.Quote) -> ())?): Node
-			return ui.button {
-				label = label,
-				h = WORD,
-				px = "$zeron.space.snug",
-				-- A pill in a pill, its curve parallel to the bar's.
-				rounded = "$radius.full",
-				bg = "#00000000",
-				color = "$text.primary",
-				text_size = "$font.size.sm",
-				weight = "$font.weight.medium",
-				cursor = "pointer",
-				hover = { bg = "$hover" },
-				active = { bg = "$pressed" },
-				on_click = function()
-					local at = spot:peek()
-					take(act, if at then { text = at.text, who = at.who, from = at.from } else nil)
-				end,
-				text,
-			}
-		end
-		-- Where it stands: the last place it was given, so it fades out there.
-		local stood: any = nil
-		local function standing(): any
-			stood = spot:get() or stood
-			return stood
-		end
-		local bar: ContainerProps = {
-			ref = pill,
-			absolute = true,
-			top = function(): number
-				local at = standing()
-				return if at then at.y else 0
-			end,
-			left = function(): number
-				local at = standing()
-				local el = list:peek()
-				if not at or not el then
-					return 0
+	-- Annotations (ds/annotation_layer): the selection's pill, a comment's
+	-- input, and each annotated line's badge in its row.
+	local layer = AnnotationLayer.new {
+		name = `transcript{kept}`,
+		notes = props.annotate,
+		view = list,
+		holder_at = function(y: number): (string?, Ref?)
+			local r = row_at(y)
+			return if r then r.m.id else nil, if r then r.inner else nil
+		end,
+		holder = function(key: string): Ref?
+			local r = rows[key]
+			return if r then r.inner else nil
+		end,
+		scroll = function(): number
+			return offset:get()
+		end,
+		reveal = function(a: any, over: number)
+			local index = messages:index_of("id", a.key)
+			local function go()
+				local r = rows[a.key]
+				local el, view = if r then r.inner:peek() else nil, list:peek()
+				if not el or not view or el.y == nil or view.y == nil or view.height == nil then
+					if index then
+						local l = list:peek()
+						if l then
+							l:scroll_to_row(index, { align = "center" })
+						end
+					end
+					return false
 				end
-				local w = pill.width or 0
-				local x = if at.left then at.left else at.right - w
-				return math.clamp(x, MARGIN, math.max(MARGIN, (list.width or 0) - w - MARGIN))
-			end,
-			gap = "$zeron.space.hair",
-			items = "center",
-			shadow = "$shadow.md",
-			selectable = false,
-			word(locale.t("ds.transcript.mention"), locale.t("ds.transcript.mention_hint"), props.on_mention),
-			word(locale.t("ds.transcript.attach"), locale.t("ds.transcript.attach_hint"), props.on_attach),
-		}
-		control.contain(glass.style(bar, "menu"), { radius = "$radius.full", inset = "$zeron.space.hair", border = 1 })
-		return ui.row(bar)
-	end)
+				local top = (el.y :: number) + a.dy - (view.y :: number)
+				local room = (view.height :: number) - foot() - 8
+				if top - over < 8 then
+					offset:set(math.max(0, offset:peek() + top - over - 8))
+				elseif top + a.lh > room then
+					offset:set(offset:peek() + top + a.lh - room)
+				end
+				return true
+			end
+			if not go() then
+				ui.after(32, function()
+					go()
+				end)
+			end
+		end,
+	}
+	local function settle()
+		layer.settle(text_of)
+	end
+	local function offers(s: any): { any }
+		return layer.offers(s, text_of)
+	end
 	-- Away from the end long enough to mean it: a moment's leaving isn't,
 	-- nor a send's glide (it steps off the end to rise to it again).
 	local pending: (() -> ())? = nil
@@ -1663,6 +1546,9 @@ local function Transcript(props: Props): Node
 		local inner = ui.ref()
 		local outer = ui.ref()
 		local row_w: number? = nil
+		local function washed(): string?
+			return layer.wash(m.id)
+		end
 		-- (`state`: the message as it is now; `m`, as the row was made.)
 		rows[m.id] = { outer = outer, inner = inner, index = index, m = m, state = state }
 		ui.on_cleanup(function()
@@ -1730,6 +1616,7 @@ local function Transcript(props: Props): Node
 			min_h = need,
 			ui.column {
 				ref = inner,
+				relative = true,
 				-- A prompt's own height (its words, and the room above it, not
 				-- the runway it may hold): what its reply's runway leaves it.
 				-- Last, or its reply under it: a prompt sent alone (its reply
@@ -1812,11 +1699,12 @@ local function Transcript(props: Props): Node
 							pictures = props.sent_pictures,
 							session = props.sent_from,
 							find = if find_for then find_for(`{m.id}:u`) else nil,
+							wash = washed,
 						},
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry, props.working, props.compaction_wait),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed }),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?
@@ -1831,6 +1719,7 @@ local function Transcript(props: Props): Node
 						end,
 					}
 				end, { w_full = true, exit = { opacity = 0, duration = 120 } }),
+				layer.Here(m.id),
 			},
 		}
 	end
@@ -1838,6 +1727,10 @@ local function Transcript(props: Props): Node
 	return ui.overlay {
 		w_full = true,
 		h_full = true,
+		-- (A press anywhere lets an annotation's pinned tip go.)
+		on_press = function()
+			layer.press()
+		end,
 		on_pointer_move = function(e: { x: number, y: number })
 			pointer = { x = e.x, y = e.y }
 		end,
@@ -1849,7 +1742,7 @@ local function Transcript(props: Props): Node
 				hover:set("")
 			end
 		end,
-		ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, SelectionMenu { w_full = true, h_full = true, more = offers, on_release = if props.on_mention or props.on_attach
+		ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, SelectionMenu { w_full = true, h_full = true, more = offers, on_release = if props.annotate
 			then function()
 				-- (A turn on: the release ends the gesture first.)
 				ui.after(0, settle)
@@ -2028,21 +1921,8 @@ local function Transcript(props: Props): Node
 				return list.height or 0
 			end,
 		},
-		-- What a selection offers.
-		ui.presence(function()
-			return if spot:get() then "shown" else nil
-		end, function()
-			return Action {}
-		end, {
-			absolute = true,
-			left = 0,
-			right = 0,
-			top = 0,
-			bottom = 0,
-			pointer_events = "none",
-			enter = { opacity = { 0, 1 }, y = { 4, 0 }, duration = 140, ease = "outQuad" },
-			exit = { opacity = 0, duration = 90 },
-		}),
+		-- A selection's pill, and the comment written on it.
+		layer.Overlay(),
 		-- Away from the end: the way back, over the list's foot.
 		ui.row {
 			absolute = true,

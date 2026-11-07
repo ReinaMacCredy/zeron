@@ -59,6 +59,7 @@ local badge = require("@self/badge")
 local CodeEditor = require("@self/code_editor")
 local Syntax = require("@self/syntax")
 local SelectionMenu = require("@self/selection_menu")
+local AnnotationLayer = require("@self/annotation_layer")
 -- (Zoom eases as the lightbox's does: one system.)
 local Motion = require("@self/motion")
 local locale = require("@self/locale")
@@ -133,6 +134,9 @@ export type Props = {
 	-- alt text and such links only styled.
 	picture: ((path: string, src: string) -> string?)?,
 	on_link: ((path: string, target: string) -> ())?,
+	-- Text selected in a Markdown preview, annotated on its chat's draft
+	-- (ds/annotation_layer's `Notes`, by the file's path): its pill, input and badges.
+	annotate: ((path: string) -> any)?,
 	readonly: boolean?,
 	-- What stands between a code file's lines (`ds/code_editor`'s).
 	blocks: any?,
@@ -1696,7 +1700,42 @@ local function component(props: Props): Node
 		if k == "markdown" then
 			return ui.presence(rendered, function(on: boolean): Node
 				if on then
-					return SelectionMenu { w_full = true, h_full = true, ui.scroll {
+					-- Annotations on what it shows (ds/annotation_layer): the column of text its one holder.
+					local notes = if props.annotate then props.annotate(doc_.path) else nil
+					local view, holder = ui.ref(), ui.ref()
+					local scrolled = ui.use_state(0)
+					local layer = AnnotationLayer.new {
+						name = `preview.{doc_.path}`,
+						notes = notes,
+						view = view,
+						holder_at = function(y: number): (string?, Ref?)
+							local el = holder:peek()
+							return if el and el.y and el.height and y >= el.y and y < el.y + el.height then "doc" else nil, holder
+						end,
+						holder = function(): Ref?
+							return holder
+						end,
+						scroll = function(): number
+							return scrolled:get()
+						end,
+						reveal = function(a: any, over: number)
+							scrolled:set(math.max(0, a.dy - over))
+						end,
+					}
+					return ui.overlay { w_full = true, h_full = true, SelectionMenu {
+						w_full = true,
+						h_full = true,
+						more = if notes then function(s: any): { any }
+							return layer.offers(s)
+						end else nil,
+						on_release = if notes then function()
+							ui.after(0, function()
+								layer.settle()
+							end)
+						end else nil,
+						ui.scroll {
+						ref = view,
+						offset = scrolled,
 						w_full = true,
 						h_full = true,
 						scrollbar = true,
@@ -1707,7 +1746,10 @@ local function component(props: Props): Node
 							max_w = ui.theme.get("zeron.prose.measure") :: number?,
 							px = "$space.6",
 							py = "$space.5",
-							Markdown {
+							ui.column { ref = holder, w_full = true, relative = true, Markdown {
+								wash = if notes then function(): string?
+									return layer.wash("doc")
+								end else nil,
 								text = function(): string
 									return text:get()
 								end,
@@ -1729,9 +1771,9 @@ local function component(props: Props): Node
 									else function(k: number, done: boolean)
 										text:set(tick_task(text:peek(), k, done))
 									end,
-							},
+							}, layer.Here("doc") },
 						},
-					} }
+					} }, layer.Overlay() }
 				end
 				return code("markdown", doc_.path)
 			end, {
@@ -1802,7 +1844,7 @@ local function component(props: Props): Node
 
 	local box: { [any]: any } = {}
 	for k, v in props do
-		if k ~= "doc" and k ~= "root" and k ~= "limit" and k ~= "readonly" and k ~= "blocks" and k ~= "block_view" and k ~= "head" and k ~= "lead" and k ~= "hooks" and k ~= "drafts" and k ~= "places" and k ~= "openable" and k ~= "more_menu" and k ~= "wrap_default" and k ~= "autosave" and k ~= "code_size" and k ~= "picture" and k ~= "reveal_line" and k ~= "escape_hint" and string.sub(tostring(k), 1, 3) ~= "on_" and k ~= "children" then
+		if k ~= "doc" and k ~= "root" and k ~= "limit" and k ~= "readonly" and k ~= "blocks" and k ~= "block_view" and k ~= "head" and k ~= "lead" and k ~= "hooks" and k ~= "drafts" and k ~= "places" and k ~= "openable" and k ~= "more_menu" and k ~= "wrap_default" and k ~= "autosave" and k ~= "code_size" and k ~= "picture" and k ~= "reveal_line" and k ~= "escape_hint" and k ~= "annotate" and string.sub(tostring(k), 1, 3) ~= "on_" and k ~= "children" then
 			box[k] = v
 		end
 	end
