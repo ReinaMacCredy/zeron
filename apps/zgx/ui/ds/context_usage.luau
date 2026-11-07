@@ -79,7 +79,7 @@ function M.usage_ink(f: number): string
 	return if f >= 0.95 then "$danger" elseif f >= 0.8 then "$warning" else "$accent"
 end
 
-function M.Body(props: { usage: () -> Usage? }): Node
+function M.Body(props: { usage: () -> Usage?, more: Node? }): Node
 	local usage = props.usage
 	return ui.column {
 		id = "composer-context-card",
@@ -115,6 +115,8 @@ function M.Body(props: { usage: () -> Usage? }): Node
 				color = "$text.secondary",
 			}),
 		},
+		-- (The compaction's part, under the numbers: ds/compaction's CardPart.)
+		props.more,
 	}
 end
 

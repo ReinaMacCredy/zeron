@@ -1318,6 +1318,77 @@
       "effort": "Effort",
       "use_current": "Use current selection",
       "more": "More…"
+    },
+    "compaction": {
+      "verdict": {
+        "new": "New task",
+        "carry": "Carry over",
+        "continue": "Same task",
+        "failed": "No answer"
+      },
+      "swapped_in": "Swapped in",
+      "usually": "{elapsed}, usually ~{usual}",
+      "compacted": "Compacted",
+      "compacting": "Compacting",
+      "background": "Compacted in the background",
+      "nothing_carried": "nothing carried",
+      "turns_as_text": "{n, plural, one {# turn as text} other {# turns as text}}",
+      "not_compacted": "Not compacted",
+      "context_kept": "context kept",
+      "no_answer": "the classifier gave no answer",
+      "classifier": "Classifier",
+      "queued": "Compaction queued",
+      "queued_meta": "· starts when the turn settles",
+      "checking": "Checking whether to compact",
+      "checking_note": "Checking the agent's note",
+      "said": "{verdict} (said {said})",
+      "by": {
+        "stage1": "First look",
+        "stage2": "Second look",
+        "streak": "Three same-task verdicts in a row",
+        "ceiling": "Context near the window, not asked",
+        "agent_note": "Agent note, compacted without asking",
+        "turn_end": "Past the check when the turn ended, not asked",
+        "background_copy": "A copy compacted in the background, not asked"
+      },
+      "decision": "Decision",
+      "reason": "Reason",
+      "decided_by": "Decided by",
+      "context": {
+        "title": "Context",
+        "subtitle": "Claude Code · {model}",
+        "caption": "Bar drawn {n}× so the used part reads; free space is not drawn.",
+        "buffer": "Autocompact buffer",
+        "free": "Free",
+        "compact_now": "Compact now",
+        "settings": "Context settings"
+      },
+      "context_tokens": "{n} tokens",
+      "tokens": "Tokens",
+      "usage": "{input} in · {output} out",
+      "saw": "What the classifier saw",
+      "would_see": "What it would have seen (not sent)",
+      "first_look": "First look",
+      "second_look": "Second look",
+      "reply": "Reply",
+      "summary_label": "Summary the agent wrote",
+      "carried_label": "Carried over word for word",
+      "nothing_carried_long": "Nothing carried word for word: the next turn starts from the summary",
+      "kept_heading": "WHAT THE AGENT KEPT",
+      "classifier_heading": "CLASSIFIER",
+      "resume_title": "Resume with less context",
+      "resume_body": "{tokens} tokens from {idle} ago · cache expired",
+      "resume_compact": "Compact",
+      "resume_keep": "Keep full history",
+      "prompt_cache": "Prompt cache",
+      "idle_expired": "Idle for {idle}; the prompt cache has expired.",
+      "compact_context": "Compact context",
+      "minutes_seconds": "{m}m {s}s",
+      "days_hours": "{d}d {h}h",
+      "context_label": "Context",
+      "copy_running": "Compacting a copy · {clock}",
+      "copy_ready_turn": "Copy ready · swaps when the turn ends",
+      "copy_ready_background": "Copy ready · waits for background work"
     }
   },
   "settings": {
@@ -2678,6 +2749,44 @@
       "loading": "Loading…",
       "empty": "No profiles yet. Add one to start chats from a saved agent and model.",
       "unavailable_host": "This version of Zeron can't keep agent profiles."
+    },
+    "compaction": {
+      "title": "Compaction",
+      "terms": "compaction compact context summary idle cache classifier agents tokens",
+      "unread": "Couldn't read the compaction settings",
+      "loading": "Loading…",
+      "off": "Off",
+      "idle_section": "When idle",
+      "chat_section": "During a chat",
+      "idle": {
+        "label": "Compact idle chats before the cache expires",
+        "description": "Summarize a long idle conversation just before its 1-hour prompt cache expires, so coming back reprocesses the summary instead of the whole chat.",
+        "terms": "idle cache expire summarize prompt cache"
+      },
+      "threshold": {
+        "label": "Idle threshold",
+        "description": "Smaller chats are left alone.",
+        "terms": "idle threshold tokens size"
+      },
+      "agents": {
+        "label": "Let agents compact themselves",
+        "description": "Agents get the compact tool, and a reminder once their context fills up.",
+        "terms": "agent compact tool reminder self"
+      },
+      "tasks": {
+        "label": "In tasks",
+        "description": "Lead and step threads compact by the same rule. Off leaves tasks alone.",
+        "terms": "tasks lead step threads"
+      },
+      "check": {
+        "label": "Check from",
+        "description": "Context a compaction could free, above what the last one left; a chat with a smaller window is checked from 70% of its free room.",
+        "terms": "check from remind at classifier new task threshold"
+      },
+      "remind": {
+        "label": "Remind at",
+        "description": "Context a compaction could free, above what the last one left; a chat with a smaller window is reminded at 70% of its free room. Every message past it carries the reminder until the chat compacts."
+      }
     }
   },
   "common": {

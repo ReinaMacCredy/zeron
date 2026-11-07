@@ -27,6 +27,7 @@ local cloud = require("@account/cloud")
 local shared = require("@app/screens/chat/shared")
 local sessions = require("@account/sessions")
 local LinkNotice = require("@app/screens/chat/link_notice")
+local Compaction = require("@ds/compaction")
 local Where = require("@app/screens/chat/where")
 local DropOverlay = require("@ds/drop_overlay")
 local Asks = require("@app/screens/chat/asks")
@@ -591,6 +592,18 @@ local function Composer(): Node
 	end
 	side_chat_opener = function()
 		open_side_chat(nil)
+	end
+	-- "Keep full history": the resume card stays away for this quiet
+	-- spell of this chat (gpui's `keep_full_history`), back once it's used.
+	local resume_kept = ui.state("chat_resume_kept", nil :: { id: string, at: string }?)
+	local function resume_offer(): any
+		local s: any = open()
+		local o = if s then s.resume else nil
+		local k = resume_kept:get()
+		if not o or (k and k.id == s.id and k.at == o.at) then
+			return nil
+		end
+		return o
 	end
 	local function compact(focus: string)
 		AppCommands.run_compact(session_id:peek(), open(), running:peek(), focus, function(key: string)
@@ -1184,6 +1197,43 @@ local function Composer(): Node
 			stats = function(): any
 				return store.stats:get()
 			end,
+			-- Compaction: the chip while it checks or compacts, the resume
+			-- card on a large idle Claude chat, and the ring card's part.
+			compaction = {
+				label = function(): string?
+					local s: any = open()
+					return Compaction.chip_label(if s then s.compaction_wait else nil)
+				end,
+				resume = resume_offer,
+				on_resume_compact = function()
+					compact("")
+				end,
+				on_resume_keep = function()
+					local s: any = open()
+					if s and s.resume then
+						resume_kept:set({ id = s.id, at = s.resume.at })
+					end
+				end,
+				plan = function(): any
+					local s: any = open()
+					return if s then s.compact_plan else nil
+				end,
+				blocked = function(): string?
+					local s: any = open()
+					local b = if s then s.compact_blocked else nil
+					if b == "compacting" then
+						return ui.t("chat.composer.compact_in_progress"):get()
+					elseif b == "running" then
+						return ui.t("chat.composer.compact_wait_turn"):get()
+					elseif type(b) == "table" then
+						return b.text
+					end
+					return nil
+				end,
+				on_compact = function()
+					compact("")
+				end,
+			},
 			working = function(): boolean
 				local s: any = open()
 				if s and s.in_flight ~= nil then

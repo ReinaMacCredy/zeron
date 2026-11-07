@@ -12,6 +12,7 @@ local ds = require("@ds")
 local T = require("@ds/transcript")
 local store = require("@app/screens/chat/store")
 local route = require("@app/screens/shell/route")
+local AppCommands = require("@app/screens/chat/app_commands")
 -- Its side chats and subagents, in a card at the top right (the title
 -- bar's "Show session details").
 local lanes = require("@app/screens/chat/lanes")
@@ -265,6 +266,21 @@ local function Session(id: Id?): Node
 							-- folded into one group.
 							compact = function(): boolean
 								return prefs.compact_transcript:get()
+							end,
+							-- A `/context` card's actions: compact this chat, Settings > Compaction.
+							on_compact = function()
+								local s: any = store.session:peek()
+								if s and s.id == id then
+									AppCommands.run_compact(id, s, s.running == true, "", function() end, function() end)
+								end
+							end,
+							on_context_settings = function()
+								route.settings("compaction")
+							end,
+							-- The compaction it waits on, in the trailer's place.
+							compaction_wait = function(): any
+								local s = store.session:get()
+								return if s and s.id == id then s.compaction_wait else nil
 							end,
 							on_mention = shared.mention,
 							chat_of = shared.chat_of,

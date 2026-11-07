@@ -51,6 +51,7 @@ local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
 local context_usage = require("@self/context_usage")
+local Compaction = require("@self/compaction")
 local SessionStats = require("@self/session_stats")
 local motion = require("@self/motion")
 local EditorMenu = require("@self/editor_menu")
@@ -293,6 +294,20 @@ export type Props = {
 	model_retry: (() -> ())?,
 	model_close: State<number>?,
 	context_tokens: (() -> number?)?,
+	-- Compaction (ds/compaction): `label` the chip's words while the chat
+	-- checks or compacts; `resume` the offer to resume with less context
+	-- (`on_resume_compact`, `on_resume_keep`); `plan` a planned or running
+	-- compaction (the ring's dot and its card's section), `blocked` why
+	-- Compact context can't now, `on_compact` it pressed.
+	compaction: {
+		label: () -> string?,
+		resume: () -> any,
+		on_resume_compact: () -> (),
+		on_resume_keep: () -> (),
+		plan: () -> any,
+		blocked: () -> string?,
+		on_compact: () -> (),
+	}?,
 	-- Agent profiles (ds.ProfilePicker's props, but its trigger and
 	-- placement): with one applied, the model's chip is two, the profile's
 	-- half opening the profiles card. `open_profiles` bumped opens it.
@@ -612,7 +627,7 @@ local function project_chip(
 	}
 end
 
-local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: () -> string): Node
+local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: () -> string, compaction: any?, stats: (() -> any)?): Node
 	local function known(): number?
 		if usage then
 			return context_usage.fraction(usage())
@@ -623,7 +638,15 @@ local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: (
 		return known() or 0
 	end
 	local open = ui.use_state(false)
+	local function plan(): any
+		return if compaction then compaction.plan() or nil else nil
+	end
+	-- A compaction planned: the accent, its dot; running, the busy ink.
 	local function ink(): string
+		local p = plan()
+		if p then
+			return if p.busy then "$zeron.status.working" else "$accent"
+		end
 		local f = known()
 		return if f then context_usage.ink(f) else "$text.tertiary"
 	end
@@ -655,7 +678,28 @@ local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: (
 				open:set(not open:peek())
 			end
 			else nil,
-		context_usage.Ring { fraction = fraction, footer = true },
+		relative = true,
+		context_usage.Ring {
+			fraction = fraction,
+			footer = true,
+			ink = function(f: number): string
+				local p = plan()
+				return if p then ink() else context_usage.ink(f)
+			end,
+		},
+		ui.show(function(): boolean
+			return plan() and true or false
+		end, ui.div {
+			id = "composer-context-dot",
+			absolute = true,
+			left = ui.raw(19, "gpui's plan dot"),
+			top = 1,
+			w = 5,
+			h = 5,
+			rounded = "$radius.full",
+			bg = ink :: any,
+			aria_hidden = true,
+		}),
 		ui.text {
 			function(): string
 				local f = known()
@@ -681,7 +725,21 @@ local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: (
 			w = 248,
 			placement = { side = at, align = "end", offset = 6 },
 			build = function(): Node
-				return context_usage.Body { usage = usage }
+				return context_usage.Body {
+					usage = usage,
+					more = if compaction
+						then Compaction.CardPart {
+							plan = compaction.plan,
+							blocked = compaction.blocked,
+							resume = compaction.resume,
+							stats = stats,
+							on_compact = function()
+								open:set(false)
+								compaction.on_compact()
+							end,
+						}
+						else nil,
+				}
 			end,
 		})
 	end)
@@ -2806,11 +2864,19 @@ return ui.component(function(props: Props): Node
 				items = "center",
 				shrink = 0,
 				gap = "$space.1",
+				if props.compaction
+					then Compaction.CopyChip {
+						plan = props.compaction.plan,
+						working = function(): boolean
+							return props.working ~= nil and props.working()
+						end,
+					}
+					else nil,
 				if props.usage
 					then ui.show(function(): boolean
 						local u = (props.usage :: () -> Usage?)()
 						return u ~= nil and u.window ~= nil and u.window > 0
-					end, ring(0, props.usage, side))
+					end, ring(0, props.usage, side, props.compaction, props.stats))
 					elseif props.context then ring(props.context, nil, side)
 					else nil,
 				if props.on_terminal
@@ -3026,6 +3092,14 @@ return ui.component(function(props: Props): Node
 		w_full = true,
 		gap = 0,
 		if props.notice then notice_line(props.notice, props.on_notice_action, props.on_dismiss_notice) else nil,
+		if props.compaction then Compaction.Chip { label = props.compaction.label } else nil,
+		if props.compaction
+			then Compaction.Resume {
+				offer = props.compaction.resume,
+				on_compact = props.compaction.on_resume_compact,
+				on_keep = props.compaction.on_resume_keep,
+			}
+			else nil,
 		body,
 	}
 end)

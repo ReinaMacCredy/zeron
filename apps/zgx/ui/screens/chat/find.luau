@@ -18,6 +18,7 @@
 local ds = require("@ds")
 local locale = require("@ds/locale")
 local MarkdownFind = require("@ds/markdown_find")
+local Compaction = require("@ds/compaction")
 local store = require("@app/screens/chat/store")
 local route = require("@app/screens/shell/route")
 
@@ -38,6 +39,10 @@ export type Match = { key: string, block: number, k: number, row: number }
 local function sources(m: any): { { key: string, text: string, breaks: boolean? } }
 	if m.role == "user" then
 		return { { key = `{m.id}:u`, text = m.text or "", breaks = true } }
+	end
+	-- A compaction's divider: its label's words, as drawn settled.
+	if m.role == "system" and (m.line == "classifier" or m.line == "compaction") then
+		return { { key = `{m.id}:c`, text = Compaction.words(m) } }
 	end
 	if m.role ~= "assistant" then
 		return {}

@@ -1652,6 +1652,63 @@ require("./profiles_stub").install {
 	settled = settled,
 }
 
+-- Compaction (tests/chat_compaction): the rows a test sets pushed as the
+-- host publishes them, one row's fields replaced, and how many of the
+-- dividers' clocks tick.
+local test_rows = ui.state("test_rows", {} :: { any })
+local test_row_patch = ui.state("test_row_patch", {} :: { [string]: any })
+local test_row_drop = ui.state("test_row_drop", "")
+local test_clocks = ui.state("test_clocks", -1)
+ui.command {
+	id = "push_rows",
+	title = "Push the test's rows",
+	run = function()
+		for _, m in test_rows:peek() do
+			store.messages:push(m)
+		end
+	end,
+}
+ui.command {
+	id = "patch_row",
+	title = "Patch a row of the transcript",
+	run = function()
+		local patch = test_row_patch:peek()
+		for i = 1, store.messages:len() do
+			local m = store.messages:at(i)
+			if m and m.id == patch.id then
+				local next_m = table.clone(m)
+				for k, v in patch do
+					next_m[k] = v
+				end
+				store.messages:set_key({ i }, next_m)
+			end
+		end
+	end,
+}
+ui.command {
+	id = "drop_row",
+	title = "Drop a row of the transcript",
+	run = function()
+		local id = test_row_drop:peek()
+		local kept = {}
+		for i = 1, store.messages:len() do
+			local m = store.messages:at(i)
+			if m and m.id ~= id then
+				table.insert(kept, m)
+			end
+		end
+		store.messages:set(kept)
+	end,
+}
+ui.command {
+	id = "compaction_clocks",
+	title = "How many compaction clocks tick",
+	run = function()
+		local c = require("@ds/compaction")
+		test_clocks:set(c.clocks)
+	end,
+}
+
 -- The shell, as small as can hold the page: the route's page, and the
 -- composer over it.
 local test_fan = ui.state("test_fan", false)

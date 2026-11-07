@@ -122,6 +122,18 @@ local engine: { [string]: any } = {
 	},
 	GetTitleSettings = {},
 	GetNativeSubagents = { switchable = { "claude-code" }, off = {} },
+	-- (Settings → Compaction: the engine's defaults.)
+	GetCompactionSettings = {
+		enabled = true,
+		minTokens = 100000,
+		nudgeTokens = 150000,
+		mode = "classifier",
+		classifier = {},
+		missions = true,
+		compactAhead = false,
+		hasJevKey = false,
+	},
+	GetToolSettings = { settings = { disabledTools = {}, disabledGroups = {}, agentsUseFullToken = false }, disabled = {} },
 }
 local banners = { desktop = true, background_only = true, agent_updates = true }
 
@@ -292,6 +304,12 @@ local answers: { [string]: (arg: any) -> any } = {
 				engine[get] = w
 			elseif m == "SetTitleSettings" then
 				engine[get] = arg.params
+			elseif m == "SetCompactionSettings" then
+				local c = table.clone(arg.params)
+				c.hasJevKey = false
+				engine[get] = c
+			elseif m == "SetToolSettings" then
+				engine[get] = { settings = arg.params, disabled = table.clone(arg.params.disabledTools or {}) }
 			end
 			return settled(engine[get])
 		end

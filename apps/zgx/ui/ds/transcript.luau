@@ -59,6 +59,8 @@ local SelectionMenu = require("@self/selection_menu")
 local Rail = require("@self/rail")
 local motion = require("@self/motion")
 local locale = require("@self/locale")
+local Compaction = require("@self/compaction")
+local ContextCard = require("@self/compaction_context")
 
 export type Tool = Activity.Tool
 export type Message = {
@@ -138,6 +140,13 @@ export type Props = {
 	-- Replies laid out compact (each one's work folded into one group),
 	-- as the setting says.
 	compact: (() -> boolean)?,
+	-- The compaction the chat waits on (ds/compaction's Wait): it stands in
+	-- the working trailer's place at the conversation's end, or, while the
+	-- decision itself compacts, on that row.
+	compaction_wait: (() -> any)?,
+	-- A `/context` card's Compact now and Context settings.
+	on_compact: (() -> ())?,
+	on_context_settings: (() -> ())?,
 	-- The widest the conversation runs (points; a function follows a
 	-- setting as it changes); by default the theme's measure.
 	measure: (number | () -> number)?,
@@ -504,11 +513,27 @@ end
 -- word and clock, as Zeron's working trailer (transcript.rs); not
 -- delivered, a line to send it again. The reply's own row takes over once
 -- it comes.
-local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?, working: any): Node
+-- A wait that stands at the conversation's end: not one a row shows.
+local function trailing_wait(wait: (() -> any)?): any
+	local w = if wait then wait() else nil
+	return if w and w.row == nil then w else nil
+end
+
+local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?, working: any, wait: (() -> any)?): Node
 	return ui.presence(function(): string?
 		local w = row:get().waiting
-		return if w == "failed" then "failed" elseif w then "waiting" else nil
+		if w == "failed" then
+			return "failed"
+		end
+		return if w and trailing_wait(wait) then "compaction" elseif w then "waiting" else nil
 	end, function(kind: string): Node
+		if kind == "compaction" then
+			return Compaction.Wait {
+				wait = function(): any
+					return trailing_wait(wait)
+				end,
+			}
+		end
 		if kind == "failed" then
 			return ui.button {
 				label = locale.t("ds.transcript.not_delivered"),
@@ -1688,6 +1713,20 @@ local function Transcript(props: Props): Node
 						end
 					end,
 				if m.role == "switch" then seam(m)
+					elseif m.role == "system" and (m.line == "classifier" or m.line == "compaction") then Compaction.Divider {
+						id = m.id,
+						m = function(): any
+							return state:get()
+						end,
+						live = props.compaction_wait,
+					}
+					elseif m.role == "system" and m.line == "claude_command" and m.context then ContextCard {
+						report = function(): any
+							return state:get().context
+						end,
+						on_compact = props.on_compact,
+						on_settings = props.on_context_settings,
+					}
 					elseif m.role == "system" then line_row(m.hint, function(): any
 						return state:get()
 					end)
@@ -1715,9 +1754,23 @@ local function Transcript(props: Props): Node
 							find = if find_for then find_for(`{m.id}:u`) else nil,
 						},
 						strip(m, state, hovered),
-						waiting_line(state, props.on_retry, props.working),
+						waiting_line(state, props.on_retry, props.working, props.compaction_wait),
 					}
 					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for, working = props.working }),
+				-- The wait for a compaction after the last row (the agent's,
+				-- once its turn ended): in the trailer's place.
+				ui.presence(function(): string?
+					if not last() or (mine and state:get().waiting ~= nil) then
+						return nil
+					end
+					return if trailing_wait(props.compaction_wait) then "wait" else nil
+				end, function(): Node
+					return Compaction.Wait {
+						wait = function(): any
+							return trailing_wait(props.compaction_wait)
+						end,
+					}
+				end, { w_full = true, exit = { opacity = 0, duration = 120 } }),
 			},
 		}
 	end

@@ -94,6 +94,11 @@ const ENGINE_METHODS: &[&str] = &[
     "SetTitleSettings",
     "GetNativeSubagents",
     "SetNativeSubagents",
+    "GetCompactionSettings",
+    "SetCompactionSettings",
+    // (Compaction's "Let agents compact themselves" is the `compact` tool's switch.)
+    "GetToolSettings",
+    "SetToolSettings",
     // Whether this window has the keys: banners set to "only when in the
     // background" hold while it does.
     "SetViewportFocus",
