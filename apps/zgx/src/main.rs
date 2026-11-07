@@ -27,6 +27,7 @@
 
 mod about;
 mod acp_registry;
+mod agent_profiles;
 mod agents;
 mod app_api;
 mod appshots;
@@ -748,6 +749,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         engine_update::install(cx, &host);
         // A chat: its transcript, sending, approvals (src/chat.rs).
         chat::install(cx, &host);
+        agent_profiles::install(cx, &host);
         // Agent visuals in a transcript (src/visuals.rs).
         visuals::install(cx, &host);
         // Settings' account, organization and engine calls (src/settings.rs).

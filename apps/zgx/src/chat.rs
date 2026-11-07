@@ -512,6 +512,12 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     });
     // Shown as the call is made: a chat on another device answers a round trip later.
     let pick = which.clone();
+    // A profile applied to a chat, or none ("No profile"), as one config
+    // write: `{ id, profile?, note?, note_hint? }`.
+    host.async_action("chat.apply_profile", move |args| async move {
+        crate::plugins::preview::refuse("chat.apply_profile")?;
+        apply_profile(args).await.map(|_| Value::Nil).map_err(String::from)
+    });
     host.async_action("chat.queue", move |args| {
         let v = pick(&args);
         let allowed = crate::plugins::preview::refuse("chat.queue");
@@ -1354,7 +1360,9 @@ fn tabs_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, errors: &HashMap<St
 
 /// A dev catalog for the picker's proofs, from `ZERON_ZGX_MOCK_CATALOG` (a JSON
 /// file: `harnesses` as the engine lists them, `models`, `errors` and
-/// `announceIds` by agent, `newIds`) on a mock Dev. Its agents are listed, never run.
+/// `announceIds` by agent, `newIds`; `profiles`, saved once, and
+/// `profilesError`, src/agent_profiles.rs) on a mock Dev. Its agents are
+/// listed, never run.
 fn mock_catalog() -> Option<Json> {
     let path = std::env::var("ZERON_ZGX_MOCK_CATALOG").ok()?;
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
@@ -2232,6 +2240,21 @@ impl View {
                 .map_err(|e| engine::outcome(&e));
         }
         let mut config = merged_config(&chat["config"], &req);
+        // A new chat started on a profile: its instructions and tools too (its
+        // model, effort, mode and options came as the composer's picks).
+        if fresh
+            && let Some(profile) = req.field("profile").map(text).and_then(|id| crate::agent_profiles::find(&id))
+        {
+            config["profileId"] = json!(profile.id);
+            if profile.instructions.is_empty() {
+                if let Some(map) = config.as_object_mut() {
+                    map.remove("instructions");
+                }
+            } else {
+                config["instructions"] = json!(profile.instructions);
+            }
+            config["disabledTools"] = json!(profile.disabled_tools);
+        }
         // gpui's `effective_plan`: off on a harness without one, whatever the switch says.
         if config["harness"].as_str().is_some_and(|h| chats.offers_plan(h, target.as_deref()) == Some(false))
             && let Some(fields) = config.as_object_mut()
@@ -3156,6 +3179,75 @@ async fn upload(path: &str, name: &str, target: Option<&str>) -> Result<String, 
     committed["path"].as_str().map(Into::into).ok_or("failed")
 }
 
+/// A chat's config with a profile applied, or none: shown at once, the
+/// engine's word following, its divider when the switch asked first.
+async fn apply_profile(args: Value) -> Result<(), Outcome> {
+    let chats = CHATS.with(Rc::clone);
+    let id = args.field("id").map(text).unwrap_or_default();
+    let chat = chats.chat(&id).ok_or("missing")?;
+    let profile = match args.field("profile").map(text).filter(|p| !p.is_empty()) {
+        Some(pid) => Some(crate::agent_profiles::find(&pid).ok_or("missing")?),
+        None => None,
+    };
+    let config = crate::agent_profiles::apply(&chat["config"], profile.as_ref()).ok_or("failed")?;
+    if let Some(c) = chats.chats.borrow_mut().get_mut(&id) {
+        c["config"] = config.clone();
+    }
+    chats.publish_views();
+    let mut params = json!({ "op": "setChatConfig", "chatId": id, "config": config });
+    if let Some(note) = args.field("note").map(text).filter(|t| !t.is_empty()) {
+        params["note"] = json!({ "text": note, "hint": args.field("note_hint").map(text) });
+    }
+    engine::get().call("Mutate", params).await.map(|_| ()).map_err(|e| engine::outcome(&e))
+}
+
+/// A model as its agent's catalog lists it (this device's, else the
+/// composer's device's).
+pub(crate) fn catalog_model(harness: &str, model: &str) -> Option<Json> {
+    CHATS.with(|chats| {
+        let find = |by: &HashMap<String, Vec<Json>>| by.get(harness).and_then(|l| l.iter().find(|m| m["id"].as_str() == Some(model)).cloned());
+        let here = find(&chats.models.borrow());
+        here.or_else(|| chats.remote.borrow().as_ref().and_then(|r| find(&r.models)))
+    })
+}
+
+/// An effort's word, as the picker says it ("Extra high").
+pub(crate) fn effort_word(level: &str) -> String {
+    effort_label(level).to_owned()
+}
+
+pub(crate) fn agent_name(harness: &str) -> Option<String> {
+    CHATS.with(|chats| chats.harness_name(harness))
+}
+
+/// An ACP registry agent's own icon (its SVG), as the catalog lists it.
+pub(crate) fn agent_icon(harness: &str) -> Option<String> {
+    CHATS.with(|chats| chats.harnesses.borrow().iter().find(|h| h["id"].as_str() == Some(harness)).and_then(|h| h["icon"].as_str().map(Into::into)))
+}
+
+pub(crate) fn chat_config(id: &str) -> Option<Json> {
+    CHATS.with(|chats| chats.chat(id)).map(|c| c["config"].clone())
+}
+
+/// A new chat's picks as a config (`model`, `effort`, `access`, `options`,
+/// `fast`, as `chat.send` reads them).
+pub(crate) fn draft_config(args: &Value) -> Json {
+    merged_config(&json!({}), args)
+}
+
+/// The profiles changed: each chat's comparison with its own again.
+pub(crate) fn profiles_changed() {
+    CHATS.with(|chats| chats.publish_views());
+}
+
+/// A mock Dev's seed (`ZERON_ZGX_MOCK_CATALOG`), nil elsewhere.
+pub(crate) fn mock_seed() -> Option<Json> {
+    if !std::env::var("ZERON_ZGX_MOCK").is_ok_and(|v| v == "1") {
+        return None;
+    }
+    mock_catalog()
+}
+
 /// The chat's config with what the script changed: a model as
 /// "<harness>/<model>", its effort, Fast, the access mode and plan mode.
 /// Whether a run's config picks another agent, model, effort or model option
@@ -3195,12 +3287,12 @@ fn merged_config(config: &Json, args: &Value) -> Json {
     if let Some(harness) = field("harness") {
         c["harness"] = json!(harness);
     }
-    // An instance runs on its own agent, and a profile was picked for it.
+    // An instance runs on its own agent. (A profile stays, drifted to another
+    // agent, as gpui's `update_chat_config` keeps `profile_id`.)
     if c["harness"] != config["harness"]
         && let Some(map) = c.as_object_mut()
     {
         map.remove("instanceId");
-        map.remove("profileId");
     }
     if let Some(effort) = field("effort") {
         c["reasoning"] = json!(effort);
@@ -5220,6 +5312,9 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("options", options),
         ("access", Value::from(access)),
         ("plan", Value::Bool(config["plan"].as_bool() == Some(true))),
+        // Its profile, and how the chat stands against it (read as the
+        // session is published, never as the draft is typed).
+        ("profile", crate::agent_profiles::applied(config)),
         ("running", Value::Bool(live)),
         ("in_flight", Value::Bool(chats.turn_in_flight(open))),
         ("steers", steers.map_or(Value::Nil, Value::Bool)),
@@ -6481,10 +6576,12 @@ mod tests {
         let other = merged_config(&chat, &Value::record([("model", Value::from("gpt")), ("harness", Value::from("codex"))]));
         assert!(runs_otherwise(&chat, &other));
         assert_eq!(other["harness"], json!("codex"));
-        // An instance or profile belongs to the agent it was picked on.
-        let bound = json!({ "harness": "claude-code", "model": "sonnet", "instanceId": "work", "profileId": "lead" });
+        // An instance belongs to the agent it was picked on; a profile stays, drifted.
+        let bound = json!({ "harness": "claude-code", "model": "sonnet", "instanceId": "work", "profileId": "lead", "instructions": "Lead", "disabledTools": ["x"] });
         let moved = merged_config(&bound, &Value::record([("harness", Value::from("codex"))]));
-        assert!(moved.get("instanceId").is_none() && moved.get("profileId").is_none());
+        assert!(moved.get("instanceId").is_none());
+        assert_eq!((moved["profileId"].as_str(), moved["instructions"].as_str()), (Some("lead"), Some("Lead")));
+        assert_eq!(moved["disabledTools"], json!(["x"]));
         let stayed = merged_config(&bound, &Value::record([("model", Value::from("opus"))]));
         assert_eq!(stayed["instanceId"], json!("work"));
         let effort = merged_config(&chat, &Value::record([("effort", Value::from("high"))]));

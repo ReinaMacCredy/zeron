@@ -300,6 +300,20 @@ local function note(what: string)
 	calls:set(table.concat(said, ","))
 end
 
+-- Agent profiles for Settings → Agent profiles (profiles_stub.luau).
+require("./profiles_stub").install {
+	note = note,
+	meta = {},
+	publish = function() end,
+	settled = function(value: any): any
+		return {
+			after = function(_self: any, ok: (any) -> (), _err: any)
+				ok(value)
+			end,
+		}
+	end,
+}
+
 -- An engine that answers a place when told (`hold_echo`, then `echo`).
 local holding = false
 local held: any = nil

@@ -121,6 +121,12 @@ export type Props = {
 	on_retry: (() -> ())?,
 	-- What the chat holds of its context, for the warnings on a smaller window.
 	context_tokens: (() -> number?)?,
+	-- The chip's mark only while true (a profile's half carries it).
+	mark_when: (() -> boolean)?,
+	-- The full layout's Profiles tab: what it opens (the profiles card), and its
+	-- dot while a profile is applied ("accent", or "warning" drifted).
+	on_profiles: (() -> ())?,
+	profile_dot: (() -> string?)?,
 }
 
 -- Devin Fusion's lead (what runs), listed first among its options.
@@ -649,6 +655,44 @@ return ui.component(function(props: Props): Node
 			size = 16,
 		}
 	)
+	-- Profiles, after the starred (gpui's `model-tab-profiles`): the card of
+	-- them, in the picker's place.
+	local on_profiles = props.on_profiles
+	local profile_dot = props.profile_dot
+	local profiles_tab = if on_profiles
+		then ui.button {
+			id = "model-tab-profiles",
+			label = locale.t("ds.profiles.title"),
+			role = "tab",
+			shrink = 0,
+			w = 32,
+			h = 32,
+			relative = true,
+			items = "center",
+			justify = "center",
+			tooltip = locale.s("ds.profiles.title"),
+			rounded = "$zeron.icon_button.radius",
+			bg = "#00000000",
+			color = "$text.tertiary",
+			hover = { bg = "$hover", color = "$text.primary" },
+			active = { bg = "$pressed" },
+			on_click = on_profiles,
+			Icon { name = "user-rounded", size = 16 },
+			ui.show(function(): boolean
+				return profile_dot ~= nil and profile_dot() ~= nil
+			end, ui.div {
+				absolute = true,
+				top = 6,
+				right = 6,
+				w = 5,
+				h = 5,
+				rounded = "$radius.full",
+				bg = function(): string
+					return if profile_dot and profile_dot() == "warning" then "$warning" else "$accent"
+				end,
+			}),
+		}
+		else nil
 	-- An agent's tab each, following the agents as they come and go.
 	local agent_tabs = ui.each(ui.computed(harness_list), function(h: Harness): Node
 		return tab_of(h.id, h.label, agent_mark(h, 16))
@@ -678,7 +722,7 @@ return ui.component(function(props: Props): Node
 		local v = viewed()
 		for i, h in harness_list() do
 			if h.id == v then
-				reveal_strip(i + 1)
+				reveal_strip(i + (if on_profiles then 2 else 1))
 				return
 			end
 		end
@@ -1746,6 +1790,7 @@ return ui.component(function(props: Props): Node
 					-- them, on the rule by the list) stays inside the strip's clip.
 					items = if bottom_up then "end" else "start",
 					starred_tab,
+					profiles_tab,
 					agent_tabs,
 				},
 			},
@@ -2169,6 +2214,7 @@ return ui.component(function(props: Props): Node
 
 	return Dropdown {
 		fold = props.fold,
+		mark_when = props.mark_when,
 		value = props.model,
 		items = items :: any,
 		tone = props.tone or "chip",

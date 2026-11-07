@@ -13,6 +13,7 @@ local T = require("@ds/transcript")
 local lanes = require("@app/screens/chat/lanes")
 local store = require("@app/screens/chat/store")
 local model_switch = require("@app/screens/chat/model_switch")
+local composer_profiles = require("@app/screens/chat/composer_profiles")
 local prefs = require("@app/screens/settings/prefs")
 local locale = require("@ds/locale")
 local sessions = require("@account/sessions")
@@ -292,6 +293,49 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 			open_picker:set(open_picker:peek() + 1)
 		end,
 	})
+	-- Its agent profiles, on this chat (before its first message, its own
+	-- pick, sent with it).
+	local lane_profile = ui.state(`chat_lane_profile_{chat}`, nil :: string?)
+	local open_profiles = ui.state(`chat_lane_profiles_open_{chat}`, 0)
+	local close_profiles = ui.state(`chat_lane_profiles_close_{chat}`, 0)
+	local profiles, profile_dialog = composer_profiles.bind {
+		key = chat,
+		chat = function(): string?
+			return if unsent() or session:get() == nil then nil else chat
+		end,
+		session = function(): any?
+			local s: any = session:get()
+			return if s and s.state == "ready" then s else nil
+		end,
+		committed = function(): boolean
+			return not unsent() and session:get() ~= nil
+		end,
+		picks = function(): composer_profiles.Picks
+			return { model = model:get(), effort = effort:get(), access = access:get(), options = options:get(), fast = fast:get() }
+		end,
+		set_picks = function(p: composer_profiles.Picks)
+			model:set(p.model)
+			effort:set(p.effort)
+			access:set(p.access)
+			options:set(p.options or {})
+			fast:set(p.fast == true)
+		end,
+		draft_profile = lane_profile,
+		history = function(): boolean?
+			local s: any = session:peek()
+			return model_switch.has_history(view.messages:peek(), running:peek(), s ~= nil and s.state == "ready")
+		end,
+		reopen = function()
+			open_profiles:set(open_profiles:peek() + 1)
+		end,
+		refocus = function()
+			local el = field:peek()
+			if el then
+				el:focus()
+			end
+		end,
+		close = close_profiles,
+	}
 	-- Before its first message: where it works starts where its parent
 	-- does (once, as the parent is known).
 	ui.effect(function()
@@ -437,7 +481,9 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 		ui.text { ui.t("chat.composer.expired"), grow = 1, wrap = true, text_size = "$font.size.sm", color = "$text.tertiary" },
 	}
 	local cargo_props = Shared.cargo_props(chat)
-	return ui.column { w_full = true, switch_dialog, ui.show(expired, expired_line, ds.Composer {
+	return ui.column { w_full = true, switch_dialog, profile_dialog, ui.show(expired, expired_line, ds.Composer {
+		profiles = profiles,
+		open_profiles = open_profiles,
 		field = field,
 		cargo = carried,
 		on_remove_cargo = function(cid: string)
@@ -601,6 +647,7 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 			end, mid, name)
 			-- Its first message makes it (New side chat), then sends.
 			if is_unsent then
+				req.profile = composer_profiles.find(lane_profile:peek()) and lane_profile:peek()
 				sent = lanes.send_first(chat, parts.text, req, place())
 			else
 				req.session, req.text = chat, parts.text

@@ -21,6 +21,7 @@ local T = require("@ds/transcript")
 local prefs = require("@app/screens/settings/prefs")
 local store = require("@app/screens/chat/store")
 local model_switch = require("@app/screens/chat/model_switch")
+local composer_profiles = require("@app/screens/chat/composer_profiles")
 local route = require("@app/screens/shell/route")
 local cloud = require("@account/cloud")
 local shared = require("@app/screens/chat/shared")
@@ -167,6 +168,8 @@ local function Composer(): Node
 	local checkout = ui.state("chat_checkout", "worktree" :: string?)
 	local branch = ui.state("chat_branch", nil :: string?)
 	local project = ui.state("chat_project", nil :: string?)
+	-- A new chat's agent profile (its id, sent with its first message).
+	local draft_profile = ui.state("chat_profile", nil :: string?)
 	local locals: { [string]: State<any> } =
 		{ model = model, effort = effort, fast = fast, options = options, access = access, plan = plan }
 
@@ -765,6 +768,7 @@ local function Composer(): Node
 			options = options:peek(),
 			access = access:peek(),
 			plan = plan:peek(),
+			profile = composer_profiles.find(draft_profile:peek()) and draft_profile:peek(),
 		}
 		for _, m in store.catalog:peek().models do
 			if m.value == req.model then
@@ -987,8 +991,46 @@ local function Composer(): Node
 			shared.open_model:set(shared.open_model:peek() + 1)
 		end,
 	})
+	-- Its agent profiles: the card's open and close.
+	local open_profiles = ui.state("chat_profiles_open", 0)
+	local close_profiles = ui.state("chat_profiles_close", 0)
+	local profiles, profile_dialog = composer_profiles.bind {
+		key = "page",
+		chat = function(): string?
+			return session_id:get()
+		end,
+		session = function(): any?
+			return open()
+		end,
+		committed = function(): boolean
+			return session_id:get() ~= nil
+		end,
+		picks = function(): composer_profiles.Picks
+			return { model = model:get(), effort = effort:get(), access = access:get(), options = options:get(), fast = fast:get() }
+		end,
+		set_picks = function(p: composer_profiles.Picks)
+			model:set(p.model)
+			effort:set(p.effort)
+			access:set(p.access)
+			options:set(p.options or {})
+			fast:set(p.fast == true)
+		end,
+		draft_profile = draft_profile,
+		history = function(): boolean?
+			return model_switch.has_history(store.messages:peek(), running:peek(), open() ~= nil)
+		end,
+		reopen = function()
+			open_profiles:set(open_profiles:peek() + 1)
+		end,
+		refocus = function()
+			shared.focus:add(1)
+		end,
+		close = close_profiles,
+	}
 	local function composer(): Node
 		return ds.Composer {
+			profiles = profiles,
+			open_profiles = open_profiles,
 			-- Its measures, fold and open tray kept across a reload, so it
 			-- is laid out as it was from the first frame.
 			keep = "chat",
@@ -1560,6 +1602,7 @@ local function Composer(): Node
 		-- text's ink, at once and gone at once; no accent).
 		DropOverlay { shown = shared.carrying, id = "chat-drop" },
 		switch_dialog,
+		profile_dialog,
 		-- (A sidebar session carried: dropped, a mention; production's words.)
 		DropOverlay { shown = shared.carrying_session, id = "chat-drop-mention", label = ui.t("chat.composer.drop_to_mention") :: any },
 	}

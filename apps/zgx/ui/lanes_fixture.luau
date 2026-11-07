@@ -200,9 +200,11 @@ local stub_lanes = lanes :: any
 stub_lanes.on_screen = function(slot: string, shown: boolean)
 	note(`on_screen:{slot}:{shown}`)
 end
+local SLOTS: { [string]: string } = {}
 stub_lanes.watch = function(slot: string, id: string?, frozen: boolean?, _chat: string?)
 	note(`watch:{id or "none"}{if frozen then ":frozen" else ""}`)
 	if id then
+		SLOTS[id] = slot
 		lanes.view(slot).messages:set({ { id = `{id}-m`, role = "assistant", text = `This is {id}` } })
 		-- (A side chat as the host publishes it: side-a runs Codex's GPT-6.1.)
 		if id == "side-a" then
@@ -281,6 +283,45 @@ ui.command { id = "finish", title = "Subagent finishes", run = function()
 	now[2] = reply
 	store.messages:set(now)
 end }
+
+-- Agent profiles, as the host lists and applies them (src/agent_profiles.rs):
+-- Codex's two, the side chat's agent. Applied, the chat's session says it.
+do
+	local profiles = require("@app/screens/chat/composer_profiles")
+	local function p(id: string, name: string): any
+		return { id = id, name = name, harness = "codex", harness_label = "Codex", mark = "openai", options = {}, notes = "", instructions = "", tools_off = {} }
+	end
+	local LIST = { p("fixer", "Fixer"), p("lean", "Lean") }
+	profiles.list:set({ state = "ready", profiles = LIST })
+	local function applied(id: string?): any
+		for _, x in LIST do
+			if x.id == id then
+				return { id = x.id, name = x.name, harness = x.harness, mark = x.mark, edited = false, savable = false, drift = {} }
+			end
+		end
+		return ui.null
+	end
+	local function set_profile(chat: string, id: string?)
+		local slot = SLOTS[chat]
+		local s = if slot then lanes.view(slot).session:peek() else nil
+		if s and s.id == chat then
+			local next_s = table.clone(s)
+			next_s.profile = applied(id)
+			lanes.view(slot :: string).session:set(next_s)
+		end
+	end
+	local host = table.clone(profiles.host)
+	host.load = function() end
+	host.apply = function(args: any): any
+		note(`apply_profile:{args.id}:{args.profile or "none"}`)
+		set_profile(args.id, args.profile)
+		return settled(true, nil)
+	end
+	profiles.host = host
+	ui.command { id = "side_a_on_fixer", title = "side-a runs on Fixer", run = function()
+		set_profile("side-a", "fixer")
+	end }
+end
 
 route.open_session("chat-1")
 -- (The card is off by default in the app: on here.)

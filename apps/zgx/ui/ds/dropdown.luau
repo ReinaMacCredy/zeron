@@ -176,9 +176,16 @@ export type Props = {
 	-- A row's own words after its name (who made it, when two share one).
 	row_note: ((item: Item) -> string?)?,
 	-- At the panel's top, above a rule, and under a rule at its foot: the
-	-- caller's own rows.
+	-- caller's own rows. (`head_when`: the head and its rule only while true.)
 	head: Node?,
+	head_when: (() -> boolean)?,
 	extra: Node?,
+	-- While true, Tab moves among the panel's own fields (a form in its head)
+	-- rather than leaving it.
+	tab_inside: (() -> boolean)?,
+	-- With `mark`, the chosen item's mark shows only while true (a chip whose
+	-- mark another half carries).
+	mark_when: (() -> boolean)?,
 	-- The panel's width (232 by default).
 	width: number?,
 	-- The caller's own trigger in place of the chip (a row of another
@@ -658,6 +665,9 @@ return ui.component(function(props: Props): Node
 				return AgentMark { label = seed :: string, seed = seed, icon = code, size = glyph, bare = true }
 			end),
 		}
+		if props.mark_when then
+			leading = ui.show(props.mark_when, leading :: Node)
+		end
 	elseif props.icon then
 		leading = Icon { name = props.icon, size = TRIGGER[tone].glyph }
 	else
@@ -937,6 +947,9 @@ return ui.component(function(props: Props): Node
 					own_close = true
 					return false
 				elseif e.key == "Tab" then
+					if props.tab_inside and props.tab_inside() then
+						return false
+					end
 					-- Tab leaves it, as it leaves a menu: closed, the keys
 					-- back on its trigger, to go on from there.
 					shut()
@@ -965,14 +978,23 @@ return ui.component(function(props: Props): Node
 				end
 				local function section(node: Node, is_head: boolean?)
 					local shown = if is_head then node else gated(node)
+					local ruled = gated(rule())
+					local head_when = props.head_when
+					if is_head and head_when then
+						shown = ui.show(head_when, node)
+						local list_when = props.list_when
+						ruled = ui.show(function(): boolean
+							return head_when() and (list_when == nil or list_when())
+						end, rule())
+					end
 					if listless then
 						table.insert(top, shown)
 					elseif bottom_up then
-						table.insert(top, gated(rule()))
+						table.insert(top, ruled)
 						table.insert(top, shown)
 					else
 						table.insert(top, shown)
-						table.insert(top, gated(rule()))
+						table.insert(top, ruled)
 					end
 				end
 				local head = if props.head then ui.column { w_full = true, p = "$space.1", props.head } else nil

@@ -261,6 +261,9 @@ stub.send = function(req: any)
 		end)
 	end
 	note(`send:{req.session or "new"}:{req.text}{if req.steer_now then "|steer_now" else ""}{if req.queued then "|queued" else ""}`)
+	if req.profile then
+		note(`send_profile:{req.profile}`)
+	end
 	for _, a in req.attachments or {} do
 		note(`att:{a.path}|{if a.on_host then "host" else "upload"}`)
 	end
@@ -1637,6 +1640,16 @@ ui.command {
 	run = function()
 		remade:add(1)
 	end,
+}
+
+-- Agent profiles (src/agent_profiles.rs), as the host answers
+-- (profiles_stub.luau): s2 on Planner after `s2_on_planner`.
+require("./profiles_stub").install {
+	note = note,
+	meta = META,
+	publish = publish,
+	store = stub,
+	settled = settled,
 }
 
 -- The shell, as small as can hold the page: the route's page, and the

@@ -35,6 +35,9 @@ local control = require("@self/control")
 local FadeText = require("@self/fade_text")
 local Dropdown = require("@self/dropdown")
 local ModelPicker = require("@self/model_picker")
+local ProfilePicker = require("@self/profile_picker")
+local AgentMark = require("@self/agent_mark")
+local profile_look = require("@self/profile_look")
 local IconButton = require("@self/icon_button").IconButton
 local status = require("@self/status")
 local markdown = require("@self/markdown_edit")
@@ -290,6 +293,11 @@ export type Props = {
 	model_retry: (() -> ())?,
 	model_close: State<number>?,
 	context_tokens: (() -> number?)?,
+	-- Agent profiles (ds.ProfilePicker's props, but its trigger and
+	-- placement): with one applied, the model's chip is two, the profile's
+	-- half opening the profiles card. `open_profiles` bumped opens it.
+	profiles: { [string]: any }?,
+	open_profiles: State<number>?,
 	-- Which of `@`, `/`, `$` open their list (an agent's completion
 	-- settings), and what an empty list says, by trigger.
 	mention_enabled: ((trigger: string) -> boolean)?,
@@ -344,6 +352,8 @@ local HYSTERESIS = 32
 local LABELS_LINE, LABELS_OPEN = 645, 375
 local LINE_ROOM, LINE_MIN = 200, 490
 local MODEL_SHARE = 0.45
+-- gpui's `chip_max_width`: 248, and 320 with a profile's half.
+local PROFILE_SHARE = MODEL_SHARE * 320 / 248
 -- What a chip takes of the name it says.
 local PROJECT_MAX, LABEL_MAX, CHIP_MAX = 180, 160, 280
 local FOOTER_CHIP = 20
@@ -1461,6 +1471,14 @@ return ui.component(function(props: Props): Node
 		local on = if type(below) == "function" then below() else below == true
 		return if on then "bottom" else "top"
 	end
+	-- A profile applied: the chip's profile half shows (gpui's split chip).
+	local profiles = props.profiles
+	local function applied(): any?
+		return if profiles then profiles.applied() else nil
+	end
+	local function profiled(): boolean
+		return applied() ~= nil
+	end
 	-- The model's chip at most: MODEL_SHARE of the pill, and on one line no more
 	-- than leaves the draft its LINE_ROOM; opened out, no more than the row
 	-- holds. Under that its words fade, the effort's first.
@@ -1473,7 +1491,8 @@ return ui.component(function(props: Props): Node
 		local room = if open:get()
 			then width - HAIRLINES - INSET_OPEN * 2 - others - 4
 			else width - HAIRLINES - INSET_LINE * 2 - TEXT_SIDE * 2 - others - LINE_ROOM
-		return math.max(CONTROL, math.min(MODEL_SHARE * width, room))
+		local share = if profiled() then PROFILE_SHARE else MODEL_SHARE
+		return math.max(CONTROL, math.min(share * width, room))
 	end)
 
 	-- Closed, the keys go back to the draft, as Zeron's picker gives them back;
@@ -1493,8 +1512,95 @@ return ui.component(function(props: Props): Node
 		end
 		picker_was = now
 	end)
+	-- The profiles card: its keys back to the draft as it closes, as the
+	-- model picker's.
+	local profile_open = ui.use_state(false)
+	local profile_outside = ui.use_state(false)
+	local profile_was = false
+	ui.effect(function()
+		local now = profile_open:get()
+		if profile_was and not now then
+			ui.after(0, function()
+				local el = field:peek()
+				if el and not profile_outside:peek() and not picker_open:peek() then
+					el:focus()
+				end
+			end)
+		end
+		profile_was = now
+	end)
+	local open_profiles = props.open_profiles or ui.use_state(0)
+	local model_close = props.model_close or ui.use_state(0)
+	-- The full picker's Profiles tab: the profiles card in its place.
+	local function to_profiles()
+		model_close:set(model_close:peek() + 1)
+		ui.after(0, function()
+			open_profiles:set(open_profiles:peek() + 1)
+		end)
+	end
+	-- The chip's profile half (gpui's `picker-model-profile`): its brand's mark,
+	-- its name in bold held to NAME_MAX, the warning's dot when drifted.
+	local function profile_half(menu: Dropdown.Menu): Node
+		local function name(): string
+			local a = applied()
+			return if a then a.name else ""
+		end
+		return ui.row {
+			shrink = 0,
+			items = "center",
+			ui.button {
+				id = "picker-model-profile",
+				label = function(): string
+					return locale.s("ds.profiles.change", { name = name() })
+				end,
+				expanded = function(): boolean
+					return menu.open:get()
+				end,
+				h = 32,
+				px = "$zeron.space.tight",
+				gap = "$zeron.space.tight",
+				items = "center",
+				rounded = "$radius.lg",
+				text_size = "$font.size.sm",
+				bg = function(): string
+					return if menu.open:get() then "$hover" else "#00000000"
+				end,
+				hover = { bg = "$hover" },
+				active = { bg = "$pressed" },
+				on_click = menu.toggle,
+				ui.presence(function(): string
+					local a = applied()
+					return if a then `{a.harness}\0{a.mark or ""}\0{a.icon or ""}` else ""
+				end, function(_key: string): Node
+					local a = applied()
+					if not a then
+						return ui.div {}
+					end
+					return ui.div {
+						shrink = 0,
+						AgentMark { label = a.name, mark = a.mark, icon = a.icon, seed = a.harness, size = 16, bare = true },
+					}
+				end, { shrink = 0 }),
+				ui.text {
+					name,
+					mb = LIFT,
+					max_w = profile_look.NAME_MAX,
+					truncate = true,
+					shrink = 0,
+					weight = "$font.weight.semibold",
+					color = "$text.primary",
+				},
+				ui.show(function(): boolean
+					local a = applied()
+					return a ~= nil and a.edited
+				end, ui.div { id = "picker-model-profile-drift", w = 6, h = 6, shrink = 0, rounded = "$radius.full", bg = "$warning" }),
+			},
+			-- The hairline between the halves (gpui's 1×12).
+			ui.div { w = 1, h = 12, shrink = 0, bg = "$border" },
+		}
+	end
 	local model = ui.presence(side, function(at: string): Node
-		return ModelPicker {
+		local picker = ModelPicker {
 			model = props.model,
 			effort = props.effort,
 			fast = props.fast,
@@ -1506,7 +1612,7 @@ return ui.component(function(props: Props): Node
 			on_accounts_open = props.on_accounts_open,
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
-			close_with = props.model_close,
+			close_with = model_close,
 			showing = picker_open,
 			outside = picker_outside,
 			committed = props.model_committed,
@@ -1515,6 +1621,50 @@ return ui.component(function(props: Props): Node
 			on_retry = props.model_retry,
 			context_tokens = props.context_tokens,
 			tone = "model",
+			mark_when = if profiles
+				then function(): boolean
+					return not profiled()
+				end
+				else nil,
+			on_profiles = if profiles then to_profiles else nil,
+			profile_dot = if profiles
+				then function(): string?
+					local a = applied()
+					return if a == nil then nil elseif a.edited then "warning" else "accent"
+				end
+				else nil,
+		}
+		if not profiles then
+			return picker
+		end
+		local p = profiles
+		return ProfilePicker {
+			list = p.list,
+			applied = p.applied,
+			can_save = p.can_save,
+			switching = p.switching,
+			agents = p.agents,
+			models = p.models,
+			apply = p.apply,
+			save_drift = p.save_drift,
+			current = p.current,
+			save = p.save,
+			more = p.more,
+			on_open = p.on_open,
+			open_with = open_profiles,
+			close_with = p.close_with,
+			showing = profile_open,
+			outside = profile_outside,
+			placement = { side = at, align = "end", offset = 6 },
+			trigger = function(menu: Dropdown.Menu): Node
+				return ui.row {
+					items = "center",
+					min_w = 0,
+					shrink = 1,
+					ui.show(profiled, profile_half(menu)),
+					picker,
+				}
+			end,
 		}
 	end, { min_w = 0, shrink = 1 })
 

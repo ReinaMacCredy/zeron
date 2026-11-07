@@ -100,6 +100,9 @@ export type Request = {
 	options: { [string]: string }?,
 	access: string?,
 	plan: boolean?,
+	-- A new chat's agent profile (its id): its instructions and tools go
+	-- with the config.
+	profile: string?,
 	-- A chat just made (sessions.create): its first message, run in `cwd`,
 	-- in a new worktree of it when `worktree`.
 	fresh: boolean?,
