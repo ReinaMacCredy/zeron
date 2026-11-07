@@ -517,11 +517,12 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "html_render",
-            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline above your final reply; call it before the reply, which adds only what the page doesn't say. Call it from the main conversation, not a subagent. Give exactly one of `html` or `url`. `html` is a finished page you wrote: the frame fits the page's height; a smaller `height` caps it and the rest scrolls. `url` is a local dev server you are running (http(s) on localhost, 127.0.0.1 or [::1], any port and path, such as a Vite preview): the person watches it live in a `height`-tall frame, with animations and hot reloads as they happen, and can click and scroll it; check it first with html_preview `url`. The rules below are for `html` pages. {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::THEME_GUIDE),
+            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline above your final reply; call it before the reply, which adds only what the page doesn't say. Call it from the main conversation, not a subagent. Give exactly one of `html`, `path` or `url`. `html` is a finished page you wrote: the frame fits the page's height; a smaller `height` caps it and the rest scrolls. `path` is an .html file you already wrote in this thread's folder, shown as `html` is without reading it back. `url` is a local dev server you are running (http(s) on localhost, 127.0.0.1 or [::1], any port and path, such as a Vite preview): the person watches it live in a `height`-tall frame, with animations and hot reloads as they happen, and can click and scroll it; check it first with html_preview `url`. The rules below are for `html` and `path` pages. {} {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::THEME_GUIDE, html_render::PICK_GUIDE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES },
+                    "path": { "type": "string", "description": "An .html file in this thread's folder, instead of `html`." },
                     "url": { "type": "string", "maxLength": html_render::MAX_URL_BYTES, "description": "A running local dev server's page, instead of `html`." },
                     "title": { "type": "string", "maxLength": html_render::MAX_TITLE_CHARS },
                     "height": { "type": "integer", "minimum": html_render::MIN_HEIGHT, "maximum": html_render::MAX_HEIGHT, "description": "CSS pixels." }
@@ -1937,11 +1938,19 @@ impl ThreadTools {
         let title = args["title"].as_str().ok_or("title must be a string")?;
         let height = args["height"].as_f64().ok_or("height must be a number")?;
         let mut params = json!({ "chatId": self.chat_id, "runSecret": secret, "title": title, "height": height });
-        match html_render::render_source(args["html"].as_str(), args["url"].as_str())? {
-            html_render::RenderSource::Html(html) => params["html"] = html.into(),
-            html_render::RenderSource::Url(_) => params["url"] = args["url"].clone(),
+        let input = html_render::render_input(
+            args["html"].as_str(),
+            args["path"].as_str(),
+            args["url"].as_str(),
+        )?;
+        match input {
+            html_render::RenderInput::Html(html) => params["html"] = html.into(),
+            html_render::RenderInput::Path(_) => params["path"] = args["path"].clone(),
+            html_render::RenderInput::Url(_) => params["url"] = args["url"].clone(),
         }
-        self.call_engine(methods::PUBLISH_HTML_RENDER, params).await
+        self.call_engine(methods::PUBLISH_HTML_RENDER, params)
+            .await
+            .map_err(|error| html_render::stale_engine_reply(&error, input).unwrap_or(error))
     }
 
     async fn show_visual(&self, args: &Value) -> Result<Value, String> {
@@ -4163,6 +4172,9 @@ mod tests {
                             "html_render needs this chat's live Zeron run".into(),
                         ));
                     }
+                    if params["title"] == "Stale" && params.get("html").is_none() {
+                        return Err(RpcError::BadParams("missing field `html`".into()));
+                    }
                     Ok(RpcReply::Value(json!({
                         "htmlRender": { "path": "/u/html/c1/ab.html", "title": params["title"], "height": 420 },
                         "message": html_render::RENDERED_MESSAGE,
@@ -5739,6 +5751,28 @@ mod tests {
         let sent = logged(&rig.calls, methods::PUBLISH_HTML_RENDER);
         assert_eq!(sent[1]["url"], "http://localhost:5391/?capture=zeron-tray");
         assert!(sent[1].get("html").is_none());
+        rig.tools
+            .call(
+                "html_render",
+                &json!({ "path": "out/tray.html", "title": "Tray", "height": 600 }),
+            )
+            .await
+            .unwrap();
+        let sent = logged(&rig.calls, methods::PUBLISH_HTML_RENDER);
+        assert_eq!(sent[2]["path"], "out/tray.html");
+        assert!(sent[2].get("html").is_none() && sent[2].get("url").is_none());
+        let stale = rig
+            .tools
+            .call(
+                "html_render",
+                &json!({ "url": "http://localhost:5391/", "title": "Stale", "height": 600 }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            stale.contains("older than the app") && !stale.contains("missing field"),
+            "{stale}"
+        );
         let listed = tool_list();
         let tool = listed
             .as_array()
@@ -5751,7 +5785,8 @@ mod tests {
         let description = tool["description"].as_str().unwrap();
         assert!(
             description.contains("--chart-1")
-                && description.contains("exactly one of `html` or `url`")
+                && description.contains("exactly one of `html`, `path` or `url`")
+                && description.contains("data-zeron-pick")
         );
         let preview = listed
             .as_array()

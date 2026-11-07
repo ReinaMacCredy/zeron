@@ -2959,6 +2959,7 @@ fn a_child_revived_after_a_crash_settles_from_its_revived_run() {
 struct PublishingHarness {
     secret: Arc<Mutex<Option<String>>>,
     release: Arc<tokio::sync::Notify>,
+    input: serde_json::Value,
 }
 
 #[async_trait]
@@ -2995,6 +2996,7 @@ impl Harness for PublishingHarness {
         });
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
         let release = self.release.clone();
+        let input = self.input.clone();
         tokio::spawn(async move {
             let events = [
                 AgentEvent::SessionStarted {
@@ -3010,9 +3012,7 @@ impl Harness for PublishingHarness {
                     call: zeron_proto::ToolCall::Mcp {
                         server: "zeron".into(),
                         tool: "html_render".into(),
-                        input: Some(serde_json::json!({
-                            "html": "<p>chart</p>", "title": "Chart", "height": 420,
-                        })),
+                        input: Some(input),
                     },
                 },
             ];
@@ -3056,6 +3056,7 @@ async fn a_published_page_lands_on_its_tool_part_and_leaves_with_the_chat() {
     let rig = rig_on(Arc::new(PublishingHarness {
         secret: secret.clone(),
         release: release.clone(),
+        input: serde_json::json!({ "html": "<p>chart</p>", "title": "Chart", "height": 420 }),
     }));
     let core = &rig.core;
     core.sessions.set_tool_server_port(1);
@@ -3127,6 +3128,77 @@ async fn a_published_page_lands_on_its_tool_part_and_leaves_with_the_chat() {
         !std::path::Path::new(&path).exists(),
         "deleting the chat deletes its pages"
     );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_page_file_shown_by_path_is_read_in_the_chats_folder_and_lands_on_its_part() {
+    use zeron_rpc::RpcService;
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::create_dir(folder.path().join("out")).unwrap();
+    std::fs::write(folder.path().join("out/tray.html"), "<p>tray</p>").unwrap();
+    let secret = Arc::new(Mutex::new(None));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let rig = rig_on(Arc::new(PublishingHarness {
+        secret: secret.clone(),
+        release: release.clone(),
+        input: serde_json::json!({ "path": "out/tray.html", "title": "Tray", "height": 420 }),
+    }));
+    let core = &rig.core;
+    core.workspace
+        .create_chat(
+            "paged",
+            Some("space-tt"),
+            None,
+            None,
+            Some(folder.path().to_string_lossy().into_owned()),
+        )
+        .expect("paged chat");
+    core.sessions.set_tool_server_port(1);
+    queue_human_run(core, "paged", "cmd-1", "msg-1");
+    wait_for(|| secret.lock().unwrap().is_some(), "the run secret").await;
+    let secret = secret.lock().unwrap().clone().unwrap();
+    let rpc = core.rpc_service();
+    let publish = |path: &str| serde_json::json!({ "chatId": "paged", "runSecret": secret, "path": path, "title": "Tray", "height": 420 });
+    for outside in ["../x.html", "out/missing.html"] {
+        assert!(
+            matches!(
+                rpc.handle(zeron_rpc::methods::PUBLISH_HTML_RENDER, publish(outside)).await,
+                Err(zeron_rpc::RpcError::BadParams(_))
+            ),
+            "{outside} is refused"
+        );
+    }
+    let reply = match rpc
+        .handle(
+            zeron_rpc::methods::PUBLISH_HTML_RENDER,
+            publish("out/tray.html"),
+        )
+        .await
+        .expect("publish by path")
+    {
+        zeron_rpc::RpcReply::Value(value) => value,
+        _ => panic!("publish answers once"),
+    };
+    let path = reply["htmlRender"]["path"].as_str().unwrap().to_owned();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "<p>tray</p>");
+    release.notify_one();
+    let stamped = || {
+        entries(core, "paged").iter().find_map(|entry| {
+            entry.parts.iter().find_map(|part| match part {
+                zeron_doc::MessagePart::Tool {
+                    id, html_render, ..
+                } if id == "tc-html" => html_render.clone(),
+                _ => None,
+            })
+        })
+    };
+    wait_for(
+        || stamped().is_some(),
+        "the page reference on the path call's tool part",
+    )
+    .await;
+    assert_eq!(stamped().unwrap().path, path);
     core.shutdown().await;
 }
 

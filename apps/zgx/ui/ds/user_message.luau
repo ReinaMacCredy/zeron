@@ -20,6 +20,7 @@
 local Icon = require("@self/icon")
 local HoverCard = require("@self/hover_card")
 local Lightbox = require("@self/lightbox")
+local HtmlPicks = require("@self/html_picks")
 local PastedText = require("@self/pasted_text")
 local ReplyPicture = require("@self/reply_picture")
 local Markdown = require("@self/markdown")
@@ -329,9 +330,13 @@ return ui.component(function(props: Props): Node
 	local group = `message:{id or `unnamed{unnamed}`}`
 	local shown = 0
 	local badges: { Node } = {}
+	local chosen: { any } = {}
 	for _, a in props.attachments or {} do
 		if (a :: any).kind == "badge" then
 			table.insert(badges, badge(a))
+		elseif (a :: any).kind == "pick" then
+			-- Options picked on an agent's page (ds/html_picks).
+			table.insert(chosen, a)
 		elseif a.kind == "image" and a.src and a.src ~= "" then
 			shown += 1
 			local n = shown
@@ -372,6 +377,7 @@ return ui.component(function(props: Props): Node
 		if #badges > 0
 			then ui.row { selectable = false, max_w = "80%", flex_wrap = true, justify = "end", gap = ui.raw(6, "Zeron's message badges"), badges }
 			else nil,
+		if #chosen > 0 then HtmlPicks.Sent { chips = chosen } else nil,
 		if props.text == "" then nil else ui.column {
 			min_w = 0,
 			max_w = "80%",

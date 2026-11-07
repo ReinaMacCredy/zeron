@@ -8313,18 +8313,27 @@ impl RpcService for EngineRpc {
                         "html_render needs this chat's live Zeron run".into(),
                     ));
                 }
-                let source =
-                    zeron_proto::html_render::render_source(p.html.as_deref(), p.url.as_deref())
-                        .map_err(RpcError::BadParams)?;
-                let page = match source {
-                    zeron_proto::html_render::RenderSource::Url(url) => {
+                let input = zeron_proto::html_render::render_input(
+                    p.html.as_deref(),
+                    p.path.as_deref(),
+                    p.url.as_deref(),
+                )
+                .map_err(RpcError::BadParams)?;
+                let page = match input {
+                    zeron_proto::html_render::RenderInput::Url(url) => {
                         crate::html_render::live_page(url, &p.title, p.height)
                             .map_err(|e| RpcError::Failed(e.to_string()))?
                     }
-                    zeron_proto::html_render::RenderSource::Html(html) => {
+                    zeron_proto::html_render::RenderInput::Html(_)
+                    | zeron_proto::html_render::RenderInput::Path(_) => {
+                        let html = match input {
+                            zeron_proto::html_render::RenderInput::Path(path) => {
+                                self.chat_page(&p.chat_id, path.to_owned()).await?
+                            }
+                            _ => p.html.clone().unwrap_or_default(),
+                        };
                         let uploads = self.uploads.clone();
-                        let (chat_id, html, title, height) =
-                            (p.chat_id.clone(), html.to_owned(), p.title.clone(), p.height);
+                        let (chat_id, title, height) = (p.chat_id.clone(), p.title.clone(), p.height);
                         tokio::task::spawn_blocking(move || {
                             crate::html_render::publish(&uploads, &chat_id, &html, &title, height)
                         })
@@ -8333,9 +8342,12 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?
                     }
                 };
-                let key = match source {
-                    zeron_proto::html_render::RenderSource::Html(html) => html,
-                    zeron_proto::html_render::RenderSource::Url(_) => {
+                let key = match input {
+                    zeron_proto::html_render::RenderInput::Html(html) => html,
+                    zeron_proto::html_render::RenderInput::Path(_) => {
+                        p.path.as_deref().unwrap_or_default()
+                    }
+                    zeron_proto::html_render::RenderInput::Url(_) => {
                         p.url.as_deref().unwrap_or_default()
                     }
                 };

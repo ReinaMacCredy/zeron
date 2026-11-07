@@ -289,6 +289,8 @@ impl Pending {
         let (words, badges) = quote_badges(&words);
         let (words, quotes) = split_quotes(&words);
         let (words, picks) = split_annotations(&words);
+        let (words, chosen) = page_picks(&words);
+        let badges: Vec<Value> = badges.into_iter().chain(chosen).collect();
         Value::record([
             ("id", Value::from(self.id.as_str())),
             ("role", Value::from("user")),
@@ -4031,7 +4033,7 @@ fn apply(entries: &mut Vec<Entry>, frame: &mut Json) -> Result<Change, ()> {
 /// neither: the entry as it is.
 fn with_host(entry: &Json, doc: &str, device: Option<&str>) -> Option<Json> {
     let parts = entry["parts"].as_array()?;
-    let visual = |p: &Json| device.is_some() && p["kind"].as_str() == Some("visual");
+    let visual = |p: &Json| device.is_some() && (p["kind"].as_str() == Some("visual") || p["htmlRender"].is_object());
     let cut = |p: &Json| p["kind"].as_str() == Some("tool") && p["outputTruncated"].as_bool() == Some(true);
     if !parts.iter().any(|p| visual(p) || cut(p)) {
         return None;
@@ -4144,6 +4146,8 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             let (words, badges) = quote_badges(&words);
             let (words, quotes) = split_quotes(&words);
             let (words, picks) = split_annotations(&words);
+            let (words, chosen) = page_picks(&words);
+            let badges: Vec<Value> = badges.into_iter().chain(chosen).collect();
             for p in entry["parts"].as_array().into_iter().flatten() {
                 if p["kind"].as_str() == Some("image")
                     && let Some(path) = p["path"].as_str()
@@ -4183,9 +4187,13 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             // A settled reply with nothing to show (only an empty thought,
             // say) has no row, as in the shipping app: drawn, it would be an
             // empty lane whose time floats over the next reply.
-            let shown = blocks(entry);
+            let mut shown = blocks(entry);
             if !streaming && matches!(&shown, Value::List(list) if list.is_empty()) {
                 return None;
+            }
+            let files = html_files_block(entry);
+            if let Some(files) = files.clone() {
+                shown = push_block(shown, files);
             }
             let mut fields = vec![
                 ("id", Value::from(id)),
@@ -4213,7 +4221,10 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             }
             // The same reply laid out for Settings' compact transcript.
             if let Some(compact) = compact_blocks(entry) {
-                fields.push(("compact", compact));
+                fields.push(("compact", match files {
+                    Some(files) => push_block(compact, files),
+                    None => compact,
+                }));
             }
             Some(Value::record(fields))
         }
@@ -4808,6 +4819,11 @@ fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
                     flush(&mut out, &mut group, group_last);
                     out.push(denied);
                 }
+                // (The shipping app's: outside the group, so the page stays above the reply.)
+                if let Some(page) = html_block(part) {
+                    flush(&mut out, &mut group, group_last);
+                    out.push(page);
+                }
             }
             Some("reasoning") => {
                 if part["text"].as_str().unwrap_or_default().trim().is_empty() {
@@ -4959,7 +4975,7 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
         ("summary", Value::from(line.as_str())),
         ("live", Value::Bool(streaming)),
         ("tools", Value::List(tools.iter().filter_map(|p| tool(p)).collect::<Vec<_>>().into())),
-        ("blocks", blocks_of(&work_parts, streaming)),
+        ("blocks", without_pages(blocks_of(&work_parts, streaming))),
     ]);
     let mut out: Vec<Value> = Vec::new();
     let mut placed = false;
@@ -4980,6 +4996,7 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
             }
             let earlier: Vec<&Json> = parts[..ix].iter().collect();
             out.extend(denied_block(part, &earlier));
+            out.extend(html_block(part));
             continue;
         }
         let words = match part["kind"].as_str() {
@@ -5098,6 +5115,96 @@ fn visual_block(part: &Json) -> Value {
         ("title", field("title")),
         ("device", field("device")),
     ])
+}
+
+/// A page an `html_render` call published (the shipping app's
+/// `html_render_row`): its stored path on the chat's host (empty for a live
+/// dev server's `url`), title, the agent's height, and that host's device
+/// when it isn't this one. Nil for any other part.
+fn html_block(part: &Json) -> Option<Value> {
+    let page = part.get("htmlRender").filter(|p| p.is_object())?;
+    let call: zeron_proto::ToolCall = serde_json::from_value(part["call"].clone()).ok()?;
+    if !call.is_html_render() {
+        return None;
+    }
+    let field = |k: &str| page[k].as_str().filter(|v| !v.is_empty()).map_or(Value::Nil, Value::from);
+    Some(Value::record([
+        ("id", Value::from(format!("{}-html", part["id"].as_str().unwrap_or_default()).as_str())),
+        ("kind", Value::from("html")),
+        ("path", field("path")),
+        ("title", Value::from(page["title"].as_str().unwrap_or_default())),
+        ("height", Value::Num(page["height"].as_f64().unwrap_or(f64::from(zeron_proto::html_render::MIN_HEIGHT)))),
+        ("url", field("url")),
+        ("device", part["device"].as_str().map_or(Value::Nil, Value::from)),
+    ]))
+}
+
+fn without_pages(blocks: Value) -> Value {
+    match blocks {
+        Value::List(list) => Value::List(list.iter().filter(|b| b.field("kind").map(crate::auth::text).as_deref() != Some("html")).cloned().collect::<Vec<_>>().into()),
+        other => other,
+    }
+}
+
+/// The `.html` files a settled reply names (the shipping app's
+/// `html_link_targets`), as the block its "Open in" cards stand in. Nil for none.
+fn html_files_block(entry: &Json) -> Option<Value> {
+    if entry["status"].as_str() == Some("streaming") {
+        return None;
+    }
+    let texts: Vec<&str> = entry["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["kind"].as_str() == Some("text"))
+        .filter_map(|p| p["text"].as_str())
+        .collect();
+    let targets = zeron_proto::html_render::html_link_targets(texts.into_iter());
+    if targets.is_empty() {
+        return None;
+    }
+    let list: Vec<Value> = targets
+        .iter()
+        .map(|t| Value::record([("dest", Value::from(t.dest.as_str())), ("linked", Value::Bool(t.linked))]))
+        .collect();
+    Some(Value::record([("id", Value::from("html-files")), ("kind", Value::from("html_files")), ("targets", Value::List(list.into()))]))
+}
+
+fn push_block(blocks: Value, block: Value) -> Value {
+    match blocks {
+        Value::List(list) => {
+            let mut all: Vec<Value> = list.iter().cloned().collect();
+            all.push(block);
+            Value::List(all.into())
+        }
+        other => other,
+    }
+}
+
+/// A prompt's picks on a reply's pages (zeron_proto html_render
+/// `with_picks`), apart from its words: a chip for each, its card's title,
+/// group, code and label.
+fn page_picks(words: &str) -> (String, Vec<Value>) {
+    let (rest, cards) = zeron_proto::html_render::extract_picks(words);
+    if cards.is_empty() {
+        return (words.to_owned(), Vec::new());
+    }
+    let chips = cards
+        .iter()
+        .flat_map(|(card, picks)| {
+            picks.iter().map(move |pick| {
+                Value::record([
+                    ("kind", Value::from("pick")),
+                    ("name", Value::from(pick.label.as_str())),
+                    ("card", Value::from(card.as_str())),
+                    ("group", Value::from(pick.group.as_deref().unwrap_or_default())),
+                    ("code", Value::from(pick.code.as_str())),
+                    ("label", Value::from(pick.label.as_str())),
+                ])
+            })
+        })
+        .collect();
+    (rest, chips)
 }
 
 /// How long, as the shipping app says it (transcript.rs `format_elapsed`).
@@ -7581,6 +7688,42 @@ mod tests {
         let remote = with_host(&entry, "c1", Some("dev-2")).expect("it has a visual");
         let shown = blocks(&remote);
         assert_eq!(shown.list()[1].field("device"), Some(&Value::from("dev-2")));
+    }
+
+    #[test]
+    fn a_published_page_is_a_block_after_its_tool_and_a_prompt_s_picks_its_chips() {
+        let page = json!({ "kind": "tool", "id": "tc1", "resolved": true, "isError": false,
+            "call": { "kind": "mcp", "server": "zeron", "tool": "html_render", "input": { "path": "out/tray.html", "title": "Tray", "height": 420 } },
+            "htmlRender": { "path": "/u/html/c1/ab.html", "title": "Tray", "height": 420 } });
+        let entry = json!({ "id": "a1", "role": "assistant", "status": "complete", "parts": [
+            page,
+            { "kind": "text", "id": "t1", "text": "Made [it](out/tray.html) and `notes.md`." },
+        ]});
+        let list = blocks(&entry).list().to_vec();
+        let kinds: Vec<String> = list.iter().map(|b| text_of(b, "kind")).collect();
+        assert_eq!(kinds, ["tools", "html", "text"], "the page after its tool, above the reply");
+        assert_eq!(text_of(&list[1], "path"), "/u/html/c1/ab.html");
+        assert_eq!(list[1].field("height"), Some(&Value::Num(420.)));
+        let row = message(&entry, None).unwrap();
+        let shown = row.field("blocks").unwrap().list();
+        let files = shown.last().unwrap();
+        assert_eq!(text_of(files, "kind"), "html_files");
+        assert_eq!(text_of(&files.field("targets").unwrap().list()[0], "dest"), "out/tray.html");
+        let compact = row.field("compact").unwrap().list();
+        let kinds: Vec<String> = compact.iter().map(|b| text_of(b, "kind")).collect();
+        assert_eq!(kinds, ["work", "html", "text", "html_files"], "compact: the page outside the fold");
+        assert!(compact[0].field("blocks").unwrap().list().iter().all(|b| text_of(b, "kind") != "html"));
+        let remote = with_host(&entry, "c1", Some("dev-2")).expect("a page is read from its host");
+        assert_eq!(text_of(&blocks(&remote).list()[1], "device"), "dev-2");
+        let sent = zeron_proto::html_render::with_picks(
+            "go",
+            &[("Tray".into(), vec![zeron_proto::html_render::Pick { group: Some("A".into()), code: "A2".into(), label: "Floating".into() }], vec![])],
+        );
+        let prompt = json!({ "id": "u2", "role": "user", "createdAt": 1000., "parts": [{ "kind": "text", "text": sent }] });
+        let row = message(&prompt, None).unwrap();
+        assert_eq!(text_of(&row, "text"), "go");
+        let chip = &row.field("attachments").unwrap().list()[0];
+        assert_eq!((text_of(chip, "kind"), text_of(chip, "card"), text_of(chip, "group"), text_of(chip, "code")), ("pick".into(), "Tray".into(), "A".into(), "A2".into()));
     }
 
     /// A command whose output the doc cut names the doc it is in (its row

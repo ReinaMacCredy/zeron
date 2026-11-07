@@ -5,12 +5,12 @@
 
 use crate::theme::Theme;
 use gpui::Hsla;
+use zeron_proto::html_render::{self as shared, PageTheme, Rgba};
 
-pub const MIN_HEIGHT: f32 = zeron_proto::html_render::MIN_HEIGHT as f32;
-pub const MAX_HEIGHT: f32 = zeron_proto::html_render::MAX_HEIGHT as f32;
+pub const MIN_HEIGHT: f32 = shared::MIN_HEIGHT as f32;
+pub const MAX_HEIGHT: f32 = shared::MAX_HEIGHT as f32;
 
 pub use zeron_proto::html_render::{frame_height, overflows, scrolls_inside};
-use zeron_proto::html_render::SIZE_SCRIPT;
 
 pub fn clamp_height(height: f32) -> f32 {
     if height.is_finite() {
@@ -20,214 +20,83 @@ pub fn clamp_height(height: f32) -> f32 {
     }
 }
 
-fn css_color(color: Hsla) -> String {
+fn rgba(color: Hsla) -> Rgba {
     let rgba = gpui::Rgba::from(color);
-    let channel = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!(
-        "rgba({},{},{},{})",
-        channel(rgba.r),
-        channel(rgba.g),
-        channel(rgba.b),
-        (rgba.a.clamp(0.0, 1.0) * 1000.0).round() / 1000.0
-    )
-}
-
-fn font_stack(family: &str, generic: &str) -> String {
-    let family = family.replace(['"', ';', '{', '}', '<', '>'], "");
-    if family.trim().is_empty() {
-        generic.into()
-    } else {
-        format!("\"{family}\", {generic}")
+    Rgba {
+        r: rgba.r,
+        g: rgba.g,
+        b: rgba.b,
+        a: rgba.a,
     }
 }
 
-/// Roles themes cannot change, plus a categorical chart series after the
-/// theme's own accent (t3 `FIXED_COLORS`).
-fn fixed(dark: bool) -> (&'static str, &'static str, [&'static str; 5]) {
-    if dark {
-        (
-            "#3b82f6",
-            "#60a5fa",
-            ["#2dd4bf", "#fbbf24", "#c084fc", "#fb7185", "#a3e635"],
-        )
-    } else {
-        (
-            "#3b82f6",
-            "#1d4ed8",
-            ["#0d9488", "#d97706", "#9333ea", "#e11d48", "#65a30d"],
-        )
+/// The theme's roles as the shared page theme holds them.
+pub fn page_theme(theme: &Theme) -> PageTheme {
+    let c = rgba;
+    PageTheme {
+        dark: theme.appearance.is_dark(),
+        glass: theme.is_glass(),
+        bg: c(theme.bg),
+        text: c(theme.text),
+        text_faint: c(theme.text_faint),
+        text_muted: c(theme.text_muted),
+        element_hover: c(theme.element_hover),
+        hover: c(theme.wash(0.08)),
+        selection: c(theme.selection),
+        surface_card: c(theme.surface_card),
+        surface_overlay: c(theme.surface_overlay),
+        surface_raised: c(theme.surface_raised),
+        border: c(theme.border),
+        border_strong: c(theme.border_strong),
+        input_bg: c(theme.input_bg),
+        accent: c(theme.accent),
+        solid: c(theme.solid),
+        on_solid: c(theme.on_solid),
+        on_accent: c(theme.on_accent),
+        accent_wash: c(theme.accent_wash),
+        accent_strong: c(theme.accent_strong),
+        danger: c(theme.danger),
+        danger_strong: c(theme.danger_strong),
+        danger_muted: c(theme.danger_muted),
+        warning: c(theme.warning),
+        warning_muted: c(theme.warning_muted),
+        success: c(theme.success),
+        success_muted: c(theme.success_muted),
+        code_wash: c(theme.code_wash),
+        code_text: c(theme.code_text),
+        font_sans: theme.font_sans.to_string(),
+        font_mono: theme.font_mono.to_string(),
+        code_font_size: theme.code_font_size,
+        text_size: crate::markdown::render::MD_TEXT_SIZE,
+        line_height: crate::markdown::render::MD_LINE_HEIGHT,
     }
-}
-
-// The transcript's sizes at 16px: meta, label, prose, then `heading_metrics` h3/h2/h1.
-const TYPE_SCALE: [(&str, f32); 7] = [
-    ("--font-size-xs", 11.0),
-    ("--font-size-sm", 12.0),
-    ("--font-size", crate::markdown::render::MD_TEXT_SIZE),
-    ("--font-size-lg", 15.0),
-    ("--font-size-xl", 16.0),
-    ("--font-size-2xl", 19.0),
-    ("--line-height", crate::markdown::render::MD_LINE_HEIGHT),
-];
-
-fn css_px(value: f32) -> String {
-    format!("{}px", (value * 100.0).round() / 100.0)
 }
 
 /// The variables a page styles against, named like t3's so one page works in
 /// both apps. `--accent` is the brand color, not a hover surface.
 pub fn theme_variables(theme: &Theme, font_size: f32) -> Vec<(&'static str, String)> {
-    let dark = theme.appearance.is_dark();
-    let (info, info_foreground, chart) = fixed(dark);
-    let c = css_color;
-    let mut vars = vec![
-        ("--background", c(theme.bg)),
-        ("--foreground", c(theme.text)),
-        ("--faint-foreground", c(theme.text_faint)),
-        ("--muted", c(theme.element_hover)),
-        ("--muted-foreground", c(theme.text_muted)),
-        ("--hover", c(theme.wash(0.08))),
-        ("--selection", c(theme.selection)),
-        ("--card", c(theme.surface_card)),
-        ("--card-foreground", c(theme.text)),
-        ("--popover", c(theme.surface_overlay)),
-        ("--popover-foreground", c(theme.text)),
-        ("--secondary", c(theme.surface_raised)),
-        ("--secondary-foreground", c(theme.text)),
-        ("--border", c(theme.border)),
-        ("--border-strong", c(theme.border_strong)),
-        ("--input", c(theme.input_bg)),
-        ("--ring", c(theme.accent)),
-        ("--primary", c(theme.solid)),
-        ("--primary-foreground", c(theme.on_solid)),
-        ("--accent", c(theme.accent)),
-        ("--accent-foreground", c(theme.on_accent)),
-        ("--accent-surface", c(theme.accent_wash)),
-        ("--accent-surface-foreground", c(theme.accent_strong)),
-        ("--destructive", c(theme.danger)),
-        ("--destructive-foreground", c(theme.danger_strong)),
-        ("--destructive-surface", c(theme.danger_muted)),
-        ("--danger", c(theme.danger)),
-        ("--warning", c(theme.warning)),
-        ("--warning-foreground", c(theme.warning)),
-        ("--warning-surface", c(theme.warning_muted)),
-        ("--success", c(theme.success)),
-        ("--success-foreground", c(theme.success)),
-        ("--success-surface", c(theme.success_muted)),
-        ("--info", info.into()),
-        ("--info-foreground", info_foreground.into()),
-        ("--code-background", c(theme.code_wash)),
-        ("--code-foreground", c(theme.code_text)),
-        ("--chart-1", c(theme.accent)),
-    ];
-    const CHART: [&str; 5] = [
-        "--chart-2",
-        "--chart-3",
-        "--chart-4",
-        "--chart-5",
-        "--chart-6",
-    ];
-    vars.extend(
-        CHART
-            .into_iter()
-            .zip(chart)
-            .map(|(name, color)| (name, color.into())),
-    );
-    vars.push(("--radius", "0.625rem".into()));
-    vars.push((
-        "--font-sans",
-        font_stack(
-            &theme.font_sans,
-            "-apple-system, BlinkMacSystemFont, system-ui, sans-serif",
-        ),
-    ));
-    vars.push((
-        "--font-mono",
-        font_stack(&theme.font_mono, "\"SF Mono\", Menlo, monospace"),
-    ));
-    let scale = font_size / 16.0;
-    vars.extend(
-        TYPE_SCALE
-            .into_iter()
-            .map(|(name, size)| (name, css_px(size * scale))),
-    );
-    vars.push(("--font-size-code", css_px(theme.code_font_size)));
-    vars.push(("--surface-treatment", surface(theme).into()));
-    vars
-}
-
-fn surface(theme: &Theme) -> &'static str {
-    if theme.is_glass() { "glass" } else { "opaque" }
-}
-
-fn appearance(theme: &Theme) -> &'static str {
-    if theme.appearance.is_dark() {
-        "dark"
-    } else {
-        "light"
-    }
+    shared::theme_variables(&page_theme(theme), font_size)
 }
 
 /// The theme stylesheet the bootstrap's `<style id="zeron-theme">` holds.
-/// Inline cards sit on the thread itself, so their page background is clear;
-/// a preview screenshot paints the thread's background.
 pub fn theme_css(theme: &Theme, font_size: f32, inline: bool) -> String {
-    let mut css = format!(":root{{color-scheme:{};", appearance(theme));
-    for (name, value) in theme_variables(theme, font_size) {
-        css.push_str(name);
-        css.push(':');
-        css.push_str(&value);
-        css.push(';');
-    }
-    css.push('}');
-    css.push_str(if inline {
-        "html{background:transparent;overscroll-behavior:none;"
-    } else {
-        "html{background:var(--background);"
-    });
-    css.push_str("color:var(--foreground);font-family:var(--font-sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;scrollbar-width:none}html::-webkit-scrollbar{display:none}body{margin:0}code,kbd,pre,samp{font-family:var(--font-mono)}");
-    css
+    shared::theme_css(&page_theme(theme), font_size, inline)
 }
-
-// The host hands the wheel back to the transcript once the page is scrolled to that edge.
-const EDGE_SCRIPT: &str = r#"(function(){var l=-1,e=function(){var s=document.scrollingElement||document.documentElement,y=s.scrollTop,v=(y<=0?1:0)|(y+s.clientHeight>=s.scrollHeight-1?2:0);if(v===l||!window.ipc)return;l=v;window.ipc.postMessage(JSON.stringify({edges:v}));};window.addEventListener("scroll",e,{passive:true});window.addEventListener("resize",e);window.addEventListener("load",e);document.addEventListener("DOMContentLoaded",e);if(window.ResizeObserver)new ResizeObserver(e).observe(document.documentElement);})();"#;
-
-// Snapshots are taken only while the page reports a change, at most every 250ms.
-const ACTIVITY_SCRIPT: &str = r#"(function(){var t=0;function a(){var n=Date.now();if(n-t<250||!window.ipc)return;t=n;window.ipc.postMessage(JSON.stringify({active:1}));}function w(f){return typeof f==="function"?function(){a();return f.apply(this,arguments);}:f;}var r=window.requestAnimationFrame;window.requestAnimationFrame=function(f){a();return r.call(window,f);};var st=window.setTimeout,si=window.setInterval;window.setTimeout=function(f){var g=[].slice.call(arguments);g[0]=w(f);return st.apply(window,g);};window.setInterval=function(f){var g=[].slice.call(arguments);g[0]=w(f);return si.apply(window,g);};new MutationObserver(a).observe(document.documentElement,{subtree:true,childList:true,attributes:true,characterData:true});["transitionrun","transitionend","animationstart","animationiteration","animationend","input","change","scroll","load"].forEach(function(e){window.addEventListener(e,a,true);});})();"#;
 
 #[cfg(target_os = "macos")]
 pub fn live_script() -> String {
-    format!("{EDGE_SCRIPT}{ACTIVITY_SCRIPT}")
-}
-
-fn attributes_script(theme: &Theme) -> String {
-    format!(
-        "(function(){{var d=document.documentElement;d.setAttribute(\"data-surface\",\"{}\");d.setAttribute(\"data-appearance\",\"{}\");}})();",
-        surface(theme),
-        appearance(theme)
-    )
+    format!("{}{}", shared::EDGE_SCRIPT, shared::ACTIVITY_SCRIPT)
 }
 
 /// JavaScript that swaps a mounted page's theme without reloading it.
 pub fn retheme_script(theme: &Theme, font_size: f32, inline: bool) -> String {
-    let css = serde_json::to_string(&theme_css(theme, font_size, inline))
-        .unwrap_or_else(|_| "\"\"".into());
-    format!(
-        "(function(){{var s=document.getElementById('zeron-theme');if(s)s.textContent={css};}})();{}",
-        attributes_script(theme)
-    )
+    shared::retheme_script(&page_theme(theme), font_size, inline)
 }
 
 /// Inserts the theme bootstrap at the start of the document head, so a
 /// page's own styles and scripts come after it and win.
 pub fn inject_bootstrap(html: &str, theme: &Theme, font_size: f32, inline: bool) -> String {
-    let mut script = attributes_script(theme);
-    if inline {
-        script.push_str(SIZE_SCRIPT);
-        script.push_str(EDGE_SCRIPT);
-        script.push_str(ACTIVITY_SCRIPT);
-    }
-    zeron_proto::html_render::inject_bootstrap(html, &theme_css(theme, font_size, inline), &script)
+    shared::themed_page(html, &page_theme(theme), font_size, inline, "")
 }
 
 #[cfg(test)]

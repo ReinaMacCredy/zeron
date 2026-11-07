@@ -1115,6 +1115,18 @@ impl ToolCall {
         }
     }
 
+    /// The page file an `html_render` call showed by its path.
+    pub fn html_render_path(&self) -> Option<&str> {
+        match self {
+            ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. }
+                if self.is_html_render() =>
+            {
+                input.as_ref()?.get("path")?.as_str()
+            }
+            _ => None,
+        }
+    }
+
     /// The local dev server an `html_render` call showed instead of a page.
     pub fn html_render_url(&self) -> Option<&str> {
         match self {

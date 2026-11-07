@@ -47,6 +47,7 @@ mod fonts;
 mod github;
 mod haptics;
 mod heap;
+mod html_pages;
 mod images;
 mod links;
 mod pasted;
@@ -756,6 +757,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         agent_profiles::install(cx, &host);
         // Agent visuals in a transcript (src/visuals.rs).
         visuals::install(cx, &host);
+        // Agent pages in a transcript (src/html_pages.rs).
+        html_pages::install(&host);
         // Settings' account, organization and engine calls (src/settings.rs).
         settings::install(cx, &host);
         // The installed fonts, for Settings → Appearance's font pickers

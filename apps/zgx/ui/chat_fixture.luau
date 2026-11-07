@@ -1952,6 +1952,182 @@ ui.command {
 -- The shell, as small as can hold the page: the route's page, and the
 -- composer over it.
 local test_fan = ui.state("test_fan", false)
+-- Agent pages (ds/html_card) without a host: the page read is the
+-- fixture's, a view is a box of its id that hears what a test posts
+-- (`page_post`), and what's run in a page is noted (`page_runs`).
+do
+	local html_api = require("@ds/html_api") :: any
+	local heard: { [string]: (any, string, boolean) -> () } = {}
+	local runs = ui.state("page_runs", {} :: { string })
+	local loads = ui.state("page_loads", 0)
+	html_api.web = function(id: string): any
+		return { id = id }
+	end
+	html_api.load = function(_web: any, _html: string, _base: string)
+		loads:set(loads:peek() + 1)
+	end
+	html_api.run = function(web: any, js: string)
+		local list = table.clone(runs:peek())
+		table.insert(list, `{web.id}|{js}`)
+		runs:set(list)
+	end
+	html_api.close = function(_web: any) end
+	html_api.page = function(args: any, done: (any, string?) -> ())
+		if string.find(args.path or "", "gone", 1, true) then
+			done(nil, "not found")
+			return
+		end
+		done({ html = `<p>{args.path}</p>`, nonce = `n:{args.path}` }, nil)
+	end
+	html_api.view = function(props: any): Node
+		if props.id then
+			heard[props.id] = props.on_message
+		end
+		return ui.column { id = props.id, label = props.label, w_full = true, h = props.h, min_h = props.min_h, grow = props.grow }
+	end
+	html_api.retheme = function(_args: any): string
+		return "retheme()"
+	end
+	-- (zeron_proto html_render `frame_height`, `overflows`.)
+	html_api.frame = function(agent: number, content: number?): any
+		local a = math.clamp(math.floor(agent + 0.5), 80, 2000)
+		local over = content ~= nil and content > a + 64
+		local h = if content ~= nil and not over then content else a
+		h = math.clamp(math.floor(h + 0.5), 80, 2000)
+		return { height = h, agent = a, overflows = over, scrolls = content ~= nil and content > h + 1 }
+	end
+	html_api.live = function(url: string): any
+		local server = string.match(url, "^https?://([^/?#]+)")
+		if not server or not (string.find(server, "^localhost") or string.find(server, "^127%.0%.0%.1")) then
+			return nil
+		end
+		local rest = string.match(url, "^https?://([^?#]*)") or server
+		return { label = (string.gsub(rest, "/+$", "")), server = server, url = url }
+	end
+	local reach_up = ui.state("page_reach_up", true)
+	html_api.reach = function(_url: string, done: (boolean) -> ())
+		note("reach")
+		done(reach_up:peek())
+	end
+	html_api.source = function(args: any): string
+		return `<p>{args.path}</p>`
+	end
+	html_api.save = function(args: any, done: (boolean) -> ())
+		note(`save:{args.path}:{args.to}`)
+		done(true)
+	end
+	html_api.file_name = function(title: string): string
+		return `{title}.html`
+	end
+	local titles = ui.state("page_titles", { ["/tmp/atlas/out/demo.html"] = "Demo page" } :: { [string]: string })
+	html_api.title = function(path: string, done: (any) -> ())
+		local t = titles:peek()[path]
+		done(if t then { title = t } else { missing = true })
+	end
+	html_api.picks = function(state: any): string
+		return ui.json.encode(state)
+	end
+	html_api.open_url = function(url: string)
+		note(`open_url:{url}`)
+	end
+	-- What a page posts: `{ id = <view id>, value, main? }`.
+	local page_message = ui.state("page_message", nil :: any)
+	ui.command {
+		id = "page_post",
+		title = "A page posts a message",
+		run = function()
+			local m = page_message:peek()
+			local f = m and heard[m.id]
+			if f then
+				f(m.value, "https://zeron.page", m.main ~= false)
+			end
+		end,
+	}
+	-- s2 with a reply that shows a page of three groups, a page of free
+	-- picks, a dev server's page, and a reply naming .html files.
+	local function page_reply(id: string, blocks: { any }): any
+		return { id = id, role = "assistant", text = "", model = "Opus", at = "Sep 8, 1:43 PM", copy = "", blocks = blocks }
+	end
+	local function seed(list: { any })
+		TRANSCRIPTS.s2 = list
+		store.messages:set(list)
+		publish("s2", { cwd = "/tmp/atlas" })
+	end
+	ui.command {
+		id = "pages_seed",
+		title = "s2 shows agent pages",
+		run = function()
+			seed {
+				{ id = "x2", role = "user", text = "And pictures?" },
+				page_reply("p2", {
+					{ id = "tc2-html", kind = "html", path = "/u/html/s2/pictures.html", title = "Ảnh", height = 120 },
+					{ id = "tc3-html", kind = "html", path = "/u/html/s2/gone.html", title = "Gone", height = 100 },
+				}),
+				{ id = "x1", role = "user", text = "Design the frame" },
+				page_reply("p1", {
+					{ id = "tc1-html", kind = "html", path = "/u/html/s2/frame.html", title = "Khung app", height = 600 },
+					{ id = "t", kind = "text", text = "Ba chỗ cần chọn." },
+				}),
+			}
+		end,
+	}
+	ui.command {
+		id = "pages_seed_live",
+		title = "s2 shows a dev server's page and names .html files",
+		run = function()
+			seed {
+				{ id = "x3", role = "user", text = "Run it" },
+				page_reply("p3", {
+					{ id = "tc4-html", kind = "html", url = "http://localhost:5391/app/?x=1", title = "Tray", height = 300 },
+					{ id = "t", kind = "text", text = "Made [demo](out/demo.html) and `out/other.html`." },
+					{ id = "html-files", kind = "html_files", targets = { { dest = "out/demo.html", linked = true }, { dest = "out/other.html", linked = false }, { dest = "out/missing.html", linked = true } } },
+				}),
+			}
+		end,
+	}
+	-- The host reading back the last prompt sent to s2: a user row with its
+	-- picks as chips (chat.rs `page_picks`).
+	ui.command {
+		id = "picks_echo",
+		title = "s2's last prompt comes back with its picks",
+		run = function()
+			local text: string? = nil
+			for i = #said, 1, -1 do
+				local m = string.match(said[i], "^send:s2:(.*)$")
+				if m then
+					text = m
+					break
+				end
+			end
+			if not text then
+				return
+			end
+			local chips, words, card = {}, {}, nil
+			for line in string.gmatch(text .. "\n", "(.-)\n") do
+				local c = string.match(line, '^Picked in "(.*)":$')
+				if c then
+					card = c
+				elseif card and string.match(line, "^%- ") then
+					local label = string.sub(line, 3)
+					table.insert(chips, { kind = "pick", name = label, card = card, group = "", code = label, label = label })
+				elseif card and string.match(line, "^(%S+) = (.-) %((.*)%)$") then
+					local g, code, label = string.match(line, "^(%S+) = (.-) %((.*)%)$")
+					table.insert(chips, { kind = "pick", name = label, card = card, group = g, code = code, label = label })
+				elseif card and string.match(line, "^Not picked:") then
+					continue
+				else
+					card = nil
+					table.insert(words, line)
+				end
+			end
+			local list = table.clone(TRANSCRIPTS.s2 or {})
+			table.insert(list, { id = `echo{#list}`, role = "user", text = (string.gsub(table.concat(words, "\n"), "%s+$", "")), attachments = chips })
+			TRANSCRIPTS.s2 = list
+			store.messages:set(list)
+		end,
+	}
+end
+
 return ui.overlay {
 	on_press = function()
 		require("@app/screens/chat/pills").press_outside()

@@ -29,6 +29,8 @@ pub struct PublishHtmlRenderParams {
     #[serde(default)]
     pub html: Option<String>,
     #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
     pub url: Option<String>,
     pub title: String,
     pub height: f64,
@@ -224,6 +226,158 @@ pub fn render_source<'a>(
     }
 }
 
+/// What an `html_render` call shows: a page it sent, a page file it wrote,
+/// or a live dev server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderInput<'a> {
+    Html(&'a str),
+    Path(&'a str),
+    Url(&'a str),
+}
+
+pub fn render_input<'a>(
+    html: Option<&'a str>,
+    path: Option<&'a str>,
+    url: Option<&'a str>,
+) -> Result<RenderInput<'a>, String> {
+    let given = |text: Option<&'a str>| text.filter(|text| !text.trim().is_empty());
+    match (given(html), given(path), given(url)) {
+        (Some(html), None, None) => Ok(RenderInput::Html(html)),
+        (None, Some(path), None) => Ok(RenderInput::Path(path.trim())),
+        (None, None, Some(url)) => live_url(url).map(|live| RenderInput::Url(live.url)),
+        (None, None, None) => Err(
+            "give `html` (a finished page), `path` (an .html file you wrote in this chat's folder) or `url` (a local dev server you are running)".into(),
+        ),
+        _ => Err("give one of `html`, `path` or `url`, not both".into()),
+    }
+}
+
+/// The reply to an engine's refusal of a `path` or `url` render that only an
+/// engine older than this one gives (`html` was required, then only `html`
+/// or `url` were known), naming the skew instead of the raw error.
+pub fn stale_engine_reply(error: &str, sent: RenderInput<'_>) -> Option<String> {
+    let what = match sent {
+        RenderInput::Html(_) => return None,
+        RenderInput::Path(_) => "`path`",
+        RenderInput::Url(_) => "`url`",
+    };
+    let required_html = error.contains("missing field") && error.contains("html");
+    let no_path = matches!(sent, RenderInput::Path(_))
+        && error.contains("give `html` (a finished page) or `url`");
+    (required_html || no_path).then(|| {
+        format!(
+            "The Zeron engine serving this chat is older than the app and does not take {what} yet. Restart the engine (quit Zeron fully and open it again), then call html_render again; until then pass the page as `html`."
+        )
+    })
+}
+
+/// How the agent offers choices on a page: the person's clicks fill the
+/// composer, never send.
+pub const PICK_GUIDE: &str = "Options: when the page offers choices to pick from, make each option a <button> with data-zeron-pick=\"A2\" (its code), data-zeron-group=\"A\" (one pick per group; leave it out for options picked freely) and data-zeron-label=\"Floating tab\"; data-zeron-group-label names a group. A click puts the pick in the person's composer; the host marks chosen buttons data-zeron-chosen and sent ones data-zeron-locked, and fills an element with data-zeron-count. You receive the picks with their message.";
+
+/// A pick on a page, as the composer sends it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pick {
+    pub group: Option<String>,
+    pub code: String,
+    pub label: String,
+}
+
+/// A page's group, by its code and name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickGroup {
+    pub code: String,
+    pub name: String,
+}
+
+pub const PICKED_IN: &str = "Picked in";
+pub const NOT_PICKED: &str = "Not picked:";
+
+/// The block a message's picks on card `card` add after its words: one
+/// `A = A2 (label)` line per group picked (`- label` for ungrouped picks),
+/// then the groups left unanswered.
+pub fn picks_block(card: &str, picks: &[Pick], missing: &[PickGroup]) -> String {
+    let mut out = format!("{PICKED_IN} \"{card}\":");
+    for pick in picks {
+        out.push('\n');
+        match &pick.group {
+            Some(group) => out.push_str(&format!("{group} = {} ({})", pick.code, pick.label)),
+            None => out.push_str(&format!("- {}", pick.label)),
+        }
+    }
+    if !missing.is_empty() {
+        let names: Vec<String> = missing
+            .iter()
+            .map(|group| format!("{} ({})", group.code, group.name))
+            .collect();
+        out.push_str(&format!("\n{NOT_PICKED} {}", names.join(", ")));
+    }
+    out
+}
+
+/// The words with each card's picks after them.
+pub fn with_picks(words: &str, cards: &[(String, Vec<Pick>, Vec<PickGroup>)]) -> String {
+    let mut out = words.trim_end().to_owned();
+    for (card, picks, missing) in cards {
+        if picks.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&picks_block(card, picks, missing));
+    }
+    out
+}
+
+/// A sent message's pick blocks read back: its words without them, and each
+/// card's picks in order.
+pub fn extract_picks(text: &str) -> (String, Vec<(String, Vec<Pick>)>) {
+    let mut words: Vec<&str> = Vec::new();
+    let mut cards: Vec<(String, Vec<Pick>)> = Vec::new();
+    let mut lines = text.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        let card = line
+            .strip_prefix(PICKED_IN)
+            .and_then(|rest| rest.strip_prefix(" \""))
+            .and_then(|rest| rest.strip_suffix("\":"));
+        let Some(card) = card else {
+            words.push(line);
+            continue;
+        };
+        let mut picks = Vec::new();
+        while let Some(next) = lines.peek() {
+            if let Some(label) = next.strip_prefix("- ") {
+                picks.push(Pick {
+                    group: None,
+                    code: label.to_owned(),
+                    label: label.to_owned(),
+                });
+            } else if let Some((group, rest)) = next.split_once(" = ")
+                && let Some((code, label)) = rest.split_once(" (")
+                && let Some(label) = label.strip_suffix(')')
+                && !group.is_empty()
+                && !group.contains(char::is_whitespace)
+            {
+                picks.push(Pick {
+                    group: Some(group.to_owned()),
+                    code: code.to_owned(),
+                    label: label.to_owned(),
+                });
+            } else if !next.starts_with(NOT_PICKED) {
+                break;
+            }
+            lines.next();
+        }
+        if picks.is_empty() {
+            words.push(line);
+        } else {
+            cards.push((card.to_owned(), picks));
+        }
+    }
+    (words.join("\n").trim_end().to_owned(), cards)
+}
+
 /// A local dev server's page, the only kind of `url` a thread shows live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveUrl<'a> {
@@ -327,6 +481,279 @@ pub fn scrolls_inside(frame: f32, content_height: Option<f32>) -> bool {
 /// Reports the page's content height to the host as it changes (t3's
 /// measure: the document's scroll height when it overflows, else its box).
 pub const SIZE_SCRIPT: &str = r#"(function(){var h,z=function(){var r=document.documentElement,v=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height);if(v===h||!window.ipc)return;h=v;window.ipc.postMessage(JSON.stringify({height:v}));};if(window.ResizeObserver){var o=new ResizeObserver(z);o.observe(document.documentElement);document.addEventListener("DOMContentLoaded",function(){if(document.body)o.observe(document.body);});}document.addEventListener("DOMContentLoaded",z);window.addEventListener("load",z);})();"#;
+
+/// A color as straight RGBA, each channel 0 to 1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rgba {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+impl Rgba {
+    /// `#rrggbb` or `#rrggbbaa`.
+    pub fn hex(text: &str) -> Option<Self> {
+        let digits = text.strip_prefix('#')?;
+        if !matches!(digits.len(), 6 | 8) || !digits.is_ascii() {
+            return None;
+        }
+        let byte = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).ok();
+        let a = if digits.len() == 8 { byte(6)? } else { 255 };
+        Some(Self {
+            r: f32::from(byte(0)?) / 255.0,
+            g: f32::from(byte(2)?) / 255.0,
+            b: f32::from(byte(4)?) / 255.0,
+            a: f32::from(a) / 255.0,
+        })
+    }
+}
+
+/// The theme a page is handed, by the roles both apps' themes name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageTheme {
+    pub dark: bool,
+    pub glass: bool,
+    pub bg: Rgba,
+    pub text: Rgba,
+    pub text_faint: Rgba,
+    pub text_muted: Rgba,
+    pub element_hover: Rgba,
+    pub hover: Rgba,
+    pub selection: Rgba,
+    pub surface_card: Rgba,
+    pub surface_overlay: Rgba,
+    pub surface_raised: Rgba,
+    pub border: Rgba,
+    pub border_strong: Rgba,
+    pub input_bg: Rgba,
+    pub accent: Rgba,
+    pub solid: Rgba,
+    pub on_solid: Rgba,
+    pub on_accent: Rgba,
+    pub accent_wash: Rgba,
+    pub accent_strong: Rgba,
+    pub danger: Rgba,
+    pub danger_strong: Rgba,
+    pub danger_muted: Rgba,
+    pub warning: Rgba,
+    pub warning_muted: Rgba,
+    pub success: Rgba,
+    pub success_muted: Rgba,
+    pub code_wash: Rgba,
+    pub code_text: Rgba,
+    pub font_sans: String,
+    pub font_mono: String,
+    pub code_font_size: f32,
+    /// The transcript's prose size and line height at a 16px interface.
+    pub text_size: f32,
+    pub line_height: f32,
+}
+
+pub fn css_color(color: Rgba) -> String {
+    let channel = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!(
+        "rgba({},{},{},{})",
+        channel(color.r),
+        channel(color.g),
+        channel(color.b),
+        (color.a.clamp(0.0, 1.0) * 1000.0).round() / 1000.0
+    )
+}
+
+fn font_stack(family: &str, generic: &str) -> String {
+    let family = family.replace(['"', ';', '{', '}', '<', '>'], "");
+    if family.trim().is_empty() {
+        generic.into()
+    } else {
+        format!("\"{family}\", {generic}")
+    }
+}
+
+/// Roles themes cannot change, plus a categorical chart series after the
+/// theme's own accent (t3 `FIXED_COLORS`).
+fn fixed(dark: bool) -> (&'static str, &'static str, [&'static str; 5]) {
+    if dark {
+        (
+            "#3b82f6",
+            "#60a5fa",
+            ["#2dd4bf", "#fbbf24", "#c084fc", "#fb7185", "#a3e635"],
+        )
+    } else {
+        (
+            "#3b82f6",
+            "#1d4ed8",
+            ["#0d9488", "#d97706", "#9333ea", "#e11d48", "#65a30d"],
+        )
+    }
+}
+
+fn css_px(value: f32) -> String {
+    format!("{}px", (value * 100.0).round() / 100.0)
+}
+
+/// The variables a page styles against, named like t3's so one page works in
+/// both apps. `--accent` is the brand color, not a hover surface.
+pub fn theme_variables(theme: &PageTheme, font_size: f32) -> Vec<(&'static str, String)> {
+    let (info, info_foreground, chart) = fixed(theme.dark);
+    let c = css_color;
+    let mut vars = vec![
+        ("--background", c(theme.bg)),
+        ("--foreground", c(theme.text)),
+        ("--faint-foreground", c(theme.text_faint)),
+        ("--muted", c(theme.element_hover)),
+        ("--muted-foreground", c(theme.text_muted)),
+        ("--hover", c(theme.hover)),
+        ("--selection", c(theme.selection)),
+        ("--card", c(theme.surface_card)),
+        ("--card-foreground", c(theme.text)),
+        ("--popover", c(theme.surface_overlay)),
+        ("--popover-foreground", c(theme.text)),
+        ("--secondary", c(theme.surface_raised)),
+        ("--secondary-foreground", c(theme.text)),
+        ("--border", c(theme.border)),
+        ("--border-strong", c(theme.border_strong)),
+        ("--input", c(theme.input_bg)),
+        ("--ring", c(theme.accent)),
+        ("--primary", c(theme.solid)),
+        ("--primary-foreground", c(theme.on_solid)),
+        ("--accent", c(theme.accent)),
+        ("--accent-foreground", c(theme.on_accent)),
+        ("--accent-surface", c(theme.accent_wash)),
+        ("--accent-surface-foreground", c(theme.accent_strong)),
+        ("--destructive", c(theme.danger)),
+        ("--destructive-foreground", c(theme.danger_strong)),
+        ("--destructive-surface", c(theme.danger_muted)),
+        ("--danger", c(theme.danger)),
+        ("--warning", c(theme.warning)),
+        ("--warning-foreground", c(theme.warning)),
+        ("--warning-surface", c(theme.warning_muted)),
+        ("--success", c(theme.success)),
+        ("--success-foreground", c(theme.success)),
+        ("--success-surface", c(theme.success_muted)),
+        ("--info", info.into()),
+        ("--info-foreground", info_foreground.into()),
+        ("--code-background", c(theme.code_wash)),
+        ("--code-foreground", c(theme.code_text)),
+        ("--chart-1", c(theme.accent)),
+    ];
+    const CHART: [&str; 5] = [
+        "--chart-2",
+        "--chart-3",
+        "--chart-4",
+        "--chart-5",
+        "--chart-6",
+    ];
+    vars.extend(
+        CHART
+            .into_iter()
+            .zip(chart)
+            .map(|(name, color)| (name, color.into())),
+    );
+    vars.push(("--radius", "0.625rem".into()));
+    vars.push((
+        "--font-sans",
+        font_stack(
+            &theme.font_sans,
+            "-apple-system, BlinkMacSystemFont, system-ui, sans-serif",
+        ),
+    ));
+    vars.push((
+        "--font-mono",
+        font_stack(&theme.font_mono, "\"SF Mono\", Menlo, monospace"),
+    ));
+    // The transcript's sizes at 16px: meta, label, prose, then its h3/h2/h1.
+    let type_scale: [(&'static str, f32); 7] = [
+        ("--font-size-xs", 11.0),
+        ("--font-size-sm", 12.0),
+        ("--font-size", theme.text_size),
+        ("--font-size-lg", 15.0),
+        ("--font-size-xl", 16.0),
+        ("--font-size-2xl", 19.0),
+        ("--line-height", theme.line_height),
+    ];
+    let scale = font_size / 16.0;
+    vars.extend(
+        type_scale
+            .into_iter()
+            .map(|(name, size)| (name, css_px(size * scale))),
+    );
+    vars.push(("--font-size-code", css_px(theme.code_font_size)));
+    vars.push(("--surface-treatment", surface(theme).into()));
+    vars
+}
+
+fn surface(theme: &PageTheme) -> &'static str {
+    if theme.glass { "glass" } else { "opaque" }
+}
+
+fn appearance(theme: &PageTheme) -> &'static str {
+    if theme.dark { "dark" } else { "light" }
+}
+
+/// The theme stylesheet the bootstrap's `<style id="zeron-theme">` holds.
+/// Inline cards sit on the thread itself, so their page background is clear;
+/// a preview screenshot paints the thread's background.
+pub fn theme_css(theme: &PageTheme, font_size: f32, inline: bool) -> String {
+    let mut css = format!(":root{{color-scheme:{};", appearance(theme));
+    for (name, value) in theme_variables(theme, font_size) {
+        css.push_str(name);
+        css.push(':');
+        css.push_str(&value);
+        css.push(';');
+    }
+    css.push('}');
+    css.push_str(if inline {
+        "html{background:transparent;overscroll-behavior:none;"
+    } else {
+        "html{background:var(--background);"
+    });
+    css.push_str("color:var(--foreground);font-family:var(--font-sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;scrollbar-width:none}html::-webkit-scrollbar{display:none}body{margin:0}code,kbd,pre,samp{font-family:var(--font-mono)}");
+    css
+}
+
+/// The host hands the wheel back to the transcript once the page is scrolled to that edge.
+pub const EDGE_SCRIPT: &str = r#"(function(){var l=-1,e=function(){var s=document.scrollingElement||document.documentElement,y=s.scrollTop,v=(y<=0?1:0)|(y+s.clientHeight>=s.scrollHeight-1?2:0);if(v===l||!window.ipc)return;l=v;window.ipc.postMessage(JSON.stringify({edges:v}));};window.addEventListener("scroll",e,{passive:true});window.addEventListener("resize",e);window.addEventListener("load",e);document.addEventListener("DOMContentLoaded",e);if(window.ResizeObserver)new ResizeObserver(e).observe(document.documentElement);})();"#;
+
+/// Snapshots are taken only while the page reports a change, at most every 250ms.
+pub const ACTIVITY_SCRIPT: &str = r#"(function(){var t=0;function a(){var n=Date.now();if(n-t<250||!window.ipc)return;t=n;window.ipc.postMessage(JSON.stringify({active:1}));}function w(f){return typeof f==="function"?function(){a();return f.apply(this,arguments);}:f;}var r=window.requestAnimationFrame;window.requestAnimationFrame=function(f){a();return r.call(window,f);};var st=window.setTimeout,si=window.setInterval;window.setTimeout=function(f){var g=[].slice.call(arguments);g[0]=w(f);return st.apply(window,g);};window.setInterval=function(f){var g=[].slice.call(arguments);g[0]=w(f);return si.apply(window,g);};new MutationObserver(a).observe(document.documentElement,{subtree:true,childList:true,attributes:true,characterData:true});["transitionrun","transitionend","animationstart","animationiteration","animationend","input","change","scroll","load"].forEach(function(e){window.addEventListener(e,a,true);});})();"#;
+
+pub fn attributes_script(theme: &PageTheme) -> String {
+    format!(
+        "(function(){{var d=document.documentElement;d.setAttribute(\"data-surface\",\"{}\");d.setAttribute(\"data-appearance\",\"{}\");}})();",
+        surface(theme),
+        appearance(theme)
+    )
+}
+
+/// JavaScript that swaps a mounted page's theme without reloading it.
+pub fn retheme_script(theme: &PageTheme, font_size: f32, inline: bool) -> String {
+    let css = serde_json::to_string(&theme_css(theme, font_size, inline))
+        .unwrap_or_else(|_| "\"\"".into());
+    format!(
+        "(function(){{var s=document.getElementById('zeron-theme');if(s)s.textContent={css};}})();{}",
+        attributes_script(theme)
+    )
+}
+
+/// The page with its theme bootstrap; inline cards report their height, hand
+/// the wheel back at their edges and say when they change, then run `extra`.
+pub fn themed_page(
+    html: &str,
+    theme: &PageTheme,
+    font_size: f32,
+    inline: bool,
+    extra: &str,
+) -> String {
+    let mut script = attributes_script(theme);
+    if inline {
+        script.push_str(SIZE_SCRIPT);
+        script.push_str(EDGE_SCRIPT);
+        script.push_str(ACTIVITY_SCRIPT);
+    }
+    script.push_str(extra);
+    inject_bootstrap(html, &theme_css(theme, font_size, inline), &script)
+}
 
 /// Inserts the bootstrap (`css` in `<style id="zeron-theme">`, then
 /// `script`) at the start of the document head, so a page's own styles and
@@ -611,9 +1038,313 @@ pub fn page_file_name(title: &str) -> String {
     format!("{}.html", if name.is_empty() { "Page" } else { name })
 }
 
+/// "Open in" cards a settled reply shows at most, one per `.html` file it names.
+pub const MAX_OPEN_CARDS: usize = 3;
+const TITLE_SCAN_BYTES: usize = 64 * 1024;
+
+pub fn is_html_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".html") || lower.ends_with(".htm")
+}
+
+/// An `.html` file a reply names: a link to it, or a path in inline code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HtmlTarget {
+    pub dest: String,
+    pub linked: bool,
+}
+
+pub fn html_link_targets<'a>(texts: impl Iterator<Item = &'a str>) -> Vec<HtmlTarget> {
+    use pulldown_cmark::{Event, Parser, Tag};
+    let mut out: Vec<HtmlTarget> = Vec::new();
+    for text in texts {
+        for event in Parser::new(text) {
+            let (dest, linked) = match &event {
+                Event::Start(Tag::Link { dest_url, .. }) => (dest_url.trim(), true),
+                Event::Code(code) if !code.contains(char::is_whitespace) => (code.as_ref(), false),
+                _ => continue,
+            };
+            if dest.contains("://") && !dest.starts_with("file://") {
+                continue;
+            }
+            let mut path = dest.split('#').next().unwrap_or(dest);
+            while let Some((head, tail)) = path.rsplit_once(':')
+                && !tail.is_empty()
+                && tail.bytes().all(|b| b.is_ascii_digit())
+            {
+                path = head;
+            }
+            if !is_html_path(path) {
+                continue;
+            }
+            match out.iter_mut().find(|seen| seen.dest == dest) {
+                Some(seen) => seen.linked |= linked,
+                None => out.push(HtmlTarget {
+                    dest: dest.to_string(),
+                    linked,
+                }),
+            }
+        }
+    }
+    out
+}
+
+/// A page file's `<title>`, from its first 64 KB; `Err` when it is not a
+/// readable file.
+pub fn read_title(path: &Path) -> Result<Option<String>, ()> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|_| ())?;
+    if !file.metadata().map_err(|_| ())?.is_file() {
+        return Err(());
+    }
+    let mut bytes = Vec::new();
+    file.take(TITLE_SCAN_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    Ok(title_from_html(&String::from_utf8_lossy(&bytes)))
+}
+
+pub fn title_from_html(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let open = lower.find("<title")?;
+    let body = open + lower[open..].find('>')? + 1;
+    let close = body + lower[body..].find("</title")?;
+    let title = html[body..close]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!title.is_empty()).then_some(title)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixed_theme() -> PageTheme {
+        let g = |v: u8, a: f32| Rgba {
+            r: f32::from(v) / 255.0,
+            g: f32::from(v) / 255.0,
+            b: f32::from(v) / 255.0,
+            a,
+        };
+        PageTheme {
+            dark: true,
+            glass: false,
+            bg: g(16, 1.0),
+            text: g(240, 1.0),
+            text_faint: g(120, 1.0),
+            text_muted: g(170, 1.0),
+            element_hover: g(40, 1.0),
+            hover: g(255, 0.08),
+            selection: Rgba::hex("#ec83b759").unwrap(),
+            surface_card: g(24, 1.0),
+            surface_overlay: g(30, 1.0),
+            surface_raised: g(28, 1.0),
+            border: g(255, 0.1),
+            border_strong: g(255, 0.2),
+            input_bg: g(20, 1.0),
+            accent: Rgba::hex("#ec83b7").unwrap(),
+            solid: g(240, 1.0),
+            on_solid: g(16, 1.0),
+            on_accent: g(0, 1.0),
+            accent_wash: Rgba::hex("#ec83b729").unwrap(),
+            accent_strong: Rgba::hex("#f4a8cf").unwrap(),
+            danger: Rgba::hex("#ff5f57").unwrap(),
+            danger_strong: Rgba::hex("#ff8a84").unwrap(),
+            danger_muted: Rgba::hex("#ff5f571f").unwrap(),
+            warning: Rgba::hex("#febc2e").unwrap(),
+            warning_muted: Rgba::hex("#febc2e1f").unwrap(),
+            success: Rgba::hex("#28c840").unwrap(),
+            success_muted: Rgba::hex("#28c8401f").unwrap(),
+            code_wash: g(255, 0.06),
+            code_text: g(230, 1.0),
+            font_sans: "Inter".into(),
+            font_mono: "".into(),
+            code_font_size: 12.5,
+            text_size: 14.0,
+            line_height: 22.0,
+        }
+    }
+
+    // gpui's `theme_css` (crates/ui/src/html_render.rs before U23), worked by hand for `fixed_theme`.
+    const GPUI_CSS: &str = ":root{color-scheme:dark;--background:rgba(16,16,16,1);--foreground:rgba(240,240,240,1);--faint-foreground:rgba(120,120,120,1);--muted:rgba(40,40,40,1);--muted-foreground:rgba(170,170,170,1);--hover:rgba(255,255,255,0.08);--selection:rgba(236,131,183,0.349);--card:rgba(24,24,24,1);--card-foreground:rgba(240,240,240,1);--popover:rgba(30,30,30,1);--popover-foreground:rgba(240,240,240,1);--secondary:rgba(28,28,28,1);--secondary-foreground:rgba(240,240,240,1);--border:rgba(255,255,255,0.1);--border-strong:rgba(255,255,255,0.2);--input:rgba(20,20,20,1);--ring:rgba(236,131,183,1);--primary:rgba(240,240,240,1);--primary-foreground:rgba(16,16,16,1);--accent:rgba(236,131,183,1);--accent-foreground:rgba(0,0,0,1);--accent-surface:rgba(236,131,183,0.161);--accent-surface-foreground:rgba(244,168,207,1);--destructive:rgba(255,95,87,1);--destructive-foreground:rgba(255,138,132,1);--destructive-surface:rgba(255,95,87,0.122);--danger:rgba(255,95,87,1);--warning:rgba(254,188,46,1);--warning-foreground:rgba(254,188,46,1);--warning-surface:rgba(254,188,46,0.122);--success:rgba(40,200,64,1);--success-foreground:rgba(40,200,64,1);--success-surface:rgba(40,200,64,0.122);--info:#3b82f6;--info-foreground:#60a5fa;--code-background:rgba(255,255,255,0.06);--code-foreground:rgba(230,230,230,1);--chart-1:rgba(236,131,183,1);--chart-2:#2dd4bf;--chart-3:#fbbf24;--chart-4:#c084fc;--chart-5:#fb7185;--chart-6:#a3e635;--radius:0.625rem;--font-sans:\"Inter\", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;--font-mono:\"SF Mono\", Menlo, monospace;--font-size-xs:11px;--font-size-sm:12px;--font-size:14px;--font-size-lg:15px;--font-size-xl:16px;--font-size-2xl:19px;--line-height:22px;--font-size-code:12.5px;--surface-treatment:opaque;}html{background:transparent;overscroll-behavior:none;color:var(--foreground);font-family:var(--font-sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;scrollbar-width:none}html::-webkit-scrollbar{display:none}body{margin:0}code,kbd,pre,samp{font-family:var(--font-mono)}";
+
+    #[test]
+    fn the_theme_css_is_gpuis_for_the_same_colors() {
+        assert_eq!(theme_css(&fixed_theme(), 16.0, true), GPUI_CSS);
+        let preview = theme_css(&fixed_theme(), 16.0, false);
+        assert!(preview.contains("}html{background:var(--background);color:"));
+        let large = theme_css(&fixed_theme(), 20.0, true);
+        assert!(large.contains("--font-size:17.5px;") && large.contains("--font-size-xs:13.75px;"));
+        assert!(large.contains("--font-size-code:12.5px;"));
+        let mut light = fixed_theme();
+        light.dark = false;
+        light.glass = true;
+        let css = theme_css(&light, 16.0, true);
+        assert!(css.starts_with(":root{color-scheme:light;"));
+        assert!(
+            css.contains("--info-foreground:#1d4ed8;--code") && css.contains("--chart-2:#0d9488;")
+        );
+        assert!(css.contains("--surface-treatment:glass;"));
+    }
+
+    #[test]
+    fn the_bootstrap_is_gpuis_for_the_same_page() {
+        let theme = fixed_theme();
+        let attributes = "(function(){var d=document.documentElement;d.setAttribute(\"data-surface\",\"opaque\");d.setAttribute(\"data-appearance\",\"dark\");})();";
+        assert_eq!(attributes_script(&theme), attributes);
+        let page = "<html><head><title>x</title></head><body>hi</body></html>";
+        let inline = themed_page(page, &theme, 16.0, true, "");
+        assert_eq!(
+            inline,
+            format!(
+                "<html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><style id=\"zeron-theme\">{GPUI_CSS}</style><script>{attributes}{SIZE_SCRIPT}{EDGE_SCRIPT}{ACTIVITY_SCRIPT}</script><title>x</title></head><body>hi</body></html>"
+            )
+        );
+        let extra = themed_page(page, &theme, 16.0, true, "X();");
+        assert!(extra.contains(&format!("{ACTIVITY_SCRIPT}X();</script>")));
+        let preview = themed_page(page, &theme, 16.0, false, "");
+        assert!(preview.contains(&format!("<script>{attributes}</script>")));
+        let retheme = retheme_script(&theme, 16.0, true);
+        assert!(retheme.starts_with("(function(){var s=document.getElementById('zeron-theme');if(s)s.textContent=\":root{color-scheme:dark;"));
+        assert!(retheme.ends_with(attributes));
+    }
+
+    #[test]
+    fn colors_read_from_hex_with_or_without_alpha() {
+        assert_eq!(
+            css_color(Rgba::hex("#c0347a").unwrap()),
+            "rgba(192,52,122,1)"
+        );
+        assert_eq!(
+            css_color(Rgba::hex("#c0347a80").unwrap()),
+            "rgba(192,52,122,0.502)"
+        );
+        for bad in ["c0347a", "#c034", "#c0347g", "#ếế"] {
+            assert_eq!(Rgba::hex(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_render_takes_exactly_one_of_html_path_or_url() {
+        assert_eq!(
+            render_input(Some("<p>x</p>"), None, None),
+            Ok(RenderInput::Html("<p>x</p>"))
+        );
+        assert_eq!(
+            render_input(None, Some(" out/tray.html "), Some("")),
+            Ok(RenderInput::Path("out/tray.html"))
+        );
+        assert_eq!(
+            render_input(None, None, Some("http://localhost:5391/")),
+            Ok(RenderInput::Url("http://localhost:5391/"))
+        );
+        for (html, path, url) in [
+            (Some("<p>x</p>"), Some("a.html"), None),
+            (None, Some("a.html"), Some("http://localhost:5391/")),
+            (Some("<p>x</p>"), None, Some("http://localhost:5391/")),
+        ] {
+            assert!(
+                render_input(html, path, url)
+                    .unwrap_err()
+                    .contains("not both")
+            );
+        }
+        let none = render_input(None, Some(" "), None).unwrap_err();
+        assert!(none.contains("give `html`") && none.contains("`path`"));
+        assert!(render_input(None, None, Some("https://example.com/")).is_err());
+    }
+
+    #[test]
+    fn a_stale_engines_refusal_names_the_skew() {
+        let old = "PublishHtmlRender: bad params: missing field `html`";
+        let url = RenderInput::Url("http://localhost:5391/");
+        let path = RenderInput::Path("a.html");
+        let said = stale_engine_reply(old, url).unwrap();
+        assert!(said.contains("older than the app") && said.contains("`url`"));
+        assert!(said.contains("Restart the engine") && !said.contains("missing field"));
+        assert!(stale_engine_reply(old, path).unwrap().contains("`path`"));
+        let before_path = "PublishHtmlRender: bad params: give `html` (a finished page) or `url` (a local dev server you are running)";
+        assert!(stale_engine_reply(before_path, path).is_some());
+        assert_eq!(stale_engine_reply(before_path, url), None);
+        assert_eq!(stale_engine_reply(old, RenderInput::Html("<p>x</p>")), None);
+        assert_eq!(
+            stale_engine_reply(
+                "PublishHtmlRender: `a.html` is not a file in this chat's folder",
+                path
+            ),
+            None
+        );
+    }
+
+    fn pick(group: Option<&str>, code: &str, label: &str) -> Pick {
+        Pick {
+            group: group.map(str::to_owned),
+            code: code.into(),
+            label: label.into(),
+        }
+    }
+
+    #[test]
+    fn picks_are_sent_one_line_a_group_with_what_was_left() {
+        let picks = [
+            pick(Some("A"), "A2", "Nổi sát đỉnh"),
+            pick(Some("B"), "B2", "Không viền"),
+        ];
+        let missing = [PickGroup {
+            code: "C".into(),
+            name: "Rail".into(),
+        }];
+        let sent = with_picks(
+            "+ header của C2",
+            &[("Khung app".into(), picks.to_vec(), missing.to_vec())],
+        );
+        assert_eq!(
+            sent,
+            "+ header của C2\n\nPicked in \"Khung app\":\nA = A2 (Nổi sát đỉnh)\nB = B2 (Không viền)\nNot picked: C (Rail)"
+        );
+        let free = with_picks(
+            "",
+            &[(
+                "Ảnh".into(),
+                vec![pick(None, "p1", "Sea"), pick(None, "p3", "Hill")],
+                vec![],
+            )],
+        );
+        assert_eq!(free, "Picked in \"Ảnh\":\n- Sea\n- Hill");
+        let (words, cards) = extract_picks(&sent);
+        assert_eq!(words, "+ header của C2");
+        assert_eq!(cards, vec![("Khung app".into(), picks.to_vec())]);
+        let (words, cards) = extract_picks(&free);
+        assert_eq!(words, "");
+        assert_eq!(
+            cards[0].1,
+            vec![pick(None, "Sea", "Sea"), pick(None, "Hill", "Hill")]
+        );
+        let plain = "Picked in \"x\":\nnot a pick";
+        assert_eq!(extract_picks(plain), (plain.to_owned(), vec![]));
+    }
+
+    #[test]
+    fn a_replys_html_files_are_its_links_and_code_paths() {
+        let text = "Made [demo.html](demo.html), [web](https://x.dev/a.html), `c.html`, `open e.html`, [line](b.html:12:3)";
+        let targets = html_link_targets([text].into_iter());
+        assert_eq!(
+            targets
+                .iter()
+                .map(|t| (t.dest.as_str(), t.linked))
+                .collect::<Vec<_>>(),
+            vec![
+                ("demo.html", true),
+                ("c.html", false),
+                ("b.html:12:3", true)
+            ]
+        );
+        assert_eq!(
+            title_from_html("<TITLE lang=vi>\n Demo  đơn giản </TITLE>"),
+            Some("Demo đơn giản".into())
+        );
+    }
 
     #[test]
     fn the_source_view_summarizes_inlined_images_and_cuts_long_pages() {

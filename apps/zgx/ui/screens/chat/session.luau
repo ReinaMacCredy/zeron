@@ -23,6 +23,7 @@ local FileLinks = require("@app/screens/chat/file_links")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Find = require("@app/screens/chat/find")
 local boundary = require("@app/screens/shell/boundary")
+local Pages = require("@app/screens/chat/pages")
 
 -- The pictures replies show, read from the open chat's folder on its device.
 local pictures = ReplyImages.for_session(function(): any
@@ -318,6 +319,13 @@ local function Session(id: Id?): Node
 									lanes.ask_side(id, text)
 								end,
 							}),
+							-- Its agent pages: their picks on this chat's draft.
+							pages = Pages.pages(function(): string?
+								return id
+							end, store.messages, function(): any
+								local s = store.session:get()
+								return if s and s.id == id then s else nil
+							end),
 							chat_of = shared.chat_of,
 							threads = shared.threads_for(which, which, function(): any
 								return store.session:get()

@@ -292,6 +292,20 @@ local function cargo_get(key: string): { any }
 	return if d and type(d.cargo) == "table" then d.cargo else {}
 end
 
+-- A chat's cargo, tracked, and put in its place (the composer's for the
+-- chat shown): for what stages items of its own (screens/chat/pages' picks).
+function M.cargo_of(key: string): { any }
+	return cargo_get(key)
+end
+
+function M.peek_cargo_of(key: string): { any }
+	return cargo_in(key)
+end
+
+function M.set_cargo_of(key: string, list: { any })
+	set_cargo_in(key, list)
+end
+
 function M.add_annotation(key: string, q: { text: string, source: string?, anchor: any?, comment: string? }): string
 	local id = chip_id("quote")
 	push_cargo(key, { { id = id, kind = "quote", name = Quote.excerpt(q.text), text = q.text, comment = q.comment or "", source = q.source, anchor = q.anchor } })

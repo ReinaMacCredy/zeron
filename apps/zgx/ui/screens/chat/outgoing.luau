@@ -10,6 +10,7 @@ local Annotation = require("@ds/annotation")
 local Comments = require("@app/screens/chat/comments")
 local Invocations = require("@app/screens/chat/invocations")
 local Appshots = require("@app/screens/chat/appshots")
+local HtmlPicks = require("@ds/html_picks")
 local shared = require("@app/screens/chat/shared")
 
 local M = {}
@@ -37,8 +38,14 @@ function M.badges(quotes: { Quote.Staged }): { any }
 	return out
 end
 
-local function shown(list: { any }, quotes: { Quote.Staged }, picks: { { [string]: any } }, said: { Comments.Comment }): { any }
+local function shown(list: { any }, quotes: { Quote.Staged }, picks: { { [string]: any } }, said: { Comments.Comment }, cards: { HtmlPicks.Card }): { any }
 	local out = {}
+	-- (The picks on agent pages, as chat.rs `page_picks` reads them back.)
+	for _, c in cards do
+		for _, p in c.picks do
+			table.insert(out, { kind = "pick", name = p.label, card = c.card, group = p.group or "", code = if (p.group or "") ~= "" then p.code else p.label, label = p.label })
+		end
+	end
 	for _, a in list do
 		table.insert(out, {
 			kind = if a.kind == "image" then "image" else "file",
@@ -84,8 +91,13 @@ function M.parts(typed: string, text: string, carried: { any }): { [string]: any
 	-- Review comments left on files: a block after the words
 	-- (screens/chat/comments), each its file and line.
 	local comments: { Comments.Comment } = {}
+	-- Options picked on agent pages: each card's block after the words
+	-- (ds/html_picks `with_picks`, zeron_proto's).
+	local chosen: { any } = {}
 	for _, item in carried do
-		if item.kind == "comment" then
+		if item.kind == "pick" then
+			table.insert(chosen, item)
+		elseif item.kind == "comment" then
 			table.insert(comments, { file = item.file, line = item.line, body = item.body, to = item.to, side = item.side, snippet = item.snippet })
 		elseif item.path then
 			-- (A project's file: on the session's computer already.)
@@ -106,12 +118,13 @@ function M.parts(typed: string, text: string, carried: { any }): { [string]: any
 	end
 	-- (Each command or skill picked: its canonical reference.)
 	local words = Invocations.encode(if typed ~= "" then typed else text)
+	local cards = HtmlPicks.cards(chosen)
 	return {
 		words = words,
-		text = Comments.with_comments(Quote.with_quotes(Annotation.with_annotations(words, picks), quotes), comments),
+		text = Comments.with_comments(Quote.with_quotes(Annotation.with_annotations(HtmlPicks.with_picks(words, cards), picks), quotes), comments),
 		attachments = attachments,
 		appshots = Appshots.of_cargo(carried),
-		shown = shown(attachments, quotes, picks, comments),
+		shown = shown(attachments, quotes, picks, comments, cards),
 	}
 end
 

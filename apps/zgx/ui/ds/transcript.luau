@@ -62,6 +62,7 @@ local locale = require("@self/locale")
 local Compaction = require("@self/compaction")
 local ContextCard = require("@self/compaction_context")
 local Threads = require("@self/transcript_threads")
+local HtmlCard = require("@self/html_card")
 
 export type Tool = Activity.Tool
 export type Message = {
@@ -195,6 +196,10 @@ export type Props = {
 	-- lane of its own). Without it, the row opens its call as any does.
 	on_open_subagent: ((sub: { ref: string, title: string?, status: string? }) -> ())?,
 	threads: Threads.Threads?,
+	-- What its agent pages reach of the chat (screens/chat/pages): the
+	-- picks on them, the chat's folder for "Open in". None: pages show,
+	-- their options do nothing.
+	pages: HtmlCard.Pages?,
 }
 export type Anchor = { id: string, dy: number }
 export type TranscriptFind = {
@@ -211,7 +216,7 @@ export type Draft = { id: string, text: string, part: string?, part_text: string
 -- its own blocks, opened.
 export type Block = {
 	id: string,
-	kind: "text" | "tools" | "work" | "visual" | "display_failed" | "images" | "line",
+	kind: "text" | "tools" | "work" | "visual" | "display_failed" | "images" | "line" | "html" | "html_files",
 	text: string?,
 	line: string?,
 	-- Pictures an agent showed (`show_image`, a generated image), one after
@@ -228,6 +233,11 @@ export type Block = {
 	summary: string?,
 	live: boolean?,
 	blocks: { Block }?,
+	-- A page an agent showed (ds/html_card): its stored `path` (or a dev
+	-- server's `url`), `title`, the agent's height; a reply's `.html` files.
+	height: number?,
+	url: string?,
+	targets: { { dest: string, linked: boolean } }?,
 }
 
 -- Rows not yet measured: about a short message.
@@ -643,6 +653,7 @@ type View = {
 	-- The text an open annotation input washes in it.
 	wash: (() -> string?)?,
 	working: any?,
+	pages: HtmlCard.Pages?,
 }
 
 -- A reply's thought being written, for its row (ds/activity's `thought`): the
@@ -693,6 +704,23 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 					end
 					else nil,
 			}
+		end
+		-- A page an agent showed, live above its reply (ds/html_card).
+		if b.kind == "html" then
+			return HtmlCard.Card {
+				key = `{m.id}-{b.id}`,
+				message = m.id,
+				title = b.title or "",
+				path = b.path,
+				url = b.url,
+				height = b.height or 600,
+				device = b.device,
+				source = b.source,
+				pages = if view then view.pages else nil,
+			}
+		end
+		if b.kind == "html_files" then
+			return HtmlCard.OpenCards { key = m.id, targets = b.targets or {}, pages = if view then view.pages else nil }
 		end
 		-- An agent's visual: built once, followed by the host (src/visuals.rs).
 		if b.kind == "visual" then
@@ -1704,7 +1732,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry, props.working, props.compaction_wait),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed, pages = props.pages }),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?

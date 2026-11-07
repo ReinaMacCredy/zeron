@@ -1092,6 +1092,7 @@ impl Inner {
                         .html_render_html()
                         .filter(|html| !html.trim().is_empty())
                         .or_else(|| call.html_render_url())
+                        .or_else(|| call.html_render_path())
                         .is_some_and(|html| crate::html_render::html_key(html) == *key) =>
                 {
                     Some(html_render)
