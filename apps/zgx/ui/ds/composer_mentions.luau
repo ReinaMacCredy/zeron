@@ -27,6 +27,11 @@ local FadeText = require("@self/fade_text")
 local Menu = require("@self/menu")
 local Rail = require("@self/rail")
 local motion = require("@self/motion")
+local AgentMark = require("@self/agent_mark")
+local status = require("@self/status")
+
+-- A thread's state in the `@` list, in words (Zeron's `thread_status_label`).
+local STATUS_WORDS: { [string]: string } = { working = "ds.status.working", input = "ds.status.input", failed = "ds.status.failed", done = "ds.status.done" }
 
 local M = {}
 
@@ -151,10 +156,10 @@ function M.use(opts: Use)
 		end
 		local all = sources()
 		local items = M.filter(all[t.trigger] or {}, t.query)
-		if t.trigger ~= "@" or not all.attachments then
+		if t.trigger ~= "@" or (not all.attachments and not all.threads) then
 			return items
 		end
-		local rows = tokens.attachments(all.attachments, t.query)
+		local rows = if all.attachments then tokens.attachments(all.attachments, t.query) else {}
 		for _, row in rows do
 			if not row.detail then
 				row.detail = locale.s(if row.src then "ds.composer_mentions.attached_image" else "ds.composer_mentions.attached_file")
@@ -163,7 +168,26 @@ function M.use(opts: Use)
 		for _, item in items do
 			table.insert(rows, item)
 		end
-		return rows
+		-- Threads first, under their heading; then the files, under theirs
+		-- (the shipping app's `@`: Threads, then Files).
+		local threads = all.threads or {}
+		if #threads == 0 then
+			return rows
+		end
+		local out: { Item } = {}
+		for i, th in threads do
+			local row = table.clone(th)
+			row.heading = if i == 1 then locale.s("ds.composer_mentions.threads") else nil
+			table.insert(out, row)
+		end
+		for i, row in rows do
+			if i == 1 then
+				row = table.clone(row)
+				row.heading = locale.s("ds.composer_mentions.files")
+			end
+			table.insert(out, row)
+		end
+		return out
 	end)
 	local layout = ui.computed(function(): { heights: { number }, total: number }
 		local heights: { number } = {}
@@ -390,10 +414,114 @@ function M.use(opts: Use)
 			end
 		end)
 	end
+	-- A thread's row (the shipping app's): its agent's mark, its title, how it
+	-- stands (Working, Input, Failed, Done: words, in their hue), its project.
+	local function thread_row(item: Item, index: State<number>, lit: () -> boolean, over: State<boolean>): Node
+		local th = (item :: any).thread
+		local st = th.status
+		local badge: Node? = nil
+		if STATUS_WORDS[st or ""] then
+			badge = ui.row {
+				shrink = 0,
+				gap = ui.raw(4, "mentions.rs status badge"),
+				items = "center",
+				color = `$zeron.status.{st}`,
+				if st == "working" then status.Spinner { size = 11, ink = "$zeron.status.working" }
+					elseif st == "done" then Icon { name = "check", size = 11 }
+					else ui.div { w = 6, h = 6, rounded = "$radius.full", bg = `$zeron.status.{st}` },
+				ui.text { locale.s(STATUS_WORDS[st]), wrap = false, text_size = ui.raw(10, "mentions.rs status badge"), weight = "$font.weight.medium" },
+			}
+		end
+		local body: { [any]: any } = {
+			id = `mention-{key_of(item)}`,
+			role = "option",
+			selected = lit,
+			label = if badge then `{item.label} {locale.s(STATUS_WORDS[st])}` else item.label,
+			relative = true,
+			h = ROW,
+			shrink = 0,
+			w_full = true,
+			px = "$space.2",
+			gap = ui.raw(8, "mentions.rs thread row"),
+			items = "center",
+			rounded = ui.raw(7, "the card's 12 less its edge and inset"),
+			bg = function(): string
+				return if lit() then "$zeron.popup.selected" else "#00000000"
+			end,
+			cursor = "pointer",
+			on_hover = function(inside: boolean)
+				over:set(inside)
+			end,
+			on_click = function()
+				choose(item)
+			end,
+		}
+		local parts: { Node } = {
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				rounded = ui.raw(7, "the row's corner"),
+				bg = "$zeron.popup.selected",
+				pointer_events = "none",
+				aria_hidden = true,
+				opacity = motion.tween(
+					ui.computed(function(): number
+						return if over:get() and not lit() then 1 else 0
+					end),
+					motion.hover()
+				),
+			},
+			ui.div {
+				w = 16,
+				h = 16,
+				shrink = 0,
+				items = "center",
+				justify = "center",
+				color = "$text.secondary",
+				if th.mark or th.icon then AgentMark.Mark { label = th.mark or item.label, mark = th.mark, icon = th.icon, seed = th.mark, size = 14, bare = true } else Icon { name = "chat-round-line", size = 14 },
+			},
+			FadeText { item.label, literal = true, grow = 1, shrink = 1, basis = 0, min_w = 0, text_size = ui.raw(13, "mentions.rs thread title"), color = "$text.primary" },
+		}
+		if badge then
+			table.insert(parts, badge)
+		end
+		if item.detail and item.detail ~= "" then
+			table.insert(parts, FadeText { item.detail, literal = true, shrink = 0, max_w = 160, text_size = ui.raw(12.5, "mentions.rs thread project"), color = "$text.secondary" })
+		end
+		for i, n in parts do
+			body[i] = n
+		end
+		return ui.column {
+			w_full = true,
+			px = "$space.1",
+			if item.heading
+				then ui.text {
+					tracked_upper(item.heading),
+					literal = true,
+					h = HEADING,
+					shrink = 0,
+					px = "$space.2",
+					pt = "$zeron.space.tight",
+					pb = "$space.1",
+					text_size = ui.raw(10, "gpui's menu heading"),
+					weight = "$font.weight.medium",
+					color = "$text.secondary",
+				}
+				else nil,
+			ui.row(body),
+		}
+	end
 	local function row(item: Item, index: State<number>): Node
 		local over = ui.use_state(false)
 		local function lit(): boolean
 			return active:get() == index:get()
+		end
+		local thread = (item :: any).thread
+		if thread then
+			return thread_row(item, index, lit, over)
 		end
 		local lead: Node
 		if item.src then

@@ -969,7 +969,8 @@
       },
       "attached_image": "已附加图片",
       "attached_file": "已附加文件",
-      "terminal": "终端"
+      "terminal": "终端",
+      "threads": "线程"
     },
     "model_picker": {
       "starred": "已加星标",
@@ -1389,6 +1390,66 @@
       "copy_running": "正在压缩副本 · {clock}",
       "copy_ready_turn": "副本已就绪 · 本轮结束后换入",
       "copy_ready_background": "副本已就绪 · 等待后台工作结束"
+    },
+    "threads": {
+      "agent": "智能体",
+      "the_agent": "该智能体",
+      "subagent": "子智能体",
+      "delegated_task": "委派的任务",
+      "thread": "线程",
+      "native": "{agent} 原生",
+      "spawn_label": "智能体 {title}",
+      "route": {
+        "routed": "已路由",
+        "chosen": "由智能体选择",
+        "fell_back": "已回退（{reason}）",
+        "reason_resets": "{reason}，{at} 重置"
+      },
+      "state": {
+        "running": "运行中",
+        "done": "完成",
+        "completed": "已完成",
+        "failed": "失败",
+        "stopped": "已停止",
+        "limited": "达到用量上限",
+        "unavailable": "不可用",
+        "after": "{state}，用时 {time}"
+      },
+      "limit": {
+        "title": "{name} 达到了用量上限",
+        "reset_unknown": "重置时间未知",
+        "resets_in": "{at} 重置，还有 {left}",
+        "resets": "{at} 重置",
+        "switch_to": "切换到",
+        "keeps": "{target}（保留对话记录）",
+        "switch_sub": "同一线程，换用其他提供方。只有再次切换才会回到 {name}。",
+        "wait_for_at": "等待 {at} 重置",
+        "wait_for": "等待重置",
+        "wait_auto": "重置时在 {name} 上自动继续，和现在一样。",
+        "wait_unarmed": "未开启自动继续：线程在此停下，并通知其父线程。",
+        "switch_now": "立即切换",
+        "wait_now": "立即等待",
+        "switching_in": "{n} 秒后切换",
+        "waiting_in": "{n} 秒后等待",
+        "cancel": "取消"
+      },
+      "started_thread": "已开启线程",
+      "open": "打开",
+      "open_thread": "打开线程 {title}",
+      "couldnt_message": "无法发送消息给",
+      "sending_to": "正在发送给",
+      "message_to": "已发送给",
+      "wake": {
+        "finished": "已结束",
+        "failed": "失败",
+        "stopped": "已停止",
+        "one": "委派的任务“{title}”{outcome}",
+        "many": "{n} 个委派的任务{outcome}：{titles}"
+      },
+      "open_subagent": "打开子智能体",
+      "from": "来自",
+      "from_label": "打开 {title}",
+      "auto_continue": "自动继续"
     }
   },
   "settings": {
@@ -3356,7 +3417,10 @@
       "didnt_send": "消息未发送",
       "couldnt_fork": "无法分叉此对话",
       "forking": "正在分叉…",
-      "retry": "重试"
+      "retry": "重试",
+      "subagent_of": "{title} 的子智能体",
+      "open_parent": "打开父线程",
+      "this_chat": "此对话"
     },
     "lanes": {
       "subagent": "子智能体",
@@ -3540,7 +3604,8 @@
     },
     "completions": {
       "search_failed": "文件搜索失败",
-      "search_outdated": "会话所在设备的 Zeron 版本较旧，请更新后再搜索其文件"
+      "search_outdated": "会话所在设备的 Zeron 版本较旧，请更新后再搜索其文件",
+      "new_session": "新会话"
     }
   },
   "sidecar": {

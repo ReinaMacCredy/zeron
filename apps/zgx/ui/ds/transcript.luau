@@ -61,6 +61,7 @@ local motion = require("@self/motion")
 local locale = require("@self/locale")
 local Compaction = require("@self/compaction")
 local ContextCard = require("@self/compaction_context")
+local Threads = require("@self/transcript_threads")
 
 export type Tool = Activity.Tool
 export type Message = {
@@ -108,6 +109,13 @@ export type Message = {
 	hint: string?,
 	-- A person's that another chat sent: which, and its title when it was sent.
 	sender: { chat: string, title: string }?,
+	-- A person's that another thread's agent sent (thread tools): that
+	-- thread; a delegated task's wake names the tasks (`wake`), a step
+	-- handback the threads it speaks for (`steps`); when it was sent.
+	from_chat: string?,
+	wake: { string }?,
+	steps: { string }?,
+	clock: string?,
 }
 
 export type Props = {
@@ -190,6 +198,10 @@ export type Props = {
 	-- A subagent's spawn (an agent row naming its doc): what opens it (a
 	-- lane of its own). Without it, the row opens its call as any does.
 	on_open_subagent: ((sub: { ref: string, title: string?, status: string? }) -> ())?,
+	-- The other chats it speaks of (ds/transcript_threads): a delegate's,
+	-- a thread's, a message's; what opens them. Without it, they read as
+	-- their ids and open nothing.
+	threads: Threads.Threads?,
 }
 export type Anchor = { id: string, dy: number }
 export type TranscriptFind = {
@@ -494,6 +506,28 @@ local function sender_line(m: Message, props: Props): Node
 	end, { w_full = true, pb = ui.raw(6, "Zeron's USER_CAPTION_GAP") })
 end
 
+-- Whose voice a person's row is (Zeron's user row): the chat's own turn sent
+-- to itself ("self", Auto-continue over it), a delegated task's wake ("wake",
+-- a line in its place), another thread's agent ("peer", its words as prose
+-- under "From"), or the person's.
+local function voice_of(m: Message, props: Props): string?
+	local from = m.from_chat
+	if not from then
+		return nil
+	end
+	local here = if props.sent_from then props.sent_from() else nil
+	if from == here then
+		return "self"
+	end
+	if m.wake and #m.wake > 0 and props.threads then
+		local c = props.threads.child(from)
+		if c and (c :: any).delegated_by == here then
+			return "wake"
+		end
+	end
+	return "peer"
+end
+
 -- A reply's row: its tools, its text, and while it waits for either, that it
 -- is working.
 -- Where a turn's working words start: from its message's id, so the word
@@ -620,6 +654,7 @@ type View = {
 	open: ((target: string) -> ())?,
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
 	open_subagent: ((sub: any) -> ())?,
+	threads: Threads.Threads?,
 	-- A message text's find (its key: `<id>:u`, `<id>:<block>`, `<id>:r`).
 	find: ((key: string) -> any)?,
 }
@@ -648,6 +683,8 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			return Activity {
 				key = `{m.id}:{b.id}`,
 				open_subagent = if view then view.open_subagent else nil,
+				threads = if view then view.threads else nil,
+				agent = if view and view.threads then view.threads.agent else nil,
 				thought = thought_of(m, now, draft),
 				tools = function()
 					return brow:get().tools or {}
@@ -717,6 +754,20 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			return line_row(nil, function(): any
 				return brow:get()
 			end)
+		end
+		-- A message the agent sent another chat: one line, its recipient.
+		if b.kind == "sent" then
+			return Threads.Sent {
+				id = `sent-{b.id}`,
+				now = function(): any
+					return brow:get()
+				end,
+				threads = if view then view.threads else nil,
+			}
+		end
+		-- A native spawn the engine routed: the delegate chip, on the chat's own agent.
+		if b.kind == "native_route" then
+			return Threads.Delegate { id = `native-{b.id}`, title = (b :: any).title, route = (b :: any).route, native = true, threads = if view then view.threads else nil }
 		end
 		-- Its words: the draft's while this is the text being written.
 		local function words(): string
@@ -809,6 +860,8 @@ local function reply(
 			Activity {
 				key = m.id,
 				open_subagent = if view then view.open_subagent else nil,
+				threads = if view then view.threads else nil,
+				agent = if view and view.threads then view.threads.agent else nil,
 				thought = thought_of(m, now, draft),
 				tools = function()
 					return now().tools or {}
@@ -1730,6 +1783,23 @@ local function Transcript(props: Props): Node
 					elseif m.role == "system" then line_row(m.hint, function(): any
 						return state:get()
 					end)
+					elseif mine and voice_of(m, props) == "wake" then Threads.Wake { id = `wake-{m.id}`, ids = m.wake :: { string }, threads = props.threads }
+					elseif mine and voice_of(m, props) == "peer" then ui.column {
+						class = "message message-peer",
+						provide = { message = m.id },
+						w_full = true,
+						Threads.From { id = `from-{m.id}`, senders = if m.steps and #m.steps > 1 then m.steps else { m.from_chat :: string }, clock = m.clock, threads = props.threads },
+						Markdown {
+							text = function(): string
+								return state:get().text or ""
+							end,
+							breaks = true,
+							open = props.open_link,
+							link_menu = props.link_menu,
+							find = if find_for then find_for(`{m.id}:u`) else nil,
+						},
+						strip(m, state, hovered),
+					}
 					elseif mine then ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the
@@ -1738,6 +1808,7 @@ local function Transcript(props: Props): Node
 						provide = { message = m.id },
 						w_full = true,
 						if m.sender then sender_line(m, props) else nil,
+						if voice_of(m, props) == "self" then Threads.AutoContinue() else nil,
 						UserMessage {
 							id = m.id,
 							text = m.text,
@@ -1756,7 +1827,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry, props.working, props.compaction_wait),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for, working = props.working }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working }),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?

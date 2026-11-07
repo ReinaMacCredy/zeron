@@ -969,7 +969,8 @@
       },
       "attached_image": "Attached image",
       "attached_file": "Attached file",
-      "terminal": "Terminal"
+      "terminal": "Terminal",
+      "threads": "Threads"
     },
     "model_picker": {
       "starred": "Starred",
@@ -1389,6 +1390,66 @@
       "copy_running": "Compacting a copy · {clock}",
       "copy_ready_turn": "Copy ready · swaps when the turn ends",
       "copy_ready_background": "Copy ready · waits for background work"
+    },
+    "threads": {
+      "agent": "Agent",
+      "the_agent": "The agent",
+      "subagent": "Subagent",
+      "delegated_task": "Delegated task",
+      "thread": "thread",
+      "native": "{agent} native",
+      "spawn_label": "Agent {title}",
+      "route": {
+        "routed": "routed",
+        "chosen": "chosen by agent",
+        "fell_back": "fell back ({reason})",
+        "reason_resets": "{reason}, resets {at}"
+      },
+      "state": {
+        "running": "Running",
+        "done": "Done",
+        "completed": "Completed",
+        "failed": "Failed",
+        "stopped": "Stopped",
+        "limited": "Hit usage limit",
+        "unavailable": "Unavailable",
+        "after": "{state} in {time}"
+      },
+      "limit": {
+        "title": "{name} hit its usage limit",
+        "reset_unknown": "reset time unknown",
+        "resets_in": "resets {at}, in {left}",
+        "resets": "resets {at}",
+        "switch_to": "Switch to",
+        "keeps": "{target} (keeps transcript)",
+        "switch_sub": "Same thread, provider switched. Back to {name} only if you switch it again.",
+        "wait_for_at": "Wait for reset {at}",
+        "wait_for": "Wait for reset",
+        "wait_auto": "Auto-resumes on {name} at reset, as today.",
+        "wait_unarmed": "Auto-resume is not armed: the thread stops here and its parent is told.",
+        "switch_now": "Switch now",
+        "wait_now": "Wait now",
+        "switching_in": "Switching in {n} s",
+        "waiting_in": "Waiting in {n} s",
+        "cancel": "Cancel"
+      },
+      "started_thread": "Started thread",
+      "open": "Open",
+      "open_thread": "Open thread {title}",
+      "couldnt_message": "Couldn't message",
+      "sending_to": "Sending to",
+      "message_to": "Message to",
+      "wake": {
+        "finished": "finished",
+        "failed": "failed",
+        "stopped": "stopped",
+        "one": "Delegated task “{title}” {outcome}",
+        "many": "{n} delegated tasks {outcome}: {titles}"
+      },
+      "open_subagent": "Open subagent",
+      "from": "From",
+      "from_label": "Open {title}",
+      "auto_continue": "Auto-continue"
     }
   },
   "settings": {
@@ -3356,7 +3417,10 @@
       "didnt_send": "Your message didn't send",
       "couldnt_fork": "Couldn't fork this chat",
       "forking": "Forking…",
-      "retry": "Retry"
+      "retry": "Retry",
+      "subagent_of": "Subagent of {title}",
+      "open_parent": "Open parent",
+      "this_chat": "this chat"
     },
     "lanes": {
       "subagent": "Subagent",
@@ -3540,7 +3604,8 @@
     },
     "completions": {
       "search_failed": "File search failed",
-      "search_outdated": "The session's device runs an older zeron — update it to search its files"
+      "search_outdated": "The session's device runs an older zeron — update it to search its files",
+      "new_session": "New session"
     }
   },
   "sidecar": {

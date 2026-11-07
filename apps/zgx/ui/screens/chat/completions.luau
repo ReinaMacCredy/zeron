@@ -2,6 +2,7 @@ local Invocations = require("@app/screens/chat/invocations")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
 local prefs = require("@app/screens/settings/prefs")
 local files = require("@app/screens/files/api")
+local sessions = require("@account/sessions")
 
 local M = {}
 
@@ -26,6 +27,47 @@ local function search_words(why: string?): string
 	return ui.t("chat.completions.search_failed"):get()
 end
 
+-- At most this many threads at once (Zeron's THREAD_MENTION_LIMIT).
+M.THREAD_LIMIT = 6
+
+-- Threads whose title holds the query (any case) or whose id starts with it,
+-- on `scope.device`, apart from `scope.exclude`; the scope's project first,
+-- then the rest, each in the list's order; as `@` rows.
+function M.thread_items(chats: { any }, query: string, scope: { device: string?, project: string?, exclude: string? }, projects: { [string]: string }): { any }
+	local q = string.lower(string.match(query or "", "^%s*(.-)%s*$") or "")
+	local own, other = {}, {}
+	for _, c in chats do
+		if c.id ~= scope.exclude and (scope.device == nil or c.device == scope.device) then
+			local title = string.match(string.gsub(c.title or "", "%s+", " "), "^%s*(.-)%s*$") or ""
+			if title == "" then
+				title = ui.t("chat.completions.new_session"):get()
+			end
+			if q == "" or string.find(string.lower(title), q, 1, true) or string.sub(string.lower(c.id), 1, #q) == q then
+				table.insert(if c.project == scope.project then own else other, { c = c, title = title })
+			end
+		end
+	end
+	for _, x in other do
+		table.insert(own, x)
+	end
+	local out: { any } = {}
+	for i, x in own do
+		if i > M.THREAD_LIMIT then
+			break
+		end
+		local c = x.c
+		table.insert(out, {
+			value = `thread:{c.id}`,
+			key = `thread-{c.id}`,
+			label = x.title,
+			detail = if c.project then projects[c.project] else nil,
+			consume = true,
+			thread = { id = c.id, mark = c.mark or c.agent, icon = c.agent_icon, status = c.status },
+		})
+	end
+	return out
+end
+
 function M.bind(b: Bind): { [string]: any }
 	local kept = b.key or "chat"
 	local results = ui.state(`{kept}_mention_results`, nil :: { any }?)
@@ -40,10 +82,40 @@ function M.bind(b: Bind): { [string]: any }
 		return Invocations.key(b.agent(), b.target())
 	end
 
+	-- The threads `@` can mention (the shipping app's `thread_matches`): this
+	-- device's (where the prompt runs and reads), its project's first, never
+	-- the chat being written in, the first few matching what's typed.
+	local function threads(): { any }?
+		local t = token:get()
+		if not t or t.trigger ~= "@" then
+			return nil
+		end
+		local place = b.target()
+		local now = sessions.now:get()
+		local here_chat = if place then place.chat else nil
+		local device = if place then place.device else nil
+		local project = if place then place.space else nil
+		if here_chat then
+			for _, c in now.chats do
+				if c.id == here_chat then
+					device = device or c.device
+					project = project or c.project
+				end
+			end
+		end
+		device = device or now.here
+		local names: { [string]: string } = {}
+		for _, p in now.projects or {} do
+			names[p.id] = p.name
+		end
+		return M.thread_items(now.chats, t.query, { device = device, project = project, exclude = here_chat }, names)
+	end
+
 	local lists = ui.computed(function(): any
 		-- (No project chosen: nowhere to search, and nothing that could come.)
 		local nowhere = b.target() == nil
 		local given: { [string]: any } = { ["@"] = if nowhere then {} else results:get() }
+		given.threads = threads()
 		if b.attachments then
 			given.attachments = b.attachments()
 		end
@@ -175,7 +247,9 @@ function M.bind(b: Bind): { [string]: any }
 	return {
 		mentions = lists,
 		on_mention = function(item: any, trigger: string, token_text: string)
-			if item.zeron then
+			if item.thread then
+				require("@app/screens/chat/shared").mention_chat(item.thread.id)
+			elseif item.zeron then
 				local place = b.target()
 				ZeronCommands.run(item.zeron, if place then place.chat else nil)
 			elseif trigger == "@" then

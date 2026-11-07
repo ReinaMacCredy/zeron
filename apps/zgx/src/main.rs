@@ -112,6 +112,8 @@ mod editor_scroll_tests;
 mod i18n_tests;
 #[cfg(test)]
 mod visuals_tests;
+#[cfg(test)]
+mod thread_rows_tests;
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 

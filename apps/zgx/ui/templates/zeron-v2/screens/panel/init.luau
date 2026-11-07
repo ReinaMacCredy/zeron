@@ -109,7 +109,7 @@ end
 
 -- A lane's tab (a side chat, a subagent: screens/chat/lane_tab), loaded
 -- the same way; the lanes card opens them through `open_lane_tab`.
-type LaneModule = { Tab: (props: { tab: any }) -> Node, title: (tab: any) -> string, icon: (tab: any) -> string }
+type LaneModule = { Tab: (props: { tab: any }) -> Node, title: (tab: any) -> string, icon: (tab: any) -> string, TabIcon: (tab: any) -> Node }
 local Lanes: LaneModule? = nil
 local lanes_card: any = nil
 do
@@ -597,6 +597,20 @@ if lanes_card then
 		local s = state.of(k)
 		return s.active ~= nil and state.take_keys_now(k, s.active)
 	end
+	-- The chats and subagents its lane tabs show, while the panel does (a
+	-- spawn card's or a delegate chip's accent edge).
+	lanes_card.open_ids = function(session: string): { [string]: boolean }
+		local k = state.key(session, nil)
+		local out: { [string]: boolean } = {}
+		if k and panel_open() then
+			for _, t in state.of(k).tabs do
+				if (t.kind == "side_chat" or t.kind == "subagent") and t.chat then
+					out[t.chat] = true
+				end
+			end
+		end
+		return out
+	end
 	lanes_card.side_tab_open = function(session: string): boolean
 		local k = state.key(session, nil)
 		if k then
@@ -808,7 +822,7 @@ M.Panel = ui.component(function(props: Props): Node
 					return ui.image { src = path, w = 14, h = 14, fit = "contain", rounded = "$radius.sm" }
 				end)
 			elseif tab.kind == "plugin" then Icon { name = (tab.icon or "widget") :: any, size = 14 }
-			elseif (tab.kind == "side_chat" or tab.kind == "subagent") and Lanes then Icon { name = Lanes.icon(tab) :: any, size = 14 }
+			elseif (tab.kind == "side_chat" or tab.kind == "subagent") and Lanes then Lanes.TabIcon(tab)
 			else ui.presence(function(): string
 				-- (A file tab's file by its name; none yet, "": by the file,
 				-- not the words, which follow the language.)

@@ -273,6 +273,29 @@ ui.command { id = "many", title = "Many side chats", run = function()
 	end
 	publish()
 end }
+-- Children by kind (U21): a task delegated to Codex, opened at once; a
+-- thread asked for before it's listed, arriving later or never; an agent
+-- asked for by its label alone; a fork.
+ui.command { id = "open_delegate", title = "Open a delegated child", run = function()
+	table.insert(children, { id = "dg-1", parent = "chat-1", title = "Port the parser", kind = "agent", delegation = "running", delegated_by = "chat-1", harness = "codex", mark = "openai", agent = "openai", device = "d", updated = NOW, created = NOW })
+	publish()
+	lanes.open_child("chat-1", "dg-1")
+end }
+ui.command { id = "open_late", title = "Open a child not yet listed", run = function()
+	lanes.open_child("chat-1", "late-1")
+end }
+ui.command { id = "late_arrives", title = "The late child is listed", run = function()
+	table.insert(children, { id = "late-1", parent = "chat-1", title = "Late thread", kind = "agent", created_by = "chat-1", device = "d", updated = NOW, created = NOW })
+	publish()
+end }
+ui.command { id = "open_agent_label", title = "Open an agent by its label", run = function()
+	lanes.open_agent_of("chat-1", "read  the docs")
+end }
+ui.command { id = "open_fork", title = "Open a fork", run = function()
+	table.insert(children, { id = "fork-1", parent = "chat-1", title = "Try the other way", kind = "fork", device = "d", updated = NOW, created = NOW })
+	publish()
+	lanes.open_child("chat-1", "fork-1")
+end }
 ui.command { id = "finish", title = "Subagent finishes", run = function()
 	local now = table.clone(store.messages:peek()) :: any
 	local reply = table.clone(now[2])
@@ -357,6 +380,13 @@ return ui.row {
 				end,
 			},
 		},
+	},
+	ui.text {
+		id = "fixture-route",
+		function(): string
+			local r = route.session:get()
+			return if r then r.id else ""
+		end,
 	},
 	ui.text {
 		id = "subagent-count",

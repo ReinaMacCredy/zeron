@@ -1,0 +1,71 @@
+-- A chat's children in its panel (screens/chat/lanes, lane_tab): one opened
+-- by its id at once when listed, else as it arrives (10 seconds at most); an
+-- agent by its label alone; a delegated task's chat says whose it is, with
+-- Open parent. On ui/lanes_fixture.luau.
+
+local function open(): any
+	local app = mount("lanes_fixture.luau")
+	app:resize(1400, 900)
+	app:frames(30)
+	return app
+end
+
+local function calls(app: any): string
+	return app:state("calls") or ""
+end
+
+test("children: a delegated task's chat opens as a tab, saying whose it is, with Open parent", function()
+	local app = open()
+	app:command("open_delegate")
+	app:frames(30)
+	expect(calls(app)).to_contain("watch:dg-1")
+	expect(app:has("#delegate-owner-dg-1")).to_be(true)
+	expect(app:tree("#delegate-owner-dg-1")).to_contain("Subagent of Parent")
+	app:click('#delegate-owner-dg-1 >> role:button "Open parent"')
+	app:frames(20)
+	expect(app:text("#fixture-route")).to_be("chat-1")
+end)
+
+test("children: a side chat says nothing of a parent", function()
+	local app = open()
+	app:click('#session-lanes >> role:button "Open side chat Looking at the tests"')
+	app:frames(30)
+	expect(app:has(".side-chat-tab")).to_be(true)
+	expect(app:has("#delegate-owner-side-a")).to_be(false)
+end)
+
+test("children: one asked for before it's listed opens as it arrives", function()
+	local app = open()
+	app:command("open_late")
+	app:frames(20)
+	expect(string.find(calls(app), "watch:late-1", 1, true)).to_be(nil)
+	app:command("late_arrives")
+	app:frames(30)
+	expect(calls(app)).to_contain("watch:late-1")
+end)
+
+test("children: one that doesn't arrive within 10 seconds isn't opened later", function()
+	local app = open()
+	app:command("open_late")
+	app:frames(20)
+	-- (11 s of frames.)
+	app:frames(660)
+	app:command("late_arrives")
+	app:frames(30)
+	expect(string.find(calls(app), "watch:late-1", 1, true)).to_be(nil)
+end)
+
+test("children: an agent asked for by its label alone opens its spawn's tab", function()
+	local app = open()
+	app:command("open_agent_label")
+	app:frames(30)
+	expect(calls(app)).to_contain("watch:chat-1--sub--2:frozen")
+end)
+
+test("children: a fork opens as a tab too", function()
+	local app = open()
+	app:command("open_fork")
+	app:frames(30)
+	expect(calls(app)).to_contain("watch:fork-1")
+	expect(app:has("#delegate-owner-fork-1")).to_be(false)
+end)

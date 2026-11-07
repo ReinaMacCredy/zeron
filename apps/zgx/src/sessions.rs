@@ -764,6 +764,11 @@ impl Sessions {
                 ("mark", brand_mark(harness, c["config"]["model"].as_str()).map_or(Value::Nil, |g| Value::from(g.as_str()))),
                 ("delegation", opt(c["delegation"]["status"].as_str())),
                 ("delegated_at", c["delegation"]["startedAt"].as_str().and_then(unix_seconds).map_or(Value::Nil, |at| Value::from(at as f64))),
+                // When it settled, how it was routed, and who delegated or started it.
+                ("delegated_end", c["delegation"]["completedAt"].as_str().and_then(unix_seconds).map_or(Value::Nil, |at| Value::from(at as f64))),
+                ("route", crate::chat::route_value(&c["delegation"]["route"])),
+                ("delegated_by", opt(c["delegation"]["delegatedByChatId"].as_str())),
+                ("created_by", opt(c["createdByChatId"].as_str())),
                 ("last_message", c["lastMessageAt"].as_str().and_then(unix_seconds).map_or(Value::Nil, |at| Value::from(at as f64))),
                 ("expires", if c["sidechatSourceChatId"].is_string() {
                     Value::from((created + zeron_proto::sidechat::SIDECHAT_LIFETIME_HOURS * 3600) as f64)
@@ -1947,6 +1952,34 @@ mod tests {
         ]));
         let parent = |ix: usize| rows[ix]["parentChatId"].as_str();
         assert_eq!((parent(0), parent(1), parent(2), parent(3)), (Some("p"), Some("p"), Some("p"), None));
+    }
+
+    /// A delegated child's row: when it started and settled, its route's
+    /// badge, who delegated it; a thread an agent started names its starter.
+    #[test]
+    fn a_delegate_s_row_says_how_it_ran_and_whose_it_is() {
+        let s = super::Sessions::default();
+        *s.chats.borrow_mut() = serde_json::json!([
+            { "id": "p", "title": "Parent", "deviceId": "d", "createdAt": "2026-11-01T10:00:00Z", "config": { "harness": "claude-code" } },
+            { "id": "dg", "parentChatId": "p", "title": "Port the parser", "deviceId": "d", "createdAt": "2026-11-01T10:05:00Z",
+              "config": { "harness": "codex", "model": "gpt-6.1" },
+              "delegation": { "delegatedByChatId": "p", "status": "completed", "startedAt": "2026-11-01T10:05:00Z", "completedAt": "2026-11-01T10:07:03Z",
+                              "route": { "source": "routed", "role": "builder" } } },
+            { "id": "th", "parentChatId": "p", "createdByChatId": "p", "title": "Notes", "deviceId": "d", "createdAt": "2026-11-01T10:08:00Z" },
+        ]);
+        let v = s.value();
+        let kids = v.field("children").unwrap().field("p").unwrap().list();
+        let kid = |id: &str| kids.iter().find(|c| c.field("id").map(crate::auth::text).as_deref() == Some(id)).unwrap();
+        let dg = kid("dg");
+        let num = |c: &zgx_script::Value, k: &str| match c.field(k) { Some(zgx_script::Value::Num(n)) => *n, _ => -1. };
+        assert_eq!(num(dg, "delegated_end") - num(dg, "delegated_at"), 123.);
+        assert_eq!(dg.field("delegated_by").map(crate::auth::text).as_deref(), Some("p"));
+        let route = dg.field("route").unwrap();
+        assert_eq!(route.field("source").map(crate::auth::text).as_deref(), Some("routed"));
+        assert_eq!(route.field("role").map(crate::auth::text).as_deref(), Some("builder"));
+        let th = kid("th");
+        assert_eq!(th.field("created_by").map(crate::auth::text).as_deref(), Some("p"));
+        assert!(matches!(th.field("delegated_by"), None | Some(zgx_script::Value::Nil)));
     }
 
     /// Chats (a parent, two side chats, one working, one archived) and

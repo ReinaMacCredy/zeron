@@ -196,7 +196,127 @@ end
 -- upload first.
 function M.open_subagent(session: string, sub: any)
 	local frozen = sub.status == "done" or sub.status == "failed"
-	M.open(session, { kind = "subagent", id = sub.ref, title = sub.title or locale.s("chat.lanes.subagent"), data = { frozen = frozen, parent = session } })
+	M.open(session, { kind = "subagent", id = sub.ref, title = sub.title or locale.s("chat.lanes.subagent"), data = { frozen = frozen, parent = session, agent = sub.agent } })
+end
+
+-- A chat that's another's child (a side chat, a fork, a thread an agent
+-- started, a task it delegated), wherever it's listed: its row.
+function M.child_row(id: string): any
+	for _, list in sessions.now:get().children or {} do
+		for _, c in list do
+			if c.id == id then
+				return c
+			end
+		end
+	end
+	return nil
+end
+
+-- What the panel says is open in a session's tabs (by chat or doc id), while
+-- the panel shows: the panel's, as `opener`.
+M.open_ids = nil :: ((session: string) -> { [string]: boolean })?
+
+function M.is_open(session: string?, id: string): boolean
+	local ids = if session and M.open_ids then M.open_ids(session) else nil
+	return ids ~= nil and ids[id] == true
+end
+
+-- A child asked for before it's listed (a thread just started, a delegate
+-- just made): it opens as it arrives, for 10 seconds, while its parent is
+-- still the open chat (the shipping app's `pending_child`). An agent asked
+-- for by its label alone opens as a spawn of that title shows.
+local PENDING_MS = 10000
+M.pending = ui.state("chat_lanes_pending", nil :: { parent: string, chat: string?, agent: string?, n: number }?)
+local pending_n = 0
+
+local function one_line(text: string?): string
+	return (string.gsub(string.gsub(text or "", "%s+", " "), "^%s*(.-)%s*$", "%1"))
+end
+
+local function resolve_pending()
+	local p = M.pending:peek()
+	if not p then
+		return
+	end
+	local s = route.session:peek()
+	if not s or s.id ~= p.parent then
+		M.pending:set(nil)
+		return
+	end
+	if p.chat then
+		local c = M.child_row(p.chat)
+		if c then
+			M.pending:set(nil)
+			M.open(p.parent, { kind = "side_chat", id = c.id, title = c.title })
+		end
+	elseif p.agent then
+		local want = one_line(p.agent)
+		for _, sub in M.subagents() do
+			if one_line(sub.title) == want then
+				M.pending:set(nil)
+				M.open_subagent(p.parent, sub)
+				return
+			end
+		end
+	end
+end
+
+local function await(parent: string, target: { chat: string?, agent: string? })
+	local s = route.session:peek()
+	if not s or s.id ~= parent then
+		route.open_session(parent)
+	end
+	pending_n += 1
+	local n = pending_n
+	M.pending:set({ parent = parent, chat = target.chat, agent = target.agent, n = n })
+	resolve_pending()
+	if M.pending:peek() then
+		ui.after(PENDING_MS, function()
+			local p = M.pending:peek()
+			if p and p.n == n then
+				M.pending:set(nil)
+			end
+		end)
+	end
+end
+
+ui.effect(function()
+	if not M.pending:get() then
+		return
+	end
+	sessions.now:get()
+	route.session:get()
+	subagents:get()
+	resolve_pending()
+end)
+
+-- A child of `session` in its panel (the shipping app's `open_child`): at
+-- once if it's listed, else as it arrives.
+function M.open_child(session: string, id: string, title: string?)
+	local c = M.child_row(id)
+	if c then
+		M.open(session, { kind = "side_chat", id = id, title = c.title or title or locale.s("chat.lanes.side_chat") })
+		return
+	end
+	await(session, { chat = id })
+end
+
+-- An agent of `parent` named by its label alone (a list that carries only
+-- that): its parent opened, then its spawn's tab (`open_agent_of`).
+function M.open_agent_of(parent: string, label: string)
+	await(parent, { agent = label })
+end
+
+-- Another chat named in this one (a message's sender or recipient): a
+-- child opens in its parent's panel, the parent opened first if it isn't
+-- the open chat; any other chat opens as itself (`open_thread`).
+function M.open_thread(id: string)
+	local c = M.child_row(id)
+	if c and c.parent then
+		await(c.parent, { chat = id })
+		return
+	end
+	route.open_session(id)
 end
 
 -- Side chats opened and not yet sent to, by id: their parent. The engine

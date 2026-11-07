@@ -68,7 +68,46 @@ function M.title(tab: any): string
 end
 
 function M.icon(tab: any): string
-	return if tab.kind == "subagent" then "bot" else "side-chat"
+	if tab.kind == "subagent" then
+		return "bot"
+	end
+	local c = if tab.chat then lanes.child_row(tab.chat) else nil
+	local kind = if lanes.forks:peek()[tab.chat or ""] then "fork" else (if c then c.kind else nil)
+	if kind == "fork" then
+		return "git-branch"
+	elseif kind == "agent" then
+		return "bot"
+	end
+	return "side-chat"
+end
+
+-- Its tab's mark, by its kind (the shipping app's `child_surface_mark`): an
+-- agent's thread or a subagent wears its provider's mark, a fork and a side
+-- chat their kind's icon.
+function M.TabIcon(tab: any): Node
+	return ui.presence(function(): string
+		local mark: string? = nil
+		if tab.kind == "subagent" then
+			mark = (tab.data or {}).agent
+			if not mark then
+				local parent = (tab.data or {}).parent
+				local p = if parent then Shared.chat_of(parent) else nil
+				mark = if p then p.mark else nil
+			end
+		else
+			local c = if tab.chat then lanes.child_row(tab.chat) else nil
+			if c and c.kind == "agent" and not lanes.forks:get()[tab.chat or ""] then
+				mark = c.mark or c.agent
+			end
+		end
+		return if mark then `mark:{mark}` else `icon:{M.icon(tab)}`
+	end, function(key: string): Node
+		local mark = string.match(key, "^mark:(.+)$")
+		if mark then
+			return ds.AgentMark.Mark { label = mark, mark = mark, seed = mark, size = 14, bare = true }
+		end
+		return ds.Icon { name = string.sub(key, 6) :: any, size = 14 }
+	end, { shrink = 0 })
 end
 
 -- A side chat's composer: the chat page's (ds.Composer), its footer the
@@ -845,6 +884,60 @@ local function forking(chat: string): Node
 end
 
 -- A lane's composer's height as measured, by its slot.
+-- "Subagent of {parent} · Open parent" under a delegated task's chat (the
+-- shipping app's `delegate_owner_line`): its own mark, its parent's title as
+-- listed now; Open parent opens it, this chat staying where it was.
+local function owner_line(chat: string, owner: string): Node
+	local function title(): string
+		local p = Shared.chat_of(owner)
+		return if p then p.title else locale.s("chat.lane_tab.this_chat")
+	end
+	local c0 = lanes.child_row(chat)
+	local mark = if c0 then c0.mark or c0.agent else nil
+	return ui.row {
+		id = `delegate-owner-{chat}`,
+		w_full = true,
+		justify = "center",
+		items = "center",
+		gap = ui.raw(6, "side_chats.rs delegate_owner_line"),
+		py = ui.raw(4, "side_chats.rs delegate_owner_line"),
+		px = "$space.3",
+		text_size = ui.raw(11, "side_chats.rs delegate_owner_line"),
+		color = "$text.secondary",
+		selectable = false,
+		ui.div {
+			shrink = 0,
+			color = "$text.tertiary",
+			aria_hidden = true,
+			if mark then ds.AgentMark.Mark { label = mark, mark = mark, seed = mark, size = 12, bare = true } else ds.Icon { name = "bot", size = 12 },
+		},
+		ds.FadeText {
+			function(): string
+				return locale.s("chat.lane_tab.subagent_of", { title = title() })
+			end,
+			literal = true,
+			shrink = 1,
+			min_w = 0,
+		},
+		ui.button {
+			id = `delegate-owner-open-{chat}`,
+			label = locale.t("chat.lane_tab.open_parent"),
+			h = "auto" :: any,
+			p = 0,
+			bg = "#00000000",
+			hover = { bg = "#00000000", color = "$text.primary" },
+			active = { bg = "#00000000" },
+			color = "$text.primary",
+			cursor = "pointer",
+			shrink = 0,
+			on_click = function()
+				route.open_session(owner)
+			end,
+			ui.text { locale.t("chat.lane_tab.open_parent"), wrap = false, weight = "$font.weight.medium" },
+		},
+	}
+end
+
 function M.dock_height(slot: string): State<number>
 	return ui.state(`chat_lane_dock_h_{slot}`, Dock.REST)
 end
@@ -1045,6 +1138,12 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		end,
 		open_link = open_link,
 		chat_of = Shared.chat_of,
+		threads = Shared.threads_for(function(): string?
+			local s = lane_session()
+			return if s then s.id else nil
+		end, home_session, function(): any
+			return view.session:get()
+		end),
 		link_menu = LinkMenu(open_link, function(): any
 			return view.session:peek()
 		end),
@@ -1136,6 +1235,16 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 				},
 			}
 		end, { grow = 1, w_full = true, min_h = 0 }),
+		-- A delegated task's chat: whose it is, and the way back to it.
+		ui.presence(function(): string?
+			if split then
+				return nil
+			end
+			local c = lanes.child_row(chat)
+			return if c and c.delegated_by then c.delegated_by else nil
+		end, function(owner: string): Node
+			return owner_line(chat, owner)
+		end, { w_full = true, shrink = 0 }),
 	}
 end)
 

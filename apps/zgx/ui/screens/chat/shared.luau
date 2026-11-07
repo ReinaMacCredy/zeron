@@ -890,6 +890,123 @@ function M.chat_of(id: string): { title: string, mark: string? }?
 	return { title = if title ~= "" then title else string.sub(id, 1, 8), mark = found.agent }
 end
 
+-- Any chat as it's listed now (a top-level one, a child, an archived one).
+local function listed(id: string): any
+	local now = sessions.now:get()
+	for _, c in now.chats do
+		if c.id == id then
+			return c
+		end
+	end
+	for _, list in now.children or {} do
+		for _, c in list do
+			if c.id == id then
+				return c
+			end
+		end
+	end
+	for _, c in now.archived or {} do
+		if c.id == id then
+			return c
+		end
+	end
+	return nil
+end
+
+-- The chat a message names (Zeron's `resolve_chat_key`, as the MCP server
+-- reads it): an exact id, else a unique id prefix, else a unique title, any case.
+function M.resolve_chat(key: string): { id: string, title: string, mark: string? }?
+	key = string.match(key or "", "^%s*(.-)%s*$") or ""
+	if key == "" then
+		return nil
+	end
+	local function said(c: any): { id: string, title: string, mark: string? }
+		local title = string.match(string.gsub(c.title or "", "%s+", " "), "^%s*(.-)%s*$") or ""
+		return { id = c.id, title = if title ~= "" then title else string.sub(c.id, 1, 8), mark = c.mark or c.agent }
+	end
+	local exact = listed(key)
+	if exact then
+		return said(exact)
+	end
+	local now = sessions.now:get()
+	local all: { any } = table.clone(now.chats)
+	for _, list in now.children or {} do
+		for _, c in list do
+			table.insert(all, c)
+		end
+	end
+	local by_prefix, by_title = {}, {}
+	local lower = string.lower(key)
+	for _, c in all do
+		if string.sub(c.id, 1, #key) == key then
+			table.insert(by_prefix, c)
+		end
+		if string.lower(c.title or "") == lower then
+			table.insert(by_title, c)
+		end
+	end
+	if #by_prefix == 1 then
+		return said(by_prefix[1])
+	end
+	if #by_title == 1 then
+		return said(by_title[1])
+	end
+	return nil
+end
+
+-- What a transcript needs to speak of other chats (ds/transcript_threads):
+-- `session()` is the chat it shows, `home()` the one whose panel its
+-- children open in; `live()` its session as the host says it (its limits,
+-- its agent).
+function M.threads_for(session: () -> string?, home: () -> string?, live: () -> any): any
+	local lanes = require("@app/screens/chat/lanes") :: any
+	return {
+		child = function(id: string): any
+			return listed(id)
+		end,
+		chat = M.resolve_chat,
+		limit = function(id: string): any
+			local s = live()
+			if not s or s.id ~= session() then
+				return nil
+			end
+			for _, l in s.limits or {} do
+				if l.chat == id then
+					return l
+				end
+			end
+			return nil
+		end,
+		is_open = function(id: string): boolean
+			return lanes.is_open(home(), id)
+		end,
+		open_child = function(id: string)
+			local h = home()
+			if h then
+				lanes.open_child(h, id)
+			end
+		end,
+		open_chat = function(id: string)
+			lanes.open_thread(id)
+		end,
+		limit_op = function(id: string, op: string)
+			local answer = require("@app/screens/chat/store").limit(id, op)
+			if answer then
+				answer:after(function() end, function() end)
+			end
+		end,
+		agent = function(): any
+			local s = live()
+			if not s or s.id ~= session() then
+				return nil
+			end
+			local row = listed(s.id)
+			local Threads = require("@ds/transcript_threads") :: any
+			return { label = Threads.harness_name(s.harness), mark = if row then row.mark or row.agent else nil, model = s.model }
+		end,
+	}
+end
+
 -- A chat chip's text as it goes.
 function M.chat_link(title: string, id: string): string
 	return ChatLinks.link(title, id) or ""

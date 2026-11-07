@@ -706,6 +706,196 @@ ui.command {
 	end,
 }
 
+-- Threads across chats (U21's seed, the engine's mock can't make most of
+-- these): s1's children (a thread its agent started, a delegate running on
+-- Codex that fell back, one finished, one on its limit with an offer
+-- counting down, a side chat, a fork), and its transcript: the thread
+-- started, the delegates, two spawns (one running, one failed), messages
+-- to other chats (on its way, sent, failed), a native route, a peer's
+-- message, a delegate's wake, the chat's own auto-continue.
+local THREAD_NOW = os.time()
+local function thread_children(): { any }
+	return {
+		{ id = "th-1", parent = "s1", title = "Write the release notes", kind = "agent", created_by = "s1", device = "mac", mark = "claude", agent = "claude", harness = "claude-code", created = THREAD_NOW - 30, updated = THREAD_NOW - 30 },
+		{ id = "dg-run", parent = "s1", title = "Port the parser", kind = "agent", delegation = "running", delegated_by = "s1", harness = "codex", model = "gpt-6.1", mark = "openai", agent = "openai", device = "mac", delegated_at = THREAD_NOW - 90, created = THREAD_NOW - 90, updated = THREAD_NOW - 10, route = { source = "fell_back", short = "Claude quota", resets_at = (THREAD_NOW + 3600) * 1000, role = "builder" } },
+		{ id = "dg-done", parent = "s1", title = "Review the diff", kind = "agent", delegation = "completed", delegated_by = "s1", harness = "claude-code", model = "opus", mark = "claude", agent = "claude", device = "mac", delegated_at = THREAD_NOW - 400, delegated_end = THREAD_NOW - 277, created = THREAD_NOW - 400, updated = THREAD_NOW - 277, route = { source = "routed", short = "", role = "reviewer" } },
+		{ id = "dg-lim", parent = "s1", title = "Run the benchmarks", kind = "agent", delegation = "running", delegated_by = "s1", harness = "claude-code", model = "sonnet", mark = "claude", agent = "claude", device = "mac", delegated_at = THREAD_NOW - 50, created = THREAD_NOW - 50, updated = THREAD_NOW - 20 },
+		{ id = "side-1", parent = "s1", title = "Side question", kind = "side_chat", device = "mac", created = THREAD_NOW - 600, updated = THREAD_NOW - 600 },
+		{ id = "fork-1", parent = "s1", title = "Try the other way", kind = "fork", device = "mac", created = THREAD_NOW - 700, updated = THREAD_NOW - 700 },
+	}
+end
+local function thread_transcript(): { any }
+	return {
+		{ id = "tu1", role = "user", text = "Split the work", at = "Sep 8, 4:00 PM", copy = "Split the work" },
+		{
+			id = "ta1",
+			role = "assistant",
+			text = "Done.",
+			at = "Sep 8, 4:05 PM",
+			copy = "Done.",
+			blocks = {
+				{ id = "g:t1", kind = "tools", summary = "Called 1 tool", tools = { { id = "t1", kind = "thread", verb = "Started thread", target = "Write the release notes", thread = { ref = "th-1", title = "Write the release notes" } } } },
+				{
+					id = "g:t2",
+					kind = "tools",
+					summary = "Called 3 tools",
+					tools = {
+						{ id = "t2", kind = "delegate", verb = "Delegated", target = "Port the parser", delegate = { ref = "dg-run", title = "Port the parser" } },
+						{ id = "t3", kind = "delegate", verb = "Delegated", target = "Review the diff", delegate = { ref = "dg-done", title = "Review the diff" } },
+						{ id = "t4", kind = "delegate", verb = "Delegated", target = "Run the benchmarks", delegate = { ref = "dg-lim", title = "Run the benchmarks" } },
+					},
+				},
+				{
+					id = "g:t5",
+					kind = "tools",
+					summary = "Ran 2 subagents",
+					tools = {
+						{ id = "t5", kind = "agent", verb = "Ran a subagent", target = "scan the repo", tag = "Opus 5.5", subagent = { ref = "s1--sub--1", title = "scan the repo", status = "running", agent = "claude" } },
+						{ id = "t6", kind = "agent", verb = "Ran a subagent", target = "read the docs", tag = "Explore", failed = true, subagent = { ref = "s1--sub--2", title = "read the docs", status = "failed" } },
+					},
+				},
+				{ id = "t7.m0", kind = "sent", to = "Short chat", pending = true, failed = false },
+				{ id = "t8.m0", kind = "sent", to = "s2", pending = false, failed = false },
+				{ id = "t9.m0", kind = "sent", to = "nobody", pending = false, failed = true },
+				{ id = "t10-native", kind = "native_route", title = "Summarize the logs", route = { source = "chosen_by_agent", short = "", role = "scout" } },
+				{ id = "x1", kind = "text", text = "Done." },
+			},
+		},
+		{ id = "tu2", role = "user", text = "The parser tests pass on my side.", from_chat = "s2", clock = "4:12 PM", at = "Sep 8, 4:12 PM", copy = "The parser tests pass on my side." },
+		{ id = "tu3", role = "user", text = "Delegated task dg-done (\"Review the diff\") completed.", from_chat = "dg-done", wake = { "dg-done" }, at = "Sep 8, 4:13 PM" },
+		{ id = "tu4", role = "user", text = "Continue with the next step.", from_chat = "s1", at = "Sep 8, 4:14 PM", copy = "Continue with the next step." },
+	}
+end
+-- The limit's offer: switch to Codex, acting on its own in 20 s.
+local thread_limits = ui.state("test_thread_limits", nil :: any)
+ui.command {
+	id = "threads_seed",
+	title = "Threads across chats",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.children = table.clone(now.children or {})
+		now.children.s1 = thread_children()
+		sessions.now:set(now)
+		TRANSCRIPTS.s1 = thread_transcript()
+		store.messages:set(thread_transcript())
+		local limits = thread_limits:peek() or { { chat = "dg-lim", resets_at = (THREAD_NOW + 7200) * 1000, auto = true, to = true, to_label = "GPT-6.1", target = "Codex · GPT-6.1 · High", to_mark = "openai", preselect = "switch", act_at = ui.now() + 20000, harness = "Claude Code" } }
+		publish("s1", { limits = limits })
+		local lanes = require("@app/screens/chat/lanes") :: any
+		lanes.opener = function(session: string, lane: any)
+			note(`lane:{session}:{lane.kind}:{lane.id}`)
+		end
+		lanes.open_ids = function(session: string): { [string]: boolean }
+			return if session == "s1" then { ["dg-done"] = true, ["s1--sub--1"] = true } else {}
+		end
+	end,
+}
+-- What the threads' rows sent the host (a limit's choice).
+stub.limit = function(id: string, op: string): any
+	note(`limit:{id}:{op}`)
+	return settled(nil)
+end
+-- s1 working, and a chat on another device (not mentionable from here).
+ui.command {
+	id = "threads_listed",
+	title = "s1 works; a chat on the build box",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		local chats = {}
+		for _, c in now.chats do
+			local x = table.clone(c)
+			if x.id == "s1" then
+				x.status = "working"
+				x.mark = "claude"
+			end
+			table.insert(chats, x)
+		end
+		table.insert(chats, { id = "far1", title = "Far away chat", project = "borealis", device = "box", updated = 0, created = 0 })
+		now.chats = chats
+		sessions.now:set(now)
+	end,
+}
+ui.command {
+	id = "thread_limit_gone",
+	title = "The delegate's limit is resolved",
+	run = function()
+		publish("s1", { limits = {} })
+	end,
+}
+-- Every run over: the delegates finished, the running spawn done.
+ui.command {
+	id = "threads_settle",
+	title = "The threads' runs end",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.children = table.clone(now.children or {})
+		local kids = {}
+		for _, c in now.children.s1 or {} do
+			local x = table.clone(c)
+			if x.delegation == "running" then
+				x.delegation = "completed"
+				x.delegated_end = THREAD_NOW
+			end
+			table.insert(kids, x)
+		end
+		now.children.s1 = kids
+		sessions.now:set(now)
+		publish("s1", { limits = {} })
+		local list = table.clone(store.messages:peek()) :: any
+		for i, m in list do
+			if m.id == "ta1" then
+				local r = table.clone(m)
+				r.blocks = table.clone(r.blocks)
+				for j, b in r.blocks do
+					if b.id == "g:t5" then
+						local nb = table.clone(b)
+						nb.tools = table.clone(nb.tools)
+						local t = table.clone(nb.tools[1])
+						t.subagent = { ref = "s1--sub--1", title = "scan the repo", status = "done", agent = "claude" }
+						nb.tools[1] = t
+						r.blocks[j] = nb
+					end
+				end
+				list[i] = r
+			end
+		end
+		store.messages:set(list)
+	end,
+}
+ui.command {
+	id = "thread_sent_lands",
+	title = "The message on its way lands",
+	run = function()
+		local list = table.clone(store.messages:peek()) :: any
+		for i, m in list do
+			if m.id == "ta1" then
+				local r = table.clone(m)
+				r.blocks = table.clone(r.blocks)
+				for j, b in r.blocks do
+					if b.id == "t7.m0" then
+						local nb = table.clone(b)
+						nb.pending = false
+						r.blocks[j] = nb
+					end
+				end
+				list[i] = r
+			end
+		end
+		store.messages:set(list)
+	end,
+}
+ui.command {
+	id = "thread_child_arrives",
+	title = "A thread started a moment ago is listed",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.children = table.clone(now.children or {})
+		local kids = table.clone(now.children.s1 or {})
+		table.insert(kids, { id = "th-late", parent = "s1", title = "Late thread", kind = "agent", created_by = "s1", device = "mac", created = os.time(), updated = os.time() })
+		now.children.s1 = kids
+		sessions.now:set(now)
+	end,
+}
+
 -- The theme, for captures in both.
 ui.command { id = "theme_light", title = "Light theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-light") end }
 ui.command { id = "theme_dark", title = "Dark theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-dark") end }
@@ -1547,6 +1737,13 @@ ui.command {
 	title = "Mention s9",
 	run = function()
 		require("@app/screens/chat/shared").mention_chat("s9")
+	end,
+}
+ui.command {
+	id = "mention_s2",
+	title = "Mention s2",
+	run = function()
+		require("@app/screens/chat/shared").mention_chat("s2")
 	end,
 }
 ui.command {

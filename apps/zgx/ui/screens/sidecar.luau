@@ -660,12 +660,14 @@ local function make_data(props: { session: () -> string?, open_panel: () -> () }
 		return out
 	end
 	local shells = ui.computed(shells_now)
-	local function all_tasks(): { any }
+	-- What Stop all stops: the agents that can stop and the shells, where
+	-- shells can be (the shipping app's `stop_all_background`), for this chat.
+	local function stoppable(): { agents: { any }, shells: { any } }
 		local s = store.session:get()
 		if not s or s.id ~= session() then
-			return {}
+			return { agents = {}, shells = {} }
 		end
-		return (s :: any).tasks or {}
+		return Pills.stoppable_of(Pills.window_runs(), s)
 	end
 
 	local function stop_task(id: string)
@@ -769,7 +771,8 @@ local function make_data(props: { session: () -> string?, open_panel: () -> () }
 		return out
 	end)
 	local foot = ui.computed(function(): { Entry }
-		if #all_tasks() == 0 then
+		local can = stoppable()
+		if #can.agents == 0 and #can.shells == 0 then
 			return {}
 		end
 		return {
@@ -915,8 +918,9 @@ local function make_data(props: { session: () -> string?, open_panel: () -> () }
 		elseif what == "stop_task" then
 			stop_task(act.id)
 		elseif what == "stop_all" then
-			for _, t in all_tasks() do
-				stop_task(t.id)
+			local s = store.session:peek()
+			if s and s.id == sid then
+				Pills.stop_all(Pills.window_runs(), s)
 			end
 		elseif what == "retry" then
 			bound.retry()

@@ -264,6 +264,13 @@ function M.stop_task(session: string, task: string): any
 	return ui.call("chat.stop_task", { session = session, task = task })
 end
 
+-- A usage limit's choice for a chat (its own, or a delegate's): "switch",
+-- "wait", "hold" (Cancel), "arm", "cancel".
+function M.limit(id: string, op: string): any
+	local ok, p = pcall(ui.call, "chat.limit", { id = id, op = op })
+	return if ok then p else nil
+end
+
 function M.cancel_delegate(session: string, task: string): any
 	local ok, p = pcall(ui.call, "chat.cancel_delegate", { session = session, task = task })
 	return if ok then p else nil

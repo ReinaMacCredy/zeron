@@ -27,8 +27,9 @@ local ToolDetail = require("@self/tool_detail")
 local Markdown = require("@self/markdown")
 local locale = require("@self/locale")
 local FoldButton = require("@self/fold_button")
+local Threads = require("@self/transcript_threads")
 
-export type Kind = "exec" | "read" | "edit" | "write" | "search" | "glob" | "web" | "todo" | "agent" | "thought"
+export type Kind = "exec" | "read" | "edit" | "write" | "search" | "glob" | "web" | "todo" | "agent" | "delegate" | "thread" | "thought"
 -- One tool: what kind, what it did ("Read", "transcript.rs"), and for an
 -- edit the lines it added and removed; `failed` tints its glyph.
 export type Tool = {
@@ -36,7 +37,12 @@ export type Tool = {
 	kind: Kind,
 	verb: string,
 	-- A subagent's spawn: the doc it runs in, how it stands, its title.
-	subagent: { ref: string, title: string?, status: string? }?,
+	subagent: { ref: string, title: string?, status: string?, agent: string? }?,
+	-- A task delegated to another chat, a thread an agent started: that chat.
+	delegate: { ref: string, title: string? }?,
+	thread: { ref: string, title: string? }?,
+	-- What a spawn was given to run on: its model, else its agent type.
+	tag: string?,
 	target: string?,
 	-- The whole call, when the line says less (a command of many lines, a
 	-- tool's input): the row opens to it.
@@ -81,6 +87,11 @@ export type Props = {
 	-- A subagent's spawn row (its tool's `subagent`): what opens it (its
 	-- lane). Without it, the row opens its call as any does.
 	open_subagent: ((sub: any) -> ())?,
+	-- The chats a group of agents runs in (ds/transcript_threads), and the
+	-- chat's own agent: a group of spawns, delegates or threads is a column
+	-- of their cards, always open.
+	threads: Threads.Threads?,
+	agent: (() -> any)?,
 	-- A thought being written: `words`, a thought's words as they arrive, by
 	-- its id (nil for one not being written: the reply's draft holds them,
 	-- so a tick of them doesn't build its rows again); `seeded`, whether what
@@ -99,8 +110,28 @@ local GLYPH: { [Kind]: Icon.Name } = {
 	web = "global",
 	todo = "checklist",
 	agent = "bot",
+	delegate = "bot",
+	thread = "chat-round-line",
 	thought = "chat-round-line",
 }
+
+-- The kinds a group of cards holds (a spawn, a delegated task, a thread started).
+local CARDS: { [string]: boolean } = { agent = true, delegate = true, thread = true }
+
+local function card_of(now: () -> any, props: any): Node
+	local t = now()
+	if t.kind == "thread" and t.thread then
+		return Threads.Started { id = `thread-{t.id}`, ref = t.thread.ref, title = t.thread.title or t.target, threads = props.threads }
+	elseif t.kind == "delegate" then
+		return Threads.Delegate {
+			id = `delegate-{t.id}`,
+			ref = if t.delegate then t.delegate.ref else nil,
+			title = if t.delegate and t.delegate.title then t.delegate.title else t.target,
+			threads = props.threads,
+		}
+	end
+	return Threads.Spawn { now = now, threads = props.threads, open_subagent = props.open_subagent, agent = props.agent }
+end
 
 -- The tree, in points: the trunk's x (under the working loader's middle, so
 -- the trunk runs down from it), the elbow's radius (Zeron's), where the
@@ -641,6 +672,33 @@ return ui.component(function(props: Props): Node
 			end
 			return false
 		end
+	end
+	-- Spawns, delegates and threads: their cards, always open, no fold (Zeron's
+	-- `tool_group_collapses` is false for them).
+	local all_cards = #tools:peek() > 0
+	for _, t in tools:peek() do
+		all_cards = all_cards and CARDS[t.kind] == true
+	end
+	if all_cards then
+		return ui.column {
+			class = "agent-cards",
+			w_full = true,
+			pt = ui.raw(2, "transcript.rs CHIPS_TOP_PAD"),
+			gap = ui.raw(8, "transcript.rs CHIP_HEIGHT less its card"),
+			ui.each(tools, function(t: Tool)
+				local now = ui.computed(function(): Tool
+					return by_id:get()[t.id] or t
+				end)
+				return card_of(function(): any
+					return now:get()
+				end, props)
+			end, {
+				key = function(t: Tool): string
+					return t.id
+				end,
+				enter = { opacity = { 0, 1 }, y = { -6, 0 }, duration = 360, ease = "outExpo" },
+			}),
+		}
 	end
 	-- The rows exist while the tree is open or folding: folded away, they'd
 	-- be built for nothing as a list scrolls, and a selection across the
