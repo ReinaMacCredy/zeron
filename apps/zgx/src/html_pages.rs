@@ -1,33 +1,4 @@
-//! Agent pages (`html_render`) for ds/html_card: the shipping app's page host
-//! (crates/proto html_render.rs, shared with crates/ui), here for zgx's
-//! `ui.webview`. A page is stored on the chat's host (the engine's uploads),
-//! read once through the engine (`ReadAttachmentChunk`, from that device when
-//! it isn't this one), and handed to the view with the theme bootstrap at the
-//! start of its head: the theme's CSS variables, its height reported, and
-//! the options it offers (`data-zeron-pick`) heard when clicked.
-//!
-//! The calls:
-//!   html.page { path, device?, theme, font_size }        (`ui.call`)
-//!       { html, nonce }: the page with its bootstrap; `nonce` signs what its
-//!       bootstrap posts (a page's own script can't read it).
-//!   html.retheme { theme, font_size }                     (`ui.call_sync`)
-//!       the script that swaps a shown page's theme.
-//!   html.frame { agent, content? }                        (`ui.call_sync`)
-//!       { height, overflows, scrolls }: the frame for a page, by the
-//!       agent's height and the height it reports.
-//!   html.live url                                         (`ui.call_sync`)
-//!       { label, server } of a local dev server's URL, or nil.
-//!   html.reach url                                        (`ui.call`)
-//!       whether that server answers.
-//!   html.source { path, device? }                         (`ui.call_sync`)
-//!       the page as the sheet's Source shows it (nil before it was read).
-//!   html.save { path, device?, to }                       (`ui.call`)
-//!       the page as the agent wrote it, saved at `to`.
-//!   html.file_name title                                  (`ui.call_sync`)
-//!   html.title path                                       (`ui.call`)
-//!       { title? } of a page file here, or { missing = true }.
-//!   html.picks_state { chosen, sent, locked, count }       (`ui.call_sync`)
-//!       the script that shows a page's picks on its buttons.
+//! Agent pages (`html_render`) for ds/html_card: zeron_proto's page host behind `html.*` calls.
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
@@ -35,18 +6,42 @@ use serde_json::json;
 use zeron_proto::html_render::{self as shared, PageTheme, Rgba};
 use zgx_script::{ScriptHost, Value};
 
-/// What a page's bootstrap adds in zgx: the height its size script reports,
-/// passed on to the view, and its options, clicked (`isTrusted` only),
-/// with the button's place and what is in view there. The script removes
-/// itself as it runs, so the page's own scripts never read its nonce.
-const PICK_SCRIPT: &str = r#"(function(){var s=document.currentScript,z=window.zgx,N="__NONCE__";if(!z)return;var post=z.postMessage.bind(z);function send(m){m.kind="zeron.page";m.nonce=N;post(m);}window.ipc={postMessage:function(t){try{var m=JSON.parse(t);if(m&&typeof m.height==="number")send({height:m.height});}catch(e){}}};var st={chosen:[],sent:[],locked:[],count:""};function g(b){return b.getAttribute("data-zeron-group")||"";}function label(b){return b.getAttribute("data-zeron-label")||(b.textContent||"").replace(/\s+/g," ").trim().slice(0,80);}function has(l,gr,c){for(var i=0;i<l.length;i++){if(l[i][0]===gr&&l[i][1]===c)return true;}return false;}function groups(){var out=[],seen={},all=document.querySelectorAll("[data-zeron-pick]");for(var i=0;i<all.length;i++){var b=all[i],gr=g(b);if(gr&&!seen[gr]){seen[gr]=1;var l=b.closest("[data-zeron-group-label]");out.push({code:gr,name:(l&&l.getAttribute("data-zeron-group-label"))||gr});}}return out;}function apply(){var all=document.querySelectorAll("[data-zeron-pick]");for(var i=0;i<all.length;i++){var b=all[i],gr=g(b),c=b.getAttribute("data-zeron-pick"),sent=has(st.sent,gr,gr?c:label(b)),on=sent||has(st.chosen,gr,c),locked=gr?st.locked.indexOf(gr)>=0:sent;if(on)b.setAttribute("data-zeron-chosen","");else b.removeAttribute("data-zeron-chosen");if(locked)b.setAttribute("data-zeron-locked","");else b.removeAttribute("data-zeron-locked");b.setAttribute("aria-pressed",on?"true":"false");}var n=document.querySelectorAll("[data-zeron-count]");for(var j=0;j<n.length;j++)n[j].textContent=st.count;}window.__zeronPicks=function(next){if(next)st=next;apply();};document.addEventListener("click",function(e){if(!e.isTrusted)return;var b=e.target&&e.target.closest?e.target.closest("[data-zeron-pick]"):null;if(!b)return;e.preventDefault();var gr=g(b),c=b.getAttribute("data-zeron-pick"),r=b.getBoundingClientRect(),at=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);send({pick:{group:gr,code:c,label:label(b),groups:groups(),rect:[r.left,r.top,r.width,r.height],covered:!(at&&(b===at||b.contains(at)))}});},true);document.addEventListener("DOMContentLoaded",function(){apply();send({ready:groups()});});var css=document.createElement("style");css.id="zeron-picks";css.textContent="[data-zeron-pick]{cursor:pointer}[data-zeron-pick][data-zeron-chosen]{box-shadow:inset 0 0 0 1.5px var(--zeron-pick,var(--accent))}[data-zeron-pick][data-zeron-locked]{cursor:default}[data-zeron-pick][data-zeron-locked]:not([data-zeron-chosen]){opacity:.45}";if(s&&s.parentNode){s.parentNode.insertBefore(css,s);s.remove();}else{(document.head||document.documentElement).appendChild(css);}})();"#;
+/// Locks what the channel calls and posts null-prototype objects: the page shares this world until zgx gives it an isolated one.
+const PICK_SCRIPT: &str = r#"(function(){var s=document.currentScript,W=window,z=W.zgx,H="__HEIGHT__",N="__PICKS__";if(!z)return;var O=Object,DP=O.defineProperty,OC=O.create,J=W.JSON,P=J.parse,post=z.postMessage;function fix(o,k,v){try{var d=OC(null);d.value=v;d.writable=false;d.configurable=false;DP(o,k,d);}catch(e){}}fix(W,"JSON",J);fix(J,"stringify",J.stringify);var h=W.webkit&&W.webkit.messageHandlers&&W.webkit.messageHandlers.zgx;if(h)fix(h,"postMessage",h.postMessage);function rec(a){var o=OC(null);for(var i=0;i+1<a.length;i+=2){var d=OC(null);d.value=a[i+1];d.enumerable=true;DP(o,a[i],d);}return o;}function send(n,k,v){if(n)post(rec(["kind","zeron.page","nonce",n,k,v]));}W.ipc={postMessage:function(t){try{var m=P(t);if(m&&typeof m.height==="number")send(H,"height",m.height);}catch(e){}}};var st={chosen:[],sent:[],locked:[],count:""};function g(b){return b.getAttribute("data-zeron-group")||"";}function label(b){return b.getAttribute("data-zeron-label")||(b.textContent||"").replace(/\s+/g," ").trim().slice(0,80);}function has(l,gr,c){for(var i=0;i<l.length;i++){if(l[i][0]===gr&&l[i][1]===c)return true;}return false;}function groups(){var out=[],seen=OC(null),all=document.querySelectorAll("[data-zeron-pick]");for(var i=0;i<all.length;i++){var b=all[i],gr=g(b);if(gr&&!seen[gr]){seen[gr]=1;var l=b.closest("[data-zeron-group-label]");out[out.length]=rec(["code",gr,"name",(l&&l.getAttribute("data-zeron-group-label"))||gr]);}}return out;}function apply(){var all=document.querySelectorAll("[data-zeron-pick]");for(var i=0;i<all.length;i++){var b=all[i],gr=g(b),c=b.getAttribute("data-zeron-pick"),sent=has(st.sent,gr,gr?c:label(b)),on=sent||has(st.chosen,gr,c),locked=gr?st.locked.indexOf(gr)>=0:sent;if(on)b.setAttribute("data-zeron-chosen","");else b.removeAttribute("data-zeron-chosen");if(locked)b.setAttribute("data-zeron-locked","");else b.removeAttribute("data-zeron-locked");b.setAttribute("aria-pressed",on?"true":"false");}var n=document.querySelectorAll("[data-zeron-count]");for(var j=0;j<n.length;j++)n[j].textContent=st.count;}fix(W,"__zeronPicks",function(next){if(next)st=next;apply();});document.addEventListener("click",function(e){if(!e.isTrusted||!N)return;var b=e.target&&e.target.closest?e.target.closest("[data-zeron-pick]"):null;if(!b)return;e.preventDefault();var gr=g(b),c=b.getAttribute("data-zeron-pick"),r=b.getBoundingClientRect(),at=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);send(N,"pick",rec(["group",gr,"code",c,"label",label(b),"groups",groups(),"rect",[r.left,r.top,r.width,r.height],"covered",!(at&&(b===at||b.contains(at)))]));},true);document.addEventListener("DOMContentLoaded",function(){apply();send(H,"ready",groups());});var css=document.createElement("style");css.id="zeron-picks";css.textContent="[data-zeron-pick]{cursor:pointer}[data-zeron-pick][data-zeron-chosen]{box-shadow:inset 0 0 0 1.5px var(--zeron-pick,var(--accent))}[data-zeron-pick][data-zeron-locked]{cursor:default}[data-zeron-pick][data-zeron-locked]:not([data-zeron-chosen]){opacity:.45}";if(s&&s.parentNode){s.parentNode.insertBefore(css,s);s.remove();}else{(document.head||document.documentElement).appendChild(css);}})();"#;
 
-/// The page script for a nonce.
-pub fn pick_script(nonce: &str) -> String {
-    PICK_SCRIPT.replace("__NONCE__", nonce)
+pub fn pick_script(nonce: &str, picks: &str) -> String {
+    PICK_SCRIPT.replace("__HEIGHT__", nonce).replace("__PICKS__", picks)
 }
 
-/// Pages read, by where they are (`device\0path`), as the agent wrote them.
+/// A page script before the bootstrap could hook what it captures, so picks stay off then.
+pub fn bootstrap_first(html: &str, themed: &str) -> bool {
+    let same = html.bytes().zip(themed.bytes()).take_while(|(a, b)| a == b).count();
+    let shared = &html[..html.floor_char_boundary(same)];
+    let at = shared.rfind('>').map_or(0, |i| i + 1);
+    let tag = |lower: &str, name: &str| {
+        lower.strip_prefix(name).is_some_and(|rest| rest.chars().next().is_none_or(|c| c.is_whitespace() || c == '>' || c == '/'))
+    };
+    let mut rest = &html[..at];
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+        if rest.is_empty() {
+            return true;
+        }
+        let lower = rest.chars().take(10).collect::<String>().to_ascii_lowercase();
+        let end = if rest.starts_with("<!--") {
+            rest.find("-->").map(|i| i + 3)
+        } else if lower.starts_with("<!doctype") || tag(&lower, "<html") || tag(&lower, "<head") {
+            rest.find('>').map(|i| i + 1)
+        } else {
+            None
+        };
+        match end {
+            Some(end) => rest = &rest[end..],
+            None => return false,
+        }
+    }
+}
+
 type Pages = Rc<RefCell<HashMap<String, Rc<str>>>>;
 
 thread_local! {
@@ -71,8 +66,6 @@ fn page_key(path: &str, device: Option<&str>) -> String {
     format!("{}\0{path}", device.unwrap_or_default())
 }
 
-/// The page theme from the roles ds/html_card reads from the theme
-/// (`#rrggbbaa` each), its flags and its fonts.
 pub fn page_theme(theme: Option<&Value>) -> PageTheme {
     let color = |name: &str| {
         theme
@@ -123,17 +116,16 @@ pub fn page_theme(theme: Option<&Value>) -> PageTheme {
     }
 }
 
-/// The page with its bootstrap, signed with `nonce`; the pick colour as a
-/// variable the page may use (`--zeron-pick`).
-pub fn themed(html: &str, theme: &PageTheme, font_size: f32, pick: Option<&str>, nonce: &str) -> String {
-    let mut extra = pick_script(nonce);
+pub fn themed(html: &str, theme: &PageTheme, font_size: f32, pick: Option<&str>, nonce: &str, picks: &str) -> (String, bool) {
+    let first = bootstrap_first(html, &shared::themed_page(html, theme, font_size, true, ""));
+    let mut extra = pick_script(nonce, if first { picks } else { "" });
     if let Some(pick) = pick.and_then(Rgba::hex) {
         extra.push_str(&format!(
             "document.documentElement.style.setProperty(\"--zeron-pick\",\"{}\");",
             shared::css_color(pick)
         ));
     }
-    shared::themed_page(html, theme, font_size, true, &extra)
+    (shared::themed_page(html, theme, font_size, true, &extra), first)
 }
 
 fn nonce() -> String {
@@ -143,7 +135,6 @@ fn nonce() -> String {
     format!("{:016x}", h.finish())
 }
 
-/// The picks a page shows, as the script that puts them on its buttons.
 pub fn picks_script(arg: &Value) -> String {
     let pairs = |name: &str| -> Vec<(String, String)> {
         arg.field(name)
@@ -163,8 +154,7 @@ pub fn picks_script(arg: &Value) -> String {
     format!("window.__zeronPicks&&window.__zeronPicks({state});")
 }
 
-/// Whether something accepts connections at a live URL's loopback address
-/// (the shipping app's `server_answers`).
+/// The shipping app's `server_answers`.
 fn server_answers(url: &str) -> bool {
     use std::net::ToSocketAddrs;
     let Ok(live) = shared::live_url(url) else {
@@ -186,7 +176,6 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
     rx.recv().await
 }
 
-/// A stored page, through the engine, a chunk at a time.
 async fn read_page(path: &str, device: Option<&str>) -> Result<String, String> {
     use base64::Engine as _;
     let mut bytes = Vec::new();
@@ -215,8 +204,7 @@ async fn read_page(path: &str, device: Option<&str>) -> Result<String, String> {
     }
 }
 
-/// A page by its key: kept, else read (`source` stands in for the file: a
-/// fixture's).
+/// `source` stands in for the stored file in fixtures.
 async fn page(pages: Pages, arg: &Value) -> Result<Rc<str>, String> {
     let (path, device) = key_of(arg);
     let key = page_key(&path, device.as_deref());
@@ -241,9 +229,13 @@ pub fn install(host: &ScriptHost) {
             let theme = page_theme(arg.field("theme"));
             let font = num(arg.field("font_size"), 16.) as f32;
             let pick = arg.field("theme").and_then(|t| t.field("pick")).map(crate::auth::text);
-            let nonce = nonce();
-            let out = themed(&html, &theme, font, pick.as_deref(), &nonce);
-            Ok(Value::record([("html", Value::from(out.as_str())), ("nonce", Value::from(nonce.as_str()))]))
+            let (nonce, picks) = (nonce(), nonce());
+            let (out, heard) = themed(&html, &theme, font, pick.as_deref(), &nonce, &picks);
+            Ok(Value::record([
+                ("html", Value::from(out.as_str())),
+                ("nonce", Value::from(nonce.as_str())),
+                ("picks", if heard { Value::from(picks.as_str()) } else { Value::Nil }),
+            ]))
         }
     });
     host.function("html.retheme", |arg| {
@@ -307,6 +299,12 @@ pub fn install(host: &ScriptHost) {
         })
     });
     host.function("html.picks_state", |arg| Value::from(picks_script(&arg).as_str()));
+    let p = pages.clone();
+    host.function("html.forget", move |arg| {
+        let (path, device) = key_of(&arg);
+        p.borrow_mut().remove(&page_key(&path, device.as_deref()));
+        Value::Nil
+    });
 }
 
 #[cfg(test)]
@@ -334,7 +332,7 @@ mod tests {
             ("id", Value::from(format!("html-page-{card}").as_str())),
             (
                 "value",
-                Value::record([("kind", Value::from("zeron.page")), ("nonce", Value::from(format!("n:{path}").as_str())), ("pick", pick)]),
+                Value::record([("kind", Value::from("zeron.page")), ("nonce", Value::from(format!("p:{path}").as_str())), ("pick", pick)]),
             ),
         ]);
         app.host.set_state("page_message", message).unwrap();
@@ -358,7 +356,6 @@ mod tests {
         let pick = Value::record([("group", Value::from("A")), ("code", Value::from("A2")), ("label", Value::from("Nổi sát đỉnh")), ("groups", groups)]);
         post(&mut app, "p1-tc1-html", "/u/html/s2/frame.html", pick);
         assert!(app.find("#composer-picks").is_some(), "the tray shows");
-        // (Past the landed slot's 700 ms light.)
         app.frames(120);
         let before = app.calls();
         app.frames(180);
@@ -403,14 +400,121 @@ mod tests {
     #[test]
     fn a_page_is_handed_the_shared_bootstrap_and_its_pick_script() {
         let theme = page_theme(None);
-        let out = themed("<p>x</p>", &theme, 16., Some("#c0347a"), "n0");
+        let (out, heard) = themed("<p>x</p>", &theme, 16., Some("#c0347a"), "n0", "p0");
         let shared_page = shared::themed_page("<p>x</p>", &theme, 16., true, "");
         let (head, _) = shared_page.split_once("</script>").unwrap();
         assert!(out.starts_with(head), "the shared bootstrap comes first");
-        assert!(out.contains("N=\"n0\"") && out.contains("e.isTrusted"));
+        assert!(heard && out.contains("H=\"n0\",N=\"p0\"") && out.contains("e.isTrusted"));
         assert!(out.contains("--zeron-pick\",\"rgba(192,52,122,1)\""));
         assert!(out.ends_with("</head><p>x</p>"));
+        let (early, heard) = themed("<script>hook()</script><head></head><p>x</p>", &theme, 16., None, "n0", "p0");
+        assert!(!heard && early.contains("H=\"n0\",N=\"\""), "a script before the bootstrap: no pick nonce in the page");
     }
+
+    #[test]
+    fn only_a_doctype_comments_and_the_html_and_head_tags_may_come_before_the_bootstrap() {
+        let theme = page_theme(None);
+        let first = |html: &str| bootstrap_first(html, &shared::themed_page(html, &theme, 16., true, ""));
+        for html in [
+            "<p>x</p>",
+            "<!doctype html><title>x</title><script>a()</script>",
+            "\u{feff}<!-- made by -->\n<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\"><script>a()</script>",
+            "<html><body><p>no head</p></body></html>",
+            "<!doctype html><html><head><title>x</title></head><body><button data-zeron-pick=\"A1\">A1</button></body></html>",
+        ] {
+            assert!(first(html), "{html}");
+        }
+        for html in [
+            "<script>hook()</script><head></head>",
+            "<!doctype html><script>hook()</script><html><head></head>",
+            "<html><body><img src=x onerror=hook()><head></head>",
+            "<script>hook()</script><html><body></body></html>",
+            "<html data-x=\"a>b\"><script>hook()</script><head></head>",
+            "<svg><script>hook()</script></svg><head></head>",
+        ] {
+            assert!(!first(html), "{html}");
+        }
+    }
+
+    /// The two leak routes the U23 review reproduced, and the ones next to them, run under node
+    /// against both zgx channels (macOS's and WebKitGTK's, as at the pinned rev).
+    #[test]
+    fn a_pages_own_script_never_reads_the_nonces_nor_forges_a_signed_message() {
+        let dir = std::env::temp_dir().join(format!("zeron-pick-script-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (script, harness) = (dir.join("pick.js"), dir.join("harness.js"));
+        std::fs::write(&script, pick_script("HEIGHTNONCE1", "PICKSNONCE22")).unwrap();
+        std::fs::write(&harness, LEAK_HARNESS).unwrap();
+        let run = std::process::Command::new("node").arg(&harness).arg(&script).arg("HEIGHTNONCE1").arg("PICKSNONCE22").output();
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = match run {
+            Ok(out) => out,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("node is not on PATH: the page-script leak test did not run");
+                return;
+            }
+            Err(e) => panic!("node: {e}"),
+        };
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains("checked 26"), "every attack ran on both channels:\n{said}");
+    }
+
+    const LEAK_HARNESS: &str = r#"
+const vm = require('vm'), fs = require('fs');
+const [, , file, HN, PN] = process.argv;
+const pick = fs.readFileSync(file, 'utf8');
+const MAC = "(() => { const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zgx; if (!handler || window.zgx) return; Object.defineProperty(window, 'zgx', { value: Object.freeze({ postMessage(value) { handler.postMessage(JSON.stringify(value === undefined ? null : value)); } }) }); Object.defineProperty(window, 'zgui', { value: window.zgx }); })();";
+const GTK = "(() => { const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zgx; if (!handler || window.zgx) return; const post = handler.postMessage.bind(handler); const stringify = JSON.stringify; const origin = location.origin; const main = window === window.top; Object.defineProperty(window, 'zgx', { value: Object.freeze({ postMessage(value) { post({ n: 'zgx', o: origin, m: main, b: stringify(value === undefined ? null : value) }); } }) }); Object.defineProperty(window, 'zgui', { value: window.zgx }); })();";
+const SETUP = "var handlers={};function Btn(c,g,l){this.a={'data-zeron-pick':c,'data-zeron-group':g,'data-zeron-label':l};this.textContent=l;}Btn.prototype.getAttribute=function(k){return Object.prototype.hasOwnProperty.call(this.a,k)?this.a[k]:null;};Btn.prototype.setAttribute=function(k,v){this.a[k]=v;};Btn.prototype.removeAttribute=function(k){delete this.a[k];};Btn.prototype.closest=function(s){return s==='[data-zeron-pick]'?this:null;};Btn.prototype.getBoundingClientRect=function(){return {left:1,top:2,width:3,height:4};};Btn.prototype.contains=function(x){return x===this;};var buttons=[new Btn('A1','A','One'),new Btn('A2','A','Two')];var document={currentScript:{parentNode:{insertBefore:function(){}},remove:function(){}},addEventListener:function(k,f){(handlers[k]=handlers[k]||[]).push(f);},querySelectorAll:function(s){return s==='[data-zeron-pick]'?buttons:[];},createElement:function(){return {};},elementFromPoint:function(){return buttons[1];},head:{appendChild:function(){}},documentElement:{appendChild:function(){},style:{setProperty:function(){}}}};function MH(){}MH.prototype.postMessage=function(t){__native(t);};var webkit={messageHandlers:{zgx:new MH()}};var location={origin:'null'};var window=this;var top=this;function steal(v){__steal(v);}";
+const RUN = "var i,l=handlers.DOMContentLoaded||[];for(i=0;i<l.length;i++)l[i]();if(window.ipc)window.ipc.postMessage('{\"height\":7}');l=handlers.click||[];for(i=0;i<l.length;i++)l[i]({isTrusted:true,target:buttons[1],preventDefault:function(){}});";
+const ATTACKS = {
+  prototype_setter: "Object.defineProperty(Object.prototype,'nonce',{configurable:true,set:function(v){steal(v);}});",
+  stringify_wrapped: "var s0=JSON.stringify;JSON.stringify=function(v){steal(s0(v));return s0.apply(this,arguments);};",
+  json_replaced: "var s1=JSON.stringify;window.JSON={stringify:function(v){steal(s1(v));return s1(v);},parse:JSON.parse};",
+  json_shadowed: "let JSON={stringify:function(v){steal(v);return '{}';},parse:function(){return {};}};",
+  to_json: "function forged(n){var o=Object.create(null),p=Object.create(null);p.group='A';p.code='A1';p.label='forged';o.kind='zeron.page';o.nonce=n;o.pick=p;return o;}Object.prototype.toJSON=function(){steal(this);return forged(this.nonce);};",
+  array_to_json: "Array.prototype.toJSON=function(){steal(this);var o=Object.create(null);o.pick='forged';return o;};",
+  descriptor_getters: "['get','set','value','writable','enumerable','configurable'].forEach(function(k){try{Object.defineProperty(Object.prototype,k,{configurable:true,get:function(){steal(this);return undefined;}});}catch(e){}});",
+  handler_wrapped: "var hp=webkit.messageHandlers.zgx,o0=hp.postMessage;try{hp.postMessage=function(t){steal(t);return o0.call(hp,t);};}catch(e){}var pr=Object.getPrototypeOf(hp),p0=pr.postMessage;pr.postMessage=function(t){steal(t);return p0.call(this,t);};",
+  channel_replaced: "try{window.zgx={postMessage:function(v){steal(v);}};}catch(e){}try{Object.defineProperty(window,'zgx',{value:{postMessage:function(v){steal(v);}}});}catch(e){}",
+  define_property_wrapped: "var d0=Object.defineProperty;Object.defineProperty=function(o,k,d){steal(d);return d0(o,k,d);};var c0=Object.create;Object.create=function(p){var o=c0(p);steal(o);return o;};",
+  array_push_hooked: "var u0=Array.prototype.push;Array.prototype.push=function(){steal([].slice.call(arguments));return u0.apply(this,arguments);};Object.defineProperty(Array.prototype,'0',{configurable:true,set:function(v){steal(v);}});",
+  string_hooked: "var r0=String.prototype.replace;String.prototype.replace=function(){steal(String(this));return r0.apply(this,arguments);};",
+  picks_replaced: "try{window.__zeronPicks=function(v){steal(v);};}catch(e){}window.ipc={postMessage:function(t){steal(t);}};",
+};
+const seen = new Set();
+function holds(v, depth) {
+  if (typeof v === 'string') return v.includes(HN) || v.includes(PN);
+  if (v === null || (typeof v !== 'object' && typeof v !== 'function') || depth > 6 || seen.has(v)) return false;
+  seen.add(v);
+  for (const k of Reflect.ownKeys(v)) {
+    const d = Reflect.getOwnPropertyDescriptor(v, k);
+    if (d && 'value' in d && holds(d.value, depth + 1)) return true;
+  }
+  return false;
+}
+let checked = 0, failed = [];
+for (const [channel, CHANNEL] of [['mac', MAC], ['gtk', GTK]]) {
+  for (const [name, attack] of Object.entries(ATTACKS)) {
+    const stolen = [], native = [];
+    const ctx = vm.createContext({ __steal: (v) => stolen.push(v), __native: (t) => native.push(t) });
+    for (const code of [SETUP, CHANNEL, pick]) vm.runInContext(code, ctx);
+    try { vm.runInContext(attack, ctx); } catch (e) {}
+    try { vm.runInContext(RUN, ctx); } catch (e) { failed.push(`${channel}/${name}: the page broke the run: ${e}`); }
+    checked++;
+    seen.clear();
+    if (stolen.some((v) => holds(v, 0))) failed.push(`${channel}/${name}: the page read a nonce`);
+    const bodies = native.map((t) => JSON.parse(channel === 'gtk' ? t.b : t));
+    const picks = bodies.filter((b) => b && b.nonce === PN);
+    const ok = picks.length === 1 && picks[0].pick && picks[0].pick.code === 'A2' && picks[0].pick.label === 'Two' && Object.keys(picks[0]).sort().join() === 'kind,nonce,pick';
+    if (!ok) failed.push(`${channel}/${name}: signed picks ${JSON.stringify(picks)}`);
+    if (bodies.some((b) => b && b.nonce === HN && (b.pick !== undefined || !(typeof b.height === 'number' || b.ready !== undefined)))) failed.push(`${channel}/${name}: a height message carried more`);
+  }
+}
+if (failed.length) { console.error(failed.join('\n')); process.exit(1); }
+console.log(`checked ${checked}`);
+"#;
 
     #[test]
     fn theme_roles_read_from_hex_and_fall_back_to_grey() {

@@ -1475,6 +1475,7 @@
       "count_sent": "已发送",
       "count_free": "已选 {n} 项",
       "count_partly_sent": "已发送 {n}/{total}",
+      "count_partly_sent_chosen": "已发送 {n}/{total} · 已选 {chosen}",
       "count_all": "{total} 项已全部选好",
       "count_chosen": "已选 {n}/{total}",
       "open_in_browser": "在浏览器中打开",

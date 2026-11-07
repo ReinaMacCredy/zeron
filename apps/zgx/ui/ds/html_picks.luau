@@ -1,21 +1,4 @@
--- Options picked on an agent's page (`data-zeron-pick` buttons): what the
--- composer sends for them, and how the tray over its input and a sent
--- message show them. A click on a page only places its pick in the tray:
--- sending stays with the composer.
---
---   picks.with_picks(words, cards)   the prompt: its words, then each card's
---                                    block, as zeron_proto html_render
---                                    `with_picks` writes it
---   picks.ink()                      the pick colour: the accent, deeper
---                                    in light themes
---   picks.Code { code }              a pick's code chip
---   picks.Tray { items, on_clear }   the tray: a fixed slot per group (each
---                                    card's), free picks after
---   picks.Sent { chips }             a sent message's picks
---
--- An item (the composer's cargo, kind "pick"): { id, card, card_title,
--- group ("" for a free pick), group_name, code, label, groups = { { code,
--- name } }, locked = { code } }.
+-- Options picked on an agent's page: the agent's block (zeron_proto `with_picks`), the tray and a sent message's chips.
 
 local Icon = require("@self/icon")
 local control = require("@self/control")
@@ -23,26 +6,31 @@ local locale = require("@self/locale")
 
 local M = {}
 
-M.PICKED_IN = "Picked in"
-M.NOT_PICKED = "Not picked:"
+-- The agent's words, locked in DECISIONS whatever the app's language.
+M.PICKED_IN = "Đã chọn trong"
+M.NOT_PICKED = "Chưa chọn:"
 
 export type Pick = { group: string?, code: string, label: string }
 export type Group = { code: string, name: string }
 export type Card = { card: string, picks: { Pick }, missing: { Group } }
 
+local function one_line(s: string): string
+	return string.match((string.gsub(s, "%s+", " ")), "^ ?(.-) ?$") or s
+end
+
 function M.block(card: string, picks: { Pick }, missing: { Group }): string
-	local lines = { `{M.PICKED_IN} "{card}":` }
+	local lines = { `{M.PICKED_IN} "{one_line(card)}":` }
 	for _, p in picks do
 		if p.group and p.group ~= "" then
-			table.insert(lines, `{p.group} = {p.code} ({p.label})`)
+			table.insert(lines, `{p.group} = {p.code} ({one_line(p.label)})`)
 		else
-			table.insert(lines, `- {p.label}`)
+			table.insert(lines, `- {one_line(p.label)}`)
 		end
 	end
 	if #missing > 0 then
 		local names = {}
 		for _, g in missing do
-			table.insert(names, `{g.code} ({g.name})`)
+			table.insert(names, `{g.code} ({one_line(g.name)})`)
 		end
 		table.insert(lines, `{M.NOT_PICKED} {table.concat(names, ", ")}`)
 	end
@@ -62,9 +50,6 @@ function M.with_picks(words: string, cards: { Card }): string
 	return out
 end
 
--- The cards a send's pick items make, in the order they were placed: each
--- card's picks in its groups' order (free picks as placed), and the groups
--- neither picked nor sent before.
 function M.cards(items: { any }): { Card }
 	local order: { string } = {}
 	local by: { [string]: { any } } = {}
@@ -106,7 +91,6 @@ function M.cards(items: { any }): { Card }
 				table.insert(missing, g)
 			end
 		end
-		-- (A group the page no longer lists still goes, after the rest.)
 		for _, it in list do
 			if it.group and it.group ~= "" and picked[it.group] then
 				table.insert(picks, { group = it.group, code = it.code, label = it.label })
@@ -121,7 +105,6 @@ function M.cards(items: { any }): { Card }
 	return out
 end
 
--- A colour's hue, saturation and lightness, and back.
 local function hsl(hex: string): (number, number, number)
 	local r = (tonumber(string.sub(hex, 2, 3), 16) or 0) / 255
 	local g = (tonumber(string.sub(hex, 4, 5), 16) or 0) / 255
@@ -168,9 +151,7 @@ local function from_hsl(h: number, s: number, l: number): string
 	return string.format("#%02x%02x%02x", byte(r), byte(g), byte(b))
 end
 
--- The pick colour now (tracked): the theme's accent; in a light theme no
--- lighter than 48% nor more saturated than 57%, so the mock's #ec83b7
--- deepens to #c0347a on white and the tick and send read.
+-- In light themes capped at 48% lightness and 57% saturation, so the tick and send read on white.
 function M.ink(): string
 	ui.theme.current:get()
 	local accent = ui.theme.get("accent")
@@ -180,6 +161,10 @@ function M.ink(): string
 	local kind = ui.theme.kind()
 	if kind == "dark" or kind == "high-contrast" then
 		return string.sub(accent, 1, 7)
+	end
+	-- (DECISIONS' colour for the mock's pink exactly; the formula rounds it to #c0357a.)
+	if string.lower(string.sub(accent, 1, 7)) == "#ec83b7" then
+		return "#c0347a"
 	end
 	local h, s, l = hsl(accent)
 	return from_hsl(h, math.min(s, 0.57), math.min(l, 0.48))
@@ -193,6 +178,7 @@ function M.Code(props: { code: string, id: string? }): Node
 	return ui.row {
 		id = props.id,
 		min_w = raw(28, "the mock's code chip"),
+		max_w = raw(140, "a free pick's label as its code"),
 		h = raw(18, "the mock's code chip"),
 		px = raw(6, "the mock's code chip"),
 		items = "center",
@@ -202,16 +188,14 @@ function M.Code(props: { code: string, id: string? }): Node
 		bg = "$surface.raised",
 		border = 0.5,
 		border_color = "$border",
-		ui.text { props.code, literal = true, text_size = "$font.size.xs", weight = "$font.weight.semibold", color = "$text.primary" },
+		ui.text { props.code, literal = true, min_w = 0, truncate = true, text_size = "$font.size.xs", weight = "$font.weight.semibold", color = "$text.primary" },
 	}
 end
 
 local SLOT_H, SLOT_GAP, COLUMNS = 28, 6, 3
--- Narrower than this, a slot keeps its code alone (a split pane).
+-- A split pane's width.
 local NARROW = 420
 
--- `items`: the tray's picks; `on_clear(id)`: a slot's ×; `lit`: the pick id
--- that just landed, its slot lit for a moment.
 M.Tray = ui.component(function(props: { items: () -> { any }, on_clear: (id: string) -> (), lit: (() -> string?)? }): Node
 	local width = ui.use_state(0)
 	local slots = ui.computed(function(): { any }
@@ -384,7 +368,6 @@ M.Tray = ui.component(function(props: { items: () -> { any }, on_clear: (id: str
 	}
 end)
 
--- A sent message's picks: each its code and label.
 function M.Sent(props: { chips: { any } }): Node
 	local cells = {}
 	for _, c in props.chips do

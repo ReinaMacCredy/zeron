@@ -226,8 +226,6 @@ pub fn render_source<'a>(
     }
 }
 
-/// What an `html_render` call shows: a page it sent, a page file it wrote,
-/// or a live dev server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderInput<'a> {
     Html(&'a str),
@@ -252,9 +250,7 @@ pub fn render_input<'a>(
     }
 }
 
-/// The reply to an engine's refusal of a `path` or `url` render that only an
-/// engine older than this one gives (`html` was required, then only `html`
-/// or `url` were known), naming the skew instead of the raw error.
+/// An engine older than the app refuses `path` and `url` with these words.
 pub fn stale_engine_reply(error: &str, sent: RenderInput<'_>) -> Option<String> {
     let what = match sent {
         RenderInput::Html(_) => return None,
@@ -271,11 +267,8 @@ pub fn stale_engine_reply(error: &str, sent: RenderInput<'_>) -> Option<String> 
     })
 }
 
-/// How the agent offers choices on a page: the person's clicks fill the
-/// composer, never send.
 pub const PICK_GUIDE: &str = "Options: when the page offers choices to pick from, make each option a <button> with data-zeron-pick=\"A2\" (its code), data-zeron-group=\"A\" (one pick per group; leave it out for options picked freely) and data-zeron-label=\"Floating tab\"; data-zeron-group-label names a group. A click puts the pick in the person's composer; the host marks chosen buttons data-zeron-chosen and sent ones data-zeron-locked, and fills an element with data-zeron-count. You receive the picks with their message.";
 
-/// A pick on a page, as the composer sends it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pick {
     pub group: Option<String>,
@@ -283,39 +276,43 @@ pub struct Pick {
     pub label: String,
 }
 
-/// A page's group, by its code and name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickGroup {
     pub code: String,
     pub name: String,
 }
 
-pub const PICKED_IN: &str = "Picked in";
-pub const NOT_PICKED: &str = "Not picked:";
+/// The agent's words, locked in DECISIONS whatever the app's language.
+pub const PICKED_IN: &str = "Đã chọn trong";
+pub const NOT_PICKED: &str = "Chưa chọn:";
 
-/// The block a message's picks on card `card` add after its words: one
-/// `A = A2 (label)` line per group picked (`- label` for ungrouped picks),
-/// then the groups left unanswered.
+fn one_line(text: &str) -> String {
+    text.split_ascii_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn picks_block(card: &str, picks: &[Pick], missing: &[PickGroup]) -> String {
-    let mut out = format!("{PICKED_IN} \"{card}\":");
+    let mut out = format!("{PICKED_IN} \"{}\":", one_line(card));
     for pick in picks {
         out.push('\n');
         match &pick.group {
-            Some(group) => out.push_str(&format!("{group} = {} ({})", pick.code, pick.label)),
-            None => out.push_str(&format!("- {}", pick.label)),
+            Some(group) => out.push_str(&format!(
+                "{group} = {} ({})",
+                pick.code,
+                one_line(&pick.label)
+            )),
+            None => out.push_str(&format!("- {}", one_line(&pick.label))),
         }
     }
     if !missing.is_empty() {
         let names: Vec<String> = missing
             .iter()
-            .map(|group| format!("{} ({})", group.code, group.name))
+            .map(|group| format!("{} ({})", group.code, one_line(&group.name)))
             .collect();
         out.push_str(&format!("\n{NOT_PICKED} {}", names.join(", ")));
     }
     out
 }
 
-/// The words with each card's picks after them.
 pub fn with_picks(words: &str, cards: &[(String, Vec<Pick>, Vec<PickGroup>)]) -> String {
     let mut out = words.trim_end().to_owned();
     for (card, picks, missing) in cards {
@@ -330,52 +327,76 @@ pub fn with_picks(words: &str, cards: &[(String, Vec<Pick>, Vec<PickGroup>)]) ->
     out
 }
 
-/// A sent message's pick blocks read back: its words without them, and each
-/// card's picks in order.
+/// Only trailing blocks in exactly `with_picks`'s form read back, so typed text stays words.
 pub fn extract_picks(text: &str) -> (String, Vec<(String, Vec<Pick>)>) {
-    let mut words: Vec<&str> = Vec::new();
-    let mut cards: Vec<(String, Vec<Pick>)> = Vec::new();
-    let mut lines = text.split('\n').peekable();
-    while let Some(line) = lines.next() {
-        let card = line
-            .strip_prefix(PICKED_IN)
-            .and_then(|rest| rest.strip_prefix(" \""))
-            .and_then(|rest| rest.strip_suffix("\":"));
-        let Some(card) = card else {
-            words.push(line);
-            continue;
+    let mut rest = text.trim_end();
+    let mut cards = Vec::new();
+    loop {
+        let (before, block) = match rest.rfind("\n\n") {
+            Some(at) => (&rest[..at], &rest[at + 2..]),
+            None => ("", rest),
         };
-        let mut picks = Vec::new();
-        while let Some(next) = lines.peek() {
-            if let Some(label) = next.strip_prefix("- ") {
-                picks.push(Pick {
-                    group: None,
-                    code: label.to_owned(),
-                    label: label.to_owned(),
-                });
-            } else if let Some((group, rest)) = next.split_once(" = ")
-                && let Some((code, label)) = rest.split_once(" (")
-                && let Some(label) = label.strip_suffix(')')
-                && !group.is_empty()
-                && !group.contains(char::is_whitespace)
-            {
-                picks.push(Pick {
-                    group: Some(group.to_owned()),
-                    code: code.to_owned(),
-                    label: label.to_owned(),
-                });
-            } else if !next.starts_with(NOT_PICKED) {
-                break;
-            }
-            lines.next();
-        }
-        if picks.is_empty() {
-            words.push(line);
-        } else {
-            cards.push((card.to_owned(), picks));
+        let Some(card) = picks_of_block(block) else {
+            break;
+        };
+        cards.push(card);
+        rest = before;
+        if rest.is_empty() {
+            break;
         }
     }
-    (words.join("\n").trim_end().to_owned(), cards)
+    if cards.is_empty() {
+        return (text.trim_end().to_owned(), cards);
+    }
+    cards.reverse();
+    (rest.trim_end().to_owned(), cards)
+}
+
+fn picks_of_block(block: &str) -> Option<(String, Vec<Pick>)> {
+    let mut lines = block.split('\n');
+    let card = lines
+        .next()?
+        .strip_prefix(PICKED_IN)?
+        .strip_prefix(" \"")?
+        .strip_suffix("\":")?;
+    if card.is_empty() {
+        return None;
+    }
+    let mut picks = Vec::new();
+    let mut missing = false;
+    for line in lines {
+        if missing {
+            return None;
+        }
+        if let Some(label) = line.strip_prefix("- ") {
+            if label.trim().is_empty() {
+                return None;
+            }
+            picks.push(Pick {
+                group: None,
+                code: label.to_owned(),
+                label: label.to_owned(),
+            });
+        } else if let Some((group, rest)) = line.split_once(" = ")
+            && let Some((code, label)) = rest.split_once(" (")
+            && let Some(label) = label.strip_suffix(')')
+            && !group.is_empty()
+            && !group.contains(char::is_whitespace)
+            && !code.is_empty()
+            && !code.contains(char::is_whitespace)
+        {
+            picks.push(Pick {
+                group: Some(group.to_owned()),
+                code: code.to_owned(),
+                label: label.to_owned(),
+            });
+        } else if line.starts_with(NOT_PICKED) && !picks.is_empty() {
+            missing = true;
+        } else {
+            return None;
+        }
+    }
+    (!picks.is_empty()).then(|| (card.to_owned(), picks))
 }
 
 /// A local dev server's page, the only kind of `url` a thread shows live.
@@ -1301,7 +1322,7 @@ mod tests {
         );
         assert_eq!(
             sent,
-            "+ header của C2\n\nPicked in \"Khung app\":\nA = A2 (Nổi sát đỉnh)\nB = B2 (Không viền)\nNot picked: C (Rail)"
+            "+ header của C2\n\nĐã chọn trong \"Khung app\":\nA = A2 (Nổi sát đỉnh)\nB = B2 (Không viền)\nChưa chọn: C (Rail)"
         );
         let free = with_picks(
             "",
@@ -1311,7 +1332,7 @@ mod tests {
                 vec![],
             )],
         );
-        assert_eq!(free, "Picked in \"Ảnh\":\n- Sea\n- Hill");
+        assert_eq!(free, "Đã chọn trong \"Ảnh\":\n- Sea\n- Hill");
         let (words, cards) = extract_picks(&sent);
         assert_eq!(words, "+ header của C2");
         assert_eq!(cards, vec![("Khung app".into(), picks.to_vec())]);
@@ -1321,8 +1342,38 @@ mod tests {
             cards[0].1,
             vec![pick(None, "Sea", "Sea"), pick(None, "Hill", "Hill")]
         );
-        let plain = "Picked in \"x\":\nnot a pick";
-        assert_eq!(extract_picks(plain), (plain.to_owned(), vec![]));
+        let both = with_picks(
+            "two",
+            &[
+                ("A".into(), vec![pick(Some("A"), "A1", "x")], vec![]),
+                ("B".into(), vec![pick(None, "f", "f")], vec![]),
+            ],
+        );
+        let (words, cards) = extract_picks(&both);
+        assert_eq!((words.as_str(), cards.len()), ("two", 2));
+        let spaced = with_picks(
+            "",
+            &[(
+                "Two\nlines".into(),
+                vec![pick(Some("A"), "A1", "a\n  b")],
+                vec![],
+            )],
+        );
+        assert_eq!(spaced, "Đã chọn trong \"Two lines\":\nA = A1 (a b)");
+        for typed in [
+            "Đã chọn trong \"x\":\nnot a pick",
+            "Đã chọn trong \"x\":\n- y\n\nand then more words",
+            "Đã chọn trong \"x\":\n- y\nand a line after",
+            "Đã chọn trong \"x\":\nChưa chọn: C (Rail)",
+            "Đã chọn trong \"x\":\nChưa chọn: C (Rail)\n- y",
+            "Đã chọn trong \"x\":\nA B = A1 (x)",
+        ] {
+            assert_eq!(
+                extract_picks(typed),
+                (typed.to_owned(), vec![]),
+                "typed, not sent: {typed}"
+            );
+        }
     }
 
     #[test]

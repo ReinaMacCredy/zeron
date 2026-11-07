@@ -292,8 +292,7 @@ local function cargo_get(key: string): { any }
 	return if d and type(d.cargo) == "table" then d.cargo else {}
 end
 
--- A chat's cargo, tracked, and put in its place (the composer's for the
--- chat shown): for what stages items of its own (screens/chat/pages' picks).
+-- For screens/chat/pages, which stages picks of its own.
 function M.cargo_of(key: string): { any }
 	return cargo_get(key)
 end

@@ -319,7 +319,6 @@ local function Session(id: Id?): Node
 									lanes.ask_side(id, text)
 								end,
 							}),
-							-- Its agent pages: their picks on this chat's draft.
 							pages = Pages.pages(function(): string?
 								return id
 							end, store.messages, function(): any

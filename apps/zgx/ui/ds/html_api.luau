@@ -1,22 +1,4 @@
--- An agent page's host side (src/html_pages.rs), behind one module so tests
--- can stand in for it (ui/chat_fixture.luau): the page read and given its
--- bootstrap, its view, a dev server's reach, the sheet's source and save.
---
---   api.page(args, done)        `html.page`: done({ html, nonce }) or done(nil, why)
---   api.view(props)             zgx's web view (ui.webview)
---   api.web(id)                 the host's page for `id` (ui.web), kept across
---                               its row leaving the view; api.load(web, html,
---                               base), api.run(web, js), api.close(web)
---   api.retheme(args)           the script that swaps a shown page's theme
---   api.frame(agent, content)   { height, overflows, scrolls }
---   api.live(url)               { label, server, url } of a dev server, or nil
---   api.reach(url, done)        done(answers)
---   api.source(args)            what Source shows, or nil
---   api.save(args, done)        the page written where the person chose
---   api.file_name(title)        its download name
---   api.title(path, done)       done({ title? } or { missing = true })
---   api.picks(state)            the script that shows a page's picks
---   api.open_url(url)           in the default browser
+-- src/html_pages.rs behind one module, so ui/chat_fixture.luau can stand in for it.
 
 local M = {}
 
@@ -55,8 +37,9 @@ function M.web(id: string): any
 	return (ui :: any).web(id, { transparent = true, profile = "ephemeral" })
 end
 
-function M.load(web: any, html: string, base: string)
-	web:html(html, base)
+-- (No base: `about:blank`, as gpui loads a page, so relative references fail closed.)
+function M.load(web: any, html: string)
+	web:html(html)
 end
 
 function M.run(web: any, js: string)
@@ -110,6 +93,10 @@ function M.title(path: string, done: (any) -> ())
 	settle(call("html.title", path), function(v: any)
 		done(v or { missing = true })
 	end)
+end
+
+function M.forget(args: any)
+	sync("html.forget", args)
 end
 
 function M.picks(state: any): string?

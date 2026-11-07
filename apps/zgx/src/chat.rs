@@ -5117,10 +5117,7 @@ fn visual_block(part: &Json) -> Value {
     ])
 }
 
-/// A page an `html_render` call published (the shipping app's
-/// `html_render_row`): its stored path on the chat's host (empty for a live
-/// dev server's `url`), title, the agent's height, and that host's device
-/// when it isn't this one. Nil for any other part.
+/// The shipping app's `html_render_row`.
 fn html_block(part: &Json) -> Option<Value> {
     let page = part.get("htmlRender").filter(|p| p.is_object())?;
     let call: zeron_proto::ToolCall = serde_json::from_value(part["call"].clone()).ok()?;
@@ -5146,8 +5143,7 @@ fn without_pages(blocks: Value) -> Value {
     }
 }
 
-/// The `.html` files a settled reply names (the shipping app's
-/// `html_link_targets`), as the block its "Open in" cards stand in. Nil for none.
+/// The shipping app's `html_link_targets`.
 fn html_files_block(entry: &Json) -> Option<Value> {
     if entry["status"].as_str() == Some("streaming") {
         return None;
@@ -5181,9 +5177,7 @@ fn push_block(blocks: Value, block: Value) -> Value {
     }
 }
 
-/// A prompt's picks on a reply's pages (zeron_proto html_render
-/// `with_picks`), apart from its words: a chip for each, its card's title,
-/// group, code and label.
+/// Read back from zeron_proto's `with_picks`, so a reload or another device sees the same picks.
 fn page_picks(words: &str) -> (String, Vec<Value>) {
     let (rest, cards) = zeron_proto::html_render::extract_picks(words);
     if cards.is_empty() {

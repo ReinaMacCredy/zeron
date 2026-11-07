@@ -1278,7 +1278,6 @@ fn rechunk(event: AgentEvent, n: usize) -> Vec<AgentEvent> {
     }
 }
 
-/// One `tools/call` over a fresh `zeron mcp` stdio server (dev knobs only).
 /// A page of three groups of two options each, as the U23 mockup has them.
 pub const MOCK_PICK_PAGE: &str = r#"<!doctype html><html><head><title>Khung app</title><style>.g{display:grid;grid-template-columns:72px 1fr 1fr;gap:6px;align-items:center;margin:6px 0}button{height:34px;border:0;border-radius:8px;background:var(--card);color:var(--foreground);font:inherit;text-align:left;padding:0 8px;box-shadow:inset 0 0 0 .5px var(--border)}button[data-zeron-chosen]{background:var(--accent-surface)}.h{display:flex;justify-content:space-between;font-weight:600}.c{color:var(--muted-foreground);font-weight:400}</style></head><body><div class="h">Khung app <span class="c" data-zeron-count></span></div><div class="g" data-zeron-group-label="Góc trang"><span>Góc trang</span><button data-zeron-pick="A1" data-zeron-group="A" data-zeron-label="Bo góc thường">A1 Bo góc thường</button><button data-zeron-pick="A2" data-zeron-group="A" data-zeron-label="Nổi sát đỉnh">A2 Nổi sát đỉnh</button></div><div class="g" data-zeron-group-label="Thanh tab"><span>Thanh tab</span><button data-zeron-pick="B1" data-zeron-group="B" data-zeron-label="Có viền">B1 Có viền</button><button data-zeron-pick="B2" data-zeron-group="B" data-zeron-label="Không viền">B2 Không viền</button></div><div class="g" data-zeron-group-label="Rail"><span>Rail</span><button data-zeron-pick="C1" data-zeron-group="C" data-zeron-label="Ảnh sát mép">C1 Ảnh sát mép</button><button data-zeron-pick="C2" data-zeron-group="C" data-zeron-label="Cùng tông">C2 Cùng tông</button></div></body></html>"#;
 
@@ -1304,6 +1303,7 @@ fn mock_page_input(page: &str, height: u32) -> (serde_json::Value, serde_json::V
     )
 }
 
+/// One `tools/call` over a fresh `zeron mcp` stdio server (dev knobs only).
 async fn mock_mcp_call(
     server: &zeron_proto::McpServer,
     tool: &str,
@@ -1524,6 +1524,8 @@ fn background_run(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn the_mock_page_knob_sends_html_a_pick_page_or_a_path() {
         let (pick, _) = super::mock_page_input("pick", 600);
@@ -1541,8 +1543,6 @@ mod tests {
         let (missing, _) = super::mock_page_input("/nope/page.html", 600);
         assert_eq!(missing["html"], "<p>mock page</p>");
     }
-
-    use super::*;
 
     #[test]
     fn error_prompt_names_the_failure() {

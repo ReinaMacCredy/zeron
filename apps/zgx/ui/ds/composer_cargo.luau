@@ -30,8 +30,7 @@ local HtmlPicks = require("@self/html_picks")
 
 local M = {}
 
--- ("comment": a review comment left on a file; "pick": an option picked on
--- an agent's page, in the tray over the input, ds/html_picks.)
+-- ("comment": a review comment left on a file; "pick": ds/html_picks' tray.)
 export type Kind = "image" | "file" | "text" | "annotation" | "comment" | "appshot" | "chat" | "quote" | "pick"
 export type Item = {
 	id: string,

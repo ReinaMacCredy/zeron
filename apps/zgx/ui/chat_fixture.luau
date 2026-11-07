@@ -1952,19 +1952,26 @@ ui.command {
 -- The shell, as small as can hold the page: the route's page, and the
 -- composer over it.
 local test_fan = ui.state("test_fan", false)
--- Agent pages (ds/html_card) without a host: the page read is the
--- fixture's, a view is a box of its id that hears what a test posts
--- (`page_post`), and what's run in a page is noted (`page_runs`).
+-- Agent pages (ds/html_card) without a host: a view is a box that hears what a test posts (`page_post`).
 do
 	local html_api = require("@ds/html_api") :: any
 	local heard: { [string]: (any, string, boolean) -> () } = {}
+	local navigators: { [string]: (any) -> () } = {}
 	local runs = ui.state("page_runs", {} :: { string })
-	local loads = ui.state("page_loads", 0)
+	local loaded = ui.state("page_loaded", {} :: { string })
+	local early = ui.state("page_early_script", false)
 	html_api.web = function(id: string): any
 		return { id = id }
 	end
-	html_api.load = function(_web: any, _html: string, _base: string)
-		loads:set(loads:peek() + 1)
+	local real_load = html_api.load
+	html_api.load = function(web: any, html: string, ...)
+		real_load({
+			html = function(_self: any, h: string, base: string?)
+				local list = table.clone(loaded:peek())
+				table.insert(list, `{web.id}|{base or "about:blank"}|{h}`)
+				loaded:set(list)
+			end,
+		}, html, ...)
 	end
 	html_api.run = function(web: any, js: string)
 		local list = table.clone(runs:peek())
@@ -1972,16 +1979,18 @@ do
 		runs:set(list)
 	end
 	html_api.close = function(_web: any) end
+	html_api.forget = function(_args: any) end
 	html_api.page = function(args: any, done: (any, string?) -> ())
 		if string.find(args.path or "", "gone", 1, true) then
 			done(nil, "not found")
 			return
 		end
-		done({ html = `<p>{args.path}</p>`, nonce = `n:{args.path}` }, nil)
+		done({ html = `<p>{args.path}</p>`, nonce = `n:{args.path}`, picks = if early:peek() then nil else `p:{args.path}` }, nil)
 	end
 	html_api.view = function(props: any): Node
 		if props.id then
 			heard[props.id] = props.on_message
+			navigators[props.id] = props.on_navigate
 		end
 		return ui.column { id = props.id, label = props.label, w_full = true, h = props.h, min_h = props.min_h, grow = props.grow }
 	end
@@ -2030,7 +2039,19 @@ do
 	html_api.open_url = function(url: string)
 		note(`open_url:{url}`)
 	end
-	-- What a page posts: `{ id = <view id>, value, main? }`.
+	local page_nav = ui.state("page_nav", nil :: any)
+	ui.command {
+		id = "page_navigate",
+		title = "A page navigates",
+		run = function()
+			local n = page_nav:peek()
+			local f = n and navigators[n.id]
+			if f then
+				f({ kind = n.kind, url = n.url })
+			end
+		end,
+	}
+	-- `{ id = <view id>, value, main? }`.
 	local page_message = ui.state("page_message", nil :: any)
 	ui.command {
 		id = "page_post",
@@ -2043,8 +2064,6 @@ do
 			end
 		end,
 	}
-	-- s2 with a reply that shows a page of three groups, a page of free
-	-- picks, a dev server's page, and a reply naming .html files.
 	local function page_reply(id: string, blocks: { any }): any
 		return { id = id, role = "assistant", text = "", model = "Opus", at = "Sep 8, 1:43 PM", copy = "", blocks = blocks }
 	end
@@ -2072,6 +2091,19 @@ do
 		end,
 	}
 	ui.command {
+		id = "pages_seed_spans",
+		title = "s2 names three .html files not on disk in code, then links one that is",
+		run = function()
+			seed {
+				{ id = "x4", role = "user", text = "Which?" },
+				page_reply("p4", {
+					{ id = "t", kind = "text", text = "`a.html` `b.html` `c.html` [demo](out/demo.html)" },
+					{ id = "html-files", kind = "html_files", targets = { { dest = "a.html", linked = false }, { dest = "b.html", linked = false }, { dest = "c.html", linked = false }, { dest = "out/demo.html", linked = true } } },
+				}),
+			}
+		end,
+	}
+	ui.command {
 		id = "pages_seed_live",
 		title = "s2 shows a dev server's page and names .html files",
 		run = function()
@@ -2085,8 +2117,32 @@ do
 			}
 		end,
 	}
-	-- The host reading back the last prompt sent to s2: a user row with its
-	-- picks as chips (chat.rs `page_picks`).
+	-- chat.rs `page_picks`: only trailing blocks in exactly the sent form are chips.
+	local function block_of(par: string): (string?, { any })
+		local lines = string.split(par, "\n")
+		local card = string.match(lines[1] or "", '^Đã chọn trong "(.+)":$')
+		local chips, missing = {}, false
+		if not card then
+			return nil, chips
+		end
+		for i = 2, #lines do
+			local line = lines[i]
+			local free = string.match(line, "^%- (.+)$")
+			local g, code, label = string.match(line, "^(%S+) = (%S+) %((.*)%)$")
+			if missing then
+				return nil, {}
+			elseif free then
+				table.insert(chips, { kind = "pick", name = free, card = card, group = "", code = free, label = free })
+			elseif g then
+				table.insert(chips, { kind = "pick", name = label, card = card, group = g, code = code, label = label })
+			elseif #chips > 0 and string.sub(line, 1, #"Chưa chọn:") == "Chưa chọn:" then
+				missing = true
+			else
+				return nil, {}
+			end
+		end
+		return if #chips > 0 then card else nil, chips
+	end
 	ui.command {
 		id = "picks_echo",
 		title = "s2's last prompt comes back with its picks",
@@ -2102,24 +2158,23 @@ do
 			if not text then
 				return
 			end
-			local chips, words, card = {}, {}, nil
-			for line in string.gmatch(text .. "\n", "(.-)\n") do
-				local c = string.match(line, '^Picked in "(.*)":$')
-				if c then
-					card = c
-				elseif card and string.match(line, "^%- ") then
-					local label = string.sub(line, 3)
-					table.insert(chips, { kind = "pick", name = label, card = card, group = "", code = label, label = label })
-				elseif card and string.match(line, "^(%S+) = (.-) %((.*)%)$") then
-					local g, code, label = string.match(line, "^(%S+) = (.-) %((.*)%)$")
-					table.insert(chips, { kind = "pick", name = label, card = card, group = g, code = code, label = label })
-				elseif card and string.match(line, "^Not picked:") then
-					continue
-				else
-					card = nil
-					table.insert(words, line)
+			local pars = string.split((string.gsub(text, "%s+$", "")), "\n\n")
+			local blocks = {}
+			while #pars > 0 do
+				local card, found = block_of(pars[#pars])
+				if not card then
+					break
+				end
+				table.insert(blocks, 1, found)
+				table.remove(pars)
+			end
+			local chips = {}
+			for _, b in blocks do
+				for _, c in b do
+					table.insert(chips, c)
 				end
 			end
+			local words = { table.concat(pars, "\n\n") }
 			local list = table.clone(TRANSCRIPTS.s2 or {})
 			table.insert(list, { id = `echo{#list}`, role = "user", text = (string.gsub(table.concat(words, "\n"), "%s+$", "")), attachments = chips })
 			TRANSCRIPTS.s2 = list

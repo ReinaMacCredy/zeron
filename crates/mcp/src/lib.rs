@@ -522,7 +522,7 @@ fn thread_tool_list() -> Value {
                 "type": "object",
                 "properties": {
                     "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES },
-                    "path": { "type": "string", "description": "An .html file in this thread's folder, instead of `html`." },
+                    "path": { "type": "string", "maxLength": 4096, "description": "An .html file in this thread's folder, instead of `html`." },
                     "url": { "type": "string", "maxLength": html_render::MAX_URL_BYTES, "description": "A running local dev server's page, instead of `html`." },
                     "title": { "type": "string", "maxLength": html_render::MAX_TITLE_CHARS },
                     "height": { "type": "integer", "minimum": html_render::MIN_HEIGHT, "maximum": html_render::MAX_HEIGHT, "description": "CSS pixels." }

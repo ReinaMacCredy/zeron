@@ -1,9 +1,4 @@
--- Agent pages (`html_render`) in a transcript, as Zeron's card
--- (crates/ui/src/transcript/html_card.rs), and the options picked on them
--- landing in the composer's tray (DECISIONS 2026-11-06): a slot per group,
--- swapped in place, cleared again; sent with the note, locked once sent,
--- the rest still open. The page is the fixture's: its view hears what a test
--- posts (`page_post`), as a page's bootstrap posts it.
+-- Agent pages (`html_render`) and the options picked on them (DECISIONS 2026-11-06), on the fixture's pages.
 
 local function settle(app: any)
 	app:frames(30)
@@ -41,17 +36,21 @@ local function seeded(app: any, which: string?)
 	settle(app)
 end
 
--- What a page's bootstrap posts, signed with its nonce (the fixture's: its path's).
-local function post(app: any, card: string, value: any)
+-- Signed as the fixture's bootstrap signs: picks `p:<path>`, the rest `n:<path>`.
+local function post_to(app: any, view: string, card: string, value: any)
 	local path = if card == FRAME then "/u/html/s2/frame.html" else "/u/html/s2/pictures.html"
 	local v = table.clone(value)
 	v.kind = v.kind or "zeron.page"
 	if v.nonce == nil then
-		v.nonce = `n:{path}`
+		v.nonce = if v.pick ~= nil then `p:{path}` else `n:{path}`
 	end
-	app:set_state("page_message", { id = `html-page-{card}`, value = v })
+	app:set_state("page_message", { id = view, value = v })
 	app:command("page_post")
 	settle(app)
+end
+
+local function post(app: any, card: string, value: any)
+	post_to(app, `html-page-{card}`, card, value)
 end
 
 local GROUPS = { { code = "A", name = "Góc trang" }, { code = "B", name = "Thanh tab" }, { code = "C", name = "Rail" } }
@@ -185,7 +184,7 @@ test("picks: the prompt carries the note then each group's pick and what's left;
 	pick(app, "A2")
 	pick(app, "B2")
 	send(app, "+ header của C2")
-	expect(app:state("calls")).to_contain('send:s2:+ header của C2\n\nPicked in "Khung app":\nA = A2 (Nổi sát đỉnh)\nB = B2 (Không viền)\nNot picked: C (Rail)')
+	expect(app:state("calls")).to_contain('send:s2:+ header của C2\n\nĐã chọn trong "Khung app":\nA = A2 (Nổi sát đỉnh)\nB = B2 (Không viền)\nChưa chọn: C (Rail)')
 	expect(app:has("#composer-picks")).to_be(false)
 	app:command("picks_echo")
 	settle(app)
@@ -199,10 +198,11 @@ test("picks: the prompt carries the note then each group's pick and what's left;
 	expect(app:has("#composer-picks")).to_be(false)
 	pick(app, "C1")
 	expect(app:tree("#composer-picks")).to_contain(LABELS.C1)
+	expect(last_run(app, FRAME)).to_contain("2/3 sent · 1 chosen")
 	-- Only the open group has a slot.
 	expect(app:has(`#pick-slot-{FRAME}-A`)).to_be(false)
 	send(app, "")
-	expect(app:state("calls")).to_contain('send:s2:Picked in "Khung app":\nC = C1 (Ảnh sát mép)')
+	expect(app:state("calls")).to_contain('send:s2:Đã chọn trong "Khung app":\nC = C1 (Ảnh sát mép)')
 	app:command("picks_echo")
 	settle(app)
 	expect(last_run(app, FRAME)).to_contain('"count":"Sent"')
@@ -221,7 +221,7 @@ test("picks: a page without groups adds free chips, several, sent as label lines
 	expect(app:tree("#composer-picks")).to_contain('"Sea"')
 	expect(string.find(app:tree("#composer-picks"), "Field", 1, true)).to_be(nil)
 	send(app, "")
-	expect(app:state("calls")).to_contain('send:s2:Picked in "Ảnh":\n- Sea\n- Hill')
+	expect(app:state("calls")).to_contain('send:s2:Đã chọn trong "Ảnh":\n- Sea\n- Hill')
 end)
 
 test("picks: six groups wrap the tray to two rows", function()
@@ -256,27 +256,109 @@ test("picks: unsent picks stay in the draft over a reload and the page is told t
 	expect(last_run(app, FRAME)).to_contain('{"code":"A2","group":"A"}')
 end)
 
-test("pages: what a page posts without its nonce, from a frame, or asking to send or focus does nothing", function()
+test("pages: what a page posts without its pick nonce, from a frame, or asking to send or focus does nothing", function()
 	local app = mount("chat_fixture.luau")
 	seeded(app)
 	-- Forged: no nonce, another's nonce, an iframe's.
 	post(app, FRAME, { nonce = "", pick = { group = "A", code = "A2", label = "x", groups = GROUPS } })
 	expect(app:has("#composer-picks")).to_be(false)
-	post(app, FRAME, { nonce = "n:/u/html/s2/pictures.html", pick = { group = "B", code = "B2", label = "x", groups = GROUPS } })
+	post(app, FRAME, { nonce = "p:/u/html/s2/pictures.html", pick = { group = "B", code = "B2", label = "x", groups = GROUPS } })
 	expect(app:has("#composer-picks")).to_be(false)
-	app:set_state("page_message", { id = `html-page-{FRAME}`, main = false, value = { kind = "zeron.page", nonce = "n:/u/html/s2/frame.html", pick = { group = "C", code = "C2", label = "x", groups = GROUPS } } })
+	app:set_state("page_message", { id = `html-page-{FRAME}`, main = false, value = { kind = "zeron.page", nonce = "p:/u/html/s2/frame.html", pick = { group = "C", code = "C2", label = "x", groups = GROUPS } } })
 	app:command("page_post")
 	settle(app)
 	expect(app:has("#composer-picks")).to_be(false)
+	-- The review's two leak routes (a setter on Object.prototype, a wrapped JSON.stringify) and their
+	-- neighbours are refused in the page itself (html_pages `a_pages_own_script_never_reads_the_nonces…`,
+	-- under node); what a leak of the height channel would still give, its nonce, places no pick.
+	post(app, FRAME, { nonce = "n:/u/html/s2/frame.html", pick = { group = "A", code = "A1", label = "x", groups = GROUPS } })
+	expect(app:has("#composer-picks")).to_be(false)
 	-- Signed, asking the app to send, focus the composer or click its send.
 	post(app, FRAME, { send = true, focus = true, click = "#composer-send", text = "go" })
+	post(app, FRAME, { nonce = "p:/u/html/s2/frame.html", send = true, focus = true, click = "#composer-send", text = "go" })
 	expect(string.find(app:state("calls"), "send:", 1, true)).to_be(nil)
 	expect(app:tree('role:textbox "Message"')).never.to_contain(" focused")
+	-- A `ready` that isn't a list, as a page's own toJSON could make it, is no error.
+	post(app, FRAME, { ready = { pick = { group = "A", code = "A1" } } })
+	expect(app:has("#composer-picks")).to_be(false)
 	-- A signed pick only places it.
 	pick(app, "A2")
 	expect(app:has("#composer-picks")).to_be(true)
 	expect(string.find(app:state("calls"), "send:", 1, true)).to_be(nil)
 	expect(app:tree('role:textbox "Message"')).never.to_contain(" focused")
+end)
+
+test("pages: a page with a script before its bootstrap gets no pick nonce, and its picks place nothing", function()
+	local app = mount("chat_fixture.luau")
+	app:set_state("page_early_script", true)
+	seeded(app)
+	pick(app, "A2")
+	expect(app:has("#composer-picks")).to_be(false)
+	-- Its height still follows.
+	post(app, FRAME, { height = 420 })
+	local page = `#html-page-{FRAME}`
+	expect((box_of(app, page, page) :: any).h).to_be(420)
+end)
+
+test("pages: the sheet's page never sizes the card, and gets the ticks, locks and theme the card has", function()
+	local app = mount("chat_fixture.luau")
+	seeded(app)
+	local page = `#html-page-{FRAME}`
+	post(app, FRAME, { height = 420 })
+	expect((box_of(app, page, page) :: any).h).to_be(420)
+	app:click(`#html-card-expand-{FRAME}`)
+	settle(app)
+	-- The sheet's copy, wider, measures shorter.
+	post_to(app, "html-sheet-page", FRAME, { height = 250 })
+	app:key("Escape")
+	settle(app)
+	expect((box_of(app, page, page) :: any).h).to_be(420)
+	-- A pick on either page shows on both.
+	post_to(app, "html-sheet-page", FRAME, { pick = { group = "A", code = "A2", label = LABELS.A2, groups = GROUPS } })
+	expect(app:tree("#composer-picks")).to_contain(LABELS.A2)
+	expect(last_run(app, `{FRAME}#sheet`)).to_contain('{"code":"A2","group":"A"}')
+	expect(last_run(app, FRAME)).to_contain('{"code":"A2","group":"A"}')
+	-- The theme switched while the sheet was closed: its page follows too.
+	local runs = #(app:state("page_runs") or {})
+	app:command("theme_light")
+	settle(app)
+	local after = app:state("page_runs") or {}
+	local sheet_rethemed = false
+	for i = runs + 1, #after do
+		if after[i] == `html:{FRAME}#sheet|retheme()` then
+			sheet_rethemed = true
+		end
+	end
+	expect(sheet_rethemed).to_be(true)
+end)
+
+test("pages: a link leaving the page opens in the browser and the card keeps its page; pages load under about:blank", function()
+	local app = mount("chat_fixture.luau")
+	seeded(app)
+	local loaded = app:state("page_loaded") or {}
+	expect(loaded[1]).to_contain("|about:blank|")
+	local before = #loaded
+	local function nav(kind: string, url: string)
+		app:set_state("page_nav", { id = `html-page-{FRAME}`, kind = kind, url = url })
+		app:command("page_navigate")
+		settle(app)
+	end
+	-- Its own document and its anchors stay.
+	nav("started", "about:blank")
+	nav("changed", "about:blank#top")
+	expect(#(app:state("page_loaded") or {})).to_be(before)
+	nav("started", "https://example.com/docs")
+	expect(app:state("calls")).to_contain("open_url:https://example.com/docs")
+	loaded = app:state("page_loaded") or {}
+	expect(#loaded).to_be(before + 1)
+	expect(loaded[#loaded]).to_be(`html:{FRAME}|about:blank|<p>/u/html/s2/frame.html</p>`)
+	expect(app:has(`#html-page-{FRAME}`)).to_be(true)
+	-- Its commit after its start is the same leaving.
+	nav("committed", "https://example.com/docs")
+	expect(#(app:state("page_loaded") or {})).to_be(before + 1)
+	-- Not a web address: put back, never opened.
+	nav("started", "file:///etc/hosts")
+	expect(string.find(app:state("calls"), "open_url:file", 1, true)).to_be(nil)
 end)
 
 test("open in: a reply naming .html files shows Website cards: linked ones, found ones, a missing one disabled", function()
@@ -304,6 +386,12 @@ test("open in: a reply naming .html files shows Website cards: linked ones, foun
 	app:key("Escape")
 	settle(app)
 	expect(app:tree('role:menuitem "Zeron"')).to_contain(" hidden")
+end)
+
+test("open in: code spans not on disk don't count toward the three", function()
+	local app = mount("chat_fixture.luau")
+	seeded(app, "pages_seed_spans")
+	expect(app:tree("#html-open-p4")).to_contain('"Demo page"')
 end)
 
 test("pages: a chat on another device says where its dev server runs, and its Website cards are disabled", function()

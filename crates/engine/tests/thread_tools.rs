@@ -3163,7 +3163,8 @@ async fn a_page_file_shown_by_path_is_read_in_the_chats_folder_and_lands_on_its_
     for outside in ["../x.html", "out/missing.html"] {
         assert!(
             matches!(
-                rpc.handle(zeron_rpc::methods::PUBLISH_HTML_RENDER, publish(outside)).await,
+                rpc.handle(zeron_rpc::methods::PUBLISH_HTML_RENDER, publish(outside))
+                    .await,
                 Err(zeron_rpc::RpcError::BadParams(_))
             ),
             "{outside} is refused"

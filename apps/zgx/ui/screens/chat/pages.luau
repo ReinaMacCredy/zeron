@@ -1,16 +1,4 @@
--- What a transcript's agent pages (ds/html_card) reach of their chat: the
--- options picked on them, placed in the chat's draft (the composer's cargo,
--- kind "pick"), what was sent of them (read back from the sent messages'
--- picks, so a reload or another device sees the same), and the chat's
--- folder and device for the "Open in" cards.
---
--- A pick on a page goes to the tray, one slot per group: another option of
--- the group takes the slot in place, the chosen one again clears it. Free
--- picks (no group) add one each, and the chosen one again takes it off. A
--- group already sent is locked: its options do nothing. Nothing here sends.
---
---   Pages.pages(key, messages, session)   the Pages a transcript is given
---   Pages.lit                             the pick that just landed, lit
+-- What a transcript's agent pages reach of their chat: picks on its draft (cargo kind "pick"), what was sent, its folder.
 
 local shared = require("@app/screens/chat/shared")
 local sessions = require("@account/sessions")
@@ -23,14 +11,23 @@ local M = {}
 
 M.lit = ui.shared("chat.picks.lit", nil :: string?)
 
--- What was sent of card `title` after message `message`: each pick, and
--- the groups it answered.
+-- (Up to a later card of the same title: what was sent there is that card's.)
 function M.sent_of(list: { any }, title: string, message: string): { list: { any }, locked: { [string]: boolean } }
 	local out, locked = {}, {}
 	local after = false
 	for _, m in list do
 		if m.id == message then
 			after = true
+		elseif after and m.role == "assistant" then
+			local again = false
+			for _, b in m.blocks or {} do
+				if b.kind == "html" and b.title == title then
+					again = true
+				end
+			end
+			if again then
+				break
+			end
 		elseif after and m.role == "user" then
 			for _, a in m.attachments or {} do
 				if a.kind == "pick" and a.card == title then
@@ -45,8 +42,6 @@ function M.sent_of(list: { any }, title: string, message: string): { list: { any
 	return { list = out, locked = locked }
 end
 
--- `p` on card `card` (titled `title`, in reply `message`), on chat `key`'s
--- draft; `sent` what went of it.
 function M.place(key: string, card: string, title: string, p: any, sent: { list: { any }, locked: { [string]: boolean } })
 	local group = p.group or ""
 	if group ~= "" and sent.locked[group] then

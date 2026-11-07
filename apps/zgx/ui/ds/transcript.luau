@@ -196,9 +196,7 @@ export type Props = {
 	-- lane of its own). Without it, the row opens its call as any does.
 	on_open_subagent: ((sub: { ref: string, title: string?, status: string? }) -> ())?,
 	threads: Threads.Threads?,
-	-- What its agent pages reach of the chat (screens/chat/pages): the
-	-- picks on them, the chat's folder for "Open in". None: pages show,
-	-- their options do nothing.
+	-- None: pages show, their options do nothing.
 	pages: HtmlCard.Pages?,
 }
 export type Anchor = { id: string, dy: number }
@@ -233,8 +231,6 @@ export type Block = {
 	summary: string?,
 	live: boolean?,
 	blocks: { Block }?,
-	-- A page an agent showed (ds/html_card): its stored `path` (or a dev
-	-- server's `url`), `title`, the agent's height; a reply's `.html` files.
 	height: number?,
 	url: string?,
 	targets: { { dest: string, linked: boolean } }?,
@@ -705,7 +701,6 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 					else nil,
 			}
 		end
-		-- A page an agent showed, live above its reply (ds/html_card).
 		if b.kind == "html" then
 			return HtmlCard.Card {
 				key = `{m.id}-{b.id}`,

@@ -1,25 +1,4 @@
--- A page an agent showed with `html_render`, live in the transcript above
--- its reply, as Zeron's card (crates/ui/src/transcript/html_card.rs): a
--- globe, its title and expand over the page, the page's frame as tall as
--- the page (capped at the agent's height once it overflowed), and the
--- expanded sheet (title, Live and Source, Save .html, Close). A local dev
--- server's page (`url`) is live too: its label, Reload, open in the
--- browser; "X is not responding" with Retry when its server doesn't
--- answer; "Running on X" for a chat on another device.
---
--- The page is the chat host's stored copy, read once (src/html_pages.rs)
--- and given the theme bootstrap. Its options (`data-zeron-pick` buttons)
--- only place a pick in the composer's tray: a page never sends, focuses the
--- composer or acts in the app. What it posts is heard only from the top
--- frame and signed with the nonce its bootstrap carries.
---
--- The "Open in" cards under a reply naming a `.html` file (`OpenCards`,
--- crates/ui transcript.rs `render_html_card`): Website, its path and title,
--- "Open in" with its app and the chooser (Zeron, the default browser),
--- Reveal and Copy path; disabled on another device or once the file is gone.
---
---   HtmlCard.Card { key, message, title, path?, url?, height, device?, pages }
---   HtmlCard.OpenCards { key, targets, pages }
+-- Agent pages (`html_render`) as gpui's crates/ui/src/transcript/html_card.rs, and its "Open in" cards.
 
 local Icon = require("@self/icon")
 local IconButton = require("@self/icon_button").IconButton
@@ -31,7 +10,6 @@ local picks = require("@self/html_picks")
 
 local M = {}
 
--- What a transcript's pages reach of the chat (screens/chat/pages).
 export type Pages = {
 	chosen: (card: string) -> { any },
 	sent: (title: string, message: string) -> { list: { any }, locked: { [string]: boolean } },
@@ -42,14 +20,11 @@ export type Pages = {
 	reveal: (path: string) -> (),
 	open_external: (path: string) -> (),
 	open_in_zeron: (path: string) -> (),
-	-- A link's target as a file of the chat's folder (screens/chat/file_links).
 	resolve: (target: string, root: string?) -> any,
 }
 
 local MIN_H, MAX_H = 80, 2000
-local BASE_URL = "https://zeron.page/"
--- Live pages kept at once; one not in view longest closes first and
--- loads again when it comes back (the shipping app's MAX_LIVE_PAGES).
+-- The shipping app's MAX_LIVE_PAGES.
 local MAX_LIVE = 6
 
 local function raw(n: number, why: string): any
@@ -82,8 +57,6 @@ local function font_of(token: string): string
 	return if type(v) == "string" then v else ""
 end
 
--- The theme's roles as a page is handed them (zeron_proto html_render
--- `PageTheme`), each `#rrggbbaa`: Zeron's names, zgx's tokens.
 function M.theme(): { [string]: any }
 	local kind = ui.theme.kind()
 	local text = hex("text.primary")
@@ -128,8 +101,6 @@ function M.theme(): { [string]: any }
 	}
 end
 
--- Each card's page, kept across its row leaving the view (the host keeps
--- a page by its id): its controller, nonce, markup and reported height.
 local PAGES: { [string]: any } = {}
 local ORDER: { string } = {}
 
@@ -146,8 +117,18 @@ local function touch(key: string)
 		local p = PAGES[old]
 		if p and (p.mounted or 0) <= 0 then
 			api.close(p.web)
+			if p.sheet then
+				api.close(p.sheet)
+			end
 			PAGES[old] = nil
 			table.remove(ORDER, at)
+			local shared = false
+			for _, other in PAGES do
+				shared = shared or (other.path == p.path and other.device == p.device)
+			end
+			if not shared and p.path then
+				api.forget({ path = p.path, device = p.device })
+			end
 			over -= 1
 		else
 			at += 1
@@ -164,23 +145,29 @@ local function entry_of(key: string): any
 	return e
 end
 
--- A pick as a page posts it, kept to plain short strings.
+-- One line each, so the agent's block reads back (zeron_proto `extract_picks`).
+local function word(v: any, most: number): string?
+	if type(v) ~= "string" then
+		return nil
+	end
+	local s = string.gsub((string.gsub(v, "%c", " ")), "%s+", " ")
+	s = string.match(s, "^%s*(.-)%s*$") or ""
+	if #s > most then
+		local cut = most
+		while cut > 0 and (string.byte(s, cut + 1) or 0) >= 0x80 and (string.byte(s, cut + 1) or 0) < 0xC0 do
+			cut -= 1
+		end
+		s = string.sub(s, 1, cut)
+	end
+	return s
+end
+
 local function clean_pick(p: any): any?
 	if type(p) ~= "table" then
 		return nil
 	end
-	local function word(v: any, most: number): string?
-		if type(v) ~= "string" then
-			return nil
-		end
-		local s = string.match(v, "^%s*(.-)%s*$") or ""
-		if #s > most then
-			s = string.sub(s, 1, most)
-		end
-		return s
-	end
 	local code, group, label = word(p.code, 32), word(p.group, 32) or "", word(p.label, 120)
-	if not code or code == "" or not label then
+	if not code or code == "" or not label or string.find(code, "%s") or string.find(group, "%s") then
 		return nil
 	end
 	if label == "" then
@@ -189,11 +176,11 @@ local function clean_pick(p: any): any?
 	local groups = {}
 	if type(p.groups) == "table" then
 		for i, g in p.groups do
-			if i > 12 or type(g) ~= "table" then
+			if type(i) ~= "number" or i > 12 or type(g) ~= "table" then
 				break
 			end
 			local c, n = word(g.code, 32), word(g.name, 60)
-			if c and c ~= "" then
+			if c and c ~= "" and not string.find(c, "%s") then
 				table.insert(groups, { code = c, name = if n and n ~= "" then n else c })
 			end
 		end
@@ -201,8 +188,6 @@ local function clean_pick(p: any): any?
 	return { code = code, group = group, label = label, groups = groups }
 end
 
--- The count a page's `data-zeron-count` shows: chosen of its groups, all
--- chosen, how many went, or sent.
 function M.count(groups: { any }, chosen: { any }, sent: { list: { any }, locked: { [string]: boolean } }): string
 	local total = #groups
 	if total == 0 then
@@ -221,6 +206,9 @@ function M.count(groups: { any }, chosen: { any }, sent: { list: { any }, locked
 		return locale.s("ds.html_card.count_sent")
 	end
 	if locked > 0 then
+		if #chosen > 0 then
+			return locale.s("ds.html_card.count_partly_sent_chosen", { n = locked, total = total, chosen = #chosen })
+		end
 		return locale.s("ds.html_card.count_partly_sent", { n = locked, total = total })
 	end
 	if #chosen >= total then
@@ -229,7 +217,6 @@ function M.count(groups: { any }, chosen: { any }, sent: { list: { any }, locked
 	return locale.s("ds.html_card.count_chosen", { n = #chosen, total = total })
 end
 
--- What a page's buttons show: chosen, sent, locked, its count.
 local function picks_state(e: any, chosen: { any }, sent: any): any
 	local list, done = {}, {}
 	for _, it in chosen do
@@ -286,11 +273,11 @@ local function title_text(words: any): Node
 	return ui.text { words, literal = true, grow = 1, min_w = 0, truncate = true, text_size = "$font.size.sm", color = "$text.secondary" }
 end
 
--- The expanded sheet over the conversation.
 local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 	local view = ui.state(`html_sheet_view:{props.key}`, "live")
-	local web = api.web(`html:{props.key}#sheet`)
-	local loaded = false
+	if not live and not e.sheet then
+		e.sheet = api.web(`html:{props.key}#sheet`)
+	end
 	local function size(): any
 		local s = (ui :: any).window.size:get()
 		return s
@@ -314,9 +301,9 @@ local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 		border_color = "$border",
 		bg = "$surface.overlay",
 		build = function(): Node
-			if not loaded and e.html then
-				api.load(web, e.html, BASE_URL)
-				loaded = true
+			if not live and not e.sheet_loaded and e.html then
+				api.load(e.sheet, e.html)
+				e.sheet_loaded, e.sheet_theme, e.sheet_shown = true, e.baked, nil
 			end
 			return ui.column {
 				w_full = true,
@@ -452,16 +439,15 @@ local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 						api.view {
 							id = "html-sheet-page",
 							label = props.title,
-							web = if live then nil else web,
+							web = if live then nil else e.sheet,
 							src = if live then props.url else nil,
 							transparent = not live,
 							w_full = true,
 							grow = 1,
 							min_h = 0,
-							on_message = props.heard,
-							on_new_window = function(url: string)
-								api.open_url(url)
-							end,
+							on_message = props.sheet_heard,
+							on_navigate = props.sheet_navigated,
+							on_new_window = props.open_out or api.open_url,
 						},
 					}
 				end, { w_full = true, grow = 1, min_h = 0 }),
@@ -470,25 +456,61 @@ local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 	}
 end
 
--- A stored page.
+local function theme_now(): string
+	return `{tostring(ui.theme.current:peek())}|{tostring(material.frosted:peek())}`
+end
+
+-- The page's theme swapped in place when it was shown under another; returns the one it has now.
+local function retheme(web: any, has: string?): string
+	local now = theme_now()
+	if has ~= now then
+		local js = api.retheme({ theme = M.theme(), font_size = 16 })
+		if js then
+			api.run(web, js)
+		end
+	end
+	return now
+end
+
+local function signed(value: any, main_frame: any, nonce: string?): boolean
+	return main_frame == true and type(value) == "table" and value.kind == "zeron.page" and type(nonce) == "string" and nonce ~= "" and value.nonce == nonce
+end
+
+local function groups_of(ready: any): { any }
+	local groups = {}
+	for i, g in ready do
+		if type(i) ~= "number" or i > 12 or type(g) ~= "table" then
+			break
+		end
+		local c = word(g.code, 32)
+		if c and c ~= "" and not string.find(c, "%s") then
+			local n = word(g.name, 60)
+			table.insert(groups, { code = c, name = if n and n ~= "" then n else c })
+		end
+	end
+	return groups
+end
+
 local function Page(props: any): Node
 	local key = props.key
 	local e = entry_of(key)
+	e.path, e.device = props.path, props.device
 	e.mounted = (e.mounted or 0) + 1
 	touch(key)
 	ui.on_cleanup(function()
 		e.mounted = (e.mounted or 1) - 1
 	end)
-	local status = ui.use_state(if e.loaded then "ready" else "loading")
+	local status = ui.use_state(if e.loaded then "ready" elseif e.gone then "failed" else "loading")
 	local content = ui.use_state(e.height or -1)
 	local sheet = ui.use_state(false)
-	if not e.loaded and not e.reading then
+	if not e.loaded and not e.reading and not e.gone then
 		e.reading = true
+		local baked = theme_now()
 		api.page({ path = props.path, device = props.device, theme = M.theme(), font_size = 16, source = props.source }, function(got: any, _why: string?)
 			e.reading = false
 			if type(got) == "table" and type(got.html) == "string" then
-				e.nonce, e.html, e.loaded = got.nonce, got.html, true
-				api.load(e.web, got.html, BASE_URL)
+				e.nonce, e.picks, e.html, e.loaded, e.baked, e.theme = got.nonce, got.picks, got.html, true, baked, baked
+				api.load(e.web, got.html)
 				status:set("ready")
 			else
 				status:set("failed")
@@ -510,65 +532,41 @@ local function Page(props: any): Node
 	local function sent(): any
 		return if pages then pages.sent(props.title, props.message) else { list = {}, locked = {} }
 	end
-	local function push()
-		if e.loaded then
-			local js = api.picks(picks_state(e, chosen(), sent()))
-			if js then
-				api.run(e.web, js)
-			end
-		end
-	end
-	-- The page's buttons follow the tray and what was sent (only when they change).
-	ui.effect(function()
-		local _ = status:get()
+	-- (The host call only when the state changed: this reruns with every streamed token.)
+	local function sync_picks()
 		local state = picks_state(e, chosen(), sent())
-		local js = api.picks(state)
-		if e.loaded and js and js ~= e.shown then
+		local sig = ui.json.encode(state)
+		if sig ~= e.sig then
+			e.sig, e.js = sig, api.picks(state)
+		end
+		local js = e.js
+		if not js then
+			return
+		end
+		if e.loaded and js ~= e.shown then
 			e.shown = js
 			api.run(e.web, js)
 		end
+		if e.sheet_loaded and js ~= e.sheet_shown then
+			e.sheet_shown = js
+			api.run(e.sheet, js)
+		end
+	end
+	ui.effect(function()
+		local _ = status:get()
+		sync_picks()
 	end)
-	-- A theme switched: the page's variables swapped in place.
-	local themed = false
 	ui.effect(function()
 		ui.theme.current:get()
 		material.frosted:get()
-		if not themed then
-			themed = true
-			return
-		end
 		if e.loaded then
-			local js = api.retheme({ theme = M.theme(), font_size = 16 })
-			if js then
-				api.run(e.web, js)
-			end
+			e.theme = retheme(e.web, e.theme)
+		end
+		if e.sheet_loaded then
+			e.sheet_theme = retheme(e.sheet, e.sheet_theme)
 		end
 	end)
-	local function heard(value: any, _origin: any, main_frame: any)
-		if main_frame ~= true or type(value) ~= "table" or value.kind ~= "zeron.page" then
-			return
-		end
-		if e.nonce == nil or value.nonce ~= e.nonce then
-			return
-		end
-		if type(value.height) == "number" and value.height == value.height and value.height >= 0 then
-			e.height = value.height
-			if math.abs(content:peek() - value.height) >= 1 then
-				content:set(value.height)
-			end
-		end
-		if type(value.ready) == "table" then
-			local groups = {}
-			for i, g in value.ready do
-				if i > 12 or type(g) ~= "table" or type(g.code) ~= "string" then
-					break
-				end
-				table.insert(groups, { code = string.sub(g.code, 1, 32), name = if type(g.name) == "string" then string.sub(g.name, 1, 60) else g.code })
-			end
-			e.groups = groups
-			e.shown = nil
-			push()
-		end
+	local function take_pick(value: any)
 		if value.pick ~= nil and pages then
 			local p = clean_pick(value.pick)
 			if p then
@@ -579,8 +577,91 @@ local function Page(props: any): Node
 			end
 		end
 	end
+	local function heard(value: any, _origin: any, main_frame: any)
+		if signed(value, main_frame, e.picks) then
+			take_pick(value)
+			return
+		end
+		if not signed(value, main_frame, e.nonce) then
+			return
+		end
+		if type(value.height) == "number" and value.height == value.height and value.height >= 0 then
+			e.height = value.height
+			if math.abs(content:peek() - value.height) >= 1 then
+				content:set(value.height)
+			end
+		end
+		if type(value.ready) == "table" then
+			e.groups = groups_of(value.ready)
+			e.shown = nil
+			e.theme = retheme(e.web, e.theme)
+			sync_picks()
+		end
+	end
+	-- (The sheet's copy is wider: its height is not the card's.)
+	local function sheet_heard(value: any, _origin: any, main_frame: any)
+		if signed(value, main_frame, e.picks) then
+			take_pick(value)
+		elseif signed(value, main_frame, e.nonce) and type(value.ready) == "table" then
+			e.sheet_shown = nil
+			e.sheet_theme = retheme(e.sheet, e.sheet_theme)
+			sync_picks()
+		end
+	end
+	local function open_out(url: string)
+		local host = string.match(url, "^https?://([^/?#]*)")
+		local t = ui.now()
+		if host and host ~= "" and not string.find(host, "@", 1, true) and t - (e.opened or -1e9) >= 1000 then
+			e.opened = t
+			api.open_url(url)
+		end
+	end
+	-- (zgx asks the view no navigation policy yet: a page leaving its document is put back, as gpui refuses it.)
+	local function navigated(on_sheet: boolean): (any) -> ()
+		return function(nav: any)
+			if type(nav) ~= "table" or (nav.kind ~= "started" and nav.kind ~= "committed") or not e.html then
+				return
+			end
+			local url = if type(nav.url) == "string" then nav.url else ""
+			if url == "" or url == "about:blank" or string.sub(url, 1, 12) == "about:blank#" then
+				return
+			end
+			local web = if on_sheet then e.sheet else e.web
+			local t = ui.now()
+			-- (A link's start and commit come as two events: one leaving.)
+			if url == e.left and t - (e.left_at or -1e9) < 2000 then
+				return
+			end
+			e.left, e.left_at = url, t
+			local recent = {}
+			for _, at in e.bounces or {} do
+				if t - at < 10000 then
+					table.insert(recent, at)
+				end
+			end
+			table.insert(recent, t)
+			e.bounces = recent
+			if #recent > 6 then
+				api.load(web, "")
+				if not on_sheet then
+					e.loaded, e.gone = false, true
+					status:set("failed")
+				end
+				return
+			end
+			api.load(web, e.html)
+			if on_sheet then
+				e.sheet_theme, e.sheet_shown = e.baked, nil
+			else
+				e.theme, e.shown = e.baked, nil
+			end
+			open_out(url)
+		end
+	end
 	local sheet_props = table.clone(props)
-	sheet_props.heard = heard
+	sheet_props.sheet_heard = sheet_heard
+	sheet_props.sheet_navigated = navigated(true)
+	sheet_props.open_out = open_out
 	return ui.column {
 		id = `html-card-{key}`,
 		class = "html-card",
@@ -611,16 +692,14 @@ local function Page(props: any): Node
 				w_full = true,
 				h = frame,
 				on_message = heard,
-				on_new_window = function(url: string)
-					api.open_url(url)
-				end,
+				on_navigate = navigated(false),
+				on_new_window = open_out,
 			}
 		end, { w_full = true }),
 		Sheet(sheet_props, sheet, e, false),
 	}
 end
 
--- A local dev server's page.
 local function Live(props: any): Node
 	local live = api.live(props.url)
 	if not live then
@@ -653,8 +732,6 @@ local function Live(props: any): Node
 		nonce:set(nonce:peek() + 1)
 		probe()
 	end
-	local sheet_props = table.clone(props)
-	sheet_props.heard = function() end
 	return ui.column {
 		id = `html-card-{props.key}`,
 		class = "html-card",
@@ -673,8 +750,9 @@ local function Live(props: any): Node
 				end
 			end),
 		},
+		-- (Keyed on the sheet too, so the sheet's live view is the only one loading the server.)
 		ui.presence(function(): string
-			return `{reach:get()}:{nonce:get()}`
+			return `{reach:get()}:{nonce:get()}:{if sheet:get() then "sheet" else ""}`
 		end, function(now: string): Node
 			if string.sub(now, 1, 5) == "down:" then
 				return ui.column {
@@ -718,7 +796,7 @@ local function Live(props: any): Node
 				end,
 			}
 		end, { w_full = true }),
-		Sheet(sheet_props, sheet, {}, true),
+		Sheet(props, sheet, {}, true),
 	}
 end
 
@@ -729,7 +807,6 @@ M.Card = ui.component(function(props: any): Node
 	return Page(props)
 end)
 
--- The remembered "Open in" app: the default browser or Zeron.
 M.open_app = ui.persist("html_open_app", "default")
 
 local function open_card(props: any, ix: number, path: string, absolute: string): Node
@@ -917,8 +994,7 @@ local OpenCard = ui.component(function(props: any): Node
 	return open_card(props.card, props.ix, props.path, props.absolute)
 end)
 
--- The "Open in" cards for a settled reply's `.html` files: linked ones, and
--- ones in inline code once they are found on disk; at most three.
+-- (Code spans count toward the three only once found on disk, as gpui filters before it truncates.)
 M.OpenCards = ui.component(function(props: any): Node
 	local pages: Pages? = props.pages
 	if not pages then
@@ -932,7 +1008,7 @@ M.OpenCards = ui.component(function(props: any): Node
 	local cards = {}
 	local seen: { [string]: boolean } = {}
 	for _, t in props.targets or {} do
-		if #cards >= 3 then
+		if #cards >= 12 then
 			break
 		end
 		local r = pages.resolve(t.dest, root)
@@ -944,23 +1020,35 @@ M.OpenCards = ui.component(function(props: any): Node
 	if #cards == 0 then
 		return ui.column {}
 	end
-	local nodes = {}
-	for ix, c in cards do
-		local node = OpenCard { card = props, ix = ix, path = c.path, absolute = c.absolute }
-		if c.linked then
-			table.insert(nodes, node)
-		else
-			-- (Only once it's found on disk: a passing mention shows nothing.)
+	for _, c in cards do
+		if not c.linked then
 			local found = ui.state(`html_found:{c.absolute}`, nil :: boolean?)
 			if found:peek() == nil then
 				api.title(c.absolute, function(got: any)
 					found:set(not (got and got.missing))
 				end)
 			end
-			table.insert(nodes, ui.show(function(): boolean
-				return found:get() == true
-			end, node))
+			c.found = found
 		end
+	end
+	local function shown(ix: number): boolean
+		local n = 0
+		for i, c in cards do
+			local here = c.linked or c.found:get() == true
+			if here then
+				n += 1
+			end
+			if i == ix then
+				return here and n <= 3
+			end
+		end
+		return false
+	end
+	local nodes = {}
+	for ix, c in cards do
+		table.insert(nodes, ui.show(function(): boolean
+			return shown(ix)
+		end, OpenCard { card = props, ix = ix, path = c.path, absolute = c.absolute }))
 	end
 	return ui.column { id = `html-open-{props.key}`, w_full = true, gap = "$space.2", nodes }
 end)

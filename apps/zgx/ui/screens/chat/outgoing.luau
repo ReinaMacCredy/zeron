@@ -40,7 +40,7 @@ end
 
 local function shown(list: { any }, quotes: { Quote.Staged }, picks: { { [string]: any } }, said: { Comments.Comment }, cards: { HtmlPicks.Card }): { any }
 	local out = {}
-	-- (The picks on agent pages, as chat.rs `page_picks` reads them back.)
+	-- (As chat.rs `page_picks` reads them back.)
 	for _, c in cards do
 		for _, p in c.picks do
 			table.insert(out, { kind = "pick", name = p.label, card = c.card, group = p.group or "", code = if (p.group or "") ~= "" then p.code else p.label, label = p.label })
@@ -91,8 +91,6 @@ function M.parts(typed: string, text: string, carried: { any }): { [string]: any
 	-- Review comments left on files: a block after the words
 	-- (screens/chat/comments), each its file and line.
 	local comments: { Comments.Comment } = {}
-	-- Options picked on agent pages: each card's block after the words
-	-- (ds/html_picks `with_picks`, zeron_proto's).
 	local chosen: { any } = {}
 	for _, item in carried do
 		if item.kind == "pick" then

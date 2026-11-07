@@ -1216,6 +1216,7 @@ return {
 	["ds.html_card.count_sent"] = "Sent",
 	["ds.html_card.count_free"] = "{n} chosen",
 	["ds.html_card.count_partly_sent"] = "{n}/{total} sent",
+	["ds.html_card.count_partly_sent_chosen"] = "{n}/{total} sent · {chosen} chosen",
 	["ds.html_card.count_all"] = "All {total} chosen",
 	["ds.html_card.count_chosen"] = "{n}/{total} chosen",
 	["ds.html_card.open_in_browser"] = "Open in browser",
