@@ -49,6 +49,8 @@ export type Props = {
 	attachments: { Attachment }?,
 	now: (() -> Now?)?,
 	id: string?,
+	-- A thread mention's agent mark, by its chat.
+	chat_mark: ((chat: string) -> string?)?,
 	open: ((target: string) -> ())?,
 	-- Their context menus where they aren't the web's (ds/markdown's).
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
@@ -404,7 +406,7 @@ return ui.component(function(props: Props): Node
 					ref = body,
 					w_full = true,
 					shrink = 0,
-					Markdown { text = props.text, breaks = true, open = props.open, link_menu = props.link_menu, find = props.find, wash = props.wash },
+					Markdown { text = props.text, breaks = true, open = props.open, link_menu = props.link_menu, chat_mark = props.chat_mark, find = props.find, wash = props.wash },
 				},
 			},
 			-- The way to open it: a plain link under the text, at its left

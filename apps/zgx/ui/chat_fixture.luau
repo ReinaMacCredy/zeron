@@ -1555,8 +1555,13 @@ ui.command {
 -- a line, one outside the chat's folder, one on the web), in a chat whose
 -- folder is /work/atlas; what opens a file there noted (`open_file:`).
 local panel_stub: any = (require :: any)("@app/screens/panel")
-panel_stub.open_file = function(session: any, path: string)
-	note(`open_file:{if type(session) == "table" then session.id else session}:{path}`)
+panel_stub.open_file = function(session: any, path: string, _project: any?, at: any?)
+	local line = if type(at) == "table" then at.line elseif type(at) == "number" then at else nil
+	note(`open_file:{if type(session) == "table" then session.id else session}:{path}{if line then `@{line}` else ""}`)
+end
+store.answer_secret = function(id: string, request: string, secret: string?): any
+	note(`secret:{id}:{request}:{secret or "declined"}`)
+	return settled(nil)
 end
 -- The app taking web links (ds/links, as the shell sets it for "Open links
 -- in Zeron"): each link opened is noted, nothing else happens.
@@ -1626,6 +1631,124 @@ ui.command {
 			copy = reply,
 			blocks = { { id = "t", kind = "text", text = reply } },
 		}
+	end,
+}
+-- One of every row kind U24 draws (src/chat.rs writes each in this shape; its
+-- Rust tests prove it), in a chat whose folder is /work/atlas.
+local function kinds_messages(): { any }
+	local reply = "The parser is [parse.rs](src/parse.rs:12) and the host [main.rs](/work/atlas/src/main.rs#L40), not [this one](/etc/hosts.conf) nor [the docs](https://example.com/a.rs).\n\n"
+		.. "[chat.rs](src/chat.rs:7)\n\nCargo.toml\n\nversion 1.2"
+	local function tool(id: string, kind: string, verb: string, target: string?, extra: { [string]: any }?): any
+		local t: { [string]: any } = { id = id, kind = kind, verb = verb, target = target }
+		for k, v in extra or {} do
+			t[k] = v
+		end
+		return t
+	end
+	return {
+		{ id = "ku1", role = "user", text = "Ask [Long chat](zeron-chat:s1) about [chat.rs](zeron-file:src/chat.rs)", at = "Sep 8, 1:50 PM", copy = "Ask Long chat", attachments = { { kind = "file", name = "Pasted text 2.txt", path = "/tmp/pasted/x.txt" } } },
+		{
+			id = "ka1",
+			role = "assistant",
+			text = reply,
+			model = "Opus",
+			at = "Sep 8, 1:51 PM",
+			copy = reply,
+			blocks = {
+				{
+					id = "g:k1",
+					kind = "tools",
+					summary = "Read 1 file · called 4 tools",
+					tools = {
+						tool("k1", "read", "Read", "parse.rs", { path = "src/parse.rs", output = "fn parse_all() {}" }),
+						tool("k2", "mcp", "Used", "zeron.device_screenshot", { images = { "assets/composer/shell.png", "assets/composer/transcript.png" } }),
+						tool("k3", "wait", "Waited for agents"),
+						tool("k4", "skill", "Used", "zgx-port", { path = "/work/atlas/skills/zgx-port/SKILL.md" }),
+						tool("k5", "todo", "Updated the plan", "1/3 done", { call = "[x] a\n[ ] b\n[ ] c" }),
+						tool("k6", "edit", "Patched", "workspace"),
+					},
+				},
+				{ id = "t1", kind = "text", text = reply },
+				{ id = "q1", kind = "line", line = "input", outcome = "answered", text = "Scope → Branch · Reviewer → Codex", answers = { { label = "Scope", answer = "Branch", skipped = false }, { label = "Reviewer", answer = "Codex", skipped = false } } },
+				{ id = "q2", kind = "line", line = "input", outcome = "answered", text = "Plan → Skipped", answers = { { label = "Plan", answer = "Skipped", skipped = true } } },
+				{ id = "q3", kind = "line", line = "input", outcome = "pending", title = "Deploy" },
+				{ id = "x1", kind = "line", line = "secret", request = "req-1", title = "Tailscale auth key", reason = "Create one at https://login.tailscale.com/admin/settings/keys.", status = "pending" },
+				{ id = "x2", kind = "line", line = "secret", request = "req-0", title = "Old key", reason = "", status = "saved" },
+				{ id = "e1", kind = "line", line = "error", text = "Codex exited with status 101: thread 'main' panicked at src/lib.rs:4" },
+				{ id = "e2", kind = "line", line = "error", text = "Claude Code is not logged in. Please run /login.", problem = "signed_out" },
+			},
+		},
+		{ id = "ks1", role = "system", line = "claude_command", text = "Claude Code ran /cost", card = { command = "/cost", text = "Total cost: 1.2M tokens\nTotal duration: 4m", pending = false } },
+		{ id = "ks2", role = "system", line = "claude_command", text = "Claude Code ran /doctor", card = { command = "/doctor", text = "", pending = true, started = os.time() * 1000, stale_ms = 120000 } },
+		{ id = "ks3", role = "system", line = "claude_command", text = "Claude Code ran /status", card = { command = "/status", text = "", pending = false, terminal = "status", action = "Open Status" } },
+		{ id = "ks6", role = "system", line = "claude_command", text = "Claude Code /model", card = { command = "/model", text = "", pending = false, model = "opus", models = { { id = "sonnet", label = "Sonnet" }, { id = "opus", label = "Opus" }, { id = "haiku", label = "Haiku" } } } },
+		{ id = "ks4", role = "system", line = "claude_config", text = "Claude Code settings · Theme → dark, Verbose → on" },
+		{ id = "ks5", role = "system", line = "divider", text = "Branch switched to feat/kinds" },
+	}
+end
+ui.command {
+	id = "kinds_turn",
+	title = "One of every row kind",
+	run = function()
+		local s = table.clone(store.session:peek() or {})
+		s.cwd = "/work/atlas"
+		store.session:set(s)
+		for _, m in kinds_messages() do
+			store.messages:push(m)
+		end
+	end,
+}
+-- A long chat for the reading place (U24): forty turns, a question waiting
+-- in the fifth reply; each changed above the view by the commands after it.
+ui.command {
+	id = "kinds_long",
+	title = "Forty turns, a question waiting early on",
+	run = function()
+		local list = {}
+		for i = 1, 40 do
+			table.insert(list, { id = `lu{i}`, role = "user", text = `Prompt {i} asks a thing.`, at = "Sep 8, 1:50 PM", copy = `Prompt {i}` })
+			local blocks: { any } = { { id = "t", kind = "text", text = `Reply {i} says a line of words.` } }
+			if i == 5 then
+				table.insert(blocks, { id = "q", kind = "line", line = "input", outcome = "pending", title = "Pick" })
+			end
+			table.insert(list, { id = `la{i}`, role = "assistant", text = `Reply {i} says a line of words.`, model = "Opus", at = "Sep 8, 1:51 PM", copy = "x", blocks = blocks })
+		end
+		store.messages:set(list)
+	end,
+}
+-- A steer landing mid-turn, as the engine writes it: the reply so far
+-- settles, the steer's prompt lands, and the reply goes on in a new entry.
+ui.command {
+	id = "kinds_steer",
+	title = "A steer lands mid-turn",
+	run = function()
+		local n = store.messages:len()
+		store.messages:set_key({ n, "streaming" }, false)
+		store.messages:set_key({ n, "text" }, "First half of the answer, before the steer.")
+		store.messages:push { id = "steer", role = "user", text = "Also check the tests while you're at it.", at = "Sep 8, 5:01 PM", copy = "Also check" }
+		store.messages:push { id = "live2", role = "assistant", text = "", model = "Opus", streaming = true, started = ui.now() / 1000, tools = {} }
+		store.draft:set { id = "live2", text = "Going on with the tests" }
+	end,
+}
+-- (Which reply: `kinds_at`, the nth.)
+local kinds_at = ui.state("kinds_at", 3)
+ui.command {
+	id = "kinds_grow_above",
+	title = "A reply grows",
+	run = function()
+		local long = string.rep("A paragraph that grew in while the reader was further down.\n\n", 12)
+		store.messages:set_key({ kinds_at:peek() * 2, "blocks" }, { { id = "t", kind = "text", text = long } })
+	end,
+}
+ui.command {
+	id = "kinds_answer_above",
+	title = "A reply's question is answered",
+	run = function()
+		local n = kinds_at:peek()
+		store.messages:set_key({ n * 2, "blocks" }, {
+			{ id = "t", kind = "text", text = `Reply {n} says a line of words.` },
+			{ id = "q", kind = "line", line = "input", outcome = "answered", text = "", answers = { { label = "A", answer = "1" }, { label = "B", answer = "2" }, { label = "C", answer = "3" } } },
+		})
 	end,
 }
 -- A live turn whose tools include a command of five lines (a shell script

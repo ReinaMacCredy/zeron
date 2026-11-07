@@ -819,8 +819,6 @@
       "forked_from": "Forked from {title}",
       "continued_from": "Continued from {title}",
       "context_handoff": "Context handoff",
-      "secret_requested": "Secret requested: {title}",
-      "awaiting_answer": "{title}: awaiting your answer",
       "resumed": "Resumed"
     },
     "user_message": {
@@ -1499,6 +1497,48 @@
       "default_browser": "Default browser",
       "reveal": "Reveal in Finder",
       "copy_path": "Copy path"
+    },
+    "transcript_rows": {
+      "question": "Question",
+      "questions": "{n, plural, one {# question} other {# questions}}",
+      "awaiting": "Awaiting your answer…",
+      "secret": {
+        "status": {
+          "pending": "Asking for a secret",
+          "saved": "Secret saved",
+          "declined": "Declined",
+          "timedout": "Timed out",
+          "cancelled": "Cancelled"
+        },
+        "field": "Secret",
+        "placeholder": "Paste the secret",
+        "save": "Save securely",
+        "decline": "Decline",
+        "kept_out": "Kept out of chat, in a private file this agent's commands can read for 24 hours",
+        "failed": "The secret wasn't saved. Try again.",
+        "offline": "Zeron's engine can't be reached."
+      },
+      "claude": {
+        "running": "Running in Claude Code…",
+        "elapsed": "{n}s",
+        "terminal_only": " only runs in Claude Code's terminal.",
+        "output": "Claude Code · command output",
+        "copy": "Copy as Markdown",
+        "copied": "Copied",
+        "retry": "Retry",
+        "local": "Ran locally in Claude Code · no tokens used",
+        "stale": "No answer came back from Claude Code.",
+        "model": "Model",
+        "claude_code": "Claude Code",
+        "default": "default",
+        "model_note": "Picking a model here changes this chat's model chip."
+      },
+      "error": {
+        "label": "Error",
+        "signed_out": "Signed out",
+        "limit": "Limit reached",
+        "log_in": "Log in"
+      }
     }
   },
   "settings": {

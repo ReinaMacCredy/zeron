@@ -66,8 +66,9 @@ local function walk(app: any)
 	end
 	-- (Every step a row's, none round to the composer's controls, but the
 	-- side chat's tab each way, and the last Tab: down past the newest row,
-	-- back to the composer.)
-	expect(seen).to_be(25)
+	-- back to the composer. Going down, a reply focus came into shows its
+	-- lane, its Copy a stop: two more.)
+	expect(seen).to_be(27)
 end
 
 test("Tab and ⇧Tab through a long chat bring each focused row clear of the title fade and the composer", function()

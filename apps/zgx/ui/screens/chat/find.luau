@@ -19,6 +19,7 @@ local ds = require("@ds")
 local locale = require("@ds/locale")
 local MarkdownFind = require("@ds/markdown_find")
 local Compaction = require("@ds/compaction")
+local Rows = require("@ds/transcript_rows")
 local store = require("@app/screens/chat/store")
 local route = require("@app/screens/shell/route")
 
@@ -36,13 +37,21 @@ export type Match = { key: string, block: number, k: number, row: number }
 -- Markdown is found by: a prompt's (`<id>:u`, its line breaks breaks), a
 -- reply's text blocks (`<id>:<block id>`), or a reply's whole text
 -- (`<id>:r`).
-local function sources(m: any): { { key: string, text: string, breaks: boolean? } }
+local function sources(m: any): { { key: string, text: string, breaks: boolean?, plain: boolean? } }
 	if m.role == "user" then
 		return { { key = `{m.id}:u`, text = m.text or "", breaks = true } }
 	end
 	-- A compaction's divider: its label's words, as drawn settled.
 	if m.role == "system" and (m.line == "classifier" or m.line == "compaction") then
 		return { { key = `{m.id}:c`, text = Compaction.words(m) } }
+	end
+	-- A row's own words (a line, a Claude Code card), drawn as they are.
+	if m.role == "system" then
+		local out = {}
+		for _, t in Rows.texts(m) do
+			table.insert(out, { key = t.key, text = t.text, plain = true })
+		end
+		return out
 	end
 	if m.role ~= "assistant" then
 		return {}
@@ -52,6 +61,10 @@ local function sources(m: any): { { key: string, text: string, breaks: boolean? 
 		for _, b in m.blocks do
 			if b.kind == "text" and b.text then
 				table.insert(out, { key = `{m.id}:{b.id}`, text = b.text })
+			elseif b.kind == "line" then
+				for _, t in Rows.texts(m, b) do
+					table.insert(out, { key = t.key, text = t.text, plain = true })
+				end
 			end
 		end
 		return out
@@ -61,12 +74,12 @@ end
 
 -- Each text's blocks, parsed once while its text stays the same.
 local parsed: { [string]: { text: string, blocks: { MarkdownBlock } } } = {}
-local function blocks_of(key: string, text: string, breaks: boolean?): { MarkdownBlock }
+local function blocks_of(key: string, text: string, breaks: boolean?, plain: boolean?): { MarkdownBlock }
 	local hit = parsed[key]
 	if hit and hit.text == text then
 		return hit.blocks
 	end
-	local list = MarkdownFind.parse(text, breaks)
+	local list = if plain then { Rows.plain_block(text) } else MarkdownFind.parse(text, breaks)
 	parsed[key] = { text = text, blocks = list }
 	return list
 end
@@ -81,7 +94,7 @@ M.matches = ui.computed(function(): { Match }
 	for row = 1, store.messages:len() do
 		local m = store.messages:at(row)
 		for _, src in sources(m) do
-			for n, b in blocks_of(src.key, src.text, src.breaks) do
+			for n, b in blocks_of(src.key, src.text, src.breaks, src.plain) do
 				for k = 1, MarkdownFind.count(b, q) do
 					table.insert(out, { key = src.key, block = n, k = k, row = row })
 				end

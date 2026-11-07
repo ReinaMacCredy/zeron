@@ -68,7 +68,9 @@ use crate::engine::{
     rpc::{Rpc, Watch},
 };
 
+mod code_links;
 mod pills;
+mod tool_images;
 
 type Outcome = &'static str;
 
@@ -548,6 +550,10 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("chat.compact", move |args| async move {
         crate::plugins::preview::refuse("chat.compact")?;
         compact(args).await
+    });
+    host.async_action("chat.answer_secret", move |args| async move {
+        crate::plugins::preview::refuse("chat.answer_secret")?;
+        answer_secret(args).await
     });
     host.async_action("chat.set_work_tree", move |args| async move {
         crate::plugins::preview::refuse("chat.set_work_tree")?;
@@ -2976,6 +2982,15 @@ async fn compact(args: Value) -> Result<Value, String> {
     }
 }
 
+/// A transcript secret card's answer: the secret saved, or declined with none.
+async fn answer_secret(args: Value) -> Result<Value, String> {
+    let id = args.field("id").map(text).unwrap_or_default();
+    let request = args.field("request").map(text).unwrap_or_default();
+    let secret = args.field("secret").map(text).filter(|s| !s.trim().is_empty());
+    let params = json!({ "chatId": id, "requestId": request, "secret": secret });
+    engine::get().call("AnswerSecret", params).await.map(|_| Value::Nil).map_err(|e| e.to_string())
+}
+
 async fn set_work_tree(args: Value) -> Result<Value, Outcome> {
     let chats = CHATS.with(Rc::clone);
     let id = args.field("id").map(text).unwrap_or_default();
@@ -3778,7 +3793,9 @@ fn build_context(open: &mut Open, chats: &Chats) -> (Option<String>, Option<Stri
         }
         open.built_model = Some(model.clone());
     }
-    (model, chats.target(&chat))
+    let target = chats.target(&chat);
+    code_links::set_root(chat["cwd"].as_str(), target.is_none());
+    (model, target)
 }
 
 /// An entry as its row reads it.
@@ -4299,10 +4316,11 @@ fn system_row(entry: &Json, id: &str) -> Option<Value> {
     }
     if let Some(card) = zeron_proto::claude_config::CommandCard::from_note(text, texts.last().copied()) {
         let context = (card.command.trim_start_matches('/') == "context").then(|| context_report(&card)).flatten();
-        return row("claude_command", text, None, None).map(|r| with_fields(r, [("context", context.unwrap_or(Value::Nil))]));
+        return row("claude_command", text, None, None).map(|r| with_fields(r, [("context", context.unwrap_or(Value::Nil)), ("card", card_value(&card))]));
     }
-    if text.starts_with(zeron_proto::claude_panel::SUMMARY_PREFIX) {
-        return row("claude_config", text, None, None);
+    if let Some(parts) = zeron_proto::claude_panel::summary_parts(text) {
+        let parts: Vec<Value> = parts.iter().map(|(label, value)| Value::record([("label", Value::from(label.as_str())), ("value", Value::from(value.as_str()))])).collect();
+        return row("claude_config", text, None, None).map(|r| with_fields(r, [("parts", Value::List(parts.into()))]));
     }
     match computer_notice(text) {
         Some(ComputerNotice::Disclosure) => return None,
@@ -4314,6 +4332,26 @@ fn system_row(entry: &Json, id: &str) -> Option<Value> {
         return None;
     }
     row("divider", text, hint, None)
+}
+
+/// A Claude Code command's card, as gpui's `render_claude_card` reads it.
+fn card_value(card: &zeron_proto::claude_config::CommandCard) -> Value {
+    use zeron_proto::claude_cards::{STALE_PENDING_MS, terminal_action, terminal_only};
+    let terminal = terminal_only(card);
+    let opt = |v: Option<&str>| v.map_or(Value::Nil, Value::from);
+    Value::record([
+        ("command", Value::from(card.command.as_str())),
+        ("text", Value::from(card.text.as_str())),
+        ("error", opt(card.error.as_deref())),
+        ("pending", Value::Bool(card.pending)),
+        ("started", card.started_at.map_or(Value::Nil, |ms| Value::Num(ms as f64))),
+        ("stale_ms", Value::Num(STALE_PENDING_MS as f64)),
+        ("terminal", opt(terminal)),
+        ("action", opt(terminal.and_then(terminal_action).map(|(label, _)| label))),
+        ("model", opt(card.model.as_deref())),
+        ("note", opt(card.note.as_deref())),
+        ("models", Value::List(card.models.iter().map(|(id, label)| Value::record([("id", Value::from(id.as_str())), ("label", Value::from(label.as_str()))])).collect::<Vec<_>>().into())),
+    ])
 }
 
 /// Claude Code's `/context` answer as gpui's card draws it (claude_cards.rs `render_context`): the bar's parts and the legend, the buffer, what is free, the tip.
@@ -4595,7 +4633,7 @@ fn utc_stamp(secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
-fn line_block(part: &Json) -> Option<Value> {
+fn line_block(part: &Json, streaming: bool) -> Option<Value> {
     let id = part["id"].as_str().unwrap_or_default();
     let block = |line: &str, fields: Vec<(&'static str, Value)>| {
         let mut all = vec![("id", Value::from(id)), ("kind", Value::from("line")), ("line", Value::from(line))];
@@ -4616,18 +4654,41 @@ fn line_block(part: &Json) -> Option<Value> {
             let questions: Vec<zeron_proto::UserInputQuestion> = serde_json::from_value(part["questions"].clone()).ok()?;
             let header = input_header(&questions);
             // Only that one was asked for: whatever came back isn't the transcript's.
-            if questions.iter().any(zeron_proto::UserInputQuestion::is_secret) {
-                return block("secret", vec![("title", Value::from(header.as_str()))]);
-            }
             let answers: Option<Vec<zeron_proto::UserInputAnswer>> = serde_json::from_value(part["answers"].clone()).ok();
+            let resolved = part["resolved"].as_bool() == Some(true);
+            if let Some(q) = questions.iter().find(|q| q.is_secret()) {
+                use zeron_proto::view::{SecretStatus, secret_status};
+                let status = match secret_status(resolved, answers.as_deref()) {
+                    SecretStatus::Pending if !streaming => SecretStatus::Cancelled,
+                    status => status,
+                };
+                let placeholder = match &q.kind {
+                    Some(zeron_proto::UserInputKind::Secret { placeholder }) => placeholder.as_deref(),
+                    _ => None,
+                };
+                return block(
+                    "secret",
+                    vec![
+                        ("title", Value::from(header.as_str())),
+                        ("request", part["requestId"].as_str().map_or(Value::Nil, Value::from)),
+                        ("reason", Value::from(q.question.as_str())),
+                        ("placeholder", placeholder.map_or(Value::Nil, Value::from)),
+                        ("status", Value::from(format!("{status:?}").to_lowercase().as_str())),
+                        ("text", Value::from(status.label())),
+                    ],
+                );
+            }
             let said = |line: &zeron_proto::view::AnswerLine| format!("{} → {}", line.label, line.answer);
-            let text = match input_outcome(&questions, part["resolved"].as_bool() == Some(true), answers.as_deref()) {
-                InputOutcome::Pending => return block("input", vec![("title", Value::from(header.as_str()))]),
-                InputOutcome::Unrecorded => header,
-                InputOutcome::Closed(line) => said(&line),
-                InputOutcome::Answered(lines) => lines.iter().map(said).collect::<Vec<_>>().join(" · "),
+            let row = |line: &zeron_proto::view::AnswerLine| {
+                Value::record([("label", Value::from(line.label.as_str())), ("answer", Value::from(line.answer.as_str())), ("skipped", Value::Bool(line.skipped))])
             };
-            block("input", vec![("text", Value::from(text.as_str()))])
+            let (outcome, text, lines) = match input_outcome(&questions, resolved, answers.as_deref()) {
+                InputOutcome::Pending => return block("input", vec![("title", Value::from(header.as_str())), ("outcome", Value::from("pending"))]),
+                InputOutcome::Unrecorded => ("unrecorded", header, Vec::new()),
+                InputOutcome::Closed(line) => ("closed", said(&line), vec![row(&line)]),
+                InputOutcome::Answered(lines) => ("answered", lines.iter().map(said).collect::<Vec<_>>().join(" · "), lines.iter().map(row).collect()),
+            };
+            block("input", vec![("text", Value::from(text.as_str())), ("outcome", Value::from(outcome)), ("answers", Value::List(lines.into()))])
         }
         _ => None,
     }
@@ -4845,10 +4906,13 @@ fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
                     continue;
                 }
                 let words = match kind {
-                    Some("text") => part["text"].as_str().unwrap_or_default().to_owned(),
-                    Some("error") => format!("> {}", part["message"].as_str().unwrap_or_default()),
+                    Some("text") => reply_words(part, streaming),
+                    Some("error") => {
+                        out.push(error_block(part));
+                        continue;
+                    }
                     _ => {
-                        out.extend(line_block(part));
+                        out.extend(line_block(part, streaming));
                         continue;
                     }
                 };
@@ -4866,6 +4930,29 @@ fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
     flush(&mut out, &mut group, group_last);
     out.extend(images_block(&mut pictures));
     Value::List(out.into())
+}
+
+/// A run's error (gpui's `error_chip`): what it said, and whether signing in fixes it.
+fn error_block(part: &Json) -> Value {
+    use zeron_proto::run_errors::{ProviderProblem, provider_problem};
+    let message = part["message"].as_str().unwrap_or_default();
+    let problem = match provider_problem(message) {
+        Some(ProviderProblem::SignedOut) => Value::from("signed_out"),
+        Some(ProviderProblem::LimitReached) => Value::from("limit"),
+        None => Value::Nil,
+    };
+    Value::record([
+        ("id", Value::from(part["id"].as_str().unwrap_or_default())),
+        ("kind", Value::from("line")),
+        ("line", Value::from("error")),
+        ("text", Value::from(message)),
+        ("problem", problem),
+    ])
+}
+
+fn reply_words(part: &Json, streaming: bool) -> String {
+    let text = part["text"].as_str().unwrap_or_default();
+    (!streaming).then(|| code_links::linked(text)).flatten().unwrap_or_else(|| text.to_owned())
 }
 
 fn sent_blocks(part: &Json) -> Option<Vec<Value>> {
@@ -5000,8 +5087,11 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
             continue;
         }
         let words = match part["kind"].as_str() {
-            Some("text") => part["text"].as_str().unwrap_or_default().to_owned(),
-            Some("error") => format!("> {}", part["message"].as_str().unwrap_or_default()),
+            Some("text") => reply_words(part, streaming),
+            Some("error") => {
+                out.push(error_block(part));
+                continue;
+            }
             Some("visual") => {
                 out.push(visual_block(part));
                 continue;
@@ -5011,7 +5101,7 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
                 continue;
             }
             _ => {
-                out.extend(line_block(part));
+                out.extend(line_block(part, streaming));
                 continue;
             }
         };
@@ -5356,6 +5446,11 @@ fn group_summary(group: &[&Json]) -> String {
         .iter()
         .filter(|p| p["kind"].as_str() == Some("tool") && crate::tool_details::computer_tool_of(p).is_none())
         .collect();
+    let parsed: Vec<(zeron_proto::ToolCall, bool)> =
+        calls.iter().filter_map(|p| Some((serde_json::from_value(p["call"].clone()).ok()?, p["isError"].as_bool() == Some(true)))).collect();
+    if thoughts == 0 && !calls.is_empty() && parsed.len() == calls.len() && parsed.iter().all(|(c, _)| zeron_proto::cloud_setup_step(c).is_some()) {
+        return zeron_proto::view::tool_group_summary(&parsed);
+    }
     let mut segments: Vec<String> = Vec::new();
     match thoughts {
         0 => {}
@@ -5495,33 +5590,46 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
             }
             let call = &part["call"];
             let s = |k: &str| call[k].as_str().map(str::to_owned);
+            let parsed: Option<zeron_proto::ToolCall> = serde_json::from_value(call.clone()).ok();
             match call["kind"].as_str().unwrap_or_default() {
                 "exec" => ("exec", "Ran".into(), s("command")),
                 "readFile" => ("read", "Read".into(), s("path").map(|p| base(&p))),
                 "writeFile" => ("write", "Wrote".into(), s("path").map(|p| base(&p))),
-                "editFile" | "applyPatch" => ("edit", "Edited".into(), s("path").map(|p| base(&p))),
+                "editFile" => ("edit", "Edited".into(), s("path").map(|p| base(&p))),
+                "applyPatch" => ("edit", "Patched".into(), Some(s("path").map_or_else(|| "workspace".into(), |p| base(&p)))),
                 "search" => ("search", "Searched".into(), s("pattern")),
                 "glob" => ("glob", "Listed".into(), s("pattern")),
                 "webFetch" => ("web", "Fetched".into(), s("url")),
                 "webSearch" => ("web", "Searched the web".into(), s("query")),
-                "todo" => ("todo", "Updated the plan".into(), None),
+                "todo" => ("todo", "Updated the plan".into(), todo_count(call)),
                 _ if is_thread_link(part) => ("thread", "Started thread".into(), call["input"]["title"].as_str().map(Into::into)),
                 // (The doc keeps a delegate's `title` alone: crates/doc `zeron_badge`.)
                 _ if is_delegate(part) => ("delegate", "Delegated".into(), call["input"]["title"].as_str().or(call["input"]["task"].as_str()).map(Into::into)),
                 "mcp" => {
                     let tool = s("tool").unwrap_or_default();
+                    let server = s("server").unwrap_or_default();
                     if tool == "Agent" || tool.starts_with("Agent: ") {
                         ("agent", "Ran a subagent".into(), tool.strip_prefix("Agent: ").map(Into::into))
                     } else {
-                        ("exec", "Used".into(), Some(format!("{}.{tool}", s("server").unwrap_or_default())))
+                        let action = (server == "zeron").then(|| zeron_proto::tools::action_label(&tool, &call["input"])).flatten();
+                        ("mcp", "Used".into(), Some(format!("{server}.{}", action.unwrap_or(&tool))))
                     }
+                }
+                _ if parsed.as_ref().is_some_and(zeron_proto::ToolCall::is_advisor) => ("advisor", "Advisor".into(), None),
+                _ if parsed.as_ref().and_then(zeron_proto::cloud_setup_step).is_some() => {
+                    let step = parsed.as_ref().and_then(zeron_proto::cloud_setup_step).unwrap_or_default();
+                    (if matches!(step, "clone" | "branch") { "cloud_git" } else { "cloud" }, "Cloud".into(), s("name"))
                 }
                 _ => {
                     let name = s("name").unwrap_or_else(|| "a tool".into());
                     if name == "Agent" || name.starts_with("Agent: ") {
                         ("agent", "Ran a subagent".into(), name.strip_prefix("Agent: ").map(Into::into))
+                    } else if name == "Wait for agents" {
+                        ("wait", "Waited for agents".into(), None)
+                    } else if let Some(skill) = parsed.as_ref().and_then(zeron_proto::ToolCall::skill_name) {
+                        ("skill", "Used".into(), Some(skill.to_owned()))
                     } else {
-                        ("exec", "Used".into(), Some(name))
+                        ("mcp", "Used".into(), Some(name))
                     }
                 }
             }
@@ -5579,6 +5687,15 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
             ]),
         ));
     }
+    if let Some(path) = tool_file(part, kind) {
+        fields.push(("path", Value::from(path)));
+    }
+    if part["kind"].as_str() == Some("tool") {
+        let images = tool_images::image_paths(part, code_links::cwd().as_deref());
+        if !images.is_empty() {
+            fields.push(("images", Value::List(images.iter().map(|p| Value::from(p.as_str())).collect::<Vec<_>>().into())));
+        }
+    }
     // What its row opens to (src/tool_details.rs).
     fields.extend(crate::tool_details::tool_fields(part));
     let stats = part["diffStats"].as_array();
@@ -5588,6 +5705,23 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
         fields.push(("removed", Value::Num(sum("deletions"))));
     }
     Some(Value::record(fields))
+}
+
+/// The file a row's name opens (gpui's `tool_file_path`, and a skill's SKILL.md).
+fn tool_file<'a>(part: &'a Json, kind: &str) -> Option<&'a str> {
+    let call = &part["call"];
+    match kind {
+        "read" | "write" | "edit" => call["path"].as_str().filter(|p| !p.is_empty()),
+        "skill" => call["input"]["path"].as_str().filter(|p| p.ends_with("/SKILL.md")),
+        _ => None,
+    }
+}
+
+/// The shipping app's Todo detail, "N/M done".
+fn todo_count(call: &Json) -> Option<String> {
+    let items = call["items"].as_array()?;
+    let done = items.iter().filter(|i| i["done"].as_bool() == Some(true) || i["status"].as_str() == Some("completed")).count();
+    Some(format!("{done}/{} done", items.len()))
 }
 
 fn computer_tool(id: &str, part: &Json, computer: crate::tool_details::ComputerRow) -> Value {
@@ -7158,6 +7292,65 @@ mod tests {
         for dropped in ["handoff", "classifier", "compaction"] {
             assert!(lines(json!({ "kind": dropped, "id": "p" })).is_empty(), "{dropped}");
         }
+    }
+
+    #[test]
+    fn tool_rows_by_kind_question_secret_and_claude_rows_carry_what_gpui_draws() {
+        let call = |id: &str, call: Json| json!({ "kind": "tool", "id": id, "resolved": true, "call": call });
+        let row = |c: Json| tool(&c).unwrap();
+        let f = |v: &Value, k: &str| v.field(k).map(text).unwrap_or_default();
+        let mcp = row(call("m", json!({ "kind": "mcp", "server": "zeron", "tool": "device", "input": { "action": "screenshot" } })));
+        assert_eq!((f(&mcp, "kind"), f(&mcp, "target")), ("mcp".into(), "zeron.device_screenshot".into()));
+        let other = row(call("o", json!({ "kind": "mcp", "server": "github", "tool": "device", "input": { "action": "screenshot" } })));
+        assert_eq!(f(&other, "target"), "github.device", "only zeron's own tools take an action's label");
+        let wait = row(call("w", json!({ "kind": "unknown", "name": "Wait for agents" })));
+        assert_eq!((f(&wait, "kind"), f(&wait, "verb")), ("wait".into(), "Waited for agents".into()));
+        let skill = row(call("s", json!({ "kind": "unknown", "name": "Skill", "input": { "skill": "zgx-port", "path": "/w/skills/zgx-port/SKILL.md" } })));
+        assert_eq!((f(&skill, "kind"), f(&skill, "target"), f(&skill, "path")), ("skill".into(), "zgx-port".into(), "/w/skills/zgx-port/SKILL.md".into()));
+        let todo = row(call("t", json!({ "kind": "todo", "items": [{ "text": "a", "done": true }, { "text": "b", "status": "pending" }, { "text": "c", "status": "completed" }] })));
+        assert_eq!(f(&todo, "target"), "2/3 done");
+        let patch = row(call("p", json!({ "kind": "applyPatch" })));
+        assert_eq!((f(&patch, "verb"), f(&patch, "target")), ("Patched".into(), "workspace".into()));
+        let read = row(call("r", json!({ "kind": "readFile", "path": "/w/src/parse.rs" })));
+        assert_eq!((f(&read, "target"), f(&read, "path")), ("parse.rs".into(), "/w/src/parse.rs".into()));
+        let reply = |parts: Json| json!({ "id": "a", "role": "assistant", "status": "complete", "parts": parts });
+        let q = |id: &str, header: &str| json!({ "id": id, "header": header, "question": "Which?", "options": ["A", "B"] });
+        let two = json!({ "kind": "input", "id": "i", "requestId": "r", "resolved": true, "questions": [q("a", "Scope"), q("b", "Reviewer")],
+            "answers": [{ "questionId": "a", "labels": ["A"] }, { "questionId": "b", "labels": [] }] });
+        let b = blocks(&reply(json!([two]))).list().to_vec();
+        assert_eq!(f(&b[0], "outcome"), "answered");
+        let answers = b[0].field("answers").unwrap().list().to_vec();
+        assert_eq!((f(&answers[0], "label"), f(&answers[0], "answer")), ("Scope".into(), "A".into()));
+        assert_eq!(answers[1].field("skipped"), Some(&Value::Bool(true)));
+        let waiting = json!({ "kind": "input", "id": "i", "requestId": "r", "resolved": false, "questions": [q("a", "Deploy")] });
+        assert_eq!(f(&blocks(&reply(json!([waiting]))).list()[0], "outcome"), "pending");
+        let secret = |resolved: bool, labels: Json, status: &str| {
+            json!({ "id": "a", "role": "assistant", "status": status, "parts": [{ "kind": "input", "id": "x", "requestId": "rq", "resolved": resolved,
+                "questions": [{ "id": "q", "header": "Tailscale key", "question": "Create one at https://x.dev.", "options": [], "kind": { "type": "secret", "placeholder": "tskey-…" } }],
+                "answers": [{ "questionId": "q", "labels": labels }] }] })
+        };
+        let pending = blocks(&secret(false, json!([]), "streaming")).list()[0].clone();
+        assert_eq!((f(&pending, "status"), f(&pending, "request"), f(&pending, "placeholder")), ("pending".into(), "rq".into(), "tskey-…".into()));
+        assert_eq!(f(&pending, "reason"), "Create one at https://x.dev.");
+        assert_eq!(f(&blocks(&secret(false, json!([]), "complete")).list()[0], "status"), "cancelled", "a settled reply no longer asks");
+        assert_eq!(f(&blocks(&secret(true, json!(["saved"]), "complete")).list()[0], "status"), "saved");
+        assert_eq!(f(&blocks(&secret(true, json!(["timed_out"]), "complete")).list()[0], "status"), "timedout");
+        let note = |hint: Json| json!({ "id": "s", "role": "system", "parts": [{ "kind": "text", "id": "t0", "text": "Claude Code /status" }, { "kind": "text", "id": "t1", "text": hint.to_string() }] });
+        let status = message(&note(json!({ "command": "/status" })), None).unwrap();
+        let card = status.field("card").unwrap();
+        assert_eq!((f(card, "terminal"), f(card, "action")), ("status".into(), "Open Status".into()));
+        let pending = message(&note(json!({ "command": "/doctor", "pending": true, "startedAt": 1_000 })), None).unwrap();
+        assert_eq!(pending.field("card").unwrap().field("started").and_then(Value::as_f64), Some(1_000.));
+        let model = message(&note(json!({ "command": "/model", "model": "opus", "models": [["default", "Default"], ["opus", "Opus"]] })), None).unwrap();
+        let models = model.field("card").unwrap().field("models").unwrap().list().to_vec();
+        assert_eq!((models.len(), f(&models[1], "id"), f(model.field("card").unwrap(), "model")), (2, "opus".into(), "opus".into()));
+        let failed = blocks(&reply(json!([{ "kind": "error", "id": "e", "message": "Claude Code is not logged in. Please run /login." }]))).list().to_vec();
+        assert_eq!((f(&failed[0], "line"), f(&failed[0], "problem")), ("error".into(), "signed_out".into()));
+        let plain = blocks(&reply(json!([{ "kind": "error", "id": "e", "message": "exit 101" }]))).list().to_vec();
+        assert!(matches!(plain[0].field("problem"), None | Some(Value::Nil)));
+        let summary = json!({ "id": "c", "role": "system", "parts": [{ "kind": "text", "id": "t0", "text": "Claude Code settings · Theme → dark, Verbose → on" }] });
+        let parts = message(&summary, None).unwrap().field("parts").unwrap().list().to_vec();
+        assert_eq!((f(&parts[1], "label"), f(&parts[1], "value")), ("Verbose".into(), "on".into()));
     }
 
     #[test]

@@ -72,6 +72,8 @@ mod audit_shots;
 #[cfg(test)]
 mod menu_tests;
 #[cfg(test)]
+mod transcript_kinds_tests;
+#[cfg(test)]
 mod shell_tests;
 #[cfg(test)]
 mod waiting_toast_tests;

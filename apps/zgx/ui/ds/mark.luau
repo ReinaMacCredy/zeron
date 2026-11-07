@@ -63,7 +63,7 @@ local function picture(name: Name, side: number, tint: string?): Node
 	return ui.svg { src = src, tint = if MONO[name] then tint else nil, w = side, h = side, shrink = 0 }
 end
 
-return function(props: Props): Node
+local function component(props: Props): Node
 	local size = props.size or 40
 	local name = props.name
 	if props.bare then
@@ -101,3 +101,17 @@ return function(props: Props): Node
 		picture(name :: Name, size * 0.56, nil),
 	}
 end
+
+-- (A span's icon takes a file, not a node: a thread chip's mark.)
+local function glyph(name: string): (string?, boolean)
+	if registry(name) or not FILES[name :: Name] then
+		return nil, false
+	end
+	return file(name :: Name), MONO[name :: Name] == true
+end
+
+return setmetatable({ glyph = glyph }, {
+	__call = function(_, props: Props): Node
+		return component(props)
+	end,
+}) :: any

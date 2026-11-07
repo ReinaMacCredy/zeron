@@ -326,6 +326,25 @@ local function Session(id: Id?): Node
 								return if s and s.id == id then s else nil
 							end),
 							chat_of = shared.chat_of,
+							on_sign_in = function()
+								route.settings("providers")
+							end,
+							current_model = function(): string?
+								local s = store.session:get()
+								return if s and s.id == id then s.model else nil
+							end,
+							on_model = function(model: string)
+								store.configure(id, { model = model })
+							end,
+							on_secret = function(request: string, secret: string?): any
+								local s = which()
+								return if s then store.answer_secret(s, request, secret) else nil
+							end,
+							file_link = function(target: string): boolean
+								local s = store.session:peek()
+								local r = FileLinks.resolve(target, if s then s.cwd else nil)
+								return r ~= nil and not r.outside
+							end,
 							threads = shared.threads_for(which, which, function(): any
 								return store.session:get()
 							end),

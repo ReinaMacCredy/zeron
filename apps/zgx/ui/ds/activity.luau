@@ -27,9 +27,10 @@ local ToolDetail = require("@self/tool_detail")
 local Markdown = require("@self/markdown")
 local locale = require("@self/locale")
 local FoldButton = require("@self/fold_button")
+local ReplyPicture = require("@self/reply_picture")
 local Threads = require("@self/transcript_threads")
 
-export type Kind = "exec" | "read" | "edit" | "write" | "search" | "glob" | "web" | "todo" | "agent" | "delegate" | "thread" | "thought"
+export type Kind = "exec" | "read" | "edit" | "write" | "search" | "glob" | "web" | "todo" | "agent" | "delegate" | "thread" | "thought" | "mcp" | "skill" | "wait" | "advisor" | "cloud" | "cloud_git"
 -- One tool: what kind, what it did ("Read", "transcript.rs"), and for an
 -- edit the lines it added and removed; `failed` tints its glyph.
 export type Tool = {
@@ -42,6 +43,10 @@ export type Tool = {
 	thread: { ref: string, title: string? }?,
 	tag: string?,
 	target: string?,
+	-- The file its name opens (a read's, an edit's, a skill's SKILL.md).
+	path: string?,
+	-- The pictures it read, wrote or printed (at most four), shown opened.
+	images: { string }?,
 	-- The whole call, when the line says less (a command of many lines, a
 	-- tool's input): the row opens to it.
 	call: string?,
@@ -85,6 +90,10 @@ export type Props = {
 	-- A subagent's spawn row (its tool's `subagent`): what opens it (its
 	-- lane). Without it, the row opens its call as any does.
 	open_subagent: ((sub: any) -> ())?,
+	-- A tool's file (Tool `path`): what opens it, a click on its name.
+	open_file: ((path: string) -> ())?,
+	-- Where a tool's pictures (Tool `images`) are read from; without it, none show.
+	pictures: ReplyPicture.Pictures?,
 	threads: Threads.Threads?,
 	agent: (() -> any)?,
 	-- A thought being written: `words`, a thought's words as they arrive, by
@@ -108,7 +117,19 @@ local GLYPH: { [Kind]: Icon.Name } = {
 	delegate = "bot",
 	thread = "chat-round-line",
 	thought = "chat-round-line",
+	mcp = "widget",
+	skill = "widget",
+	wait = "bot",
+	advisor = "chat-round-line",
+	cloud = "cloud",
+	cloud_git = "git-branch",
 }
+
+-- A skill's name, in the sidecar branch's violet (gpui's `branch_ink`).
+local function skill_ink(): string
+	local kind = ui.theme.kind()
+	return ui.raw(if kind == "light" or kind == "high-contrast-light" then "#7f22fe" else "#c4b4ff", "gpui's branch_ink; the composer's token lives only while it shows")
+end
 
 local CARDS: { [string]: boolean } = { agent = true, delegate = true, thread = true }
 
@@ -407,6 +428,33 @@ local function thought_row(now: () -> Tool, below: () -> boolean, writing: Writi
 	}
 end
 
+-- gpui's tool image previews: a reply's pictures, opening in the lightbox together.
+local function tool_pictures(now: () -> Tool, pictures: ReplyPicture.Pictures): Node
+	local function entries(): { ReplyPicture.Entry }
+		local out = {}
+		for _, path in now().images or {} do
+			table.insert(out, { src = path, alt = string.match(path, "([^/\\]+)$") or path })
+		end
+		return out
+	end
+	return ui.presence(function(): string?
+		local n = #(now().images or {})
+		return if n > 1 then "run" elseif n == 1 then "one" else nil
+	end, function(kind: string): Node
+		local group = `tool:{now().id}`
+		local body = if kind == "run"
+			then ReplyPicture.Run { pictures = pictures, items = entries, group = group, set = entries }
+			else ReplyPicture.Single { pictures = pictures, src = entries()[1].src, alt = entries()[1].alt, group = group, set = entries }
+		return ui.div {
+			class = "tool-pictures",
+			ml = ui.raw(GUTTER, "under the line's words, past the tree's gutter"),
+			mb = "$space.2",
+			min_w = 0,
+			body,
+		}
+	end, { w_full = true, min_w = 0 })
+end
+
 -- (`below`: a tool with a branch follows, so the trunk runs on under this
 -- one; `running`: it is the one in flight, its glyph the working loader.)
 local function row(
@@ -415,7 +463,9 @@ local function row(
 	running: () -> boolean,
 	open_subagent: ((sub: any) -> ())?,
 	writing: Writing?,
-	group: string?
+	group: string?,
+	open_file: ((path: string) -> ())?,
+	pictures: ReplyPicture.Pictures?
 ): Node
 	if now().kind == "thought" then
 		return thought_row(now, below, writing, group)
@@ -432,9 +482,12 @@ local function row(
 	local function has_detail(): boolean
 		return ToolDetail.has(now() :: any)
 	end
+	local function has_pictures(): boolean
+		return pictures ~= nil and #(now().images or {}) > 0
+	end
 	-- Open as the reader left it (opened or closed), else closed.
 	local function showing(): boolean
-		if not (has_call() or has_detail()) then
+		if not (has_call() or has_detail() or has_pictures()) then
 			return false
 		end
 		return CALLS_OPEN:get()[id] == true
@@ -446,7 +499,7 @@ local function row(
 	-- (A tool that may come to have a result opens: whether it has one
 	-- isn't known as its row is made.)
 	local OPENS: { [string]: boolean } = { exec = true, read = true, edit = true, write = true, search = true, glob = true, web = true }
-	local opens = has_call() or lane() ~= nil or OPENS[now().kind] == true
+	local opens = has_call() or lane() ~= nil or OPENS[now().kind] == true or has_pictures()
 	return ui.column {
 		w_full = true,
 		relative = true,
@@ -496,7 +549,7 @@ local function row(
 					open_subagent(sub)
 					return
 				end
-				if has_call() or has_detail() then
+				if has_call() or has_detail() or has_pictures() then
 					local all = table.clone(CALLS_OPEN:peek())
 					all[id] = not showing()
 					CALLS_OPEN:set(all)
@@ -533,15 +586,34 @@ local function row(
 					function(): boolean
 						return now().target ~= nil
 					end,
-					FadeText {
-						function(): string
-							return line_of(now())
-						end,
-						literal = true,
+					ui.row {
+						class = "tool-target",
+						min_w = 0,
 						shrink = 1,
-						font = "$font.mono",
-						text_size = "$font.size.sm",
-						color = "$text.primary",
+						-- (Only a name that opens takes the click: elsewhere it's the row's.)
+						cursor = if open_file and now().path then "pointer" else nil,
+						on_click = if open_file and now().path
+							then function()
+								local path = now().path
+								if path then
+									open_file(path)
+								end
+							end
+							else nil,
+						FadeText {
+							function(): string
+								return line_of(now())
+							end,
+							literal = true,
+							shrink = 1,
+							font = function(): string?
+								return if now().kind == "skill" then nil else "$font.mono"
+							end,
+							text_size = "$font.size.sm",
+							color = function(): string
+								return if now().kind == "skill" then skill_ink() else "$text.primary"
+							end,
+						},
 					}
 				),
 				-- An edit's lines, added and removed, in their hues.
@@ -591,6 +663,7 @@ local function row(
 						ToolDetail.ToolDetail { tool = now :: any },
 					}
 				),
+				if pictures then tool_pictures(now, pictures) else nil,
 			}
 		),
 	}
@@ -803,7 +876,7 @@ return ui.component(function(props: Props): Node
 						return now:get()
 					end, below_of(t), function(): boolean
 						return live() and last()
-					end, props.open_subagent, props.thought, props.key)
+					end, props.open_subagent, props.thought, props.key, props.open_file, props.pictures)
 				end, {
 					key = function(t: Tool): string
 						return t.id

@@ -216,6 +216,11 @@ function M.answer(id: string, request: string, answer: { values: { string }, tex
 	})
 end
 
+-- A transcript secret card's answer: the secret, or nil to decline.
+function M.answer_secret(id: string, request: string, secret: string?): any
+	return ui.call("chat.answer_secret", { id = id, request = request, secret = secret })
+end
+
 function M.configure(id: string, patch: { [string]: any })
 	local args = table.clone(patch)
 	args.id = id

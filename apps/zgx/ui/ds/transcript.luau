@@ -63,6 +63,7 @@ local Compaction = require("@self/compaction")
 local ContextCard = require("@self/compaction_context")
 local Threads = require("@self/transcript_threads")
 local HtmlCard = require("@self/html_card")
+local Rows = require("@self/transcript_rows")
 
 export type Tool = Activity.Tool
 export type Message = {
@@ -198,6 +199,17 @@ export type Props = {
 	threads: Threads.Threads?,
 	-- None: pages show, their options do nothing.
 	pages: HtmlCard.Pages?,
+	-- A secret card's answer: the secret, or nil to decline (a promise).
+	on_secret: ((request: string, secret: string?) -> any)?,
+	-- A Claude Code command card's Retry.
+	on_claude_command: ((command: string) -> ())?,
+	-- An error that signing in fixes: its Log in.
+	on_sign_in: (() -> ())?,
+	-- The chat's model, and a pick from Claude Code's `/model` card.
+	current_model: (() -> string?)?,
+	on_model: ((model: string) -> ())?,
+	-- Whether a link's target is a file of the chat's that opens.
+	file_link: ((target: string) -> boolean)?,
 }
 export type Anchor = { id: string, dy: number }
 export type TranscriptFind = {
@@ -390,25 +402,9 @@ local function seam(m: Message): Node
 	}
 end
 
-local function line_words(x: any): string
-	local title = x.title or ""
-	if x.line == "resumed" then
-		return locale.s("ds.transcript.resumed")
-	elseif x.line == "fork" then
-		return locale.s("ds.transcript.forked_from", { title = title })
-	elseif x.line == "handoff" then
-		return if x.title then locale.s("ds.transcript.continued_from", { title = title }) else locale.s("ds.transcript.context_handoff")
-	elseif x.line == "switch" then
-		return locale.s("ds.transcript.switched", { from = x.from or "?", to = x.to or "?" })
-	elseif x.line == "secret" then
-		return locale.s("ds.transcript.secret_requested", { title = title })
-	elseif x.line == "input" and not x.text then
-		return locale.s("ds.transcript.awaiting_answer", { title = title })
-	end
-	return x.text or ""
-end
+local line_words = Rows.line_words
 
-local function line_row(hint: string?, now: () -> any): Node
+local function line_row(hint: string?, now: () -> any, key: string?, find: Rows.Find?): Node
 	local function rule(): Node
 		return ui.div { grow = 1, min_w = 12, h = 1, bg = "$border.subtle", aria_hidden = true }
 	end
@@ -420,11 +416,12 @@ local function line_row(hint: string?, now: () -> any): Node
 		selectable = false,
 		tooltip = hint,
 		rule(),
-		ui.text {
-			function(): string
+		Rows.Found {
+			key = `{key or ""}:0`,
+			text = function(): string
 				return line_words(now())
 			end,
-			literal = true,
+			find = if key then find else nil,
 			truncate = true,
 			min_w = 0,
 			text_size = "$font.size.xs",
@@ -650,6 +647,10 @@ type View = {
 	wash: (() -> string?)?,
 	working: any?,
 	pages: HtmlCard.Pages?,
+	on_secret: ((request: string, secret: string?) -> any)?,
+	file_link: ((target: string) -> boolean)?,
+	open_file: ((path: string) -> ())?,
+	on_sign_in: (() -> ())?,
 }
 
 -- A reply's thought being written, for its row (ds/activity's `thought`): the
@@ -676,6 +677,8 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			return Activity {
 				key = `{m.id}:{b.id}`,
 				open_subagent = if view then view.open_subagent else nil,
+				open_file = if view then view.open_file else nil,
+				pictures = if view then view.shown_pictures else nil,
 				threads = if view then view.threads else nil,
 				agent = if view and view.threads then view.threads.agent else nil,
 				thought = thought_of(m, now, draft),
@@ -760,9 +763,19 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			}
 		end
 		if b.kind == "line" then
-			return line_row(nil, function(): any
+			local key = `{m.id}:{b.id}`
+			local find = if view then view.find else nil
+			local function now_b(): any
 				return brow:get()
-			end)
+			end
+			if b.line == "input" then
+				return Rows.Question { key = key, now = now_b, find = find }
+			elseif b.line == "secret" then
+				return Rows.Secret { key = key, now = now_b, find = find, on_answer = if view then view.on_secret else nil }
+			elseif b.line == "error" then
+				return Rows.Error { key = key, now = now_b, find = find, on_sign_in = if view then view.on_sign_in else nil }
+			end
+			return line_row(nil, now_b, key, find)
 		end
 		if b.kind == "sent" then
 			return Threads.Sent {
@@ -808,6 +821,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				else nil,
 			pictures = if view then view.pictures else nil,
 			open = if view then view.open else nil,
+			file_link = if view then view.file_link else nil,
 			link_menu = if view then view.link_menu else nil,
 			find = if view and view.find then view.find(`{m.id}:{b.id}`) else nil,
 			wash = if view then view.wash else nil,
@@ -890,6 +904,7 @@ local function reply(
 			veil_seed = ui.now() - opened_at < 300,
 			pictures = if view then view.pictures else nil,
 			open = if view then view.open else nil,
+			file_link = if view then view.file_link else nil,
 			link_menu = if view then view.link_menu else nil,
 			find = if view and view.find then view.find(`{m.id}:r`) else nil,
 			wash = if view then view.wash else nil,
@@ -982,6 +997,10 @@ local function Transcript(props: Props): Node
 	local at_end = ui.state(`transcript_at_end{kept}`, true)
 	-- A find's: each text's marks, and its current match brought into view
 	-- (its message scrolled to, if it's away; then the block holding it).
+	local function chat_mark(chat: string): string?
+		local c = if props.chat_of then props.chat_of(chat) else nil
+		return if c then c.mark else nil
+	end
 	local find_for: ((key: string) -> any)? = nil
 	local find = props.find
 	if find then
@@ -1664,6 +1683,12 @@ local function Transcript(props: Props): Node
 							set_hover("")
 						end
 					end,
+				-- (Focus coming into a message shows its lane too, so its Copy is the next stop.)
+				on_focus = if m.role == "switch" or m.role == "system"
+					then nil
+					else function()
+						set_hover(m.id)
+					end,
 				if m.role == "switch" then seam(m)
 					elseif m.role == "system" and (m.line == "classifier" or m.line == "compaction") then Compaction.Divider {
 						id = m.id,
@@ -1679,9 +1704,26 @@ local function Transcript(props: Props): Node
 						on_compact = props.on_compact,
 						on_settings = props.on_context_settings,
 					}
+					elseif m.role == "system" and m.line == "claude_command" and m.card then Rows.ClaudeCard {
+						key = `{m.id}:row`,
+						now = function(): any
+							return state:get()
+						end,
+						find = find_for,
+						on_retry = props.on_claude_command,
+						current_model = props.current_model,
+						on_model = props.on_model,
+					}
+					elseif m.role == "system" and m.line == "claude_config" then Rows.ConfigSummary {
+						key = `{m.id}:row`,
+						now = function(): any
+							return state:get()
+						end,
+						find = find_for,
+					}
 					elseif m.role == "system" then line_row(m.hint, function(): any
 						return state:get()
-					end)
+					end, `{m.id}:row`, find_for)
 					elseif mine and voice_of(m, props) == "wake" then Threads.Wake { id = `wake-{m.id}`, ids = m.wake :: { string }, threads = props.threads }
 					elseif mine and voice_of(m, props) == "peer" then ui.column {
 						class = "message message-peer",
@@ -1694,6 +1736,7 @@ local function Transcript(props: Props): Node
 							end,
 							breaks = true,
 							open = props.open_link,
+							chat_mark = chat_mark,
 							link_menu = props.link_menu,
 							find = if find_for then find_for(`{m.id}:u`) else nil,
 						},
@@ -1711,6 +1754,7 @@ local function Transcript(props: Props): Node
 						UserMessage {
 							id = m.id,
 							text = m.text,
+							chat_mark = chat_mark,
 							attachments = m.attachments,
 							-- (Its pictures follow the message: sent from here,
 							-- this Mac's files, then the chat's copies.)
@@ -1727,7 +1771,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry, props.working, props.compaction_wait),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed, pages = props.pages }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, file_link = props.file_link, open_file = if props.open_link then props.open_link else nil, on_sign_in = props.on_sign_in }),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?

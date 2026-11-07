@@ -819,8 +819,6 @@
       "forked_from": "分叉自 {title}",
       "continued_from": "接续自 {title}",
       "context_handoff": "上下文交接",
-      "secret_requested": "已请求密钥：{title}",
-      "awaiting_answer": "{title}：等待你的回答",
       "resumed": "已继续"
     },
     "user_message": {
@@ -1499,6 +1497,48 @@
       "default_browser": "默认浏览器",
       "reveal": "在访达中显示",
       "copy_path": "拷贝路径"
+    },
+    "transcript_rows": {
+      "question": "问题",
+      "questions": "{n, plural, other {# 个问题}}",
+      "awaiting": "等待你的回答…",
+      "secret": {
+        "status": {
+          "pending": "正在请求密钥",
+          "saved": "密钥已保存",
+          "declined": "已拒绝",
+          "timedout": "已超时",
+          "cancelled": "已取消"
+        },
+        "field": "密钥",
+        "placeholder": "粘贴密钥",
+        "save": "安全保存",
+        "decline": "拒绝",
+        "kept_out": "不会出现在聊天中，存放在一个私密文件里，此智能体的命令可在 24 小时内读取",
+        "failed": "密钥未保存，请重试。",
+        "offline": "无法连接 Zeron 引擎。"
+      },
+      "claude": {
+        "running": "正在 Claude Code 中运行…",
+        "elapsed": "{n} 秒",
+        "terminal_only": " 只能在 Claude Code 的终端中运行。",
+        "output": "Claude Code · 命令输出",
+        "copy": "复制为 Markdown",
+        "copied": "已复制",
+        "retry": "重试",
+        "local": "在 Claude Code 本地运行 · 未使用 token",
+        "stale": "Claude Code 没有返回结果。",
+        "model": "模型",
+        "claude_code": "Claude Code",
+        "default": "默认",
+        "model_note": "在这里选择模型会更改此聊天的模型标签。"
+      },
+      "error": {
+        "label": "错误",
+        "signed_out": "已退出登录",
+        "limit": "已达上限",
+        "log_in": "登录"
+      }
     }
   },
   "settings": {

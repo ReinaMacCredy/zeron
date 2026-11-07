@@ -42,6 +42,7 @@ local Syntax = require("@self/syntax")
 local Motion = require("@self/motion")
 local Links = require("@ds/links")
 local FileIcon = require("@self/file_icons")
+local Mark = require("@self/mark")
 -- LaTeX math: `$$…$$` and `$…$` read before markdown is (ds/math).
 local Math = require("@self/math")
 -- ```mermaid fences drawn as their diagrams (ds/mermaid).
@@ -81,6 +82,10 @@ export type Props = {
 	-- the kind's own (a web link's: Open, the other place, Copy link; any
 	-- other: Open with `open`, Copy link).
 	link_menu: ((target: string) -> { Links.Entry }?)?,
+	-- Whether a link's target is a file `open` opens (gpui's `with_file_link_glyphs`).
+	file_link: ((target: string) -> boolean)?,
+	-- A thread mention's agent mark, by its chat (`zeron-chat:<id>`).
+	chat_mark: ((chat: string) -> string?)?,
 	-- A task list's box ticked or cleared: the `k`th task in the text (in
 	-- the order they're written, from 1), and whether it's done now. With
 	-- it, tasks are boxes; without, their ☐ and ☑.
@@ -259,6 +264,8 @@ type Ctx = {
 	image_size: ((src: string) -> (number?, number?))?,
 	open: ((target: string) -> ())?,
 	link_menu: ((target: string) -> { Links.Entry }?)?,
+	file_link: ((target: string) -> boolean)?,
+	chat_mark: ((chat: string) -> string?)?,
 	task: ((k: number, done: boolean) -> ())?,
 	tasks: { [any]: number },
 	pictures: ReplyPicture.Pictures?,
@@ -381,7 +388,7 @@ end
 -- (transcript.rs `user_bubble_text`, composer/chip.rs `paint_chip`): its
 -- name in the body's ink on the composer chip's wash, corner 5, its file's
 -- icon (or a chat's) before it. Its click is the document's `open`.
-local function mention_chip(span: { [any]: any }, target: string, name: string)
+local function mention_chip(span: { [any]: any }, target: string, name: string, ctx: Ctx?)
 	local chat = string.match(target, "^zeron%-chat:") ~= nil
 	local dir = string.sub(target, -1) == "/"
 	local set = if string.find(ui.theme.kind(), "dark", 1, true) then "dark" else "light"
@@ -395,8 +402,11 @@ local function mention_chip(span: { [any]: any }, target: string, name: string)
 	span[1] = name
 	span.padding = { 2, 2 }
 	span.radius = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
-	span.icon = if chat
-		then { src = "assets/icons/ui/chat-round-line.svg", size = 14, gap = 3, tint = "currentColor" }
+	local mark = if chat and ctx and ctx.chat_mark then ctx.chat_mark(string.match(target, "^zeron%-chat:(.*)$") or "") else nil
+	local src, mono = if mark then Mark.glyph(mark) else nil, false
+	span.icon = if chat and src
+		then { src = src, size = 14, gap = 3, tint = if mono then "currentColor" else nil }
+		elseif chat then { src = "assets/icons/ui/chat-round-line.svg", size = 14, gap = 3, tint = "currentColor" }
 		else { src = `assets/icons/files/{set}/{FileIcon.of(name, dir)}.svg`, size = 14, gap = 3 }
 end
 
@@ -468,6 +478,44 @@ local function autolinked(list: { MarkdownRun }): { MarkdownRun }
 		end
 	end
 	return out or list
+end
+
+local FILE_GLYPH_SIZE, FILE_GLYPH_GAP = 12, 4
+local GENERIC_FILE = FileIcon.of("\0")
+
+-- gpui's `sole_file_reference`: a paragraph of one file link, or one bare name its icon knows.
+local function sole_file(list: { MarkdownRun }, ctx: Ctx?): (string?, boolean)
+	local file_link = if ctx then ctx.file_link else nil
+	if not file_link then
+		return nil, false
+	end
+	local target: string? = nil
+	local plain = ""
+	for _, r in list do
+		if r.x ~= "" or r.img then
+			if r.img then
+				return nil, false
+			end
+			if r.a then
+				if (target and target ~= r.a) or plain ~= "" or string.match(r.a, "^%a[%w+.-]*:") then
+					return nil, false
+				end
+				target = r.a
+			elseif r.c or target then
+				return nil, false
+			else
+				plain ..= r.x
+			end
+		end
+	end
+	if target then
+		return if file_link(target) then target else nil, true
+	end
+	local word = string.match(plain, "^%s*(%S+)%s*$")
+	if word and file_link(word) and FileIcon.of(string.match(word, "([^/]+)$") or word) ~= GENERIC_FILE then
+		return word, false
+	end
+	return nil, false
 end
 
 -- A paragraph's runs as one paragraph of spans; `style` sets the
@@ -575,7 +623,9 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			table.insert(props, ui.span(rest))
 		end
 	end
-	for _, run in list do
+	local file_link = if ctx then ctx.file_link else nil
+	local sole = sole_file(list, ctx) ~= nil
+	for i, run in list do
 		-- A picture among the words, not drawn as one (a reply's that it can
 		-- show are: `block`'s paragraph): the link it is, by its alt or its
 		-- file's name, as Zeron's markdown keeps a picture the host won't
@@ -613,7 +663,7 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			span.underline_offset = 4
 			span.hover = { underline = true, color = "$accent" }
 			if string.match(r.a, "^zeron%-file:") or string.match(r.a, "^zeron%-chat:") then
-				mention_chip(span, r.a, r.x)
+				mention_chip(span, r.a, r.x, ctx)
 			end
 			local target = r.a
 			local open = if ctx then ctx.open else nil
@@ -651,6 +701,15 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			table.insert(props, ui.span(span))
 		else
 			emit(span, r.x)
+		end
+		local after = list[i + 1]
+		if r.a and not r.img and not sole and file_link and (not after or after.a ~= r.a) and not string.match(r.a, "^zeron%-") and file_link(r.a) then
+			table.insert(props, ui.span {
+				"\u{2060}",
+				class = "md-file-glyph",
+				padding = { FILE_GLYPH_GAP / 2, 0 },
+				icon = { src = "assets/icons/ui/arrow-up-right.svg", size = FILE_GLYPH_SIZE, gap = 0, tint = "$text.tertiary" },
+			})
 		end
 	end
 	return ui.rich(props)
@@ -1038,6 +1097,29 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 				}
 			end
 		end
+		local file = sole_file(b.s, ctx)
+		if file then
+			local name = string.match(string.gsub(file, "[:#].*$", ""), "([^/]+)$") or file
+			return ui.row {
+				class = "md-file-row",
+				w_full = true,
+				min_w = 0,
+				gap = ui.raw(4, "gpui's sole file row"),
+				items = "center",
+				ui.row {
+					w = 20,
+					h = 20,
+					shrink = 0,
+					items = "center",
+					justify = "center",
+					rounded = ui.raw(4, "gpui's file icon well"),
+					bg = "$hover",
+					aria_hidden = true,
+					FileIcon { name = name, size = 14 },
+				},
+				ui.div { grow = 1, min_w = 0, runs(b.s, style, ctx) },
+			}
+		end
 		return runs(b.s, style, ctx)
 	elseif b.t == "h" then
 		local level = math.min(b.l, 3)
@@ -1419,7 +1501,7 @@ return function(props: Props): Node
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
 	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.task or props.pictures or props.small
-		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
+		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, file_link = props.file_link, chat_mark = props.chat_mark, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
 		else nil
 	-- A text that grows: what a ```mermaid fence reads to know whether
 	-- it's still being written (ds/mermaid).
