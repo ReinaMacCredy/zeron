@@ -926,8 +926,15 @@ return function(props: Props): Node
 	-- closing with it. (Each worked out as its width eases, telling what
 	-- shows them only when they change: its edge's, its fill's and its
 	-- gap's bindings don't run on every frame of its glide.)
+	-- (And none at all, shut or in its glide's last half point: out of the
+	-- layout then, its content kept, rather than laid out in a box of no
+	-- width.)
+	local seen_step = ui.computed(function(): number
+		local w = open_w:get()
+		return if w >= 2 then 2 elseif w > 0.5 then 1 else 0
+	end)
 	local panel_seen = ui.computed(function(): boolean
-		return open_w:get() >= 2
+		return seen_step:get() == 2
 	end)
 	local gap_before = ui.computed(function(): number
 		if expanded() then
@@ -996,6 +1003,9 @@ return function(props: Props): Node
 		ui.column {
 			-- (Its own width, or, expanding, the one it grows to.)
 			w = inner_w,
+			hidden = function(): boolean
+				return seen_step:get() == 0
+			end,
 			h_full = true,
 			-- The session's panel (its tabs: the files, a terminal), or, until
 			-- that screen is there, the files pane alone.

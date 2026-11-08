@@ -2034,3 +2034,43 @@ fn passes_per_text_input() {
         eprintln!("INPUTS {n}: {:.1} layout passes a frame, {} measures a frame, {ms:.3} ms a frame", passes.len() as f64 / 20., measures / 20);
     }
 }
+
+/// No column the shell holds a screen in stands at no width with the screen
+/// in it (the layout's `zero width … with a child`): the shut panel's, the
+/// Sidecar's slot. At launch, a chat open, its panel opened and shut, a split.
+#[test]
+fn the_shell_lays_out_no_screen_in_a_column_of_no_width() {
+    const IDS: [&str; 2] = ["a1", "a2"];
+    let mut app = mount(&scratch("no-zero-column"));
+    let mut seen = Vec::new();
+    let mut check = |app: &mut TestApp, at: &str| {
+        let roots: Vec<_> = ["#shell-files", "#sidecar-slot"].iter().filter_map(|id| app.target(id).ok()).collect();
+        let scene = app.ui.scene.borrow();
+        for w in zgx::inspect::layout_warnings(&app.ui) {
+            let mut up = Some(w.node);
+            while let Some(id) = up {
+                if roots.contains(&id) {
+                    seen.push(format!("{at}: {w}"));
+                    break;
+                }
+                up = scene.parent(id);
+            }
+        }
+    };
+    check(&mut app, "launch");
+    open(&mut app, "Fix the build");
+    app.frames(30);
+    check(&mut app, "a chat");
+    app.click("#titlebar >> role:button \"Panel\"");
+    app.frames(60);
+    check(&mut app, "its panel open");
+    app.click("#titlebar >> role:button \"Panel\"");
+    app.frames(60);
+    check(&mut app, "its panel shut");
+    long_chats(&app, &IDS, None);
+    split_of(&mut app, &IDS);
+    open(&mut app, "Fix the build");
+    app.frames(60);
+    check(&mut app, "a split");
+    assert!(seen.is_empty(), "{seen:#?}");
+}

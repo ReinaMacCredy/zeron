@@ -243,51 +243,93 @@ local function chip_text(app: any, name: string): string
 	return table.concat(out, " ")
 end
 
-test("composer footer: short of room the effort goes first, the model's name last", function()
-	local app = mount("chat_fixture.luau")
-	app:resize(800, 500)
-	app:frames(60)
-	expect(chip_text(app, "Model")).to_contain("High")
-	-- Narrowing: the effort is gone while the access mode still has its name.
-	local effort_gone, access_folded = nil :: number?, nil :: number?
-	for w = 600, 360, -4 do
-		app:resize(w, 500)
+-- A text's laid-out width in a chip (0: not showing).
+local function text_w(app: any, name: string, text: string): number
+	for line in app:tree(`role:button "{name}"`):gmatch("[^\n]+") do
+		if not line:find(" hidden", 1, true) and line:find(`"{text}"`, 1, true) then
+			return tonumber(line:match(" %-?%d+,%-?%d+ (%d+)x%d+")) or 0
+		end
+	end
+	return 0
+end
+
+test("composer footer: short of room the model's name shortens first, its effort stays whole", function()
+	local app = mounted()
+	app:set_state("test_place_model", "sonnet")
+	app:set_state("test_place_w", 800)
+	rested(app)
+	-- Roomy: all of it, the chip as wide as what it says.
+	local name, effort = text_w(app, "Model", "Claude Sonnet 4.5"), text_w(app, "Model", "High")
+	expect(name > 60 and effort > 0).to_be(true)
+	-- Narrowing: the name shortens while the access mode still has its
+	-- name, and the effort is whole at every width.
+	local shortened, access_folded = nil :: number?, nil :: number?
+	for w = 640, 180, -4 do
+		app:set_state("test_place_w", w)
 		app:frames(10)
-		if not effort_gone and not chip_text(app, "Model"):find("High", 1, true) then
-			effort_gone = w
+		expect(text_w(app, "Model", "High")).to_be(effort)
+		if not shortened and text_w(app, "Model", "Claude Sonnet 4.5") < name then
+			shortened = w
 		end
 		if not access_folded and chip_text(app, "Access") == "" then
 			access_folded = w
 		end
 	end
-	expect(effort_gone ~= nil and access_folded ~= nil).to_be(true)
-	expect((effort_gone :: number) > (access_folded :: number)).to_be(true)
-	expect(chip_text(app, "Model")).to_contain("Opus")
+	expect(shortened ~= nil and access_folded ~= nil).to_be(true)
+	expect((shortened :: number) > (access_folded :: number)).to_be(true)
+	-- At the last of it the name is shortened, still there.
+	local least = text_w(app, "Model", "Claude Sonnet 4.5")
+	expect(least > 0 and least < name).to_be(true)
 	-- Wide again, all of it.
-	app:resize(800, 500)
-	app:frames(60)
-	expect(chip_text(app, "Model")).to_contain("High")
+	app:set_state("test_place_w", 800)
+	rested(app)
+	expect(text_w(app, "Model", "Claude Sonnet 4.5")).to_be(name)
+	expect(text_w(app, "Model", "High")).to_be(effort)
 	expect(chip_text(app, "Access")).never.to_be("")
 	expect(app:error()).to_be_nil()
 end)
 
-test("composer footer: the model's name goes only after everything else has folded", function()
+test("composer footer: everything else folded, the model keeps its name's start, its effort and the ring", function()
 	local app = mounted()
+	app:set_state("test_place_model", "sonnet")
 	app:set_state("test_place_w", 800)
 	rested(app)
-	expect(chip_text(app, "Model")).to_contain("Opus")
+	local name, effort = text_w(app, "Model", "Claude Sonnet 4.5"), text_w(app, "Model", "High")
 	app:set_state("test_place_w", 260)
 	rested(app)
 	expect(chip_text(app, "Access")).to_be("")
 	expect(chip_text(app, "Branch")).to_be("")
-	expect(chip_text(app, "Model")).to_contain("Opus")
+	local kept = text_w(app, "Model", "Claude Sonnet 4.5")
+	expect(kept > 32 and kept < name).to_be(true)
+	expect(text_w(app, "Model", "High")).to_be(effort)
+	-- Past that: the name at its least, never gone; the effort and the ring stay.
 	app:set_state("test_place_w", 180)
 	rested(app)
-	expect(chip_text(app, "Model")).to_be("")
-	expect(width(app, 'role:button "Model"')).to_be(24)
-	-- Back with room, its name again.
+	local least = text_w(app, "Model", "Claude Sonnet 4.5")
+	expect(least > 0 and least < kept).to_be(true)
+	expect(text_w(app, "Model", "High")).to_be(effort)
+	expect(showing(app, "#composer-context")).to_be(true)
+	-- Back with room, all of it.
 	app:set_state("test_place_w", 800)
 	rested(app)
-	expect(chip_text(app, "Model")).to_contain("Opus")
+	expect(text_w(app, "Model", "Claude Sonnet 4.5")).to_be(name)
+	expect(app:error()).to_be_nil()
+end)
+
+-- Made narrow at once (a side chat opened in a small window, a split): the
+-- access mode's chip alone wider than the room left, the place chip squeezed
+-- to nothing. It still folds, rather than taking that for not laid out and
+-- clipping every chip where it stood.
+test("composer footer: narrowed at once past the place chip, it still folds", function()
+	local app = mounted()
+	app:set_state("test_place_model", "sonnet")
+	app:set_state("test_place_w", 800)
+	rested(app)
+	local effort = text_w(app, "Model", "High")
+	app:set_state("test_place_w", 200)
+	rested(app)
+	expect(chip_text(app, "Access")).to_be("")
+	expect(chip_text(app, "Branch")).to_be("")
+	expect(text_w(app, "Model", "High")).to_be(effort)
 	expect(app:error()).to_be_nil()
 end)

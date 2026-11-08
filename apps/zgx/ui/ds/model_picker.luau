@@ -107,8 +107,8 @@ export type Props = {
 	showing: State<boolean>?,
 	-- Set as it closes: whether from outside it (Dropdown's `outside`).
 	outside: State<boolean>?,
-	-- How far its chip folds (Dropdown's `fold`): 1, without the effort; 2, its
-	-- mark alone.
+	-- How far its chip folds (a footer short of room): 1, its name shortened;
+	-- 2, to its least. The effort, the bolt and the ring always stay.
 	fold: (() -> number)?,
 	-- This chat has its agent: another agent's tab only browses, and its models
 	-- go through the switch. (Not given or false: a new chat, whose agent is
@@ -133,6 +133,10 @@ export type Props = {
 local LEAD = "lead"
 -- A choice list's width.
 local CHOICES_W = 232
+-- The chip's name at each fold: at its most (a chip's label), shortened as
+-- the footer runs short, at its least. Past it, it ends in "…"; the effort
+-- after it is always whole.
+local NAME_AT: { [number]: number } = { [0] = 160, [1] = 72, [2] = 32 }
 -- The two layouts' widths, and their rows.
 local COMPACT_W, FULL_W = 256, 304
 local COMPACT_ROW, FULL_ROW = 32, 30
@@ -1140,11 +1144,11 @@ return ui.component(function(props: Props): Node
 	end
 
 	-- The ring on the chip, right of the effort: how near the account in use
-	-- is to a limit. (Nothing reported, or its mark alone, folded: no ring.)
+	-- is to a limit. (Nothing reported: no ring.)
 	local function usage_ring(): Node
 		return ui.show(function(): boolean
 			local a = in_use()
-			return a ~= nil and a.used ~= nil and (props.fold == nil or props.fold() < 2)
+			return a ~= nil and a.used ~= nil
 		end, ui.div {
 			id = "model-picker-usage",
 			self = "center",
@@ -2185,7 +2189,7 @@ return ui.component(function(props: Props): Node
 	-- The chip: the bolt after the effort, its 700 ms sheen as Fast comes on;
 	-- then the ring.
 	local chip_fast = ui.presence(function(): string?
-		if fast and fast:get() and has_fast() and (props.fold == nil or props.fold() < 2) then
+		if fast and fast:get() and has_fast() then
 			return "on"
 		end
 		return nil
@@ -2214,7 +2218,9 @@ return ui.component(function(props: Props): Node
 	end
 
 	return Dropdown {
-		fold = props.fold,
+		name_max = function(): number
+			return NAME_AT[if props.fold then props.fold() else 0] or NAME_AT[0]
+		end,
 		mark_when = props.mark_when,
 		value = props.model,
 		items = items :: any,

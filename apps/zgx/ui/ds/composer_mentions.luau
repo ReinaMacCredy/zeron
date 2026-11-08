@@ -18,7 +18,13 @@
 --   local m = mentions.use { field = field, value = draft, sources = { ["@"] = files, ["/"] = commands, ["$"] = skills } }
 --   ui.popover(m.popover(anchor))    -- the pill as the anchor
 --   on_key = function(e) if m.keys(e) then return true end … end
---   on_caret = m.on_caret, highlight = mentions.highlight
+--   on_caret = m.on_caret, on_blur = m.on_blur, on_press = m.on_press,
+--   highlight = mentions.highlight
+--
+-- A press anywhere but the popover puts it away as Escape does, and acts
+-- where it landed (the popover lets presses through): elsewhere, as the
+-- draft loses focus; on the draft, as it's pressed. A row picked with the
+-- pointer leaves the keys in the draft, the caret where the pick put it.
 
 local Icon = require("@self/icon")
 local FileIcon = require("@self/file_icons")
@@ -252,6 +258,30 @@ function M.use(opts: Use)
 		end
 		return false
 	end
+	-- A press in the popover lets the draft's focus go (its rows are
+	-- buttons): not a dismissal, and the keys come back to the draft.
+	local in_panel = false
+	local function pressed_in_panel()
+		in_panel = true
+		ui.after(0, function()
+			in_panel = false
+			local el = opts.field:peek()
+			if el then
+				el:focus({ scroll = false })
+			end
+		end)
+	end
+	local function put_away()
+		local t = token:peek()
+		if t and dismissed:peek() ~= t.from then
+			dismiss(t.from)
+		end
+	end
+	local function on_blur()
+		if not in_panel then
+			put_away()
+		end
+	end
 	local function on_caret(_line: number, _column: number, _anchor: number, focus: number)
 		if M.debug then
 			print(`[mentions] caret {focus} text {string.sub(opts.value:peek(), 1, 80)}`)
@@ -356,6 +386,7 @@ function M.use(opts: Use)
 				w_full = true,
 				p = "$space.1",
 				gap = 0,
+				on_press = pressed_in_panel,
 				Menu.Heading { title },
 				ui.show(loading, ui.column { gap = "$zeron.list.gap", table.unpack(skeleton) }),
 				ui.show(function()
@@ -387,6 +418,8 @@ function M.use(opts: Use)
 		open = open,
 		keys = keys,
 		on_caret = on_caret,
+		on_blur = on_blur,
+		on_press = put_away,
 		descendant = descendant,
 		choose = choose,
 		popover = popover,

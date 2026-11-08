@@ -128,6 +128,8 @@ local Field = ui.component(function(): Node
 			highlight = Mentions.highlight,
 			active_descendant = m.descendant,
 			on_caret = m.on_caret,
+			on_blur = m.on_blur,
+			on_press = m.on_press,
 			on_key = function(e)
 				return m.keys(e)
 			end,

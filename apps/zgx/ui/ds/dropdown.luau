@@ -100,6 +100,10 @@ export type Props = {
 	placeholder: (string | Message)?,
 	-- A muted second half to the trigger's label (a model's effort).
 	detail: (string | Message | () -> string)?,
+	-- The most the chosen name takes, given: it ends in "…" past it, and the
+	-- detail stays whole (the model chip's effort). Not given, the detail
+	-- gives way first and a long name fades out.
+	name_max: (() -> number)?,
 	-- After the detail, at the trigger's end (the model chip's usage ring).
 	trail: Node?,
 	-- The label and detail roll only for a change made in the open panel; one
@@ -726,6 +730,7 @@ return ui.component(function(props: Props): Node
 			return control.text(d) or ""
 		end
 		local fold = props.fold
+		local whole = props.name_max ~= nil
 		detail = ui.show(function()
 			return said() ~= "" and (fold == nil or fold() < 1)
 		end, FadeText {
@@ -734,33 +739,45 @@ return ui.component(function(props: Props): Node
 			roll = true,
 			rolls = rolls,
 			color = TRIGGER[tone].detail,
-			-- (Short of room it goes first, the name last.)
-			min_w = 0,
-			shrink = 1000,
+			-- (Short of room it goes first, the name last; or, kept whole, the name.)
+			min_w = if whole then nil else 0,
+			shrink = if whole then 0 else 1000,
 		})
 	end
 	-- The chosen item's name. A chip's is held to a width and, past it, fades
 	-- out at its end rather than cutting to "…" (only while it overflows).
 	local label_node: Node
 	if TRIGGER[tone].lift then
-		local clip, text = ui.ref(), ui.ref()
-		-- A row, so the text keeps its own width inside (a column would
-		-- stretch it to the box's, and nothing would overflow).
-		label_node = ui.row {
-			ref = clip,
-			-- (Lifted by a margin under it: the row stays centred, its words
-			-- a point up, nothing outside its clip.)
-			mb = TRIGGER[tone].lift,
-			min_w = 0,
-			items = "center",
-			max_w = CHIP_LABEL,
-			overflow = "hidden",
-			fade_x = function()
-				local over = (text.width or 0) > (clip.width or 0) + 0.5
-				return { 0, if over then CHIP_FADE else 0 }
-			end,
-			RollText { chosen, rolls = rolls, ref = text, shrink = 0, color = TRIGGER[tone].label },
-		}
+		if props.name_max then
+			-- (Held to its most, it ends in "…": the detail after it stays.)
+			label_node = ui.row {
+				mb = TRIGGER[tone].lift,
+				min_w = 0,
+				items = "center",
+				max_w = props.name_max :: any,
+				overflow = "hidden",
+				RollText { chosen, rolls = rolls, shrink = 1, min_w = 0, truncate = true, color = TRIGGER[tone].label },
+			}
+		else
+			local clip, text = ui.ref(), ui.ref()
+			-- A row, so the text keeps its own width inside (a column would
+			-- stretch it to the box's, and nothing would overflow).
+			label_node = ui.row {
+				ref = clip,
+				-- (Lifted by a margin under it: the row stays centred, its words
+				-- a point up, nothing outside its clip.)
+				mb = TRIGGER[tone].lift,
+				min_w = 0,
+				items = "center",
+				max_w = CHIP_LABEL,
+				overflow = "hidden",
+				fade_x = function()
+					local over = (text.width or 0) > (clip.width or 0) + 0.5
+					return { 0, if over then CHIP_FADE else 0 }
+				end,
+				RollText { chosen, rolls = rolls, ref = text, shrink = 0, color = TRIGGER[tone].label },
+			}
+		end
 		if props.ghost then
 			label_node = ui.row {
 				min_w = 0,

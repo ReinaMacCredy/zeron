@@ -11,6 +11,7 @@
 --   test_place_checkout  "worktree" | "local"
 --   test_place_usage     { tokens, window } or nil
 --   test_place_w         the composer's width
+--   test_place_model     "opus", or "sonnet" (a long name with an effort)
 --   test_place_card      the ring's card, drawn in place over the composer
 --   test_place_menu_specimen  the draft's text menu, drawn in place
 --   test_place_bare      the art hidden, its backings kept (to measure ink)
@@ -60,7 +61,12 @@ ui.effect(function()
 end)
 
 local HARNESSES: { ds.Harness } = { { id = "claude", label = "Claude", mark = "claude" } }
-local MODELS: { ds.Model } = { { value = "opus", label = "Opus 5.5", harness = "claude" } }
+-- (A long name with an effort: `test_place_model` = "sonnet".)
+local EFFORT = { { value = "medium", label = "Medium" }, { value = "high", label = "High" } }
+local MODELS: { ds.Model } = {
+	{ value = "opus", label = "Opus 5.5", harness = "claude" },
+	{ value = "sonnet", label = "Claude Sonnet 4.5", harness = "claude", efforts = EFFORT, effort = "high" },
+}
 local PROJECTS: { Composer.Project } = {
 	{ value = "zeron", label = "zeron", hue = "violet" },
 	{ value = "atlas", label = "Atlas Platform Monorepo", hue = "teal" },

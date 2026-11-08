@@ -350,8 +350,8 @@ local PROJECT_MIN, PROJECT_MAX, BRANCH_MAX, BRANCH_FLOOR = 44, 140, 180, 36
 -- The device's name before them: how wide at most, kept before the access
 -- mode folds, and least.
 local DEVICE_MAX, DEVICE_KEEP, DEVICE_MIN = 120, 72, 36
--- What a chevron between two of them takes, with its gap.
-local PLACE_CHEVRON = 14
+-- What a chevron between two of them takes, with its gap; the glyph leading.
+local PLACE_CHEVRON, PLACE_GLYPH = 14, 12
 -- The footer's chips: one height, one corner (the menus' row corner),
 -- each lead (a glyph's 12) 6 in all round, and as far from its words.
 local CHIP_H, CHIP_RADIUS = 24, "$radius.lg"
@@ -359,7 +359,7 @@ local CHIP_H, CHIP_RADIUS = 24, "$radius.lg"
 -- chip): centred by their capitals, lowercase reads low beside a glyph. (A
 -- margin under them of twice that: their box stays centred, a point up.)
 local LIFT = "$zeron.space.hair"
-type Folded = { level: number, access_at: { [string]: number }, where_icon: number?, model_at: { [string]: number }? }
+type Folded = { level: number, access_at: { [string]: number }, model_at: { [string]: number }? }
 local FOOTER_SIDES, FOOTER_GAP = 20, 4
 -- With cargo or a question over the draft, the draft keeps the strip's
 -- `below` over it (the theme's; read as the composer is built) rather than
@@ -1126,15 +1126,20 @@ return ui.component(function(props: Props): Node
 		return if props.keep then ui.state(`composer:{props.keep}:{key}`, initial) else ui.use_state(initial)
 	end
 	local pill_w = kept("pill_w", 0)
+	-- (What reads only whether it's laid out, or short of room, reads these:
+	-- an edge dragged moves the width at every frame, and these seldom.)
+	local function is_narrow(w: number): boolean
+		return (if w > 0 then w else 1000) < NARROW
+	end
+	local pill_shown = ui.use_state(pill_w:peek() > 0)
+	local pill_narrow = ui.use_state(is_narrow(pill_w:peek()))
 	local line_w = kept("line_w", 0)
 	local wrapped_h = kept("wrapped_h", 0)
 	local head_h_seen = kept("head_h", 0)
 	local trailing_seen = kept("trailing_w", 0)
-	local footer_w = kept("footer_w", 0)
 	local right_w = kept("right_w", 0)
 	local model_w = kept("model_w", 0)
 	local access_w = kept("access_w", 0)
-	local where_w = kept("where_w", 0)
 	local name_w = kept("name_w", 0)
 	local branch_w = kept("branch_w", 0)
 	local device_w = kept("device_w", 0)
@@ -1249,7 +1254,7 @@ return ui.component(function(props: Props): Node
 		empty = props.mention_empty,
 		on_choose = props.on_mention,
 		in_view = function(): boolean
-			return (pill_w:get() or 0) > 0
+			return pill_shown:get()
 		end,
 	}
 	-- Asked to: the keys, the caret at the end.
@@ -1270,8 +1275,7 @@ return ui.component(function(props: Props): Node
 
 	-- Short of room: the caller's word, else the pill's width.
 	local narrow = props.narrow or function(): boolean
-		local w = pill_w:get()
-		return (if w > 0 then w else 1000) < NARROW
+		return pill_narrow:get()
 	end
 
 	-- One line or opened out. On one line the text has the pill less the
@@ -1431,15 +1435,21 @@ return ui.component(function(props: Props): Node
 		return if on then "bottom" else "top"
 	end
 	-- The footer folds a step at a time as it runs short of room, the
-	-- fullest that fits: 0, all of it; 1, the model without its effort; 2,
-	-- the access mode without "Plan" too; 3, the access mode's icon alone; 4,
-	-- where it works as its icon too; 5, the model's icon alone. Until 4 where
-	-- it works keeps the project's name and BRANCH_KEEP of the branch's
-	-- (`where_min`, fading past it).
+	-- fullest that fits: 0, all of it; 1, the model's name shortened (its
+	-- effort always whole: ds/model_picker's chip); 2, the access mode
+	-- without "Plan" too; 3, the access mode's icon alone; 4, where it works
+	-- as its icon too; 5, the model's name to its least. Until 4 where it works
+	-- keeps the project's name and BRANCH_KEEP of the branch's (`where_min`,
+	-- fading past it).
 	--
-	-- Its measures: the footer's width, the right group's, and each chip's.
-	-- A chip's width at each of its folds is kept from when it was last at
-	-- that fold; a fold not yet measured is tried, and measured.
+	-- Its measures: the footer's width (the pill's: both span the
+	-- composer), the right group's, and each chip's. A chip's width at each
+	-- of its folds is kept from when it was last at that fold; a fold not
+	-- yet measured is tried, and measured.
+	--
+	-- Folded again only as one of them changes, from the pill's own measure
+	-- and the chips' (`refold`): a pane's edge dragged runs no more script
+	-- than the pill's measure did already.
 	--
 	-- Kept (`folded`), so one made again (a reload) starts at the fold it
 	-- was at, its measures known, rather than unfolded until its chips are
@@ -1456,48 +1466,63 @@ return ui.component(function(props: Props): Node
 		return if lv == 0 then 0 elseif lv >= 5 then 2 else 1
 	end
 	local function where_min(lv: number): number
-		if not place_known:get() then
+		if not place_known:peek() then
 			return BRANCH_MIN
 		end
-		local n, b, d = name_w:get(), branch_w:get(), device_w:get()
+		local n, b, d = name_w:peek(), branch_w:peek(), device_w:peek()
 		if lv >= 2 then
 			return PLACE_CHROME + math.min(n, PROJECT_MIN) + math.min(b, BRANCH_FLOOR) + math.min(d, DEVICE_MIN + PLACE_CHEVRON)
 		end
 		return PLACE_CHROME + math.min(n, PROJECT_MAX) + math.min(b, BRANCH_KEEP) + math.min(d, DEVICE_KEEP + PLACE_CHEVRON)
+	end
+	-- Folded to its glyph, where it works is the glyph and the chip's sides.
+	local function where_icon(): number
+		return PLACE_GLYPH + 2 * ((ui.theme.get("zeron.space.tight") :: number?) or 6)
 	end
 	local was = folded:peek()
 	local access_at: { [number]: number } = {}
 	for k, v in was.access_at do
 		access_at[tonumber(k) :: number] = v
 	end
-	local where_icon: number? = was.where_icon
 	local model_at: { [number]: number } = {}
 	for k, v in was.model_at or {} do
 		model_at[tonumber(k) :: number] = v
 	end
 	-- (What the model's chip says: another pick, its other folds measure again.)
 	local model_says: string? = nil
-	local level = was.level
-	-- Bumped a frame after trying a fold not yet measured: its chip may lay
-	-- out no wider or narrower (the access mode without "Plan" when plan
-	-- mode is off), so no measure changes to look again by.
-	local tried = ui.use_state(0)
-	-- (Asked by the fold, started by the effect after it: a timer made in a
-	-- computed lasts only until its next run.)
-	local retry = false
-	local fold = ui.computed(function(): number
-		tried:get()
-		local f, r, m = footer_w:get(), right_w:get(), model_w:get()
+	local level_now = was.level
+	-- What each chip makes of it, apart: a step that folds one chip wakes
+	-- that chip's alone.
+	local access_fold = ui.use_state(math.min(left_fold(was.level), 2))
+	local where_folded = ui.use_state(left_fold(was.level) >= 3)
+	local model_folded = ui.use_state(model_fold(was.level))
+	-- (A fold not yet measured is looked at again a frame after it's tried:
+	-- its chip may lay out no wider or narrower (the access mode without
+	-- "Plan" when plan mode is off), so no measure changes to look again by.)
+	local retry_at = 0
+	local function keep_fold(level: number)
+		local at: { [string]: number } = {}
+		for k, v in access_at do
+			at[tostring(k)] = v
+		end
+		local chip_at: { [string]: number } = {}
+		for k, v in model_at do
+			chip_at[tostring(k)] = v
+		end
+		folded:set { level = level, access_at = at, model_at = chip_at }
+	end
+	local function refold()
+		local level = level_now
+		local f, r, m = pill_w:peek(), right_w:peek(), model_w:peek()
 		-- (Not laid out yet: as it was.)
 		if f <= 0 or r <= 0 or m <= 0 then
-			return level
+			return
 		end
-		local a = if props.access then access_w:get() else 0
-		local w = if props.branch then where_w:get() else 0
-		if (props.access and a <= 0) or (props.branch and w <= 0) then
-			return level
+		local a = if props.access then access_w:peek() else 0
+		if props.access and a <= 0 then
+			return
 		end
-		local says = `{props.model:get()}/{props.effort:get()}`
+		local says = `{props.model:peek()}/{props.effort:peek()}`
 		if says ~= model_says then
 			if model_says ~= nil then
 				table.clear(model_at)
@@ -1505,10 +1530,6 @@ return ui.component(function(props: Props): Node
 			model_says = says
 		end
 		access_at[math.min(left_fold(level), 2)] = a
-		-- (Its widest: with no room at all it's squeezed under the icon's width.)
-		if left_fold(level) >= 3 then
-			where_icon = math.max(where_icon or 0, w)
-		end
 		model_at[model_fold(level)] = m
 		-- The footer's room: less its sides, what's on the right but the model,
 		-- and the gaps.
@@ -1518,9 +1539,9 @@ return ui.component(function(props: Props): Node
 		local function needs(lv: number): number?
 			local left = left_fold(lv)
 			local access_w = access_at[math.min(left, 2)]
-			local where_w = if not props.branch then 0 elseif left >= 3 then where_icon else where_min(left)
+			local where_w = if not props.branch then 0 elseif left >= 3 then where_icon() else where_min(left)
 			local chip_w = model_at[model_fold(lv)]
-			if access_w == nil or where_w == nil or chip_w == nil then
+			if access_w == nil or chip_w == nil then
 				return nil
 			end
 			return access_w + where_w + chip_w
@@ -1535,29 +1556,36 @@ return ui.component(function(props: Props): Node
 				break
 			end
 		end
-		if next ~= level and needs(next) == nil then
-			retry = true
+		if next ~= level then
+			level_now = next
+			access_fold:set(math.min(left_fold(next), 2))
+			where_folded:set(left_fold(next) >= 3)
+			model_folded:set(model_fold(next))
+			keep_fold(next)
+			if needs(next) == nil then
+				retry_at += 1
+				local asked = retry_at
+				ui.after(16, function()
+					if asked == retry_at then
+						refold()
+					end
+				end)
+			end
 		end
-		level = next
-		return level
-	end)
+	end
+	-- The chips' own measures (and the model said), as they change: not the
+	-- pane's width, which the pill's measure brings.
 	ui.effect(function()
-		local now = fold:get()
-		if retry then
-			retry = false
-			ui.after(16, function()
-				tried:set(tried:peek() + 1)
-			end)
-		end
-		local at: { [string]: number } = {}
-		for k, v in access_at do
-			at[tostring(k)] = v
-		end
-		local chip_at: { [string]: number } = {}
-		for k, v in model_at do
-			chip_at[tostring(k)] = v
-		end
-		folded:set { level = now, access_at = at, where_icon = where_icon, model_at = chip_at }
+		right_w:get()
+		model_w:get()
+		access_w:get()
+		place_known:get()
+		name_w:get()
+		branch_w:get()
+		device_w:get()
+		props.model:get()
+		props.effort:get()
+		refold()
 	end)
 
 	local picker_open = props.model_open or ui.use_state(false)
@@ -1597,7 +1625,7 @@ return ui.component(function(props: Props): Node
 			on_retry = props.model_retry,
 			context_tokens = props.context_tokens,
 			fold = function(): number
-				return model_fold(fold:get())
+				return model_folded:get()
 			end,
 		}
 	end)
@@ -1609,7 +1637,7 @@ return ui.component(function(props: Props): Node
 		local plan = props.plan
 		access = Dropdown {
 			fold = function()
-				return math.min(left_fold(fold:get()), 2)
+				return access_fold:get()
 			end,
 			accent = if plan
 				then function()
@@ -2033,7 +2061,15 @@ return ui.component(function(props: Props): Node
 	end
 	local surface = ui.div {
 		ref = pill,
-		on_resize = measure(pill_w, "w"),
+		-- (The footer's width too: it folds as this moves.)
+		on_resize = function(size: Size)
+			if math.abs(pill_w:peek() - size.w) >= 0.5 then
+				pill_w:set(size.w)
+				pill_shown:set(size.w > 0)
+				pill_narrow:set(is_narrow(size.w))
+			end
+			refold()
+		end,
 		relative = true,
 		w_full = true,
 		h = eased(height),
@@ -2186,6 +2222,8 @@ return ui.component(function(props: Props): Node
 					m.on_caret(line, column, anchor, focus)
 					caret_moved:set(caret_moved:peek() + 1)
 				end,
+				on_blur = m.on_blur,
+				on_press = m.on_press,
 				on_paste = function(e)
 					-- (Files first: a copied file puts its name in `text` too.)
 					if e.files and #e.files > 0 and props.on_files then
@@ -2404,7 +2442,7 @@ return ui.component(function(props: Props): Node
 				return if checkout and checkout:get() == "local" then nil else "worktree"
 			end
 			local function folded(): boolean
-				return left_fold(fold:get()) >= 3
+				return where_folded:get()
 			end
 			-- The device chosen, by name, leading the chip.
 			local function chosen_device(): string?
@@ -2508,7 +2546,6 @@ return ui.component(function(props: Props): Node
 			table.insert(
 				left,
 				ui.row {
-					on_resize = measure(where_w, "w"),
 					min_w = 0,
 					if static
 						then ui.show(function(): boolean
@@ -2520,7 +2557,6 @@ return ui.component(function(props: Props): Node
 		end
 		footer = ui.row {
 			id = props.toolbar_id,
-			on_resize = measure(footer_w, "w"),
 			h = 24,
 			-- On the tray: a tight step under the pill and above the tray's
 			-- foot (the pill's full control inset read too airy there), and

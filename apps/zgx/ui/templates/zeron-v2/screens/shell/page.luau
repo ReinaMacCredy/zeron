@@ -693,6 +693,11 @@ return function(props: Props): Node
 			chosen:set(true)
 		end
 	end
+	-- Shut, or in its glide's last half point: out of the layout, its content
+	-- kept, rather than laid out in a box of no width.
+	local shut = ui.computed(function(): boolean
+		return open_w:get() <= 0.5
+	end)
 	local beside = ui.column {
 		id = "shell-files",
 		hook = "shell.files",
@@ -707,6 +712,9 @@ return function(props: Props): Node
 		ui.column {
 			-- (Its own width, or, expanding, the one it grows to.)
 			w = inner_w,
+			hidden = function(): boolean
+				return shut:get()
+			end,
 			h_full = true,
 			-- The session's panel (its tabs: the files, a terminal), or, until
 			-- that screen is there, the files pane alone.
