@@ -848,6 +848,8 @@ end
 -- bumped, it opens. `open_model_picker` says whether there was a composer
 -- to open it in.
 M.open_model = ui.shared("chat.composer.open_model", 0)
+-- A new chat's agent asked for from elsewhere (the Skills page's Try now): an agent's id; the composer takes its first model unless it runs that agent already, then clears it.
+M.want_agent = ui.shared("chat.composer.want_agent", nil :: string?)
 M.composer_shown = ui.shared("chat.composer.shown", false)
 function M.open_model_picker(): boolean
 	if not M.composer_shown:peek() then

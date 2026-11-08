@@ -61,7 +61,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -162,6 +162,8 @@ struct Agents {
     loading: Cell<u64>,
     /// Each account's last banked reset (Codex), by account id.
     resets: RefCell<HashMap<String, Reset>>,
+    /// Each local session's last finished turn, as last heard (`turns_ended`).
+    turns: RefCell<HashMap<String, Option<String>>>,
     /// The idempotency key each (account, credit) is redeemed with, kept
     /// until Codex gives a definite answer: a retry after a failure is the
     /// same request, never a second reset.
@@ -256,6 +258,16 @@ pub(crate) fn registry_icon(harness: &str) -> Option<String> {
 
 thread_local! {
     static AGENTS: Rc<Agents> = Rc::new(Agents::new());
+}
+
+/// This Mac's sessions as the engine says they run (src/sessions.rs): a turn finished here
+/// looks at this Mac's usage again, once it has posted.
+pub(crate) fn heard_sessions(sessions: &Json, here: Option<&str>) {
+    let agents = AGENTS.with(Rc::clone);
+    let ended = turns_ended(&mut agents.turns.borrow_mut(), sessions, here);
+    if ended && agents.device_accounts.borrow().get("").is_some_and(|d| d.asked) {
+        agents.schedule_device(String::new(), Instant::now() + TURN_SETTLE, TURN_REFRESH_MIN);
+    }
 }
 
 pub fn install(host: &ScriptHost) {
@@ -537,6 +549,7 @@ impl Agents {
             wanted: Cell::new(false),
             loading: Cell::new(0),
             resets: RefCell::default(),
+            turns: RefCell::default(),
             reset_keys: RefCell::default(),
             reset_generation: Cell::new(0),
         }
@@ -949,6 +962,44 @@ impl Agents {
             }
             if let Ok(snapshot) = engine::get().call("ListAgentAccounts", params(force)).await {
                 me.keep_device(key.clone(), &snapshot);
+                let next = me.device_accounts.borrow().get(&key).and_then(|d| next_reset(&d.accounts, now_ms() / 1000));
+                if let Some(next) = next {
+                    let at = Instant::now() + next + RESET_SETTLE;
+                    me.schedule_device(key, at, DEVICE_USAGE_MIN);
+                }
+            }
+        });
+    }
+
+    /// `key`'s accounts looked at again at `at`, or `floor` past the last forced look if that's
+    /// later; the sooner of two asked for stands (account_usage.rs `schedule`).
+    fn schedule_device(self: &Rc<Self>, key: String, at: Instant, floor: Duration) {
+        let generation = {
+            let mut devices = self.device_accounts.borrow_mut();
+            let Some(device) = devices.get_mut(&key) else { return };
+            let at = device.last_forced.map_or(at, |forced| at.max(forced + floor));
+            if device.scheduled.is_some_and(|(pending, _)| pending <= at) {
+                return;
+            }
+            device.scheduled_count += 1;
+            device.scheduled = Some((at, device.scheduled_count));
+            (at, device.scheduled_count)
+        };
+        let me = self.clone();
+        engine::get().spawn(async move {
+            zgx::timer::sleep(generation.0.saturating_duration_since(Instant::now())).await;
+            let ready = {
+                let mut devices = me.device_accounts.borrow_mut();
+                let Some(device) = devices.get_mut(&key) else { return };
+                if device.scheduled.map(|(_, n)| n) != Some(generation.1) {
+                    return;
+                }
+                device.scheduled = None;
+                device.last_forced.map(|forced| forced + DEVICE_USAGE_MIN).filter(|ready| *ready > Instant::now())
+            };
+            match ready {
+                Some(ready) => me.schedule_device(key, ready, DEVICE_USAGE_MIN),
+                None => me.load_device(key, true),
             }
         });
     }
@@ -1546,12 +1597,60 @@ struct DeviceAccounts {
     /// A composer has asked for them.
     asked: bool,
     last_forced: Option<Instant>,
+    /// A look again set for later (a turn's end, a window's reset): when, and its number.
+    scheduled: Option<(Instant, u64)>,
+    scheduled_count: u64,
 }
 
 /// Forced usage asks the provider: not more often than this.
 const DEVICE_USAGE_MIN: Duration = Duration::from_secs(30);
 /// How often usage is looked at again while the app is open.
 const DEVICE_USAGE_POLL: Duration = Duration::from_secs(5 * 60);
+/// A finished turn's usage posts a moment later; parallel agents end turns all the time and the
+/// provider refuses a flood, so not more often than the floor (account_usage.rs).
+const TURN_SETTLE: Duration = Duration::from_secs(5);
+const TURN_REFRESH_MIN: Duration = Duration::from_secs(60);
+/// Past a usage window's reset, once the provider has rolled it over.
+const RESET_SETTLE: Duration = Duration::from_secs(3);
+
+/// Whether a session here finished a turn since `seen` last looked (account_usage.rs
+/// `note_turns`): one first seen is only noted, launch and reattach are not a turn's end.
+fn turns_ended(seen: &mut HashMap<String, Option<String>>, sessions: &Json, here: Option<&str>) -> bool {
+    let mut ended = false;
+    let mut live = HashSet::new();
+    for row in sessions.as_array().into_iter().flatten() {
+        let Some(chat) = row["chatId"].as_str() else { continue };
+        if here.is_some_and(|here| row["deviceId"].as_str().is_some_and(|d| d != here)) {
+            continue;
+        }
+        live.insert(chat.to_string());
+        let turn = row["lastCompletedTurn"].as_str().map(str::to_owned);
+        match seen.get_mut(chat) {
+            Some(was) if *was != turn => {
+                ended |= turn.is_some();
+                *was = turn;
+            }
+            Some(_) => {}
+            None => {
+                seen.insert(chat.to_string(), turn);
+            }
+        }
+    }
+    seen.retain(|chat, _| live.contains(chat));
+    ended
+}
+
+/// How long until the soonest reset of a usage window of an account in use, if one is ahead.
+fn next_reset(accounts: &[Json], now: i64) -> Option<Duration> {
+    accounts
+        .iter()
+        .filter(|a| a["active"].as_bool() == Some(true))
+        .flat_map(|a| a["usageWindows"].as_array().into_iter().flatten())
+        .filter_map(|w| w["resetsAt"].as_str().and_then(epoch_secs))
+        .filter(|at| *at > now)
+        .min()
+        .map(|at| Duration::from_secs((at - now) as u64))
+}
 
 /// `account` the one in use of its group: its agent, or for an agent that
 /// keeps a login per model provider, that provider; other groups keep theirs.
@@ -1654,6 +1753,30 @@ fn epoch_secs(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_turn_finished_here_looks_again_but_a_first_sighting_and_another_device_do_not() {
+        let mut seen = HashMap::new();
+        let rows = |a: Option<&str>, b: Option<&str>| {
+            json!([
+                { "chatId": "a", "deviceId": "mac", "lastCompletedTurn": a },
+                { "chatId": "b", "deviceId": "pc", "lastCompletedTurn": b },
+            ])
+        };
+        assert!(!turns_ended(&mut seen, &rows(Some("t1"), None), Some("mac")));
+        assert!(!turns_ended(&mut seen, &rows(Some("t1"), Some("t9")), Some("mac")));
+        assert!(turns_ended(&mut seen, &rows(Some("t2"), Some("t9")), Some("mac")));
+        assert!(!turns_ended(&mut seen, &rows(Some("t2"), Some("t9")), Some("mac")));
+        assert!(!turns_ended(&mut seen, &json!([]), Some("mac")));
+        assert!(seen.is_empty());
+        let now = epoch_secs("2026-11-01T15:00:00Z").unwrap();
+        let accounts = [
+            json!({ "active": true, "usageWindows": [{ "resetsAt": "2026-11-01T15:45:00Z" }, { "resetsAt": "2026-11-01T14:00:00Z" }] }),
+            json!({ "active": false, "usageWindows": [{ "resetsAt": "2026-11-01T15:05:00Z" }] }),
+        ];
+        assert_eq!(next_reset(&accounts, now), Some(Duration::from_secs(45 * 60)));
+        assert_eq!(next_reset(&accounts[1..], now), None);
+    }
 
     #[test]
     fn a_switch_moves_only_its_own_login_group() {

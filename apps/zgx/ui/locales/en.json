@@ -2541,7 +2541,7 @@
       "reading": "Reading agent transcripts…",
       "failed": "Couldn't read usage",
       "sessions": "{n, plural, one {# session} other {# sessions}}",
-      "unpriced": "Excludes {n, plural, one {# request} other {# requests}} on models with no known price",
+      "unpriced": "Excludes {n, plural, one {# response} other {# responses}} on models with no known price",
       "metric": "Show",
       "cost": "Cost",
       "tokens": "Tokens",
@@ -2567,6 +2567,15 @@
         "model": "Model",
         "day": "Day",
         "hour": "Hour"
+      },
+      "estimate": "{sessions} · API estimate",
+      "provider_cost": "{share} of cost · {tokens} tokens",
+      "provider_tokens": "{share} of tokens · {cost}",
+      "chart": {
+        "daily_cost": "Daily cost",
+        "daily_tokens": "Daily processed tokens",
+        "hourly_cost": "Hourly cost",
+        "hourly_tokens": "Hourly processed tokens"
       }
     },
     "cloud": {
@@ -3494,7 +3503,8 @@
         "switcher": "Chat switcher",
         "tasks": "Tasks",
         "inbox": "Inbox",
-        "quick_capture": "Quick capture"
+        "quick_capture": "Quick capture",
+        "skills": "Skills"
       }
     },
     "title_bar": {
@@ -3865,7 +3875,8 @@
     "home": {
       "title": "Add a project to get started",
       "body": "A project is a folder on one of your devices.",
-      "action": "Add a project"
+      "action": "Add a project",
+      "headline": "What should we work on?"
     },
     "link_notice": {
       "offline_intent": "Offline — messages will send when you're back online.",
@@ -5047,5 +5058,32 @@
     "todays_tasks": "Today’s tasks",
     "all_tasks": "All tasks",
     "add_placeholder": "Add a task for today, or press Tab to hand it to an agent"
+  },
+  "skills": {
+    "title": "Skills",
+    "all": "All skills",
+    "harnesses": "Skill harnesses",
+    "count": "{n, plural, one {# skill} other {# skills}}",
+    "loading": "Loading skills…",
+    "couldnt_load": "Could not load skills: {why}",
+    "old_host": "this version of Zeron can't list them",
+    "none": "No skills installed for this harness.",
+    "kind": "Skill",
+    "use": "Use this skill",
+    "more": "More options",
+    "close": "Close",
+    "open": "Open",
+    "reveal": "Reveal in Finder",
+    "copy": "Copy Markdown",
+    "copied": "Copied SKILL.md",
+    "couldnt_open": "Could not open the skill",
+    "reading": "Loading SKILL.md…",
+    "couldnt_read": "Could not read SKILL.md: {why}",
+    "native": "This skill comes from the harness and has no SKILL.md on disk.",
+    "uninstall": "Uninstall",
+    "uninstall_says": "Moves the skill to the Trash. Every harness that loads it loses it.",
+    "move_to_trash": "Move to Trash",
+    "couldnt_trash": "Could not move the skill to the Trash: {why}",
+    "try": "Try now"
   }
 }

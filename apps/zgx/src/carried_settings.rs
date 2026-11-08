@@ -28,6 +28,7 @@ const PREFS: &str = "screens%2Fsettings%2Fprefs.luau%3A%3A";
 const SWITCHER: &str = "screens%2Fshell%2Fswitcher.luau%3A%3A";
 const APPSHOTS: &str = "screens%2Fchat%2Fappshots.luau%3A%3A";
 const MOTION: &str = "ds%2Fmotion.luau%3A%3A";
+const SKILLS_OFF: &str = "screens%2Fchat%2Finvocations.luau%3A%3Askills_disabled.json";
 
 fn look(name: &str) -> String {
     format!("{LOOK}{name}.json")
@@ -240,6 +241,12 @@ fn carried_prefs(settings: &Json) -> Vec<(String, Json)> {
     if let Some(on) = settings["pauseAnimationsInBackground"].as_bool() {
         out.push((format!("{MOTION}motion_pause_background.json"), json!(on)));
     }
+    if let Some(paths) = settings["disabledSkills"].as_array() {
+        let off: serde_json::Map<String, Json> = paths.iter().filter_map(|p| p.as_str()).map(|p| (p.to_string(), json!(true))).collect();
+        if !off.is_empty() {
+            out.push((SKILLS_OFF.to_string(), Json::Object(off)));
+        }
+    }
     out
 }
 
@@ -363,6 +370,7 @@ mod tests {
                 "soundEnabled": true, "soundCompletionEnabled": false, "soundInputEnabled": true, "soundAttentionEnabled": false,
                 "appshotsEnabled": true, "appshotSoundEnabled": false, "appshotDestination": "last-session",
                 "transcriptWidth": 736.0, "reduceMotion": "on", "pauseAnimationsInBackground": true,
+                "disabledSkills": ["/u/.claude/skills/pdf/SKILL.md"],
             }),
         );
         let file = |name: String| serde_json::from_slice::<Json>(&std::fs::read(dir.path().join(name)).unwrap()).unwrap();
@@ -386,6 +394,7 @@ mod tests {
         assert_eq!(file(format!("{APPSHOTS}appshots_destination.json")), json!("last"));
         assert_eq!((file(format!("{MOTION}motion_reduce.json")), file(format!("{MOTION}motion_follow_system.json"))), (json!(true), json!(false)));
         assert_eq!(file(format!("{MOTION}motion_pause_background.json")), json!(true));
+        assert_eq!(file(SKILLS_OFF.to_string()), json!({ "/u/.claude/skills/pdf/SKILL.md": true }));
         // A word or a number this app doesn't take stays its default.
         let odd = tempfile::tempdir().unwrap();
         carry_into(odd.path(), &odd.path().join("kept"), &json!({ "composerSendBehavior": "shift-enter", "switcherWindow": "weeks2", "appshotDestination": "elsewhere", "filesAutosaveDelayMs": 0, "transcriptWidth": 99999.0 }));

@@ -522,7 +522,7 @@ return function(props: Props): Node
 	-- off, a quiet word. What's around it gives the page.
 	local function plugin_page(key: string): Node
 		local plugin, page = string.match(key, "^([^/]*)/(.*)$")
-		if plugin == "zeron" and (page == "tasks" or page == "inbox") then
+		if plugin == "zeron" and (page == "tasks" or page == "inbox" or page == "skills") then
 			return boundary.screen(boundary.named(`shell.boundary.screen.{page}`), `@app/screens/{page}`, function(screen): Node
 				return screen.Page()
 			end)

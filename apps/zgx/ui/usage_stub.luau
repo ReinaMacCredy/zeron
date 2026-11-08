@@ -31,7 +31,7 @@ usage.summary = function(days: number): any
 	if days == 90 then
 		return settled {
 			hourly = false, sessions = 0, unpriced = 0, cost = "$0.00", tokens = "0", cached = "0", uncached = "0", output = "0", savings = "$0.00",
-			models = {}, periods = {},
+			providers = {}, models = {}, periods = {},
 		}
 	end
 	return settled {
@@ -44,6 +44,10 @@ usage.summary = function(days: number): any
 		uncached = "400K",
 		output = "200K",
 		savings = "$4.20",
+		providers = {
+			{ harness = "claude-code", name = "Claude Code", sessions = 2, cost = "$12.00", tokens = "1.2M", cost_share = "97%", tokens_share = "80%" },
+			{ harness = "codex", name = "Codex", sessions = 1, cost = "$0.34", tokens = "300K", cost_share = "3%", tokens_share = "20%" },
+		},
 		models = {
 			{ key = "claude-code/opus", name = "opus", harness = "claude-code", cost = "$12.00", tokens = "1.2M", cost_share = "97%", tokens_share = "80%" },
 			{ key = "codex/gpt", name = "gpt", harness = "codex", cost = "$0.34", tokens = "300K", cost_share = "3%", tokens_share = "20%" },

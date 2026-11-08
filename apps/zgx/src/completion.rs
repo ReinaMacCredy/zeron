@@ -135,6 +135,7 @@ struct Row {
     plain: bool,
     terminal_only: bool,
     blocked: Option<String>,
+    path: Option<String>,
 }
 
 fn row_value(row: Row) -> Value {
@@ -153,6 +154,9 @@ fn row_value(row: Row) -> Value {
     }
     if let Some(reason) = &row.blocked {
         fields.push(("blocked", Value::from(reason.as_str())));
+    }
+    if let Some(path) = &row.path {
+        fields.push(("path", Value::from(path.as_str())));
     }
     Value::record(fields)
 }
@@ -220,7 +224,7 @@ fn native_skill(path: &str) -> bool {
 }
 
 /// `Invocation::link`: `[/name](zeron-invoke:<hex of its JSON>)`.
-fn link(prefix: char, name: &str, invocation: &Json) -> String {
+pub(crate) fn link(prefix: char, name: &str, invocation: &Json) -> String {
     let bytes = serde_json::to_vec(invocation).unwrap_or_default();
     let payload: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     let label = name.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]").replace('`', "\\`");
@@ -255,6 +259,7 @@ fn candidates(commands: &[Json], skills: &[Json]) -> Vec<Row> {
             plain: false,
             terminal_only: false,
             blocked: None,
+            path: None,
         });
     }
     for s in skills {
@@ -281,6 +286,7 @@ fn candidates(commands: &[Json], skills: &[Json]) -> Vec<Row> {
             plain: false,
             terminal_only: false,
             blocked: None,
+            path: Some(path.to_string()),
         });
     }
     rows

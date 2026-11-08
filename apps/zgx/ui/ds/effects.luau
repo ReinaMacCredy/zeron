@@ -44,15 +44,19 @@ end
 -- ` .-+xXS80#@` rising steeply with the brightness at its centre (the
 -- highlights dense, the mid tones light), its strokes lit in that colour at
 -- its full value over the picture at 75%; laid over it at `strength`.
+-- On light paper (gpui's `ascii_pixels`) the dark parts take the glyphs, inked
+-- in their colour over a picture lifted towards white.
 -- params[0]: the font pixel (points), the strength (0 to 1), the threshold
--- (0 to 1).
+-- (0 to 1), light (1) or dark (0).
 M.ascii = ui.layer_shader(decode.GLYPHS .. [[
 fn layer(input:LayerInput)->vec4<f32> {
  let px=max(1.,round(input.params[0].x*input.scale))/input.scale;
  let size=vec2(6.,8.)*px;
  let cell=floor(input.p/size);
  let c=zgx_sample((cell+.5)*size);
- let lum=dot(c.rgb,vec3(.2126,.7152,.0722));
+ let light=input.params[0].w>.5;
+ var lum=dot(c.rgb,vec3(.2126,.7152,.0722));
+ if light {lum=1.-lum;}
  let peak=max(max(c.r,c.g),c.b);
  let t=input.params[0].z;
  let level=pow(clamp((lum-t)/max(1.-t,.01),0.,1.),1.4);
@@ -60,13 +64,13 @@ fn layer(input:LayerInput)->vec4<f32> {
  // Between the strokes, everywhere alike (a glyph's cell or none, so no
  // character is boxed in): the picture a little dimmer, so the glyphs
  // stand out of it and its own softness shows less.
- let dim=input.color.rgb*.75;
+ let dim=select(input.color.rgb*.75,input.color.rgb+(vec3(1.)-input.color.rgb)*.25,light);
  if i==0u {return vec4(mix(input.color.rgb,dim,input.params[0].y),input.color.a);}
  let g=glyph(i);
  let fp=vec2<u32>(floor((input.p-cell*size)/px));
  var lit=0u;
  if fp.x<5u && fp.y<7u {lit=(select(g.y,g.x>>(fp.y*5u),fp.y<6u)>>(4u-fp.x))&1u;}
- let art=select(dim,c.rgb/max(peak,.004),lit==1u);
+ let art=select(dim,select(c.rgb/max(peak,.004),c.rgb*.6,light),lit==1u);
  return vec4(mix(input.color.rgb,art,input.params[0].y),input.color.a);
 }
 ]])
@@ -74,8 +78,8 @@ fn layer(input:LayerInput)->vec4<f32> {
 -- The characters' parameters: a font pixel `px` points (1.5, by default),
 -- laid over the picture at `strength` (0.75), none in cells darker than
 -- `threshold` (0.22).
-function M.ascii_params(px: number?, strength: number?, threshold: number?): { any }
-	return { { px or 1.5, strength or 0.75, threshold or 0.22, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } }
+function M.ascii_params(px: number?, strength: number?, threshold: number?, light: boolean?): { any }
+	return { { px or 1.5, strength or 0.75, threshold or 0.22, if light then 1 else 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } }
 end
 
 -- Printed in dots, as Zeron's halftone (new_thread_background_effects.rs,

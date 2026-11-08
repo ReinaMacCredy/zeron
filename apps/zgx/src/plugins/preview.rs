@@ -68,6 +68,8 @@ pub const BLOCKED: &[&str] = &[
     "files.delete",
     // (Opens a file as a double click would: a `.command` runs.)
     "files.open_external",
+    "skills.open",
+    "skills.trash",
     "chat.send",
     "tasks.create",
     "tasks.update",

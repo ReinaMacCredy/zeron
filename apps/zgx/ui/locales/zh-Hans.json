@@ -2541,7 +2541,7 @@
       "reading": "正在读取智能体记录…",
       "failed": "无法读取用量",
       "sessions": "{n} 个会话",
-      "unpriced": "不包括未知价格模型上的 {n} 次请求",
+      "unpriced": "不包括未知价格模型上的 {n} 条回复",
       "metric": "显示",
       "cost": "费用",
       "tokens": "令牌",
@@ -2567,6 +2567,15 @@
         "model": "模型",
         "day": "天",
         "hour": "小时"
+      },
+      "estimate": "{sessions} · API 估算",
+      "provider_cost": "占费用 {share} · {tokens} 令牌",
+      "provider_tokens": "占令牌 {share} · {cost}",
+      "chart": {
+        "daily_cost": "每日费用",
+        "daily_tokens": "每日处理的令牌",
+        "hourly_cost": "每小时费用",
+        "hourly_tokens": "每小时处理的令牌"
       }
     },
     "cloud": {
@@ -3494,7 +3503,8 @@
         "switcher": "会话切换器",
         "tasks": "任务",
         "inbox": "收件箱",
-        "quick_capture": "快速记录"
+        "quick_capture": "快速记录",
+        "skills": "技能"
       }
     },
     "title_bar": {
@@ -3865,7 +3875,8 @@
     "home": {
       "title": "添加项目以开始使用",
       "body": "项目是你的一台设备上的文件夹。",
-      "action": "添加项目"
+      "action": "添加项目",
+      "headline": "我们来做点什么？"
     },
     "link_notice": {
       "offline_intent": "离线中——恢复连接后将发送消息。",
@@ -5047,5 +5058,32 @@
     "todays_tasks": "今天的任务",
     "all_tasks": "全部任务",
     "add_placeholder": "添加今天的任务，或按 Tab 交给代理"
+  },
+  "skills": {
+    "title": "技能",
+    "all": "全部技能",
+    "harnesses": "技能所属的代理",
+    "count": "{n, plural, other {# 个技能}}",
+    "loading": "正在载入技能…",
+    "couldnt_load": "无法载入技能：{why}",
+    "old_host": "此版本的 Zeron 无法列出技能",
+    "none": "此代理没有安装技能。",
+    "kind": "技能",
+    "use": "使用此技能",
+    "more": "更多选项",
+    "close": "关闭",
+    "open": "打开",
+    "reveal": "在访达中显示",
+    "copy": "复制 Markdown",
+    "copied": "已复制 SKILL.md",
+    "couldnt_open": "无法打开此技能",
+    "reading": "正在载入 SKILL.md…",
+    "couldnt_read": "无法读取 SKILL.md：{why}",
+    "native": "此技能来自代理本身，磁盘上没有 SKILL.md。",
+    "uninstall": "卸载",
+    "uninstall_says": "将技能移到废纸篓。所有载入它的代理都会失去它。",
+    "move_to_trash": "移到废纸篓",
+    "couldnt_trash": "无法将技能移到废纸篓：{why}",
+    "try": "立即试用"
   }
 }

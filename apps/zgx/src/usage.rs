@@ -4,16 +4,18 @@
 //!
 //!   usage.summary({ days })   { hourly, sessions, unpriced, cost, tokens,
 //!                               cached, uncached, output, savings,
-//!                               models, periods }
+//!                               providers, models, periods }
 //!
 //! Figures are text, ready to show; `cost_n` and `tokens_n` are what the chart
-//! scales by. `models`: { key, name, harness, cost, tokens, cost_share,
-//! tokens_share }, the priciest first. `periods`: { start (Unix seconds), cost,
-//! tokens, cost_n, tokens_n }, oldest first.
+//! scales by. `providers`: { harness, name, sessions, cost, tokens,
+//! cost_share, tokens_share }, those with any use. `models`: { key, name,
+//! harness, cost, tokens, cost_share, tokens_share }, the priciest first.
+//! `periods`: { start (Unix seconds), cost, tokens, cost_n, tokens_n }, oldest
+//! first.
 
 use serde_json::json;
 use zeron_proto::usage::{
-    ModelTotal, PeriodTotal, USAGE_WINDOWS, UsageSummary, UsageView, format_tokens, format_usd, percent,
+    ModelTotal, PeriodTotal, ProviderTotal, USAGE_WINDOWS, UsageSummary, UsageView, format_tokens, format_usd, percent,
 };
 use zgx_desktop::WindowContext;
 use zgx_script::{ScriptHost, Value};
@@ -53,8 +55,23 @@ fn summary_value(summary: &UsageSummary) -> Value {
         ("uncached", Value::from(format_tokens(view.tokens.uncached_input + view.tokens.cache_write).as_str())),
         ("output", Value::from(format_tokens(view.tokens.output).as_str())),
         ("savings", Value::from(format_usd(view.savings).as_str())),
+        ("providers", Value::List(view.active().into_iter().map(|i| provider_value(&view.providers[i], &view)).collect::<Vec<_>>().into())),
         ("models", Value::List(models.collect::<Vec<_>>().into())),
         ("periods", Value::List(periods.collect::<Vec<_>>().into())),
+    ])
+}
+
+/// An agent's share, as the gpui page's summary rows: its sessions, figures and share of each.
+fn provider_value(p: &ProviderTotal, view: &UsageView) -> Value {
+    let harness = serde_json::to_value(p.harness).ok();
+    Value::record([
+        ("harness", Value::from(harness.as_ref().and_then(|h| h.as_str()).unwrap_or_default())),
+        ("name", Value::from(p.harness.display_name())),
+        ("sessions", Value::from(p.sessions as f64)),
+        ("cost", Value::from(format_usd(p.cost).as_str())),
+        ("tokens", Value::from(format_tokens(p.tokens).as_str())),
+        ("cost_share", Value::from(percent(p.cost, view.cost).as_str())),
+        ("tokens_share", Value::from(percent(p.tokens as f64, view.tokens.total() as f64).as_str())),
     ])
 }
 

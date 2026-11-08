@@ -723,10 +723,20 @@ test("the chat page's parts carry the names plugins place by", function()
 	-- (`.message`, `.message-user`, `.message-assistant` and
 	-- `.message-actions` are set too; zgx's test selectors don't match a
 	-- class yet, so they're checked once it does.)
+	expect(app:has("#new-chat-headline")).to_be(false)
 	app:command("go_home")
 	settle(app)
 	expect(app:has("#chat-home")).to_be(true)
 	expect(app:has("#chat-session")).to_be(false)
+	-- gpui's headline over a new chat's composer, centred on it.
+	expect(app:has("\"What should we work on?\"")).to_be(true)
+	local tx, hy, tw, hh = box(app, "#new-chat-headline")
+	local cx, cy, cw = box(app, "#chat-composer")
+	expect(hy + hh <= cy).to_be(true)
+	expect(math.abs((tx + tw / 2) - (cx + cw / 2)) <= 2).to_be(true)
+	open(app, "s6")
+	app:frames(20)
+	expect(app:has("#new-chat-headline")).to_be(false)
 end)
 
 -- Settings' "Conversation width": the transcript's column and the composer

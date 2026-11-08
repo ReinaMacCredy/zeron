@@ -186,8 +186,8 @@ function M.Wallpaper(props: Props): Node
 			return ""
 		end
 		local how = effect()
-		-- (Halftone's and the lines' paper follow the scheme.)
-		local paper = if how == "halftone" or how == "scanlines" then (if light() then ":light" else ":dark") else ""
+		-- (Halftone's, the characters' and the lines' paper follow the scheme.)
+		local paper = if how == "halftone" or how == "scanlines" or how == "ascii" then (if light() then ":light" else ":dark") else ""
 		return `{how}{paper}|{w}`
 	end
 	local function strength(): number
@@ -267,7 +267,7 @@ function M.Wallpaper(props: Props): Node
 			scene.layer_params = effects.dither_params(2, strength())
 		elseif how == "ascii" then
 			scene.layer_shader = effects.ascii
-			scene.layer_params = effects.ascii_params(1.5, strength(), threshold())
+			scene.layer_params = effects.ascii_params(1.5, strength(), threshold(), light())
 		elseif how == "halftone" then
 			scene.layer_shader = effects.halftone
 			scene.layer_params = effects.halftone_params(4, strength() * share, light())

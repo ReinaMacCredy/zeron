@@ -571,6 +571,7 @@ impl Sessions {
             }
             Slot::Live => {
                 let first = !self.live_heard.replace(true);
+                crate::agents::heard_sessions(&item, self.here.borrow().as_deref());
                 if !replace_changed(&self.live, item) && !first {
                     return;
                 }

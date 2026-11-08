@@ -62,6 +62,7 @@ mod session_home;
 mod sessions;
 mod tasks;
 mod settings;
+mod skills;
 mod terminal;
 mod tool_details;
 mod usage;
@@ -748,6 +749,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         files::install(cx, &host);
         // The composer's `/` commands and `$` skills, from the engine.
         completion::install(&host);
+        skills::install(&host);
         // What a tool row opens to: its whole output or diff, fetched.
         tool_details::install(&host);
         // Appshots: the frontmost window, captured on its shortcut.

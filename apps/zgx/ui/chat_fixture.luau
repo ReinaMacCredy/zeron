@@ -573,7 +573,7 @@ invocations_stub.read = function(harness: string, target: any): any
 			{ kind = "command", name = "compact", label = "/compact", detail = "Summarize the conversation", link = "[/compact](zeron-invoke:7b7d)" },
 			-- (The agent's own `/new`: Zeron's is `/zeron:new` beside it.)
 			{ kind = "command", name = "new", label = "/new", detail = "The agent's new", link = "[/new](zeron-invoke:7b7d)" },
-			{ kind = "skill", name = "code-review", label = "Code Review", detail = "Careful review — /s/code-review/SKILL.md", link = "[$code-review](zeron-invoke:7b7d)" },
+			{ kind = "skill", name = "code-review", label = "Code Review", detail = "Careful review — /s/code-review/SKILL.md", link = "[$code-review](zeron-invoke:7b7d)", path = "/s/code-review/SKILL.md" },
 		},
 	})
 end

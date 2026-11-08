@@ -21,24 +21,33 @@ search.index(M.ID, ui.t("settings.usage.title"), ui.t("settings.usage.terms"), {
 })
 
 local CHART_H = 112
+-- gpui's value axis: its labels' column, ticks aimed at.
+local AXIS_W, TICKS = 56, 4
+-- An agent's colour in the sums (usage.rs `provider_color`): Claude's brand, Grok's grey, the rest the text's.
+local BRAND: { [string]: string } = { ["claude-code"] = "#d97757" }
 local HARNESS: { [string]: string } = { ["claude-code"] = "Claude Code", codex = "Codex", grok = "Grok" }
+local MARKS: { [string]: string } = { ["claude-code"] = "claude", codex = "openai", grok = "grok" }
 
 local days = ui.state("settings_usage_days", 30)
 local metric = ui.state("settings_usage_metric", "cost")
 local by = ui.state("settings_usage_by", "model")
 local data = ui.state("settings_usage_data", nil :: any)
 local failed = ui.state("settings_usage_failed", false)
+local loading = ui.state("settings_usage_loading", false)
 
 local function load()
 	local asked = days:peek()
 	failed:set(false)
+	loading:set(true)
 	usage.summary(asked):after(function(summary: any)
 		if days:peek() == asked then
 			data:set(summary)
+			loading:set(false)
 		end
 	end, function()
 		if days:peek() == asked then
 			failed:set(data:peek() == nil)
+			loading:set(false)
 		end
 	end)
 end
@@ -52,6 +61,42 @@ function M.period_label(start: number, hourly: boolean): string
 	end
 	local t = os.date("*t", at) :: any
 	return ui.t("time.month_day", { m = tostring(t.month), day = tostring(t.day) }):get()
+end
+
+-- The value axis's top and its ticks, rounded up to a readable step (usage.rs `nice_scale`).
+function M.nice_scale(peak: number, target: number): (number, { number })
+	if peak <= 0 or peak ~= peak or peak == math.huge then
+		return 1, { 0 }
+	end
+	local raw = peak / target
+	local magnitude = 10 ^ math.floor(math.log10(raw))
+	local step = 10 * magnitude
+	for _, m in { 1, 2, 5, 10 } do
+		if m * magnitude >= raw then
+			step = m * magnitude
+			break
+		end
+	end
+	local max = math.ceil(peak / step - 1e-9) * step
+	local ticks = {}
+	for i = 0, math.floor(max / step + 0.5) do
+		table.insert(ticks, i * step)
+	end
+	return max, ticks
+end
+
+-- A tick's words: dollars, or tokens as the figures shorten them.
+function M.tick_label(v: number, cost: boolean): string
+	if cost then
+		return if v == math.floor(v) then `${math.floor(v)}` else string.format("$%.2f", v)
+	end
+	for _, unit in { { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" } } do
+		if v >= unit[1] then
+			local n = v / unit[1]
+			return (if n == math.floor(n) then tostring(math.floor(n)) else string.format("%.1f", n)) .. unit[2]
+		end
+	end
+	return tostring(math.floor(v))
 end
 
 local function figure(text: string | () -> string): Node
@@ -95,6 +140,65 @@ local function bar(now: State<any>, peak: () -> number, width: () -> number, hou
 	}
 end
 
+local function provider_rows(): Node
+	local list = ui.computed(function(): { any }
+		local d = data:get()
+		return if d and d.providers then d.providers else {}
+	end)
+	return ui.each(list, function(_p: any, _i: number, now: State<any>): Node
+		local function cost(): boolean
+			return metric:get() == "cost"
+		end
+		return ui.column {
+			w_full = true,
+			gap = ui.raw(2, "gpui"),
+			ui.row {
+				w_full = true,
+				gap = ui.raw(12, "gpui"),
+				items = "center",
+				justify = "between",
+				ui.row {
+					gap = ui.raw(8, "gpui"),
+					items = "center",
+					min_w = 0,
+					ui.div { w = 8, h = 8, shrink = 0, rounded = "$radius.full", bg = function(): string
+						local h = now:get().harness
+						local brand = BRAND[h]
+						return if brand then ui.raw(brand, "Claude's brand, as gpui's sums") :: any else (if h == "grok" then "$text.secondary" else "$text.primary")
+					end },
+					ui.presence(function(): string
+						return now:get().harness
+					end, function(h: string): Node
+						return ds.AgentMark { label = now:peek().name, seed = h, mark = MARKS[h], size = 16, bare = true }
+					end),
+					ui.text { function(): string
+						return now:get().name
+					end, literal = true, truncate = true, text_size = ui.raw(13, "gpui"), color = "$text.primary" },
+					ui.text { function(): string
+						return ui.t("settings.usage.sessions", { n = now:get().sessions }):get()
+					end, text_size = ui.raw(11, "gpui"), color = "$text.secondary", wrap = false },
+				},
+				ui.text { function(): string
+					return if cost() then now:get().cost else now:get().tokens
+				end, shrink = 0, tabular = true, text_size = ui.raw(13, "gpui"), weight = "$font.weight.medium", color = "$text.primary" },
+			},
+			ui.text { function(): string
+				local p = now:get()
+				return if cost()
+					then ui.t("settings.usage.provider_cost", { share = p.cost_share, tokens = p.tokens }):get()
+					else ui.t("settings.usage.provider_tokens", { share = p.tokens_share, cost = p.cost }):get()
+			end, text_size = ui.raw(12, "gpui"), color = "$text.secondary" },
+		}
+	end, {
+		key = function(p: any): string
+			return p.harness
+		end,
+		id = "usage-providers",
+		w_full = true,
+		gap = "$space.4",
+	})
+end
+
 local function spend(): Node
 	local periods = ui.computed(function(): { any }
 		local d = data:get()
@@ -104,12 +208,16 @@ local function spend(): Node
 		local d = data:get()
 		return d ~= nil and d.hourly
 	end
-	local function peak(): number
+	local scale = ui.computed(function(): any
 		local p = 0
 		for _, period in periods:get() do
 			p = math.max(p, value_of(period))
 		end
-		return p
+		local max, ticks = M.nice_scale(p, TICKS)
+		return { max = max, ticks = ticks }
+	end)
+	local function peak(): number
+		return scale:get().max
 	end
 	local chart_w = ui.use_state(0)
 	local GAP = (ui.theme.get("zeron.space.hair") :: number?) or 2
@@ -117,13 +225,17 @@ local function spend(): Node
 		local n = #periods:get()
 		return if n == 0 then 0 else math.max(1, (chart_w:get() - GAP * (n - 1)) / n)
 	end
-	local function edge(last: boolean): string
+	local function at(where: "first" | "middle" | "last"): string
 		local list = periods:get()
-		local p = list[if last then #list else 1]
-		return if p then M.period_label(p.start, hourly()) else ""
+		local p = list[if where == "first" then 1 elseif where == "last" then #list else math.floor(#list / 2) + 1]
+		return if p then string.upper(M.period_label(p.start, hourly())) else ""
 	end
 	local function caption(text: () -> string): Node
-		return ui.text { text, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary" }
+		return ui.text { text, text_size = ui.raw(10, "gpui's axis"), color = "$text.tertiary" }
+	end
+	local function tick_y(v: number): number
+		local max = scale:get().max
+		return CHART_H - (if max > 0 then CHART_H * v / max else 0)
 	end
 	return ds.Settings.Section {
 		title = ui.t("settings.usage.spend.title"),
@@ -144,6 +256,7 @@ local function spend(): Node
 						ui.column {
 							grow = 1,
 							min_w = 0,
+							gap = ui.raw(4, "gpui"),
 							ui.text {
 								function(): string
 									local d = data:get()
@@ -152,23 +265,32 @@ local function spend(): Node
 									end
 									return if failed:get() then ui.t("settings.usage.failed"):get() else ui.t("settings.usage.reading"):get()
 								end,
-								text_size = "$font.size.xl",
-								line_height = "$font.line.xl",
+								id = "usage-headline",
+								text_size = function(): any
+									return if data:get() then ui.raw(36, "gpui's summary headline") else "$font.size.xl"
+								end,
+								line_height = function(): any
+									return if data:get() then ui.raw(42, "gpui's summary headline") else "$font.line.xl"
+								end,
 								weight = "$font.weight.semibold",
 								color = "$text.primary",
 								tabular = true,
 							},
-							caption(function(): string
+							ui.text { function(): string
 								local d = data:get()
 								if not d then
 									return " "
 								end
-								local line = ui.t("settings.usage.sessions", { n = d.sessions }):get()
-								if d.unpriced > 0 then
-									line ..= ` · {ui.t("settings.usage.unpriced", { n = d.unpriced }):get()}`
-								end
-								return line
-							end),
+								local n = ui.t("settings.usage.sessions", { n = d.sessions }):get()
+								return if metric:get() == "cost" then ui.t("settings.usage.estimate", { sessions = n }):get() else n
+							end, text_size = ui.raw(12, "gpui"), color = "$text.secondary" },
+							ui.show(function(): boolean
+								local d = data:get()
+								return d ~= nil and d.unpriced > 0 and metric:get() == "cost"
+							end, ui.text { function(): string
+								local d = data:get()
+								return ui.t("settings.usage.unpriced", { n = if d then d.unpriced else 0 }):get()
+							end, text_size = ui.raw(12, "gpui"), color = "$text.secondary" }),
 						},
 						ui.row {
 							gap = "$space.2",
@@ -196,45 +318,98 @@ local function spend(): Node
 									}
 								end,
 							},
-							ds.IconButton { icon = "refresh", label = ui.t("settings.usage.refresh"), on_click = load },
+							ui.div {
+								id = "usage-refresh",
+								opacity = function(): number
+									return if loading:get() then 0.5 else 1
+								end,
+								ds.IconButton { icon = "refresh", label = ui.t("settings.usage.refresh"), on_click = load },
+							},
 						},
 					},
+					ui.column { w_full = true, px = "$space.4", pb = "$space.4", provider_rows() },
 					ui.column {
 						w_full = true,
 						px = "$space.4",
 						pb = "$space.4",
 						gap = "$space.2",
+						ui.text { function(): string
+							local key = (if hourly() then "hourly_" else "daily_") .. metric:get()
+							return ui.t(`settings.usage.chart.{key}`):get()
+						end, id = "usage-chart-title", text_size = ui.raw(13, "gpui"), weight = "$font.weight.medium", color = "$text.primary" },
 						ui.row {
 							w_full = true,
-							h = CHART_H,
-							items = "end",
-							on_resize = function(size: any)
-								if math.abs(chart_w:peek() - size.w) >= 0.5 then
-									chart_w:set(size.w)
-								end
-							end,
-							ui.each(periods, function(_p: any, _i: number, now: State<any>): Node
-								return bar(now, peak, width, hourly)
-							end, {
-								key = function(p: any): string
-									return tostring(p.start)
-								end,
-								w_full = true,
-								h_full = true,
+							ui.div {
+								id = "usage-axis",
+								w = AXIS_W,
+								h = CHART_H,
+								shrink = 0,
+								relative = true,
+								ui.each(ui.computed(function(): { number }
+									return scale:get().ticks
+								end), function(v: number): Node
+									return ui.text {
+										M.tick_label(v, metric:peek() == "cost"),
+										absolute = true,
+										right = ui.raw(8, "gpui"),
+										top = function(): number
+											return tick_y(v) - 6
+										end,
+										text_size = ui.raw(10, "gpui's axis"),
+										color = "$text.tertiary",
+										tabular = true,
+									}
+								end, { key = function(v: number): string
+									return `{metric:peek()}:{v}`
+								end, w_full = true, h_full = true }),
+							},
+							ui.row {
 								grow = 1,
-								direction = "row",
+								min_w = 0,
+								h = CHART_H,
+								relative = true,
 								items = "end",
-								gap = "$zeron.space.hair",
-							}),
+								on_resize = function(size: any)
+									if math.abs(chart_w:peek() - size.w) >= 0.5 then
+										chart_w:set(size.w)
+									end
+								end,
+								ui.each(ui.computed(function(): { number }
+									return scale:get().ticks
+								end), function(v: number): Node
+									return ui.div { absolute = true, left = 0, right = 0, h = 1, top = function(): number
+										return tick_y(v)
+									end, bg = "$border.subtle", pointer_events = "none" }
+								end, { key = function(v: number): string
+									return tostring(v)
+								end, absolute = true, left = 0, right = 0, top = 0, bottom = 0, pointer_events = "none" }),
+								ui.each(periods, function(_p: any, _i: number, now: State<any>): Node
+									return bar(now, peak, width, hourly)
+								end, {
+									key = function(p: any): string
+										return tostring(p.start)
+									end,
+									w_full = true,
+									h_full = true,
+									grow = 1,
+									direction = "row",
+									items = "end",
+									gap = "$zeron.space.hair",
+								}),
+							},
 						},
 						ui.row {
 							w_full = true,
+							pl = ui.raw(AXIS_W, "gpui's value axis"),
 							justify = "between",
 							caption(function(): string
-								return edge(false)
+								return at("first")
 							end),
 							caption(function(): string
-								return edge(true)
+								return at("middle")
+							end),
+							caption(function(): string
+								return at("last")
 							end),
 						},
 					},

@@ -10,7 +10,7 @@ end
 
 local function open(): any
 	local app = mount("shell_fixture.luau")
-	app:resize(1200, 900)
+	app:resize(1200, 1200)
 	app:frames(30)
 	app:command("settings_stub.sign_in")
 	app:command("shell.settings")
@@ -29,18 +29,28 @@ test("Usage reads the window, then follows the metric and the breakdown", functi
 	expect(app:state("shell_route_path")).to_be("/settings/usage")
 	expect((app:state("usage_stub_calls") :: any)[1]).to_be(30)
 	expect(shows(app, "$12.34")).to_be(true)
-	expect(shows(app, "3 sessions")).to_be(true)
-	expect(shows(app, "Excludes 2 requests")).to_be(true)
+	expect(shows(app, "3 sessions · API estimate")).to_be(true)
+	expect(shows(app, "Excludes 2 responses")).to_be(true)
 	expect(shows(app, "Claude Code · 97%")).to_be(true)
+	-- gpui's summary: each agent's sessions, figure and share; the chart named, its axis on round steps.
+	expect(app:tree("#usage-providers")).to_contain("97% of cost · 1.2M tokens")
+	expect(app:tree("#usage-providers")).to_contain("$0.34")
+	expect(app:tree("#usage-chart-title")).to_contain("Daily cost")
+	expect(app:tree("#usage-axis")).to_contain('"$15"')
+	expect(app:tree("#usage-axis")).to_contain('"$5"')
 
 	app:click(`{PAGE} >> "Tokens"`)
 	app:frames(10)
 	expect(shows(app, "1.5M")).to_be(true)
 	expect(shows(app, "Claude Code · 80%")).to_be(true)
+	expect(shows(app, "API estimate")).to_be(false)
+	expect(app:tree("#usage-providers")).to_contain("80% of tokens · $12.00")
+	expect(app:tree("#usage-chart-title")).to_contain("Daily processed tokens")
+	expect(app:tree("#usage-axis")).to_contain('"500K"')
 
 	app:click(`{PAGE} >> "Day"`)
 	app:frames(10)
-	expect(shows(app, "Claude Code")).to_be(false)
+	expect(shows(app, "Claude Code · 80%")).to_be(false)
 end)
 
 test("Usage says so when a window has no activity, or the read fails", function()

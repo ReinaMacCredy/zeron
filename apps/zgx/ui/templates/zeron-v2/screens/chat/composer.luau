@@ -46,6 +46,8 @@ local Asks = require("@app/screens/chat/asks")
 
 -- The title bar's height (Zeron's): a new chat centres under it.
 local TITLE_H = 38
+-- gpui's hero headline: its line, and its gap over the 28 of chips above the pill.
+local HEADLINE_LINE, HEADLINE_GAP = 38, 18
 -- What Resume says (crates/proto/src/agent.rs `RESUME_PROMPT`).
 -- The side chat's chord: the open composer's, as the panel's commands are its tab's.
 local side_chat_opener: (() -> ())? = nil
@@ -458,6 +460,30 @@ local function Composer(): Node
 		if store.catalog:peek().state ~= "ready" and not looked_up:peek() then
 			looked_up:set(true)
 			store.load_catalog()
+		end
+	end)
+	ui.effect(function()
+		local want = shared.want_agent:get()
+		local c = store.catalog:get()
+		if want == nil or session_id:get() ~= nil or c.state ~= "ready" then
+			return
+		end
+		shared.want_agent:set(nil)
+		local now = nil
+		for _, m in c.models do
+			if m.value == model:peek() then
+				now = m.harness
+			end
+		end
+		if now == want then
+			return
+		end
+		for _, m in c.models do
+			if m.harness == want then
+				model:set(m.value)
+				effort:set(m.effort)
+				return
+			end
 		end
 	end)
 	-- A new chat with no model yet: the catalog's first. (Never a session's:
@@ -1611,6 +1637,27 @@ local function Composer(): Node
 				-- the pane, left a box over the transcript taking its wheel.)
 				-- (And not over a plugin's page: the chat's page is kept unseen
 				-- under it, and so is this.)
+				ui.show(function(): boolean
+					return shown_new() and not route.needs_project:get() and route.current:get().name ~= "plugin"
+				end, ui.row {
+					id = "new-chat-headline",
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = -(HEADLINE_LINE + HEADLINE_GAP + 28),
+					h = HEADLINE_LINE,
+					justify = "center",
+					items = "center",
+					pointer_events = "none",
+					exit = motion.transition({ opacity = 0, duration = 160, ease = "out(3)" }),
+					ui.text {
+						ui.t("chat.home.headline"),
+						text_size = ui.raw(30, "gpui's hero headline"),
+						line_height = ui.raw(HEADLINE_LINE, "gpui's hero headline"),
+						color = "$text.primary",
+						wrap = false,
+					},
+				}),
 				ui.show(function(): boolean
 					return not route.needs_project:get() and route.current:get().name ~= "plugin"
 				end, composer()),

@@ -27,6 +27,7 @@ export type Row = {
 	plain: boolean?,
 	blocked: string?,
 	terminal_only: boolean?,
+	path: string?,
 }
 export type Catalog = { state: "loading" | "ready" | "failed", rows: { Row }, failed: string?, why: string?, warning: string? }
 export type Target = { chat: string?, space: string?, device: string?, path: string? }
@@ -35,6 +36,8 @@ export type Target = { chat: string?, space: string?, device: string?, path: str
 local CATALOGS = ui.state("chat_invocations", {} :: { [string]: Catalog })
 -- The tokens picked, and the reference each stands for.
 local PICKS = ui.state("chat_invocation_picks", {} :: { [string]: string })
+-- Skills turned off on the Skills page, by path: left out of `$` (gpui's `disabled_skills`).
+M.disabled = ui.persist("skills_disabled", {} :: { [string]: boolean })
 
 -- How a list is read: the host's action (a test puts its own here).
 M.read = function(harness: string, target: Target): any
@@ -119,8 +122,9 @@ function M.items(catalog: Catalog?, kind: "command" | "skill"): { any }?
 	end
 	local out = {}
 	local seen: { [string]: boolean } = {}
+	local off = M.disabled:get()
 	for _, r in catalog.rows do
-		if r.kind == kind and not seen[r.name] then
+		if r.kind == kind and not seen[r.name] and not (r.path and off[r.path]) then
 			seen[r.name] = true
 			table.insert(out, {
 				value = r.name,

@@ -25,6 +25,7 @@ local function reads(app: any): number
 end
 
 local PREFS = "screens/settings/prefs.luau::settings_skill_completion"
+local DISABLED = "screens/chat/invocations.luau::skills_disabled"
 
 test("`/` lists the agent's commands, read as it opens, narrowing as the name is typed", function()
 	local app = chat()
@@ -52,6 +53,11 @@ test("`$` lists the skills; with the agent's `$` off it's plain text, and with `
 	settle(app)
 	expect(app:has('role:option "Code Review"')).to_be(true)
 	expect(app:has('role:option "/review"')).to_be(false)
+	-- Turned off on the Skills page (by its path): not offered.
+	app:set_state(DISABLED, { ["/s/code-review/SKILL.md"] = true })
+	settle(app)
+	expect(app:has('role:option "Code Review"')).to_be(false)
+	app:set_state(DISABLED, {})
 	app:key("Escape")
 	app:fill("role:textbox", "")
 	settle(app)

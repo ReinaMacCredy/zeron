@@ -172,7 +172,7 @@ local function pull_requests(): Node
 	})
 end
 
--- Inbox and Tasks (app_rail.rs), built-in pages on the plugin route; Tasks counts unseen captures.
+-- Inbox, Tasks and Skills (app_rail.rs), built-in pages on the plugin route; Tasks counts unseen captures.
 local function page_entry(page: string, icon: string, word: string): Node
 	local count = if page == "tasks" then tasks_store.unseen else nil
 	return RailButton {
@@ -639,11 +639,12 @@ local function settings_entry(): Node
 end
 
 M.Rail = ui.component(function(): Node
-	-- Skills joins `entries` with its page, Voice above Help.
+	-- Voice joins above Help.
 	local entries: { any } = {
 		new_chat(),
 		page_entry("inbox", "inbox", "inbox.title"),
 		page_entry("tasks", "checklist", "tasks.title"),
+		page_entry("skills", "magic-stick", "skills.title"),
 		pull_requests(),
 		ui.div { grow = 1 },
 		usage_ring(),
