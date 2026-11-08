@@ -24,34 +24,35 @@ local function showing(app: any, sel: string): boolean
 	return string.find(first, " hidden", 1, true) == nil
 end
 
--- A new chat.
+-- A new chat, its panel open.
 local function home(app: any)
 	app:resize(960, 760)
 	app:command("go_home")
 	settle(app)
 end
 
--- Its branches' list open.
 local function panel(app: any)
-	if not showing(app, 'role:textbox "Search branches…"') then
+	if not showing(app, 'role:button "Device"') then
 		app:click('role:button "Branch"')
 		settle(app)
 	end
 end
 
 local function pick_in(app: any, row: string, option: string)
+	panel(app)
 	app:click(`role:button "{row}"`)
 	settle(app)
 	app:click(`role:option ~"{option}"`)
 	settle(app)
 end
 
--- What a chip says: the project and the device chosen.
+-- What the panel's rows say: the project and the device chosen.
 local function chosen(app: any, row: string): string
 	rested(app)
+	-- (Its whole line: a project's tile letter, then its name.)
 	local words = {}
 	for line in app:tree(`role:button "{row}"`):gmatch("[^\n]+") do
-		local t = if line:match('button "') then nil else line:match('"([^"]*)"')
+		local t = line:match('text "([^"]*)"')
 		if t then
 			table.insert(words, t)
 		end
@@ -59,14 +60,15 @@ local function chosen(app: any, row: string): string
 	return table.concat(words, " ")
 end
 
--- What names where it works, once it has rolled to it: the branch's chip, in
--- a project; else the project's, "No project".
+-- What the chip names, once it has rolled to it: the branch, in a
+-- project ([tile] project › branch); else what stands in its place, "No
+-- project".
 local function chip(app: any): string
 	rested(app)
-	if showing(app, 'role:button "Branch"') then
+	if app:has('role:button "Branch" >> #composer-place-branch') then
 		return app:text('role:button "Branch" >> #composer-place-branch[1]')
 	end
-	return app:text("#composer-place-project[1]")
+	return app:text('role:button "Branch" >> #composer-place-project[1]')
 end
 
 local function send(app: any, words: string)
@@ -104,6 +106,7 @@ test("another device brings its projects and their branches", function()
 	expect(app:state("calls")).to_contain("refs:/srv/borealis:box")
 	expect(chip(app)).to_be("trunk")
 	-- Its projects are the box's alone.
+	panel(app)
 	app:click('role:button "Project"')
 	settle(app)
 	expect(app:has('role:option ~"Borealis"')).to_be(true)
@@ -119,6 +122,7 @@ end)
 test("a device out of reach shows why, and can't be picked", function()
 	local app = mount("chat_fixture.luau")
 	home(app)
+	panel(app)
 	app:click('role:button "Device"')
 	settle(app)
 	expect(app:has('role:option ~"Old laptop" >> ~"Offline · last seen"')).to_be(true)
@@ -208,6 +212,7 @@ end)
 test("no project: made on the device chosen, no ref", function()
 	local app = mount("chat_fixture.luau")
 	home(app)
+	panel(app)
 	app:click('role:button "Project"')
 	settle(app)
 	app:click('~"Don\'t work in a project"')

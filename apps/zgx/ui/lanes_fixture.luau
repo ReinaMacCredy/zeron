@@ -494,6 +494,10 @@ return ui.row {
 	w_full = true,
 	h_full = true,
 	gap = "$space.4",
+	-- (As the shell's: a focus landing outside the panel ends its claim on the keys.)
+	on_focus = function()
+		Panel.focus_moved()
+	end,
 	ui.column {
 		shrink = 0,
 		p = "$space.3",
@@ -558,6 +562,7 @@ return ui.row {
 			}
 		),
 	},
+	ui.button { id = "outside-panel", "Outside the panel" },
 	ui.text {
 		id = "fixture-route",
 		function(): string

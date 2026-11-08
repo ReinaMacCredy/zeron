@@ -83,6 +83,18 @@ function M.use(opts: Use)
 	end
 	local caret = ui.use_state(0)
 	local dismissed = ui.use_state(-1)
+	-- An edit opens it again, a new draft's token where the last one's was too.
+	local dismissed_text = ""
+	local function dismiss(from: number)
+		dismissed_text = opts.value:peek()
+		dismissed:set(from)
+	end
+	ui.effect(function()
+		local now = opts.value:get()
+		if dismissed:peek() ~= -1 and now ~= dismissed_text then
+			dismissed:set(-1)
+		end
+	end)
 	local active = ui.use_state(1)
 	local token = ui.computed(function(): Token?
 		local t = M.token(opts.value:get(), caret:get())
@@ -121,7 +133,7 @@ function M.use(opts: Use)
 	local closed_from, closed_at = -1, -math.huge
 	local away_from = -1
 	local function closed(from: number)
-		dismissed:set(from)
+		dismiss(from)
 		closed_from, closed_at = from, os.clock()
 		if ui.window.active:peek() == false then
 			away_from = from
@@ -203,7 +215,7 @@ function M.use(opts: Use)
 		end
 		-- The caret is past the token now (the field says so on its next
 		-- caret event; meanwhile, nothing to show).
-		dismissed:set(t.from)
+		dismiss(t.from)
 		if opts.on_choose then
 			opts.on_choose(item, t.trigger, tok)
 		end
@@ -234,7 +246,7 @@ function M.use(opts: Use)
 		elseif e.key == "Escape" then
 			local t = token:peek()
 			if t then
-				dismissed:set(t.from)
+				dismiss(t.from)
 			end
 			return true
 		end

@@ -119,15 +119,15 @@ test("a letter with a control of the page focused stays with that control", func
 	app:key("Tab")
 	app:frames(5)
 	local n = 0
-	while n < 40 and not string.find(focused(app), "composer-plan", 1, true) do
+	while n < 40 and not string.find(focused(app), 'button "Access"', 1, true) do
 		app:key("Tab")
 		app:frames(2)
 		n += 1
 	end
-	expect(focused(app)).to_contain("composer-plan")
+	expect(focused(app)).to_contain('button "Access"')
 	app:key("x")
 	app:frames(5)
-	expect(focused(app)).to_contain("composer-plan")
+	expect(focused(app)).to_contain('button "Access"')
 end)
 
 test("with nothing holding the keys a letter or Cmd+V goes to the composer; an arrow or another chord doesn't", function()

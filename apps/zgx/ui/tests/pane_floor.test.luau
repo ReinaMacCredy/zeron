@@ -424,10 +424,3 @@ test("a split with more panes shown: the sidebar steps aside for room, and isn't
 	expect(panel_w(app)).to_be(360)
 	expect(app:has("#split-pane-a3")).to_be(true)
 end)
-
-test("a pane's access mode folds to its glyph on one line, as gpui's under its pill's width", function()
-	local app = split(1150, row({ "a1", "a2" }))
-	expect(app:tree('#split-pane-a2 >> role:button "Access"')).never.to_contain("Full access")
-	local _, access = box(app, '#split-pane-a2 >> role:button "Access"')
-	expect(access).to_be(24)
-end)

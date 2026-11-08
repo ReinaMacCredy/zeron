@@ -44,8 +44,8 @@ function M.bind(b: Bind): { [string]: any }
 		local catalog = Invocations.catalog(invocation_key())
 		given["/"] = Invocations.items(catalog, "command")
 		given["$"] = Invocations.items(catalog, "skill")
-		-- No agent to ask: Zeron's own alone. Its list still coming: nil.
-		if b.agent() == nil then
+		-- No agent to ask, or nowhere to ask it: Zeron's own alone. Its list still coming: nil.
+		if b.agent() == nil or invocation_key() == nil then
 			given["/"] = {}
 		elseif given["/"] == nil then
 			return given
@@ -95,6 +95,10 @@ function M.bind(b: Bind): { [string]: any }
 		end
 		local target: any = b.files()
 		if not target then
+			-- (Nowhere to search: an empty list, not one loading for ever.)
+			if sources:peek()["@"] == nil then
+				sources:set { ["@"] = {}, ["/"] = {}, ["$"] = {} }
+			end
 			return
 		end
 		local key = `{target.chat or target.space or ""}:{t.query}`

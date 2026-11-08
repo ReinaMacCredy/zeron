@@ -184,8 +184,10 @@ ui.command {
 -- done; opening one is noted (`open_subagent:<session>:<doc>`).
 do
 	local lanes = require("@app/screens/chat/lanes") :: any
+	local open_subagent = lanes.open_subagent
 	lanes.open_subagent = function(session: string, sub: any)
 		note(`open_subagent:{session}:{sub.ref}`)
+		open_subagent(session, sub)
 	end
 	local published = ui.shared("chat.subagents", {} :: { any })
 	ui.command {

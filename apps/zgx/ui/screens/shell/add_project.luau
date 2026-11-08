@@ -61,7 +61,7 @@ type Page = any
 
 -- The engine's refusal, as the flow says it (production's own words).
 local function says(err: any, path: string?): string
-	local text = if type(err) == "string" then err elseif type(err) == "table" and err.message then tostring(err.message) else locale.s("shell.add_project.something_went_wrong")
+	local text = if type(err) == "string" then err elseif type(err) == "table" and err.message then tostring(err.message) elseif err ~= nil then tostring(err) else locale.s("shell.add_project.something_went_wrong")
 	if string.find(text, "not connected", 1, true) or text == "offline" then
 		return locale.s("shell.add_project.not_connected")
 	elseif path and (string.find(text, "os error 2)", 1, true) or string.find(text, "os error 3)", 1, true)) then

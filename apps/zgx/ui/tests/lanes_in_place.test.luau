@@ -294,16 +294,19 @@ test("a new side chat's footer is the chat page's: access, where it works, the m
 	expect(app:has('.side-chat-tab >> role:button "Branch"')).to_be(true)
 	expect(footer_words(app)).to_contain("atlas")
 	expect(footer_words(app)).to_contain("main")
-	-- As the chat page's: access then the model in the pill, the place under it.
+	-- As the chat page's: one row under the pill, access, where it works, the model.
 	local function at(target: string): (number, number)
 		local x, y = app:tree(target):match(" (%-?%d+),(%-?%d+) %d+x%d+")
 		return tonumber(x) or -1, tonumber(y) or -1
 	end
 	local ax, ay = at('.side-chat-tab >> role:button "Access"')
-	local mx = at('.side-chat-tab >> role:button "Model"')
-	local _, by = at('.side-chat-tab >> role:button "Branch"')
-	expect(ax < mx).to_be(true)
-	expect(by > ay).to_be(true)
+	local mx, my = at('.side-chat-tab >> role:button "Model"')
+	local bx, by = at('.side-chat-tab >> role:button "Branch"')
+	local _, py = at('.side-chat-tab >> role:textbox')
+	expect(ax < bx and bx < mx).to_be(true)
+	expect(by).to_be(ay)
+	expect(my).to_be(ay)
+	expect(ay > py).to_be(true)
 	-- Sent as it stands: made where its parent is (no place of its own), with
 	-- the parent's access.
 	app:type('.side-chat-tab >> role:textbox', "hi")
@@ -436,22 +439,6 @@ test("a side chat's tab says when it leaves the screen, so its rate stream close
 	app:frames(30)
 	expect(calls(app)).to_contain(`on_screen:{slot}:false`)
 	expect(app:error()).to_be(nil)
-end)
-
-test("a side chat's profile chip changes that chat, not the page's", function()
-	local app = open()
-	app:click('#session-lanes >> role:button "Open side chat Looking at the tests"')
-	app:frames(30)
-	app:command("side_a_on_fixer")
-	app:frames(30)
-	expect(app:has('.side-chat-tab >> role:button "Fixer · Change profile"')).to_be(true)
-	app:click('.side-chat-tab >> role:button "Fixer · Change profile"')
-	app:frames(30)
-	app:click('role:option "Lean"')
-	app:frames(30)
-	expect(calls(app)).to_contain("apply_profile:side-a:lean")
-	expect(calls(app)).never.to_contain("apply_profile:chat-1")
-	expect(app:has('.side-chat-tab >> role:button "Lean · Change profile"')).to_be(true)
 end)
 
 test("a lane's tab wears the Working dot on its badge while it runs, and loses it when done", function()

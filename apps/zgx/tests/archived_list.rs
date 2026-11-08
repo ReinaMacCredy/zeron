@@ -41,7 +41,10 @@ fn archived() -> TestApp {
 /// Each row of `Chat <n>` built: its words and where it stands.
 fn rows(app: &mut TestApp) -> Vec<(String, f32)> {
     let mut out = Vec::new();
-    for line in app.tree().lines() {
+    // (The page's own tree: the whole window's runs past the tree's budget.)
+    let page = app.target("#settings-page").expect("the settings page");
+    let (lines, hidden) = zgx_script::driver::tree_lines(&app.ui, &app.handle, Some(page), &Default::default());
+    for line in zgx_script::driver::tree_lines_text(&lines, hidden).lines() {
         let line = line.trim_start();
         let Some(at) = line.find("\"Chat ") else {
             continue;

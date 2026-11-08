@@ -917,8 +917,7 @@ M.Panel = ui.component(function(props: Props): Node
 				then Lanes.tile(tab)
 				else ds.Tile { size = SLOT, inside = make_icon() }
 			local running = if Lanes then Lanes.running else nil
-			local stated = tab.kind == "side_chat" and Lanes ~= nil and Lanes.state ~= nil
-			if (tab.kind ~= "side_chat" and tab.kind ~= "subagent") or not running or stated then
+			if (tab.kind ~= "side_chat" and tab.kind ~= "subagent") or not running then
 				return tile
 			end
 			-- (gpui's 7-point Working dot on the badge's corner: a lane at work keeps its mark.)

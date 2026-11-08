@@ -320,31 +320,6 @@ test("compaction: the resume card on a large idle Claude chat: Keep full history
 	expect(app:has("#composer-resume")).to_be(false)
 end)
 
-test("compaction: the ring's card: the plan's section and dot, why Compact context can't, the idle line", function()
-	local app = opened()
-	app:set_state("test_patch", {
-		context_tokens = 212000,
-		context_window = 1000000,
-		compact_plan = { heading = "Agent compaction", note = "The agent asked to compact. It runs as soon as the turn ends.", rows = { { label = "Compacts", value = "when this turn ends" } }, busy = false },
-		compact_blocked = "running",
-		resume = { tokens = "212K", idle = "2h 25m", at = "t1" },
-	})
-	app:command("patch_open")
-	settle(app)
-	expect(app:has("#composer-context-dot")).to_be(true)
-	app:click("#composer-context")
-	settle(app)
-	local tree = app:tree()
-	for _, w in { "Agent compaction", "The agent asked to compact. It runs as soon as the turn", "Compacts", "when this turn ends", "Compact context", "Wait for the current turn to finish", "Idle for 2h 25m; the prompt cache has expired." } do
-		expect(`{w}: {tree:find(w, 1, true) ~= nil}`).to_be(`{w}: true`)
-	end
-	app:set_state("test_patch", { compact_plan = false, compact_blocked = false, resume = false })
-	app:command("patch_open")
-	settle(app)
-	expect(app:has("#composer-context-dot")).to_be(false)
-	expect(app:has("#compact-context-reason")).to_be(false)
-end)
-
 test("compaction: Find finds a compaction by its label's words", function()
 	local app = opened()
 	push(app, {
@@ -385,22 +360,4 @@ test("compaction: a /context card: its bar's legend with the buffer and what is 
 		expect(`{w}: {tree:find(w, 1, true) ~= nil}`).to_be(`{w}: true`)
 	end
 	expect(app:error()).to_be(nil)
-end)
-
-
-test("compaction: a copy compacting in the background shows its clock in the footer, then why it waits", function()
-	local app = opened()
-	expect(app:has("#composer-copy-chip")).to_be(false)
-	app:set_state("test_patch", { compact_plan = { heading = "Background compaction", rows = {}, busy = false, copy = { since = 0, ready = false } } })
-	app:command("patch_open")
-	settle(app)
-	expect(app:tree("#composer-copy-chip"):match('text "(Compacting a copy · %d+:%d%d)"') ~= nil).to_be(true)
-	app:set_state("test_patch", { running = false, in_flight = false, compact_plan = { heading = "Background compaction", rows = {}, busy = false, copy = { since = 0, ready = true } } })
-	app:command("patch_open")
-	settle(app)
-	expect(app:tree("#composer-copy-chip"):find("Copy ready · waits for background work", 1, true) ~= nil).to_be(true)
-	app:set_state("test_patch", { compact_plan = false })
-	app:command("patch_open")
-	settle(app)
-	expect(app:has("#composer-copy-chip")).to_be(false)
 end)

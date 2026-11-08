@@ -1325,7 +1325,7 @@ local function Composer(): Node
 			on_queue_remove = asks.on_queue_remove,
 			on_queue_reorder = asks.on_queue_reorder,
 			todos = asks.todos,
-			tasks = if Deck.on:peek() then tasks else asks.tasks,
+			tasks = if Deck.on:peek() then tasks else nil,
 			-- A subagent's row opens it, a tab of the session's panel.
 			on_open_task = function(ref: string)
 				local id = session_id:peek()

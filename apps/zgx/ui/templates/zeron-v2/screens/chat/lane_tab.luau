@@ -8,6 +8,7 @@
 --
 --   LaneTab { tab = { id, kind = "side_chat" | "subagent", chat, title } }
 
+local Deck = require("@ds/composer_deck")
 local ds = require("@ds")
 local T = require("@ds/transcript")
 local lanes = require("@app/screens/chat/lanes")
@@ -933,7 +934,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		on_queue_remove = asks.on_queue_remove,
 		on_queue_reorder = asks.on_queue_reorder,
 		todos = asks.todos,
-		tasks = asks.tasks,
+		tasks = if Deck.on:peek() then asks.tasks else nil,
 		on_stop_task = function(task: string)
 			store.stop_task(chat, task):after(function() end, function()
 				notice:set({ tone = "danger", text = locale.s("chat.composer.couldnt_stop_task"), dismissable = true })

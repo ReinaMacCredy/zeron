@@ -1,6 +1,6 @@
 -- ds/composer_mentions and screens/chat/completions on a plain field, the host
--- stubbed: what a window's composer and a split pane's are given. Its `calls`
--- notes each read and search.
+-- stubbed, wired as ds/composer wires them. Its `calls` notes each read,
+-- search and run.
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -85,45 +85,37 @@ ui.command {
 	end,
 }
 local place = ui.state("place", "s1")
-local attachments = ui.state("attachments", {} :: { any })
 local field = ui.ref()
 local completions = Completions.bind {
 	key = "fixture",
+	text = draft,
 	agent = function(): string?
 		return "claude-code"
 	end,
 	target = function(): any
 		return { chat = place:get() }
 	end,
+	files = function(): any
+		return { chat = place:get() }
+	end,
 	in_chat = function(): boolean
 		return true
 	end,
-	attachments = function(): { any }
-		return attachments:get()
+	run = function(name: string)
+		note(`run:{name}`)
 	end,
 }
--- Rows a later unit gives `@`, a heading over its first.
-local extra = ui.state("extra", nil :: { any }?)
-local sources = ui.computed(function(): any
-	local lists = table.clone(completions.mentions:get())
-	if extra:get() then
-		lists["@"] = extra:get()
-	end
-	return lists
-end)
 
 local Field = ui.component(function(): Node
 	local m = Mentions.use {
 		field = field,
 		value = draft,
-		sources = sources,
-		enabled = completions.mention_enabled,
-		empty = completions.mention_empty,
-		failed = completions.mention_failed,
+		sources = completions.lists,
+		enabled = completions.enabled,
+		empty = completions.empty,
 		on_choose = completions.on_mention,
-		on_token = completions.mention_token,
 	}
-	return m.menu(ui.div {
+	local pill = ui.div {
 		id = "pill",
 		w_full = true,
 		h = 60,
@@ -140,7 +132,8 @@ local Field = ui.component(function(): Node
 				return m.keys(e)
 			end,
 		},
-	})
+	}
+	return ui.popover(m.popover(pill))
 end)
 
 return ui.column {

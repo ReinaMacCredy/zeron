@@ -579,14 +579,12 @@ return function(): Node
 				local card = ui.ref()
 				-- (Its place on the card, not the region's root: what leaves is laid
 				-- over what enters, and would take this one's offset on top of its own.)
+				-- (A point, not the window's size, which stood in front of every resize edge's cursor; not 0, which a presence drops at once.)
 				return ui.div {
 					pointer_events = "none",
-					w = function(): number
-						return root.width or 0
-					end,
-					h = function(): number
-						return root.height or 0
-					end,
+					w = 1,
+					h = 1,
+					overflow = "visible",
 					ui.div {
 						ref = card,
 						absolute = true,

@@ -101,7 +101,8 @@ test("every folded section's count ends on the same line", function()
 	app:set_state("test_sidebar_places", places({ "a2" }, { { id = "s1", name = "Later", sessions = { "b2" } } }))
 	settle(app)
 	local scope = "#wide"
-	for _, title in { "Pinned", "Later", "Projects" } do
+	-- (Our sidebar has no Projects section: its projects are rows of their own.)
+	for _, title in { "Pinned", "Later" } do
 		app:click(`{scope} >> "{title}"`)
 		settle(app)
 	end
@@ -115,19 +116,18 @@ test("every folded section's count ends on the same line", function()
 			table.insert(ends, tonumber(x) + tonumber(w))
 		end
 	end
-	expect(#ends).to_be(3)
+	expect(#ends >= 2).to_be(true)
 	expect(ends[1]).to_be(ends[2])
-	expect(ends[2]).to_be(ends[3])
 	-- And their names start on one line, each row as tall.
 	local starts: { [string]: number } = {}
 	for line in app:tree(scope):gmatch("[^\n]+") do
-		for _, title in { "Pinned", "Later", "Projects" } do
-			local x = line:match(`text "{title}" (%-?[%d%.]+),`)
+		for _, title in { "Pinned", "Later" } do
+			local x = line:match(`text "{title}" (%-?[%d%.]+),`) or line:match(`button "{title}" (%-?[%d%.]+),`)
 			if x then
 				starts[title] = tonumber(x) :: number
 			end
 		end
 	end
+	expect(starts.Later).never.to_be_nil()
 	expect(starts.Later).to_be(starts.Pinned)
-	expect(starts.Later).to_be(starts.Projects)
 end)

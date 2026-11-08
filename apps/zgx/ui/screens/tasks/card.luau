@@ -10,7 +10,6 @@ local sessions = require("@account/sessions")
 local store = require("@app/screens/tasks/store")
 local route = require("@app/screens/shell/route")
 local chat_store = require("@app/screens/chat/store")
-local completions = require("@app/screens/chat/completions")
 
 local M = {}
 
@@ -311,6 +310,39 @@ local function NewChat(t: store.Task): Node
 	}
 end
 
+-- The threads a task can go to, as gpui's `thread_matches`: this project's first, six at most.
+local function thread_matches(chats: { any }, query: string, device: string?, project: string?, projects: { [string]: string }): { any }
+	local q = string.lower(string.match(query or "", "^%s*(.-)%s*$") or "")
+	local own, other = {}, {}
+	for _, c in chats do
+		if device == nil or c.device == device then
+			local title = string.match(string.gsub(c.title or "", "%s+", " "), "^%s*(.-)%s*$") or ""
+			if title == "" then
+				title = ui.t("chat.completions.new_session"):get()
+			end
+			if q == "" or string.find(string.lower(title), q, 1, true) or string.sub(string.lower(c.id), 1, #q) == q then
+				table.insert(if c.project == project then own else other, { c = c, title = title })
+			end
+		end
+	end
+	for _, x in other do
+		table.insert(own, x)
+	end
+	local out: { any } = {}
+	for i, x in own do
+		if i > 6 then
+			break
+		end
+		local c = x.c
+		table.insert(out, {
+			label = x.title,
+			detail = if c.project then projects[c.project] else nil,
+			thread = { id = c.id, mark = c.mark or c.agent, icon = c.agent_icon, status = c.status },
+		})
+	end
+	return out
+end
+
 local function Thread(t: store.Task): Node
 	local query = ui.use_state("")
 	local picked = ui.use_state(nil :: any)
@@ -321,7 +353,7 @@ local function Thread(t: store.Task): Node
 			names[p.id] = p.name
 		end
 		local q = string.gsub(query:get(), "^@", "")
-		return completions.thread_items(now.chats, q, { device = now.here, project = t.project }, names)
+		return thread_matches(now.chats, q, now.here, t.project, names)
 	end
 	local function send(yes: boolean)
 		local p = picked:peek()
