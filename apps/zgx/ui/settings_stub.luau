@@ -399,6 +399,11 @@ local answers: { [string]: (arg: any) -> any } = {
 			elseif m == "SetComputerSettings" or m == "SetReviewSettings" then
 				engine[get] = table.clone(arg.params)
 			elseif m == "SetRoutingSettings" or m == "SetDelegationSettings" then
+				local roles = arg.params.roles
+				-- zgx sends an empty or array-like table as a JSON list; proto's `roles` is a map.
+				if m == "SetRoutingSettings" and type(roles) == "table" and (roles[1] ~= nil or next(roles) == nil) then
+					return settled(nil, "invalid type: sequence, expected a map")
+				end
 				engine[get] = arg.params
 			elseif m == "SetAutoResumeLimits" then
 				engine.auto_resume = arg.params.enabled == true
