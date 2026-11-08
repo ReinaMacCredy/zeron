@@ -105,6 +105,12 @@ export type Props = {
 	-- The folded pill's width while it shows, nil while it doesn't (so the
 	-- other pill can move aside for it in turn).
 	on_pill_width: ((w: number?) -> ())?,
+	-- The width it is centred in, and the room to keep clear at its right
+	-- (the side chat's tab): the folded pill stops short of it.
+	width: (() -> number)?,
+	clear_right: (() -> number)?,
+	-- Where the folded pill's width is kept (a composer made again lays it out where it stood).
+	pill_w: State<number>?,
 }
 
 -- The trays' geometry, in points, read as the dock is built (the theme's).
@@ -263,8 +269,10 @@ M.PILL_H, M.PILL_GAP = PILL_H, 6
 -- just above the composer (the "Scroll to end" pill's glass and height):
 -- each thing waiting its glyph and count, a tap opening it. Open, the
 -- composer's own top: a header of tabs (one alone reads as a title), the
--- open tab's rows, a rule, then the pill. Returns the top, then the pill.
-local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: number }, narrow: () -> boolean, aside: (() -> number?)?, on_pill_width: ((w: number?) -> ())?): (Node, Node, () -> boolean)
+-- open tab's rows, a rule, then the pill. Returns the top, the pill,
+-- whether it shows, and its left edge at rest (from the width's left).
+local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: number }, narrow: () -> boolean, props: Props): (Node, Node, () -> boolean, () -> number?)
+	local aside, on_pill_width = props.aside, props.on_pill_width
 	local inset, tab_h, gap = geometry.inset, geometry.tab, geometry.tab_gap
 	local function present(): { Tab }
 		local out: { Tab } = {}
@@ -561,7 +569,7 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 	-- Tabs that each read as words (the queue's, the plan's) make one line
 	-- instead: the list's glyph, then each, "·" between, no chevron.
 	-- (Its width, as laid out: how far it moves aside.)
-	local pill_w = ui.use_state(0)
+	local pill_w = props.pill_w or ui.use_state(0)
 	local function words(): boolean
 		for _, t in present() do
 			if not t.pill_text then
@@ -719,15 +727,25 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 	-- Centred over the composer; while another pill floats there ("Scroll
 	-- to end", `aside` its width), the two glide apart into a centred pair,
 	-- this one on the right (the other moves left by as much: `on_pill_width`
-	-- says how wide this one is while it shows).
+	-- says how wide this one is while it shows). Short of room before
+	-- `clear_right`, it stops there, and says it is wider by twice what it
+	-- gave up, so the other still clears it.
+	local function placed(): (number, number)
+		local other = if aside then aside() else nil
+		local want = if other and other > 0 then (other + PILL_PAIR_GAP) / 2 else 0
+		local clear = if props.clear_right then props.clear_right() else 0
+		local w = if props.width then props.width() else 0
+		local pw = pill_w:get()
+		if clear <= 0 or w <= 0 or pw <= 0 then
+			return want, 0
+		end
+		local most = math.max(w / 2 - pw / 2 - clear, -(w - pw) / 2)
+		return math.min(want, most), math.max(0, want - most)
+	end
 	local floating = ui.div {
 		shrink = 0,
 		x = motion.spring(ui.computed(function(): number
-			local other = if aside then aside() else nil
-			if not other or other <= 0 then
-				return 0
-			end
-			return (other + PILL_PAIR_GAP) / 2
+			return (placed())
 		end), THUMB_SPRING),
 		ui.presence(function(): string?
 			return if any() and not is_open() then "pill" else nil
@@ -740,11 +758,19 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 		local report = on_pill_width
 		ui.effect(function()
 			local w = pill_w:get()
-			report(if any() and not is_open() and w > 0 then w else nil)
+			local _, gave = placed()
+			report(if any() and not is_open() and w > 0 then w + gave * 2 else nil)
 		end)
 	end
 	return top, floating, function(): boolean
 		return any() and not is_open()
+	end, function(): number?
+		local w = if props.width then props.width() else 0
+		local pw = pill_w:get()
+		if not any() or is_open() or w <= 0 or pw <= 0 then
+			return nil
+		end
+		return (w - pw) / 2 + (placed())
 	end
 end
 
@@ -1390,10 +1416,10 @@ end
 
 -- The deck's two parts, for the composer: its top (inside the frame, over
 -- the pill), and the folded pill (floating over the conversation); and
--- whether that pill shows.
-function M.parts(props: Props): (Node, Node, () -> boolean)
+-- whether that pill shows, and its left edge at rest.
+function M.parts(props: Props): (Node, Node, () -> boolean, () -> number?)
 	local tabs, open, geometry, narrow = build(props)
-	return deck(tabs, open, geometry, narrow, props.aside, props.on_pill_width)
+	return deck(tabs, open, geometry, narrow, props)
 end
 
 -- The deck alone (a fixture's): the pill over the top.

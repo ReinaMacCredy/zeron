@@ -262,6 +262,12 @@ end }
 ui.command { id = "side_failed", title = "A message of its didn't go", run = function()
 	lanes.view("tab1").messages:push({ id = "lost1", role = "user", text = "Lost on the way", waiting = "failed" })
 end }
+ui.command { id = "side_long", title = "Its conversation runs long", run = function()
+	for i = 1, 30 do
+		lanes.view("tab1").messages:push({ id = `long-u{i}`, role = "user", text = `Question {i}` })
+		lanes.view("tab1").messages:push({ id = `long-a{i}`, role = "assistant", text = `Answer {i}, a line of reply.` })
+	end
+end }
 ui.command { id = "side_renamed", title = "It's renamed", run = function()
 	children[#children - 1].title = "Renamed by a person"
 	publish()

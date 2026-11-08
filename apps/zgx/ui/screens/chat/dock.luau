@@ -11,8 +11,12 @@
 --                         8 above them), which has no surface of its own;
 --                         its height with one line of draft
 --   Dock.page_pad()       the page's bottom padding: to the footer's line
---   Dock.room(height)     the transcript's `foot`, from the
---                         docked composer's measured height
+--   Dock.room(height, lift?)   the transcript's `foot`, from the
+--                         docked composer's measured height and how far
+--                         its pill row stands raised (the chat page's by
+--                         default)
+--   Dock.lift(key)        how far a composer's pill row stands raised over
+--                         its folded deck pill: "page", or a lane's slot
 --   Dock.Dock { height, composer, id? }   the composer at the page's foot,
 --                         as wide as the conversation's column, its height
 --                         measured into `height`; the page under it takes
@@ -38,12 +42,20 @@ function M.page_pad(): any
 	return ui.raw(M.FOOTER + M.GAP, "the docked composer's footer line and its gap to the foot")
 end
 
-function M.room(height: () -> number): { foot: () -> number }
+function M.lift(key: string): State<number>
+	return ui.state(`chat_dock_lift_{key}`, 0)
+end
+
+function M.room(height: () -> number, lift: (() -> number)?): { foot: () -> number }
+	local page = M.lift("page")
+	local raised = lift or function(): number
+		return page:get()
+	end
 	return {
 		-- (The viewport ends at the footer's line: what floats over it is the
-		-- composer above that.)
+		-- composer above that, its pill row raised included.)
 		foot = function(): number
-			return height() - M.FOOTER
+			return height() - M.FOOTER + raised()
 		end,
 	}
 end

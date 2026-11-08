@@ -16,7 +16,7 @@
 --   Dock { queue = queued, todos = plan, tasks = running, open = tray, … }
 --
 -- The queue's rows are Zeron's (crates/ui/src/queue.rs): a grip, its first
--- line, its thumbnails, and at its end Remove, Edit and one primary action:
+-- line, its thumbnails, and at its end Edit, one primary action and Remove:
 -- "Send now" for a message with cargo (it interrupts), "Steer" where the
 -- agent takes a word mid-turn, else "Send next". Rows drag into a new order
 -- (or Alt+↑/↓). A row being edited says so. The plan's rows are the todo
@@ -687,9 +687,7 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 			items = "center",
 			ui.row {
 				items = "center",
-				opacity = ui.tween(ui.computed(function(): number
-					return if hovered:get() then 1 else 0
-				end), { duration = 120 }),
+				opacity = ui.tween(ui.computed(quiet_when), { duration = 120 }),
 				glyph_button {
 					label = locale.t("ds.composer_dock.edit"),
 					tooltip = locale.s("ds.composer_dock.edit"),

@@ -1065,6 +1065,9 @@ local function Composer(): Node
 		end,
 		close = close_profiles,
 	}
+	-- How far the pill row's pills reach, and how far it stands raised over the deck's pill (the transcript keeps the room).
+	local pills_reach = ui.state("chat_pills_reach", 0)
+	local lifted = require("@app/screens/chat/dock").lift("page")
 	local function composer(): Node
 		return ds.Composer {
 			-- Its measures, fold and open tray kept across a reload, so it
@@ -1117,7 +1120,24 @@ local function Composer(): Node
 				return (s :: any).prediction
 			end,
 			limit = limit,
-			pills = Pills.Row { bind = Pills.window_bind(), tasks = asks.tasks, waiting = true },
+			pills = Pills.Row {
+				bind = Pills.window_bind(),
+				tasks = asks.tasks,
+				waiting = true,
+				on_extent = function(w: number)
+					if math.abs(pills_reach:peek() - w) >= 0.5 then
+						pills_reach:set(w)
+					end
+				end,
+			},
+			pills_reach = function(): number
+				return pills_reach:get()
+			end,
+			on_lift = function(n: number)
+				if lifted:peek() ~= n then
+					lifted:set(n)
+				end
+			end,
 			side_tab = {
 				shown = function(): boolean
 					return session_id:get() ~= nil

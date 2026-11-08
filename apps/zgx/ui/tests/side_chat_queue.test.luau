@@ -156,3 +156,27 @@ test("a side chat's todos show", function()
 	app:frames(20)
 	expect(app:tree(".side-chat-tab")).to_contain("Read the tests")
 end)
+
+test("scrolled up with a message queued, a side chat's Jump to latest and its deck's pill stand side by side", function()
+	local app = open()
+	app:command("side_long")
+	app:frames(30)
+	app:command("side_running")
+	app:command("side_queue_one")
+	app:frames(30)
+	app:scroll(".side-chat-tab >> #transcript", -900)
+	app:frames(60)
+	local jump = '.side-chat-tab >> role:button "Jump to latest"'
+	local pill = '.side-chat-tab >> role:toolbar "What\'s waiting"'
+	expect(app:has(jump)).to_be(true)
+	expect(app:has(pill)).to_be(true)
+	local function edges(target: string): (number, number)
+		local line = app:tree(target):match("[^\n]+") or ""
+		local x, w = line:match(" (%-?[%d%.]+),%-?[%d%.]+ ([%d%.]+)x")
+		return tonumber(x) :: number, (tonumber(x) :: number) + (tonumber(w) :: number)
+	end
+	local _, jump_right = edges(jump)
+	local pill_left = edges(pill)
+	expect(jump_right <= pill_left).to_be(true)
+	expect(app:error()).to_be(nil)
+end)

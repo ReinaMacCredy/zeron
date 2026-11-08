@@ -10,6 +10,13 @@ local function box(app: any, what: string): (number, number, number, number)
 	return tonumber(x) or 0, tonumber(y) or 0, tonumber(w) or 0, tonumber(h) or 0
 end
 
+-- Whether two nodes' boxes stand clear of each other.
+local function apart(app: any, a: string, b: string): boolean
+	local ax, ay, aw, ah = box(app, a)
+	local bx, by, bw, bh = box(app, b)
+	return ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay
+end
+
 local function top(app: any): number
 	local _, y = box(app, 'role:textbox "Message"')
 	return y
@@ -135,7 +142,7 @@ test("a queued message that fails keeps its row, and its Steer tries again", fun
 	expect(app:error()).to_be(nil)
 end)
 
-test("the composer holds still as the deck comes, opens and folds; the pill row stands clear above it", function()
+test("the composer holds still as the deck comes, opens and folds; the pill row stands clear of it", function()
 	local app = chat()
 	app:command("task_running")
 	app:frames(30)
@@ -146,9 +153,7 @@ test("the composer holds still as the deck comes, opens and folds; the pill row 
 		expect(math.abs(top(app) - was) <= 1).to_be(true)
 	end
 	app:frames(30)
-	local _, pill_y = box(app, PILL)
-	local _, row_y, _, row_h = box(app, "#composer-pills")
-	expect(row_y + row_h <= pill_y + 1).to_be(true)
+	expect(apart(app, "#pills-shells-pill", PILL)).to_be(true)
 	app:click(`{PILL} >> role:button "Open Queue"`)
 	for _ = 1, 30 do
 		app:frames(1)
@@ -183,4 +188,103 @@ test("with the deck there, the caption still says the agent can't be steered", f
 	app:frames(30)
 	expect(app:has(PILL)).to_be(true)
 	expect(app:has('~"This agent can\'t be steered mid-turn"')).to_be(true)
+end)
+
+test("a row's Edit stands at rest, faint as Remove (gpui's .72), not only under the pointer", function()
+	local app = chat()
+	patch(app, { queue = TWO, steers = true })
+	app:click(`{PILL} >> role:button "Open Queue"`)
+	app:frames(30)
+	app:hover('role:textbox "Message"')
+	app:frames(20)
+	local edit = 'role:listitem "1. Then update the changelog" >> role:button "Edit"'
+	expect(app:tree(edit)).never.to_contain("hidden")
+	expect(app:tree('role:listitem "1. Then update the changelog" >> role:button "Remove"')).never.to_contain("hidden")
+	expect(app:error()).to_be(nil)
+end)
+
+test("the pill row rises over the deck's pill only where its pills would meet it, and the conversation keeps clear of it", function()
+	-- One pill, at its left: no need to rise, so the Working row stays where it was.
+	local app = chat()
+	app:command("task_running")
+	app:frames(30)
+	local _, row_was = box(app, "#composer-pills")
+	local _, working_was = box(app, "#working-clock")
+	app:command("queue_one")
+	app:frames(40)
+	local _, row_y = box(app, "#composer-pills")
+	expect(row_y).to_be(row_was)
+	expect(apart(app, "#pills-shells-pill", PILL)).to_be(true)
+	local _, working_y = box(app, "#working-clock")
+	expect(working_y).to_be(working_was)
+	expect(apart(app, "#working-clock", "#pills-shells-pill")).to_be(true)
+	-- Agents and Shells across a narrow composer reach its middle: it rises,
+	-- and the conversation's end rises with it.
+	local narrow = mount("chat_fixture.luau")
+	narrow:resize(600, 700)
+	narrow:command("go_s1")
+	narrow:frames(30)
+	narrow:command("start_reply")
+	narrow:command("task_running")
+	narrow:command("subagents_running")
+	narrow:frames(30)
+	narrow:command("queue_one")
+	narrow:frames(40)
+	local _, pill_y = box(narrow, PILL)
+	local _, ry, _, rh = box(narrow, "#composer-pills")
+	expect(ry + rh <= pill_y).to_be(true)
+	expect(apart(narrow, "#pills-shells-pill", PILL)).to_be(true)
+	local _, wy, _, wh = box(narrow, "#working-clock")
+	expect(wy + wh <= ry).to_be(true)
+	expect(narrow:error()).to_be(nil)
+end)
+
+test("the folded pill and the pill row stand over the notice line, never on it", function()
+	local app = chat()
+	app:command("task_running")
+	app:command("queue_one")
+	app:frames(30)
+	app:command("connection_offline")
+	app:frames(40)
+	local notice = '~"Offline — messages will send"'
+	expect(app:has(notice)).to_be(true)
+	expect(apart(app, PILL, notice)).to_be(true)
+	expect(apart(app, "#pills-shells-pill", notice)).to_be(true)
+	-- A Steer that fails: the deck's pill is up just while its card is.
+	local failed = chat()
+	failed:command("queue_one")
+	failed:frames(30)
+	failed:click(`{PILL} >> role:button "Open Queue"`)
+	failed:frames(30)
+	failed:command("steer_fails")
+	failed:click('role:listitem "1. Queued words" >> role:button "Steer"')
+	failed:frames(30)
+	failed:click('role:tab "Fold Queue"')
+	failed:frames(40)
+	local card = '~"Couldn\'t send that message"'
+	expect(failed:has(card)).to_be(true)
+	expect(failed:has(PILL)).to_be(true)
+	expect(apart(failed, PILL, card)).to_be(true)
+	expect(failed:error()).to_be(nil)
+end)
+
+test("beside the side chat's tab the folded pill stops short of it, and Scroll to end still clears it", function()
+	for _, w in { 520, 700 } do
+		local app = mount("chat_fixture.luau")
+		app:resize(w, 700)
+		app:command("go_s1")
+		app:frames(30)
+		app:command("start_reply")
+		app:frames(10)
+		patch(app, { queue = { { id = "q1", text = "Words" } }, todos = plan(0, 2) })
+		expect(app:tree(PILL)).to_contain("Plan 0/2")
+		expect(apart(app, PILL, "#composer-side-chat")).to_be(true)
+		app:scroll("#transcript", -900)
+		app:frames(60)
+		local jump = 'role:button "Jump to latest"'
+		expect(app:has(jump)).to_be(true)
+		expect(apart(app, PILL, "#composer-side-chat")).to_be(true)
+		expect(apart(app, PILL, jump)).to_be(true)
+		expect(app:error()).to_be(nil)
+	end
 end)

@@ -253,7 +253,16 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
+-- A lane's two floating pills, by its slot: "Jump to latest"'s width and the
+-- deck's folded pill's while each shows (each moves aside for the other, as
+-- on the chat page), and how far its pill row's pills reach.
+local function pair(slot: string): (State<number?>, State<number?>, State<number>)
+	return ui.state(`chat_lane_jump_w_{slot}`, nil :: number?), ui.state(`chat_lane_pill_w_{slot}`, nil :: number?), ui.state(`chat_lane_pills_reach_{slot}`, 0)
+end
+
 local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, panel_key: string?, tab_id: string?): Node
+	local jump_w, deck_w, reach = pair(tab_id or name)
+	local lifted = Dock.lift(tab_id or name)
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
@@ -1125,7 +1134,28 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				end,
 			},
 			tasks = asks.tasks,
+			on_extent = function(w: number)
+				if math.abs(reach:peek() - w) >= 0.5 then
+					reach:set(w)
+				end
+			end,
 		},
+		pills_reach = function(): number
+			return reach:get()
+		end,
+		on_lift = function(n: number)
+			if lifted:peek() ~= n then
+				lifted:set(n)
+			end
+		end,
+		aside = function(): number?
+			return jump_w:get()
+		end,
+		on_pill_width = function(w: number?)
+			if deck_w:peek() ~= w then
+				deck_w:set(w)
+			end
+		end,
 		tray = tray,
 	}) }
 end
@@ -1360,8 +1390,12 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 	end)
 	local dock_h = M.dock_height(slot)
 	-- (A split's pane, focused: the window's composer stands at its foot.)
+	local jump_w, deck_w = pair(slot)
+	local own_lift, page_lift = Dock.lift(slot), Dock.lift("page")
 	local room = Dock.room(function(): number
 		return if split and focused_now() then Shared.dock_h:get() else dock_h:get()
+	end, function(): number
+		return if split and focused_now() then page_lift:get() else own_lift:get()
 	end)
 	local function lane_session(): any
 		local s = view.session:get()
@@ -1434,6 +1468,14 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		offset = offset,
 		keep = anchor,
 		foot = if tab.kind == "subagent" then nil else room.foot,
+		beside = function(): number?
+			return deck_w:get()
+		end,
+		on_jump_width = function(w: number?)
+			if jump_w:peek() ~= w then
+				jump_w:set(w)
+			end
+		end,
 		compact = function(): boolean
 			return prefs.compact_transcript:get()
 		end,

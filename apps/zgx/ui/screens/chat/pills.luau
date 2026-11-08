@@ -1088,7 +1088,7 @@ local ShellsBody = ui.component(function(props: { bind: any, tasks: any, detail:
 	end, { w_full = true })
 end)
 
-M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?, id: string?, keys: (() -> ())? }): Node
+M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?, id: string?, keys: (() -> ())?, on_extent: ((w: number) -> ())? }): Node
 	local bind = props.bind
 	local keys = props.keys or typing.take
 	local runs = M.runs_of(bind)
@@ -1370,6 +1370,21 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 			elsewhere_of = bind.id,
 		})
 	end
+	-- The pills in a row as wide as they stand (the cards stay the outer row's, absolute): `on_extent` hears how far they reach.
+	local pills: { any } = { gap = ui.raw(6, "background.rs render_corner"), items = "end", shrink = 1, min_w = 0, pointer_events = "none" }
+	for i, c in ipairs(children) do
+		pills[i] = c
+	end
+	for i = #children, 1, -1 do
+		children[i] = nil
+	end
+	if props.on_extent then
+		local report = props.on_extent
+		pills.on_resize = function(size: { w: number, h: number })
+			report(size.w)
+		end
+	end
+	children[1] = ui.row(pills)
 	return ui.row(children)
 end)
 

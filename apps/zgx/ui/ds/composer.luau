@@ -279,6 +279,10 @@ export type Props = {
 	limit: (() -> any)?,
 	side_tab: any?,
 	pills: Node?,
+	-- How far the pill row's pills reach from its left, as laid out: it rises over the deck's folded pill only when they would meet it.
+	pills_reach: (() -> number)?,
+	-- How far the pill row stands raised, for the room the conversation keeps under it.
+	on_lift: ((n: number) -> ())?,
 	caption: (() -> string?)?,
 	footer_status: boolean?,
 	footer_git: (() -> boolean)?,
@@ -2565,14 +2569,23 @@ return ui.component(function(props: Props): Node
 
 	-- The deck (1B): the queue and the plan only, the composer's own top, and
 	-- folded a pill over it. What runs and what's asked are the pill row's.
-	-- (Whether its folded pill shows: the pill row stands clear above it.)
 	local trays: Node? = nil
 	local tray_pill: Node? = nil
 	local deck_folded: () -> boolean = function()
 		return false
 	end
+	local deck_left: () -> number? = function()
+		return nil
+	end
+	local side_tab_w = kept("side_tab_w", 0)
+	-- The side chat's tab, its inset and a gap: the room the folded pill keeps clear of at the right.
+	local function tab_room(): number
+		local tab = props.side_tab
+		local w = side_tab_w:get()
+		return if tab and tab.shown() and w > 0 then 16 + w + deck.PILL_PAIR_GAP else 0
+	end
 	if props.queue or props.todos then
-		trays, tray_pill, deck_folded = deck.parts {
+		trays, tray_pill, deck_folded, deck_left = deck.parts {
 			queue = props.queue,
 			can_steer = props.can_steer,
 			on_queue_send = props.on_queue_send,
@@ -2595,7 +2608,31 @@ return ui.component(function(props: Props): Node
 			narrow = narrow,
 			aside = props.aside,
 			on_pill_width = props.on_pill_width,
+			width = function(): number
+				return pill_w:get()
+			end,
+			clear_right = tab_room,
+			pill_w = kept("deck_pill_w", 0),
 		}
+	end
+	-- The pill row rises over the folded pill only where its pills would meet it (the caller's transcript keeps the room, `on_lift`).
+	local LIFT = deck.PILL_H + deck.PILL_GAP
+	local lift = ui.computed(function(): number
+		if not deck_folded() then
+			return 0
+		end
+		if not props.pills_reach then
+			return LIFT
+		end
+		local left = deck_left()
+		local reach = props.pills_reach()
+		return if left and reach > 0 and reach + deck.PILL_PAIR_GAP > left then LIFT else 0
+	end)
+	if props.on_lift then
+		local report = props.on_lift
+		ui.effect(function()
+			report(lift:get())
+		end)
 	end
 
 	-- The side chat's tab, behind the pill's top right corner, tucked 26 behind it.
@@ -2618,6 +2655,7 @@ return ui.component(function(props: Props): Node
 			y = -24,
 			ui.button {
 				id = "composer-side-chat",
+				on_resize = measure(side_tab_w, "w"),
 				label = locale.t("ds.composer.side_chat"),
 				tooltip = locale.s("ds.composer.side_chat_tip"),
 				pointer_events = "auto",
@@ -2677,7 +2715,7 @@ return ui.component(function(props: Props): Node
 			h = 28,
 			mb = ui.raw(-28, "its own height"),
 			y = ui.tween(ui.computed(function(): number
-				return if deck_folded() then -34 - deck.PILL_H - deck.PILL_GAP else -34
+				return -34 - lift:get()
 			end), { duration = 180, ease = "out(3)" }),
 			pr = if props.side_tab
 				then function(): any
@@ -2709,13 +2747,13 @@ return ui.component(function(props: Props): Node
 
 	-- The pill (the mentions' popover anchored on it: its panel opens at
 	-- the caret inside), its trays behind, the footer under.
+	local function dimmed(): number
+		return if disabled() then (ui.theme.get("zeron.disabled") :: number?) or 0.4 else 1
+	end
 	local body = ui.column {
 		w_full = true,
 		relative = true,
-		opacity = function(): number
-			return if disabled() then (ui.theme.get("zeron.disabled") :: number?) or 0.4 else 1
-		end,
-		pill_row(),
+		opacity = dimmed,
 		side_tab(),
 		caption_line(),
 		-- The tray (over a wallpaper): the pill's glass continued under the
@@ -2794,26 +2832,15 @@ return ui.component(function(props: Props): Node
 			ui.popover(m.popover(surface)),
 		},
 		footer,
-		-- Folded, what waits on the agent: a pill floating just over the
-		-- composer's middle, out of the layout (the conversation shows under
-		-- it, as under "Scroll to end", which it moves aside for).
-		if tray_pill
-			then ui.row {
-				absolute = true,
-				left = 0,
-				right = 0,
-				justify = "center",
-				top = ui.raw(-(deck.PILL_H + deck.PILL_GAP), "the pill's height and its gap over the composer"),
-				h = deck.PILL_H,
-				pointer_events = "none",
-				tray_pill,
-			}
-			else nil,
 	}
 
+	-- The pill row and the folded pill stand over all of it, the notice
+	-- line and the compaction's cards included, so neither covers those.
 	return ui.column {
 		w_full = true,
 		gap = 0,
+		relative = true,
+		if props.pills then ui.div { w_full = true, h = 0, shrink = 0, opacity = dimmed, pill_row() } else nil,
 		if props.notice then notice_line(props.notice, props.on_notice_action, props.on_dismiss_notice) else nil,
 		if props.compaction then Compaction.Chip { label = props.compaction.label } else nil,
 		if props.compaction
@@ -2824,5 +2851,21 @@ return ui.component(function(props: Props): Node
 			}
 			else nil,
 		body,
+		-- Folded, what waits on the agent: a pill floating just over the
+		-- composer's middle, out of the layout (the conversation shows under
+		-- it, as under "Scroll to end", which it moves aside for).
+		if tray_pill
+			then ui.row {
+				absolute = true,
+				left = 0,
+				right = 0,
+				justify = "center",
+				top = ui.raw(-(deck.PILL_H + deck.PILL_GAP), "the pill's height and its gap over everything above the composer"),
+				h = deck.PILL_H,
+				pointer_events = "none",
+				opacity = dimmed,
+				tray_pill,
+			}
+			else nil,
 	}
 end)
