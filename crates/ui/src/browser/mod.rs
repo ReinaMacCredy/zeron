@@ -11,7 +11,7 @@ use macos as native;
 #[cfg(target_os = "macos")]
 pub(crate) mod automation;
 #[cfg(target_os = "macos")]
-pub(crate) mod control_admission;
+pub(crate) use zeron_computer_host::control_admission;
 #[cfg(target_os = "macos")]
 pub(crate) mod control_host;
 #[cfg(target_os = "macos")]

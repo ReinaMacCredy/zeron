@@ -1,5 +1,5 @@
 use super::*;
-use crate::computer::host::{ComputerShieldEngagement, ComputerShieldHost};
+use crate::host::{ComputerShieldEngagement, ComputerShieldHost};
 use zeron_proto::computer::CuaShieldFrame;
 
 type ShieldCall = (

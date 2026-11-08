@@ -1,5 +1,5 @@
 use super::*;
-use crate::computer::host::CuaCursorStyle;
+use crate::host::CuaCursorStyle;
 
 fn colors(fill: Option<&str>, rim: Option<&str>, shadow: Option<&str>) -> CuaCursorStyle {
     CuaCursorStyle {

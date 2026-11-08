@@ -39,7 +39,7 @@ pub use support::{
     CUA_CURSOR_IDLE_HIDE_MS, CuaCursorStyle, ESCAPE_INPUT_COOLDOWN, normalize_cua_cursor_style,
 };
 
-use crate::computer::runtime_ownership::create_cua_runtime_directory;
+use crate::runtime_ownership::create_cua_runtime_directory;
 
 type Chain = Shared<LocalBoxFuture<'static, ()>>;
 type Fallible = Shared<LocalBoxFuture<'static, Result<(), String>>>;
@@ -57,8 +57,7 @@ const HANDSHAKE_ATTEMPTS: usize = 80;
 const HANDSHAKE_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(200);
 const HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const EXIT_GRACE: Duration = Duration::from_millis(500);
-const ENGINE_CALL_TIMEOUT: Duration =
-    Duration::from_millis(zeron_engine::computer::cua_backend::CUA_HOST_CALL_TIMEOUT_MS);
+const ENGINE_CALL_TIMEOUT: Duration = Duration::from_millis(crate::CUA_HOST_CALL_TIMEOUT_MS);
 const QUIET_POLL: Duration = Duration::from_millis(50);
 
 const STOPPED_DURING_STARTUP: &str = "Cua Driver stopped during startup.";
@@ -3378,7 +3377,7 @@ impl CuaDriverHost {
     }
 }
 
-impl crate::computer::desktop_lifecycle::ComputerDesktopLifecycleHost for CuaDriverHost {
+impl crate::desktop_lifecycle::ComputerDesktopLifecycleHost for CuaDriverHost {
     fn pause_desktop(
         &self,
         reason: &'static str,

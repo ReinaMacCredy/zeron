@@ -16,6 +16,8 @@ end
 
 -- Each request's answer under way or sent, outliving its row (gpui's `SecretCards`): scrolled away and back, a sent card stays sent.
 local SECRETS = ui.state("transcript_secrets", {} :: { [string]: { busy: boolean?, sent: string?, failure: string? } })
+-- Each computer card's answer under way, sent or refused, outliving its row (gpui's `consent_sent`, `foreground_sent`, `consent_failures`).
+local COMPUTER = ui.state("transcript_computer", {} :: { [string]: { busy: boolean?, sent: string?, failure: string? } })
 
 function M.line_words(x: any): string
 	local title = x.title or ""
@@ -90,6 +92,17 @@ function M.texts(m: any, b: any?): { { key: string, text: string } }
 			local body = if stale then s("claude.stale") else (c.error or c.text or "")
 			if body ~= "" then
 				table.insert(out, { key = `{base}:1`, text = body })
+			end
+		end
+	elseif x.line == "computer_consent" or x.line == "computer_foreground" then
+		local own = if x.request then COMPUTER:peek()[x.request] else nil
+		local settled = x.text or (if own then own.sent else nil)
+		if settled then
+			table.insert(out, { key = `{base}:0`, text = settled })
+		else
+			table.insert(out, { key = `{base}:0`, text = x.title or "" })
+			if (x.detail or "") ~= "" then
+				table.insert(out, { key = `{base}:1`, text = x.detail })
 			end
 		end
 	elseif x.line == "error" then
@@ -550,6 +563,297 @@ M.Secret = ui.component(function(props: SecretProps): Node
 			},
 		}
 	end, { w_full = true })
+end)
+
+local function computer_set(request: string, patch: { busy: boolean?, sent: string?, failure: string? })
+	local all = table.clone(COMPUTER:peek())
+	all[request] = patch
+	COMPUTER:set(all)
+end
+
+local function tone_ink(tone: string): string
+	return if tone == "warning" then "$warning" elseif tone == "success" then "$success" else "$text.secondary"
+end
+
+local function card_button(id: string, label: string, primary: boolean, h: number, px: number, disabled: (() -> boolean)?, on_click: () -> ()): Node
+	return ui.button {
+		id = id,
+		label = label,
+		h = ui.raw(h, "gpui's computer card"),
+		px = ui.raw(px, "gpui's computer card"),
+		shrink = 0,
+		rounded = ui.raw(8, "gpui's computer card"),
+		bg = if primary then "$zeron.primary.bg" else "#00000000",
+		hover = if primary then { bg = "$zeron.primary.hover", opacity = 0.9 } else { bg = "$hover" },
+		active = if primary then { bg = "$zeron.primary.active" } else { bg = "$pressed" },
+		border = if primary then 0 else 1,
+		border_color = "$border.subtle",
+		color = if primary then "$zeron.primary.text" else "$text.primary",
+		weight = "$font.weight.medium",
+		focus = control.ring,
+		disabled = disabled,
+		on_click = on_click,
+		ui.text { label },
+	}
+end
+
+export type ComputerProps = {
+	key: string,
+	now: () -> any,
+	find: Find?,
+	on_answer: ((request: string, question: string, answer: string) -> any)?,
+	disclosure: (() -> boolean)?,
+	on_approved: (() -> ())?,
+}
+-- gpui's `approval_card`: a consent card (Allow this conversation, Always allow, Deny) or a foreground one (Allow for this turn, No); once answered, the row it settled to.
+M.ComputerApproval = ui.component(function(props: ComputerProps): Node
+	local function mine(): { busy: boolean?, sent: string?, failure: string? }
+		local b = props.now()
+		return if b.request then COMPUTER:get()[b.request] or {} else {}
+	end
+	local function settled(): string?
+		return props.now().text or mine().sent
+	end
+	local function busy(): boolean
+		return mine().busy == true or mine().sent ~= nil
+	end
+	local function answer(c: any)
+		local b = props.now()
+		local request = b.request
+		local was = if request then COMPUTER:peek()[request] or {} else {}
+		if not request or was.busy or was.sent then
+			return
+		end
+		local ok, p = false, nil
+		if props.on_answer then
+			ok, p = pcall(props.on_answer, request, b.question, c.answer)
+		end
+		if not ok or type(p) ~= "table" or not p.after then
+			computer_set(request, { failure = s("computer.unsupported") })
+			return
+		end
+		computer_set(request, { busy = true })
+		p:after(function()
+			-- (A foreground card stays until the engine's answer turns it into its row.)
+			computer_set(request, { busy = true, sent = c.settled })
+			if c.key ~= "deny" and b.line == "computer_consent" and props.on_approved then
+				props.on_approved()
+			end
+		end, function(e: any)
+			local why = if type(e) == "table" then e.message else e
+			computer_set(request, { failure = s("computer.failed", { why = if type(why) == "string" then why else "failed" }) })
+		end)
+	end
+	return ui.presence(function(): string
+		return if settled() then "row" else "card"
+	end, function(kind: string): Node
+		if kind == "row" then
+			return ui.column {
+				class = "transcript-computer",
+				w_full = true,
+				event_row("computer-cursor", function(): string
+					return settled() or ""
+				end, function(): string
+					return "$text.secondary"
+				end, `{props.key}:0`, props.find),
+			}
+		end
+		local function risk(): string?
+			return props.now().risk
+		end
+		local choices = ui.computed(function(): { any }
+			return props.now().choices or {}
+		end)
+		return ui.column {
+			class = "transcript-computer",
+			w_full = true,
+			py = ui.raw(4, "gpui's approval card"),
+			ui.column {
+				id = `computer-approval-{props.key}`,
+				role = "group",
+				label = function(): string
+					return props.now().title or ""
+				end,
+				w_full = true,
+				overflow = "hidden",
+				rounded = ui.raw(12, "gpui's approval card"),
+				border = 1,
+				border_color = function(): string
+					return if risk() then "$zeron.tone.warning.edge" else "$border.subtle"
+				end,
+				bg = "$surface.raised",
+				text_size = ui.raw(12.5, "gpui's approval card"),
+				line_height = ui.raw(18, "gpui's approval card"),
+				ui.show(function(): boolean
+					return risk() ~= nil
+				end, ui.column {
+					id = `computer-risk-{props.key}`,
+					w_full = true,
+					px = ui.raw(12, "gpui's approval card"),
+					py = ui.raw(8, "gpui's approval card"),
+					gap = ui.raw(2, "gpui's approval card"),
+					bg = "$zeron.tone.warning.wash",
+					ui.row {
+						gap = ui.raw(6, "gpui's approval card"),
+						items = "center",
+						color = "$warning",
+						weight = "$font.weight.semibold",
+						Icon { name = "danger-triangle", size = 13 },
+						ui.text { s("computer.elevated_risk") },
+					},
+					ui.text { function(): string
+						return risk() or ""
+					end, wrap = true, color = "$text.secondary" },
+				}),
+				ui.row {
+					w_full = true,
+					p = ui.raw(12, "gpui's approval card"),
+					gap = ui.raw(12, "gpui's approval card"),
+					items = "center",
+					ui.row {
+						w = 32,
+						h = 32,
+						shrink = 0,
+						items = "center",
+						justify = "center",
+						rounded = ui.raw(8, "gpui's approval card"),
+						bg = "$hover",
+						color = "$text.secondary",
+						aria_hidden = true,
+						Icon { name = "computer-cursor", size = 16 },
+					},
+					ui.column {
+						grow = 1,
+						min_w = 0,
+						gap = ui.raw(2, "gpui's approval card"),
+						found { key = `{props.key}:0`, text = function(): string
+							return props.now().title or ""
+						end, find = props.find, text_size = ui.raw(13.5, "gpui's approval card"), weight = "$font.weight.semibold", color = "$text.primary", wrap = true },
+						ui.show(function(): boolean
+							return (props.now().detail or "") ~= ""
+						end, found { key = `{props.key}:1`, text = function(): string
+							return props.now().detail or ""
+						end, find = props.find, color = "$text.secondary", wrap = true }),
+					},
+				},
+				ui.show(function(): boolean
+					return props.now().line == "computer_consent" and (props.disclosure == nil or props.disclosure())
+				end, ui.text {
+					function(): string
+						return props.now().disclosure_text or ""
+					end,
+					id = `computer-disclosure-{props.key}`,
+					wrap = true,
+					px = ui.raw(12, "gpui's approval card"),
+					pb = ui.raw(10, "gpui's approval card"),
+					text_size = ui.raw(11.5, "gpui's approval card"),
+					color = "$text.secondary",
+				}),
+				ui.row {
+					w_full = true,
+					px = ui.raw(12, "gpui's approval card"),
+					pb = ui.raw(12, "gpui's approval card"),
+					gap = ui.raw(6, "gpui's approval card"),
+					items = "center",
+					justify = "end",
+					flex_wrap = true,
+					ui.show(function(): boolean
+						return mine().failure ~= nil
+					end, ui.text { function(): string
+						return mine().failure or ""
+					end, grow = 1, min_w = 0, wrap = true, weight = "$font.weight.medium", color = "$warning" }),
+					ui.each(choices, function(c: any): Node
+						return card_button(`computer-{c.key}-{props.key}`, c.label, c.primary == true, 28, 12, busy, function()
+							answer(c)
+						end)
+					end),
+				},
+			},
+		}
+	end, { w_full = true })
+end)
+
+-- gpui's `computer_card`: a tile, its title, the lines under it and an action.
+local function computer_card(key: string, tone: string, title: () -> string, lines: () -> { string }, action: { label: string, on_click: () -> () }?, find: Find?): Node
+	local accent = tone_ink(tone)
+	local list = ui.computed(lines)
+	return ui.column {
+		class = "transcript-computer",
+		w_full = true,
+		py = ui.raw(4, "gpui's computer card"),
+		ui.row {
+			id = `computer-card-{key}`,
+			w_full = true,
+			gap = ui.raw(10, "gpui's computer card"),
+			items = "start",
+			overflow = "hidden",
+			rounded = ui.raw(10, "gpui's computer card"),
+			border = 1,
+			border_color = "$border.subtle",
+			bg = "$surface.raised",
+			p = ui.raw(10, "gpui's computer card"),
+			text_size = ui.raw(12, "gpui's computer card"),
+			line_height = ui.raw(17, "gpui's computer card"),
+			ui.row {
+				w = 28,
+				h = 28,
+				shrink = 0,
+				items = "center",
+				justify = "center",
+				rounded = ui.raw(8, "gpui's computer card"),
+				bg = if tone == "info" then "$hover" else `$zeron.tone.{tone}.wash`,
+				color = accent,
+				aria_hidden = true,
+				Icon { name = "computer-cursor", size = 14 },
+			},
+			ui.column {
+				grow = 1,
+				min_w = 0,
+				gap = ui.raw(2, "gpui's computer card"),
+				found { key = `{key}:0`, text = title, find = find, weight = "$font.weight.medium", color = "$text.primary", wrap = true },
+				ui.each(list, function(line: string): Node
+					return ui.text { line, wrap = true, color = "$text.secondary" }
+				end),
+				if action
+					then ui.row {
+						pt = ui.raw(6, "gpui's computer card"),
+						gap = ui.raw(6, "gpui's computer card"),
+						flex_wrap = true,
+						items = "center",
+						card_button(`computer-action-{key}`, action.label, false, 26, 10, nil, action.on_click),
+					}
+					else nil,
+			},
+		},
+	}
+end
+
+-- gpui's `render_computer_notice`: Revoked, Paused, Foreground and Left open as one quiet row; Unavailable, Control denied and Setup as a card.
+M.ComputerNotice = ui.component(function(props: { key: string, now: () -> any, find: Find?, on_enable: (() -> ())? }): Node
+	local b = props.now()
+	local kind = b.notice
+	local function words(): string
+		return props.now().text or ""
+	end
+	if kind == "revoked" then
+		return event_row("stop", words, function(): string
+			return "$warning"
+		end, `{props.key}:0`, props.find)
+	elseif kind == "unavailable" or kind == "setup" or kind == "control_denied" then
+		local action = nil
+		if kind == "control_denied" and props.on_enable then
+			local enable = props.on_enable
+			action = { label = b.action or s("computer.use_for_request"), on_click = function()
+				enable()
+			end }
+		end
+		return computer_card(props.key, "warning", words, function(): { string }
+			return props.now().lines or {}
+		end, action, props.find)
+	end
+	return event_row("computer-cursor", words, function(): string
+		return "$text.secondary"
+	end, `{props.key}:0`, props.find)
 end)
 
 local function glyph_button(id: string, icon: () -> string, label: () -> string, tooltip: string, on_click: () -> ()): Node

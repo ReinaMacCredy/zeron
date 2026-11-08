@@ -70,6 +70,8 @@ pub const BLOCKED: &[&str] = &[
     "files.open_external",
     "chat.send",
     "chat.respond",
+    // (Lets an agent use this computer.)
+    "chat.answer_computer",
     "chat.queue",
     "chat.steer_all",
     "chat.limit",

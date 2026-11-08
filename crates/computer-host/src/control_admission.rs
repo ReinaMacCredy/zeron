@@ -9,9 +9,9 @@ struct State {
     pauses: HashSet<&'static str>,
 }
 #[derive(Default)]
-pub(crate) struct Admission(Mutex<State>);
+pub struct Admission(Mutex<State>);
 #[derive(Clone)]
-pub(crate) struct Stamp {
+pub struct Stamp {
     thread: String,
     epoch: u64,
     generation: u64,

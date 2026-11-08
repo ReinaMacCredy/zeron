@@ -1,5 +1,5 @@
 use super::*;
-use crate::computer::host::{ComputerFrameTapHost, ComputerShieldEngagement, ComputerShieldHost};
+use crate::host::{ComputerFrameTapHost, ComputerShieldEngagement, ComputerShieldHost};
 use zeron_proto::computer::CuaPreviewTarget;
 
 fn press_for(task: Option<&CuaComputerTask>) -> ComputerHostCall {

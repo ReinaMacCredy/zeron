@@ -7,6 +7,7 @@
 //! the Live state column's fold and the model picker's layout, each of the frame and the art as a set: one you've touched here isn't
 //! paired with the other app's rest. New project's pinned folders come with it. Pinned chats and sections
 //! aren't here: the engine keeps them, for either app.
+//! Computer use's click sounds and its guide's Got it come too.
 
 use std::path::Path;
 
@@ -20,6 +21,7 @@ const SIDECAR_COLLAPSED: &str = "screens%2Fsidecar.luau%3A%3Asidecar_collapsed.j
 const INSET: &str = "ds%2Flook.luau%3A%3Ainset_card.json";
 const THEME_COLORS: &str = "ds%2Flook.luau%3A%3Awallpaper_theme_colors.json";
 const MODEL_PICKER_COMPACT: &str = "ds%2Fmodel_picker.luau%3A%3Amodel_picker_compact.json";
+const COMPUTER: &str = "screens%2Fsettings%2Fcomputer.luau%3A%3A";
 
 fn look(name: &str) -> String {
     format!("{LOOK}{name}.json")
@@ -133,6 +135,12 @@ fn carried(settings: &Json) -> Vec<(String, Json)> {
     if let Some(color) = settings["wallpaperColor"].as_str() {
         out.push((look("wallpaper_color"), json!(color)));
     }
+    if let Some(sounds) = settings["computerClickSounds"].as_str().filter(|s| matches!(*s, "foreground" | "foreground-and-background" | "off")) {
+        out.push((format!("{COMPUTER}click_sounds.json"), json!(sounds)));
+    }
+    if let Some(seen) = settings["computerGettingStartedAcknowledged"].as_bool() {
+        out.push((format!("{COMPUTER}guide_acknowledged.json"), json!(seen)));
+    }
     if let Some(pins) = settings["projectFolderPins"].as_object().filter(|pins| !pins.is_empty()) {
         out.push((format!("{PICKER}pins.json"), Json::Object(pins.clone())));
     }
@@ -232,6 +240,17 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.path().join(MODEL_PICKER_COMPACT)).unwrap(), "false");
         // What it doesn't say stays at this app's default.
         assert!(!dir.path().join(format!("{SIDEBAR}show_branch.json")).exists());
+    }
+
+    #[test]
+    fn computer_use_s_click_sounds_and_guide_come_across() {
+        let dir = tempfile::tempdir().unwrap();
+        carry_into(dir.path(), &dir.path().join("kept"), &json!({ "computerClickSounds": "foreground-and-background", "computerGettingStartedAcknowledged": true }));
+        let read = |name: &str| std::fs::read_to_string(dir.path().join(format!("{COMPUTER}{name}.json"))).unwrap();
+        assert_eq!((read("click_sounds").as_str(), read("guide_acknowledged").as_str()), ("\"foreground-and-background\"", "true"));
+        let odd = tempfile::tempdir().unwrap();
+        carry_into(odd.path(), &odd.path().join("kept"), &json!({ "computerClickSounds": "loud" }));
+        assert!(!odd.path().join(format!("{COMPUTER}click_sounds.json")).exists(), "a word this app doesn't know stays its default");
     }
 
     #[test]

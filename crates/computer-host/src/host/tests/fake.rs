@@ -15,7 +15,7 @@ use super::Driver;
 
 pub(super) const FAKE_DIR_ENV: &str = "ZERON_FAKE_CUA_DIR";
 pub(super) const FAKE_ARGV_ENV: &str = "ZERON_FAKE_CUA_ARGV";
-pub(super) const FAKE_TEST_PATH: &str = "computer::host::tests::fake::fake_cua_driver_process";
+pub(super) const FAKE_TEST_PATH: &str = "host::tests::fake::fake_cua_driver_process";
 
 #[test]
 fn fake_cua_driver_process() {

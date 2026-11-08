@@ -1,5 +1,5 @@
 use super::*;
-use crate::computer::host::ComputerFrameTapHost;
+use crate::host::ComputerFrameTapHost;
 use zeron_proto::computer::CuaPreviewTarget;
 
 #[derive(Default)]

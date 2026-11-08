@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use super::*;
-use crate::computer::host::{PhysicalComputerInput, PhysicalInputKind, TakeoverEvent};
+use crate::host::{PhysicalComputerInput, PhysicalInputKind, TakeoverEvent};
 
 const QUIET: Duration = Duration::from_millis(2_000);
 const LATE: Duration = Duration::from_millis(60);

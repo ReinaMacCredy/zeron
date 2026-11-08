@@ -201,6 +201,12 @@ export type Props = {
 	pages: HtmlCard.Pages?,
 	-- A secret card's answer: the secret, or nil to decline (a promise).
 	on_secret: ((request: string, secret: string?) -> any)?,
+	-- A computer card's answer (a promise); whether its first-use words show, and that one was allowed.
+	on_computer: ((request: string, question: string, answer: string) -> any)?,
+	computer_disclosure: (() -> boolean)?,
+	on_computer_approved: (() -> ())?,
+	-- A "Computer is off" card's Use for this request.
+	on_computer_enable: (() -> ())?,
 	-- A Claude Code command card's Retry.
 	on_claude_command: ((command: string) -> ())?,
 	-- An error that signing in fixes: its Log in.
@@ -660,6 +666,10 @@ type View = {
 	working: any?,
 	pages: HtmlCard.Pages?,
 	on_secret: ((request: string, secret: string?) -> any)?,
+	on_computer: ((request: string, question: string, answer: string) -> any)?,
+	computer_disclosure: (() -> boolean)?,
+	on_computer_approved: (() -> ())?,
+	on_computer_enable: (() -> ())?,
 	file_link: ((target: string) -> boolean)?,
 	open_file: ((path: string) -> ())?,
 	file_opens: ((path: string) -> boolean)?,
@@ -786,6 +796,17 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				return Rows.Question { key = key, now = now_b, find = find }
 			elseif b.line == "secret" then
 				return Rows.Secret { key = key, now = now_b, find = find, on_answer = if view then view.on_secret else nil }
+			elseif b.line == "computer_consent" or b.line == "computer_foreground" then
+				return Rows.ComputerApproval {
+					key = key,
+					now = now_b,
+					find = find,
+					on_answer = if view then view.on_computer else nil,
+					disclosure = if view then view.computer_disclosure else nil,
+					on_approved = if view then view.on_computer_approved else nil,
+				}
+			elseif b.line == "computer_notice" then
+				return Rows.ComputerNotice { key = key, now = now_b, find = find, on_enable = if view then view.on_computer_enable else nil }
 			elseif b.line == "error" then
 				return Rows.Error { key = key, now = now_b, find = find, on_sign_in = if view then view.on_sign_in else nil }
 			end
@@ -1766,6 +1787,14 @@ local function Transcript(props: Props): Node
 						end,
 						find = find_for,
 					}
+					elseif m.role == "system" and m.line == "computer_notice" then Rows.ComputerNotice {
+						key = `{m.id}:row`,
+						now = function(): any
+							return state:get()
+						end,
+						find = find_for,
+						on_enable = props.on_computer_enable,
+					}
 					elseif m.role == "system" then line_row(m.hint, function(): any
 						return state:get()
 					end, `{m.id}:row`, find_for)
@@ -1816,7 +1845,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry, props.working, props.compaction_wait),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in }),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?

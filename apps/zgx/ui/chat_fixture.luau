@@ -1632,6 +1632,99 @@ store.answer_secret = function(id: string, request: string, secret: string?): an
 	note(`secret:{id}:{request}:{secret or "declined"}`)
 	return settled(nil)
 end
+-- A computer card's answer (src/chat.rs `chat.answer_computer`); `computer_fail_next` makes the next one fail offline.
+local computer_fails = false
+store.answer_computer = function(id: string, request: string, question: string, answer: string): any
+	note(`computer:{id}:{request}:{question}:{answer}`)
+	if computer_fails then
+		computer_fails = false
+		return { after = function(_self: any, _ok: any, bad: (any) -> ())
+			bad({ message = "offline" })
+		end }
+	end
+	return settled(nil)
+end
+ui.command {
+	id = "computer_fail_next",
+	title = "The next computer answer fails",
+	run = function()
+		computer_fails = true
+	end,
+}
+-- Computer use's rows, as src/chat.rs writes each (zeron_proto's words): a consent card for Ghostty, a foreground card for Safari, an answered call, the denied notice; the engine's notes.
+local function consent_choice(key: string, label: string, answer: string, settled_words: string, primary: boolean?): any
+	return { key = key, label = label, answer = answer, settled = settled_words, primary = primary == true }
+end
+ui.command {
+	id = "computer_turn",
+	title = "Computer use's cards and notes",
+	run = function()
+		store.messages:push({ id = "cu1", role = "user", text = "/computer-use open Ghostty", at = "Sep 8, 2:00 PM", copy = "/computer-use open Ghostty" })
+		store.messages:push({
+			id = "ca1",
+			role = "assistant",
+			text = "",
+			model = "Opus",
+			at = "Sep 8, 2:01 PM",
+			copy = "",
+			blocks = {
+				{
+					id = "c1",
+					kind = "line",
+					line = "computer_consent",
+					request = "req-c1",
+					question = "q1",
+					scope = "task",
+					app = "Ghostty",
+					title = "Allow Zeron to use Ghostty?",
+					detail = "Open a new tab and run the tests.",
+					risk = "Zeron could run commands that change files and settings on this Mac.",
+					disclosure_text = "Computer use lets Zeron use apps on your computer. It may take screenshots and act in the background. You can stop at any time from the menu bar.",
+					choices = {
+						consent_choice("deny", "Deny", "Deny", "Declined Ghostty"),
+						consent_choice("always", "Always allow", "Always allow Ghostty", "Always allowed Ghostty"),
+						consent_choice("allow", "Allow this conversation", "Allow", "Allowed Ghostty for this task", true),
+					},
+				},
+				{
+					id = "f1",
+					kind = "line",
+					line = "computer_foreground",
+					request = "req-f1",
+					question = "qf",
+					app = "Safari",
+					title = "Bring Safari to the front?",
+					detail = "Zeron needs it in front to type. It will cover your screen until the turn ends.",
+					choices = {
+						{ key = "no", label = "No", answer = "No", primary = false },
+						{ key = "allow", label = "Allow for this turn", answer = "Allow for this turn", primary = true },
+					},
+				},
+				{ id = "c0", kind = "line", line = "computer_consent", request = "req-c0", question = "q0", scope = "call", title = "Approve this tool call?", outcome = "allowed", text = "Allowed once", choices = {} },
+				{ id = "d1", kind = "line", line = "computer_notice", notice = "control_denied", text = "Computer is off for ordinary turns", lines = { "Send this request with /computer-use to let the agent use the desktop once." }, action = "Use for this request" },
+			},
+		})
+		store.messages:push({ id = "cs1", role = "system", line = "computer_notice", notice = "revoked", text = "Desktop access revoked by you (Esc)" })
+		store.messages:push({ id = "cs2", role = "system", line = "computer_notice", notice = "paused", text = "Paused while you used Safari" })
+		store.messages:push({ id = "cs3", role = "system", line = "computer_notice", notice = "left_open", text = "Left 2 Ghostty windows open", app = "Ghostty" })
+		store.messages:push({ id = "cs4", role = "system", line = "computer_notice", notice = "unavailable", text = "Computer is unavailable for this turn", lines = { "The desktop host is offline." } })
+		store.messages:push({ id = "cs5", role = "system", line = "computer_notice", notice = "setup", text = "Computer control needs setup", lines = {} })
+	end,
+}
+-- The engine's answer lands: the foreground card becomes its row.
+ui.command {
+	id = "computer_settle",
+	title = "The engine settles the foreground card",
+	run = function()
+		for i, m in store.messages:peek() do
+			for j, b in m.blocks or {} do
+				if b.request == "req-f1" then
+					store.messages:set_key({ i, "blocks", j }, { id = "f1", kind = "line", line = "computer_notice", notice = "foreground", text = "You allowed Safari to come to the front" })
+				end
+			end
+		end
+	end,
+}
 -- The app taking web links (ds/links, as the shell sets it for "Open links
 -- in Zeron"): each link opened is noted, nothing else happens.
 ui.command {

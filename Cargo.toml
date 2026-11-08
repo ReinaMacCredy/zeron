@@ -36,6 +36,7 @@ members = [
     "crates/visual-gpu",
     "crates/zatex",
     "crates/plugin-guard",
+    "crates/computer-host",
     "apps/zeron",
 ]
 exclude = ["vendor/cua-driver"]
@@ -63,6 +64,7 @@ zeron-sync = { path = "crates/sync" }
 zeron-harness = { path = "crates/harness" }
 zeron-engine = { path = "crates/engine" }
 zeron-rpc = { path = "crates/rpc" }
+zeron-computer-host = { path = "crates/computer-host" }
 zeron-mcp = { path = "crates/mcp" }
 zeron-update = { path = "crates/update" }
 zeron-cli = { path = "crates/cli" }

@@ -145,6 +145,7 @@ zeron-doc.workspace = true
 zeron-engine.workspace = true
 zeron-harness.workspace = true
 zeron-rpc.workspace = true
+zeron-computer-host.workspace = true
 zeron-docs.workspace = true
 zeron-update.workspace = true
 zeron-notify.workspace = true

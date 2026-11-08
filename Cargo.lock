@@ -13744,6 +13744,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-computer-host"
+version = "0.2.132"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zeron-proto",
+ "zeron-rpc",
+]
+
+[[package]]
 name = "zeron-doc"
 version = "0.2.132"
 dependencies = [
@@ -14212,6 +14231,7 @@ dependencies = [
  "wry",
  "x11rb 0.14.0",
  "zatex",
+ "zeron-computer-host",
  "zeron-doc",
  "zeron-docs",
  "zeron-engine",

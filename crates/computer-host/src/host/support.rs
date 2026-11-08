@@ -6,7 +6,7 @@ use zeron_proto::computer::{
     cua_computer_task_key,
 };
 
-pub use crate::computer::cursor_preference::{CuaCursorStyle, normalize_cua_cursor_style};
+pub use crate::cursor_preference::{CuaCursorStyle, normalize_cua_cursor_style};
 
 pub const CUA_CURSOR_IDLE_HIDE_MS: u64 = 60_000;
 pub const CUA_CURSOR_THEME: &str = "zeron.codex";

@@ -1,5 +1,5 @@
 use super::*;
-use crate::computer::host::{ComputerInputMonitorState, PhysicalComputerInput, PhysicalInputKind};
+use crate::host::{ComputerInputMonitorState, PhysicalComputerInput, PhysicalInputKind};
 
 fn keyboard(pid: u32) -> PhysicalComputerInput {
     PhysicalComputerInput {

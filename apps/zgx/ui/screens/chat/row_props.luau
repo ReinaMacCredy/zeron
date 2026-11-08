@@ -3,6 +3,8 @@
 local store = require("@app/screens/chat/store")
 local route = require("@app/screens/shell/route")
 local FileLinks = require("@app/screens/chat/file_links")
+local Shared = require("@app/screens/chat/shared")
+local Computer = require("@app/screens/settings/computer")
 
 local M = {}
 
@@ -25,6 +27,23 @@ function M.add(props: { [string]: any }, chat: () -> string?, session: () -> any
 		local id = chat()
 		return if id then store.answer_secret(id, request, secret) else nil
 	end
+	props.on_computer = function(request: string, question: string, answer: string): any
+		local id = chat()
+		return if id then store.answer_computer(id, request, question, answer) else nil
+	end
+	props.computer_disclosure = Computer.shows_disclosure
+	props.on_computer_approved = Computer.mark_approved
+	props.on_computer_enable = function()
+		local id = chat()
+		if not id then
+			return
+		end
+		local draft = Shared.draft_peek(id).text or ""
+		if not M.invokes_computer(draft) then
+			Shared.set_draft_of(id, "text", if string.match(draft, "^%s*$") then "/computer-use " else `/computer-use {draft}`)
+		end
+		Shared.focus:add(1)
+	end
 	if props.open_link then
 		props.file_link = function(target: string): boolean
 			local s = peek()
@@ -33,6 +52,12 @@ function M.add(props: { [string]: any }, chat: () -> string?, session: () -> any
 		end
 	end
 	return props
+end
+
+-- The engine's `parse_computer_invocation`: up to three spaces, then /computer-use alone or before a space.
+function M.invokes_computer(text: string): boolean
+	local command, after = string.match(text, "^ ? ? ?(/[%w%-]+)(.*)$")
+	return command ~= nil and string.lower(command) == "/computer-use" and (after == "" or string.match(after, "^[ \t\r\n]") ~= nil)
 end
 
 return M

@@ -134,6 +134,32 @@ local engine: { [string]: any } = {
 		hasJevKey = false,
 	},
 	GetToolSettings = { settings = { disabledTools = {}, disabledGroups = {}, agentsUseFullToken = false }, disabled = {} },
+	-- (Settings → Computer use: the engine's defaults, and two apps once allowed always.)
+	GetComputerSettings = {
+		computerControlEnabled = false,
+		browserDeveloperAccess = false,
+		autoOpenComputerPane = true,
+		computerPreviewSize = "compact",
+		computerPreviewPlacement = "rail",
+		agentCursorColorMode = "stock",
+		agentCursorFillColor = "",
+		agentCursorRimColor = "",
+		alwaysAllowedApps = { { bundleId = "com.mitchellh.ghostty", name = "Ghostty" }, { bundleId = "com.example.tool" } },
+	},
+	-- (Settings → Code review: Auto, no instructions.)
+	GetReviewSettings = { reviewer = { kind = "auto" }, instructions = "" },
+}
+-- (zeron_proto's reviewer list, as `review.reviewers` builds it: Auto naming whom it picks, each agent, each profile.)
+local REVIEWERS = {
+	{ choice = { kind = "auto" }, label = "Auto", detail = "Codex" },
+	{ choice = { kind = "harness", harness = "claude-code" }, label = "Claude Code" },
+	{ choice = { kind = "harness", harness = "codex" }, label = "Codex" },
+	{ choice = { kind = "profile", id = "p1" }, label = "Careful", detail = "Profile" },
+}
+local LEVELS = { ["claude-code"] = { { value = "low", label = "Low" }, { value = "high", label = "High" } }, codex = {} }
+local MODELS = {
+	["claude-code"] = { { id = "opus", label = "Opus", levels = {} }, { id = "haiku", label = "Haiku", levels = { { value = "low", label = "Low" } } } },
+	codex = { { id = "gpt-5.5", label = "GPT-5.5", levels = {} } },
 }
 local banners = { desktop = true, background_only = true, agent_updates = true }
 
@@ -310,10 +336,38 @@ local answers: { [string]: (arg: any) -> any } = {
 				engine[get] = c
 			elseif m == "SetToolSettings" then
 				engine[get] = { settings = arg.params, disabled = table.clone(arg.params.disabledTools or {}) }
+			elseif m == "SetComputerSettings" or m == "SetReviewSettings" then
+				engine[get] = table.clone(arg.params)
 			end
 			return settled(engine[get])
 		end
 		return settled(engine[m])
+	end,
+	-- Computer use's status line (src/settings.rs `computer_status_value`): a desktop host up and ready.
+	["settings.computer_status"] = function()
+		return settled({
+			kind = "ready",
+			title = "Computer control available",
+			description = "The agent can use the desktop through its computer tools.",
+			attention = false,
+			line = "Host sh.zeron.app · Driver revision 39",
+			driver = "Revision 39, matching this build.",
+			host = "Registered host: sh.zeron.app",
+		})
+	end,
+	["review.reviewers"] = function(arg: any)
+		local current = (arg or {}).current or { kind = "auto" }
+		local list = table.clone(REVIEWERS)
+		local selected = 1
+		for i, c in list do
+			if c.choice.kind == current.kind and (c.choice.harness == current.harness and c.choice.id == current.id) then
+				selected = i
+			end
+		end
+		return settled({ choices = list, selected = selected, levels = if current.kind == "harness" then LEVELS[current.harness] or {} else {} })
+	end,
+	["review.models"] = function(arg: any)
+		return settled(MODELS[arg.harness] or {})
 	end,
 	["notifications.get"] = function()
 		if refuse:peek() then

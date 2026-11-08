@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::future::LocalBoxFuture;
-use zeron_engine::computer::visible_use::COMPUTER_USER_INTERACTION_QUIET_MS;
 use zeron_proto::computer::{CuaComputerTask, CuaPreviewTarget, CuaShieldFrame, CuaToolResult};
 
 use super::support::CuaCursorStyle;
+use crate::COMPUTER_USER_INTERACTION_QUIET_MS;
 
 pub type HostFuture<T> = LocalBoxFuture<'static, T>;
 

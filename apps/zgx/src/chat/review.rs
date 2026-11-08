@@ -34,6 +34,103 @@ pub(super) fn install(host: &ScriptHost) {
         crate::plugins::preview::refuse("review.fix")?;
         fix(args).await
     });
+    host.async_action("review.reviewers", move |args| async move {
+        let current = args.field("current").map(crate::plugins::value_json).unwrap_or(Json::Null);
+        Ok::<_, String>(reviewers_value(&reviewer_options().await, &current))
+    });
+    host.async_action("review.models", move |args| async move {
+        let harness = args.field("harness").map(text).unwrap_or_default();
+        let listed = engine::get().call("ListModels", json!({ "harness": harness, "force": false })).await.map_err(|e| e.to_string())?;
+        Ok::<_, String>(models_value(&listed))
+    });
+}
+
+/// gpui's `reviewer_options`: the agents this Mac offers (as its pickers do) and the saved profiles.
+async fn reviewer_options() -> review::ReviewerOptions {
+    let mock = std::env::var("ZERON_ZGX_MOCK").is_ok_and(|v| v == "1");
+    let listed = engine::get().call("ListHarnesses", json!({ "includeRegistry": true })).await.unwrap_or(Json::Null);
+    let profiles = engine::get().call("ListAgentProfiles", json!({})).await.ok();
+    options_from(&listed, profiles.as_ref(), mock)
+}
+
+fn options_from(listed: &Json, profiles: Option<&Json>, mock: bool) -> review::ReviewerOptions {
+    use zeron_proto::HarnessId;
+    let mut options = review::ReviewerOptions::default();
+    for h in listed.as_array().into_iter().flatten() {
+        let Ok(id) = serde_json::from_value::<HarnessId>(h["id"].clone()) else { continue };
+        let installed = h["installed"].as_bool() != Some(false);
+        let enabled = h["enabled"].as_bool().unwrap_or(installed && id != HarnessId::Mock);
+        if installed && (enabled || (mock && id == HarnessId::Mock)) {
+            options.offered.push(id);
+            options.levels.insert(id, serde_json::from_value(h["reasoningLevels"].clone()).unwrap_or_default());
+        }
+    }
+    options.profiles = profiles
+        .and_then(|p| serde_json::from_value::<zeron_proto::AgentProfilesSnapshot>(p.clone()).ok())
+        .map(|s| s.profiles)
+        .unwrap_or_default();
+    options
+}
+
+fn levels_value(levels: &[zeron_proto::ReasoningLevel]) -> Value {
+    Value::List(
+        levels
+            .iter()
+            .map(|l| Value::record([("value", crate::plugins::json_value(&serde_json::to_value(l).unwrap_or(Json::Null))), ("label", Value::from(l.label()))]))
+            .collect::<Vec<_>>()
+            .into(),
+    )
+}
+
+/// Settings → Code review's reviewer list as gpui's page builds it: Auto (naming whom it picks), each agent, each profile, and the saved pick in its own slot when the list lacks it.
+fn reviewers_value(options: &review::ReviewerOptions, current: &Json) -> Value {
+    use review::ReviewerChoice as C;
+    let current: C = serde_json::from_value(current.clone()).unwrap_or_default();
+    let same = |c: &C| match (c, &current) {
+        (C::Harness { harness: a, .. }, C::Harness { harness: b, .. }) => a == b,
+        _ => *c == current,
+    };
+    let mut choices = options.choices();
+    if !choices.iter().any(same) {
+        choices.insert(1, current.clone());
+    }
+    let selected = choices.iter().position(same).unwrap_or(0);
+    let auto = review::resolve_reviewer(&C::Auto, None, options).name();
+    let list: Vec<Value> = choices
+        .iter()
+        .map(|c| {
+            let detail = match c {
+                C::Auto => Value::from(auto.as_str()),
+                C::Profile { .. } => Value::from("Profile"),
+                C::Harness { .. } => Value::Nil,
+            };
+            Value::record([
+                ("choice", crate::plugins::json_value(&serde_json::to_value(c).unwrap_or(Json::Null))),
+                ("label", Value::from(options.label(c).as_str())),
+                ("detail", detail),
+            ])
+        })
+        .collect();
+    let levels = match &current {
+        C::Harness { harness, .. } => options.levels.get(harness).cloned().unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    Value::record([
+        ("choices", Value::List(list.into())),
+        ("selected", Value::Num((selected + 1) as f64)),
+        ("levels", levels_value(&levels)),
+    ])
+}
+
+fn models_value(listed: &Json) -> Value {
+    let models: Vec<zeron_proto::Model> = serde_json::from_value(listed["models"].clone()).unwrap_or_default();
+    Value::List(
+        models
+            .iter()
+            .map(|m| Value::record([("id", Value::from(m.id.as_str())), ("label", Value::from(m.label.as_str())), ("levels", levels_value(&m.reasoning_levels))]))
+            .collect::<Vec<_>>()
+            .into(),
+    )
 }
 
 fn with<R>(chat: &str, f: impl FnOnce(&mut ChatReview) -> R) -> R {
@@ -268,6 +365,34 @@ fn state_of(r: &ChatReview, chat: Option<&zeron_proto::Chat>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reviewer_list_is_gpui_s_auto_each_agent_each_profile_and_the_saved_pick() {
+        let listed = json!([
+            { "id": "claude-code", "installed": true, "enabled": true, "reasoningLevels": ["low", "high"] },
+            { "id": "codex", "installed": true, "reasoningLevels": ["medium"] },
+            { "id": "cursor", "installed": false },
+            { "id": "mock", "installed": true },
+        ]);
+        let profiles = json!({ "profiles": [{ "id": "p1", "name": "Reviewer", "harness": "codex" }] });
+        let options = options_from(&listed, Some(&profiles), false);
+        let f = |v: &Value, k: &str| v.field(k).map(text).unwrap_or_default();
+        let at = |v: &Value| v.field("selected").and_then(Value::as_f64).unwrap_or(0.0);
+        let labels = |v: &Value| -> Vec<String> { v.field("choices").unwrap().list().iter().map(|c| f(c, "label")).collect() };
+        let auto = reviewers_value(&options, &Json::Null);
+        assert_eq!(labels(&auto), ["Auto", "Claude Code", "Codex", "Reviewer"], "mock only on a mock Dev, an agent not installed never");
+        assert_eq!(f(&auto.field("choices").unwrap().list()[0], "detail"), "Reviewer", "Auto names whom it picks: the profile named reviewer");
+        assert_eq!(at(&auto), 1.0);
+        let picked = reviewers_value(&options, &json!({ "kind": "harness", "harness": "claude-code", "model": "opus" }));
+        assert_eq!(at(&picked), 2.0, "the agent's slot, whatever its model");
+        let levels: Vec<String> = picked.field("levels").unwrap().list().iter().map(|l| f(l, "label")).collect();
+        assert_eq!(levels, ["Low", "High"]);
+        let gone = reviewers_value(&options, &json!({ "kind": "profile", "id": "deleted" }));
+        assert_eq!((labels(&gone)[1].as_str(), at(&gone)), ("Missing profile", 2.0), "a pick the list lacks keeps a slot of its own");
+        assert_eq!(labels(&reviewers_value(&options_from(&listed, None, true), &Json::Null)).len(), 4, "a mock Dev offers the mock agent");
+        let models = models_value(&json!({ "models": [{ "id": "gpt", "label": "GPT", "reasoningLevels": ["high"] }] }));
+        assert_eq!((f(&models.list()[0], "id"), f(&models.list()[0].field("levels").unwrap().list()[0], "value")), ("gpt".into(), "high".into()));
+    }
 
     #[test]
     fn a_finished_review_reads_as_its_findings_each_with_how_it_was_settled() {

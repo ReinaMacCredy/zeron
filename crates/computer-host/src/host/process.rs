@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use super::Chain;
 use super::support::{CUA_CURSOR_IDLE_HIDE_MS, CUA_CURSOR_THEME};
-use crate::computer::runtime_ownership::{
+use crate::runtime_ownership::{
     RuntimeSweep, cua_host_process_is_alive, sweep_owned_cua_runtime_directories,
 };
 

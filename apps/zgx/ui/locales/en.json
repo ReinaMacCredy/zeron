@@ -1540,6 +1540,12 @@
         "signed_out": "Signed out",
         "limit": "Limit reached",
         "log_in": "Log in"
+      },
+      "computer": {
+        "elevated_risk": "Elevated Risk",
+        "failed": "Answer failed: {why}",
+        "unsupported": "This window can't answer it.",
+        "use_for_request": "Use for this request"
       }
     }
   },
@@ -2938,6 +2944,128 @@
       "remind": {
         "label": "Remind at",
         "description": "Context a compaction could free, above what the last one left; a chat with a smaller window is reminded at 70% of its free room. Every message past it carries the reminder until the chat compacts."
+      }
+    },
+    "computer": {
+      "title": "Computer use",
+      "terms": "computer use, desktop, cursor, permission",
+      "note": "Let an agent see and drive this Mac's apps.",
+      "unread": "Couldn't read Computer use's settings",
+      "loading": "Loading…",
+      "checking": "Checking the desktop host…",
+      "control": {
+        "title": "Computer control",
+        "label": "Let the agent use the desktop in any chat",
+        "description": "Enable Computer by default in any chat. Leave this off and use /computer-use for one request without adding Computer tools to ordinary turns.",
+        "elsewhere": "Computer control is set on the Mac that runs this engine.",
+        "terms": "computer control, desktop, agent, any chat"
+      },
+      "cursor": {
+        "label": "Cursor colors",
+        "description": "The agent pointer is stock monochrome by default — like a normal pointer. Custom colors apply to new computer sessions.",
+        "stock": "Stock",
+        "custom": "Custom",
+        "fill": "Fill",
+        "rim": "Rim",
+        "reset": "Reset cursor colors to default",
+        "terms": "cursor, pointer, color, fill, rim"
+      },
+      "preview": {
+        "label": "Preview",
+        "description": "Show the live preview the first time an agent acts on the desktop in a chat. Compact keeps it small and glanceable; Large gives it the full wide card.",
+        "auto": "Show the computer preview automatically when an agent drives the desktop",
+        "compact": "Compact",
+        "large": "Large",
+        "reset": "Reset preview to default",
+        "terms": "preview, live, compact, large"
+      },
+      "placement": {
+        "label": "Placement",
+        "description": "Floating card sits over the transcript. Rail puts a small thumbnail under Computer in the right rail; click it to pop out.",
+        "card": "Floating card",
+        "rail": "Rail + thumbnail",
+        "reset": "Reset placement to default",
+        "terms": "placement, floating card, rail, thumbnail"
+      },
+      "sounds": {
+        "label": "Click sounds",
+        "description": "Play a soft click when the agent clicks in an app.",
+        "foreground": "Foreground clicks",
+        "all": "Foreground and background clicks",
+        "off": "Off",
+        "terms": "click, sound"
+      },
+      "developer": {
+        "title": "Developer access",
+        "label": "Developer access for Zeron browser",
+        "description": "Allow all tasks to run JavaScript and collect partial page diagnostics in their Zeron browser tabs. Page scripts can access sensitive site data. This does not enable full CDP.",
+        "terms": "developer, javascript, browser, diagnostics"
+      },
+      "allowed": {
+        "title": "Always-allowed apps",
+        "description": "In Ask mode these apps skip the per-app consent card. Other apps still ask.",
+        "empty": "No apps yet. Choose Always allow on a Computer consent card to skip that app's card in future tasks.",
+        "remove": "Remove {app} from always-allowed apps",
+        "terms": "always allow, apps, consent"
+      },
+      "guide": {
+        "title": "Getting started",
+        "show": "Show guide",
+        "hide": "Hide guide",
+        "done": "Got it",
+        "appshots": "Appshots is separate: it attaches a window image without giving the agent control.",
+        "ask": {
+          "title": "Ask for a task",
+          "body": "Type /computer-use followed by your task, for example: “/computer-use open Calculator and calculate 123 × 45.” This enables Computer for that request only. The Computer control switch above can enable it on every turn."
+        },
+        "approve": {
+          "title": "Approve the task",
+          "body": "If asked, approve Computer for the task. Use the permission guide when desktop access is missing. Zeron may still ask before consequential actions."
+        },
+        "follow": {
+          "title": "Follow and stop",
+          "body": "Watch the preview while the agent works. Choose Stop Using an app under Computer Use Controls in the menu bar to take that app back for the rest of the turn; the agent then sums up. The chat's Stop button ends the turn. Closing the preview only hides it."
+        },
+        "terms": "getting started, guide, how to"
+      },
+      "advanced": {
+        "title": "Advanced",
+        "show": "Show",
+        "hide": "Hide",
+        "driver": "Desktop driver",
+        "terms": "driver, revision, host"
+      }
+    },
+    "code_review": {
+      "title": "Code review",
+      "terms": "review, reviewer, findings, model",
+      "subtitle": "Who reviews changes when you press Review in the composer.",
+      "unread": "Couldn't read Code review's settings",
+      "loading": "Loading…",
+      "default": "Default",
+      "override": "A pick in the Review button's menu applies to that chat only and overrides this default.",
+      "reviewer": {
+        "section": "Reviewer",
+        "label": "Reviewer",
+        "hint": "Auto picks a profile named reviewer, else the other agent family from the chat's.",
+        "terms": "reviewer, profile, auto"
+      },
+      "model": {
+        "label": "Model",
+        "hint": "Shown when the reviewer is an agent.",
+        "terms": "model"
+      },
+      "thinking": {
+        "label": "Thinking",
+        "hint": "How hard the reviewer thinks. Default leaves it to the agent.",
+        "terms": "thinking, reasoning, effort"
+      },
+      "instructions": {
+        "title": "Review instructions",
+        "hint": "Added to every review prompt, for every reviewer, before the findings format it must follow.",
+        "placeholder": "Focus on correctness and security. Ignore formatting.",
+        "save": "Save",
+        "terms": "instructions, prompt, focus"
       }
     }
   },

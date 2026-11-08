@@ -99,6 +99,11 @@ const ENGINE_METHODS: &[&str] = &[
     // (Compaction's "Let agents compact themselves" is the `compact` tool's switch.)
     "GetToolSettings",
     "SetToolSettings",
+    // Computer use (its desktop host's, on the Mac that runs the engine) and Code review's default reviewer.
+    "GetComputerSettings",
+    "SetComputerSettings",
+    "GetReviewSettings",
+    "SetReviewSettings",
     // Whether this window has the keys: banners set to "only when in the
     // background" hold while it does.
     "SetViewportFocus",
@@ -354,6 +359,10 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             forget_wallpaper(&path, &dir.join(WALLPAPER_DIR));
         }
     });
+    host.async_action("settings.computer_status", |_| async move {
+        let answer = engine::get().call("GetComputerStatus", json!({})).await;
+        Ok::<_, String>(computer_status_value(answer.as_ref().map_err(String::as_str)))
+    });
     host.async_action("settings.engine", |args| {
         let method = args.field("method").map(text).unwrap_or_default();
         let params = args.field("params").map(value_json).unwrap_or(json!({}));
@@ -376,6 +385,79 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 })
         }
     });
+}
+
+/// Settings → Computer use's status line, its attention row and Advanced's driver, as gpui's
+/// `availability_view`, `needs_setup` and `status_line` say them; this app checks no permission
+/// of its own yet, so none is missing here.
+fn computer_status_value(answer: Result<&Json, &str>) -> Value {
+    use zeron_proto::computer::{ComputerAvailability as A, ComputerHealthStatus as H, ComputerHostStatus, CUA_NATIVE_REVISION, list_computer_permissions};
+    let host: Option<ComputerHostStatus> = answer.ok().and_then(|j| serde_json::from_value(j.clone()).ok());
+    let status = host.as_ref().map(|h| &h.status);
+    let (kind, title, description): (&str, String, String) = match status {
+        None => ("checking", "Checking computer availability".into(), "Waiting for the desktop backend.".into()),
+        Some(s) if s.health.status == H::Reconnecting => (
+            "checking",
+            "Reconnecting to the desktop".into(),
+            s.health.last_failure.as_ref().map_or_else(|| "Zeron is reconnecting to the desktop.".into(), |f| f.message.clone()),
+        ),
+        Some(s) => match &s.availability {
+            A::Available { .. } if s.health.status != H::Connected => {
+                ("checking", "Computer access has not been checked".into(), "Choose Set up to check that Zeron can see and control the desktop.".into())
+            }
+            A::Available { .. } if !s.health.capture_available => (
+                "blocked",
+                "Screen capture is unavailable".into(),
+                "Desktop input is connected, but Zeron cannot take screenshots. Choose Set up to check access.".into(),
+            ),
+            A::Available { .. } => ("ready", "Computer control available".into(), "The agent can use the desktop through its computer tools.".into()),
+            A::UnsupportedPlatform { platform } => {
+                ("blocked", "Computer control is unavailable".into(), format!("This engine is running on {platform}. Computer control needs macOS."))
+            }
+            A::PermissionRequired { missing, message, .. } => ("blocked", format!("Computer control needs {}", list_computer_permissions(missing)), message.clone()),
+            other => (
+                "blocked",
+                "Computer control is unavailable".into(),
+                serde_json::to_value(other).ok().and_then(|v| v["message"].as_str().map(str::to_owned)).unwrap_or_else(|| "The computer backend is not available.".into()),
+            ),
+        },
+    };
+    let setup = status.is_some_and(|s| {
+        !matches!(s.availability, A::UnsupportedPlatform { .. })
+            && ((s.provisionable == Some(true) && s.health.status != H::Connected)
+                || matches!(s.availability, A::BackendUnavailable { .. } | A::PermissionRequired { .. })
+                || !s.health.capture_available
+                || !s.capabilities.input
+                || !s.capabilities.capture)
+    });
+    let reconnecting = status.is_some_and(|s| s.health.status == H::Reconnecting);
+    let attention = kind == "blocked" || (kind == "checking" && (setup || reconnecting));
+    let line = match (answer, host.as_ref()) {
+        (Err(error), _) => format!("Status unavailable: {error}"),
+        (Ok(_), None) => "Checking the desktop host…".into(),
+        (Ok(_), Some(h)) => {
+            let bundle = h.host_bundle_id.as_deref().map_or_else(|| "No desktop host registered".to_owned(), |b| format!("Host {b}"));
+            let driver = h.driver_native_revision.map_or_else(|| format!("Driver not started (bundled revision {CUA_NATIVE_REVISION})"), |r| format!("Driver revision {r}"));
+            format!("{bundle} · {driver}")
+        }
+    };
+    let driver = match host.as_ref().and_then(|h| h.driver_native_revision) {
+        Some(r) if r == CUA_NATIVE_REVISION => format!("Revision {r}, matching this build."),
+        Some(r) => format!("Revision {r}; this build expects revision {CUA_NATIVE_REVISION}."),
+        None => format!("Not started yet. The bundled driver is revision {CUA_NATIVE_REVISION}."),
+    };
+    let reconnects = status.map(|s| s.health.reconnects).filter(|n| *n > 0).map(|n| if n == 1 { "Reconnected once since startup.".to_owned() } else { format!("Reconnected {n} times since startup.") });
+    let opt = |s: Option<String>| s.map_or(Value::Nil, |s| Value::from(s.as_str()));
+    Value::record([
+        ("kind", Value::from(kind)),
+        ("title", Value::from(title.as_str())),
+        ("description", Value::from(description.as_str())),
+        ("attention", Value::Bool(attention)),
+        ("line", Value::from(line.as_str())),
+        ("reconnects", opt(reconnects)),
+        ("driver", Value::from(driver.as_str())),
+        ("host", opt(host.as_ref().and_then(|h| h.host_bundle_id.as_ref()).map(|b| format!("Registered host: {b}")))),
+    ])
 }
 
 /// The largest background image taken.
@@ -944,6 +1026,42 @@ fn snake(item: &Json) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_computer_status_reads_as_gpui_says_it() {
+        let f = |v: &Value, k: &str| v.field(k).map(text).unwrap_or_default();
+        let on = |b: &Value, k: &str| matches!(b.field(k), Some(Value::Bool(true)));
+        let caps = json!({ "windows": true, "windowBounds": true, "stacking": true, "capture": true, "input": true, "clipboard": true, "focus": true, "raise": true, "ghostCursor": true, "visibleDesktop": true });
+        let status = |availability: Json, health: &str, capture: bool, reconnects: u64| json!({
+            "hostBundleId": "sh.zeron.app",
+            "driverNativeRevision": zeron_proto::computer::CUA_NATIVE_REVISION,
+            "status": { "computerId": "desktop", "availability": availability, "capabilities": caps,
+                "health": { "status": health, "consecutiveFailures": 0, "reconnects": reconnects, "captureAvailable": capture } },
+        });
+        let ready = computer_status_value(Ok(&status(json!({ "kind": "available", "backend": "cua" }), "connected", true, 1)));
+        assert_eq!((f(&ready, "kind"), f(&ready, "title")), ("ready".into(), "Computer control available".into()));
+        assert!(!on(&ready, "attention"));
+        assert_eq!(f(&ready, "line"), format!("Host sh.zeron.app · Driver revision {}", zeron_proto::computer::CUA_NATIVE_REVISION));
+        assert_eq!((f(&ready, "reconnects"), f(&ready, "host")), ("Reconnected once since startup.".into(), "Registered host: sh.zeron.app".into()));
+        assert!(f(&ready, "driver").ends_with(", matching this build."));
+        let blind = computer_status_value(Ok(&status(json!({ "kind": "available" }), "connected", false, 0)));
+        assert_eq!((f(&blind, "kind"), f(&blind, "title")), ("blocked".into(), "Screen capture is unavailable".into()));
+        assert!(on(&blind, "attention"));
+        let linux = computer_status_value(Ok(&status(json!({ "kind": "unsupported-platform", "platform": "linux" }), "unavailable", true, 0)));
+        assert_eq!(f(&linux, "description"), "This engine is running on linux. Computer control needs macOS.");
+        let asks = computer_status_value(Ok(&status(
+            json!({ "kind": "permission-required", "missing": ["inputMonitoring", "accessibility"], "message": "Allow it.", "buildSignature": "signed" }),
+            "connected", true, 0,
+        )));
+        assert_eq!((f(&asks, "title"), f(&asks, "description")), ("Computer control needs Accessibility and Input Monitoring".into(), "Allow it.".into()));
+        let away = computer_status_value(Err("offline"));
+        assert_eq!((f(&away, "kind"), f(&away, "line")), ("checking".into(), "Status unavailable: offline".into()));
+        assert!(f(&away, "driver").starts_with("Not started yet."));
+        for method in ["GetComputerSettings", "SetComputerSettings", "GetReviewSettings", "SetReviewSettings"] {
+            assert!(ENGINE_METHODS.contains(&method), "{method}");
+        }
+        assert!(!ENGINE_METHODS.contains(&"ComputerAction"), "Settings never drives the desktop");
+    }
 
     #[test]
     fn signing_keys_read_as_the_scripts_do() {

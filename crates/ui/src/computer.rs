@@ -1,12 +1,11 @@
 //! Computer use: the desktop host that owns `cua-driver`.
 
 pub mod cards;
-pub mod cursor_preference;
-pub mod desktop_lifecycle;
+pub use zeron_computer_host::{cursor_preference, desktop_lifecycle};
 #[cfg(target_os = "macos")]
 pub mod driver;
 #[cfg(target_os = "macos")]
-pub mod host;
+pub use zeron_computer_host::host;
 #[cfg(target_os = "macos")]
 pub mod native;
 pub mod presence;
@@ -16,9 +15,16 @@ pub mod preview_card;
 pub mod protected_surfaces;
 pub mod registration;
 #[cfg(target_os = "macos")]
-pub mod runtime_ownership;
+pub use zeron_computer_host::runtime_ownership;
 pub mod status_menu;
 pub mod thumbnail;
+
+const _: () = assert!(
+    zeron_computer_host::CUA_HOST_CALL_TIMEOUT_MS
+        == zeron_engine::computer::cua_backend::CUA_HOST_CALL_TIMEOUT_MS
+        && zeron_computer_host::COMPUTER_USER_INTERACTION_QUIET_MS
+            == zeron_engine::computer::visible_use::COMPUTER_USER_INTERACTION_QUIET_MS
+);
 
 /// Proof knob (`ZERON_CUA_PROBE=<file>`): spawn the bundled driver through the
 /// host, run one grant-requiring read, retire it, and write the replies to

@@ -442,6 +442,9 @@ fn logged_fixture(
     driver: Driver,
     configure: impl FnOnce(&mut CuaDriverHostOptions),
 ) -> (Fixture, Logs) {
+    // With one live dispatcher tracing takes interest from the registering thread's, so another test's host thread could switch the log off.
+    static SECOND: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+    SECOND.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
     let logs = Logs::default();
     let sink = logs.0.clone();
     let subscriber = tracing_subscriber::fmt()

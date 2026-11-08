@@ -217,6 +217,10 @@ function M.answer(id: string, request: string, answer: { values: { string }, tex
 end
 
 -- A transcript secret card's answer: the secret, or nil to decline.
+function M.answer_computer(id: string, request: string, question: string, answer: string): any
+	return ui.call("chat.answer_computer", { id = id, request = request, question = question, answer = answer })
+end
+
 function M.answer_secret(id: string, request: string, secret: string?): any
 	return ui.call("chat.answer_secret", { id = id, request = request, secret = secret })
 end

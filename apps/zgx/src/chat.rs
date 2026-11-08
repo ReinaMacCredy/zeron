@@ -32,6 +32,7 @@
 //!   chat.interrupt(id)
 //!   chat.respond({ id, request, decision = "once" | "always" | "deny" |
 //!                  "answer", values?, text? })
+//!   chat.answer_computer({ id, request, question, answer })  a computer card, answered
 //!   chat.configure({ id, model?, effort?, fast?, access?, plan? })
 //!   chat.queue({ id, op = "remove" | "send" | "move", item, to? })
 //!                                 ("gone": the row had left the queue)
@@ -552,6 +553,10 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("chat.compact", move |args| async move {
         crate::plugins::preview::refuse("chat.compact")?;
         compact(args).await
+    });
+    host.async_action("chat.answer_computer", move |args| async move {
+        crate::plugins::preview::refuse("chat.answer_computer")?;
+        answer_computer(args).await.map_err(String::from)
     });
     host.async_action("chat.answer_secret", move |args| async move {
         crate::plugins::preview::refuse("chat.answer_secret")?;
@@ -2988,6 +2993,26 @@ async fn compact(args: Value) -> Result<Value, String> {
     }
 }
 
+/// A computer card's answer, one of the labels the engine reads (gpui's `consent_answers`).
+async fn answer_computer(args: Value) -> Result<Value, Outcome> {
+    let id = args.field("id").map(text).unwrap_or_default();
+    let request = args.field("request").map(text).unwrap_or_default();
+    let question = args.field("question").map(text).unwrap_or_default();
+    let answer = args.field("answer").map(text).unwrap_or_default();
+    if !computer_answer(&answer) || request.is_empty() || question.is_empty() {
+        return Err("failed");
+    }
+    let answers = json!([{ "questionId": question, "labels": [answer] }]);
+    command(&id, json!({ "kind": "respondInput", "requestId": request, "answers": answers })).await?;
+    Ok(Value::Nil)
+}
+
+fn computer_answer(label: &str) -> bool {
+    use zeron_proto::computer::cards::*;
+    [COMPUTER_CONSENT_ALLOW, COMPUTER_CONSENT_DECLINE, COMPUTER_FOREGROUND_ALLOW, COMPUTER_FOREGROUND_DECLINE].contains(&label)
+        || label.strip_prefix(COMPUTER_CONSENT_ALWAYS_PREFIX).is_some_and(|app| !app.trim().is_empty())
+}
+
 /// A transcript secret card's answer: the secret saved, or declined with none.
 async fn answer_secret(args: Value) -> Result<Value, String> {
     let id = args.field("id").map(text).unwrap_or_default();
@@ -4330,8 +4355,10 @@ fn system_row(entry: &Json, id: &str) -> Option<Value> {
     }
     match computer_notice(text) {
         Some(ComputerNotice::Disclosure) => return None,
-        Some(ComputerNotice::Revoked) => return row("computer_notice", &revoked_label(text, hint), hint, None),
-        Some(_) => return row("computer_notice", text, hint, None),
+        Some(notice) => {
+            let words = if notice == ComputerNotice::Revoked { revoked_label(text, hint) } else { text.to_owned() };
+            return row("computer_notice", &words, hint, None).map(|r| with_fields(r, computer_notice_fields(notice, text, hint)));
+        }
         None => {}
     }
     if text.trim().is_empty() {
@@ -4662,6 +4689,9 @@ fn line_block(part: &Json, streaming: bool) -> Option<Value> {
             // Only that one was asked for: whatever came back isn't the transcript's.
             let answers: Option<Vec<zeron_proto::UserInputAnswer>> = serde_json::from_value(part["answers"].clone()).ok();
             let resolved = part["resolved"].as_bool() == Some(true);
+            if let Some(row) = computer_input(id, part, &questions, resolved, answers.as_deref()) {
+                return row;
+            }
             if let Some(q) = questions.iter().find(|q| q.is_secret()) {
                 use zeron_proto::view::{SecretStatus, secret_status};
                 let status = match secret_status(resolved, answers.as_deref()) {
@@ -4700,6 +4730,126 @@ fn line_block(part: &Json, streaming: bool) -> Option<Value> {
     }
 }
 
+/// A computer ask as gpui's transcript draws it (`ComputerConsent`, `ComputerForeground`):
+/// its card, the row it settled to, or none; `None` when it isn't one.
+fn computer_input(
+    id: &str,
+    part: &Json,
+    questions: &[zeron_proto::UserInputQuestion],
+    resolved: bool,
+    answers: Option<&[zeron_proto::UserInputAnswer]>,
+) -> Option<Option<Value>> {
+    use zeron_proto::UserInputKind;
+    use zeron_proto::computer::ComputerConsentScope;
+    use zeron_proto::computer::cards::*;
+    let block = |line: &str, fields: Vec<(&'static str, Value)>| {
+        let mut all = vec![("id", Value::from(id)), ("kind", Value::from("line")), ("line", Value::from(line))];
+        all.extend(fields);
+        Some(Value::record(all))
+    };
+    let request = || part["requestId"].as_str().map_or(Value::Nil, Value::from);
+    let opt = |s: Option<&str>| s.map_or(Value::Nil, Value::from);
+    let choice = |key: &str, label: &str, answer: &str, primary: bool, settled: Option<String>| {
+        Value::record([
+            ("key", Value::from(key)),
+            ("label", Value::from(label)),
+            ("answer", Value::from(answer)),
+            ("primary", Value::Bool(primary)),
+            ("settled", settled.as_deref().map_or(Value::Nil, Value::from)),
+        ])
+    };
+    let foreground = questions.iter().find_map(|q| match &q.kind {
+        Some(UserInputKind::Foreground { app }) => Some((q, app.as_ref())),
+        _ => None,
+    });
+    if let Some((question, app)) = foreground {
+        if let Some(text) = foreground_outcome_label(questions, answers) {
+            return Some(block("computer_notice", vec![("notice", Value::from("foreground")), ("text", Value::from(text.as_str()))]));
+        }
+        if resolved {
+            return Some(None);
+        }
+        let app = app.map(|a| a.name.as_str());
+        let choices = vec![
+            choice("no", COMPUTER_FOREGROUND_DECLINE, COMPUTER_FOREGROUND_DECLINE, false, None),
+            choice("allow", COMPUTER_FOREGROUND_ALLOW, COMPUTER_FOREGROUND_ALLOW, true, None),
+        ];
+        return Some(block(
+            "computer_foreground",
+            vec![
+                ("request", request()),
+                ("question", Value::from(question.id.as_str())),
+                ("app", opt(app)),
+                ("title", Value::from(foreground_title(app).as_str())),
+                ("detail", Value::from(COMPUTER_FOREGROUND_DETAIL)),
+                ("choices", Value::List(choices.into())),
+            ],
+        ));
+    }
+    let question = consent_question(questions)?;
+    let scope = consent_scope(question);
+    let app = consent_app(question);
+    let outcome = consent_outcome(resolved, answers);
+    let key = |o: ConsentOutcome| match o {
+        ConsentOutcome::Allowed => "allowed",
+        ConsentOutcome::AlwaysAllowed => "always",
+        ConsentOutcome::Declined => "declined",
+        ConsentOutcome::Cancelled => "cancelled",
+    };
+    // gpui lists them Allow first and draws them reversed, Allow last and filled.
+    let choices: Vec<Value> = consent_choices(scope, app.as_ref())
+        .into_iter()
+        .rev()
+        .map(|(c, label)| {
+            let settled = consent_event_label(c.outcome(), scope, app.as_ref());
+            choice(consent_choice_key(&c), &label, c.answer_label(), c == ConsentChoice::Allow, Some(settled))
+        })
+        .collect();
+    let detail = consent_detail(question);
+    Some(block(
+        "computer_consent",
+        vec![
+            ("request", request()),
+            ("question", Value::from(question.id.as_str())),
+            ("scope", Value::from(if scope == ComputerConsentScope::Call { "call" } else { "task" })),
+            ("app", opt(app.as_ref().map(|a| a.name.as_str()))),
+            ("title", Value::from(consent_card_title(scope, app.as_ref()).as_str())),
+            ("detail", if detail.is_empty() { Value::Nil } else { Value::from(detail.as_str()) }),
+            ("risk", opt(app.as_ref().and_then(elevated_risk))),
+            ("disclosure_text", Value::from(COMPUTER_FIRST_USE_DISCLOSURE)),
+            ("choices", Value::List(choices.into())),
+            ("outcome", opt(outcome.map(key))),
+            ("text", outcome.map_or(Value::Nil, |o| Value::from(consent_event_label(o, scope, app.as_ref()).as_str()))),
+        ],
+    ))
+}
+
+/// What a computer note says, by gpui's `render_computer_notice`: its kind, and for a card its lines.
+fn computer_notice_fields(notice: zeron_proto::computer::cards::ComputerNotice, text: &str, hint: Option<&str>) -> Vec<(&'static str, Value)> {
+    use zeron_proto::computer::cards::*;
+    let (kind, lines): (&str, Vec<&str>) = match notice {
+        ComputerNotice::Disclosure => ("disclosure", Vec::new()),
+        ComputerNotice::Revoked => ("revoked", Vec::new()),
+        ComputerNotice::Paused => ("paused", Vec::new()),
+        ComputerNotice::Foreground => ("foreground", Vec::new()),
+        ComputerNotice::LeftOpen => ("left_open", Vec::new()),
+        ComputerNotice::Unavailable => ("unavailable", hint.into_iter().collect()),
+        ComputerNotice::ControlDenied => ("control_denied", vec![COMPUTER_DENIED_HINT]),
+        ComputerNotice::SetupRequired => ("setup", hint.into_iter().collect()),
+    };
+    let mut fields = vec![
+        ("notice", Value::from(kind)),
+        ("lines", Value::List(lines.into_iter().map(Value::from).collect::<Vec<_>>().into())),
+    ];
+    if notice == ComputerNotice::ControlDenied {
+        fields.push(("action", Value::from(COMPUTER_DENIED_ACTION)));
+    }
+    if let Some(app) = left_open_app(text) {
+        fields.push(("app", Value::from(app)));
+    }
+    fields
+}
+
 fn denied_block(part: &Json, earlier: &[&Json]) -> Option<Value> {
     use zeron_proto::computer::cards::{COMPUTER_DENIED_TITLE, is_control_denied};
     let denied = |p: &Json| {
@@ -4711,12 +4861,14 @@ fn denied_block(part: &Json, earlier: &[&Json]) -> Option<Value> {
     if earlier.iter().any(|p| denied(p) == Some(tool)) {
         return None;
     }
-    Some(Value::record([
+    let mut fields = vec![
         ("id", Value::from(format!("{}-denied", part["id"].as_str().unwrap_or_default()).as_str())),
         ("kind", Value::from("line")),
         ("line", Value::from("computer_notice")),
         ("text", Value::from(COMPUTER_DENIED_TITLE)),
-    ]))
+    ];
+    fields.extend(computer_notice_fields(zeron_proto::computer::cards::ComputerNotice::ControlDenied, COMPUTER_DENIED_TITLE, None));
+    Some(Value::record(fields))
 }
 
 /// A finished delegation's wake, its quoted reply as a markdown quote
@@ -5874,6 +6026,10 @@ fn is_secret(question: &Json) -> bool {
 fn ask_value(part: &Json, answered: usize) -> Option<Value> {
     let request = part["requestId"].as_str()?;
     let questions = part["questions"].as_array()?;
+    // gpui's `pending_input_request`: a computer ask is its transcript card's alone.
+    if questions.iter().any(|q| matches!(q["kind"]["type"].as_str(), Some("consent" | "foreground"))) {
+        return None;
+    }
     if is_approval(questions) {
         let q = &questions[0];
         let words = q["question"].as_str().unwrap_or_default();
@@ -6290,7 +6446,7 @@ const TURN_START_GRACE: std::time::Duration = std::time::Duration::from_secs(10)
 const SEND_GRACE_SECONDS: f64 = 120.;
 
 /// A record with more fields (or some replaced).
-fn with_fields<const N: usize>(record: Value, extra: [(&str, Value); N]) -> Value {
+fn with_fields<'a>(record: Value, extra: impl IntoIterator<Item = (&'a str, Value)>) -> Value {
     let Value::Map(fields) = &record else { return record };
     let mut all: Vec<(std::rc::Rc<str>, Value)> = fields.iter().cloned().collect();
     for (key, value) in extra {
@@ -7302,6 +7458,80 @@ mod tests {
         assert_eq!(kinds, ["tools", "line", "tools"], "one notice for the tool, however often it's turned away");
         for dropped in ["handoff", "classifier", "compaction"] {
             assert!(lines(json!({ "kind": dropped, "id": "p" })).is_empty(), "{dropped}");
+        }
+    }
+
+    #[test]
+    fn a_computer_ask_is_its_card_or_what_it_settled_to_and_never_the_composer_s() {
+        use zeron_proto::computer::cards::*;
+        let reply = |parts: Json| json!({ "id": "a", "role": "assistant", "status": "streaming", "parts": parts });
+        let ask = |kind: Json, question: &str, resolved: bool, labels: Option<Json>| {
+            let mut part = json!({ "kind": "input", "id": "i", "requestId": "r", "resolved": resolved,
+                "questions": [{ "id": "q", "header": "Computer", "question": question, "options": [], "kind": kind }] });
+            if let Some(labels) = labels {
+                part["answers"] = json!([{ "questionId": "q", "labels": labels }]);
+            }
+            part
+        };
+        let one = |part: Json| blocks(&reply(json!([part]))).list().first().cloned();
+        let f = |v: &Value, k: &str| v.field(k).map(text).unwrap_or_default();
+        let keys = |v: &Value| -> Vec<String> { v.field("choices").unwrap().list().iter().map(|c| f(c, "key")).collect() };
+        let ghostty = json!({ "type": "consent", "scope": "task", "app": { "name": "Ghostty", "bundleId": "com.mitchellh.ghostty" } });
+        let card = one(ask(ghostty.clone(), "Use Ghostty? It runs commands.", false, None)).unwrap();
+        assert_eq!((f(&card, "line"), f(&card, "title"), f(&card, "detail")), ("computer_consent".into(), "Allow Zeron to use Ghostty?".into(), "It runs commands.".into()));
+        assert_eq!(f(&card, "risk"), "Zeron could run commands that change files and settings on this Mac.");
+        assert_eq!(keys(&card), ["deny", "always", "allow"], "gpui's order, Allow last");
+        let allow = &card.field("choices").unwrap().list()[2];
+        assert_eq!((f(allow, "label"), f(allow, "answer"), f(allow, "settled")), ("Allow this conversation".into(), "Allow".into(), "Allowed Ghostty for this task".into()));
+        assert!(matches!(allow.field("primary"), Some(Value::Bool(true))));
+        assert_eq!(f(&card.field("choices").unwrap().list()[1], "answer"), "Always allow Ghostty");
+        assert!(matches!(card.field("outcome"), Some(Value::Nil) | None));
+        let unverified = one(ask(json!({ "type": "consent", "scope": "task", "app": { "name": "Notes" } }), "Use Notes?", false, None)).unwrap();
+        assert_eq!(keys(&unverified), ["deny", "allow"], "Always only for a verified bundle");
+        assert!(matches!(unverified.field("risk"), Some(Value::Nil) | None));
+        let call = one(ask(json!({ "type": "consent", "scope": "call", "tool": "computer_click" }), "Click?", false, None)).unwrap();
+        assert_eq!((f(&call, "title"), f(&call.field("choices").unwrap().list()[1], "label")), ("Approve this tool call?".into(), "Allow once".into()));
+        let allowed = one(ask(ghostty.clone(), "Use Ghostty?", true, Some(json!(["Allow"])))).unwrap();
+        assert_eq!((f(&allowed, "outcome"), f(&allowed, "text")), ("allowed".into(), "Allowed Ghostty for this task".into()));
+        let always = one(ask(ghostty.clone(), "Use Ghostty?", true, Some(json!(["Always allow Ghostty"])))).unwrap();
+        assert_eq!(f(&always, "text"), "Always allowed Ghostty");
+        let cancelled = one(ask(ghostty, "Use Ghostty?", true, None)).unwrap();
+        assert_eq!(f(&cancelled, "text"), "Cancelled");
+
+        let safari = json!({ "type": "foreground", "app": { "name": "Safari" } });
+        let front = one(ask(safari.clone(), "Front?", false, None)).unwrap();
+        assert_eq!((f(&front, "line"), f(&front, "title"), f(&front, "detail")), ("computer_foreground".into(), "Bring Safari to the front?".into(), COMPUTER_FOREGROUND_DETAIL.into()));
+        assert_eq!(keys(&front), ["no", "allow"]);
+        let kept = one(ask(safari.clone(), "Front?", true, Some(json!(["No"])))).unwrap();
+        assert_eq!((f(&kept, "line"), f(&kept, "notice"), f(&kept, "text")), ("computer_notice".into(), "foreground".into(), "You kept Safari in the background".into()));
+        assert!(one(ask(safari.clone(), "Front?", true, None)).is_none(), "settled unanswered: no row, as gpui's");
+
+        let session = |part: Json| json!({ "id": "a", "role": "assistant", "status": "streaming", "parts": [part] });
+        assert!(ask_value(&session(ask(safari, "Front?", false, None))["parts"][0], 0).is_none(), "the composer doesn't ask it again");
+        assert!(ask_value(&session(ask(Json::Null, "Pick?", false, None))["parts"][0], 0).is_some());
+
+        let entry = |words: &[&str]| json!({ "id": "s", "role": "system", "parts": words.iter().enumerate().map(|(i, w)| json!({ "kind": "text", "id": format!("t{i}"), "text": w })).collect::<Vec<_>>() });
+        let note = |words: &[&str]| message(&entry(words), None).unwrap();
+        let esc = note(&[COMPUTER_ESCAPE_STOP_NOTICE]);
+        assert_eq!((f(&esc, "notice"), f(&esc, "text")), ("revoked".into(), "Desktop access revoked by you (Esc)".into()));
+        let left = note(&["Left 2 Ghostty windows open"]);
+        assert_eq!((f(&left, "notice"), f(&left, "app")), ("left_open".into(), "Ghostty".into()));
+        assert_eq!(f(&note(&["Paused while you used Safari"]), "notice"), "paused");
+        let away = note(&[COMPUTER_UNAVAILABLE_NOTE, "The desktop host is offline."]);
+        assert_eq!(f(&away, "notice"), "unavailable");
+        assert_eq!(away.field("lines").unwrap().list().iter().map(text).collect::<Vec<_>>(), ["The desktop host is offline."]);
+        assert_eq!(f(&note(&[COMPUTER_SETUP_NOTE]), "notice"), "setup");
+        let denied = json!({ "kind": "tool", "id": "c1", "resolved": true, "isError": true, "output": "capability_denied",
+            "call": { "kind": "mcp", "server": "zeron", "tool": "computer_click", "input": {} } });
+        let line = blocks(&reply(json!([denied]))).list().iter().find(|b| f(b, "kind") == "line").cloned().unwrap();
+        assert_eq!((f(&line, "notice"), f(&line, "action")), ("control_denied".into(), COMPUTER_DENIED_ACTION.into()));
+        assert_eq!(line.field("lines").unwrap().list().iter().map(text).collect::<Vec<_>>(), [COMPUTER_DENIED_HINT]);
+
+        for ok in ["Allow", "Deny", "Always allow Ghostty", "Allow for this turn", "No"] {
+            assert!(computer_answer(ok), "{ok}");
+        }
+        for refused in ["Yes", "Always allow ", "", "allow"] {
+            assert!(!computer_answer(refused), "{refused:?}");
         }
     }
 

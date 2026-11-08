@@ -137,6 +137,7 @@ export type Name =
 	-- annotation), a skill, a command, a queued row's grip, a file attached,
 	-- and trying again.
 	| "cursor"
+	| "computer-cursor"
 	| "magic-stick"
 	| "command"
 	| "drag-handle"
