@@ -1673,50 +1673,97 @@ panel_stub.open_file = function(session: any, path: string, _project: any?, at: 
 	local line = if type(at) == "table" then at.line elseif type(at) == "number" then at else nil
 	note(`open_file:{if type(session) == "table" then session.id else session}:{path}{if line then `@{line}` else ""}`)
 end
--- The review host (src/chat/review.rs), stood in for: each call noted; Fix hands back the open finding's comment.
+-- The review host (src/chat/review.rs), stood in for: each call noted, s2's
+-- review published as the host does. Start runs it (Reviewing); `review_lands`
+-- brings its findings, as the reviewer's read does, and its row into s2's
+-- transcript where it was asked; Fix hands back the fixable findings asked
+-- for (one, or every one) as their comments, and they're fixable no more.
 local Review = require("@app/screens/chat/review")
+local REVIEW_SCOPES = {
+	{ key = "uncommitted", label = "Uncommitted", add = 12, del = 3, empty = false, picked = true },
+	{ key = "latest_turn", label = "Latest turn", add = 4, del = 1, empty = false, picked = false },
+}
+local function review_state(look: string): any
+	local base = { scope = "uncommitted", scopes = REVIEW_SCOPES, start_label = "Review uncommitted", tip = "Review uncommitted with a fresh agent", reviewable = true, busy = false, add = 12, del = 3, findings = {}, fix_open = 0 }
+	if look == "idle" then
+		base.label, base.action = "Review", "start"
+	elseif look == "busy" then
+		base.label, base.action, base.busy, base.reviewer = "Reviewing", "inert", true, "Claude Code · haiku"
+	elseif look == "done" then
+		base.label, base.action, base.reviewer = "1 finding", "open", "Claude Code · haiku"
+		base.block = { status = "done" }
+		base.fix_open = 1
+		base.findings = {
+			{ id = "F1", severity = "Bug", title = "A token can reach the log when a request fails", body = "", location = "crates/engine/src/rpc.rs:212", path = "crates/engine/src/rpc.rs", line = 212, outcome = "fixed", commit = "abcdef1", fixable = false },
+			{ id = "F2", severity = "Risk", title = "The retry has no limit", body = "It loops forever offline.", location = "crates/client/src/conn.rs:88", path = "crates/client/src/conn.rs", line = 88, outcome = "open", fixable = true },
+			{ id = "F3", severity = "Nit", title = "The new test doesn't run on Linux", body = "", location = "apps/zgx/src/chat.rs:40", path = "apps/zgx/src/chat.rs", line = 40, outcome = "skipped", reason = "Linux runs it in CI.", fixable = false },
+		}
+	elseif look == "none" then
+		base.reviewable = false
+	end
+	return base
+end
+local function set_review(state: any)
+	local all = ui.shared("review.chats", {} :: any)
+	local now = table.clone(all:peek())
+	now.s2 = state
+	all:set(now)
+end
 Review.host = function(name: string, args: { [string]: any }): any
 	note(`{name}:{args.chat or ""}{if args.scope then ":" .. args.scope elseif args.id then ":" .. args.id else ""}`)
-	if name == "review.fix" then
-		return settled({ { path = "src/render.rs", line = 42, body = "Bug: the frame is drawn twice\nThe loop redraws on every tick." } })
+	local now = (ui.shared("review.chats", {} :: any):peek() :: any)[args.chat or ""]
+	if name == "review.start" and now then
+		set_review(review_state("busy"))
+	elseif name == "review.fix" and now then
+		local next = table.clone(now)
+		next.findings = {}
+		local out = {}
+		for _, f in now.findings or {} do
+			local one = table.clone(f)
+			if f.fixable and (args.id == nil or args.id == f.id) then
+				one.fixable = false
+				table.insert(out, { path = f.path, line = f.line, body = `{f.severity}: {f.title}` })
+			end
+			table.insert(next.findings, one)
+		end
+		next.fix_open = 0
+		for _, f in next.findings do
+			next.fix_open += if f.fixable then 1 else 0
+		end
+		set_review(next)
+		return settled(out)
 	end
 	return settled(nil)
 end
-local function review_state(look: string): any
-	local scopes = {
-		{ key = "uncommitted", label = "Uncommitted", add = 12, del = 3, empty = false, picked = true },
-		{ key = "latest_turn", label = "Latest turn", add = 4, del = 1, empty = false, picked = false },
-	}
-	if look == "idle" then
-		return { scope = "uncommitted", scopes = scopes, start_label = "Review uncommitted", label = "Review", tip = "Review uncommitted with a fresh agent", action = "start", busy = false, add = 12, del = 3, findings = {} }
-	elseif look == "busy" then
-		return { scope = "uncommitted", scopes = scopes, start_label = "Review uncommitted", label = "Reviewing", tip = "The reviewer is working.", action = "inert", busy = true, findings = {} }
-	end
-	return {
-		scope = "uncommitted",
-		scopes = scopes,
-		start_label = "Review uncommitted",
-		label = "1 finding",
-		tip = "Open the findings",
-		action = "open",
-		busy = false,
-		fix = "Fix 1 remaining",
-		outcomes = "1 fixed · 1 open",
-		findings = {
-			{ id = "F1", severity = "Bug", title = "the frame is drawn twice", body = "The loop redraws on every tick.", location = "src/render.rs:42", path = "src/render.rs", line = 42, state = "Open", open = true },
-			{ id = "F2", severity = "Nit", title = "a name", body = "", location = "src/app.rs:7", path = "src/app.rs", line = 7, state = "Fixed · abcdef1", open = false },
-		},
-	}
-end
-for _, look in { "idle", "busy", "done" } do
+for _, look in { "idle", "busy", "done", "none" } do
 	ui.command {
 		id = `review_{look}`,
 		title = `Review: {look}`,
 		run = function()
-			local all = ui.shared("review.chats", {} :: any)
-			local now = table.clone(all:peek())
-			now.s2 = review_state(look)
-			all:set(now)
+			set_review(review_state(look))
+		end,
+	}
+end
+ui.command {
+	id = "review_lands",
+	title = "Review: its findings land where it was asked",
+	run = function()
+		set_review(review_state("done"))
+		local list = table.clone(TRANSCRIPTS.s2 or {})
+		table.insert(list, { id = "review:t1", role = "system", line = "review", chat = "s2" })
+		TRANSCRIPTS.s2 = list
+		if store.session:peek() and store.session:peek().id == "s2" then
+			store.messages:set(list)
+		end
+	end,
+}
+-- The Review built-in, on or off in Settings → Plugins (the engine's plugin list).
+for _, status in { "on", "off" } do
+	ui.command {
+		id = `review_plugin_{status}`,
+		title = `Review: the built-in {status}`,
+		run = function()
+			ui.shared("plugins", {} :: any):set { state = "ready", list = { { id = "review", name = "Review", version = "1.0.0", author = { kind = "zeron" }, status = status, builtin = true, permissions = {}, allowed = {}, ask = {} } } }
 		end,
 	}
 end

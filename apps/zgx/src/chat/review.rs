@@ -1,4 +1,4 @@
-//! gpui's composer review chip, its state kept here as zeron_proto's `ChatReview`: the engine starts the reviewer (StartReview), the chats' watch says when it's done, its findings are read then (TaskStatus), each with how the agent settled it.
+//! The Review built-in's state (the chat header's Review button, the findings block in the transcript), kept here as zeron_proto's `ChatReview`, gpui's review chip's: the engine starts the reviewer (StartReview), the chats' watch says when it's done, its findings are read then (TaskStatus), each with how the agent settled it (the reviewer child's delegation `findingOutcomes`).
 
 use super::*;
 use zeron_proto::review::{self, ChatReview, ChipAction, ReviewScope, RunStatus, StartedReview};
@@ -7,6 +7,12 @@ thread_local! {
     static REVIEWS: RefCell<HashMap<String, ChatReview>> = RefCell::default();
     static SHARED: RefCell<Option<Shared>> = const { RefCell::new(None) };
     static READING: RefCell<HashSet<String>> = RefCell::default();
+    /// When each chat's review was asked here (Unix seconds), until its reviewer's delegation says.
+    static ASKED: RefCell<HashMap<String, f64>> = RefCell::default();
+    /// Each chat's block as its transcript last placed it, to place it again only as it moves.
+    static PLACED: RefCell<HashMap<String, Option<(String, i64)>>> = RefCell::default();
+    /// Each reviewed chat's turn as last seen (status, start): a turn starting or ending counts its changes again.
+    static TURNS: RefCell<HashMap<String, String>> = RefCell::default();
 }
 
 pub(super) fn install(host: &ScriptHost) {
@@ -206,14 +212,14 @@ async fn start(args: Value) -> Result<Value, String> {
     let owner = chats_now().into_iter().find(|c| c.id == chat).ok_or_else(|| "chat not found".to_string())?;
     let (scope, choice, previous) = with(&chat, |r| {
         let scope = scope_of(r, Some(&owner));
-        let choice = r.effective_reviewer(None);
-        let previous = r.begin(scope, choice.clone());
-        (scope, choice, previous)
+        let previous = r.begin(scope, r.effective_reviewer(None));
+        (scope, start_choice(r), previous)
     });
+    ASKED.with(|a| a.borrow_mut().insert(chat.clone(), now_seconds() as f64));
     publish();
     let commit = with(&chat, |r| r.run.as_ref().and_then(|run| run.commit.clone()));
     let started = engine::get()
-        .call("StartReview", review::start_params(&chat, scope, commit.as_deref(), Some(&choice)))
+        .call("StartReview", review::start_params(&chat, scope, commit.as_deref(), choice.as_ref()))
         .await
         .map_err(|e| e.to_string())
         .and_then(|v| {
@@ -228,6 +234,11 @@ async fn start(args: Value) -> Result<Value, String> {
     publish();
     chats_changed();
     Ok(Value::Nil)
+}
+
+/// The reviewer StartReview is asked for: one picked for this chat, else none, so the engine runs Settings → Code review's (an explicit Auto would override it).
+fn start_choice(r: &ChatReview) -> Option<review::ReviewerChoice> {
+    r.reviewer.clone()
 }
 
 async fn fix(args: Value) -> Result<Value, String> {
@@ -302,7 +313,7 @@ fn publish() {
     let list = chats_now();
     let value = REVIEWS.with(|all| {
         let all = all.borrow();
-        let rows: Vec<(String, Value)> = all.iter().map(|(id, r)| (id.clone(), state_of(r, list.iter().find(|c| &c.id == id)))).collect();
+        let rows: Vec<(String, Value)> = all.iter().map(|(id, r)| (id.clone(), state_of(r, list.iter().find(|c| &c.id == id), &list))).collect();
         Value::record(rows.iter().map(|(k, v)| (k.as_str(), v.clone())).collect::<Vec<_>>())
     });
     SHARED.with(|s| {
@@ -310,9 +321,89 @@ fn publish() {
             s.set(value);
         }
     });
+    let blocks: Vec<(String, Option<(String, i64)>)> = REVIEWS.with(|all| all.borrow().iter().map(|(id, r)| (id.clone(), block_of(id, r).map(|(row, at)| (row, at as i64)))).collect());
+    let moved: Vec<String> = PLACED.with(|placed| {
+        let mut placed = placed.borrow_mut();
+        blocks.into_iter().filter(|(id, now)| placed.insert(id.clone(), now.clone()).unwrap_or(None) != *now).map(|(id, _)| id).collect()
+    });
+    if moved.is_empty() {
+        return;
+    }
+    for view in CHATS.with(Rc::clone).views() {
+        let shows = view.open.borrow().as_ref().is_some_and(|open| moved.contains(&open.id));
+        if shows {
+            view.publish_messages();
+        }
+    }
 }
 
-fn state_of(r: &ChatReview, chat: Option<&zeron_proto::Chat>) -> Value {
+/// A finished run's block: its row's id, and when it was asked (Unix seconds: its reviewer's delegation's start, else when it was asked here).
+fn block_of(chat: &str, r: &ChatReview) -> Option<(String, f64)> {
+    let run = r.run.as_ref().filter(|run| matches!(run.status, RunStatus::Done | RunStatus::Unreadable | RunStatus::Stopped | RunStatus::Failed(_)))?;
+    let at = run
+        .delegation
+        .as_ref()
+        .map(|d| d.started_at.timestamp_millis() as f64 / 1000.)
+        .or_else(|| ASKED.with(|a| a.borrow().get(chat).copied()))
+        .unwrap_or(f64::INFINITY);
+    Some((format!("review:{}", run.task_id.as_deref().unwrap_or("start")), at))
+}
+
+/// The chat's review block, a row of its transcript where it was asked: after the last message made before then.
+pub(super) fn place(chat: &str, list: &mut Vec<Value>) {
+    let Some((id, at)) = REVIEWS.with(|all| all.borrow().get(chat).and_then(|r| block_of(chat, r))) else { return };
+    place_at(list, Value::record([("id", Value::from(id.as_str())), ("role", Value::from("system")), ("line", Value::from("review")), ("chat", Value::from(chat))]), at);
+}
+
+fn place_at(list: &mut Vec<Value>, row: Value, at: f64) {
+    let time = |r: &Value| r.field("created").or_else(|| r.field("started")).and_then(Value::as_f64);
+    let index = if list.iter().any(|r| time(r).is_some()) { list.iter().rposition(|r| time(r).is_some_and(|t| t <= at)).map_or(0, |i| i + 1) } else { list.len() };
+    list.insert(index, row);
+}
+
+/// The sessions moved: a shown, reviewed chat's turn starting or ending counts its changes again (gpui's `sync_review` stats key), so the button shows once there is something to review.
+pub(super) fn sessions_changed() {
+    if REVIEWS.with(|all| all.borrow().is_empty()) {
+        return;
+    }
+    let chats = CHATS.with(Rc::clone);
+    let shown: Vec<String> = chats.views().iter().filter_map(|v| v.open.borrow().as_ref().map(|o| o.id.clone())).collect();
+    let ids: Vec<String> = REVIEWS.with(|all| all.borrow().keys().filter(|id| shown.contains(id)).cloned().collect());
+    for chat in ids {
+        let turn = chats.sessions.borrow().get(&chat).map(|s| format!("{}|{}", s["status"], s["startedAt"])).unwrap_or_default();
+        let moved = TURNS.with(|t| t.borrow_mut().insert(chat.clone(), turn.clone())).is_some_and(|was| was != turn);
+        if !moved {
+            continue;
+        }
+        let owner = chats_now().into_iter().find(|c| c.id == chat);
+        let scope = with(&chat, |r| scope_of(r, owner.as_ref()));
+        engine::get().spawn(async move { load_stats(&chat, scope).await });
+    }
+}
+
+fn reviewer_name(r: &ChatReview, chat: Option<&zeron_proto::Chat>, list: &[zeron_proto::Chat]) -> Option<String> {
+    let run = r.run.as_ref()?;
+    let child = chat.and_then(|c| review::reviewer_child(list, &c.id, run.task_id.as_deref())).filter(|_| run.task_id.is_some());
+    match child.and_then(|c| c.config.as_ref()) {
+        Some(config) => Some(match config.model.as_deref().filter(|m| !m.is_empty()) {
+            Some(model) => format!("{} · {model}", config.harness.display_name()),
+            None => config.harness.display_name().to_string(),
+        }),
+        None => run.choice.as_ref().map(|c| review::ReviewerOptions::default().label(c)),
+    }
+}
+
+fn outcome_key(state: review::FindingState) -> &'static str {
+    match state {
+        review::FindingState::Open => "open",
+        review::FindingState::AgentOnIt => "agent_on_it",
+        review::FindingState::Fixed => "fixed",
+        review::FindingState::Skipped => "skipped",
+        review::FindingState::NoChange => "no_change",
+    }
+}
+
+fn state_of(r: &ChatReview, chat: Option<&zeron_proto::Chat>, list: &[zeron_proto::Chat]) -> Value {
     let scope = scope_of(r, chat);
     let picked = r.commit.as_ref().map(|c| c.short().to_owned());
     let look = r.look(scope);
@@ -347,6 +438,9 @@ fn state_of(r: &ChatReview, chat: Option<&zeron_proto::Chat>) -> Value {
                         ("line", Value::Num(f.line as f64)),
                         ("state", Value::from(run.state_label(&f.id).as_str())),
                         ("open", Value::Bool(run.state(&f.id) == review::FindingState::Open)),
+                        ("outcome", Value::from(outcome_key(run.state(&f.id)))),
+                        ("fixable", Value::Bool(run.fixable().any(|x| x.id == f.id))),
+                        ("commit", run.outcome(&f.id).and_then(|o| o.commit.as_deref()).map_or(Value::Nil, |sha| Value::from(review::short_sha(sha)))),
                         ("reason", run.reason(&f.id).as_deref().map_or(Value::Nil, Value::from)),
                     ])
                 })
@@ -354,6 +448,19 @@ fn state_of(r: &ChatReview, chat: Option<&zeron_proto::Chat>) -> Value {
         })
         .unwrap_or_default();
     let fixable = run.map_or(0, |run| run.fixable().count());
+    let block = r.run.as_ref().and_then(|run| {
+        let (status, message) = match &run.status {
+            RunStatus::Done if run.findings.is_empty() => ("clean", None),
+            RunStatus::Done => ("done", None),
+            RunStatus::Unreadable => ("unreadable", None),
+            RunStatus::Stopped => ("stopped", None),
+            RunStatus::Failed(message) => ("failed", Some(message.as_str())),
+            _ => return None,
+        };
+        Some(Value::record([("status", Value::from(status)), ("message", message.map_or(Value::Nil, Value::from))]))
+    });
+    // (Something to review: changes counted in its scope, or a run of its own.)
+    let reviewable = matches!(&look, Some(l) if !matches!(l, review::Look::Empty(_)));
     Value::record([
         ("scope", Value::from(scope.key())),
         ("scopes", Value::List(scopes.into())),
@@ -374,6 +481,10 @@ fn state_of(r: &ChatReview, chat: Option<&zeron_proto::Chat>) -> Value {
         ("findings", Value::List(findings.into())),
         ("fix", if fixable > 0 { Value::from(review::fix_remaining(fixable).as_str()) } else { Value::Nil }),
         ("outcomes", r.run.as_ref().filter(|run| run.status == RunStatus::Done).map_or(Value::Nil, |run| Value::from(run.outcome_counts().as_str()))),
+        ("reviewable", Value::Bool(reviewable)),
+        ("reviewer", reviewer_name(r, chat, list).map_or(Value::Nil, |n| Value::from(n.as_str()))),
+        ("block", block.unwrap_or(Value::Nil)),
+        ("fix_open", Value::Num(fixable as f64)),
     ])
 }
 
@@ -415,7 +526,7 @@ mod tests {
         r.apply_stats(ReviewScope::Uncommitted, Err("not loaded".into()));
         let previous = r.begin(ReviewScope::Uncommitted, Default::default());
         r.run.as_mut().unwrap().apply_start(Ok(StartedReview { task_id: "t1".into(), patch: String::new(), note: None }), previous);
-        let busy = state_of(&r, None);
+        let busy = state_of(&r, None, &[]);
         assert_eq!(busy.field("label").map(text).as_deref(), Some("Reviewing"));
         assert_eq!(busy.field("busy"), Some(&Value::Bool(true)));
         let summary = "Done.\n\n```zeron-review\n[{\"path\":\"src/a.rs\",\"line\":3,\"severity\":\"bug\",\"title\":\"off by one\",\"body\":\"The loop skips the last row.\"},{\"path\":\"src/b.rs\",\"line\":9,\"severity\":\"nit\",\"title\":\"name\"}]\n```";
@@ -429,7 +540,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("delegation: {e}"));
         delegation.client_request_id = Some("zeron-review:uncommitted:n".into());
         run.sync_child(Some(delegation), false);
-        let done = state_of(&r, None);
+        let done = state_of(&r, None, &[]);
         let findings = match done.field("findings") {
             Some(Value::List(list)) => list.to_vec(),
             other => panic!("findings: {other:?}"),
@@ -441,5 +552,50 @@ mod tests {
         assert_eq!(done.field("label").map(text).as_deref(), Some("1 finding"));
         assert_eq!(done.field("action").map(text).as_deref(), Some("open"));
         assert_eq!(done.field("fix").map(text).as_deref(), Some("Fix 1 remaining"));
+        assert_eq!((row(0, "outcome"), row(0, "commit"), row(1, "outcome")), ("fixed".into(), "abcdef1".into(), "open".into()), "each finding's outcome from the reviewer's delegation");
+        assert_eq!((findings[0].field("fixable"), findings[1].field("fixable")), (Some(&Value::Bool(false)), Some(&Value::Bool(true))));
+        assert_eq!(done.field("block").and_then(|b| b.field("status")).map(text).as_deref(), Some("done"));
+        assert_eq!(busy.field("block"), Some(&Value::Nil), "no block while the reviewer works: the button says so");
+        assert_eq!(done.field("reviewable"), Some(&Value::Bool(true)));
+        let comments = r.take_fixable(None);
+        assert_eq!(comments.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(), ["src/b.rs"], "Fix all open: the open one only, not the fixed");
+        let staged = state_of(&r, None, &[]);
+        let staged = staged.field("findings").unwrap().list()[1].clone();
+        assert_eq!((staged.field("outcome").map(text).as_deref(), staged.field("fixable")), (Some("open"), Some(&Value::Bool(false))), "staged by Fix: still open, not fixable twice");
+    }
+
+    #[test]
+    fn the_review_runs_the_reviewer_settings_chose_unless_this_chat_picked_one() {
+        let mut r = ChatReview::default();
+        assert_eq!(start_choice(&r), None, "none sent: the engine runs Settings → Code review's reviewer (an explicit Auto would override it)");
+        r.reviewer = Some(review::ReviewerChoice::Harness { harness: zeron_proto::HarnessId::Codex, model: None, reasoning: None });
+        assert_eq!(start_choice(&r), r.reviewer);
+    }
+
+    #[test]
+    fn the_findings_block_stands_in_the_transcript_where_the_review_was_asked() {
+        let row = |id: &str, k: &str, t: f64| Value::record([("id", Value::from(id)), (k, Value::Num(t))]);
+        let ids = |list: &[Value]| list.iter().map(|r| r.field("id").map(text).unwrap_or_default()).collect::<Vec<_>>();
+        let block = || Value::record([("id", Value::from("review:t1"))]);
+        let seam = Value::record([("id", Value::from("seam")), ("role", Value::from("switch"))]);
+        let mut list = vec![row("u1", "created", 10.), row("a1", "started", 11.), seam.clone(), row("u2", "created", 30.), row("a2", "started", 31.)];
+        place_at(&mut list, block(), 20.);
+        assert_eq!(ids(&list), ["u1", "a1", "review:t1", "seam", "u2", "a2"], "after the last message made before it, the later turn under it");
+        let mut list = vec![row("u1", "created", 10.), row("a1", "started", 11.)];
+        place_at(&mut list, block(), 50.);
+        assert_eq!(ids(&list), ["u1", "a1", "review:t1"]);
+        let mut list = vec![row("u1", "created", 10.)];
+        place_at(&mut list, block(), 5.);
+        assert_eq!(ids(&list), ["review:t1", "u1"]);
+        let mut list = vec![seam];
+        place_at(&mut list, block(), 5.);
+        assert_eq!(ids(&list), ["seam", "review:t1"], "no times at all: at the end");
+        let mut r = ChatReview::default();
+        assert!(block_of("c", &r).is_none());
+        r.run = Some(review::ReviewRun::new(ReviewScope::Uncommitted));
+        assert!(block_of("c", &r).is_none(), "starting: no block yet");
+        r.run.as_mut().unwrap().status = RunStatus::Failed("Nothing to review".into());
+        ASKED.with(|a| a.borrow_mut().insert("c".into(), 42.));
+        assert_eq!(block_of("c", &r), Some(("review:start".into(), 42.)), "a start that failed says so where it was asked");
     }
 }

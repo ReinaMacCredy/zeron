@@ -1,23 +1,32 @@
 --!strict
--- gpui's composer review chip (composer/review_chip.rs) and its findings; its look, scopes and findings are the host's (src/chat/review.rs, zeron_proto's `ChatReview`).
+-- The Review built-in (plugins-builtin/review): the chat header's Review button and the findings block in the transcript; its look, scopes and findings are the host's (src/chat/review.rs, zeron_proto's `ChatReview`, gpui's review chip's).
 
 local Icon = require("@ds/icon")
 local Tooltip = require("@ds/tooltip")
 local ContextMenu = require("@ds/context_menu")
-local IconButton = require("@ds/icon_button").IconButton
 local Button = require("@ds/button")
+local IconButton = require("@ds/icon_button")
 local locale = require("@ds/locale")
 
 local M = {}
 
 local reviews = ui.shared("review.chats", {} :: { [string]: any })
+local plugins = ui.shared("plugins", { state = "loading", list = {} } :: any)
 
 function M.of(chat: string?): any
 	return if chat then reviews:get()[chat] else nil
 end
 
--- The chat whose findings are open over its composer.
-M.open = ui.state("review_findings_open", nil :: string?)
+-- Whether the built-in is on in Settings → Plugins (on until the engine lists it off).
+function M.on(): boolean
+	local now = plugins:get()
+	for _, p in (if type(now) == "table" and type(now.list) == "table" then now.list else {}) :: { any } do
+		if p.id == "review" then
+			return p.status ~= "off"
+		end
+	end
+	return true
+end
 
 -- (The host's calls: a fixture stands in for them.)
 function M.host(name: string, args: { [string]: any }): any
@@ -33,7 +42,7 @@ local function call(name: string, args: { [string]: any }): any
 end
 
 -- The comments a fix carries, staged on the chat's composer as a diff's are (gpui's `stage_review_findings`).
-local function stage(_chat: string, list: { any })
+local function stage(chat: string, list: { any })
 	local ok, shared = pcall(function(): any
 		return (require :: any)("@app/screens/chat/shared")
 	end)
@@ -41,10 +50,11 @@ local function stage(_chat: string, list: { any })
 		return
 	end
 	for _, c in list do
-		shared.attach_comment({ file = c.path, line = c.line, body = c.body })
+		shared.attach_comment({ file = c.path, line = c.line, body = c.body, session = chat })
 	end
 end
 
+-- One finding's comment staged (`id`), or every open one's.
 function M.fix(chat: string, id: string?)
 	local p = call("review.fix", { chat = chat, id = id })
 	if p and p.after then
@@ -56,14 +66,20 @@ function M.fix(chat: string, id: string?)
 	end
 end
 
-local SEVERITY_TONE: { [string]: string } = { Bug = "$zeron.status.danger", Risk = "$zeron.tone.danger.ink", Nit = "$text.tertiary" }
+-- gpui's `severity_colors`: a Bug red on red, a Risk muted red (never yellow), a Nit quiet.
+local SEVERITY: { [string]: { ink: string, wash: string } } = {
+	Bug = { ink = "$danger", wash = "$zeron.tone.danger.wash" },
+	Risk = { ink = "$zeron.tone.danger.ink", wash = "$zeron.tone.neutral.wash" },
+	Nit = { ink = "$text.tertiary", wash = "$zeron.tone.neutral.wash" },
+}
 
-M.Chip = ui.component(function(props: { chat: () -> string? }): Node
+-- The chat header's Review: there while the built-in is on and the chat has something to review; it runs Settings → Code review's reviewer over the chat's changes. Reviewing, it says so and takes no press. Its scopes on a secondary click.
+M.Button = ui.component(function(props: { chat: () -> string?, size: number }): Node
 	local chat = props.chat
 	local watched: string? = nil
 	ui.effect(function()
 		local id = chat()
-		if id and id ~= watched then
+		if id and id ~= watched and M.on() then
 			watched = id
 			call("review.watch", { chat = id })
 		end
@@ -71,9 +87,11 @@ M.Chip = ui.component(function(props: { chat: () -> string? }): Node
 	local function r(): any
 		return M.of(chat())
 	end
+	local function busy(): boolean
+		local now = r()
+		return now ~= nil and now.busy == true
+	end
 	local menu_open = ui.use_state(false)
-	local open_at: ((x: number, y: number) -> boolean)? = nil
-	local caret = ui.ref()
 	local function entries(): { ContextMenu.Entry }?
 		local id, now = chat(), r()
 		if not id or not now then
@@ -104,154 +122,207 @@ M.Chip = ui.component(function(props: { chat: () -> string? }): Node
 		})
 		return out
 	end
-	local function click()
-		local id, now = chat(), r()
-		if not id or not now then
-			return
-		end
-		if now.action == "open" then
-			M.open:set(if M.open:peek() == id then nil else id)
-		elseif now.action == "start" then
-			M.open:set(nil)
-			call("review.start", { chat = id })
-		end
+	local function label(): string
+		return locale.s(if busy() then "chat.review.running" else "chat.review.button")
 	end
 	return ui.show(function(): boolean
 		local now = r()
-		return now ~= nil and now.label ~= nil
+		return M.on() and now ~= nil and now.reviewable == true
 	end, ContextMenu {
 		label = locale.t("chat.review.menu"),
 		open = menu_open,
-		hook = function(at: (x: number, y: number) -> boolean)
-			open_at = at
-		end,
 		items = function(): { ContextMenu.Entry }?
 			return entries()
 		end,
-		ui.row {
-			id = "composer-review-chip",
+		ui.button {
+			id = "chat-review",
+			label = label,
+			-- (Its tip says what a press does: the host's while it runs, else the review it starts.)
+			tooltip = Tooltip {
+				function(): string
+					local now = r()
+					if not now then
+						return ""
+					end
+					return if now.busy then now.tip or "" else now.start_label or ""
+				end,
+			},
+			tooltip_placement = IconButton.placement("bottom"),
+			disabled = busy,
+			h = props.size,
+			px = "$zeron.space.tight",
+			gap = ui.raw(5, "gpui's review chip"),
 			items = "center",
 			shrink = 0,
-			ui.button {
-				id = "composer-review",
-				label = function(): string
-					local now = r()
-					return if now then now.label or "" else ""
-				end,
-				tooltip = Tooltip {
-					function(): string
-						local now = r()
-						return if now then now.tip or "" else ""
-					end,
-				},
-				h = 28,
-				px = ui.raw(8, "gpui's review chip"),
-				gap = ui.raw(5, "gpui's review chip"),
-				items = "center",
-				rounded = ui.raw(8, "gpui's review chip"),
-				color = "$text.secondary",
-				hover = { bg = "$hover" },
-				on_click = click,
-				ui.presence(function(): string
-					local now = r()
-					return if now and now.busy then "busy" else "idle"
-				end, function(k: string): Node
-					return Icon { name = if k == "busy" then "refresh" else "checklist", size = 14 } :: any
-				end),
-				ui.text {
-					function(): string
-						local now = r()
-						return if now then now.label or "" else ""
-					end,
-					text_size = "$font.size.sm",
-					wrap = false,
-				},
-				ui.show(function(): boolean
-					local now = r()
-					return now ~= nil and now.add ~= nil
-				end, ui.row {
-					gap = ui.raw(3, "gpui's review chip"),
-					ui.text {
-						function(): string
-							local now = r()
-							return if now and now.add then `+{now.add}` else ""
-						end,
-						text_size = "$font.size.xs",
-						color = "$zeron.status.success",
-						wrap = false,
-					},
-					ui.text {
-						function(): string
-							local now = r()
-							return if now and now.del then `−{now.del}` else ""
-						end,
-						text_size = "$font.size.xs",
-						color = "$zeron.status.danger",
-						wrap = false,
-					},
-				}),
-			},
-			IconButton {
-				id = "composer-review-scope",
-				ref = caret,
-				icon = "alt-arrow-down",
-				label = locale.t("chat.review.menu"),
-				size = "sm",
-				tone = "quiet",
-				lit = menu_open,
-				on_click = function()
-					local el, at = caret:peek(), open_at
-					if el and at then
-						at(el.x or 0, (el.y or 0) + (el.height or 0) / 2)
-					end
-				end,
-			},
+			rounded = "$radius.lg",
+			color = "$text.secondary",
+			hover = { bg = "$hover", color = "$text.primary" },
+			on_click = function()
+				local id = chat()
+				if id and not busy() then
+					call("review.start", { chat = id })
+				end
+			end,
+			ui.presence(function(): string
+				return if busy() then "busy" else "idle"
+			end, function(k: string): Node
+				return Icon { name = if k == "busy" then "refresh" else "checklist", size = 14 } :: any
+			end),
+			ui.text { label, text_size = "$font.size.sm", weight = "$font.weight.medium", wrap = false },
 		},
 	})
 end)
 
-local function finding_row(chat: string, f: any): Node
-	return ui.column {
+local OUTCOME_TONE: { [string]: string } = { fixed = "$success", skipped = "$warning", agent_on_it = "$accent" }
+
+local function outcome_words(f: any): string
+	if f.outcome == "fixed" then
+		return if f.commit then locale.s("chat.review.fixed_at", { commit = f.commit }) else locale.s("chat.review.fixed")
+	end
+	return locale.s(`chat.review.{f.outcome or "open"}`)
+end
+
+local function finding_row(chat: () -> string?, f: any, open_link: ((target: string) -> ())?): Node
+	local place = `{f.path}:{f.line}`
+	-- (The finding as the host says it now: its outcome moves while its row stays.)
+	local function cur(): any
+		local now = M.of(chat())
+		for _, x in (if now then now.findings or {} else {}) :: { any } do
+			if x.id == f.id then
+				return x
+			end
+		end
+		return f
+	end
+	local function fixable(): boolean
+		return cur().fixable == true and M.on()
+	end
+	return ui.row {
 		id = `review-finding-{f.id}`,
 		class = "review-finding",
 		w_full = true,
-		gap = "$space.1",
-		py = "$space.2",
+		gap = "$space.2",
+		items = "start",
+		py = "$space.1",
+		opacity = function(): number
+			local o = cur().outcome
+			return if o == "fixed" or o == "no_change" then 0.6 else 1
+		end,
 		ui.row {
-			w_full = true,
-			gap = "$space.2",
+			class = "review-severity",
+			shrink = 0,
+			h = 18,
+			px = ui.raw(5, "gpui's severity pill"),
 			items = "center",
-			ui.text { f.severity, class = "review-severity", text_size = "$font.size.xs", weight = "$font.weight.semibold", color = SEVERITY_TONE[f.severity] or "$text.secondary", shrink = 0 },
-			ui.text { f.title, grow = 1, min_w = 0, truncate = true, text_size = "$font.size.sm", weight = "$font.weight.medium" },
-			ui.text { f.state, class = "review-state", text_size = "$font.size.xs", color = if f.open then "$text.tertiary" else "$zeron.status.success", shrink = 0 },
-			IconButton {
-				id = `review-dismiss-{f.id}`,
-				icon = "close",
-				label = locale.t("chat.review.dismiss"),
-				size = "sm",
-				tone = "quiet",
-				on_click = function()
-					call("review.dismiss", { chat = chat, id = f.id })
+			rounded = "$radius.sm",
+			bg = (SEVERITY[f.severity] or SEVERITY.Nit).wash,
+			ui.text { f.severity, text_size = "$font.size.xs", weight = "$font.weight.semibold", color = (SEVERITY[f.severity] or SEVERITY.Nit).ink, wrap = false },
+		},
+		ui.column {
+			grow = 1,
+			min_w = 0,
+			gap = ui.raw(2, "a finding's title over its place"),
+			ui.text { f.title, text_size = "$font.size.sm", color = "$text.primary", wrap = true },
+			ui.show(function(): boolean
+				return cur().reason ~= nil
+			end, ui.text {
+				function(): string
+					return cur().reason or ""
 				end,
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
+				wrap = true,
+			}),
+			-- (A file link, as a reply's: its words alone, brighter under the pointer.)
+			ui.button {
+				class = "review-place",
+				label = place,
+				self = "start",
+				h = 18,
+				p = 0,
+				items = "center",
+				bg = "#00000000",
+				hover = { bg = "#00000000", color = "$text.secondary" },
+				active = { bg = "#00000000" },
+				color = "$text.tertiary",
+				cursor = if open_link then "pointer" else nil,
+				on_click = if open_link then function()
+					open_link(place)
+				end else nil,
+				ui.text { place, font = "$font.mono", text_size = "$font.size.xs", literal = true, wrap = false },
 			},
 		},
-		ui.text { f.location, text_size = "$font.size.xs", color = "$text.tertiary", literal = true },
-		if f.body ~= "" then ui.text { f.body, text_size = "$font.size.sm", color = "$text.secondary", wrap = true } else nil,
-		if f.reason then ui.text { f.reason, text_size = "$font.size.xs", color = "$text.tertiary", wrap = true } else nil,
+		ui.show(fixable, Button {
+			id = `review-fix-{f.id}`,
+			tone = "secondary",
+			size = "xs",
+			label = locale.s("chat.review.fix_named", { title = f.title }),
+			on_click = function()
+				local id = chat()
+				if id then
+					M.fix(id, f.id)
+				end
+			end,
+			ui.text { locale.t("chat.review.fix") },
+		}),
+		ui.show(function(): boolean
+			return not fixable()
+		end, ui.row {
+			class = "review-outcome",
+			shrink = 0,
+			gap = ui.raw(3, "a glyph and its word"),
+			items = "center",
+			h = 24,
+			ui.show(function(): boolean
+				return cur().outcome == "fixed"
+			end, ui.row { color = OUTCOME_TONE.fixed, Icon { name = "check", size = 12 } :: any }),
+			ui.text {
+				function(): string
+					return outcome_words(cur())
+				end,
+				text_size = "$font.size.xs",
+				weight = "$font.weight.medium",
+				color = function(): string
+					return OUTCOME_TONE[cur().outcome] or "$text.tertiary"
+				end,
+				wrap = false,
+			},
+		}),
 	}
 end
 
-function M.Findings(props: { chat: () -> string? }): Node
+-- What the block's head says beside "Review": its findings and who reviewed, or how the run ended.
+local function head_words(now: any): string
+	local b = now.block or {}
+	local who = now.reviewer
+	local function by(words: string): string
+		return if who and who ~= "" then `{words} · {who}` else words
+	end
+	if b.status == "done" then
+		local n = #(now.findings or {})
+		return by(locale.s(if n == 1 then "chat.review.one_finding" else "chat.review.findings_count", { n = n }))
+	elseif b.status == "clean" then
+		return by(locale.s("chat.review.clean"))
+	elseif b.status == "failed" then
+		return if b.message and b.message ~= "" then locale.s("chat.review.failed_why", { why = b.message }) else locale.s("chat.review.failed")
+	end
+	return locale.s(`chat.review.{b.status or "failed"}`)
+end
+
+-- The findings, a block of the transcript where the review was asked (the host's `review` row): each finding's severity, title, place (a file link) and how it was settled, Fix on an open one, Fix all open in its head. With the built-in off it stays readable, its actions gone.
+function M.Block(props: { chat: () -> string?, open_link: ((target: string) -> ())? }): Node
 	local chat = props.chat
+	local function r(): any
+		return M.of(chat())
+	end
 	return ui.show(function(): boolean
-		local id = chat()
-		local now = M.of(id)
-		return id ~= nil and M.open:get() == id and now ~= nil and #(now.findings or {}) > 0
+		local now = r()
+		return now ~= nil and now.block ~= nil
 	end, ui.column {
-		id = "review-findings",
+		id = "review-block",
+		class = "review-block",
 		w_full = true,
-		max_h = ui.raw(320, "gpui's findings card"),
-		overflow_y = "auto",
+		gap = "$space.1",
 		px = "$space.3",
 		py = "$space.2",
 		rounded = "$radius.lg",
@@ -262,45 +333,42 @@ function M.Findings(props: { chat: () -> string? }): Node
 			w_full = true,
 			items = "center",
 			gap = "$space.2",
-			ui.text { locale.t("chat.review.findings"), grow = 1, text_size = "$font.size.sm", weight = "$font.weight.semibold" },
+			min_h = 24,
+			ui.text { locale.t("chat.review.title"), text_size = "$font.size.sm", weight = "$font.weight.semibold", shrink = 0 },
 			ui.text {
 				function(): string
-					local now = M.of(chat())
-					return if now then now.outcomes or "" else ""
+					local now = r()
+					return if now then head_words(now) else ""
 				end,
+				class = "review-head",
+				grow = 1,
+				min_w = 0,
+				truncate = true,
 				text_size = "$font.size.xs",
 				color = "$text.tertiary",
 			},
 			ui.show(function(): boolean
-				local now = M.of(chat())
-				return now ~= nil and now.fix ~= nil
+				local now = r()
+				return M.on() and now ~= nil and (now.fix_open or 0) > 0
 			end, Button {
-				id = "review-fix-remaining",
-				tone = "secondary",
-				size = "sm",
-				label = function(): string
-					local now = M.of(chat())
-					return if now then now.fix or "" else ""
-				end,
+				id = "review-fix-all",
+				tone = "ghost",
+				size = "xs",
+				label = locale.t("chat.review.fix_all"),
 				on_click = function()
 					local id = chat()
 					if id then
 						M.fix(id)
 					end
 				end,
-				ui.text {
-					function(): string
-						local now = M.of(chat())
-						return if now then now.fix or "" else ""
-					end,
-				},
+				ui.text { locale.t("chat.review.fix_all") },
 			}),
 		},
 		ui.each(ui.computed(function(): { any }
-			local now = M.of(chat())
-			return if now then now.findings or {} else {}
+			local now = r()
+			return if now and now.block and now.block.status == "done" then now.findings or {} else {}
 		end), function(f: any): Node
-			return finding_row(chat() or "", f)
+			return finding_row(chat, f, props.open_link)
 		end),
 	})
 end

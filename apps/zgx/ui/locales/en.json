@@ -4177,8 +4177,25 @@
     "review": {
       "scope": "Scope",
       "menu": "Review options",
-      "dismiss": "Dismiss",
-      "findings": "Review findings"
+      "button": "Review",
+      "running": "Reviewing",
+      "title": "Review",
+      "one_finding": "1 finding",
+      "findings_count": "{n} findings",
+      "clean": "No issues found",
+      "unreadable": "Couldn’t read the findings",
+      "stopped": "Stopped",
+      "failed": "Review failed",
+      "failed_why": "Review failed: {why}",
+      "fix": "Fix",
+      "fix_named": "Fix {title}",
+      "fix_all": "Fix all open",
+      "open": "Open",
+      "fixed": "Fixed",
+      "fixed_at": "Fixed · {commit}",
+      "skipped": "Skipped",
+      "no_change": "No change",
+      "agent_on_it": "Agent on it"
     }
   },
   "sidecar": {

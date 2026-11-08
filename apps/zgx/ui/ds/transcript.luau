@@ -224,6 +224,8 @@ export type Props = {
 	on_model: ((model: string) -> ())?,
 	-- Whether a link's target is a file of the chat's that opens.
 	file_link: ((target: string) -> boolean)?,
+	-- A review's findings, where the host put its `review` row (screens/chat/review's Block); without it the row is empty.
+	review_block: ((m: Message) -> Node)?,
 }
 export type Anchor = { id: string, dy: number }
 export type TranscriptFind = {
@@ -1815,6 +1817,7 @@ local function Transcript(props: Props): Node
 						find = find_for,
 						on_enable = props.on_computer_enable,
 					}
+					elseif m.role == "system" and m.line == "review" then (if props.review_block then props.review_block(m) else ui.div {})
 					elseif m.role == "system" then line_row(m.hint, function(): any
 						return state:get()
 					end, `{m.id}:row`, find_for)

@@ -78,6 +78,23 @@ return function(props: Props): Node
 		id = "titlebar-actions",
 		items = "center",
 		gap = "$zeron.island.gap",
+		-- The Review built-in's button (screens/chat/review), the chat's own.
+		-- (Loaded as a chat first shows, off the shell's mount.)
+		ui.presence(function(): string?
+			return if route.current:get().name == "session" then "review" else nil
+		end, function(_k: string): Node
+			local review: any = boundary.load("@app/screens/chat/review")
+			if not review then
+				return ui.div {}
+			end
+			return review.Button {
+				chat = function(): string?
+					local s = route.session:get()
+					return if s then s.id else nil
+				end,
+				size = size,
+			}
+		end),
 		-- The session's details (its lanes: side chats and subagents), as
 		-- Zeron's titlebar toggle: its count while any run, open or not.
 		ui.show(

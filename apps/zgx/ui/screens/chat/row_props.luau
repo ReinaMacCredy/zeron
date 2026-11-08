@@ -44,6 +44,10 @@ function M.add(props: { [string]: any }, chat: () -> string?, session: () -> any
 		end
 		Shared.focus:add(1)
 	end
+	-- (Loaded with its first block, off the page's mount.)
+	props.review_block = function(_m: any): Node
+		return (require :: any)("@app/screens/chat/review").Block({ chat = chat, open_link = props.open_link })
+	end
 	if props.open_link then
 		props.file_link = function(target: string): boolean
 			local s = peek()

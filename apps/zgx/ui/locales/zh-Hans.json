@@ -4177,8 +4177,25 @@
     "review": {
       "scope": "范围",
       "menu": "审查选项",
-      "dismiss": "忽略",
-      "findings": "审查发现"
+      "button": "审查",
+      "running": "审查中",
+      "title": "审查",
+      "one_finding": "1 个发现",
+      "findings_count": "{n} 个发现",
+      "clean": "未发现问题",
+      "unreadable": "无法读取审查结果",
+      "stopped": "已停止",
+      "failed": "审查失败",
+      "failed_why": "审查失败：{why}",
+      "fix": "修复",
+      "fix_named": "修复 {title}",
+      "fix_all": "修复全部未处理",
+      "open": "未处理",
+      "fixed": "已修复",
+      "fixed_at": "已修复 · {commit}",
+      "skipped": "已跳过",
+      "no_change": "无需修改",
+      "agent_on_it": "Agent 处理中"
     }
   },
   "sidecar": {

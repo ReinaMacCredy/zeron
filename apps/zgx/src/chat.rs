@@ -891,6 +891,7 @@ impl Chats {
             *me.sessions.borrow_mut() = by_field(item, "chatId");
             me.follow_asks();
             me.publish_views();
+            review::sessions_changed();
             // A turn starting or ending: the newest prompt's line follows.
             for view in me.views() {
                 let changed = {
@@ -2405,6 +2406,7 @@ impl View {
                     list.push(row);
                 }
             }
+            review::place(&open.id, &mut list);
             subagents = seen.rows();
             list
         };
@@ -4680,6 +4682,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("text", Value::from(words.as_str())),
                 ("attachments", crate::appshots::tag_attachments(carried_value(&paths, &quotes, &picks, &comments, &badges), &shots)),
                 ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
+                ("created", Value::Num(created)),
                 ("copy", copy_value(&words)),
                 ("sender", sender),
                 ("answers", entry["answersRequestId"].as_str().map_or(Value::Nil, Value::from)),
