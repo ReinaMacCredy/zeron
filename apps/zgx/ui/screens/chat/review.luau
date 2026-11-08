@@ -204,9 +204,13 @@ local function finding_row(chat: () -> string?, f: any, open_link: ((target: str
 		gap = "$space.2",
 		items = "start",
 		py = "$space.1",
+		-- (An outdated finding at gpui's .5: its lines are gone from the changes.)
 		opacity = function(): number
-			local o = cur().outcome
-			return if o == "fixed" or o == "no_change" then 0.6 else 1
+			local now = cur()
+			if now.outdated then
+				return 0.5
+			end
+			return if now.outcome == "fixed" or now.outcome == "no_change" then 0.6 else 1
 		end,
 		ui.row {
 			class = "review-severity",
@@ -233,23 +237,30 @@ local function finding_row(chat: () -> string?, f: any, open_link: ((target: str
 				color = "$text.tertiary",
 				wrap = true,
 			}),
-			-- (A file link, as a reply's: its words alone, brighter under the pointer.)
-			ui.button {
-				class = "review-place",
-				label = place,
+			-- (A file link, as a reply's: its words alone, brighter under the pointer. Gone from the changes, it says so after, as gpui's meta.)
+			ui.row {
 				self = "start",
-				h = 18,
-				p = 0,
+				gap = ui.raw(4, "a place and its note"),
 				items = "center",
-				bg = "#00000000",
-				hover = { bg = "#00000000", color = "$text.secondary" },
-				active = { bg = "#00000000" },
-				color = "$text.tertiary",
-				cursor = if open_link then "pointer" else nil,
-				on_click = if open_link then function()
-					open_link(place)
-				end else nil,
-				ui.text { place, font = "$font.mono", text_size = "$font.size.xs", literal = true, wrap = false },
+				ui.button {
+					class = "review-place",
+					label = place,
+					h = 18,
+					p = 0,
+					items = "center",
+					bg = "#00000000",
+					hover = { bg = "#00000000", color = "$text.secondary" },
+					active = { bg = "#00000000" },
+					color = "$text.tertiary",
+					cursor = if open_link then "pointer" else nil,
+					on_click = if open_link then function()
+						open_link(place)
+					end else nil,
+					ui.text { place, font = "$font.mono", text_size = "$font.size.xs", literal = true, wrap = false },
+				},
+				ui.show(function(): boolean
+					return cur().outdated == true
+				end, ui.text { "· " .. locale.s("chat.review.outdated"), class = "review-outdated", font = "$font.mono", text_size = "$font.size.xs", color = "$text.tertiary", wrap = false }),
 			},
 		},
 		ui.show(fixable, Button {
@@ -300,7 +311,9 @@ local function head_words(now: any): string
 	end
 	if b.status == "done" then
 		local n = #(now.findings or {})
-		return by(locale.s(if n == 1 then "chat.review.one_finding" else "chat.review.findings_count", { n = n }))
+		local words = by(locale.s(if n == 1 then "chat.review.one_finding" else "chat.review.findings_count", { n = n }))
+		local stale = tonumber(now.outdated) or 0
+		return if stale > 0 then `{words} · {locale.s("chat.review.outdated_count", { n = stale })}` else words
 	elseif b.status == "clean" then
 		return by(locale.s("chat.review.clean"))
 	elseif b.status == "failed" then

@@ -4195,7 +4195,9 @@
       "fixed_at": "已修复 · {commit}",
       "skipped": "已跳过",
       "no_change": "无需修改",
-      "agent_on_it": "Agent 处理中"
+      "agent_on_it": "Agent 处理中",
+      "outdated": "已过时",
+      "outdated_count": "{n} 个已过时"
     }
   },
   "sidecar": {

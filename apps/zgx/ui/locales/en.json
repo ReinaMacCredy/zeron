@@ -4195,7 +4195,9 @@
       "fixed_at": "Fixed · {commit}",
       "skipped": "Skipped",
       "no_change": "No change",
-      "agent_on_it": "Agent on it"
+      "agent_on_it": "Agent on it",
+      "outdated": "outdated",
+      "outdated_count": "{n} outdated"
     }
   },
   "sidecar": {

@@ -80,7 +80,7 @@ test("Review runs the review, says Reviewing and takes no second press; its find
 	app:frames(30)
 	expect(app:has('#transcript >> #review-block >> "3 findings · Claude Code · haiku"')).to_be(true)
 	expect(app:count("#review-block >> .review-finding")).to_be(3)
-	-- Under the reply it was asked after.
+	-- Under the reply it was asked after (the fixture places the row; the host's placement is Rust `the_findings_block_stands_in_the_transcript_where_the_review_was_asked`).
 	local reply, block = top_of(app, "Hi! What shall we work on?"), top_of(app, "#review-block")
 	expect(reply ~= nil and block ~= nil and (block :: number) > (reply :: number)).to_be(true)
 	-- Each with its severity, title, place and outcome: Fixed, Fix while open, Skipped.
@@ -139,4 +139,29 @@ test("the block stays through a reload and a chat switch; with the built-in off 
 	expect(app:has("#review-fix-F2")).to_be(false)
 	expect(app:has("#review-fix-all")).to_be(false)
 	expect(app:has("#chat-review")).to_be(false)
+end)
+
+test("pressed again, the landed block stays with its outcomes and Fix while the new run works", function()
+	local app = landed()
+	app:command("review_again")
+	app:frames(20)
+	expect(app:has('#chat-review >> "Reviewing"')).to_be(true)
+	expect(app:has('#review-block >> "3 findings · Claude Code · haiku"')).to_be(true)
+	expect(app:has('#review-finding-F1 >> "Fixed · abcdef1"')).to_be(true)
+	app:click("#review-fix-F2")
+	app:frames(30)
+	expect(calls(app)).to_contain("review.fix:s2:F2")
+	expect(app:has('#chat-composer >> role:button ~"1 comment"')).to_be(true)
+end)
+
+test("a finding whose lines went away says outdated, as gpui's meta, and the head counts it", function()
+	local app = landed()
+	app:command("review_outdated")
+	app:frames(20)
+	expect(app:has('#review-finding-F2 >> "· outdated"')).to_be(true)
+	expect(app:has('#review-finding-F2 >> "Open"')).to_be(true)
+	expect(app:has("#review-fix-F2")).to_be(false)
+	expect(app:has('#review-finding-F1 >> "· outdated"')).to_be(false)
+	expect(app:has('#review-block >> "3 findings · Claude Code · haiku · 1 outdated"')).to_be(true)
+	expect(app:has("#review-fix-all")).to_be(false)
 end)

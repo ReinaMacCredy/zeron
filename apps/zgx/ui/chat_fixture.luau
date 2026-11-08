@@ -1744,6 +1744,27 @@ for _, look in { "idle", "busy", "done", "none" } do
 		end,
 	}
 end
+-- Pressed again over a landed block: the host keeps that block, its outcomes and Fix while the new run works.
+ui.command {
+	id = "review_again",
+	title = "Review: a new run over the landed block",
+	run = function()
+		local now = review_state("done")
+		now.label, now.action, now.busy, now.tip = "Reviewing", "inert", true, "The reviewer is working."
+		set_review(now)
+	end,
+}
+-- The agent committed F2's lines away: open, no Fix, outdated (proto `refresh`).
+ui.command {
+	id = "review_outdated",
+	title = "Review: a finding gone outdated",
+	run = function()
+		local now = review_state("done")
+		now.findings[2].fixable, now.findings[2].outdated = false, true
+		now.fix_open, now.outdated = 0, 1
+		set_review(now)
+	end,
+}
 ui.command {
 	id = "review_lands",
 	title = "Review: its findings land where it was asked",
