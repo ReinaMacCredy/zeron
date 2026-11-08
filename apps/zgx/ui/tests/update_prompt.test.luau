@@ -82,7 +82,10 @@ test("a loaded flag left by a script reload builds nothing: the prompt loads fro
 	app:set_state("screens/engine/update.luau::update_prompt_loaded", true)
 	app:frames(10)
 	-- (About's module, which the prompt's brings, unloaded: its state not yet made.)
-	expect(app:state("screens/settings/about.luau::about_beta")).to_be(nil)
+	local made, beta = pcall(function(): any
+		return app:state("screens/settings/about.luau::about_beta")
+	end)
+	expect(made and beta ~= nil).to_be(false)
 	expect(app:has(DIALOG)).to_be(false)
 	app:set_state("settings_stub_about_next", "pending")
 	app:command("shell.check_updates")

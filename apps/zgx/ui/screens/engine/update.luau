@@ -44,9 +44,12 @@ local asked = ui.state("engine_update_asked", false)
 M.prompt_loaded = ui.state("update_prompt_loaded", false)
 M.prompt_loaded:set(false)
 local prompt_module: any = nil
+local prompt_here = ui.state("update_prompt_here", 0)
+prompt_here:set(0)
 function M.show_prompt(prompt: any)
 	prompt_module = prompt
 	M.prompt_loaded:set(true)
+	prompt_here:set(prompt_here:peek() + 1)
 end
 
 -- Whether anything runs in the engine now.
@@ -113,7 +116,7 @@ M.Watch = ui.component(function(): Node
 		h = 0,
 		absolute = true,
 		ui.presence(function(): string?
-			return if M.prompt_loaded:get() and prompt_module then "prompt" else nil
+			return if prompt_here:get() > 0 and prompt_module then "prompt" else nil
 		end, function(): Node
 			return prompt_module.Prompt()
 		end),
