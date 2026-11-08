@@ -1625,7 +1625,8 @@
         "terms": "follow-up queue steer running agent message",
         "description": "Queue follow-ups while the agent runs, or steer the current run. Press {key} to do the opposite for one message.",
         "description_send_key": "Queue follow-ups while the agent runs, or steer the current run. {key} is the send key, so every message follows this setting."
-      }
+      },
+      "description": "Language, switching, privacy, worktrees and commits."
     },
     "engine": {
       "outdated": "Update Zeron on this computer to change this.",
@@ -1942,6 +1943,11 @@
       "sidebar_hover": {
         "label": "Reveal sidebar on hover",
         "description": "Show the hidden sidebar when the pointer rests at the window's left edge."
+      },
+      "pause_motion": {
+        "label": "Pause animations in background",
+        "description": "Hold animations still while Zeron isn't the focused window.",
+        "terms": "pause animations background focus still"
       }
     },
     "notifications": {
@@ -2105,6 +2111,27 @@
         "terms": "accessibility permission",
         "description": "Accessibility adds visible and off-screen application text. Screenshots work without it.",
         "allow": "Enable text capture"
+      },
+      "intro": {
+        "title": "Take an Appshot to show your agent another app's window",
+        "body": "Press your hotkey while any app is frontmost. Zeron captures that window as an image, brings itself forward, and attaches the snap to a session composer; the capture stays on this device until you send the message.",
+        "desktop_only": "Appshots are available only in the desktop app."
+      },
+      "status": {
+        "unsupported": "Available on macOS and Linux only",
+        "off": "Off",
+        "capture": "Allow Screen Recording in macOS System Settings, then try again.",
+        "unavailable": "This shortcut is unavailable. Choose a different key combination.",
+        "listening": "Listening: press {keys} to snap"
+      },
+      "preview": "Preview",
+      "restore": "Restore defaults",
+      "reset": "Reset {what} to default",
+      "reset_what": {
+        "enabled": "Appshots",
+        "sound": "capture sound",
+        "shortcut": "hotkey",
+        "destination": "destination"
       }
     },
     "providers": {
@@ -2469,7 +2496,8 @@
         "cloud": "Cloud",
         "customize": "Customize",
         "plugins": "Plugins",
-        "browser": "Browser"
+        "browser": "Browser",
+        "lab": "Lab"
       }
     },
     "store": {
@@ -3068,6 +3096,121 @@
         "save": "Save",
         "terms": "instructions, prompt, focus"
       }
+    },
+    "lab": {
+      "title": "Experimental",
+      "description": "Experimental and beta features. They may change or go away in a later version.",
+      "terms": "lab beta experimental compact jev classifier token",
+      "beta": "Beta",
+      "unread": "Couldn't read the Lab settings",
+      "compaction_section": "Compaction",
+      "access_section": "Agent access",
+      "ahead": {
+        "label": "Compact ahead of time",
+        "description": "Claude compacts in place right after a turn. Codex summarizes a copy in the background and swaps it in at the next pause; turns after the copy come back as text.",
+        "terms": "ahead early background summarize copy"
+      },
+      "mode": {
+        "label": "Compact new tasks",
+        "classifier_description": "A model reads each message and compacts first when it starts a new task.",
+        "reminder_description": "Each message carries a reminder; the agent decides whether to compact.",
+        "reminder": "Reminder",
+        "classifier": "Classifier",
+        "terms": "new task reminder classifier mode"
+      },
+      "source": {
+        "label": "Classifier",
+        "description": "An agent's model, or TypeSafe's Jev classifier with your API key. Jev receives the recent conversation and each new message past the check.",
+        "agent": "Agent model",
+        "typesafe": "Jev · TypeSafe",
+        "openrouter": "Jev · OpenRouter",
+        "terms": "jev typesafe openrouter source"
+      },
+      "model": {
+        "label": "Classifier model",
+        "description": "Sonnet when Claude classifies, Codex's default model when Codex does; a small model compacted follow-ups in testing.",
+        "auto": "Session agent",
+        "terms": "classifier model sonnet"
+      },
+      "key": {
+        "label": "API key",
+        "saved": "Key saved in the Keychain.",
+        "none_typesafe": "No key. Get one at console.typesafe.ai/keys",
+        "none_openrouter": "No key. Get one at openrouter.ai/settings/keys",
+        "paste": "Paste key",
+        "remove": "Remove key",
+        "copy_first": "Copy the API key first, then press Paste key."
+      },
+      "full_token": {
+        "label": "Agents use the full token",
+        "description": "New runs reach everything the app can, including allowing plugins and signing in, with no question to you. Only turn this on if a tool you need is refused.",
+        "terms": "full token ipc agents access"
+      }
+    },
+    "chat": {
+      "title": "Chat",
+      "description": "How the composer sends and the transcript reads.",
+      "terms": "chat composer send follow-up queue steer escape transcript compact thread naming titles",
+      "composer": "Composer",
+      "transcript": "Transcript"
+    },
+    "tools": {
+      "title": "Tools",
+      "description": "The tools Zeron adds to every agent through its zeron MCP server, on every provider. A chat that is already running keeps its tool list until its next turn; a call to a tool you turn off is refused right away.",
+      "terms": "tools mcp zeron tools delegate thread tools groups",
+      "unread": "Couldn't read the tool settings",
+      "all_on": "Turn all on",
+      "all_off": "Turn all off",
+      "all_terms": "turn all on off every tool",
+      "groups": "Tool groups",
+      "groups_terms": "groups threads workspace delegation pages devices computer plugins",
+      "couldnt_save": "Could not save: {error}",
+      "count": "{n} TOOLS",
+      "count_one": "{n} TOOL",
+      "actions": " · {n} ACTIONS",
+      "saving": "Saving…",
+      "saving_body": "Zeron is updating its MCP server. A running chat picks up the change on its next turn.",
+      "all_live": "Every tool is live",
+      "all_live_body": "Agents on this engine can call all {n} Zeron tools across {groups} groups.",
+      "some": "{n} of {total} tools on",
+      "some_body": "Open a group to pick single tools. A call to a tool you turn off is refused right away.",
+      "none": "No Zeron tools",
+      "none_body": "Agents see no Zeron MCP tools. Turn a group on and calls to it work again.",
+      "tag": {
+        "saving": "SAVING",
+        "on": "ALL LIVE",
+        "partial": "PARTIAL",
+        "off": "OFF"
+      },
+      "needs": "Off while {tool} is off",
+      "linked": {
+        "computer": "Same switch as Settings > Computer use",
+        "devices": "Same switch as agent access in Settings > Device hub"
+      },
+      "open": "Open",
+      "show_tools": "Show {group}'s tools",
+      "group_off": "The whole group is off. Your choices below are kept for when you turn it back on."
+    },
+    "predictions": {
+      "title": "Predictions",
+      "terms": "predictions suggest next message tab accept autocomplete",
+      "show": "Show predictions",
+      "show_description": "Suggest your next message in the composer. Tab accepts it.",
+      "predict_with": "Predict with",
+      "predict_with_description": "A coding agent, or any OpenAI-compatible API.",
+      "agent": "Agent",
+      "custom": "Custom API",
+      "agent_model": "Agent model",
+      "follows_session": "Each chat's own agent, on its cheapest model.",
+      "one_model": "Every chat uses this model.",
+      "session_agent": "Session agent",
+      "reset": "Reset",
+      "custom_api": "Custom API",
+      "no_key": "No key. Local servers like Ollama need none.",
+      "base_url": "Base URL",
+      "model": "Model",
+      "model_placeholder": "Model id",
+      "save": "Save"
     }
   },
   "common": {

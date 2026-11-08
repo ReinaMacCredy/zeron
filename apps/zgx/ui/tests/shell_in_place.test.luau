@@ -336,7 +336,7 @@ test("a settings page chosen in the list opens at its top", function()
 	expect(app:state("shell_settings_scroll") > 0).to_be(true)
 	-- (The list runs past the short window too: a taller one shows its foot,
 	-- where Archived is, the page still scrolled under it.)
-	app:resize(1200, 840)
+	app:resize(1200, 980)
 	app:frames(20)
 	expect(app:state("shell_settings_scroll") > 0).to_be(true)
 	app:click('#settings-nav >> "Archived"')

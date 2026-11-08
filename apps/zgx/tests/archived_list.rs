@@ -20,10 +20,10 @@ fn ui_dir() -> PathBuf {
 fn archived() -> TestApp {
     let mut app = TestApp::new(|runtime| {
         let host = ScriptHost::new(runtime, ui_dir().join("shell_fixture.luau"));
-        host.window_size(runtime.signal((1200., 900.)));
+        host.window_size(runtime.signal((1200., 1100.)));
         host
     });
-    app.ui.scene.borrow_mut().resize(1200., 900.);
+    app.ui.scene.borrow_mut().resize(1200., 1100.);
     app.frames(30);
     assert_eq!(app.error(), None, "the shell failed to load");
     assert!(app.host.run_command("archive_thousands"));

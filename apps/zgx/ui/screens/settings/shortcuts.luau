@@ -105,13 +105,6 @@ do
 			table.insert(rows, { key = `key_{k.id}`, title = title_message(k), section = group_message(k.group), terms = ui.t("settings.shortcuts.row_terms") })
 		end
 	end
-	for _, id in { "window", "limit", "cycles" } do
-		table.insert(rows, {
-			key = `key_switcher_{id}`,
-			title = ui.t(`settings.shortcuts.switcher.{id}.label`),
-			section = ui.t("settings.shortcuts.switcher.section"),
-		})
-	end
 	table.insert(rows, {
 		key = "key_appshot",
 		title = ui.t("settings.shortcuts.appshot.label"),
@@ -282,6 +275,9 @@ local function switcher_section(): Node?
 	}
 end
 
+-- (On General, as gpui has it.)
+M.switcher_section = switcher_section
+
 function M.view(): Node
 	local sections: { Node } = {}
 	for _, g in grouped() do
@@ -305,10 +301,6 @@ function M.view(): Node
 	local appshot_section = appshot()
 	if appshot_section then
 		table.insert(sections, appshot_section)
-	end
-	local switcher_rows = switcher_section()
-	if switcher_rows then
-		table.insert(sections, switcher_rows)
 	end
 	if #sections == 0 then
 		table.insert(sections, ds.EmptyState {

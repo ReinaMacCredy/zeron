@@ -7,7 +7,9 @@
 //! the Live state column's fold and the model picker's layout, each of the frame and the art as a set: one you've touched here isn't
 //! paired with the other app's rest. New project's pinned folders come with it. Pinned chats and sections
 //! aren't here: the engine keeps them, for either app.
-//! Computer use's click sounds and its guide's Got it come too.
+//! Computer use's click sounds and its guide's Got it come too, and so do
+//! Chat's, the session switcher's, Files', the chimes', Appshots', the motion and the
+//! conversation's width.
 
 use std::path::Path;
 
@@ -22,6 +24,10 @@ const INSET: &str = "ds%2Flook.luau%3A%3Ainset_card.json";
 const THEME_COLORS: &str = "ds%2Flook.luau%3A%3Awallpaper_theme_colors.json";
 const MODEL_PICKER_COMPACT: &str = "ds%2Fmodel_picker.luau%3A%3Amodel_picker_compact.json";
 const COMPUTER: &str = "screens%2Fsettings%2Fcomputer.luau%3A%3A";
+const PREFS: &str = "screens%2Fsettings%2Fprefs.luau%3A%3A";
+const SWITCHER: &str = "screens%2Fshell%2Fswitcher.luau%3A%3A";
+const APPSHOTS: &str = "screens%2Fchat%2Fappshots.luau%3A%3A";
+const MOTION: &str = "ds%2Fmotion.luau%3A%3A";
 
 fn look(name: &str) -> String {
     format!("{LOOK}{name}.json")
@@ -144,6 +150,96 @@ fn carried(settings: &Json) -> Vec<(String, Json)> {
     if let Some(pins) = settings["projectFolderPins"].as_object().filter(|pins| !pins.is_empty()) {
         out.push((format!("{PICKER}pins.json"), Json::Object(pins.clone())));
     }
+    out.extend(carried_prefs(settings));
+    out
+}
+
+/// Settings' own pages (Chat, General's switcher, Files, Notifications'
+/// chimes, Appshots, Appearance's motion and the conversation's width): each only as a value this
+/// app takes.
+fn carried_prefs(settings: &Json) -> Vec<(String, Json)> {
+    let mut out = Vec::new();
+    let pref = |name: &str| format!("{PREFS}{name}.json");
+    for (from, to) in [
+        ("escapeStopsActiveAgent", "settings_escape_stops"),
+        ("transcriptCompactMode", "settings_compact_transcript"),
+        ("filesAutosaveEnabled", "settings_files_autosave"),
+        ("filesWordWrap", "settings_files_word_wrap"),
+        ("filesShowAll", "settings_files_show_all"),
+        ("soundEnabled", "settings_sounds"),
+        ("soundCompletionEnabled", "settings_sound_done"),
+        ("soundInputEnabled", "settings_sound_request"),
+        ("soundAttentionEnabled", "settings_sound_attention"),
+    ] {
+        if let Some(on) = settings[from].as_bool() {
+            out.push((pref(to), json!(on)));
+        }
+    }
+    match settings["composerSendBehavior"].as_str() {
+        Some("enter") => out.push((pref("settings_send_with"), json!("enter"))),
+        Some("mod-enter") => out.push((pref("settings_send_with"), json!("mod_enter"))),
+        _ => {}
+    }
+    if let Some(follow) = settings["followUpBehavior"].as_str().filter(|f| matches!(*f, "queue" | "steer")) {
+        out.push((pref("settings_follow_up"), json!(follow)));
+    }
+    if let Some(zeron) = settings["openWebLinksInZeron"].as_bool() {
+        out.push((pref("settings_open_links"), json!(if zeron { "zeron" } else { "external" })));
+    }
+    if let Some(ms) = settings["filesAutosaveDelayMs"].as_u64().filter(|ms| (100..=60_000).contains(ms)) {
+        out.push((pref("settings_files_autosave_delay"), json!(ms)));
+    }
+    if let Some(width) = settings["transcriptWidth"].as_f64().filter(|w| w.is_finite()) {
+        out.push((pref("settings_conversation_width"), json!(width.clamp(560.0, 1200.0))));
+    }
+    let window = match settings["switcherWindow"].as_str() {
+        Some("all") => Some("all"),
+        Some("hours1") => Some("1h"),
+        Some("hours2") => Some("2h"),
+        Some("hours4") => Some("4h"),
+        Some("hours8") => Some("8h"),
+        Some("hours12") => Some("12h"),
+        Some("hours24") => Some("24h"),
+        Some("days3") => Some("3d"),
+        Some("days7") => Some("7d"),
+        _ => None,
+    };
+    if let Some(window) = window {
+        out.push((format!("{SWITCHER}shell_switcher_window.json"), json!(window)));
+    }
+    if let Some(limit) = settings["switcherLimit"].as_u64() {
+        out.push((format!("{SWITCHER}shell_switcher_limit.json"), json!(limit)));
+    }
+    if let Some(on) = settings["switcherCyclesTabs"].as_bool() {
+        out.push((format!("{SWITCHER}shell_switcher_cycles_tabs.json"), json!(on)));
+    }
+    for (from, to) in [("appshotsEnabled", "appshots_enabled"), ("appshotSoundEnabled", "appshots_sound")] {
+        if let Some(on) = settings[from].as_bool() {
+            out.push((format!("{APPSHOTS}{to}.json"), json!(on)));
+        }
+    }
+    let destination = match settings["appshotDestination"].as_str() {
+        Some("automatic") => Some("automatic"),
+        Some("last-session") => Some("last"),
+        Some("new-session") => Some("new"),
+        _ => None,
+    };
+    if let Some(destination) = destination {
+        out.push((format!("{APPSHOTS}appshots_destination.json"), json!(destination)));
+    }
+    let (reduce, follow) = match settings["reduceMotion"].as_str() {
+        Some("system") => (Some(false), Some(true)),
+        Some("on") => (Some(true), Some(false)),
+        Some("off") => (Some(false), Some(false)),
+        _ => (None, None),
+    };
+    if let (Some(reduce), Some(follow)) = (reduce, follow) {
+        out.push((format!("{MOTION}motion_reduce.json"), json!(reduce)));
+        out.push((format!("{MOTION}motion_follow_system.json"), json!(follow)));
+    }
+    if let Some(on) = settings["pauseAnimationsInBackground"].as_bool() {
+        out.push((format!("{MOTION}motion_pause_background.json"), json!(on)));
+    }
     out
 }
 
@@ -251,6 +347,53 @@ mod tests {
         let odd = tempfile::tempdir().unwrap();
         carry_into(odd.path(), &odd.path().join("kept"), &json!({ "computerClickSounds": "loud" }));
         assert!(!odd.path().join(format!("{COMPUTER}click_sounds.json")).exists(), "a word this app doesn't know stays its default");
+    }
+
+    #[test]
+    fn settings_pages_come_across_as_this_app_takes_them() {
+        let dir = tempfile::tempdir().unwrap();
+        carry_into(
+            dir.path(),
+            &dir.path().join("kept"),
+            &json!({
+                "composerSendBehavior": "mod-enter", "followUpBehavior": "steer", "escapeStopsActiveAgent": true,
+                "transcriptCompactMode": true, "openWebLinksInZeron": false,
+                "switcherWindow": "hours12", "switcherLimit": 8, "switcherCyclesTabs": true,
+                "filesAutosaveEnabled": true, "filesAutosaveDelayMs": 1500, "filesWordWrap": true, "filesShowAll": false,
+                "soundEnabled": true, "soundCompletionEnabled": false, "soundInputEnabled": true, "soundAttentionEnabled": false,
+                "appshotsEnabled": true, "appshotSoundEnabled": false, "appshotDestination": "last-session",
+                "transcriptWidth": 736.0, "reduceMotion": "on", "pauseAnimationsInBackground": true,
+            }),
+        );
+        let file = |name: String| serde_json::from_slice::<Json>(&std::fs::read(dir.path().join(name)).unwrap()).unwrap();
+        let pref = |name: &str| file(format!("{PREFS}{name}.json"));
+        assert_eq!(pref("settings_send_with"), json!("mod_enter"));
+        assert_eq!(pref("settings_follow_up"), json!("steer"));
+        assert_eq!(pref("settings_escape_stops"), json!(true));
+        assert_eq!(pref("settings_compact_transcript"), json!(true));
+        assert_eq!(pref("settings_open_links"), json!("external"));
+        assert_eq!(pref("settings_files_autosave"), json!(true));
+        assert_eq!(pref("settings_files_autosave_delay"), json!(1500));
+        assert_eq!(pref("settings_files_word_wrap"), json!(true));
+        assert_eq!(pref("settings_files_show_all"), json!(false));
+        assert_eq!((pref("settings_sounds"), pref("settings_sound_done"), pref("settings_sound_request"), pref("settings_sound_attention")), (json!(true), json!(false), json!(true), json!(false)));
+        assert_eq!(pref("settings_conversation_width"), json!(736.0));
+        assert_eq!(file(format!("{SWITCHER}shell_switcher_window.json")), json!("12h"));
+        assert_eq!(file(format!("{SWITCHER}shell_switcher_limit.json")), json!(8));
+        assert_eq!(file(format!("{SWITCHER}shell_switcher_cycles_tabs.json")), json!(true));
+        assert_eq!(file(format!("{APPSHOTS}appshots_enabled.json")), json!(true));
+        assert_eq!(file(format!("{APPSHOTS}appshots_sound.json")), json!(false));
+        assert_eq!(file(format!("{APPSHOTS}appshots_destination.json")), json!("last"));
+        assert_eq!((file(format!("{MOTION}motion_reduce.json")), file(format!("{MOTION}motion_follow_system.json"))), (json!(true), json!(false)));
+        assert_eq!(file(format!("{MOTION}motion_pause_background.json")), json!(true));
+        // A word or a number this app doesn't take stays its default.
+        let odd = tempfile::tempdir().unwrap();
+        carry_into(odd.path(), &odd.path().join("kept"), &json!({ "composerSendBehavior": "shift-enter", "switcherWindow": "weeks2", "appshotDestination": "elsewhere", "filesAutosaveDelayMs": 0, "transcriptWidth": 99999.0 }));
+        for name in [format!("{PREFS}settings_send_with.json"), format!("{SWITCHER}shell_switcher_window.json"), format!("{APPSHOTS}appshots_destination.json"), format!("{PREFS}settings_files_autosave_delay.json")] {
+            assert!(!odd.path().join(&name).exists(), "{name}");
+        }
+        let wide = serde_json::from_slice::<Json>(&std::fs::read(odd.path().join(format!("{PREFS}settings_conversation_width.json"))).unwrap()).unwrap();
+        assert_eq!(wide, json!(1200.0));
     }
 
     #[test]

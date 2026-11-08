@@ -535,7 +535,7 @@ impl Appshots {
     }
 }
 
-fn play_sound() {
+pub(crate) fn play_sound() {
     static SOUND: &[u8] = include_bytes!("../../../../crates/ui/assets/sounds/appshot.wav");
     std::thread::spawn(|| {
         let path = std::env::temp_dir().join(format!("zeron-zgx-appshot-{}.wav", std::process::id()));

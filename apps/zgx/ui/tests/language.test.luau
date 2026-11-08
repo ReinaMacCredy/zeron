@@ -34,7 +34,7 @@ end)
 
 test("choosing 简体中文 changes the page's words at once, and English brings them back", function()
 	local app = open()
-	expect(shows(app, PAGE, "Send messages with")).to_be(true)
+	expect(shows(app, PAGE, "Close the panel with its last tab")).to_be(true)
 	app:click(`{PAGE} >> role:button "Language"`)
 	app:frames(10)
 	app:click('role:menuitem "简体中文"')
@@ -42,8 +42,8 @@ test("choosing 简体中文 changes the page's words at once, and English brings
 	expect(app:state("settings_language")).to_be("zh-Hans")
 	-- The same page, now in Chinese: none of its English is left.
 	expect(app:state("shell_route_path")).to_be("/settings/general")
-	expect(shows(app, PAGE, "Send messages with")).to_be(false)
-	expect(shows(app, PAGE, "Compact mode")).to_be(false)
+	expect(shows(app, PAGE, "Close the panel with its last tab")).to_be(false)
+	expect(shows(app, PAGE, "Hide email addresses")).to_be(false)
 	expect(shows(app, PAGE, "简体中文")).to_be(true)
 	-- English again, as chosen in the same select (its name now in Chinese:
 	-- reached by its id).
@@ -52,8 +52,8 @@ test("choosing 简体中文 changes the page's words at once, and English brings
 	app:click('role:menuitem "English"')
 	app:frames(20)
 	expect(app:state("settings_language")).to_be("en")
-	expect(shows(app, PAGE, "Send messages with")).to_be(true)
-	expect(shows(app, PAGE, "Compact mode")).to_be(true)
+	expect(shows(app, PAGE, "Close the panel with its last tab")).to_be(true)
+	expect(shows(app, PAGE, "Hide email addresses")).to_be(true)
 end)
 
 test("Settings search finds Language by its Chinese name, in English too", function()

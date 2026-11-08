@@ -1,12 +1,12 @@
--- Settings → General: how the composer and conversations behave, where
--- pull requests open, which model names threads, and this Mac's git
--- settings: the shipping app's General (crates/ui settings/shortcuts.rs's
--- page, thread_naming.rs, worktrees.rs), in the gallery's Settings parts.
+-- Settings → General: the language, the panel, the session switcher, privacy
+-- and this Mac's git settings: the shipping app's General (crates/ui
+-- settings/shortcuts.rs's page, worktrees.rs), in the gallery's Settings
+-- parts. (The composer's rows and thread naming are Chat's: chat.luau.)
 --
--- The composer's and the links' are this Mac's preferences (prefs.luau),
--- read where they apply. Thread naming, commit credit and the worktree
--- folder are the engine's (`settings.engine`): asked once a visit, each
--- change shown at once and put back if the engine refuses it.
+-- The panel's and privacy's are this Mac's preferences (prefs.luau), read
+-- where they apply. Thread naming, commit credit and the worktree folder are
+-- the engine's (`settings.engine`): asked once a visit, each change shown at
+-- once and put back if the engine refuses it.
 
 local host = require("@app/screens/settings/host")
 local ds = require("@ds")
@@ -16,6 +16,7 @@ local search = require("@app/screens/settings/search")
 local visits = require("@app/screens/settings/visits")
 local chat = require("@app/screens/chat/store")
 local language = require("@app/screens/language")
+local predictions = require("@app/screens/settings/predictions")
 
 local M = {}
 
@@ -24,13 +25,12 @@ M.TITLE = "General"
 
 search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"), {
 	{ key = "language", title = ui.t("settings.general.language.label"), terms = ui.t("settings.general.language.terms") },
-	{ key = "send_with", title = ui.t("settings.general.send_with.label"), terms = ui.t("settings.general.send_with.terms") },
-	{ key = "follow_up", title = ui.t("settings.general.follow_up.label"), terms = ui.t("settings.general.follow_up.terms") },
-	{ key = "compact_mode", title = ui.t("settings.general.compact_mode.label"), terms = ui.t("settings.general.compact_mode.terms") },
-	{ key = "escape_stops", title = ui.t("settings.general.escape_stops.label"), terms = ui.t("settings.general.escape_stops.terms") },
 	{ key = "close_panel", title = ui.t("settings.general.close_panel.label"), terms = ui.t("settings.general.close_panel.terms") },
+	{ key = "key_switcher_window", title = ui.t("settings.shortcuts.switcher.window.label"), section = ui.t("settings.shortcuts.switcher.section") },
+	{ key = "key_switcher_limit", title = ui.t("settings.shortcuts.switcher.limit.label"), section = ui.t("settings.shortcuts.switcher.section") },
+	{ key = "key_switcher_cycles", title = ui.t("settings.shortcuts.switcher.cycles.label"), section = ui.t("settings.shortcuts.switcher.section") },
+	{ key = "predictions", title = ui.t("settings.predictions.show"), section = ui.t("settings.predictions.title"), terms = ui.t("settings.predictions.terms") },
 	{ key = "hide_emails", title = ui.t("settings.general.hide_emails.label"), section = ui.t("settings.general.privacy"), terms = ui.t("settings.general.hide_emails.terms") },
-	{ key = "thread_naming", title = ui.t("settings.general.thread_naming.label"), terms = ui.t("settings.general.thread_naming.terms") },
 	{ key = "worktrees", title = ui.t("settings.general.worktrees.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.worktrees.terms") },
 	{ key = "commit_credit", title = ui.t("settings.general.commit_credit.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.commit_credit.terms") },
 })
@@ -75,6 +75,9 @@ end
 local function load_all()
 	load("credit", "GetCommitCredit", credit)
 	load("worktrees", "GetWorktreeSettings", worktrees)
+end
+-- (Thread naming is Chat's row, on these same states.)
+function M.load_titles()
 	load("titles", "GetTitleSettings", titles)
 end
 
@@ -207,15 +210,33 @@ local function row(key: string, props: any): Node
 	return search.anchor(key, ds.Settings.Row(props))
 end
 
+function M.thread_naming_row(): Node
+	return row("thread_naming", {
+		label = ui.t("settings.general.thread_naming.label"),
+		description = function()
+			if failed:get().titles then
+				return says(failed:get().titles):get()
+			end
+			return if title_value() == AUTO
+				then ui.t("settings.general.thread_naming.auto"):get()
+				else ui.t("settings.general.thread_naming.model"):get()
+		end,
+		control = naming(),
+	})
+end
+
 function M.view(): Node
 	visits.once("general", function()
 		load_all()
+		predictions.load()
 		if chat.catalog:peek().state ~= "ready" then
 			chat.load_catalog()
 		end
 	end)
+	local switcher = require("@app/screens/settings/shortcuts").switcher_section()
 	return ds.Settings.Page {
 		title = ui.t("settings.general.title"),
+		description = ui.t("settings.general.description"),
 		ds.Settings.Section {
 			ds.Settings.Group {
 				row("language", {
@@ -231,34 +252,6 @@ function M.view(): Node
 						ds.Select { value = language.chosen, name = ui.t("settings.general.language.label"), w = 180, options = language.options },
 					},
 				}),
-				row("send_with", {
-					label = ui.t("settings.general.send_with.label"),
-					description = function()
-						return if prefs.send_with:get() == "enter"
-							then ui.t("settings.general.send_with.enter"):get()
-							else ui.t("settings.general.send_with.mod_enter"):get()
-					end,
-					control = ds.Select { value = prefs.send_with, name = ui.t("settings.general.send_with.label"), w = 128, options = prefs.SEND_WITH },
-				}),
-				row("follow_up", {
-					label = ui.t("settings.general.follow_up.label"),
-					description = function()
-						return if prefs.send_with:get() == "enter"
-							then ui.t("settings.general.follow_up.description", { key = ui.shortcut_text("cmd+enter") }):get()
-							else ui.t("settings.general.follow_up.description_send_key", { key = ui.shortcut_text("cmd+enter") }):get()
-					end,
-					control = ds.Select { value = prefs.follow_up, name = ui.t("settings.general.follow_up.label"), w = 128, options = prefs.FOLLOW_UP },
-				}),
-				row("compact_mode", {
-					label = ui.t("settings.general.compact_mode.label"),
-					description = ui.t("settings.general.compact_mode.description"),
-					control = ds.Switch { value = prefs.compact_transcript, label = ui.t("settings.general.compact_mode.label") },
-				}),
-				row("escape_stops", {
-					label = ui.t("settings.general.escape_stops.label"),
-					description = ui.t("settings.general.escape_stops.description"),
-					control = ds.Switch { value = prefs.escape_stops, label = ui.t("settings.general.escape_stops.label") },
-				}),
 				row("close_panel", {
 					label = ui.t("settings.general.close_panel.label"),
 					description = ui.t("settings.general.close_panel.description"),
@@ -266,6 +259,8 @@ function M.view(): Node
 				}),
 			},
 		},
+		switcher,
+		predictions.section(),
 		ds.Settings.Section {
 			title = ui.t("settings.general.privacy"),
 			ds.Settings.Group {
@@ -273,22 +268,6 @@ function M.view(): Node
 					label = ui.t("settings.general.hide_emails.label"),
 					description = ui.t("settings.general.hide_emails.description"),
 					control = ds.Switch { value = prefs.hide_emails, label = ui.t("settings.general.hide_emails.label") },
-				}),
-			},
-		},
-		ds.Settings.Section {
-			ds.Settings.Group {
-				row("thread_naming", {
-					label = ui.t("settings.general.thread_naming.label"),
-					description = function()
-						if failed:get().titles then
-							return says(failed:get().titles):get()
-						end
-						return if title_value() == AUTO
-							then ui.t("settings.general.thread_naming.auto"):get()
-							else ui.t("settings.general.thread_naming.model"):get()
-					end,
-					control = naming(),
 				}),
 			},
 		},

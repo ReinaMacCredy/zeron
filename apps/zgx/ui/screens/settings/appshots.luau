@@ -6,6 +6,7 @@
 -- to System Settings.
 
 local ds = require("@ds")
+local host = require("@app/screens/settings/host")
 local search = require("@app/screens/settings/search")
 local Appshots = require("@app/screens/chat/appshots")
 
@@ -39,6 +40,79 @@ end
 -- The shortcut, as its keys show it ("⌃⌥Space").
 local function shown(combo: string): string
 	return ui.shortcut_text(combo)
+end
+
+-- gpui's defaults (settings.rs, appshots.rs): off, sound on, its hotkey, Automatic.
+local DEFAULTS = { enabled = false, sound = true, shortcut = "ctrl+alt+space", destination = "automatic" }
+
+local function customized(): boolean
+	return Appshots.enabled:get() ~= DEFAULTS.enabled
+		or Appshots.sound:get() ~= DEFAULTS.sound
+		or Appshots.shortcut:get() ~= DEFAULTS.shortcut
+		or Appshots.destination:get() ~= DEFAULTS.destination
+end
+
+-- A row's reset glyph, while its setting is off its default.
+local function reset(id: string, what: Message, setting: State<any>, default: any): Node
+	return ui.show(function(): boolean
+		return setting:get() ~= default
+	end, ds.IconButton {
+		id = id,
+		icon = "restart",
+		size = "sm",
+		tone = "quiet",
+		label = function(): string
+			return ui.t("settings.appshots.reset", { what = what:get() }):get()
+		end,
+		on_click = function()
+			setting:set(default)
+		end,
+	})
+end
+
+local function restore(): Node
+	return ds.Button {
+		id = "appshots-restore-defaults",
+		tone = "ghost",
+		size = "sm",
+		disabled = function(): boolean
+			return not customized()
+		end,
+		on_click = function()
+			for k, v in DEFAULTS do
+				(Appshots :: any)[k]:set(v)
+			end
+		end,
+		ds.Icon { name = "restart", size = 14 },
+		ui.t("settings.appshots.restore"),
+	} :: any
+end
+
+-- The Enable row's line under it (gpui's `enable_status`).
+local function status(): string
+	local st = state()
+	if st.platform == false then
+		return ui.t("settings.appshots.status.unsupported"):get()
+	elseif not Appshots.enabled:get() then
+		return ui.t("settings.appshots.status.off"):get()
+	elseif st.capture == "missing" then
+		return ui.t("settings.appshots.status.capture"):get()
+	elseif st.shortcut_ready ~= true then
+		return ui.t("settings.appshots.status.unavailable"):get()
+	end
+	return ui.t("settings.appshots.status.listening", { keys = shown(Appshots.shortcut:get()) }):get()
+end
+
+local function preview(): Node
+	return ds.Button {
+		id = "appshots-sound-preview",
+		tone = "secondary",
+		size = "sm",
+		on_click = function()
+			pcall(host.invoke, "sound.play", "appshot")
+		end,
+		ui.t("settings.appshots.preview"),
+	} :: any
 end
 
 -- A combination from a key pressed, or nil (as the shipping app takes them:
@@ -172,18 +246,41 @@ M.view = ui.component(function(_: {}): Node
 	return ds.Settings.Page {
 		title = ui.t("settings.appshots.title"),
 		description = ui.t("settings.appshots.description"),
+		trail = restore(),
+		ds.Settings.Group {
+			ds.Settings.Row {
+				icon = "gallery",
+				label = ui.t("settings.appshots.intro.title"),
+				description = ui.t("settings.appshots.intro.body"),
+				detail = function(): string?
+					return if state().platform == false then ui.t("settings.appshots.intro.desktop_only"):get() else nil
+				end,
+			},
+		},
 		ds.Settings.Section {
 			title = ui.t("settings.appshots.capture_section"),
 			ds.Settings.Group {
 				row("enabled", {
 					label = ui.t("settings.appshots.enabled.label"),
 					description = ui.t("settings.appshots.enabled.description"),
-					control = ds.Switch { value = Appshots.enabled, label = ui.t("settings.appshots.enabled.label") },
+					detail = status,
+					control = ui.row {
+						gap = "$space.2",
+						items = "center",
+						reset("appshots-enabled-reset", ui.t("settings.appshots.reset_what.enabled"), Appshots.enabled, DEFAULTS.enabled),
+						ds.Switch { value = Appshots.enabled, label = ui.t("settings.appshots.enabled.label") },
+					},
 				}),
 				row("sound", {
 					label = ui.t("settings.appshots.sound.label"),
 					description = ui.t("settings.appshots.sound.description"),
-					control = ds.Switch { value = Appshots.sound, label = ui.t("settings.appshots.sound.label") },
+					control = ui.row {
+						gap = "$space.2",
+						items = "center",
+						reset("appshots-sound-reset", ui.t("settings.appshots.reset_what.sound"), Appshots.sound, DEFAULTS.sound),
+						preview(),
+						ds.Switch { value = Appshots.sound, label = ui.t("settings.appshots.sound.label") },
+					},
 				}),
 				row("shortcut", {
 					label = ui.t("settings.appshots.shortcut.label"),
@@ -192,7 +289,13 @@ M.view = ui.component(function(_: {}): Node
 							then ui.t("settings.appshots.shortcut.ready"):get()
 							else ui.t("settings.appshots.shortcut.unavailable"):get()
 					end,
-					control = ui.row { gap = "$space.2", items = "center", badge(shortcut_ready, ui.t("settings.appshots.set_up")), Recorder {} },
+					control = ui.row {
+						gap = "$space.2",
+						items = "center",
+						reset("appshots-shortcut-reset", ui.t("settings.appshots.reset_what.shortcut"), Appshots.shortcut, DEFAULTS.shortcut),
+						badge(shortcut_ready, ui.t("settings.appshots.set_up")),
+						Recorder {},
+					},
 				}),
 				row("destination", {
 					label = ui.t("settings.appshots.destination.label"),
@@ -205,7 +308,7 @@ M.view = ui.component(function(_: {}): Node
 						end
 						return ui.t("settings.appshots.destination.automatic_description"):get()
 					end,
-					control = ds.Select {
+					control = ui.row { gap = "$space.2", items = "center", reset("appshots-destination-reset", ui.t("settings.appshots.reset_what.destination"), Appshots.destination, DEFAULTS.destination), ds.Select {
 						value = Appshots.destination,
 						name = ui.t("settings.appshots.destination.label"),
 						w = 148,
@@ -217,7 +320,7 @@ M.view = ui.component(function(_: {}): Node
 								{ value = "new", label = ui.t("settings.appshots.destination.new"):get() },
 							}
 						end,
-					},
+					} },
 				}),
 			},
 		},

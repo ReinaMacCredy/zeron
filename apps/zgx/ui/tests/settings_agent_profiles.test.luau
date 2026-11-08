@@ -32,7 +32,7 @@ test("the profiles list in their order with their lines, by agent and notes; the
 	local app = open()
 	expect(app:has(`{PAGE} >> "Planner"`)).to_be(true)
 	expect(app:has(`{PAGE} >> "Scout"`)).to_be(true)
-	expect(shows(app, '"by agent"')).to_be(true)
+	expect(shows(app, '"by agent"', PAGE)).to_be(true)
 	expect(app:has(`{PAGE} >> ~"Claude · Opus · Auto-accept edits · High"`)).to_be(true)
 	expect(app:has(`{PAGE} >> ~"Plans before it edits"`)).to_be(true)
 	expect(app:text('role:textbox "System prompt"')).to_be("Answer briefly.")

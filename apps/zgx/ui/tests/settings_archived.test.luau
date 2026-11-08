@@ -13,7 +13,7 @@ local DELETE_ONE = `role:dialog "Delete session?"`
 
 local function open(command: string?): any
 	local app = mount("shell_fixture.luau")
-	app:resize(1200, 900)
+	app:resize(1200, 1100)
 	app:frames(30)
 	app:command(command or "archived_days")
 	app:command("shell.settings")
@@ -349,7 +349,7 @@ test("narrow, Delete all goes under the title", function()
 	expect(delete.y > title.y + title.h).to_be(true)
 	-- Its ink (inside the ghost's 10) on the words' edge.
 	expect(math.abs(delete.x + 10 - title.x) < 0.5).to_be(true)
-	app:resize(1200, 900)
+	app:resize(1200, 1100)
 	app:frames(30)
 	delete = box(app, "#archived-delete-all")
 	title = box(app, `{PAGE} >> role:heading "Archived"`)

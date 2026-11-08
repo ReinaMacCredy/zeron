@@ -150,6 +150,7 @@ local BACK = "::back"
 -- the name it was given); a heading by its English.
 local TITLE_KEYS: { [string]: { string } } = {
 	general = { "General", "settings.general.title" },
+	chat = { "Chat", "settings.chat.title" },
 	appearance = { "Appearance", "settings.appearance.title" },
 	notifications = { "Notifications", "settings.notifications.title" },
 	files = { "Files", "settings.files.title" },
@@ -166,6 +167,8 @@ local TITLE_KEYS: { [string]: { string } } = {
 	billing = { "Billing", "settings.billing.title" },
 	about = { "About & updates", "settings.about.title" },
 	archived = { "Archived", "settings.archived.title" },
+	experimental = { "Experimental", "settings.lab.title" },
+	tools = { "Tools", "settings.tools.title" },
 	plugins = { "Plugins", "plugins.page.title" },
 	themes = { "Themes", "themes.page.title" },
 	templates = { "Templates", "templates.page.title" },
@@ -179,6 +182,7 @@ local GROUP_KEYS: { [string]: string } = {
 	Cloud = "settings.shell.group.cloud",
 	Customize = "settings.shell.group.customize",
 	Plugins = "settings.shell.group.plugins",
+	Lab = "settings.shell.group.lab",
 }
 local function title_of(id: string, title: string): string
 	local known = TITLE_KEYS[id]

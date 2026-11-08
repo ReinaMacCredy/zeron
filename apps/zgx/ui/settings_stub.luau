@@ -133,7 +133,7 @@ local engine: { [string]: any } = {
 		compactAhead = false,
 		hasJevKey = false,
 	},
-	GetToolSettings = { settings = { disabledTools = {}, disabledGroups = {}, agentsUseFullToken = false }, disabled = {} },
+	GetToolSettings = { settings = { disabledTools = {}, disabledGroups = {}, agentsUseFullToken = false }, disabled = { "computer_screenshot" } },
 	-- (Settings → Computer use: the engine's defaults, and two apps once allowed always.)
 	GetComputerSettings = {
 		computerControlEnabled = false,
@@ -146,6 +146,8 @@ local engine: { [string]: any } = {
 		agentCursorRimColor = "",
 		alwaysAllowedApps = { { bundleId = "com.mitchellh.ghostty", name = "Ghostty" }, { bundleId = "com.example.tool" } },
 	},
+	-- (General → Predictions: the engine's defaults.)
+	GetPredictionSettings = { enabled = false, hasApiKey = false },
 	-- (Settings → Code review: Auto, no instructions.)
 	GetReviewSettings = { reviewer = { kind = "auto" }, instructions = "" },
 }
@@ -162,6 +164,46 @@ local MODELS = {
 	codex = { { id = "gpt-5.5", label = "GPT-5.5", levels = {} } },
 }
 local banners = { desktop = true, background_only = true, agent_updates = true }
+local TOOL_GROUPS = {
+	{ group = "threads", title = "Threads", summary = "Read, write and steer the chats in the sidebar.", tools = {
+		{ name = "list_threads", summary = "List the chats in the sidebar." },
+		{ name = "read_thread", summary = "Read the tail of a thread's transcript." },
+		{ name = "wait_thread", summary = "Wait for a thread.", needs = "read_thread" },
+	} },
+	{ group = "workspace", title = "Workspace", summary = "Files and shells.", tools = {
+		{ name = "run_shell", summary = "Run a shell." },
+		{ name = "read_file", summary = "Read a file." },
+	} },
+	{ group = "computer", title = "Computer", summary = "Use the desktop.", tools = {
+		{ name = "computer_screenshot", summary = "" },
+	} },
+}
+local function tool_off(_: string): any
+	local off = table.clone(engine.GetToolSettings.settings.disabledTools or {})
+	for _, g in TOOL_GROUPS do
+		local group_off = false
+		for _, x in engine.GetToolSettings.settings.disabledGroups or {} do
+			group_off = group_off or x == g.group
+		end
+		for _, t in g.tools do
+			local own = false
+			for _, x in engine.GetToolSettings.settings.disabledTools or {} do
+				own = own or x == t.name
+			end
+			if (group_off or own or g.group == "computer") and not table.find(off, t.name) then
+				table.insert(off, t.name)
+			end
+		end
+	end
+	for _, g in TOOL_GROUPS do
+		for _, t in g.tools do
+			if t.needs and table.find(off, t.needs) and not table.find(off, t.name) then
+				table.insert(off, t.name)
+			end
+		end
+	end
+	return off
+end
 
 local function find(list: { any }, id: string): number?
 	for i, item in list do
@@ -332,16 +374,48 @@ local answers: { [string]: (arg: any) -> any } = {
 				engine[get] = arg.params
 			elseif m == "SetCompactionSettings" then
 				local c = table.clone(arg.params)
-				c.hasJevKey = false
+				local key = c.jevApiKey
+				c.jevApiKey = nil
+				c.hasJevKey = if key ~= nil then key ~= "" else (engine[get].hasJevKey == true)
+				if key ~= nil then
+					log(`jev_key:{key}`)
+				end
 				engine[get] = c
 			elseif m == "SetToolSettings" then
-				engine[get] = { settings = arg.params, disabled = table.clone(arg.params.disabledTools or {}) }
+				engine[get] = { settings = arg.params, disabled = {} }
+				engine[get].disabled = tool_off("")
+			elseif m == "SetPredictionSettings" then
+				local p = table.clone(arg.params)
+				local key = p.apiKey
+				p.apiKey = nil
+				p.hasApiKey = if key ~= nil then key ~= "" else (engine[get].hasApiKey == true)
+				if key ~= nil then
+					log(`prediction_key:{key}`)
+				end
+				engine[get] = p
 			elseif m == "SetComputerSettings" or m == "SetReviewSettings" then
 				engine[get] = table.clone(arg.params)
 			end
 			return settled(engine[get])
 		end
 		return settled(engine[m])
+	end,
+	-- Settings → Tools' groups (src/settings.rs `tool_groups`): a few of proto's, counted against what's off.
+	["settings.tool_groups"] = function(arg: any): any
+		local off: { [string]: boolean } = {}
+		for _, name in (arg and arg.disabled) or {} do
+			off[name] = true
+		end
+		local out = {}
+		for _, g in TOOL_GROUPS do
+			local live = 0
+			for _, t in g.tools do
+				live += if off[t.name] then 0 else 1
+			end
+			table.insert(out, { group = g.group, title = g.title, summary = g.summary, tools = g.tools, count = { tools = #g.tools, live_tools = live, actions = 0, live_actions = 0 } })
+		end
+		log(`tool_groups:{#((arg and arg.disabled) or {})}`)
+		return settled(out)
 	end,
 	-- Computer use's status line (src/settings.rs `computer_status_value`): a desktop host up and ready.
 	["settings.computer_status"] = function()

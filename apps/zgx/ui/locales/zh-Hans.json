@@ -1625,7 +1625,8 @@
         "terms": "后续 排队 引导 运行中 智能体 消息 follow-up queue steer",
         "description": "智能体运行时将后续消息排队，或引导当前运行。按 {key} 可让这条消息反向处理。",
         "description_send_key": "智能体运行时将后续消息排队，或引导当前运行。{key} 是发送键，所以每条消息都遵循此设置。"
-      }
+      },
+      "description": "语言、切换、隐私、工作树和提交。"
     },
     "engine": {
       "outdated": "更新此电脑上的 Zeron 以更改此设置。",
@@ -1942,6 +1943,11 @@
       "sidebar_hover": {
         "label": "悬停显示侧边栏",
         "description": "指针停在窗口左边缘时显示隐藏的侧边栏。"
+      },
+      "pause_motion": {
+        "label": "后台时暂停动画",
+        "description": "当 Zeron 不是焦点窗口时，让动画保持静止。",
+        "terms": "暂停 动画 后台 焦点 静止 pause animations background"
       }
     },
     "notifications": {
@@ -2105,6 +2111,27 @@
         "terms": "辅助功能 权限 accessibility permission",
         "description": "辅助功能可添加可见及屏幕外的应用文本。不启用也可以截图。",
         "allow": "启用文本截取"
+      },
+      "intro": {
+        "title": "拍一张 Appshot，把另一个应用的窗口给智能体看",
+        "body": "在任何应用位于最前时按下你的快捷键。Zeron 会把该窗口截成图片，切到前台，并把截图附加到会话输入框；在你发送消息之前，截图只保存在这台设备上。",
+        "desktop_only": "Appshots 仅在桌面应用中可用。"
+      },
+      "status": {
+        "unsupported": "仅在 macOS 和 Linux 上可用",
+        "off": "关闭",
+        "capture": "请在 macOS 系统设置中允许屏幕录制，然后重试。",
+        "unavailable": "此快捷键不可用。请选择其他组合键。",
+        "listening": "正在监听：按 {keys} 截图"
+      },
+      "preview": "试听",
+      "restore": "恢复默认",
+      "reset": "将{what}重置为默认",
+      "reset_what": {
+        "enabled": "Appshots",
+        "sound": "截图提示音",
+        "shortcut": "快捷键",
+        "destination": "目标位置"
       }
     },
     "providers": {
@@ -2469,7 +2496,8 @@
         "cloud": "Cloud",
         "customize": "自定义",
         "plugins": "插件",
-        "browser": "浏览器"
+        "browser": "浏览器",
+        "lab": "实验室"
       }
     },
     "store": {
@@ -3068,6 +3096,121 @@
         "save": "保存",
         "terms": "说明, 提示, 关注"
       }
+    },
+    "lab": {
+      "title": "实验功能",
+      "description": "实验和测试版功能。它们可能在以后的版本中改变或移除。",
+      "terms": "实验室 测试版 实验 压缩 jev 分类器 令牌 lab beta experimental",
+      "beta": "测试版",
+      "unread": "无法读取实验室设置",
+      "compaction_section": "压缩",
+      "access_section": "智能体权限",
+      "ahead": {
+        "label": "提前压缩",
+        "description": "Claude 在一轮结束后立即就地压缩。Codex 在后台为副本生成摘要，并在下次停顿时换入；副本之后的轮次以文本形式返回。",
+        "terms": "提前 后台 摘要 副本 ahead"
+      },
+      "mode": {
+        "label": "压缩新任务",
+        "classifier_description": "由模型阅读每条消息，在开始新任务时先压缩。",
+        "reminder_description": "每条消息都附带提醒，由智能体决定是否压缩。",
+        "reminder": "提醒",
+        "classifier": "分类器",
+        "terms": "新任务 提醒 分类器 模式"
+      },
+      "source": {
+        "label": "分类器",
+        "description": "智能体的模型，或使用你的 API 密钥的 TypeSafe Jev 分类器。Jev 会收到最近的对话以及检查点之后的每条新消息。",
+        "agent": "智能体模型",
+        "typesafe": "Jev · TypeSafe",
+        "openrouter": "Jev · OpenRouter",
+        "terms": "jev typesafe openrouter 来源"
+      },
+      "model": {
+        "label": "分类器模型",
+        "description": "由 Claude 分类时用 Sonnet，由 Codex 分类时用 Codex 的默认模型；测试中小模型会压缩后续消息。",
+        "auto": "会话智能体",
+        "terms": "分类器 模型 sonnet"
+      },
+      "key": {
+        "label": "API 密钥",
+        "saved": "密钥已保存在钥匙串中。",
+        "none_typesafe": "没有密钥。可在 console.typesafe.ai/keys 获取",
+        "none_openrouter": "没有密钥。可在 openrouter.ai/settings/keys 获取",
+        "paste": "粘贴密钥",
+        "remove": "移除密钥",
+        "copy_first": "请先复制 API 密钥，再点按“粘贴密钥”。"
+      },
+      "full_token": {
+        "label": "智能体使用完整令牌",
+        "description": "新的运行可以触及应用能做的一切，包括允许插件和登录，且不会询问你。只有在你需要的工具被拒绝时才打开它。",
+        "terms": "完整 令牌 ipc 智能体 权限"
+      }
+    },
+    "chat": {
+      "title": "聊天",
+      "description": "输入框如何发送，对话记录如何呈现。",
+      "terms": "聊天 输入框 发送 后续 排队 引导 退出 对话记录 紧凑 线程 命名 标题 chat composer send follow-up queue steer",
+      "composer": "输入框",
+      "transcript": "对话记录"
+    },
+    "tools": {
+      "title": "工具",
+      "description": "Zeron 通过其 zeron MCP 服务器为每个提供方的每个智能体添加的工具。已在运行的聊天会保留其工具列表直到下一轮；对你关闭的工具的调用会立即被拒绝。",
+      "terms": "工具 mcp zeron 工具 委派 线程 分组 tools",
+      "unread": "无法读取工具设置",
+      "all_on": "全部打开",
+      "all_off": "全部关闭",
+      "all_terms": "全部 打开 关闭 每个 工具",
+      "groups": "工具分组",
+      "groups_terms": "分组 线程 工作区 委派 页面 设备 电脑 插件",
+      "couldnt_save": "无法保存：{error}",
+      "count": "{n} 个工具",
+      "count_one": "{n} 个工具",
+      "actions": " · {n} 个操作",
+      "saving": "正在保存…",
+      "saving_body": "Zeron 正在更新其 MCP 服务器。正在运行的聊天会在下一轮获取此更改。",
+      "all_live": "所有工具均已启用",
+      "all_live_body": "此引擎上的智能体可以调用 {groups} 个分组中的全部 {n} 个 Zeron 工具。",
+      "some": "已打开 {total} 个工具中的 {n} 个",
+      "some_body": "打开一个分组来挑选单个工具。对你关闭的工具的调用会立即被拒绝。",
+      "none": "没有 Zeron 工具",
+      "none_body": "智能体看不到任何 Zeron MCP 工具。打开一个分组后，对它的调用会恢复正常。",
+      "tag": {
+        "saving": "保存中",
+        "on": "全部启用",
+        "partial": "部分",
+        "off": "关闭"
+      },
+      "needs": "{tool} 关闭时此项也关闭",
+      "linked": {
+        "computer": "与“设置 > 电脑操控”为同一开关",
+        "devices": "与“设置 > 设备中心”中的智能体访问为同一开关"
+      },
+      "open": "打开",
+      "show_tools": "显示{group}的工具",
+      "group_off": "整个分组已关闭。你在下方的选择会保留，等你重新打开时生效。"
+    },
+    "predictions": {
+      "title": "预测",
+      "terms": "预测 建议 下一条 消息 tab 接受 自动补全 predictions",
+      "show": "显示预测",
+      "show_description": "在输入框中建议你的下一条消息。按 Tab 接受。",
+      "predict_with": "预测方式",
+      "predict_with_description": "编程智能体，或任何兼容 OpenAI 的 API。",
+      "agent": "智能体",
+      "custom": "自定义 API",
+      "agent_model": "智能体模型",
+      "follows_session": "每个聊天自己的智能体，使用其最便宜的模型。",
+      "one_model": "所有聊天都使用此模型。",
+      "session_agent": "会话智能体",
+      "reset": "重置",
+      "custom_api": "自定义 API",
+      "no_key": "没有密钥。Ollama 等本地服务器不需要密钥。",
+      "base_url": "基础 URL",
+      "model": "模型",
+      "model_placeholder": "模型 ID",
+      "save": "保存"
     }
   },
   "common": {

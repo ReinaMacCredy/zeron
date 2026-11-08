@@ -20,12 +20,14 @@ local M = {}
 -- a binding or computed, it follows a change of either.
 M.reduce = ui.persist("motion_reduce", false)
 M.follow_system = ui.persist("motion_follow_system", true)
+-- (gpui's "Pause animations in background": held still while the window hasn't the keys.)
+M.pause_in_background = ui.persist("motion_pause_background", false)
 function M.reduced(): boolean
-	return M.reduce:get() or (M.follow_system:get() and prefers.reduced_motion:get())
+	return M.reduce:get() or (M.follow_system:get() and prefers.reduced_motion:get()) or (M.pause_in_background:get() and ui.window.active:get() == false)
 end
 -- The same, untracked (where a move starts: a handler, an effect).
 function M.reduced_now(): boolean
-	return M.reduce:peek() or (M.follow_system:peek() and prefers.reduced_motion:peek())
+	return M.reduce:peek() or (M.follow_system:peek() and prefers.reduced_motion:peek()) or (M.pause_in_background:peek() and ui.window.active:peek() == false)
 end
 function M.choice(): string
 	return if M.reduce:get() then "on" elseif M.follow_system:get() then "system" else "off"

@@ -39,7 +39,7 @@ local NAV = "#settings-nav"
 
 local function open(page: string?): any
 	local app = mount("shell_fixture.luau")
-	app:resize(1200, 900)
+	app:resize(1200, 1100)
 	app:frames(30)
 	app:command("settings_stub.sign_in")
 	app:command("shell.settings")
@@ -59,7 +59,7 @@ test("the pages list under Personal, Devices and Organization", function()
 	-- The account's page is "Account" (its id still `profile`): no "Profile".
 	expect(app:has(`{NAV} >> "Profile"`)).to_be(false)
 	expect(app:state("shell_route_path")).to_be("/settings/general")
-	expect(shows(app, PAGE, "Send messages with")).to_be(true)
+	expect(shows(app, PAGE, "Close the panel with its last tab")).to_be(true)
 	expect(shows(app, PAGE, "Credit Zeron in commits")).to_be(true)
 end)
 

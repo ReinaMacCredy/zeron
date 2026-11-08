@@ -5,7 +5,8 @@
 -- tool's switch in its tool settings (`GetToolSettings`, `SetToolSettings`).
 -- Asked once a visit; each change shown at once, back as it was with the
 -- engine's words under the rows when it refuses. The rest of gpui's page
--- (compact ahead, the classifier's source and model) is its Lab's.
+-- (compact ahead, the classifier's source and model) is its Lab's
+-- (lab.luau, on these same states).
 
 local host = require("@app/screens/settings/host")
 local ds = require("@ds")
@@ -63,10 +64,16 @@ local function load()
 end
 
 M.load = load
+M.settings = settings
+M.tools = tools
+M.refused = refused
+M.unread = unread
+M.engine = engine
+M.says = says
 
 -- A change to the engine's: shown now, back as it was if refused (its
 -- words under the rows, as gpui's error strip).
-local function save(patch: { [string]: any })
+local function save(patch: { [string]: any }, clear: { string }?)
 	local before = settings:peek()
 	if not before then
 		return
@@ -80,6 +87,11 @@ local function save(patch: { [string]: any })
 	for k, v in patch do
 		shown[k] = v
 	end
+	for _, k in clear or {} do
+		next[k] = nil
+		shown[k] = nil
+	end
+	shown.jevApiKey = nil
 	settings:set(shown)
 	engine("SetCompactionSettings", next):after(function(v: any)
 		if v ~= nil then
@@ -188,6 +200,10 @@ local function engine_choice(label: Message, field: string, options: { { value: 
 		return ds.Segmented { value = chosen, label = label, options = options :: any }
 	end)()
 end
+
+M.save = save
+M.engine_switch = engine_switch
+M.engine_choice = engine_choice
 
 local function row(key: string, props: any): Node
 	return search.anchor(key, ds.Settings.Row(props))

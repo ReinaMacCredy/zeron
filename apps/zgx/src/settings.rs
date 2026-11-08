@@ -62,7 +62,8 @@
 //!                                         methods (ENGINE_METHODS), its answer
 //!   notifications.get / .set({ desktop?, background_only?, agent_updates? })
 //!                                       the banners the engine posts
-//!   sound.play(kind)                    a chime: done, request, attention
+//!   sound.play(kind)                    a chime: done, request, attention;
+//!                                       appshot, Appshots' capture sound
 //!   wallpaper.keep({ path })            a new chat's background image: a
 //!                                       copy of the picked file kept in the
 //!                                       engine's data folder (the shipping
@@ -104,6 +105,9 @@ const ENGINE_METHODS: &[&str] = &[
     "SetComputerSettings",
     "GetReviewSettings",
     "SetReviewSettings",
+    // General's Predictions (the composer's suggested next message).
+    "GetPredictionSettings",
+    "SetPredictionSettings",
     // Whether this window has the keys: banners set to "only when in the
     // background" hold while it does.
     "SetViewportFocus",
@@ -290,6 +294,9 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     // A session's chime, the shipping app's own: "done", "request" (an
     // agent waiting on you) or "attention" (failed, or the connection gone).
     host.action("sound.play", |kind| {
+        if text(&kind) == "appshot" {
+            return crate::appshots::play_sound();
+        }
         let data: &'static [u8] = match text(&kind).as_str() {
             "done" => SOUND_DONE,
             "request" => SOUND_REQUEST,
@@ -363,6 +370,10 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let answer = engine::get().call("GetComputerStatus", json!({})).await;
         Ok::<_, String>(computer_status_value(answer.as_ref().map_err(String::as_str)))
     });
+    host.async_action("settings.tool_groups", |args| {
+        let disabled: Vec<String> = args.field("disabled").map(value_json).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        async move { Ok::<_, String>(json_value(&tool_groups(&disabled))) }
+    });
     host.async_action("settings.engine", |args| {
         let method = args.field("method").map(text).unwrap_or_default();
         let params = args.field("params").map(value_json).unwrap_or(json!({}));
@@ -385,6 +396,26 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 })
         }
     });
+}
+
+/// Settings → Tools' groups as zeron_proto lists them, each with its tools and how many of them
+/// (and of their actions) are live while `disabled` (the engine's) are off.
+fn tool_groups(disabled: &[String]) -> Json {
+    use zeron_proto::tools::listed_tool_groups;
+    let off: std::collections::BTreeSet<&str> = disabled.iter().map(String::as_str).collect();
+    let groups: Vec<Json> = listed_tool_groups()
+        .map(|info| {
+            let count = info.received(&off);
+            json!({
+                "group": serde_json::to_value(info.group).unwrap_or_default(),
+                "title": info.title,
+                "summary": info.summary,
+                "tools": info.tools().iter().map(|t| json!({ "name": t.name, "summary": t.summary, "needs": t.needs })).collect::<Vec<_>>(),
+                "count": { "tools": count.tools, "live_tools": count.live_tools, "actions": count.actions, "live_actions": count.live_actions },
+            })
+        })
+        .collect();
+    Json::Array(groups)
 }
 
 /// Settings → Computer use's status line, its attention row and Advanced's driver, as gpui's
@@ -1061,6 +1092,24 @@ mod tests {
             assert!(ENGINE_METHODS.contains(&method), "{method}");
         }
         assert!(!ENGINE_METHODS.contains(&"ComputerAction"), "Settings never drives the desktop");
+    }
+
+    #[test]
+    fn tools_lists_proto_s_groups_with_their_live_counts() {
+        let all = tool_groups(&[]);
+        let groups = all.as_array().unwrap();
+        assert!(groups.iter().all(|g| g["group"] != "uiDriver"), "the App API is never listed");
+        let threads = groups.iter().find(|g| g["group"] == "threads").unwrap();
+        assert_eq!(threads["title"], "Threads");
+        let n = threads["count"]["tools"].as_u64().unwrap();
+        assert_eq!(threads["count"]["live_tools"].as_u64(), Some(n));
+        let first = threads["tools"][0]["name"].as_str().unwrap().to_string();
+        let one_off = tool_groups(&[first]);
+        let threads = one_off.as_array().unwrap().iter().find(|g| g["group"] == "threads").unwrap().clone();
+        assert_eq!(threads["count"]["live_tools"].as_u64(), Some(n - 1));
+        for method in ["GetToolSettings", "SetToolSettings", "GetPredictionSettings", "SetPredictionSettings"] {
+            assert!(ENGINE_METHODS.contains(&method), "{method}");
+        }
     }
 
     #[test]

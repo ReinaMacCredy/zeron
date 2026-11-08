@@ -31,7 +31,7 @@ end
 
 local function open(page: string?, offer: boolean?): any
 	local app = mount("shell_fixture.luau")
-	app:resize(1200, 900)
+	app:resize(1200, 1100)
 	app:frames(30)
 	app:command("settings_stub.sign_in")
 	if offer ~= false then
