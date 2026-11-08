@@ -236,9 +236,12 @@ function M.add_images(t: store.Task)
 end
 
 -- The new chat composer's agent, as a new chat would start (nil: none known).
-local defaults = ui.persist("chat_new_defaults", {} :: { [string]: any })
+local function defaults(): { [string]: any }
+	local d = chat_store.new_defaults
+	return if d then d:get() else {}
+end
 local function new_chat_model(): any
-	local d = defaults:get()
+	local d = defaults()
 	local catalog = chat_store.catalog:get()
 	for _, m in catalog.models or {} do
 		if m.value == d.model then
@@ -262,7 +265,7 @@ function M.start(t: store.Task)
 			M.starting:set(nil)
 		end
 	end
-	store.start(t.id, { model = m.value, effort = defaults:peek().effort, access = defaults:peek().access }, t.project, over, over)
+	store.start(t.id, { model = m.value, effort = defaults().effort, access = defaults().access }, t.project, over, over)
 end
 
 local function NewChat(t: store.Task): Node

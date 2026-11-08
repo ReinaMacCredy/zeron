@@ -366,3 +366,20 @@ test("Appearance's Mode is gpui's three cards, each a small window, and a card p
 	expect(app:state("appearance")).to_be("light")
 	expect(read(app, "worn")).to_contain("theme-light")
 end)
+
+test("on a host from before the theme library, Import theme still brings a theme in, and the menu offers none of the library's actions", function()
+	local app = open()
+	app:command("old_host")
+	app:frames(5)
+	add_dialog(app, "Harbor Night.json")
+	expect(app:error()).to_be(nil)
+	expect(calls(app)).to_contain("import:Harbor Night.json")
+	expect((app:tree("#themes-add"):match("[^\n]+")) or "hidden").to_contain("hidden")
+	expect(app:has("#theme-custom-harbor-night")).to_be(true)
+	tab(app, "Yours")
+	app:click('role:button "More for Harbor Night"')
+	expect(app:wait('role:menuitem "Rename"', { timeout_ms = 15000 })).to_be(true)
+	for _, item in { "Reload", "Reveal", "Review mapping", "Duplicate as editable", "Unlink" } do
+		expect(app:has(`role:menuitem "{item}"`)).to_be(false)
+	end
+end)

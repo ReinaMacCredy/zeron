@@ -735,6 +735,17 @@ end
 -- (its search, highlight and scope, given back on the way back).
 type Level = { page: Page, query: string, hi: string?, scope: string }
 
+-- A lifted row's palette goes on the next frame, and its end comes as zgx gives it (to the row, gone or not);
+-- a test's drag, which gives no frame between press and release, may hold either back.
+local hooks = {
+	after_lift = function(f: () -> ())
+		ui.after(0, f)
+	end,
+	on_land = function(f: () -> ())
+		f()
+	end,
+}
+
 local Body = ui.component(function(props: Props & { recent_state: State<{ string }>, width: State<number>, held: { query: string?, scope: string?, lifted: boolean? } }): Node
 	local open = props.open
 	local recent = props.recent_state
@@ -2247,7 +2258,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 					if payload ~= nil then
 						held.query, held.scope, held.lifted = query:peek(), scope:peek(), true
 						-- (Once the drag holds the row: gone before, the row's end would go unheard.)
-						ui.after(0, function()
+						hooks.after_lift(function()
 							if held.lifted then
 								open:set(false)
 							end
@@ -2272,22 +2283,24 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 				else nil,
 			on_drag_end = if item_now and item_now.drag
 				then function(_payload: any, accepted: boolean?)
-					local ended = (item_now.drag :: any).ended
-					if ended then
-						ended(accepted == true)
-					end
-					held.lifted = false
-					if accepted == true then
-						held.query, held.scope = nil, nil
-						open:set(false)
-					elseif not open:peek() then
-						open:set(true)
-					else
-						held.query, held.scope = nil, nil
-						if field then
-							field:focus()
+					hooks.on_land(function()
+						local ended = (item_now.drag :: any).ended
+						if ended then
+							ended(accepted == true)
 						end
-					end
+						held.lifted = false
+						if accepted == true then
+							held.query, held.scope = nil, nil
+							open:set(false)
+						elseif not open:peek() then
+							open:set(true)
+						else
+							held.query, held.scope = nil, nil
+							if field then
+								field:focus()
+							end
+						end
+					end)
 				end
 				else nil,
 			on_press = if item_now and item_now.click_selects
@@ -2698,7 +2711,7 @@ local function scope_key(n: number): boolean
 	return f ~= nil and f(n)
 end
 
-return setmetatable({ type_path = type_path, scope_key = scope_key }, {
+return setmetatable({ type_path = type_path, scope_key = scope_key, hooks = hooks }, {
 	__call = function(_, props: Props): Node
 		return Palette(props)
 	end,

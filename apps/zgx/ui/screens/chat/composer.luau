@@ -91,6 +91,7 @@ local defaults = ui.persist("chat_new_defaults", {
 	checkout = "worktree" :: string?,
 	device = nil :: string?,
 })
+store.new_defaults = defaults
 
 local FIELDS = { "model", "effort", "fast", "options", "access", "plan" }
 -- Past ds/dialog's leaving and its modal's going (which gives the keys back

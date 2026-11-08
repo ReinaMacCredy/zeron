@@ -114,7 +114,18 @@ local function save(edit: (any) -> ())
 	next.fallback = next.fallback or {}
 	edit(next)
 	settings:set(next)
-	engine("SetRoutingSettings", next):after(function(saved: any)
+	local sent = next
+	-- zgx sends an empty table as `[]`, which proto's `roles` map refuses; left out, it reads as empty.
+	local any_role = false
+	for _ in next.roles do
+		any_role = true
+		break
+	end
+	if not any_role then
+		sent = table.clone(next)
+		sent.roles = nil
+	end
+	engine("SetRoutingSettings", sent):after(function(saved: any)
 		settings:set(if type(saved) == "table" then saved else next)
 		refused:set(nil)
 		load_preview()

@@ -662,15 +662,34 @@ ui.effect(function()
 	if not id or now.state ~= "ready" then
 		return
 	end
-	held_link:set(nil)
 	for _, list in { now.chats, now.archived or {} } do
 		for _, c in list do
 			if c.id == id then
+				held_link:set(nil)
 				M.open_session(id)
 				return
 			end
 		end
 	end
+	-- A side chat opens in its parent, as the palette's rows do: lanes loads in a timer, which this run owns
+	-- until the timer lets the link go.
+	for parent, list in now.children or {} do
+		for _, c in list do
+			if c.id == id then
+				ui.after(0, function()
+					held_link:set(nil)
+					local lanes: any = require("@app/screens/shell/boundary").load("@app/screens/chat/lanes")
+					if lanes and lanes.open_thread then
+						lanes.open_thread(id)
+					else
+						M.open_session(parent)
+					end
+				end)
+				return
+			end
+		end
+	end
+	held_link:set(nil)
 	notice("shell.links.not_found")
 end)
 

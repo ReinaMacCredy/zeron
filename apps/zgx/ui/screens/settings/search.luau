@@ -63,6 +63,24 @@ function M.index(page: string, title: Words, terms: Words, rows: { Row })
 	M.revision:set(M.revision:peek() + 1)
 end
 
+-- The pages indexed, in the list's order (they index as they load, in whatever order they're opened);
+-- one the list doesn't hold after it, as it came.
+local function in_order(): { string }
+	local rank: { [string]: number } = {}
+	local shell = require("@app/screens/shell/settings") :: any
+	for i, id in shell.pages:get() do
+		rank[id] = i
+	end
+	for i, id in page_order do
+		rank[id] = rank[id] or (100000 + i)
+	end
+	local out = table.clone(page_order)
+	table.sort(out, function(a: string, b: string): boolean
+		return rank[a] < rank[b]
+	end)
+	return out
+end
+
 -- A page that went (a plugin's settings, the plugin off): out of the index.
 function M.unindex(page: string)
 	if not pages[page] then
@@ -123,7 +141,7 @@ function M.find(query: string): { Hit }
 	local whole = string.lower((string.gsub(query, "^%s*(.-)%s*$", "%1")))
 	local hits: { Hit } = {}
 	local n = 0
-	for _, page in page_order do
+	for _, page in in_order() do
 		for _, e in pages[page] or {} do
 			n += 1
 			local score = 0
@@ -169,7 +187,7 @@ end
 function M.rows(): { Hit }
 	M.revision:get()
 	local out: { Hit } = {}
-	for _, page in page_order do
+	for _, page in in_order() do
 		for _, e in pages[page] or {} do
 			if e.key then
 				local page_title = said(e.page_title)

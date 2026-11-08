@@ -404,7 +404,10 @@ local answers: { [string]: (arg: any) -> any } = {
 				if m == "SetRoutingSettings" and type(roles) == "table" and (roles[1] ~= nil or next(roles) == nil) then
 					return settled(nil, "invalid type: sequence, expected a map")
 				end
-				engine[get] = arg.params
+				engine[get] = table.clone(arg.params)
+				if m == "SetRoutingSettings" then
+					engine[get].roles = roles or {}
+				end
 			elseif m == "SetAutoResumeLimits" then
 				engine.auto_resume = arg.params.enabled == true
 				return settled({ autoResume = engine.auto_resume, chats = {} })

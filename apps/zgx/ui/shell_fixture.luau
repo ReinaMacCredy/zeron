@@ -488,6 +488,32 @@ ui.command {
 		publish()
 	end,
 }
+-- A test's drag gives no frame between press and release: `fixture.hold_lift` keeps a palette row's lift and
+-- end back, `fixture.lift_frame` runs the frame that takes the palette from under it, `fixture.lift_land` its end.
+local held_lift: { close: (() -> ())?, land: (() -> ())? } = {}
+ui.command { id = "fixture.hold_lift", title = "Fixture: hold a palette row's drag", menu = "Fixture", run = function()
+	local hooks = (require("@ds/command_palette") :: any).hooks
+	hooks.after_lift = function(f: () -> ())
+		held_lift.close = f
+	end
+	hooks.on_land = function(f: () -> ())
+		held_lift.land = f
+	end
+end }
+ui.command { id = "fixture.lift_frame", title = "Fixture: a frame mid-drag", menu = "Fixture", run = function()
+	local f = held_lift.close
+	held_lift.close = nil
+	if f then
+		f()
+	end
+end }
+ui.command { id = "fixture.lift_land", title = "Fixture: the held drag ends", menu = "Fixture", run = function()
+	local f = held_lift.land
+	held_lift.land = nil
+	if f then
+		f()
+	end
+end }
 ui.command { id = "fixture.icons_outdated", title = "Fixture: an engine without project icons", menu = "Fixture", run = function()
 	icons_refused = "outdated"
 end }

@@ -309,6 +309,8 @@ function M.catalog_on(device: string?)
 end
 
 M.dismiss_cards = nil :: (() -> boolean)?
+-- The composer's `chat_new_defaults`, set as it loads (a module's persist is its own).
+M.new_defaults = nil :: any
 
 -- A bare Escape no one else took (a menu, a dialog, a mention list, a
 -- question): with Settings' "Escape stops the agent" on, it stops the

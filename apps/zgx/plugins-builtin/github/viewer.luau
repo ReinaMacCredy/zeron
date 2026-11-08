@@ -43,6 +43,7 @@ local people = require("@ds/people")
 local progress = require("@ds/progress")
 local EmptyState = require("@ds/empty_state")
 local Icon = require("@ds/icon")
+local Tooltip = require("@ds/tooltip")
 local Dialog = require("@ds/dialog").Dialog
 
 export type Detail = {
@@ -2068,27 +2069,31 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 					tone = "quiet",
 					on_click = refresh,
 				},
-				ui.presence(function(): string
-					return if link_copied:get() then "copied" else "copy"
-				end, function(k: string): Node
-					return IconButton {
-						icon = if k == "copied" then "check" else "copy",
-						label = T.s(if k == "copied" then "viewer.link_copied" else "viewer.copy_link"),
-						size = "sm",
-						tone = "quiet",
-						on_click = function()
-							ui.clipboard.write(d.url or url)
-							link_copied:set(true)
-							copied_at += 1
-							local mine = copied_at
-							ui.after(1500, function()
-								if mine == copied_at then
-									link_copied:set(false)
-								end
-							end)
-						end,
-					}
-				end),
+				-- (One button, its glyph and name following the copy: a press keeps the keys on it.)
+				IconButton {
+					icon = function(): string
+						return if link_copied:get() then "check" else "copy"
+					end :: any,
+					label = function(): string
+						return T.s(if link_copied:get() then "viewer.link_copied" else "viewer.copy_link")
+					end,
+					tooltip = Tooltip { function(): string
+						return T.s(if link_copied:get() then "viewer.link_copied" else "viewer.copy_link")
+					end } :: any,
+					size = "sm",
+					tone = "quiet",
+					on_click = function()
+						ui.clipboard.write(d.url or url)
+						link_copied:set(true)
+						copied_at += 1
+						local mine = copied_at
+						ui.after(1500, function()
+							if mine == copied_at then
+								link_copied:set(false)
+							end
+						end)
+					end,
+				},
 				IconButton {
 					icon = "arrow-up-right",
 					label = T.s("viewer.open_github"),

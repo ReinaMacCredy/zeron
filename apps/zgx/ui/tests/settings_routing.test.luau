@@ -71,6 +71,8 @@ test("Routing: when out of quota, the fallback list, mid-run, native sub-agents 
 	local app = open()
 	expect(app:tree(`{PAGE} >> role:button "When the routed harness is out of quota"`)).to_contain("Native sub-agent (Recommended)")
 	pick(app, "When the routed harness is out of quota", "Next in fallback list")
+	-- Nothing routed yet: an empty roles table must not go out as a list.
+	expect(app:has("#routing-refused")).to_be(false)
 	pick(app, "Add fallback", "Codex GPT-5.5")
 	expect(has(app, "#routing-fallback", "Codex GPT-5.5")).to_be(true)
 	pick(app, "Add fallback", "Claude Code Opus")

@@ -65,6 +65,14 @@ local entries = {
 	entry("pdf", "Pdf", HOME .. "/.claude/skills/pdf/SKILL.md", { "claude-code" }, "Read and write PDF files"),
 }
 entries[1].paths = { entries[1].path, HOME .. "/.codex/skills/code-review/SKILL.md" }
+-- A second `pdf`, Codex's own, its bytes not Claude's: two cards of one name.
+ui.command {
+	id = "skills.twin_pdf",
+	title = "Codex has a pdf skill of its own",
+	run = function()
+		table.insert(entries, entry("pdf", "Pdf", HOME .. "/.codex/skills/pdf/SKILL.md", { "codex" }, "Codex's own PDF skill"))
+	end,
+}
 
 store.host = {
 	list = function(): any

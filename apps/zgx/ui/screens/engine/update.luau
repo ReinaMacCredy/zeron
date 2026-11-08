@@ -22,7 +22,6 @@
 -- updated, and the chip says so.
 
 local sessions = require("@account/sessions")
-local boundary = require("@app/screens/shell/boundary")
 local Icon = require("@ds/icon")
 local FadeText = require("@ds/fade_text")
 local locale = require("@ds/locale")
@@ -40,9 +39,15 @@ end
 -- A restart asked of this stale engine already (once each: the engine that
 -- comes back is a new one, and says again).
 local asked = ui.state("engine_update_asked", false)
--- (Its module loads the first time it's asked for, from a timer: nothing more at launch.)
+-- (Its module loads the first time it's asked for, from a timer: nothing more at launch. The flag
+-- starts over with the script, as the module it says is loaded does: a build never loads it.)
 M.prompt_loaded = ui.state("update_prompt_loaded", false)
-local PROMPT = "@app/screens/shell/update_prompt"
+M.prompt_loaded:set(false)
+local prompt_module: any = nil
+function M.show_prompt(prompt: any)
+	prompt_module = prompt
+	M.prompt_loaded:set(true)
+end
 
 -- Whether anything runs in the engine now.
 local function busy(): boolean
@@ -108,10 +113,9 @@ M.Watch = ui.component(function(): Node
 		h = 0,
 		absolute = true,
 		ui.presence(function(): string?
-			return if M.prompt_loaded:get() then "prompt" else nil
+			return if M.prompt_loaded:get() and prompt_module then "prompt" else nil
 		end, function(): Node
-			local prompt: any = boundary.load(PROMPT)
-			return if prompt then prompt.Prompt() else ui.div {}
+			return prompt_module.Prompt()
 		end),
 	}
 end)

@@ -172,3 +172,13 @@ test("a chat's link opens its chat; one that isn't here, another workspace's, or
 	expect(app:has('role:status >> "missing workspace locator"')).to_be(true)
 	expect(app:state("shell_route_path")).to_be("/session/a2")
 end)
+
+test("a side chat's link opens it in its parent, as gpui finds it among every chat", function()
+	local app = open()
+	app:command("side_chats")
+	app:frames(5)
+	app:set_state("app.link", { seq = 1, chat = "s1", linked = true })
+	app:frames(30)
+	expect(app:state("shell_route_path")).to_be("/session/a1")
+	expect(app:has('role:status >> "The linked conversation was not found"')).to_be(false)
+end)

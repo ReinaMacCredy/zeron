@@ -38,7 +38,7 @@ do
 				local watch: any = boundary.load("@app/screens/engine/update")
 				if prompt and watch then
 					prompt.open()
-					watch.prompt_loaded:set(true)
+					watch.show_prompt(prompt)
 				end
 			end)
 		end,

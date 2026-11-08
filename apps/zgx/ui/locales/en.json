@@ -4958,7 +4958,8 @@
         "adjusted": "Adjusted · {count}",
         "warnings": "Warnings · {count}",
         "checks": "Checks · {count}"
-      }
+      },
+      "host_too_old": "Update Zeron to use this."
     }
   },
   "tasks": {

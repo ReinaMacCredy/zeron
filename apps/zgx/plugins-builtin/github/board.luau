@@ -27,6 +27,7 @@ local Badge = require("@ds/badge")
 local ListRow = require("@ds/list_row").ListRow
 local Button = require("@ds/button")
 local IconButton = require("@ds/icon_button").IconButton
+local glyph_size = require("@ds/icon_button").glyph_size
 local Text = require("@ds/text")
 local Tabs = require("@ds/tabs")
 local Dropdown = require("@ds/dropdown")
@@ -38,6 +39,8 @@ local skeleton = require("@ds/skeleton")
 local people = require("@ds/people")
 local control = require("@ds/control")
 local ProgressRing = require("@ds/progress").ProgressRing
+local Icon = require("@ds/icon")
+local Tooltip = require("@ds/tooltip")
 
 export type Item = {
 	number: number,
@@ -440,46 +443,47 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 						tone = "tertiary",
 					},
 				},
+				-- (One button throughout, its ring in its glyph's place while it loads: a press keeps the keys on it.)
 				ui.div {
 					on_hover = function(inside: boolean)
 						if inside then
 							fresh_tick:set(fresh_tick:peek() + 1)
 						end
 					end,
-					ui.presence(function(): string
-						fresh_tick:get()
-						if refreshing:get() then
-							return "busy"
-						end
-						local at = loaded_at:get()
-						if not at then
-							return zeron.s("board.refresh_tip")
-						end
-						local mins = math.floor((os.time() - at) / 60)
-						return if mins < 1 then zeron.s("board.loaded_now") else zeron.s("board.loaded_ago", { n = mins })
-					end, function(tip: string): Node
-						if tip == "busy" then
-							return ui.row {
-								w = 32,
-								h = 32,
-								items = "center",
-								justify = "center",
-								ProgressRing { size = 16, tone = "neutral", label = zeron.s("board.refreshing") },
-							}
-						end
-						return IconButton {
-							icon = "refresh",
-							label = zeron.s("board.refresh_tip"),
-							tooltip = tip,
-							tone = "quiet",
-							disabled = function(): boolean
-								return repo:get() == nil
-							end,
-							on_click = function()
+					IconButton {
+						label = function(): string
+							return if refreshing:get() then zeron.s("board.refreshing") else zeron.s("board.refresh_tip")
+						end,
+						tooltip = Tooltip { function(): string
+							fresh_tick:get()
+							if refreshing:get() then
+								return zeron.s("board.refreshing")
+							end
+							local at = loaded_at:get()
+							if not at then
+								return zeron.s("board.refresh_tip")
+							end
+							local mins = math.floor((os.time() - at) / 60)
+							return if mins < 1 then zeron.s("board.loaded_now") else zeron.s("board.loaded_ago", { n = mins })
+						end } :: any,
+						tone = "quiet",
+						disabled = function(): boolean
+							return repo:get() == nil
+						end,
+						on_click = function()
+							if not refreshing:peek() then
 								load({ refresh = true, quiet = state:peek() == "ready" })
-							end,
-						}
-					end),
+							end
+						end,
+						ui.presence(function(): string
+							return if refreshing:get() then "busy" else "idle"
+						end, function(k: string): Node
+							if k == "busy" then
+								return ProgressRing { size = 16, tone = "neutral", label = zeron.s("board.refreshing") }
+							end
+							return Icon { name = "refresh", size = glyph_size("md") }
+						end),
+					},
 				},
 			},
 			ui.row {

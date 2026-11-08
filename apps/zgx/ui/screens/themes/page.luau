@@ -178,6 +178,16 @@ local function analyze()
 		found_now:set(f)
 	end, function(err: any)
 		analyzing:set(false)
+		if type(err) == "table" and err.unsupported then
+			-- A host from before the library still imports a copy of all it holds, as a drop does.
+			state.import(path):after(function(done: any)
+				adding:set(false)
+				imported(done)
+			end, function(e: any)
+				add_error:set(state.said(e))
+			end)
+			return
+		end
 		add_error:set(state.said(err))
 	end)
 end
@@ -539,24 +549,27 @@ local function controls(e: state.Entry, now: State<any>): Node
 				end),
 			})
 		end
-		table.insert(library, Menu.Row {
-			icon = "eye",
-			label = ui.t("themes.page.review_mapping"),
-			role = "menuitem",
-			on_click = pick_(function()
-				open_review(id)
-			end),
-		})
-		table.insert(library, Menu.Row {
-			icon = "copy",
-			label = ui.t("themes.page.duplicate"),
-			role = "menuitem",
-			on_click = pick_(function()
-				act(function()
-					return state.duplicate(id)
-				end, "themes.page.couldnt_duplicate")
-			end),
-		})
+		-- (No origin: a host from before the library, which has no review or duplicate.)
+		if e.origin then
+			table.insert(library, Menu.Row {
+				icon = "eye",
+				label = ui.t("themes.page.review_mapping"),
+				role = "menuitem",
+				on_click = pick_(function()
+					open_review(id)
+				end),
+			})
+			table.insert(library, Menu.Row {
+				icon = "copy",
+				label = ui.t("themes.page.duplicate"),
+				role = "menuitem",
+				on_click = pick_(function()
+					act(function()
+						return state.duplicate(id)
+					end, "themes.page.couldnt_duplicate")
+				end),
+			})
+		end
 		if state.linked(e) then
 			table.insert(library, Menu.Row {
 				icon = "lock-keyhole-unlocked",
@@ -569,7 +582,9 @@ local function controls(e: state.Entry, now: State<any>): Node
 				end),
 			})
 		end
-		table.insert(groups, Menu.Group(library))
+		if #library > 0 then
+			table.insert(groups, Menu.Group(library))
+		end
 		table.insert(groups, Menu.Group {
 			Menu.Row {
 				icon = "pen",

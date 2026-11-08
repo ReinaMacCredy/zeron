@@ -96,10 +96,11 @@ end
 function M.try(e: store.Entry)
 	local f = store.filter:peek()
 	local allowed = if f and table.find(e.harnesses, f) then { f } else e.harnesses
-	local defaults = ui.persist("chat_new_defaults", {} :: { [string]: any })
+	local defaults = chat_store.new_defaults
+	local model = if defaults then defaults:peek().model else nil
 	local now: string? = nil
 	for _, m in chat_store.catalog:peek().models or {} do
-		if m.value == defaults:peek().model then
+		if model ~= nil and m.value == model then
 			now = m.harness
 		end
 	end
@@ -220,9 +221,9 @@ local function Filters(): Node
 	end, { w_full = true })
 end
 
-local function Card(e: store.Entry): Node
+local function Card(e: store.Entry, id: string): Node
 	return ui.button {
-		id = `skills-card-{e.name}`,
+		id = id,
 		label = e.title,
 		w_full = true,
 		min_w = 0,
@@ -258,12 +259,20 @@ local function Grid(width: State<number>): Node
 	end, function(key: string): Node
 		local columns = tonumber(string.match(key, "^[^|]*|(%d)")) or 1
 		local list = store.shown(store.filter:peek())
+		-- (Two skills of one name, their bytes apart, are two cards: the later ones numbered, as every agent's list has them.)
+		local ids: { [string]: string } = {}
+		local seen: { [string]: number } = {}
+		for _, e in store.shown(nil) do
+			local n = (seen[e.name] or 0) + 1
+			seen[e.name] = n
+			ids[e.path] = if n == 1 then `skills-card-{e.name}` else `skills-card-{e.name}-{n}`
+		end
 		local rows: { any } = {}
 		for i = 1, #list, columns do
 			local cells: { any } = {}
 			for j = 0, columns - 1 do
 				local e = list[i + j]
-				table.insert(cells, ui.div { grow = 1, basis = 0, min_w = 0, if e then Card(e) else nil })
+				table.insert(cells, ui.div { grow = 1, basis = 0, min_w = 0, if e then Card(e, ids[e.path] or `skills-card-{e.name}`) else nil })
 			end
 			table.insert(rows, ui.row { w_full = true, gap = "$space.2", table.unpack(cells) })
 		end

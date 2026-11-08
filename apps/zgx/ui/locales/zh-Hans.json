@@ -4958,7 +4958,8 @@
         "adjusted": "已调整 · {count}",
         "warnings": "警告 · {count}",
         "checks": "检查 · {count}"
-      }
+      },
+      "host_too_old": "更新 Zeron 以使用此功能。"
     }
   },
   "tasks": {

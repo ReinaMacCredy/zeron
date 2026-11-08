@@ -45,6 +45,13 @@ test("choosing 简体中文 changes the page's words at once, and English brings
 	expect(shows(app, PAGE, "Close the panel with its last tab")).to_be(false)
 	expect(shows(app, PAGE, "Hide email addresses")).to_be(false)
 	expect(shows(app, PAGE, "简体中文")).to_be(true)
+	-- The list of pages too, every name of the app's own.
+	for _, english in { "Usage", "Computer use", "Compaction", "Code review", "General", "Routing" } do
+		expect(app:has(`{NAV} >> role:tab "{english}"`)).to_be(false)
+	end
+	for _, chinese in { "用量", "电脑操控", "压缩", "代码审查" } do
+		expect(app:has(`{NAV} >> role:tab "{chinese}"`)).to_be(true)
+	end
 	-- English again, as chosen in the same select (its name now in Chinese:
 	-- reached by its id).
 	app:click("#settings-language >> role:button")

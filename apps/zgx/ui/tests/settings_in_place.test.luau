@@ -88,6 +88,22 @@ test("the search finds a page and a setting, and opens the setting's page at it"
 	expect(app:has(`{NAV} >> "General"`)).to_be(true)
 end)
 
+test("the search's ties keep the list's order, whichever page was opened first", function()
+	local function found(app: any): string
+		app:type(`{NAV} >> #settings-search`, "model")
+		app:frames(20)
+		local out = {}
+		for words in app:tree("#settings-search-results"):gmatch('"([^"]+)"') do
+			table.insert(out, words)
+		end
+		return table.concat(out, "|")
+	end
+	local first = found(open())
+	local routing_first = found(open("Routing"))
+	expect(first ~= "").to_be(true)
+	expect(routing_first).to_be(first)
+end)
+
 test("a member joining and a role changed leave the other rows the same nodes", function()
 	local app = open("Members")
 	expect(asked(app, "account.members:org_1")).to_be(true)

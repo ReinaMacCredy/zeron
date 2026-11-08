@@ -52,6 +52,21 @@ export type Entry = {
 	path: string?,
 }
 
+-- `ui.call` raises on a host too old to have the action: refused instead, in words, `unsupported` set.
+local function call(name: string, arg: any): any
+	local ok, promise = pcall(ui.call, name, arg)
+	if ok then
+		return promise
+	end
+	return {
+		after = function(_self: any, _done: any, failed: ((any) -> ())?)
+			if failed then
+				failed({ message = ui.t("themes.page.host_too_old"):get(), unsupported = true })
+			end
+		end,
+	}
+end
+
 -- What the host does, where a test may stand in for it: each a promise
 -- (`:after(ok, err)`) but remove.
 M.host = {
@@ -68,13 +83,13 @@ M.host = {
 		return ui.call("themes.choose", slots)
 	end,
 	analyze = function(path: string): any
-		return ui.call("themes.analyze", path)
+		return call("themes.analyze", path)
 	end,
 	add = function(path: string, variants: { string }, link: boolean): any
-		return ui.call("themes.add", { path = path, variants = variants, link = link })
+		return call("themes.add", { path = path, variants = variants, link = link })
 	end,
 	entry = function(action: string, id: string): any
-		return ui.call(`themes.{action}`, id)
+		return call(`themes.{action}`, id)
 	end,
 }
 

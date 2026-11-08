@@ -20,6 +20,8 @@ end
 local appearance = require("@app/screens/shell/appearance")
 local templates = require("@app/screens/templates/state")
 local state = require("@app/screens/themes/state")
+-- (The real calls, for `old_host`: a host from before the library's actions has none of them.)
+local real_host = table.clone(state.host)
 local page = require("@app/screens/themes/page")
 local settings_appearance = require("@app/screens/settings/appearance")
 local route = require("@app/screens/shell/route")
@@ -204,6 +206,9 @@ state.host.entry = function(action: string, id: string): any
 	end
 	return settled(true, nil)
 end
+ui.command { id = "old_host", title = "Run on a host from before the theme library", run = function()
+	state.host.analyze, state.host.add, state.host.entry = real_host.analyze, real_host.add, real_host.entry
+end }
 ui.command { id = "break_source", title = "Break the linked source", run = function()
 	source_broken = true
 end }
