@@ -306,7 +306,8 @@
         "body": "There's nothing in it yet."
       },
       "lines": "{n, plural, one {# line} other {# lines}}",
-      "toggle_fit": "Double-click to toggle fit"
+      "toggle_fit": "Double-click to toggle fit",
+      "outside": "Read-only: outside this chat's folder."
     },
     "dropdown": {
       "placeholder": "Choose…",
@@ -1540,7 +1541,8 @@
         "label": "Error",
         "signed_out": "Signed out",
         "limit": "Limit reached",
-        "log_in": "Log in"
+        "log_in": "Log in",
+        "copy": "Copy error"
       },
       "computer": {
         "elevated_risk": "Elevated Risk",
@@ -2466,7 +2468,17 @@
         "description": "For a bug report: the versions and builds above.",
         "copied": "Version info copied"
       },
-      "updates_description": "Updates go to the engine on this computer, as the Zeron app's do. This app isn't packaged yet, so it isn't updated here."
+      "updates_description": "Updates go to the engine on this computer, as the Zeron app's do. This app isn't packaged yet, so it isn't updated here.",
+      "devices_section": "Devices",
+      "devices": {
+        "terms": "devices machines computers versions other update",
+        "this": "This device",
+        "updated_above": "Updated above",
+        "update_there": "Update on that device",
+        "up_to_date": "Up to date",
+        "unknown": "Version unknown",
+        "none": "No paired devices."
+      }
     },
     "archived": {
       "title": "Archived",
@@ -3504,7 +3516,8 @@
         "tasks": "Tasks",
         "inbox": "Inbox",
         "quick_capture": "Quick capture",
-        "skills": "Skills"
+        "skills": "Skills",
+        "update_prompt": "The update dialog"
       }
     },
     "title_bar": {
@@ -3544,7 +3557,8 @@
         "shell_reload": "Reload Zeron",
         "shell_reload_interface": "Reload interface",
         "shell_random_wallpaper": "Random wallpaper",
-        "chat_side_chat": "Side chat"
+        "chat_side_chat": "Side chat",
+        "shell_check_updates": "Check for Updates…"
       },
       "group": {
         "sessions": "Sessions",
@@ -3738,6 +3752,16 @@
       "asking": "Asking",
       "failed": "Failed",
       "done": "Done"
+    },
+    "update_prompt": {
+      "later": "Later",
+      "hide": "Hide",
+      "ok": "OK"
+    },
+    "links": {
+      "bad": "That link can't be opened",
+      "other_workspace": "This conversation link belongs to another workspace",
+      "not_found": "The linked conversation was not found"
     }
   },
   "onboarding": {

@@ -442,9 +442,9 @@ local function build_panel(props: PanelProps): Node
 	local function keys(e: KeyEvent): boolean
 		local k = e.key
 		local i = focused:peek()
-		if k == "ArrowDown" then
+		if k == "ArrowDown" or (e.ctrl and k == "n") then
 			step(1)
-		elseif k == "ArrowUp" then
+		elseif k == "ArrowUp" or (e.ctrl and k == "p") then
 			step(-1)
 		elseif k == "Home" or k == "PageUp" then
 			edge(true)

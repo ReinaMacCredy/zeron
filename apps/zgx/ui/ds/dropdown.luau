@@ -927,10 +927,11 @@ return ui.component(function(props: Props): Node
 				}) then
 					return true
 				end
-				if e.key == "ArrowDown" then
+				-- (Ctrl+N and Ctrl+P too, as Zeron's menus take them.)
+				if e.key == "ArrowDown" or (e.ctrl and e.key == "n") then
 					move(1)
 					return true
-				elseif e.key == "ArrowUp" then
+				elseif e.key == "ArrowUp" or (e.ctrl and e.key == "p") then
 					move(-1)
 					return true
 				elseif e.key == "Enter" then

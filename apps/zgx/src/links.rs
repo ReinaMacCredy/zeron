@@ -9,8 +9,10 @@
 //!                                   workspace it came from
 //!
 //! What to open goes to the scripts as shared `app.link`,
-//! `{ seq, chat?, settings? }` (`seq` moving with each), which the shell's
-//! route follows (ui/screens/shell/route.luau). The beta registers for them
+//! `{ seq, chat?, linked?, settings?, notice?, why? }` (`seq` moving with each; `linked`, a
+//! chat's link, which says so when the chat isn't there), which the shell's
+//! route follows (ui/screens/shell/route.luau). `notice` is a link that won't
+//! open, as Zeron.app says it: `bad` (`why`, the link's fault), `other_workspace`. The beta registers for them
 //! (`sh.zeron.app`'s `zeron` scheme, src/main.rs); a launch with a link
 //! (`zeron <url>`) opens it too.
 
@@ -23,6 +25,7 @@ use zgx_script::{ScriptHost, Shared, Value};
 pub enum Target {
     Chat(String),
     Settings(&'static str),
+    Notice(&'static str, Option<String>),
 }
 
 /// What `url` asks for: the target and, for a conversation link, the
@@ -51,11 +54,21 @@ pub fn install(host: &ScriptHost) {
     WINDOWS.with(|w| w.borrow_mut().push(host.shared("app.link", last)));
 }
 
+/// How long a chat's link waits for the engine to say which workspace is open.
+const WORKSPACE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Why `url` won't open, in Zeron.app's words (crates/notify's), if it isn't one.
+fn refused(url: &str) -> Target {
+    let why = zeron_notify::links::parse_conversation_link(url).err().unwrap_or("not a Zeron conversation link");
+    Target::Notice("bad", Some(why.to_string()))
+}
+
 /// Open `url`: a banner's target at once; a chat's link once the engine says
-/// which workspace is open, and only if it's the link's.
+/// which workspace is open (held until it does), and only if it's the link's.
 pub fn open(url: &str) {
     let Some((target, workspace)) = parse(url) else {
         eprintln!("zeron-zgx: links: not a Zeron link: {url}");
+        tell(refused(url));
         return;
     };
     let Some(workspace) = workspace else {
@@ -63,23 +76,50 @@ pub fn open(url: &str) {
         return;
     };
     crate::engine::get().spawn(async move {
-        match crate::sessions::current_locator().await {
-            Some(current) if current == workspace => tell(target),
-            Some(_) => eprintln!("zeron-zgx: links: this conversation link belongs to another workspace"),
-            None => eprintln!("zeron-zgx: links: the workspace isn't known yet; the link wasn't opened"),
+        let until = std::time::Instant::now() + WORKSPACE_WAIT;
+        loop {
+            match crate::sessions::current_locator().await {
+                Some(current) if current == workspace => return tell_linked(target),
+                Some(_) => return tell(Target::Notice("other_workspace", None)),
+                None if std::time::Instant::now() >= until => {
+                    eprintln!("zeron-zgx: links: the workspace isn't known yet; the link wasn't opened");
+                    return;
+                }
+                None => zgx::timer::sleep(std::time::Duration::from_millis(500)).await,
+            }
         }
     });
 }
 
 fn tell(target: Target) {
+    send(target, false);
+}
+
+/// A chat's link: the scripts say so if the chat isn't there once the chats are.
+fn tell_linked(target: Target) {
+    send(target, true);
+}
+
+fn send(target: Target, linked: bool) {
     let seq = SEQ.with(|s| {
         s.set(s.get() + 1);
         s.get()
     });
     let mut fields = vec![("seq", Value::from(seq as f64))];
     match target {
-        Target::Chat(id) => fields.push(("chat", Value::from(id.as_str()))),
+        Target::Chat(id) => {
+            fields.push(("chat", Value::from(id.as_str())));
+            if linked {
+                fields.push(("linked", Value::Bool(true)));
+            }
+        }
         Target::Settings(page) => fields.push(("settings", Value::from(page))),
+        Target::Notice(word, why) => {
+            fields.push(("notice", Value::from(word)));
+            if let Some(why) = why {
+                fields.push(("why", Value::from(why.as_str())));
+            }
+        }
     }
     let value = Value::record(fields);
     LAST.with(|l| *l.borrow_mut() = value.clone());
@@ -105,5 +145,7 @@ mod tests {
         assert_eq!(parse(&link), Some((Target::Chat("c 1".into()), Some("abc".into()))));
         assert_eq!(parse("https://example.com"), None);
         assert_eq!(parse("zeron://open/chat/id"), None);
+        assert_eq!(refused("zeron://open/chat/id"), Target::Notice("bad", Some("missing workspace locator".into())));
+        assert_eq!(refused("https://example.com"), Target::Notice("bad", Some("not a Zeron conversation link".into())));
     }
 }

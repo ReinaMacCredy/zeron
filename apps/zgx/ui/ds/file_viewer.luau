@@ -88,6 +88,8 @@ export type Doc = {
 	-- Deleted on disk while it had unsaved edits: they're kept, and it
 	-- asks whether to save them (making the file again) or let them go.
 	deleted: boolean?,
+	-- Outside the chat's folder (a link's absolute path): read only.
+	outside: boolean?,
 }
 export type Props = {
 	doc: State<Doc?> | () -> Doc?,
@@ -1527,6 +1529,17 @@ local function component(props: Props): Node
 	})
 
 	-- Its file moved on disk under unsaved edits: which to keep.
+	-- (gpui's `outside_read_only_row`.)
+	local outside = ui.show(function(): boolean
+		local d = doc()
+		return d ~= nil and d.outside == true and d.state == "ready"
+	end, banner.Banner {
+		edge = true,
+		tone = "neutral",
+		title = function(): string
+			return locale.s("ds.file_viewer.outside")
+		end,
+	})
 	local conflict = ui.show(stale, banner.Banner {
 		edge = true,
 		tone = "warning",
@@ -1558,13 +1571,14 @@ local function component(props: Props): Node
 
 	-- The code, in the editor.
 	local function code(language: string?, path: string): Node
+		local d = doc_peek()
 		return CodeEditor {
 			value = text,
 			saved = base,
 			dirty = dirty,
 			commands = editor_commands,
 			language = language,
-			readonly = readonly,
+			readonly = readonly or (d ~= nil and d.outside == true),
 			wrap = wrap,
 			find_open = find_open,
 			status = true,
@@ -1766,7 +1780,7 @@ local function component(props: Props): Node
 								-- A task's box: the text's own `[ ]` ticked, an edit
 								-- like any (saved as one is). Not in a file that
 								-- can't be saved.
-								task = if readonly
+								task = if readonly or doc_.outside
 									then nil
 									else function(k: number, done: boolean)
 										text:set(tick_task(text:peek(), k, done))
@@ -1852,6 +1866,7 @@ local function component(props: Props): Node
 	box[#box + 1] = header
 	box[#box + 1] = deleted
 	box[#box + 1] = conflict
+	box[#box + 1] = outside
 	box[#box + 1] = body
 	box[#box + 1] = ui.show(function(): boolean
 		local k = kind()

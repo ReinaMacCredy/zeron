@@ -120,14 +120,14 @@ test("a reply's file links and a prompt's mention open in the session's panel", 
 	app:click('role:link "the parser"')
 	app:click('role:link "the host"')
 	app:click('role:link ~"chat.rs"')
-	-- Outside the chat's folder: styled, opening nothing.
+	-- Outside the chat's folder: by its whole path, read only.
 	app:click('role:link "this one"')
 	app:frames(5)
 	local calls = app:state("calls")
 	expect(calls).to_contain("open_file:s2:src/parse.rs")
 	expect(calls).to_contain("open_file:s2:src/main.rs")
 	expect(calls).to_contain("open_file:s2:src/chat.rs")
-	expect(calls).never.to_contain("hosts.conf")
+	expect(calls).to_contain("open_file:s2:/etc/hosts.conf")
 	-- A web address written bare (here in bold) is a link too, the full
 	-- stop after it left out.
 	expect(app:has('role:link "https://github.com/zeronsh/example/pull/1"')).to_be(true)

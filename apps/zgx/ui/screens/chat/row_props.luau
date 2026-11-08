@@ -48,7 +48,7 @@ function M.add(props: { [string]: any }, chat: () -> string?, session: () -> any
 		props.file_link = function(target: string): boolean
 			local s = peek()
 			local r = FileLinks.resolve(target, if s then s.cwd else nil)
-			return r ~= nil and not r.outside
+			return r ~= nil
 		end
 	end
 	return props

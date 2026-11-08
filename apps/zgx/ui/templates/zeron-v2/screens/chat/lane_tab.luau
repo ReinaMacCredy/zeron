@@ -897,7 +897,7 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		local r = FileLinks.resolve(target, if s then s.cwd else nil)
 		local panel: any = boundary.load("@app/screens/panel")
 		local home = home_session()
-		if r and not r.outside and panel and panel.open_file and home then
+		if r and panel and panel.open_file and home then
 			(panel.open_file :: any)(home, r.path, route.project:peek(), { line = r.line, column = r.column, end_line = r.end_line })
 		end
 	end

@@ -93,8 +93,8 @@ end
 local function Session(id: Id?): Node
 	local which = resolve(id :: any)
 	-- A file a reply links or a prompt mentions: opened in the session's
-	-- panel (a link outside its folder stays as it is); a chat mentioned,
-	-- that chat.
+	-- panel (one outside its folder by its whole path, read only); a chat
+	-- mentioned, that chat.
 	local function open_link(target: string)
 		local chat = string.match(target, "^zeron%-chat:([%w%-_]+)$")
 		if chat then
@@ -105,7 +105,7 @@ local function Session(id: Id?): Node
 		local r = FileLinks.resolve(target, if s then s.cwd else nil)
 		local panel: any = boundary.load("@app/screens/panel")
 		local id = which()
-		if r and not r.outside and panel and panel.open_file and id then
+		if r and panel and panel.open_file and id then
 			-- (Its line too, for the files pane to go to.)
 			(panel.open_file :: any)(id, r.path, route.project:peek(), { line = r.line, column = r.column, end_line = r.end_line })
 		end

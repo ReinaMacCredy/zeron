@@ -3,7 +3,7 @@
 --   a chat mentioned   Open, Copy link (its Zeron link, `zeron://open/…`)
 --   a file in its folder   Open, Reveal in Finder (the chat on this Mac),
 --                          Copy path (its whole path, on the chat's device)
---   a file outside it      Copy path
+--   a file outside it      Open (read only), Copy path
 -- Anything else that isn't a file (a `#section`, a link still arriving) has
 -- none: the message's own menu shows.
 --
@@ -49,7 +49,12 @@ return function(open: (target: string) -> (), session: () -> any?): (target: str
 		end
 		local path = r.path
 		if r.outside then
-			return Links.file { path = path }
+			return Links.file {
+				open = function()
+					open(target)
+				end,
+				path = path,
+			}
 		end
 		local here = s ~= nil and (s.device == nil or s.device == sessions.now:peek().here)
 		return Links.file {

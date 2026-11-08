@@ -386,3 +386,27 @@ test("the peek stays for the filter's panel, the keys and a press, and Escape ha
 	expect(app:state("shell_sidebar_peek")).to_be(false)
 	expect(app:state("chat_focus")).to_be(focus + 1)
 end)
+
+test("a session's menu walks with Ctrl+N and Ctrl+P as with the arrows, as Zeron's menus do", function()
+	local app = open()
+	app:right_click(`{SIDE} >> role:button "Write the docs"`)
+	app:frames(20)
+	local function focused(): string?
+		for line in app:tree():gmatch("[^\n]+") do
+			if line:find(" menuitem ", 1, true) and line:find(" focused", 1, true) then
+				return line:match('menuitem "([^"]+)"')
+			end
+		end
+		return nil
+	end
+	app:key("ctrl+n")
+	app:key("ctrl+n")
+	app:frames(3)
+	expect(focused()).to_be("Pin")
+	app:key("ctrl+p")
+	app:frames(3)
+	expect(focused()).to_be("Rename")
+	app:key("ArrowDown")
+	app:frames(3)
+	expect(focused()).to_be("Pin")
+end)

@@ -1111,10 +1111,10 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		local panel: any = boundary.load("@app/screens/panel")
 		local home = home_session()
 		-- (A split's pane: focused, so its panel, where the file opens, shows.)
-		if split and r and not r.outside then
+		if split and r then
 			route.open_session(chat)
 		end
-		if r and not r.outside and panel and panel.open_file and home then
+		if r and panel and panel.open_file and home then
 			(panel.open_file :: any)(home, r.path, route.project:peek(), { line = r.line, column = r.column, end_line = r.end_line })
 		end
 	end

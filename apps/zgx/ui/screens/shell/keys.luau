@@ -58,6 +58,7 @@ for _, k in
 	{
 		{ id = "shell.palette", title = "Search", key = "cmd+k", group = "App", menu = "File", reserved = true },
 		{ id = "shell.settings", title = "Settings", key = "cmd+,", group = "App", menu = "File", reserved = true },
+		{ id = "shell.check_updates", title = "Check for Updates…", key = "", group = "App", menu = "File", elsewhere = true },
 		{ id = "shell.find", title = "Find", key = "cmd+f", group = "App", menu = "Edit" },
 		{ id = "shell.quick_capture", title = "Quick capture", key = "cmd+alt+n", group = "App", menu = "File", reserved = true },
 		{ id = "shell.random_wallpaper", title = "Random wallpaper", key = "cmd+u", group = "App", menu = "View" },

@@ -638,6 +638,9 @@ local function bump(w: Workspace)
 end
 
 local function absolute(w: Workspace, path: string): string?
+	if string.sub(path, 1, 1) == "/" then
+		return path
+	end
 	return if w.target.root then `{w.target.root}/{path}` else nil
 end
 
@@ -733,7 +736,7 @@ end
 -- (An image on another device shows loading: `show` reads its bytes.)
 local function doc_from(w: Workspace, path: string, f: api.File): Doc
 	set_meta(w, path, { hash = f.hash, checkout = f.checkout, encoding = f.encoding, line_ending = f.line_ending, readonly = f.readonly })
-	local d: Doc = { path = path, state = "ready", size = f.size, absolute = absolute(w, path), status = M.git_of(w)[path] :: any }
+	local d: Doc = { path = path, state = "ready", size = f.size, absolute = absolute(w, path), status = M.git_of(w)[path] :: any, outside = f.readonly == "outsideWorkspace" or nil }
 	if IMAGE[ext(path)] then
 		if f.here and w.target.root then
 			d.image = absolute(w, path)

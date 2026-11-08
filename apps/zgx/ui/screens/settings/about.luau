@@ -21,6 +21,7 @@ local ds = require("@ds")
 local host = require("@app/screens/settings/host")
 local search = require("@app/screens/settings/search")
 local locale = require("@ds/locale")
+local sessions = require("@account/sessions")
 
 local M = {}
 
@@ -50,6 +51,7 @@ search.index(M.ID, ui.t("settings.about.title"), ui.t("settings.about.terms"), {
 		section = ui.t("settings.about.updates_section"),
 		terms = ui.t("settings.about.beta.terms"),
 	},
+	{ key = "devices", title = ui.t("settings.about.devices_section"), section = ui.t("settings.about.updates_section"), terms = ui.t("settings.about.devices.terms") },
 	{ key = "website", title = ui.t("settings.about.website.label"), section = ui.t("settings.about.links_section"), terms = ui.t("settings.about.website.terms") },
 	{ key = "copy_version", title = ui.t("settings.about.copy_version.label"), terms = ui.t("settings.about.copy_version.terms") },
 })
@@ -256,6 +258,91 @@ function M.summary(a: About): string
 	return table.concat(lines, "\n")
 end
 
+-- crates/update `parse_version`: the core's numbers, then any pre-release's parts (numbers before words).
+local function parse_version(v: string): ({ number }?, { any }?)
+	local core_text, pre_text = string.match(string.gsub(v, "^%s*v?", ""), "^([^%-]*)%-?(.*)$")
+	if not core_text then
+		return nil, nil
+	end
+	local core: { number } = {}
+	for part in string.gmatch(core_text .. ".", "([^%.]*)%.") do
+		local n = tonumber(part)
+		if not n or not string.match(part, "^%d+$") then
+			return nil, nil
+		end
+		table.insert(core, n)
+	end
+	local pre: { any } = {}
+	if pre_text ~= "" then
+		for id in string.gmatch(pre_text .. ".", "([^%.]*)%.") do
+			if id == "" or string.find(id, "[^%w%-]") then
+				return nil, nil
+			end
+			table.insert(pre, if string.match(id, "^%d+$") then tonumber(id) else string.lower(id))
+		end
+	end
+	return core, pre
+end
+
+-- Whether `latest` is newer than `current` (crates/update `version_newer`; unreadable ones never are).
+function M.version_newer(latest: string, current: string): boolean
+	local lc, lp = parse_version(latest)
+	local cc, cp = parse_version(current)
+	if not lc or not cc or not lp or not cp then
+		return false
+	end
+	for i = 1, math.max(#lc, #cc) do
+		local a, b = lc[i], cc[i]
+		if a == nil or b == nil then
+			return a ~= nil
+		elseif a ~= b then
+			return a > b
+		end
+	end
+	if #lp == 0 or #cp == 0 then
+		return #lp == 0 and #cp > 0
+	end
+	for i = 1, math.max(#lp, #cp) do
+		local a, b = lp[i], cp[i]
+		if a == nil or b == nil then
+			return a ~= nil
+		elseif a ~= b then
+			if type(a) ~= type(b) then
+				return type(a) == "string"
+			end
+			return a > b
+		end
+	end
+	return false
+end
+
+-- What Updates says of each device (gpui's `render_update_devices`): this one first, Cloud's left out.
+export type DeviceLine = { id: string, name: string, platform: string, meta: string, status: string, current: boolean }
+function M.device_lines(devices: { sessions.Device }, a: About): { DeviceLine }
+	local newest = if a.available and a.latest then a.latest else (a.engine_version or a.app_version)
+	local out: { DeviceLine } = {}
+	for _, d in devices do
+		if not d.cloud then
+			local version = if d.version and d.version ~= "" then d.version else nil
+			local meta = { ({ macos = "macOS", linux = "Linux", windows = "Windows", ios = "iOS", android = "Android" } :: any)[d.platform] or d.platform }
+			if version then
+				table.insert(meta, `v{version}`)
+			end
+			table.insert(meta, ui.t(if d.here then "settings.about.devices.this" elseif d.online then "settings.devices.online" else "settings.devices.offline"):get())
+			local status = if d.here
+				then "updated_above"
+				elseif version and newest and M.version_newer(newest, version) then "update_there"
+				elseif version then "up_to_date"
+				else "unknown"
+			table.insert(out, { id = d.id, name = d.name, platform = d.platform, meta = table.concat(meta, " · "), status = status, current = status == "up_to_date" })
+		end
+	end
+	table.sort(out, function(x: DeviceLine, y: DeviceLine): boolean
+		return x.status == "updated_above" and y.status ~= "updated_above"
+	end)
+	return out
+end
+
 local function row(key: string, props: any): Node
 	return search.anchor(key, ds.Settings.Row(props))
 end
@@ -386,6 +473,54 @@ function M.view(): Node
 					}),
 				},
 			},
+		},
+		ds.Settings.Section {
+			title = ui.t("settings.about.devices_section"),
+			search.anchor(
+				"devices",
+				ui.column {
+					w_full = true,
+					ui.show(function(): boolean
+						return #M.device_lines(sessions.now:get().devices or {}, M.now:get()) == 0
+					end, ds.Settings.Group {
+						ds.Settings.Row { label = ui.t("settings.about.devices.none") },
+					}),
+					ds.Settings.Each(
+						ui.computed(function(): { DeviceLine }
+							return M.device_lines(sessions.now:get().devices or {}, M.now:get())
+						end),
+						function(_line: DeviceLine, _i: number, line: State<DeviceLine>): Node
+							return ds.Settings.Row {
+								label = function(): string
+									return line:get().name
+								end,
+								description = function(): string
+									return line:get().meta
+								end,
+								icon = if line:peek().platform == "linux"
+									then "remote-server"
+									elseif line:peek().platform == "ios" or line:peek().platform == "android" then "smartphone"
+									else "laptop",
+								truncate = true,
+								control = ui.text {
+									function(): string
+										return ui.t(`settings.about.devices.{line:get().status}`):get()
+									end,
+									text_size = "$font.size.sm",
+									color = function(): string
+										return if line:get().current then "$success" else "$text.secondary"
+									end,
+								},
+							}
+						end,
+						{
+							key = function(l: DeviceLine): string
+								return l.id
+							end,
+						}
+					),
+				}
+			),
 		},
 		ds.Settings.Section {
 			title = ui.t("settings.about.links_section"),

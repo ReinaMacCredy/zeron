@@ -185,6 +185,14 @@ stub.list = function(target: api.Target, dir: string): any
 end
 stub.read = function(target: api.Target, path: string): any
 	note(`read:{path}`)
+	-- (A whole path past the folder: the engine reads it for the chat, read only.)
+	if string.sub(path, 1, 1) == "/" then
+		local outside = disk[path]
+		if not outside then
+			return settle(nil, "file not found")
+		end
+		return settle({ checkout = "", path = path, text = outside, hash = hash(outside), size = #outside, encoding = "utf8", line_ending = "lf", truncated = false, here = true, readonly = "outsideWorkspace" })
+	end
 	local text = disk[root_of(target) .. path]
 	if not text then
 		return settle(nil, "file not found")
@@ -295,6 +303,16 @@ stub.frames = function(key: string, since: number): { api.Frame }
 	return out
 end
 
+-- A file outside the folder, shown in view `id` as a link to it would
+-- (`test_files_show_outside`: the view's id).
+local show_outside = ui.state("test_files_show_outside", nil :: string?)
+ui.effect(function()
+	local id = show_outside:get()
+	if id then
+		disk["/etc/hosts"] = "127.0.0.1 localhost\n"
+		Workspace.show_in_view(id, "/etc/hosts")
+	end
+end)
 ui.command {
 	id = "disk_add",
 	title = "A file made in src",

@@ -633,19 +633,45 @@ end
 -- A `zeron://` link the system handed the app (a clicked banner, a chat's
 -- link), read by the host (src/links.rs): `{ seq, chat?, settings? }`, `seq`
 -- moving with each. Followed once each, never on a reload.
-local link = ui.shared("app.link", { seq = 0 } :: { seq: number, chat: string?, settings: string? })
+local link = ui.shared("app.link", { seq = 0 } :: { seq: number, chat: string?, linked: boolean?, settings: string?, notice: string?, why: string? })
 local followed = ui.state("shell_link_followed", 0)
+-- A chat's link held until the chats are here (gpui's `apply_pending_deep_link`).
+local held_link = ui.state("shell_link_held", nil :: string?)
+local function notice(key: string, why: string?)
+	require("@ds/toast").show { title = ui.t(key):get(), body = why, tone = "info" }
+end
 ui.effect(function()
 	local l = link:get()
 	if l.seq == 0 or l.seq == followed:peek() then
 		return
 	end
 	followed:set(l.seq)
-	if l.chat then
+	if l.notice then
+		notice(if l.notice == "other_workspace" then "shell.links.other_workspace" else "shell.links.bad", l.why)
+	elseif l.chat and l.linked then
+		held_link:set(l.chat)
+	elseif l.chat then
 		M.open_session(l.chat)
 	elseif l.settings then
 		M.settings(l.settings)
 	end
+end)
+ui.effect(function()
+	local id = held_link:get()
+	local now = sessions.now:get()
+	if not id or now.state ~= "ready" then
+		return
+	end
+	held_link:set(nil)
+	for _, list in { now.chats, now.archived or {} } do
+		for _, c in list do
+			if c.id == id then
+				M.open_session(id)
+				return
+			end
+		end
+	end
+	notice("shell.links.not_found")
 end)
 
 -- To a plugin's page ("pages.add", listed in the sidebar). One replaces

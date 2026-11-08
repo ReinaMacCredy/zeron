@@ -306,7 +306,8 @@
         "body": "其中还没有内容。"
       },
       "lines": "{n, plural, other {# 行}}",
-      "toggle_fit": "连按两下以切换适合窗口"
+      "toggle_fit": "连按两下以切换适合窗口",
+      "outside": "只读：在此对话的文件夹之外。"
     },
     "dropdown": {
       "placeholder": "选择…",
@@ -1540,7 +1541,8 @@
         "label": "错误",
         "signed_out": "已退出登录",
         "limit": "已达上限",
-        "log_in": "登录"
+        "log_in": "登录",
+        "copy": "复制错误"
       },
       "computer": {
         "elevated_risk": "风险较高",
@@ -2466,7 +2468,17 @@
         "description": "用于问题报告的上述版本和构建信息。",
         "copied": "已拷贝版本信息"
       },
-      "updates_description": "更新会应用到此电脑上的引擎，与 Zeron App 的更新一样。此 App 尚未打包，因此不会在此更新。"
+      "updates_description": "更新会应用到此电脑上的引擎，与 Zeron App 的更新一样。此 App 尚未打包，因此不会在此更新。",
+      "devices_section": "设备",
+      "devices": {
+        "terms": "设备 机器 电脑 版本 其他 更新 devices update",
+        "this": "此设备",
+        "updated_above": "已在上方更新",
+        "update_there": "请在该设备上更新",
+        "up_to_date": "已是最新",
+        "unknown": "版本未知",
+        "none": "没有已配对的设备。"
+      }
     },
     "archived": {
       "title": "已归档",
@@ -3504,7 +3516,8 @@
         "tasks": "任务",
         "inbox": "收件箱",
         "quick_capture": "快速记录",
-        "skills": "技能"
+        "skills": "技能",
+        "update_prompt": "更新对话框"
       }
     },
     "title_bar": {
@@ -3544,7 +3557,8 @@
         "shell_reload": "重新启动 Zeron",
         "shell_reload_interface": "重新加载界面",
         "shell_random_wallpaper": "随机壁纸",
-        "chat_side_chat": "侧边对话"
+        "chat_side_chat": "侧边对话",
+        "shell_check_updates": "检查更新…"
       },
       "group": {
         "sessions": "会话",
@@ -3738,6 +3752,16 @@
       "asking": "等待回答",
       "failed": "失败",
       "done": "已完成"
+    },
+    "update_prompt": {
+      "later": "稍后",
+      "hide": "隐藏",
+      "ok": "好"
+    },
+    "links": {
+      "bad": "无法打开该链接",
+      "other_workspace": "此对话链接属于另一个工作区",
+      "not_found": "找不到链接的对话"
     }
   },
   "onboarding": {

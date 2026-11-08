@@ -3,7 +3,7 @@
 -- tone's glyph, a title and a line, an action, and a × that shows under
 -- the pointer. They stack newest at the bottom, rising in; each goes by
 -- itself after a while (longer for a warning; a danger stays until put
--- away), paused while the pointer is over the stack. Showing the same
+-- away), paused while the pointer is over the stack or the window is behind another. Showing the same
 -- message again restarts it rather than adding another.
 --
 --   toast.show { title = "Pushed to origin", tone = "success" }
@@ -71,6 +71,10 @@ local GLYPH: { [Tone]: Icon.Name } = {
 -- The stack: each toast as data, with an id and the time it was (re)shown.
 local toasts = ui.state("ds_toasts", {} :: { any })
 local hovered = ui.state("ds_toasts_hovered", false)
+-- (gpui's toast.rs: the countdown also waits while the window isn't the one in front.)
+local function held(): boolean
+	return hovered:get() or ui.window.active:get() == false
+end
 -- (Kept as state, as the stack is: a hot reload keeps the toasts showing,
 -- so a new one mustn't take one of their ids.)
 local next_id = ui.state("ds_toasts_next", 0)
@@ -231,10 +235,10 @@ local Card = ui.component(function(props: { toast: any }): Node
 					M.dismiss(t.id)
 				end,
 			}
-			timer.paused = hovered:peek()
+			timer.paused = hovered:peek() or ui.window.active:peek() == false
 		end)
 		ui.effect(function()
-			local paused = hovered:get()
+			local paused = held()
 			if timer then
 				timer.paused = paused
 			end

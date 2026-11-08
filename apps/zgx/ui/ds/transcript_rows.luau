@@ -348,6 +348,28 @@ M.Error = ui.component(function(props: { key: string, now: () -> any, find: Find
 						ui.text { s("error.log_in") },
 					}
 				),
+				-- (Zeron's notice chip: a failure's words are for pasting, not a screenshot.)
+				ui.button {
+					id = `error-copy-{props.key}`,
+					label = s("error.copy"),
+					tooltip = locale.s("ds.composer.notice_copy"),
+					w = 20,
+					h = 20,
+					p = 0,
+					shrink = 0,
+					items = "center",
+					justify = "center",
+					rounded = ui.raw(6, "gpui's error chip"),
+					bg = "#00000000",
+					hover = { bg = "$zeron.tone.danger.wash" },
+					active = { bg = "$zeron.tone.danger.wash" },
+					color = "$danger",
+					focus = control.ring,
+					on_click = function()
+						ui.clipboard.write(props.now().text or "")
+					end,
+					Icon { name = "copy", size = 12 },
+				},
 			},
 			found { key = `{props.key}:0`, text = function(): string
 				return props.now().text or ""

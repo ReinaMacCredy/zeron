@@ -1001,6 +1001,21 @@ ui.command {
 		publish()
 	end,
 }
+-- Each device's Zeron (Settings → About & updates' Devices): one behind, one current, one unknown, Cloud's.
+ui.command {
+	id = "device_versions",
+	title = "Devices with their versions",
+	run = function()
+		model.devices = {
+			{ id = "mac", name = "MacBook Pro", platform = "macos", here = true, version = "0.2.140" },
+			{ id = "box", name = "devbox", platform = "linux", here = false, online = true, version = "0.2.131" },
+			{ id = "mini", name = "Mac mini", platform = "macos", here = false, online = false, version = "0.2.140" },
+			{ id = "pad", name = "iPad", platform = "ios", here = false, online = true },
+			{ id = "cloud", name = "Cloud", platform = "linux", here = false, online = true, cloud = true, version = "0.2.100" },
+		}
+		publish()
+	end,
+}
 ui.command {
 	id = "one_device",
 	title = "This computer alone",

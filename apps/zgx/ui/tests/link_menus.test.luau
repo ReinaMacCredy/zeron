@@ -157,10 +157,10 @@ test("a file link: Open, Reveal in Finder on this computer, Copy path", function
 	menu(app, 'role:link ~"chat.rs"')
 	pick(app, "Copy path")
 	expect(app:clipboard()).to_be("/work/atlas/src/chat.rs")
-	-- Outside the chat's folder: its path to copy, nothing to open.
+	-- Outside the chat's folder: opened read only, its path to copy, no Finder.
 	menu(app, 'role:link "this one"')
 	expect(shows(app, "Copy path")).to_be(true)
-	expect(shows(app, "Open")).to_be(false)
+	expect(shows(app, "Open")).to_be(true)
 	expect(shows(app, "Reveal in Finder")).to_be(false)
 	shut(app)
 	-- On another device: no Finder to show it in.

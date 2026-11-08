@@ -21,6 +21,29 @@ require("@app/screens/language")
 local cloud_page = require("@app/screens/settings/cloud")
 local billing_page = require("@app/screens/settings/billing")
 local cloud = require("@account/cloud")
+local keys = require("@app/screens/shell/keys")
+local boundary = require("@app/screens/shell/boundary")
+
+-- "Check for Updates…" (Zeron's update prompt): its dialog loads the first time it's asked for, from a timer.
+do
+	local k = keys.get("shell.check_updates") :: keys.Key
+	ui.command {
+		id = k.id,
+		title = keys.title(k),
+		menu = k.menu,
+		key = keys.key(k.id),
+		run = function()
+			ui.after(0, function()
+				local prompt: any = boundary.load("@app/screens/shell/update_prompt")
+				local watch: any = boundary.load("@app/screens/engine/update")
+				if prompt and watch then
+					prompt.open()
+					watch.prompt_loaded:set(true)
+				end
+			end)
+		end,
+	}
+end
 
 -- Ahead of the pages others add (Plugins, which joins Organization after
 -- Members; the shell's Archived): whichever of them is listed first.
