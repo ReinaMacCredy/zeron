@@ -434,6 +434,29 @@ impl PictureRead {
     }
 }
 
+/// A task's picture from this device's uploads, kept as `attachment`'s are.
+pub(crate) async fn attachment_here(path: &str) -> Result<Value, String> {
+    use std::hash::{Hash, Hasher};
+    if !path.starts_with('/') {
+        return Err("That picture isn't a path on this device.".into());
+    }
+    let mut read = PictureRead::default();
+    loop {
+        let chunk = crate::engine::get().call("ReadAttachmentChunk", json!({ "path": path, "offset": read.offset })).await?;
+        if read.take(&chunk)? {
+            break;
+        }
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    read.bytes.hash(&mut hasher);
+    let hash = format!("r{:016x}{:x}", hasher.finish(), read.bytes.len());
+    let file = keep_image(&hash, &read.mime, &read.bytes)?;
+    Ok(Value::record([
+        ("src", Value::from(file.to_string_lossy().as_ref())),
+        ("size", num(Some(read.bytes.len() as u64))),
+    ]))
+}
+
 /// `bytes` kept as a file named by their hash (one already there is the
 /// same picture), with the extension its media type says.
 fn keep_image(hash: &str, mime: &str, bytes: &[u8]) -> Result<std::path::PathBuf, String> {

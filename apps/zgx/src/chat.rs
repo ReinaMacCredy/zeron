@@ -3183,7 +3183,7 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
     rx.recv().await
 }
 
-async fn upload(path: &str, name: &str, target: Option<&str>) -> Result<String, Outcome> {
+pub(crate) async fn upload(path: &str, name: &str, target: Option<&str>) -> Result<String, Outcome> {
     // Read and encoded off the window's thread, and no larger than the cap.
     let owned = path.to_owned();
     let remote = target.is_some();

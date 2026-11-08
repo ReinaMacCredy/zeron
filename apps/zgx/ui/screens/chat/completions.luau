@@ -3,6 +3,8 @@ local ZeronCommands = require("@app/screens/chat/zeron_commands")
 local prefs = require("@app/screens/settings/prefs")
 local files = require("@app/screens/files/api")
 local sessions = require("@account/sessions")
+local tasks_store = require("@app/screens/tasks/store")
+local locale = require("@ds/locale")
 
 local M = {}
 
@@ -66,6 +68,60 @@ function M.thread_items(chats: { any }, query: string, scope: { device: string?,
 	return out
 end
 
+-- The shipping app's `task_matches`: open tasks, this project's first, five
+-- with no query; with one, or scoped (`@task …`), eight, done ones after.
+M.TASK_LIMIT, M.TASK_IDLE_LIMIT = 8, 5
+local TASK_COLUMNS = { todo = "tasks.column.todo", working = "tasks.column.working", needs = "tasks.column.needs", done = "tasks.column.done" }
+local TASK_GLYPHS = { todo = "check-circle", working = "refresh", needs = "danger-triangle", done = "check" }
+function M.task_items(query: string, project: string?, scoped: boolean): { any }
+	local tasks = tasks_store
+	local q = string.lower(string.match(query or "", "^%s*(.-)%s*$") or "")
+	local p = tasks.parts:get()
+	local function pick(list: { any }): { any }
+		local own, other = {}, {}
+		for _, t in list do
+			if q == "" or string.find(string.lower(t.title), q, 1, true) then
+				table.insert(if t.project == project then own else other, t)
+			end
+		end
+		for _, t in other do
+			table.insert(own, t)
+		end
+		return own
+	end
+	local found = pick(p.open)
+	local limit = M.TASK_LIMIT
+	if q == "" and not scoped then
+		limit = M.TASK_IDLE_LIMIT
+	else
+		for _, t in pick(p.done) do
+			table.insert(found, t)
+		end
+	end
+	local out: { any } = {}
+	for i, t in found do
+		if i > limit then
+			break
+		end
+		local title = string.match(string.gsub(t.title or "", "%s+", " "), "^%s*(.-)%s*$") or ""
+		if title == "" then
+			title = locale.s("tasks.untitled")
+		end
+		local column = tasks.state(t).column
+		local where = tasks.project_name(t.project) or locale.s("tasks.no_project")
+		local escaped = string.gsub(title, "([%[%]\\])", "\\%1")
+		table.insert(out, {
+			value = `task:{t.id}`,
+			key = `task-{t.id}`,
+			label = title,
+			detail = if column == "todo" then where else `{locale.s(TASK_COLUMNS[column])} · {where}`,
+			icon = TASK_GLYPHS[column],
+			task_link = `[{escaped}](zeron-task:{t.id})`,
+		})
+	end
+	return out
+end
+
 function M.bind(b: Bind): { [string]: any }
 	local kept = b.key or "chat"
 	local results = ui.state(`{kept}_mention_results`, nil :: { any }?)
@@ -112,6 +168,12 @@ function M.bind(b: Bind): { [string]: any }
 		local nowhere = b.target() == nil
 		local given: { [string]: any } = { ["@"] = if nowhere then {} else results:get() }
 		given.threads = threads()
+		local t = token:get()
+		if t and t.trigger == "@" then
+			local place = b.target()
+			local scoped = string.lower(string.sub(t.query, 1, 5)) == "task "
+			given.tasks = M.task_items(if scoped then string.sub(t.query, 6) else t.query, if place then place.space else nil, scoped)
+		end
 		if b.attachments then
 			given.attachments = b.attachments()
 		end

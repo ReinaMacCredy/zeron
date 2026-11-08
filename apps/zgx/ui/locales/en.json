@@ -975,7 +975,8 @@
       "attached_image": "Attached image",
       "attached_file": "Attached file",
       "terminal": "Terminal",
-      "threads": "Threads"
+      "threads": "Threads",
+      "tasks": "Tasks"
     },
     "model_picker": {
       "starred": "Starred",
@@ -3250,7 +3251,10 @@
         "new_project": "New project",
         "app_rail": "The app rail",
         "frame": "The window frame",
-        "switcher": "Chat switcher"
+        "switcher": "Chat switcher",
+        "tasks": "Tasks",
+        "inbox": "Inbox",
+        "quick_capture": "Quick capture"
       }
     },
     "title_bar": {
@@ -3266,6 +3270,7 @@
     },
     "keys": {
       "title": {
+        "shell_quick_capture": "Quick capture",
         "shell_new_chat": "New chat",
         "shell_new_project": "New project",
         "shell_archive": "Archive session",
@@ -4636,5 +4641,125 @@
       "imported_toast": "{count, plural, one {Theme imported} other {# themes imported}}",
       "imported_body": "It's under Yours."
     }
+  },
+  "tasks": {
+    "title": "Tasks",
+    "untitled": "Untitled task",
+    "nothing": "Nothing to do",
+    "to_do_count": "{n} to do",
+    "view": "Tasks view",
+    "list": "List",
+    "kanban": "Kanban",
+    "add_placeholder": "Add a task, or press Tab to add notes and start it",
+    "mark_done": "Mark as done",
+    "mark_not_done": "Mark as not done",
+    "new": "New",
+    "not_sent": "Not sent",
+    "chat_deleted": "Chat deleted",
+    "blocked_by": "Blocked by",
+    "depends_on": "Depends on",
+    "done": "Done",
+    "done_count": "Done, {n}",
+    "no_project": "No project",
+    "image_missing": "This image could not be loaded",
+    "add_image": "Add image",
+    "column": {
+      "todo": "To do",
+      "working": "Working",
+      "needs": "Needs you",
+      "done": "Done"
+    },
+    "linked": {
+      "working": "Working",
+      "asks": "Asked you a question",
+      "failed": "Failed",
+      "ready": "Ready for you"
+    },
+    "due": {
+      "today": "due today",
+      "tomorrow": "due tomorrow",
+      "yesterday": "due yesterday",
+      "on": "due {month} {day}",
+      "on_year": "due {month} {day}, {year}"
+    },
+    "month": {
+      "m1": "Jan",
+      "m2": "Feb",
+      "m3": "Mar",
+      "m4": "Apr",
+      "m5": "May",
+      "m6": "Jun",
+      "m7": "Jul",
+      "m8": "Aug",
+      "m9": "Sep",
+      "m10": "Oct",
+      "m11": "Nov",
+      "m12": "Dec"
+    },
+    "card": {
+      "remove_image": "Remove image",
+      "add_image_tile": "＋ Add image",
+      "images": "Images",
+      "image_failed": "Couldn't add {name}.",
+      "no_agent": "No agent yet",
+      "starting": "Starting…",
+      "start": "Start",
+      "assign": "Assign to a thread",
+      "assign_placeholder": "@ a thread",
+      "assign_hint": "Enter picks the first match",
+      "clear": "Clear",
+      "send": "Send task",
+      "link_only": "Link only",
+      "hand_it_to": "Hand it to",
+      "new_chat": "New chat",
+      "thread": "Thread",
+      "not_sent": "Not sent: {error}",
+      "retry": "Retry",
+      "open_thread": "Open thread",
+      "unassign": "Unassign",
+      "open_chat": "Open chat",
+      "more": "More options",
+      "delete": "Delete",
+      "close": "Close",
+      "title": "Task title",
+      "notes": "Add a note",
+      "due": "Due",
+      "no_date": "No date",
+      "today": "Today",
+      "tomorrow": "Tomorrow",
+      "project": "Project"
+    },
+    "capture": {
+      "added": "Added to To do: {title}",
+      "undo": "Undo",
+      "title": "Quick capture",
+      "placeholder": "Jot down an idea…",
+      "save": "save",
+      "notes": "notes",
+      "close": "close",
+      "where": "To do · No project"
+    }
+  },
+  "inbox": {
+    "title": "Inbox",
+    "greeting": "History: what your agents asked, finished and failed. Live items wait in the sidebar's Inbox.",
+    "needs": "{n, plural, one {# thing needs you right now.} other {# things need you right now.}}",
+    "open": "Open",
+    "today": "Today",
+    "runs_failed": "Today’s runs did not load.",
+    "history_loading": "Loading today’s history…",
+    "history_empty": "Nothing finished or answered yet today.",
+    "what": {
+      "failed": "Failed",
+      "finished": "Finished",
+      "stopped": "Stopped",
+      "answered": "You answered"
+    },
+    "in_chat": "In {title}",
+    "overdue": "Overdue",
+    "due_today": "Today",
+    "todays_tasks": "Today’s tasks",
+    "all_tasks": "All tasks",
+    "add_placeholder": "Add a task for today, or press Tab to hand it to an agent"
   }
 }

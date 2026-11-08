@@ -155,8 +155,22 @@ function M.use(opts: Use)
 			return {}
 		end
 		local all = sources()
+		-- (`@task …`: tasks alone, composer.rs `task_scope_query`.)
+		local tasks = if t.trigger == "@" then all.tasks or {} else {}
+		local function with_heading(list: { Item }): { Item }
+			local out: { Item } = {}
+			for i, item in list do
+				local row = table.clone(item)
+				row.heading = if i == 1 then locale.s("ds.composer_mentions.tasks") else nil
+				table.insert(out, row)
+			end
+			return out
+		end
+		if t.trigger == "@" and string.lower(string.sub(t.query, 1, 5)) == "task " then
+			return with_heading(tasks)
+		end
 		local items = M.filter(all[t.trigger] or {}, t.query)
-		if t.trigger ~= "@" or (not all.attachments and not all.threads) then
+		if t.trigger ~= "@" or (not all.attachments and not all.threads and #tasks == 0) then
 			return items
 		end
 		local rows = if all.attachments then tokens.attachments(all.attachments, t.query) else {}
@@ -168,15 +182,18 @@ function M.use(opts: Use)
 		for _, item in items do
 			table.insert(rows, item)
 		end
-		-- (The shipping app's order: Threads, then Files.)
+		-- (The shipping app's order: Threads, Tasks, then Files.)
 		local threads = all.threads or {}
-		if #threads == 0 then
+		if #threads == 0 and #tasks == 0 then
 			return rows
 		end
 		local out: { Item } = {}
 		for i, th in threads do
 			local row = table.clone(th)
 			row.heading = if i == 1 then locale.s("ds.composer_mentions.threads") else nil
+			table.insert(out, row)
+		end
+		for _, row in with_heading(tasks) do
 			table.insert(out, row)
 		end
 		for i, row in rows do

@@ -69,6 +69,12 @@ pub const BLOCKED: &[&str] = &[
     // (Opens a file as a double click would: a `.command` runs.)
     "files.open_external",
     "chat.send",
+    "tasks.create",
+    "tasks.update",
+    "tasks.delete",
+    "tasks.assign",
+    "tasks.start",
+    "tasks.upload_image",
     "chat.respond",
     // (Lets an agent use this computer.)
     "chat.answer_computer",

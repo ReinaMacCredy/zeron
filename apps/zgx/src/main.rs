@@ -60,6 +60,7 @@ mod projects;
 mod relaunch;
 mod session_home;
 mod sessions;
+mod tasks;
 mod settings;
 mod terminal;
 mod tool_details;
@@ -759,6 +760,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         // A chat: its transcript, sending, approvals (src/chat.rs).
         chat::install(cx, &host);
         agent_profiles::install(cx, &host);
+        // Tasks, the Inbox page and quick capture (src/tasks.rs).
+        tasks::install(cx, &host);
         // Agent visuals in a transcript (src/visuals.rs).
         visuals::install(cx, &host);
         // Agent pages in a transcript (src/html_pages.rs).

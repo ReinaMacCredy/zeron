@@ -787,6 +787,7 @@ return {
 	["ds.composer_mentions.attached_file"] = "Attached file",
 	["ds.composer_mentions.terminal"] = "Terminal",
 	["ds.composer_mentions.threads"] = "Threads",
+	["ds.composer_mentions.tasks"] = "Tasks",
 	["ds.model_picker.starred"] = "Starred",
 	["ds.model_picker.fast_mode"] = "Fast mode",
 	["ds.model_picker.default"] = "Default",

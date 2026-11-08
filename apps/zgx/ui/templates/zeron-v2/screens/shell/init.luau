@@ -133,6 +133,9 @@ return function(): Node
 	runs["shell.settings"] = function()
 		route.settings()
 	end
+	runs["shell.quick_capture"] = function()
+		require("@app/screens/tasks/capture").toggle()
+	end
 	-- (Pinned on Settings: it would only change what the chats show after Back, shell.rs `toggle_sidebar`.)
 	runs["shell.toggle_sidebar"] = function()
 		if route.current:peek().name ~= "settings" then
@@ -666,6 +669,9 @@ return function(): Node
 				return AddProject()
 			end),
 			require("@ds/pasted_text").Host(),
+			boundary.screen(boundary.named("shell.boundary.screen.quick_capture"), "@app/screens/tasks/capture", function(capture): Node
+				return capture.Overlay()
+			end),
 		},
 	}
 end

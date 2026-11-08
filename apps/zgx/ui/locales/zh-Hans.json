@@ -975,7 +975,8 @@
       "attached_image": "已附加图片",
       "attached_file": "已附加文件",
       "terminal": "终端",
-      "threads": "线程"
+      "threads": "线程",
+      "tasks": "任务"
     },
     "model_picker": {
       "starred": "已加星标",
@@ -3250,7 +3251,10 @@
         "new_project": "新建项目",
         "app_rail": "应用侧栏",
         "frame": "窗口边框",
-        "switcher": "会话切换器"
+        "switcher": "会话切换器",
+        "tasks": "任务",
+        "inbox": "收件箱",
+        "quick_capture": "快速记录"
       }
     },
     "title_bar": {
@@ -3266,6 +3270,7 @@
     },
     "keys": {
       "title": {
+        "shell_quick_capture": "快速记录",
         "shell_new_chat": "新建对话",
         "shell_new_project": "新建项目",
         "shell_archive": "归档会话",
@@ -4636,5 +4641,125 @@
       "imported_toast": "{count, plural, one {已导入主题} other {已导入 # 个主题}}",
       "imported_body": "它在“你的”中。"
     }
+  },
+  "tasks": {
+    "title": "任务",
+    "untitled": "未命名任务",
+    "nothing": "没有待办",
+    "to_do_count": "{n} 项待办",
+    "view": "任务视图",
+    "list": "列表",
+    "kanban": "看板",
+    "add_placeholder": "添加任务，或按 Tab 添加备注并开始",
+    "mark_done": "标记为完成",
+    "mark_not_done": "标记为未完成",
+    "new": "新",
+    "not_sent": "未发送",
+    "chat_deleted": "对话已删除",
+    "blocked_by": "被阻塞于",
+    "depends_on": "依赖",
+    "done": "已完成",
+    "done_count": "已完成，{n}",
+    "no_project": "无项目",
+    "image_missing": "无法加载此图片",
+    "add_image": "添加图片",
+    "column": {
+      "todo": "待办",
+      "working": "进行中",
+      "needs": "需要你",
+      "done": "已完成"
+    },
+    "linked": {
+      "working": "进行中",
+      "asks": "向你提了问题",
+      "failed": "失败",
+      "ready": "等你查看"
+    },
+    "due": {
+      "today": "今天到期",
+      "tomorrow": "明天到期",
+      "yesterday": "昨天到期",
+      "on": "{month}{day}日到期",
+      "on_year": "{year}年{month}{day}日到期"
+    },
+    "month": {
+      "m1": "1月",
+      "m2": "2月",
+      "m3": "3月",
+      "m4": "4月",
+      "m5": "5月",
+      "m6": "6月",
+      "m7": "7月",
+      "m8": "8月",
+      "m9": "9月",
+      "m10": "10月",
+      "m11": "11月",
+      "m12": "12月"
+    },
+    "card": {
+      "remove_image": "移除图片",
+      "add_image_tile": "＋ 添加图片",
+      "images": "图片",
+      "image_failed": "无法添加 {name}。",
+      "no_agent": "还没有代理",
+      "starting": "正在开始…",
+      "start": "开始",
+      "assign": "分配给线程",
+      "assign_placeholder": "@ 一个线程",
+      "assign_hint": "回车选择第一个匹配",
+      "clear": "清除",
+      "send": "发送任务",
+      "link_only": "仅关联",
+      "hand_it_to": "交给",
+      "new_chat": "新对话",
+      "thread": "线程",
+      "not_sent": "未发送：{error}",
+      "retry": "重试",
+      "open_thread": "打开线程",
+      "unassign": "取消分配",
+      "open_chat": "打开对话",
+      "more": "更多选项",
+      "delete": "删除",
+      "close": "关闭",
+      "title": "任务标题",
+      "notes": "添加备注",
+      "due": "截止",
+      "no_date": "无日期",
+      "today": "今天",
+      "tomorrow": "明天",
+      "project": "项目"
+    },
+    "capture": {
+      "added": "已添加到待办：{title}",
+      "undo": "撤销",
+      "title": "快速记录",
+      "placeholder": "记下一个想法…",
+      "save": "保存",
+      "notes": "备注",
+      "close": "关闭",
+      "where": "待办 · 无项目"
+    }
+  },
+  "inbox": {
+    "title": "收件箱",
+    "greeting": "历史：代理问过、完成和失败的事。实时项目在侧边栏的收件箱中等待。",
+    "needs": "{n, plural, other {有 # 件事现在需要你。}}",
+    "open": "打开",
+    "today": "今天",
+    "runs_failed": "今天的运行没有加载。",
+    "history_loading": "正在加载今天的历史…",
+    "history_empty": "今天还没有完成或回答的内容。",
+    "what": {
+      "failed": "失败",
+      "finished": "完成",
+      "stopped": "已停止",
+      "answered": "你已回答"
+    },
+    "in_chat": "在 {title} 中",
+    "overdue": "已逾期",
+    "due_today": "今天",
+    "todays_tasks": "今天的任务",
+    "all_tasks": "全部任务",
+    "add_placeholder": "添加今天的任务，或按 Tab 交给代理"
   }
 }

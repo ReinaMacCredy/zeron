@@ -66,6 +66,17 @@ function M.token(text: string, caret: number): Token?
 		end
 		return fences % 2 == 1
 	end
+	-- `@task …` runs past spaces to the caret, the scope's own (composer.rs `task_scope_token`).
+	local line = string.match(before, "[^\n]*$") or ""
+	local mark = string.match(line, "^.*()@")
+	if mark then
+		local at_task = #before - #line + mark
+		local q = string.sub(before, at_task + 1)
+		if string.lower(string.sub(q, 1, 5)) == "task " and starts(at_task) and not fenced(at_task) then
+			local rest = string.match(string.sub(text, caret + 1), "^%S*") or ""
+			return { trigger = "@" :: Trigger, query = q, from = at_task - 1, to = caret + #rest }
+		end
+	end
 	-- `@` and `$`: back over the token's characters (a path's slashes among
 	-- them) to the trigger.
 	local at = #before
@@ -114,6 +125,12 @@ function M.pick(text: string, caret: number, item: Item, sources: Sources): (num
 	-- (An action, as Zeron's own `/model`: taken, its token goes.)
 	if (item :: any).consume then
 		return t.from, t.to, "", ""
+	end
+	-- (A task: its link, `[title](zeron-task:<id>)`, as Zeron's task mention.)
+	if (item :: any).task_link then
+		local link = (item :: any).task_link :: string
+		local after = string.sub(text, t.to + 1, t.to + 1)
+		return t.from, t.to, if after == " " then link else `{link} `, link
 	end
 	if item.attached then
 		local words = if string.sub(text, t.to + 1, t.to + 1) == " " then item.label else `{item.label} `

@@ -1,0 +1,68 @@
+-- The Inbox page on ui/tasks_fixture.luau.
+
+local function open(): any
+	local app = mount("tasks_fixture.luau")
+	app:resize(1300, 900)
+	app:frames(30)
+	app:click("#rail-inbox")
+	app:frames(30)
+	return app
+end
+local function calls(app: any): string
+	return app:state("tasks_calls") :: string
+end
+
+test("the rail opens Inbox: its title, the greeting, and the chats that need you counted as the sidebar has them", function()
+	local app = open()
+	expect(app:state("shell_route_path")).to_be("/plugin/zeron/inbox")
+	expect(app:has('#inbox-page >> role:heading "Inbox"')).to_be(true)
+	expect(app:tree("#inbox-greeting")).to_contain("History: what your agents asked")
+	expect(app:tree("#inbox-banner")).to_contain("1 thing needs you right now.")
+	app:click("#inbox-open")
+	app:frames(20)
+	expect(app:state("shell_route_path")).to_be("/session/b1")
+end)
+
+test("today's history: finished, stopped and answered, newest first, from the engine's runs", function()
+	local app = open()
+	expect(calls(app)).to_contain("today")
+	local tree = app:tree("#inbox-history")
+	local answered = string.find(tree, "You answered", 1, true)
+	local finished = string.find(tree, "Finished", 1, true)
+	local stopped = string.find(tree, "Stopped", 1, true)
+	expect(answered ~= nil and finished ~= nil and stopped ~= nil).to_be(true)
+	expect(answered < finished and finished < stopped).to_be(true)
+	expect(tree).never.to_contain("Fix the build")
+end)
+
+test("today's tasks: those handed to a chat, those due, and those done today; a row opens its card", function()
+	local app = open()
+	local tree = app:tree("#inbox-tasks")
+	expect(tree).to_contain("Fix the login redirect")
+	expect(tree).to_contain("In Ship the release")
+	expect(tree).to_contain("Renew the signing certificate")
+	expect(tree).to_contain("Overdue")
+	expect(tree).to_contain("Answer the design review")
+	expect(tree).never.to_contain("Upgrade the build image")
+	expect(tree).never.to_contain("Draft the onboarding copy")
+	app:click("#inbox-task-t3")
+	app:frames(20)
+	expect(app:has("#task-card")).to_be(true)
+	app:key("Escape")
+	app:frames(20)
+	expect(app:has("#task-card")).to_be(false)
+end)
+
+test("the add row makes a task due today, and All tasks leads to Tasks", function()
+	local app = open()
+	app:scroll("#inbox-page", 800)
+	app:frames(5)
+	app:type("#inbox-add", "Pay the invoice")
+	app:key("Enter")
+	app:frames(10)
+	expect(calls(app)).to_contain("create:Pay the invoice@")
+	expect(app:tree("#inbox-tasks")).to_contain("Pay the invoice")
+	app:click("#inbox-all-tasks")
+	app:frames(20)
+	expect(app:state("shell_route_path")).to_be("/plugin/zeron/tasks")
+end)

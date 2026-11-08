@@ -12,6 +12,7 @@ local boundary = require("@app/screens/shell/boundary")
 local keys = require("@app/screens/shell/keys")
 local route = require("@app/screens/shell/route")
 local art = require("@app/screens/shell/art")
+local tasks_store = require("@app/screens/tasks/store")
 
 local M = {}
 
@@ -169,6 +170,47 @@ local function pull_requests(): Node
 		end,
 		ds.Icon { name = "pull-request", size = GLYPH },
 	})
+end
+
+-- Inbox and Tasks (app_rail.rs), built-in pages on the plugin route; Tasks counts unseen captures.
+local function page_entry(page: string, icon: string, word: string): Node
+	local count = if page == "tasks" then tasks_store.unseen else nil
+	return RailButton {
+		key = `rail-{page}`,
+		label = function(): string
+			return locale.s(word)
+		end,
+		tooltip = function(): string
+			return locale.s(word)
+		end,
+		lit = function(): boolean
+			local c = route.current:get()
+			return c.name == "plugin" and c.plugin == "zeron" and c.page == page
+		end,
+		on_click = function()
+			route.plugin_page("zeron", page)
+		end,
+		ui.div { relative = true, w = GLYPH, h = GLYPH, ds.Icon { name = icon, size = GLYPH }, if count then ui.show(function(): boolean
+			return count:get() > 0
+		end, ui.text {
+			id = "rail-tasks-badge",
+			function(): string
+				return tostring(count:get())
+			end,
+			absolute = true,
+			top = -5,
+			right = -7,
+			min_w = 14,
+			h = 14,
+			px = ui.raw(3, "gpui badge"),
+			rounded = "$radius.full",
+			bg = "$accent",
+			color = ui.raw("#ffffff", "white on the accent, as gpui"),
+			text_size = ui.raw(9, "gpui badge"),
+			align = "center",
+			line_height = 14,
+		}) else nil },
+	}
 end
 
 type Live = { provider: any, account: any }
@@ -597,9 +639,11 @@ local function settings_entry(): Node
 end
 
 M.Rail = ui.component(function(): Node
-	-- Inbox, Tasks and Skills join `entries` with their pages, Voice above Help.
+	-- Skills joins `entries` with its page, Voice above Help.
 	local entries: { any } = {
 		new_chat(),
+		page_entry("inbox", "inbox", "inbox.title"),
+		page_entry("tasks", "checklist", "tasks.title"),
 		pull_requests(),
 		ui.div { grow = 1 },
 		usage_ring(),
