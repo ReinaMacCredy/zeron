@@ -37,7 +37,7 @@ use std::{
 };
 
 use zgx::reactive::{Effect, Runtime, Signal};
-use zgx_desktop::{AppMenu, AppMenuEntry, AppMenuError, MenuAccelerator, WindowFactory};
+use zgx_desktop::{AppMenu, AppMenuEntry, AppMenuError, MenuAccelerator, StandardItem, WindowFactory};
 use zgx_script::{Command, DroppedShortcut, ScriptHost};
 
 use crate::plugins::{self, preview::Preview};
@@ -123,7 +123,7 @@ impl Bar {
     /// (`dropped`, `ScriptHost::dropped_shortcuts`) and the template in
     /// preview, if any.
     pub fn of(commands: &[Command], reserved: &[String], dropped: &[DroppedShortcut], preview: Option<&Preview>) -> Bar {
-        let mut menus = Menus::default();
+        let mut menus = Menus::new();
         for (at, command) in commands.iter().enumerate().filter(|(_, c)| !is_plugins(c)) {
             menus.add(at, command);
         }
@@ -159,7 +159,7 @@ impl Bar {
 
     /// The host's own items alone: the last resort.
     fn host_only(preview: Option<&Preview>) -> Vec<AppMenu> {
-        Menus::default().finish(preview)
+        Menus::new().finish(preview)
     }
 }
 
@@ -180,7 +180,28 @@ struct Menus {
     dropped: Vec<(usize, Dropped)>,
 }
 
+/// Zeron's Edit menu (crates/ui app_menus.rs): the platform's own items,
+/// each with the shortcut zgx-desktop names it by on every platform.
+const EDIT: [(StandardItem, &str); 6] = [
+    (StandardItem::Undo, "Super+Z"),
+    (StandardItem::Redo, "Super+Shift+Z"),
+    (StandardItem::Cut, "Super+X"),
+    (StandardItem::Copy, "Super+C"),
+    (StandardItem::Paste, "Super+V"),
+    (StandardItem::SelectAll, "Super+A"),
+];
+
 impl Menus {
+    /// A bar with the Edit menu's shortcuts already held, so a command
+    /// asking for one is left without it rather than the bar refused.
+    fn new() -> Self {
+        let mut menus = Menus::default();
+        for (item, name) in EDIT {
+            menus.keys.insert(name.to_string(), item.label().to_string());
+        }
+        menus
+    }
+
     /// `command`, the `at`th declared, as an item.
     fn add(&mut self, at: usize, command: &Command) {
         let menu = clean(&command.menu);
@@ -265,6 +286,24 @@ impl Menus {
     /// the macOS one for an item that asks before acting: it opens the keep
     /// sheet).
     fn finish(mut self, preview: Option<&Preview>) -> Vec<AppMenu> {
+        // Edit: Undo, Redo, then Cut, Copy, Paste, then Select All, the
+        // scripts' own (Find) after them; it follows File, as Zeron's.
+        let mut edit: Vec<AppMenuEntry> = Vec::new();
+        for (at, (item, _)) in EDIT.into_iter().enumerate() {
+            if at == 2 || at == 5 {
+                edit.push(AppMenuEntry::Separator);
+            }
+            edit.push(AppMenuEntry::Standard(item));
+        }
+        if let Some(index) = self.menus.iter().position(|m| m.label == "Edit") {
+            let own = self.menus.remove(index).entries;
+            if !own.is_empty() {
+                edit.push(AppMenuEntry::Separator);
+            }
+            edit.extend(own);
+        }
+        let at = self.menus.iter().position(|m| m.label == "File").map_or(0, |file| file + 1);
+        self.menus.insert(at, AppMenu::new("Edit", edit));
         let view = match self.menus.iter().position(|m| m.label == "View") {
             Some(index) => index,
             None => {

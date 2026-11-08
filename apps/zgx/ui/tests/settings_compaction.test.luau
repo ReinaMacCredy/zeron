@@ -71,9 +71,7 @@ test("compaction settings: each change goes to the engine, the agents' switch to
 	app:click(`{PAGE} >> "200K"[1]`)
 	app:frames(20)
 	expect(select(2, string.gsub(calls(app), "SetCompactionSettings", ""))).to_be(before + 1)
-	-- Back on the page, it reads what the engine now has.
-	app:command("shell.settings")
-	app:frames(10)
+	-- Back on the page, it reads what the engine now has. (Settings open, a ⌘, would leave it.)
 	app:click('#settings-nav >> "General"')
 	app:frames(20)
 	app:click('#settings-nav >> "Compaction"')

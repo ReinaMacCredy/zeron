@@ -31,6 +31,24 @@ local recent = ui.persist("shell_palette_recent", {} :: { string })
 
 type Item = any
 
+-- The sidebar's view, as screens/shell/sidebar shares it (its Show options among it).
+local sidebar_view = ui.shared("sidebar.view", {} :: { [string]: any })
+-- (A session carried: the page's split shows where it can land, as for the sidebar's rows.)
+local split_dragging = ui.shared("split.dragging", false)
+
+-- A session's row lifted out, as the sidebar's (its payload): onto a composer as a mention, into a split.
+local function session_drag(id: string): any
+	return {
+		payload = function(): any
+			split_dragging:set(true)
+			return { session = id }
+		end,
+		ended = function()
+			split_dragging:set(false)
+		end,
+	}
+end
+
 -- A chat as the palette lists it: its glyph, state, project, branch and
 -- where it runs, as the sidebar's regular row says it.
 local function session_items(): { Item }
@@ -47,6 +65,11 @@ local function session_items(): { Item }
 	for _, id in now.places.pinned do
 		pinned[id] = true
 	end
+	-- What the sidebar's Show has on (Zeron's palette rows honour it).
+	local details = sidebar_view:get().details or {}
+	local with_branch = details.branch ~= false
+	local with_harness = details.harness ~= false
+	local here = route.session:get()
 	local out: { Item } = {}
 	local function add(c: sessions.Chat, archived: boolean)
 		local p = if c.project then projects[c.project] else nil
@@ -57,16 +80,19 @@ local function session_items(): { Item }
 			session = {
 				status = c.status,
 				time = c.updated,
-				agent = c.agent,
+				agent = if with_harness then c.agent else nil,
 				project = if p then p.name else nil,
 				hue = if p then (route.look(p.id) or { hue = route.hue(p.id) }).hue else nil,
 				src = if p then (route.look(p.id) or {}).src else nil,
 				emoji = if p then (route.look(p.id) or {}).emoji else nil,
-				branch = c.branch,
+				branch = if with_branch then c.branch else nil,
 				device = devices[c.device],
 				archived = archived,
 			},
 			pinned = pinned[c.id],
+			-- (The chat open aside until searched for, as Zeron's recent threads.)
+			search_only = here ~= nil and here.id == c.id,
+			drag = if archived then nil else session_drag(c.id),
 			verb = locale.s("shell.palette.open"),
 			run = function()
 				route.open_session(c.id)
@@ -86,6 +112,33 @@ local function session_items(): { Item }
 	end
 	for _, c in now.archived or {} do
 		add(c, true)
+	end
+	-- Side chats have no sidebar row: a search is their way in (Zeron's).
+	for parent, list in now.children or {} do
+		for _, c in list do
+			local id = c.id
+			table.insert(out, {
+				id = `session:{id}`,
+				label = c.title,
+				section = locale.s("shell.palette.sessions"),
+				session = {
+					status = c.status,
+					time = c.updated,
+					agent = if with_harness then c.agent else nil,
+					device = devices[c.device],
+				},
+				search_only = true,
+				verb = locale.s("shell.palette.open"),
+				run = function()
+					local lanes: any = boundary.load("@app/screens/chat/lanes")
+					if lanes and lanes.open_thread then
+						lanes.open_thread(id)
+					else
+						route.open_session(parent)
+					end
+				end,
+			})
+		end
 	end
 	return out
 end
@@ -415,6 +468,49 @@ local function page_title(id: string, title: string): string
 	return if type(of) == "function" then of(id, title) else title
 end
 
+-- A command's keys now (a rebind's, else its default), for its row's cap.
+local function key_of(id: string): string?
+	local combo = keys.combo(id)
+	return if combo ~= "" then combo else nil
+end
+
+-- Each setting's row (Settings' own search index), found by what's typed, opening Settings at it;
+-- made again only as the index or the locale changes. (Not Shortcuts': its rows are the commands' own names.)
+local settings_made: { key: string, items: { Item } }? = nil
+local function setting_rows(): { Item }
+	local search: any = boundary.load("@app/screens/settings/search")
+	if not search or not search.rows then
+		return {}
+	end
+	local section = locale.s("shell.palette.in_settings")
+	local key = `{search.revision:get()}:{section}`
+	if settings_made and settings_made.key == key then
+		return settings_made.items
+	end
+	local out: { Item } = {}
+	for _, hit in search.rows() do
+		local h = hit
+		if h.page ~= "shortcuts" then
+			table.insert(out, {
+				id = `setting:{h.page}:{h.key}`,
+				label = h.title,
+				section = section,
+				scope = "settings",
+				icon = "settings-minimalistic",
+				hint = h.where,
+				keywords = h.terms,
+				search_only = true,
+				verb = locale.s("shell.palette.open"),
+				run = function()
+					search.open(h)
+				end,
+			})
+		end
+	end
+	settings_made = { key = key, items = out }
+	return out
+end
+
 local function root(): { Item }
 	local out: { Item } = {
 		{
@@ -422,7 +518,7 @@ local function root(): { Item }
 			label = locale.s("shell.palette.new_chat"),
 			section = locale.s("shell.palette.actions"),
 			icon = "pen-new-square",
-			shortcut = "cmd+n",
+			shortcut = key_of("shell.new_chat"),
 			keywords = "session start",
 			run = function()
 				route.new_chat()
@@ -434,7 +530,7 @@ local function root(): { Item }
 			label = locale.s("shell.palette.new_project"),
 			section = locale.s("shell.palette.actions"),
 			icon = "folder",
-			shortcut = "cmd+shift+n",
+			shortcut = key_of("shell.new_project"),
 			keywords = "add folder repository clone",
 			-- Its steps a page of this palette, as "New chat in…": it slides
 			-- there, and Back comes back.
@@ -448,7 +544,7 @@ local function root(): { Item }
 			label = locale.s("shell.palette.toggle_sidebar"),
 			section = locale.s("shell.palette.actions"),
 			icon = "list",
-			shortcut = "cmd+b",
+			shortcut = key_of("shell.toggle_sidebar"),
 			run = function()
 				-- (As ⌘B: hidden for room, it comes back.)
 				fit.toggle_sidebar()
@@ -466,7 +562,7 @@ local function root(): { Item }
 					label = locale.s("shell.palette.archive_session"),
 					section = locale.s("shell.palette.actions"),
 					icon = "archive-minimalistic",
-					shortcut = "cmd+shift+a",
+					shortcut = key_of("shell.archive"),
 					keywords = "thread",
 					run = function()
 						local sidebar: any = boundary.load("@app/screens/shell/sidebar")
@@ -482,10 +578,6 @@ local function root(): { Item }
 	-- relaunched whole (the engine keeps running, the chat open comes back),
 	-- or its interface's scripts evaluated again in place. (Their keys, if
 	-- Settings → Shortcuts gave them any.)
-	local function key_of(id: string): string?
-		local combo = keys.combo(id)
-		return if combo ~= "" then combo else nil
-	end
 	table.insert(out, {
 		id = "a-reload",
 		label = locale.s("shell.palette.reload_zeron"),
@@ -520,7 +612,7 @@ local function root(): { Item }
 				section = locale.s("shell.palette.go_to"),
 				scope = "settings",
 				icon = page.icon or "settings-minimalistic",
-				shortcut = if id == "general" then "cmd+," else nil,
+				shortcut = if id == "general" then key_of("shell.settings") else nil,
 				keywords = "preferences",
 				verb = locale.s("shell.palette.open"),
 				run = function()
@@ -540,6 +632,9 @@ local function root(): { Item }
 	for _, c in command_items() do
 		table.insert(out, c)
 	end
+	for _, r in setting_rows() do
+		table.insert(out, r)
+	end
 	for _, s in session_items() do
 		table.insert(out, s)
 	end
@@ -554,8 +649,12 @@ return function(): Node
 			open = view.palette,
 			recent = recent,
 			-- (Its placeholder read as it's drawn: the locale shown then.)
-			root = setmetatable({ id = "root", title = "Zeron", items = root, search = search_files, scopes = true }, {
+			root = setmetatable({ id = "root", title = "Zeron", items = root, search = search_files, scopes = true, escape_closes = true }, {
 				__index = function(_, field: string): any
+					if field == "shortcut" then
+						-- (⌘K's cap at the field's end, as rebound.)
+						return key_of("shell.palette")
+					end
 					return if field == "placeholder" then locale.s("shell.palette.search") else nil
 				end,
 			}) :: any,

@@ -3582,7 +3582,8 @@
       "reload_interface": "Reload interface",
       "commands": "Commands",
       "run": "Run",
-      "default_interface": "Use Zeron v3"
+      "default_interface": "Use Zeron v3",
+      "in_settings": "In Settings"
     },
     "add_project": {
       "something_went_wrong": "Something went wrong",

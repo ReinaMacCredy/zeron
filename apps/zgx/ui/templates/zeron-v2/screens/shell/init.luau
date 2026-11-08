@@ -37,6 +37,7 @@ local view = require("@app/screens/shell/view")
 local Links = require("@ds/links")
 local plugin_links = require("@app/screens/shell/plugin_links")
 local MenuAt = require("@ds/menu_at")
+local CommandPalette = require("@ds/command_palette")
 local prefs = require("@app/screens/settings/prefs")
 local fit = require("@app/screens/shell/fit")
 local rail = require("@app/screens/shell/rail")
@@ -130,8 +131,13 @@ return function(): Node
 	runs["shell.palette"] = function()
 		view.palette:set(not view.palette:peek())
 	end
+	-- (A second ⌘, leaves, as Zeron's `toggle_settings`.)
 	runs["shell.settings"] = function()
-		route.settings()
+		if route.current:peek().name == "settings" then
+			route.leave_settings()
+		else
+			route.settings()
+		end
 	end
 	runs["shell.quick_capture"] = function()
 		require("@app/screens/tasks/capture").toggle()
@@ -255,6 +261,10 @@ return function(): Node
 	-- `jump_hints`).
 	for i = 1, 9 do
 		runs[`shell.session_{i}`] = function()
+			-- (The palette open: its scopes, as Zeron's ⌘1–4 outrank the jumps.)
+			if CommandPalette.scope_key(i) then
+				return
+			end
 			local sidebar: any = boundary.load("@app/screens/shell/sidebar")
 			local id = sidebar and sidebar.order:peek()[i]
 			if id then

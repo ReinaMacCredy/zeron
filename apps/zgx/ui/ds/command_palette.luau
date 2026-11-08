@@ -112,6 +112,10 @@ export type Item = {
 	quiet: boolean?,
 	strong: boolean?,
 	idle_only: boolean?,
+	-- Lifted out of the palette (a session, as the sidebar's row): what it carries, and its end, taken or not.
+	drag: { payload: () -> any, ended: ((accepted: boolean) -> ())? }?,
+	-- Listed only once something is typed (Zeron's: the chat open, a side chat, a setting's row).
+	search_only: boolean?,
 	inert: boolean?,
 	stay: boolean?,
 	click_selects: boolean?,
@@ -190,6 +194,8 @@ export type Page = {
 	-- step of its own (New project's devices): its title heads the search
 	-- as the pages opened from it do, and Tab only completes or opens.
 	scopes: boolean?,
+	-- Escape closes it at once, whatever is typed (Zeron's ⌘K); a page opened over it still goes back first.
+	escape_closes: boolean?,
 }
 export type Props = {
 	open: State<boolean>,
@@ -205,6 +211,7 @@ export type Props = {
 -- section's title (the first a little shorter: nothing above it to keep
 -- from); the inset at the list's ends; a glyph's slot.
 local typing_paths: { () -> boolean }
+local scope_keys: { (n: number) -> boolean }
 local W = 640
 local SEARCH_H, SCOPES_H, FOOT_H = 52, 38, 40
 local ROW, SESSION, HEAD, HEAD_FIRST, INSET, SLOT = 36, 52, 32, 26, 6, 18
@@ -728,11 +735,14 @@ end
 -- (its search, highlight and scope, given back on the way back).
 type Level = { page: Page, query: string, hi: string?, scope: string }
 
-local Body = ui.component(function(props: Props & { recent_state: State<{ string }>, width: State<number> }): Node
+local Body = ui.component(function(props: Props & { recent_state: State<{ string }>, width: State<number>, held: { query: string?, scope: string?, lifted: boolean? } }): Node
 	local open = props.open
 	local recent = props.recent_state
-	local query = ui.use_state("")
-	local scope = ui.use_state("all")
+	-- (Back from a drag nothing took: the search it was lifted from.)
+	local held = props.held
+	local query = ui.use_state(held.query or "")
+	local scope = ui.use_state(held.scope or "all")
+	held.query, held.scope = nil, nil
 	-- The pages open, the root first (plain: a page holds functions), and a
 	-- count that changes as one opens or closes, for what follows them.
 	local stack: { Level } = { { page = props.root, query = "", hi = nil, scope = "all" } }
@@ -888,7 +898,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			local s = 0
 			if #terms == 0 then
 				-- Nothing typed: archived sessions only come by search.
-				if archived then
+				if archived or item.search_only then
 					continue
 				end
 			elseif item.idle_only then
@@ -1061,6 +1071,12 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 				if of_files and #s.hits > SEARCH_ALL + 1 then
 					s.hits = table.move(s.hits, 1, SEARCH_ALL, 1, {})
 					s.more = "files"
+				end
+				-- (Settings' rows found: a few, the rest in its scope.)
+				local first = if #s.hits > 0 then s.hits[1].item else nil
+				if first and first.search_only and scope_of(first) == "settings" and #s.hits > SEARCH_ALL + 1 then
+					s.hits = table.move(s.hits, 1, SEARCH_ALL, 1, {})
+					s.more = "settings"
 				end
 			end
 		end
@@ -1551,10 +1567,23 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		return true
 	end
 	table.insert(typing_paths, type_path)
+	-- ⌘1–⌘5 as a menu hears them first (the sessions' jumps): this palette's scopes while it's open at its root.
+	local function scope_key(n: number): boolean
+		if not open:peek() or not scoped or depth:peek() ~= 1 or not SCOPES[n] then
+			return false
+		end
+		scope:set(SCOPES[n].id)
+		return true
+	end
+	table.insert(scope_keys, scope_key)
 	ui.on_cleanup(function()
 		local i = table.find(typing_paths, type_path)
 		if i then
 			table.remove(typing_paths, i)
+		end
+		local j = table.find(scope_keys, scope_key)
+		if j then
+			table.remove(scope_keys, j)
 		end
 	end)
 	local function keys(e): boolean
@@ -1632,7 +1661,10 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			return false
 		elseif k == "Escape" then
 			-- One step at a time: the search, then the page, then the palette.
-			if query:peek() ~= "" then
+			if depth:peek() == 1 and props.root.escape_closes then
+				open:set(false)
+				return true
+			elseif query:peek() ~= "" then
 				query:set("")
 				return true
 			elseif depth:peek() > 1 then
@@ -1640,7 +1672,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 				return true
 			end
 			return false
-		elseif cmd and (k == "1" or k == "2" or k == "3" or k == "4") and depth:peek() == 1 and scoped then
+		elseif cmd and SCOPES[tonumber(k) or 0] and depth:peek() == 1 and scoped then
 			scope:set(SCOPES[tonumber(k) :: number].id)
 			return true
 		elseif cmd and (k == "k" or k == "K") then
@@ -2207,6 +2239,57 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 					field:focus()
 				end
 			end,
+			-- Lifted (Zeron's palette drag): the palette goes from under it, so what's beneath takes the drop;
+			-- one taken leaves it closed, one let go elsewhere or Escape brings it back as it was.
+			on_drag = if item_now and item_now.drag and depth:peek() == 1
+				then function(): any
+					local payload = (item_now.drag :: any).payload()
+					if payload ~= nil then
+						held.query, held.scope, held.lifted = query:peek(), scope:peek(), true
+						-- (Once the drag holds the row: gone before, the row's end would go unheard.)
+						ui.after(0, function()
+							if held.lifted then
+								open:set(false)
+							end
+						end)
+					end
+					return payload
+				end
+				else nil,
+			drag_preview = if item_now and item_now.drag
+				then function()
+					return ui.row {
+						w = W - 20,
+						h = r.h - (r.gap or gap()),
+						px = "$space.2",
+						items = "center",
+						rounded = row_corner,
+						bg = "$background",
+						shadow = "$shadow.sm",
+						ui.text { label or "", literal = true, grow = 1, min_w = 0, text_size = "$font.size.md", color = "$text.primary", truncate = true },
+					}
+				end
+				else nil,
+			on_drag_end = if item_now and item_now.drag
+				then function(_payload: any, accepted: boolean?)
+					local ended = (item_now.drag :: any).ended
+					if ended then
+						ended(accepted == true)
+					end
+					held.lifted = false
+					if accepted == true then
+						held.query, held.scope = nil, nil
+						open:set(false)
+					elseif not open:peek() then
+						open:set(true)
+					else
+						held.query, held.scope = nil, nil
+						if field then
+							field:focus()
+						end
+					end
+				end
+				else nil,
 			on_press = if item_now and item_now.click_selects
 				then function(e: any)
 					if e.clicks == 2 then
@@ -2422,7 +2505,9 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		return nil
 	end
 	local function way_out(): string
-		if query:get() ~= "" then
+		if depth:get() == 1 and props.root.escape_closes then
+			return locale.s("ds.command_palette.close")
+		elseif query:get() ~= "" then
 			return locale.s("ds.command_palette.clear")
 		end
 		return locale.s(if depth:get() > 1 then "ds.command_palette.back" else "ds.command_palette.close")
@@ -2560,12 +2645,14 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 	}
 end)
 
--- Each open palette's ⌘L, the newest last.
+-- Each open palette's ⌘L, the newest last; and its ⌘1–⌘5.
 typing_paths = {}
+scope_keys = {}
 
 local Palette = ui.component(function(props: Props): Node
 	local recent = props.recent or ui.use_state({} :: { string })
 	local width = ui.use_state(W)
+	local held = {}
 	return ui.modal {
 		open = props.open,
 		label = locale.t("ds.command_palette.label"),
@@ -2593,7 +2680,7 @@ local Palette = ui.component(function(props: Props): Node
 						props.open:set(false)
 					end,
 				},
-				Body { open = props.open, root = props.root, recent_state = recent, width = width, rises = props.rises },
+				Body { open = props.open, root = props.root, recent_state = recent, width = width, rises = props.rises, held = held },
 			}
 		end,
 	}
@@ -2605,8 +2692,13 @@ local function type_path(): boolean
 	local f = typing_paths[#typing_paths]
 	return f ~= nil and f()
 end
+-- ⌘`n` as a menu key hears it: the open palette's `n`th scope; whether it took it.
+local function scope_key(n: number): boolean
+	local f = scope_keys[#scope_keys]
+	return f ~= nil and f(n)
+end
 
-return setmetatable({ type_path = type_path }, {
+return setmetatable({ type_path = type_path, scope_key = scope_key }, {
 	__call = function(_, props: Props): Node
 		return Palette(props)
 	end,

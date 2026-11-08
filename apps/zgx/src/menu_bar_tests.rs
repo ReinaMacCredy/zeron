@@ -450,3 +450,29 @@ fn the_host_s_own_items_follow_a_preview_and_no_script_takes_their_ids() {
     let none = crate::menu_bar::Bar::of(&commands, &[], &[], None);
     assert!(!items(&none.menus).iter().any(|(label, _, _)| label.starts_with("Keep")), "no preview, no Keep");
 }
+
+/// Zeron's Edit menu: the platform's Undo, Redo, Cut, Copy, Paste and
+/// Select All, after File, the scripts' Find under them; a plugin asking
+/// for one of their keys goes without it and the bar is still taken.
+#[test]
+fn the_edit_menu_has_the_platform_s_items_and_keeps_their_keys() {
+    let command = |id: &str, title: &str, menu: &str, key: Option<&str>| zgx_script::Command { id: id.into(), title: title.into(), menu: menu.into(), key: key.map(Into::into), separator: false };
+    let commands = vec![
+        command("shell.new_chat", "New chat", "File", Some("cmd+n")),
+        command("shell.toggle_sidebar", "Toggle sidebar", "View", Some("cmd+b")),
+        command("shell.find", "Find", "Edit", Some("cmd+f")),
+        command("clip/grab", "Grab", "View", Some("super+c")),
+    ];
+    let bar = crate::menu_bar::Bar::of(&commands, &[], &[], None);
+    assert_eq!(refusal(&bar.menus), None);
+    let labels: Vec<&str> = bar.menus.iter().map(|m| m.label.as_str()).collect();
+    assert_eq!(&labels[..2], &["File", "Edit"]);
+    let edit = &bar.menus[1].entries;
+    use zgx_desktop::StandardItem::*;
+    let standard: Vec<_> = edit.iter().filter_map(|e| if let AppMenuEntry::Standard(item) = e { Some(*item) } else { None }).collect();
+    assert_eq!(standard, vec![Undo, Redo, Cut, Copy, Paste, SelectAll]);
+    assert!(matches!(edit.last(), Some(AppMenuEntry::Item { label, .. }) if label == "Find"), "Find after them");
+    let dropped = bar.dropped.iter().find(|d| d.plugin == "clip").expect("the plugin's key left off");
+    assert_eq!(dropped.why, crate::menu_bar::Why::Zerons("Copy".into()));
+    assert_eq!(refusal(&bar.own), None);
+}

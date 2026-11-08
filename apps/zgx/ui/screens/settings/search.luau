@@ -28,6 +28,7 @@ export type Hit = {
 	-- Where it is: its page's title, and its section's.
 	where: string,
 	score: number,
+	terms: string?,
 }
 
 type Entry = { page: string, key: string?, title: Words, page_title: Words, section: Words?, terms: Words }
@@ -162,6 +163,29 @@ function M.find(query: string): { Hit }
 		return a.score > b.score
 	end)
 	return hits
+end
+
+-- Every setting's row the index lists, in the locale shown (tracked): what the command palette finds them by.
+function M.rows(): { Hit }
+	M.revision:get()
+	local out: { Hit } = {}
+	for _, page in page_order do
+		for _, e in pages[page] or {} do
+			if e.key then
+				local page_title = said(e.page_title)
+				local section = if e.section then said(e.section) else nil
+				table.insert(out, {
+					page = e.page,
+					key = e.key,
+					title = said(e.title),
+					where = if section then `{page_title} · {section}` else page_title,
+					score = 0,
+					terms = said(e.terms),
+				})
+			end
+		end
+	end
+	return out
 end
 
 -- A hit's identity: its page and row.
