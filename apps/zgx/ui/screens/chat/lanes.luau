@@ -170,6 +170,7 @@ function M.view(slot: string): any
 			draft = ui.shared(`chat.lane.{slot}.draft`, { id = "", text = "" } :: any),
 			stats = ui.shared(`chat.lane.{slot}.stats`, nil :: any),
 			token_rate = ui.shared(`chat.lane.{slot}.token_rate`, nil :: number?),
+			turn_tokens = ui.shared(`chat.lane.{slot}.turn_tokens`, nil :: string?),
 		}
 	end
 	return views[slot]

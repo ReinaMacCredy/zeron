@@ -621,6 +621,7 @@ local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?
 				end,
 				says = if working then working.says else nil,
 				rate = if working then working.rate else nil,
+				tokens = if working then working.tokens else nil,
 				seed = seed_of(row:peek().id),
 			},
 		}
@@ -980,6 +981,7 @@ local function reply(
 						end,
 						says = if view and view.working then view.working.says else nil,
 						rate = if view and view.working then view.working.rate else nil,
+						tokens = if view and view.working then view.working.tokens else nil,
 						seed = seed_of(m.id),
 					},
 				}

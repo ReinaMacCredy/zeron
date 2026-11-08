@@ -1223,6 +1223,58 @@ for _, r in { { "rate_41", 41 }, { "rate_gone", nil } } do
 		end,
 	}
 end
+for _, t in { { "tokens_1_1k", "1.1K" }, { "tokens_gone", nil } } do
+	ui.command {
+		id = t[1],
+		title = `The turn's output so far: {t[2] or "gone"}`,
+		run = function()
+			store.turn_tokens:set(t[2])
+		end,
+	}
+end
+-- The live turn settles, as the host republishes its row.
+ui.command {
+	id = "turn_settles",
+	title = "The live turn settles",
+	run = function()
+		local n = store.messages:len()
+		store.messages:set_key({ n, "streaming" }, false)
+	end,
+}
+-- The ring's numbers: 84k of a 200k window.
+ui.command {
+	id = "context_84k",
+	title = "The context holds 84k of 200k",
+	run = function()
+		local s = store.session:peek()
+		if s and s.id then
+			local next_s = table.clone(s) :: any
+			next_s.context_tokens, next_s.context_window = 84000, 200000
+			store.session:set(next_s)
+		end
+	end,
+}
+-- The host's stats: before any turn ended, then after one (its rate and output, a 1h cache with this long left).
+local cache_left_ms = ui.state("test_cache_left_ms", 192500)
+ui.command {
+	id = "stats_none_ended",
+	title = "Stats with no turn ended",
+	run = function()
+		store.stats:set { turns = 0 }
+	end,
+}
+ui.command {
+	id = "stats_turn_ended",
+	title = "Stats after a turn ended",
+	run = function()
+		store.stats:set {
+			turns = 1,
+			cache_ttl = 3600,
+			cache_touched = ui.now() - 3600000 + cache_left_ms:peek(),
+			last = { tps = "52", output = "1.2K" },
+		}
+	end,
+}
 ui.command {
 	id = "stats_say",
 	title = "The session's numbers",

@@ -789,6 +789,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			end
 			return { tokens = s.context_tokens, window = s.context_window }
 		end,
+		stats = function(): any
+			return view.stats:get()
+		end,
 		footer_git = function(): boolean
 			local s = session:get()
 			for _, p in sessions.now:get().projects do
@@ -1256,6 +1259,9 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		working = {
 			rate = function(): number?
 				return view.token_rate:get()
+			end,
+			tokens = function(): string?
+				return view.turn_tokens:peek()
 			end,
 			says = function(sending: boolean): string?
 				return LinkNotice.working_says(sending, sessions.now:get(), view.session:get())

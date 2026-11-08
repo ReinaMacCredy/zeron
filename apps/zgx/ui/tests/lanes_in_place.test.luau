@@ -394,6 +394,13 @@ test("a side chat's composer has the chat page's context ring, from its own numb
 		return tonumber((app:tree(target):match(" (%-?%d+),%-?%d+ %d+x%d+"))) or -1
 	end
 	expect(x('.side-chat-tab >> #composer-context') > x('.side-chat-tab >> role:button "Model"')).to_be(true)
+	-- Its card says its own last turn.
+	app:hover('.side-chat-tab >> #composer-context')
+	app:wait("#composer-context-card", { timeout_ms = 2000 })
+	app:frames(30)
+	expect(app:text("#composer-context-turn-rate")).to_be("48 tok/s")
+	expect(app:text("#composer-context-turn-output")).to_be("900 tokens")
+	expect(app:has("#composer-context-cache")).to_be(false)
 end)
 
 test("a side chat's tab has the sidebar's menu for its chat: rename, copy, archive, delete; no pin or move", function()

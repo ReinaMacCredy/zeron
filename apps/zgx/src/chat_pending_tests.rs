@@ -23,6 +23,7 @@ fn pending_chat() -> (TestApp, Rc<View>, Sending) {
         draft: app.host.shared("test.draft", Value::Nil),
         stats: app.host.shared("test.stats", Value::Nil),
         token_rate: app.host.shared("test.token_rate", Value::Nil),
+        turn_tokens: app.host.shared("test.turn_tokens", Value::Nil),
         on_screen: Cell::new(true),
         rpc: RefCell::default(),
         open: RefCell::default(),

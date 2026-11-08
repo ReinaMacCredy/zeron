@@ -19,6 +19,8 @@ export type Props = {
 	sending: (() -> boolean)?,
 	says: ((sending: boolean) -> string?)?,
 	rate: (() -> number?)?,
+	-- The turn's output so far ("1.2K"), read on the clock's tick: it adds no frame of its own.
+	tokens: (() -> string?)?,
 }
 
 local SAYS: { [string]: string } = {
@@ -82,6 +84,10 @@ return ui.component(function(props: Props): Node
 	local function rate(): number?
 		return if props.rate and not sending() then props.rate() else nil
 	end
+	local function tokens(): string?
+		now:get()
+		return if props.tokens and not sending() then props.tokens() else nil
+	end
 	return ui.row {
 		h = 26,
 		gap = "$space.2",
@@ -127,6 +133,17 @@ return ui.component(function(props: Props): Node
 				return locale.s("ds.working.rate", { n = string.format("%d", rate() or 0) })
 			end,
 			id = "working-rate",
+			tabular = true,
+			text_size = "$font.size.xs",
+			color = "$text.tertiary",
+		}),
+		ui.show(function(): boolean
+			return tokens() ~= nil
+		end, ui.text {
+			function(): string
+				return locale.s("ds.working.tokens", { n = tokens() or "" })
+			end,
+			id = "working-tokens",
 			tabular = true,
 			text_size = "$font.size.xs",
 			color = "$text.tertiary",

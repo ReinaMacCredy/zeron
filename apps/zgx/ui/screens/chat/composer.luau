@@ -1216,6 +1216,9 @@ local function Composer(): Node
 				end
 				return { tokens = s.context_tokens, window = s.context_window }
 			end,
+			stats = function(): any
+				return if open() then store.stats:get() else nil
+			end,
 			compaction = {
 				label = function(): string?
 					local s: any = open()

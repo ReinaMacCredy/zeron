@@ -141,6 +141,9 @@ export type Props = {
 	-- one has none), and hovering or focusing it opens a card saying the
 	-- numbers, as Zeron's does (crates/ui/src/context_usage.rs).
 	usage: (() -> Usage?)?,
+	-- The chat's stats (the host's `chat.stats`): the card's last turn and
+	-- prompt cache under the numbers.
+	stats: (() -> any)?,
 	-- The footer stands over a wallpaper (a new chat's art): the pill's glass
 	-- continues under it as a tray, the chips on it rather than on the art,
 	-- easing in and out as the art comes and goes. Without, it stays bare.
@@ -720,7 +723,7 @@ end
 -- chips beside it are. Given what the context holds, it opens the card
 -- above (below, with the menus below) as the pointer rests on it or the
 -- keys reach it.
-local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: () -> string): Node
+local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: () -> string, stats: (() -> any)?, working: (() -> boolean)?): Node
 	local function fraction(): number
 		if usage then
 			return context_usage.fraction(usage()) or 0
@@ -737,7 +740,7 @@ local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: (
 			hover = { bg = "$hover" },
 			focusable = usage ~= nil,
 			label = locale.t("ds.composer.context_used"),
-			tooltip = if usage then context_usage.Card { usage = usage } else nil,
+			tooltip = if usage then context_usage.Card { usage = usage, stats = stats, working = working } else nil,
 			tooltip_placement = if at then { side = at, align = "end", offset = 8 } else nil,
 			tooltip_delay = 150,
 			context_usage.Ring { fraction = fraction },
@@ -2560,7 +2563,9 @@ return ui.component(function(props: Props): Node
 					then ui.show(function(): boolean
 						local u = (props.usage :: () -> Usage?)()
 						return u ~= nil and u.window ~= nil and u.window > 0
-					end, ring(0, props.usage, side))
+					end, ring(0, props.usage, side, props.stats, function(): boolean
+						return props.running ~= nil and props.running:get()
+					end))
 					elseif props.context then ring(props.context, nil, side)
 					else nil,
 			},

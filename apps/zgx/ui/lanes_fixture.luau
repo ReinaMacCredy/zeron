@@ -215,6 +215,7 @@ stub_lanes.watch = function(slot: string, id: string?, frozen: boolean?, _chat: 
 		-- (A side chat as the host publishes it: side-a runs Codex's GPT-6.1.)
 		if id == "side-a" then
 			lanes.view(slot).session:set({ id = id, state = "ready", harness = "codex", model = "codex/gpt-6.1", effort = "medium", access = "edits", project = "p1", device = "d", branch = "feature", cwd = "/proj/.zeron/worktrees/feature", running = false, context_tokens = 52000, context_window = 200000 })
+			lanes.view(slot).stats:set({ turns = 2, last = { tps = "48", output = "900" } })
 		end
 	end
 end

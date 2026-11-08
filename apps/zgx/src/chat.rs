@@ -111,6 +111,8 @@ struct Chats {
     views: RefCell<Vec<Weak<View>>>,
     watches: RefCell<Vec<Watch>>,
     rates: RefCell<HashMap<String, RateWatch>>,
+    /// By chat: its stats before its latest turn began, and that turn's number (`turn_base`).
+    turn_bases: RefCell<HashMap<String, (zeron_proto::SessionStats, u64)>>,
     machine_polls: RefCell<std::collections::HashSet<String>>,
     rpc: RefCell<Option<Rpc>>,
     /// What each chat waiting on its person asks: "approval" or
@@ -432,6 +434,8 @@ struct View {
     stats: Shared,
     /// The live tok/s: on its own, so a rate moving repaints those digits and no reader of the session.
     token_rate: Shared,
+    /// The running turn's output so far ("1.2K"), read by the working row on its clock's tick.
+    turn_tokens: Shared,
     on_screen: Cell<bool>,
     rpc: RefCell<Option<Rpc>>,
     open: RefCell<Option<Open>>,
@@ -530,6 +534,8 @@ struct Open {
     /// and the window's size (either may be missing), for the ring's card.
     context_usage: (Option<f64>, Option<f64>),
     stats: Option<zeron_proto::SessionStats>,
+    /// The last stats a frame carried, through frames that carry none.
+    stats_seen: Option<zeron_proto::SessionStats>,
     machine: Option<zeron_proto::CloudState>,
     in_flight_seen: bool,
     queue: Vec<Json>,
@@ -588,6 +594,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         draft: host.shared("chat.draft", draft_value("", "")),
         stats: host.shared("chat.stats", Value::Nil),
         token_rate: host.shared("chat.token_rate", Value::Nil),
+        turn_tokens: host.shared("chat.turn_tokens", Value::Nil),
         on_screen: Cell::new(true),
         rpc: RefCell::default(),
         open: RefCell::default(),
@@ -809,6 +816,7 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
         draft: host.shared(&format!("chat.lane.{slot}.draft"), draft_value("", "")),
         stats: host.shared(&format!("chat.lane.{slot}.stats"), Value::Nil),
         token_rate: host.shared(&format!("chat.lane.{slot}.token_rate"), Value::Nil),
+        turn_tokens: host.shared(&format!("chat.lane.{slot}.turn_tokens"), Value::Nil),
         on_screen: Cell::new(false),
         rpc: RefCell::default(),
         open: RefCell::default(),
@@ -1152,6 +1160,7 @@ impl Chats {
             heard: true,
             context_usage: held.context_usage,
             stats: held.stats,
+            stats_seen: held.stats,
             built: held.built,
             built_model: held.built_model,
             has_whole: true,
@@ -1886,6 +1895,7 @@ impl View {
         self.publish_messages();
         self.publish_session();
         self.publish_stats();
+        self.publish_turn_tokens();
         chats.follow_rates();
         if let Some(id) = self.open_id() {
             // Its finished state seen, as the shipping app marks it.
@@ -1910,6 +1920,7 @@ impl View {
         self.draft.set(draft_value("", ""));
         self.publish_session();
         self.publish_stats();
+        self.publish_turn_tokens();
         CHATS.with(Rc::clone).follow_rates();
         let generation = self.generation.get();
         let weak = Rc::downgrade(self);
@@ -2072,6 +2083,15 @@ impl View {
             }
             let stats = stats_of(&frame);
             let moved = open.stats != stats;
+            if let Some(now) = &stats {
+                let chats = CHATS.with(Rc::clone);
+                let mut bases = chats.turn_bases.borrow_mut();
+                match turn_base(bases.get(&open.id).copied(), open.stats_seen.as_ref(), now) {
+                    Some(base) => bases.insert(open.id.clone(), base),
+                    None => bases.remove(&open.id),
+                };
+                open.stats_seen = Some(*now);
+            }
             open.stats = stats;
             moved
         };
@@ -2136,6 +2156,9 @@ impl View {
             }
             result
         };
+        if matches!(applied, Ok(Change::Words | Change::Rows)) {
+            self.publish_turn_tokens();
+        }
         match applied {
             Ok(Change::Quiet) => {}
             Ok(Change::Words) => self.publish_draft(),
@@ -2456,8 +2479,17 @@ impl View {
     }
 
     fn publish_stats(&self) {
-        let stats = self.open.borrow().as_ref().and_then(|o| o.stats);
-        self.stats.set(stats.as_ref().map_or(Value::Nil, stats_value));
+        let value = self.open.borrow().as_ref().and_then(|o| {
+            let stats = o.stats?;
+            let base = CHATS.with(|c| c.turn_bases.borrow().get(&o.id).copied());
+            Some(stats_value(&stats, base.filter(|(_, n)| *n == stats.turns).map(|(before, _)| last_turn(&before, &stats))))
+        });
+        self.stats.set(value.unwrap_or(Value::Nil));
+    }
+
+    fn publish_turn_tokens(&self) {
+        let tokens = self.open.borrow().as_ref().and_then(|o| turn_tokens(&o.entries));
+        self.turn_tokens.set(tokens.map_or(Value::Nil, |n| Value::from(zeron_proto::usage::format_tokens(n).as_str())));
     }
 
     async fn send(self: &Rc<Self>, req: Value) -> Result<Option<String>, Outcome> {
@@ -6740,39 +6772,62 @@ fn stats_of(frame: &Json) -> Option<zeron_proto::SessionStats> {
     serde_json::from_value(frame.get("sessionStats")?.clone()).ok()
 }
 
-fn stats_value(stats: &zeron_proto::SessionStats) -> Value {
-    use zeron_proto::stats_view::{cost_headline, duration, token_split};
+fn stats_value(stats: &zeron_proto::SessionStats, last: Option<zeron_proto::SessionStats>) -> Value {
     use zeron_proto::usage::format_tokens;
-    let priced = stats.cost_usd().is_some();
-    let split: Vec<Value> = token_split(stats)
-        .into_iter()
-        .map(|(label, n)| {
-            Value::record([
-                ("label", Value::from(label)),
-                ("n", Value::Num(n as f64)),
-                ("tokens", Value::from(format_tokens(n).as_str())),
-            ])
-        })
-        .collect();
-    let opt = |v: Option<String>| v.map_or(Value::Nil, |v| Value::from(v.as_str()));
+    let last = last.filter(|t| t.output_tokens > 0).map_or(Value::Nil, |t| {
+        Value::record([
+            ("tps", t.tokens_per_second().map_or(Value::Nil, |r| Value::from(format!("{r:.0}").as_str()))),
+            ("output", Value::from(format_tokens(t.output_tokens).as_str())),
+        ])
+    });
     Value::record([
         ("turns", Value::Num(stats.turns as f64)),
-        ("steps", Value::Num(stats.steps as f64)),
-        ("llm", Value::from(duration(stats.llm_ms).as_str())),
-        ("tool", Value::from(duration(stats.tool_ms).as_str())),
-        ("ttft", opt(stats.avg_ttft_ms().map(duration))),
-        ("tps", opt(stats.tokens_per_second().map(|t| format!("{t:.0}")))),
-        ("hit", opt(stats.cache_hit_rate().map(|r| format!("{:.0}", r * 100.0)))),
         ("cache_ttl", stats.cache_ttl_secs.map_or(Value::Nil, |t| Value::Num(f64::from(t)))),
         ("cache_touched", stats.cache_touched_at.map_or(Value::Nil, |t| Value::Num(t as f64))),
-        ("headline", opt(cost_headline(stats))),
-        ("priced", Value::Bool(priced)),
-        ("unpriced", Value::Num(if priced { stats.unpriced_turns as f64 } else { 0. })),
-        ("estimated", Value::Bool(priced && stats.cost_estimated)),
-        ("total", Value::from(format_tokens(stats.total_tokens()).as_str())),
-        ("total_n", Value::Num(stats.total_tokens() as f64)),
-        ("split", Value::List(split.into())),
+        ("last", last),
     ])
+}
+
+/// Its stats before the turn `now` ends on began, and that turn's number: a turn seen
+/// starting, the one kept while it's still the latest, or a first turn's from nothing.
+fn turn_base(
+    kept: Option<(zeron_proto::SessionStats, u64)>,
+    seen: Option<&zeron_proto::SessionStats>,
+    now: &zeron_proto::SessionStats,
+) -> Option<(zeron_proto::SessionStats, u64)> {
+    let still = kept.filter(|(_, n)| *n == now.turns);
+    match seen {
+        Some(was) if now.turns == was.turns + 1 => Some((*was, now.turns)),
+        Some(was) if now.turns == was.turns => still,
+        Some(_) => None,
+        None => still.or_else(|| (now.turns == 1).then(|| (zeron_proto::SessionStats::default(), 1))),
+    }
+}
+
+fn last_turn(before: &zeron_proto::SessionStats, now: &zeron_proto::SessionStats) -> zeron_proto::SessionStats {
+    zeron_proto::SessionStats {
+        output_tokens: now.output_tokens.saturating_sub(before.output_tokens),
+        usage_llm_ms: now.usage_llm_ms.saturating_sub(before.usage_llm_ms),
+        ..Default::default()
+    }
+}
+
+/// The running turn's output as the engine's live meter counts it before a bill corrects it:
+/// its replies' words and reasoning since the prompt, a token to four characters.
+fn turn_tokens(entries: &[Entry]) -> Option<u64> {
+    let last = entries.last()?.json.as_ref()?;
+    if last["status"].as_str() != Some("streaming") {
+        return None;
+    }
+    let chars: usize = entries
+        .iter()
+        .rev()
+        .map_while(|e| e.json.as_ref().filter(|j| j["role"].as_str() != Some("user")))
+        .flat_map(|j| j["parts"].as_array().into_iter().flatten())
+        .filter(|p| matches!(p["kind"].as_str(), Some("text" | "reasoning")))
+        .map(|p| p["text"].as_str().map_or(0, |t| t.chars().count()))
+        .sum();
+    (chars > 0).then(|| zeron_proto::transcript::estimated_tokens(chars))
 }
 
 /// `zeron_doc::schema::turn_stopped` on the wire's entry: this app doesn't depend on zeron-doc.
@@ -8821,43 +8876,54 @@ mod tests {
     }
 
     #[test]
-    fn stats_value_says_what_stats_view_says() {
-        use zeron_proto::stats_view::{cost_headline, stats_rows, token_split};
-        let stats = zeron_proto::SessionStats {
-            turns: 86,
-            steps: 1903,
-            llm_ms: 172 * 60_000 + 14_000,
-            tool_ms: 13_400,
-            ttft_ms: 2_400,
-            ttft_count: 2,
-            output_tokens: 137_000,
-            usage_llm_ms: 1_000_000,
-            input_tokens: 5,
-            cache_read_tokens: 90,
-            cache_write_tokens: 5,
-            cache_ttl_secs: Some(3600),
-            cache_touched_at: Some(1_000_000),
-            unpriced_turns: 4,
-            cost_micros: 12_840_000,
-            cost_estimated: true,
-            ..Default::default()
-        };
-        let v = stats_value(&stats);
-        let said = |k: &str| v.field(k).map(text).unwrap_or_default();
-        let rows = stats_rows(&stats, None);
-        assert_eq!(said("llm"), rows[0].1);
-        assert_eq!(said("tool"), rows[1].1);
-        assert_eq!(said("ttft"), rows[2].1);
-        assert_eq!(format!("{} tok/s", said("tps")), rows[3].1);
-        assert_eq!(format!("{}%", said("hit")), rows[4].1);
-        assert_eq!(said("headline"), cost_headline(&stats).unwrap());
-        assert_eq!(v.field("unpriced").and_then(Value::as_f64), Some(4.));
-        let Some(Value::List(split)) = v.field("split") else { panic!("no split") };
-        let labels: Vec<String> = split.iter().map(|p| p.field("label").map(text).unwrap_or_default()).collect();
-        assert_eq!(labels, token_split(&stats).iter().map(|(l, _)| (*l).to_owned()).collect::<Vec<_>>());
-        let none = stats_value(&zeron_proto::SessionStats { input_tokens: 9, unpriced_turns: 5, ..Default::default() });
-        assert_eq!(none.field("priced"), Some(&Value::Bool(false)));
-        assert_eq!(none.field("unpriced").and_then(Value::as_f64), Some(0.));
+    fn the_last_turn_is_what_its_turn_added_to_the_stats() {
+        use zeron_proto::SessionStats as S;
+        let at = |turns: u64, output_tokens: u64, usage_llm_ms: u64| S { turns, output_tokens, usage_llm_ms, ..Default::default() };
+        let (three, four) = (at(3, 900, 30_000), at(4, 2_100, 53_000));
+        // Opened on a chat with turns behind it: which was the last can't be told.
+        assert_eq!(turn_base(None, None, &three), None);
+        // One seen starting: what it added.
+        let base = turn_base(None, Some(&three), &four);
+        assert_eq!(base, Some((three, 4)));
+        let last = last_turn(&base.unwrap().0, &four);
+        assert_eq!((last.output_tokens, last.usage_llm_ms), (1_200, 23_000));
+        // Its later segments' writes still count to it; it's kept, opened again, while it's the latest.
+        let later = at(4, 2_500, 60_000);
+        assert_eq!(turn_base(base, Some(&four), &later), base);
+        assert_eq!(turn_base(base, None, &later), base);
+        assert_eq!(turn_base(base, None, &at(5, 3_000, 70_000)), None);
+        // Two turns at once, or the stats starting over: no turn of its own.
+        assert_eq!(turn_base(base, Some(&three), &at(5, 3_000, 70_000)), None);
+        assert_eq!(turn_base(base, Some(&four), &at(1, 10, 100)), None);
+        // A chat's first turn is its whole stats.
+        assert_eq!(turn_base(None, None, &at(1, 288, 4_000)), Some((S::default(), 1)));
+        let v = stats_value(&four, Some(last));
+        let said = |k: &str| v.field("last").and_then(|l| l.field(k)).map(text);
+        assert_eq!(said("tps").as_deref(), Some("52"));
+        assert_eq!(said("output").as_deref(), Some("1.2K"));
+        // A harness that bills nothing: no last turn to say.
+        assert_eq!(stats_value(&four, Some(at(0, 0, 9_000))).field("last"), Some(&Value::Nil));
+        assert_eq!(stats_value(&four, None).field("last"), Some(&Value::Nil));
+        let no_time = stats_value(&four, Some(at(0, 40, 0)));
+        assert_eq!(no_time.field("last").and_then(|l| l.field("tps")), Some(&Value::Nil));
+    }
+
+    #[test]
+    fn a_running_turns_output_is_its_words_since_the_prompt() {
+        let entry = |id: &str, role: &str, status: &str, parts: Json| Entry::new(json!({ "id": id, "role": role, "status": status, "parts": parts }));
+        let text = |t: &str| json!({ "kind": "text", "text": t });
+        let thought = |t: &str| json!({ "kind": "reasoning", "text": t });
+        let tool = json!({ "kind": "tool", "call": { "kind": "unknown", "name": "Bash" }, "resolved": true });
+        let before = entry("a0", "assistant", "complete", json!([text(&"x".repeat(4_000))]));
+        let prompt = entry("u1", "user", "complete", json!([text("go")]));
+        let segment = entry("a1", "assistant", "complete", json!([thought(&"t".repeat(400)), tool]));
+        let streaming = entry("a2", "assistant", "streaming", json!([text(&"é".repeat(4_001))]));
+        assert_eq!(turn_tokens(&[before, prompt, segment, streaming]), Some(1_101));
+        let quiet = entry("a3", "assistant", "streaming", json!([]));
+        assert_eq!(turn_tokens(&[entry("u2", "user", "complete", json!([text("go")])), quiet]), None);
+        let done = entry("a4", "assistant", "complete", json!([text("done")]));
+        assert_eq!(turn_tokens(&[done]), None);
+        assert_eq!(turn_tokens(&[]), None);
     }
 
     #[test]
@@ -8919,6 +8985,7 @@ mod tests {
                     draft: host.shared(&format!("t.{slot}.draft"), Value::Nil),
                     stats: host.shared(&format!("t.{slot}.stats"), Value::Nil),
                     token_rate: host.shared(&format!("t.{slot}.rate"), Value::Nil),
+                    turn_tokens: host.shared(&format!("t.{slot}.turn_tokens"), Value::Nil),
                     on_screen: Cell::new(true),
                     rpc: RefCell::default(),
                     open: RefCell::default(),
@@ -9018,6 +9085,7 @@ mod tests {
                 draft: host.shared("t.draft", Value::Nil),
                 stats: host.shared("t.stats", Value::Nil),
                 token_rate: host.shared("t.rate", Value::Nil),
+                turn_tokens: host.shared("t.turn_tokens", Value::Nil),
                 on_screen: Cell::new(true),
                 rpc: RefCell::default(),
                 open: RefCell::default(),
@@ -9039,6 +9107,13 @@ mod tests {
         view.heard_frame(json!({}));
         assert_eq!(view.stats.get(), Value::Nil);
         assert!(view.open.borrow().as_ref().unwrap().stats.is_none());
+        // Its second turn was there before it opened: no last turn; the next one seen ending is.
+        let last = |v: &View| v.stats.get().field("last").and_then(|l| l.field("output")).map(text);
+        view.heard_frame(json!({ "sessionStats": stats }));
+        assert_eq!(last(&view), None);
+        let third = zeron_proto::SessionStats { turns: 3, output_tokens: 1_200, usage_llm_ms: 23_000, ..Default::default() };
+        view.heard_frame(json!({ "sessionStats": third }));
+        assert_eq!(last(&view).as_deref(), Some("1.2K"));
     }
 
     #[test]

@@ -9,11 +9,15 @@
 --   context_usage.ink(f)       the ring's ink at `f`
 --   Body { usage = fn }        "Context window" and the lines, followed as
 --                              the usage changes
+--   Card { usage, stats?, working? }  the ring's card; given the chat's
+--                              stats (`chat.stats`), its last turn's rate and
+--                              output and the prompt cache's time left
 
 local locale = require("@self/locale")
 local Menu = require("@self/menu")
 local HoverCard = require("@self/hover_card")
 local progress = require("@self/progress")
+local SessionStats = require("@self/session_stats")
 
 export type Usage = { tokens: number?, window: number? }
 
@@ -126,7 +130,76 @@ local function tone(f: number): progress.Tone
 	return if f >= 0.9 then "danger" elseif f >= 0.75 then "warning" else "neutral"
 end
 
-function M.Card(props: { usage: () -> Usage? }): Node
+-- The last turn seen ending and the prompt cache (what the session stats
+-- chip said, folded in here): the cache counts down once a second while the
+-- card shows, and not at all once it hides.
+local TurnPart = ui.component(function(props: { stats: () -> SessionStats.Stats?, working: () -> boolean }): Node
+	local now = ui.use_state(ui.now())
+	local shown = ui.use_state(false)
+	local function known(): boolean
+		local s = props.stats()
+		return s ~= nil and s.cache_ttl ~= nil and s.cache_touched ~= nil
+	end
+	ui.effect(function()
+		if shown:get() and known() then
+			now:set(ui.now())
+			ui.every(1000, function()
+				now:set(ui.now())
+			end)
+		end
+	end)
+	local function last(): SessionStats.Last?
+		local s = props.stats()
+		return if s then s.last else nil
+	end
+	local function cache(): SessionStats.Cache?
+		local s = props.stats()
+		return if s then SessionStats.cache_of(s, props.working(), now:get()) else nil
+	end
+	local function row(label: string, id: string, value: () -> string, shows: () -> boolean): Node
+		return ui.show(shows, ui.row {
+			h = 22,
+			px = "$space.2",
+			gap = "$space.2",
+			items = "center",
+			justify = "between",
+			text_size = "$font.size.sm",
+			color = "$text.tertiary",
+			ui.text { locale.t(label) },
+			ui.text { value, id = id, tabular = true, color = "$text.primary" },
+		})
+	end
+	return ui.show(function(): boolean
+		return last() ~= nil or known()
+	end, ui.column {
+		id = "composer-context-turn",
+		w_full = true,
+		pb = "$space.1",
+		on_visible = function(visible: boolean)
+			shown:set(visible)
+		end,
+		ui.div { mx = ui.raw(-4, "the card's inset: the rule runs edge to edge"), mb = "$space.1", Menu.Rule {} },
+		row("ds.composer.context.last_turn", "composer-context-turn-rate", function(): string
+			local l = last()
+			return locale.s("ds.composer.context.tok_s", { n = if l then l.tps or "" else "" })
+		end, function(): boolean
+			local l = last()
+			return l ~= nil and l.tps ~= nil
+		end),
+		row("ds.composer.context.output", "composer-context-turn-output", function(): string
+			local l = last()
+			return locale.s("ds.composer.context.output_tokens", { n = if l then l.output else "" })
+		end, function(): boolean
+			return last() ~= nil
+		end),
+		row("ds.composer.context.cache", "composer-context-cache", function(): string
+			local c = cache()
+			return if c then SessionStats.cache_countdown(c) else ""
+		end, known),
+	})
+end)
+
+function M.Card(props: { usage: () -> Usage?, stats: (() -> SessionStats.Stats?)?, working: (() -> boolean)? }): Node
 	local usage = props.usage
 	local function fraction(): number?
 		return M.fraction(usage())
@@ -206,6 +279,14 @@ function M.Card(props: { usage: () -> Usage? }): Node
 				}),
 			},
 		},
+		if props.stats
+			then TurnPart {
+				stats = props.stats,
+				working = props.working or function(): boolean
+					return false
+				end,
+			}
+			else nil,
 	}
 end
 

@@ -374,6 +374,9 @@ local function Session(id: Id?): Node
 								rate = function(): number?
 									return store.token_rate:get()
 								end,
+								tokens = function(): string?
+									return store.turn_tokens:peek()
+								end,
 								says = function(sending: boolean): string?
 									return LinkNotice.working_says(sending, sessions.now:get(), store.session:get())
 								end,
