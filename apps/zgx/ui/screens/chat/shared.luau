@@ -16,6 +16,7 @@ local agents = require("@account/agents")
 local locale = require("@ds/locale")
 local toast = require("@ds/toast")
 local ChatLinks = require("@app/screens/chat/chat_links")
+local composer_surface = require("@ds/composer_surface")
 
 local M = {}
 
@@ -381,8 +382,10 @@ M.editing = ui.shared("chat.annotation.edit", nil :: any)
 -- What a transcript or a file's preview needs to annotate for chat `key()`
 -- (ds/annotation_layer's `Notes`): only what `source` drew (nil: the
 -- conversation). `extra.side`: Ask in side chat; `extra.focus`: the
--- composer that takes the keys after a comment (the chat page's by default).
-function M.notes(key: () -> string?, source: (string | () -> string?)?, extra: { side: ((text: string) -> ())?, focus: (() -> ())? }?): { [string]: any }
+-- composer that takes the keys after a comment (the chat page's by default);
+-- `extra.mention`: Mention (by default into chat `key()`'s draft, at the
+-- chat page's caret while it shows that chat).
+function M.notes(key: () -> string?, source: (string | () -> string?)?, extra: { side: ((text: string) -> ())?, focus: (() -> ())?, mention: ((q: { text: string, who: string? }) -> ())? }?): { [string]: any }
 	local x = extra or {}
 	local function from(): string?
 		return if type(source) == "function" then source() else source
@@ -426,6 +429,24 @@ function M.notes(key: () -> string?, source: (string | () -> string?)?, extra: {
 			end
 		end,
 		side = x.side,
+		mention = x.mention or function(q: { text: string, who: string? })
+			local k = key()
+			if k then
+				M.mention_in(k, { text = q.text, who = q.who or from() or "" }, if here:peek() == k then composer_surface.field else nil)
+			end
+		end,
+		keys = function()
+			local k = key()
+			local field = composer_surface.field
+			local el = if k and here:peek() == k and field then field:peek() else nil
+			if el then
+				el:focus()
+			elseif x.focus then
+				x.focus()
+			else
+				M.focus:add(1)
+			end
+		end,
 		edit = function(): string?
 			local e = M.editing:get()
 			return if e then e.id else nil
@@ -447,6 +468,54 @@ function M.mention(q: Quote.Quote)
 		M.text:set(Quote.add(M.text:peek(), line))
 	end)
 	M.focus:add(1)
+end
+
+-- A passage quoted into chat `key`'s draft at `field`'s caret (the end
+-- without one), its line marking it, then the keys there, the caret after it.
+-- `focus`: who takes the keys with no field (the chat page's composer).
+function M.mention_in(key: string, q: Quote.Quote, field: any?, focus: (() -> ())?)
+	local line = Quote.line(q)
+	local mine = here:peek() == key
+	local text = if mine then M.text:peek() else M.draft_peek(key).text
+	local el = if field then field:peek() else nil
+	local at: number? = nil
+	if el then
+		local a, b = el:selection_bytes()
+		if a and b and math.max(a, b) <= #text then
+			at = math.max(a, b)
+		end
+	end
+	local out, caret = Quote.insert(text, line, at)
+	ui.batch(function()
+		if mine then
+			local quotes = table.clone(M.quotes:peek())
+			quotes[line] = q.text
+			M.quotes:set(quotes)
+			M.text:set(out)
+		else
+			change_kept(key, function(d: any)
+				local quotes = table.clone(d.quotes or {})
+				quotes[line] = q.text
+				d.quotes, d.text = quotes, out
+			end)
+		end
+	end)
+	if not el then
+		if focus then
+			focus()
+		else
+			M.focus:add(1)
+		end
+		return
+	end
+	-- (Once the field shows the new words.)
+	ui.after(0, function()
+		local now = field:peek()
+		if now then
+			now:focus()
+			now:set_selection_bytes(caret, caret)
+		end
+	end)
 end
 
 function M.attach_quote(q: Quote.Quote, key: string?)

@@ -1,5 +1,7 @@
--- Text annotations, as Zeron's layer has them (crates/ui/src/annotations.rs):
--- a selection's pill, Add to chat opening a comment input on its first line,
+-- Text annotations, as Zeron's layer has them (crates/ui/src/annotations.rs),
+-- offered from upstream zgx's glass pill under the selection's end (Mention,
+-- Add to chat, Ask in side chat; a scroll or Escape puts it away): Mention
+-- quoting into the draft at the caret, Add to chat opening a comment input on its first line,
 -- the comment kept on Enter or a click outside and the annotation dropped on
 -- Escape, a numbered badge on the annotated line, the composer's one chip and
 -- its card, and the prompt carrying Zeron's annotation block. The selection
@@ -27,10 +29,10 @@ local function box_of(app: any, sel: string, pattern: string): { x: number, y: n
 end
 
 -- `words` selected where `shown` is drawn (its first line), and the press let go there.
-local function select(app: any, shown: string, words: string)
+local function select(app: any, shown: string, words: string, w: number?)
 	local b = box_of(app, "#transcript", shown) :: any
 	expect(b ~= nil).to_be(true)
-	local line = { x = b.x + 10, y = b.y, w = math.min(b.w - 10, 160), h = 20 }
+	local line = { x = b.x + 10, y = b.y, w = w or math.min(b.w - 10, 160), h = 20 }
 	app:set_state("fake_selection", { text = words, top = line, bottom = line })
 	app:click(`#transcript >> ~"{shown}"`)
 	settle(app)
@@ -54,6 +56,18 @@ local function card(app: any)
 	settle(app)
 end
 
+-- The pill's buttons, in order.
+local function words_of(app: any): { string }
+	local out: { string } = {}
+	for line in app:tree("#annotation-pill"):gmatch("[^\n]+") do
+		local name = line:match(' button "([^"]+)"')
+		if name then
+			table.insert(out, name)
+		end
+	end
+	return out
+end
+
 local function send(app: any, words: string)
 	app:type('role:textbox "Message"', words)
 	app:key("Enter")
@@ -61,17 +75,21 @@ local function send(app: any, words: string)
 	settle(app)
 end
 
-test("annotations: the pill's Add to chat takes a comment, and the prompt carries both in Zeron's block", function()
+test("annotations: the pill's three words stand under the selection's end; Add to chat takes a comment, and the prompt carries both in Zeron's block", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(960, 700)
 	open(app, "s2")
-	select(app, "Hi! What shall we work on?", "What shall we work on?")
-	expect(app:has('#annotation-pill >> role:button "Add to chat"')).to_be(true)
-	expect(app:has('#annotation-pill >> role:button "Ask in side chat"')).to_be(true)
-	-- Over the selection's first line, centred on it.
+	select(app, "Hi! What shall we work on?", "What shall we work on?", 420)
+	-- Upstream's pill, with ours: Mention, Add to chat, Ask in side chat; no Attach.
+	expect(table.concat(words_of(app), "|")).to_be("Mention|Add to chat|Ask in side chat")
+	expect(app:has('#annotation-pill >> role:button "Attach"')).to_be(false)
+	-- Just under the selection's last line (6 clear), ending where it ends.
 	local line = box_of(app, "#transcript", "Hi! What shall we work on?") :: any
 	local pill = box_of(app, "#annotation-pill", "#annotation-pill") :: any
-	expect(pill.y + pill.h).to_be(line.y - 8)
+	local sel = app:state("fake_selection").bottom
+	expect(pill.y).to_be(sel.y + sel.h + 6)
+	expect(pill.x + pill.w).to_be(sel.x + sel.w)
+	expect(pill.h).to_be(32)
 	app:click("#annotation-add-to-chat")
 	settle(app)
 	-- The input, focused, in the pill's place; the selection gone.
@@ -243,19 +261,108 @@ test("annotations: a plain selection staged is Zeron's one selections chip, sent
 	expect(app:has('#transcript >> .message-badge "1 selection"')).to_be(true)
 end)
 
-test("annotations: the pill follows its text as the transcript scrolls", function()
+test("annotations: a scroll takes the pill away, fading where it stood, and leaves the selection", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(960, 640)
 	open(app, "s1")
 	select(app, "Part 29 works like this.", "Part 29 works like this.")
 	local before = box_of(app, "#annotation-pill", "#annotation-pill") :: any
-	local line = box_of(app, "#transcript", "Part 29 works like this.") :: any
 	app:scroll("#transcript", -60)
+	app:frames(2)
+	-- (Going: where it stood, not riding its line.)
+	local going = box_of(app, "#annotation-pill", "#annotation-pill")
+	if going then
+		expect(going.y).to_be(before.y)
+	end
 	settle(app)
-	local after = box_of(app, "#annotation-pill", "#annotation-pill") :: any
-	local moved = box_of(app, "#transcript", "Part 29 works like this.") :: any
-	expect(moved.y ~= line.y).to_be(true)
-	expect(after.y - before.y).to_be(moved.y - line.y)
+	expect(app:has("#annotation-pill")).to_be(false)
+	expect(app:state("fake_selection") ~= nil).to_be(true)
+	-- Still there, nothing comes back on its own as the view rests.
+	app:frames(30)
+	expect(app:has("#annotation-pill")).to_be(false)
+end)
+
+test("annotations: the pill rises a little into place as it fades in; with motion reduced it only fades", function()
+	for _, reduce in { false, true } do
+		local app = mount("chat_fixture.luau")
+		app:resize(960, 700)
+		app:set_state("motion_reduce", reduce)
+		open(app, "s2")
+		local b = box_of(app, "#transcript", "Hi! What shall we work on?") :: any
+		local line = { x = b.x + 10, y = b.y, w = 160, h = 20 }
+		app:set_state("fake_selection", { text = "What shall we work on?", top = line, bottom = line })
+		app:click('#transcript >> ~"Hi! What shall we work on?"')
+		app:frames(1)
+		local first = (box_of(app, "#annotation-pill", "#annotation-pill") :: any).y
+		settle(app)
+		local rest = (box_of(app, "#annotation-pill", "#annotation-pill") :: any).y
+		expect(rest).to_be(line.y + line.h + 6)
+		if reduce then
+			expect(first).to_be(rest)
+		else
+			expect(first > rest and first <= rest + 4).to_be(true)
+		end
+	end
+end)
+
+test("annotations: Mention puts the passage in the draft at the caret, sent in full; nothing staged, no badge", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(960, 700)
+	open(app, "s2")
+	app:type('role:textbox "Message"', "Look at this: why?")
+	-- (The caret before "why?".)
+	for _ = 1, 4 do
+		app:key("Left")
+	end
+	local long = "What shall we work on? A passage long enough that its line in the draft is cut short, well past the excerpt's seventy-two characters."
+	select(app, "Hi! What shall we work on?", long)
+	app:click("#annotation-mention")
+	settle(app)
+	expect(app:has("#annotation-pill")).to_be(false)
+	expect(app:has("#annotation-editor")).to_be(false)
+	expect(app:state("fake_selection")).to_be(nil)
+	local draft = app:text('role:textbox "Message"')
+	expect(draft).to_contain("Look at this:\n\n> Opus: What shall we work on? A passage long enough")
+	expect(draft).to_contain("…\n\nwhy?")
+	expect(draft).never.to_contain("seventy-two characters.")
+	-- The keys back in the draft; nothing on the composer's strip or the line.
+	expect(app:tree('role:textbox "Message"')).to_contain(" focused")
+	expect(app:has('#chat-composer >> "1 annotation"')).to_be(false)
+	expect(app:has('#chat-composer >> "1 selection"')).to_be(false)
+	expect(app:has("#annotation-badge-1")).to_be(false)
+	app:key("Enter")
+	app:wait('"never shown, only waited past"', { timeout_ms = 600 })
+	settle(app)
+	expect(app:state("calls")).to_contain(`send:s2:Look at this:\n\n> Opus:\n> {long}\n\nwhy?`)
+	expect(app:state("calls")).never.to_contain("Annotations (numbered")
+end)
+
+test("annotations: the pill holds the keys: Tab walks its words, Escape puts it away and keeps the selection", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(960, 700)
+	open(app, "s2")
+	select(app, "Hi! What shall we work on?", "What shall we work on?")
+	-- (The pill itself, not a word yet: no ring until the keys move.)
+	expect(app:tree("#annotation-pill"):match("^[^\n]*")).to_contain(" focused")
+	app:key("Tab")
+	expect(app:tree("#annotation-mention")).to_contain(" focused")
+	app:key("Tab")
+	expect(app:tree("#annotation-add-to-chat")).to_contain(" focused")
+	app:key("Tab")
+	expect(app:tree("#annotation-ask-side-chat")).to_contain(" focused")
+	app:key("Escape")
+	settle(app)
+	expect(app:has("#annotation-pill")).to_be(false)
+	expect(app:state("fake_selection") ~= nil).to_be(true)
+	expect(app:state("calls")).never.to_contain("stop:")
+	expect(app:text('role:textbox "Message"')).to_be("")
+	-- Taken by the keys: Add to chat opens the input as a click does.
+	select(app, "Hi! What shall we work on?", "What shall we work on?")
+	app:key("Tab")
+	app:key("Tab")
+	app:key("Enter")
+	settle(app)
+	expect(app:tree("#annotation-comment")).to_contain(" focused")
 end)
 
 test("annotations: Ask in side chat stages the text on a side chat's draft, with nothing to badge here", function()
@@ -288,13 +395,13 @@ test("annotations: with no room over the first line the input stands under it; t
 	open(app, "s2")
 	select(app, "Hello there", "Hello there")
 	local line = box_of(app, "#transcript", "Hello there") :: any
-	local pill = box_of(app, "#annotation-pill", "#annotation-pill") :: any
 	local view = box_of(app, "#transcript", "#transcript") :: any
-	-- (The first line sits under the view's top, too near it for the pill above.)
-	expect(line.y - view.y - 8 - 30 < 8).to_be(true)
-	expect(pill.y).to_be(line.y + 20 + 8)
+	-- (The first line sits under the view's top, too near it for the input above.)
+	expect(line.y - view.y - 7 - 45 < 8).to_be(true)
 	app:click("#annotation-add-to-chat")
 	settle(app)
+	local input = box_of(app, "#annotation-editor", "#annotation-editor") :: any
+	expect(input.y).to_be(line.y + 20 + 7)
 	app:key("Enter")
 	settle(app)
 	annotate(app, "Hello there", "there", "")

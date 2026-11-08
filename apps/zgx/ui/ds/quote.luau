@@ -71,6 +71,22 @@ function M.add(draft: string, line: string): string
 	return `{base}\n\n{line}\n\n`
 end
 
+-- `draft` with `line` on a line of its own at byte `at` (the caret: nil or
+-- the end, after the rest as `add` puts it), and where the caret goes: the
+-- start of what followed it.
+function M.insert(draft: string, line: string, at: number?): (string, number)
+	if at == nil or at >= #(string.gsub(draft, "%s+$", "")) then
+		local out = M.add(draft, line)
+		return out, #out
+	end
+	local before = string.gsub(string.sub(draft, 1, math.max(0, at)), "[ \t]+$", "")
+	local after = string.gsub(string.sub(draft, math.max(0, at) + 1), "^[ \t]+", "")
+	local lead = if before == "" or string.sub(before, -2) == "\n\n" then "" elseif string.sub(before, -1) == "\n" then "\n" else "\n\n"
+	local trail = if string.sub(after, 1, 2) == "\n\n" then "" elseif string.sub(after, 1, 1) == "\n" then "\n" else "\n\n"
+	local head = `{before}{lead}{line}{trail}`
+	return head .. after, #head
+end
+
 -- What of `quotes` (each passage by its line) the draft still holds.
 function M.kept(draft: string, quotes: { [string]: string }): { [string]: string }
 	local out = {}

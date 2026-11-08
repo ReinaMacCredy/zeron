@@ -232,6 +232,84 @@ test("a passage attached to a side chat goes with its message, in full", functio
 	expect(calls(app)).to_contain("the whole passage")
 end)
 
+test("a passage mentioned in a side chat's draft goes in full, and comes back with it if it doesn't go", function()
+	local app = open()
+	local line = "> the whole…"
+	app:command("side_quote_in_draft")
+	app:frames(5)
+	expect(app:text(BOX)).to_be(line)
+	app:command("send_fails")
+	app:click(BOX)
+	app:key("Enter")
+	app:frames(5)
+	expect(calls(app)).to_contain("the whole passage")
+	app:frames(30)
+	expect(app:text(BOX)).to_be(line)
+end)
+
+-- `words` selected over the side chat's reply line, and the press let go there.
+local function select_in_side(app: any, words: string)
+	local x, y, w = box(app, '"This is side-a"', ".side-chat-tab")
+	local line = { x = x, y = y, w = math.min(w, 120), h = 20 }
+	app:set_state("fake_selection", { text = words, top = line, bottom = line })
+	app:click('.side-chat-tab >> "This is side-a"')
+	app:frames(30)
+end
+
+test("a side chat's selection offers the pill's three words; Mention goes into its own draft, not the chat page's", function()
+	local app = open()
+	app:type(BOX, "Before ")
+	select_in_side(app, "This is side-a")
+	local names: { string } = {}
+	for l in app:tree(".side-chat-tab >> #annotation-pill"):gmatch("[^\n]+") do
+		local name = l:match(' button "([^"]+)"')
+		if name then
+			table.insert(names, name)
+		end
+	end
+	expect(table.concat(names, "|")).to_be("Mention|Add to chat|Ask in side chat")
+	app:click(".side-chat-tab >> #annotation-mention")
+	app:frames(20)
+	expect(app:text(BOX)).to_contain("Before\n\n> Agent: This is side-a\n\n")
+	expect(app:tree(BOX)).to_contain(" focused")
+	local drafts = app:state("chat.composer.drafts") or {}
+	expect(drafts["chat-1"] == nil or not string.find(drafts["chat-1"].text or "", "This is side-a", 1, true)).to_be(true)
+	app:key("Enter")
+	app:frames(10)
+	expect(calls(app)).to_contain("send:side-a:Before\n\n> Agent:\n> This is side-a")
+end)
+
+test("typed with a side chat's pill showing, its composer takes the keys; Escape puts the pill away", function()
+	local app = open()
+	select_in_side(app, "This is side-a")
+	expect(app:tree(".side-chat-tab >> #annotation-pill"):match("^[^\n]*")).to_contain(" focused")
+	-- (A key alone, as the window has it: its text then follows to the field focused, which the test can't send.)
+	app:key("x")
+	app:frames(5)
+	expect(app:tree(BOX)).to_contain(" focused")
+	select_in_side(app, "This is side-a")
+	app:key("Escape")
+	app:frames(20)
+	expect(app:has(".side-chat-tab >> #annotation-pill")).to_be(false)
+	expect(app:state("fake_selection") ~= nil).to_be(true)
+end)
+
+test("a side chat's Add to chat gives its line a badge and its own composer the chip", function()
+	local app = open()
+	select_in_side(app, "This is side-a")
+	app:click(".side-chat-tab >> #annotation-add-to-chat")
+	app:frames(20)
+	app:type("#annotation-comment", "why?")
+	app:key("Enter")
+	app:frames(20)
+	expect(app:has(".side-chat-tab >> #annotation-badge-1")).to_be(true)
+	expect(app:has('#lane-composer-tab1 >> "1 annotation"')).to_be(true)
+	expect(app:tree(BOX)).to_contain(" focused")
+	app:key("Enter")
+	app:frames(10)
+	expect(calls(app)).to_contain("send:side-a:Refer to the selected text below.\n\nAnnotations (numbered; each quotes the text the user selected, then the user's comment on it):\n1. Selected text:\n> This is side-a\nUser comment:\n> why?")
+end)
+
 test("a tab made again after its edit was let go puts its own draft back", function()
 	local app = open()
 	app:type(BOX, "My own draft")

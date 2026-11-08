@@ -56,3 +56,21 @@ fn a_prompt_carries_its_annotations_as_zeron_writes_them() {
     );
     assert!(calls.contains(&format!("send:s2:{zeron}")), "sent as Zeron writes it:\n{zeron}\n---\n{calls}");
 }
+
+#[test]
+fn a_selection_pill_put_away_runs_no_script() {
+    let mut app = mount();
+    let reply = "#transcript >> ~\"Hi! What shall we work on?\"";
+    let b = app.bounds(reply);
+    let line = || Value::record([("x", Value::Num(f64::from(b.x) + 10.)), ("y", Value::Num(f64::from(b.y))), ("w", Value::Num(160.)), ("h", Value::Num(20.))]);
+    app.host.set_state("fake_selection", Value::record([("text", Value::from("What shall we work on?")), ("top", line()), ("bottom", line())])).unwrap();
+    app.click(reply);
+    app.frames(30);
+    assert!(app.find("#annotation-pill").is_some(), "the selection's pill shows");
+    app.keys("Escape");
+    app.frames(30);
+    assert!(app.find("#annotation-pill").is_none(), "Escape put the pill away");
+    let before = app.calls();
+    app.frames(180);
+    assert_eq!(app.calls() - before, 0, "the selection kept, its pill gone, runs no script");
+}

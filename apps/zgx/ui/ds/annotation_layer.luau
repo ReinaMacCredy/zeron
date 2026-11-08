@@ -1,11 +1,14 @@
 -- Text annotations over a scrolled text (a transcript, a rendered file), as
--- Zeron's annotation layer draws them (crates/ui/src/annotations.rs): a
--- selection settled offers a pill, "Add to chat" and "Ask in side chat",
--- over its first line; Add to chat stages an annotation and opens a comment
--- input there, focused; a numbered badge then stands over the annotated line
--- at the column's right edge, its comment in a tip under the pointer. The
--- text is washed only while its input is open (the code's choice, not the
--- doc's "stays highlighted").
+-- Zeron's annotation layer draws them (crates/ui/src/annotations.rs), offered
+-- from upstream zgx's selection pill (ds/transcript's Action): a selection
+-- settled shows a glass pill just under its end, "Mention", "Add to chat" and
+-- "Ask in side chat", fading in with a small rise; a scroll takes it away
+-- and it fades where it stood. Mention quotes the text into the draft at its
+-- caret; Add to chat stages an annotation and opens a comment input over the
+-- first selected line, focused; a numbered badge then stands over the
+-- annotated line at the column's right edge, its comment in a tip under the
+-- pointer. The text is washed only while its input is open (the code's
+-- choice, not the doc's "stays highlighted").
 --
 -- An anchor is the holder the selection began in (a transcript's message
 -- row), the first selected line's place in it, and the holder's size then: a
@@ -13,7 +16,7 @@
 --
 -- Each holder draws its badges and their tips, so they scroll with it and go
 -- when it isn't laid out; the pill and the input stand over the whole view,
--- placed again a frame after it scrolls.
+-- the input placed again a frame after it scrolls.
 --
 --   local layer = Layer.new { name = "...", notes = notes, view = list_ref,
 --   	holder_at = function(y) return key, ref end, holder = function(key) return ref end }
@@ -25,6 +28,9 @@
 local Icon = require("@self/icon")
 local SelectionMenu = require("@self/selection_menu")
 local locale = require("@self/locale")
+local glass = require("@self/glass")
+local control = require("@self/control")
+local motion = require("@self/motion")
 
 ui.theme.tokens {
 	zeron = {
@@ -47,11 +53,16 @@ export type Notes = {
 	comment: (id: string, text: string, focus: boolean) -> (),
 	remove: (id: string) -> (),
 	side: ((text: string) -> ())?,
+	mention: ((q: { text: string, who: string? }) -> ())?,
+	-- Typing with the pill holding the keys: the composer takes them (type to focus).
+	keys: (() -> ())?,
 	edit: () -> string?,
 	edited: () -> (),
 }
 
-local PILL_H, PILL_R, SEG_PAD, PILL_GAP = 30, 14, 8, 8
+-- Upstream's selection pill: its words' height and its own (the bar's
+-- even inset and its border, each side), what it keeps from the selection.
+local WORD, PILL_H, CLEAR = 26, 32, 6
 local EDITOR_W, EDITOR_H, EDIT_R, EDITOR_GAP, ACTION = 296, 45, 17, 7, 27
 local BADGE, TAIL, OVER_LINE, STEP_GAP = 30, 4, 28.5, 2
 local TIP_H, TIP_R, TIP_GAP, TIP_MAX, TIP_CHARS = 32, 11, 11.5, 280, 36
@@ -69,6 +80,10 @@ function M.new(opts: {
 	holder_at: (y: number) -> (string?, Ref?),
 	holder: (key: string) -> Ref?,
 	top_inset: (() -> number)?,
+	-- The room the pill leaves at the view's foot (what floats there).
+	floor: (() -> number)?,
+	-- Who said a selection, for Mention's line.
+	who: ((s: any) -> string?)?,
 	scroll: (() -> number)?,
 	reveal: ((a: Anchor, over: number) -> ())?,
 }): { [string]: any }
@@ -130,7 +145,8 @@ function M.new(opts: {
 	-- In the holder: over the anchor's line, centred on it; under it with no
 	-- room above in the view; kept inside the view's sides.
 	-- Placed again a frame after the view scrolls or the anchor's holder
-	-- changes size (once laid out there), while the pill or the input shows.
+	-- changes size (once laid out there), while the input shows. (The pill
+	-- stays where it was put, and a scroll takes it away.)
 	local tick = ui.state(`annotation_tick.{opts.name}`, 0)
 	local function anchor_shown(): Anchor?
 		local e = editor:get()
@@ -138,8 +154,7 @@ function M.new(opts: {
 			local n = note_of(e.id)
 			return if n then n.anchor else nil
 		end
-		local p = pending:get()
-		return if p then p.anchor else nil
+		return nil
 	end
 	ui.effect(function()
 		local a = anchor_shown()
@@ -157,6 +172,15 @@ function M.new(opts: {
 		ui.after(0, function()
 			tick:set(tick:peek() + 1)
 		end)
+	end)
+
+	-- A scroll takes the pill away: it no longer stands by what it offers.
+	-- (The offset is read only while it shows: no work a scroll frame otherwise.)
+	ui.effect(function()
+		local p = pending:get()
+		if p and opts.scroll and math.abs(opts.scroll() - p.offset) > 1 then
+			pending:set(nil)
+		end
 	end)
 
 	-- In the view: over the anchor's line, centred on it; under it with no
@@ -270,17 +294,66 @@ function M.new(opts: {
 		SelectionMenu.clear()
 		notes.side(p.text)
 	end
+	local function mention()
+		local p = pending:peek()
+		if not p or not notes or not notes.mention then
+			return
+		end
+		pending:set(nil)
+		SelectionMenu.clear()
+		notes.mention({ text = p.text, who = p.who })
+	end
+
+	-- Where the pill stands for a selection, in the view: under its last
+	-- line, ending with it; else over its first, starting with it; else at
+	-- the view's foot (upstream's `place`).
+	local function place_of(s: any): any
+		local el = opts.view:peek()
+		local b, t = s.bottom or s.top, s.top or s.bottom
+		if not el or el.x == nil or el.y == nil or not el.height or not b or not t then
+			return nil
+		end
+		local floor = el.height - (if opts.floor then opts.floor() else EDGE) - PILL_H
+		local below = b.y + b.h + CLEAR - el.y
+		if below <= floor then
+			return { y = below, right = b.x + b.w - el.x }
+		end
+		local above = t.y - CLEAR - PILL_H - el.y
+		if above >= (if opts.top_inset then opts.top_inset() else 0) + EDGE then
+			return { y = above, left = t.x - el.x }
+		end
+		return { y = floor, right = b.x + b.w - el.x }
+	end
+	local function pending_of(s: any, text_of: ((s: any) -> string)?): any
+		local a = anchor_of(s)
+		if not a then
+			return nil
+		end
+		return {
+			text = if text_of then text_of(s) else s.text,
+			who = if opts.who then opts.who(s) else nil,
+			anchor = a,
+			at = place_of(s),
+			offset = if opts.scroll then opts.scroll() else 0,
+			-- (Motion as the setting is when it shows.)
+			still = motion.reduced_now(),
+			gen = (function(): number
+				made += 1
+				return made
+			end)(),
+		}
+	end
 
 	-- A press let go: the selection now, its text as `text_of` reads it.
 	function L.settle(text_of: ((s: any) -> string)?)
 		pinned:set(nil)
 		local s = if notes then SelectionMenu.read() else nil
-		local a = if s then anchor_of(s) else nil
-		if not s or not a then
+		local p = if s then pending_of(s, text_of) else nil
+		if not p or not p.at then
 			pending:set(nil)
 			return
 		end
-		pending:set { text = if text_of then text_of(s) else s.text, anchor = a }
+		pending:set(p)
 	end
 	function L.clear()
 		pending:set(nil)
@@ -293,22 +366,26 @@ function M.new(opts: {
 	function L.shown(): boolean
 		return pending:get() ~= nil or editor:get() ~= nil
 	end
-	-- What the selection's menu offers, the pill's own two.
+	-- What the selection's menu offers, the pill's own words.
 	function L.offers(s: any, text_of: ((s: any) -> string)?): { any }
 		if not notes then
 			return {}
 		end
 		local function take(act: () -> ())
 			return function()
-				local a = anchor_of(s)
-				if a then
-					pending:set { text = if text_of then text_of(s) else s.text, anchor = a }
+				local p = pending_of(s, text_of)
+				if p then
+					pending:set(p)
 					act()
 				end
 			end
 		end
 		pending:set(nil)
-		local out: { any } = { { label = locale.s("ds.annotation.add_to_chat"), icon = "chat-round-line", on_select = take(add) } }
+		local out: { any } = {}
+		if notes.mention then
+			table.insert(out, { label = locale.s("ds.annotation.mention"), icon = "chat-round-line", on_select = take(mention) })
+		end
+		table.insert(out, { label = locale.s("ds.annotation.add_to_chat"), icon = "chat-round-line", on_select = take(add) })
 		if notes.side then
 			table.insert(out, { label = locale.s("ds.annotation.ask_side"), icon = "chat-round-line", on_select = take(side) })
 		end
@@ -357,27 +434,30 @@ function M.new(opts: {
 		end)
 	end
 
-	local function segment(id: string, label: Label, act: () -> ()): Node
+	-- A word on the pill: a pill in a pill, its curve parallel to the bar's.
+	local function word(id: string, label: Label, act: () -> ()): Node
 		return ui.button {
 			id = id,
 			label = label,
-			h_full = true,
-			px = ui.raw(SEG_PAD, "Zeron's pill segment"),
-			items = "center",
+			h = WORD,
+			px = "$zeron.space.snug",
+			rounded = "$radius.full",
 			bg = "#00000000",
-			rounded = 0,
 			color = "$text.primary",
-			text_size = ui.raw(TEXT, "Zeron's annotation text"),
+			text_size = "$font.size.sm",
+			weight = "$font.weight.medium",
 			cursor = "pointer",
 			hover = { bg = "$hover" },
 			active = { bg = "$pressed" },
+			focus = control.ring,
 			on_click = act,
 			label,
 		}
 	end
 
-	local Pill = ui.component(function(): Node
+	local Pill = ui.component(function(props: { gen: number }): Node
 		local pill = ui.ref()
+		-- However the selection went (a press elsewhere, its row rebuilt), the pill goes with it.
 		ui.every(WATCH, function()
 			if SelectionMenu.read() == nil then
 				pending:set(nil)
@@ -385,40 +465,57 @@ function M.new(opts: {
 			end
 			return true
 		end)
+		-- Where it stands: its selection's place, so it fades out there.
 		local stood: any = nil
-		local function place(): (number, number)
-			local p = pending:get() or stood
-			stood = p
-			if not p then
-				return 0, -1000
-			end
-			return over_line(p.anchor, pill.width or 200, PILL_H, PILL_GAP)
+		local function standing(): any
+			local p = pending:get()
+			stood = if p and p.gen == props.gen then p.at else stood
+			return stood
 		end
-		return ui.row {
+		local bar: { [any]: any } = {
 			id = "annotation-pill",
 			ref = pill,
 			absolute = true,
-			left = function(): number
-				local x = place()
-				return x
-			end,
 			top = function(): number
-				local _, y = place()
-				return y
+				local at = standing()
+				return if at then at.y else -1000
 			end,
-			h = PILL_H,
+			left = function(): number
+				local at = standing()
+				if not at then
+					return 0
+				end
+				local w = pill.width or 0
+				local x = if at.left then at.left else at.right - w
+				return math.clamp(x, EDGE, math.max(EDGE, (opts.view.width or 0) - w - EDGE))
+			end,
+			gap = "$zeron.space.hair",
 			items = "center",
-			rounded = ui.raw(PILL_R, "Zeron's annotation pill"),
-			border = 1,
-			border_color = "$border",
-			bg = "$zeron.annotation.fill",
-			overflow = "hidden",
 			shadow = "$shadow.md",
 			selectable = false,
-			segment("annotation-add-to-chat", locale.t("ds.annotation.add_to_chat"), add),
-			if notes and notes.side then ui.div { w = 1, h_full = true, bg = "$border" } else nil,
-			if notes and notes.side then segment("annotation-ask-side-chat", locale.t("ds.annotation.ask_side"), side) else nil,
+			-- (It holds the keys, so Tab walks its words and Escape puts it away.)
+			focusable = true,
+			focus = { outline = 0 },
+			on_mount = function(el: any)
+				el:focus()
+			end,
+			on_key = function(e: any): boolean
+				if e.key == "Escape" and not (e.shift or e.cmd or e.alt or e.ctrl) then
+					pending:set(nil)
+					return true
+				end
+				-- (Not taken: the window gives its text to the field just focused.)
+				if notes and notes.keys and not (e.cmd or e.ctrl or e.meta) and (utf8.len(e.key) == 1 or e.key == "Space") then
+					notes.keys()
+				end
+				return false
+			end,
+			if notes and notes.mention then word("annotation-mention", locale.t("ds.annotation.mention"), mention) else nil,
+			word("annotation-add-to-chat", locale.t("ds.annotation.add_to_chat"), add),
+			if notes and notes.side then word("annotation-ask-side-chat", locale.t("ds.annotation.ask_side"), side) else nil,
 		}
+		control.contain(glass.style(bar, "menu"), { radius = "$radius.full", inset = "$zeron.space.hair", border = 1 })
+		return ui.row(bar)
 	end)
 
 	-- A press on the comment card's own buttons (its field keeps the comment open).
@@ -713,32 +810,47 @@ function M.new(opts: {
 		}
 	end
 
-	-- Over the view (above every row): the pill, or the comment's input.
+	-- Over the view (above every row): the pill, and the comment's input.
 	function L.Overlay(): Node?
 		if not notes then
 			return nil
 		end
-		return ui.presence(function(): string?
-			local e = editor:get()
-			if e then
-				return `{e.gen}:{if e.editing then "edit" else "new"}`
-			end
-			return if pending:get() then "pill" else nil
-		end, function(which: string): Node
-			if which == "pill" then
-				return Pill()
-			end
-			return Editor { editing = string.find(which, "edit", 1, true) ~= nil }
-		end, {
+		local function over(): { [string]: any }
+			return { absolute = true, left = 0, right = 0, top = 0, bottom = 0, overflow = "hidden", pointer_events = "none" }
+		end
+		-- Upstream's: a fade and a small rise in (no rise with motion reduced), a fade out where it stood.
+		local function pill(reduced: boolean): Node
+			local box = over()
+			box.enter = if reduced
+				then { opacity = { 0, 1 }, duration = 160, ease = "outQuad" }
+				else { opacity = { 0, 1 }, y = { 4, 0 }, duration = 160, ease = "outQuad" }
+			box.exit = { opacity = 0, duration = 90 }
+			return ui.presence(function(): string?
+				-- (Each selection its own: one let go again fades where it stood as the next comes in.)
+				local p = pending:get()
+				return if p and not editor:get() and p.still == reduced then `pill:{p.gen}` else nil
+			end, function(which: string): Node
+				return Pill { gen = tonumber(string.sub(which, 6)) :: number }
+			end, box)
+		end
+		local editor_box = over()
+		editor_box.exit = { opacity = 0, duration = 80 }
+		return ui.div {
 			absolute = true,
 			left = 0,
 			right = 0,
 			top = 0,
 			bottom = 0,
-			overflow = "hidden",
 			pointer_events = "none",
-			exit = { opacity = 0, duration = 80 },
-		})
+			pill(false),
+			pill(true),
+			ui.presence(function(): string?
+				local e = editor:get()
+				return if e then `{e.gen}:{if e.editing then "edit" else "new"}` else nil
+			end, function(which: string): Node
+				return Editor { editing = string.find(which, "edit", 1, true) ~= nil }
+			end, editor_box),
+		}
 	end
 
 	-- What stands on holder `key`'s text: its badges, and a badge's tip.

@@ -1,6 +1,7 @@
--- Text selected in a file's Markdown preview: the same annotation pill and
--- comment as the conversation's, the annotation naming its file and staged
--- on the chat the files are its, its badge on the preview's line.
+-- Text selected in a file's Markdown preview: the same pill (Mention, Add to
+-- chat, Ask in side chat) and comment as the conversation's, the annotation
+-- naming its file and staged on the chat the files are its, its badge on the
+-- preview's line; Mention quotes it into that chat's draft under its path.
 
 local function box_of(app: any, sel: string, pattern: string): { x: number, y: number, w: number, h: number }?
 	for line in app:tree(sel):gmatch("[^\n]+") do
@@ -51,4 +52,20 @@ test("preview annotations: a selection in a rendered file is annotated with its 
 	local badge = box_of(app, "#file-viewer", "#annotation-badge-1") :: any
 	expect(badge ~= nil).to_be(true)
 	expect(math.abs(badge.y - (b.y - 28.5)) <= 1).to_be(true)
+	app:set_state("fake_selection", { text = "Write it", top = line, bottom = line })
+	app:click('#file-viewer >> "Write it"')
+	app:frames(30)
+	local names: { string } = {}
+	for l in app:tree("#annotation-pill"):gmatch("[^\n]+") do
+		local name = l:match(' button "([^"]+)"')
+		if name then
+			table.insert(names, name)
+		end
+	end
+	expect(table.concat(names, "|")).to_be("Mention|Add to chat|Ask in side chat")
+	app:click("#annotation-mention")
+	app:frames(30)
+	local kept = app:state("chat.composer.drafts")["chat-1"]
+	local text = if app:state("chat.composer.here") == "chat-1" then app:state("chat.composer.text") else kept and kept.text
+	expect(text).to_contain("> docs/guide.md: Write it")
 end)

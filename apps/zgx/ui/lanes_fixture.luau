@@ -251,6 +251,23 @@ end }
 ui.command { id = "side_attach_passage", title = "A passage attached to it", run = function()
 	require("@app/screens/chat/shared").attach_quote({ text = "the whole passage", who = "Reply" }, "side-a")
 end }
+-- A passage mentioned in its draft (upstream's `chat_lane_quotes_*`, now its chat's draft): its line, the whole passage kept by it.
+ui.command { id = "side_quote_in_draft", title = "A passage mentioned in its draft", run = function()
+	local shared = require("@app/screens/chat/shared")
+	shared.set_draft_of("side-a", "quotes", { ["> the whole…"] = "the whole passage" })
+	shared.set_draft_of("side-a", "text", "> the whole…")
+end }
+-- What's selected (the host reads it, which a fixture can't): a test sets
+-- `fake_selection` to `{ text, top, bottom }`, each line `{ x, y, w, h }`.
+local SelectionMenu = require("@ds/selection_menu")
+local fake_selection = ui.state("fake_selection", nil :: any)
+SelectionMenu.read = function(): any
+	local sel = fake_selection:peek()
+	return if type(sel) == "table" and type(sel.text) == "string" and string.find(sel.text, "%S") then sel else nil
+end
+SelectionMenu.clear = function()
+	fake_selection:set(nil)
+end
 ui.command { id = "side_edit_lost", title = "Its edit let go", run = function()
 	side_says({ queue = { { id = "q1", text = "Queued words" } } })
 end }

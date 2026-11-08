@@ -813,7 +813,12 @@
       "forked_from": "分叉自 {title}",
       "continued_from": "接续自 {title}",
       "context_handoff": "上下文交接",
-      "resumed": "已继续"
+      "resumed": "已继续",
+      "you": "你",
+      "agent": "智能体",
+      "several_messages": "多条消息",
+      "two_names": "{first}和{final}",
+      "n_messages": "{n} 条消息"
     },
     "user_message": {
       "open_named": "打开 {name}",
@@ -1484,7 +1489,8 @@
       "placeholder": "添加可选评论…",
       "add": "添加标注",
       "delete": "删除标注",
-      "badge": "标注 {n}"
+      "badge": "标注 {n}",
+      "mention": "提及"
     },
     "html_picks": {
       "tray": "已选选项",

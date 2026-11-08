@@ -28,11 +28,13 @@
 --
 -- Quoting:
 -- - A selection (one message or several; a code block, a tool's row) offers
---   Zeron's annotation pill over its first line (ds/annotation_layer): Add
---   to chat opens a comment input there, then a numbered badge marks the
---   line. zgx gives scripts no selection, so the host reads it
---   (`read_selection`), each time a press lets go in the list. Its context
---   menu (ds/selection_menu) offers the same two.
+--   upstream's glass pill under its last line (ds/annotation_layer): Mention
+--   quotes it into the draft, Add to chat opens Zeron's comment input over
+--   its first line, then a numbered badge marks the line, and Ask in side
+--   chat seeds a side chat. A scroll takes the pill away. zgx gives scripts
+--   no selection, so the host reads it (`read_selection`), each time a press
+--   lets go in the list. Its context menu (ds/selection_menu) offers the
+--   same words.
 --
 -- `Transcript { messages = state, offset = state }`; `latest()`
 -- goes to the end (a person sending goes there too, whatever they were
@@ -1551,6 +1553,27 @@ local function Transcript(props: Props): Node
 		end
 		return nil
 	end
+	-- Who said it, for Mention's line: one name, two, or how many messages it
+	-- runs across (upstream's). With an end scrolled out of reach, there's no
+	-- telling how many.
+	local function who(s: any): string
+		local first = if s.top then row_at(s.top.y + s.top.h / 2) else nil
+		local final = if s.bottom then row_at(s.bottom.y + s.bottom.h / 2) else nil
+		local function name(r: any): string
+			return if r.m.role == "user" then locale.s("ds.transcript.you") else r.m.model or locale.s("ds.transcript.agent")
+		end
+		if not first or not final then
+			return locale.s("ds.transcript.several_messages")
+		end
+		if first == final then
+			return name(first)
+		end
+		local span = math.abs(final.index:peek() - first.index:peek()) + 1
+		if span == 2 and name(first) ~= name(final) then
+			return locale.s("ds.transcript.two_names", { first = name(first), final = name(final) })
+		end
+		return locale.s("ds.transcript.n_messages", { n = tostring(span) })
+	end
 	-- What a selection quotes: from its first word (a drag begun inside a word still quotes the word).
 	local function text_of(s: any): string
 		local first = if s.top then row_at(s.top.y + s.top.h / 2) else nil
@@ -1563,6 +1586,11 @@ local function Transcript(props: Props): Node
 		name = `transcript{kept}`,
 		notes = props.annotate,
 		view = list,
+		who = who,
+		-- (Clear of the composer, and of the way back to the end while it shows.)
+		floor = function(): number
+			return foot() + (if away:peek() then 46 else 8)
+		end,
 		holder_at = function(y: number): (string?, Ref?)
 			local r = row_at(y)
 			return if r then r.m.id else nil, if r then r.inner else nil

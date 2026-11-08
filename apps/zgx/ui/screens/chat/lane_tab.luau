@@ -224,6 +224,8 @@ end
 -- Each tab's find bar and model picker, by its slot, while it's made.
 local finders: { [string]: any } = {}
 local pickers: { [string]: State<number> } = {}
+-- Each chat's composer field here, by its chat: where a passage mentioned from its transcript goes.
+local fields: { [string]: any } = {}
 
 function M.open_find(tab: any): boolean
 	local find = finders[tab.id]
@@ -274,6 +276,12 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	-- (Asked for by the panel, or by keys typed with the panel holding them: the
 	-- field takes them as soon as it's there, as gpui's `focus_pending`.)
 	local field = ui.ref()
+	fields[chat] = field
+	ui.on_cleanup(function()
+		if fields[chat] == field then
+			fields[chat] = nil
+		end
+	end)
 	local take_on_mount = ui.use_state(false)
 	local function take_keys()
 		local el = field:peek()
@@ -1443,16 +1451,21 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 	end
 	-- Text selected in it, annotated on its own chat's draft (a split's
 	-- pane: the window's composer takes the keys after; a side chat's, its own).
+	local function keys_here()
+		if split or not props.panel_key or not PanelState.take_keys_now(props.panel_key, slot) then
+			Shared.focus:add(1)
+		end
+	end
 	local annotate = Shared.notes(function(): string?
 		return chat
 	end, nil, {
 		side = function(text: string)
 			lanes.ask_side(data.parent or lanes.unsent:peek()[chat] or chat, text)
 		end,
-		focus = function()
-			if split or not props.panel_key or not PanelState.take_keys_now(props.panel_key, slot) then
-				Shared.focus:add(1)
-			end
+		focus = keys_here,
+		-- (Into its own draft, at its own composer's caret.)
+		mention = function(q: any)
+			Shared.mention_in(chat, { text = q.text, who = q.who or "" }, fields[chat], keys_here)
 		end,
 	})
 	local function make_transcript(): Node

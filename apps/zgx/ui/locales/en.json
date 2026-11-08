@@ -813,7 +813,12 @@
       "forked_from": "Forked from {title}",
       "continued_from": "Continued from {title}",
       "context_handoff": "Context handoff",
-      "resumed": "Resumed"
+      "resumed": "Resumed",
+      "you": "You",
+      "agent": "Agent",
+      "several_messages": "Several messages",
+      "two_names": "{first} and {final}",
+      "n_messages": "{n} messages"
     },
     "user_message": {
       "open_named": "Open {name}",
@@ -1484,7 +1489,8 @@
       "placeholder": "Add an optional comment...",
       "add": "Add annotation",
       "delete": "Delete annotation",
-      "badge": "Annotation {n}"
+      "badge": "Annotation {n}",
+      "mention": "Mention"
     },
     "html_picks": {
       "tray": "Picked options",
