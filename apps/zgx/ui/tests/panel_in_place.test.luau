@@ -288,6 +288,48 @@ test("a terminal tab opens one engine terminal and keeps it across switches and 
 	expect(term_calls(app)).to_be("open:term-1,start:tab1:bridge term-1")
 end)
 
+test("a terminal's program goes on while another chat is shown: back, the same terminal, never closed or started again", function()
+	local app = open_panel()
+	app:click("#panel-open-terminal")
+	expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
+	expect(term_calls(app)).to_be("open:term-1,start:tab1:bridge term-1")
+	app:set_state("test_panel_session", { id = "chat-2", cwd = "/proj" })
+	expect(app:wait("#panel-empty", { timeout_ms = 15000 })).to_be(true)
+	app:frames(10)
+	expect(term_calls(app)).never.to_contain("close:")
+	expect(term_calls(app)).never.to_contain("end:")
+	app:set_state("test_panel_session", { id = "chat-1", cwd = "/proj" })
+	expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
+	app:frames(10)
+	expect(term_calls(app)).to_be("open:term-1,start:tab1:bridge term-1")
+end)
+
+test("what's selected in a terminal rides the chat's next message as its own quote, replaced as it changes, gone as it clears", function()
+	local app = open_panel()
+	app:click("#panel-open-terminal")
+	expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
+	local function staged(): { any }
+		local out = {}
+		for _, item in (app:state("chat.composer.cargo") or {}) :: { any } do
+			if item.terminal then
+				table.insert(out, item)
+			end
+		end
+		return out
+	end
+	app:set_state("test_term_selection", "cargo build\nerror[E0425]")
+	app:frames(4)
+	expect(#staged()).to_be(1)
+	expect(staged()[1].text).to_be("cargo build\nerror[E0425]")
+	app:set_state("test_term_selection", "warning: unused")
+	app:frames(4)
+	expect(#staged()).to_be(1)
+	expect(staged()[1].text).to_be("warning: unused")
+	app:set_state("test_term_selection", nil)
+	app:frames(4)
+	expect(#staged()).to_be(0)
+end)
+
 test("closing a terminal with a program running asks first; an idle one closes at once", function()
 	local app = open_panel()
 	app:click("#panel-open-terminal")
@@ -615,6 +657,27 @@ test("a terminal opened or turned to takes the keyboard: typing reaches its shel
 	app:set_state("test_panel_generation", 2)
 	app:wait('"never shown, only waited past"', { timeout_ms = 300 })
 	expect(typed("e")).to_be(false)
+end)
+
+test("Escape in a terminal goes to its program and the keyboard stays there; ⌘ keys go to the app, ⌘W closing its tab", function()
+	local app = open_panel()
+	app:click("#panel-open-terminal")
+	expect(eventually(app, function(): boolean
+		return app:has("#stub-terminal") and string.find(app:tree("#stub-terminal"), "focused", 1, true) ~= nil
+	end, 3000)).to_be(true)
+	app:key("escape")
+	expect(eventually(app, function(): boolean
+		return string.find(term_calls(app), "key:Escape", 1, true) ~= nil
+	end, 3000)).to_be(true)
+	app:frames(4)
+	expect(string.find(app:tree("#stub-terminal"), "focused", 1, true) ~= nil).to_be(true)
+	app:key("cmd+k")
+	app:frames(4)
+	expect(term_calls(app)).never.to_contain("key:k")
+	app:key("cmd+w")
+	expect(eventually(app, function(): boolean
+		return string.find(term_calls(app), "close:term-1", 1, true) ~= nil and app:has("#panel-empty")
+	end)).to_be(true)
 end)
 
 test("/terminal opens a new terminal each time, with the keyboard; /files shows the one files tab", function()

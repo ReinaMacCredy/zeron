@@ -102,7 +102,7 @@ function M.parts(typed: string, text: string, carried: { any }): { [string]: any
 			-- (An Appshot goes as its picture; what it shows of the app, below.)
 			table.insert(attachments, { kind = if item.kind == "appshot" then "image" else item.kind, path = item.path, name = item.name, rel = item.rel, on_host = item.on_host })
 		elseif item.kind == "quote" then
-			table.insert(quotes, { text = item.text, comment = item.comment, source = item.source })
+			table.insert(quotes, { text = item.text, comment = item.comment, source = item.source, terminal = item.terminal })
 		elseif item.kind == "annotation" and item.quote then
 			table.insert(quotes, { text = item.quote })
 		elseif item.kind == "annotation" and item.annotation then

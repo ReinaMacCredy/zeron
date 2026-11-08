@@ -106,10 +106,11 @@ end
 -- annotations (a quote with a comment, even an empty one) numbered under
 -- their header, then plain selections quoted under theirs. `source`: the
 -- file it was selected in.
-export type Staged = { text: string, comment: string?, source: string? }
+export type Staged = { text: string, comment: string?, source: string?, terminal: boolean? }
 
 M.ANNOTATION_HEADER = "Annotations (numbered; each quotes the text the user selected, then the user's comment on it):"
 M.SELECTION_HEADER = "Selected text from this conversation (quoted):"
+M.TERMINAL_HEADER = "Selected text from this chat's terminal (quoted):"
 M.ONLY = "Refer to the selected text below."
 
 local function trimmed(s: string): string
@@ -145,14 +146,16 @@ function M.with_quotes(text: string, quotes: { Staged }): string
 	if #entries > 0 then
 		out = `{out}\n\n{M.ANNOTATION_HEADER}\n{table.concat(entries, "\n\n")}`
 	end
-	local plain: { string } = {}
-	for _, q in quotes do
-		if q.comment == nil then
-			table.insert(plain, M.quoted(q.text))
+	for _, group in { { false, M.SELECTION_HEADER }, { true, M.TERMINAL_HEADER } } do
+		local plain: { string } = {}
+		for _, q in quotes do
+			if q.comment == nil and (q.terminal == true) == group[1] then
+				table.insert(plain, M.quoted(q.text))
+			end
 		end
-	end
-	if #plain > 0 then
-		out = `{out}\n\n{M.SELECTION_HEADER}\n{table.concat(plain, "\n\n")}`
+		if #plain > 0 then
+			out = `{out}\n\n{group[2]}\n{table.concat(plain, "\n\n")}`
+		end
 	end
 	return out
 end

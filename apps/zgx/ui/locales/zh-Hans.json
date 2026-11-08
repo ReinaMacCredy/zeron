@@ -3511,7 +3511,8 @@
       "retry": "重试",
       "subagent_of": "{title} 的子智能体",
       "open_parent": "打开父线程",
-      "this_chat": "此对话"
+      "this_chat": "此对话",
+      "sidechat_of": "{title} 的侧边对话 · 源对话已复制为仅供参考的上下文"
     },
     "lanes": {
       "subagent": "子智能体",
@@ -3697,6 +3698,12 @@
       "search_failed": "文件搜索失败",
       "search_outdated": "会话所在设备的 Zeron 版本较旧，请更新后再搜索其文件",
       "new_session": "新会话"
+    },
+    "review": {
+      "scope": "范围",
+      "menu": "审查选项",
+      "dismiss": "忽略",
+      "findings": "审查发现"
     }
   },
   "sidecar": {

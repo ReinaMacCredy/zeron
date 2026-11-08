@@ -39,6 +39,7 @@ local ZeronCommands = require("@app/screens/chat/zeron_commands")
 local SessionPlace = require("@app/screens/chat/session_place")
 local Lanes = require("@app/screens/chat/lanes")
 local Pills = require("@app/screens/chat/pills")
+local Review = require("@app/screens/chat/review")
 local AppCommands = require("@app/screens/chat/app_commands")
 local Outgoing = require("@app/screens/chat/outgoing")
 local Asks = require("@app/screens/chat/asks")
@@ -1116,6 +1117,12 @@ local function Composer(): Node
 			end,
 			limit = limit,
 			pills = Pills.Row { bind = Pills.window_bind(), tasks = asks.tasks, waiting = true },
+			review = Review.Chip { chat = function(): string?
+				return session_id:get()
+			end },
+			review_findings = Review.Findings { chat = function(): string?
+				return session_id:get()
+			end },
 			side_tab = {
 				shown = function(): boolean
 					return session_id:get() ~= nil

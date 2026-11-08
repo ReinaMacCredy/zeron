@@ -180,3 +180,61 @@ test("a closed panel leaves nothing to Tab to: its tabs and choices come back as
 	end)).to_be(true)
 	expect(tab_reaches_panel(app, 60)).to_be(false)
 end)
+
+-- The y of the first line holding `words` in the open chat's transcript.
+local function y_in_transcript(app: any, words: string): number?
+	for line in app:tree("#transcript"):gmatch("[^\n]+") do
+		if line:find(words, 1, true) then
+			return tonumber(line:match(" %-?%d+,(%-?%d+) "))
+		end
+	end
+	return nil
+end
+
+test("the panel opening and closing leaves the transcript where it was read: the line in view stays put", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 800)
+	app:frames(30)
+	show_chat(app, "Fix the build")
+	local list = {}
+	for i = 1, 40 do
+		table.insert(list, { id = `pu{i}`, role = "user", text = `Prompt {i}.`, at = "Sep 8, 1:50 PM", copy = `Prompt {i}` })
+		table.insert(list, { id = `pa{i}`, role = "assistant", text = `Reply {i}. ` .. string.rep("Words that wrap again as the column narrows. ", 12), model = "Opus", at = "Sep 8, 1:51 PM", copy = "x" })
+	end
+	app:set_state("chat.session", { id = "a1", cwd = "/work/atlas", model = "sonnet", state = "ready" })
+	app:set_state("chat.messages", list)
+	app:frames(40)
+	app:scroll("#transcript", -900)
+	app:frames(40)
+	local seen: string? = nil
+	local y0: number? = nil
+	for i = 40, 1, -1 do
+		local y = y_in_transcript(app, `Reply {i}.`)
+		if y and y > 150 and y < 600 then
+			seen, y0 = `Reply {i}.`, y
+			break
+		end
+	end
+	expect(seen ~= nil).to_be(true)
+	local function settled_y(): number?
+		local last: number? = -1
+		local y: number? = nil
+		eventually(app, function(): boolean
+			app:frames(5)
+			y = y_in_transcript(app, seen :: string)
+			local still = y == last
+			last = y
+			return still
+		end)
+		return y
+	end
+	open_files_tab(app)
+	expect(panel_width(app) > 300).to_be(true)
+	expect(settled_y()).to_be(y0)
+	app:click('#titlebar >> role:button "Panel"')
+	expect(eventually(app, function(): boolean
+		app:frames(5)
+		return panel_width(app) == 0
+	end)).to_be(true)
+	expect(settled_y()).to_be(y0)
+end)

@@ -134,6 +134,9 @@ export type Props = {
 	-- The tab tucked behind the pill's top right corner.
 	side_tab: any?,
 	pills: Node?,
+	-- gpui's review chip beside the paperclip, and its findings over the pill (screens/chat/review).
+	review: Node?,
+	review_findings: Node?,
 	-- A line under the trays, over the pill (an agent that can't be steered).
 	caption: (() -> string?)?,
 	-- Why sending wouldn't do now: the button dimmed and saying so, a press
@@ -2606,6 +2609,11 @@ return ui.component(function(props: Props): Node
 					ui.show(function()
 						return not asking()
 					end, attach),
+					if props.review
+						then ui.show(function(): boolean
+							return not asking() and not dictating()
+						end, props.review)
+						else nil,
 					if props.project and props.projects
 						then ui.show(function(): boolean
 							return not asking() and not dictating() and not (props.branch_fixed and props.branch_fixed() ~= nil)
@@ -3092,6 +3100,7 @@ return ui.component(function(props: Props): Node
 		w_full = true,
 		gap = 0,
 		if props.notice then notice_line(props.notice, props.on_notice_action, props.on_dismiss_notice) else nil,
+		props.review_findings,
 		if props.compaction then Compaction.Chip { label = props.compaction.label } else nil,
 		if props.compaction
 			then Compaction.Resume {

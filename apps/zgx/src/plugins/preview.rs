@@ -78,6 +78,9 @@ pub const BLOCKED: &[&str] = &[
     "chat.queue_edit",
     "chat.queue_finish",
     "chat.retry",
+    // (A reviewer is an agent started; Fix hands it findings.)
+    "review.start",
+    "review.fix",
     // (Only one that says what an agent may do unasked: `chat.configure`.)
     "chat.configure",
     "agents.install",

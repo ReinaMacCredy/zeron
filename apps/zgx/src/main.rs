@@ -119,6 +119,8 @@ mod visuals_tests;
 mod thread_rows_tests;
 #[cfg(test)]
 mod annotation_tests;
+#[cfg(test)]
+mod panel_rest_tests;
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 

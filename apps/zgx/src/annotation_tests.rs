@@ -34,6 +34,7 @@ fn a_prompt_carries_its_annotations_as_zeron_writes_them() {
     use zeron_proto::quotes::{Quote, with_quotes};
     let mut app = mount();
     assert!(app.host.run_command("stage_selection"));
+    assert!(app.host.run_command("stage_terminal"));
     app.frames(30);
     app.type_text("role:textbox \"Message\"", "look");
     app.keys("Enter");
@@ -51,7 +52,7 @@ fn a_prompt_carries_its_annotations_as_zeron_writes_them() {
     let note = |text: &str, comment: &str, source: Option<&str>| Quote { comment: Some(comment.into()), ..Quote::annotation(text, source.map(str::to_owned)) };
     let zeron = with_quotes(
         "look",
-        &[note("What shall we work on?", "why this?\nand how", None), note("Hello there", "", Some("docs/plan.md")), Quote::new("Layout dominates on both machines.")],
+        &[note("What shall we work on?", "why this?\nand how", None), note("Hello there", "", Some("docs/plan.md")), Quote::new("Layout dominates on both machines."), Quote::terminal("cargo build\nerror[E0425]: cannot find value")],
     );
     assert!(calls.contains(&format!("send:s2:{zeron}")), "sent as Zeron writes it:\n{zeron}\n---\n{calls}");
 }

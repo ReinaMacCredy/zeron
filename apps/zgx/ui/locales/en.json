@@ -3511,7 +3511,8 @@
       "retry": "Retry",
       "subagent_of": "Subagent of {title}",
       "open_parent": "Open parent",
-      "this_chat": "this chat"
+      "this_chat": "this chat",
+      "sidechat_of": "Sidechat of {title} · source transcript copied as reference-only context"
     },
     "lanes": {
       "subagent": "Subagent",
@@ -3697,6 +3698,12 @@
       "search_failed": "File search failed",
       "search_outdated": "The session's device runs an older zeron — update it to search its files",
       "new_session": "New session"
+    },
+    "review": {
+      "scope": "Scope",
+      "menu": "Review options",
+      "dismiss": "Dismiss",
+      "findings": "Review findings"
     }
   },
   "sidecar": {

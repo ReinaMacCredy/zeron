@@ -57,6 +57,20 @@ function M.icon(tab: any): string
 	return "side-chat"
 end
 
+-- At work: a side chat whose chat is working, a subagent still running (gpui's `subagent_running`).
+function M.running(tab: any): boolean
+	if tab.kind == "subagent" then
+		for _, s in lanes.subagents() do
+			if s.ref == tab.chat then
+				return s.status == "running" or s.status == "working"
+			end
+		end
+		return false
+	end
+	local c = if tab.chat then lanes.child_row(tab.chat) else nil
+	return c ~= nil and c.status == "working"
+end
+
 -- The shipping app's `child_surface_mark`.
 function M.TabIcon(tab: any): Node
 	return ui.presence(function(): string
@@ -801,6 +815,23 @@ local function owners(chat: string, split: boolean?): Node
 	end, { w_full = true, shrink = 0 })
 end
 
+-- gpui's `sidechat_context_line`: a side chat (not a fork, not an agent's thread) names the chat it reads from.
+local function context_of(chat: string): string?
+	if lanes.forks:get()[chat] then
+		return nil
+	end
+	local c = lanes.child_row(chat)
+	if c and c.kind ~= nil and c.kind ~= "side_chat" then
+		return nil
+	end
+	local parent = if c then c.parent else lanes.unsent:get()[chat]
+	local p = if parent then Shared.chat_of(parent) else nil
+	if not p or not p.title or p.title == "" then
+		return nil
+	end
+	return locale.s("chat.lane_tab.sidechat_of", { title = p.title })
+end
+
 M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 	local tab = props.tab
 	local slot, chat = tab.id, tab.chat
@@ -977,6 +1008,20 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 					h_full = true,
 					min_h = 0,
 					pb = Dock.page_pad(),
+					ui.show(function(): boolean
+						return data.split ~= true and context_of(chat) ~= nil
+					end, ui.text {
+						function(): string
+							return context_of(chat) or ""
+						end,
+						class = "sidechat-context",
+						shrink = 0,
+						px = ui.raw(12, "gpui's sidechat context inset"),
+						py = ui.raw(8, "gpui's sidechat context inset"),
+						text_size = "$font.size.xs",
+						color = "$text.secondary",
+						truncate = true,
+					}),
 					ui.column { w_full = true, grow = 1, min_h = 0, relative = true, transcript },
 				},
 				Dock.Dock { height = dock_h, composer = ui.column { w_full = true, owners(chat, false), composer(chat, view, `lane.{slot}`, props.panel_key, slot) }, id = `lane-composer-{slot}` },

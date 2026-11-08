@@ -21,6 +21,8 @@ local function term_note(what: string)
 	term_calls:set(table.concat(term_said, ","))
 end
 local busy = ui.state("test_term_busy", false)
+-- What's selected in its shell (zgx's `term.selection`).
+local term_selection = ui.state("test_term_selection", nil :: string?)
 local opened = 0
 local sessions: { [string]: any } = {}
 -- A new one: its bridge opens it (term-N), its id claimed after.
@@ -63,6 +65,9 @@ tapi.term = function(key: string, options: any?): any
 				el:focus()
 			end
 		end
+		setmetatable(s, { __index = function(_: any, field: string): any
+			return if field == "selection" then term_selection:get() else nil
+		end })
 		sessions[key] = s
 	end
 	return s

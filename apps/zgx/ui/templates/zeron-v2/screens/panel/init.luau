@@ -109,7 +109,7 @@ end
 
 -- A lane's tab (a side chat, a subagent: screens/chat/lane_tab), loaded
 -- the same way; the lanes card opens them through `open_lane_tab`.
-type LaneModule = { Tab: (props: { tab: any }) -> Node, title: (tab: any) -> string, icon: (tab: any) -> string, TabIcon: (tab: any) -> Node }
+type LaneModule = { Tab: (props: { tab: any }) -> Node, title: (tab: any) -> string, icon: (tab: any) -> string, TabIcon: (tab: any) -> Node, running: ((tab: any) -> boolean)? }
 local Lanes: LaneModule? = nil
 local lanes_card: any = nil
 do
@@ -840,6 +840,29 @@ M.Panel = ui.component(function(props: Props): Node
 			end)
 		end
 		local icon = make_icon()
+		if (tab.kind == "side_chat" or tab.kind == "subagent") and Lanes and Lanes.running then
+			local running = Lanes.running
+			-- (gpui's 7-point Working dot on the badge's corner: a lane at work keeps its mark.)
+			icon = ui.div {
+				relative = true,
+				shrink = 0,
+				icon,
+				ui.show(function(): boolean
+					return running(tab)
+				end, ui.div {
+					class = "panel-tab-running",
+					role = "img",
+					label = ui.t("ds.status.working"),
+					absolute = true,
+					top = -1,
+					right = -1,
+					w = 7,
+					h = 7,
+					rounded = "$radius.full",
+					bg = "$zeron.status.working",
+				}),
+			}
+		end
 		-- Being dragged: the tab left behind dims, its preview under the
 		-- pointer (the tab itself, chosen, on the menus' glass).
 		local dragging = ui.use_state(false)

@@ -971,6 +971,14 @@ ui.command {
 		chat.shared.cargo:push { id = "plain1", kind = "quote", name = "Layout", text = "Layout dominates on both machines." }
 	end,
 }
+-- What's selected in the panel's terminal, staged as the terminal tab stages it.
+ui.command {
+	id = "stage_terminal",
+	title = "A terminal selection staged",
+	run = function()
+		chat.shared.set_terminal_quote("cargo build\nerror[E0425]: cannot find value")
+	end,
+}
 ui.command {
 	id = "ask_question",
 	title = "The agent asks a question",
@@ -1572,6 +1580,53 @@ local panel_stub: any = (require :: any)("@app/screens/panel")
 panel_stub.open_file = function(session: any, path: string, _project: any?, at: any?)
 	local line = if type(at) == "table" then at.line elseif type(at) == "number" then at else nil
 	note(`open_file:{if type(session) == "table" then session.id else session}:{path}{if line then `@{line}` else ""}`)
+end
+-- The review host (src/chat/review.rs), stood in for: each call noted; Fix hands back the open finding's comment.
+local Review = require("@app/screens/chat/review")
+Review.host = function(name: string, args: { [string]: any }): any
+	note(`{name}:{args.chat or ""}{if args.scope then ":" .. args.scope elseif args.id then ":" .. args.id else ""}`)
+	if name == "review.fix" then
+		return settled({ { path = "src/render.rs", line = 42, body = "Bug: the frame is drawn twice\nThe loop redraws on every tick." } })
+	end
+	return settled(nil)
+end
+local function review_state(look: string): any
+	local scopes = {
+		{ key = "uncommitted", label = "Uncommitted", add = 12, del = 3, empty = false, picked = true },
+		{ key = "latest_turn", label = "Latest turn", add = 4, del = 1, empty = false, picked = false },
+	}
+	if look == "idle" then
+		return { scope = "uncommitted", scopes = scopes, start_label = "Review uncommitted", label = "Review", tip = "Review uncommitted with a fresh agent", action = "start", busy = false, add = 12, del = 3, findings = {} }
+	elseif look == "busy" then
+		return { scope = "uncommitted", scopes = scopes, start_label = "Review uncommitted", label = "Reviewing", tip = "The reviewer is working.", action = "inert", busy = true, findings = {} }
+	end
+	return {
+		scope = "uncommitted",
+		scopes = scopes,
+		start_label = "Review uncommitted",
+		label = "1 finding",
+		tip = "Open the findings",
+		action = "open",
+		busy = false,
+		fix = "Fix 1 remaining",
+		outcomes = "1 fixed · 1 open",
+		findings = {
+			{ id = "F1", severity = "Bug", title = "the frame is drawn twice", body = "The loop redraws on every tick.", location = "src/render.rs:42", path = "src/render.rs", line = 42, state = "Open", open = true },
+			{ id = "F2", severity = "Nit", title = "a name", body = "", location = "src/app.rs:7", path = "src/app.rs", line = 7, state = "Fixed · abcdef1", open = false },
+		},
+	}
+end
+for _, look in { "idle", "busy", "done" } do
+	ui.command {
+		id = `review_{look}`,
+		title = `Review: {look}`,
+		run = function()
+			local all = ui.shared("review.chats", {} :: any)
+			local now = table.clone(all:peek())
+			now.s2 = review_state(look)
+			all:set(now)
+		end,
+	}
 end
 store.answer_secret = function(id: string, request: string, secret: string?): any
 	note(`secret:{id}:{request}:{secret or "declined"}`)

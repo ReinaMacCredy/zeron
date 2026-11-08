@@ -311,6 +311,33 @@ function M.add_annotation(key: string, q: { text: string, source: string?, ancho
 	return id
 end
 
+-- gpui's `set_terminal_quote`: what's selected in the panel's terminal rides the shown chat's next message as a quote of its own, replaced as the selection changes, gone as it clears.
+M.TERMINAL_QUOTE = "terminal-selection"
+function M.set_terminal_quote(text: string?): boolean
+	local wanted = if text and string.find(text, "%S") then text else nil
+	local list = M.cargo:peek()
+	local current: string? = nil
+	for _, item in list do
+		if item.id == M.TERMINAL_QUOTE then
+			current = item.text
+		end
+	end
+	if current == wanted then
+		return false
+	end
+	local out: { any } = {}
+	for _, item in list do
+		if item.id ~= M.TERMINAL_QUOTE then
+			table.insert(out, item)
+		end
+	end
+	if wanted then
+		table.insert(out, { id = M.TERMINAL_QUOTE, kind = "quote", terminal = true, name = Quote.excerpt(wanted), text = wanted })
+	end
+	M.cargo:set(out)
+	return true
+end
+
 local function change_quote(key: string, id: string, change: (item: any) -> ())
 	local list = table.clone(cargo_in(key))
 	for i, item in list do

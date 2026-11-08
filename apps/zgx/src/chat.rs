@@ -70,6 +70,7 @@ use crate::engine::{
 
 mod code_links;
 mod pills;
+mod review;
 mod tool_images;
 
 type Outcome = &'static str;
@@ -386,6 +387,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     chats.catalog.borrow_mut().push(host.shared("chat.catalog", chats.catalog_value()));
     chats.asks_shared.borrow_mut().push(host.shared("chat.asks", chats.asks_value()));
     pills::install(host);
+    review::install(host);
     let view = Rc::new(View {
         session: host.shared("chat.session", Value::Nil),
         messages: host.shared("chat.messages", Value::List(Rc::from([]))),
@@ -713,6 +715,7 @@ impl Chats {
             }
             *me.chats.borrow_mut() = by;
             me.chats_heard.set(true);
+            review::chats_changed();
             for view in me.views() {
                 view.watch_host();
             }

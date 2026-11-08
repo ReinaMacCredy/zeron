@@ -19,6 +19,22 @@ local files_paths = require("@app/screens/files/paths")
 
 type Tab = state.Tab
 
+-- The chat page's composer, if it's there (a fixture mounts the panel alone): a terminal's selection rides its next message.
+local chat_shared: any = (function(): any
+	local ok, shared = pcall(function(): any
+		return (require :: any)("@app/screens/chat/shared")
+	end)
+	return if ok and shared and type(shared.set_terminal_quote) == "function" then shared else nil
+end)()
+
+-- What's selected in it once a drag ends, nil when cleared: zgx's `term.selection` (nil on a zgx without it).
+local function selection_of(term: any): string?
+	local ok, text = pcall(function(): any
+		return term.selection
+	end)
+	return if ok and type(text) == "string" then text else nil
+end
+
 local M = {}
 
 -- Where the terminal runs (as the files pane works): the session's chat on
@@ -229,6 +245,18 @@ M.Terminal = ui.component(function(props: Props): Node
 				command = t.command,
 				cwd = "~",
 			})
+			-- (Staged on the chat shown, as gpui's `share_selection` stages it on the chat focused.)
+			local shared = chat_shared
+			if shared then
+				local was: string? = nil
+				ui.effect(function()
+					local text = selection_of(term)
+					if text ~= was then
+						was = text
+						shared.set_terminal_quote(text)
+					end
+				end)
+			end
 			-- The keyboard, when a person opened or turned to this tab.
 			ui.on_cleanup(state.focuser(props.key, id, function()
 				if term and term.focus then
