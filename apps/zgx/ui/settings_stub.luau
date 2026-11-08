@@ -148,6 +148,9 @@ local engine: { [string]: any } = {
 	},
 	-- (General → Predictions: the engine's defaults.)
 	GetPredictionSettings = { enabled = false, hasApiKey = false },
+	-- (Settings → Routing: the engine's defaults, nothing routed; delegate_task's limits.)
+	GetRoutingSettings = { roles = {}, outOfQuota = "native", fallback = {}, midRun = "after30s", native = "sameModelOnly" },
+	GetDelegationSettings = { maxDepth = 2, maxRunningChildren = 8 },
 	-- (Settings → Code review: Auto, no instructions.)
 	GetReviewSettings = { reviewer = { kind = "auto" }, instructions = "" },
 }
@@ -395,10 +398,44 @@ local answers: { [string]: (arg: any) -> any } = {
 				engine[get] = p
 			elseif m == "SetComputerSettings" or m == "SetReviewSettings" then
 				engine[get] = table.clone(arg.params)
+			elseif m == "SetRoutingSettings" or m == "SetDelegationSettings" then
+				engine[get] = arg.params
+			elseif m == "SetAutoResumeLimits" then
+				engine.auto_resume = arg.params.enabled == true
+				return settled({ autoResume = engine.auto_resume, chats = {} })
 			end
 			return settled(engine[get])
 		end
 		return settled(engine[m])
+	end,
+	-- Settings → Routing's agents (src/chat/review.rs) and its PreviewRoutes as src/settings.rs reads it:
+	-- Codex reports its quota (42%), Claude Code none; a role on Codex costs half.
+	["routing.harnesses"] = function(): any
+		return settled({
+			{ id = "claude-code", label = "Claude Code", short = "Claude", levels = LEVELS["claude-code"] },
+			{ id = "codex", label = "Codex", short = "Codex", levels = {} },
+		})
+	end,
+	["settings.routing_preview"] = function(): any
+		local r = engine.GetRoutingSettings
+		local rows, told = {}, {}
+		for role, route in r.roles or {} do
+			if route.kind == "target" then
+				rows[role] = { fell_back = false, multiplier = if route.harness == "codex" then "0.5x" else nil }
+				table.insert(told, `{role} → {route.harness}{if route.model then " " .. route.model else ""}`)
+			end
+		end
+		table.sort(told)
+		return settled({
+			base = "opus",
+			guidance = if #told > 0 then `Pass a role: {table.concat(told, ", ")}.` else "",
+			rows = rows,
+			quota = { codex = { fraction = 0.42, resets_at = 1893456000000, name = "Codex" } },
+		})
+	end,
+	-- Providers' auto-resume (src/settings.rs reads it off WatchLimitResumes).
+	["settings.auto_resume"] = function(): any
+		return settled(engine.auto_resume == true)
 	end,
 	-- Settings → Tools' groups (src/settings.rs `tool_groups`): a few of proto's, counted against what's off.
 	["settings.tool_groups"] = function(arg: any): any

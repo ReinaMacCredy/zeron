@@ -114,6 +114,100 @@ state.host.rename = function(id: string, name: string): any
 	return settled(true, nil)
 end
 
+-- The library's own (src/themes.rs, its Rust tests run the real thing):
+-- Analyze lists a source's variants ("Pair" a package of Harbor Night and
+-- Paper Mill), Add brings those picked in, a copy or linked, and a linked
+-- entry reloads, breaking once the `break_source` command says so.
+local PAPER = table.clone(data.HARBOR)
+PAPER.id, PAPER.name, PAPER.kind, PAPER.entry, PAPER.background = "custom-pair-paper-mill", "Paper Mill", "light", "custom-pair", "#f6f1e7"
+local source_broken = false
+state.host.analyze = function(path: string): any
+	local name = string.match(path, "([^/]+)$") or path
+	note(`analyze:{name}`)
+	if string.find(path, "Broken", 1, true) then
+		return settled(false, { message = `could not parse JSONC theme {path}` })
+	end
+	if string.find(path, "Pair", 1, true) then
+		return settled(true, { kind = "package", name = "Pair", variants = {
+			{ id = "custom-pair-harbor-night", name = "Harbor Night", kind = "dark" },
+			{ id = PAPER.id, name = "Paper Mill", kind = "light" },
+		}, skipped = { "Ghost: could not resolve ghost.json" } })
+	end
+	return settled(true, { kind = "file", name = "Harbor Night", variants = { { id = data.HARBOR.id, name = "Harbor Night", kind = "dark" } }, skipped = {} })
+end
+state.host.add = function(path: string, variants: { string }, link: boolean): any
+	local name = string.match(path, "([^/]+)$") or path
+	note(`add:{name}:{table.concat(variants, "+")}:{if link then "link" else "copy"}`)
+	local pair = string.find(path, "Pair", 1, true) ~= nil
+	local entry = if pair then "custom-pair" else data.HARBOR.entry
+	local ids: { string } = {}
+	for _, id in variants do
+		local p = if id == PAPER.id then table.clone(PAPER) else table.clone(data.HARBOR)
+		p.id, p.entry = id, entry
+		table.insert(model.list, p)
+		table.insert(ids, id)
+	end
+	table.insert(model.entries, {
+		id = entry, name = if pair then "Pair" else data.HARBOR.name, source = "imported", status = { ok = true }, variants = ids,
+		origin = if link then "linked_file" else "imported", path = path,
+	})
+	publish()
+	return settled(true, { entry = entry, variants = ids, skipped = {} })
+end
+local function entry_named(id: string): any
+	for _, e in model.entries do
+		if e.id == id then
+			return e
+		end
+	end
+	return nil
+end
+state.host.entry = function(action: string, id: string): any
+	note(`{action}:{id}`)
+	local e = entry_named(id)
+	if action == "reload" then
+		if source_broken then
+			e.status = { ok = false, message = "could not parse JSONC theme" }
+			publish()
+			return settled(false, { message = "could not parse JSONC theme" })
+		end
+		e.status = { ok = true }
+		publish()
+	elseif action == "unlink" then
+		e.origin, e.status = "imported", { ok = true }
+		publish()
+	elseif action == "duplicate" then
+		local copy = table.clone(e)
+		copy.id, copy.name, copy.origin, copy.path = `{id}-copy`, `{e.name} Copy`, "editable", `/data/custom-themes/{id}-copy.zeron-theme.json`
+		copy.variants = {}
+		for _, v in e.variants do
+			local p: any = nil
+			for _, x in model.list do
+				if x.id == v then
+					p = table.clone(x)
+				end
+			end
+			p.id, p.entry = `{v}-copy`, copy.id
+			table.insert(model.list, p)
+			table.insert(copy.variants, p.id)
+		end
+		table.insert(model.entries, copy)
+		publish()
+		return settled(true, copy.id)
+	elseif action == "review" then
+		return settled(true, { name = e.name, variants = { {
+			id = e.variants[1], name = e.name, kind = "dark",
+			mappings = { { role = "background", key = "editor.background", value = "#14181f" }, { role = "accent", key = "focusBorder", value = "#7aa2f7" } },
+			fallbacks = { "zeron.composer.edge" }, dropped = { "statusBar.debuggingBackground" }, warnings = {},
+			adjustments = { { role = "text.tertiary", original = "#3b4252", resolved = "#7c8594", reason = "contrast" } }, validation = {},
+		} } })
+	end
+	return settled(true, nil)
+end
+ui.command { id = "break_source", title = "Break the linked source", run = function()
+	source_broken = true
+end }
+
 for _, mode in { "system", "light", "dark" } do
 	ui.command { id = `scheme_{mode}`, title = `Scheme: {mode}`, run = function()
 		appearance.scheme:set(mode)

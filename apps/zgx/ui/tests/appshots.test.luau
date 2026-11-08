@@ -149,6 +149,11 @@ test("Settings → Appshots records a new shortcut, and Escape keeps the old one
 	expect(app:state("appshots_shortcut")).to_be(before)
 	app:click('#settings-page >> role:button ~"Change shortcut"')
 	app:frames(10)
+	-- A key with no modifier is refused, saying what it takes (gpui's rule).
+	app:key("k")
+	app:frames(10)
+	expect(app:has('#settings-page >> ~"Use Control, Option or Command"')).to_be(true)
+	expect(app:state("appshots_shortcut")).to_be(before)
 	app:key("cmd+shift+k")
 	app:frames(10)
 	expect(app:state("appshots_shortcut")).to_be("shift+cmd+k")

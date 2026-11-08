@@ -321,7 +321,7 @@ end
 
 test("a plugin's wallpaper is used from its own page, said on Appearance, and taken back there", function()
 	local app = open()
-	app:resize(1200, 1800)
+	app:resize(1200, 2000)
 	app:command("scenes_on")
 	app:frames(20)
 	app:set_state("shell_wallpaper", "image")
@@ -373,7 +373,7 @@ end)
 
 test("a plugin's wallpaper going off falls back to Appearance's choice, and another plugin's takes over", function()
 	local app = open()
-	app:resize(1200, 1800)
+	app:resize(1200, 2000)
 	app:command("scenes_on")
 	app:command("backdrops_on")
 	app:frames(20)

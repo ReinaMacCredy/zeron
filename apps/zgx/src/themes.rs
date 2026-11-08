@@ -13,7 +13,17 @@
 //! invoke  themes.remove    entry id (a slot it fills is let go)
 //! call    themes.rename    { id, name }
 //! call    themes.choose    { light?, dark? }: each slot named takes that theme's id, or "" to let it go
+//! call    themes.analyze   path → { path, kind = "file" | "package", name, variants = { { id, name, kind }… }, skipped }
+//! call    themes.add       { path, variants? (ids, all if none), link? } → as import's; linked, Reload reads the source again
+//! call    themes.reload    entry id: a linked one compiled again; on an error its last known good stays, its status says why
+//! call    themes.unlink    entry id: kept as a copy
+//! call    themes.duplicate entry id → the new one's id: an editable file of its own (`custom-themes/<id>.zeron-theme.json`)
+//! call    themes.reveal    entry id: its source shown in the file manager
+//! call    themes.review    entry id → { name, variants = { { name, kind, mappings, fallbacks, dropped, warnings, adjustments, validation }… } }
 //! ```
+//!
+//! An imported Entry also has `origin` ("imported", "linked_file",
+//! "linked_package", "editable") and `path` (its source, if known).
 //!
 //! An agent's theme tools write the same files through the engine, which
 //! says so (`WatchThemes`): the list is read again, and a theme worn as it
@@ -22,11 +32,12 @@
 //! its cache.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use serde_json::json;
-use zeron_theme::CustomThemeLibrary;
+use serde_json::{Value as Json, json};
+use zeron_theme::vscode::DetectedThemeSource;
+use zeron_theme::{CustomThemeLibrary, CustomThemeSource, InstallMode};
 pub use zeron_theme::catalog::{Choice, TemplateTheme, chosen, choice_of, find_builtin, save_choice};
 use zeron_theme::catalog::{self, describe};
 use zgx_desktop::WindowContext;
@@ -66,8 +77,102 @@ fn publish() {
         Ok(library) => (library, None),
         Err(error) => (CustomThemeLibrary::default(), Some(error.to_string())),
     };
-    let described = TEMPLATES.with(|t| describe(&library, &t.borrow(), &chosen(&dir), warning.as_deref()));
+    let mut described = TEMPLATES.with(|t| describe(&library, &t.borrow(), &chosen(&dir), warning.as_deref()));
+    with_origins(&mut described, &library);
     shared.set(json_value(&described));
+}
+
+/// Each imported entry's `origin` and `path`, as the library keeps them.
+fn with_origins(described: &mut Json, library: &CustomThemeLibrary) {
+    for entry in described["entries"].as_array_mut().into_iter().flatten() {
+        let Some(own) = entry["id"].as_str().and_then(|id| library.entry(id)) else { continue };
+        let origin = match &own.source {
+            CustomThemeSource::ImportedSnapshot { .. } => "imported",
+            CustomThemeSource::LinkedFile { .. } => "linked_file",
+            CustomThemeSource::LinkedPackage { .. } => "linked_package",
+            CustomThemeSource::EditableFile { .. } => "editable",
+        };
+        entry["origin"] = json!(origin);
+        if let Some(path) = own.source.path() {
+            entry["path"] = json!(path.display().to_string());
+        }
+    }
+}
+
+fn kind_of(v: &zeron_theme::ThemeVariant) -> &'static str {
+    if v.appearance.is_dark() { "dark" } else { "light" }
+}
+
+/// What `path` holds before it comes in: gpui's Add a theme's Analyze.
+fn analyze(path: &Path) -> Result<Json, String> {
+    let name = catalog::source_name(path);
+    let compiled = CustomThemeLibrary::compile(path, &format!("custom-{}", catalog::slug(&name)), &name).map_err(said)?;
+    let kind = match compiled.source_kind {
+        DetectedThemeSource::File => "file",
+        DetectedThemeSource::Package => "package",
+    };
+    let variants: Vec<Json> = compiled.family.variants.iter().map(|v| json!({ "id": v.id, "name": v.name, "kind": kind_of(v) })).collect();
+    let skipped: Vec<String> = compiled.failures.iter().map(|f| format!("{}: {}", f.name, f.message)).collect();
+    Ok(json!({ "path": path.display().to_string(), "kind": kind, "name": name, "variants": variants, "skipped": skipped }))
+}
+
+/// `path` brought in with only `variants` (all if empty), a copy or linked to its source.
+fn add(dir: &Path, path: &Path, variants: &[String], link: bool) -> Result<Json, String> {
+    let name = catalog::source_name(path);
+    let compiled = CustomThemeLibrary::compile(path, &format!("custom-{}", catalog::slug(&name)), &name).map_err(said)?;
+    let skipped: Vec<String> = compiled.failures.iter().map(|f| format!("{}: {}", f.name, f.message)).collect();
+    let mut library = CustomThemeLibrary::load(dir).map_err(said)?;
+    let mode = if link { InstallMode::Link } else { InstallMode::Snapshot };
+    let entry = library.install(compiled, variants, mode).map_err(said)?;
+    library.save(dir).map_err(said)?;
+    let ids: Vec<String> = library.entry(&entry).map(|e| e.family.variants.iter().map(|v| v.id.clone()).collect()).unwrap_or_default();
+    Ok(json!({ "entry": entry, "variants": ids, "skipped": skipped }))
+}
+
+/// A linked theme read again; saved either way, so its warning (and its last known good) stays.
+fn reload(dir: &Path, id: &str) -> Result<(), String> {
+    let mut library = CustomThemeLibrary::load(dir).map_err(said)?;
+    let result = library.reload(id).map_err(said);
+    library.save(dir).map_err(said)?;
+    result
+}
+
+fn edit<T, E: std::fmt::Display>(dir: &Path, change: impl FnOnce(&mut CustomThemeLibrary) -> Result<T, E>) -> Result<T, String> {
+    let mut library = CustomThemeLibrary::load(dir).map_err(said)?;
+    let out = change(&mut library).map_err(said)?;
+    library.save(dir).map_err(said)?;
+    Ok(out)
+}
+
+fn source_of(dir: &Path, id: &str) -> Result<PathBuf, String> {
+    let library = CustomThemeLibrary::load(dir).map_err(said)?;
+    library.entry(id).and_then(|e| e.source.path()).map(Path::to_path_buf).ok_or_else(|| "This theme has no file to show".to_string())
+}
+
+/// gpui's mapping review: for each variant, which VS Code colour each Zeron role took, and what fell back, was dropped or adjusted.
+fn review(dir: &Path, id: &str) -> Result<Json, String> {
+    let library = CustomThemeLibrary::load(dir).map_err(said)?;
+    let entry = library.entry(id).ok_or_else(|| format!("There's no imported theme {id}"))?;
+    let variants: Vec<Json> = entry
+        .family
+        .variants
+        .iter()
+        .map(|v| {
+            let report = entry.reports.get(&v.id).cloned().unwrap_or_default();
+            json!({
+                "id": v.id,
+                "name": v.name,
+                "kind": kind_of(v),
+                "mappings": report.mappings.iter().map(|m| json!({ "role": m.zeron_role, "key": m.vscode_key, "value": m.value })).collect::<Vec<_>>(),
+                "fallbacks": report.fallbacks,
+                "dropped": report.dropped,
+                "warnings": report.warnings,
+                "adjustments": report.adjustments.iter().map(|a| json!({ "role": a.zeron_role, "original": a.original, "resolved": a.resolved, "reason": a.reason })).collect::<Vec<_>>(),
+                "validation": report.validation.iter().map(|i| i.message.clone()).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(json!({ "name": entry.name, "variants": variants }))
 }
 
 /// The templates' own themes now (the templates' bridge, as they change):
@@ -123,6 +228,57 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         catalog::rename(&dir, &id, &name).map_err(said)?;
         publish();
         Ok(Value::Nil)
+    });
+    host.async_action("themes.analyze", move |arg| async move {
+        let path = PathBuf::from(text(&arg));
+        let found = off_thread(move || analyze(&path)).await.ok_or("The check stopped")??;
+        Ok(json_value(&found))
+    });
+    host.async_action("themes.add", move |arg| async move {
+        let dir = data_dir().ok_or("Themes aren't available right now")?;
+        let path = PathBuf::from(arg.field("path").map(text).unwrap_or_default());
+        if path.as_os_str().is_empty() {
+            return Err("Choose a theme file or an extension's folder.".into());
+        }
+        let variants: Vec<String> = match crate::plugins::value_json(&arg)["variants"].as_array() {
+            Some(list) => list.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect(),
+            None => Vec::new(),
+        };
+        let link = arg.field("link").is_some_and(|v| matches!(v, Value::Bool(true)));
+        let added = off_thread(move || add(&dir, &path, &variants, link)).await.ok_or("The import stopped")??;
+        publish();
+        Ok(json_value(&added))
+    });
+    host.async_action("themes.reload", move |arg| async move {
+        let dir = data_dir().ok_or("Themes aren't available right now")?;
+        let id = text(&arg);
+        let done = off_thread(move || reload(&dir, &id)).await.ok_or("The reload stopped")?;
+        publish();
+        done.map(|()| Value::Nil)
+    });
+    host.async_action("themes.unlink", move |arg| async move {
+        let dir = data_dir().ok_or("Themes aren't available right now")?;
+        let id = text(&arg);
+        edit(&dir, |l| l.unlink(&id))?;
+        publish();
+        Ok(Value::Nil)
+    });
+    host.async_action("themes.duplicate", move |arg| async move {
+        let dir = data_dir().ok_or("Themes aren't available right now")?;
+        let id = text(&arg);
+        let made = edit(&dir, |l| l.duplicate_as_editable(&id, &dir))?;
+        publish();
+        Ok(Value::from(made.as_str()))
+    });
+    host.async_action("themes.reveal", move |arg| async move {
+        let dir = data_dir().ok_or("Themes aren't available right now")?;
+        let path = source_of(&dir, &text(&arg))?;
+        crate::files::reveal_in_finder(&path).map_err(said)?;
+        Ok(Value::Nil)
+    });
+    host.async_action("themes.review", move |arg| async move {
+        let dir = data_dir().ok_or("Themes aren't available right now")?;
+        Ok(json_value(&review(&dir, &text(&arg))?))
     });
     host.async_action("themes.choose", move |arg| async move {
         let dir = data_dir().ok_or("Themes aren't available right now")?;
@@ -229,6 +385,81 @@ mod tests {
         let missing = import(&dir, &fixture("nowhere.json")).unwrap_err().to_string();
         assert!(missing.starts_with("could not resolve"), "{missing}");
         assert!(library(&dir).entries.is_empty());
+    }
+
+    fn entry_of(dir: &Path, id: &str) -> Json {
+        let mut described = describe(&library(dir), &[], &Choice::default(), None);
+        with_origins(&mut described, &library(dir));
+        described["entries"].as_array().unwrap().iter().find(|e| e["id"] == id).cloned().unwrap()
+    }
+
+    fn background(dir: &Path, id: &str) -> Json {
+        let described = describe(&library(dir), &[], &Choice::default(), None);
+        described["list"].as_array().unwrap().iter().find(|p| p["entry"] == id).unwrap()["background"].clone()
+    }
+
+    #[test]
+    fn a_linked_theme_reloads_keeps_its_last_known_good_and_unlinks() {
+        let dir = data("link");
+        let source = dir.join("harbor.json");
+        std::fs::copy(fixture("Harbor Night.json"), &source).unwrap();
+        let added = add(&dir, &source, &[], true).unwrap();
+        let id = added["entry"].as_str().unwrap().to_string();
+        let entry = entry_of(&dir, &id);
+        assert_eq!((entry["origin"].as_str(), entry["path"].as_str()), (Some("linked_file"), source.to_str()));
+        std::fs::write(&source, std::fs::read_to_string(&source).unwrap().replace("#14181f", "#202833")).unwrap();
+        reload(&dir, &id).unwrap();
+        assert_eq!(background(&dir, &id), "#202833", "an edit on disk comes in on Reload");
+        std::fs::write(&source, "{ not a theme").unwrap();
+        assert!(reload(&dir, &id).is_err());
+        assert_eq!(background(&dir, &id), "#202833", "the last known good stays");
+        let entry = entry_of(&dir, &id);
+        assert_eq!(entry["status"]["ok"], false, "{entry}");
+        assert!(entry["status"]["message"].as_str().is_some_and(|m| !m.is_empty()));
+        edit(&dir, |l| l.unlink(&id)).unwrap();
+        assert_eq!(entry_of(&dir, &id)["origin"], "imported");
+        assert!(reload(&dir, &id).is_err(), "a copy has no source to read again");
+    }
+
+    #[test]
+    fn analyze_lists_a_package_s_variants_and_add_takes_those_chosen() {
+        let dir = data("analyze");
+        let ext = dir.join("pair-ext");
+        std::fs::create_dir_all(ext.join("themes")).unwrap();
+        std::fs::copy(fixture("Harbor Night.json"), ext.join("themes/harbor.json")).unwrap();
+        std::fs::copy(fixture("Paper Mill.json"), ext.join("themes/paper.json")).unwrap();
+        std::fs::write(
+            ext.join("package.json"),
+            r#"{ "name": "pair-ext", "contributes": { "themes": [{ "label": "Harbor Night", "uiTheme": "vs-dark", "path": "./themes/harbor.json" }, { "label": "Paper Mill", "uiTheme": "vs", "path": "./themes/paper.json" }] } }"#,
+        )
+        .unwrap();
+        let found = analyze(&ext).unwrap();
+        assert_eq!(found["kind"], "package");
+        let variants = found["variants"].as_array().unwrap();
+        let kinds: Vec<&str> = variants.iter().map(|v| v["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["dark", "light"], "{found}");
+        let light = variants[1]["id"].as_str().unwrap().to_string();
+        let added = add(&dir, &ext, &[light], false).unwrap();
+        let id = added["entry"].as_str().unwrap();
+        assert_eq!(added["variants"].as_array().unwrap().len(), 1, "{added}");
+        assert_eq!(entry_of(&dir, id)["origin"], "imported");
+        assert!(!library(&dir).entry(id).unwrap().family.variants[0].appearance.is_dark());
+        assert!(analyze(&fixture("Broken.json")).is_err());
+    }
+
+    #[test]
+    fn a_duplicate_is_an_editable_file_and_review_says_each_mapping() {
+        let dir = data("duplicate");
+        let imported = import(&dir, &fixture("Harbor Night.json")).unwrap();
+        let copy = edit(&dir, |l| l.duplicate_as_editable(&imported.entry, &dir)).unwrap();
+        let entry = entry_of(&dir, &copy);
+        assert_eq!(entry["origin"], "editable");
+        assert!(Path::new(entry["path"].as_str().unwrap()).is_file());
+        assert_eq!(source_of(&dir, &copy).unwrap().to_str(), entry["path"].as_str());
+        let said = review(&dir, &imported.entry).unwrap();
+        let mappings = said["variants"][0]["mappings"].as_array().unwrap();
+        assert!(mappings.iter().any(|m| m["key"] == "editor.background" && m["value"] == "#14181f"), "{said}");
+        assert!(review(&dir, "nobody").is_err());
     }
 
     // -- Each theme worn (ui/theme_check_fixture.luau) ---------------------

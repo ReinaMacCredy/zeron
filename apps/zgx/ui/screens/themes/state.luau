@@ -19,6 +19,12 @@
 --   state.use_for(kind, id)   variant `id` worn for that scheme alone
 --   state.import(path)        a theme file or an extension's folder brought in
 --   state.rename(id, name), state.remove(id)   an imported one's
+--   state.analyze(path)       what a source holds before it comes in
+--                             (`{ kind, name, variants = { { id, name, kind } }, skipped }`)
+--   state.add(path, variants, link)  those variants brought in, a copy or linked
+--   state.reload(id), state.unlink(id), state.duplicate(id), state.reveal(id),
+--   state.review(id)          a library entry's (gpui's Reload, Unlink,
+--                             Duplicate as editable, Reveal, Review)
 --   state.previews:get()      the themes each one's swatch halves wear, by id
 --                             (kept while `state.swatches()`'s owner lives)
 --   state.error, state.busy   an import's error, and one under way
@@ -40,6 +46,10 @@ export type Entry = {
 	template: string?,
 	-- An imported one's: whether it compiled cleanly, and what's wrong.
 	status: { ok: boolean, message: string? }?,
+	-- An imported one's: "imported" (a copy), "linked_file", "linked_package"
+	-- or "editable" (a file of its own Zeron made), and its source's path.
+	origin: string?,
+	path: string?,
 }
 
 -- What the host does, where a test may stand in for it: each a promise
@@ -56,6 +66,15 @@ M.host = {
 	end,
 	choose = function(slots: { [string]: string }): any
 		return ui.call("themes.choose", slots)
+	end,
+	analyze = function(path: string): any
+		return ui.call("themes.analyze", path)
+	end,
+	add = function(path: string, variants: { string }, link: boolean): any
+		return ui.call("themes.add", { path = path, variants = variants, link = link })
+	end,
+	entry = function(action: string, id: string): any
+		return ui.call(`themes.{action}`, id)
 	end,
 }
 
@@ -198,6 +217,47 @@ end
 
 function M.rename(id: string, name: string): any
 	return M.host.rename(id, name)
+end
+
+function M.analyze(path: string): any
+	return M.host.analyze(path)
+end
+
+-- As `import`, with the variants picked and how it's kept.
+function M.add(path: string, variants: { string }, link: boolean): any
+	M.error:set(nil)
+	M.busy:set(true)
+	local p: any = M.host.add(path, variants, link)
+	p:after(function(done: any)
+		M.busy:set(false)
+		if done and done.skipped and #done.skipped > 0 then
+			M.error:set(ui.t("themes.page.skipped", { names = table.concat(done.skipped, "; ") }):get())
+		end
+	end, function(_: any)
+		M.busy:set(false)
+	end)
+	return p
+end
+
+-- Whether it reads again from a source of its own (linked, or editable).
+function M.linked(e: Entry): boolean
+	return e.origin == "linked_file" or e.origin == "linked_package" or e.origin == "editable"
+end
+
+function M.reload(id: string): any
+	return M.host.entry("reload", id)
+end
+function M.unlink(id: string): any
+	return M.host.entry("unlink", id)
+end
+function M.duplicate(id: string): any
+	return M.host.entry("duplicate", id)
+end
+function M.reveal(id: string): any
+	return M.host.entry("reveal", id)
+end
+function M.review(id: string): any
+	return M.host.entry("review", id)
 end
 
 -- An imported theme gone (a scheme it's worn for goes back: the host's).

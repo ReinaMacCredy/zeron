@@ -31,6 +31,7 @@ M.TITLE = "Providers"
 
 search.index(M.ID, ui.t("settings.providers.title"), ui.t("settings.providers.terms"), {
 	{ key = "agents", title = ui.t("settings.providers.agents.label"), terms = ui.t("settings.providers.agents.terms") },
+	{ key = "auto_resume", title = ui.t("settings.providers.auto_resume.label"), terms = ui.t("settings.providers.auto_resume.terms") },
 	{
 		key = "native_subagents",
 		title = ui.t("settings.providers.native_subagents.label"),
@@ -450,6 +451,49 @@ local function more(): Node
 	)
 end
 
+-- gpui's "Auto-resume after usage limits": the engine says it only on its
+-- LimitResumes stream, so the host reads that once (`settings.auto_resume`);
+-- unknown (an old host or engine), the row isn't shown. This computer's.
+local auto_resume_known = ui.state("settings_providers_auto_resume_known", false)
+local auto_resume = ui.state("settings_providers_auto_resume", false)
+local function load_auto_resume()
+	local ok, p = pcall(host.call, "settings.auto_resume")
+	if not ok or p == nil then
+		auto_resume_known:set(false)
+		return
+	end
+	p:after(function(on: any)
+		auto_resume_known:set(type(on) == "boolean")
+		auto_resume:set(on == true)
+	end, function()
+		auto_resume_known:set(false)
+	end)
+end
+-- (The switch has flipped already: put back if the engine refuses.)
+local function set_auto_resume(on: boolean)
+	host.call("settings.engine", { method = "SetAutoResumeLimits", params = { enabled = on } }):after(function(r: any)
+		if type(r) == "table" and type(r.autoResume) == "boolean" then
+			auto_resume:set(r.autoResume)
+		end
+	end, function()
+		auto_resume:set(not on)
+		toast.show { title = ui.t("settings.providers.auto_resume.failed"):get(), tone = "warning" }
+	end)
+end
+local function auto_resume_section(): Node
+	return ui.show(function(): boolean
+		return auto_resume_known:get() and now().target == nil
+	end, search.anchor("auto_resume", ds.Settings.Section {
+		ds.Settings.Group {
+			ds.Settings.Row {
+				label = ui.t("settings.providers.auto_resume.label"),
+				description = ui.t("settings.providers.auto_resume.description"),
+				control = ds.Switch { value = auto_resume, on_change = set_auto_resume, label = ui.t("settings.providers.auto_resume.label") },
+			},
+		},
+	}))
+end
+
 local function body(k: string): Node
 	if k == "looking" then
 		return ds.ProviderCard.Loading()
@@ -458,7 +502,7 @@ local function body(k: string): Node
 			return device_name()
 		end, agents.load)
 	end
-	return ui.column { w_full = true, gap = "$space.6", cards(), more() }
+	return ui.column { w_full = true, gap = "$space.6", cards(), auto_resume_section(), more() }
 end
 
 -- How an agent's updates come, and what each means (in the locale shown:
@@ -754,6 +798,7 @@ function M.view(): Node
 	visits.once("providers", function()
 		agents.load()
 		registry.load()
+		load_auto_resume()
 		if view:peek() ~= "agents" then
 			view:set("agents")
 		end

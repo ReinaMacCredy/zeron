@@ -171,8 +171,11 @@ end
 -- The shortcut's recorder: its keys; pressed, it listens for a new
 -- combination (the shortcut let go meanwhile, so pressing it doesn't
 -- capture); Escape puts it back as it was.
+-- (gpui's refusal for a key with no modifier: said in place of "Press a shortcut…".)
+local BARE = { Shift = true, Control = true, Alt = true, Meta = true, CapsLock = true }
 local Recorder = ui.component(function(_: {}): Node
 	local listening = ui.use_state(false)
+	local refused = ui.use_state(false)
 	local function stop()
 		listening:set(false)
 		Appshots.set_recording(false)
@@ -184,6 +187,7 @@ local Recorder = ui.component(function(_: {}): Node
 			return if listening:get() then ui.t("settings.appshots.press"):get() else ui.t("settings.appshots.change_shortcut", { keys = shown(Appshots.shortcut:get()) }):get()
 		end,
 		on_click = function()
+			refused:set(false)
 			listening:set(true)
 			Appshots.set_recording(true)
 		end,
@@ -204,11 +208,16 @@ local Recorder = ui.component(function(_: {}): Node
 			if combo then
 				Appshots.shortcut:set(combo)
 				stop()
+			elseif not BARE[e.key] then
+				refused:set(true)
 			end
 			return true
 		end,
 		ui.text {
 			function(): string
+				if listening:get() and refused:get() then
+					return ui.t("settings.appshots.key_rule"):get()
+				end
 				return if listening:get() then ui.t("settings.appshots.press_now"):get() else shown(Appshots.shortcut:get())
 			end,
 		},

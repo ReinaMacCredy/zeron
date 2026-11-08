@@ -269,25 +269,29 @@ local function accents(accent: State<string>): Node
 	}
 end
 
-local function picker(props: Props): Node
-	local scheme, frosted, accent = props.scheme, props.frosted, props.accent
+local function schemes(scheme: State<string>, accent: State<string>): Node
 	local function chosen_ink(): string
 		return look.ink(look.find(accent:get()))
 	end
+	return ui.row {
+		w_full = true,
+		gap = "$space.3",
+		role = "radiogroup",
+		label = locale.t("ds.appearance_picker.color_scheme"),
+		scheme_card(scheme, chosen_ink, "system", locale.t("ds.appearance_picker.scheme.system")),
+		scheme_card(scheme, chosen_ink, "light", locale.t("ds.appearance_picker.scheme.light")),
+		scheme_card(scheme, chosen_ink, "dark", locale.t("ds.appearance_picker.scheme.dark")),
+	}
+end
+
+local function picker(props: Props): Node
+	local scheme, frosted, accent = props.scheme, props.frosted, props.accent
 	-- The cards and the rows under them a step closer than a form's own
 	-- gap: one set of choices, and the window's room.
 	return ui.column {
 		w_full = true,
 		gap = "$space.3",
-		ui.row {
-			w_full = true,
-			gap = "$space.3",
-			role = "radiogroup",
-			label = locale.t("ds.appearance_picker.color_scheme"),
-			scheme_card(scheme, chosen_ink, "system", locale.t("ds.appearance_picker.scheme.system")),
-			scheme_card(scheme, chosen_ink, "light", locale.t("ds.appearance_picker.scheme.light")),
-			scheme_card(scheme, chosen_ink, "dark", locale.t("ds.appearance_picker.scheme.dark")),
-		},
+		schemes(scheme, accent),
 		Settings.Group {
 			Settings.Row {
 				label = locale.t("ds.appearance_picker.window"),
@@ -315,11 +319,15 @@ local function picker(props: Props): Node
 	}
 end
 
--- `AppearancePicker { scheme, frosted, accent }`, and its accents alone
--- (`AppearancePicker.Accents { value = state }`).
+-- `AppearancePicker { scheme, frosted, accent }`, its accents alone
+-- (`AppearancePicker.Accents { value = state }`) and its scheme cards alone
+-- (`AppearancePicker.Schemes { value = state, accent = state }`).
 return setmetatable({
 	Accents = function(p: { value: State<string> }): Node
 		return accents(p.value)
+	end,
+	Schemes = function(p: { value: State<string>, accent: State<string> }): Node
+		return schemes(p.value, p.accent)
 	end,
 }, {
 	__call = function(_: any, props: Props): Node

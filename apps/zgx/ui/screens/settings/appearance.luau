@@ -676,15 +676,9 @@ function M.view(): Node
 				row("scheme", {
 					label = ui.t("settings.appearance.scheme.label"),
 					description = ui.t("settings.appearance.scheme.description"),
-					control = ds.Segmented {
-						value = appearance.scheme,
-						label = ui.t("settings.appearance.scheme.label"),
-						options = {
-							{ value = "system", label = ui.t("settings.appearance.scheme.system") },
-							{ value = "light", label = ui.t("settings.appearance.scheme.light") },
-							{ value = "dark", label = ui.t("settings.appearance.scheme.dark") },
-						} :: any,
-					},
+					-- gpui's option cards, each a small window in the theme its scheme wears now.
+					stacked = true,
+					control = ds.AppearancePicker.Schemes { value = appearance.scheme, accent = ds.look.accent },
 				}),
 				theme_rows(),
 				-- The accent: the theme's own, or one of Zeron's presets, the

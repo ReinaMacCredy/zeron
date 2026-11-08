@@ -2056,7 +2056,9 @@
           "label": "Ctrl+Tab cycles tabs",
           "description": "Move straight to the next tab instead of opening the switcher."
         }
-      }
+      },
+      "focused_pane": "Navigate within the focused pane.",
+      "taken_on_page": "{keys} is already assigned to {name} in Settings → {page}."
     },
     "appshots": {
       "title": "Appshots",
@@ -2132,7 +2134,8 @@
         "sound": "capture sound",
         "shortcut": "hotkey",
         "destination": "destination"
-      }
+      },
+      "key_rule": "Use Control, Option or Command with a letter, number, function key or navigation key."
     },
     "providers": {
       "title": "Providers",
@@ -2272,6 +2275,12 @@
           "label": "{name}'s sign-in"
         },
         "remove_row_description": "Chats that used it stay."
+      },
+      "auto_resume": {
+        "label": "Auto-resume after usage limits",
+        "description": "Continue a thread stopped by a usage limit once the limit resets.",
+        "terms": "auto resume continue usage limit reset quota",
+        "failed": "Couldn't change auto-resume"
       }
     },
     "devices": {
@@ -3211,6 +3220,94 @@
       "model": "Model",
       "model_placeholder": "Model id",
       "save": "Save"
+    },
+    "routing": {
+      "title": "Routing",
+      "terms": "routing roles delegate delegation sub-agent child harness model quota fallback",
+      "description": "Which harness and model a delegated child runs on when the agent passes a role and no model. An explicit model in delegate_task always wins. Quota comes from the Usage page.",
+      "loading": "Loading…",
+      "couldnt_load": "Couldn't read the routing settings",
+      "couldnt_save": "Couldn't save the routing settings",
+      "roles": "Roles",
+      "roles_terms": "role worker validator research design general harness model reasoning quota",
+      "roles_note": "Quota refreshes with the Usage page.",
+      "role": {
+        "worker": "Write and change code, incl. tests",
+        "validator": "Review a diff or finished step, run tests and QA",
+        "research": "Read code, docs and the web, report back",
+        "design": "Shape an approach or a UI before code",
+        "general": "Anything else"
+      },
+      "harness_for": "Harness for {role}",
+      "model_for": "Model for {role}",
+      "reasoning_for": "Reasoning for {role}",
+      "off": "Off (agent decides)",
+      "same_as_parent": "Same as parent",
+      "default": "Default",
+      "off_line": "Agent picks harness and model for this role",
+      "parent_line": "Parent's model · Parent's reasoning",
+      "fell_back": "fell back",
+      "quota": "Quota",
+      "no_quota": "{name}: no quota data",
+      "no_quota_line": "No quota data, falls back after the first limit error",
+      "quota_section": "When out of quota",
+      "out_of_quota": {
+        "label": "When the routed harness is out of quota",
+        "description": "Checked before start for harnesses that report usage. The others report no quota, so this applies after their first limit error.",
+        "terms": "out of quota limit fallback native wait ask"
+      },
+      "recommended": "{label} (Recommended)",
+      "policy": {
+        "native": "Native sub-agent",
+        "native_detail": "Run the work as the chat's own sub-agent, on the chat's model. If native sub-agents are Off, open a Zeron child on the chat's model instead. Mid-run: switch the child to the chat's model.",
+        "nextInList": "Next in fallback list",
+        "nextInList_detail": "Try the next harness below that still has quota.",
+        "wait": "Wait for reset",
+        "wait_detail": "Start or resume when the window resets, like auto-resume today.",
+        "ask": "Ask me",
+        "ask_detail": "Stop and ask in the chat, with the options above."
+      },
+      "fallback": {
+        "label": "Fallback list",
+        "description": "Used by \"Next in fallback list\". Harnesses without quota are skipped.",
+        "terms": "fallback list order next harness",
+        "add": "Add fallback",
+        "remove": "Remove {name}"
+      },
+      "mid_run": {
+        "label": "Mid-run limit",
+        "description": "When a running child hits its limit, act on the choice above after a countdown, or always ask.",
+        "terms": "mid run limit countdown ask",
+        "ask": "Ask",
+        "after10s": "10 s",
+        "after30s": "30 s"
+      },
+      "native_section": "Claude Code native sub-agents",
+      "native": {
+        "label": "Native sub-agents",
+        "description": "The Task tool runs on this chat's own model, so Zeron cannot route it. \"Only when same model\" relaxes for a quota fallback. \"Off\" stays off: the fallback then opens a Zeron child on the chat's own model.",
+        "terms": "native sub-agents task tool claude code",
+        "same_model": "Only when same model",
+        "always": "Always allowed",
+        "off": "Off"
+      },
+      "guidance": {
+        "label": "What agents are told",
+        "description": "Written from this table into each chat's delegation guidance. Updates on the next turn.",
+        "terms": "guidance prompt delegation told",
+        "none": "Nothing yet: no role is routed."
+      },
+      "delegation": "Delegation",
+      "depth": {
+        "label": "Delegation depth",
+        "description": "How many levels of delegated tasks an agent may nest.",
+        "terms": "delegation depth nest levels delegate_task"
+      },
+      "children": {
+        "label": "Delegated tasks per chat",
+        "description": "How many delegated tasks one chat may run at once.",
+        "terms": "delegated tasks per chat running children limit"
+      }
     }
   },
   "common": {
@@ -4753,7 +4850,10 @@
       "byline": {
         "builtin": "Built in",
         "template": "From {name}",
-        "imported": "Imported"
+        "imported": "Imported",
+        "linked_file": "Linked file · {path}",
+        "linked_package": "Linked package · {path}",
+        "editable": "Editable file · {path}"
       },
       "needs_fixing": "Something in this theme needs fixing.",
       "in_use": "In use",
@@ -4782,7 +4882,47 @@
       "import_failed": "This theme couldn't be imported",
       "skipped": "Some of its themes didn't import: {names}",
       "imported_toast": "{count, plural, one {Theme imported} other {# themes imported}}",
-      "imported_body": "It's under Yours."
+      "imported_body": "It's under Yours.",
+      "last_good": "Using last known good · {message}",
+      "reload": "Reload",
+      "reveal": "Reveal",
+      "review_mapping": "Review mapping",
+      "duplicate": "Duplicate as editable",
+      "unlink": "Unlink",
+      "couldnt_reload": "Couldn't reload the theme",
+      "couldnt_reveal": "Couldn't show the theme's file",
+      "couldnt_duplicate": "Couldn't duplicate the theme",
+      "couldnt_unlink": "Couldn't unlink the theme",
+      "couldnt_review": "Couldn't open the review",
+      "add": {
+        "title": "Add a theme",
+        "body": "Import a local theme into your library or keep it linked to its source.",
+        "source": "Source",
+        "source_hint": "A theme's .json, or an extension's folder",
+        "browse": "Browse…",
+        "keep": "Keep it up to date",
+        "copy": "Import a copy",
+        "copy_hint": "Works independently from the original file.",
+        "link": "Link to source",
+        "link_hint": "Reload changes from the file on disk.",
+        "analyze": "Analyze theme",
+        "import_selected": "Import selected",
+        "detected": "Detected themes · {count, plural, one {# variant} other {# variants}}",
+        "kind_light": "Light theme",
+        "kind_dark": "Dark theme",
+        "skipped_one": "Didn't compile: {line}",
+        "no_source": "Choose a theme file or an extension's folder."
+      },
+      "review": {
+        "title": "Review {name}",
+        "done": "Done",
+        "mapped": "Mapped · {count}",
+        "fallbacks": "Fell back · {count}",
+        "dropped": "Dropped · {count}",
+        "adjusted": "Adjusted · {count}",
+        "warnings": "Warnings · {count}",
+        "checks": "Checks · {count}"
+      }
     }
   },
   "tasks": {

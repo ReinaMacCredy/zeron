@@ -2056,7 +2056,9 @@
           "label": "Ctrl+Tab 循环切换标签页",
           "description": "直接转到下一个标签页,而不打开切换器。"
         }
-      }
+      },
+      "focused_pane": "在当前聚焦的窗格内切换。",
+      "taken_on_page": "{keys} 已分配给“设置 → {page}”中的{name}。"
     },
     "appshots": {
       "title": "Appshots",
@@ -2132,7 +2134,8 @@
         "sound": "截图提示音",
         "shortcut": "快捷键",
         "destination": "目标位置"
-      }
+      },
+      "key_rule": "请将 Control、Option 或 Command 与字母、数字、功能键或导航键组合使用。"
     },
     "providers": {
       "title": "提供方",
@@ -2272,6 +2275,12 @@
           "label": "{name} 的登录"
         },
         "remove_row_description": "使用过它的对话会保留。"
+      },
+      "auto_resume": {
+        "label": "达到用量上限后自动继续",
+        "description": "因用量上限停下的对话，在额度重置后继续。",
+        "terms": "自动继续 用量 上限 重置 额度 auto resume",
+        "failed": "无法更改自动继续"
       }
     },
     "devices": {
@@ -3211,6 +3220,94 @@
       "model": "模型",
       "model_placeholder": "模型 ID",
       "save": "保存"
+    },
+    "routing": {
+      "title": "路由",
+      "terms": "路由 角色 委派 子代理 子任务 智能体 模型 额度 回退 routing",
+      "description": "当智能体只指定角色而未指定模型时，委派出的子任务在哪个智能体和模型上运行。delegate_task 中明确指定的模型总是优先。额度来自“用量”页面。",
+      "loading": "正在载入…",
+      "couldnt_load": "无法读取路由设置",
+      "couldnt_save": "无法保存路由设置",
+      "roles": "角色",
+      "roles_terms": "角色 实现 审查 研究 设计 通用 智能体 模型 推理 额度",
+      "roles_note": "额度随“用量”页面刷新。",
+      "role": {
+        "worker": "编写和修改代码，包括测试",
+        "validator": "审查差异或已完成的步骤，运行测试和质检",
+        "research": "阅读代码、文档和网页，并汇报",
+        "design": "在写代码前构思方案或界面",
+        "general": "其他任何事情"
+      },
+      "harness_for": "{role} 的智能体",
+      "model_for": "{role} 的模型",
+      "reasoning_for": "{role} 的推理",
+      "off": "关闭（由智能体决定）",
+      "same_as_parent": "与父任务相同",
+      "default": "默认",
+      "off_line": "由智能体为此角色选择智能体和模型",
+      "parent_line": "父任务的模型 · 父任务的推理",
+      "fell_back": "已回退",
+      "quota": "额度",
+      "no_quota": "{name}：无额度数据",
+      "no_quota_line": "无额度数据，首次遇到上限错误后回退",
+      "quota_section": "额度用尽时",
+      "out_of_quota": {
+        "label": "路由到的智能体额度用尽时",
+        "description": "对报告用量的智能体在开始前检查。其余智能体不报告额度，因此在其首次遇到上限错误后才适用。",
+        "terms": "额度 用尽 上限 回退 原生 等待 询问"
+      },
+      "recommended": "{label}（推荐）",
+      "policy": {
+        "native": "原生子代理",
+        "native_detail": "在对话自己的模型上，以对话的原生子代理运行。若原生子代理已关闭，则改为在对话的模型上开一个 Zeron 子任务。运行中：把子任务切换到对话的模型。",
+        "nextInList": "回退列表中的下一个",
+        "nextInList_detail": "尝试下面仍有额度的下一个智能体。",
+        "wait": "等待重置",
+        "wait_detail": "在额度窗口重置时开始或继续，就像现在的自动继续。",
+        "ask": "询问我",
+        "ask_detail": "停下并在对话中询问，给出上面的选项。"
+      },
+      "fallback": {
+        "label": "回退列表",
+        "description": "供“回退列表中的下一个”使用。没有额度的智能体会被跳过。",
+        "terms": "回退 列表 顺序 下一个",
+        "add": "添加回退",
+        "remove": "移除 {name}"
+      },
+      "mid_run": {
+        "label": "运行中达到上限",
+        "description": "运行中的子任务达到上限时，倒计时后按上面的选择处理，或总是询问。",
+        "terms": "运行中 上限 倒计时 询问",
+        "ask": "询问",
+        "after10s": "10 秒",
+        "after30s": "30 秒"
+      },
+      "native_section": "Claude Code 原生子代理",
+      "native": {
+        "label": "原生子代理",
+        "description": "Task 工具在此对话自己的模型上运行，因此 Zeron 无法为它路由。“仅限相同模型”在额度回退时放宽。“关闭”则保持关闭：回退时改为在对话自己的模型上开一个 Zeron 子任务。",
+        "terms": "原生 子代理 task 工具 claude code",
+        "same_model": "仅限相同模型",
+        "always": "始终允许",
+        "off": "关闭"
+      },
+      "guidance": {
+        "label": "告诉智能体的内容",
+        "description": "根据此表写入每个对话的委派指引。下一轮生效。",
+        "terms": "指引 提示 委派",
+        "none": "暂无：没有角色被路由。"
+      },
+      "delegation": "委派",
+      "depth": {
+        "label": "委派深度",
+        "description": "智能体最多可以嵌套多少层委派任务。",
+        "terms": "委派 深度 嵌套 层级 delegate_task"
+      },
+      "children": {
+        "label": "每个对话的委派任务数",
+        "description": "一个对话同时最多可以运行多少个委派任务。",
+        "terms": "委派 任务 每个对话 同时 上限"
+      }
     }
   },
   "common": {
@@ -4753,7 +4850,10 @@
       "byline": {
         "builtin": "内置",
         "template": "来自 {name}",
-        "imported": "已导入"
+        "imported": "已导入",
+        "linked_file": "关联文件 · {path}",
+        "linked_package": "关联扩展包 · {path}",
+        "editable": "可编辑文件 · {path}"
       },
       "needs_fixing": "此主题有需要修复的地方。",
       "in_use": "使用中",
@@ -4782,7 +4882,47 @@
       "import_failed": "无法导入此主题",
       "skipped": "部分主题未能导入：{names}",
       "imported_toast": "{count, plural, one {已导入主题} other {已导入 # 个主题}}",
-      "imported_body": "它在“你的”中。"
+      "imported_body": "它在“你的”中。",
+      "last_good": "正在使用上次可用的版本 · {message}",
+      "reload": "重新载入",
+      "reveal": "显示文件",
+      "review_mapping": "查看映射",
+      "duplicate": "复制为可编辑",
+      "unlink": "取消关联",
+      "couldnt_reload": "无法重新载入主题",
+      "couldnt_reveal": "无法显示主题文件",
+      "couldnt_duplicate": "无法复制主题",
+      "couldnt_unlink": "无法取消关联主题",
+      "couldnt_review": "无法打开映射",
+      "add": {
+        "title": "添加主题",
+        "body": "将本地主题导入你的主题库，或保持与源文件关联。",
+        "source": "来源",
+        "source_hint": "主题的 .json 文件，或扩展的文件夹",
+        "browse": "浏览…",
+        "keep": "保持更新",
+        "copy": "导入副本",
+        "copy_hint": "与原文件互不影响。",
+        "link": "关联到源文件",
+        "link_hint": "从磁盘上的文件重新载入更改。",
+        "analyze": "分析主题",
+        "import_selected": "导入所选",
+        "detected": "检测到的主题 · {count, plural, other {# 个变体}}",
+        "kind_light": "浅色主题",
+        "kind_dark": "深色主题",
+        "skipped_one": "未能编译：{line}",
+        "no_source": "请选择主题文件或扩展的文件夹。"
+      },
+      "review": {
+        "title": "查看 {name}",
+        "done": "完成",
+        "mapped": "已映射 · {count}",
+        "fallbacks": "已回退 · {count}",
+        "dropped": "已丢弃 · {count}",
+        "adjusted": "已调整 · {count}",
+        "warnings": "警告 · {count}",
+        "checks": "检查 · {count}"
+      }
     }
   },
   "tasks": {

@@ -206,6 +206,17 @@ local function binding(k: Key): Node
 				end
 			end,
 			on_change = function(combo: string)
+				-- (Appshots' hotkey is the host's, not the shell's: gpui names its page.)
+				local ok, appshots = pcall(require, "@app/screens/chat/appshots")
+				local a = if ok and type(appshots) == "table" then appshots :: any else nil
+				if a and a.shortcut and a.enabled and a.enabled:peek() and a.shortcut:peek() == combo then
+					notice:set(ui.t("settings.shortcuts.taken_on_page", {
+						keys = Shortcut.shown(combo),
+						name = ui.t("settings.shortcuts.appshot.label"):get(),
+						page = ui.t("settings.appshots.title"):get(),
+					}):get())
+					return
+				end
 				local owner = s.owner(combo, id)
 				if owner then
 					notice:set(ui.t("settings.shortcuts.taken", { keys = Shortcut.shown(combo), name = owner_name(owner) }):get())
@@ -287,6 +298,7 @@ function M.view(): Node
 				label = function(): string
 					return title_of(k)
 				end,
+				description = if k.id == "shell.next_session" or k.id == "shell.previous_session" then ui.t("settings.shortcuts.focused_pane") else nil,
 				control = binding(k),
 			}))
 		end

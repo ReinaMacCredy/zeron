@@ -38,6 +38,21 @@ pub(super) fn install(host: &ScriptHost) {
         let current = args.field("current").map(crate::plugins::value_json).unwrap_or(Json::Null);
         Ok::<_, String>(reviewers_value(&reviewer_options().await, &current))
     });
+    // Settings → Routing's harness picks: the agents offered (ACP agents take no route), each with its reasoning levels.
+    host.async_action("routing.harnesses", move |_| async move {
+        let options = reviewer_options().await;
+        let list = options
+            .offered
+            .iter()
+            .filter(|h| **h != zeron_proto::HarnessId::Acp)
+            .map(|h| {
+                let id = crate::plugins::json_value(&serde_json::to_value(h).unwrap_or(Json::Null));
+                let levels = options.levels.get(h).map(Vec::as_slice).unwrap_or_default();
+                Value::record([("id", id), ("label", Value::from(h.display_name())), ("short", Value::from(zeron_proto::routing::short_name(*h))), ("levels", levels_value(levels))])
+            })
+            .collect::<Vec<_>>();
+        Ok::<_, String>(Value::List(list.into()))
+    });
     host.async_action("review.models", move |args| async move {
         let harness = args.field("harness").map(text).unwrap_or_default();
         let listed = engine::get().call("ListModels", json!({ "harness": harness, "force": false })).await.map_err(|e| e.to_string())?;

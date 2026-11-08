@@ -160,6 +160,7 @@ local TITLE_KEYS: { [string]: { string } } = {
 	appshots = { "Appshots", "settings.appshots.title" },
 	providers = { "Providers", "settings.providers.title" },
 	["agent-profiles"] = { "Agent profiles", "settings.agent_profiles.title" },
+	routing = { "Routing", "settings.routing.title" },
 	devices = { "Devices", "settings.devices.title" },
 	members = { "Members", "settings.members.title" },
 	profile = { "Account", "settings.profile.title" },

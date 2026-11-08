@@ -1242,7 +1242,7 @@ fn inside(root: &Path, relative: &str) -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn reveal_in_finder(path: &Path) -> std::io::Result<()> {
+pub(crate) fn reveal_in_finder(path: &Path) -> std::io::Result<()> {
     spawn_reaped(std::process::Command::new("/usr/bin/open").arg("-R").arg(path)).map(|_| ())
 }
 
@@ -1261,7 +1261,7 @@ pub(crate) fn spawn_reaped(command: &mut std::process::Command) -> std::io::Resu
 
 /// Elsewhere: its folder, opened.
 #[cfg(not(target_os = "macos"))]
-fn reveal_in_finder(path: &Path) -> std::io::Result<()> {
+pub(crate) fn reveal_in_finder(path: &Path) -> std::io::Result<()> {
     open::that_detached(path.parent().unwrap_or(path))
 }
 

@@ -108,6 +108,13 @@ const ENGINE_METHODS: &[&str] = &[
     // General's Predictions (the composer's suggested next message).
     "GetPredictionSettings",
     "SetPredictionSettings",
+    // Settings → Routing: each role's route and the out-of-quota rules, and delegate_task's limits.
+    "GetRoutingSettings",
+    "SetRoutingSettings",
+    "GetDelegationSettings",
+    "SetDelegationSettings",
+    // Providers' "Auto-resume after usage limits" (read by `settings.auto_resume`).
+    "SetAutoResumeLimits",
     // Whether this window has the keys: banners set to "only when in the
     // background" hold while it does.
     "SetViewportFocus",
@@ -374,6 +381,24 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let disabled: Vec<String> = args.field("disabled").map(value_json).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
         async move { Ok::<_, String>(json_value(&tool_groups(&disabled))) }
     });
+    host.async_action("settings.routing_preview", |_| async move {
+        let preview = engine::get().call("PreviewRoutes", json!({})).await.map_err(|e| engine::outcome(&e).to_string())?;
+        Ok::<_, String>(json_value(&routing_preview(&preview)))
+    });
+    // The engine says this only on its LimitResumes stream: its first word, then let go.
+    host.async_action("settings.auto_resume", |_| async move {
+        let rpc = engine::get().connection(std::time::Duration::from_secs(5)).await.ok_or("offline")?;
+        let (tell, mut heard) = zgx::task::latest::<Json>();
+        let ended = tell.clone();
+        let watch = rpc.watch_ending("WatchLimitResumes", json!({}), move |item| {
+            tell.send(item);
+        }, move |_| {
+            ended.send(Json::Null);
+        });
+        let item = heard.recv().await.unwrap_or(Json::Null);
+        drop(watch);
+        item["autoResume"].as_bool().map(Value::Bool).ok_or_else(|| "failed".to_string())
+    });
     host.async_action("settings.engine", |args| {
         let method = args.field("method").map(text).unwrap_or_default();
         let params = args.field("params").map(value_json).unwrap_or(json!({}));
@@ -396,6 +421,27 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 })
         }
     });
+}
+
+/// Settings → Routing's PreviewRoutes, read as gpui's page does: each role's
+/// fallback line and multiplier, each harness's quota, the base model and
+/// what the agents are told.
+fn routing_preview(preview: &Json) -> Json {
+    use zeron_proto::routing::{Preview, multiplier_text, short_name};
+    let Ok(preview) = serde_json::from_value::<Preview>(preview.clone()) else { return Json::Null };
+    let mut rows = serde_json::Map::new();
+    let mut quota = serde_json::Map::new();
+    for row in &preview.rows {
+        let multiplier = if row.source == "routed" { row.multiplier.map(multiplier_text) } else { None };
+        rows.insert(row.role.clone(), json!({ "fell_back": row.fell_back(), "line": row.fallback_line(), "multiplier": multiplier }));
+        if let (true, Some(target)) = (row.quota.known, &row.target) {
+            let harness = serde_json::to_value(target.harness).unwrap_or_default().as_str().unwrap_or_default().to_string();
+            let fraction = if row.quota.exhausted { 1.0 } else { row.quota.used_fraction.unwrap_or_default() };
+            quota.entry(harness).or_insert_with(|| json!({ "fraction": fraction, "resets_at": row.quota.resets_at, "name": short_name(target.harness) }));
+        }
+    }
+    let base = preview.base.as_ref().map(|b| b.model.clone().unwrap_or_else(|| b.harness.display_name().to_string()));
+    json!({ "base": base, "guidance": preview.guidance, "rows": rows, "quota": quota })
 }
 
 /// Settings → Tools' groups as zeron_proto lists them, each with its tools and how many of them
@@ -1110,6 +1156,40 @@ mod tests {
         for method in ["GetToolSettings", "SetToolSettings", "GetPredictionSettings", "SetPredictionSettings"] {
             assert!(ENGINE_METHODS.contains(&method), "{method}");
         }
+    }
+
+    #[test]
+    fn routing_s_methods_are_allowed_and_its_preview_reads_as_gpui_s() {
+        for method in ["GetRoutingSettings", "SetRoutingSettings", "GetDelegationSettings", "SetDelegationSettings", "SetAutoResumeLimits"] {
+            assert!(ENGINE_METHODS.contains(&method), "{method}");
+        }
+        for method in ["PreviewRoutes", "UpdateHarnesses", "SetLimitResume", "WatchLimitResumes"] {
+            assert!(!ENGINE_METHODS.contains(&method), "{method} is the host's, or not Settings'");
+        }
+        let preview = json!({
+            "base": { "harness": "claude-code", "model": "opus" },
+            "guidance": "Pass role worker for code.",
+            "rows": [
+                { "role": "worker", "source": "routed", "target": { "harness": "codex", "model": "gpt-5.5" }, "multiplier": 0.5,
+                  "quota": { "known": true, "usedFraction": 0.42, "resetsAt": 1800000000000i64, "exhausted": false } },
+                { "role": "validator", "source": "fell_back", "target": { "harness": "claude-code" }, "reason": "Codex is out of quota", "multiplier": 2.0,
+                  "quota": { "known": true, "exhausted": true } },
+                { "role": "research", "source": "off", "quota": { "known": false } }
+            ]
+        });
+        let read = routing_preview(&preview);
+        assert_eq!(read["base"], "opus");
+        assert_eq!(read["guidance"], "Pass role worker for code.");
+        assert_eq!(read["rows"]["worker"]["multiplier"], "0.5x");
+        assert_eq!(read["rows"]["worker"]["fell_back"], false);
+        assert_eq!(read["rows"]["validator"]["fell_back"], true);
+        assert_eq!(read["rows"]["validator"]["multiplier"], Json::Null, "a multiplier only for a routed role, as gpui's");
+        assert_eq!(read["rows"]["validator"]["line"], "Falling back: Claude Code (Codex is out of quota)");
+        assert_eq!(read["quota"]["codex"]["fraction"], 0.42);
+        assert_eq!(read["quota"]["codex"]["name"], "Codex");
+        assert_eq!(read["quota"]["claude-code"]["fraction"], 1.0, "out of quota reads full");
+        assert!(read["quota"].get("research").is_none());
+        assert_eq!(routing_preview(&json!("nonsense")), Json::Null);
     }
 
     #[test]

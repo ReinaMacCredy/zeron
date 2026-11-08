@@ -50,10 +50,12 @@ local function template_name(id: string?): string
 	return id or ""
 end
 
--- Which schemes it has, or what's wrong with an imported one.
+-- Which schemes it has, or what's wrong with an imported one (a linked
+-- one keeps the colours it last read cleanly: gpui's last known good).
 local function about(e: state.Entry): string
 	if e.status and e.status.ok == false then
-		return e.status.message or ui.t("themes.page.needs_fixing"):get()
+		local message = e.status.message or ui.t("themes.page.needs_fixing"):get()
+		return if state.linked(e) then ui.t("themes.page.last_good", { message = message }):get() else message
 	end
 	if e.id == "zeron" then
 		return ui.t("themes.page.about.default"):get()
@@ -68,6 +70,9 @@ local function byline(e: state.Entry): string
 	if e.source == "template" then
 		return ui.t("themes.page.byline.template", { name = template_name(e.template) }):get()
 	elseif e.source == "imported" then
+		if e.origin and e.origin ~= "imported" and e.path then
+			return ui.t(`themes.page.byline.{e.origin}`, { path = e.path }):get()
+		end
 		return ui.t("themes.page.byline.imported"):get()
 	end
 	return ui.t("themes.page.byline.builtin"):get()
@@ -125,8 +130,84 @@ local function import(path: string)
 	end
 end
 
--- Pick a file, then import it.
-local function pick()
+-- gpui's Add a theme: a source (typed, or Browse…), kept as a copy or
+-- linked to it, analyzed to show the themes it holds, those picked brought
+-- in. A file dropped on the page skips it: a copy of all it holds.
+local adding = ui.state("themes_add_open", false)
+local add_path = ui.state("themes_add_path", "")
+local add_link = ui.state("themes_add_link", false)
+local found_now = ui.state("themes_add_found", nil :: any)
+local picked = ui.state("themes_add_picked", {} :: { [string]: boolean })
+local add_error = ui.state("themes_add_error", nil :: string?)
+local analyzing = ui.state("themes_add_analyzing", false)
+
+local function open_add()
+	add_path:set("")
+	found_now:set(nil)
+	picked:set({})
+	add_error:set(nil)
+	adding:set(true)
+end
+
+-- A new source forgets what the last one held.
+ui.effect(function()
+	local path = add_path:get()
+	local f = found_now:peek()
+	if f and f.path ~= path then
+		found_now:set(nil)
+		picked:set({})
+	end
+end)
+
+local function analyze()
+	local path = string.match(add_path:peek(), "^%s*(.-)%s*$") or ""
+	if path == "" then
+		add_error:set(ui.t("themes.page.add.no_source"):get())
+		return
+	end
+	add_error:set(nil)
+	analyzing:set(true)
+	state.analyze(path):after(function(f: any)
+		analyzing:set(false)
+		f.path = add_path:peek()
+		local all: { [string]: boolean } = {}
+		for _, v in f.variants or {} do
+			all[v.id] = true
+		end
+		picked:set(all)
+		found_now:set(f)
+	end, function(err: any)
+		analyzing:set(false)
+		add_error:set(state.said(err))
+	end)
+end
+
+local function chosen_ids(): { string }
+	local out: { string } = {}
+	local f = found_now:peek()
+	for _, v in (f and f.variants) or {} do
+		if picked:peek()[v.id] then
+			table.insert(out, v.id)
+		end
+	end
+	return out
+end
+
+local function add_selected()
+	local ids = chosen_ids()
+	if #ids == 0 then
+		return
+	end
+	local path = string.match(add_path:peek(), "^%s*(.-)%s*$") or ""
+	state.add(path, ids, add_link:peek()):after(function(done: any)
+		adding:set(false)
+		imported(done)
+	end, function(err: any)
+		add_error:set(state.said(err))
+	end)
+end
+
+local function browse()
 	ui.task(function()
 		local files = ui.open_files({
 			title = ui.t("themes.page.choose_source"):get(),
@@ -134,9 +215,220 @@ local function pick()
 		}):await()
 		local file = files and files[1]
 		if file then
-			import(file.path)
+			add_path:set(file.path)
+			analyze()
 		end
 	end)
+end
+
+local pick = open_add
+
+local function add_dialog(): Node
+	local function variant_row(v: any): Node
+		return ds.Checkbox {
+			value = function(): boolean
+				return picked:get()[v.id] == true
+			end,
+			on_change = function(on: boolean)
+				local next = table.clone(picked:peek())
+				next[v.id] = on or nil
+				picked:set(next)
+			end,
+			label = v.name,
+			description = ui.t(`themes.page.add.kind_{v.kind}`),
+		}
+	end
+	return ds.Dialog {
+		open = adding,
+		title = ui.t("themes.page.add.title"),
+		body = ui.t("themes.page.add.body"),
+		size = "md",
+		confirm = {
+			label = function(): string
+				return if found_now:get() then ui.t("themes.page.add.import_selected"):get() else ui.t("themes.page.add.analyze"):get()
+			end,
+			keep_open = true,
+			busy = function(): boolean
+				return analyzing:get() or state.busy:get()
+			end,
+			disabled = function(): boolean
+				local f = found_now:get()
+				if f then
+					return next(picked:get()) == nil
+				end
+				return (string.match(add_path:get(), "^%s*(.-)%s*$") or "") == ""
+			end,
+			on_click = function()
+				if found_now:peek() then
+					add_selected()
+				else
+					analyze()
+				end
+			end,
+		},
+		ui.column {
+			id = "themes-add",
+			w_full = true,
+			gap = "$space.3",
+			ui.row {
+				w_full = true,
+				gap = "$space.2",
+				items = "end",
+				ui.div { grow = 1, min_w = 0, ds.TextField { value = add_path, label = ui.t("themes.page.add.source"), placeholder = ui.t("themes.page.add.source_hint"), w_full = true } },
+				ds.Button { tone = "secondary", on_click = browse, ui.t("themes.page.add.browse") },
+			},
+			ui.column {
+				w_full = true,
+				gap = "$space.1",
+				ui.text { ui.t("themes.page.add.keep"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.secondary" },
+				ds.Segmented {
+					value = add_link,
+					label = ui.t("themes.page.add.keep"),
+					options = {
+						{ value = false, label = ui.t("themes.page.add.copy") },
+						{ value = true, label = ui.t("themes.page.add.link") },
+					} :: any,
+				},
+				ui.text {
+					function(): string
+						return if add_link:get() then ui.t("themes.page.add.link_hint"):get() else ui.t("themes.page.add.copy_hint"):get()
+					end,
+					text_size = "$font.size.sm",
+					color = "$text.tertiary",
+				},
+			},
+			ui.show(function(): boolean
+				return found_now:get() ~= nil
+			end, ui.column {
+				id = "themes-add-found",
+				w_full = true,
+				gap = "$space.1",
+				ui.text {
+					function(): string
+						local f = found_now:get()
+						return ui.t("themes.page.add.detected", { count = if f then #(f.variants or {}) else 0 }):get()
+					end,
+					text_size = "$font.size.sm",
+					weight = "$font.weight.medium",
+					color = "$text.secondary",
+				},
+				ui.each(ui.computed(function(): { any }
+					local f = found_now:get()
+					return (f and f.variants) or {}
+				end), function(v: any): Node
+					return variant_row(v)
+				end, { key = function(v: any): string
+					return v.id
+				end }),
+				ui.each(ui.computed(function(): { string }
+					local f = found_now:get()
+					return (f and f.skipped) or {}
+				end), function(line: string): Node
+					return ui.text { ui.t("themes.page.add.skipped_one", { line = line }), text_size = "$font.size.sm", color = "$zeron.tone.warning.ink" }
+				end),
+			}),
+			ui.show(function(): boolean
+				return add_error:get() ~= nil
+			end, ui.text {
+				id = "themes-add-error",
+				function(): string
+					return add_error:get() or ""
+				end,
+				text_size = "$font.size.sm",
+				color = "$zeron.tone.danger.ink",
+			}),
+		},
+	}
+end
+
+-- gpui's mapping review: what each Zeron colour took from the source, and
+-- what fell back, was dropped or adjusted.
+local reviewing = ui.state("themes_review_open", false)
+local review_data = ui.state("themes_review", nil :: any)
+local function open_review(id: string)
+	review_data:set(nil)
+	state.review(id):after(function(r: any)
+		review_data:set(r)
+		reviewing:set(true)
+	end, function(err: any)
+		ds.toast.show { title = ui.t("themes.page.couldnt_review"):get(), body = state.said(err), tone = "warning" }
+	end)
+end
+
+local function review_dialog(): Node
+	local function lines(title: string, list: { string }): Node?
+		if #list == 0 then
+			return nil
+		end
+		local out: { any } = { w_full = true, gap = "$zeron.space.hair", ui.text { ui.t(`themes.page.review.{title}`, { count = #list }), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.secondary" } }
+		for _, line in list do
+			table.insert(out, ui.text { line, text_size = "$font.size.xs", font = "$font.mono", color = "$text.tertiary" })
+		end
+		return ui.column(out)
+	end
+	local function variant(v: any): Node
+		local mapped: { string } = {}
+		for _, m in v.mappings or {} do
+			table.insert(mapped, `{m.role} ← {m.key} {m.value}`)
+		end
+		local adjusted: { string } = {}
+		for _, a in v.adjustments or {} do
+			table.insert(adjusted, `{a.role}: {a.original} → {a.resolved} ({a.reason})`)
+		end
+		local parts: { any } = {
+			class = "theme-review-variant",
+			w_full = true,
+			gap = "$space.2",
+			ui.text { `{v.name} · {ui.t(`themes.page.add.kind_{v.kind}`):get()}`, weight = "$font.weight.medium", color = "$text.primary" },
+		}
+		for _, part in {
+			lines("mapped", mapped),
+			lines("fallbacks", v.fallbacks or {}),
+			lines("dropped", v.dropped or {}),
+			lines("adjusted", adjusted),
+			lines("warnings", v.warnings or {}),
+			lines("checks", v.validation or {}),
+		} do
+			table.insert(parts, part)
+		end
+		return ui.column(parts)
+	end
+	return ds.Dialog {
+		open = reviewing,
+		title = function(): string
+			local r = review_data:get()
+			return ui.t("themes.page.review.title", { name = if r then r.name else "" }):get()
+		end,
+		size = "lg",
+		cancel = ui.t("themes.page.review.done"),
+		ui.scroll {
+			id = "themes-review",
+			w_full = true,
+			max_h = 420,
+			ui.column {
+				w_full = true,
+				gap = "$space.4",
+				ui.each(ui.computed(function(): { any }
+					local r = review_data:get()
+					return (r and r.variants) or {}
+				end), function(v: any): Node
+					return variant(v)
+				end, { key = function(v: any): string
+					return v.id
+				end }),
+			},
+		},
+	}
+end
+
+-- A library entry's action, said if it fails.
+local function act(run: () -> any, failed: string)
+	local p: any = run()
+	if p ~= nil then
+		p:after(function() end, function(err: any)
+			ds.toast.show { title = ui.t(failed):get(), body = state.said(err), tone = "warning" }
+		end)
+	end
 end
 
 -- Files dropped on the page: each brought in (a folder as an extension).
@@ -222,6 +514,62 @@ local function controls(e: state.Entry, now: State<any>): Node
 			},
 		})
 	elseif e.source == "imported" then
+		local library: { Node } = {}
+		if state.linked(e) then
+			table.insert(library, Menu.Row {
+				icon = "refresh",
+				label = ui.t("themes.page.reload"),
+				role = "menuitem",
+				on_click = pick_(function()
+					act(function()
+						return state.reload(id)
+					end, "themes.page.couldnt_reload")
+				end),
+			})
+		end
+		if e.path then
+			table.insert(library, Menu.Row {
+				icon = "folder",
+				label = ui.t("themes.page.reveal"),
+				role = "menuitem",
+				on_click = pick_(function()
+					act(function()
+						return state.reveal(id)
+					end, "themes.page.couldnt_reveal")
+				end),
+			})
+		end
+		table.insert(library, Menu.Row {
+			icon = "eye",
+			label = ui.t("themes.page.review_mapping"),
+			role = "menuitem",
+			on_click = pick_(function()
+				open_review(id)
+			end),
+		})
+		table.insert(library, Menu.Row {
+			icon = "copy",
+			label = ui.t("themes.page.duplicate"),
+			role = "menuitem",
+			on_click = pick_(function()
+				act(function()
+					return state.duplicate(id)
+				end, "themes.page.couldnt_duplicate")
+			end),
+		})
+		if state.linked(e) then
+			table.insert(library, Menu.Row {
+				icon = "lock-keyhole-unlocked",
+				label = ui.t("themes.page.unlink"),
+				role = "menuitem",
+				on_click = pick_(function()
+					act(function()
+						return state.unlink(id)
+					end, "themes.page.couldnt_unlink")
+				end),
+			})
+		end
+		table.insert(groups, Menu.Group(library))
 		table.insert(groups, Menu.Group {
 			Menu.Row {
 				icon = "pen",
@@ -362,6 +710,8 @@ end
 
 local function dialogs(): { Node }
 	return {
+		add_dialog(),
+		review_dialog(),
 		ds.Dialog {
 			open = renaming_open,
 			title = ui.t("themes.page.rename_title"),
@@ -442,8 +792,9 @@ function M.View(): Node
 			end,
 			found = found,
 			row = row,
+			-- (A row's menu is built with it: an entry linked or unlinked is a row anew.)
 			key = function(e: state.Entry): string
-				return e.id
+				return `{e.id}:{e.origin or ""}`
 			end,
 			none = none,
 			hint = { id = "themes-hint", text = ui.t("themes.page.hint") },
