@@ -174,6 +174,7 @@ struct RowWith {
     tasks: Tasks,
     created_by: Option<String>,
     fan: Vec<FanTile>,
+    errored: bool,
 }
 
 struct FanRun {
@@ -728,6 +729,7 @@ impl Sessions {
                 tasks: Tasks::default(),
                 created_by: None,
                 fan: Vec::new(),
+                errored: live.get(id).is_some_and(|l| l.errored),
             };
             if let Some(row) = rows.get(id).filter(|row| row.with == with) {
                 let row = (row.updated, row.value.clone());
@@ -752,6 +754,7 @@ impl Sessions {
                 ("title", Value::from(title)),
                 ("device", Value::from(c["deviceId"].as_str().unwrap_or_default())),
                 ("status", status.map_or(Value::Nil, Value::from)),
+                ("errored", Value::Bool(with.errored)),
                 ("updated", Value::from(updated as f64)),
                 ("created", Value::from(created as f64)),
                 ("harness", opt(harness)),
@@ -811,6 +814,7 @@ impl Sessions {
                     tasks: live.get(id).map_or_else(Tasks::default, |l| l.tasks),
                     created_by: c["createdByChatId"].as_str().map(|opener| openers.title(opener).to_owned()),
                     fan: fan_tiles(harness, c["config"]["model"].as_str(), live.get(id).map_or(0, |l| l.subagents), fan_children.get(id).map_or(&[][..], Vec::as_slice)),
+                    errored: live.get(id).is_some_and(|l| l.errored),
                 };
                 if let Some(row) = rows.get(id).filter(|row| row.with == with) {
                     return Some(row.value.clone());
@@ -833,6 +837,8 @@ impl Sessions {
                     // looked up by, as the shipping app's sidebar does.
                     ("source_branch", opt(c["sourceContext"]["branch"].as_str())),
                     ("status", with.status.map_or(Value::Nil, Value::from)),
+                    // Its last turn ended on an error, seen or not (the Inbox's Failed, as the shipping app's `last_turn_outcome`).
+                    ("errored", Value::Bool(with.errored)),
                     ("stale", Value::Bool(with.stale)),
                     ("updated", Value::from(updated as f64)),
                     ("created", Value::from(created as f64)),
@@ -1277,6 +1283,7 @@ struct Live {
     /// It went quiet while active: not finished, only unheard from.
     stale: bool,
     interrupted: bool,
+    errored: bool,
     /// Its subagents streaming now (the session row's `runningSubagents`),
     /// none once the row has gone quiet.
     subagents: u32,
@@ -1412,6 +1419,7 @@ fn live_states(value: &Json, now: i64) -> HashMap<String, Live> {
             status = "idle".into();
         }
         let interrupted = row["lastTurnOutcome"]["status"].as_str() == Some("interrupted");
+        let errored = row["lastTurnOutcome"]["status"].as_str() == Some("errored");
         let subagents = if now - updated > STALE_SECS { 0 } else { row["runningSubagents"].as_u64().unwrap_or(0) as u32 };
         let quiet = now - updated > STALE_SECS;
         let started = if quiet { None } else { row["startedAt"].as_str().and_then(unix_seconds) };
@@ -1420,6 +1428,7 @@ fn live_states(value: &Json, now: i64) -> HashMap<String, Live> {
             status: "idle".into(),
             stale: false,
             interrupted,
+            errored,
             subagents: 0,
             started: None,
             tasks: Tasks::default(),
@@ -1434,7 +1443,7 @@ fn live_states(value: &Json, now: i64) -> HashMap<String, Live> {
             } else {
                 old_errors.remove(chat);
             }
-            *entry = Live { status, stale, interrupted, subagents: entry.subagents, started, tasks };
+            *entry = Live { status, stale, interrupted, errored, subagents: entry.subagents, started, tasks };
         } else {
             entry.stale = stale;
         }
@@ -2050,6 +2059,13 @@ mod tests {
         assert!(!same(chat(&first, "p"), chat(&waiting, "p")));
         assert_eq!(chat(&waiting, "p").field("status").map(crate::auth::text).as_deref(), Some("input"));
         assert_eq!(chat(&waiting, "p").field("working_side_chats").and_then(|n| n.as_f64()), Some(0.));
+        assert_eq!(chat(&waiting, "p").field("errored").map(zgx_script::Value::truthy), Some(false));
+        s.heard(
+            super::Slot::Live,
+            serde_json::json!([{ "chatId": "p", "status": "idle", "updatedAt": "2099-01-01T00:00:00Z", "lastTurnOutcome": { "status": "errored", "finishedAt": "2099-01-01T00:00:00Z" } }]),
+        );
+        let errored = s.value();
+        assert_eq!(chat(&errored, "p").field("errored").map(zgx_script::Value::truthy), Some(true));
         // Gone from the list: gone from what's kept.
         chats.as_array_mut().unwrap().remove(2);
         s.heard(super::Slot::Chats, chats);

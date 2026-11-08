@@ -9,18 +9,15 @@ local card = require("@app/screens/tasks/card")
 
 local M = {}
 
-local LIST_W, ROW_H, META_H, ROW_GAP, DONE_H, CHECK = 640, 44, 50, 2, 36, 18
+local LIST_W, ROW_H, META_H, ROW_GAP, DONE_H, CHECK = 640, 44, 46, 2, 36, 18
 local THUMB, THUMBS = 28, 3
 
 M.view = ui.persist("tasks_view", "list")
 M.done_open = ui.persist("tasks_done_open", false)
-M.lit = ui.state("tasks_lit", 0)
+M.lit = ui.state("tasks_lit", nil :: string?)
 M.scroll = ui.state("tasks_scroll", 0)
 
-local function title_of(t: store.Task): string
-	local s = string.gsub(t.title or "", "%s+", " ")
-	return if s == "" then locale.s("tasks.untitled") else s
-end
+local title_of = store.title_of
 M.title_of = title_of
 
 local function sep(): Node
@@ -28,7 +25,7 @@ local function sep(): Node
 end
 
 -- A row's meta line: project, due, linked thread and its word, Not sent, Chat deleted, Blocked by (tasks.rs `meta`).
-function M.meta(t: store.Task): { Node }
+function M.meta(t: store.Task, given: store.State?): { Node }
 	local parts: { Node } = {}
 	local function add(n: Node)
 		if #parts > 0 then
@@ -36,7 +33,7 @@ function M.meta(t: store.Task): { Node }
 		end
 		table.insert(parts, n)
 	end
-	local s = store.state(t)
+	local s = given or store.state(t)
 	local project = store.project_name(t.project)
 	if project then
 		add(ui.text { project, literal = true, truncate = true, shrink = 1, min_w = 0 })
@@ -73,9 +70,6 @@ function M.meta(t: store.Task): { Node }
 	return parts
 end
 
-local function has_meta(t: store.Task): boolean
-	return #M.meta(t) > 0
-end
 
 -- The check: a ring, filled with the accent once done (tasks.rs `check_visual`).
 function M.Check(props: { task: store.Task, id: string }): Node
@@ -180,8 +174,8 @@ local function open_card(id: string)
 end
 
 -- A list row (tasks.rs `row_content`): the check, the title (struck once done), "New" on a capture, the meta line, the thumbs.
-local function Row(t: store.Task, index: State<number>): Node
-	local meta = M.meta(t)
+local function Row(t: store.Task, s: store.State): Node
+	local meta = M.meta(t, s)
 	local done = t.completed ~= nil
 	return ui.row {
 		id = `task-row-{t.id}`,
@@ -196,11 +190,11 @@ local function Row(t: store.Task, index: State<number>): Node
 		rounded = ui.raw(12, "gpui"),
 		cursor = "pointer",
 		bg = function(): string
-			return if M.lit:get() == index:get() or card.current:get() == t.id then "$zeron.selected.flat.bg" else "#00000000"
+			return if M.lit:get() == t.id or card.current:get() == t.id then "$zeron.selected.flat.bg" else "#00000000"
 		end,
 		hover = { bg = "$hover" },
 		on_click = function()
-			M.lit:set(index:peek())
+			M.lit:set(t.id)
 			open_card(t.id)
 		end,
 		M.Check { task = t, id = `task-check-{t.id}` },
@@ -219,19 +213,52 @@ local function Row(t: store.Task, index: State<number>): Node
 	}
 end
 
+-- A task's line: it, its state, and what its meta line reads, so a row is built again when its thread, project or blockers change (plain fields, no nodes).
+type Line = { kind: string, task: store.Task?, key: string, n: number?, state: store.State?, said: string?, meta: boolean? }
+-- (Kept by task: a sessions publish makes again only the lines whose chat or project changed.)
+local memo: { [string]: any } = {}
+function M.line(t: store.Task): Line
+	local c = store.chat_of(t.chat)
+	local project = store.project_name(t.project)
+	local m = memo[t.id]
+	if m and m.t == t and m.c == (c ~= nil) and m.status == (c and c.status) and m.title == (c and c.title) and m.project == project and #(t.depends or {}) == 0 and #(t.steps or {}) == 0 then
+		return m.line
+	end
+	local l = M.line_of(t, project)
+	memo[t.id] = { t = t, c = c ~= nil, status = c and c.status, title = c and c.title, project = project, line = l }
+	return l
+end
+
+function M.line_of(t: store.Task, project: string?): Line
+	local s = store.state(t)
+	local c = s.chat
+	local blockers = ""
+	if not t.completed then
+		for _, id in t.depends or {} do
+			local d = store.find(id)
+			if d then
+				blockers ..= `{if d.completed then "+" else "-"}{d.title}\n`
+			end
+		end
+	end
+	local open = s.column ~= "done"
+	local meta = project ~= nil or t.due ~= nil or (open and (c ~= nil or s.reason == "not_sent" or s.gone or blockers ~= ""))
+	local slim = { column = s.column, reason = s.reason, gone = s.gone, chat = if c then { id = c.id, title = c.title, status = c.status } else nil }
+	return { kind = "task", task = t, key = t.id, state = slim, said = `{project or ""}|{blockers}`, meta = meta }
+end
+
 -- What the list shows: open rows, the Done toggle, and done rows while open.
-type Line = { kind: string, task: store.Task?, key: string, n: number? }
 local lines = ui.computed(function(): { Line }
 	local p = store.parts:get()
 	local out: { Line } = {}
 	for _, t in p.open do
-		table.insert(out, { kind = "task", task = t, key = t.id })
+		table.insert(out, M.line(t))
 	end
 	if #p.done > 0 then
 		table.insert(out, { kind = "done", key = "done", n = #p.done })
 		if M.done_open:get() then
 			for _, t in p.done do
-				table.insert(out, { kind = "task", task = t, key = t.id })
+				table.insert(out, M.line(t))
 			end
 		end
 	end
@@ -267,42 +294,44 @@ end
 
 local list_ref = ui.ref()
 
-local function task_lines(): { number }
-	local out: { number } = {}
-	for i, l in lines:peek() do
-		if l.kind == "task" then
-			table.insert(out, i)
+-- ↑ ↓ walk the rows, Enter opens one's card, Space ticks it (Zeron's list is mouse-first; this is the port's keyboard way); the lit row is kept by its task, not its place.
+function M.keys(e: any): boolean
+	if e.editing or e.cmd or e.ctrl or e.meta or e.alt then
+		return false
+	end
+	local k = e.key
+	local l = lines:peek()
+	local rows: { number } = {}
+	local at = 0
+	for i, x in l do
+		if x.kind == "task" then
+			table.insert(rows, i)
+			if x.key == M.lit:peek() then
+				at = #rows
+			end
 		end
 	end
-	return out
-end
-
--- ↑ ↓ walk the rows, Enter opens one's card, Space ticks it (Zeron's list is mouse-first; this is the port's keyboard way).
-function M.keys(e: any): boolean
-	local k = e.key
-	local rows = task_lines()
 	if #rows == 0 then
 		return false
 	end
-	local at = table.find(rows, M.lit:peek()) or 0
 	if k == "ArrowDown" or k == "ArrowUp" then
 		local to = if k == "ArrowDown" then math.min(#rows, at + 1) else math.max(1, at - 1)
-		M.lit:set(rows[to])
+		M.lit:set(l[rows[to]].key)
 		local el = list_ref:peek()
 		if el then
 			el:scroll_to_row(rows[to])
 		end
 		return true
 	end
-	local l = lines:peek()[M.lit:peek()]
-	if not l or not l.task then
+	local t = if at > 0 then l[rows[at]].task else nil
+	if not t then
 		return false
 	end
 	if k == "Enter" then
-		open_card(l.task.id)
+		open_card(t.id)
 		return true
 	elseif k == "Space" or k == " " then
-		store.set_done(l.task.id, l.task.completed == nil)
+		store.set_done(t.id, t.completed == nil)
 		return true
 	end
 	return false
@@ -413,22 +442,22 @@ local function List(): Node
 		heights = function(): { number }
 			local out: { number } = {}
 			for i, l in lines:get() do
-				out[i] = if l.kind == "done" then DONE_H else (if has_meta(l.task :: store.Task) then META_H else ROW_H) + ROW_GAP
+				out[i] = if l.kind == "done" then DONE_H else (if l.meta then META_H else ROW_H) + ROW_GAP
 			end
 			return out
 		end,
-		row = function(l: Line, index: State<number>): Node
+		row = function(l: Line): Node
 			if l.kind == "done" then
 				return DoneToggle(l.n :: number)
 			end
-			return ui.div { w_full = true, pb = ui.raw(ROW_GAP, "gpui ROW_GAP"), Row(l.task :: store.Task, index) }
+			return ui.div { w_full = true, pb = ui.raw(ROW_GAP, "gpui ROW_GAP"), Row(l.task :: store.Task, l.state :: store.State) }
 		end,
 	}
 end
 
 -- A board card (tasks.rs `render_kanban_card`): the title to 3 lines, New, thumbs, the project or "No project".
-local function BoardCard(t: store.Task): Node
-	local s = store.state(t)
+local function BoardCard(l: Line): Node
+	local t, s = l.task :: store.Task, l.state :: store.State
 	return ui.button {
 		id = `task-kanban-{t.id}`,
 		label = title_of(t),
@@ -458,20 +487,24 @@ local function BoardCard(t: store.Task): Node
 	}
 end
 
+-- Every task in its column, split in one pass.
+local columns = ui.computed(function(): { [string]: { Line } }
+	local out: { [string]: { Line } } = { todo = {}, working = {}, needs = {}, done = {} }
+	local p = store.parts:get()
+	for _, list in { p.open, p.done } do
+		for _, t in list do
+			local l = M.line(t)
+			table.insert(out[(l.state :: store.State).column], l)
+		end
+	end
+	return out
+end)
+
 local function Board(): Node
 	local cols: { [any]: any } = { id = "tasks-board", w_full = true, grow = 1, gap = ui.raw(12, "gpui"), items = "stretch", px = ui.raw(12, "gpui") }
 	for _, col in store.COLUMNS do
-		local tasks = ui.computed(function(): { store.Task }
-			local out: { store.Task } = {}
-			local p = store.parts:get()
-			for _, list in { p.open, p.done } do
-				for _, t in list do
-					if store.state(t).column == col then
-						table.insert(out, t)
-					end
-				end
-			end
-			return out
+		local tasks = ui.computed(function(): { Line }
+			return columns:get()[col]
 		end)
 		table.insert(cols, ui.column {
 			id = `tasks-column-{col}`,
@@ -501,11 +534,11 @@ local function Board(): Node
 				measured = true,
 				height = 80,
 				gap = ui.raw(8, "gpui"),
-				key = function(t: store.Task): string
-					return t.id
+				key = function(l: Line): string
+					return l.key
 				end,
-				row = function(t: store.Task): Node
-					return ui.div { w_full = true, pb = ui.raw(8, "gpui"), BoardCard(t) }
+				row = function(l: Line): Node
+					return ui.div { w_full = true, pb = ui.raw(8, "gpui"), BoardCard(l) }
 				end,
 			},
 		})
@@ -531,6 +564,9 @@ M.Page = ui.component(function(): Node
 			if e.key == "Escape" and card.current:peek() then
 				card.close()
 				return true
+			end
+			if e.editing or card.current:peek() then
+				return false
 			end
 			if M.view:peek() == "list" then
 				return M.keys(e)

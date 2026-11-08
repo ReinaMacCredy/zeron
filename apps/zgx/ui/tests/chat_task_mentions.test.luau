@@ -6,6 +6,7 @@ local TASKS = {
 		{ id = "t1", title = "Renew the signing certificate", notes = "", order = "a1", created = 1, images = {}, depends = {} },
 		{ id = "t2", title = "Draft [the] copy", notes = "", order = "a2", created = 2, images = {}, depends = {} },
 		{ id = "t3", title = "Renew the domain", notes = "", order = "a3", created = 3, images = {}, depends = {}, completed = 10 },
+		{ id = "t4", title = "Ask [Fix the build](zeron-chat:a1) again", notes = "", order = "a4", created = 4, images = {}, depends = {} },
 	},
 }
 
@@ -55,4 +56,15 @@ test("@ tasks: a title's brackets are escaped in its link", function()
 	app:key("Enter")
 	app:frames(10)
 	expect(app:tree(BOX)).to_contain("[Draft \\\\[the\\\\] copy](zeron-task:t2)")
+end)
+
+test("@ tasks: a title holding a mention lists and links by its words alone", function()
+	local app = open()
+	app:type(BOX, "@task fix the")
+	app:frames(20)
+	expect(app:tree("#mention-task-t4")).to_contain("Ask Fix the build again")
+	expect(app:tree("#mention-task-t4")).never.to_contain("zeron-chat")
+	app:key("Enter")
+	app:frames(10)
+	expect(app:tree(BOX)).to_contain("[Ask Fix the build again](zeron-task:t4)")
 end)

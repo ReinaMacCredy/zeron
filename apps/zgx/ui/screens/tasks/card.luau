@@ -34,9 +34,18 @@ function M.close()
 	M.current:set(nil)
 end
 
-local function title_of(t: store.Task): string
-	local s = string.gsub(t.title or "", "%s+", " ")
-	return if s == "" then locale.s("tasks.untitled") else s
+local title_of = store.title_of
+
+-- (A press anywhere outside the card closes it, as the shell's other floating cards; the card's own presses mark themselves first.)
+local pressed_in = false
+function M.press_outside()
+	if pressed_in then
+		pressed_in = false
+		return
+	end
+	if M.current:peek() then
+		M.close()
+	end
 end
 
 -- A field that saves `key` as typed, a pause after the last key.
@@ -200,6 +209,9 @@ function M.add_images(t: store.Task)
 		local function one_done()
 			left -= 1
 			if left == 0 then
+				if #next > store.IMAGES_MAX then
+					ds.toast.show({ title = locale.s("tasks.card.images_max", { n = store.IMAGES_MAX }), tone = "warning" })
+				end
 				while #next > store.IMAGES_MAX do
 					table.remove(next)
 				end
@@ -236,19 +248,30 @@ local function new_chat_model(): any
 	return (catalog.models or {})[1]
 end
 
-local function NewChat(t: store.Task): Node
-	local starting = ui.use_state(false)
-	local function start()
-		local m = new_chat_model()
-		if not m or starting:peek() then
-			return
-		end
-		starting:set(true)
-		store.start(t.id, { model = m.value, effort = defaults:peek().effort, access = defaults:peek().access }, t.project, function()
-			starting:set(false)
-		end)
+M.starting = ui.state("tasks_card_starting", nil :: string?)
+
+-- Start a task in a new chat on the new chat composer's agent; refused, the button comes back.
+function M.start(t: store.Task)
+	local m = new_chat_model()
+	if not m or M.starting:peek() == t.id then
+		return
 	end
-	M.start_now = start
+	M.starting:set(t.id)
+	local function over()
+		if M.starting:peek() == t.id then
+			M.starting:set(nil)
+		end
+	end
+	store.start(t.id, { model = m.value, effort = defaults:peek().effort, access = defaults:peek().access }, t.project, over, over)
+end
+
+local function NewChat(t: store.Task): Node
+	local function starting(): boolean
+		return M.starting:get() == t.id
+	end
+	local function start()
+		M.start(t)
+	end
 	return ui.column {
 		gap = ui.raw(8, "gpui"),
 		ui.row {
@@ -269,14 +292,14 @@ local function NewChat(t: store.Task): Node
 			items = "center",
 			ds.Button {
 				function(): string
-					return locale.s(if starting:get() then "tasks.card.starting" else "tasks.card.start")
+					return locale.s(if starting() then "tasks.card.starting" else "tasks.card.start")
 				end,
 				id = "task-card-start",
 				
 				tone = "primary",
 				size = "sm",
 				disabled = function(): boolean
-					return new_chat_model() == nil or starting:get()
+					return new_chat_model() == nil or starting()
 				end,
 				on_click = start,
 			},
@@ -422,16 +445,25 @@ local function HandOff(t: store.Task): Node
 end
 
 local function Linked(t: store.Task): Node
-	local s = store.state(t)
-	local c = s.chat
+	local c = store.state(t).chat
+	local function now(): store.State
+		return store.state(store.find(t.id) or t)
+	end
 	return ui.column {
 		id = "task-card-linked",
 		gap = ui.raw(8, "gpui"),
 		p = ui.raw(10, "gpui"),
 		rounded = ui.raw(12, "gpui"),
 		bg = "$hover",
-		ui.text { if c then c.title else locale.s("tasks.chat_deleted"), literal = true, weight = "$font.weight.semibold", truncate = true },
-		if c then ui.text { id = "task-card-status", store.linked_word(c), color = store.TONES[s.column], text_size = ui.raw(12, "gpui") } else nil,
+		ui.text { function(): string
+			local l = now().chat
+			return if l then l.title else locale.s("tasks.chat_deleted")
+		end, literal = true, weight = "$font.weight.semibold", truncate = true },
+		if c then ui.text { id = "task-card-status", function(): string
+			return store.linked_word(now().chat)
+		end, color = function(): string
+			return store.TONES[now().column]
+		end, text_size = ui.raw(12, "gpui") } else nil,
 		if t.send_error then ui.row {
 			gap = ui.raw(8, "gpui"),
 			items = "center",
@@ -568,7 +600,7 @@ local function Body(id: string): Node
 			end,
 			on_change = type_title,
 			on_key = function(e: any): boolean
-				if e.key == "Enter" then
+				if e.key == "Enter" and not (e.meta or e.cmd or e.ctrl) then
 					local el = notes_ref:peek()
 					if el then
 						el:focus()
@@ -654,7 +686,7 @@ local function Body(id: string): Node
 			if l.completed then
 				return "done"
 			end
-			return if l.chat or l.send_error then `linked:{l.chat or ""}` else "hand"
+			return if l.chat or l.send_error then `linked:{l.chat or ""}:{if store.state(l).chat then "" else "gone"}` else "hand"
 		end, function(kind: string): Node
 			if kind == "done" then
 				return Done(live())
@@ -703,21 +735,32 @@ M.Card = ui.component(function(): Node
 				if e.key == "Escape" then
 					M.close()
 					return true
-				elseif e.key == "Enter" and (e.meta or e.cmd) and M.start_now then
-					M.start_now()
-					return true
+				elseif e.key == "Enter" and (e.meta or e.cmd) then
+					local t = store.find(M.current:peek())
+					if t and not t.completed and not t.chat and not t.send_error and hand_off:peek() == "new" then
+						M.start(t)
+						return true
+					end
 				end
 				return false
+			end,
+			on_press = function()
+				pressed_in = true
+				ui.after(0, function()
+					pressed_in = false
+				end)
 			end,
 			enter = motion.transition({ opacity = { 0, 1 }, x = { 28, 0 }, duration = 200 }),
 			exit = motion.transition({ opacity = 0, x = 20, duration = 140 }),
 			ui.scroll {
 				w_full = true,
 				grow = 1,
+				-- (The engine may answer a create before its watch brings the task: the body is built again as it comes.)
 				ui.presence(function(): string
-					return M.current:get() or ""
-				end, function(id: string): Node
-					return Body(id)
+					local id = M.current:get() or ""
+					return if store.find(id) then id else `{id}?`
+				end, function(key: string): Node
+					return Body((string.gsub(key, "%?$", "")))
 				end, { w_full = true }),
 			},
 		}, "popup")),

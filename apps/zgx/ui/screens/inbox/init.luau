@@ -12,22 +12,52 @@ local M = {}
 
 local PAGE_W, TILE_RADIUS, RUNS_EVERY = 1760, 16, 60000
 
--- The chats that need you, in the sidebar's order: newest first.
+local waiting = ui.shared("chat.waiting", {} :: { any })
+
+-- What needs you, as the shipping app's tray counts it past its waits (shell.rs `render_inbox_page`): chats asking with no question to answer here, chats failed, newest first, then tasks Not sent or Ready to review.
 function M.needs(): { any }
+	local asked: { [string]: boolean } = {}
+	for _, w in waiting:get() do
+		asked[w.chat] = true
+	end
 	local out = {}
 	for _, c in sessions.now:get().chats do
-		if c.status == "input" or c.status == "failed" then
-			table.insert(out, c)
+		if (c.status == "input" and not asked[c.id]) or c.status == "failed" then
+			table.insert(out, { chat = c })
 		end
 	end
 	table.sort(out, function(a: any, b: any): boolean
-		return (a.updated or 0) > (b.updated or 0)
+		return (a.chat.updated or 0) > (b.chat.updated or 0)
 	end)
+	for _, t in store.parts:get().open do
+		local reason = (tasks_page.line(t).state :: store.State).reason
+		if reason == "not_sent" or reason == "review" then
+			table.insert(out, { task = t })
+		end
+	end
 	return out
 end
+local needs = ui.computed(M.needs)
 
 M.runs = ui.state("inbox_runs", nil :: any)
 M.runs_failed = ui.state("inbox_runs_failed", false)
+
+local function same(a: any, b: any): boolean
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return a == b
+	end
+	for k, v in a do
+		if not same(v, b[k]) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
 
 local function refresh()
 	local p = store.host.today({ since = store.day_start() })
@@ -36,7 +66,10 @@ local function refresh()
 		return
 	end
 	p:after(function(v: any)
-		M.runs:set(v or { runs = {}, waits = {} })
+		local got = v or { runs = {}, waits = {} }
+		if not same(M.runs:peek(), got) then
+			M.runs:set(got)
+		end
 		M.runs_failed:set(false)
 	end, function()
 		M.runs_failed:set(true)
@@ -45,15 +78,11 @@ end
 M.refresh = refresh
 
 local function title_of(id: string, fallback: string?): string
-	for _, c in sessions.now:get().chats do
-		if c.id == id then
-			return c.title
-		end
-	end
-	return fallback or locale.s("chat.completions.new_session")
+	local c = store.chat_of(id)
+	return if c then c.title else fallback or locale.s("chat.completions.new_session")
 end
 
--- Today's history (inbox.rs `render_history`): a chat's last run Failed (its chat failed) or Finished, Stopped, and the questions you answered, newest first.
+-- Today's history (inbox.rs `render_history`): a chat's last run Failed (its last turn errored, seen or not) or Finished, Stopped, and the questions you answered, newest first.
 function M.history(): { any }
 	local r = M.runs:get()
 	if not r then
@@ -68,7 +97,7 @@ function M.history(): { any }
 		local what = nil
 		if run.status == "complete" then
 			local c = store.chat_of(run.chatId)
-			what = if c and c.status == "failed" and latest[run.chatId] == run.startedAtMs then "failed" else "finished"
+			what = if c and c.errored and latest[run.chatId] == run.startedAtMs then "failed" else "finished"
 		elseif run.status == "aborted" then
 			what = "stopped"
 		end
@@ -114,7 +143,7 @@ end
 
 local function Banner(): Node
 	return ui.show(function(): boolean
-		return #M.needs() > 0
+		return #needs:get() > 0
 	end, Tile {
 		id = "inbox-banner",
 		px = ui.raw(16, "gpui"),
@@ -124,7 +153,7 @@ local function Banner(): Node
 		items = "center",
 		ds.Icon { name = "bell", size = 16, color = "$text.secondary" },
 		ui.text { function(): string
-			return locale.s("inbox.needs", { n = #M.needs() })
+			return locale.s("inbox.needs", { n = #needs:get() })
 		end, grow = 1, truncate = true, text_size = ui.raw(13.5, "gpui"), color = "$text.secondary" },
 		ui.button {
 			id = "inbox-open",
@@ -138,9 +167,11 @@ local function Banner(): Node
 			weight = "$font.weight.semibold",
 			text_size = ui.raw(13, "gpui"),
 			on_click = function()
-				local first = M.needs()[1]
-				if first then
-					route.open_session(first.id)
+				local first = needs:peek()[1]
+				if first and first.chat then
+					route.open_session(first.chat.id)
+				elseif first then
+					card.open(first.task.id)
 				end
 			end,
 			ui.text { locale.s("inbox.open") },
@@ -188,19 +219,26 @@ local function History(): Node
 end
 
 -- Today's tasks (inbox.rs `render_tasks`): check, title, In {chat}, Overdue or Today; a row opens its card; the add row makes one due today.
-local function TaskRow(t: store.Task): Node
-	local done = t.completed ~= nil
+type Line = { task: store.Task, key: string, meta: string?, late: boolean }
+local function line(t: store.Task): Line
 	local meta: string? = nil
-	if not done then
+	local late = false
+	if not t.completed then
 		local c = store.chat_of(t.chat)
 		if c then
 			meta = locale.s("inbox.in_chat", { title = c.title })
-		elseif t.due and t.due < store.today() then
-			meta = locale.s("inbox.overdue")
+		elseif t.due and t.due < store.work_day() then
+			meta, late = locale.s("inbox.overdue"), true
 		elseif t.due then
 			meta = locale.s("inbox.due_today")
 		end
 	end
+	return { task = t, key = t.id, meta = meta, late = late }
+end
+
+local function TaskRow(l: Line): Node
+	local t, meta = l.task, l.meta
+	local done = t.completed ~= nil
 	return ui.row {
 		id = `inbox-task-{t.id}`,
 		role = "listitem",
@@ -221,14 +259,18 @@ local function TaskRow(t: store.Task): Node
 			grow = 1,
 			min_w = 0,
 			ui.rich { ui.span { tasks_page.title_of(t), literal = true, strike = done }, truncate = true, text_size = ui.raw(13.5, "gpui"), color = if done then "$text.secondary" else "$text.primary" },
-			if meta then ui.text { meta, literal = true, truncate = true, text_size = ui.raw(12, "gpui"), color = if meta == locale.s("inbox.overdue") then "$danger" else "$text.secondary" } else nil,
+			if meta then ui.text { meta, literal = true, truncate = true, text_size = ui.raw(12, "gpui"), color = if l.late then "$danger" else "$text.secondary" } else nil,
 		},
 	}
 end
 
 local function Tasks(): Node
-	local list = ui.computed(function(): { store.Task }
-		return store.today_tasks()
+	local list = ui.computed(function(): { Line }
+		local out: { Line } = {}
+		for _, t in store.today_tasks() do
+			table.insert(out, line(t))
+		end
+		return out
 	end)
 	return Tile {
 		id = "inbox-tasks",
@@ -236,8 +278,8 @@ local function Tasks(): Node
 		py = ui.raw(18, "gpui"),
 		Heading("inbox.todays_tasks", function(): number
 			local n = 0
-			for _, t in list:get() do
-				if not t.completed then
+			for _, l in list:get() do
+				if not l.task.completed then
 					n += 1
 				end
 			end
@@ -261,7 +303,7 @@ local function Tasks(): Node
 			ui.each(list, TaskRow),
 		},
 		tasks_page.AddRow { id = "inbox-add", placeholder = locale.s("inbox.add_placeholder"), due = function(): string
-			return store.today()
+			return store.work_day()
 		end },
 	}
 end

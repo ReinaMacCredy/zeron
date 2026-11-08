@@ -80,7 +80,7 @@ function M.task_items(query: string, project: string?, scoped: boolean): { any }
 	local function pick(list: { any }): { any }
 		local own, other = {}, {}
 		for _, t in list do
-			if q == "" or string.find(string.lower(t.title), q, 1, true) then
+			if q == "" or string.find(string.lower(tasks.plain(t.title)), q, 1, true) then
 				table.insert(if t.project == project then own else other, t)
 			end
 		end
@@ -103,10 +103,7 @@ function M.task_items(query: string, project: string?, scoped: boolean): { any }
 		if i > limit then
 			break
 		end
-		local title = string.match(string.gsub(t.title or "", "%s+", " "), "^%s*(.-)%s*$") or ""
-		if title == "" then
-			title = locale.s("tasks.untitled")
-		end
+		local title = tasks.title_of(t)
 		local column = tasks.state(t).column
 		local where = tasks.project_name(t.project) or locale.s("tasks.no_project")
 		local escaped = string.gsub(title, "([%[%]\\])", "\\%1")

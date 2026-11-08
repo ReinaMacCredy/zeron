@@ -1,27 +1,4 @@
-//! Tasks: the engine's to-do list (`WatchTasks`, `Mutate` task ops,
-//! crates/engine/src/rpc/tasks.rs), as the Tasks page, the Inbox page, the
-//! card and quick capture read and write it (ui/screens/tasks).
-//!
-//! `tasks.list` is the list as scripts read it: `{ state, tasks }`, `state`
-//! "idle" until the engine answers, then "ready". Each task is `{ id,
-//! title, notes, project?, due?, chat?, completed? (ms), order, created
-//! (ms), images, send_error?, plan?, depends }`, deleted ones left out.
-//!
-//!   tasks.create { title, notes?, project?, due?, images?, depends? }
-//!                                  a new task at the top of To do: its id
-//!   tasks.update { id, title?, notes?, due? ("" none), project? ("" none),
-//!                  completed?, images? }
-//!   tasks.delete { id }
-//!   tasks.assign { id, chat, send? }   linked to a thread (sent its words
-//!                                  with `send`); `chat` "" unlinks
-//!   tasks.start { id, picks?, project? }  handed to a new chat on these picks
-//!                                  (the new chat composer's), its id
-//!   tasks.today { since }           today's runs and waits (`GetTodayRuns`)
-//!   tasks.image { path }            an image of a task, here: { src }
-//!   tasks.upload_image { path }     a file uploaded for a task: its path
-//!
-//! A mock Dev (`ZERON_ZGX_MOCK=1`) with `ZERON_ZGX_MOCK_TASKS=<n>` seeds n
-//! tasks into an engine that has none.
+//! The engine's tasks (`WatchTasks`, `WatchTaskSteps`, `Mutate` task ops) as `tasks.list` and the `tasks.*` actions ui/screens/tasks reads and calls.
 
 use std::{
     cell::{Cell, RefCell},
@@ -38,12 +15,14 @@ use crate::engine;
 #[derive(Default)]
 struct Tasks {
     list: RefCell<Json>,
+    steps: RefCell<Json>,
     ready: Cell<bool>,
     seeded: Cell<bool>,
     shared: RefCell<Vec<(u64, Shared)>>,
     next_window: Cell<u64>,
     watching: Cell<bool>,
     watch: RefCell<Option<crate::engine::rpc::Watch>>,
+    steps_watch: RefCell<Option<crate::engine::rpc::Watch>>,
 }
 
 thread_local! {
@@ -51,8 +30,13 @@ thread_local! {
 }
 
 /// A task as scripts read it, or none for a deleted one.
-fn shaped(task: &Json) -> Option<Json> {
+fn shaped(task: &Json, steps: &[zeron_proto::TaskStep]) -> Option<Json> {
     let t: zeron_proto::Task = serde_json::from_value(task.clone()).ok()?;
+    let steps: Vec<Json> = steps
+        .iter()
+        .filter(|s| s.task_id == t.id && !s.deleted)
+        .map(|s| json!({ "chat": s.chat_id, "outcome": s.outcome, "ended": s.turn.as_ref().map(|turn| turn.ended) }))
+        .collect();
     if t.deleted {
         return None;
     }
@@ -69,12 +53,15 @@ fn shaped(task: &Json) -> Option<Json> {
         "images": t.images,
         "send_error": t.send_error,
         "plan": t.mode == zeron_proto::TaskMode::Orchestrated || t.plan_pending,
+        "plan_pending": t.plan_pending,
+        "steps": steps,
         "depends": t.depends_on,
     }))
 }
 
-fn shaped_all(tasks: &Json) -> Json {
-    Json::Array(tasks.as_array().into_iter().flatten().filter_map(shaped).collect())
+fn shaped_all(tasks: &Json, steps: &Json) -> Json {
+    let steps: Vec<zeron_proto::TaskStep> = steps.as_array().into_iter().flatten().filter_map(|s| serde_json::from_value(s.clone()).ok()).collect();
+    Json::Array(tasks.as_array().into_iter().flatten().filter_map(|t| shaped(t, &steps)).collect())
 }
 
 /// An order key above every open task's, as the shipping app's quick add.
@@ -142,7 +129,7 @@ fn create_params(args: &Value, id: &str, order: Option<String>) -> Json {
 
 impl Tasks {
     fn value(&self) -> Value {
-        let tasks = shaped_all(&self.list.borrow());
+        let tasks = shaped_all(&self.list.borrow(), &self.steps.borrow());
         let state = if self.ready.get() { "ready" } else { "idle" };
         Value::from_json(&json!({ "state": state, "tasks": tasks }).to_string()).unwrap_or(Value::Nil)
     }
@@ -194,8 +181,7 @@ const SEED_TITLES: [&str; 8] = [
     "Benchmark the parser",
 ];
 
-/// A mock Dev's tasks: titles in turn, every fifth due yesterday, every
-/// seventh done, keys in list order.
+/// A mock Dev's tasks: titles in turn, every fifth overdue, every seventh done, keys in list order.
 fn seed_params(n: usize) -> Vec<Json> {
     let mut out = Vec::new();
     let mut lower: Option<String> = None;
@@ -214,6 +200,11 @@ fn seed_params(n: usize) -> Vec<Json> {
         }
     }
     out
+}
+
+/// Unlinked as the shipping app's Unassign: the link alone, a send error kept.
+fn unassign_params(id: &str) -> Json {
+    json!({ "op": "updateTask", "taskId": id, "patch": { "chatId": null } })
 }
 
 async fn mutate(params: Json) -> Result<Value, String> {
@@ -239,6 +230,13 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             *t.watch.borrow_mut() = Some(rpc.watch("WatchTasks", json!({}), move |item| {
                 if let Some(t) = heard.upgrade() {
                     t.heard(item);
+                }
+            }));
+            let heard = Rc::downgrade(&t);
+            *t.steps_watch.borrow_mut() = Some(rpc.watch("WatchTaskSteps", json!({}), move |item| {
+                if let Some(t) = heard.upgrade() {
+                    *t.steps.borrow_mut() = item;
+                    t.publish();
                 }
             }));
         });
@@ -273,7 +271,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         let id = args.field("id").map(text).unwrap_or_default();
         let chat = args.field("chat").map(text).unwrap_or_default();
         if chat.is_empty() {
-            return mutate(json!({ "op": "updateTask", "taskId": id, "patch": { "chatId": null, "sendError": null } })).await;
+            return mutate(unassign_params(&id)).await;
         }
         let send = args.field("send").is_some_and(Value::truthy);
         mutate(json!({ "op": "assignTask", "taskId": id, "chatId": chat, "send": send })).await
@@ -322,7 +320,13 @@ mod tests {
             { "id": "b", "title": "Gone", "deleted": true },
             { "id": "c", "title": "Plan", "mode": "orchestrated", "sendError": "offline" },
         ]);
-        let out = shaped_all(&tasks);
+        let steps = json!([
+            { "id": "s1", "taskId": "c", "chatId": "k1", "turn": { "ended": "failed" } },
+            { "id": "s2", "taskId": "c", "outcome": "done" },
+            { "id": "s3", "taskId": "c", "deleted": true },
+            { "id": "s4", "taskId": "a" , "deleted": true },
+        ]);
+        let out = shaped_all(&tasks, &steps);
         let list = out.as_array().unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0]["project"], "p1");
@@ -335,6 +339,11 @@ mod tests {
         assert!(list[1]["completed"].is_null());
         assert_eq!(list[1]["plan"], true);
         assert_eq!(list[1]["send_error"], "offline");
+        assert_eq!(list[0]["steps"], json!([]));
+        assert_eq!(list[1]["steps"], json!([{ "chat": "k1", "outcome": null, "ended": "failed" }, { "chat": null, "outcome": "done", "ended": null }]));
+        let patch: zeron_proto::TaskPatch = serde_json::from_value(unassign_params("a")["patch"].clone()).unwrap();
+        assert_eq!(patch.chat_id, Some(None));
+        assert_eq!(patch.send_error, None);
     }
 
     #[test]

@@ -536,6 +536,10 @@ local function sidebar_limit(): number
 			if pills then
 				pills.press_outside()
 			end
+			local task_card: any = boundary.load("@app/screens/tasks/card")
+			if task_card then
+				task_card.press_outside()
+			end
 		end,
 		on_swipe = function(e: any)
 			local swipe: any = boundary.load("@app/screens/shell/swipe")

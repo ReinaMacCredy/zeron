@@ -28,7 +28,8 @@ function M.split(text: string): (string, string)
 end
 
 function M.save(): boolean
-	local title, notes = M.split(M.text:peek())
+	local typed = M.text:peek()
+	local title, notes = M.split(typed)
 	if title == "" then
 		return false
 	end
@@ -43,6 +44,12 @@ function M.save(): boolean
 			tone = "success",
 			action = { label = locale.s("tasks.capture.undo"), run = "tasks.capture.undo", value = id },
 		})
+	end, function()
+		-- (Not saved: what was typed comes back, for another go.)
+		if M.text:peek() == "" then
+			M.text:set(typed)
+		end
+		M.open:set(true)
 	end)
 	return true
 end
