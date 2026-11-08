@@ -27,6 +27,17 @@ local function box(app: any, target: string): (number, number, number, number)
 	return tonumber(x) :: number, tonumber(y) :: number, tonumber(w) :: number, tonumber(h) :: number
 end
 
+-- The room gpui's sidechat context line takes above a side chat's transcript (none on the page).
+local function context_h(app: any, side: string): number
+	local target = `{SIDES[side]} >> .sidechat-context`
+	if not app:has(target) then
+		return 0
+	end
+	local _, _, _, h = box(app, target)
+	-- (Its box is its line; its 8-point inset above and below takes room too.)
+	return h + 16
+end
+
 -- Where a side's composer starts (its pill's top), and its transcript.
 local COMPOSER = { page = "#chat-composer", lane = "#lane-composer-tab1" }
 local function composer_top(app: any, side: string): number
@@ -74,7 +85,7 @@ test("the composer sits as far from the foot, the top inset is the same, the las
 	local _, page_y, _, page_h = box(app, "#parity-page")
 	local _, lane_y, _, lane_h = box(app, "#parity-lane")
 	same(page_y + page_h - composer_top(app, "page"), lane_y + lane_h - composer_top(app, "lane"), "the composer's distance from the foot")
-	same(transcript_top(app, "page") - page_y, transcript_top(app, "lane") - lane_y, "the transcript's top inset")
+	same(transcript_top(app, "page") - page_y, transcript_top(app, "lane") - lane_y - context_h(app, "lane"), "the transcript's top inset")
 	same(composer_top(app, "page") - last_bottom(app, "page"), composer_top(app, "lane") - last_bottom(app, "lane"), "the last row's room above the composer")
 end)
 
@@ -94,7 +105,7 @@ test("a sent prompt glides to the same place, its working row as far above the c
 	local lane_prompt = top_of(app, "lane", "Tell me a long story")
 	expect(page_prompt ~= nil and lane_prompt ~= nil).to_be(true)
 	same((page_prompt :: number) - transcript_top(app, "page"), (lane_prompt :: number) - transcript_top(app, "lane"), "the sent prompt's place under the top")
-	same(composer_top(app, "page") - last_bottom(app, "page"), composer_top(app, "lane") - last_bottom(app, "lane"), "the working row's room above the composer")
+	same(composer_top(app, "page") - last_bottom(app, "page"), composer_top(app, "lane") - last_bottom(app, "lane") + context_h(app, "lane"), "the working row's room above the composer")
 	expect(composer_top(app, "lane") - last_bottom(app, "lane") > 0).to_be(true)
 end)
 
