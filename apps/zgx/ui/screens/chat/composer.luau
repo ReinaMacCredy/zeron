@@ -9,7 +9,7 @@
 --
 -- In a session it sends to that session (queued while a turn runs, which
 -- Stop ends), and shows what the agent asks (an approval, a question) in
--- the pill, the queue, the plan and what runs behind it in its trays. On a
+-- the pill, the queue and the plan in the deck over it. On a
 -- new chat it starts a chat in the route's project and opens it.
 --
 -- `Composer()` is placed once over the page pane (absolute, filling it):
@@ -22,14 +22,12 @@ local prefs = require("@app/screens/settings/prefs")
 local store = require("@app/screens/chat/store")
 local model_switch = require("@app/screens/chat/model_switch")
 local composer_profiles = require("@app/screens/chat/composer_profiles")
-local lanes = require("@app/screens/chat/lanes")
 local route = require("@app/screens/shell/route")
 local cloud = require("@account/cloud")
 local shared = require("@app/screens/chat/shared")
 local sessions = require("@account/sessions")
 local LinkNotice = require("@app/screens/chat/link_notice")
 local Compaction = require("@ds/compaction")
-local Deck = require("@ds/composer_deck")
 local Where = require("@app/screens/chat/where")
 local DropOverlay = require("@ds/drop_overlay")
 local Asks = require("@app/screens/chat/asks")
@@ -117,9 +115,8 @@ local function equal(a: any, b: any): boolean
 	end
 	return a == b
 end
--- The tray open behind the composer (its todos, tasks or queue), kept
--- across a reload.
-local TRAY = ui.state("chat_tray", nil :: ("todos" | "tasks" | "queue")?)
+-- The deck's tab open (its queue or plan), kept across a reload.
+local TRAY = ui.state("chat_tray", nil :: ("todos" | "queue")?)
 
 local function Composer(): Node
 	-- The session shown, or nil on a new chat.
@@ -390,7 +387,7 @@ local function Composer(): Node
 		return s ~= nil and s.running == true
 	end)
 	-- What the agent asks, and which of a question's options are chosen
-	-- (fresh for each question); its queue, todos and tasks. (The same as
+	-- (fresh for each question); its queue and todos. (The same as
 	-- a split pane's composer shows them: screens/chat/asks.)
 	local own_notice = ui.state("chat_own_notice", nil :: any)
 	local saving_row = ui.state("chat_queue_saving", nil :: string?)
@@ -414,29 +411,6 @@ local function Composer(): Node
 		end,
 	}
 	local ask, queue = asks.ask, asks.queue
-	-- What runs behind it: this chat's subagents (the open chat's: its
-	-- transcript is the session shown) and the processes it left running.
-	local tasks = ui.computed(function(): { any }
-		local out: { any } = {}
-		local shown = store.session:get()
-		local id = session_id:get()
-		if shown and id and shown.id == id then
-			out = lanes.tasks()
-		end
-		local first_ended = #out + 1
-		for i, t in out do
-			if t.ended then
-				first_ended = i
-				break
-			end
-		end
-		-- (Processes after the subagents that run, before those that ended.)
-		for _, t in asks.tasks:get() do
-			table.insert(out, first_ended, t)
-			first_ended += 1
-		end
-		return out
-	end)
 	-- Its own goes as the chat changes (kept: a reload isn't a change).
 	local notice_for = ui.state("chat_notice_for", "?")
 	ui.effect(function()
@@ -1325,25 +1299,6 @@ local function Composer(): Node
 			on_queue_remove = asks.on_queue_remove,
 			on_queue_reorder = asks.on_queue_reorder,
 			todos = asks.todos,
-			tasks = if Deck.on:peek() then tasks else nil,
-			-- A subagent's row opens it, a tab of the session's panel.
-			on_open_task = function(ref: string)
-				local id = session_id:peek()
-				if id then
-					lanes.open_task(id, ref)
-				end
-			end,
-			-- Stop on a background process: its host stops it, and its row
-			-- goes as the session stops listing it (production's tray).
-			on_stop_task = function(task: string)
-				local id = session_id:peek()
-				if not id then
-					return
-				end
-				store.stop_task(id, task):after(function() end, function()
-					own_notice:set { tone = "danger", key = "chat.composer.couldnt_stop_task", dismissable = true }
-				end)
-			end,
 			question = asks.question,
 			chosen = asks.chosen,
 			on_pick = asks.on_pick,

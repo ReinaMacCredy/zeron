@@ -978,7 +978,11 @@
       "rest_label": "{tooltip}；编辑消息可查看全部",
       "open_named": "打开 {name}",
       "todo_collapse": "收起待办列表",
-      "todo_expand": "展开待办列表"
+      "todo_expand": "展开待办列表",
+      "queue": "队列",
+      "plan": "计划",
+      "plan_count": "计划 {count}",
+      "n_queued": "{n} 条排队"
     },
     "composer_mentions": {
       "files": "文件",

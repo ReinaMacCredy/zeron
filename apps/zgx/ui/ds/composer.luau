@@ -22,10 +22,10 @@
 -- Everything else is in the pill or behind it. In it, over the draft: the
 -- cargo (ds/composer_cargo: what the message carries, as chips), or what
 -- the agent asks (ds/composer_ask: a question's options, an approval), the
--- draft then being the answer. Over it, the deck (ds/composer_dock: the
--- alerts, the queue, subagents, what is running, the plan): folded, a pill
--- floating over it; opened, its own top. A notice (offline, a failed send,
--- a draft restored) is the first of the alerts, there till it's over.
+-- draft then being the answer. Over it, the deck (ds/composer_deck: the
+-- queue and the plan): folded, a pill floating over it; opened, its own
+-- top. Above that, the pill row (what runs, what's asked), and a notice
+-- (offline, a failed send, a draft restored) in its own line.
 -- Mentions (ds/composer_mentions) open at the caret. Dictating, a track
 -- unrolls from the microphone over the controls: a dot, "Listening", the
 -- voice, a clock.
@@ -195,7 +195,7 @@ export type Props = {
 	-- own; otherwise the pill's own sense of it).
 	dropping: State<boolean>?,
 
-	-- The trays behind it (ds/composer_dock's).
+	-- The deck's queue and plan (ds/composer_deck).
 	queue: State<{ dock.Queued }>?,
 	can_steer: (boolean | () -> boolean)?,
 	on_queue_send: ((id: string) -> ())?,
@@ -206,13 +206,13 @@ export type Props = {
 	on_queue_cancel: ((id: string) -> ())?,
 	todos: State<{ dock.Todo }>?,
 	on_dismiss_todos: (() -> ())?,
+	-- Which of its tabs is open.
+	tray: State<dock.Tray?>?,
+	-- (Unused, 1B: the pill row carries what runs, the notice line what to know; the gallery still passes them.)
 	tasks: State<{ dock.Task }>?,
 	on_stop_task: ((id: string) -> ())?,
 	on_stop_all: (() -> ())?,
 	on_open_task: ((id: string) -> ())?,
-	tray: State<dock.Tray?>?,
-	-- What to know about the chat (ds/composer_dock's alerts): each in its
-	-- tone's colours, its action, and letting one go.
 	alerts: State<{ deck.Alert }>?,
 	on_alert_action: ((id: string) -> ())?,
 	on_dismiss_alert: ((id: string) -> ())?,
@@ -2563,14 +2563,16 @@ return ui.component(function(props: Props): Node
 		}
 	end
 
-	local function on_deck(): boolean
-		return deck.on:peek()
-	end
-	-- The trays, behind the pill.
+	-- The deck (1B): the queue and the plan only, the composer's own top, and
+	-- folded a pill over it. What runs and what's asked are the pill row's.
+	-- (Whether its folded pill shows: the pill row stands clear above it.)
 	local trays: Node? = nil
-	local behind: Node? = nil
-	if not on_deck() and (props.queue or props.todos or props.tasks) then
-		behind = dock.Dock {
+	local tray_pill: Node? = nil
+	local deck_folded: () -> boolean = function()
+		return false
+	end
+	if props.queue or props.todos then
+		trays, tray_pill, deck_folded = deck.parts {
 			queue = props.queue,
 			can_steer = props.can_steer,
 			on_queue_send = props.on_queue_send,
@@ -2589,108 +2591,18 @@ return ui.component(function(props: Props): Node
 				return running ~= nil and running:get()
 			end,
 			on_dismiss_todos = props.on_dismiss_todos,
-			tasks = props.tasks,
-			on_stop_task = props.on_stop_task,
-			on_stop_all = props.on_stop_all,
-			open = props.tray,
-			narrow = narrow,
-		}
-	end
-	-- (Folded, what waits is a pill floating over the conversation.)
-	local tray_pill: Node? = nil
-	-- The notice (not connected, a send that failed, a draft restored) is
-	-- an alert of the deck's, first, in its tone; it goes only as what it
-	-- says is over, unless it says it may be let go.
-	local NOTICE = "\0notice"
-	local alerts: any = props.alerts
-	if props.notice and on_deck() then
-		local notice = props.notice
-		alerts = ui.computed(function(): { deck.Alert }
-			local out: { deck.Alert } = {}
-			local n = notice:get()
-			if n then
-				local tone: deck.AlertTone = if n.tone == "danger" then "danger" elseif n.tone == "warning" then "warning" else "info"
-				table.insert(out, {
-					id = NOTICE,
-					tone = tone,
-					title = n.text,
-					action = n.action,
-					spinner = n.spinner,
-					dismissable = n.dismissable == true,
-				})
-			end
-			if props.alerts then
-				for _, x in props.alerts:get() do
-					table.insert(out, x)
-				end
-			end
-			return out
-		end)
-	end
-	if on_deck() and (props.queue or props.todos or props.tasks or alerts) then
-		trays, tray_pill = deck.parts {
-			queue = props.queue,
-			can_steer = props.can_steer,
-			on_queue_send = props.on_queue_send,
-			on_queue_edit = props.on_queue_edit,
-			on_queue_remove = props.on_queue_remove,
-			on_queue_reorder = props.on_queue_reorder,
-			on_queue_save = props.on_queue_save,
-			on_queue_cancel = props.on_queue_cancel,
-			todos = props.todos,
-			live = function()
-				return running ~= nil and running:get()
-			end,
-			on_dismiss_todos = props.on_dismiss_todos,
-			tasks = props.tasks,
-			on_stop_task = props.on_stop_task,
-			on_stop_all = props.on_stop_all,
-			on_open_task = props.on_open_task,
-			open = props.tray,
+			open = props.tray :: any,
 			narrow = narrow,
 			aside = props.aside,
-			alerts = alerts,
-			on_alert_action = function(id: string)
-				if id == NOTICE then
-					if props.on_notice_action then
-						props.on_notice_action()
-					end
-				elseif props.on_alert_action then
-					props.on_alert_action(id)
-				end
-			end,
-			on_dismiss_alert = function(id: string)
-				if id == NOTICE then
-					if props.on_dismiss_notice then
-						props.on_dismiss_notice()
-					end
-				elseif props.on_dismiss_alert then
-					props.on_dismiss_alert(id)
-				end
-			end,
 			on_pill_width = props.on_pill_width,
 		}
 	end
 
-	-- The side chat's tab, behind the pill's (or the top tray's) top right
-	-- corner: 16 further in for each tray under it, tucked 26 behind it.
+	-- The side chat's tab, behind the pill's top right corner, tucked 26 behind it.
 	local function side_tab(): Node?
 		local tab = props.side_tab
 		if not tab then
 			return nil
-		end
-		local function trays_under(): number
-			local n = 0
-			if props.queue and #props.queue:get() > 0 then
-				n += 1
-			end
-			if props.todos and #props.todos:get() > 0 then
-				n += 1
-			end
-			if props.tasks and #props.tasks:get() > 0 then
-				n += 1
-			end
-			return n
 		end
 		return ui.show(function(): boolean
 			return tab.shown()
@@ -2699,9 +2611,7 @@ return ui.component(function(props: Props): Node
 			justify = "end",
 			shrink = 0,
 			pointer_events = "none",
-			pr = function(): any
-				return ui.raw(16 * (trays_under() + 1), "gpui's side chat tab, a step in per tray")
-			end :: any,
+			pr = ui.raw(16, "gpui's side chat tab"),
 			-- (Taking no room: nothing under it moves as it comes.)
 			h = 42,
 			mb = ui.raw(-42, "its own height"),
@@ -2766,7 +2676,9 @@ return ui.component(function(props: Props): Node
 			pointer_events = "none",
 			h = 28,
 			mb = ui.raw(-28, "its own height"),
-			y = -34,
+			y = ui.tween(ui.computed(function(): number
+				return if deck_folded() then -34 - deck.PILL_H - deck.PILL_GAP else -34
+			end), { duration = 180, ease = "out(3)" }),
 			pr = if props.side_tab
 				then function(): any
 					return if (props.side_tab :: any).shown() then ui.raw(112, "clear of the side chat's tab") else 0
@@ -2803,10 +2715,9 @@ return ui.component(function(props: Props): Node
 		opacity = function(): number
 			return if disabled() then (ui.theme.get("zeron.disabled") :: number?) or 0.4 else 1
 		end,
-		if on_deck() then nil else pill_row(),
-		if on_deck() then nil else side_tab(),
-		behind,
-		if on_deck() then nil else caption_line(),
+		pill_row(),
+		side_tab(),
+		caption_line(),
 		-- The tray (over a wallpaper): the pill's glass continued under the
 		-- footer, tucked behind the pill (its top hidden under it, its sides
 		-- the pill's), so the chips sit on the composer's surface rather than
@@ -2903,7 +2814,7 @@ return ui.component(function(props: Props): Node
 	return ui.column {
 		w_full = true,
 		gap = 0,
-		if props.notice and not on_deck() then notice_line(props.notice, props.on_notice_action, props.on_dismiss_notice) else nil,
+		if props.notice then notice_line(props.notice, props.on_notice_action, props.on_dismiss_notice) else nil,
 		if props.compaction then Compaction.Chip { label = props.compaction.label } else nil,
 		if props.compaction
 			then Compaction.Resume {

@@ -1,11 +1,14 @@
--- ds/composer_dock with screens/chat/asks over a made-up session: what
+-- The deck's Queue and Plan (ds/composer_deck, its rows ds/composer_dock's)
+-- with screens/chat/asks over a made-up session: what
 -- tests/chat_queue.test.luau and the plan's tests in chat_tasks.test.luau drive.
+-- The queue's tab is open while it has rows (the tests read them), as a person
+-- who opened it; the plan's only when a test opens it.
 -- The session is `test_session`; the engine answers only when told. Here, beside
 -- app.luau, as a mounted script loads modules from its own directory down.
 
 ui.theme.strict("warn")
 local ds = require("@ds")
-local Dock = require("@ds/composer_dock")
+local Deck = require("@ds/composer_deck")
 local Asks = require("@app/screens/chat/asks")
 local store = require("@app/screens/chat/store")
 ds.setup()
@@ -202,12 +205,19 @@ ui.command {
 	end,
 }
 
+local tray = ui.state("test_tray", nil :: Deck.Tray?)
+ui.effect(function()
+	if #asks.queue:get() > 0 and tray:peek() == nil then
+		tray:set("queue")
+	end
+end)
+
 return ui.column {
 	w_full = true,
 	h_full = true,
 	p = "$space.4",
 	justify = "end",
-	Dock.Dock {
+	Deck.Dock {
 		queue = asks.queue,
 		can_steer = asks.can_steer,
 		on_queue_send = asks.on_queue_send,
@@ -225,9 +235,10 @@ return ui.column {
 		composer_empty = function(): boolean
 			return empty:get()
 		end,
+		pictures = nil,
 		narrow = function(): boolean
 			return narrow:get()
 		end,
-		open = ui.state("test_tray", nil :: Dock.Tray?),
+		open = tray,
 	},
 }

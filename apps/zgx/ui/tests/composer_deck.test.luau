@@ -77,7 +77,7 @@ test("the chevrons: the header's folds, the pill's opens the one open last", fun
 	app:frames(30)
 	-- Nothing opens itself: the plan arriving is in the pill.
 	expect(app:state("test_running_tray")).to_be(nil)
-	expect(app:has('role:button "Open Todo"')).to_be(true)
+	expect(app:has('role:button "Open Plan"')).to_be(true)
 	app:click('role:button "Open Running"')
 	app:frames(30)
 	app:click('role:button "Fold what\'s waiting"')

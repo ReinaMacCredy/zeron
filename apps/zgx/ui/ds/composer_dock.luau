@@ -686,34 +686,10 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 			shrink = 0,
 			items = "center",
 			ui.row {
-				gap = ui.raw(3, "gpui's row actions"),
 				items = "center",
-				opacity = ui.tween(ui.computed(quiet_when), { duration = 120 }),
-				ui.show(
-					removing,
-					glyph_button {
-						label = locale.t("ds.composer_dock.removing"),
-						tooltip = locale.s("ds.composer_dock.removing"),
-						tone = "quiet",
-						disabled = true,
-						Icon { name = "trash-bin-minimalistic", size = 13 },
-					},
-					glyph_button {
-						label = locale.t("ds.composer_dock.remove"),
-						tooltip = locale.s("ds.composer_dock.remove"),
-						tooltip_delay = 350,
-						tone = "quiet",
-						disabled = function()
-							return now().sending == true
-						end,
-						on_click = function()
-							if props.on_queue_remove then
-								props.on_queue_remove(now().id)
-							end
-						end,
-						Icon { name = "trash-bin-minimalistic", size = 13 },
-					}
-				),
+				opacity = ui.tween(ui.computed(function(): number
+					return if hovered:get() then 1 else 0
+				end), { duration = 120 }),
 				glyph_button {
 					label = locale.t("ds.composer_dock.edit"),
 					tooltip = locale.s("ds.composer_dock.edit"),
@@ -729,6 +705,35 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 				},
 			},
 			primary,
+			ui.row {
+				items = "center",
+				opacity = ui.tween(ui.computed(quiet_when), { duration = 120 }),
+				ui.show(
+					removing,
+					glyph_button {
+						label = locale.t("ds.composer_dock.removing"),
+						tooltip = locale.s("ds.composer_dock.removing"),
+						tone = "quiet",
+						disabled = true,
+						Icon { name = "close", size = 13 },
+					},
+					glyph_button {
+						label = locale.t("ds.composer_dock.remove"),
+						tooltip = locale.s("ds.composer_dock.remove"),
+						tooltip_delay = 350,
+						tone = "quiet",
+						disabled = function()
+							return now().sending == true
+						end,
+						on_click = function()
+							if props.on_queue_remove then
+								props.on_queue_remove(now().id)
+							end
+						end,
+						Icon { name = "close", size = 13 },
+					}
+				),
+			},
 		}
 	end
 	return ui.row {
@@ -771,6 +776,15 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 			ui.show(function()
 				return not editing()
 			end, Icon { name = "drag-handle", size = 13 }),
+		},
+		ui.text {
+			function(): string
+				return `{i()}.`
+			end,
+			shrink = 0,
+			tabular = true,
+			text_size = SMALL,
+			color = "$text.tertiary",
 		},
 		FadeText {
 			line,
@@ -963,6 +977,245 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 	}
 end
 
+-- The primary modifier held with the pill empty: the newest row says its keys.
+function M.key_held(props: Props): () -> boolean
+	local modifiers = ui.modifiers
+	local function key_held(): boolean
+		if not props.composer_empty or not props.composer_empty() then
+			return false
+		end
+		local primary, other = modifiers.control, modifiers.meta
+		if MAC then
+			primary, other = modifiers.meta, modifiers.control
+		end
+		return primary:get() and not (modifiers.shift:get() or other:get() or modifiers.alt:get())
+	end
+	return key_held
+end
+
+-- The plan's rows (todo_panel.rs), with what its header says: the deck's Plan tab.
+export type Plan = { body: Node, counts: () -> (number, number, number?), summary: () -> string, finished: () -> boolean, trail: { Node }, glyph: Node }
+function M.plan(props: Props, todos: State<{ Todo }>, live: () -> boolean): Plan
+	local function finished(): boolean
+		for _, t in todos:get() do
+			if t.state ~= "done" then
+				return false
+			end
+		end
+		return #todos:get() > 0
+	end
+	local show_earlier = ui.use_state(false)
+	local show_later = ui.use_state(false)
+	local function counts(): (number, number, number?)
+		local done, total, current = 0, 0, nil
+		for i, t in todos:get() do
+			total += 1
+			if t.state == "done" then
+				done += 1
+			elseif t.state == "doing" and current == nil then
+				current = i
+			end
+		end
+		return done, total, current
+	end
+	local function window(): (number, number)
+		local list = todos:get()
+		local _, total, current = counts()
+		if total <= PLAN_FOLD_PAST then
+			return 1, total
+		end
+		local focus = current
+		if not focus then
+			for i, t in list do
+				if t.state ~= "done" then
+					focus = i
+					break
+				end
+			end
+		end
+		local from = math.clamp((focus or total) - 1, 1, total - PLAN_FOLD_TO + 1)
+		return from, from + PLAN_FOLD_TO - 1
+	end
+	type Shown = { kind: "step", todo: Todo } | { kind: "fold", later: boolean }
+	local shown = ui.computed(function(): { Shown }
+		local list = todos:get()
+		local from, to = window()
+		local out: { Shown } = {}
+		if from > 1 then
+			table.insert(out, { kind = "fold", later = false } :: Shown)
+		end
+		for i = if show_earlier:get() then 1 else from, to do
+			table.insert(out, { kind = "step", todo = list[i] } :: Shown)
+		end
+		if to < #list then
+			if show_later:get() then
+				for i = to + 1, #list do
+					table.insert(out, { kind = "step", todo = list[i] } :: Shown)
+				end
+			end
+			table.insert(out, { kind = "fold", later = true } :: Shown)
+		end
+		return out
+	end)
+	local function summary(): string
+		local list = todos:get()
+		for _, t in list do
+			if t.state == "doing" then
+				return t.text
+			end
+		end
+		for _, t in list do
+			if t.state ~= "done" then
+				return t.text
+			end
+		end
+		return locale.s("ds.composer_dock.all_done")
+	end
+	local trail: { Node } = {}
+	if props.on_dismiss_todos then
+		table.insert(trail, ui.show(function()
+			return not live()
+		end, IconButton {
+			label = locale.t("ds.composer_dock.dismiss_todos"),
+			tooltip = locale.s("ds.composer_dock.dismiss"),
+			tooltip_delay = 350,
+			size = "sm",
+			tone = "quiet",
+			w = 24,
+			h = 24,
+			rounded = ui.raw(5, "todo_panel.rs dismiss"),
+			on_click = function()
+				(props.on_dismiss_todos :: () -> ())()
+			end,
+			Icon { name = "close", size = 11 },
+		}))
+	end
+	local glyph = ui.div {
+		ui.show(finished, ui.div { color = "$success", Icon { name = "check", size = 14 } }, Icon { name = "checklist", size = 14 }),
+	}
+	local body = ui.column {
+		w_full = true,
+		pt = ui.raw(2, "todo_panel.rs rows area"),
+		pb = ui.raw(6, "todo_panel.rs rows area"),
+		ui.each(shown, function(s: Shown): Node
+			if s.kind == "fold" then
+				local later = s.later
+				local revealed = if later then show_later else show_earlier
+				return fold_row(function()
+					local from, to = window()
+					return if later then #todos:get() - to else from - 1
+				end, later, function()
+					return revealed:get()
+				end, function()
+					revealed:set(not revealed:peek())
+				end)
+			end
+			local t = s.todo
+			-- The row follows its step (its state changes under it).
+			local row = ui.computed(function(): Todo
+				for _, x in todos:get() do
+					if x.id == t.id then
+						return x
+					end
+				end
+				return t
+			end)
+			return todo_row(t, row, live)
+		end, {
+			key = function(s: Shown): string
+				return if s.kind == "fold" then (if s.later then "\0later" else "\0earlier") else s.todo.id
+			end,
+			animate = { duration = 150, ease = "outCubic" },
+			enter = { opacity = { 0, 1 }, duration = 150, ease = "outCubic" },
+		}),
+	}
+	return { body = body, counts = counts, summary = summary, finished = finished, trail = trail, glyph = glyph }
+end
+
+-- The queue's rows, and Steer all while it can do something: the deck's Queue tab.
+function M.queue_list(props: Props, queue: State<{ Queued }>, narrow: () -> boolean, live: () -> boolean, height: number): (Node, Node?)
+	local key_held = M.key_held(props)
+	local body = ui.column {
+		w_full = true,
+		role = "list",
+		label = locale.t("ds.composer_dock.queued_messages"),
+		ui.each(queue, function(q: Queued): Node
+			local key = q.key or q.id
+			local function same(x: Queued): boolean
+				return (x.key or x.id) == key
+			end
+			local row = ui.computed(function(): Queued
+				for _, x in queue:get() do
+					if same(x) then
+						return x
+					end
+				end
+				return q
+			end)
+			local function index(): number
+				for i, x in queue:get() do
+					if same(x) then
+						return i
+					end
+				end
+				return 0
+			end
+			local function last(): boolean
+				local list = queue:get()
+				return list[#list] ~= nil and same(list[#list])
+			end
+			return queue_row(q, index, last, row, props, narrow, key_held, live, height)
+		end, {
+			key = function(q: Queued): string
+				return q.key or q.id
+			end,
+			gap = "$space.1",
+			animate = { duration = 150, ease = "outCubic" },
+			reorder = props.on_queue_reorder,
+			item_label = function(q: Queued): string
+				return q.text
+			end,
+		}),
+	}
+	-- Rows stacked with no head of their own, always open, as gpui's. Steer all
+	-- (upstream #1150, not gpui's) stands over them while it can do something.
+	local steer_all: Node? = nil
+	if props.on_queue_steer_all then
+		local function can_steer_all(): boolean
+			local s = props.can_steer
+			local steers = if type(s) == "function" then s() else s
+			if steers ~= true or not live() then
+				return false
+			end
+			local n = 0
+			for _, q in queue:get() do
+				if M.steerable(q) then
+					n += 1
+				end
+			end
+			return n >= 2
+		end
+		steer_all = ui.show(can_steer_all, ui.row {
+			w_full = true,
+			justify = "end",
+			Button {
+				locale.t("ds.composer_dock.steer_all"),
+				size = "xs",
+				tone = "ghost",
+				h = 24,
+				px = "$space.2",
+				text_size = SMALL,
+				tooltip = locale.s("ds.composer_dock.steer_all_hint"),
+				tooltip_delay = 350,
+				on_click = function()
+					(props.on_queue_steer_all :: () -> ())()
+				end,
+			},
+		})
+	end
+	return body, steer_all
+end
+
 M.Dock = ui.component(function(props: Props): Node
 	local geometry = {
 		radius = n("zeron.composer.tray.radius", 16),
@@ -978,17 +1231,6 @@ M.Dock = ui.component(function(props: Props): Node
 	end
 	local live = props.live or function()
 		return false
-	end
-	local modifiers = ui.modifiers
-	local function key_held(): boolean
-		if not props.composer_empty or not props.composer_empty() then
-			return false
-		end
-		local primary, other = modifiers.control, modifiers.meta
-		if MAC then
-			primary, other = modifiers.meta, modifiers.control
-		end
-		return primary:get() and not (modifiers.shift:get() or other:get() or modifiers.alt:get())
 	end
 	local function opened(id: Tray): () -> boolean
 		return function(): boolean
@@ -1066,132 +1308,8 @@ M.Dock = ui.component(function(props: Props): Node
 
 	-- The plan.
 	if props.todos then
-		local todos = props.todos
-		local show_earlier = ui.use_state(false)
-		local show_later = ui.use_state(false)
-		local function counts(): (number, number, number?)
-			local done, total, current = 0, 0, nil
-			for i, t in todos:get() do
-				total += 1
-				if t.state == "done" then
-					done += 1
-				elseif t.state == "doing" and current == nil then
-					current = i
-				end
-			end
-			return done, total, current
-		end
-		local function window(): (number, number)
-			local list = todos:get()
-			local _, total, current = counts()
-			if total <= PLAN_FOLD_PAST then
-				return 1, total
-			end
-			local focus = current
-			if not focus then
-				for i, t in list do
-					if t.state ~= "done" then
-						focus = i
-						break
-					end
-				end
-			end
-			local from = math.clamp((focus or total) - 1, 1, total - PLAN_FOLD_TO + 1)
-			return from, from + PLAN_FOLD_TO - 1
-		end
-		type Shown = { kind: "step", todo: Todo } | { kind: "fold", later: boolean }
-		local shown = ui.computed(function(): { Shown }
-			local list = todos:get()
-			local from, to = window()
-			local out: { Shown } = {}
-			if from > 1 then
-				table.insert(out, { kind = "fold", later = false } :: Shown)
-			end
-			for i = if show_earlier:get() then 1 else from, to do
-				table.insert(out, { kind = "step", todo = list[i] } :: Shown)
-			end
-			if to < #list then
-				if show_later:get() then
-					for i = to + 1, #list do
-						table.insert(out, { kind = "step", todo = list[i] } :: Shown)
-					end
-				end
-				table.insert(out, { kind = "fold", later = true } :: Shown)
-			end
-			return out
-		end)
-		local function summary(): string
-			local list = todos:get()
-			for _, t in list do
-				if t.state == "doing" then
-					return t.text
-				end
-			end
-			for _, t in list do
-				if t.state ~= "done" then
-					return t.text
-				end
-			end
-			return locale.s("ds.composer_dock.all_done")
-		end
-		local trail: { Node } = {}
-		if props.on_dismiss_todos then
-			table.insert(trail, ui.show(function()
-				return not live()
-			end, IconButton {
-				label = locale.t("ds.composer_dock.dismiss_todos"),
-				tooltip = locale.s("ds.composer_dock.dismiss"),
-				tooltip_delay = 350,
-				size = "sm",
-				tone = "quiet",
-				w = 24,
-				h = 24,
-				rounded = ui.raw(5, "todo_panel.rs dismiss"),
-				on_click = function()
-					(props.on_dismiss_todos :: () -> ())()
-				end,
-				Icon { name = "close", size = 11 },
-			}))
-		end
-		local glyph = ui.div {
-			ui.show(finished, ui.div { color = "$success", Icon { name = "check", size = 14 } }, Icon { name = "checklist", size = 14 }),
-		}
-		local body = ui.column {
-			w_full = true,
-			pt = ui.raw(2, "todo_panel.rs rows area"),
-			pb = ui.raw(6, "todo_panel.rs rows area"),
-			ui.each(shown, function(s: Shown): Node
-				if s.kind == "fold" then
-					local later = s.later
-					local revealed = if later then show_later else show_earlier
-					return fold_row(function()
-						local from, to = window()
-						return if later then #todos:get() - to else from - 1
-					end, later, function()
-						return revealed:get()
-					end, function()
-						revealed:set(not revealed:peek())
-					end)
-				end
-				local t = s.todo
-				-- The row follows its step (its state changes under it).
-				local row = ui.computed(function(): Todo
-					for _, x in todos:get() do
-						if x.id == t.id then
-							return x
-						end
-					end
-					return t
-				end)
-				return todo_row(t, row, live)
-			end, {
-				key = function(s: Shown): string
-					return if s.kind == "fold" then (if s.later then "\0later" else "\0earlier") else s.todo.id
-				end,
-				animate = { duration = 150, ease = "outCubic" },
-				enter = { opacity = { 0, 1 }, duration = 150, ease = "outCubic" },
-			}),
-		}
+		local plan = M.plan(props, props.todos, live)
+		local counts, summary, trail, glyph, body = plan.counts, plan.summary, plan.trail, plan.glyph, plan.body
 		table.insert(
 			trays,
 			ui.show(
@@ -1318,85 +1436,7 @@ M.Dock = ui.component(function(props: Props): Node
 
 	-- The queue.
 	if props.queue then
-		local queue = props.queue
-		local body = ui.column {
-			w_full = true,
-			role = "list",
-			label = locale.t("ds.composer_dock.queued_messages"),
-			ui.each(queue, function(q: Queued): Node
-				local key = q.key or q.id
-				local function same(x: Queued): boolean
-					return (x.key or x.id) == key
-				end
-				local row = ui.computed(function(): Queued
-					for _, x in queue:get() do
-						if same(x) then
-							return x
-						end
-					end
-					return q
-				end)
-				local function index(): number
-					for i, x in queue:get() do
-						if same(x) then
-							return i
-						end
-					end
-					return 0
-				end
-				local function last(): boolean
-					local list = queue:get()
-					return list[#list] ~= nil and same(list[#list])
-				end
-				return queue_row(q, index, last, row, props, narrow, key_held, live, geometry.row)
-			end, {
-				key = function(q: Queued): string
-					return q.key or q.id
-				end,
-				gap = "$space.1",
-				animate = { duration = 150, ease = "outCubic" },
-				reorder = props.on_queue_reorder,
-				item_label = function(q: Queued): string
-					return q.text
-				end,
-			}),
-		}
-		-- Rows stacked with no head of their own, always open, as gpui's. Steer all
-		-- (upstream #1150, not gpui's) stands over them while it can do something.
-		local steer_all: Node? = nil
-		if props.on_queue_steer_all then
-			local function can_steer_all(): boolean
-				local s = props.can_steer
-				local steers = if type(s) == "function" then s() else s
-				if steers ~= true or not live() then
-					return false
-				end
-				local n = 0
-				for _, q in queue:get() do
-					if M.steerable(q) then
-						n += 1
-					end
-				end
-				return n >= 2
-			end
-			steer_all = ui.show(can_steer_all, ui.row {
-				w_full = true,
-				justify = "end",
-				Button {
-					locale.t("ds.composer_dock.steer_all"),
-					size = "xs",
-					tone = "ghost",
-					h = 24,
-					px = "$space.2",
-					text_size = SMALL,
-					tooltip = locale.s("ds.composer_dock.steer_all_hint"),
-					tooltip_delay = 350,
-					on_click = function()
-						(props.on_queue_steer_all :: () -> ())()
-					end,
-				},
-			})
-		end
+		local body, steer_all = M.queue_list(props, props.queue, narrow, live, geometry.row)
 		table.insert(
 			trays,
 			ui.show(

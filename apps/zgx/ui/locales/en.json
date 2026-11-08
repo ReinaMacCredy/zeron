@@ -978,7 +978,11 @@
       "rest_label": "{tooltip}; edit message to view all",
       "open_named": "Open {name}",
       "todo_collapse": "Collapse todo list",
-      "todo_expand": "Expand todo list"
+      "todo_expand": "Expand todo list",
+      "queue": "Queue",
+      "plan": "Plan",
+      "plan_count": "Plan {count}",
+      "n_queued": "{n} queued"
     },
     "composer_mentions": {
       "files": "Files",
