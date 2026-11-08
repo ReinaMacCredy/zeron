@@ -113,8 +113,16 @@ fn a_rows_wash_runs_edge_to_edge_in_its_card() {
         .set_state("shell_settings_scroll", Value::Num(3000.))
         .unwrap();
     app.frames(10);
-    let (words, _) = rows(&mut app).into_iter().nth(3).expect("rows in view");
-    let target = format!("#settings-page >> role:group \"{words}\"");
+    // The window's tree stops at 200 lines, so the rows in the 1100-tall window are found by name.
+    let target = (0..400)
+        .map(|n| format!("#settings-page >> role:group \"Chat {n}\""))
+        .find(|t| {
+            app.find(t).is_some_and(|row| {
+                let b = app.ui.scene.borrow().bounds(row);
+                b.y > 120. && b.y + b.height < 980.
+            })
+        })
+        .expect("a row wholly in view");
     let row = app.find(&target).expect("the row");
     let bounds = app.ui.scene.borrow().bounds(row);
     let (card, _) = wash(&app, row).expect("the card's fill around it, at rest");
