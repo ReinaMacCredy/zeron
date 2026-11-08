@@ -67,7 +67,16 @@
     "failed_title": "无法载入拉取请求",
     "try_again": "重试",
     "load_more": "加载更多",
-    "count": "{total} 项中显示 {shown} 项"
+    "count": "{total} 项中显示 {shown} 项",
+    "refresh_tip": "刷新拉取请求",
+    "loaded_now": "刚刚加载 · 刷新拉取请求",
+    "loaded_ago": "{n} 分钟前加载 · 刷新拉取请求",
+    "refreshing": "正在加载拉取请求",
+    "kept_results": "无法刷新拉取请求。显示的是上次加载的结果。",
+    "show_all": "显示所有拉取请求",
+    "count_matching": "{shown} / {total} 个拉取请求",
+    "loading_more": "正在加载更多…",
+    "load_n_more": "再加载 {n} 个"
   },
   "checks": {
     "not_reported": "未报告",
@@ -142,7 +151,11 @@
       "open_file": "在 GitHub 上打开 {path}",
       "send_failed": "无法发送到 GitHub",
       "no_files_title": "没有更改文件",
-      "no_files_body": "此拉取请求没有更改任何文件。"
+      "no_files_body": "此拉取请求没有更改任何文件。",
+      "copy_path": "复制路径",
+      "copy_diff": "复制差异",
+      "copied_path": "路径已复制",
+      "copied_diff": "差异已复制"
     },
     "merge": {
       "title": "合并",
@@ -207,7 +220,13 @@
       "merge_pr": "合并拉取请求",
       "branch_kept": "无法删除 {branch}：{why}。",
       "working": "运行中",
-      "ready_end": "。"
+      "ready_end": "。",
+      "confirm_title": "合并拉取请求？",
+      "confirm_body": "将以 {how} 方式把 #{number} 合并到 {base}。",
+      "confirm_body_plain": "将以 {how} 方式合并 #{number}。",
+      "word_merge": "合并提交",
+      "word_squash": "压缩",
+      "word_rebase": "变基"
     },
     "activity": {
       "resolved": "已解决",
@@ -226,7 +245,21 @@
       "empty_title": "暂无动态",
       "empty_body": "评论和审查会显示在这里。在下方开始对话。"
     },
-    "details": "详情"
+    "details": "详情",
+    "copy_link": "复制链接",
+    "link_copied": "链接已复制",
+    "toast": {
+      "merged": "拉取请求已合并",
+      "approved": "拉取请求已批准",
+      "changes": "已请求更改",
+      "reviewed": "审查已提交"
+    },
+    "checkout": {
+      "title": "检出",
+      "label": "在本地检出",
+      "copy": "复制检出命令",
+      "copied": "检出命令已复制"
+    }
   },
   "gh": {
     "no_cli": "此 Mac 上没有 GitHub CLI：请安装 gh，然后使用 `gh auth login` 登录。",

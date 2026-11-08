@@ -86,13 +86,18 @@
     "amend": "Amend the last commit",
     "you": "You",
     "placeholder": "What changed, and why",
-    "message": "Commit message"
+    "message": "Commit message",
+    "done_on": "Committed {sha} to {branch}",
+    "done": "Committed {sha}"
   },
   "discard": {
     "title_one": "Discard the changes to {name}?",
     "title_many": "Discard changes to {n, plural, one {# file} other {# files}}?",
     "body": "They go back to the last commit, and a new file is deleted. This can't be undone.",
-    "confirm": "Discard"
+    "confirm": "Discard",
+    "title_untracked": "Delete {name}?",
+    "body_untracked": "It is untracked, so this can't be undone.",
+    "delete": "Delete"
   },
   "branches": {
     "label": "Branch",
@@ -107,7 +112,9 @@
     "on_remote": "On {remote}, not here yet",
     "ahead_behind": "{ahead} ahead, {behind} behind",
     "no_match": "No branch matches “{query}”",
-    "current": "current"
+    "current": "current",
+    "created": "Created {name} and checked it out.",
+    "checked_out": "Checked out {name}."
   },
   "history": {
     "head": "{n, plural, one {# commit} other {# commits}} on {branch}",
@@ -307,6 +314,9 @@
   "comment": {
     "placeholder": "Say what to change here…",
     "add": "Add to chat",
-    "where_old": "{where} (old)"
+    "where_old": "{where} (old)",
+    "edit": "Edit comment",
+    "remove": "Remove comment",
+    "save": "Save"
   }
 }

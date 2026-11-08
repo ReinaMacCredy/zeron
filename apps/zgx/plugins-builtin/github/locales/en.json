@@ -67,7 +67,16 @@
     "failed_title": "Couldn't load pull requests",
     "try_again": "Try again",
     "load_more": "Load more",
-    "count": "{shown} of {total}"
+    "count": "{shown} of {total}",
+    "refresh_tip": "Refresh pull requests",
+    "loaded_now": "Loaded just now · Refresh pull requests",
+    "loaded_ago": "Loaded {n}m ago · Refresh pull requests",
+    "refreshing": "Loading pull requests",
+    "kept_results": "Couldn't refresh pull requests. Showing the last loaded results.",
+    "show_all": "Show all pull requests",
+    "count_matching": "{shown} of {total} pull requests",
+    "loading_more": "Loading more…",
+    "load_n_more": "Load {n} more"
   },
   "checks": {
     "not_reported": "Not reported",
@@ -142,7 +151,11 @@
       "open_file": "Open {path} on GitHub",
       "send_failed": "Couldn't send that to GitHub",
       "no_files_title": "No files changed",
-      "no_files_body": "This pull request changes no files."
+      "no_files_body": "This pull request changes no files.",
+      "copy_path": "Copy path",
+      "copy_diff": "Copy diff",
+      "copied_path": "Path copied",
+      "copied_diff": "Diff copied"
     },
     "merge": {
       "title": "Merge",
@@ -207,7 +220,13 @@
       "merge_pr": "Merge pull request",
       "branch_kept": "{branch} couldn't be deleted: {why}.",
       "working": "Working",
-      "ready_end": "."
+      "ready_end": ".",
+      "confirm_title": "Merge pull request?",
+      "confirm_body": "This merges #{number} into {base} using {how}.",
+      "confirm_body_plain": "This merges #{number} using {how}.",
+      "word_merge": "merge",
+      "word_squash": "squash",
+      "word_rebase": "rebase"
     },
     "activity": {
       "resolved": "Resolved",
@@ -226,7 +245,21 @@
       "empty_title": "No activity yet",
       "empty_body": "Comments and reviews will appear here. Start the conversation below."
     },
-    "details": "Details"
+    "details": "Details",
+    "copy_link": "Copy link",
+    "link_copied": "Link copied",
+    "toast": {
+      "merged": "Pull request merged",
+      "approved": "Pull request approved",
+      "changes": "Changes requested",
+      "reviewed": "Review submitted"
+    },
+    "checkout": {
+      "title": "Checkout",
+      "label": "Check it out locally",
+      "copy": "Copy checkout command",
+      "copied": "Checkout command copied"
+    }
   },
   "gh": {
     "no_cli": "GitHub's CLI isn't on this Mac: install gh, then sign in with `gh auth login`.",

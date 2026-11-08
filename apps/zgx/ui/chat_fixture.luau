@@ -1482,15 +1482,36 @@ ui.command {
 		shared.attach_comment({ file = "src/old.rs", line = 4, side = "L", body = "Why did this go?", plugin = "git", key = "k2", session = "s2" })
 	end,
 }
+-- Asked again under k1 (its card's Edit), then k2 taken off by the plugin.
+ui.command {
+	id = "plugin_comment_edited",
+	title = "The plugin asks k1 again with new words",
+	run = function()
+		local shared = require("@app/screens/chat/shared")
+		shared.attach_comment({ file = "src/graph.rs", line = 10, to = 12, side = "R", body = "Keep the old name, it's public.", plugin = "git", key = "k1", session = "s2" })
+	end,
+}
+ui.command {
+	id = "plugin_comment_withdrawn",
+	title = "The plugin takes k2 off",
+	run = function()
+		require("@app/screens/chat/shared").remove_plugin_comment("git", "k2")
+	end,
+}
 local plugin_comments = ui.state("test_plugin_comments", "")
+local plugin_notes = ui.state("test_plugin_notes", "")
 ui.effect(function()
 	local shared = require("@app/screens/chat/shared")
 	local keys: { string } = {}
+	local notes: { string } = {}
 	for key, c in shared.plugin_comments().git or {} do
 		table.insert(keys, `{key}@{c.session}`)
+		table.insert(notes, `{key}={c.body}`)
 	end
 	table.sort(keys)
+	table.sort(notes)
 	plugin_comments:set(table.concat(keys, ","))
+	plugin_notes:set(table.concat(notes, ","))
 end)
 ui.command {
 	id = "comment_moves",

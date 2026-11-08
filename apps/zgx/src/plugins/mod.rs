@@ -2305,6 +2305,19 @@ impl Bridge {
                 }
             }
         });
+        host.action(format!("plugin.{id}.uncompose_comment"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |key| {
+                if let Some(b) = me.upgrade()
+                    && b.item(&plugin).is_some_and(|i| i.may("compose"))
+                {
+                    let key = text(&key);
+                    if !key.is_empty() {
+                        b.request("uncompose_comment", &plugin, Value::from(key.as_str()));
+                    }
+                }
+            }
+        });
         host.action(format!("plugin.{id}.open_url"), {
             let (me, plugin) = (me.clone(), plugin.clone());
             move |url| {

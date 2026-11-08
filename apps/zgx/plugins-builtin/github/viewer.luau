@@ -43,6 +43,7 @@ local people = require("@ds/people")
 local progress = require("@ds/progress")
 local EmptyState = require("@ds/empty_state")
 local Icon = require("@ds/icon")
+local Dialog = require("@ds/dialog").Dialog
 
 export type Detail = {
 	title: string,
@@ -872,6 +873,8 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 		-- pane's), the folders folded, the filter, where its lists stand, the
 		-- line a comment is being written on, its words, and what failed.
 		local diffs = ui.use_state(nil :: { [string]: any }?)
+		-- The diff as GitHub gave it, for Copy diff.
+		local patch = ""
 		local diff_failed = ui.use_state(nil :: string?)
 		local asked_diff = false
 		local chosen = ui.use_state("")
@@ -893,6 +896,10 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 		local acting = ui.use_state(nil :: string?)
 		local act_failed = ui.use_state(nil :: { what: string, why: string }?)
 		local after_note = ui.use_state(nil :: string?)
+		-- Merging, asked first (gpui's merge dialog); the link, just copied.
+		local merge_asked = ui.use_state(false)
+		local link_copied = ui.use_state(false)
+		local copied_at = 0
 		-- What you sent and GitHub hasn't been read back with yet: each comment
 		-- on a line, reply and comment on the pull request stands at once, and
 		-- goes as the pull request read again has it (or as GitHub says no).
@@ -987,6 +994,9 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 					done(value)
 				end
 				acting:set(nil)
+				if what == "merge" then
+					zeron.toast(T.s("viewer.toast.merged"))
+				end
 				load(true)
 			end, function(why: any)
 				acting:set(nil)
@@ -1021,7 +1031,8 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 			asked_diff = true
 			diff_failed:set(nil)
 			gh.diff(url, { head = d.headRefOid, base = d.baseRefOid }):after(function(text: any)
-				diffs:set(by_file(if type(text) == "string" then text else ""))
+				patch = if type(text) == "string" then text else ""
+				diffs:set(by_file(patch))
 			end, function(err: any)
 				asked_diff = false
 				diff_failed:set(reason(err))
@@ -1257,6 +1268,29 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 
 		-- The way to a file on GitHub, a quiet icon at the end of a diff card's
 		-- head (the window's width).
+		-- A file's menu (a secondary click): its path, or the whole diff,
+		-- copied (pull_request_code.rs's Copy path and Copy diff).
+		local function file_menu(f: Changes.File): { any }?
+			return {
+				{
+					label = T.s("viewer.code.copy_path"),
+					icon = "copy",
+					on_select = function()
+						ui.clipboard.write(f.path)
+						zeron.toast(T.s("viewer.code.copied_path"))
+					end,
+				},
+				{
+					label = T.s("viewer.code.copy_diff"),
+					icon = "copy",
+					disabled = patch == "",
+					on_select = function()
+						ui.clipboard.write(patch)
+						zeron.toast(T.s("viewer.code.copied_diff"))
+					end,
+				},
+			}
+		end
 		local function file_link(path: string): Node
 			return IconButton {
 				icon = "arrow-up-right",
@@ -1336,6 +1370,7 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 						on_frame = function(el)
 							list_frame = el
 						end,
+						menu = file_menu,
 						row_class = "github-file",
 					},
 				}
@@ -1418,6 +1453,7 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 								pane_offset:set(0)
 							end,
 							offset = list_offset,
+							menu = file_menu,
 							row_class = "github-file",
 						},
 					},
@@ -1690,16 +1726,45 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 					end,
 					w_full = narrow,
 					on_click = function()
-						local deleting = delete_after:peek() and not d.isCrossRepository
-						act("merge", gh.merge(d.url or url, d, method:peek(), deleting), function(result: any)
-							if deleting and type(result) == "table" and result.deleted == false then
-								after_note:set(T.s("viewer.merge.branch_kept", { branch = d.headRefName, why = result.why or T.s("gh.said_no") }))
-							end
-						end)
+						merge_asked:set(true)
 					end,
 					Icon { name = "git-merge", size = 16 },
 				}
 				else nil
+			local function merge_now()
+				local deleting = delete_after:peek() and not d.isCrossRepository
+				act("merge", gh.merge(d.url or url, d, method:peek(), deleting), function(result: any)
+					if deleting and type(result) == "table" and result.deleted == false then
+						after_note:set(T.s("viewer.merge.branch_kept", { branch = d.headRefName, why = result.why or T.s("gh.said_no") }))
+					end
+				end)
+			end
+			-- (proto's merge_confirm: the method's own label and word.)
+			local function method_words(): (string, string)
+				local m = method:peek()
+				if m == "squash" then
+					return T.s("viewer.merge.squash"), T.s("viewer.merge.word_squash")
+				elseif m == "rebase" then
+					return T.s("viewer.merge.rebase"), T.s("viewer.merge.word_rebase")
+				end
+				return T.s("viewer.merge.merge_pr"), T.s("viewer.merge.word_merge")
+			end
+			if merge then
+				table.insert(parts, Dialog {
+					open = merge_asked,
+					title = T.s("viewer.merge.confirm_title"),
+					body = function(): string
+						local _, word = method_words()
+						return T.s(if base ~= "" then "viewer.merge.confirm_body" else "viewer.merge.confirm_body_plain", { number = d.number, base = base, how = word })
+					end,
+					confirm = {
+						label = function(): string
+							return (method_words())
+						end,
+						on_click = merge_now,
+					},
+				})
+			end
 			-- The button (the gallery's: alone at the end of the line, full
 			-- width at a pane's), what's on its way beside it.
 			if merge then
@@ -1718,6 +1783,33 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 		-- Summary: where it stands, and the way to say so. A failure is said
 		-- once, by the checks block, which then comes first: it is what a
 		-- reviewer needs before the description.
+		-- Checkout: the command that brings it to a checkout, and Copy
+		-- (pull_request_handoff.rs, proto's checkout_command).
+		local function checkout_section(d: Detail): Node?
+			local repository = string.match(d.url or url, "^https?://[^/]+/([^/]+/[^/#?]+)")
+			if not repository or not d.number then
+				return nil
+			end
+			local command = `gh pr checkout {d.number} --repo {repository}`
+			return Settings.Section {
+				title = T.s("viewer.checkout.title"),
+				Settings.Group {
+					Settings.Row {
+						label = T.s("viewer.checkout.label"),
+						description = command,
+						control = Button {
+							T.s("viewer.checkout.copy"),
+							tone = "ghost",
+							size = "sm",
+							on_click = function()
+								ui.clipboard.write(command)
+								zeron.toast(T.s("viewer.checkout.copied"))
+							end,
+						},
+					},
+				},
+			}
+		end
 		local function summary(d: Detail, narrow: boolean): Node
 			local list = checks_of(zeron, d)
 			local any_failed = false
@@ -1773,6 +1865,7 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 								acting:set(event)
 								gh.review(d.id or "", event, body):after(function()
 									acting:set(nil)
+									zeron.toast(T.s(if event == "APPROVE" then "viewer.toast.approved" elseif event == "REQUEST_CHANGES" then "viewer.toast.changes" else "viewer.toast.reviewed"))
 									load(true)
 								end, function(why: any)
 									acting:set(nil)
@@ -1787,6 +1880,7 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 					return Settings.Section(review :: any)
 				end)(),
 				merge_section(d, narrow),
+				checkout_section(d),
 			}
 		end
 
@@ -1974,6 +2068,27 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 					tone = "quiet",
 					on_click = refresh,
 				},
+				ui.presence(function(): string
+					return if link_copied:get() then "copied" else "copy"
+				end, function(k: string): Node
+					return IconButton {
+						icon = if k == "copied" then "check" else "copy",
+						label = T.s(if k == "copied" then "viewer.link_copied" else "viewer.copy_link"),
+						size = "sm",
+						tone = "quiet",
+						on_click = function()
+							ui.clipboard.write(d.url or url)
+							link_copied:set(true)
+							copied_at += 1
+							local mine = copied_at
+							ui.after(1500, function()
+								if mine == copied_at then
+									link_copied:set(false)
+								end
+							end)
+						end,
+					}
+				end),
 				IconButton {
 					icon = "arrow-up-right",
 					label = T.s("viewer.open_github"),

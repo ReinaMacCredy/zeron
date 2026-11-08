@@ -48,8 +48,8 @@ local ChatShared = require("@app/screens/chat/shared")
 local Cargo = require("@ds/composer_cargo")
 
 -- Each plugin's review comments still on a draft (`zeron.compose_comment`),
--- told back to it: its key → the session it's in and whether its chip is
--- under the pointer (`plugin.<id>.composed`), so the diff it was left on
+-- told back to it: its key → the session it's in, its note and whether its
+-- chip is under the pointer (`plugin.<id>.composed`), so the diff it was left on
 -- keeps a mark on its lines and lights them as the chip is pointed at.
 -- (Only plugins that have had one are told, and told again when they
 -- have none left.)
@@ -63,7 +63,7 @@ ui.effect(function()
 	for plugin in composed_told do
 		local out: { [string]: any } = {}
 		for key, c in all[plugin] or {} do
-			out[key] = { session = c.session, hovered = c.id == over }
+			out[key] = { session = c.session, hovered = c.id == over, note = c.body }
 		end
 		ui.shared(`plugin.{plugin}.composed`, {} :: any):set(out)
 	end
@@ -208,6 +208,8 @@ local function run(r: any)
 				session = if type(c.session) == "string" then c.session else nil,
 			}
 		end
+	elseif r.kind == "uncompose_comment" and type(r.value) == "string" and type(r.title) == "string" then
+		ChatShared.remove_plugin_comment(r.title, r.value)
 	elseif r.kind == "panel_tab" and type(r.value) == "table" then
 		-- A plugin's tab in a chat's panel (the host checked "panel.tabs").
 		local ok, Panel = pcall(require, "@app/screens/panel")

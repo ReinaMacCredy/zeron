@@ -37,6 +37,7 @@ local banner = require("@ds/banner")
 local skeleton = require("@ds/skeleton")
 local people = require("@ds/people")
 local control = require("@ds/control")
+local ProgressRing = require("@ds/progress").ProgressRing
 
 export type Item = {
 	number: number,
@@ -66,6 +67,8 @@ end
 -- shown and asked again behind it (Zeron's five minutes: GitHub's rate
 -- limits are tight).
 local FRESH_SECONDS = 5 * 60
+-- A page of the list, as pulls.luau asks GitHub for one.
+local PAGE = 30
 
 -- Under this width (a pane's), the page's gutters tighten.
 local NARROW = 640
@@ -208,6 +211,12 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 		local failed = ui.use_state(nil :: string?)
 		local open = ui.use_state(nil :: Item?)
 		local width = ui.use_state(0)
+		-- Asked again behind what shows (the head's ring); the next page's
+		-- ask ("loading", "failed"); when the list shown was GitHub's (os.time).
+		local refreshing = ui.use_state(false)
+		local more_state = ui.use_state("idle")
+		local loaded_at = ui.use_state(nil :: number?)
+		local fresh_tick = ui.use_state(0)
 		-- (Answers to an older ask are let go: the newest wins.)
 		local asked = 0
 
@@ -272,6 +281,12 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 			if not h.more and not h.quiet then
 				state:set("loading")
 			end
+			if h.more then
+				more_state:set("loading")
+			else
+				more_state:set("idle")
+			end
+			refreshing:set(h.quiet == true or (h.refresh == true and not h.more))
 			pulls.list(r, {
 				filter = chosen.filter,
 				after = if h.more then paging:peek().next else nil,
@@ -289,8 +304,13 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 				paging:set({ next = page.nextCursor, total = page.totalCount })
 				failed:set(nil)
 				state:set("ready")
-				-- Kept, and older than five minutes: shown, and asked again.
+				more_state:set("idle")
+				refreshing:set(false)
 				local old = age(page.fetchedAt)
+				if not h.more then
+					loaded_at:set(os.time() - math.max(0, old or 0))
+				end
+				-- Kept, and older than five minutes: shown, and asked again.
 				if not h.more and not h.refresh and old and old > FRESH_SECONDS then
 					load({ refresh = true, quiet = true })
 				end
@@ -298,7 +318,15 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 				if mine ~= asked then
 					return
 				end
+				refreshing:set(false)
+				-- (The next page, or asked again behind the list: the list stays,
+				-- and the button or a toast says so, as gpui's.)
+				if h.more and state:peek() == "ready" then
+					more_state:set("failed")
+					return
+				end
 				if h.quiet and state:peek() == "ready" then
+					zeron.toast(zeron.s("board.kept_results"))
 					return
 				end
 				failed:set(if type(err) == "table" and err.message then tostring(err.message) else tostring(err))
@@ -392,17 +420,66 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 				w_full = true,
 				gap = "$space.3",
 				items = "center",
-				Text { zeron.t("board.title"), style = "title", heading = 1, grow = 1, min_w = 0 },
-				IconButton {
-					icon = "refresh",
-					label = zeron.s("board.refresh"),
-					tone = "quiet",
-					disabled = function(): boolean
-						return repo:get() == nil
+				ui.row {
+					grow = 1,
+					min_w = 0,
+					gap = "$space.2",
+					items = "baseline",
+					Text { zeron.t("board.title"), style = "title", heading = 1, shrink = 0 },
+					-- (How many there are, beside it, once the list is GitHub's.)
+					Text {
+						function(): string
+							local list = items:get()
+							if state:get() ~= "ready" and #list == 0 then
+								return ""
+							end
+							return tostring(math.max(paging:get().total or #list, #list))
+						end,
+						class = "github-board-total",
+						style = "body",
+						tone = "tertiary",
+					},
+				},
+				ui.div {
+					on_hover = function(inside: boolean)
+						if inside then
+							fresh_tick:set(fresh_tick:peek() + 1)
+						end
 					end,
-					on_click = function()
-						load({ refresh = true, quiet = state:peek() == "ready" })
-					end,
+					ui.presence(function(): string
+						fresh_tick:get()
+						if refreshing:get() then
+							return "busy"
+						end
+						local at = loaded_at:get()
+						if not at then
+							return zeron.s("board.refresh_tip")
+						end
+						local mins = math.floor((os.time() - at) / 60)
+						return if mins < 1 then zeron.s("board.loaded_now") else zeron.s("board.loaded_ago", { n = mins })
+					end, function(tip: string): Node
+						if tip == "busy" then
+							return ui.row {
+								w = 32,
+								h = 32,
+								items = "center",
+								justify = "center",
+								ProgressRing { size = 16, tone = "neutral", label = zeron.s("board.refreshing") },
+							}
+						end
+						return IconButton {
+							icon = "refresh",
+							label = zeron.s("board.refresh_tip"),
+							tooltip = tip,
+							tone = "quiet",
+							disabled = function(): boolean
+								return repo:get() == nil
+							end,
+							on_click = function()
+								load({ refresh = true, quiet = state:peek() == "ready" })
+							end,
+						}
+					end),
 				},
 			},
 			ui.row {
@@ -516,13 +593,24 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 				end
 				if #list == 0 then
 					local said = if q ~= "" then { zeron.s("board.empty.nomatch_title", { q = q }), zeron.s("board.empty.nomatch_body") } else empty_words(chosen.filter)
+					-- (gpui's way out of an empty filter or search: everything.)
+					local show_all = if q ~= "" or chosen.filter ~= "all"
+						then {
+							label = zeron.s("board.show_all"),
+							on_click = function()
+								query:set("")
+								filter_value:set("all")
+								set_filter("all")
+							end,
+						}
+						else nil
 					-- (In from the card's sides, as Settings.Catalog's empty states
 					-- are: its words wrap inside the card, never against its edge.)
 					return ui.column {
 						w_full = true,
 						py = "$space.6",
 						px = "$space.4",
-						EmptyState { icon = if q ~= "" then "search" else "pull-request", title = said[1], body = said[2] },
+						EmptyState { icon = if q ~= "" then "search" else "pull-request", title = said[1], body = said[2], action = show_all },
 					}
 				end
 				return ui.column { w_full = true, table.unpack(list) }
@@ -577,6 +665,16 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 						items = "center",
 						Text {
 							function(): string
+								local q = query:get()
+								if q ~= "" then
+									local n = 0
+									for _, item in items:get() do
+										if matches(item, q) then
+											n += 1
+										end
+									end
+									return zeron.s("board.count_matching", { shown = n, total = #items:get() })
+								end
 								local total = paging:get().total
 								return if total then zeron.s("board.count", { shown = #items:get(), total = total }) else ""
 							end,
@@ -589,9 +687,22 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 								return paging:get().next ~= nil
 							end,
 							Button {
-								zeron.t("board.load_more"),
+								function(): string
+									local m = more_state:get()
+									if m == "loading" then
+										return zeron.s("board.loading_more")
+									elseif m == "failed" then
+										return zeron.s("board.try_again")
+									end
+									local total = paging:get().total
+									local left = if total then total - #items:get() else 0
+									return if left > 0 then zeron.s("board.load_n_more", { n = math.min(left, PAGE) }) else zeron.s("board.load_more")
+								end,
 								tone = "ghost",
 								size = "sm",
+								disabled = function(): boolean
+									return more_state:get() == "loading"
+								end,
 								on_click = function()
 									load({ more = true })
 								end,

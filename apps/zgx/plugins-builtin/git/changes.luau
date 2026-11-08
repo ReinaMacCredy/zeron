@@ -35,7 +35,11 @@ local people = require("@ds/people")
 local progress = require("@ds/progress")
 local banner = require("@ds/banner")
 local Inline = require("@ds/inline_block")
+local comment_ds = require("@ds/comment")
 
+
+-- (Across tabs: a comment's key is never another's.)
+local made_comments = 0
 
 return function(zeron: any, Repo: any, words: any)
 	-- A notice of what went wrong, with the way to try again if there is
@@ -373,13 +377,38 @@ return function(zeron: any, Repo: any, words: any)
 		-- (`zeron.compose_comment`: Zeron's review comments block, its file,
 		-- lines, side, the code and the note); the lines keep a mark while
 		-- the chip is there, lit as it's pointed at.
-		local composing = ui.use_state(nil :: { path: string, key: string, lines: { git.Line } }?)
+		local composing = ui.use_state(nil :: { path: string, key: string, lines: { git.Line }, editing: string? }?)
 		local note = ui.use_state("")
 		-- A comment's key: its file and its lines' keys (so the marks find
-		-- their lines again after a reload, with nothing kept but the chip).
+		-- their lines again after a reload, with nothing kept but the chip),
+		-- and a number of its own, so two on the same lines are two chips.
 		local function comment_key(path: string, keys: { string }): string
-			return ui.json.encode({ p = path, k = keys })
+			made_comments += 1
+			return ui.json.encode({ p = path, k = keys, n = `{math.floor(ui.now())}.{made_comments}` })
 		end
+		-- This chat's comments still on its draft, by file and the key of
+		-- the line their card stands under (a range's last).
+		local cards = ui.computed(function(): { [string]: { [string]: { { key: string, keys: { string }, note: string } } } }
+			local out: { [string]: { [string]: { { key: string, keys: { string }, note: string } } } } = {}
+			for key, at in zeron.composed() do
+				local ok, d = pcall(ui.json.decode, key)
+				if ok and type(d) == "table" and type(d.p) == "string" and type(d.k) == "table" and #d.k > 0 and (at.session == nil or at.session == id) then
+					local by = out[d.p] or {}
+					out[d.p] = by
+					local last = d.k[#d.k]
+					by[last] = by[last] or {}
+					table.insert(by[last], { key = key, keys = d.k, note = at.note or "" })
+				end
+			end
+			for _, by in out do
+				for _, list in by do
+					table.sort(list, function(a, b)
+						return a.key < b.key
+					end)
+				end
+			end
+			return out
+		end)
 		-- The marks: by file, each line's ("on", or "lit" while its chip is
 		-- pointed at), from this chat's comments still on its draft.
 		local marked = ui.computed(function(): { [string]: { [string]: string } }
@@ -456,43 +485,132 @@ return function(zeron: any, Repo: any, words: any)
 				side = side,
 				snippet = table.concat(code, "\n"),
 				note = text,
-				key = comment_key(c.path, keys),
+				key = c.editing or comment_key(c.path, keys),
 				session = id,
 			}
 			composing:set(nil)
 			note:set("")
 		end
-		local function after(path: string, key: string): { git.Block }?
-			local c = composing:get()
-			if not c or c.path ~= path or c.key ~= key then
-				return nil
+		-- A card's Edit: its words back in a writer under the same lines,
+		-- sent again under its key (its chip takes them).
+		local function edit_comment(path: string, card: { key: string, keys: { string }, note: string })
+			local f = m.by_path:peek()[path]
+			local want: { [string]: boolean } = {}
+			for _, k in card.keys do
+				want[k] = true
 			end
-			local file, lo, hi, side = cited(path, c.lines)
+			local lines: { git.Line } = {}
+			for _, l in (if f then lines_of(f) else nil) or {} do
+				if want[git.line_key(l)] then
+					table.insert(lines, l)
+				end
+			end
+			if #lines == 0 then
+				return
+			end
+			note:set(card.note)
+			composing:set({ path = path, key = card.keys[#card.keys], lines = lines, editing = card.key })
+		end
+		local function where_of(path: string, lines: { git.Line }): string
+			local file, lo, hi, side = cited(path, lines)
 			local where = if hi > lo then `{file}:{lo}–{hi}` else `{file}:{lo}`
-			return {
-				{
-					kind = "composer",
-					build = function(ctx: git.BlockCtx): Node
-						return ui.div {
-							class = "git-comment-writer",
-							w_full = true,
-							Inline.Composer {
-								inset = ctx.inset,
-								joined = ctx.joined,
-								reveal = ctx.reveal,
-								location = if side == "L" then zeron.s("comment.where_old", { where = where }) else where,
-								value = note,
-								placeholder = zeron.s("comment.placeholder"),
-								submit = zeron.s("comment.add"),
-								on_submit = send_comment,
-								on_cancel = function()
-									composing:set(nil)
-								end,
-							},
-						}
-					end,
+			return if side == "L" then zeron.s("comment.where_old", { where = where }) else where
+		end
+		-- A comment on the chat's draft, under its lines: where it is, its
+		-- note, Edit and Remove under the pointer (changes.rs CommentCard).
+		local CommentCard = ui.component(function(p: { path: string, card: { key: string, keys: { string }, note: string }, ctx: git.BlockCtx }): Node
+			local over = ui.use_state(false)
+			local focus = ui.use_state(false)
+			local f = m.by_path:peek()[p.path]
+			local want: { [string]: boolean } = {}
+			for _, k in p.card.keys do
+				want[k] = true
+			end
+			local lines: { git.Line } = {}
+			for _, l in (if f then lines_of(f) else nil) or {} do
+				if want[git.line_key(l)] then
+					table.insert(lines, l)
+				end
+			end
+			local where = if #lines > 0 then where_of(p.path, lines) else p.path
+			return ui.div {
+				class = "git-comment-card",
+				w_full = true,
+				role = "article",
+				label = `{where}: {p.card.note}`,
+				on_hover = function(inside: boolean)
+					over:set(inside)
+				end,
+				Inline.InlineBlock {
+					inset = p.ctx.inset,
+					joined = p.ctx.joined,
+					ui.row {
+						w_full = true,
+						min_w = 0,
+						gap = "$space.2",
+						items = "center",
+						comment_ds.Location(where),
+						ui.div { grow = 1 },
+						comment_ds.Actions({
+							{ icon = "pen", label = zeron.s("comment.edit"), on_click = function()
+								edit_comment(p.path, p.card)
+							end },
+							{ icon = "close-circle", label = zeron.s("comment.remove"), on_click = function()
+								zeron.uncompose_comment(p.card.key)
+							end },
+						}, function(inside: boolean)
+							focus:set(inside)
+						end, {
+							opacity = ui.tween(ui.computed(function(): number
+								return if over:get() or focus:get() then 1 else 0
+							end), { duration = 120 }),
+						}),
+					},
+					ui.text { p.card.note, literal = true, wrap = true, text_size = "$font.size.md", line_height = 20, color = "$text.secondary" },
 				},
 			}
+		end)
+		local function after(path: string, key: string): { git.Block }?
+			local c = composing:get()
+			local out: { git.Block } = {}
+			local editing = if c and c.path == path then c.editing else nil
+			for _, card in (cards:get()[path] or {})[key] or {} do
+				if card.key ~= editing then
+					table.insert(out, {
+						kind = "card",
+						build = function(ctx: git.BlockCtx): Node
+							return CommentCard { path = path, card = card, ctx = ctx }
+						end,
+					})
+				end
+			end
+			if not c or c.path ~= path or c.key ~= key then
+				return if #out > 0 then out else nil
+			end
+			local where = where_of(path, c.lines)
+			table.insert(out, {
+				kind = "composer",
+				build = function(ctx: git.BlockCtx): Node
+					return ui.div {
+						class = "git-comment-writer",
+						w_full = true,
+						Inline.Composer {
+							inset = ctx.inset,
+							joined = ctx.joined,
+							reveal = ctx.reveal,
+							location = where,
+							value = note,
+							placeholder = zeron.s("comment.placeholder"),
+							submit = zeron.s(if c.editing then "comment.save" else "comment.add"),
+							on_submit = send_comment,
+							on_cancel = function()
+								composing:set(nil)
+							end,
+						},
+					}
+				end,
+			})
+			return out
 		end
 
 		local function panel(narrow: boolean): Node
@@ -645,8 +763,12 @@ return function(zeron: any, Repo: any, words: any)
 
 		local function commit(push: boolean, amend: boolean)
 			local message = m.message:peek()
-			m.act("commit", "commit", { message = message, amend = amend }, function()
+			m.act("commit", "commit", { message = message, amend = amend }, function(value: any)
 				m.message:set("")
+				local sha = if type(value) == "table" and type(value.sha) == "string" then string.sub(value.sha, 1, 7) else ""
+				local s = m.status:peek()
+				local branch = s and s.branch
+				zeron.toast(if branch and branch ~= "" then zeron.s("commit.done_on", { sha = sha, branch = branch }) else zeron.s("commit.done", { sha = sha }))
 				if push then
 					-- (After the commit's own refresh has started: the push next.)
 					ui.after(0, function()
@@ -742,13 +864,14 @@ return function(zeron: any, Repo: any, words: any)
 					end,
 				}
 			else
+				local function cannot_commit(): boolean
+					return conflicts() or staged_count() == 0 or m.message:get() == "" or m.acting:get() ~= nil
+				end
 				local button = SplitButton {
 					commit_label,
 					-- (The foot's scale: the pull request's, push's, 24.)
 					size = "xs",
-					disabled = function(): boolean
-						return conflicts() or staged_count() == 0 or m.message:get() == "" or m.acting:get() ~= nil
-					end,
+					disabled = cannot_commit,
 					items = {
 						{
 							label = zeron.s("commit.and_push"),
@@ -784,6 +907,12 @@ return function(zeron: any, Repo: any, words: any)
 						placeholder = zeron.t("commit.placeholder"),
 						name = zeron.s("commit.message"),
 						subject = { soft = 50, max = 72 },
+						-- (⌘↵ commits, as the button would.)
+						on_submit = function()
+							if not cannot_commit() then
+								commit(false, false)
+							end
+						end,
 						rows = if wide then 2 else 1,
 						max_rows = 6,
 						w_full = true,
@@ -813,19 +942,29 @@ return function(zeron: any, Repo: any, words: any)
 
 		-- -- discarding, asked first ------------------------------------------
 
+		-- (One file git doesn't track yet: deleted, not discarded, as gpui says.)
+		local function untracked_one(): boolean
+			local paths = discard_paths:get()
+			local f = if #paths == 1 then m.by_path:get()[paths[1]] else nil
+			return f ~= nil and f.status == "added" and (f.stage or "none") == "none"
+		end
 		local discard_dialog = Dialog {
 			open = discard_open,
 			tone = "danger",
 			title = function(): string
 				local paths = discard_paths:get()
 				if #paths == 1 then
-					return zeron.s("discard.title_one", { name = string.match(paths[1], "([^/]+)$") or paths[1] })
+					return zeron.s(if untracked_one() then "discard.title_untracked" else "discard.title_one", { name = string.match(paths[1], "([^/]+)$") or paths[1] })
 				end
 				return zeron.s("discard.title_many", { n = #paths })
 			end,
-			body = zeron.t("discard.body"),
+			body = function(): string
+				return zeron.s(if untracked_one() then "discard.body_untracked" else "discard.body")
+			end,
 			confirm = {
-				label = zeron.s("discard.confirm"),
+				label = function(): string
+					return zeron.s(if untracked_one() then "discard.delete" else "discard.confirm")
+				end,
 				on_click = function()
 					local paths = discard_paths:peek()
 					discard_open:set(false)

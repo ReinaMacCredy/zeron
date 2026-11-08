@@ -1213,6 +1213,22 @@ function M.attach_comment(c: {
 	key: string?,
 	session: string?,
 }): string
+	local target = c.session or here:peek()
+	if c.plugin and c.key then
+		-- (A plugin's comment asked again under its key: an edit, its chip kept.)
+		local list = cargo_in(target)
+		for i, item in list do
+			if item.kind == "comment" and item.plugin == c.plugin and item.key == c.key then
+				local next = table.clone(list)
+				local one = table.clone(item)
+				one.body = c.body
+				one.meta = (string.gsub(c.body, "%s+", " "))
+				next[i] = one
+				set_cargo_in(target, next)
+				return item.id
+			end
+		end
+	end
 	local id = chip_id("comment")
 	local file = c.file or c.path or ""
 	local root = c.root
@@ -1237,19 +1253,19 @@ function M.attach_comment(c: {
 		plugin = c.plugin,
 		key = c.key,
 	}
-	push_cargo(c.session or here:peek(), { item })
+	push_cargo(target, { item })
 	return id
 end
 
 -- Every comment a plugin added still carried, in the draft shown and the
--- drafts kept: by plugin, its key → the chip's id and its session.
-function M.plugin_comments(): { [string]: { [string]: { id: string, session: string } } }
-	local out: { [string]: { [string]: { id: string, session: string } } } = {}
+-- drafts kept: by plugin, its key → the chip's id, its session and its note.
+function M.plugin_comments(): { [string]: { [string]: { id: string, session: string, body: string } } }
+	local out: { [string]: { [string]: { id: string, session: string, body: string } } } = {}
 	local function take(cargo: { any }?, session: string)
 		for _, item in cargo or {} do
 			if item.kind == "comment" and type(item.plugin) == "string" and type(item.key) == "string" then
 				out[item.plugin] = out[item.plugin] or {}
-				out[item.plugin][item.key] = { id = item.id, session = session }
+				out[item.plugin][item.key] = { id = item.id, session = session, body = item.body or "" }
 			end
 		end
 	end
@@ -1258,6 +1274,28 @@ function M.plugin_comments(): { [string]: { [string]: { id: string, session: str
 		take(draft.cargo, session)
 	end
 	return out
+end
+
+-- A plugin's comment taken off by the plugin (its card's Remove), wherever
+-- its draft is.
+function M.remove_plugin_comment(plugin: string, key: string)
+	local function take(cargo: { any }?, session: string): boolean
+		for _, item in cargo or {} do
+			if item.kind == "comment" and item.plugin == plugin and item.key == key then
+				M.remove_cargo_of(session, item.id)
+				return true
+			end
+		end
+		return false
+	end
+	if take(M.cargo:peek(), here:peek()) then
+		return
+	end
+	for session, draft in kept:peek() do
+		if take(draft.cargo, session) then
+			return
+		end
+	end
 end
 
 -- A comment carried to another line (the edits above it moved it): its

@@ -86,13 +86,18 @@
     "amend": "修改上一次提交",
     "you": "你",
     "placeholder": "改了什么，为什么",
-    "message": "提交信息"
+    "message": "提交信息",
+    "done_on": "已将 {sha} 提交到 {branch}",
+    "done": "已提交 {sha}"
   },
   "discard": {
     "title_one": "放弃对 {name} 的更改？",
     "title_many": "放弃对 {n} 个文件的更改？",
     "body": "它们会恢复到上一次提交的样子，新文件会被删除。此操作无法撤销。",
-    "confirm": "放弃"
+    "confirm": "放弃",
+    "title_untracked": "删除 {name}？",
+    "body_untracked": "它未被跟踪，因此无法撤销。",
+    "delete": "删除"
   },
   "branches": {
     "label": "分支",
@@ -107,7 +112,9 @@
     "on_remote": "在 {remote} 上，本地还没有",
     "ahead_behind": "领先 {ahead}，落后 {behind}",
     "no_match": "没有匹配“{query}”的分支",
-    "current": "当前"
+    "current": "当前",
+    "created": "已创建 {name} 并检出。",
+    "checked_out": "已检出 {name}。"
   },
   "history": {
     "head": "{branch} 上的 {n} 个提交",
@@ -307,6 +314,9 @@
   "comment": {
     "placeholder": "说说这里要怎么改…",
     "add": "添加到对话",
-    "where_old": "{where}（旧）"
+    "where_old": "{where}（旧）",
+    "edit": "编辑评论",
+    "remove": "移除评论",
+    "save": "保存"
   }
 }

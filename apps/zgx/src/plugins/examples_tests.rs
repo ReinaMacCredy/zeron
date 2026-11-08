@@ -1049,7 +1049,8 @@ fn viewer_with(github: serde_json::Value) -> (TestApp, Heard) {
     let github = world(github);
     let calls: Heard = Heard::default();
     let asked = calls.clone();
-    let app = TestApp::new(move |runtime| {
+    // (With a clipboard: Copy link, Copy checkout command.)
+    let app = TestApp::with_desktop(move |runtime| {
         // (Zeron's design system lent as the app lends it, from ui/.)
         let host = super::lend_design_system(ScriptHost::new(runtime, &entry), &entry);
         host.shared("zgx.window.size", zgx_script::window_size_value(600., 1200.));
@@ -1082,12 +1083,12 @@ fn viewer_with(github: serde_json::Value) -> (TestApp, Heard) {
         expose_own(&host, "github");
         // (Its own words, as the bridge publishes them.)
         super::locales::publish(&host, "github", &super::builtin_dir().join("github"));
-        for name in ["result", "ack", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "store_set", "cost"] {
+        for name in ["result", "ack", "menus", "problem", "open_tab", "add_page", "github_watch", "store_set", "cost"] {
             host.action(format!("plugin.github.{name}"), |_| {});
         }
-        {
+        for name in ["open_url", "toast"] {
             let calls = calls.clone();
-            host.action("plugin.github.open_url", move |v: zgx_script::Value| calls.borrow_mut().push(("open_url".into(), v.to_json())));
+            host.action(format!("plugin.github.{name}"), move |v: zgx_script::Value| calls.borrow_mut().push((name.into(), v.to_json())));
         }
         fake_github(&host, "github", github.clone(), calls.clone());
         host.set_plugins(item.plugin().into_iter().collect());
@@ -1220,6 +1221,15 @@ fn github_s_viewer_shows_each_file_s_diff_in_code() {
     app.frames(10);
     let tree = app.tree();
     assert!(!tree.contains("\"+new a\"") && tree.contains("\"+one b\""), "{tree}");
+    // A file's menu: its path, or the whole diff, copied.
+    for (item, copied) in [("Copy path", "ui/b.luau"), ("Copy diff", diff)] {
+        let row = app.bounds("#github-pr-code >> role:button \"ui/b.luau\"");
+        zgx_script::driver::right_click_at(&mut app.ui, (row.x + row.width / 2., row.y + row.height / 2.));
+        app.frames(10);
+        app.click(&format!("role:menuitem \"{item}\""));
+        app.frames(10);
+        assert_eq!(app.desktop.as_ref().unwrap().clipboard(), copied, "{item}");
+    }
 }
 
 #[test]
@@ -1397,14 +1407,37 @@ fn github_s_viewer_merges_closes_and_reviews_a_pull_request() {
     for text in ["\"Ready to merge\"", "\"Approved by theo, every check passed, no conflicts with", "\"How it goes in\"", "\"The 3 commits become one on main", "\"Merge commit\"", "\"Rebase and merge\"", "\"Delete the branch after\"", "\"zeron/primitives goes from GitHub."] {
         assert!(tree.contains(text), "{text}: {tree}");
     }
-    // A verdict: someone else's, still open.
+    let toasts = |asked: &Heard| -> Vec<String> { asked.borrow().iter().filter(|(k, _)| k == "toast").map(|(_, v)| v.clone()).collect() };
+    // A verdict: someone else's, still open; said done as a toast.
     app.click("#github-pr-review >> role:button \"Approve\"");
     app.frames(10);
     assert!(runs(&asked).iter().any(|r| ran(r, &["addPullRequestReview", "\"event\":\"APPROVE\"", "PR_1"])), "{:?}", runs(&asked));
-    // Merged, squashed, against the head it was read at; then its branch
-    // deleted on GitHub; then the pull request read again.
+    assert!(toasts(&asked).iter().any(|t| t.contains("Pull request approved")), "{:?}", toasts(&asked));
+    // The link, and the command that checks it out, copied.
+    app.click("role:button \"Copy link\"");
+    app.frames(5);
+    assert_eq!(app.desktop.as_ref().unwrap().clipboard(), "https://github.com/zeronsh/zgx/pull/1264");
+    assert!(app.find("role:button \"Link copied\"").is_some(), "{}", app.tree());
+    assert!(app.tree().contains("gh pr checkout 1264 --repo zeronsh/zgx"), "{}", app.tree());
+    app.click("role:button \"Copy checkout command\"");
+    app.frames(5);
+    assert_eq!(app.desktop.as_ref().unwrap().clipboard(), "gh pr checkout 1264 --repo zeronsh/zgx");
+    // Merging asks first: Escape leaves it; the dialog's own button merges.
+    let merging = |asked: &Heard| runs(asked).iter().any(|r| ran(r, &["mergePullRequest"]));
     app.click("#github-pr-merge >> role:button \"Squash and merge\"");
     app.frames(10);
+    assert!(app.tree().contains("\"Merge pull request?\"") && app.tree().contains("This merges #1264 into main using squash."), "{}", app.tree());
+    assert!(!merging(&asked), "nothing merged before it's confirmed");
+    app.keys("Escape");
+    assert!(app.wait_until(|app| !app.shown("role:dialog \"Merge pull request?\"")), "{}", app.tree());
+    assert!(!merging(&asked));
+    app.click("#github-pr-merge >> role:button \"Squash and merge\"");
+    app.frames(20);
+    app.click("role:dialog >> role:button \"Squash and merge\"");
+    app.frames(10);
+    assert!(toasts(&asked).iter().any(|t| t.contains("Pull request merged")), "{:?}", toasts(&asked));
+    // Merged, squashed, against the head it was read at; then its branch
+    // deleted on GitHub; then the pull request read again.
     let all = runs(&asked);
     let merged = all.iter().position(|r| ran(r, &["mergePullRequest", "\"how\":\"SQUASH\"", &head])).unwrap_or_else(|| panic!("{all:?}"));
     assert!(all[merged..].iter().any(|r| ran(r, &["DELETE", "repos/zeronsh/zgx/git/refs/heads/zeron/primitives"])), "{all:?}");
@@ -1728,6 +1761,12 @@ fn github_s_viewer_edits_and_deletes_your_own_comments() {
 /// (ui/github_board_fixture.luau), GitHub, the records and storage played
 /// here.
 fn board() -> (TestApp, Heard) {
+    let (app, asked, _) = board_in();
+    (app, asked)
+}
+
+/// `board`, and GitHub's world, to change as the test goes.
+fn board_in() -> (TestApp, Heard, World) {
     let entry = crate::ui_dir().join("github_board_fixture.luau");
     let item = builtin("github");
     let calls: Heard = Heard::default();
@@ -1750,6 +1789,7 @@ fn board() -> (TestApp, Heard) {
             "reviewing": page(vec![row(9, "Review me", false)], None, 1),
         },
     }));
+    let played = github.clone();
     let app = TestApp::new(move |runtime| {
         let host = super::lend_design_system(ScriptHost::new(runtime, &entry), &entry);
         offline(&host);
@@ -1766,12 +1806,12 @@ fn board() -> (TestApp, Heard) {
             "p4": { "name": "Cedar", "path": "/srv/cedar", "repository": "commit:cedar", "created": 100, "here": false },
             "p5": { "name": "cedar-clone", "path": "/work/cedar", "repository": "commit:cedar", "created": 200, "here": true },
         } })));
-        for name in ["result", "ack", "menus", "toast", "add_page", "github_watch", "open_url", "cost"] {
+        for name in ["result", "ack", "menus", "add_page", "github_watch", "open_url", "cost"] {
             host.action(format!("plugin.github.{name}"), |_| {});
         }
-        {
+        for name in ["open_tab", "toast"] {
             let calls = calls.clone();
-            host.action("plugin.github.open_tab", move |v: zgx_script::Value| calls.borrow_mut().push(("open_tab".into(), v.to_json())));
+            host.action(format!("plugin.github.{name}"), move |v: zgx_script::Value| calls.borrow_mut().push((name.into(), v.to_json())));
         }
         {
             let calls = calls.clone();
@@ -1794,7 +1834,7 @@ fn board() -> (TestApp, Heard) {
     });
     app.ui.scene.borrow_mut().resize(1100., 900.);
     app.frames(10);
-    (app, asked)
+    (app, asked, played)
 }
 
 #[test]
@@ -1818,7 +1858,7 @@ fn github_s_board_lists_a_repository_once_however_many_clones_it_has() {
 
 #[test]
 fn github_s_board_lists_a_project_s_pull_requests_by_filter_and_opens_one() {
-    let (mut app, asked) = board();
+    let (mut app, asked, world) = board_in();
     assert_eq!(app.error(), None);
     assert!(!asked.borrow().iter().any(|(k, _)| k == "problem"), "{:?}", asked.borrow());
     let tree = app.tree();
@@ -1836,20 +1876,40 @@ fn github_s_board_lists_a_project_s_pull_requests_by_filter_and_opens_one() {
     for text in ["zeronsh/zgx", "Pull request 1, open", "Pull request 2, draft", "First fix", "Second draft", "ada · Approved · CI passed", "ada · Draft · CI passed", "2 of 3"] {
         assert!(tree.contains(&format!("\"{text}\"")), "{text}: {tree}");
     }
+    // How many beside the title (gpui's page header), the freshness on
+    // Refresh's tooltip.
+    assert!(app.find(".github-board-total").is_some_and(|_| tree.contains("\"3\"")), "{tree}");
+    let refresh = "role:button \"Refresh pull requests\"";
+    app.hover(refresh);
+    assert!(app.wait_until(|app| app.tree().contains("Loaded just now · Refresh pull requests")), "{}", app.tree());
     // Kept for the next run.
     assert!(asked.borrow().iter().any(|(k, v)| k == "store_set" && v.contains("\"p1\"")), "{:?}", asked.borrow());
-    // The next page, after the first.
-    app.click("role:button \"Load more\"");
+    // The next page, after the first: what's left of it on its button;
+    // refused, the list stays and the button says Try again.
+    world.borrow_mut()["fail"] = json!("gh: HTTP 502");
+    app.click("role:button \"Load 1 more\"");
     app.frames(10);
     let tree = app.tree();
-    assert!(tree.contains("\"Third\"") && tree.contains("\"3 of 3\"") && !tree.contains("\"Load more\""), "{tree}");
-    // Searched as you type.
+    assert!(tree.contains("\"First fix\"") && tree.contains("\"Try again\"") && !tree.contains("\"Third\""), "{tree}");
+    world.borrow_mut()["fail"] = serde_json::Value::Null;
+    app.click("role:button \"Try again\"");
+    app.frames(10);
+    let tree = app.tree();
+    assert!(tree.contains("\"Third\"") && tree.contains("\"3 of 3\"") && !tree.contains("\"Load 1 more\""), "{tree}");
+    // Searched as you type, the count of what matches under it.
     app.type_text("role:textbox \"Search pull requests\"", "draft");
     app.frames(10);
     let tree = app.tree();
-    assert!(tree.contains("\"Second draft\"") && !tree.contains("\"First fix\""), "{tree}");
-    app.fill("role:textbox \"Search pull requests\"", "");
-    app.frames(5);
+    assert!(tree.contains("\"Second draft\"") && !tree.contains("\"First fix\"") && tree.contains("\"1 of 3 pull requests\""), "{tree}");
+    // Nothing matching: everything, from the empty state.
+    app.fill("role:textbox \"Search pull requests\"", "nothing like it");
+    app.frames(10);
+    app.click("role:button \"Show all pull requests\"");
+    app.frames(10);
+    assert!(app.tree().contains("\"First fix\""), "{}", app.tree());
+    assert!(runs(&asked).iter().any(|r| ran(r, &["search(", "repo:zeronsh/zgx"]) && !ran(r, &["author:@me"]) && !ran(r, &["review-requested"])), "{:?}", runs(&asked));
+    app.click("#github-board-filters >> role:tab \"Authored\"");
+    app.frames(10);
     // Reviewing: what waits for your review.
     app.click("#github-board-filters >> role:tab \"Reviewing\"");
     app.frames(10);
@@ -2758,7 +2818,7 @@ fn git_in(fixture: &str, records: serde_json::Value, service: serde_json::Value,
             let id = item.id().to_string();
             expose_own(&host, &id);
             super::locales::publish(&host, &id, Path::new(item.json["snapshot"].as_str().unwrap()));
-            for name in ["result", "ack", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "store_set", "cost", "open_url", "notify", "compose_comment"] {
+            for name in ["result", "ack", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "store_set", "cost", "open_url", "notify", "compose_comment", "uncompose_comment"] {
                 let (calls, key) = (calls.clone(), format!("plugin.{id}.{name}"));
                 host.action(key.clone(), move |v: zgx_script::Value| calls.borrow_mut().push((key.clone(), v.to_json())));
             }
@@ -2969,6 +3029,17 @@ fn git_asks_again_only_as_its_device_says_and_while_it_shows() {
 fn git_stages_and_discards_after_asking() {
     let (mut app, heard, world) = git_tab(git_world(), None);
     assert!(app.wait_until(|app| app.find("role:checkbox \"src/graph.rs\"").is_some()), "{}", app.tree());
+    // A file git doesn't track yet: deleted, and the question says so.
+    app.hover("role:button \"docs/history.md\"");
+    app.frames(5);
+    app.click("role:button \"docs/history.md\" >> role:button \"Discard changes\"");
+    assert!(app.wait_until(|app| app.find("role:dialog \"Delete history.md?\"").is_some()), "{}", app.tree());
+    app.frames(40);
+    assert!(app.tree().contains("It is untracked, so this can't be undone."), "{}", app.tree());
+    assert!(app.find("role:dialog \"Delete history.md?\" >> role:button \"Delete\"").is_some(), "{}", app.tree());
+    app.keys("Escape");
+    assert!(app.wait_until(|app| !app.shown("role:dialog \"Delete history.md?\"")), "{}", app.tree());
+    assert!(asked_service(&heard, "discard").is_empty());
     // A box: staged at once, asked of the service (and so read back).
     world.borrow_mut()["changes"]["working"]["files"][2]["stage"] = json!("all");
     app.click("role:checkbox \"docs/history.md\"");
@@ -2992,14 +3063,34 @@ fn git_stages_and_discards_after_asking() {
 
 #[test]
 fn git_commits_and_pushes_and_a_refused_push_pulls_first() {
-    let (mut app, heard, world) = git_tab(git_world(), None);
+    let mut w = git_world();
+    w["commit"] = json!({ "sha": "abcdef1234567890abcdef1234567890abcdef12" });
+    let (mut app, heard, world) = git_tab(w, None);
     assert!(app.wait_until(|app| app.find("role:checkbox \"src/graph.rs\"").is_some()), "{}", app.tree());
-    // A commit, with its message; then its push.
+    let toasts = |heard: &Heard| -> Vec<String> { heard.borrow().iter().filter(|(k, _)| k == "plugin.git.toast").map(|(_, v)| v.clone()).collect() };
+    // A commit, with its message; said done as a toast; then its push.
     app.type_text("role:textbox \"Commit message\"", "Draw the lanes");
     app.frames(5);
     app.click("#git-commit >> role:button \"Commit 2 files\"");
     assert!(app.wait_until(|_| !asked_service(&heard, "commit").is_empty()), "{}", app.tree());
     assert_eq!(asked_service(&heard, "commit")[0]["args"]["message"], "Draw the lanes");
+    assert!(app.wait_until(|_| toasts(&heard).iter().any(|t| t.contains("Committed abcdef1 to feature/graph"))), "{:?}", toasts(&heard));
+    // ⌘↵ in the message commits as the button does.
+    app.frames(10);
+    app.type_text("role:textbox \"Commit message\"", "Name the rows");
+    app.frames(5);
+    app.keys("cmd+Enter");
+    assert!(app.wait_until(|_| asked_service(&heard, "commit").len() == 2), "{}", app.tree());
+    assert_eq!(asked_service(&heard, "commit")[1]["args"]["message"], "Name the rows");
+    app.frames(10);
+    // Another branch, from the branch menu: checked out, said so.
+    app.click("#git-branch >> role:button");
+    assert!(app.wait_until(|app| app.find("role:option \"main ↓1\"").is_some()), "{}", app.tree());
+    app.frames(20);
+    app.click("role:option \"main ↓1\"");
+    assert!(app.wait_until(|_| !asked_service(&heard, "switch").is_empty()), "{}", app.tree());
+    assert_eq!(asked_service(&heard, "switch")[0]["args"]["branch"], "main");
+    assert!(app.wait_until(|_| toasts(&heard).iter().any(|t| t.contains("Checked out main."))), "{:?}", toasts(&heard));
     // A push the remote refuses: why, and Pull, then push.
     world.borrow_mut()["fail"]["push"] = json!("failed: rejected: ! [rejected] feature/graph (fetch first)");
     app.click("role:button \"Push 2\"");
@@ -3299,14 +3390,62 @@ fn git_s_diff_comments_go_to_the_chat_s_draft_and_mark_their_lines() {
     app.frames(5);
     assert!(app.opacity(&bar("+fn lines() {}")) > 0.99, "its chip pointed at: lit");
     assert!(app.opacity(&bar(" fn lanes() {}")) < 0.9, "the other stays quiet");
-    app.host.set_state("git_fixture.composed", json_value(&json!({ k2: { "session": "s1", "hovered": false } }))).unwrap();
+    app.host.set_state("git_fixture.composed", json_value(&json!({ k2.clone(): { "session": "s1", "hovered": false } }))).unwrap();
     app.frames(5);
     assert!(app.opacity(&mark("+fn lines() {}")) < 0.01, "its chip taken off: no mark");
     assert!(app.opacity(&mark(" fn lanes() {}")) > 0.99);
     // Another chat's comment marks nothing here.
-    app.host.set_state("git_fixture.composed", json_value(&json!({ k1: { "session": "s2", "hovered": false } }))).unwrap();
+    app.host.set_state("git_fixture.composed", json_value(&json!({ k1.clone(): { "session": "s2", "hovered": false } }))).unwrap();
     app.frames(5);
     assert!(app.opacity(&mark("+fn lines() {}")) < 0.01);
+    assert!(app.find(".git-comment-card").is_none(), "nor stands as a card: {}", app.tree());
+
+    // Each on this chat's draft is a card under its last line: where it
+    // is, its note, Edit and Remove under the pointer (changes.rs).
+    app.host.set_state("git_fixture.composed", json_value(&json!({
+        k1.clone(): { "session": "s1", "hovered": false, "note": "Name it for what it draws." },
+        k2.clone(): { "session": "s1", "hovered": false, "note": "Keep the old name." },
+    }))).unwrap();
+    app.frames(10);
+    let one_card = "role:article \"src/graph.rs:3: Name it for what it draws.\"";
+    let range_card = "role:article \"src/graph.rs:1–2: Keep the old name.\"";
+    assert!(app.find(one_card).is_some() && app.find(range_card).is_some(), "{}", app.tree());
+    let (two, three) = (app.bounds("\"+fn rows(n: usize) {}\""), app.bounds("\"+fn lines() {}\""));
+    let (a, b) = (app.bounds(range_card), app.bounds(one_card));
+    assert!(a.y >= two.y + two.height - 0.5 && a.y + a.height <= three.y + 0.5, "the range's under its last line: {two:?} {a:?} {three:?}");
+    assert!(b.y >= three.y + three.height - 0.5, "the line's under it: {three:?} {b:?}");
+    let actions = format!("{one_card} >> .comment-actions");
+    app.hover("#git-head");
+    app.frames(20);
+    assert!(app.opacity(&actions) < 0.01, "quiet until pointed at");
+    app.hover(one_card);
+    app.frames(20);
+    assert!(app.opacity(&actions) > 0.99, "pointed at: its Edit and Remove");
+    // Remove: the plugin asks the draft to let it go.
+    app.click(&format!("{one_card} >> role:button \"Remove comment\""));
+    app.frames(5);
+    let off: Vec<String> = heard.borrow().iter().filter(|(k, _)| k == "plugin.git.uncompose_comment").map(|(_, v)| v.clone()).collect();
+    assert_eq!(off, vec![serde_json::to_string(&k1).unwrap()]);
+    // Edit: its words back in a writer under the same lines, the card
+    // making way; saved, asked again under its own key.
+    app.hover(range_card);
+    app.frames(20);
+    app.click(&format!("{range_card} >> role:button \"Edit comment\""));
+    assert!(app.wait_until(|app| app.find(".git-comment-writer").is_some()), "{}", app.tree());
+    assert!(app.find(range_card).is_none(), "{}", app.tree());
+    let (two, writer) = (app.bounds("\"+fn rows(n: usize) {}\""), app.bounds(".git-comment-writer"));
+    assert!(writer.y >= two.y + two.height - 0.5, "under its last line: {two:?} {writer:?}");
+    app.fill(".git-comment-writer >> role:textbox \"Comment\"", "Keep the old name, it's public.");
+    app.click(".git-comment-writer >> role:button \"Save\"");
+    app.frames(5);
+    let asked = composed_comments(&heard);
+    assert_eq!(asked.len(), 3, "{asked:?}");
+    assert_eq!(
+        (asked[2]["key"].as_str(), asked[2]["note"].as_str(), asked[2]["line"].as_i64(), asked[2]["to"].as_i64(), asked[2]["side"].as_str()),
+        (Some(k2.as_str()), Some("Keep the old name, it's public."), Some(1), Some(2), Some("R")),
+        "{}", asked[2]
+    );
+    assert!(app.find(".git-comment-writer").is_none(), "{}", app.tree());
     assert_eq!(app.error(), None);
 }
 

@@ -44,6 +44,20 @@ test("a plugin's comments on a diff are listed, told back while carried, and sen
 	expect(app:has('~"graph.rs:10–12"')).to_be(true)
 	expect(app:has('~"old.rs:4"')).to_be(true)
 	expect(app:state("test_plugin_comments")).to_be("k1@s2,k2@s2")
+	expect(app:state("test_plugin_notes")).to_be("k1=Keep the old name.,k2=Why did this go?")
+	-- Asked again under its key (the card's Edit): the same chip, new words.
+	app:command("plugin_comment_edited")
+	app:frames(30)
+	expect(app:state("test_plugin_comments")).to_be("k1@s2,k2@s2")
+	expect(app:state("test_plugin_notes")).to_be("k1=Keep the old name, it's public.,k2=Why did this go?")
+	expect(app:has('#chat-composer >> role:button ~"2 comments"')).to_be(true)
+	-- Taken off by the plugin (the card's Remove), then put back as it was.
+	app:command("plugin_comment_withdrawn")
+	app:frames(30)
+	expect(app:state("test_plugin_comments")).to_be("k1@s2")
+	app:command("plugin_diff_comments")
+	app:frames(30)
+	expect(app:state("test_plugin_notes")).to_be("k1=Keep the old name.,k2=Why did this go?")
 	-- Taken off: no longer the plugin's to mark.
 	app:click('role:button "Remove comment Why did this go?"')
 	app:frames(30)

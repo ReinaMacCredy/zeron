@@ -96,6 +96,7 @@ return function(zeron: any, Repo: any, words: any)
 			m.act("switch", "switch", { branch = wanted, create = true }, function()
 				name:set("")
 				m.branches:set(nil)
+				zeron.toast(zeron.s("branches.created", { name = wanted }))
 			end)
 		end
 		return ui.row {
@@ -124,6 +125,7 @@ return function(zeron: any, Repo: any, words: any)
 					end
 					m.act("switch", "switch", { branch = chosen }, function()
 						m.branches:set(nil)
+						zeron.toast(zeron.s("branches.checked_out", { name = chosen }))
 					end)
 				end,
 				actions = {
