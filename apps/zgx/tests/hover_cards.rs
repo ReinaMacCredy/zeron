@@ -20,7 +20,7 @@ fn ui_dir() -> PathBuf {
 }
 
 /// What a tooltip may be built with: the hover card, and what is made of it.
-const FRAMED: &[&str] = &["HoverCard.Card", "HoverCard.Tip", "Tooltip"];
+const FRAMED: &[&str] = &["HoverCard.Card", "HoverCard.Tip", "Tooltip", "context_usage.Card"];
 
 /// The files built on the hover card's frame: none paints a surface of its
 /// own round it (a fill, an edge, a shadow, a blur, glass).

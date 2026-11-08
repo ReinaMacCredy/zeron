@@ -68,6 +68,7 @@ pub struct ThreadTools {
     ui_driver_calls: Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>,
     ipc_port: Option<u16>,
     advertised_plugin_tools: Mutex<Option<BTreeSet<String>>>,
+    waits_on_background: bool,
 }
 
 /// `ReasoningLevel`'s serde names, spelled out so the schema can list them.
@@ -103,6 +104,42 @@ pub fn tool_list() -> Value {
         list.extend(themes::tools());
     }
     tools
+}
+
+const WAIT_ON_BACKGROUND: &str = "wait_on_background";
+
+const WAIT_ON_BACKGROUND_DESCRIPTION: &str = "\
+Say that you'll wait on background work you started, so this chat reads as waiting (not finished) \
+after your turn ends, until that work ends and you're woken to carry on. Pass the ids your tools \
+gave the background tasks (a background command says the id it runs under). Use it for work you'll \
+come back to: a test run, a build, a long check. Never for something you leave running on purpose \
+(a dev server, a file watcher): nothing is coming, and the chat would look busy. Background agents \
+you started are waited on already. `waiting: false` takes a mark back. It doesn't stop or change \
+the work. Refused where your runtime doesn't wake you when background work ends: wait for the work \
+inside your turn instead.";
+
+fn wait_on_background_tool() -> Value {
+    json!({
+        "name": WAIT_ON_BACKGROUND,
+        "description": WAIT_ON_BACKGROUND_DESCRIPTION,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "description": "The background tasks' ids, as your tools reported them."
+                },
+                "waiting": {
+                    "type": "boolean",
+                    "description": "false takes the marks back. Default true."
+                }
+            },
+            "required": ["task_ids"]
+        }
+    })
 }
 
 fn supervisor_tool() -> Value {
@@ -652,6 +689,8 @@ impl ThreadTools {
             ui_driver_calls: Mutex::new(HashMap::new()),
             ipc_port: None,
             advertised_plugin_tools: Mutex::new(None),
+            waits_on_background: std::env::var(zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV)
+                .is_ok_and(|value| value == "1"),
         }
     }
 
@@ -751,6 +790,11 @@ impl ThreadTools {
             && let Some(list) = tools.as_array_mut()
         {
             list.push(supervisor_tool());
+        }
+        if self.waits_on_background
+            && let Some(list) = tools.as_array_mut()
+        {
+            list.push(wait_on_background_tool());
         }
         if let Some(secret) = &self.run_secret
             && let Ok(catalog) = self
@@ -861,6 +905,7 @@ impl ThreadTools {
             "task_status" => self.task_status(args).await,
             "task_cancel" => self.task_cancel(args).await,
             "supervisor" => self.supervisor(args).await,
+            WAIT_ON_BACKGROUND if self.waits_on_background => self.wait_on_background(args).await,
             plugins::CREATE_PLUGIN => self.create_plugin(args).await,
             plugins::LIST_PLUGINS => self.list_plugins().await,
             plugins::PLUGIN_STATUS => self.plugin_status(args).await,
@@ -1990,6 +2035,40 @@ impl ThreadTools {
         Ok(json!({
             "image": shown,
             "message": "Shown to the reader above your reply. Don't mention or describe the image; reply with only what it doesn't already show.",
+        }))
+    }
+
+    async fn wait_on_background(&self, args: &Value) -> Result<Value, String> {
+        let task_ids: Vec<&str> = args["task_ids"]
+            .as_array()
+            .filter(|ids| (1..=20).contains(&ids.len()))
+            .ok_or("task_ids must be a list of 1 to 20 ids")?
+            .iter()
+            .map(|id| id.as_str().ok_or("task_ids must be strings"))
+            .collect::<Result<_, _>>()?;
+        let waiting = match args.get("waiting") {
+            None | Some(Value::Null) => true,
+            Some(Value::Bool(waiting)) => *waiting,
+            Some(_) => return Err("waiting must be a boolean".into()),
+        };
+        let marked = self
+            .call_engine(
+                methods::AWAIT_BACKGROUND,
+                json!({ "chatId": self.chat_id, "taskIds": task_ids, "waiting": waiting }),
+            )
+            .await?;
+        let none_matched = marked["matched"].as_array().is_none_or(Vec::is_empty);
+        let message = if none_matched {
+            "None of those are running background tasks of yours now (they may have ended): nothing is waited on."
+        } else if waiting {
+            "This chat reads as waiting on that work after your turn, until it ends and you're woken."
+        } else {
+            "No longer waited on."
+        };
+        Ok(json!({
+            "matched": marked["matched"],
+            "unmatched": marked["unmatched"],
+            "message": message,
         }))
     }
 
@@ -3422,6 +3501,9 @@ fn turn_of(status: &str, timed_out: bool, entries: &[Value], replies: &[&Value])
 
 fn status_of(sessions: &[Session], chat_id: &str, now: DateTime<Utc>) -> &'static str {
     let session = sessions.iter().find(|session| session.chat_id == chat_id);
+    if zeron_proto::view::waiting(session, now).is_some() {
+        return "working";
+    }
     match effective_indicator(session, now) {
         Indicator::None => "idle",
         Indicator::Working => "working",
@@ -5110,6 +5192,54 @@ mod tests {
             rig.calls.calls.lock().unwrap().is_empty(),
             "nothing to take"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_threads_waits_through_a_turn_that_ended_into_a_wait() {
+        let mut waiting = session("b", "idle", 0);
+        waiting["waiting"] = json!({ "since": Utc::now(), "on": [{ "id": "bn1", "kind": "process", "label": "cargo test" }] });
+        let mut fake = fixture();
+        fake.session_snapshots = vec![vec![session("b", "working", 0)], vec![waiting.clone()]];
+        let out = rig(fake)
+            .tools
+            .wait_threads(&json!({ "threadIds": ["b"], "timeoutSeconds": 3 }))
+            .await
+            .unwrap();
+        assert_eq!(out["reason"], "timeout");
+        assert_eq!(out["statuses"]["b"], "working");
+        let mut fake = fixture();
+        fake.session_snapshots = vec![
+            vec![session("b", "working", 0)],
+            vec![waiting],
+            vec![session("b", "idle", 0)],
+        ];
+        let out = rig(fake)
+            .tools
+            .wait_threads(&json!({ "threadIds": ["b"], "timeoutSeconds": 30 }))
+            .await
+            .unwrap();
+        assert_eq!(out["reason"], "status");
+        assert_eq!(out["statuses"]["b"], "idle");
+    }
+
+    #[tokio::test]
+    async fn wait_on_background_is_offered_only_where_the_runtime_wakes_its_agent() {
+        let offered = |waits: bool| async move {
+            let mut tools = rig(fixture()).tools;
+            tools.waits_on_background = waits;
+            let listed = tools.tools().await;
+            let has = listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == WAIT_ON_BACKGROUND);
+            let call = tools
+                .call(WAIT_ON_BACKGROUND, &json!({ "task_ids": ["b1"] }))
+                .await;
+            (has, call.is_err_and(|e| e.contains("unknown tool")))
+        };
+        assert_eq!(offered(false).await, (false, true));
+        assert!(offered(true).await.0);
     }
 
     #[tokio::test(start_paused = true)]

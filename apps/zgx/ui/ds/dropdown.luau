@@ -22,10 +22,10 @@ local Text = require("@self/text")
 local Tile = require("@self/tile")
 local ascii = require("@self/ascii")
 local Menu = require("@self/menu")
+local Skeleton = require("@self/skeleton")
 local control = require("@self/control")
 local locale = require("@self/locale")
 local EditorMenu = require("@self/editor_menu")
-local Skeleton = require("@self/skeleton")
 
 -- An item: its name, and the harness mark or icon it shows in place of its
 -- letter tile (a model's, a mode's), what it does (under its name), a muted
@@ -149,6 +149,9 @@ export type Props = {
 	-- anything (a chip with nothing to choose: "No project").
 	say: (() -> (string | Message)?)?,
 	empty: ((query: string) -> Empty)?,
+	-- What it lists is still on its way: its chosen item's name and its rows
+	-- hold their shape rather than saying there's nothing.
+	loading: (() -> boolean)?,
 	-- `keep_open`: a pick leaves the panel open (`on_choose` hears it);
 	-- `on_escape` takes Escape first (true: handled, the panel stays).
 	keep_open: boolean?,
@@ -770,6 +773,9 @@ return ui.component(function(props: Props): Node
 	else
 		label_node = FadeText { chosen, roll = true, rolls = rolls, color = TRIGGER[tone].label }
 	end
+	if props.loading then
+		label_node = ui.show(props.loading, Skeleton.Bar { w = ui.raw(64, "about a model's name"), h = 10 }, label_node)
+	end
 	-- Opening: the search cleared, on the chosen item, in view. (Open
 	-- already, it stays as it is: asked again, by its shortcut or its
 	-- trigger, it was put back folded, the search and tab lost.)
@@ -1185,7 +1191,19 @@ return ui.component(function(props: Props): Node
 				table.insert(
 					items,
 					ui.show(function()
-						return #shown:get() == 0
+						return #shown:get() == 0 and props.loading ~= nil and props.loading()
+					end, ui.column {
+						w_full = true,
+						gap = "$zeron.list.gap",
+						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+					})
+				)
+				table.insert(
+					items,
+					ui.show(function()
+						return #shown:get() == 0 and not (props.loading ~= nil and props.loading())
 					end, ui.column {
 						w_full = true,
 						h = EMPTY_H - INSET * 2,

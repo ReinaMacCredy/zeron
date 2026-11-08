@@ -126,6 +126,39 @@ function M.subagents(): { any }
 	return subagents:get()
 end
 
+-- The open chat's subagents as the composer's Running tray lists them (its
+-- tasks, ds/composer_dock): running first, in the order they were spawned,
+-- the finished (done or failed) after, newest first, as the lanes card
+-- orders them. A subagent not heard from yet counts as running, as it does
+-- there. Each task's id is the subagent's doc (`ref`).
+function M.tasks(): { any }
+	local active, finished = {}, {}
+	for _, s in subagents:get() do
+		local task = { id = s.ref, kind = "agent", name = s.title }
+		if s.status == "done" or s.status == "failed" then
+			task.ended = s.status
+			task.failed = s.status == "failed" or nil
+			table.insert(finished, 1, task)
+		else
+			table.insert(active, task)
+		end
+	end
+	for _, t in finished do
+		table.insert(active, t)
+	end
+	return active
+end
+
+-- A tray row's subagent, opened as a tab of the session's panel.
+function M.open_task(session: string, ref: string)
+	for _, s in subagents:peek() do
+		if s.ref == ref then
+			M.open_subagent(session, s)
+			return
+		end
+	end
+end
+
 -- A lane's chat, as the host watches it in `slot`.
 local views: { [string]: any } = {}
 function M.view(slot: string): any
@@ -183,7 +216,7 @@ M.hide_side = nil :: ((session: string) -> boolean)?
 
 -- The side chat's composer takes the keys now, if gpui's `typing_target`
 -- would pick it: the keyboard left in the panel, or the panel expanded.
-M.take_keys = nil :: ((session: string) -> boolean)?
+M.typing_takes = nil :: ((session: string) -> boolean)?
 
 function M.open(session: string, lane: { kind: string, id: string, title: string, data: any? })
 	local opener = M.opener
@@ -313,6 +346,7 @@ end
 -- has nothing of one until its first message (the shipping app's
 -- `create_child_chat` writes nothing until then).
 M.unsent = ui.state("chat_lanes_unsent", {} :: { [string]: string })
+M.take_keys = ui.state("chat_lanes_take_keys", {} :: { [string]: boolean })
 -- Where an unsent side chat's composer starts, where it isn't its
 -- parent's (screens/chat/lane_tab reads it once, as it seeds the place).
 M.starts = ui.state("chat_lanes_starts", {} :: { [string]: { project: string?, device: string? } })
@@ -335,6 +369,8 @@ function M.new_side_chat(session: string?, at: { project: string?, device: strin
 		set_in(M.starts, id, { project = at.project, device = at.device })
 	end
 	set_in(M.unsent, id, session)
+	-- (Its composer takes the keys as it's made: nothing to read yet.)
+	set_in(M.take_keys, id, true)
 	M.open(session, { kind = "side_chat", id = id, title = locale.s("chat.lanes.new_side_chat") })
 end
 

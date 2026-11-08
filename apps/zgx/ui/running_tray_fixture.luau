@@ -6,7 +6,7 @@
 
 ui.theme.strict("warn")
 local ds = require("@ds")
-local Dock = require("@ds/composer_dock")
+local Dock = require("@ds/composer_deck")
 ds.setup()
 
 local calls = ui.state("calls", {} :: { string })
@@ -23,12 +23,25 @@ return ui.column {
 	justify = "end",
 	Dock.Dock {
 		tasks = ui.state("test_running_tasks", {} :: { Dock.Task }),
+		-- (Empty unless a test fills them: the deck's tabs then.)
+		queue = ui.state("test_deck_queue", {} :: { Dock.Queued }),
+		todos = ui.state("test_deck_todos", {} :: { Dock.Todo }),
+		alerts = ui.state("test_deck_alerts", {} :: { Dock.Alert }),
+		on_alert_action = function(id: string)
+			call(`alert:{id}`)
+		end,
+		on_dismiss_alert = function(id: string)
+			call(`dismiss:{id}`)
+		end,
 		open = ui.state("test_running_tray", nil :: Dock.Tray?),
 		on_stop_task = function(id: string)
 			call(`stop:{id}`)
 		end,
 		on_stop_all = function()
 			call("stop_all")
+		end,
+		on_open_task = function(id: string)
+			call(`open:{id}`)
 		end,
 	},
 }

@@ -142,7 +142,7 @@ test("with no repository chosen, Cloud's page says so; a read that fails says wh
 	choose(app, "Cloud")
 	expect(shows(app, "No repositories yet")).to_be(true)
 	expect(shows(app, "Choose repositories in Settings")).to_be(true)
-	app:key("ArrowLeft")
+	app:key("Escape")
 	app:frames(20)
 	app:command("cloud_stub.repos_fail")
 	choose(app, "Cloud")
@@ -151,18 +151,22 @@ test("with no repository chosen, Cloud's page says so; a read that fails says wh
 	expect(app:tree("#shell-add-project"):lower():find("couldn't load your repositories", 1, true) ~= nil).to_be(true)
 end)
 
-test("a step shows what it is, never ⌘K's scope tabs, and ← gives ⌘K its tabs back", function()
+test("a step shows what it is, never ⌘K's scope tabs, and Esc gives ⌘K its tabs back", function()
 	local app = open()
 	-- New project on its own: its title heads it, no tabs, no Next scope.
 	new_project(app)
 	expect(app:has('role:button "All"')).to_be(false)
 	expect(app:has('"Next scope"')).to_be(false)
 	expect(app:has('"New project"')).to_be(true)
-	app:key("Enter")
+	-- Tab cycles no scope: it opens the row's page, as it does on any page,
+	-- and the head says where it is.
+	app:key("Tab")
 	app:frames(20)
 	expect(table.concat(rows(app), "|")).to_contain("Home")
 	expect(app:has('role:button "All"')).to_be(false)
-	expect(app:has('#project-crumbs >> role:button "New project"')).to_be(true)
+	expect(app:has('role:button "Back from New project"')).to_be(true)
+	app:key("Escape")
+	app:frames(20)
 	app:key("Escape")
 	app:frames(20)
 	-- ⌘K's root has its tabs; its New project page doesn't, its crumb says it.
@@ -177,7 +181,7 @@ test("a step shows what it is, never ⌘K's scope tabs, and ← gives ⌘K its t
 	expect(app:has('role:button "All"')).to_be(false)
 	expect(app:has('"Next scope"')).to_be(false)
 	expect(app:has('role:button ~"New project"')).to_be(true)
-	app:key("ArrowLeft")
+	app:key("Escape")
 	app:frames(20)
 	expect(app:has('role:button "All"')).to_be(true)
 	expect(app:has('"Next scope"')).to_be(true)

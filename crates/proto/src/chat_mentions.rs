@@ -191,7 +191,7 @@ pub fn thread_matches<'a>(
 
 pub fn thread_status_label(status: crate::ChatIndicator) -> Option<&'static str> {
     match status {
-        crate::ChatIndicator::Working => Some("Working"),
+        crate::ChatIndicator::Working | crate::ChatIndicator::Waiting => Some("Working"),
         crate::ChatIndicator::AwaitingInput => Some("Input"),
         crate::ChatIndicator::Errored => Some("Failed"),
         crate::ChatIndicator::Completed => Some("Done"),

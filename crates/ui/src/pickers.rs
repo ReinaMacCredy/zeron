@@ -13435,6 +13435,7 @@ mod tests {
             work_tree: None,
             unsettled_at: None,
             harness_session_harness: Default::default(),
+            sleep: None,
         };
         assert_eq!(
             chat.harness_marks(),
@@ -14359,6 +14360,7 @@ mod tests {
                     work_tree: None,
                     unsettled_at: None,
                     harness_session_harness: Default::default(),
+                    sleep: None,
                 }];
                 state.selected_chat = Some("c1".into());
                 state.transcript_replayed = false;
@@ -14522,6 +14524,7 @@ mod tests {
                     work_tree: None,
                     unsettled_at: None,
                     harness_session_harness: Default::default(),
+                    sleep: None,
                 }];
                 state.selected_chat = Some("c1".into());
             });

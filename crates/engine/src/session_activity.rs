@@ -182,6 +182,7 @@ fn project(
             compacting: Default::default(),
             classifying: Default::default(),
             compact_plan: Default::default(),
+            waiting: None,
         });
         row.terminal_activity = Some(activity.clone());
         // OSC 7501 has no heartbeat requirement. The PTY owner supplies the
@@ -262,6 +263,7 @@ mod tests {
             compacting: Default::default(),
             classifying: Default::default(),
             compact_plan: Default::default(),
+            waiting: None,
         };
         let activity = TerminalActivity {
             terminal_id: "pty".into(),

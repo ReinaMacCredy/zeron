@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
     match args.get(1).map(String::as_str) {
         Some("--noop-browser") => Ok(()),
         Some("--version" | "-V") => {
-            println!("zeron-engine {}", env!("CARGO_PKG_VERSION"));
+            println!("zeron-engine {}", zeron_update::current_version());
             Ok(())
         }
         // Which build this binary is (`EngineInfo.build` of an engine it
@@ -31,7 +31,7 @@ fn main() -> anyhow::Result<()> {
         }
         // How the app starts it: the background engine.
         None => zeron_app::background::run(),
-        Some(_) => match zeron_cli::run(env!("CARGO_PKG_VERSION"), Engines::InProcess) {
+        Some(_) => match zeron_cli::run(zeron_update::current_version(), Engines::InProcess) {
             Launch::Done(result) => result,
             Launch::Engine(command) => zeron_app::run_engine_command(command),
             Launch::Window { .. } | Launch::Ui(_) | Launch::Triage { .. } => {

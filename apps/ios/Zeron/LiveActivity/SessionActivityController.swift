@@ -85,7 +85,7 @@ final class SessionActivityController {
         for r in app.sessionRows where !r.archived && r.parentChatId == nil && r.sidechatOf == nil {
             let state: SessionActivityState
             switch r.indicator {
-            case .working: state = .working
+            case .working, .waiting: state = .working
             case .awaitingInput: state = .asking
             default: continue
             }

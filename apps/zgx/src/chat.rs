@@ -130,6 +130,10 @@ struct Chats {
     /// `chat.catalog` is then its catalog, as the shipping app's pickers
     /// read their run device's (`list_harnesses(device)`).
     remote: RefCell<Option<Remote>>,
+    /// Each device's catalog as last looked at whole (some looked at ahead of
+    /// time, `look_ahead`): moving to it shows this at once, while it's looked
+    /// at again, so a model is never missing for the moment that takes.
+    known_remotes: RefCell<HashMap<String, Remote>>,
     /// The chat a view has just let go of, kept a moment: a chat on its own
     /// that becomes a split is opened again at once, in its pane, and has
     /// what it had rather than reading and building it all again.
@@ -201,12 +205,188 @@ fn sum_of(json: &Json) -> u64 {
     hasher.finish()
 }
 
+/// A settled entry's row as its row holds it out of view: what makes it,
+/// compressed, opened as a script reads it. The transcript's scripts, a
+/// template's or a plugin's read the row it opens to, as they would any.
+struct FoldedEntry {
+    bytes: Box<[u8]>,
+    context: Rc<RowContext>,
+}
+
+/// What a chat's rows are built with (`built_entry`).
+struct RowContext {
+    doc: String,
+    device: Option<String>,
+    model: Option<String>,
+    cwd: Option<String>,
+}
+
+impl zgx_script::Unfold for FoldedEntry {
+    fn unfold(&self) -> Value {
+        let json = miniz_oxide::inflate::decompress_to_vec(&self.bytes).ok();
+        let entry = json.and_then(|bytes| serde_json::from_slice::<Json>(&bytes).ok()).unwrap_or(Json::Null);
+        let RowContext { doc, device, model, cwd } = &*self.context;
+        code_links::with_root(cwd.as_deref(), device.is_none(), || built_entry(&entry, doc, device.as_deref(), model.as_deref())).unwrap_or(Value::Nil)
+    }
+}
+
+/// How hard a settled entry is compressed: fast, as a long chat's are made in
+/// slices between frames, and most of what it saves is had by the first level.
+const FOLD_LEVEL: i32 = 1;
+
+/// `bytes` compressed, the compressor's tables kept for the next (a compressor is
+/// about 300 KB, against the kilobytes of an entry: one a call was gigabytes
+/// allocated to open a few long chats).
+fn compressed(mut bytes: &[u8]) -> Box<[u8]> {
+    use miniz_oxide::deflate::core::{
+        CompressorOxide, TDEFLFlush, TDEFLStatus, compress, create_comp_flags_from_zip_params,
+    };
+    thread_local! {
+        static COMPRESSOR: RefCell<CompressorOxide> =
+            RefCell::new(CompressorOxide::new(create_comp_flags_from_zip_params(FOLD_LEVEL, 0, 0)));
+    }
+    COMPRESSOR.with_borrow_mut(|compressor| {
+        compressor.reset();
+        let mut out = vec![0; (bytes.len() / 2).max(64)];
+        let mut at = 0;
+        loop {
+            let (status, read, written) = compress(compressor, bytes, &mut out[at..], TDEFLFlush::Finish);
+            at += written;
+            bytes = &bytes[read..];
+            if matches!(status, TDEFLStatus::Done) {
+                break;
+            }
+            let room = out.len() * 2;
+            out.resize(room, 0);
+        }
+        out.truncate(at);
+        out.into_boxed_slice()
+    })
+}
+
+/// An entry's row, as a view keeps it: its subagents apart, as the transcript
+/// lists them without opening every row (`Subagents`).
+#[derive(Clone, Default)]
+struct Built {
+    row: Option<Value>,
+    subagents: Option<Rc<[Value]>>,
+}
+
+/// `entry` built: its row, folded if `fold`, which a row that shows or may
+/// change isn't. What it shows of it is read as the row is, and held in `Built`.
+fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
+    let RowContext { doc, device, model, .. } = &**context;
+    let row = built_entry(entry, doc, device.as_deref(), model.as_deref());
+    let subagents = row.as_ref().and_then(subagents_in);
+    let row = match row {
+        Some(_) if fold && entry["status"].as_str() != Some("streaming") && !kept_whole(entry) => match (entry["id"].as_str(), serde_json::to_vec(entry)) {
+            (Some(id), Ok(bytes)) => Some(Value::folded(
+                id.into(),
+                FoldedEntry {
+                    bytes: compressed(&bytes),
+                    context: context.clone(),
+                },
+            )),
+            _ => row,
+        },
+        row => row,
+    };
+    Built { row, subagents }
+}
+
+/// A long chat's settled entries, as a worker thread makes them: what they fold
+/// to, and all it read of them. Building and compressing thousands of rows on the
+/// main thread takes the window's time and strews its heap's pages with what
+/// little stays, so they stay held after the chat has gone. The worker's are its own.
+struct Folding {
+    results: std::sync::mpsc::Receiver<Vec<FoldedOff>>,
+}
+
+/// An entry, folded on the worker (`Folding`).
+struct FoldedOff {
+    /// Where it stood, and its id, to find it again.
+    at: usize,
+    id: String,
+    /// None: it shows nothing.
+    bytes: Option<Box<[u8]>>,
+    subagents: Vec<SubagentOff>,
+    sum: u64,
+    /// The plan in it, if there is one (`Open::older_todo`).
+    todo: Option<Json>,
+}
+
+/// A subagent's row in `Open`'s list, as plain data to cross threads.
+struct SubagentOff {
+    words: Vec<(&'static str, Option<String>)>,
+    at: Option<f64>,
+}
+
+/// `pills::subagent_row`'s words, `ref` first.
+const SUBAGENT_WORDS: [&str; 8] = ["ref", "call", "title", "status", "model", "kind", "agent", "reasoning"];
+
+impl SubagentOff {
+    fn of(sub: &Value) -> Option<Self> {
+        let words = |key: &str| match sub.field(key) {
+            Some(Value::Str(words)) => Some(words.to_string()),
+            _ => None,
+        };
+        words("ref")?;
+        Some(Self {
+            words: SUBAGENT_WORDS.iter().map(|&key| (key, words(key))).collect(),
+            at: sub.field("at").and_then(Value::as_f64),
+        })
+    }
+
+    fn value(&self) -> Value {
+        let mut fields: Vec<(&str, Value)> =
+            self.words.iter().map(|(key, words)| (*key, words.as_deref().map_or(Value::Nil, Value::from))).collect();
+        fields.push(("at", self.at.map_or(Value::Nil, Value::Num)));
+        fields.push(("recent", Value::Bool(true)));
+        Value::record(fields)
+    }
+}
+
+/// `entry`, as the worker folds it.
+fn fold_off(at: usize, id: String, entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> FoldedOff {
+    let row = built_entry(entry, doc, device, model);
+    let subagents = row.as_ref().and_then(subagents_in).map_or(Vec::new(), |found| found.iter().filter_map(SubagentOff::of).collect());
+    let bytes = row.and_then(|_| serde_json::to_vec(entry).ok()).map(|bytes| compressed(&bytes));
+    FoldedOff { at, id, bytes, subagents, sum: sum_of(entry), todo: latest_todo(std::iter::once(entry)).cloned() }
+}
+
+/// How many entries the worker sends at a time.
+const FOLDED_AT_ONCE: usize = 64;
+
+/// A worker folding `entries`, newest first.
+fn folding(entries: Vec<(usize, String, Json)>, context: &RowContext) -> Folding {
+    let (sender, results) = std::sync::mpsc::channel();
+    let (doc, device, model) = (context.doc.clone(), context.device.clone(), context.model.clone());
+    let spawned = std::thread::Builder::new().name("zeron-fold".into()).spawn(move || {
+        let mut batch = Vec::with_capacity(FOLDED_AT_ONCE);
+        for (at, id, entry) in entries {
+            batch.push(fold_off(at, id, &entry, &doc, device.as_deref(), model.as_deref()));
+            if batch.len() == FOLDED_AT_ONCE {
+                // (The chat has gone, or a reset replaced them: nothing wants the rest.)
+                if sender.send(std::mem::take(&mut batch)).is_err() {
+                    return;
+                }
+                batch.reserve(FOLDED_AT_ONCE);
+            }
+        }
+        let _ = sender.send(batch);
+    });
+    if let Err(error) = spawned {
+        eprintln!("zeron-zgx: a chat's rows: no worker ({error})");
+    }
+    Folding { results }
+}
+
 /// What a view's chat had read and built, as it let it go.
 struct LetGo {
     id: String,
     entries: Vec<Entry>,
     older_todo: Option<(usize, Json)>,
-    built: HashMap<Rc<str>, Option<Value>>,
+    built: HashMap<Rc<str>, Built>,
     built_model: Option<Option<String>>,
     context_usage: (Option<f64>, Option<f64>),
     stats: Option<zeron_proto::SessionStats>,
@@ -215,13 +395,18 @@ struct LetGo {
 /// How long a chat let go of is kept for another view to take it.
 const LET_GO_KEPT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// How many entries a reset may leave to build at once; more go in slices.
-const BUILT_AT_ONCE: usize = 300;
+/// How long after connecting other devices' catalogs start being looked at.
+const LOOK_AHEAD_AFTER: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// How many entries a reset may leave to build at once; more go to a worker and
+/// in slices.
+const BUILT_AT_ONCE: usize = 64;
 /// A slice of building, and the rest after it, so frames get the thread.
 const BUILD_SLICE: std::time::Duration = std::time::Duration::from_millis(3);
 const BUILD_REST: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Another device's catalog, read through the engine (`targetDeviceId`).
+#[derive(Clone)]
 struct Remote {
     device: String,
     harnesses: Vec<Json>,
@@ -250,6 +435,9 @@ struct View {
     on_screen: Cell<bool>,
     rpc: RefCell<Option<Rpc>>,
     open: RefCell<Option<Open>>,
+    /// Prompts not yet in the engine's transcript, by chat. They outlive
+    /// the open view: a send can still be in flight while another chat shows.
+    pending: RefCell<HashMap<String, Vec<Pending>>>,
     /// Moves on every open: an older watch's frames are dropped.
     generation: Cell<u64>,
     /// A finished subagent's transcript, read whole from its uploaded blob
@@ -345,8 +533,6 @@ struct Open {
     machine: Option<zeron_proto::CloudState>,
     in_flight_seen: bool,
     queue: Vec<Json>,
-    /// Sent, not yet in the transcript: shown under it meanwhile.
-    pending: Vec<Pending>,
     /// The session as last published, to republish the transcript when its
     /// turn starts or ends (the prompt's working line follows it).
     session_seen: Json,
@@ -361,8 +547,10 @@ struct Open {
     /// the entries a frame changed, and hands the rest over as the same
     /// values, so the script's copy (reconciled by id) does no work for
     /// them.
-    built: HashMap<Rc<str>, Option<Value>>,
+    built: HashMap<Rc<str>, Built>,
     built_model: Option<Option<String>>,
+    /// What its rows are built with, shared by those folded.
+    row_context: Option<Rc<RowContext>>,
     /// The chat's model changed while settled entries' rows carry the last
     /// one's name: its whole copy is asked for again to build them from.
     model_moved: bool,
@@ -374,6 +562,10 @@ struct Open {
     /// Building a reset's entries a slice at a time (`build_in_steps`): what
     /// shows stays as it is until that's done.
     stepping: bool,
+    /// The worker folding its settled entries, meanwhile.
+    folding: Option<Folding>,
+    /// They have gone to it (once a build).
+    builds_started: bool,
     /// This view is the one doing it (another view of the chat waits).
     builds: bool,
     host_watched: bool,
@@ -399,6 +591,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         on_screen: Cell::new(true),
         rpc: RefCell::default(),
         open: RefCell::default(),
+        pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
         predicts: true,
@@ -501,6 +694,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     // A background process of the chat's stopped, on its host (the shipping
     // app's `stop_background_task`): whether it's stopping.
     host.async_action("chat.stop_task", move |args| async move { stop_task(args).await.map_err(String::from) });
+    host.async_action("chat.stop_waiting", move |id| async move { stop_waiting(text(&id)).await.map_err(String::from) });
     let pick = which.clone();
     host.async_action("chat.respond", move |args| {
         let v = pick(&args);
@@ -568,19 +762,19 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     });
     host.async_action("chat.read_text", move |args| async move { read_text(args).await.map_err(String::from) });
     host.async_action("chat.stat_files", move |args| async move { stat_files(args).await.map_err(String::from) });
-    let v = view.clone();
+    let pick = which.clone();
     host.async_action("chat.retry", move |args| {
-        let v = v.clone();
+        let v = pick(&args);
         async move { crate::plugins::preview::refuse("chat.retry")?; v.retry(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
-    let v = view.clone();
+    let pick = which.clone();
     host.async_action("chat.queue_edit", move |args| {
-        let v = v.clone();
+        let v = pick(&args);
         async move { crate::plugins::preview::refuse("chat.queue_edit")?; v.begin_edit(args).await.map_err(String::from) }
     });
-    let v = view.clone();
+    let pick = which.clone();
     host.async_action("chat.queue_finish", move |args| {
-        let v = v.clone();
+        let v = pick(&args);
         async move { crate::plugins::preview::refuse("chat.queue_finish")?; v.finish_edit(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     // A project's branches, from git where it is (the shipping app's
@@ -618,6 +812,7 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
         on_screen: Cell::new(false),
         rpc: RefCell::default(),
         open: RefCell::default(),
+        pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
         predicts: false,
@@ -677,19 +872,23 @@ fn work_tree_state(state: &Json) -> (Option<&str>, f64) {
 
 // -- every window's -----------------------------------------------------------
 
+/// A frame's list, its items by `field`. Taken, not copied: these lists come whole
+/// for every change in any chat, a chat's every field, and a copy made here would
+/// be blocks by the thousand among the window's own, where they'd stay till the next.
+fn by_field(list: Json, field: &str) -> HashMap<String, Json> {
+    let Json::Array(list) = list else { return HashMap::new() };
+    list.into_iter().filter_map(|item| Some((item[field].as_str()?.to_owned(), item))).collect()
+}
+
 impl Chats {
     fn connected(self: &Rc<Self>, rpc: &Rpc) {
+        let me = self.clone();
+        engine::get().spawn(async move { me.look_ahead().await });
         let mut watches = Vec::new();
         let weak = Rc::downgrade(self);
         watches.push(rpc.watch("WatchSessions", json!({}), move |item| {
             let Some(me) = weak.upgrade() else { return };
-            let mut by = HashMap::new();
-            for s in item.as_array().into_iter().flatten() {
-                if let Some(id) = s["chatId"].as_str() {
-                    by.insert(id.to_owned(), s.clone());
-                }
-            }
-            *me.sessions.borrow_mut() = by;
+            *me.sessions.borrow_mut() = by_field(item, "chatId");
             me.follow_asks();
             me.publish_views();
             // A turn starting or ending: the newest prompt's line follows.
@@ -711,14 +910,7 @@ impl Chats {
         let weak = Rc::downgrade(self);
         watches.push(rpc.watch("WatchChats", json!({}), move |item| {
             let Some(me) = weak.upgrade() else { return };
-            let item = crate::sessions::with_parents(item);
-            let mut by = HashMap::new();
-            for c in item.as_array().into_iter().flatten() {
-                if let Some(id) = c["id"].as_str() {
-                    by.insert(id.to_owned(), c.clone());
-                }
-            }
-            *me.chats.borrow_mut() = by;
+            *me.chats.borrow_mut() = by_field(crate::sessions::with_parents(item), "id");
             me.chats_heard.set(true);
             review::chats_changed();
             for view in me.views() {
@@ -815,7 +1007,7 @@ impl Chats {
                     let waits = {
                         let mut slot = view.open.borrow_mut();
                         let Some(open) = slot.as_mut().filter(|o| o.id == id) else { continue };
-                        let waits = open.pending.iter().any(|p| p.waiting == "sending");
+                        let waits = view.sending(&id);
                         open.machine = machine.filter(|_| waits);
                         waits
                     };
@@ -929,7 +1121,8 @@ impl Chats {
     /// Keeps what a view's chat had for a moment (`LET_GO_KEPT`), for another
     /// view that's about to open it.
     fn keep_let_go(self: &Rc<Self>, old: Option<Open>) {
-        let Some(old) = old.filter(|o| o.heard) else { return };
+        // (Not while its rows are on a worker: it has only the ones they left.)
+        let Some(old) = old.filter(|o| o.heard && !o.stepping) else { return };
         let Open { id, entries, older_todo, built, built_model, context_usage, stats, .. } = old;
         *self.let_go.borrow_mut() = Some(LetGo { id, entries, older_todo, built, built_model, context_usage, stats });
         let turn = self.let_go_turn.get() + 1;
@@ -1123,12 +1316,13 @@ impl Chats {
         if self.remote.borrow().as_ref().is_some_and(|r| r.device == device) {
             return;
         }
-        *self.remote.borrow_mut() = Some(Remote {
+        let known = self.known_remotes.borrow().get(device).cloned();
+        *self.remote.borrow_mut() = Some(known.unwrap_or_else(|| Remote {
             device: device.to_owned(),
             harnesses: Vec::new(),
             models: HashMap::new(),
             ready: false,
-        });
+        }));
         self.publish_catalog();
         let (me, device) = (self.clone(), device.to_owned());
         engine::get().spawn(async move { me.load_remote(device).await });
@@ -1159,8 +1353,10 @@ impl Chats {
             Err(error) => {
                 // (Unreachable: this device's catalog stands in, as before.)
                 eprintln!("zeron-zgx: chat: {device}'s agents didn't list: {error}");
-                self.remote.borrow_mut().take();
-                self.publish_catalog();
+                if !self.known_remotes.borrow().contains_key(&device) {
+                    self.remote.borrow_mut().take();
+                    self.publish_catalog();
+                }
                 return;
             }
         };
@@ -1195,6 +1391,9 @@ impl Chats {
                         Err(error) => eprintln!("zeron-zgx: chat: {id}'s models on {device} didn't list: {error}"),
                     }
                     r.ready = left.get() == 0;
+                    if r.ready {
+                        me.known_remotes.borrow_mut().insert(device.clone(), r.clone());
+                    }
                 }
                 me.publish_catalog();
             });
@@ -1224,6 +1423,43 @@ impl Chats {
             let reason = zeron_proto::command_catalog::compaction_unsupported(id);
             self.compaction_unsupported.borrow_mut().insert(harness.to_owned(), reason);
             self.publish_catalog();
+        }
+    }
+
+    /// The other devices' catalogs looked at ahead of time, one at a time so
+    /// launch doesn't feel it, so a chat on one opens with its model known.
+    async fn look_ahead(self: &Rc<Self>) {
+        zgx::timer::sleep(LOOK_AHEAD_AFTER).await;
+        for device in crate::sessions::other_devices_online() {
+            if self.known_remotes.borrow().contains_key(&device) {
+                continue;
+            }
+            let params = json!({ "targetDeviceId": device, "includeRegistry": true });
+            let Ok(list) = engine::get().call("ListHarnesses", params).await else { continue };
+            let harnesses: Vec<Json> = list
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|h| {
+                    h["id"].as_str() != Some("mock")
+                        && h["installed"].as_bool() != Some(false)
+                        && h["enabled"].as_bool() != Some(false)
+                })
+                .cloned()
+                .collect();
+            let mut models = HashMap::new();
+            for id in harnesses.iter().filter_map(|h| h["id"].as_str()) {
+                let params = json!({ "harness": id, "targetDeviceId": device });
+                if let Ok(list) = engine::get().call("ListModels", params).await {
+                    models.insert(id.to_owned(), list.as_array().cloned().unwrap_or_default());
+                }
+            }
+            crate::agents::remember_icons(&harnesses);
+            // (One opened meanwhile has its own, as new.)
+            self.known_remotes
+                .borrow_mut()
+                .entry(device.clone())
+                .or_insert(Remote { device, harnesses, models, ready: true });
         }
     }
 
@@ -1265,9 +1501,9 @@ impl Chats {
     }
 
     /// gpui's `turn_in_flight`: a parked turn, held only by its subagents, is not one.
-    fn turn_in_flight(&self, open: &Open) -> bool {
+    fn turn_in_flight(&self, open: &Open, sending: bool) -> bool {
         let held = self.sessions.borrow().get(&open.id).is_some_and(|s| s["heldBySubagents"].as_bool() == Some(true));
-        open.pending.iter().any(|p| p.waiting == "sending") || (self.running(&open.id) && !held)
+        sending || (self.running(&open.id) && !held)
     }
 
     fn chat_compacting(&self, id: &str) -> bool {
@@ -1427,6 +1663,8 @@ fn catalog_of(
     }
     let mut fields = vec![
         ("state", Value::from(state)),
+        // (Every agent's models in: till then, a model may just not be here yet.)
+        ("complete", Value::Bool(done)),
         ("harnesses", Value::List(harnesses.into())),
         ("models", Value::List(models.into())),
         ("tabs", tabs_of(listed, by, errors, done)),
@@ -1644,6 +1882,7 @@ impl View {
         }
         self.draft.set(draft_value("", ""));
         self.subscribe();
+        self.publish_messages();
         self.publish_session();
         self.publish_stats();
         chats.follow_rates();
@@ -1693,6 +1932,10 @@ impl View {
 
     fn open_id(&self) -> Option<String> {
         self.open.borrow().as_ref().map(|o| o.id.clone())
+    }
+
+    fn sending(&self, id: &str) -> bool {
+        self.pending.borrow().get(id).is_some_and(|p| p.iter().any(|p| p.waiting == "sending"))
     }
 
     /// The open chat's watches, on the connection there is (again on each
@@ -1802,6 +2045,9 @@ impl View {
     fn resubscribe(self: &Rc<Self>) {
         if let Some(open) = self.open.borrow_mut().as_mut() {
             open.watches.clear();
+            open.folding = None;
+            open.stepping = false;
+            open.builds = false;
         }
         self.generation.set(self.generation.get() + 1);
         self.subscribe();
@@ -1846,6 +2092,9 @@ impl View {
                 }
             }
             let before = frame.get("reset").map(|_| std::mem::take(&mut open.entries));
+            if before.is_some() {
+                open.folding = None;
+            }
             let result = apply(&mut open.entries, &mut frame);
             // What it changed, to build again: on a reset, the entries that
             // differ from what this view had, unless another view of this
@@ -1874,9 +2123,15 @@ impl View {
             if result.is_ok() {
                 open.heard = true;
                 let ids: Vec<&str> = open.entries.iter().map(|e| &*e.id).collect();
-                open.pending.retain(|p| {
-                    !ids.contains(&p.id.as_str()) && p.alias.as_deref().is_none_or(|a| !ids.contains(&a))
-                });
+                let mut pending = self.pending.borrow_mut();
+                if let Some(prompts) = pending.get_mut(&open.id) {
+                    prompts.retain(|p| {
+                        !ids.contains(&p.id.as_str()) && p.alias.as_deref().is_none_or(|a| !ids.contains(&a))
+                    });
+                    if prompts.is_empty() {
+                        pending.remove(&open.id);
+                    }
+                }
             }
             result
         };
@@ -1968,6 +2223,7 @@ impl View {
         if let Some(open) = self.open.borrow_mut().as_mut() {
             open.stepping = true;
             open.builds = !waits;
+            open.builds_started = false;
         }
         let generation = self.generation.get();
         let weak = Rc::downgrade(self);
@@ -2013,18 +2269,54 @@ impl View {
             open.builds = true;
             self.share_built(open);
         }
-        let (model, device) = build_context(open, &chats);
-        let open_id = open.id.clone();
+        let context = build_context(open, &chats);
         let whole_from = open.entries.len().saturating_sub(WHOLE_TAIL);
-        let Open { entries, older_todo, built, .. } = open;
         let started = std::time::Instant::now();
         code_links::opening(true);
+        // The settled ones to the worker, once, with what's left of them here.
+        if !open.builds_started {
+            open.builds_started = true;
+            let Open { entries, built, .. } = open;
+            let off: Vec<(usize, String, Json)> = entries
+                .iter_mut()
+                .enumerate()
+                .take(whole_from)
+                .rev()
+                .filter(|(_, e)| !e.id.is_empty() && !built.contains_key(&e.id) && !e.json.as_ref().is_some_and(kept_whole))
+                .filter_map(|(at, e)| Some((at, e.id.to_string(), e.json.take()?)))
+                .collect();
+            if !off.is_empty() {
+                open.folding = Some(folding(off, &context));
+            }
+        }
+        // What it has done.
+        while let Some(folding) = &open.folding {
+            let batch = match folding.results.try_recv() {
+                Ok(batch) => batch,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    open.folding = None;
+                    break;
+                }
+            };
+            for folded in batch {
+                settle_off(open, folded, &context);
+            }
+            if started.elapsed() >= BUILD_SLICE {
+                return true;
+            }
+        }
+        // The newest, whole, here; and any left settled that hasn't its row.
+        let Open { entries, older_todo, built, .. } = open;
         for (at, entry) in entries.iter_mut().enumerate().rev() {
             if entry.id.is_empty() || built.contains_key(&entry.id) {
+                if at < whole_from && entry.json.is_some() && !entry.id.is_empty() {
+                    settle(entry, at, older_todo);
+                }
                 continue;
             }
             let Some(json) = &entry.json else { continue };
-            built.insert(entry.id.clone(), built_entry(json, &open_id, device.as_deref(), model.as_deref()));
+            built.insert(entry.id.clone(), built_for(json, &context, at < whole_from));
             if at < whole_from {
                 settle(entry, at, older_todo);
             }
@@ -2038,6 +2330,7 @@ impl View {
 
     fn publish_messages(&self) {
         let chats = CHATS.with(Rc::clone);
+        let subagents;
         let list = {
             let mut slot = self.open.borrow_mut();
             let Some(open) = slot.as_mut() else { return };
@@ -2046,26 +2339,33 @@ impl View {
                 return;
             }
             code_links::opening(false);
-            let (model, device) = build_context(open, &chats);
-            let open_id = open.id.clone();
+            let context = build_context(open, &chats);
             let whole_from = open.entries.len().saturating_sub(WHOLE_TAIL);
             let Open { entries, older_todo, built, .. } = open;
             let mut list: Vec<Value> = Vec::with_capacity(entries.len());
+            let mut seen = Subagents::default();
             for (at, e) in entries.iter_mut().enumerate() {
                 if e.id.is_empty() {
-                    list.extend(e.json.as_ref().and_then(|json| message(json, model.as_deref())));
+                    if let Some(row) = e.json.as_ref().and_then(|json| message(json, context.model.as_deref())) {
+                        seen.row(&row);
+                        list.push(row);
+                    }
                     continue;
                 }
                 let row = match (built.get(&e.id), &e.json) {
                     (Some(row), _) => row.clone(),
                     (None, Some(json)) => {
-                        let row = built_entry(json, &open_id, device.as_deref(), model.as_deref());
+                        let row = built_for(json, &context, at < whole_from);
                         built.insert(e.id.clone(), row.clone());
                         row
                     }
-                    (None, None) => None,
+                    (None, None) => Built::default(),
                 };
-                list.extend(row);
+                if let Some(row) = &row.row {
+                    seen.row(row);
+                }
+                list.extend(row.row);
+                seen.add(row.subagents.as_deref());
                 if at < whole_from && e.json.is_some() {
                     settle(e, at, older_todo);
                 }
@@ -2090,24 +2390,32 @@ impl View {
                     _ if running || fresh => Some(("sending", sent)),
                     _ => None,
                 };
-                if let (Some((waiting, since)), Some(shown)) = (waiting, list.pop()) {
+                if let Some((waiting, since)) = waiting
+                    && let Some(shown) = list.pop()
+                {
                     list.push(with_fields(
                         shown,
                         [("waiting", Value::from(waiting)), ("since", Value::Num(since))],
                     ));
                 }
             }
-            list.extend(open.pending.iter().map(Pending::value));
+            if let Some(pending) = self.pending.borrow().get(&open.id) {
+                for row in pending.iter().map(Pending::value) {
+                    seen.row(&row);
+                    list.push(row);
+                }
+            }
+            subagents = seen.rows();
             list
         };
         // The list first: a reply that ended takes its words into its row
         // before the draft lets them go.
-        self.subagents.set(subagents_of(&list));
+        self.subagents.set(Value::List(subagents.into()));
         self.messages.set(Value::List(list.into()));
         self.publish_draft();
         self.after_model_moved();
         let in_flight_moved = self.open.borrow_mut().as_mut().is_some_and(|open| {
-            let now = chats.turn_in_flight(open);
+            let now = chats.turn_in_flight(open, self.sending(&open.id));
             std::mem::replace(&mut open.in_flight_seen, now) != now
         });
         if in_flight_moved {
@@ -2139,7 +2447,7 @@ impl View {
             let offline = self.rpc.borrow().as_ref().is_none_or(Rpc::is_closed);
             match open.as_ref() {
                 None => Value::Nil,
-                Some(open) => session_value(&chats, open, offline),
+                Some(open) => session_value(&chats, open, offline, self.sending(&open.id)),
             }
         };
         self.session.set(value);
@@ -2169,23 +2477,20 @@ impl View {
         self.consume_prediction(&Value::record([("id", Value::from(id.as_str()))]));
         // Shown until the transcript has it (the page's own copy kept in
         // step as the list is published again meanwhile), sending.
-        if self.open_id().as_deref() == Some(&id)
-            && let Some(open) = self.open.borrow_mut().as_mut()
-        {
-            open.pending.push(Pending {
-                id: message_id.clone(),
-                words: words.clone(),
-                paths: local_paths(&req),
-                waiting: "sending",
-                retry: None,
-                command: None,
-                at: stamp(now_seconds()),
-                alias: None,
-            });
-        }
+        self.pending.borrow_mut().entry(id.clone()).or_default().push(Pending {
+            id: message_id.clone(),
+            words: words.clone(),
+            paths: local_paths(&req),
+            waiting: "sending",
+            retry: None,
+            command: None,
+            at: stamp(now_seconds()),
+            alias: None,
+        });
         if let Some(device) = chat["deviceId"].as_str().filter(|d| zeron_proto::is_cloud_device(d, "")) {
             chats.follow_machine(id.clone(), device.to_owned());
         }
+        self.publish_messages();
         // What it carries, uploaded to the chat's host.
         let mut paths = Vec::new();
         let mut images = 0;
@@ -2214,7 +2519,7 @@ impl View {
                 }
                 Err(why) => {
                     // Failed before it could go: the prompt says so.
-                    self.mark_failed(&message_id, None);
+                    self.mark_failed(&id, &message_id, None);
                     return Err(why);
                 }
             }
@@ -2241,14 +2546,9 @@ impl View {
             .collect();
         let words = crate::appshots::with_appshots(&words, &shots);
         let prompt = with_attachments(&words, &paths, images);
-        let forget = |me: &Rc<Self>| {
-            if let Some(open) = me.open.borrow_mut().as_mut() {
-                open.pending.retain(|p| p.id != message_id);
-            }
-        };
         if !fresh && chats.running(&id) {
             // Queued: it shows in the queue, not the transcript.
-            forget(self);
+            self.forget_pending(&id, &message_id);
             self.publish_messages();
             let mut params = json!({ "chatId": id, "text": words, "holdForTurnEnd": true });
             if !paths.is_empty() {
@@ -2291,7 +2591,7 @@ impl View {
         // parent's.)
         if fresh && config["harness"].is_null() {
             eprintln!("zeron-zgx: chat: {id}: no agent to send with (the chat isn't known here yet)");
-            self.mark_failed(&message_id, None);
+            self.mark_failed(&id, &message_id, None);
             return Err("missing");
         }
         // Another agent goes first, as the shipping app's picker does: the
@@ -2311,7 +2611,7 @@ impl View {
             }
             if let Err(e) = engine::get().call("Mutate", params).await {
                 eprintln!("zeron-zgx: chat: a chat's config wasn't set: {e}");
-                self.mark_failed(&message_id, None);
+                self.mark_failed(&id, &message_id, None);
                 return Err(engine::outcome(&e));
             }
         }
@@ -2350,7 +2650,7 @@ impl View {
         let sent = self.send_run(&id, &message_id, &run).await;
         if sent.is_err() {
             // Not delivered: the prompt stays, failed, to send again.
-            self.mark_failed(&message_id, Some(run));
+            self.mark_failed(&id, &message_id, Some(run));
         } else if !fresh && runs_otherwise(&chat["config"], &config) {
             // Sent with another agent, model or effort than the chat had (the
             // composer's pick, kept as a draft until now): the chat takes
@@ -2374,9 +2674,9 @@ impl View {
 
     /// A pending prompt that didn't go: failed, with the command that sends
     /// it again (none: it never got that far, and is sent again whole).
-    fn mark_failed(&self, message_id: &str, retry: Option<Json>) {
-        if let Some(open) = self.open.borrow_mut().as_mut()
-            && let Some(p) = open.pending.iter_mut().find(|p| p.id == message_id)
+    fn mark_failed(&self, id: &str, message_id: &str, retry: Option<Json>) {
+        if let Some(pending) = self.pending.borrow_mut().get_mut(id)
+            && let Some(p) = pending.iter_mut().find(|p| p.id == message_id)
         {
             p.waiting = "failed";
             p.retry = retry;
@@ -2384,12 +2684,22 @@ impl View {
         self.publish_messages();
     }
 
+    fn forget_pending(&self, id: &str, message_id: &str) {
+        let mut pending = self.pending.borrow_mut();
+        if let Some(prompts) = pending.get_mut(id) {
+            prompts.retain(|p| p.id != message_id);
+            if prompts.is_empty() {
+                pending.remove(id);
+            }
+        }
+    }
+
     async fn send_run(self: &Rc<Self>, chat: &str, message_id: &str, run: &Json) -> Result<(), Outcome> {
         self.set_refused(None);
         match queue_command(chat, run.clone()).await {
             Ok(command) => {
-                if let Some(open) = self.open.borrow_mut().as_mut()
-                    && let Some(p) = open.pending.iter_mut().find(|p| p.id == message_id)
+                if let Some(prompts) = self.pending.borrow_mut().get_mut(chat)
+                    && let Some(p) = prompts.iter_mut().find(|p| p.id == message_id)
                 {
                     p.command = Some(command);
                     p.retry = Some(run.clone());
@@ -2421,7 +2731,8 @@ impl View {
             let Some(open) = slot.as_mut() else { return };
             let rejections = std::mem::take(&mut open.rejections);
             let mut reason = None;
-            for p in open.pending.iter_mut().filter(|p| p.waiting == "sending") {
+            let mut pending = self.pending.borrow_mut();
+            for p in pending.get_mut(&open.id).into_iter().flatten().filter(|p| p.waiting == "sending") {
                 if let Some(why) = p.command.as_ref().and_then(|c| rejections.get(c)) {
                     p.waiting = "failed";
                     reason = Some(why.clone());
@@ -2459,11 +2770,11 @@ impl View {
         if chats.chat(chat).is_some_and(|c| chats.target(&c).is_some()) {
             return;
         }
-        let (me, message_id, run) = (Rc::downgrade(self), message_id.to_owned(), run.clone());
+        let (me, chat, message_id, run) = (Rc::downgrade(self), chat.to_owned(), message_id.to_owned(), run.clone());
         engine::get().spawn(async move {
             zgx::timer::sleep(std::time::Duration::from_secs_f64(SEND_GRACE_SECONDS)).await;
             if let Some(me) = me.upgrade() {
-                me.mark_failed(&message_id, Some(run));
+                me.mark_failed(&chat, &message_id, Some(run));
             }
         });
     }
@@ -2472,10 +2783,13 @@ impl View {
     async fn retry(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
         let id = args.field("id").map(text).unwrap_or_default();
         let message_id = args.field("message").map(text).unwrap_or_default();
+        if self.open_id().as_deref() != Some(&id) {
+            return Err("missing");
+        }
         let run = {
-            let mut slot = self.open.borrow_mut();
-            let open = slot.as_mut().filter(|o| o.id == id).ok_or("missing")?;
-            let p = open.pending.iter_mut().find(|p| p.id == message_id).ok_or("missing")?;
+            let mut pending = self.pending.borrow_mut();
+            let prompts = pending.get_mut(&id).ok_or("missing")?;
+            let p = prompts.iter_mut().find(|p| p.id == message_id).ok_or("missing")?;
             p.waiting = "sending";
             p.command = None;
             p.retry.clone()
@@ -2488,15 +2802,13 @@ impl View {
         let Some(run) = run else {
             // It never got as far as a run (an upload failed): the composer
             // has the words; the row goes.
-            if let Some(open) = self.open.borrow_mut().as_mut() {
-                open.pending.retain(|p| p.id != message_id);
-            }
+            self.forget_pending(&id, &message_id);
             self.publish_messages();
             return Err("failed");
         };
         let sent = self.send_run(&id, &message_id, &run).await;
         if sent.is_err() {
-            self.mark_failed(&message_id, Some(run));
+            self.mark_failed(&id, &message_id, Some(run));
         }
         self.publish_messages();
         sent
@@ -2579,7 +2891,20 @@ impl View {
         }
         self.publish_session();
         self.keep_lease(id, lease, answer["expiresAtMs"].as_f64());
-        Ok(Value::record([("text", Value::from(answer["text"].as_str().unwrap_or_default()))]))
+        // Its files too, as the composer's chips: already on the chat's
+        // host (they went with the message), so saving names them again
+        // rather than sending them up a second time.
+        let attachments: Vec<Value> = answer["attachments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Json::as_str)
+            .map(queued_attachment)
+            .collect();
+        Ok(Value::record([
+            ("text", Value::from(answer["text"].as_str().unwrap_or_default())),
+            ("attachments", Value::List(attachments.into())),
+        ]))
     }
 
     /// Renews the lease halfway to each expiry, while it is still held.
@@ -2640,11 +2965,31 @@ impl View {
             "leaseId": lease.lease,
             "action": action,
         });
+        let target = chats.target(&chat);
         if action == "commit" {
             params["text"] = json!(args.field("text").map(text).unwrap_or_default());
             params["expectedTextHash"] = lease.hash.clone();
+            // The files it carries now (the composer's chips): the ones it
+            // had by their paths on the host, any added sent up first. (None
+            // given: it keeps the ones it had.)
+            if let Some(list) = args.field("attachments") {
+                let mut paths = Vec::new();
+                for a in list.list() {
+                    let path = a.field("path").map(text).unwrap_or_default();
+                    if path.is_empty() {
+                        continue;
+                    }
+                    if a.field("on_host").is_some_and(Value::truthy) {
+                        paths.push(path);
+                        continue;
+                    }
+                    let name = a.field("name").map(text).unwrap_or_else(|| path.clone());
+                    paths.push(upload(&path, &name, target.as_deref()).await?);
+                }
+                params["attachments"] = json!(paths);
+            }
         }
-        if let Some(t) = chats.target(&chat) {
+        if let Some(t) = &target {
             params["targetDeviceId"] = json!(t);
         }
         let answer = engine::get()
@@ -2677,10 +3022,11 @@ impl View {
                 return None;
             }
             let shown = |e: &Entry| &*e.id == item.as_str();
-            if open.pending.iter().any(|p| p.id == item) || open.entries.iter().any(shown) {
+            let mut pending = self.pending.borrow_mut();
+            if pending.get(&id).is_some_and(|p| p.iter().any(|p| p.id == item)) || open.entries.iter().any(shown) {
                 return None;
             }
-            open.pending.push(Pending {
+            pending.entry(id.clone()).or_default().push(Pending {
                 id: item.clone(),
                 words: row["text"].as_str().unwrap_or_default().to_owned(),
                 paths: row_paths(&row),
@@ -2697,8 +3043,12 @@ impl View {
 
     fn unshow(&self, shown: &Option<String>) {
         let Some(item) = shown else { return };
-        if let Some(open) = self.open.borrow_mut().as_mut() {
-            open.pending.retain(|p| &p.id != item);
+        {
+            let mut pending = self.pending.borrow_mut();
+            for prompts in pending.values_mut() {
+                prompts.retain(|p| &p.id != item);
+            }
+            pending.retain(|_, prompts| !prompts.is_empty());
         }
         self.publish_messages();
     }
@@ -2730,18 +3080,17 @@ impl View {
         let rows = self.steer_all_rows(args)?;
         let (words, paths) = whole_of(&rows);
         let message_id = args.field("message_id").map(text).filter(|s| !s.is_empty())?;
-        if let Some(open) = self.open.borrow_mut().as_mut() {
-            open.pending.push(Pending {
-                id: message_id.clone(),
-                words,
-                paths,
-                waiting: "sending",
-                retry: None,
-                command: None,
-                at: stamp(now_seconds()),
-                alias: None,
-            });
-        }
+        let id = args.field("id").map(text).unwrap_or_default();
+        self.pending.borrow_mut().entry(id).or_default().push(Pending {
+            id: message_id.clone(),
+            words,
+            paths,
+            waiting: "sending",
+            retry: None,
+            command: None,
+            at: stamp(now_seconds()),
+            alias: None,
+        });
         self.publish_messages();
         Some(message_id)
     }
@@ -2786,8 +3135,8 @@ impl View {
             params["attachments"] = json!(paths);
         }
         let shows_whole = |alias: Option<String>| {
-            if let Some(open) = self.open.borrow_mut().as_mut()
-                && let Some(p) = open.pending.iter_mut().find(|p| Some(&p.id) == shown.as_ref())
+            if let Some(prompts) = self.pending.borrow_mut().get_mut(&id)
+                && let Some(p) = prompts.iter_mut().find(|p| Some(&p.id) == shown.as_ref())
             {
                 p.words = words.clone();
                 p.paths = paths.clone();
@@ -2800,7 +3149,7 @@ impl View {
                 // The rows are gone from the queue: the transcript's failed row holds their words, to send again.
                 shows_whole(None);
                 if let Some(item) = &shown {
-                    self.mark_failed(item, None);
+                    self.mark_failed(&id, item, None);
                 }
                 return Err(engine::outcome(&e));
             }
@@ -3133,6 +3482,32 @@ async fn stat_files(args: Value) -> Result<Value, Outcome> {
     ))
 }
 
+/// A queued message's file as the composer's chip: its path on the chat's
+/// host (or the `pending://` ref it travels by from another device), named
+/// as it was attached (an upload's id prefix off), a picture shown as one
+/// where it can be read.
+fn queued_attachment(path: &str) -> Value {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let name = match base.split_once('-') {
+        Some((id, rest)) if id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit()) && !rest.is_empty() => rest,
+        _ => base,
+    };
+    let lower = name.to_ascii_lowercase();
+    let image = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp", ".tiff"]
+        .iter()
+        .any(|e| lower.ends_with(e));
+    let mut fields = vec![
+        ("path", Value::from(path)),
+        ("name", Value::from(name)),
+        ("kind", Value::from(if image { "image" } else { "file" })),
+        ("on_host", Value::Bool(true)),
+    ];
+    if image && !path.starts_with("pending://") {
+        fields.push(("src", Value::from(path)));
+    }
+    Value::record(fields)
+}
+
 /// A command for a chat (`QueueCommand`): a run, an interrupt, an answer.
 /// `StopBackgroundTask` for `{ session, task }`, routed to the chat's host.
 async fn stop_task(args: Value) -> Result<Value, Outcome> {
@@ -3151,6 +3526,24 @@ async fn stop_task(args: Value) -> Result<Value, Outcome> {
         .await
         .map_err(|e| engine::outcome(&e))?;
     Ok(Value::Bool(answer["stopping"].as_bool() == Some(true)))
+}
+
+/// The person's Stop waiting for a chat (`StopWaiting`), routed to its host:
+/// what its agent said it waits on no longer holds it.
+async fn stop_waiting(id: String) -> Result<Value, Outcome> {
+    if id.is_empty() {
+        return Err("missing");
+    }
+    let chats = CHATS.with(Rc::clone);
+    let mut params = json!({ "chatId": id });
+    if let Some(t) = chats.chat(&id).and_then(|c| chats.target(&c)) {
+        params["targetDeviceId"] = json!(t);
+    }
+    let answer = engine::get()
+        .call("StopWaiting", params)
+        .await
+        .map_err(|e| engine::outcome(&e))?;
+    Ok(Value::Bool(answer["stopped"].as_bool() == Some(true)))
 }
 
 async fn command(chat: &str, command: Json) -> Result<(), Outcome> {
@@ -3810,7 +4203,7 @@ enum Change {
 /// The model's name a chat's replies carry, building them again if it's
 /// another now, and the device its visuals are read from (the chat's host,
 /// when it isn't this one).
-fn build_context(open: &mut Open, chats: &Chats) -> (Option<String>, Option<String>) {
+fn build_context(open: &mut Open, chats: &Chats) -> Rc<RowContext> {
     let chat = chats.chat(&open.id).unwrap_or(Json::Null);
     let harness = chat["config"]["harness"].as_str().unwrap_or("claude-code").to_owned();
     let model = chat["config"]["model"].as_str().map(|m| chats.label_of(&harness, m).unwrap_or_else(|| m.to_owned()));
@@ -3824,9 +4217,17 @@ fn build_context(open: &mut Open, chats: &Chats) -> (Option<String>, Option<Stri
         }
         open.built_model = Some(model.clone());
     }
-    let target = chats.target(&chat);
-    code_links::set_root(chat["cwd"].as_str(), target.is_none());
-    (model, target)
+    let device = chats.target(&chat);
+    let cwd = chat["cwd"].as_str().map(str::to_owned);
+    code_links::set_root(cwd.as_deref(), device.is_none());
+    match &open.row_context {
+        Some(context) if context.doc == open.id && context.device == device && context.model == model && context.cwd == cwd => context.clone(),
+        _ => {
+            let context = Rc::new(RowContext { doc: open.id.clone(), device, model, cwd });
+            open.row_context = Some(context.clone());
+            context
+        }
+    }
 }
 
 /// An entry as its row reads it.
@@ -3853,6 +4254,30 @@ fn latest_todo<'a>(newest_first: impl Iterator<Item = &'a Json>) -> Option<&'a J
     newest_first
         .flat_map(|e| e["parts"].as_array().into_iter().flatten().rev())
         .find(|p| p["kind"].as_str() == Some("tool") && p["call"]["kind"].as_str() == Some("todo"))
+}
+
+/// What the worker made of an entry, kept: its row folded, as `built_for` and
+/// `settle` would have left it.
+fn settle_off(open: &mut Open, folded: FoldedOff, context: &Rc<RowContext>) {
+    let FoldedOff { at, id, bytes, subagents, sum, todo } = folded;
+    // (Where it stood, unless a frame has moved it. Gone: nothing to keep.)
+    let Open { entries, built, older_todo, .. } = open;
+    let found = entries.get(at).filter(|e| *e.id == *id).map(|_| at).or_else(|| entries.iter().position(|e| *e.id == *id));
+    let Some(place) = found else { return };
+    let entry = &mut entries[place];
+    // (A newer copy came meanwhile: it's built from that.)
+    if entry.json.is_some() {
+        return;
+    }
+    entry.sum = sum;
+    if let Some(part) = todo
+        && older_todo.as_ref().is_none_or(|(kept, _)| *kept < place)
+    {
+        *older_todo = Some((place, part));
+    }
+    let row = bytes.map(|bytes| Value::folded(entry.id.clone(), FoldedEntry { bytes, context: context.clone() }));
+    let subagents = (!subagents.is_empty()).then(|| subagents.iter().map(SubagentOff::value).collect());
+    built.insert(entry.id.clone(), Built { row, subagents });
 }
 
 /// `entry`, built, down to its id and sum; a plan in it is kept (`todos`).
@@ -3950,7 +4375,7 @@ fn by_id(entries: &[Entry]) -> HashMap<&str, &Entry> {
 }
 
 /// `built` less what a reset changed: only the entries it has as they were.
-fn keep_unchanged(built: &mut HashMap<Rc<str>, Option<Value>>, before: &[Entry], now: &[Entry]) {
+fn keep_unchanged(built: &mut HashMap<Rc<str>, Built>, before: &[Entry], now: &[Entry]) {
     if built.is_empty() {
         return;
     }
@@ -3966,7 +4391,7 @@ fn keep_unchanged(built: &mut HashMap<Rc<str>, Option<Value>>, before: &[Entry],
 fn reuse_built(
     open: &mut Open,
     entries: &[Entry],
-    built: &HashMap<Rc<str>, Option<Value>>,
+    built: &HashMap<Rc<str>, Built>,
     built_model: &Option<Option<String>>,
 ) {
     if built_model.is_none() || (open.built_model.is_some() && open.built_model != *built_model) {
@@ -4131,22 +4556,64 @@ fn entry_text(entry: &Json) -> String {
 
 /// A transcript's subagents: each spawn that names its doc, once, in the order they
 /// were spawned, with when their turn began (a message's `tools` hold all of its).
-fn subagents_of(messages: &[Value]) -> Value {
-    let prompt = messages.iter().rposition(|m| matches!(m.field("role"), Some(Value::Str(r)) if &**r == "user") && matches!(m.field("answers"), None | Some(Value::Nil)));
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for (at, message) in messages.iter().enumerate() {
-        let Some(Value::List(tools)) = message.field("tools") else { continue };
-        for tool in tools.iter() {
-            let Some(sub) = tool.field("subagent") else { continue };
-            let Some(Value::Str(reference)) = sub.field("ref") else { continue };
-            if seen.insert(reference.clone()) {
-                let started = message.field("started").cloned().unwrap_or(Value::Nil);
-                out.push(pills::subagent_row(sub, tool, started, prompt.is_none_or(|p| at >= p)));
+fn subagents_in(message: &Value) -> Option<Rc<[Value]>> {
+    let Some(Value::List(tools)) = message.field("tools") else { return None };
+    let started = message.field("started").cloned().unwrap_or(Value::Nil);
+    let found: Vec<Value> = tools
+        .iter()
+        .filter_map(|tool| {
+            let sub = tool.field("subagent")?;
+            sub.field("ref").filter(|r| matches!(r, Value::Str(_)))?;
+            Some(pills::subagent_row(sub, tool, started.clone(), true))
+        })
+        .collect();
+    (!found.is_empty()).then(|| found.into())
+}
+
+/// A transcript's subagents as its rows are added, each once, in order; those
+/// spawned before its latest prompt aren't `recent`.
+#[derive(Default)]
+struct Subagents(Vec<Value>, std::collections::HashSet<Rc<str>>, usize);
+
+impl Subagents {
+    fn add(&mut self, found: Option<&[Value]>) {
+        for sub in found.into_iter().flatten() {
+            if let Some(Value::Str(reference)) = sub.field("ref")
+                && self.1.insert(reference.clone())
+            {
+                self.0.push(sub.clone());
             }
         }
     }
-    Value::List(out.into())
+
+    fn row(&mut self, row: &Value) {
+        if is_prompt(row) {
+            self.2 = self.0.len();
+        }
+    }
+
+    fn rows(self) -> Vec<Value> {
+        let Subagents(rows, _, recent_from) = self;
+        rows.into_iter()
+            .enumerate()
+            .map(|(at, row)| if at < recent_from { with_fields(row, [("recent", Value::Bool(false))]) } else { row })
+            .collect()
+    }
+}
+
+/// A prompt of the person's (not a question's answers). A folded row never is
+/// one (`kept_whole`), and isn't opened to tell.
+fn is_prompt(row: &Value) -> bool {
+    !matches!(row, Value::Folded(_))
+        && matches!(row.field("role"), Some(Value::Str(r)) if &**r == "user")
+        && matches!(row.field("answers"), None | Some(Value::Nil))
+}
+
+/// An entry whose row each publish reads (the prompts, `merge_compaction_rows`'
+/// lines): never folded, so reading it never opens one.
+fn kept_whole(entry: &Json) -> bool {
+    entry["role"].as_str() == Some("user")
+        || entry["parts"].as_array().into_iter().flatten().any(|p| matches!(p["kind"].as_str(), Some("classifier" | "compaction")))
 }
 
 fn resumed_row(id: &str) -> Value {
@@ -4522,7 +4989,8 @@ fn kept_value(r: &Json) -> Value {
 
 /// A compaction folds into the decision right before it, past the messages sent meanwhile (gpui's `merge_compaction_rows`).
 fn merge_compaction_rows(list: &mut Vec<Value>) {
-    let field = |v: &Value, k: &str| v.field(k).map(crate::auth::text).unwrap_or_default();
+    // (A folded row is neither a prompt nor one of these lines, `kept_whole`: it isn't opened.)
+    let field = |v: &Value, k: &str| if matches!(v, Value::Folded(_)) { String::new() } else { v.field(k).map(crate::auth::text).unwrap_or_default() };
     let mut ix = 0;
     while ix + 1 < list.len() {
         let next = (ix + 1..list.len()).find(|&at| field(&list[at], "role") != "user");
@@ -6095,7 +6563,7 @@ fn ask_value(part: &Json, answered: usize) -> Option<Value> {
     ]))
 }
 
-fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
+fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool) -> Value {
     let chat = chats.chat(&open.id);
     // Ready once its transcript has come and the chat itself (its config)
     // is known: the composer takes its model from it.
@@ -6130,7 +6598,6 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     let live = chats.running(&open.id);
     let tasks = background_tasks(&session);
     let steers = chats.steers_mid_turn(harness, chats.target(&chat).as_deref());
-    let sending = open.pending.iter().any(|p| p.waiting == "sending");
     if live {
         open.awaiting_turn.set(None);
     }
@@ -6184,7 +6651,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         // session is published, never as the draft is typed).
         ("profile", crate::agent_profiles::applied(config)),
         ("running", Value::Bool(live)),
-        ("in_flight", Value::Bool(chats.turn_in_flight(open))),
+        ("in_flight", Value::Bool(chats.turn_in_flight(open, sending))),
         ("steers", steers.map_or(Value::Nil, Value::Bool)),
         ("stopped", Value::Bool(stopped)),
         ("compacting", Value::Bool(chats.chat_compacting(&open.id))),
@@ -6611,7 +7078,31 @@ fn base64(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[path = "chat_pending_tests.rs"]
+mod pending_tests;
+
+#[cfg(test)]
 mod tests {
+    /// A queued message's files come back to an edit as chips named as they
+    /// were attached, already on the host, a picture shown where it can be.
+    #[test]
+    fn a_queued_file_is_a_chip_named_as_it_was_attached() {
+        let chip = super::queued_attachment("/data/uploads/9e97a72f-shot.png");
+        assert_eq!(chip.field("name"), Some(&Value::from("shot.png")));
+        assert_eq!(chip.field("kind"), Some(&Value::from("image")));
+        assert_eq!(chip.field("on_host"), Some(&Value::Bool(true)));
+        assert_eq!(chip.field("src"), Some(&Value::from("/data/uploads/9e97a72f-shot.png")));
+        let file = super::queued_attachment("/repo/notes/design-notes.txt");
+        assert_eq!(file.field("name"), Some(&Value::from("design-notes.txt")), "only an upload's id prefix goes");
+        assert_eq!(file.field("kind"), Some(&Value::from("file")));
+        assert_eq!(file.field("src"), None);
+        let remote = super::queued_attachment("pending://up-1/photo.jpg");
+        assert_eq!(remote.field("name"), Some(&Value::from("photo.jpg")));
+        assert_eq!(remote.field("kind"), Some(&Value::from("image")));
+        assert_eq!(remote.field("src"), None, "nothing here to show yet");
+        assert_eq!(remote.field("path"), Some(&Value::from("pending://up-1/photo.jpg")));
+    }
+
     #[test]
     fn a_queued_row_is_steered_unless_it_carries_files() {
         assert_eq!(queue_send_method(false), "SteerQueuedMessageNow");
@@ -6686,8 +7177,8 @@ mod tests {
 
     #[test]
     fn a_reset_keeps_what_it_left_as_it_was() {
-        let built_of = |ids: &[&str]| -> std::collections::HashMap<Rc<str>, Option<zgx_script::Value>> {
-            ids.iter().map(|id| (Rc::from(*id), None)).collect()
+        let built_of = |ids: &[&str]| -> std::collections::HashMap<Rc<str>, super::Built> {
+            ids.iter().map(|id| (Rc::from(*id), super::Built::default())).collect()
         };
         let mut before: Vec<super::Entry> = [
             serde_json::json!({ "id": "a", "text": "same" }),
@@ -6736,6 +7227,67 @@ mod tests {
         let mut entries = open.entries;
         let mut words = serde_json::json!({ "append": [{ "entry": "first", "part": "p", "text": "x", "len": 1 }] });
         assert!(super::apply(&mut entries, &mut words).is_err());
+    }
+
+    /// The worker's fold, kept, is what folding here keeps.
+    #[test]
+    fn the_worker_folds_as_the_window_would() {
+        let entry = serde_json::json!({
+            "id": "e1", "role": "assistant", "status": "complete", "createdAt": 1000.0,
+            "parts": [
+                { "id": "t", "kind": "text", "text": "Some words" },
+                { "id": "k", "kind": "tool", "subagentRef": "doc--sub--1", "subagentStatus": "done",
+                  "call": { "kind": "mcp", "tool": "Agent: look", "server": "s" } },
+            ],
+        });
+        let context = Rc::new(super::RowContext { doc: "chat".into(), device: None, model: Some("Opus".into()), cwd: None });
+        let here = super::built_for(&entry, &context, true);
+        let folding = super::folding(vec![(0, "e1".into(), entry.clone())], &context);
+        let folded = folding.results.recv().unwrap().pop().unwrap();
+        let mut open = super::Open { entries: vec![super::Entry::new(entry.clone())], ..super::Open::default() };
+        open.entries[0].json = None;
+        super::settle_off(&mut open, folded, &context);
+        let there = open.built.get("e1").expect("kept");
+        assert_eq!(there.row.as_ref().unwrap().to_json(), here.row.as_ref().unwrap().to_json());
+        assert_eq!(there.subagents.as_ref().map(|s| s[0].to_json()), here.subagents.as_ref().map(|s| s[0].to_json()));
+        assert_eq!(open.entries[0].sum, super::sum_of(&entry));
+    }
+
+    /// A row out of view holds what makes it, not itself: what it opens to is
+    /// the row it would have been, and a row with subagents still lists them.
+    #[test]
+    fn a_folded_row_opens_to_the_row_it_was() {
+        let entry = serde_json::json!({
+            "id": "e1", "role": "assistant", "status": "complete", "createdAt": 1000.0,
+            "parts": [
+                { "id": "t", "kind": "text", "text": "Some words ".repeat(200) },
+                { "id": "k", "kind": "tool", "subagentRef": "doc--sub--1", "subagentStatus": "done",
+                  "call": { "kind": "mcp", "tool": "Agent: look", "server": "s" } },
+            ],
+        });
+        let context = Rc::new(super::RowContext { doc: "chat".into(), device: None, model: Some("Opus".into()), cwd: None });
+        let whole = super::built_for(&entry, &context, false);
+        let folded = super::built_for(&entry, &context, true);
+        let Some(Value::Folded(_)) = folded.row else { panic!("folded") };
+        let (whole_row, folded_row) = (whole.row.unwrap(), folded.row.unwrap());
+        // What a script gets, and what it reads of it.
+        assert_eq!(folded_row.to_json(), whole_row.to_json());
+        assert_eq!(folded_row.field("id").map(text).as_deref(), Some("e1"));
+        assert_eq!(folded.subagents.as_deref().map(<[Value]>::len), Some(1));
+        assert_eq!(folded.subagents, whole.subagents);
+        // It's kept small: words that repeat, a good deal less than they are.
+        let streaming = serde_json::json!({ "id": "e2", "role": "assistant", "status": "streaming", "parts": [] });
+        assert!(!matches!(super::built_for(&streaming, &context, true).row, Some(Value::Folded(_))), "still being written");
+    }
+
+    #[test]
+    fn what_a_kept_compressor_compresses_opens_again() {
+        let long = "words that repeat ".repeat(4000);
+        for input in [long.as_bytes(), b"short", b""] {
+            let out = super::compressed(input);
+            assert_eq!(miniz_oxide::inflate::decompress_to_vec(&out).unwrap(), input);
+        }
+        assert!(super::compressed(long.as_bytes()).len() < long.len() / 10);
     }
 
     #[test]
@@ -6805,8 +7357,8 @@ mod tests {
             .collect(),
             ..super::Open::default()
         };
-        let theirs: std::collections::HashMap<Rc<str>, Option<zgx_script::Value>> =
-            [(Rc::from("a"), None), (Rc::from("b"), None)].into_iter().collect();
+        let theirs: std::collections::HashMap<Rc<str>, super::Built> =
+            [(Rc::from("a"), super::Built::default()), (Rc::from("b"), super::Built::default())].into_iter().collect();
         // (Built for another model's name: none of it.)
         open.built_model = Some(Some("mine".into()));
         super::reuse_built(&mut open, &entries, &theirs, &Some(Some("theirs".into())));
@@ -7608,7 +8160,11 @@ mod tests {
             Value::record([("role", Value::from("user"))]),
             message(2., vec![tool("a", "again"), tool("b", "second")]),
         ];
-        let Value::List(found) = subagents_of(&list) else { panic!("a list") };
+        let mut seen = Subagents::default();
+        for message in &list {
+            seen.add(subagents_in(message).as_deref());
+        }
+        let found = seen.0;
         let refs: Vec<String> = found.iter().map(|s| s.field("ref").map(text).unwrap_or_default()).collect();
         assert_eq!(refs, ["a", "b"]);
         assert_eq!(found[0].field("title").map(text).as_deref(), Some("first"));
@@ -7643,8 +8199,12 @@ mod tests {
             user("u3", Some("r1")),
             spawn("a3", "after-answer", "done"),
         ];
-        let list: Vec<Value> = entries.iter().filter_map(|e| message(e, None)).collect();
-        let Value::List(found) = subagents_of(&list) else { panic!("a list") };
+        let mut seen = Subagents::default();
+        for row in entries.iter().filter_map(|e| message(e, None)) {
+            seen.row(&row);
+            seen.add(subagents_in(&row).as_deref());
+        }
+        let found = seen.rows();
         let recent: Vec<(String, bool)> = found
             .iter()
             .map(|s| (s.field("ref").map(text).unwrap_or_default(), matches!(s.field("recent"), Some(Value::Bool(true)))))
@@ -8309,7 +8869,7 @@ mod tests {
         let chats = Chats::default();
         chats.chats.borrow_mut().insert("c".to_owned(), json!({ "id": "c", "config": config("claude-code", json!({ "autoCompact": "400k" })) }));
         let open = Open { id: "c".to_owned(), context_usage: (Some(100_000.), Some(1_000_000.)), ..Open::default() };
-        let v = session_value(&chats, &open, false);
+        let v = session_value(&chats, &open, false, false);
         assert_eq!(v.field("context_window").and_then(Value::as_f64), Some(400_000.));
         assert_eq!(v.field("context").and_then(Value::as_f64), Some(0.25));
     }
@@ -8359,6 +8919,7 @@ mod tests {
                     on_screen: Cell::new(true),
                     rpc: RefCell::default(),
                     open: RefCell::default(),
+                    pending: RefCell::default(),
                     generation: Cell::new(0),
                     snapshot: Cell::new(false),
                     predicts: false,
@@ -8429,18 +8990,16 @@ mod tests {
     fn the_chips_refreshing_follows_gpuis_turn_in_flight() {
         let chats = Chats::default();
         let row = |status: &str, held: bool| json!({ "status": status, "heldBySubagents": held, "updatedAt": now_seconds() * 1000 });
-        let mut open = Open { id: "c".to_owned(), ..Open::default() };
-        let in_flight = |chats: &Chats, open: &Open| chats.turn_in_flight(open);
-        assert!(!in_flight(&chats, &open));
+        let open = Open { id: "c".to_owned(), ..Open::default() };
+        let in_flight = |chats: &Chats, open: &Open, sending: bool| chats.turn_in_flight(open, sending);
+        assert!(!in_flight(&chats, &open, false));
         chats.sessions.borrow_mut().insert("c".to_owned(), row("working", false));
-        assert!(in_flight(&chats, &open));
+        assert!(in_flight(&chats, &open, false));
         chats.sessions.borrow_mut().insert("c".to_owned(), row("working", true));
-        assert!(!in_flight(&chats, &open));
-        open.pending.push(Pending { id: "m".to_owned(), words: String::new(), paths: Vec::new(), waiting: "sending", retry: None, command: None, at: None, alias: None });
-        assert!(in_flight(&chats, &open));
-        open.pending[0].waiting = "failed";
+        assert!(!in_flight(&chats, &open, false));
+        assert!(in_flight(&chats, &open, true));
         chats.sessions.borrow_mut().insert("c".to_owned(), row("idle", false));
-        assert!(!in_flight(&chats, &open));
+        assert!(!in_flight(&chats, &open, false));
     }
 
     #[test]
@@ -8459,6 +9018,7 @@ mod tests {
                 on_screen: Cell::new(true),
                 rpc: RefCell::default(),
                 open: RefCell::default(),
+                pending: RefCell::default(),
                 generation: Cell::new(0),
                 snapshot: Cell::new(false),
                 predicts: false,

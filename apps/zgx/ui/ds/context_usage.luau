@@ -12,6 +12,8 @@
 
 local locale = require("@self/locale")
 local Menu = require("@self/menu")
+local HoverCard = require("@self/hover_card")
+local progress = require("@self/progress")
 
 export type Usage = { tokens: number?, window: number? }
 
@@ -117,6 +119,93 @@ function M.Body(props: { usage: () -> Usage?, more: Node? }): Node
 		},
 		-- (The compaction's part, under the numbers: ds/compaction's CardPart.)
 		props.more,
+	}
+end
+
+local function tone(f: number): progress.Tone
+	return if f >= 0.9 then "danger" elseif f >= 0.75 then "warning" else "neutral"
+end
+
+function M.Card(props: { usage: () -> Usage? }): Node
+	local usage = props.usage
+	local function fraction(): number?
+		return M.fraction(usage())
+	end
+	local function known(): boolean
+		return fraction() ~= nil
+	end
+	return HoverCard.Card {
+		id = "composer-context-card",
+		w = 248,
+		p = "$space.1",
+		gap = 0,
+		ui.row {
+			h = "$zeron.menu.heading",
+			px = "$space.2",
+			gap = "$space.2",
+			items = "center",
+			ui.text {
+				locale.t("ds.composer.context.heading"),
+				grow = 1,
+				text_size = "$font.size.xs",
+				weight = "$font.weight.medium",
+				color = "$text.tertiary",
+			},
+			ui.show(known, ui.text {
+				function(): string
+					return locale.s("ds.composer.context.percent", { n = math.floor((fraction() or 0) * 100 + 0.5) })
+				end,
+				tabular = true,
+				text_size = "$font.size.xs",
+				weight = "$font.weight.medium",
+				color = function(): string
+					return M.ink(fraction() or 0)
+				end,
+			}),
+		},
+		ui.column {
+			px = "$space.2",
+			pt = "$space.1",
+			pb = "$space.2",
+			gap = "$space.2",
+			ui.show(known, progress.ProgressBar {
+				value = fraction,
+				size = "thin",
+				w_full = true,
+				label = locale.t("ds.composer.context.heading"),
+				tone = function(): progress.Tone
+					return tone(fraction() or 0)
+				end,
+			}),
+			ui.column {
+				gap = "$zeron.space.hair",
+				ui.text {
+					function(): string
+						return (M.lines(usage()))
+					end,
+					id = "composer-context-used",
+					tabular = true,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					weight = "$font.weight.medium",
+					color = "$text.primary",
+				},
+				ui.show(function(): boolean
+					local _, second = M.lines(usage())
+					return second ~= nil
+				end, ui.text {
+					function(): string
+						local _, second = M.lines(usage())
+						return second or ""
+					end,
+					id = "composer-context-left",
+					tabular = true,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.tertiary",
+				}),
+			},
+		},
 	}
 end
 

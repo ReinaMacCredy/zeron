@@ -1,325 +1,158 @@
+-- What a chat's composer offers as `@`, `/` and `$` are typed, for whichever
+-- composer shows that chat (the chat page's, a side chat's): the files of where
+-- it works, the agent's commands and skills, then Zeron's own.
+--
+--   local c = Completions.bind { key, text, agent, target, files, in_chat, run }
+--   ds.Composer { mentions = c.lists, on_mention = c.on_mention,
+--     mention_enabled = c.enabled, mention_empty = c.empty }
+--   c.command_of(draft)   the Zeron command a whole draft is, if any
+--
+-- `key` names what it keeps (so a reload reads nothing again), `text` is the
+-- draft, `agent` the harness its model runs on, `target` where its commands and
+-- skills are read (`{ chat, device }`, or a new chat's `{ space, device }`),
+-- `files` where `@` searches, `in_chat` whether the chat is made yet, and `run`
+-- runs one of Zeron's commands.
+
+local files = require("@app/screens/files/api")
+local mentions = require("@ds/composer_mentions")
+local prefs = require("@app/screens/settings/prefs")
 local Invocations = require("@app/screens/chat/invocations")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
-local prefs = require("@app/screens/settings/prefs")
-local files = require("@app/screens/files/api")
-local sessions = require("@account/sessions")
-local tasks_store = require("@app/screens/tasks/store")
-local locale = require("@ds/locale")
 
 local M = {}
 
-local SEARCH_DEBOUNCE, SEARCH_RETRY, PREFETCH_DELAY = 80, 250, 400
-
 export type Bind = {
-	-- (Names what it keeps: a reload reads nothing again, two composers keep apart.)
-	key: string?,
+	key: string,
+	text: State<string>,
 	agent: () -> string?,
 	target: () -> Invocations.Target?,
+	files: () -> any?,
 	in_chat: () -> boolean,
-	attachments: (() -> { any })?,
+	run: (name: string) -> (),
 }
 
-local function search_words(why: string?): string
-	local said = string.lower(why or "")
-	if why == "offline" then
-		return ui.t("chat.invocations.unreachable"):get()
-	elseif string.find(said, "unknown method", 1, true) or string.find(said, "update zeron", 1, true) then
-		return ui.t("chat.completions.search_outdated"):get()
-	end
-	return ui.t("chat.completions.search_failed"):get()
-end
-
--- At most this many threads at once (Zeron's THREAD_MENTION_LIMIT).
-M.THREAD_LIMIT = 6
-
--- The shipping app's `thread_matches`.
-function M.thread_items(chats: { any }, query: string, scope: { device: string?, project: string?, exclude: string? }, projects: { [string]: string }): { any }
-	local q = string.lower(string.match(query or "", "^%s*(.-)%s*$") or "")
-	local own, other = {}, {}
-	for _, c in chats do
-		if c.id ~= scope.exclude and (scope.device == nil or c.device == scope.device) then
-			local title = string.match(string.gsub(c.title or "", "%s+", " "), "^%s*(.-)%s*$") or ""
-			if title == "" then
-				title = ui.t("chat.completions.new_session"):get()
-			end
-			if q == "" or string.find(string.lower(title), q, 1, true) or string.sub(string.lower(c.id), 1, #q) == q then
-				table.insert(if c.project == scope.project then own else other, { c = c, title = title })
-			end
-		end
-	end
-	for _, x in other do
-		table.insert(own, x)
-	end
-	local out: { any } = {}
-	for i, x in own do
-		if i > M.THREAD_LIMIT then
-			break
-		end
-		local c = x.c
-		table.insert(out, {
-			value = `thread:{c.id}`,
-			key = `thread-{c.id}`,
-			label = x.title,
-			detail = if c.project then projects[c.project] else nil,
-			consume = true,
-			thread = { id = c.id, mark = c.mark or c.agent, icon = c.agent_icon, status = c.status },
-		})
-	end
-	return out
-end
-
--- The shipping app's `task_matches`: open tasks, this project's first, five
--- with no query; with one, or scoped (`@task …`), eight, done ones after.
-M.TASK_LIMIT, M.TASK_IDLE_LIMIT = 8, 5
-local TASK_COLUMNS = { todo = "tasks.column.todo", working = "tasks.column.working", needs = "tasks.column.needs", done = "tasks.column.done" }
-local TASK_GLYPHS = { todo = "check-circle", working = "refresh", needs = "danger-triangle", done = "check" }
-function M.task_items(query: string, project: string?, scoped: boolean): { any }
-	local tasks = tasks_store
-	local q = string.lower(string.match(query or "", "^%s*(.-)%s*$") or "")
-	local p = tasks.parts:get()
-	local function pick(list: { any }): { any }
-		local own, other = {}, {}
-		for _, t in list do
-			if q == "" or string.find(string.lower(tasks.plain(t.title)), q, 1, true) then
-				table.insert(if t.project == project then own else other, t)
-			end
-		end
-		for _, t in other do
-			table.insert(own, t)
-		end
-		return own
-	end
-	local found = pick(p.open)
-	local limit = M.TASK_LIMIT
-	if q == "" and not scoped then
-		limit = M.TASK_IDLE_LIMIT
-	else
-		for _, t in pick(p.done) do
-			table.insert(found, t)
-		end
-	end
-	local out: { any } = {}
-	for i, t in found do
-		if i > limit then
-			break
-		end
-		local title = tasks.title_of(t)
-		local column = tasks.state(t).column
-		local where = tasks.project_name(t.project) or locale.s("tasks.no_project")
-		local escaped = string.gsub(title, "([%[%]\\])", "\\%1")
-		table.insert(out, {
-			value = `task:{t.id}`,
-			key = `task-{t.id}`,
-			label = title,
-			detail = if column == "todo" then where else `{locale.s(TASK_COLUMNS[column])} · {where}`,
-			icon = TASK_GLYPHS[column],
-			task_link = `[{escaped}](zeron-task:{t.id})`,
-		})
-	end
-	return out
-end
-
 function M.bind(b: Bind): { [string]: any }
-	local kept = b.key or "chat"
-	local results = ui.state(`{kept}_mention_results`, nil :: { any }?)
-	local search_failed = ui.state(`{kept}_mention_failed`, nil :: string?)
-	local searched = ui.state(`{kept}_mention_searched`, nil :: string?)
-	local read_open = ui.state(`{kept}_invocations_open`, nil :: string?)
-	local warmed = ui.state(`{kept}_invocations_warmed`, nil :: string?)
-	-- (Told by ds/composer_mentions: the caret's token, which a draft's end alone wouldn't say.)
-	local token = ui.state(`{kept}_mention_token`, nil :: any)
-
+	-- What `@` offers: the files of where it works, searched as the mention is
+	-- typed. (`/` and `$` come from the catalog, below.)
+	local sources = ui.state(`{b.key}_mentions`, { ["/"] = {}, ["$"] = {} } :: any)
 	local function invocation_key(): string?
 		return Invocations.key(b.agent(), b.target())
 	end
-
-	-- (This device's only: the prompt runs and reads where it is.)
-	local function threads(): { any }?
-		local t = token:get()
-		if not t or t.trigger ~= "@" then
-			return nil
-		end
-		local place = b.target()
-		local now = sessions.now:get()
-		local here_chat = if place then place.chat else nil
-		local device = if place then place.device else nil
-		local project = if place then place.space else nil
-		if here_chat then
-			for _, c in now.chats do
-				if c.id == here_chat then
-					device = device or c.device
-					project = project or c.project
-				end
-			end
-		end
-		device = device or now.here
-		local names: { [string]: string } = {}
-		for _, p in now.projects or {} do
-			names[p.id] = p.name
-		end
-		return M.thread_items(now.chats, t.query, { device = device, project = project, exclude = here_chat }, names)
-	end
-
 	local lists = ui.computed(function(): any
-		-- (No project chosen: nowhere to search, and nothing that could come.)
-		local nowhere = b.target() == nil
-		local given: { [string]: any } = { ["@"] = if nowhere then {} else results:get() }
-		given.threads = threads()
-		local t = token:get()
-		if t and t.trigger == "@" then
-			local place = b.target()
-			local scoped = string.lower(string.sub(t.query, 1, 5)) == "task "
-			given.tasks = M.task_items(if scoped then string.sub(t.query, 6) else t.query, if place then place.space else nil, scoped)
-		end
-		if b.attachments then
-			given.attachments = b.attachments()
-		end
-		local agent = b.agent()
+		local given = table.clone(sources:get())
+		-- `/` the agent's commands, `$` its skills (nil while they come).
 		local catalog = Invocations.catalog(invocation_key())
-		local commands = Invocations.items(catalog, "command")
-		local skills = Invocations.items(catalog, "skill")
-		given["$"] = if nowhere then {} else skills
-		-- No agent to ask, or nowhere to ask it about: Zeron's own alone. Its list still coming: nil.
-		if agent == nil or nowhere then
-			commands = {}
-		elseif commands == nil then
+		given["/"] = Invocations.items(catalog, "command")
+		given["$"] = Invocations.items(catalog, "skill")
+		-- No agent to ask: Zeron's own alone. Its list still coming: nil.
+		if b.agent() == nil then
+			given["/"] = {}
+		elseif given["/"] == nil then
 			return given
 		end
-		local slash = table.clone(commands)
+		local slash = table.clone(given["/"] or {})
 		local taken: { [string]: boolean } = {}
 		for _, c in slash do
 			taken[c.value] = true
 		end
-		if not prefs.completion(agent).separate then
-			for _, skill in skills or {} do
+		if not prefs.completion(b.agent()).separate then
+			for _, skill in given["$"] or {} do
 				table.insert(slash, skill)
 			end
 		end
+		-- Then Zeron's own (named clear of the agent's).
 		for _, row in ZeronCommands.rows(taken, b.in_chat()) do
 			table.insert(slash, row)
 		end
 		given["/"] = slash
 		return given
 	end)
-
+	-- A `/` or `$` opening afresh reads the agent's list again (the last one
+	-- showing meanwhile), as does another agent or place while it's open. Kept,
+	-- so a reload with it open reads nothing.
+	local invocations_open = ui.state(`{b.key}_invocations_open`, nil :: string?)
 	ui.effect(function()
-		local t = token:get()
-		local key = if t and t.trigger ~= "@" then invocation_key() else nil
-		if key == read_open:peek() then
+		local text = b.text:get()
+		local t = mentions.token(text, #text)
+		local wanted = t ~= nil and (t.trigger == "/" or (t.trigger == "$" and prefs.completion(b.agent()).dollar))
+		local key = if wanted then invocation_key() else nil
+		if key == invocations_open:peek() then
 			return
 		end
-		read_open:set(key)
-		local agent, target = b.agent(), b.target()
-		if key and agent and target then
-			warmed:set(key)
-			Invocations.load(agent, target)
+		invocations_open:set(key)
+		local harness, target = b.agent(), b.target()
+		if key and harness and target then
+			Invocations.load(harness, target)
 		end
 	end)
-	-- (The timer goes with this effect's run: clicking through chats replaces it unread.)
+	-- What was last searched for: kept, so a reload doesn't search again.
+	local searched = ui.state(`{b.key}_mention_searched`, nil :: string?)
 	ui.effect(function()
-		local key = invocation_key()
-		if not key or key == warmed:peek() or token:get() ~= nil then
-			return
-		end
-		ui.after(PREFETCH_DELAY, function()
-			warmed:set(key)
-			local agent, target = b.agent(), b.target()
-			if agent and target and Invocations.key(agent, target) == key then
-				Invocations.load(agent, target)
-			end
-		end)
-	end)
-
-	local search_round = 0
-	ui.effect(function()
-		local t = token:get()
+		local text = b.text:get()
+		local t = mentions.token(text, #text)
 		if not t or t.trigger ~= "@" then
-			if searched:peek() ~= nil then
-				search_round += 1
-				searched:set(nil)
-				results:set(nil)
-				search_failed:set(nil)
-			end
 			return
 		end
-		local place = b.target()
-		if not place then
+		local target: any = b.files()
+		if not target then
 			return
 		end
-		local key = `{place.chat or place.space or ""}:{t.query}`
+		local key = `{target.chat or target.space or ""}:{t.query}`
 		if key == searched:peek() then
 			return
 		end
-		local where: any = if place.chat then { chat = place.chat } else { space = place.space, device = place.device }
-		local query = t.query
-		-- (The run before's timer went as this one began. Written once it
-		-- searches, so a run that stopped it first doesn't count as searched.)
-		ui.after(SEARCH_DEBOUNCE, function()
+		-- (The run before's timer went as this one began: an effect's run owns
+		-- what it makes. Written once it searches, so a run that stopped it
+		-- before then doesn't count it as searched.)
+		ui.after(120, function()
 			searched:set(key)
-			search_failed:set(nil)
-			search_round += 1
-			local round = search_round
-			local function attempt(may_retry: boolean)
-				files.search(where, query):after(function(found: any)
-					if round ~= search_round then
-						return
-					end
-					local items = {}
-					for _, f in found or {} do
-						table.insert(items, {
-							value = f.path,
-							label = string.match(f.path, "([^/]+)/?$") or f.path,
-							detail = string.match(f.path, "^(.*)/[^/]+/?$"),
-							file = not f.dir,
-							dir = f.dir,
-							searched = true,
-							query = query,
-							link = require("@app/screens/chat/shared").file_link(f.path, f.dir),
-						})
-					end
-					results:set(items)
-				end, function(err: any)
-					if round ~= search_round then
-						return
-					end
-					local why = if type(err) == "table" then err.message else err
-					if why == "offline" and may_retry then
-						ui.after(SEARCH_RETRY, function()
-							if round == search_round then
-								attempt(false)
-							end
-						end)
-						return
-					end
-					search_failed:set(search_words(why))
-					results:set({})
-				end)
-			end
-			attempt(true)
+			files.search(target, t.query):after(function(found: any)
+				if searched:peek() ~= key then
+					return
+				end
+				local items = {}
+				for _, f in found or {} do
+					local name = string.match(f.path, "([^/]+)/?$") or f.path
+					local folder = string.match(f.path, "^(.*)/[^/]+/?$")
+					table.insert(items, {
+						value = f.path,
+						label = name,
+						detail = folder,
+						file = not f.dir,
+						dir = f.dir,
+						-- Sent as Zeron's file mention (screens/chat/shared).
+						link = require("@app/screens/chat/shared").file_link(f.path, f.dir),
+					})
+				end
+				sources:set { ["@"] = items, ["/"] = {}, ["$"] = {} }
+			end, function()
+				sources:set { ["@"] = {}, ["/"] = {}, ["$"] = {} }
+			end)
 		end)
 	end)
-
 	return {
-		mentions = lists,
-		on_mention = function(item: any, trigger: string, token_text: string)
-			if item.thread then
-				require("@app/screens/chat/shared").mention_chat(item.thread.id)
-			elseif item.zeron then
-				local place = b.target()
-				ZeronCommands.run(item.zeron, if place then place.chat else nil)
+		lists = lists,
+		-- A command, skill or file picked: what its token stands for; one of
+		-- Zeron's own runs (its token gone).
+		on_mention = function(item: any, trigger: string, token: string)
+			if item.zeron then
+				b.run(item.zeron)
 			elseif trigger == "@" then
-				Invocations.remember(item, trigger, token_text)
+				Invocations.remember(item, trigger, token)
 			else
 				Invocations.remember(item, trigger)
 			end
 		end,
-		mention_enabled = function(trigger: string): boolean
+		-- The agent's completion settings: `$` opens the skills only while "Use
+		-- $ for skills" is on (else it's ordinary text).
+		enabled = function(trigger: string): boolean
 			if trigger == "$" then
 				return prefs.completion(b.agent()).dollar
 			end
 			return true
 		end,
-		mention_empty = setmetatable({}, {
+		-- With "Separate / commands" off, `/` lists the skills too.
+		empty = setmetatable({}, {
 			__index = function(_, trigger: string): string?
 				if trigger == "/" and not prefs.completion(b.agent()).separate then
 					return ui.t("chat.composer.commands_or_skills"):get()
@@ -327,20 +160,8 @@ function M.bind(b: Bind): { [string]: any }
 				return nil
 			end,
 		}) :: any,
-		mention_failed = function(trigger: string): string?
-			if trigger == "@" then
-				return search_failed:get()
-			end
-			local catalog = Invocations.catalog(invocation_key())
-			if trigger == "$" then
-				return Invocations.failed(catalog, "skill")
-			end
-			return Invocations.failed(catalog, "command")
-				or (if prefs.completion(b.agent()).separate then nil else Invocations.failed(catalog, "skill"))
-		end,
-		mention_token = function(t: any)
-			token:set(t)
-		end,
+		-- A draft that is only one of Zeron's own commands (its token goes;
+		-- anything carried stays).
 		command_of = function(draft: string): string?
 			return ZeronCommands.of_text(draft, (lists:peek() or {})["/"] or {})
 		end,

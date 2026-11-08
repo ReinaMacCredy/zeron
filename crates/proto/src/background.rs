@@ -111,7 +111,7 @@ pub fn delegate_runs(
 
 pub fn child_state(indicator: ChatIndicator) -> RunState {
     match indicator {
-        ChatIndicator::Working | ChatIndicator::AwaitingInput => RunState::Working,
+        ChatIndicator::Working | ChatIndicator::Waiting | ChatIndicator::AwaitingInput => RunState::Working,
         ChatIndicator::Errored => RunState::Failed,
         ChatIndicator::Completed | ChatIndicator::Idle => RunState::Completed,
     }
@@ -276,7 +276,10 @@ pub fn sidebar_ring(indicator: ChatIndicator, session: Option<&Session>) -> Opti
     let held = session.held_by_subagents && indicator == ChatIndicator::Working;
     let idle = session.status == SessionStatus::Idle
         && !session.background_tasks.is_empty()
-        && matches!(indicator, ChatIndicator::Idle | ChatIndicator::Completed);
+        && matches!(
+            indicator,
+            ChatIndicator::Idle | ChatIndicator::Completed | ChatIndicator::Waiting
+        );
     (held || idle).then_some(session.background_tasks.len())
 }
 
@@ -316,6 +319,7 @@ mod tests {
             classifying: None,
             last_turn_outcome: None,
             terminal_activity: None,
+            waiting: None,
         }
     }
 

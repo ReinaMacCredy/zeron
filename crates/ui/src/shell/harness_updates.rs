@@ -950,6 +950,7 @@ mod tests {
             error: None,
             can_apply: true,
             manual_command: None,
+            wait_reason: None,
             compatibility: None,
             held_back: None,
         }

@@ -239,14 +239,23 @@ function M.queue_edit(id: string, item: string): any
 	return ui.call("chat.queue_edit", { id = id, item = item })
 end
 
-function M.queue_finish(id: string, item: string, action: string, text: string?): any
-	return ui.call("chat.queue_finish", { id = id, item = item, action = action, text = text })
+-- (`attachments`: on a commit, the files it carries now, as the composer's
+-- chips pack them; nil keeps the ones it had.)
+function M.queue_finish(id: string, item: string, action: string, text: string?, attachments: { any }?): any
+	return ui.call("chat.queue_finish", { id = id, item = item, action = action, text = text, attachments = attachments })
 end
 
-function M.queue(id: string, op: { [string]: any }): any
+-- (`failed`: told when it didn't go, a send or steer the person is waiting on.)
+function M.queue(id: string, op: { [string]: any }, failed: (() -> ())?): any
 	local args = table.clone(op)
 	args.id = id
-	return ui.call("chat.queue", args)
+	local call = ui.call("chat.queue", args)
+	if failed then
+		call:after(function() end, failed)
+	else
+		quietly(call)
+	end
+	return call
 end
 
 function M.steer_all(id: string, items: { string }, message_id: string): any
@@ -316,6 +325,18 @@ M.new_defaults = nil :: any
 -- question): with Settings' "Escape stops the agent" on, it stops the
 -- chat shown's running turn, as Zeron's does (settings.rs
 -- `escape_stops_active_agent`). True if it did.
+-- The same for a chat beside the one shown (a side chat with the keyboard).
+function M.escape_chat(id: string, running: boolean): boolean
+	if shared.let_go() then
+		return true
+	end
+	if not prefs.escape_stops:peek() or not running then
+		return false
+	end
+	M.interrupt(id)
+	return true
+end
+
 function M.escape(): boolean
 	if M.dismiss_cards and M.dismiss_cards() then
 		return true

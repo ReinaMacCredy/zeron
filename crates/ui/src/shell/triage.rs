@@ -2090,6 +2090,7 @@ mod tests {
             updated_at: now,
             running_subagents: 0,
             compact_plan: None,
+            waiting: None,
         };
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| {

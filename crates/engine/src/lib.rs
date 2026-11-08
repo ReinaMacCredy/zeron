@@ -58,6 +58,7 @@ pub mod desktop_notify;
 pub mod diff_sync;
 pub mod doc_host;
 mod fs_watch;
+mod git_tree;
 pub mod harness_updates;
 pub(crate) mod home_index;
 mod home_widgets;
@@ -101,6 +102,7 @@ pub mod tool_output;
 mod transcript_history;
 pub mod triage;
 mod turn_clock;
+mod update_trial;
 pub mod uploads;
 pub mod usage;
 pub mod voice;
@@ -337,6 +339,7 @@ impl EngineCore {
     ) -> Result<Self, EngineError> {
         let data_dir = profile.device_root();
         std::fs::create_dir_all(data_dir)?;
+        update_trial::refuse_mid_update(data_dir)?;
         let legacy_uploads_root = profile.claim_legacy_uploads_root()?;
         let device_id = load_or_create_device_id(data_dir)?;
         // This device's harness enablement (Settings → Providers) rides the
@@ -413,10 +416,17 @@ impl EngineCore {
         sessions.set_doc_host(doc_host.clone());
         let resume_schedule = resume_schedule::ResumeSchedule::open(data_dir);
         sessions.set_resume_schedule(resume_schedule.clone());
-        match sessions.recover_stale() {
-            Ok(0) => {}
-            Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
-            Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
+        // A new version on trial may yet be undone, and recovering clears the
+        // journals' marks of what to resume, which a rollback doesn't restore.
+        // It waits for the commit (`update_trial`), with all other new work.
+        if zeron_update::transaction::in_trial() {
+            doc_host.hold_work();
+        } else {
+            match sessions.recover_stale() {
+                Ok(0) => {}
+                Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
+                Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
+            }
         }
         let restarted = resume_schedule.take_restart(chrono::Utc::now().timestamp_millis());
         let host = doc_host.clone();
@@ -1398,6 +1408,7 @@ impl Engine {
         tracing::info!(data_dir = %config.data_dir.display(), "engine starting");
 
         std::fs::create_dir_all(&config.data_dir)?;
+        update_trial::boot(&config.data_dir)?;
         // Cloud runner: runner.json wins; else ZERON_RUNNER_ENROLL enrolls
         // first (retrying network failures; a rejected code is fatal).
         if let Some(identity) = runner::bootstrap(&config.data_dir, &config.edge_url).await? {
@@ -1455,6 +1466,7 @@ impl Engine {
             .core()
             .sessions
             .set_ipc_token_file(zeron_rpc::ipc_auth::agent_token_path(&config.data_dir));
+        update_trial::prove_and_commit(runtime.core(), &config);
 
         tokio::select! {
             result = shutdown_signal() => result?,

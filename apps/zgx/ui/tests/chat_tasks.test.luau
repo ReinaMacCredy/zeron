@@ -134,3 +134,4 @@ test("a long plan folds round the step in progress, its folds showing and hiding
 	expect(app:has('role:button "Show 2 earlier items"')).to_be(true)
 	expect(app:has('~"Step 8"')).to_be(false)
 end)
+

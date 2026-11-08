@@ -189,7 +189,7 @@ private fun frontRows(ws: WorkspaceSnapshot): List<SessionRow> {
 
 private fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
     val rows = frontRows(ws)
-    return rows.count { it.indicator == ChatIndicator.WORKING } to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
+    return rows.count { it.indicator == ChatIndicator.WORKING || it.indicator == ChatIndicator.WAITING } to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
 }
 
 class ListEntry(val row: SessionRow, val depth: Int = 0, val children: Int = 0, val open: Boolean = false)
@@ -432,7 +432,7 @@ fun SessionsScreen(
                         }
                     }
                     Filter.NeedsYou -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.AWAITING_INPUT }.map { ListEntry(it) }, actions)
-                    Filter.Working -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.WORKING }.map { ListEntry(it) }, actions)
+                    Filter.Working -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.WORKING || it.indicator == ChatIndicator.WAITING }.map { ListEntry(it) }, actions)
                     Filter.Pinned -> group("f", null, entries(front.pinned), actions)
                 }
                 val empty = when (filter) {
@@ -618,7 +618,7 @@ private fun LazyListScope.group(
     val collapsed = fold?.collapsed == true
     if (title != null) {
         val count = rows.count { it.depth == 0 } + extra
-        val working = rows.any { it.row.indicator == ChatIndicator.WORKING }
+        val working = rows.any { it.row.indicator == ChatIndicator.WORKING || it.row.indicator == ChatIndicator.WAITING }
         val asking = rows.any { it.row.indicator == ChatIndicator.AWAITING_INPUT }
         item("h-$id") {
             var open by remember { mutableStateOf(false) }
@@ -905,7 +905,7 @@ private fun RowStatus(row: SessionRow) {
             Box(Modifier.size(7.dp).clip(CircleShape).background(MaterialTheme.colorScheme.outline))
         }
         row.sendState == uniffi.zeron_core.SendState.FAILED || ring == null -> StatusLabel(row)
-        row.indicator == ChatIndicator.WORKING -> line(row.backgroundLabel ?: "Working", MaterialTheme.colorScheme.onSurface) { ringGlyph() }
+        row.indicator == ChatIndicator.WORKING || row.indicator == ChatIndicator.WAITING -> line(row.backgroundLabel ?: "Working", MaterialTheme.colorScheme.onSurface) { ringGlyph() }
         row.indicator == ChatIndicator.COMPLETED && row.unseen -> line("Done", successColor()) { ringGlyph() }
         else -> line(if (ring > 0u) "$ring · ${row.timeLabel}" else row.timeLabel, MaterialTheme.colorScheme.outline) { ringGlyph() }
     }

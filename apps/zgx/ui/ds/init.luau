@@ -107,6 +107,7 @@ local function all()
 		Select = require("@self/select"),
 		Slider = require("@self/slider"),
 		NumberStepper = require("@self/stepper"),
+		DatePicker = require("@self/date_picker"),
 		Tabs = require("@self/tabs"),
 		Badge = require("@self/badge").Badge,
 		Tag = require("@self/badge").Tag,
@@ -309,6 +310,9 @@ local lazy: { [string]: () -> any } = {
 	end,
 	NumberStepper = function()
 		return require("@self/stepper")
+	end,
+	DatePicker = function()
+		return require("@self/date_picker")
 	end,
 	Tabs = function()
 		return require("@self/tabs")

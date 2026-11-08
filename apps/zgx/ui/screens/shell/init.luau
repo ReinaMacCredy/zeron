@@ -123,6 +123,10 @@ local function sidebar_limit(): number
 		if panel and panel.find_in_browser and (panel.find_in_browser :: any)() == true then
 			return true
 		end
+		-- (So does a chat's lane with it: its own transcript's.)
+		if panel and panel.find_in_lane and (panel.find_in_lane :: any)() == true then
+			return true
+		end
 		local search: any = boundary.load("@app/screens/settings/search")
 		if search ~= nil and search.focus ~= nil and (search.focus :: any)() == true then
 			return true
@@ -147,6 +151,17 @@ local function sidebar_limit(): number
 	runs["shell.quick_capture"] = function()
 		require("@app/screens/tasks/capture").toggle()
 	end
+	-- Check for Updates…: Zeron's update prompt (crates/ui shell.rs `render_update_prompt`), its dialog loaded the first time it's asked for, from a timer.
+	runs["shell.check_updates"] = function()
+		ui.after(0, function()
+			local prompt: any = boundary.load("@app/screens/shell/update_prompt")
+			local watch: any = boundary.load("@app/screens/engine/update")
+			if prompt and watch then
+				prompt.open()
+				watch.show_prompt(prompt)
+			end
+		end)
+	end
 	-- (Pinned on Settings: it would only change what the chats show after Back, shell.rs `toggle_sidebar`.)
 	runs["shell.toggle_sidebar"] = function()
 		if route.current:peek().name ~= "settings" then
@@ -159,15 +174,14 @@ local function sidebar_limit(): number
 			fit.toggle_panel()
 		end
 	end
-	-- ⌘W: the panel's active tab, while the panel has the keyboard (as
-	-- × closes it: a file with changes, a busy terminal, ask first). In a
-	-- split, else the pane in front: the focused chat out of it, its neighbour
-	-- focused, the last left alone. Off the chats, the window, as Zeron's closes
-	-- it, and with it the app: what's kept is saved as it closes (src/main.rs),
-	-- the engine and its terminals go on.
+	-- ⌘W closes the visible right panel's active tab first, regardless of
+	-- keyboard focus, through the same unsaved-file / busy-terminal gate as ×.
+	-- Without a tab to close, the focused split chat, then a chat's tab. Off
+	-- the chats, the window, as Zeron's closes it, and with it the app: what's
+	-- kept is saved as it closes (src/main.rs), the engine and its terminals go on.
 	runs["shell.close"] = function()
 		local panel: any = boundary.load("@app/screens/panel")
-		if panel and panel.close_focused_tab and (panel.close_focused_tab :: any)() then
+		if panel and panel.close_active_tab and (panel.close_active_tab :: any)() then
 			return
 		end
 		local name = route.current:peek().name
@@ -273,6 +287,11 @@ local function sidebar_limit(): number
 	-- ⌘/: the composer's model picker (a focused code editor keeps ⌘/ for
 	-- its comments: it takes the key first).
 	runs["shell.model_picker"] = function()
+		-- (A side chat with the keyboard: its own.)
+		local panel: any = boundary.load("@app/screens/panel")
+		if panel and panel.model_in_lane and (panel.model_in_lane :: any)() == true then
+			return
+		end
 		local chat: any = boundary.load("@app/screens/chat")
 		if chat and chat.open_model_picker then
 			(chat.open_model_picker :: any)()
@@ -318,7 +337,9 @@ local function sidebar_limit(): number
 		end
 		local add: any = boundary.load("@app/screens/shell/add_project")
 		if add then
-			if not add.new_project_key() then
+			if add.shown:peek() then
+				add.shown:set(false)
+			else
 				add.open()
 			end
 		end
@@ -367,6 +388,9 @@ local function sidebar_limit(): number
 					run()
 				end,
 			}
+			if k.rule then
+				ui.command { separator = true, menu = k.menu }
+			end
 		end
 	end
 
@@ -703,76 +727,87 @@ local function sidebar_limit(): number
 					return nil, false
 				end
 				local card = ui.ref()
+				-- (Its place on the card, not the region's root: what leaves is laid
+				-- over what enters, and would take this one's offset on top of its own.)
 				return ui.div {
-					ref = card,
-					absolute = true,
-					left = at.x + at.w + 4,
-					-- (Beside the row's top, kept inside the window.)
-					top = function(): number
-						local h = card.height or 0
-						return math.max(8, math.min(at.y, (root.height or 0) - h - 8))
+					pointer_events = "none",
+					w = function(): number
+						return root.width or 0
 					end,
-					ds.SessionCard {
-						session = id,
-						title = function(): string
-							local c = chat()
-							return if c then c.title else ""
+					h = function(): number
+						return root.height or 0
+					end,
+					ui.div {
+						ref = card,
+						absolute = true,
+						left = at.x + at.w + 4,
+						-- (Beside the row's top, kept inside the window.)
+						top = function(): number
+							local h = card.height or 0
+							return math.max(8, math.min(at.y, (root.height or 0) - h - 8))
 						end,
-						project_tile = (function(): Node?
-							local c: any = chat()
-							if not c then
-								return nil
-							end
-							local screen: any = boundary.load("@app/screens/shell/sidebar")
-							return if screen then screen.project_glyph(c.project, 12) else nil
-						end)(),
-						time = function(): number?
-							local c = chat()
-							return if c then c.updated else nil
-						end,
-						device = function(): string?
-							return (device())
-						end,
-						here = function(): boolean
-							local _, here = device()
-							return here
-						end,
-						project = function(): string?
-							local c = chat()
-							if not c or not c.project then
-								return nil
-							end
-							for _, p in sessions.now:get().projects do
-								if p.id == c.project then
-									return p.name
+						ds.SessionCard {
+							session = id,
+							title = function(): string
+								local c = chat()
+								return if c then c.title else ""
+							end,
+							project_tile = (function(): Node?
+								local c: any = chat()
+								if not c then
+									return nil
 								end
-							end
-							return nil
-						end,
-						branch = function(): string?
-							local c = chat()
-							return if c then c.branch else nil
-						end,
-						model = function(): string?
-							local c: any = chat()
-							if not c or not c.harness then
+								local screen: any = boundary.load("@app/screens/shell/sidebar")
+								return if screen then screen.project_glyph(c.project, 12) else nil
+							end)(),
+							time = function(): number?
+								local c = chat()
+								return if c then c.updated else nil
+							end,
+							device = function(): string?
+								return (device())
+							end,
+							here = function(): boolean
+								local _, here = device()
+								return here
+							end,
+							project = function(): string?
+								local c = chat()
+								if not c or not c.project then
+									return nil
+								end
+								for _, p in sessions.now:get().projects do
+									if p.id == c.project then
+										return p.name
+									end
+								end
 								return nil
-							end
-							local name = (HARNESS_NAMES :: any)[c.harness] or c.harness
-							return if c.model then `{name} · {c.model}` else name
-						end,
-						opened_by = function(): string?
-							local c: any = chat()
-							return if c then c.created_by else nil
-						end,
-						subagents = function(): number?
-							local c: any = chat()
-							return if c then c.running_subagents else nil
-						end,
-						failed = function(): boolean
-							local c: any = chat()
-							return c ~= nil and c.status == "failed"
-						end,
+							end,
+							branch = function(): string?
+								local c = chat()
+								return if c then c.branch else nil
+							end,
+							model = function(): string?
+								local c: any = chat()
+								if not c or not c.harness then
+									return nil
+								end
+								local name = (HARNESS_NAMES :: any)[c.harness] or c.harness
+								return if c.model then `{name} · {c.model}` else name
+							end,
+							opened_by = function(): string?
+								local c: any = chat()
+								return if c then c.created_by else nil
+							end,
+							subagents = function(): number?
+								local c: any = chat()
+								return if c then c.running_subagents else nil
+							end,
+							failed = function(): boolean
+								local c: any = chat()
+								return c ~= nil and c.status == "failed"
+							end,
+						},
 					},
 				}
 			end, {

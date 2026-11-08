@@ -3,7 +3,8 @@
 -- its key) and what Settings → Shortcuts lists. Zeron's defaults (crates/ui
 -- settings.rs `default_combo_on`), as zgx's actions have them.
 --
---   keys.LIST            { { id, title, key, group, menu, reserved? }, … }
+--   keys.LIST            { { id, title, key, group, menu, reserved?, rule? }, … }
+--                        (`rule`: a line after it in its menu)
 --                        in the order they're shown (and made)
 --   keys.get(id)         one, by its command's id
 --   keys.combo(id)       its combination now, a rebind's or its default
@@ -22,6 +23,8 @@ export type Key = {
 	group: string,
 	menu: string,
 	reserved: boolean?,
+	-- A line after it in its menu.
+	rule: boolean?,
 	-- Made by its own screen, not the shell (its title and key kept the
 	-- same there).
 	elsewhere: boolean?,
@@ -57,8 +60,10 @@ end
 for _, k in
 	{
 		{ id = "shell.palette", title = "Search", key = "cmd+k", group = "App", menu = "File", reserved = true },
-		{ id = "shell.settings", title = "Settings", key = "cmd+,", group = "App", menu = "File", reserved = true },
-		{ id = "shell.check_updates", title = "Check for Updates…", key = "", group = "App", menu = "File", elsewhere = true },
+		-- (The application menu's, over Services, as Zeron's was: macOS's
+		-- first menu. `Application` is zgx-desktop's APPLICATION_MENU.)
+		{ id = "shell.check_updates", title = "Check for Updates…", key = "", group = "App", menu = "Application", rule = true },
+		{ id = "shell.settings", title = "Settings", key = "cmd+,", group = "App", menu = "Application", reserved = true },
 		{ id = "shell.find", title = "Find", key = "cmd+f", group = "App", menu = "Edit" },
 		{ id = "shell.quick_capture", title = "Quick capture", key = "cmd+alt+n", group = "App", menu = "File", reserved = true },
 		{ id = "shell.random_wallpaper", title = "Random wallpaper", key = "cmd+u", group = "App", menu = "View" },

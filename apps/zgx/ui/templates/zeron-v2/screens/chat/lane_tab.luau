@@ -32,11 +32,24 @@ local Outgoing = require("@app/screens/chat/outgoing")
 local PanelState = require("@app/screens/panel/state")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
 local boundary = require("@app/screens/shell/boundary")
+local Pills = require("@app/screens/chat/pills")
+local Asks = require("@app/screens/chat/asks")
+local DropOverlay = require("@ds/drop_overlay")
 
 -- What its tab says, and its icon, as the shipping app's.
 local M = {}
 
 function M.title(tab: any): string
+	-- (Its chat's name as it's named or renamed; before that, as it was opened.)
+	if tab.kind == "side_chat" then
+		for _, list in sessions.now:get().children or {} do
+			for _, c in list do
+				if c.id == tab.chat and c.title and c.title ~= "" then
+					return c.title
+				end
+			end
+		end
+	end
 	if tab.title and tab.title ~= "" then
 		return tab.title
 	end
@@ -112,7 +125,7 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
-local function composer(chat: string, view: any, name: string, panel_key: string?, tab_id: string?): Node
+local function composer(chat: string, view: any, name: string, focus: State<number>, panel_key: string?, tab_id: string?): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
@@ -140,7 +153,14 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 	if panel_key and tab_id then
 		ui.on_cleanup(PanelState.focuser(panel_key, tab_id, take_keys))
 	end
+	-- Its draft's chips: one draft's per chat (screens/chat/shared), wherever
+	-- it's kept.
 	local carried = ui.use_state({} :: { any })
+	ui.effect(function()
+		carried:set(Shared.cargo_of(chat))
+	end)
+	-- The options picked in a question its chat asks.
+	local chosen = ui.use_state({} :: { [string]: boolean })
 	if draft:peek() ~= "" and Shared.draft_peek(chat).text == "" then
 		Shared.set_draft_of(chat, "text", draft:peek())
 	end
@@ -149,7 +169,7 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 		if draft:peek() ~= d.text then
 			draft:set(d.text)
 		end
-		carried:set(d.cargo)
+		chosen:set(d.chosen)
 	end)
 	ui.effect(function()
 		local text = draft:get()
@@ -157,11 +177,79 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 			Shared.set_draft_of(chat, "text", text)
 		end
 	end)
+	ui.effect(function()
+		local picked = chosen:get()
+		if Shared.draft_of(chat).chosen ~= picked then
+			Shared.set_draft_of(chat, "chosen", picked)
+		end
+	end)
 	local session = view.session
 	local notice = ui.use_state(nil :: any)
 	local shown_notice = ui.computed(function(): any
 		local refused = Shared.draft_of(chat).refused
 		return notice:get() or (if refused then { tone = "danger", text = refused, dismissable = true } else nil)
+	end)
+	-- What its chat asks, and its queue, todos and tasks, from its own
+	-- session, as the window's composer shows them.
+	local asks = Asks.bind {
+		id = function(): string?
+			return chat
+		end,
+		session = function(): any
+			return view.session:get()
+		end,
+		chosen = chosen,
+		asked = ui.state(`chat_split_asked_{chat}`, nil :: any),
+		notice = function(n: any)
+			notice:set(n)
+		end,
+		say = function(tone: string, key: string)
+			notice:set({ tone = tone, text = locale.s(key), dismissable = true })
+		end,
+	}
+	local tray = ui.state(`chat_split_tray_{chat}`, nil :: any)
+	-- (Its words written through first, so the draft's read-back above keeps them.)
+	local function set_cargo(list: { any })
+		Shared.set_draft_of(chat, "text", draft:peek())
+		Shared.set_cargo_of(chat, list)
+	end
+	-- A queued message edited in its composer.
+	local editing = ui.state(`chat_lane_editing_{chat}`, nil :: { item: string, aside: string, aside_cargo: { any }? }?)
+	local edits = Asks.queue_edits {
+		id = function(): string?
+			return chat
+		end,
+		text = draft,
+		editing = editing,
+		focus = take_keys,
+		say = function(tone: string, key: string)
+			notice:set({ tone = tone, text = locale.s(key), dismissable = true })
+		end,
+		cargo = function(): { any }
+			return Shared.draft_peek(chat).cargo
+		end,
+		set_cargo = set_cargo,
+	}
+	-- A tab closed mid-edit lets go of the edit, and made again finds its row
+	-- no longer held: the draft it set aside back. (A row gone is another
+	-- matter: it keeps the words, and saving says so.)
+	ui.effect(function()
+		local e = editing:get()
+		local s = session:get()
+		if not e or not s or s.state == "loading" then
+			return
+		end
+		for _, row in s.queue or {} do
+			if row.id == e.item and not row.editing then
+				ui.batch(function()
+					editing:set(nil)
+					draft:set(e.aside)
+					if e.aside_cargo then
+						set_cargo(e.aside_cargo)
+					end
+				end)
+			end
+		end
 	end)
 	local running = ui.computed(function(): boolean
 		local s = session:get()
@@ -177,6 +265,7 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 	local project = ui.state(`chat_lane_project_{chat}`, nil :: string?)
 	local device = ui.state(`chat_lane_device_{chat}`, nil :: string?)
 	local checkout = ui.state(`chat_lane_checkout_{chat}`, nil :: string?)
+	local plan = ui.state(`chat_lane_plan_{chat}`, false)
 	local branch = ui.state(`chat_lane_branch_{chat}`, nil :: string?)
 	-- Where it was seeded from (its parent's place), so a send can tell
 	-- whether the person moved it.
@@ -272,7 +361,24 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 			end
 			now.options = given
 		end
-		if now.model ~= was.model or now.effort ~= was.effort or now.access ~= was.access or now.fast ~= was.fast or not Shared.same_pick(now.options, was.options) then
+		-- (Plan mode the same; before it runs, its parent's Fast and options too.)
+		local made = session:get()
+		if not made or not made.harness then
+			local _, open = parent_of()
+			made = open
+		end
+		local changed = now.model ~= was.model or now.effort ~= was.effort or now.access ~= was.access or now.fast ~= was.fast or not Shared.same_pick(now.options, was.options)
+		for key, st in (if s then { plan = plan } else { fast = fast, options = options, plan = plan }) :: { [string]: any } do
+			local v = if made then made[key] else nil
+			-- (Off is what one with none set runs with.)
+			local before = if was[key] ~= nil then was[key] elseif key == "options" then nil else false
+			if v ~= nil and (first or Shared.same_pick(st:peek(), before)) and not Shared.same_pick(st:peek(), v) then
+				st:set(v)
+			end
+			now[key] = v
+			changed = changed or not Shared.same_pick(now[key], was[key])
+		end
+		if changed then
 			seeded:set(now)
 		end
 	end)
@@ -280,7 +386,7 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 	-- (a side chat's first message still carries its own).
 	local landing: model_switch.Ask? = nil
 	ui.effect(function()
-		local picked: { [string]: any } = { model = model:get(), effort = effort:get(), fast = fast:get(), options = options:get() }
+		local picked: { [string]: any } = { model = model:get(), effort = effort:get(), fast = fast:get(), options = options:get(), plan = plan:get() }
 		local s: any = session:peek()
 		if unsent() or not s or s.state ~= "ready" then
 			return
@@ -317,7 +423,8 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 		seeded:set(now)
 	end)
 	local close_picker = ui.state(`chat_lane_model_close_{chat}`, 0)
-	local open_picker = ui.state(`chat_lane_model_open_{chat}`, 0)
+	-- What `@`, `/` and `$` offer, as the chat page's.
+	local open_model = ui.use_state(0)
 	local take_model, switch_dialog = model_switch.use(chat, {
 		current = function(): string?
 			return model:peek()
@@ -341,7 +448,7 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 			end)
 		end,
 		back = function()
-			open_picker:set(open_picker:peek() + 1)
+			open_model:add(1)
 		end,
 	})
 	-- Its agent profiles, on this chat (before its first message, its own
@@ -462,7 +569,14 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 			}
 		end
 		local p = project_row(s.project)
+		local on: string? = nil
+		for _, d in sessions.now:get().devices do
+			if d.id == s.device then
+				on = d.name
+			end
+		end
 		return {
+			device = on,
 			name = s.branch,
 			worktree = p ~= nil and s.cwd ~= nil and s.cwd ~= p.path,
 			project = if p then p.name else nil,
@@ -474,7 +588,7 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 	-- What a message goes with: the pick, its agent, the effort, the access.
 	local function picks(): { [string]: any }
 		local m = model:peek()
-		local out: { [string]: any } = { model = m, effort = effort:peek(), fast = fast:peek(), options = options:peek(), access = access:peek() }
+		local out: { [string]: any } = { model = m, effort = effort:peek(), access = access:peek(), fast = fast:peek(), options = options:peek(), plan = plan:peek() }
 		for _, c in store.catalog:peek().models do
 			if c.value == m then
 				out.harness = c.harness
@@ -497,23 +611,64 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 		end
 		return where.plan() :: any
 	end
-	local accounts = if split
-		then Shared.model_accounts(function(): string?
-			return device:get()
+	local accounts = Shared.model_accounts(function(): string?
+		return device:get()
+	end)
+	-- A new side chat's composer takes the keys as it's made.
+	if lanes.take_keys:peek()[chat] then
+		ui.on_mount(function()
+			local left = table.clone(lanes.take_keys:peek())
+			left[chat] = nil
+			lanes.take_keys:set(left)
+			focus:add(1)
 		end)
-		else nil
+	end
+	local function run_command(command: string)
+		if command == "model" then
+			open_model:add(1)
+		else
+			ZeronCommands.run(command, if unsent() then nil else chat)
+		end
+	end
 	local completions = Completions.bind {
 		key = `chat_lane_{chat}`,
+		text = draft,
 		agent = function(): string?
-			return (as_made())
+			local chosen = model:get()
+			for _, m in store.catalog:get().models do
+				if m.value == chosen then
+					return m.harness
+				end
+			end
+			return nil
 		end,
 		target = function(): any
+			if unsent() then
+				local p = project:get()
+				return if p and p ~= Where.NO_PROJECT then { space = p, device = device:get() } else nil
+			end
+			local s = session:get()
+			return { chat = chat, device = if s then s.device else nil }
+		end,
+		files = function(): any
+			if unsent() then
+				local p = project:peek()
+				return if p and p ~= Where.NO_PROJECT then { space = p, device = device:peek() } else nil
+			end
 			return { chat = chat }
 		end,
 		in_chat = function(): boolean
-			return true
+			return not unsent()
 		end,
+		run = run_command,
 	}
+	local queue_pictures = ReplyImages.for_attachments(function(): any
+		local s = session:get()
+		if not s or s.state == "missing" then
+			return nil
+		end
+		return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.now:get().here }
+	end)
 	-- A side chat past its day: nothing more goes to it (Zeron's composer.rs).
 	local function expired(): boolean
 		for _, list in sessions.now:get().children or {} do
@@ -533,29 +688,41 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 	}
 	local cargo_props = Shared.cargo_props(chat)
 	return ui.column { w_full = true, switch_dialog, profile_dialog, ui.show(expired, expired_line, ds.Composer {
-		profiles = profiles,
-		open_profiles = open_profiles,
 		field = field,
 		cargo = carried,
+		-- (Its chips' × under the pointer, as the chat page's.)
 		on_remove_cargo = function(cid: string)
 			Shared.remove_cargo_of(chat, cid)
 		end,
 		on_paste_text = cargo_props.on_paste_text,
 		on_open_pasted = cargo_props.on_open_pasted,
-		on_attach = cargo_props.on_attach,
-		on_files = cargo_props.on_files,
-		on_paste_image = cargo_props.on_paste_image,
-		mentions = completions.mentions,
-		on_mention = completions.on_mention,
-		mention_enabled = completions.mention_enabled,
-		mention_empty = completions.mention_empty,
-		mention_failed = completions.mention_failed,
-		mention_token = completions.mention_token,
+		-- (What's dropped on it is its tab's to take, under its own overlays.)
+		drop_overlay = false,
+		-- Its + and a picture pasted: chips on its own draft, as the chat page's.
+		on_attach = function()
+			ui.open_files({ title = ui.t("chat.composer.attach_files"):get(), multiple = true }):after(function(files: any)
+				if files and #files > 0 then
+					Shared.attach_files(files, chat)
+					focus:add(1)
+				end
+			end, function() end)
+		end,
+		on_paste_image = function(): boolean
+			store.paste_image():after(function(path: string?)
+				if type(path) == "string" and path ~= "" then
+					Shared.attach_files({ { name = "image.png", path = path, clipboard = true } }, chat)
+					focus:add(1)
+				end
+			end, function() end)
+			return true
+		end,
+		focus = focus,
 		value = draft,
 		-- (ds.Composer's placeholder is a string: read as the tab is made.)
 		placeholder = locale.s("chat.lane_tab.placeholder"),
 		running = running,
 		access = access,
+		plan = plan,
 		model = model,
 		effort = effort,
 		fast = fast,
@@ -569,12 +736,27 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 		end,
 		model_retry = store.load_catalog,
 		model_close = close_picker,
-		open_model = open_picker,
+		open_model = open_model,
 		context_tokens = function(): number?
 			local s: any = session:get()
 			return if s then s.context_tokens else nil
 		end,
 		notice = shown_notice,
+		-- The app's settings: what sends, and whether Escape stops the agent.
+		send_with = function(): string
+			return prefs.send_with:get()
+		end,
+		on_escape = function(): boolean
+			return store.escape_chat(chat, running:peek())
+		end,
+		disabled = function(): boolean
+			local s = session:get()
+			return s ~= nil and (s.state == "missing" or s.state == "offline")
+		end,
+		mentions = completions.lists,
+		on_mention = completions.on_mention,
+		mention_enabled = completions.enabled,
+		mention_empty = completions.empty,
 		on_dismiss_notice = function()
 			notice:set(nil)
 			Shared.refuse_in(chat, nil)
@@ -586,10 +768,9 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 		models = function(): { any }
 			return store.catalog:get().models
 		end,
-		-- (A split's pane is a chat of its own; a side chat has none, as Zeron's.)
-		accounts = if accounts then accounts.accounts else nil,
-		on_account = if accounts then accounts.on_account else nil,
-		on_accounts_open = if accounts then accounts.on_accounts_open else nil,
+		accounts = accounts.accounts,
+		on_account = accounts.on_account,
+		on_accounts_open = accounts.on_accounts_open,
 		-- What its context holds: the chat page's ring and card, from the
 		-- side chat's own numbers (once it has run and they're reported).
 		usage = function(): any
@@ -598,16 +779,6 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 				return nil
 			end
 			return { tokens = s.context_tokens, window = s.context_window }
-		end,
-		stats = function(): any
-			return view.stats:get()
-		end,
-		working = function(): boolean
-			local s: any = session:get()
-			if s and s.in_flight ~= nil then
-				return s.in_flight
-			end
-			return running:get()
 		end,
 		footer_git = function(): boolean
 			local s = session:get()
@@ -628,40 +799,53 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 		branches = where.branches,
 		branches_empty = where.branches_empty,
 		branch_fixed = branch_fixed,
-		-- As the window's composer sends (screens/chat/composer): `false`, as it
-		-- has dealt with the draft itself.
-		on_send = function(text: string): boolean
+		-- (Work in's "New project": the shell's New project palette.)
+		on_new_project = function()
+			local add: any = boundary.load("@app/screens/shell/add_project")
+			if add then
+				add.open()
+			end
+		end,
+		-- As the window's composer sends (screens/chat/composer): it deals with
+		-- the draft itself.
+		on_send = function(text: string)
 			local say = function(n: any)
 				notice:set(n)
+			end
+			-- Editing a queued message: Send saves it.
+			if editing:peek() then
+				edits.finish("commit")
+				return
 			end
 			local side = AppCommands.side(text)
 			if side then
 				draft:set("")
 				lanes.open_side(chat, side, route.current:peek().session)
-				return false
+				return
 			end
-			local focus = AppCommands.compact(text)
-			if focus then
+			local compact_focus = AppCommands.compact(text)
+			if compact_focus then
 				draft:set("")
-				AppCommands.run_compact(chat, session:peek(), running:peek(), focus, function(key: string)
+				AppCommands.run_compact(chat, session:peek(), running:peek(), compact_focus, function(key: string)
 					say({ tone = "danger", text = locale.s(key), dismissable = true })
 				end, function(why: string)
 					say({ tone = "danger", text = why, dismissable = true })
 				end)
-				return false
+				return
 			end
 			local trimmed = string.match(text, "^%s*(.-)%s*$") or ""
-			local zeron = completions.command_of(trimmed)
-			if zeron then
+			-- A draft that is only one of Zeron's own commands runs it.
+			local command = completions.command_of(text)
+			if command then
 				draft:set("")
-				ZeronCommands.run(zeron, chat)
-				return false
+				run_command(command)
+				return
 			end
 			-- (Nowhere it can start, a project gone: the line says why.)
 			local is_unsent = lanes.unsent:peek()[chat] ~= nil
 			if is_unsent and where.blocked:peek() then
 				say({ tone = "danger", text = where.blocked:peek(), dismissable = true })
-				return false
+				return
 			end
 			local s = session:peek()
 			local goes_to = if s and s.device then s.device else device:peek()
@@ -669,7 +853,7 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 				local too_large = Shared.linked_elsewhere(carried:peek())
 				if too_large then
 					say({ tone = "danger", text = too_large, dismissable = true })
-					return false
+					return
 				end
 			end
 			-- (What's typed reaches the chat's draft by an effect: this moment's.)
@@ -682,12 +866,29 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 			-- transcript's send steps clear of the end (it glides to the top,
 			-- its reply's room opening under it), then goes to the host with
 			-- that id, so the host's copy is the same row.
-			local mid = store.new_id()
-			local req = picks()
-			req.message_id = mid
+			-- (While a turn runs it's queued instead: it shows in the queue, and
+			-- what's picked waits for the turn it will run in.)
+			local queued = not is_unsent and running:peek()
+			local req: { [string]: any } = if queued then {} else picks()
 			req.attachments = parts.attachments
 			req.appshots = parts.appshots
 			req.restores = true
+			local function failed(err: any)
+				Shared.restore(parts.text, cargo)
+				local why = if type(err) == "table" and err.message then tostring(err.message) else nil
+				say({
+					tone = "danger",
+					text = if is_unsent and why then why else locale.s("chat.lane_tab.didnt_send"),
+					dismissable = true,
+				})
+			end
+			if queued then
+				req.session, req.text = chat, parts.text
+				store.send(req :: any):after(function() end, failed)
+				return
+			end
+			local mid = store.new_id()
+			req.message_id = mid
 			local sent: any = nil
 			T.send(function()
 				local here = view.messages:index_of("id", mid) ~= nil
@@ -704,20 +905,57 @@ local function composer(chat: string, view: any, name: string, panel_key: string
 				req.session, req.text = chat, parts.text
 				sent = store.send(req :: any)
 			end
-			sent:after(function() end, function(err: any)
-				Shared.restore(parts.text, cargo)
-				local why = if type(err) == "table" and err.message then tostring(err.message) else nil
-				say({
-					tone = "danger",
-					text = if is_unsent and why then why else locale.s("chat.lane_tab.didnt_send"),
-					dismissable = true,
-				})
-			end)
-			return false
+			sent:after(function() end, failed)
 		end,
 		on_stop = function()
 			store.interrupt(chat)
 		end,
+		-- (Its chat's own.)
+		question = asks.question,
+		chosen = asks.chosen,
+		on_pick = asks.on_pick,
+		on_answer = asks.on_answer,
+		on_close_question = asks.on_close_question,
+		on_back = asks.on_back,
+		approval = asks.approval,
+		can_always = asks.can_always,
+		on_approve = asks.on_approve,
+		on_deny = asks.on_deny,
+		queue = asks.queue,
+		can_steer = asks.can_steer,
+		on_queue_send = asks.on_queue_send,
+		on_queue_steer_all = asks.on_queue_steer_all,
+		queue_pictures = queue_pictures,
+		on_dismiss_todos = asks.on_dismiss_todos,
+		on_queue_edit = edits.on_queue_edit,
+		on_queue_save = edits.on_queue_save,
+		on_queue_cancel = edits.on_queue_cancel,
+		on_queue_remove = asks.on_queue_remove,
+		on_queue_reorder = asks.on_queue_reorder,
+		todos = asks.todos,
+		tasks = asks.tasks,
+		on_stop_task = function(task: string)
+			store.stop_task(chat, task):after(function() end, function()
+				notice:set({ tone = "danger", text = locale.s("chat.composer.couldnt_stop_task"), dismissable = true })
+			end)
+		end,
+		pills = Pills.Row {
+			id = `composer-pills-{chat}`,
+			keys = take_keys,
+			bind = {
+				id = function(): string?
+					return chat
+				end,
+				session = function(): any
+					return view.session:get()
+				end,
+				subs = function(): { any }
+					return view.subagents:get()
+				end,
+			},
+			tasks = asks.tasks,
+		},
+		tray = tray,
 	}) }
 end
 
@@ -837,6 +1075,13 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 	local slot, chat = tab.id, tab.chat
 	local data = tab.data or {}
 	local view = lanes.view(slot)
+	-- Files, and the files pane's, carried over it, dropped anywhere on it, as
+	-- on the chat page: chips on its own draft (a sidebar chat, mentioned), its
+	-- composer taking the keys.
+	local focus = ui.use_state(0)
+	local zone, carrying, carrying_session = Shared.own_drop_zone(`lane.{slot}`, chat, function()
+		focus:add(1)
+	end)
 	-- What the tab is now: a fork under way or failed, or its chat (a new
 	-- side chat's not yet made, until its first message).
 	local kind = ui.computed(function(): string
@@ -960,6 +1205,15 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		end, home_session, function(): any
 			return view.session:get()
 		end),
+		-- (The chat this lane is beside is already on show: to it, as ever.)
+		open_sender = function(chat: string, title: string)
+			local home = home_session()
+			if chat == home then
+				open_link(`zeron-chat:{chat}`)
+			elseif home then
+				lanes.open(home, { kind = "side_chat", id = chat, title = title })
+			end
+		end,
 		link_menu = LinkMenu(open_link, function(): any
 			return view.session:peek()
 		end),
@@ -998,7 +1252,7 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 			end
 			-- As the chat page: the transcript to the composer's footer line,
 			-- running on behind the composer, which floats at the foot.
-			return ui.column {
+			local body: { [any]: any } = {
 				grow = 1,
 				w_full = true,
 				min_h = 0,
@@ -1024,8 +1278,14 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 					}),
 					ui.column { w_full = true, grow = 1, min_h = 0, relative = true, transcript },
 				},
-				Dock.Dock { height = dock_h, composer = ui.column { w_full = true, owners(chat, false), composer(chat, view, `lane.{slot}`, props.panel_key, slot) }, id = `lane-composer-{slot}` },
+				Dock.Dock { height = dock_h, composer = ui.column { w_full = true, owners(chat, false), composer(chat, view, `lane.{slot}`, focus, props.panel_key, slot) }, id = `lane-composer-{slot}` },
 			}
+			for k, v in zone do
+				body[k] = v
+			end
+			table.insert(body, DropOverlay { shown = carrying, id = `lane-drop-{slot}` })
+			table.insert(body, DropOverlay { shown = carrying_session, id = `lane-drop-mention-{slot}`, label = ui.t("chat.composer.drop_to_mention") :: any })
+			return ui.column(body :: any)
 		end, { grow = 1, w_full = true, min_h = 0 }),
 	}
 end)

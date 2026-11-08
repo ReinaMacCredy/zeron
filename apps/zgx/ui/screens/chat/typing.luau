@@ -16,7 +16,7 @@ local function take(): boolean
 		return false
 	end
 	local session = route.current:peek().session
-	if session and lanes.take_keys and lanes.take_keys(session) then
+	if session and lanes.typing_takes and lanes.typing_takes(session) then
 		return true
 	end
 	local field: any = (composer_surface :: any).field

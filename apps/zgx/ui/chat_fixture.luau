@@ -179,6 +179,27 @@ ui.command {
 		end
 	end,
 }
+-- The open session with subagents (the host says them, as it does from the
+-- transcript's spawn chips): `subagents_running` has two working and one
+-- done; opening one is noted (`open_subagent:<session>:<doc>`).
+do
+	local lanes = require("@app/screens/chat/lanes") :: any
+	lanes.open_subagent = function(session: string, sub: any)
+		note(`open_subagent:{session}:{sub.ref}`)
+	end
+	local published = ui.shared("chat.subagents", {} :: { any })
+	ui.command {
+		id = "subagents_running",
+		title = "Subagents run: two working, one done",
+		run = function()
+			published:set({
+				{ ref = "d1", title = "scan the repo", status = "running" },
+				{ ref = "d2", title = "read the docs", status = "running" },
+				{ ref = "d3", title = "find the flaky test", status = "done" },
+			})
+		end,
+	}
+end
 -- The open session, as if it ran on the box (a remote device that's up),
 -- or on the old laptop (one gone quiet).
 for _, d in { "box", "old" } do
@@ -488,8 +509,24 @@ stub.deny = function(id: string, request: string)
 	note(`deny:{id}:{request}`)
 end
 stub.answer = function() end
-stub.queue = function(id: string, op: any): any
+-- A queued message sent on (steered in): noted; `steer_fails` makes the
+-- next one not go.
+local STEER_FAILS = ui.state("fixture_steer_fails", false)
+stub.queue = function(id: string, op: any, failed: (() -> ())?): any
 	note(`queue:{id}:{op.op}:{op.item}`)
+	if op.op == "send" and STEER_FAILS:peek() then
+		STEER_FAILS:set(false)
+		if failed then
+			failed()
+		end
+		return {
+			after = function(_self: any, _ok: any, err: ((any) -> ())?)
+				if err then
+					err({ message = "failed" })
+				end
+			end,
+		}
+	end
 	return queue_answer(function()
 		local q = {}
 		for _, r in (META[id] or {}).queue or {} do
@@ -501,6 +538,13 @@ stub.queue = function(id: string, op: any): any
 		return nil
 	end)
 end
+ui.command {
+	id = "steer_fails",
+	title = "The next steer doesn't go",
+	run = function()
+		STEER_FAILS:set(true)
+	end,
+}
 stub.steer_all = function(id: string, items: { string }, _message_id: string): any
 	note(`steer_all:{id}:{table.concat(items, ",")}`)
 	return queue_answer(function()
@@ -514,6 +558,11 @@ stub.steer_all = function(id: string, items: { string }, _message_id: string): a
 		return nil
 	end)
 end
+-- A queued message's files, as the host hands them to an edit (`q2`'s).
+local QUEUED_FILES = {
+	{ path = "/host/uploads/9e97a72f-shot.png", name = "shot.png", kind = "image", src = "/host/uploads/9e97a72f-shot.png", on_host = true },
+	{ path = "/host/uploads/ea958e1e-note.txt", name = "note.txt", kind = "file", on_host = true },
+}
 -- One queued message, editable here.
 stub.queue_edit = function(id: string, item: string): any
 	note(`queue_edit:{id}:{item}`)
@@ -525,13 +574,33 @@ stub.queue_edit = function(id: string, item: string): any
 		end
 	end
 	publish(id, { queue = q })
+	if item == "q2" then
+		return settled({ text = "Queued with files", attachments = QUEUED_FILES })
+	end
 	return settled({ text = "Queued words" })
 end
-stub.queue_finish = function(id: string, item: string, action: string, text: string?): any
-	note(`queue_finish:{id}:{item}:{action}:{text or ""}`)
+stub.queue_finish = function(id: string, item: string, action: string, text: string?, attachments: { any }?): any
+	local files = ""
+	if attachments then
+		local names = {}
+		for _, a in attachments do
+			table.insert(names, `{a.path}{if a.on_host then "@host" else ""}`)
+		end
+		files = `:files={table.concat(names, ",")}`
+	end
+	note(`queue_finish:{id}:{item}:{action}:{text or ""}{files}`)
 	publish(id, { queue = { { id = item, text = if action == "commit" then text else "Queued words" } } })
 	return settled(nil)
 end
+ui.command {
+	id = "queue_with_files",
+	title = "A message with files waits in the queue",
+	run = function()
+		if opened then
+			publish(opened, { queue = { { id = "q2", text = "Queued with files" } } })
+		end
+	end,
+}
 ui.command {
 	id = "queue_one",
 	title = "A message waits in the queue",

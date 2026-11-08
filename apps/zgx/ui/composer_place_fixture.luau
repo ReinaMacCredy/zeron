@@ -23,7 +23,8 @@ local Composer = require("@ds/composer")
 ds.setup()
 -- (`test_place_radii` = "hot": the Hot Pink template's radii, the pill's 36
 -- and the trays' 24, read as the fixture loads: set it, then reload.)
-if ui.state("test_place_radii", "default"):peek() == "hot" then
+-- (A test sets the shared `test_place_hot_radii` before the fixture loads.)
+if ui.state("test_place_radii", "default"):peek() == "hot" or ui.shared("test_place_hot_radii", false):peek() == true then
 	ui.theme.tokens { zeron = { composer = { radius = 36, tray = { radius = 24 } } } }
 end
 
@@ -59,7 +60,7 @@ ui.effect(function()
 end)
 
 local HARNESSES: { ds.Harness } = { { id = "claude", label = "Claude", mark = "claude" } }
-local MODELS: { ds.Model } = { { value = "opus", label = "Opus 5.5", harness = "claude", efforts = { { value = "high", label = "High" } }, effort = "high" } }
+local MODELS: { ds.Model } = { { value = "opus", label = "Opus 5.5", harness = "claude" } }
 local PROJECTS: { Composer.Project } = {
 	{ value = "zeron", label = "zeron", hue = "violet" },
 	{ value = "atlas", label = "Atlas Platform Monorepo", hue = "teal" },
@@ -68,15 +69,6 @@ local BRANCHES = {
 	{ value = "main", label = "main" },
 	{ value = "zeron/create-readme-update-for-onboarding", label = "zeron/create-readme-update-for-onboarding" },
 }
-
--- (What a plugin adds to the toolbar's two slots.)
-local plugin = ui.state("test_place_plugin", false)
-ui.contribute { target = "hook:chat.composer.toolbar.start", after = ui.show(function(): boolean
-	return plugin:get()
-end, ui.text { id = "plug-start", "S" }) }
-ui.contribute { target = "hook:chat.composer.toolbar.end", before = ui.show(function(): boolean
-	return plugin:get()
-end, ui.text { id = "plug-end", "E" }) }
 
 local box = ui.ref()
 return ui.column {
@@ -162,7 +154,7 @@ return ui.column {
 		end, ui.row {
 			justify = "end",
 			pb = "$space.2",
-			ds.context_usage.Body {
+			ds.context_usage.Card {
 				usage = function(): Composer.Usage?
 					return usage:get()
 				end,
@@ -190,6 +182,9 @@ return ui.column {
 			end,
 			usage = function(): Composer.Usage?
 				return usage:get()
+			end,
+			over_art = function(): boolean
+				return art:get()
 			end,
 		},
 	},

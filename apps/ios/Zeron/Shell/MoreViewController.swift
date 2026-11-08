@@ -255,7 +255,9 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         s.appendItems(math)
         s.appendSections(["Sessions"])
         s.appendItems([
-            Row(id: "groupByProject", title: "Group by Project", subtitle: "Sessions outside your sections, under their project", symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject)),
+            Row(id: "activity", title: "Activity", subtitle: app.activityOn ? "On — the chats that need you, in one list" : "Off", symbol: "tray.full"),
+            // (Activity keeps one list of its own: grouping stands aside.)
+            Row(id: "groupByProject", title: "Group by Project", subtitle: app.activityOn ? "Not while Activity is on" : "Sessions outside your sections, under their project", symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject), disabled: app.activityOn),
             Row(id: "archived", title: "Archived Sessions", symbol: "archivebox"),
         ])
         s.appendSections(["Composer"])
@@ -286,6 +288,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         switch row.id {
         case "voice": navigationController?.pushViewController(VoiceViewController(app: app), animated: true)
         case "liveActivity": navigationController?.pushViewController(LiveActivitySettingsViewController(), animated: true)
+        case "activity": navigationController?.pushViewController(ActivitySettingsViewController(app: app), animated: true)
         case "providers":
             navigationController?.pushViewController(ProvidersViewController(app: app), animated: true)
         case "cloud":

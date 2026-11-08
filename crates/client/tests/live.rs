@@ -109,6 +109,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
         settle: None,
         work_tree: None,
         unsettled_at: None,
+        sleep: None,
     };
     (device, space, chat)
 }

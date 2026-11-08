@@ -643,6 +643,7 @@ mod tests {
             classifying: None,
             last_turn_outcome: Default::default(),
             terminal_activity: Default::default(),
+            waiting: None,
         }
     }
 

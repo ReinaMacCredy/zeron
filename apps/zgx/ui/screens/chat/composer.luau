@@ -22,12 +22,14 @@ local prefs = require("@app/screens/settings/prefs")
 local store = require("@app/screens/chat/store")
 local model_switch = require("@app/screens/chat/model_switch")
 local composer_profiles = require("@app/screens/chat/composer_profiles")
+local lanes = require("@app/screens/chat/lanes")
 local route = require("@app/screens/shell/route")
 local cloud = require("@account/cloud")
 local shared = require("@app/screens/chat/shared")
 local sessions = require("@account/sessions")
 local LinkNotice = require("@app/screens/chat/link_notice")
 local Compaction = require("@ds/compaction")
+local Deck = require("@ds/composer_deck")
 local Where = require("@app/screens/chat/where")
 local DropOverlay = require("@ds/drop_overlay")
 local Asks = require("@app/screens/chat/asks")
@@ -36,10 +38,8 @@ local Completions = require("@app/screens/chat/completions")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
 -- (Loaded with the chat page: captures land on its composer.)
-local SessionPlace = require("@app/screens/chat/session_place")
 local Lanes = require("@app/screens/chat/lanes")
 local Pills = require("@app/screens/chat/pills")
-local Review = require("@app/screens/chat/review")
 local AppCommands = require("@app/screens/chat/app_commands")
 local Outgoing = require("@app/screens/chat/outgoing")
 
@@ -409,10 +409,34 @@ local function Composer(): Node
 		saving = function(): string?
 			return saving_row:get()
 		end,
+		say = function(tone: string, key: string)
+			own_notice:set { tone = tone, key = key, dismissable = true }
+		end,
 	}
 	local ask, queue = asks.ask, asks.queue
-	-- A line above it: one of its own (a send that failed), else the
-	-- session's.
+	-- What runs behind it: this chat's subagents (the open chat's: its
+	-- transcript is the session shown) and the processes it left running.
+	local tasks = ui.computed(function(): { any }
+		local out: { any } = {}
+		local shown = store.session:get()
+		local id = session_id:get()
+		if shown and id and shown.id == id then
+			out = lanes.tasks()
+		end
+		local first_ended = #out + 1
+		for i, t in out do
+			if t.ended then
+				first_ended = i
+				break
+			end
+		end
+		-- (Processes after the subagents that run, before those that ended.)
+		for _, t in asks.tasks:get() do
+			table.insert(out, first_ended, t)
+			first_ended += 1
+		end
+		return out
+	end)
 	-- Its own goes as the chat changes (kept: a reload isn't a change).
 	local notice_for = ui.state("chat_notice_for", "?")
 	ui.effect(function()
@@ -505,10 +529,6 @@ local function Composer(): Node
 		end
 	end)
 
-	-- What a sent message shows of what it carries.
-	-- What `@` offers: the files of where it works (the session's folder,
-	-- or a new chat's project), searched as the mention is typed. (`/` and
-	-- `$` offer nothing yet.)
 	-- The agent the chat runs (its model's): whose completion settings the
 	-- composer follows.
 	local function agent(): string?
@@ -547,51 +567,45 @@ local function Composer(): Node
 	end)
 	local completions = Completions.bind {
 		key = "chat",
+		text = shared.text,
 		agent = agent,
 		target = invocation_target,
+		files = function(): any
+			local id = session_id:peek()
+			local p = route.project:peek()
+			return if id then { chat = id } elseif p then { space = p.id, device = p.device } else nil
+		end,
 		in_chat = function(): boolean
 			return session_id:get() ~= nil
 		end,
-		attachments = function(): { any }
-			local out = {}
-			for _, a in shared.cargo:get() do
-				if a.path then
-					table.insert(out, { value = a.path, label = a.name, src = if a.kind == "image" then a.path else nil, file = a.kind ~= "image" })
-				end
-			end
-			return out
+		run = function(name: string)
+			ZeronCommands.run(name, session_id:peek())
 		end,
 	}
 
 	-- A queued message being edited in the composer: which, and the draft
 	-- it set aside (put back when the edit ends).
-	local editing = ui.state("chat_editing", nil :: { item: string, aside: string }?)
-	local function end_edit(action: string)
-		local e = editing:peek()
-		local id = session_id:peek()
-		if not e or not id then
-			return
-		end
-		local words = shared.text:peek()
-		ui.batch(function()
-			editing:set(nil)
-			shared.text:set(e.aside)
-		end)
-		if action == "commit" then
-			saving_row:set(e.item)
-		end
-		store.queue_finish(id, e.item, action, if action == "commit" then words else nil):after(function()
-			saving_row:set(nil)
-		end, function(err: any)
-			saving_row:set(nil)
-			local why = err and err.message
-			own_notice:set {
-				tone = "danger",
-				key = if why == "conflict" then "chat.composer.edit_conflict" else "chat.composer.edit_not_saved",
-				dismissable = true,
-			}
-		end)
-	end
+	local editing = ui.state("chat_editing", nil :: { item: string, aside: string, aside_cargo: { any }? }?)
+	local edits = Asks.queue_edits {
+		id = function(): string?
+			return session_id:peek()
+		end,
+		text = shared.text,
+		editing = editing,
+		focus = function()
+			shared.focus:add(1)
+		end,
+		say = function(tone: string, key: string)
+			own_notice:set { tone = tone, key = key, dismissable = true }
+		end,
+		cargo = function(): { any }
+			return shared.cargo:peek()
+		end,
+		set_cargo = function(list: { any })
+			shared.cargo:set(list)
+		end,
+	}
+	local end_edit = edits.finish
 	-- Moving to another chat: an edit under way is left as it was (its
 	-- displaced draft back in place), then the draft shown is put away
 	-- under the chat left and the next chat's own comes out (shared.show),
@@ -915,18 +929,35 @@ local function Composer(): Node
 	local accounts = shared.model_accounts(function(): string?
 		return device:get()
 	end)
-	local place = SessionPlace.bind {
-		open = open,
-		cloud = Where.CLOUD,
-		live_branch = function(): string?
-			local s = open()
-			local lb = live_branch:get()
-			return if s and lb.key:sub(1, #s.id + 1) == `{s.id}|` then lb.name else (s and (s :: any).branch)
-		end,
-		notice = function(n: any)
-			own_notice:set(n)
-		end,
-	}
+	local function branch_fixed(): ds.ComposerFixed?
+		local s = open()
+		if not s then
+			return nil
+		end
+		local path: string?, project: string? = nil, nil
+		for _, p in sessions.now:get().projects do
+			if p.id == s.project then
+				path, project = p.path, p.name
+			end
+		end
+		local lb = live_branch:get()
+		local name = if lb.key:sub(1, #s.id + 1) == `{s.id}|` then lb.name else (s :: any).branch
+		local on: string? = nil
+		for _, d in sessions.now:get().devices do
+			if d.id == (s :: any).device then
+				on = d.name
+			end
+		end
+		return {
+			device = on,
+			name = name,
+			worktree = path ~= nil and s.cwd ~= nil and s.cwd ~= path,
+			project = project,
+			hue = if project and s.project then (route.look(s.project) or { hue = route.hue(s.project) }).hue else nil,
+			src = if project and s.project then (route.look(s.project) or {}).src else nil,
+			emoji = if project and s.project then (route.look(s.project) or {}).emoji else nil,
+		}
+	end
 	-- The agent the composer runs, as its catalog lists it.
 	local function harness_row(): any
 		local id = agent()
@@ -1070,8 +1101,6 @@ local function Composer(): Node
 	}
 	local function composer(): Node
 		return ds.Composer {
-			profiles = profiles,
-			open_profiles = open_profiles,
 			-- Its measures, fold and open tray kept across a reload, so it
 			-- is laid out as it was from the first frame.
 			keep = "chat",
@@ -1092,6 +1121,15 @@ local function Composer(): Node
 				return if s then (s :: any).context_tokens else nil
 			end,
 			tray = TRAY,
+			-- ("Scroll to end", while it shows: the trays' pill moves aside.)
+			aside = function(): number?
+				return shared.jump_width:get()
+			end,
+			on_pill_width = function(w: number?)
+				if shared.pill_width:peek() ~= w then
+					shared.pill_width:set(w)
+				end
+			end,
 			value = shared.text,
 			placeholder = ui.computed(function(): string
 				if new_chat() and project:get() == Where.NO_PROJECT then
@@ -1105,37 +1143,6 @@ local function Composer(): Node
 			running = running,
 			access = access,
 			plan = plan,
-			-- (While the catalog comes, or from an older host: there.)
-			plan_available = function(): boolean
-				local h = harness_row()
-				return h == nil or h.supports_plan ~= false
-			end,
-			plan_asks = function(): boolean
-				local h = harness_row()
-				if h and h.plan_asks ~= nil then
-					return h.plan_asks == true
-				end
-				local a = agent()
-				return a == "claude-code" or a == "mock"
-			end,
-			access_offered = function(): { string }?
-				local h = harness_row()
-				if not h or h.access_modes == nil then
-					return nil
-				end
-				return if #h.access_modes > 0 then h.access_modes else { "full" }
-			end,
-			access_note = function(): string?
-				local h = harness_row()
-				if not h or h.access_modes == nil or #h.access_modes > 1 then
-					return nil
-				end
-				local only = h.access_modes[1] or "full"
-				return ui.t("chat.composer.access_only", {
-					name = h.label or "",
-					mode = string.lower(ui.t(`ds.composer.access.{only}`):get()),
-				}):get()
-			end,
 			prediction = function(): string?
 				local s = open()
 				if not s or editing:get() then
@@ -1143,21 +1150,8 @@ local function Composer(): Node
 				end
 				return (s :: any).prediction
 			end,
-			resume = function(): boolean
-				local s = open()
-				return s ~= nil and (s :: any).stopped == true
-			end,
-			on_resume = function()
-				send(RESUME_PROMPT, { resume = true })
-			end,
 			limit = limit,
 			pills = Pills.Row { bind = Pills.window_bind(), tasks = asks.tasks, waiting = true },
-			review = Review.Chip { chat = function(): string?
-				return session_id:get()
-			end },
-			review_findings = Review.Findings { chat = function(): string?
-				return session_id:get()
-			end },
 			side_tab = {
 				shown = function(): boolean
 					return session_id:get() ~= nil
@@ -1191,9 +1185,6 @@ local function Composer(): Node
 					open_side_chat(nil)
 				end,
 			},
-			send_block = function(): string?
-				return if out_of_credits() then ui.t("chat.composer.credits_tip"):get() else nil
-			end,
 			caption = function(): string?
 				local s = open()
 				if not s or not running:get() or (s :: any).steers ~= false then
@@ -1213,6 +1204,9 @@ local function Composer(): Node
 				local c: any = store.catalog:get()
 				return c.tabs or c.harnesses
 			end,
+			models_loading = function(): boolean
+				return store.catalog:get().complete ~= true
+			end,
 			models = function(): { ds.Model }
 				return store.catalog:get().models
 			end,
@@ -1228,11 +1222,6 @@ local function Composer(): Node
 				end
 				return { tokens = s.context_tokens, window = s.context_window }
 			end,
-			stats = function(): any
-				return store.stats:get()
-			end,
-			-- Compaction: the chip while it checks or compacts, the resume
-			-- card on a large idle Claude chat, and the ring card's part.
 			compaction = {
 				label = function(): string?
 					local s: any = open()
@@ -1268,13 +1257,6 @@ local function Composer(): Node
 					compact("")
 				end,
 			},
-			working = function(): boolean
-				local s: any = open()
-				if s and s.in_flight ~= nil then
-					return s.in_flight
-				end
-				return s ~= nil and s.running == true
-			end,
 			footer_git = function(): boolean
 				local s = open()
 				for _, p in sessions.now:get().projects do
@@ -1283,19 +1265,6 @@ local function Composer(): Node
 					end
 				end
 				return false
-			end,
-			on_terminal = function()
-				local panel: any = require("@app/screens/shell/boundary").load("@app/screens/panel")
-				if panel and panel.toggle_terminal then
-					panel.toggle_terminal()
-				end
-			end,
-			terminal_open = function(): boolean
-				local panel: any = require("@app/screens/shell/boundary").load("@app/screens/panel")
-				return panel ~= nil and panel.terminal_shown ~= nil and panel.terminal_shown()
-			end,
-			terminal_keys = function(): string
-				return require("@app/screens/shell/keys").combo("shell.toggle_terminal")
 			end,
 			project = project,
 			projects = where.projects,
@@ -1312,8 +1281,7 @@ local function Composer(): Node
 			branch = branch,
 			branches = where.branches,
 			branches_empty = where.branches_empty,
-			branch_fixed = place.fixed,
-			branch_menu = place.menu,
+			branch_fixed = branch_fixed,
 			cargo = shared.cargo,
 			on_remove_cargo = shared.remove_cargo,
 			on_paste_text = cargo_props.on_paste_text,
@@ -1351,32 +1319,31 @@ local function Composer(): Node
 			on_queue_steer_all = asks.on_queue_steer_all,
 			queue_pictures = queue_pictures,
 			on_dismiss_todos = asks.on_dismiss_todos,
-			on_queue_edit = function(item: string)
-				local id = session_id:peek()
-				if not id or editing:peek() then
-					return
-				end
-				store.queue_edit(id, item):after(function(got: any)
-					editing:set { item = item, aside = shared.text:peek() }
-					shared.text:set(if got then got.text else "")
-					shared.focus:add(1)
-				end, function(err: any)
-					own_notice:set {
-						tone = "warning",
-						key = if err and err.message == "locked" then "chat.composer.edit_locked" else "chat.composer.edit_unavailable",
-						dismissable = true,
-					}
-				end)
-			end,
-			on_queue_save = function()
-				end_edit("commit")
-			end,
-			on_queue_cancel = function()
-				end_edit("cancel")
-			end,
+			on_queue_edit = edits.on_queue_edit,
+			on_queue_save = edits.on_queue_save,
+			on_queue_cancel = edits.on_queue_cancel,
 			on_queue_remove = asks.on_queue_remove,
 			on_queue_reorder = asks.on_queue_reorder,
 			todos = asks.todos,
+			tasks = if Deck.on:peek() then tasks else asks.tasks,
+			-- A subagent's row opens it, a tab of the session's panel.
+			on_open_task = function(ref: string)
+				local id = session_id:peek()
+				if id then
+					lanes.open_task(id, ref)
+				end
+			end,
+			-- Stop on a background process: its host stops it, and its row
+			-- goes as the session stops listing it (production's tray).
+			on_stop_task = function(task: string)
+				local id = session_id:peek()
+				if not id then
+					return
+				end
+				store.stop_task(id, task):after(function() end, function()
+					own_notice:set { tone = "danger", key = "chat.composer.couldnt_stop_task", dismissable = true }
+				end)
+			end,
 			question = asks.question,
 			chosen = asks.chosen,
 			on_pick = asks.on_pick,
@@ -1398,12 +1365,10 @@ local function Composer(): Node
 				return id ~= nil and s ~= nil and s.id == id and (s.state == "missing" or s.state == "offline")
 			end,
 			focus = shared.focus,
-			mentions = completions.mentions,
+			mentions = completions.lists,
 			on_mention = completions.on_mention,
-			mention_enabled = completions.mention_enabled,
-			mention_empty = completions.mention_empty,
-			mention_failed = completions.mention_failed,
-			mention_token = completions.mention_token,
+			mention_enabled = completions.enabled,
+			mention_empty = completions.empty,
 		}
 	end
 

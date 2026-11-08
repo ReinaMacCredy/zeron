@@ -1017,6 +1017,7 @@ mod drag_regressions {
             work_tree: None,
             unsettled_at: None,
             harness_session_harness: Default::default(),
+            sleep: None,
         }
     }
 
@@ -1358,6 +1359,7 @@ mod drag_regressions {
                     classifying: None,
                     last_turn_outcome: Default::default(),
                     terminal_activity: Default::default(),
+                    waiting: None,
                 });
             });
             std::mem::forget(dir);

@@ -1220,6 +1220,7 @@ impl WorkspaceHost {
                 settle: None,
                 work_tree: None,
                 unsettled_at: None,
+                sleep: None,
             })
         })?;
         Ok(())
@@ -1279,6 +1280,7 @@ impl WorkspaceHost {
             work_tree: None,
             unsettled_at: None,
             harness_session_harness: Default::default(),
+            sleep: None,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1339,6 +1341,7 @@ impl WorkspaceHost {
             work_tree: None,
             unsettled_at: None,
             harness_session_harness: Default::default(),
+            sleep: None,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1400,6 +1403,7 @@ impl WorkspaceHost {
             work_tree: None,
             unsettled_at: None,
             harness_session_harness: Default::default(),
+            sleep: None,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1613,6 +1617,21 @@ impl WorkspaceHost {
         patch: &TaskStepPatch,
     ) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.update_task_step(step_id, patch, Utc::now()))?)
+    }
+
+    /// A chat put to sleep until `until` (any device; `None` wakes it).
+    pub fn set_chat_sleep(
+        &self,
+        chat_id: &str,
+        until: Option<chrono::DateTime<Utc>>,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_sleep(chat_id, until, Utc::now()))?)
+    }
+
+    /// A sleeping chat woken early (its host saw it start asking for the
+    /// person, or fail). `false` when it wasn't asleep.
+    pub fn wake_chat(&self, chat_id: &str, at: chrono::DateTime<Utc>) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.wake_chat(chat_id, at))?)
     }
 
     /// Synced seen marker (any device; LWW + monotonic guard in the doc layer).
@@ -2721,6 +2740,7 @@ mod tests {
             running_subagents: 0,
             compact_plan: None,
             classifying: None,
+            waiting: None,
         }
     }
 

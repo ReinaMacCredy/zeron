@@ -1441,6 +1441,13 @@ impl DocHost {
         Ok(())
     }
 
+    /// Start no new work until [`Self::lift_quiesce`]: a new version trying out
+    /// an update, whose changes may yet be undone. Controls keep working, as
+    /// they do in a quiesce, and what queues meanwhile runs when it's lifted.
+    pub fn hold_work(&self) {
+        self.inner.quiesced.store(true, Ordering::SeqCst);
+    }
+
     /// End a quiesce and run everything that queued meanwhile.
     pub fn lift_quiesce(&self) {
         if !self.inner.quiesced.swap(false, Ordering::SeqCst) {
@@ -4979,6 +4986,8 @@ impl DocHost {
     /// in their mailbox until ready. Attachments ride the steer like a first
     /// turn: inlined by harnesses that can, path refs in the prompt trailer
     /// for the rest.
+    /// One whose files from another device haven't landed yet stays queued,
+    /// and the call says why.
     pub async fn steer_queued_now(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
         if !self.is_host(chat_id) {
             return Err(EngineError::Other(format!(
@@ -4996,6 +5005,14 @@ impl DocHost {
         else {
             return Ok(false);
         };
+        // Its files ride the steer, as images where they are. Ones still on
+        // their way from another device can't go yet (the drain waits for
+        // them; a steer says so).
+        if !self.missing_row_attachments(&candidate).is_empty() {
+            return Err(EngineError::Other(
+                "this message's images are still uploading".into(),
+            ));
+        }
         if candidate.delivery_gate.is_some() {
             return Err(EngineError::Other(
                 "queued message is blocked for editing or review".into(),
@@ -5379,12 +5396,13 @@ impl DocHost {
         }
         if send == QueueSend::Steer {
             match sessions
-                .steer_with(
+                .steer_now(
                     chat_id,
                     &prompt,
-                    &attachments,
+                    attachments.clone(),
                     Some(message_id.clone()),
                     Some(computer_control),
+                    now_ms(),
                 )
                 .await?
             {
@@ -6940,11 +6958,13 @@ impl DocHost {
         {
             tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
         }
+        // A steer is read at once: while a command runs, its turn stops in
+        // place first (the runtime and its background work stay).
         match sessions
-            .steer_at(
+            .steer_now(
                 chat_id,
                 &prompt,
-                &[],
+                Vec::new(),
                 message_id.clone(),
                 Some(computer_control),
                 issued_at,

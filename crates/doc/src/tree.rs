@@ -197,7 +197,7 @@ pub fn tokens_text(tokens: u64) -> String {
 
 pub fn linked_label(indicator: ChatIndicator) -> &'static str {
     match indicator {
-        ChatIndicator::Working => "Working",
+        ChatIndicator::Working | ChatIndicator::Waiting => "Working",
         ChatIndicator::AwaitingInput => "Asked you a question",
         ChatIndicator::Errored => "Failed",
         ChatIndicator::Completed | ChatIndicator::Idle => "Ready for you",
@@ -261,7 +261,7 @@ pub fn lead_status<B>(task: &Task, plan: &Rollup<B>) -> (TreeStatus, &'static st
     }
     if let Some(indicator) = plan.lead.filter(|_| !is_mission(task, plan)) {
         let status = match indicator {
-            ChatIndicator::Working => TreeStatus::Running,
+            ChatIndicator::Working | ChatIndicator::Waiting => TreeStatus::Running,
             ChatIndicator::Errored => TreeStatus::Failed,
             ChatIndicator::AwaitingInput | ChatIndicator::Completed | ChatIndicator::Idle => {
                 TreeStatus::Waiting
@@ -285,7 +285,9 @@ pub fn lead_status<B>(task: &Task, plan: &Rollup<B>) -> (TreeStatus, &'static st
 
 pub fn chat_status<S: TreeSource>(source: &S, chat: &Chat) -> (TreeStatus, &'static str) {
     match source.indicator(chat) {
-        ChatIndicator::Working => return (TreeStatus::Running, "Working"),
+        ChatIndicator::Working | ChatIndicator::Waiting => {
+            return (TreeStatus::Running, "Working");
+        }
         ChatIndicator::AwaitingInput => return (TreeStatus::Waiting, "Needs you"),
         ChatIndicator::Errored => return (TreeStatus::Failed, "Failed"),
         ChatIndicator::Completed | ChatIndicator::Idle => {}

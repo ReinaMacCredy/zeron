@@ -323,6 +323,7 @@ fn park_on_background_agent(session: &SessionHandle, held_by_subagents: bool) {
                 background_tasks: Vec::new(),
                 last_turn_outcome: None,
                 terminal_activity: None,
+                waiting: None,
             })
         })
         .unwrap();

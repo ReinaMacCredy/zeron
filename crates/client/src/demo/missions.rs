@@ -883,6 +883,7 @@ fn lead_chat(
         settle: None,
         work_tree: None,
         unsettled_at: None,
+        sleep: None,
     }
 }
 

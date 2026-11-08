@@ -164,6 +164,12 @@ impl AppUpdate {
             channel: None,
             held: None,
             switch: false,
+            install: None,
+            can_apply_remotely: None,
+            cannot_apply_reason: None,
+            manual_command: None,
+            update: None,
+            app_version: None,
         });
         let held = match std::env::var("ZERON_UPDATE_PREVIEW").as_deref() {
             Ok("available") => Some(Flow::Idle),
@@ -421,6 +427,12 @@ impl AppUpdate {
                         channel: None,
                         held: None,
                         switch: false,
+                        install: None,
+                        can_apply_remotely: None,
+                        cannot_apply_reason: None,
+                        manual_command: None,
+                        update: None,
+                        app_version: None,
                     });
                     status.error = Some(message.to_string());
                     this.status = Some(status);

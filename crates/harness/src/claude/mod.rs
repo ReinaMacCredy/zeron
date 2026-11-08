@@ -88,6 +88,17 @@ use wire::{
     deny_response,
 };
 
+/// Appended to a chat's system prompt (where Zeron's server offers
+/// `wait_on_background`: [`crate::ToolServer::waits_on_background`]): the text Sonnet and Opus were live-probed acting
+/// on. The CLI starts a turn of its own when a background task ends, so a
+/// turn that ends on one isn't the agent's last.
+const WAIT_ON_BACKGROUND_NOTE: &str = "\
+When you start background work you will come back to once it finishes (a test run, a build, a \
+long check) and you end your turn before it finishes, call the Zeron tool wait_on_background \
+with its task id first, so the person sees this chat waiting rather than finished. Never for work \
+you leave running on purpose (a dev server, a watcher). Zeron tools may be deferred: load it \
+with tool search first.";
+
 /// Locate the device's installed Claude Code CLI: our own PATH, then the
 /// login-shell PATH snapshot (the user's shell init shapes PATH in ways a
 /// GUI/service launch never sees — see [`crate::shell_env`]), then known
@@ -760,6 +771,10 @@ impl Harness for ClaudeHarness {
     fn id(&self) -> HarnessId {
         HarnessId::ClaudeCode
     }
+    /// Live-verified 2.1.319: a new turn 0.1 s after a background task ends.
+    fn wakes_on_background(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &str {
         "Claude Code"
     }
@@ -806,6 +821,12 @@ impl Harness for ClaudeHarness {
         true
     }
     fn compacts_in_place(&self) -> bool {
+        true
+    }
+    /// A steer during an open tool call: the `interrupt` control request
+    /// stops the foreground call (a running Bash is killed) and the CLI keeps
+    /// its background shells and agents (`perTaskStopAffordance`).
+    fn steer_stops_tool(&self) -> bool {
         true
     }
     /// `/compact` preserves the last assistant message after its summary (`compactMetadata.preservedMessages`).
@@ -1205,8 +1226,19 @@ impl Launcher {
             // wait_threads blocks up to 30 min, so raise it to the cap.
             cmd.args(["--mcp-config", &server.mcp_config_json("zeron")]);
             cmd.env("MCP_TOOL_TIMEOUT", "1800000");
-            if let Some(guidance) = &server.guidance {
-                cmd.args(["--append-system-prompt", guidance]);
+            // When to say it waits on background work (the Zeron tool
+            // `wait_on_background`), where that tool is offered. Its own
+            // description and the server's instructions say so too, but
+            // neither reaches the model before it decides to end a turn:
+            // live-probed on 2.1.319, Sonnet never called it with those
+            // alone, and Sonnet and Opus both did with this note.
+            let wait_note = server.waits_on_background().then_some(WAIT_ON_BACKGROUND_NOTE);
+            let appended: Vec<&str> = [server.guidance.as_deref(), wait_note]
+                .into_iter()
+                .flatten()
+                .collect();
+            if !appended.is_empty() {
+                cmd.args(["--append-system-prompt", &appended.join("\n\n")]);
             }
         }
         if self.one_shot.is_none()
@@ -1510,6 +1542,11 @@ async fn run_session(session: Session) {
     // A message of ours (or a background wake) began a turn that has not
     // reported its end: the CLI dying now leaves it to us to end it.
     let mut turn_open = true;
+    // The CLI re-invokes the model on its own when a background task ends
+    // (live-verified 2.1.319: `task_notification`, the roster drained, a
+    // fresh `init` 0.1 s later, the wake turn's own `result`), so what the
+    // agent waits on can be shown as a wait.
+    turn.set_wakes_on_background(true);
     // A resumed session the CLI turns out to have no conversation for is
     // relaunched fresh, once (see [`no_conversation`]).
     let mut restore_fallback = launched.resume.is_some();
@@ -1707,10 +1744,17 @@ async fn run_session(session: Session) {
                         match system.subtype.as_str() {
                             "background_tasks_changed" => {
                                 turn.set_background(system.tasks.as_ref().map_or(0, Vec::len));
+                                turn.set_background_agents(background::agents(system.tasks.as_deref()));
                             }
                             // The first, or a background wake's: either way a
-                            // turn is running.
-                            "init" => turn_open = true,
+                            // turn is running. One starting with no turn of
+                            // ours open is the CLI's own wake.
+                            "init" => {
+                                if !turn_open {
+                                    turn.note_wake();
+                                }
+                                turn_open = true;
+                            }
                             _ => {}
                         }
                     }
@@ -3066,6 +3110,43 @@ mod tests {
             .find(|(key, _)| *key == "CLAUDE_CODE_FORWARD_SUBAGENT_TEXT")
             .and_then(|(_, value)| value.map(|v| v.to_os_string()));
         assert_eq!(value.as_deref(), Some(std::ffi::OsStr::new("1")));
+    }
+
+    #[test]
+    fn a_chats_run_is_told_when_to_say_it_waits_and_nothing_else_is() {
+        let request = access_tests::request(zeron_proto::AccessMode::FullAccess, false);
+        let harness = ClaudeHarness::new();
+        let appended = |server: Option<crate::ToolServer>| {
+            let mut launcher = harness.launcher(std::path::Path::new("claude"));
+            launcher.tool_server = server;
+            let cmd = launcher.command(&request);
+            let args: Vec<String> = cmd
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            args.iter()
+                .position(|a| a == "--append-system-prompt")
+                .map(|i| args[i + 1].clone())
+        };
+        let server = |env: &[(&str, &str)], guidance: Option<&str>| crate::ToolServer {
+            command: "/opt/zeron/zeron".into(),
+            args: vec!["mcp".into(), "--chat".into(), "c1".into()],
+            env: env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
+            guidance: guidance.map(str::to_owned),
+        };
+        let waits = (zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV, "1");
+        assert_eq!(
+            appended(Some(server(&[waits], None))).as_deref(),
+            Some(WAIT_ON_BACKGROUND_NOTE)
+        );
+        assert_eq!(
+            appended(Some(server(&[waits], Some("guide")))),
+            Some(format!("guide\n\n{WAIT_ON_BACKGROUND_NOTE}"))
+        );
+        assert_eq!(appended(Some(server(&[], Some("guide")))).as_deref(), Some("guide"));
+        assert_eq!(appended(Some(server(&[], None))), None);
+        assert_eq!(appended(None), None);
     }
 }
 

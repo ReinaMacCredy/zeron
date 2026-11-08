@@ -194,7 +194,7 @@ pub(crate) fn chat_status_tone(
     use zeron_proto::ChatIndicator as Status;
     let dark = theme.appearance == crate::theme::Appearance::Dark;
     match status {
-        Status::Working => (
+        Status::Working | Status::Waiting => (
             Some("Working".into()),
             icons::LUCIDE_CIRCLE_DASHED,
             gpui::rgb(0x2b7fff).into(),
@@ -13248,7 +13248,9 @@ impl Shell {
             Some("Queued")
         } else {
             match status {
-                zeron_proto::ChatIndicator::Working => Some("Working"),
+                zeron_proto::ChatIndicator::Working | zeron_proto::ChatIndicator::Waiting => {
+                    Some("Working")
+                }
                 zeron_proto::ChatIndicator::AwaitingInput => Some("Asking"),
                 zeron_proto::ChatIndicator::Errored => Some("Failed"),
                 zeron_proto::ChatIndicator::Completed => Some("Done"),
@@ -21302,6 +21304,7 @@ mod tests {
             settle: None,
             work_tree: None,
             unsettled_at: None,
+            sleep: None,
         }
     }
 
@@ -21762,6 +21765,7 @@ mod tests {
             running_subagents: 0,
             compact_plan: None,
             classifying: None,
+            waiting: None,
         }
     }
 
@@ -24400,6 +24404,7 @@ mod exit_regressions {
                         space_id: Some("other".into()),
                         last_seen_at: None,
                         room_gen: None,
+                        sleep: None,
                     }]);
                     state.select_space(Some("mine".into()), cx);
                 });
@@ -25699,6 +25704,7 @@ mod right_tab_mouse_regressions {
                     settle: None,
                     work_tree: None,
                     unsettled_at: None,
+                    sleep: None,
                 };
                 let mut side = source.clone();
                 side.id = "side".into();

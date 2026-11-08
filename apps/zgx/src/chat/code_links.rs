@@ -25,6 +25,16 @@ pub(crate) fn set_root(cwd: Option<&str>, here: bool) {
     ROOT.with_borrow_mut(|r| *r = cwd.filter(|r| here && r.starts_with('/')).map(PathBuf::from));
 }
 
+/// `f` with `cwd`'s chat as the one being built, the one before put back after.
+pub(crate) fn with_root<T>(cwd: Option<&str>, here: bool, f: impl FnOnce() -> T) -> T {
+    let before = (CWD.with_borrow(Clone::clone), ROOT.with_borrow(Clone::clone));
+    set_root(cwd, here);
+    let out = f();
+    CWD.set(before.0);
+    ROOT.set(before.1);
+    out
+}
+
 pub(crate) fn cwd() -> Option<String> {
     CWD.with_borrow(Clone::clone)
 }

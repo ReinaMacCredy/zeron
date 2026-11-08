@@ -290,6 +290,14 @@ local function Session(id: Id?): Node
 							-- Under the docked composer: the conversation runs
 							-- behind it, its end held clear of it.
 							foot = room.foot,
+							beside = function(): number?
+								return shared.pill_width:get()
+							end,
+							on_jump_width = function(w: number?)
+								if shared.jump_width:peek() ~= w then
+									shared.jump_width:set(w)
+								end
+							end,
 							draft = store.draft,
 							-- Settings' compact transcript: each reply's work
 							-- folded into one group.
@@ -330,6 +338,12 @@ local function Session(id: Id?): Node
 							threads = shared.threads_for(which, which, function(): any
 								return store.session:get()
 							end),
+							open_sender = function(chat: string, title: string)
+								local s = which()
+								if s then
+									lanes.open(s, { kind = "side_chat", id = chat, title = title })
+								end
+							end,
 							on_retry = function(message: string)
 								local s = which()
 								if s then

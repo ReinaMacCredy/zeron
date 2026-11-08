@@ -16119,6 +16119,7 @@ mod tests {
                 running_subagents: 0,
                 compact_plan: None,
                 classifying: None,
+                waiting: None,
             }];
             state.selected_chat = Some("c".into());
             state.watch_clock_transitions(cx);
@@ -18523,6 +18524,7 @@ mod tests {
                         work_tree: None,
                         unsettled_at: None,
                         harness_session_harness: Default::default(),
+                        sleep: None,
                     }];
                     state.selected_chat = Some("c1".into());
                 });
@@ -18746,6 +18748,7 @@ mod tests {
             work_tree: None,
             unsettled_at: None,
             harness_session_harness: Default::default(),
+            sleep: None,
         }
     }
 
@@ -19374,6 +19377,7 @@ mod tests {
             work_tree: None,
             unsettled_at: None,
             harness_session_harness: Default::default(),
+            sleep: None,
         };
         let mut chats = vec![
             chat("a1", Some("Fix PR fetching")),

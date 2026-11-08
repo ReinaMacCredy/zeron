@@ -320,6 +320,7 @@ mod tests {
             classifying: None,
             last_turn_outcome: Default::default(),
             terminal_activity: Default::default(),
+            waiting: None,
         };
         let set = |sessions: Vec<zeron_proto::Session>, cx: &mut gpui::TestAppContext| {
             state.update(cx, |state, cx| {

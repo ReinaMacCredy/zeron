@@ -788,6 +788,15 @@ pub(crate) struct RawChat {
     unsettled_at: Option<i64>,
     #[serde(default, deserialize_with = "lenient")]
     work_tree: Option<zeron_proto::ChatWorkTree>,
+    /// Its sleep, a field apiece so each is its own last write
+    /// ([`crate::RegistryDoc::set_chat_sleep`]): until (ms; none, awake),
+    /// when it was put to sleep, and when it woke early.
+    #[serde(default)]
+    sleep_until: Option<i64>,
+    #[serde(default)]
+    slept_at: Option<i64>,
+    #[serde(default)]
+    sleep_woke_at: Option<i64>,
 }
 
 fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -858,6 +867,11 @@ impl From<RawChat> for Chat {
             settle: raw.settle,
             unsettled_at: raw.unsettled_at.map(dt),
             work_tree: raw.work_tree,
+            sleep: raw.sleep_until.map(|until| zeron_proto::ChatSleep {
+                until: dt(until),
+                at: dt(raw.slept_at.unwrap_or(until)),
+                woke_at: raw.sleep_woke_at.map(dt),
+            }),
         }
     }
 }
@@ -886,6 +900,18 @@ pub(crate) struct RawSession {
     running_subagents: u32,
     #[serde(default)]
     background_tasks: Vec<zeron_proto::BackgroundTask>,
+    /// LENIENT, as a chat's `config`: a wait this build can't read (a newer
+    /// peer's) costs the wait, not the row.
+    #[serde(default, deserialize_with = "lenient_waiting")]
+    waiting: Option<zeron_proto::SessionWaiting>,
+}
+
+fn lenient_waiting<'de, D>(deserializer: D) -> Result<Option<zeron_proto::SessionWaiting>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 impl From<RawSession> for Session {
@@ -905,6 +931,7 @@ impl From<RawSession> for Session {
             background_tasks: raw.background_tasks,
             compact_plan: None,
             classifying: None,
+            waiting: raw.waiting,
         }
     }
 }
@@ -1030,6 +1057,7 @@ mod tests {
             settle: None,
             unsettled_at: None,
             work_tree: None,
+            sleep: None,
         }
     }
 
@@ -1065,6 +1093,7 @@ mod tests {
             last_turn_outcome: None,
             terminal_activity: None,
             running_subagents: 0,
+            waiting: None,
         }
     }
 

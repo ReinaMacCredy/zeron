@@ -395,7 +395,7 @@ impl Shell {
                     .map(|c| state.display_status_for(c, now))
                     .unwrap_or(ChatIndicator::Idle);
                 let status_label = match status {
-                    ChatIndicator::Working => Some("Working"),
+                    ChatIndicator::Working | ChatIndicator::Waiting => Some("Working"),
                     ChatIndicator::AwaitingInput => Some("Asking"),
                     ChatIndicator::Errored => Some("Failed"),
                     ChatIndicator::Completed => Some("Done"),

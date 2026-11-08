@@ -7,8 +7,8 @@ use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatConfig, CheckoutChangeRequestStatus,
     ChildRoute, ConversationSourceContext, Delegation, DelegationStatus, DelegationWake, Device,
     HarnessId, LimitOffer, LimitResume, LimitResumes, OfferChoice, ReasoningLevel, RouteTarget,
-    SandboxLevel, Session, SessionStatus, SidebarPinChange, SidebarSectionChange, SidebarSettle,
-    Space,
+    SandboxLevel, Session, SessionStatus, SessionWaiting, SidebarPinChange, SidebarSectionChange,
+    SidebarSettle, Space, WaitingKind, WaitingOn,
 };
 
 use crate::client::ms;
@@ -44,6 +44,12 @@ pub(crate) struct DemoChat {
     pub settle: Option<(bool, i64)>,
     pub previous: &'static [HarnessId],
     pub instance: Option<&'static str>,
+    /// Its agent's turn ended into a wait on a background process (the
+    /// command): it reads as Waiting.
+    pub waiting_on: Option<&'static str>,
+    /// Put to sleep (the Activity view): until this far from now (ms; past,
+    /// it has woken), put to sleep this long ago.
+    pub sleep: Option<(i64, i64)>,
 }
 
 /// Each host's `settle_after_days` (`GetSidebarSettings`); the rest keep the default.
@@ -80,6 +86,8 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         settle: None,
         previous: &[],
         instance: None,
+        waiting_on: None,
+        sleep: None,
     };
     vec![
         DemoChat {
@@ -188,6 +196,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             )),
             last_ago_ms: 80 * MIN,
             seen: false,
+            sleep: Some((-30 * MIN, DAY)),
             harness: Codex,
             model: "gpt-6-astra",
             reasoning: Ultra,
@@ -201,6 +210,8 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         },
         DemoChat {
             last_ago_ms: 5 * HOUR,
+            status: Some(SessionStatus::Idle),
+            waiting_on: Some("xcodebuild test -scheme Zeron"),
             ..chat(
                 "chat-ios-keyboard",
                 Some("space-mobile"),
@@ -244,6 +255,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         DemoChat {
             last_ago_ms: 5 * DAY,
             created_ago_ms: 6 * DAY,
+            sleep: Some((3 * HOUR, 2 * HOUR)),
             // Started without picking a model: it runs the default.
             model: "",
             ..chat(
@@ -1025,6 +1037,7 @@ pub(crate) fn seed(
                 .settle
                 .filter(|(settled, _)| !settled)
                 .map(|(_, ago)| ms(now - ago)),
+            sleep: None,
         };
         doc.upsert_chat(&chat)?;
         if chat.id == super::review::OWNER {
@@ -1046,7 +1059,18 @@ pub(crate) fn seed(
                 held_by_subagents: false,
                 compacting: demo.compacting,
                 background_tasks: Vec::new(),
+                waiting: demo.waiting_on.map(|command| SessionWaiting {
+                    since: ms(last),
+                    on: vec![WaitingOn {
+                        id: format!("bg-{}", demo.id),
+                        kind: WaitingKind::Process,
+                        label: command.into(),
+                    }],
+                }),
             })?;
+        }
+        if let Some((until_in, slept_ago)) = demo.sleep {
+            doc.set_chat_sleep(demo.id, Some(ms(now + until_in)), ms(now - slept_ago))?;
         }
         if let (Some((number, state, title)), Some(source)) = (demo.pr, &source_context) {
             change_requests.push(CheckoutChangeRequestStatus {

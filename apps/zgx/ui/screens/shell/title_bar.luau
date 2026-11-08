@@ -13,6 +13,7 @@ local fit = require("@app/screens/shell/fit")
 local boundary = require("@app/screens/shell/boundary")
 local locale = require("@ds/locale")
 local art = require("@app/screens/shell/art")
+local updates = require("@app/screens/shell/updates")
 
 export type Props = {
 	collapsed: State<boolean>,
@@ -139,6 +140,7 @@ return function(props: Props): Node
 				),
 			}
 		),
+		ui.show(updates.shown, updates.Button {}),
 		ui.show(
 			function(): boolean
 				-- (A plugin's page has a panel of its own too.)

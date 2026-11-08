@@ -2341,6 +2341,7 @@ mod tests {
             classifying: None,
             last_turn_outcome: Default::default(),
             terminal_activity: Default::default(),
+            waiting: None,
         }
     }
 
@@ -2394,6 +2395,7 @@ mod tests {
             work_tree: None,
             unsettled_at: None,
             harness_session_harness: Default::default(),
+            sleep: None,
         }
     }
 

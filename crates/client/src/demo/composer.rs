@@ -401,6 +401,7 @@ pub(super) fn background_session(chat_id: &str) -> Option<Session> {
             compact_plan: Some(CompactPlan::Agent),
             last_turn_outcome: None,
             terminal_activity: None,
+            waiting: None,
         });
     }
     (chat_id == "chat-home").then(|| Session {
@@ -427,6 +428,7 @@ pub(super) fn background_session(chat_id: &str) -> Option<Session> {
         }),
         last_turn_outcome: None,
         terminal_activity: None,
+        waiting: None,
     })
 }
 
