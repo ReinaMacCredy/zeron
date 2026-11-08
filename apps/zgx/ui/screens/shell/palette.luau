@@ -641,6 +641,13 @@ local function root(): { Item }
 	return out
 end
 
+-- Open, Settings' pages load (a few a turn) for their rows under In Settings.
+ui.effect(function()
+	if view.palette:get() then
+		settings.load_all()
+	end
+end)
+
 return function(): Node
 	return ui.div {
 		id = "shell-palette",

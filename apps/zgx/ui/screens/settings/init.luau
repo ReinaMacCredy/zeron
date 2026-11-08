@@ -16,33 +16,11 @@ local search = require("@app/screens/settings/search")
 local store = require("@app/screens/settings/store")
 require("@app/screens/settings/chimes")
 
-local general = require("@app/screens/settings/general")
-local chat_page = require("@app/screens/settings/chat")
-local appearance = require("@app/screens/settings/appearance")
-local notifications = require("@app/screens/settings/notifications")
-local profile = require("@app/screens/settings/profile")
-local providers = require("@app/screens/settings/providers")
-local agent_profiles = require("@app/screens/settings/agent_profiles")
-local compaction = require("@app/screens/settings/compaction")
-local code_review = require("@app/screens/settings/code_review")
-local computer = require("@app/screens/settings/computer")
-local devices = require("@app/screens/settings/devices")
-local files = require("@app/screens/settings/files")
-local browser = require("@app/screens/settings/browser")
-local browser_history = require("@app/screens/settings/browser_history")
-local shortcuts = require("@app/screens/settings/shortcuts")
-local appshots = require("@app/screens/settings/appshots")
-local members = require("@app/screens/settings/members")
-local usage = require("@app/screens/settings/usage")
-local about = require("@app/screens/settings/about")
-local lab = require("@app/screens/settings/lab")
-local tools_page = require("@app/screens/settings/tools")
-local routing_page = require("@app/screens/settings/routing")
+-- (The window's language, which General picks: followed from the start.)
+require("@app/screens/language")
 local cloud_page = require("@app/screens/settings/cloud")
 local billing_page = require("@app/screens/settings/billing")
 local cloud = require("@account/cloud")
-
-type Module = { ID: string, TITLE: string, view: () -> Node }
 
 -- Ahead of the pages others add (Plugins, which joins Organization after
 -- Members; the shell's Archived): whichever of them is listed first.
@@ -55,57 +33,57 @@ local function ahead(): string
 	return "archived"
 end
 
-local function add(m: Module, icon: string, group: string, private: boolean?)
+-- (Each page by its module's `ID` and `TITLE`: the module loads as it's first shown or searched.)
+local function add(id: string, title: string, module: string, icon: string, group: string)
 	settings.add {
-		id = m.ID,
-		title = m.TITLE,
+		id = id,
+		title = title,
 		icon = icon,
 		group = group,
 		-- (The shell centres each page in the room beside the list.)
-		view = m.view,
+		module = `@app/screens/settings/{module}`,
 		before = ahead(),
-		private = private,
 	}
 end
 
-add(general, "settings-minimalistic", "Personal")
-add(chat_page, "chat-round-line", "Personal")
-add(appearance, "tuning", "Personal")
-add(notifications, "bell", "Personal")
-add(files, "folder", "Personal")
-add(shortcuts, "keyboard", "Personal")
-add(appshots, "gallery", "Personal")
+add("general", "General", "general", "settings-minimalistic", "Personal")
+add("chat", "Chat", "chat", "chat-round-line", "Personal")
+add("appearance", "Appearance", "appearance", "tuning", "Personal")
+add("notifications", "Notifications", "notifications", "bell", "Personal")
+add("files", "Files", "files", "folder", "Personal")
+add("shortcuts", "Shortcuts", "shortcuts", "keyboard", "Personal")
+add("appshots", "Appshots", "appshots", "gallery", "Personal")
 -- (Zeron's This Mac > Computer use, beside Appshots as there.)
-add(computer, "computer-cursor", "Personal")
-add(profile, "user-rounded", "Personal")
-add(usage, "wallet", "Personal")
+add("computer", "Computer use", "computer", "computer-cursor", "Personal")
+add("profile", "Account", "profile", "user-rounded", "Personal")
+add("usage", "Usage", "usage", "wallet", "Personal")
 -- The panel's browser, under a heading of its own (room for what it grows:
 -- site data, permissions, downloads).
-add(browser, "global", "Browser")
-add(browser_history, "clock-circle", "Browser")
-add(providers, "widget", "Devices")
+add("browser", "Browsing", "browser", "global", "Browser")
+add("browser_history", "History", "browser_history", "clock-circle", "Browser")
+add("providers", "Providers", "providers", "widget", "Devices")
 -- (Zeron's Agents heading has its Profiles beside Providers; zgx keeps the
 -- agents under Devices.)
-add(agent_profiles, "bot", "Devices")
+add("agent-profiles", "Agent profiles", "agent_profiles", "bot", "Devices")
 -- (Zeron's Agents > Compaction, beside the agents here too.)
-add(compaction, "collapse-arrows", "Devices")
+add("compaction", "Compaction", "compaction", "collapse-arrows", "Devices")
 -- (Zeron's Agents > Code review, beside Compaction too.)
-add(code_review, "file-diff", "Devices")
+add("code_review", "Code review", "code_review", "file-diff", "Devices")
 -- (Zeron's Agents > Tools, beside them too.)
-add(tools_page, "action-configure", "Devices")
+add("tools", "Tools", "tools", "action-configure", "Devices")
 -- (Zeron's Agents > Routing, beside them too.)
-add(routing_page, "map-arrow-right", "Devices")
-add(devices, "laptop", "Devices")
-add(members, "users-group-rounded", "Organization")
-add(lab, "action-test", "Lab")
+add("routing", "Routing", "routing", "map-arrow-right", "Devices")
+add("devices", "Devices", "devices", "laptop", "Devices")
+add("members", "Members", "members", "users-group-rounded", "Organization")
+add("experimental", "Experimental", "lab", "action-test", "Lab")
 -- Last, under Zeron's own heading (the shipping app's About and its
 -- updates, in its app menu): after everything, Archived too.
 settings.add {
-	id = about.ID,
-	title = about.TITLE,
+	id = "about",
+	title = "About & updates",
 	icon = "info-square",
 	group = "Zeron",
-	view = about.view,
+	module = "@app/screens/settings/about",
 }
 
 -- Cloud and Billing, only while the account has Cloud (the shipping app's
@@ -144,6 +122,13 @@ ui.effect(function()
 	elseif cloud_for:peek() ~= "" then
 		cloud_for:set("")
 		cloud.forget()
+	end
+end)
+
+-- Searched, every page is: each lists its rows as it loads.
+ui.effect(function()
+	if search.query:get() ~= "" then
+		settings.load_all()
 	end
 end)
 

@@ -5,6 +5,7 @@
 --
 --   local settings = require("@app/screens/shell/settings")
 --   settings.add { id = "plugins", title = "Plugins", icon = "widget", view = function() return … end }
+--   settings.add { id = "general", title = "General", module = "@app/screens/settings/general" }
 --
 -- An app module adds a page as it loads (the Plugins page does), in the
 -- order added, after the app's own; `before = "account"` puts it ahead of
@@ -13,6 +14,8 @@
 -- Plugins add rows under the list in its slot (`settings.nav`) and place
 -- by `#settings-nav`, `.settings-nav-row` and `#settings-page`. Account is
 -- out of their reach.
+--
+-- A `module` page loads it as it's first shown or searched (`settings.load_all()`), not with the script.
 --
 -- Pages that come and go (a plugin's settings, while it's on) are listed
 -- by `settings.extra(name, fn)`: `fn` returns them as they are now (read
@@ -27,6 +30,7 @@
 local ds = require("@ds")
 local route = require("@app/screens/shell/route")
 local frame = require("@app/screens/shell/frame")
+local boundary = require("@app/screens/shell/boundary")
 
 local M = {}
 
@@ -39,7 +43,9 @@ export type Page = {
 	title: string,
 	icon: string?,
 	-- What it shows: built as it opens (a page another opens in its place).
-	view: () -> Node,
+	view: (() -> Node)?,
+	-- Or the module whose `view` it is, loaded as the page is first shown.
+	module: string?,
 	-- Put ahead of this page (an id), else after the rest.
 	before: string?,
 	-- Out of plugins' reach (an account's, anything that spends or
@@ -108,8 +114,43 @@ end
 -- row); a page chosen in the list opens at its top.
 M.scroll = ui.state("shell_settings_scroll", 0)
 
+local modules: { [string]: any } = {}
+local failures: { [string]: string } = {}
+local loads = ui.state("shell_settings_loads", 0)
+
+-- (From a timer alone: a page's effects and computeds are then the script's, not a build's that goes.)
+local function load(id: string)
+	local page = pages[id]
+	if not page or not page.module or modules[id] ~= nil then
+		return
+	end
+	local found, why = boundary.load(page.module)
+	modules[id] = if found ~= nil then found else false
+	if found == nil then
+		failures[id] = why or ""
+	end
+	loads:set(loads:peek() + 1)
+end
+
+-- Whether a page can be built now (its module, if it has one, loaded).
+local function ready(id: string): boolean
+	loads:get()
+	local page = pages[id]
+	return not (page and page.module) or modules[id] ~= nil
+end
+
 function M.add(page: Page)
 	pages[page.id] = page
+	if page.module and not page.view then
+		local id = page.id
+		page.view = function(): Node
+			local m = modules[id]
+			if not m then
+				return boundary.Failed { name = page.title, error = failures[id] }
+			end
+			return m.view()
+		end
+	end
 	-- (Listed once: the list outlives a reload of the scripts, as the
 	-- pages are added again.)
 	if table.find(order:peek(), page.id) then
@@ -135,10 +176,60 @@ M.add {
 	-- (Under a heading of its own, last: Zeron keeps it in its last run of
 	-- pages, apart from the account's and the organization's.)
 	group = "Workspace",
-	view = function(): Node
-		return require("@app/screens/settings/archived").view()
-	end,
+	module = "@app/screens/settings/archived",
 }
+
+-- The page open now: the route's, else (gone, or not added yet) the first.
+local function open_id(): string
+	local id = route.current:get().page
+	if id and M.page(id) then
+		return id
+	end
+	for _, first in order:get() do
+		if pages[first] then
+			return first
+		end
+	end
+	return ""
+end
+
+-- (`ui.after(0)`: loaded before the next frame is drawn.)
+ui.effect(function()
+	if route.current:get().name ~= "settings" then
+		return
+	end
+	local id = open_id()
+	if id ~= "" and not ready(id) then
+		ui.after(0, function()
+			load(id)
+		end)
+	end
+end)
+
+-- (A few a turn, each turn well inside a call's budget.)
+local all = ui.state("shell_settings_load_all", false)
+function M.load_all()
+	if not all:peek() then
+		all:set(true)
+	end
+end
+local function load_some()
+	local start = ui.now()
+	for _, id in order:peek() do
+		if modules[id] == nil and pages[id] and pages[id].module then
+			if ui.now() - start > 12 then
+				ui.after(0, load_some)
+				return
+			end
+			load(id)
+		end
+	end
+end
+ui.effect(function()
+	if all:get() then
+		ui.after(0, load_some)
+	end
+end)
 
 -- What "Back to chats" is among the list's values.
 local BACK = "::back"
@@ -426,17 +517,8 @@ function M.View(props: { inset: boolean? }?): Node
 					pb = "$space.8",
 					items = "center",
 					ui.presence(function(): string
-						local id = route.current:get().page
-						if id and M.page(id) then
-							return id
-						end
-						-- (A page gone, or not added yet: the first one.)
-						for _, first in order:get() do
-							if pages[first] then
-								return first
-							end
-						end
-						return ""
+						local id = open_id()
+						return if id ~= "" and ready(id) then id else ""
 					end, function(id: string): Node
 						if id == "" then
 							return ui.div {}
@@ -449,7 +531,7 @@ function M.View(props: { inset: boolean? }?): Node
 							hook = if page.private then false else nil,
 							w_full = true,
 							items = "center",
-							page.view(),
+							(page.view :: () -> Node)(),
 						}
 					end, { w_full = true, items = "center" }),
 				},

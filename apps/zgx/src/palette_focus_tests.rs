@@ -101,10 +101,10 @@ enum Close {
     /// Escape from its empty field.
     Escape,
     /// Something typed (with the mouse: a click into the field, then the
-    /// text), Escape (clears it), Escape (closes).
+    /// text), Escape: closed at once, typed text and all, as gpui's.
     Typed,
-    /// Keys typed into the field as it opened (no click), Escape (clears
-    /// it), Escape (closes): the keyboard in use since.
+    /// Keys typed into the field as it opened (no click), Escape: the
+    /// keyboard in use since.
     KeysTyped,
     /// A page of it opened ("New chat in…"), Escape (back), Escape.
     Page,
@@ -123,9 +123,6 @@ fn close(app: &mut TestApp, how: Close) {
         Close::Typed => {
             app.type_text(FIELD, "zz");
             app.frames(10);
-            app.key(zgx::input::Key::Escape);
-            app.frames(10);
-            assert!(is_open(app), "the first Escape clears, not closes");
         }
         Close::Page => {
             app.click("role:option ~\"New chat in\"");
@@ -141,9 +138,6 @@ fn close(app: &mut TestApp, how: Close) {
                 app.ui.dispatch(zgx::input::InputEvent::Text("z".into()));
             }
             app.frames(10);
-            app.key(zgx::input::Key::Escape);
-            app.frames(10);
-            assert!(is_open(app), "the first Escape clears, not closes");
         }
         Close::Reloaded => {
             app.host.reload().expect("the reload");
