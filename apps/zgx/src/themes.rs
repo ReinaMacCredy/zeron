@@ -406,7 +406,8 @@ mod tests {
         let added = add(&dir, &source, &[], true).unwrap();
         let id = added["entry"].as_str().unwrap().to_string();
         let entry = entry_of(&dir, &id);
-        assert_eq!((entry["origin"].as_str(), entry["path"].as_str()), (Some("linked_file"), source.to_str()));
+        let canonical = source.canonicalize().unwrap();
+        assert_eq!((entry["origin"].as_str(), entry["path"].as_str()), (Some("linked_file"), canonical.to_str()));
         std::fs::write(&source, std::fs::read_to_string(&source).unwrap().replace("#14181f", "#202833")).unwrap();
         reload(&dir, &id).unwrap();
         assert_eq!(background(&dir, &id), "#202833", "an edit on disk comes in on Reload");

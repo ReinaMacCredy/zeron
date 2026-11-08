@@ -253,7 +253,7 @@ end
 
 test("thousands archived: only the rows the page shows are built, to the very last", function()
 	local app = thousands()
-	expect(app:has(`{PAGE} >> "2037 sessions, hidden from the sidebar until restored."`)).to_be(true)
+	expect(app:has(`{PAGE} >> "2,037 sessions, hidden from the sidebar until restored."`)).to_be(true)
 	-- Down the page by the state and by the wheel: never more than a window's.
 	local most = 0
 	local y = 2000
