@@ -591,7 +591,6 @@ local function form(): Node
 		end)
 	end)
 	local keep = { value = "", label = t("keep_current") }
-	local SELECT_W = 196
 	local function two(a: Node, b: Node?): Node
 		return ui.row { w_full = true, gap = "$space.3", ui.column { grow = 1, basis = 0, min_w = 0, a }, ui.column { grow = 1, basis = 0, min_w = 0, b } }
 	end
@@ -601,7 +600,7 @@ local function form(): Node
 	local harness_select = ds.Select {
 		value = harness_v,
 		name = t("agent"),
-		w = SELECT_W,
+		w_full = true,
 		options = function(): { any }
 			local out = {}
 			for _, a in agents() do
@@ -622,7 +621,7 @@ local function form(): Node
 	local model_select = ds.Select {
 		value = model_v,
 		name = t("model"),
-		w = SELECT_W,
+		w_full = true,
 		options = function(): { any }
 			local out = { keep }
 			for _, m in models_of(draft().harness) do
@@ -649,7 +648,7 @@ local function form(): Node
 	local mode_select = ds.Select {
 		value = mode_v,
 		name = t("mode"),
-		w = SELECT_W,
+		w_full = true,
 		options = function(): { any }
 			local out = { keep }
 			for _, m in look.modes(agent_of(draft().harness)) do
@@ -666,7 +665,7 @@ local function form(): Node
 	local effort_select = ds.Select {
 		value = effort_v,
 		name = t("effort"),
-		w = SELECT_W,
+		w_full = true,
 		options = function(): { any }
 			local out = { keep }
 			local d = draft()
@@ -702,7 +701,7 @@ local function form(): Node
 			table.insert(fields, field(o.label, ds.Select {
 				value = v,
 				name = o.label,
-				w = SELECT_W,
+				w_full = true,
 				options = (function(): { any }
 					local out = { keep }
 					for _, c in o.choices do
