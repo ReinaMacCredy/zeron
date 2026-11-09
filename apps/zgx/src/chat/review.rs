@@ -19,8 +19,8 @@ thread_local! {
     static NAMED: RefCell<HashMap<String, String>> = RefCell::default();
     /// Watched chats the chats' list did not hold yet: their scope is chosen, and counted, once it does.
     static UNSEEDED: RefCell<HashSet<String>> = RefCell::default();
-    /// Chats whose transcript looked once for a reviewer child of theirs (an unwatched chat's block after a restart).
-    static SEEN: RefCell<HashSet<String>> = RefCell::default();
+    /// Chats whose transcript looked for a reviewer child of theirs (an unwatched chat's block), by how many chats there were then: a new chat, a reviewer an agent started there, looks again.
+    static SEEN: RefCell<HashMap<String, usize>> = RefCell::default();
 }
 
 pub(super) fn install(host: &ScriptHost) {
@@ -480,10 +480,11 @@ pub(super) fn place(chat: &str, list: &mut Vec<Value>) {
     place_at(list, Value::record([("id", Value::from(id.as_str())), ("role", Value::from("system")), ("line", Value::from("review")), ("chat", Value::from(chat))]), at);
 }
 
-/// A chat shown before it is watched (a split's other pane after a restart): once the chats' list is heard, a reviewer child of its is adopted, so its block comes back.
+/// A chat shown before it is watched (a split's other pane after a restart, a side chat whose agent asked for a review): once the chats' list is heard, a reviewer child of its is adopted, so its block comes back.
 fn adopt_unwatched(chat: &str) -> bool {
     let chats = CHATS.with(Rc::clone);
-    if !chats.chats_heard.get() || REVIEWS.with(|all| all.borrow().contains_key(chat)) || !SEEN.with(|s| s.borrow_mut().insert(chat.to_owned())) {
+    let count = chats.chats.borrow().len();
+    if !chats.chats_heard.get() || REVIEWS.with(|all| all.borrow().contains_key(chat)) || SEEN.with(|s| s.borrow_mut().insert(chat.to_owned(), count)) == Some(count) {
         return false;
     }
     let list = chats_now();
@@ -863,6 +864,20 @@ mod tests {
         assert!(adopt_unwatched("u"));
         assert_eq!(with("u", |r| r.run.as_ref().and_then(|run| run.task_id.clone())).as_deref(), Some("rv"));
         assert!(!adopt_unwatched("u"), "once");
+    }
+
+    #[test]
+    fn a_shown_chat_whose_review_starts_later_adopts_it_when_its_reviewer_appears() {
+        let chats = CHATS.with(Rc::clone);
+        SEEN.with(|s| s.borrow_mut().clear());
+        chats.chats_heard.set(true);
+        chats.chats.borrow_mut().insert("side".into(), serde_json::to_value(chat_of("side", "mock", json!({}))).unwrap());
+        assert!(!adopt_unwatched("side"), "no reviewer yet");
+        assert!(!adopt_unwatched("side"), "nothing new: not looked at again");
+        let child = chat_of("rv2", "mock", json!({ "delegation": { "delegatedByChatId": "side", "depth": 1, "anchor": "m1", "wake": "never", "status": "completed", "startedAt": "2026-11-01T10:00:00Z", "clientRequestId": "zeron-review:uncommitted:n" } }));
+        chats.chats.borrow_mut().insert(child.id.clone(), serde_json::to_value(&child).unwrap());
+        assert!(adopt_unwatched("side"), "its reviewer, started from elsewhere, is adopted");
+        assert_eq!(with("side", |r| r.run.as_ref().and_then(|run| run.task_id.clone())).as_deref(), Some("rv2"));
     }
 
     #[test]
