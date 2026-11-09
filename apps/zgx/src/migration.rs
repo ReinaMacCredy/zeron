@@ -187,7 +187,7 @@ pub const TABLE: &[(&str, Home)] = &[
     ("prChatSessions", Home::None("no pull request chats here")),
     ("gitAgentBusyPolicy", Home::None("no git busy policy here")),
     ("deviceAutoFloat", Home::Persist(&["screens/settings/device_hub.luau::device_auto_float"])),
-    ("deviceFloatFrame", Home::None("no saved frame for the device preview here (U28 keeps none)")),
+    ("deviceFloatFrame", Home::Persist(&["screens/device/float.luau::device_float_frame"])),
     ("homeWidgets", Home::None("no widget grid here (U27c)")),
     ("smoothScrolling", Home::Persist(&["ds/motion.luau::smooth_scrolling"])),
     ("codexVoice", Home::Persist(&["screens/settings/voice.luau::codex_voice"])),
@@ -260,6 +260,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("ds/motion.luau::motion_follow_system", "true"),
     ("ds/motion.luau::motion_pause_background", "false"),
     ("ds/motion.luau::smooth_scrolling", "true"),
+    ("screens/device/float.luau::device_float_frame", "null"),
     ("screens/shell/appearance.luau::shell_wallpaper", "\"none\""),
     ("screens/shell/appearance.luau::shell_wallpaper_image", "null"),
     ("screens/shell/appearance.luau::shell_wallpaper_effect", "\"dither\""),
@@ -397,6 +398,11 @@ fn more(settings: &Json) -> Vec<(String, Json)> {
         if let Some(on) = settings[from].as_bool() {
             put(to, json!(on));
         }
+    }
+    let frame = &settings["deviceFloatFrame"];
+    let side = |key: &str| frame[key].as_f64().filter(|n| n.is_finite());
+    if let (Some(x), Some(y), Some(width), Some(height)) = (side("x"), side("y"), side("width"), side("height")) {
+        put("screens/device/float.luau::device_float_frame", json!({ "x": x, "y": y, "width": width, "height": height }));
     }
     let face = match s("mathFont") {
         Some("fira") => Some("fira"),
@@ -1275,6 +1281,7 @@ mod tests {
         assert_eq!(s("screens/settings/prefs.luau::settings_conversation_width"), json!(912.0));
         assert_eq!(s("ds/look.luau::accent"), json!("pink"));
         assert_eq!(s("ds/motion.luau::smooth_scrolling"), json!(false));
+        assert_eq!(s("screens/device/float.luau::device_float_frame"), json!({ "x": 10.0, "y": 10.0, "width": 400.0, "height": 300.0 }));
         assert_eq!(s("ds/look.luau::interface_font"), json!("IBM Plex Sans"));
         assert_eq!(s("ds/look.luau::code_font"), json!("JetBrains Mono"));
         assert_eq!(s("ds/look.luau::text_size"), json!(15.0));
