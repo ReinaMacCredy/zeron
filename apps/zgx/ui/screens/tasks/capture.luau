@@ -3,6 +3,7 @@
 local ds = require("@ds")
 local locale = require("@ds/locale")
 local store = require("@app/screens/tasks/store")
+local glass = require("@ds/glass")
 
 local M = {}
 
@@ -64,7 +65,7 @@ local function Hint(key: string, word: string): Node
 end
 
 M.Overlay = ui.component(function(): Node
-	return ui.modal {
+	return ui.modal(glass.style({
 		open = function(): boolean
 			return M.open:get()
 		end,
@@ -128,7 +129,7 @@ M.Overlay = ui.component(function(): Node
 				},
 			}
 		end,
-	}
+	}, "menu"))
 end)
 
 return M
