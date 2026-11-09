@@ -135,7 +135,7 @@ state.host.analyze = function(path: string): any
 			{ id = PAPER.id, name = "Paper Mill", kind = "light" },
 		}, skipped = { "Ghost: could not resolve ghost.json" } })
 	end
-	return settled(true, { kind = "file", name = "Harbor Night", variants = { { id = data.HARBOR.id, name = "Harbor Night", kind = "dark" } }, skipped = {} })
+	return settled(true, table.freeze({ kind = "file", name = "Harbor Night", variants = { { id = data.HARBOR.id, name = "Harbor Night", kind = "dark" } }, skipped = {} }))
 end
 state.host.add = function(path: string, variants: { string }, link: boolean): any
 	local name = string.match(path, "([^/]+)$") or path

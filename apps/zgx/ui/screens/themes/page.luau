@@ -167,8 +167,9 @@ local function analyze()
 	end
 	add_error:set(nil)
 	analyzing:set(true)
-	state.analyze(path):after(function(f: any)
+	state.analyze(path):after(function(found: any)
 		analyzing:set(false)
+		local f = table.clone(found)
 		f.path = add_path:peek()
 		local all: { [string]: boolean } = {}
 		for _, v in f.variants or {} do
