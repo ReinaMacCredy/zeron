@@ -109,6 +109,8 @@ struct Stream {
     /// Its frames' way to the decoder (none on a mock Dev).
     decode: Option<std::sync::mpsc::SyncSender<(u64, Vec<u8>)>>,
     watch: Option<engine::rpc::Watch>,
+    /// The engine ended its watch: a frame decoded since keeps the failure.
+    ended: bool,
 }
 
 struct Window {
@@ -173,10 +175,13 @@ impl Window {
         if self.streams.borrow().get(key).map(|s| s.generation) != Some(generation) {
             return;
         }
+        let ended = self.streams.borrow().get(key).is_some_and(|s| s.ended);
         let (w, h) = (image.width(), image.height());
         self.host.image(&image_name(key), Some(image));
         self.sizes.borrow_mut().insert(key.to_string(), (seq, w, h));
-        self.failed.borrow_mut().remove(key);
+        if !ended {
+            self.failed.borrow_mut().remove(key);
+        }
         self.publish_frames();
     }
 
@@ -279,6 +284,7 @@ impl Window {
         let generation = stream.generation;
         let (me, ended) = (Rc::downgrade(self), key.to_string());
         stream.watch.take();
+        stream.ended = false;
         // (Latest wins: a frame the decoder hasn't taken yet is passed over.)
         stream.watch = Some(rpc.watch_ending(
             "WatchHubDeviceFrames",
@@ -306,6 +312,7 @@ impl Window {
         let mut streams = self.streams.borrow_mut();
         let Some(stream) = streams.get_mut(key).filter(|s| s.generation == generation) else { return };
         stream.watch = None;
+        stream.ended = true;
         drop(streams);
         self.failed.borrow_mut().insert(key.to_string(), said(why));
         self.publish_frames();
@@ -319,7 +326,7 @@ impl Window {
         }
         let me = Rc::downgrade(self);
         if mock() {
-            self.streams.borrow_mut().insert(key.clone(), Stream { generation, host_id, device_id, decode: None, watch: None });
+            self.streams.borrow_mut().insert(key.clone(), Stream { generation, host_id, device_id, decode: None, watch: None, ended: false });
             engine::get().spawn(async move {
                 for (n, png) in MOCK_FRAMES.iter().enumerate() {
                     let decoded = off_thread(move || zgx_gpu::assets::decode_image(png).ok()).await.flatten();
@@ -348,7 +355,7 @@ impl Window {
                 window.show(&show_key, generation, seq, image);
             }
         });
-        self.streams.borrow_mut().insert(key.clone(), Stream { generation, host_id, device_id, decode: Some(decode), watch: None });
+        self.streams.borrow_mut().insert(key.clone(), Stream { generation, host_id, device_id, decode: Some(decode), watch: None, ended: false });
         let rpc = self.rpc.borrow().clone();
         if let Some(rpc) = rpc {
             self.watch_frames(&key, &rpc);
@@ -684,6 +691,11 @@ mod tests {
 
         // The engine ends the stream: it says why, and the next connection tries again.
         second.heard(json!({ "id": frames_watch, "err": "The device stopped." }));
+        assert_eq!(frames(&window)["tab-1"]["failed"], "The device stopped.");
+        let live = window.streams.borrow()["tab-1"].generation;
+        let late = zgx_gpu::assets::decode_image(MOCK_FRAMES[0]).unwrap();
+        window.show("tab-1", live, 4, late);
+        assert_eq!(frames(&window)["tab-1"]["seq"], 4);
         assert_eq!(frames(&window)["tab-1"]["failed"], "The device stopped.");
         let (third, third_sent, _bell) = Rpc::recording();
         let _ = window.connected(&third);
