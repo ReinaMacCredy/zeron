@@ -354,13 +354,15 @@ async fn fix(args: Value) -> Result<Value, String> {
 
 /// The chats' list moved: each review follows its reviewer, and one that's done is read.
 pub(super) fn chats_changed() {
+    let chats = CHATS.with(Rc::clone);
+    let shown: Vec<String> = chats.views().iter().filter_map(|v| v.open.borrow().as_ref().map(|o| o.id.clone())).collect();
+    let adopted = shown.iter().fold(false, |any, chat| adopt_unwatched(chat) | any);
     if REVIEWS.with(|all| all.borrow().is_empty()) {
         return;
     }
     let list = chats_now();
-    let chats = CHATS.with(Rc::clone);
     let mut reads = Vec::new();
-    let mut changed = false;
+    let mut changed = adopted;
     let delegation = |owner: &str, run: Option<&ReviewRun>| {
         let task = run.and_then(|run| run.task_id.clone());
         task.as_deref().and_then(|t| review::reviewer_child(&list, owner, Some(t))).and_then(|c| c.delegation.clone())
