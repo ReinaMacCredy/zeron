@@ -62,6 +62,33 @@ function M.line(q: Quote): string
 	return `> {q.who}: {M.excerpt(q.text)}`
 end
 
+-- `line` where it stands as a whole line of `s`, from byte `init`.
+local function find_line(s: string, line: string, init: number?): (number?, number?)
+	local from = init or 1
+	while true do
+		local at, to = string.find(s, line, from, true)
+		if not at or not to then
+			return nil, nil
+		end
+		if (at == 1 or string.sub(s, at - 1, at - 1) == "\n") and (to == #s or string.sub(s, to + 1, to + 1) == "\n") then
+			return at, to
+		end
+		from = at + 1
+	end
+end
+
+-- The quote's line, apart from another passage's that reads the same in
+-- `quotes` (a draft's, by line): numbered on, so each sends its own.
+function M.line_in(quotes: { [string]: string }, q: Quote): string
+	local base = M.line(q)
+	local line, n = base, 1
+	while quotes[line] ~= nil and quotes[line] ~= q.text do
+		n += 1
+		line = `{base} ({n})`
+	end
+	return line
+end
+
 -- `draft` with `line`, on a line of its own, and room to write after it.
 function M.add(draft: string, line: string): string
 	local base = string.gsub(draft, "%s+$", "")
@@ -91,22 +118,24 @@ end
 function M.kept(draft: string, quotes: { [string]: string }): { [string]: string }
 	local out = {}
 	for line, text in quotes do
-		if string.find(draft, line, 1, true) then
+		if find_line(draft, line) then
 			out[line] = text
 		end
 	end
 	return out
 end
 
--- The draft as sent: each quote's line, the whole passage.
+-- The draft as sent: each of a quote's lines, the whole passage.
 function M.expand(draft: string, quotes: { [string]: string }): string
 	local out = draft
 	for line, text in quotes do
-		local at, to = string.find(out, line, 1, true)
-		if at and to then
-			local who = string.match(line, "^> (.-): ") or ""
-			local body = string.gsub(string.gsub(text, "%s+$", ""), "\n", "\n> ")
-			out = `{string.sub(out, 1, at - 1)}> {who}:\n> {body}{string.sub(out, to + 1)}`
+		local who = string.match(line, "^> (.-): ") or ""
+		local body = string.gsub(string.gsub(text, "%s+$", ""), "\n", "\n> ")
+		local whole = `> {who}:\n> {body}`
+		local at, to = find_line(out, line)
+		while at and to do
+			out = `{string.sub(out, 1, at - 1)}{whole}{string.sub(out, to + 1)}`
+			at, to = find_line(out, line, at + #whole)
 		end
 	end
 	return out

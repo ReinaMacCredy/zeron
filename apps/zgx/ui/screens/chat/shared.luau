@@ -460,8 +460,8 @@ end
 -- A passage of the transcript, quoted into the draft (its line marks it)
 -- or carried as a chip.
 function M.mention(q: Quote.Quote)
-	local line = Quote.line(q)
-	local quotes = table.clone(M.quotes:peek())
+	local quotes = Quote.kept(M.text:peek(), M.quotes:peek())
+	local line = Quote.line_in(quotes, q)
 	quotes[line] = q.text
 	ui.batch(function()
 		M.quotes:set(quotes)
@@ -474,9 +474,10 @@ end
 -- without one), its line marking it, then the keys there, the caret after it.
 -- `focus`: who takes the keys with no field (the chat page's composer).
 function M.mention_in(key: string, q: Quote.Quote, field: any?, focus: (() -> ())?)
-	local line = Quote.line(q)
 	local mine = here:peek() == key
 	local text = if mine then M.text:peek() else M.draft_peek(key).text
+	local held = if mine then M.quotes:peek() else ((kept:peek()[key] or {}) :: any).quotes or {}
+	local line = Quote.line_in(Quote.kept(text, held), q)
 	local el = if field then field:peek() else nil
 	local at: number? = nil
 	if el then

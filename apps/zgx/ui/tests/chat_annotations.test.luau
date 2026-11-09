@@ -337,6 +337,26 @@ test("annotations: Mention puts the passage in the draft at the caret, sent in f
 	expect(app:state("calls")).never.to_contain("Annotations (numbered")
 end)
 
+test("annotations: two passages whose lines read the same each go in full, and one mentioned twice goes in full twice", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(960, 700)
+	open(app, "s2")
+	local head = "What shall we work on? A passage long enough that its line in the draft is cut short"
+	local one, two = `{head}, ending one way.`, `{head}, ending another way.`
+	for _, words in { one, two, one } do
+		select(app, "Hi! What shall we work on?", words)
+		app:click("#annotation-mention")
+		settle(app)
+	end
+	local draft = app:text('role:textbox "Message"')
+	expect(draft).to_contain("…\n\n> Opus: What shall we work on?")
+	expect(draft).to_contain("… (2)\n\n")
+	app:key("Enter")
+	app:wait('"never shown, only waited past"', { timeout_ms = 600 })
+	settle(app)
+	expect(app:state("calls")).to_contain(`send:s2:> Opus:\n> {one}\n\n> Opus:\n> {two}\n\n> Opus:\n> {one}`)
+end)
+
 -- The focused node's line, or "" with focus parked.
 local function focused(app: any): string
 	for line in app:tree():gmatch("[^\n]+") do
