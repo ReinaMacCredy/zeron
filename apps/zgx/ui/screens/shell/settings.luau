@@ -310,9 +310,7 @@ end
 
 -- The list's width, tracked: the sidebar's, dragged in either.
 function M.list_w(): number
-	local fit: any = require("@app/screens/shell/fit")
-	local sidebar: any = require("@app/screens/shell/sidebar")
-	return math.clamp(sidebar.width:get(), fit.SIDEBAR_MIN, fit.SIDEBAR_MAX)
+	return require("@app/screens/shell/fit").list_w()
 end
 
 -- Settings, a page of its own over the whole window: its pages listed

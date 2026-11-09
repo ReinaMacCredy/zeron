@@ -127,6 +127,10 @@ end)
 -- then narrow: a toggle always shows it. It gives way again only under this
 -- width; room for it all forgets it.
 local sidebar_kept = ui.state("shell_fit_sidebar_kept", nil :: number?)
+function M.list_w(): number
+	registered:get()
+	return math.clamp(if preferred then preferred() else M.SIDEBAR_DEFAULT, M.SIDEBAR_MIN, M.SIDEBAR_MAX)
+end
 -- The fit now. (Nothing hides before the window's width is known.)
 M.current = ui.computed(function(): Fit
 	local vw = M.viewport:get()
@@ -149,8 +153,7 @@ M.current = ui.computed(function(): Fit
 	local floor = M.page_floor:get()
 	-- Settings' list always stands: without room for it, a page and the panel, the panel gives way.
 	if open_panel and route.current:get().name == "settings" then
-		local settings: any = require("@app/screens/shell/settings")
-		if vw - settings.list_w() - M.RIGHT_PANE_MIN < M.CHAT_PANEL_MIN then
+		if vw - M.list_w() - M.RIGHT_PANE_MIN < M.CHAT_PANEL_MIN then
 			open_panel = false
 			open_tree = false
 		end
@@ -323,7 +326,7 @@ function M.toggle_panel()
 	end
 	local open = not view.files:peek()
 	if not open then
-		local ok, panel = pcall(function(): any
+		local ok, panel = pcall(function(): { float_active_device_tab: (() -> ())? }?
 			return (require :: any)("@app/screens/panel")
 		end)
 		if ok and panel and panel.float_active_device_tab then

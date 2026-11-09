@@ -11,6 +11,7 @@ local route = require("@app/screens/shell/route")
 local shared = require("@app/screens/chat/shared")
 local sessions = require("@account/sessions")
 local toast = require("@ds/toast")
+local Button = require("@ds/button")
 
 local M = {}
 
@@ -170,7 +171,7 @@ function M.delete(p: Playbook)
 	end)
 end
 
-local function action(id: string, words: any, tone: string, run: () -> ()): Node
+local function action(id: string, words: any, tone: Button.Tone, run: () -> ()): Node
 	return ds.Button {
 		id = id,
 		tone = tone,
@@ -187,7 +188,7 @@ local function row(p: Playbook, i: State<number>): Node
 	if name then
 		meta = `{meta} · {name}`
 	end
-	local controls: { any } = { gap = "$space.2", items = "center" }
+	local controls: { Node } = {}
 	if p.path then
 		table.insert(controls, action(`playbook-edit-{key}`, ui.t("settings.playbooks.edit"), "ghost", function()
 			local opened = call("open", p.path)
@@ -224,7 +225,7 @@ local function row(p: Playbook, i: State<number>): Node
 		description = meta,
 		icon = if p.source == "builtIn" then "action-debug" else "document",
 		truncate = true,
-		control = ui.row(controls),
+		control = ui.row { gap = "$space.2", items = "center", controls },
 	}
 end
 
