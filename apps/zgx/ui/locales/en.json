@@ -1993,6 +1993,12 @@
         "label": "Pause animations in background",
         "description": "Hold animations still while Zeron isn't the focused window.",
         "terms": "pause animations background focus still"
+      },
+      "smooth_scrolling": {
+        "label": "Smooth scrolling",
+        "helper": "Mouse wheels glide instead of jumping. Trackpads are unaffected.",
+        "helper_reduced": "Mouse wheels step instantly while motion is reduced.",
+        "terms": "smooth scrolling wheel mouse glide scroll"
       }
     },
     "notifications": {

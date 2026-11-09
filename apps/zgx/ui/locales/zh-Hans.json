@@ -1993,6 +1993,12 @@
         "label": "后台时暂停动画",
         "description": "当 Zeron 不是焦点窗口时，让动画保持静止。",
         "terms": "暂停 动画 后台 焦点 静止 pause animations background"
+      },
+      "smooth_scrolling": {
+        "label": "平滑滚动",
+        "helper": "鼠标滚轮平滑滚动，而不是跳动。触控板不受影响。",
+        "helper_reduced": "减少动态效果时，鼠标滚轮直接跳动。",
+        "terms": "平滑 滚动 滚轮 鼠标 smooth scrolling wheel"
       }
     },
     "notifications": {

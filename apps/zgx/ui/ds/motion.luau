@@ -22,6 +22,22 @@ M.reduce = ui.persist("motion_reduce", false)
 M.follow_system = ui.persist("motion_follow_system", true)
 -- (gpui's "Pause animations in background": held still while the window hasn't the keys.)
 M.pause_in_background = ui.persist("motion_pause_background", false)
+-- Smooth scrolling (gpui's): a mouse wheel's notches glide in, or step at once
+-- while it's off or motion is reduced. zgx's window does it
+-- (`ui.window.smooth_scrolling`, nil on a zgx without it).
+M.smooth_scrolling = ui.persist("smooth_scrolling", true)
+function M.wheel_glides(): boolean
+	return M.smooth_scrolling:get() and not (M.reduce:get() or (M.follow_system:get() and prefers.reduced_motion:get()))
+end
+local glides: any = (ui :: any).window.smooth_scrolling
+if glides then
+	ui.effect(function()
+		local on = M.wheel_glides()
+		if glides:peek() ~= on then
+			glides:set(on)
+		end
+	end)
+end
 function M.reduced(): boolean
 	return M.reduce:get() or (M.follow_system:get() and prefers.reduced_motion:get()) or (M.pause_in_background:get() and ui.window.active:get() == false)
 end

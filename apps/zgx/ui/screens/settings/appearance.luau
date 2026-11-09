@@ -34,6 +34,7 @@ search.index(M.ID, ui.t("settings.appearance.title"), ui.t("settings.appearance.
 	{ key = "accent", title = ui.t("settings.appearance.accent.label"), terms = ui.t("settings.appearance.accent.terms") },
 	{ key = "reduce_motion", title = ui.t("settings.appearance.reduce_motion.label"), section = ui.t("settings.appearance.motion"), terms = ui.t("settings.appearance.reduce_motion.terms") },
 	{ key = "pause_motion", title = ui.t("settings.appearance.pause_motion.label"), section = ui.t("settings.appearance.motion"), terms = ui.t("settings.appearance.pause_motion.terms") },
+	{ key = "smooth_scrolling", title = ui.t("settings.appearance.smooth_scrolling.label"), section = ui.t("settings.appearance.motion"), terms = ui.t("settings.appearance.smooth_scrolling.terms") },
 	{ key = "glass", title = ui.t("settings.appearance.glass.label"), terms = ui.t("settings.appearance.glass.terms") },
 	{ key = "interface_font", title = ui.t("settings.appearance.interface_font.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.interface_font.terms") },
 	{ key = "text_size", title = ui.t("settings.appearance.text_size.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.text_size.terms") },
@@ -640,7 +641,7 @@ end)
 
 local ADVANCED = {
 	glass = true, frost_tint = true, frost_dim = true, frost_brightness = true, inset = true, frame = true, frame_sidebar = true, frame_blend = true, frame_shade = true, frame_blur = true,
-	reduce_motion = true, pause_motion = true, render_math = true, math_font = true, math_size = true,
+	reduce_motion = true, pause_motion = true, smooth_scrolling = true, render_math = true, math_font = true, math_size = true,
 	wallpaper = true, wallpaper_image = true, wallpaper_folder = true, effect = true,
 	chat_background = true, chat_placement = true, chat_opacity = true, chat_blur = true, chat_scrim = true, chat_tab_shade = true,
 }
@@ -991,6 +992,14 @@ function M.view(): Node
 					label = ui.t("settings.appearance.pause_motion.label"),
 					description = ui.t("settings.appearance.pause_motion.description"),
 					control = ds.Switch { value = motion.pause_in_background, label = ui.t("settings.appearance.pause_motion.label") },
+				}),
+				row("smooth_scrolling", {
+					label = ui.t("settings.appearance.smooth_scrolling.label"),
+					description = function(): string
+						local reduced = motion.smooth_scrolling:get() and not motion.wheel_glides()
+						return ui.t(if reduced then "settings.appearance.smooth_scrolling.helper_reduced" else "settings.appearance.smooth_scrolling.helper"):get()
+					end,
+					control = ds.Switch { value = motion.smooth_scrolling, label = ui.t("settings.appearance.smooth_scrolling.label") },
 				}),
 			},
 		},
