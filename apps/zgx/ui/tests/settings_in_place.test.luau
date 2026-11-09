@@ -637,6 +637,15 @@ test("an engine up to date says so and when it was checked; a check finds a newe
 	app:click(`{PAGE} >> role:button "Try again"`)
 	app:frames(6)
 	expect(asked(app, "about.check")).to_be(true)
+	-- Refused by the feed: the check failed, not an update (U27-M32).
+	app:set_state("about_doing", "")
+	app:set_state("settings_stub_about_next", "unreachable")
+	app:click(`{PAGE} >> role:button "Check for updates"`)
+	app:frames(6)
+	expect(shows(app, PAGE, "Couldn't check for updates")).to_be(true)
+	expect(shows(app, PAGE, "The engine couldn't reach the release feed.")).to_be(true)
+	expect(shows(app, PAGE, "Couldn't update")).to_be(false)
+	app:set_state("about_doing", "")
 	-- What the host then says: a newer release.
 	about(app, { engine_version = "0.2.131", latest = "0.2.140", available = true, checked_at = os.time() * 1000 })
 	expect(shows(app, PAGE, "Zeron 0.2.140 is available")).to_be(true)
