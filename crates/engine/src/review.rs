@@ -73,9 +73,85 @@ pub fn prompt(input: PromptInput) -> String {
     out
 }
 
+pub fn chosen_reviewer(
+    choice: ReviewerChoice,
+    chat: Option<zeron_proto::HarnessId>,
+    options: &ReviewerOptions,
+) -> Result<Reviewer, String> {
+    use zeron_proto::HarnessId;
+    // A mock chat's diff never goes to a real model it didn't name.
+    let choice = match choice {
+        ReviewerChoice::Auto if chat == Some(HarnessId::Mock) => ReviewerChoice::Harness {
+            harness: HarnessId::Mock,
+            model: None,
+            reasoning: None,
+        },
+        choice => choice,
+    };
+    let reviewer = resolve_reviewer(&choice, chat, options);
+    let unavailable = match &choice {
+        ReviewerChoice::Auto => None,
+        ReviewerChoice::Harness { harness, .. } => (reviewer.harness != Some(*harness)
+            || reviewer.profile.is_some())
+        .then(|| harness.display_name().to_string()),
+        ReviewerChoice::Profile { id } => (reviewer.profile.as_ref().map(|p| &p.id) != Some(id))
+            .then(|| {
+                options
+                    .profiles
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .map_or_else(|| "The chosen profile".to_string(), |p| p.name.clone())
+            }),
+    };
+    match unavailable {
+        Some(name) => Err(format!(
+            "{name} is unavailable here, so nothing was reviewed. Choose another reviewer in Settings > Code review."
+        )),
+        None => Ok(reviewer),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reviewer_is_never_one_the_person_did_not_choose() {
+        use zeron_proto::HarnessId;
+        let offered = |ids: &[HarnessId]| ReviewerOptions {
+            offered: ids.to_vec(),
+            ..ReviewerOptions::default()
+        };
+        let real = offered(&[HarnessId::ClaudeCode, HarnessId::Codex]);
+        let mock = ReviewerChoice::Harness {
+            harness: HarnessId::Mock,
+            model: None,
+            reasoning: None,
+        };
+        assert!(chosen_reviewer(mock.clone(), Some(HarnessId::Mock), &real).is_err());
+        assert!(chosen_reviewer(ReviewerChoice::Auto, Some(HarnessId::Mock), &real).is_err());
+        let with_mock = offered(&[HarnessId::ClaudeCode, HarnessId::Mock]);
+        let auto =
+            chosen_reviewer(ReviewerChoice::Auto, Some(HarnessId::Mock), &with_mock).unwrap();
+        assert_eq!(auto.harness, Some(HarnessId::Mock));
+        assert_eq!(
+            chosen_reviewer(mock, None, &with_mock).unwrap().harness,
+            Some(HarnessId::Mock)
+        );
+        let codex = ReviewerChoice::Harness {
+            harness: HarnessId::Codex,
+            model: None,
+            reasoning: None,
+        };
+        assert!(chosen_reviewer(codex, Some(HarnessId::ClaudeCode), &with_mock).is_err());
+        let gone = ReviewerChoice::Profile {
+            id: "deleted".into(),
+        };
+        assert!(chosen_reviewer(gone, Some(HarnessId::ClaudeCode), &real).is_err());
+        let auto =
+            chosen_reviewer(ReviewerChoice::Auto, Some(HarnessId::ClaudeCode), &real).unwrap();
+        assert_eq!(auto.harness, Some(HarnessId::Codex));
+    }
 
     #[test]
     fn user_instructions_go_before_the_findings_format() {

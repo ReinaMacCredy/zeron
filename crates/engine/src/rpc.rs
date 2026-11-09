@@ -2396,7 +2396,8 @@ impl EngineRpc {
         let chat_harness = chat.config.as_ref().map(|config| config.harness);
         let owner_permission = chat.config.as_ref().map(|config| config.access);
         let choice = p.reviewer.clone().unwrap_or(settings.reviewer);
-        let reviewer = crate::review::resolve_reviewer(&choice, chat_harness, &options);
+        let reviewer = crate::review::chosen_reviewer(choice, chat_harness, &options)
+            .map_err(RpcError::Failed)?;
         let profile = reviewer.profile.as_ref();
         let access = profile
             .and_then(|profile| profile.access)
