@@ -2891,6 +2891,12 @@ fn git_in(fixture: &str, records: serde_json::Value, service: serde_json::Value,
             };
             async move { answer.map(|v| json_value(&v)) }
         });
+        let (w, h) = (played.clone(), calls.clone());
+        host.async_action("plugin.git.commit_message", move |asked: zgx_script::Value| {
+            h.borrow_mut().push(("commit_message".into(), asked.to_json()));
+            let answer = w.borrow().get("commit_message").cloned().ok_or_else(|| "Nothing is staged to commit".to_string());
+            async move { answer.map(|v| json_value(&v)) }
+        });
         host.set_plugins(plugins);
         host
     });
@@ -3058,6 +3064,27 @@ fn git_stages_and_discards_after_asking() {
     app.click("role:dialog \"Discard the changes to graph.rs?\" >> role:button \"Discard\"");
     assert!(app.wait_until(|_| !asked_service(&heard, "discard").is_empty()));
     assert_eq!(asked_service(&heard, "discard")[0]["args"]["paths"], json!(["src/graph.rs"]));
+    assert_eq!(app.error(), None);
+}
+
+#[test]
+fn git_writes_the_message_with_ai_for_its_session_and_says_why_it_could_not() {
+    let mut w = git_world();
+    w["commit_message"] = json!({ "message": "Draw the lanes", "harness": "mock", "model": "mock-fast" });
+    let (mut app, heard, world) = git_tab(w, None);
+    assert!(app.wait_until(|app| app.find("#git-write-message").is_some()), "{}", app.tree());
+    let asked = |heard: &Heard| -> Vec<serde_json::Value> { heard.borrow().iter().filter(|(k, _)| k == "commit_message").map(|(_, v)| serde_json::from_str(v).unwrap()).collect() };
+    app.click("role:button \"Write with AI\"");
+    assert!(app.wait_until(|app| app.tree().contains("Rewrite")), "{}", app.tree());
+    assert_eq!(asked(&heard), vec![json!({ "session": "s1" })]);
+    app.click("#git-commit >> role:button \"Commit 2 files\"");
+    assert!(app.wait_until(|_| !asked_service(&heard, "commit").is_empty()), "{}", app.tree());
+    assert_eq!(asked_service(&heard, "commit")[0]["args"]["message"], "Draw the lanes");
+    world.borrow_mut().as_object_mut().unwrap().remove("commit_message");
+    assert!(app.wait_until(|app| app.tree().contains("Write with AI")), "{}", app.tree());
+    app.click("role:button \"Write with AI\"");
+    let toasts = |heard: &Heard| -> Vec<String> { heard.borrow().iter().filter(|(k, _)| k == "plugin.git.toast").map(|(_, v)| v.clone()).collect() };
+    assert!(app.wait_until(|_| toasts(&heard).iter().any(|t| t.contains("Couldn't write the message: Nothing is staged to commit"))), "{:?}", toasts(&heard));
     assert_eq!(app.error(), None);
 }
 

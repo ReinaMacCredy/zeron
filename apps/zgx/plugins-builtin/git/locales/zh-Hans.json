@@ -88,7 +88,11 @@
     "placeholder": "改了什么，为什么",
     "message": "提交信息",
     "done_on": "已将 {sha} 提交到 {branch}",
-    "done": "已提交 {sha}"
+    "done": "已提交 {sha}",
+    "write": "用 AI 撰写",
+    "writing": "正在撰写…",
+    "rewrite": "重写",
+    "write_failed": "无法撰写提交信息：{why}"
   },
   "discard": {
     "title_one": "放弃对 {name} 的更改？",

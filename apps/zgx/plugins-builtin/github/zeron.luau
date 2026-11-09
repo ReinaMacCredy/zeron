@@ -114,6 +114,9 @@
 --   zeron.github.watch_pr(session_id)  in a build function: a function
 --       reading that session's pull request as it changes ("github"; your
 --       GitHub sign-in stays Zeron's: no token reaches the plugin)
+--   zeron.commit_message(session_id)  a promise of { message, harness,
+--       model }: a commit message for that session's staged changes, written
+--       by its own agent on its device ("source_control.ai")
 --
 -- zgx's own plugin API works too (ui.contribute, ui.filter, ui.override);
 -- zeron.place is ui.contribute with what's above around it. Some elements
@@ -718,6 +721,10 @@ return function(id: string): any
 	-- (what to notify of), never for a row's drawing (`watch_pr`'s, its own).
 	function M.github.heard(): any
 		return github_heard:get() or {}
+	end
+
+	function M.commit_message(session: string): any
+		return ui.call(`{prefix}.commit_message`, { session = session })
 	end
 
 	-- A program its manifest names (`"commands": ["gh"]`, "commands"), run

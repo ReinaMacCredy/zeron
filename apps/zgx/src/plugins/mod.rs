@@ -37,6 +37,7 @@ pub mod live;
 pub mod records;
 pub mod surfaces;
 pub mod github;
+pub mod source_control;
 pub mod store;
 pub mod commands;
 pub mod db;
@@ -2229,6 +2230,23 @@ impl Bridge {
                         return Ok(json_value(&params));
                     }
                     let reply = call(method, params).await?;
+                    Ok(json_value(&reply))
+                }
+            }
+        });
+        host.async_action(format!("plugin.{id}.commit_message"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                let (me, plugin) = (me.clone(), plugin.clone());
+                async move {
+                    let bridge = me.upgrade();
+                    let item = bridge.as_ref().and_then(|b| b.item(&plugin));
+                    let sessions = bridge
+                        .as_ref()
+                        .map(|b| value_json(&b.host.shared("sessions", Value::Nil).signal().with_untracked(Value::clone)))
+                        .unwrap_or_default();
+                    let params = source_control::commit_request(&value_json(&asked), &sessions, |p| item.as_ref().is_some_and(|i| i.may(p)))?;
+                    let reply = call("GenerateCommitMessage", params).await?;
                     Ok(json_value(&reply))
                 }
             }

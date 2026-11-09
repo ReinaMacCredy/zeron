@@ -14,7 +14,8 @@
     "service",
     "commands",
     "clipboard",
-    "compose"
+    "compose",
+    "source_control.ai"
   ],
   "commands": [
     "git"

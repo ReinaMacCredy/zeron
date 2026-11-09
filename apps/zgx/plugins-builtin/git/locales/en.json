@@ -88,7 +88,11 @@
     "placeholder": "What changed, and why",
     "message": "Commit message",
     "done_on": "Committed {sha} to {branch}",
-    "done": "Committed {sha}"
+    "done": "Committed {sha}",
+    "write": "Write with AI",
+    "writing": "Writing…",
+    "rewrite": "Rewrite",
+    "write_failed": "Couldn't write the message: {why}"
   },
   "discard": {
     "title_one": "Discard the changes to {name}?",

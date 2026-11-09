@@ -69,6 +69,8 @@ return function(zeron: any, Repo: any, words: any)
 		local discard_open = ui.use_state(false)
 		local discard_paths = ui.use_state({} :: { string })
 		local push_after = ui.use_state(false)
+		local writing = ui.use_state(false)
+		local written = ui.use_state(false)
 
 		local function status(): any
 			return m.status:get()
@@ -765,6 +767,7 @@ return function(zeron: any, Repo: any, words: any)
 			local message = m.message:peek()
 			m.act("commit", "commit", { message = message, amend = amend }, function(value: any)
 				m.message:set("")
+				written:set(false)
 				local sha = if type(value) == "table" and type(value.sha) == "string" then string.sub(value.sha, 1, 7) else ""
 				local s = m.status:peek()
 				local branch = s and s.branch
@@ -775,6 +778,19 @@ return function(zeron: any, Repo: any, words: any)
 						m.act("push", "push")
 					end)
 				end
+			end)
+		end
+		local function write_message()
+			writing:set(true)
+			zeron.commit_message(m.id):after(function(v: any)
+				writing:set(false)
+				if type(v) == "table" and type(v.message) == "string" then
+					m.message:set(v.message)
+					written:set(true)
+				end
+			end, function(e: any)
+				writing:set(false)
+				zeron.toast(zeron.s("commit.write_failed", { why = if type(e) == "table" and e.message then tostring(e.message) else tostring(e) }))
 			end)
 		end
 		local function commit_label(): string
@@ -928,6 +944,18 @@ return function(zeron: any, Repo: any, words: any)
 						ui.div { grow = 1 },
 						branch_slot(),
 						sync_node(),
+						Button {
+							function(): string
+								return zeron.s(if writing:get() then "commit.writing" elseif written:get() then "commit.rewrite" else "commit.write")
+							end,
+							id = "git-write-message",
+							tone = "ghost",
+							size = "xs",
+							disabled = function(): boolean
+								return writing:get() or staged_count() == 0 or m.acting:get() ~= nil
+							end,
+							on_click = write_message,
+						},
 						ui.div { id = "git-commit", shrink = 0, pl = "$space.1", button },
 					},
 				}
