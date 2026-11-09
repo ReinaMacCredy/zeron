@@ -1288,8 +1288,12 @@ function M.threads_for(session: () -> string?, home: () -> string?, live: () -> 
 		end,
 		model_label = function(harness: string?, model: string): string?
 			for _, m in (require("@app/screens/chat/store") :: any).catalog:get().models do
-				if m.value == model and (harness == nil or m.harness == harness) then
-					return m.label
+				if harness == nil or m.harness == harness then
+					-- (The host's catalog says `<harness>/<id>`; a child says its bare id.)
+					local bare = string.match(m.value, "^[^/]+/(.+)$")
+					if m.value == model or bare == model then
+						return m.label
+					end
 				end
 			end
 			return nil

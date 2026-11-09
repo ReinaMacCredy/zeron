@@ -856,7 +856,7 @@ local function seed_threads()
 	store.messages:set(thread_transcript())
 	local cat = table.clone(store.catalog:peek())
 	cat.models = table.clone(cat.models)
-	table.insert(cat.models, { value = "gpt-6.1", label = "GPT-6.1", harness = "codex" })
+	table.insert(cat.models, { value = "codex/gpt-6.1", label = "GPT-6.1", harness = "codex" })
 	store.catalog:set(cat)
 	local limits = thread_limits:peek() or { { chat = "dg-lim", resets_at = (THREAD_NOW + 7200) * 1000, auto = true, to = true, to_label = "GPT-6.1", target = "Codex · GPT-6.1 · High", to_mark = "openai", preselect = "switch", act_at = ui.now() + 20000, harness = "Claude Code" } }
 	publish("s1", { limits = limits })
