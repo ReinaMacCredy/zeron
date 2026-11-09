@@ -25,9 +25,9 @@ local menu = ui.state("skills_menu", false)
 -- SKILL.md as read: { path, text?, error? }.
 local doc = ui.state("skills_doc", nil :: any)
 
-local function ink(): string
+local function ink(): any
 	local kind = ui.theme.kind()
-	return if kind == "light" or kind == "high-contrast-light" then "#7f22fe" else "#c4b4ff"
+	return ui.raw(if kind == "light" or kind == "high-contrast-light" then "#7f22fe" else "#c4b4ff", "gpui's skill tile ink")
 end
 
 local function Tile(size: number, round: boolean?): Node
