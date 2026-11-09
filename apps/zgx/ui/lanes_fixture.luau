@@ -232,6 +232,9 @@ end
 ui.command { id = "side_running", title = "The side chat runs", run = function()
 	side_says({ running = true })
 end }
+ui.command { id = "side_compacts", title = "It compacts", run = function()
+	side_says({ compaction_wait = { phase = "compacting" } })
+end }
 ui.command { id = "side_queue_with_file", title = "A message with a file waits in its queue", run = function()
 	side_says({ queue = { { id = "q2", text = "Queued words" } } })
 end }

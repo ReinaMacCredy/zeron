@@ -353,3 +353,11 @@ test("its device gone, a side chat's composer is disabled", function()
 	local attach = '.side-chat-tab >> role:button "Attach"'
 	expect(app:tree(attach)).to_contain("disabled")
 end)
+
+test("a side chat compacting says so in its transcript, as the chat page does", function()
+	local app = open()
+	app:command("side_compacts")
+	app:frames(20)
+	expect(app:has(".side-chat-tab >> #compaction-wait")).to_be(true)
+	expect(app:tree(".side-chat-tab >> #compaction-wait"):find("Compacting", 1, true) ~= nil).to_be(true)
+end)

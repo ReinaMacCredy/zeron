@@ -1503,6 +1503,10 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 			return prefs.compact_transcript:get()
 		end,
 		annotate = annotate,
+		compaction_wait = function(): any
+			local s = view.session:get()
+			return if s and s.id == chat then s.compaction_wait else nil
+		end,
 		find = if split then nil else find.marks(),
 		on_retry = function(message: string)
 			store.retry(chat, message)
