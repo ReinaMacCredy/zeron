@@ -35,6 +35,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value as Json, json};
@@ -42,7 +43,9 @@ use zgx_desktop::WindowContext;
 use zgx_script::{ScriptHost, Shared, Value};
 
 use crate::auth::text;
+use crate::device_video::{self, FallbackReason};
 use crate::engine;
+use zeron_proto::device_hub::DeviceOrientation;
 use crate::plugins::{json_value, value_json};
 
 /// The engine's device methods a window may call (the hub's settings, a
@@ -90,12 +93,144 @@ pub(crate) fn supports(info: &Json) -> bool {
         .is_some_and(|all| all.iter().any(|c| c.as_str() == Some(zeron_proto::capabilities::DEVICE_HUB_V1)))
 }
 
-/// A frame from `WatchHubDeviceFrames`: its sequence and JPEG bytes.
-pub(crate) fn frame_bytes(item: &Json) -> Option<(u64, Vec<u8>)> {
+/// What a stream hands its decoder: a frame of `WatchHubDeviceFrames`
+/// (a JPEG, or H.264 in avcC envelopes), or the device turned.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Payload {
+    Jpeg(u64, Vec<u8>),
+    Avcc(u64, Vec<u8>),
+    Turn,
+}
+
+pub(crate) fn frame_payload(item: &Json) -> Option<Payload> {
     use base64::Engine as _;
-    let jpeg = item["jpeg"].as_str().filter(|s| !s.is_empty())?;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(jpeg).ok()?;
-    Some((item["seq"].as_u64().unwrap_or(0), bytes))
+    let seq = item["seq"].as_u64().unwrap_or(0);
+    let decode = |field: &str| {
+        let text = item[field].as_str().filter(|s| !s.is_empty())?;
+        base64::engine::general_purpose::STANDARD.decode(text).ok()
+    };
+    if let Some(jpeg) = decode("jpeg") {
+        return Some(Payload::Jpeg(seq, jpeg));
+    }
+    decode("avcc").map(|avcc| Payload::Avcc(seq, avcc))
+}
+
+/// The codec a stream asks for first (gpui's `codec_choice`): H.264 where
+/// VideoToolbox decodes it, MJPEG elsewhere.
+fn first_codec() -> &'static str {
+    if cfg!(target_os = "macos") { "h264" } else { "mjpeg" }
+}
+
+pub(crate) fn orientation_of(word: &str) -> DeviceOrientation {
+    serde_json::from_value(Json::from(word)).unwrap_or_default()
+}
+
+fn orientation_byte(o: DeviceOrientation) -> u8 {
+    match o {
+        DeviceOrientation::Portrait => 0,
+        DeviceOrientation::LandscapeLeft => 1,
+        DeviceOrientation::PortraitUpsideDown => 2,
+        DeviceOrientation::LandscapeRight => 3,
+    }
+}
+
+fn byte_orientation(b: u8) -> DeviceOrientation {
+    match b {
+        1 => DeviceOrientation::LandscapeLeft,
+        2 => DeviceOrientation::PortraitUpsideDown,
+        3 => DeviceOrientation::LandscapeRight,
+        _ => DeviceOrientation::Portrait,
+    }
+}
+
+/// What the decoder thread hands the window: a picture, or why H.264 stopped.
+pub(crate) enum Decoded {
+    Picture(u64, Arc<zgx::image::ImageData>),
+    Fallback(FallbackReason),
+}
+
+/// A stream's decoder, on a thread of its own: each batch of what has
+/// arrived since the last becomes at most one picture (the newest), turned
+/// to the device's orientation. After a fallback it decodes JPEG only.
+pub(crate) fn decode_frames(frames: std::sync::mpsc::Receiver<Payload>, orientation: Arc<AtomicU8>, mut out: impl FnMut(Decoded)) {
+    let mut last: Option<(u64, u32, u32, Arc<[u8]>)> = None;
+    let mut demuxer = zeron_proto::device_hub::AvccDemuxer::default();
+    #[cfg(target_os = "macos")]
+    let mut pipeline = device_video::Pipeline::default();
+    let mut h264 = true;
+    while let Ok(first) = frames.recv() {
+        let mut jpeg = None;
+        let mut turned = false;
+        let mut envelopes = Vec::new();
+        let mut pending = 0;
+        let mut avcc_seq = 0;
+        for item in std::iter::once(first).chain(frames.try_iter()) {
+            match item {
+                Payload::Jpeg(seq, bytes) => jpeg = Some((seq, bytes)),
+                Payload::Turn => turned = true,
+                Payload::Avcc(_, _) if !h264 => {}
+                Payload::Avcc(seq, bytes) => {
+                    let Some(batch) = demuxer.push(&bytes) else {
+                        h264 = false;
+                        out(Decoded::Fallback(FallbackReason::DecodeErrors));
+                        continue;
+                    };
+                    if batch.first().is_none_or(|e| e.tag != zeron_proto::device_hub::AVCC_DESCRIPTION) {
+                        pending += batch
+                            .iter()
+                            .filter(|e| matches!(e.tag, zeron_proto::device_hub::AVCC_KEYFRAME | zeron_proto::device_hub::AVCC_DELTA))
+                            .count();
+                    }
+                    avcc_seq = seq;
+                    envelopes.extend(batch);
+                }
+            }
+        }
+        let mut picture: Option<(u64, device_video::Rgba)> = None;
+        #[cfg(target_os = "macos")]
+        if h264 && (!envelopes.is_empty() || pending > 0) {
+            let batch = pipeline.feed(envelopes);
+            match pipeline.pending(pending).or(batch.fallback) {
+                Some(reason) => {
+                    h264 = false;
+                    out(Decoded::Fallback(reason));
+                }
+                None => {
+                    if let Some(p) = batch.picture {
+                        picture = Some((avcc_seq, p));
+                    } else if let Some(seed) = batch.seed {
+                        jpeg = jpeg.or(Some((avcc_seq, seed)));
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (envelopes, pending, avcc_seq);
+        if picture.is_none()
+            && let Some((seq, bytes)) = jpeg
+        {
+            picture = device_video::decode_still(&bytes).map(|p| (seq, p));
+        }
+        let rotation = byte_orientation(orientation.load(Ordering::Acquire));
+        let (seq, width, height, pixels): (u64, u32, u32, Arc<[u8]>) = match picture {
+            Some((seq, p)) => (seq, p.width, p.height, p.pixels.into()),
+            None if turned => match &last {
+                Some(kept) => kept.clone(),
+                None => continue,
+            },
+            None => continue,
+        };
+        let shown = if rotation == DeviceOrientation::Portrait {
+            zgx::image::ImageData::new(width, height, pixels.clone())
+        } else {
+            let turned = device_video::rotate(&device_video::Rgba { width, height, pixels: pixels.to_vec() }, rotation);
+            zgx::image::ImageData::new(turned.width, turned.height, turned.pixels)
+        };
+        if let Ok(image) = shown {
+            out(Decoded::Picture(seq, Arc::new(image)));
+        }
+        last = Some((seq, width, height, pixels));
+    }
 }
 
 fn image_name(key: &str) -> String {
@@ -106,8 +241,11 @@ struct Stream {
     generation: u64,
     host_id: Option<String>,
     device_id: String,
-    /// Its frames' way to the decoder (none on a mock Dev).
-    decode: Option<std::sync::mpsc::SyncSender<(u64, Vec<u8>)>>,
+    /// An Android device's stream is H.264 only: no MJPEG to fall back to.
+    android: bool,
+    codec: &'static str,
+    orientation: Arc<AtomicU8>,
+    decode: std::sync::mpsc::Sender<Payload>,
     watch: Option<engine::rpc::Watch>,
     /// The engine ended its watch: a frame decoded since keeps the failure.
     ended: bool,
@@ -276,8 +414,8 @@ impl Window {
         }
         let mut streams = self.streams.borrow_mut();
         let Some(stream) = streams.get_mut(key) else { return };
-        let Some(decode) = stream.decode.clone() else { return };
-        let mut params = json!({ "deviceId": stream.device_id, "codec": "mjpeg" });
+        let decode = stream.decode.clone();
+        let mut params = json!({ "deviceId": stream.device_id, "codec": stream.codec });
         if let Some(host) = stream.host_id.as_ref().filter(|h| *h != zeron_proto::device_hub::LOCAL_DEVICE_HOST_ID) {
             params["hostId"] = host.clone().into();
         }
@@ -285,13 +423,13 @@ impl Window {
         let (me, ended) = (Rc::downgrade(self), key.to_string());
         stream.watch.take();
         stream.ended = false;
-        // (Latest wins: a frame the decoder hasn't taken yet is passed over.)
+        // (Every H.264 frame goes to the decoder, which takes the newest picture of each batch.)
         stream.watch = Some(rpc.watch_ending(
             "WatchHubDeviceFrames",
             params,
             move |item| {
-                if let Some(frame) = frame_bytes(&item) {
-                    let _ = decode.try_send(frame);
+                if let Some(frame) = frame_payload(&item) {
+                    let _ = decode.send(frame);
                 }
             },
             move |why| {
@@ -318,57 +456,80 @@ impl Window {
         self.publish_frames();
     }
 
-    fn stream(self: &Rc<Self>, key: String, host_id: Option<String>, device_id: String) {
+    fn stream(self: &Rc<Self>, key: String, host_id: Option<String>, device_id: String, android: bool, orientation: DeviceOrientation) {
         let generation = self.next.get() + 1;
         self.next.set(generation);
         if self.failed.borrow_mut().remove(&key).is_some() {
             self.publish_frames();
         }
         let me = Rc::downgrade(self);
+        let (decode, frames) = std::sync::mpsc::channel::<Payload>();
+        let (shown, mut decoded) = zgx::task::latest::<Decoded>();
+        let turned = Arc::new(AtomicU8::new(orientation_byte(orientation)));
+        let held = turned.clone();
+        std::thread::spawn(move || decode_frames(frames, held, |d| {
+            shown.send(d);
+        }));
+        let show_key = key.clone();
+        engine::get().spawn(async move {
+            while let Some(d) = decoded.recv().await {
+                let Some(window) = me.upgrade() else { return };
+                match d {
+                    Decoded::Picture(seq, image) => window.show(&show_key, generation, seq, image),
+                    Decoded::Fallback(reason) => window.fell_back(&show_key, generation, reason),
+                }
+            }
+        });
         if mock() {
-            self.streams.borrow_mut().insert(key.clone(), Stream { generation, host_id, device_id, decode: None, watch: None, ended: false });
+            let feed = decode.clone();
             engine::get().spawn(async move {
                 for (n, png) in MOCK_FRAMES.iter().enumerate() {
-                    let decoded = off_thread(move || zgx_gpu::assets::decode_image(png).ok()).await.flatten();
-                    let Some(window) = me.upgrade() else { return };
-                    let Some(image) = decoded else { return };
-                    window.show(&key, generation, n as u64 + 1, image);
-                    drop(window);
+                    if feed.send(Payload::Jpeg(n as u64 + 1, png.to_vec())).is_err() {
+                        return;
+                    }
                     zgx::timer::sleep(MOCK_FRAME_EVERY).await;
                 }
             });
-            return;
         }
-        let (decode, frames) = std::sync::mpsc::sync_channel::<(u64, Vec<u8>)>(1);
-        let (shown, mut decoded) = zgx::task::latest::<(u64, Arc<zgx::image::ImageData>)>();
-        std::thread::spawn(move || {
-            while let Ok((seq, bytes)) = frames.recv() {
-                if let Ok(image) = zgx_gpu::assets::decode_image(&bytes) {
-                    shown.send((seq, image));
-                }
-            }
-        });
-        let show_key = key.clone();
-        engine::get().spawn(async move {
-            while let Some((seq, image)) = decoded.recv().await {
-                let Some(window) = me.upgrade() else { return };
-                window.show(&show_key, generation, seq, image);
-            }
-        });
-        self.streams.borrow_mut().insert(key.clone(), Stream { generation, host_id, device_id, decode: Some(decode), watch: None, ended: false });
+        self.streams.borrow_mut().insert(
+            key.clone(),
+            Stream { generation, host_id, device_id, android, codec: first_codec(), orientation: turned, decode, watch: None, ended: false },
+        );
         let rpc = self.rpc.borrow().clone();
         if let Some(rpc) = rpc {
             self.watch_frames(&key, &rpc);
         }
     }
-}
 
-async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
-    let (tx, mut rx) = zgx::task::latest();
-    std::thread::spawn(move || {
-        tx.send(work());
-    });
-    rx.recv().await
+    /// The device turned: its picture turns at once, and each one after.
+    fn orient(&self, key: &str, orientation: DeviceOrientation) {
+        if let Some(stream) = self.streams.borrow().get(key)
+            && stream.orientation.swap(orientation_byte(orientation), Ordering::AcqRel) != orientation_byte(orientation)
+        {
+            let _ = stream.decode.send(Payload::Turn);
+        }
+    }
+
+    /// H.264 couldn't be shown: an iOS stream is asked again as MJPEG (gpui's
+    /// fallback); an Android one has none, so the tab says why, with Try again.
+    fn fell_back(self: &Rc<Self>, key: &str, generation: u64, reason: FallbackReason) {
+        let mut streams = self.streams.borrow_mut();
+        let Some(stream) = streams.get_mut(key).filter(|s| s.generation == generation && s.codec == "h264") else { return };
+        if stream.android {
+            stream.watch = None;
+            stream.ended = true;
+            drop(streams);
+            self.failed.borrow_mut().insert(key.to_string(), device_video::undecodable(reason.describe()));
+            self.publish_frames();
+            return;
+        }
+        stream.codec = "mjpeg";
+        drop(streams);
+        let rpc = self.rpc.borrow().clone().filter(|rpc| !rpc.is_closed());
+        if let Some(rpc) = rpc {
+            self.watch_frames(key, &rpc);
+        }
+    }
 }
 
 /// One of the hub's methods (METHODS), as `device.call` and Settings'
@@ -442,7 +603,14 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             return;
         }
         let host_id = args.field("host_id").map(text).filter(|h| !h.is_empty());
-        w.stream(key, host_id, device);
+        let android = args.field("platform").map(text).as_deref() == Some("android");
+        let orientation = orientation_of(&args.field("orientation").map(text).unwrap_or_default());
+        w.stream(key, host_id, device, android, orientation);
+    });
+    let w = window.clone();
+    host.action("device.orient", move |args| {
+        let key = args.field("key").map(text).unwrap_or_default();
+        w.orient(&key, orientation_of(&args.field("orientation").map(text).unwrap_or_default()));
     });
     let w = window;
     host.action("device.unstream", move |key| {
@@ -461,6 +629,7 @@ pub(crate) struct Mock {
     booted: Vec<String>,
     sessions: Vec<Json>,
     pub(crate) inputs: Vec<Json>,
+    orientation: String,
 }
 
 impl Default for Mock {
@@ -474,6 +643,7 @@ impl Default for Mock {
             booted: vec!["mock-iphone".into()],
             sessions: Vec::new(),
             inputs: Vec::new(),
+            orientation: "portrait".into(),
         }
     }
 }
@@ -508,7 +678,7 @@ impl Mock {
         let mut streams = serde_json::Map::new();
         for s in &self.sessions {
             let key = s["deviceId"].as_str().unwrap_or_default().to_string();
-            screens.insert(key.clone(), json!({ "width": 196, "height": 426, "orientation": "portrait" }));
+            screens.insert(key.clone(), json!({ "width": 196, "height": 426, "orientation": self.orientation }));
             streams.insert(key, json!({ "video": "live", "input": "live", "subscribers": 1 }));
         }
         json!({
@@ -593,6 +763,9 @@ impl Mock {
             "SendHubDeviceInput" => {
                 serde_json::from_value::<zeron_proto::device_hub::SendHubDeviceInputParams>(params.clone())
                     .map_err(|e| e.to_string())?;
+                if let Some(turned) = params["input"]["orientation"]["orientation"].as_str() {
+                    self.orientation = turned.to_string();
+                }
                 self.inputs.push(params["input"].clone());
                 Ok(json!({}))
             }
@@ -664,7 +837,7 @@ mod tests {
         let frames = |w: &Window| value_json(&w.frames.get());
 
         window.set_watching(true);
-        window.stream("tab-1".into(), None, "Pixel_9".into());
+        window.stream("tab-1".into(), None, "Pixel_9".into(), true, DeviceOrientation::Portrait);
         assert_eq!(revision(&window), None, "no engine yet: nothing heard");
 
         let (first, first_sent, _bell) = Rpc::recording();
@@ -672,7 +845,7 @@ mod tests {
         let streamed = sent(&first_sent);
         assert_eq!(streamed.len(), 1, "{streamed:?}");
         assert_eq!(streamed[0]["method"], "WatchHubDeviceFrames");
-        assert_eq!((streamed[0]["params"]["deviceId"].as_str(), streamed[0]["params"]["codec"].as_str()), (Some("Pixel_9"), Some("mjpeg")));
+        assert_eq!((streamed[0]["params"]["deviceId"].as_str(), streamed[0]["params"]["codec"].as_str()), (Some("Pixel_9"), Some(first_codec())));
         let hub_watch = arm(&first, &first_sent, work, &mut cx);
         first.heard(json!({ "id": hub_watch, "item": { "revision": 1 } }));
         assert_eq!(revision(&window), Some(1));
@@ -711,12 +884,56 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_is_its_jpeg_and_a_codec_frame_is_none() {
+    fn a_frame_is_its_jpeg_or_its_avcc() {
         use base64::Engine as _;
         let jpeg = base64::engine::general_purpose::STANDARD.encode([0xFF, 0xD8, 1, 2]);
-        assert_eq!(frame_bytes(&json!({ "seq": 7, "jpeg": jpeg })), Some((7, vec![0xFF, 0xD8, 1, 2])));
-        assert_eq!(frame_bytes(&json!({ "seq": 8, "jpeg": "", "avcc": "AAAA" })), None);
-        assert_eq!(frame_bytes(&json!({ "seq": 9, "jpeg": "not base64!" })), None);
+        assert_eq!(frame_payload(&json!({ "seq": 7, "jpeg": jpeg })), Some(Payload::Jpeg(7, vec![0xFF, 0xD8, 1, 2])));
+        assert_eq!(frame_payload(&json!({ "seq": 8, "jpeg": "", "avcc": "AAAA" })), Some(Payload::Avcc(8, vec![0, 0, 0])));
+        assert_eq!(frame_payload(&json!({ "seq": 9, "jpeg": "not base64!" })), None);
+        assert_eq!(orientation_of("landscape_left"), DeviceOrientation::LandscapeLeft);
+        assert_eq!(orientation_of("sideways"), DeviceOrientation::Portrait);
+    }
+
+    /// The decoder thread: a still turns with the device, and turns again
+    /// when only the orientation changes; H.264 it can't show says so once,
+    /// and JPEG still shows after.
+    #[test]
+    fn the_decoder_turns_pictures_and_falls_back_from_h264() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let orientation = Arc::new(AtomicU8::new(orientation_byte(DeviceOrientation::Portrait)));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (o, out) = (orientation.clone(), seen.clone());
+        let worker = std::thread::spawn(move || {
+            decode_frames(rx, o, |d| {
+                out.lock().unwrap().push(match d {
+                    Decoded::Picture(seq, image) => format!("{seq}:{}x{}", image.width(), image.height()),
+                    Decoded::Fallback(reason) => format!("fallback:{reason:?}"),
+                })
+            })
+        });
+        tx.send(Payload::Jpeg(1, MOCK_FRAMES[0].to_vec())).unwrap();
+        orientation.store(orientation_byte(DeviceOrientation::LandscapeLeft), Ordering::Release);
+        std::thread::sleep(Duration::from_millis(200));
+        tx.send(Payload::Turn).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        // A delta with no description before it: no H.264 to show.
+        let mut delta = Vec::new();
+        zeron_proto::device_hub::AvccEnvelope { tag: zeron_proto::device_hub::AVCC_DELTA, payload: vec![0, 0, 0, 1, 0x41] }.encode_into(&mut delta);
+        tx.send(Payload::Avcc(2, delta.clone())).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        tx.send(Payload::Avcc(3, delta)).unwrap();
+        tx.send(Payload::Jpeg(4, MOCK_FRAMES[1].to_vec())).unwrap();
+        drop(tx);
+        worker.join().unwrap();
+        let seen = seen.lock().unwrap().clone();
+        let first = seen[0].clone();
+        assert!(first == "1:196x426" || first == "1:426x196", "{seen:?}");
+        assert!(seen.contains(&"1:426x196".to_string()), "turned on its side: {seen:?}");
+        if cfg!(target_os = "macos") {
+            assert_eq!(seen.iter().filter(|s| s.starts_with("fallback")).count(), 1, "{seen:?}");
+            assert!(seen.contains(&"fallback:NoDescription".to_string()), "{seen:?}");
+        }
+        assert_eq!(seen.last().unwrap(), "4:426x196", "{seen:?}");
     }
 
     #[test]

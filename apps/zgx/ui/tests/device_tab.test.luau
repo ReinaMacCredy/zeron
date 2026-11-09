@@ -447,3 +447,37 @@ test("an engine without devices: the tab says so, and Device leaves the home", f
 	app:frames(5)
 	expect(app:has("#panel-open-device")).to_be(false)
 end)
+
+test("Rotate turns the device: the picture and its box turn, and a touch lands where it shows on the turned screen", function()
+	local app = open_panel()
+	set_up(app)
+	app:click('role:button "Open iPhone 17"')
+	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
+	local function box(): (number, number)
+		local w, h = string.match(app:tree("#device-screen"), " (%d+)x(%d+)")
+		return tonumber(w) or 0, tonumber(h) or 0
+	end
+	local w, h = box()
+	expect(h > w).to_be(true)
+	app:click('role:button "Rotate device"')
+	expect(eventually(app, function()
+		return calls(app):find("orient:landscape_left", 1, true) ~= nil
+	end)).to_be(true)
+	expect(calls(app)).to_contain("SendHubDeviceInput:orientation:landscape_left")
+	app:frames(5)
+	w, h = box()
+	expect(w > h).to_be(true)
+	-- (Dragged off the right edge: on the screen turned to the left, that edge is the device's top.)
+	app:drag("#device-screen", "#device-rotate")
+	expect(eventually(app, function()
+		return calls(app):find("SendHubDeviceInput:touch:end", 1, true) ~= nil
+	end)).to_be(true)
+	expect(string.match(calls(app), "SendHubDeviceInput:touch:end:[%d.]+:([%d.]+)")).to_be("0.00")
+	app:click('role:button "Rotate device"')
+	expect(eventually(app, function()
+		return calls(app):find("orient:portrait_upside_down", 1, true) ~= nil
+	end)).to_be(true)
+	app:frames(5)
+	w, h = box()
+	expect(h > w).to_be(true)
+end)

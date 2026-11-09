@@ -93,7 +93,7 @@ local function state(): any
 	end
 	local screens, streams = {}, {}
 	for _, x in hub.sessions do
-		screens[x.deviceId] = { width = 196, height = 426, orientation = "portrait" }
+		screens[x.deviceId] = { width = 196, height = 426, orientation = hub.orientation or "portrait" }
 		streams[x.deviceId] = { video = "live", input = "live", subscribers = 1 }
 	end
 	return {
@@ -186,6 +186,9 @@ local function answer(method: string, p: any): any
 	elseif method == "HubDeviceScreenshot" then
 		return settled({ path = "/tmp/zeron-mock-device-screenshot.png" })
 	elseif method == "SendHubDeviceInput" then
+		if type(p.input) == "table" and type(p.input.orientation) == "table" then
+			hub.orientation = p.input.orientation.orientation
+		end
 		if hub.hold_input then
 			local waiting = { done = false, ok = nil :: any }
 			function waiting.after(_self: any, ok: ((any) -> ())?, _bad: ((any) -> ())?)
@@ -212,6 +215,8 @@ local function detail(method: string, p: any): string
 				return `{method}:text:{v.text}`
 			elseif kind == "keycode" then
 				return `{method}:keycode:{v.keycode}`
+			elseif kind == "orientation" then
+				return `{method}:orientation:{v.orientation}`
 			end
 		end
 	end
@@ -259,6 +264,16 @@ api.stream = function(key: string, _host: string, device: string)
 	local all = table.clone(api.frames:peek())
 	all[key] = { seq = 1, w = 196, h = 426 }
 	api.frames:set(all)
+end
+api.orient = function(key: string, orientation: string)
+	log(`orient:{orientation}`)
+	local all = table.clone(api.frames:peek())
+	local f = all[key]
+	if f and f.w then
+		local side = orientation == "landscape_left" or orientation == "landscape_right"
+		all[key] = { seq = f.seq, w = if side then 426 else 196, h = if side then 196 else 426 }
+		api.frames:set(all)
+	end
 end
 api.unstream = function(key: string)
 	local all = table.clone(api.frames:peek())

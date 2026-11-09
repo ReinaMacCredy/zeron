@@ -5507,7 +5507,8 @@
       "capturing": "Capturing...",
       "more": "More",
       "close": "Close panel",
-      "power_off": "Power off"
+      "power_off": "Power off",
+      "rotate": "Rotate device"
     }
   }
 }

@@ -9,7 +9,8 @@
 --   api.call(method, params) the host's promise of a hub method's answer
 --   api.watch()             the hub followed while what asked is on screen:
 --                           what it gives back lets go
---   api.stream(key, host, device) / api.unstream(key)
+--   api.stream(key, host, device, platform, orientation) / api.unstream(key)
+--   api.orient(key, orientation)  the device turned: its picture turns too
 --   api.frame_src(key)      the picture `ui.image` shows for a stream
 
 local M = {}
@@ -41,8 +42,12 @@ function M.watch(): () -> ()
 	end
 end
 
-function M.stream(key: string, host_id: string, device_id: string)
-	pcall(ui.invoke, "device.stream", { key = key, host_id = host_id, device_id = device_id })
+function M.stream(key: string, host_id: string, device_id: string, platform: string?, orientation: string?)
+	pcall(ui.invoke, "device.stream", { key = key, host_id = host_id, device_id = device_id, platform = platform, orientation = orientation })
+end
+
+function M.orient(key: string, orientation: string)
+	pcall(ui.invoke, "device.orient", { key = key, orientation = orientation })
 end
 
 function M.unstream(key: string)

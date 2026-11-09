@@ -5507,7 +5507,8 @@
       "capturing": "正在截图...",
       "more": "更多",
       "close": "关闭面板",
-      "power_off": "关机"
+      "power_off": "关机",
+      "rotate": "旋转设备"
     }
   }
 }

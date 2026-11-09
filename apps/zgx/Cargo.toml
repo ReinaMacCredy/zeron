@@ -144,6 +144,12 @@ zeron-zgx-pixels = { path = "pixels" }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+# A Device tab's H.264 frames (src/device_video.rs), decoded by VideoToolbox
+# as the shipping app's device panel decodes them (crates/ui).
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2-core-video"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTBase", "VTDecompressionSession", "VTErrors", "VTSession", "objc2-core-media", "objc2-core-video"] }
 # A detent's trackpad tap (src/haptics.rs), as the shipping app's.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSHapticFeedback"] }
 # Appshots (src/appshots/macos.rs, the shipping app's capture, ported): its

@@ -919,6 +919,32 @@ function M.key_inputs(platform: string, key: string): { any }
 	return out
 end
 
+function M.sideways(orientation: string): boolean
+	return orientation == "landscape_left" or orientation == "landscape_right"
+end
+
+-- A point on the turned picture, on the device's own screen (gpui's `raw_point`).
+function M.raw_point(orientation: string, x: number, y: number): (number, number)
+	if orientation == "landscape_left" then
+		return y, 1 - x
+	elseif orientation == "landscape_right" then
+		return 1 - y, x
+	elseif orientation == "portrait_upside_down" then
+		return 1 - x, 1 - y
+	end
+	return x, y
+end
+
+local NEXT_ORIENTATION = {
+	portrait = "landscape_left",
+	landscape_left = "portrait_upside_down",
+	portrait_upside_down = "landscape_right",
+	landscape_right = "portrait",
+}
+function M.next_orientation(orientation: string?): string
+	return NEXT_ORIENTATION[orientation or "portrait"] or "landscape_left"
+end
+
 local function is_move(input: any): boolean
 	return type(input.touch) == "table" and input.touch.phase == "move"
 end
@@ -938,13 +964,26 @@ local function stream(props: { tab: any, panel_key: string, r: Run, visible: (()
 	local function device(): model.Device?
 		return model.device(hub(), host, id)
 	end
+	local function screen_config(): any
+		return (hub().screens or {})[model.key(host, id)]
+	end
+	-- How the picture is turned (gpui's `display_rotation`): a screen whose
+	-- size the device already gives on its side is shown as it comes.
+	local rotation = ui.computed(function(): string
+		local sc = screen_config()
+		if sc == nil or (sc.width or 0) > (sc.height or 0) then
+			return "portrait"
+		end
+		return sc.orientation or "portrait"
+	end)
 	-- (Its frames only while it shows: the panel closed, nothing streams or decodes.)
 	local visible = props.visible or function(): boolean
 		return true
 	end
 	ui.effect(function()
 		if visible() then
-			api.stream(key, host, id)
+			local d = device()
+			api.stream(key, host, id, if d then d.platform else nil, rotation:peek())
 		else
 			api.unstream(key)
 		end
@@ -986,19 +1025,34 @@ local function stream(props: { tab: any, panel_key: string, r: Run, visible: (()
 		end
 		pump()
 	end
+	ui.effect(function()
+		api.orient(key, rotation:get())
+	end)
 	local screen = ui.ref()
 	local down = false
 	local function point(e: any): (number, number)
 		local w = screen.width or 1
 		local h = screen.height or 1
-		return math.clamp((e.local_x or 0) / math.max(w, 1), 0, 1), math.clamp((e.local_y or 0) / math.max(h, 1), 0, 1)
+		local x = math.clamp((e.local_x or 0) / math.max(w, 1), 0, 1)
+		local y = math.clamp((e.local_y or 0) / math.max(h, 1), 0, 1)
+		return M.raw_point(rotation:peek(), x, y)
 	end
 	local function aspect(): number
 		local f = frame()
-		local sc = (hub().screens or {})[model.key(host, id)]
-		local w = (f and f.w) or (sc and sc.width) or 9
-		local h = (f and f.h) or (sc and sc.height) or 19.5
+		local sc = screen_config()
+		local w = (sc and sc.width) or 9
+		local h = (sc and sc.height) or 19.5
+		if M.sideways(rotation:get()) then
+			w, h = h, w
+		end
+		if f and f.w and f.h then
+			w, h = f.w, f.h
+		end
 		return w / math.max(h, 1)
+	end
+	local function rotate()
+		local sc = screen_config()
+		send({ orientation = { orientation = M.next_orientation(if sc then sc.orientation else nil) } })
 	end
 	local more_open = ui.state(`device_more_{key}`, false)
 	local function power_off()
@@ -1068,6 +1122,13 @@ local function stream(props: { tab: any, panel_key: string, r: Run, visible: (()
 			end,
 			Icon { name = "arrow-left", size = 16 },
 		}),
+		IconButton {
+			id = "device-rotate",
+			label = ui.t("device.rail.rotate"),
+			tone = "quiet",
+			on_click = rotate,
+			Icon { name = "rotate", size = 16 },
+		},
 		IconButton {
 			id = "device-screenshot",
 			label = function(): string
