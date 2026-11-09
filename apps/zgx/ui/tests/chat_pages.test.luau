@@ -144,6 +144,18 @@ test("pages: expand opens the sheet with Live and Source and Save .html; Escape 
 	settle(app)
 	expect(sheet_open(app)).to_be(false)
 	-- (A click outside is the modal's own: the tests can't press its backdrop; on the Dev.)
+	-- Closed on Source, it opens again on Live.
+	app:click(`#html-card-expand-{FRAME}`)
+	settle(app)
+	app:click("#html-sheet-source")
+	settle(app)
+	app:key("Escape")
+	settle(app)
+	app:click(`#html-card-expand-{FRAME}`)
+	settle(app)
+	expect(sheet_open(app)).to_be(true)
+	expect(app:has("#html-sheet-page")).to_be(true)
+	expect(app:has("#html-sheet-source-text")).to_be(false)
 end)
 
 test("picks: a click fills its group's slot in the tray; another option swaps it in place; the chosen one again or its x clears it", function()

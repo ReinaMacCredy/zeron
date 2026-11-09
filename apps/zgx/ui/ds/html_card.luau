@@ -5,6 +5,7 @@ local IconButton = require("@self/icon_button").IconButton
 local control = require("@self/control")
 local locale = require("@self/locale")
 local material = require("@self/material")
+local glass = require("@self/glass")
 local api = require("@self/html_api")
 local picks = require("@self/html_picks")
 
@@ -59,10 +60,11 @@ end
 
 function M.theme(): { [string]: any }
 	local kind = ui.theme.kind()
+	local dark = kind == "dark" or kind == "high-contrast"
 	local text = hex("text.primary")
 	local accent = hex("accent")
 	return {
-		dark = kind == "dark" or kind == "high-contrast",
+		dark = dark,
 		glass = material.frosted:peek() == true,
 		bg = hex("background"),
 		text = text,
@@ -71,7 +73,8 @@ function M.theme(): { [string]: any }
 		element_hover = hex("hover"),
 		hover = alpha(text, 0.08),
 		selection = hex("selection"),
-		surface_card = hex("surface.raised"),
+		-- gpui's dark card is a step over the page (17 on 13); surface.raised, a 6% white, reads 28.
+		surface_card = if dark then alpha(text, 0.015) else hex("surface.raised"),
 		surface_overlay = hex("surface.overlay"),
 		surface_raised = hex("surface.raised"),
 		border = hex("border"),
@@ -298,10 +301,11 @@ local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 		local s = (ui :: any).window.size:get()
 		return s
 	end
-	return ui.modal {
+	return ui.modal(glass.style({
 		id = "html-sheet",
 		label = props.title,
 		open = open,
+		placement = { x = "center", y = "start", inset = { 46, 24, 96, 24 } },
 		p = 0,
 		gap = 0,
 		w = function(): number
@@ -313,10 +317,8 @@ local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 			return math.max(240, (if s then s.height else 700) - 46 - 96)
 		end,
 		rounded = raw(14, "Zeron's sheet"),
-		border = 1,
-		border_color = "$border",
-		bg = "$surface.overlay",
 		build = function(): Node
+			view:set("live")
 			if not live and not e.sheet_loaded and e.html then
 				e.sheet = e.sheet or web_of(e, `html:{props.key}#sheet`)
 				api.load(e.sheet, e.html)
@@ -470,7 +472,7 @@ local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 				end, { w_full = true, grow = 1, min_h = 0 }),
 			}
 		end,
-	}
+	}, "menu"))
 end
 
 local function theme_now(): string
