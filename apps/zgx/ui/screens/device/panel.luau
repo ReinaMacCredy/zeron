@@ -858,10 +858,12 @@ local function stream(props: { tab: any, panel_key: string, r: Run, visible: (()
 	local t = target_of(props.tab) :: { string }
 	local host, id = t[1], t[2]
 	local key = props.tab.id
+	local area = ui.use_state({ w = 0, h = 0 })
 	local screen = Screen.make {
 		key = key,
 		host = host,
 		id = id,
+		area = area,
 		visible = props.visible,
 		on_error = function(why: string)
 			r.error:set(why)
@@ -992,7 +994,17 @@ local function stream(props: { tab: any, panel_key: string, r: Run, visible: (()
 		justify = "center",
 		p = "$space.3",
 		relative = true,
-		screen.node,
+		ui.column {
+			w_full = true,
+			grow = 1,
+			min_h = 0,
+			items = "center",
+			justify = "center",
+			on_resize = function(size: { w: number, h: number })
+				area:set({ w = size.w, h = size.h })
+			end,
+			screen.node,
+		},
 		ui.show(function(): boolean
 			return r.toast:get() ~= nil
 		end, ui.row {

@@ -118,7 +118,7 @@ end
 
 export type Screen = { node: Node, send: (input: any) -> (), device: () -> model.Device?, screen_config: () -> any }
 
-function M.make(props: { key: string, host: string, id: string, visible: (() -> boolean)?, on_error: (string) -> (), node_id: string?, rounded: any? }): Screen
+function M.make(props: { key: string, host: string, id: string, visible: (() -> boolean)?, on_error: (string) -> (), node_id: string?, rounded: any?, area: State<{ w: number, h: number }>? }): Screen
 	local key, host, id = props.key, props.host, props.id
 	local function hub(): any
 		return api.hub:get() or {}
@@ -215,6 +215,16 @@ function M.make(props: { key: string, host: string, id: string, visible: (() -> 
 		end
 		return w / math.max(h, 1)
 	end
+	-- The biggest box of the picture's shape inside `area` (gpui's `fit_device_frame`): a box
+	-- clamped on one side alone would letterbox the picture and put touches off it.
+	local function fit(): (number, number)
+		local a = (props.area :: any):get()
+		local r = aspect()
+		if a.h * r <= a.w then
+			return a.h * r, a.h
+		end
+		return a.w, a.w / r
+	end
 	local node = ui.div {
 		id = props.node_id or "device-screen",
 		role = "img",
@@ -226,8 +236,20 @@ function M.make(props: { key: string, host: string, id: string, visible: (() -> 
 		focusable = true,
 		max_w = "100%",
 		max_h = "100%",
-		h_full = true,
-		aspect = aspect,
+		h_full = props.area == nil,
+		aspect = if props.area then nil else aspect,
+		w = if props.area
+			then function(): number
+				local w = fit()
+				return w
+			end
+			else nil,
+		h = if props.area
+			then function(): number
+				local _, h = fit()
+				return h
+			end
+			else nil,
 		rounded = props.rounded or "$radius.lg",
 		overflow = "hidden",
 		bg = ui.raw("#000000", "a device's screen is black behind its picture, in either theme"),
