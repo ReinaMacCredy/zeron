@@ -136,6 +136,30 @@ fn read_dir(dir: &Path, source: PlaybookSource) -> Vec<Playbook> {
     found
 }
 
+pub fn listed(data_dir: &Path, project_roots: &[PathBuf]) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = list(data_dir, project_roots)
+        .into_iter()
+        .map(|playbook| {
+            let (source, root) = match &playbook.source {
+                PlaybookSource::BuiltIn => ("builtIn", None),
+                PlaybookSource::App => ("app", None),
+                PlaybookSource::Project { root } => ("project", Some(root.display().to_string())),
+            };
+            serde_json::json!({
+                "id": playbook.id,
+                "title": playbook.title,
+                "question": playbook.question,
+                "subtitle": playbook.subtitle,
+                "source": source,
+                "root": root,
+                "path": playbook.path.as_ref().map(|path| path.display().to_string()),
+                "prompt": playbook.path.as_deref().map(prompt),
+            })
+        })
+        .collect();
+    serde_json::json!({ "folder": app_dir(data_dir).display().to_string(), "playbooks": rows })
+}
+
 pub fn read_file(path: &Path, source: PlaybookSource) -> Option<Playbook> {
     let text = std::fs::read_to_string(path).ok()?;
     let (front, _) = parse(&text);
@@ -216,6 +240,27 @@ mod tests {
         assert_eq!(all[1].path.as_deref(), Some(app.as_path()));
         assert_eq!(all[2].question, "Which version?");
         assert!(matches!(all[2].source, PlaybookSource::Project { .. }));
+    }
+
+    #[test]
+    fn the_listed_rows_say_where_each_comes_from_and_how_to_start_it() {
+        let data = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let mine = create(&app_dir(data.path())).unwrap();
+        std::fs::create_dir_all(project_dir(project.path())).unwrap();
+        std::fs::write(
+            project_dir(project.path()).join("release.md"),
+            "---\ntitle: Cut a release\n---\n",
+        )
+        .unwrap();
+        let listed = listed(data.path(), &[project.path().to_path_buf()]);
+        assert_eq!(listed["folder"], app_dir(data.path()).display().to_string());
+        let rows = listed["playbooks"].as_array().unwrap();
+        let sources: Vec<_> = rows.iter().map(|r| r["source"].as_str().unwrap()).collect();
+        assert_eq!(sources, ["builtIn", "app", "project"]);
+        assert!(rows[0]["path"].is_null() && rows[0]["prompt"].is_null());
+        assert_eq!(rows[1]["prompt"], prompt(&mine));
+        assert_eq!(rows[2]["root"], project.path().display().to_string());
     }
 
     #[test]

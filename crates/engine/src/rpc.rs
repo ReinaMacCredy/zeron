@@ -6407,6 +6407,21 @@ impl RpcService for EngineRpc {
             methods::GET_SYSTEM_STATS => {
                 RpcReply::value(&crate::home_widgets::system_stats().await)
             }
+            methods::LIST_PLAYBOOKS => {
+                let spaces = self.workspace.watch_spaces().borrow().clone();
+                let device = self.doc_host.device_id();
+                let roots: Vec<std::path::PathBuf> = spaces
+                    .iter()
+                    .filter(|space| space.device_id == device)
+                    .map(|space| std::path::PathBuf::from(&space.path))
+                    .collect();
+                RpcReply::value(&crate::playbooks::listed(self.repos.data_dir(), &roots))
+            }
+            methods::CREATE_PLAYBOOK => {
+                let path = crate::playbooks::create(&crate::playbooks::app_dir(self.repos.data_dir()))
+                    .map_err(|e| RpcError::Failed(format!("Could not create a playbook: {e}")))?;
+                RpcReply::value(&serde_json::json!({ "path": path.display().to_string() }))
+            }
             methods::GET_CHANGE_REQUEST_REPOSITORY => {
                 #[derive(Deserialize)]
                 struct P {
