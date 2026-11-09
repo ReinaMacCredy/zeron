@@ -517,7 +517,8 @@ impl DeviceHub {
     }
 
     fn publish(&self, change: impl FnOnce(&mut DeviceHubState)) {
-        self.state.send_modify(|state| {
+        self.state.send_if_modified(|state| {
+            let before = state.clone();
             change(state);
             if !state.settings.enabled {
                 state.host_status = DeviceHostStatus::Disabled;
@@ -530,7 +531,11 @@ impl DeviceHub {
             } else if state.agent_status == DeviceHostStatus::Disabled {
                 state.agent_status = DeviceHostStatus::Idle;
             }
-            state.revision += 1;
+            let changed = *state != before;
+            if changed {
+                state.revision += 1;
+            }
+            changed
         });
     }
 
@@ -2510,6 +2515,50 @@ mod tests {
             .expect("state item")
             .expect("stream open");
         serde_json::from_value(value).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_push_that_changes_nothing_wakes_no_watcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            dir.path(),
+            Arc::new(crate::HarnessRegistry::new()),
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let hub = &core.device_hub;
+        let mut watch = hub.watch();
+        watch.mark_unchanged();
+        let screen = zeron_proto::device_hub::DeviceScreenConfig {
+            width: 1206,
+            height: 2622,
+            ..Default::default()
+        };
+        let push = |screen: &zeron_proto::device_hub::DeviceScreenConfig| {
+            let screen = screen.clone();
+            hub.publish(move |state| {
+                state.screens.insert("SIM-1".into(), screen);
+            });
+        };
+        push(&screen);
+        assert!(watch.has_changed().unwrap(), "a new screen is told");
+        let revision = watch.borrow_and_update().revision;
+        for _ in 0..5 {
+            push(&screen);
+        }
+        assert!(
+            !watch.has_changed().unwrap(),
+            "the same screen again is not"
+        );
+        assert_eq!(hub.snapshot().revision, revision);
+        push(&zeron_proto::device_hub::DeviceScreenConfig {
+            width: 2622,
+            height: 1206,
+            ..Default::default()
+        });
+        assert!(watch.has_changed().unwrap());
+        assert_eq!(hub.snapshot().revision, revision + 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
