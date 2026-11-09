@@ -376,6 +376,12 @@ impl Voice {
             let granted = match microphone::access() {
                 microphone::Access::Granted => true,
                 microphone::Access::Denied => false,
+                microphone::Access::Unavailable => {
+                    if let Some(voice) = me.upgrade() {
+                        voice.event(n, "unavailable", None);
+                    }
+                    return;
+                }
                 microphone::Access::Unbundled => {
                     if let Some(voice) = me.upgrade() {
                         voice.event(n, "unavailable", Some("Dictation requires the packaged Zeron app."));
@@ -451,19 +457,21 @@ mod microphone {
     pub(super) enum Access {
         Granted,
         Denied,
+        Unavailable,
         /// No purpose string: asking would end the process.
         Unbundled,
         Asked(std::sync::mpsc::Receiver<bool>),
     }
 
     pub(super) fn access() -> Access {
-        let Some(device) = AnyClass::get(c"AVCaptureDevice") else { return Access::Denied };
+        let Some(device) = AnyClass::get(c"AVCaptureDevice") else { return Access::Unavailable };
         // SAFETY: a class method taking the media type constant AVFoundation exports.
         let status: isize = unsafe { msg_send![device, authorizationStatusForMediaType: AVMediaTypeAudio] };
         match status {
             3 => return Access::Granted,
+            1 | 2 => return Access::Denied,
             0 => {}
-            _ => return Access::Denied,
+            _ => return Access::Unavailable,
         }
         if NSBundle::mainBundle().objectForInfoDictionaryKey(ns_string!("NSMicrophoneUsageDescription")).is_none() {
             return Access::Unbundled;

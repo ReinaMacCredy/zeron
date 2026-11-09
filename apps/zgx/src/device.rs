@@ -189,13 +189,19 @@ pub(crate) fn decode_frames(frames: std::sync::mpsc::Receiver<Payload>, orientat
         let mut picture: Option<(u64, device_video::Rgba)> = None;
         #[cfg(target_os = "macos")]
         if h264 && (!envelopes.is_empty() || pending > 0) {
-            let batch = pipeline.feed(envelopes);
-            match pipeline.pending(pending).or(batch.fallback) {
-                Some(reason) => {
+            let batch = match pipeline.pending(pending) {
+                Some(behind) => Err(behind),
+                None => {
+                    let batch = pipeline.feed(envelopes);
+                    batch.fallback.map_or(Ok(batch), Err)
+                }
+            };
+            match batch {
+                Err(reason) => {
                     h264 = false;
                     out(Decoded::Fallback(reason));
                 }
-                None => {
+                Ok(batch) => {
                     if let Some(p) = batch.picture {
                         picture = Some((avcc_seq, p));
                     } else if let Some(seed) = batch.seed {
