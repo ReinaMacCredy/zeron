@@ -151,6 +151,11 @@ local function from_hsl(h: number, s: number, l: number): string
 	return string.format("#%02x%02x%02x", byte(r), byte(g), byte(b))
 end
 
+function M.capped(hex: string, s: number, l: number): string
+	local h, sat, light = hsl(hex)
+	return from_hsl(h, math.min(sat, s), math.min(light, l))
+end
+
 -- In light themes capped at 48% lightness and 57% saturation, so the tick and send read on white.
 function M.ink(): string
 	ui.theme.current:get()
@@ -166,8 +171,7 @@ function M.ink(): string
 	if string.lower(string.sub(accent, 1, 7)) == "#ec83b7" then
 		return "#c0347a"
 	end
-	local h, s, l = hsl(accent)
-	return from_hsl(h, math.min(s, 0.57), math.min(l, 0.48))
+	return M.capped(accent, 0.57, 0.48)
 end
 
 local function raw(n: number, why: string): any

@@ -519,3 +519,21 @@ test("annotations: a badge scrolls with its line, and the pencil brings a line s
 	expect(app:has('#transcript >> ~"Part 29 works like this."')).to_be(true)
 	expect(app:text("#annotation-comment")).to_be("this part")
 end)
+
+test("annotations: a badge's tip stands above it, centred on it, inside the transcript, whatever its comment's length", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(960, 700)
+	open(app, "s2")
+	annotate(app, "Hi! What shall we work on?", "What shall we work on?", "Fifty characters of comment to wrap the tip around")
+	app:hover("#annotation-badge-1")
+	settle(app)
+	local badge = box_of(app, "#transcript", "#annotation-badge-1") :: any
+	local tip = box_of(app, "#transcript", "#annotation-tip") :: any
+	local view = box_of(app, "#transcript", "#transcript") :: any
+	expect(tip ~= nil and tip.w > 0 and tip.h > 0).to_be(true)
+	expect(tip.y + tip.h <= badge.y).to_be(true)
+	expect(tip.x + tip.w <= view.x + view.w).to_be(true)
+	local centred = math.abs((tip.x + tip.w / 2) - (badge.x + badge.w / 2)) <= 1
+	local held_in = tip.x + tip.w >= view.x + view.w - 16
+	expect(centred or held_in).to_be(true)
+end)

@@ -31,19 +31,29 @@ local locale = require("@self/locale")
 local glass = require("@self/glass")
 local control = require("@self/control")
 local motion = require("@self/motion")
+local HtmlPicks = require("@self/html_picks")
 
 ui.theme.tokens {
 	zeron = {
 		annotation = {
 			-- Opaque, as Zeron's `surface_fill` (ink 8% flattened on the page).
 			fill = "over(alpha({text.primary}, 0.08), {background})",
-			badge = "{accent}",
 			wash = { dark = "alpha({accent}, 0.5)", light = "alpha({accent}, 0.28)" },
 		},
 	},
 }
 
 local M = {}
+
+-- The accent, deep enough for the white number on it in every preset (gpui's `deep_accent`).
+local function badge_fill(): any
+	ui.theme.current:get()
+	local accent = ui.theme.get("accent")
+	if type(accent) ~= "string" or #accent < 7 then
+		return "$accent"
+	end
+	return ui.raw(HtmlPicks.capped(string.sub(accent, 1, 7), 0.55, 0.56), "the theme's accent, deepened")
+end
 
 export type Anchor = { key: string, dy: number, x: number, w: number, lh: number, hw: number?, hh: number? }
 export type Note = { n: number, id: string, text: string, comment: string, source: string?, anchor: Anchor? }
@@ -798,11 +808,13 @@ function M.new(opts: {
 	end)
 
 	local Tip = ui.component(function(props: { note: string }): Node
-		local box = ui.ref()
 		local function comment(): string
 			local n = note_of(props.note)
 			return if n then n.comment else ""
 		end
+		local wide = (utf8.len(comment()) or 0) > TIP_CHARS
+		-- (Placed by its laid-out size, which a wrapped comment only has once laid out.)
+		local size = ui.use_state(nil :: { w: number, h: number }?)
 		local function place(): (number, number)
 			local n = note_of(props.note)
 			local a = n and n.anchor
@@ -812,15 +824,18 @@ function M.new(opts: {
 			local ref = opts.holder(a.key)
 			local ox = offset_in_view(ref)
 			local badge_left = (if ref then ref.width or 0 else 0) - BADGE - step_of(a.key, props.note) * (BADGE + STEP_GAP)
-			local w = box.width or 120
+			local sz = size:get()
+			local w = if sz and sz.w > 0 then sz.w else (if wide then TIP_MAX else 120)
+			local h = if sz and sz.h > 0 then sz.h else TIP_H
 			local vw = opts.view.width or 0
 			local left = math.clamp(badge_left + BADGE / 2 - w / 2, EDGE - ox, math.max(EDGE - ox, vw - w - EDGE - ox))
-			return left, dy_now(a, ref) - OVER_LINE - TIP_GAP - (box.height or TIP_H)
+			return left, dy_now(a, ref) - OVER_LINE - TIP_GAP - h
 		end
-		local wide = (utf8.len(comment()) or 0) > TIP_CHARS
 		return ui.row {
 			id = "annotation-tip",
-			ref = box,
+			on_resize = function(sz: any)
+				size:set({ w = sz.w, h = sz.h })
+			end,
 			absolute = true,
 			left = function(): number
 				local x = place()
@@ -878,7 +893,7 @@ function M.new(opts: {
 			rounded_bl = ui.raw(TAIL, "the badge's tail"),
 			border = 1,
 			border_color = ui.raw("#ffffff", "Zeron's badge edge, both themes"),
-			bg = "$zeron.annotation.badge",
+			bg = badge_fill,
 			selectable = false,
 			on_hover = function(inside: boolean)
 				if inside then
