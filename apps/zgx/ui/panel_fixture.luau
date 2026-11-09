@@ -372,6 +372,14 @@ ui.command {
 		closed:set(tostring(Panel.close_active_tab()))
 	end,
 }
+-- The pane's toggle closing it, as screens/shell/fit calls the panel first.
+ui.command {
+	id = "test.float_active_device_tab",
+	title = "Float Active Device Tab",
+	run = function()
+		Panel.float_active_device_tab()
+	end,
+}
 -- ⌃Tab as the shell calls it: what the panel answered.
 local stepped = ui.state("test_panel_stepped", "")
 ui.command {
@@ -468,6 +476,12 @@ for _, which in { "a", "b" } do
 	}
 end
 local built = generation:peek()
+local Float = require("@app/screens/device/float")
+-- (Settings → Device hub's Auto-show floating preview, `device_auto_float`, as the app has it loaded.)
+require("@app/screens/settings/device_hub")
+local float_column = ui.state("test_float_column", { w = 600, h = 600 })
+local float_chat_shown = ui.state("test_float_chat_shown", true)
+local float_to = ui.state("test_float_to", { x = 0, y = 0 })
 
 return ui.column {
 	w_full = true,
@@ -503,4 +517,43 @@ return ui.column {
 	end, { w_full = true, grow = 1, min_h = 0 }),
 	-- Something outside the panel that takes the keyboard (the chat's).
 	ui.div { id = "outside", label = "Outside", role = "button", focusable = true, h = 4, w_full = true },
+	-- The chat's column the floating device preview stands over, as the
+	-- shell's page places it: `test_float_column` its size, and
+	-- `test_float_chat_shown` whether the chat shows. `#float-to` is where a
+	-- test drags to: `test_float_to`, a point in the window.
+	ui.div {
+		id = "test-chat-column",
+		absolute = true,
+		left = 0,
+		top = 0,
+		w = function(): number
+			return float_column:get().w
+		end,
+		h = function(): number
+			return float_column:get().h
+		end,
+		pointer_events = "none",
+		Float.View {
+			chat = function(): string?
+				local s = session:get()
+				return if s then s.id else nil
+			end,
+			shown = function(): boolean
+				return float_chat_shown:get()
+			end,
+		},
+	},
+	ui.div {
+		id = "float-to",
+		absolute = true,
+		left = function(): number
+			return float_to:get().x
+		end,
+		top = function(): number
+			return float_to:get().y
+		end,
+		w = 0,
+		h = 0,
+		pointer_events = "none",
+	},
 }

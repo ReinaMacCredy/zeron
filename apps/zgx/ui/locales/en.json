@@ -5514,7 +5514,13 @@
       "more": "More",
       "close": "Close panel",
       "power_off": "Power off",
-      "rotate": "Rotate device"
+      "rotate": "Rotate device",
+      "float": "Float device over chat"
+    },
+    "float": {
+      "label": "Floating device preview",
+      "open": "Open in right panel",
+      "close": "Close floating preview"
     }
   }
 }

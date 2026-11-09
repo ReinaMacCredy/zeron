@@ -244,6 +244,8 @@ end)
 
 test("a device the chat's agent opens comes up in a Device tab, once: a tab on its picker takes it, one closed isn't opened again", function()
 	local app = open_panel()
+	-- (Auto-show floating preview off: a tab, as gpui's.)
+	app:set_state("device_auto_float", false)
 	set_up(app)
 	app:click('role:button "Open iPhone 17"')
 	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)

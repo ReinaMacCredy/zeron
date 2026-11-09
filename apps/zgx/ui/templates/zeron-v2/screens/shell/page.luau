@@ -174,6 +174,28 @@ return function(props: Props): Node
 			return c.Composer()
 		end, { pass = true }))
 	end
+	local float_ok, DeviceFloat = pcall(function(): any
+		return (require :: any)("@app/screens/device/float")
+	end)
+	if float_ok and DeviceFloat then
+		table.insert(pane, ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = TITLE_H,
+			bottom = 0,
+			pointer_events = "none",
+			DeviceFloat.View {
+				chat = function(): string?
+					local s = route.session:get()
+					return if s then s.id else nil
+				end,
+				shown = function(): boolean
+					return route.current:get().name == "session" and not shell_view.expanded:get()
+				end,
+			},
+		})
+	end
 	-- Where plugins put something over the page (a banner, a tour).
 	table.insert(pane, ui.div {}) --PERFOFF
 	-- A session's name on the title line, as the shipping app has it: its

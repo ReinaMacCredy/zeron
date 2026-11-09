@@ -2,7 +2,7 @@
 -- ui/shell_fixture.luau over the hub of ui/device_stub.luau: gpui's rows
 -- with the hub's values, the switch writing the engine and reading back,
 -- versions with Check versions and Update, platform support and Refresh,
--- agent access (no floating preview switch: zgx has no floating window), and
+-- agent access, the floating preview's switch, and
 -- device hosts: Add host's checks, Test connection's lines, Save and Remove.
 -- The page leaves the list while the Device built-in is off.
 
@@ -80,7 +80,7 @@ test("device hub settings: gpui's rows, the hub's switch writes the engine and t
 	expect(checked(app, "Agent device access")).to_be(false)
 end)
 
-test("device hub settings: a failed update says so; no floating preview's switch, as zgx has no floating window", function()
+test("device hub settings: a failed update says so; Auto-show floating preview switches device_auto_float", function()
 	local app = open()
 	app:click(`{PAGE} >> role:switch "Device hub"`)
 	expect(eventually(app, function()
@@ -92,9 +92,13 @@ test("device hub settings: a failed update says so; no floating preview's switch
 		return app:has("#settings-device-update-error")
 	end)).to_be(true)
 	expect(app:tree("#settings-device-update-error")).to_contain("Update failed. Check this host's network connection")
-	-- (An agent's device opens a tab either way: a switch here would do nothing.)
-	expect(has(app, "Auto-show floating preview")).to_be(false)
-	expect(app:state("device_auto_float")).to_be(true)
+	expect(has(app, "Show the floating preview when an agent opens a device.")).to_be(true)
+	expect(checked(app, "Auto-show floating preview")).to_be(true)
+	app:click(`{PAGE} >> role:switch "Auto-show floating preview"`)
+	expect(eventually(app, function()
+		return app:state("device_auto_float") == false
+	end)).to_be(true)
+	expect(checked(app, "Auto-show floating preview")).to_be(false)
 end)
 
 test("device hosts: Add host's form checks what's typed, tests it, saves it; a host's Test connection and Remove", function()

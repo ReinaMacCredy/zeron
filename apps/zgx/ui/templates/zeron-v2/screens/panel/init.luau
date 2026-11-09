@@ -594,33 +594,92 @@ function M.open_lane_tab(session: string, lane: { kind: string, id: string, titl
 		set_files(true)
 	end
 end
--- A device opened in a chat by its agent (or another window): a Device tab
--- for it in that chat's panel, the panel opened if that chat shows (gpui's
--- `auto_open_devices`; zgx has no floating preview, so a tab either way).
-function M.open_device_tab(session: string, host: string, device: string)
+-- A device for a chat's panel: a Device tab for it, the panel opened if that
+-- chat shows. `manual` (the floating preview's Open in right panel) opens one
+-- closed before and turns to one that shows it, as gpui's `open_device_tab`.
+function M.open_device_tab(session: string, host: string, device: string, manual: boolean?)
 	local k = state.key(session, nil)
-	if not k or not Device or Device.dismissed(session, host, device) then
+	if not k or not Device or (not manual and Device.dismissed(session, host, device)) then
 		return
 	end
-	-- (Shown already: nothing; a tab on its picker takes it; else a new one.)
+	if manual then
+		Device.undismiss(session, host, device)
+	end
 	local idle: string? = nil
+	local shown: string? = nil
 	for _, t in state.of(k).tabs do
-		if t.kind == "device" and Device.shows(t, host, device) then
-			return
+		if t.kind == "device" and not shown and Device.shows(t, host, device) then
+			if not manual then
+				return
+			end
+			shown = t.id
 		end
 		if t.kind == "device" and not idle and Device.idle(t) then
 			idle = t.id
 		end
 	end
-	local id = idle or state.open(k, "device")
-	state.patch(k, id, { device_target = { host = host, id = device } })
+	local id = shown or idle or state.open(k, "device")
+	if not shown then
+		state.patch(k, id, { device_target = { host = host, id = device } })
+	end
 	state.activate(k, id)
 	if shown_key and shown_key() == k then
 		set_panel(true)
 	end
 end
 if Device then
-	Device.follow(M.open_device_tab)
+	local Float = (require :: any)("@app/screens/device/float")
+	local function auto_float(): boolean
+		local ok, hub = pcall(function(): any
+			return (require :: any)("@app/screens/settings/device_hub")
+		end)
+		return not ok or hub.auto_float:peek() ~= false
+	end
+	-- (gpui's `auto_open_devices`: a device a tab shows stays there; the float ignores a closed tab, as gpui's does.)
+	Device.follow(function(session: string, host: string, device: string)
+		local k = state.key(session, nil)
+		if not k then
+			return
+		end
+		for _, t in state.of(k).tabs do
+			if t.kind == "device" and Device.shows(t, host, device) then
+				return
+			end
+		end
+		if auto_float() then
+			Float.open(session, host, device)
+		else
+			M.open_device_tab(session, host, device)
+		end
+	end)
+	Float.open_in_panel = function(session: string, host: string, device: string)
+		Float.close(session)
+		M.open_device_tab(session, host, device, true)
+	end
+	-- (State first, so a panel mounted later still wakes this.)
+	Float.showing = function(session: string): any
+		local k = state.key(session, nil)
+		if not k then
+			return nil
+		end
+		local s = state.of(k)
+		if not shown_key or shown_key() ~= k or (is_shown and not is_shown()) then
+			return nil
+		end
+		local tab = if s.active then state.find(k, s.active) else nil
+		local t = if tab and tab.kind == "device" then tab.device_target else nil
+		return if t and t.id then { host = t.host or "local", id = t.id } else nil
+	end
+	-- The pane's toggle closing it floats the device its active tab shows (gpui's `float_active_device_tab`).
+	function M.float_active_device_tab()
+		local k = if shown_key then shown_key() else nil
+		local s = if k then state.of(k) else nil
+		local tab = if k and s and s.active then state.find(k, s.active) else nil
+		local t = if tab and tab.kind == "device" then tab.device_target else nil
+		if k and t and t.id and string.sub(k, 1, 5) == "chat:" then
+			Float.open(string.sub(k, 6), t.host or "local", t.id)
+		end
+	end
 end
 if lanes_card then
 	lanes_card.opener = M.open_lane_tab

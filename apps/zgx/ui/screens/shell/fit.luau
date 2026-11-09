@@ -314,6 +314,14 @@ function M.toggle_panel()
 		return
 	end
 	local open = not view.files:peek()
+	if not open then
+		local ok, panel = pcall(function(): any
+			return (require :: any)("@app/screens/panel")
+		end)
+		if ok and panel and panel.float_active_device_tab then
+			panel.float_active_device_tab()
+		end
+	end
 	view.set_files(open)
 	if open then
 		M.record("right")
