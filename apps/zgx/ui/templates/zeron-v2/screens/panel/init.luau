@@ -1051,7 +1051,7 @@ M.Panel = ui.component(function(props: Props): Node
 					rounded = "$radius.full",
 					-- (Opaque: the working tone is a see-through ink, which over the badge took its colour.)
 					bg = "$popover.bg",
-					ui.div { w_full = true, h_full = true, rounded = "$radius.full", bg = "$zeron.status.working" },
+					ui.div { w_full = true, h_full = true, rounded = "$radius.full", bg = "$zeron.tab.working" },
 				}),
 			}
 		end

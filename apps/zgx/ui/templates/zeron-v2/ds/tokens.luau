@@ -471,6 +471,7 @@ function M.setup()
 			finding = { risk = { ink = "alpha({danger}, 0.6)", wash = "alpha({danger}, 0.08)" } },
 			-- gpui's transcript chips: a question's fill (ink 0.045), an error's borderless red wash.
 			chip = { bg = "alpha({text.primary}, 0.045)", alert = "alpha({danger}, 0.1)" },
+			tab = { working = "#2b7fff" },
 			-- Checks on a commit: passing, failing, running.
 			checks = { passing = "{success}", failing = "{danger}", running = "{warning}" },
 			-- A diff's counts: what it adds and what it takes away.
