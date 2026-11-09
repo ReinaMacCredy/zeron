@@ -8818,10 +8818,10 @@ async fn drive_run(
                         inner.set_waiting(&chat_id, None);
                         inner.set_status_with_completion(
                             &chat_id,
-                            SessionStatus::Idle,
+                            parked_status(&live_subagents),
                             false,
                             parked.completed_turn,
-                            false,
+                            !live_subagents.is_empty(),
                             parked.outcome,
                         );
                     }
@@ -9535,10 +9535,10 @@ async fn drive_run(
                             inner.set_waiting(&chat_id, None);
                             inner.set_status_with_completion(
                                 &chat_id,
-                                SessionStatus::Idle,
+                                parked_status(&live_subagents),
                                 false,
                                 parked.completed_turn,
-                                false,
+                                !live_subagents.is_empty(),
                                 parked.outcome,
                             );
                         }
@@ -10153,8 +10153,9 @@ async fn drive_run(
                         outcome,
                         grace: None,
                     });
-                    inner.set_status_with_completion(&chat_id, SessionStatus::Idle, false, None, false, None);
                     inner.set_waiting(&chat_id, Some(zeron_proto::SessionWaiting { since, on }));
+                    inner.set_status_with_completion(&chat_id, SessionStatus::Idle, false, None, false, None);
+                    inner.computer_turn_ended(&chat_id, run_computer.end_turn());
                     continue;
                 }
                 wait = None;

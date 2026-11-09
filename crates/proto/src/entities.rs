@@ -725,7 +725,7 @@ impl Chat {
     ) -> Option<DateTime<Utc>> {
         if matches!(
             status,
-            ChatIndicator::Working | ChatIndicator::AwaitingInput
+            ChatIndicator::Working | ChatIndicator::AwaitingInput | ChatIndicator::Waiting
         ) {
             return None;
         }
@@ -3355,6 +3355,21 @@ mod tests {
             route: None,
         });
         chat
+    }
+
+    #[test]
+    fn a_live_turn_keeps_its_chat_out_of_settled() {
+        let mut chat = child(None);
+        chat.last_message_at = Some(chat.created_at);
+        let now = chat.created_at + chrono::Duration::days(30);
+        assert!(chat.inbox_settled_at(ChatIndicator::Idle, 7, now).is_some());
+        for live in [
+            ChatIndicator::Working,
+            ChatIndicator::AwaitingInput,
+            ChatIndicator::Waiting,
+        ] {
+            assert_eq!(chat.inbox_settled_at(live, 7, now), None, "{live:?}");
+        }
     }
 
     #[test]

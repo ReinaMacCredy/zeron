@@ -306,6 +306,14 @@ fn requested_child<'a>(chats: &'a [Chat], owner: &str, key: &str) -> Option<&'a 
     })
 }
 
+fn turn_live(session: &Session) -> bool {
+    session.waiting.is_some()
+        || matches!(
+            session.status,
+            SessionStatus::Working | SessionStatus::AwaitingInput
+        )
+}
+
 /// A session reads Idle before a fresh turn starts, so only an answer to the
 /// latest user entry (`reply`) ends a task.
 pub(super) fn child_outcome(
@@ -324,10 +332,7 @@ pub(super) fn child_outcome(
         return cancelled.then_some(DelegationStatus::Cancelled);
     }
     let status = session.map(|s| s.status);
-    if matches!(
-        status,
-        Some(SessionStatus::Working | SessionStatus::AwaitingInput)
-    ) {
+    if session.is_some_and(turn_live) {
         return None;
     }
     if cancelled {
@@ -773,12 +778,7 @@ impl DocHost {
         let session = self
             .sessions()
             .and_then(|sessions| sessions.session_status(&child.id));
-        let active = session.as_ref().is_some_and(|s| {
-            matches!(
-                s.status,
-                SessionStatus::Working | SessionStatus::AwaitingInput
-            )
-        });
+        let active = session.as_ref().is_some_and(turn_live);
         let task_queued =
             delegation.is_running() && self.task_queued(&child.id, &delegation.anchor);
         let status = match delegation.status {
@@ -1631,14 +1631,7 @@ impl DocHost {
                     self.drain_queue(handle).await;
                     continue;
                 }
-                if !task_queued
-                    && session.as_ref().is_some_and(|s| {
-                        matches!(
-                            s.status,
-                            SessionStatus::Working | SessionStatus::AwaitingInput
-                        )
-                    })
-                {
+                if !task_queued && session.as_ref().is_some_and(turn_live) {
                     continue;
                 }
                 let entries = handle
@@ -1879,6 +1872,16 @@ mod tests {
         assert_eq!(
             child_outcome(&d, Some(&idle), false, false, DONE, false),
             Some(DelegationStatus::Completed)
+        );
+        let mut parked = session(SessionStatus::Idle);
+        parked.waiting = Some(zeron_proto::SessionWaiting {
+            since: Utc::now(),
+            on: Vec::new(),
+        });
+        assert_eq!(
+            child_outcome(&d, Some(&parked), false, false, DONE, false),
+            None,
+            "a turn parked on its background work is not done"
         );
         assert_eq!(
             child_outcome(
