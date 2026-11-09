@@ -1175,12 +1175,14 @@ impl Plugins {
                 .collect()
         };
         let mut present: std::collections::BTreeSet<String> = names(&self.inner.plugins_dir).into_iter().collect();
-        if let Some(dir) = lock(&self.inner.builtin_dir).clone() {
-            present.extend(names(&dir));
+        let builtin = lock(&self.inner.builtin_dir).clone();
+        if let Some(dir) = &builtin {
+            present.extend(names(dir));
         }
         let pruned = {
             let mut state = lock(&self.inner.state);
-            state.prune(&present).then(|| state.clone())
+            // Until the app names its folder, a decision may be one of Zeron's own.
+            state.prune(&present, builtin.is_some()).then(|| state.clone())
         };
         if let Some(state) = pruned {
             tracing::info!("plugins: forgot decisions for plugins that are gone");

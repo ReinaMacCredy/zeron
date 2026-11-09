@@ -1066,6 +1066,22 @@ async fn plugins_zeron_s_own_are_allowed_what_they_ask_turn_off_and_never_go() {
 }
 
 #[tokio::test]
+async fn plugins_zeron_s_own_stay_off_across_an_engine_restart() {
+    let f = fixture();
+    let shipped = f.data.join("app-plugins");
+    std::fs::create_dir_all(&shipped).unwrap();
+    write_plugin(&shipped, "git", serde_json::json!({ "name": "Git", "permissions": ["ui.add"] }), None);
+    call(&f.plugins, methods::SET_BUILTIN_PLUGINS, serde_json::json!({ "dir": shipped })).await.unwrap();
+    call(&f.plugins, methods::SET_PLUGIN_OFF, serde_json::json!({ "id": "git", "off": true })).await.unwrap();
+    let restarted = Plugins::new(&f.data, "dev-1");
+    restarted.rescan().await;
+    call(&restarted, methods::SET_BUILTIN_PLUGINS, serde_json::json!({ "dir": shipped })).await.unwrap();
+    let list = call(&restarted, methods::LIST_PLUGINS, serde_json::json!({})).await.unwrap();
+    let git = list["plugins"].as_array().unwrap().iter().find(|p| p["id"] == "git").unwrap().clone();
+    assert_eq!(git["status"], "off");
+}
+
+#[tokio::test]
 async fn plugins_zeron_s_own_load_from_the_app_s_folder_with_none_of_yours_beside_it() {
     // (The test above has a folder of yours by the same name, which hid that
     // the snapshot was copied from `<data>/plugins/<id>`: Zeron's own never

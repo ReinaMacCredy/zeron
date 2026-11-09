@@ -72,10 +72,12 @@ impl State {
     /// Forget own ids and decisions whose plugin is gone (`present`: the
     /// ids with a folder, yours and Zeron's). A stale own id would make a
     /// stranger's package of that name yours. Whether anything went.
-    pub fn prune(&mut self, present: &BTreeSet<String>) -> bool {
+    pub fn prune(&mut self, present: &BTreeSet<String>, decisions_too: bool) -> bool {
         let (own, decisions) = (self.own.len(), self.decisions.len());
         self.own.retain(|id| present.contains(id));
-        self.decisions.retain(|id, _| present.contains(id));
+        if decisions_too {
+            self.decisions.retain(|id, _| present.contains(id));
+        }
         own != self.own.len() || decisions != self.decisions.len()
     }
 }
@@ -613,8 +615,10 @@ mod tests {
         state.decisions.insert("gone".into(), allowed(&["ui.add"], Some("K"), None));
         state.decisions.insert("here".into(), allowed(&["ui.add"], Some("K"), None));
         let present: BTreeSet<String> = ["here".to_string()].into();
-        assert!(state.prune(&present));
-        assert!(!state.prune(&present));
+        assert!(state.prune(&present, false));
+        assert_eq!(state.decisions.len(), 2, "decisions wait for the app's own folder");
+        assert!(state.prune(&present, true));
+        assert!(!state.prune(&present, true));
         assert_eq!(state.own.iter().collect::<Vec<_>>(), vec!["here"]);
         assert_eq!(state.decisions.keys().collect::<Vec<_>>(), vec!["here"]);
     }
