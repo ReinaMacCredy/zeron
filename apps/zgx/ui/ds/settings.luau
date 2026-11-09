@@ -479,12 +479,12 @@ function M.Row(props: RowProps): Node
 				truncate = props.truncate,
 				text_size = "$font.size.sm",
 				line_height = "$font.line.sm",
-				color = "$text.tertiary",
+				color = "$text.secondary",
 			}
 			elseif props.description and props.truncate
-			then FadeText { props.description, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
+			then FadeText { props.description, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.secondary" }
 			elseif props.description
-			then ui.text { props.description, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true }
+			then ui.text { props.description, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.secondary", wrap = true }
 			else nil,
 		if props.detail
 			then ui.show(function(): boolean
@@ -651,6 +651,9 @@ export type NavProps = {
 }
 
 function M.Nav(props: NavProps): Node
+	local row_refs: { [any]: any } = {}
+	local view_ref = ui.ref()
+	local offset = ui.use_state(0)
 	local function row(item: NavItem, lead_row: boolean): Node
 		if item.heading then
 			return ui.row {
@@ -666,7 +669,12 @@ function M.Nav(props: NavProps): Node
 			end
 			-- (A page is a tab of the list's, the open one selected: one Tab
 			-- stop, the arrows between them. `lead` rows are buttons.)
+			local ref = ui.ref()
+			if not lead_row and item.value ~= nil then
+				row_refs[item.value] = ref
+			end
 			return ui.row {
+				ref = ref,
 				class = item.class,
 				role = if lead_row then "button" else "tab",
 				label = item.label,
@@ -749,8 +757,28 @@ function M.Nav(props: NavProps): Node
 	end
 	-- The pages scroll under what stays (Back, the search, what's added
 	-- under them) when the window is too short for them all.
+	-- The open page's row brought into sight, however it was opened (the palette, a link).
+	ui.effect(function()
+		local v = props.value:get()
+		ui.after(0, function()
+			local r = row_refs[v]
+			local el, view = if r then r:peek() else nil, view_ref:peek()
+			if not el or not view or el.y == nil or view.y == nil or not el.height or not view.height then
+				return
+			end
+			local o = offset:peek()
+			local top = el.y - view.y
+			if top < 0 then
+				offset:set(math.max(0, o + top))
+			elseif top + el.height > view.height then
+				offset:set(o + top + el.height - view.height)
+			end
+		end)
+	end)
 	local function scrolled(): Node
 		return ui.scroll {
+			ref = view_ref,
+			offset = offset,
 			w_full = true,
 			grow = 1,
 			min_h = 0,
