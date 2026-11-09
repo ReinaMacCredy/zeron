@@ -1329,3 +1329,16 @@ test("the bar stands still going into Settings and out of it, frame by frame", f
 		app:frames(10)
 	end
 end)
+
+test("Settings opened beside the panel in a narrow window keeps its page's room: the panel gives way", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(806, 900)
+	app:frames(30)
+	app:command("shell.toggle_files")
+	app:frames(30)
+	app:command("shell.settings")
+	app:frames(40)
+	local line = app:tree("#settings-page"):match("[^\n]+") or ""
+	local w = tonumber(line:match("%-?[%d%.]+,%-?[%d%.]+ ([%d%.]+)x")) or 0
+	expect(w >= 300).to_be(true)
+end)

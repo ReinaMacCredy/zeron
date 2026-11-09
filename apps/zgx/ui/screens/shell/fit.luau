@@ -147,6 +147,14 @@ M.current = ui.computed(function(): Fit
 		return { sidebar = open_sidebar, right = open_panel, files = false, sidebar_limit = width }
 	end
 	local floor = M.page_floor:get()
+	-- Settings' list always stands: without room for it, a page and the panel, the panel gives way.
+	if open_panel and route.current:get().name == "settings" then
+		local settings: any = require("@app/screens/shell/settings")
+		if vw - settings.list_w() - M.RIGHT_PANE_MIN < M.CHAT_PANEL_MIN then
+			open_panel = false
+			open_tree = false
+		end
+	end
 	-- Too little room for a split's panes as wide as the panel: the sidebar gives
 	-- way before they narrow past it, and comes back with the room. (Not over an expanded
 	-- panel; nor when it was asked for here: `sidebar_kept`.)
