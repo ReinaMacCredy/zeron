@@ -220,8 +220,8 @@ M.Question = ui.component(function(props: { key: string, now: () -> any, find: F
 			overflow = "hidden",
 			rounded = ui.raw(10, "gpui's input chip"),
 			border = 1,
-			border_color = "$border.subtle",
-			bg = "$surface.raised",
+			border_color = "$border",
+			bg = "$zeron.chip.bg",
 			px = ui.raw(8, "gpui's input chip"),
 			pb = function(): any
 				return if #answers() > 0 then ui.raw(6, "gpui's input chip") else 0
@@ -290,9 +290,7 @@ M.Error = ui.component(function(props: { key: string, now: () -> any, find: Find
 			w_full = true,
 			overflow = "hidden",
 			rounded = ui.raw(10, "gpui's error chip"),
-			border = 1,
-			border_color = "$zeron.tone.danger.edge",
-			bg = "$surface.raised",
+			bg = "$zeron.chip.alert",
 			px = ui.raw(8, "gpui's error chip"),
 			pb = ui.raw(8, "gpui's error chip"),
 			text_size = ui.raw(12, "gpui's error chip"),
@@ -310,7 +308,7 @@ M.Error = ui.component(function(props: { key: string, now: () -> any, find: Find
 					justify = "center",
 					rounded = ui.raw(6, "gpui's error chip"),
 					bg = "$zeron.tone.danger.wash",
-					color = "$danger",
+					color = "$zeron.tone.danger.ink",
 					aria_hidden = true,
 					Icon { name = "danger-triangle", size = 12 },
 				},
@@ -321,7 +319,7 @@ M.Error = ui.component(function(props: { key: string, now: () -> any, find: Find
 					end,
 					grow = 1,
 					weight = "$font.weight.medium",
-					color = "$danger",
+					color = "$zeron.tone.danger.ink",
 				},
 				ui.show(
 					function(): boolean
@@ -337,7 +335,7 @@ M.Error = ui.component(function(props: { key: string, now: () -> any, find: Find
 						bg = "$zeron.tone.danger.wash",
 						hover = { bg = "$zeron.tone.danger.edge" },
 						active = { bg = "$zeron.tone.danger.edge" },
-						color = "$danger",
+						color = "$zeron.tone.danger.ink",
 						weight = "$font.weight.medium",
 						focus = control.ring,
 						on_click = function()
@@ -363,7 +361,7 @@ M.Error = ui.component(function(props: { key: string, now: () -> any, find: Find
 					bg = "#00000000",
 					hover = { bg = "$zeron.tone.danger.wash" },
 					active = { bg = "$zeron.tone.danger.wash" },
-					color = "$danger",
+					color = "$zeron.tone.danger.ink",
 					focus = control.ring,
 					on_click = function()
 						ui.clipboard.write(props.now().text or "")
@@ -373,7 +371,7 @@ M.Error = ui.component(function(props: { key: string, now: () -> any, find: Find
 			},
 			found { key = `{props.key}:0`, text = function(): string
 				return props.now().text or ""
-			end, find = props.find, wrap = true, color = "$text.primary" },
+			end, find = props.find, wrap = true, color = "$zeron.tone.danger.ink" },
 		},
 	}
 end)
@@ -482,8 +480,8 @@ M.Secret = ui.component(function(props: SecretProps): Node
 				gap = ui.raw(12, "gpui's secret card"),
 				rounded = ui.raw(14, "gpui's secret card"),
 				border = 1,
-				border_color = "$border.subtle",
-				bg = "$surface.raised",
+				border_color = "$border",
+				bg = "$zeron.chip.bg",
 				p = ui.raw(16, "gpui's secret card"),
 				ui.column {
 					gap = ui.raw(4, "gpui's secret card"),
@@ -522,10 +520,10 @@ M.Secret = ui.component(function(props: SecretProps): Node
 						px = ui.raw(14, "gpui's secret card"),
 						shrink = 0,
 						rounded = ui.raw(8, "gpui's secret card"),
-						bg = "$zeron.primary.bg",
-						hover = { bg = "$zeron.primary.hover" },
-						active = { bg = "$zeron.primary.active" },
-						color = "$zeron.primary.text",
+						bg = "$accent",
+						hover = { bg = "$accent.hover" },
+						active = { bg = "$zeron.accent.active" },
+						color = "$accent.text",
 						text_size = ui.raw(13, "gpui's secret card"),
 						weight = "$font.weight.medium",
 						focus = control.ring,
