@@ -311,6 +311,7 @@ fn park_on_background_agent(session: &SessionHandle, held_by_subagents: bool) {
             doc.upsert_session(&zeron_proto::Session {
                 last_completed_turn: None,
                 running_subagents: 1,
+                running_subagent_models: Vec::new(),
                 compact_plan: None,
                 classifying: None,
                 chat_id,

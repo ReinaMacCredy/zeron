@@ -928,6 +928,7 @@ impl From<RawSession> for Session {
             last_turn_outcome: raw.last_turn_outcome,
             terminal_activity: raw.terminal_activity,
             running_subagents: raw.running_subagents,
+            running_subagent_models: Vec::new(),
             background_tasks: raw.background_tasks,
             compact_plan: None,
             classifying: None,
@@ -1093,6 +1094,7 @@ mod tests {
             last_turn_outcome: None,
             terminal_activity: None,
             running_subagents: 0,
+            running_subagent_models: Vec::new(),
             waiting: None,
         }
     }

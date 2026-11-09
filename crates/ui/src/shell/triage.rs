@@ -2089,6 +2089,7 @@ mod tests {
             started_at: None,
             updated_at: now,
             running_subagents: 0,
+            running_subagent_models: Vec::new(),
             compact_plan: None,
             waiting: None,
         };

@@ -234,7 +234,7 @@ fn brand_mark(harness: Option<&str>, model: Option<&str>) -> Option<String> {
 }
 
 /// A chat not open says only how many of its own subagents run, so they wear its own provider.
-fn fan_tiles(harness: Option<&str>, model: Option<&str>, native: u32, children: &[FanRun]) -> Vec<FanTile> {
+fn fan_tiles(harness: Option<&str>, model: Option<&str>, native: u32, spawned: &[String], children: &[FanRun]) -> Vec<FanTile> {
     let mut runs: Vec<&FanRun> = children.iter().collect();
     runs.sort_by_key(|run| (std::cmp::Reverse(run.asking), std::cmp::Reverse(run.created)));
     let mut tiles: Vec<FanTile> = Vec::new();
@@ -247,12 +247,14 @@ fn fan_tiles(harness: Option<&str>, model: Option<&str>, native: u32, children: 
             None => tiles.push(FanTile { key: run.key.clone(), mark: run.mark.clone(), icon: run.icon.clone(), asking: run.asking, count: 1 }),
         }
     }
-    if native > 0 {
-        let mark = brand_mark(harness, model);
+    let native = native as usize;
+    let named = spawned.len().min(native);
+    for each in spawned[..named].iter().map(|m| Some(m.as_str())).chain(std::iter::repeat_n(model, native - named)) {
+        let mark = brand_mark(harness, each);
         let key = mark.clone().or_else(|| harness.map(str::to_owned)).unwrap_or_else(|| "agent".into());
         match tiles.iter_mut().find(|t| t.key == key) {
-            Some(tile) => tile.count += native,
-            None => tiles.push(FanTile { key, mark, icon: harness.and_then(crate::agents::registry_icon), asking: false, count: native }),
+            Some(tile) => tile.count += 1,
+            None => tiles.push(FanTile { key, mark, icon: harness.and_then(crate::agents::registry_icon), asking: false, count: 1 }),
         }
     }
     tiles
@@ -892,7 +894,7 @@ impl Sessions {
                     started: session.and_then(|s| started(s, at)),
                     tasks: session.map_or_else(Tasks::default, |s| Tasks::of(s, at)),
                     created_by: c["createdByChatId"].as_str().map(|opener| openers.title(opener).to_owned()),
-                    fan: fan_tiles(harness, c["config"]["model"].as_str(), zeron_proto::view::running_subagents(session, at), fan_children.get(id).map_or(&[][..], Vec::as_slice)),
+                    fan: fan_tiles(harness, c["config"]["model"].as_str(), zeron_proto::view::running_subagents(session, at), zeron_proto::view::running_subagent_models(session, at), fan_children.get(id).map_or(&[][..], Vec::as_slice)),
                     errored: session.is_some_and(errored),
                 };
                 if let Some(row) = rows.get(id).filter(|row| row.with == with) {
@@ -2406,6 +2408,7 @@ mod tests {
             Some("claude-code"),
             None,
             2,
+            &[],
             &[run("openai", false, 5), run("grok", false, 9), run("cursor", true, 1), run("openai", false, 7)],
         );
         let keys: Vec<&str> = tiles.iter().map(|t| t.key.as_str()).collect();
@@ -2413,7 +2416,10 @@ mod tests {
         assert!(tiles[0].asking && !tiles[1].asking);
         assert_eq!(tiles[2].count, 2);
         assert_eq!(tiles[3].count, 2, "a chat's own subagents wear its provider");
-        assert!(super::fan_tiles(Some("claude-code"), None, 0, &[]).is_empty());
+        assert!(super::fan_tiles(Some("claude-code"), None, 0, &[], &[]).is_empty());
+        let spawned = super::fan_tiles(Some("claude-code"), Some("claude-sonnet-4-5"), 3, &["gpt-5.5".into()], &[]);
+        let worn: Vec<(&str, u32)> = spawned.iter().map(|t| (t.key.as_str(), t.count)).collect();
+        assert_eq!(worn, [("openai", 1), ("claude", 2)], "a spawn that named its model wears that model's maker");
     }
 
     #[test]

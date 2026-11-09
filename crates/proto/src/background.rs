@@ -315,6 +315,7 @@ mod tests {
             started_at: None,
             updated_at: Utc::now(),
             running_subagents: 0,
+            running_subagent_models: Vec::new(),
             compact_plan: None,
             classifying: None,
             last_turn_outcome: None,

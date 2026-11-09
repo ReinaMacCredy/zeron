@@ -5917,17 +5917,18 @@ impl Inner {
     /// mirrored like any status transition (it doubles as a heartbeat); an
     /// unchanged count is a no-op, and a chat without a status row has
     /// nothing to badge yet.
-    fn set_running_subagents(&self, chat_id: &str, running: usize) {
+    fn set_running_subagents(&self, chat_id: &str, running: usize, models: Vec<String>) {
         let running = u32::try_from(running).unwrap_or(u32::MAX);
         let session = {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {
                 return;
             };
-            if entry.running_subagents == running {
+            if entry.running_subagents == running && entry.running_subagent_models == models {
                 return;
             }
             entry.running_subagents = running;
+            entry.running_subagent_models = models;
             entry.updated_at = Utc::now();
             let session = entry.clone();
             let mut list: Vec<Session> = statuses.values().cloned().collect();
@@ -6027,6 +6028,7 @@ impl Inner {
                     last_turn_outcome: None,
                     terminal_activity: None,
                     running_subagents: 0,
+                    running_subagent_models: Vec::new(),
                     compact_plan: None,
                     classifying: None,
                     waiting: None,
@@ -8747,6 +8749,8 @@ async fn drive_run(
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
     let mut running_chips: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut spawn_models: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut chip_owners: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     // Spawns that have streamed and not yet settled, independent of whether
@@ -9084,6 +9088,11 @@ async fn drive_run(
         {
             inner.publish(&chat_id, &event);
             last_subagent_activity = Some(tokio::time::Instant::now());
+            if let AgentEvent::ToolCall { id, call } = sub_event.as_ref()
+                && let Some(model) = call.subagent_model()
+            {
+                spawn_models.insert(id.clone(), model.to_owned());
+            }
             // Background subagents can outlive the turn and be the only
             // traffic for minutes: keep the row (and its count) inside the
             // UI's staleness window while any is live.
@@ -9246,7 +9255,12 @@ async fn drive_run(
             ) {
                 live_subagents.insert(parent_tool_use_id.clone());
             }
-            inner.set_running_subagents(&chat_id, running_chips.len());
+            let mut models: Vec<String> = running_chips
+                .iter()
+                .filter_map(|id| spawn_models.get(id).cloned())
+                .collect();
+            models.sort();
+            inner.set_running_subagents(&chat_id, running_chips.len(), models);
             if !dirty
                 && flush_at <= tokio::time::Instant::now()
                 && subagents.values().any(|s| s.dirty)
@@ -9610,11 +9624,14 @@ async fn drive_run(
             // first boundary on, plans never rendered again.
             AgentEvent::ToolCall { id, .. } if id == zeron_proto::LIVE_PLAN_TOOL_ID => {}
             AgentEvent::ToolResult { id, .. } if id == zeron_proto::LIVE_PLAN_TOOL_ID => {}
-            AgentEvent::ToolCall { id, .. } => {
+            AgentEvent::ToolCall { id, call } => {
                 if !in_segment(&folded, id) && seen_tools.contains(id) {
                     continue;
                 }
                 seen_tools.insert(id.clone());
+                if let Some(model) = call.subagent_model() {
+                    spawn_models.insert(id.clone(), model.to_owned());
+                }
                 // This call may be (or become) a spawn: look again.
                 foreign_subagents.remove(id);
             }
@@ -10232,7 +10249,7 @@ async fn drive_run(
             );
         }
     }
-    inner.set_running_subagents(&chat_id, 0);
+    inner.set_running_subagents(&chat_id, 0, Vec::new());
     // The runtime is gone, and its background processes with it.
     inner.set_background_tasks(&chat_id, Vec::new());
     // So is anything it waited on. A wait's held end stands, unless the
@@ -11662,6 +11679,13 @@ mod tests {
                 input: None,
             },
         };
+        let spawn_on = |id: &str, name: &str, model: &str| AgentEvent::ToolCall {
+            id: id.into(),
+            call: zeron_proto::ToolCall::Unknown {
+                name: name.into(),
+                input: Some(serde_json::json!({ "model": model })),
+            },
+        };
         let tagged = |parent: &str, event: AgentEvent| AgentEvent::Subagent {
             parent_tool_use_id: parent.into(),
             event: Box::new(event),
@@ -11673,14 +11697,14 @@ mod tests {
             // folds, and the sink opens for the frames after it.
             call("skill-1", "Skill"),
             tagged("skill-1", text("early")),
-            call("skill-1", "Agent: /fanout"),
+            spawn_on("skill-1", "Agent: /fanout", "opus"),
             tagged(
                 "skill-1",
                 AgentEvent::UserMessage {
                     text: "Fan out two agents.".into(),
                 },
             ),
-            tagged("skill-1", call("nested-1", "Agent: alpha")),
+            tagged("skill-1", spawn_on("nested-1", "Agent: alpha", "haiku")),
             tagged("skill-1", call("nested-2", "Agent: bravo")),
             tagged("nested-1", text("sleeping")),
             tagged("nested-2", text("sleeping")),
@@ -11734,6 +11758,13 @@ mod tests {
                 .map(|s| s.running_subagents),
             Some(3),
             "the badge counts what the lanes card lists"
+        );
+        assert_eq!(
+            core.sessions
+                .session_status(chat)
+                .map(|s| s.running_subagent_models),
+            Some(vec!["haiku".to_owned(), "opus".to_owned()]),
+            "each spawn that named its model, nested or not; bravo inherits"
         );
         feed.send(done(DoneStatus::Completed)).unwrap();
         core.sessions.shutdown().await;

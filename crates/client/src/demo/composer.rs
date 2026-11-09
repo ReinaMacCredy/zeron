@@ -398,6 +398,7 @@ pub(super) fn background_session(chat_id: &str) -> Option<Session> {
             started_at: None,
             updated_at: Utc::now(),
             running_subagents: 0,
+            running_subagent_models: Vec::new(),
             compact_plan: Some(CompactPlan::Agent),
             last_turn_outcome: None,
             terminal_activity: None,
@@ -423,6 +424,7 @@ pub(super) fn background_session(chat_id: &str) -> Option<Session> {
         started_at: None,
         updated_at: Utc::now(),
         running_subagents: 3,
+        running_subagent_models: Vec::new(),
         compact_plan: Some(CompactPlan::Idle {
             at: (Utc::now() + Duration::minutes(38)).timestamp_millis(),
         }),

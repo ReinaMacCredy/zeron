@@ -1828,6 +1828,7 @@ mod sidecar_regressions {
                     started_at: Some(Utc::now()),
                     updated_at: Utc::now(),
                     running_subagents: 0,
+                    running_subagent_models: Vec::new(),
                     compact_plan: None,
                     waiting: None,
                 });

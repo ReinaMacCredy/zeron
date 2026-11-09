@@ -1423,6 +1423,8 @@ pub struct Session {
     /// has not opened; read it through `view::running_subagents`.
     #[serde(default)]
     pub running_subagents: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub running_subagent_models: Vec<String>,
     /// Processes the chat's agent started in the background that still run
     /// (Claude's `run_in_background` shells, Codex commands that outlived
     /// their turn). The runtime's own authoritative set, oldest first; read it

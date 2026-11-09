@@ -639,6 +639,7 @@ mod tests {
             started_at: Some(now),
             updated_at: now,
             running_subagents: 0,
+            running_subagent_models: Vec::new(),
             compact_plan: None,
             classifying: None,
             last_turn_outcome: Default::default(),

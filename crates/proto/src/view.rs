@@ -103,6 +103,12 @@ pub fn running_subagents(session: Option<&Session>, now: DateTime<Utc>) -> u32 {
         .map_or(0, |s| s.running_subagents)
 }
 
+pub fn running_subagent_models(session: Option<&Session>, now: DateTime<Utc>) -> &[String] {
+    session
+        .filter(|s| now.signed_duration_since(s.updated_at).num_milliseconds() <= SESSION_STALE_MS)
+        .map_or(&[], |s| s.running_subagent_models.as_slice())
+}
+
 /// Background processes of a chat, staleness-checked like
 /// [`running_subagents`]: engines heartbeat a live runtime's row, so a row
 /// past [`SESSION_STALE_MS`] belongs to an engine that took its processes
@@ -453,6 +459,7 @@ mod gate_tests {
             last_turn_outcome: None,
             terminal_activity: None,
             running_subagents: running,
+            running_subagent_models: Vec::new(),
             compact_plan: None,
             classifying: None,
             held_by_subagents: false,

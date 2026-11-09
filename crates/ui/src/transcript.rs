@@ -21848,6 +21848,7 @@ mod tests {
                             held_by_subagents: false,
                             compacting: false,
                             running_subagents: 0,
+                            running_subagent_models: Vec::new(),
                             compact_plan: None,
                             classifying: None,
                             waiting: None,

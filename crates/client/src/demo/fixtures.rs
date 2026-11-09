@@ -1049,6 +1049,7 @@ pub(crate) fn seed(
                 last_turn_outcome: None,
                 terminal_activity: None,
                 running_subagents: 0,
+                running_subagent_models: Vec::new(),
                 compact_plan: None,
                 classifying: None,
                 chat_id: demo.id.into(),
