@@ -98,19 +98,6 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             bg.backgroundColor = .clear
             cell.backgroundConfiguration = bg
         }
-        let moreReg = UICollectionView.CellRegistration<UICollectionViewListCell, String> { [weak self] cell, _, id in
-            var c = UIListContentConfiguration.cell()
-            c.text = "Show \(self?.moreCount(id) ?? 0) more"
-            c.textProperties.font = Fonts.ui(.sansMedium, TypeScale.size(14))
-            c.textProperties.color = Palette.secondary
-            c.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 10, leading: 20, bottom: 10, trailing: 20)
-            cell.contentConfiguration = c
-            var bg = UIBackgroundConfiguration.listCell()
-            bg.backgroundColor = .clear
-            cell.backgroundConfiguration = bg
-            cell.accessibilityIdentifier = "more-\(id)"
-            cell.accessibilityTraits = .button
-        }
         let sectionReg = UICollectionView.CellRegistration<SectionHeaderCell, String> { [weak self] cell, _, id in
             guard let state = self?.headerStates[id] else { return }
             cell.configure(state)
@@ -158,7 +145,6 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             case let .folder(id): cv.dequeueConfiguredReusableCell(using: folderReg, for: path, item: id)
             case let .header(id) where self?.collapsible == true: cv.dequeueConfiguredReusableCell(using: sectionReg, for: path, item: id)
             case let .header(id): cv.dequeueConfiguredReusableCell(using: headerReg, for: path, item: id)
-            case let .more(id): cv.dequeueConfiguredReusableCell(using: moreReg, for: path, item: id)
             }
         }
         token = app.observe { [weak self] in self?.reload(animated: true) }
@@ -306,8 +292,6 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             showMore(id)
         case let .header(id) where collapsible:
             toggleSection(id)
-        case let .more(id):
-            showMore(id)
         default:
             break
         }
