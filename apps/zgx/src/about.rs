@@ -483,10 +483,7 @@ fn updates_itself(identity: crate::identity::Identity) -> bool {
     identity.build == crate::identity::Build::Cutover && identity.updates_itself
 }
 
-/// Whether a found release downloads by itself and installs on quit: only
-/// when `ZERON_AUTO_UPDATE` says so, in the Zeron app. Not the other
-/// interface's `autoUpdate`: until the fork's feed tells this interface's
-/// releases from that one's, a release found may be the other app (U27-M14).
+// Only when `ZERON_AUTO_UPDATE` says so: following the other interface's `autoUpdate` is still Reina's call (U27-M14).
 fn automatic(identity: crate::identity::Identity, forced: Option<bool>) -> bool {
     identity.updates_itself && forced == Some(true)
 }
