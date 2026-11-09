@@ -168,3 +168,72 @@ test("⌘F with nothing focused taking it opens a session's find bar, and nothin
 	app:frames(20)
 	expect(app:state("chat.find.shown")).to_be(true)
 end)
+
+-- A selection over chat a1's reply (the fixture's stand-in for the host's), the press let go there.
+local function select_reply(app: any, within: string?)
+	local scope = if within then `{within} >> #transcript` else "#transcript"
+	local line
+	for l in app:tree(scope):gmatch("[^\n]+") do
+		if l:find('"Line 1 of a1.', 1, true) or l:find('"This is a1"', 1, true) then
+			local x, y, w = l:match(" (%-?%d+),(%-?%d+) (%d+)x%d+")
+			if x then
+				line = { x = tonumber(x) :: number + 10, y = tonumber(y) :: number, w = 120, h = 20 }
+				break
+			end
+		end
+	end
+	expect(line ~= nil).to_be(true)
+	app:set_state("fake_selection", { text = "This is a1", top = line, bottom = line })
+	-- (Off the sidebar's row first: its card would stand over the reply.)
+	app:hover(scope)
+	app:frames(10)
+	app:click(`{scope} >> ~"This is a1"`)
+	app:frames(30)
+	expect(app:has("#annotation-pill")).to_be(true)
+end
+
+test("with a selection's pill shown or put away, a letter or a paste still goes to the composer, and Space presses a word", function()
+	local app = open()
+	app:set_state("fixture.chats", { a1 = { session = { id = "a1", cwd = "/work/atlas", model = "opus", state = "ready" }, messages = { { id = "a1-0", role = "user", text = "Say who you are, please." }, { id = "a1-m", role = "assistant", text = "This is a1" } } } })
+	app:click('#shell-sidebar >> role:button "Fix the build"')
+	app:frames(30)
+	select_reply(app)
+	-- (The pill takes no keys: nothing holds them, as before it showed.)
+	expect(focused(app)).to_be("")
+	app:key("q")
+	app:frames(5)
+	expect(focused(app)).to_contain("textbox")
+	-- Escape puts it away, the keys still parked: not on the composer's Side chat tab.
+	select_reply(app)
+	app:key("Escape")
+	app:frames(20)
+	expect(app:has("#annotation-pill")).to_be(false)
+	expect(focused(app)).to_be("")
+	app:key("q")
+	app:frames(5)
+	expect(focused(app)).to_contain("textbox")
+	-- From a word Tab reached: Escape parks the keys, a letter or a paste goes to the composer.
+	select_reply(app)
+	app:key("Tab")
+	expect(focused(app)).to_contain('button "Mention"')
+	app:key("Escape")
+	app:frames(20)
+	expect(app:has("#annotation-pill")).to_be(false)
+	expect(focused(app)).to_be("")
+	select_reply(app)
+	app:key("Tab")
+	app:key("ctrl+v")
+	app:frames(5)
+	expect(focused(app)).to_contain("textbox")
+	-- Space presses the word that has the keys (Mention: the line in the draft), never the composer's Side chat tab.
+	app:fill("role:textbox", "")
+	select_reply(app)
+	app:key("Tab")
+	expect(focused(app)).to_contain('button "Mention"')
+	app:key("Space")
+	app:frames(30)
+	expect(app:has("#annotation-pill")).to_be(false)
+	expect(app:state("chat.composer.text")).to_be("> Agent: This is a1\n\n")
+	expect(focused(app)).to_contain("textbox")
+	expect(app:has("#side-chat-panel") or app:has(".side-chat-tab")).to_be(false)
+end)

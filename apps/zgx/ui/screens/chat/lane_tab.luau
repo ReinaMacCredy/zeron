@@ -276,12 +276,16 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	-- (Asked for by the panel, or by keys typed with the panel holding them: the
 	-- field takes them as soon as it's there, as gpui's `focus_pending`.)
 	local field = ui.ref()
-	fields[chat] = field
-	ui.on_cleanup(function()
-		if fields[chat] == field then
-			fields[chat] = nil
-		end
-	end)
+	-- (A split's pane types in the window's composer: its own, hidden while
+	-- it's focused, is never where a passage goes.)
+	if not split then
+		fields[chat] = field
+		ui.on_cleanup(function()
+			if fields[chat] == field then
+				fields[chat] = nil
+			end
+		end)
+	end
 	local take_on_mount = ui.use_state(false)
 	local function take_keys()
 		local el = field:peek()
@@ -1463,10 +1467,13 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 			lanes.ask_side(data.parent or lanes.unsent:peek()[chat] or chat, text)
 		end,
 		focus = keys_here,
-		-- (Into its own draft, at its own composer's caret.)
-		mention = function(q: any)
-			Shared.mention_in(chat, { text = q.text, who = q.who or "" }, fields[chat], keys_here)
-		end,
+		-- (Into its own draft, at its own composer's caret; a split's pane:
+		-- the window composer's, as the chat page's.)
+		mention = if split
+			then nil
+			else function(q: any)
+				Shared.mention_in(chat, { text = q.text, who = q.who or "" }, fields[chat], keys_here)
+			end,
 	})
 	local function make_transcript(): Node
 		return T.Transcript(RowProps.add({

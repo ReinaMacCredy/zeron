@@ -459,6 +459,10 @@ return function(): Node
 			if sidebar and sidebar.key_pressed then
 				sidebar.key_pressed(string.match(e.key, "^[1-9]$") ~= nil and not (e.shift or e.alt or (e.ctrl and e.meta)))
 			end
+			local typing: any = boundary.load("@app/screens/chat/typing")
+			if typing and typing.pill_key(e) then
+				return true
+			end
 			if e.key == "Escape" and not (e.shift or e.cmd or e.alt or e.ctrl) then
 				-- (A press on the bar's muted controls leaves the keyboard nowhere.)
 				if route.current:peek().name == "settings" then
@@ -474,7 +478,6 @@ return function(): Node
 			if panel and panel.home_key and (panel.home_key :: any)(e) == true then
 				return true
 			end
-			local typing: any = boundary.load("@app/screens/chat/typing")
 			if typing then
 				typing.key(e)
 			end

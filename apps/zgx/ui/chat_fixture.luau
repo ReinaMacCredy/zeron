@@ -2790,6 +2790,10 @@ return ui.overlay {
 	on_press = function()
 		require("@app/screens/chat/pills").press_outside()
 	end,
+	-- (As the shell's root: the selection pill's Escape and Tab first.)
+	on_key = function(e: any): boolean
+		return require("@app/screens/chat/typing").pill_key(e)
+	end,
 	w_full = true,
 	h_full = true,
 	ui.column {

@@ -54,7 +54,7 @@ export type Notes = {
 	remove: (id: string) -> (),
 	side: ((text: string) -> ())?,
 	mention: ((q: { text: string, who: string? }) -> ())?,
-	-- Typing with the pill holding the keys: the composer takes them (type to focus).
+	-- Typing with one of the pill's words holding the keys: the composer takes them (type to focus).
 	keys: (() -> ())?,
 	edit: () -> string?,
 	edited: () -> (),
@@ -68,6 +68,25 @@ local BADGE, TAIL, OVER_LINE, STEP_GAP = 30, 4, 28.5, 2
 local TIP_H, TIP_R, TIP_GAP, TIP_MAX, TIP_CHARS = 32, 11, 11.5, 280, 36
 local EDGE, TEXT, LINE, MAX_LINES = 8, 13, 20, 6
 local WATCH = 200
+
+-- The layers made, each its pill's keys; the last settled is the one shown.
+local layers: { [any]: (e: any) -> any } = {}
+local settled = 0
+
+-- A key the window's root heard with nothing holding the keyboard (the
+-- selection's press leaves focus parked): the pill's Escape and Tab while
+-- one shows. The pill never takes the keys itself, so typing, a paste, and
+-- a split's focus go on as with no pill.
+function M.key(e: any): boolean
+	local best: any, at = nil, -1
+	for _, key in layers do
+		local n = key(nil)
+		if n and n > at then
+			best, at = key, n
+		end
+	end
+	return best ~= nil and best(e) == true
+end
 
 function M.wash_color(): string
 	return if string.find(ui.theme.kind(), "dark", 1, true) then "$zeron.annotation.wash.dark" else "$zeron.annotation.wash.light"
@@ -174,12 +193,26 @@ function M.new(opts: {
 		end)
 	end)
 
+	-- The pill put away. (A word holding the keys lets go of them first:
+	-- removed, its focus would fall to the next control, a composer's button
+	-- or another split pane's composer, which then takes the split's focus.)
+	local bar: Ref? = nil
+	local words: { Ref } = {}
+	local holding = false
+	local function away()
+		local el = if bar then bar:peek() else nil
+		if el then
+			el:blur()
+		end
+		pending:set(nil)
+	end
+
 	-- A scroll takes the pill away: it no longer stands by what it offers.
 	-- (The offset is read only while it shows: no work a scroll frame otherwise.)
 	ui.effect(function()
 		local p = pending:get()
 		if p and opts.scroll and math.abs(opts.scroll() - p.offset) > 1 then
-			pending:set(nil)
+			away()
 		end
 	end)
 
@@ -235,9 +268,9 @@ function M.new(opts: {
 			notes.comment(was.id, draft:peek(), false)
 		end
 		made += 1
+		away()
 		ui.batch(function()
 			draft:set(comment)
-			pending:set(nil)
 			pinned:set(nil)
 			hovered:set(nil)
 			editor:set { id = id, editing = editing, gen = made }
@@ -278,7 +311,7 @@ function M.new(opts: {
 		if not p or not notes then
 			return
 		end
-		pending:set(nil)
+		away()
 		SelectionMenu.clear()
 		local id = notes.add(p.text, p.anchor)
 		if id then
@@ -290,7 +323,7 @@ function M.new(opts: {
 		if not p or not notes or not notes.side then
 			return
 		end
-		pending:set(nil)
+		away()
 		SelectionMenu.clear()
 		notes.side(p.text)
 	end
@@ -299,7 +332,7 @@ function M.new(opts: {
 		if not p or not notes or not notes.mention then
 			return
 		end
-		pending:set(nil)
+		away()
 		SelectionMenu.clear()
 		notes.mention({ text = p.text, who = p.who })
 	end
@@ -329,7 +362,9 @@ function M.new(opts: {
 		if not a then
 			return nil
 		end
+		settled += 1
 		return {
+			seq = settled,
 			text = if text_of then text_of(s) else s.text,
 			who = if opts.who then opts.who(s) else nil,
 			anchor = a,
@@ -356,8 +391,41 @@ function M.new(opts: {
 		pending:set(p)
 	end
 	function L.clear()
-		pending:set(nil)
+		away()
 	end
+	-- The window's key, while this layer's pill shows (`M.key`; with no key,
+	-- when it settled).
+	local function key(e: any): any
+		local p = pending:peek()
+		if not p or editor:peek() then
+			return nil
+		end
+		-- (A word holding the keys has them first, and Tab goes on from it.)
+		if holding then
+			return nil
+		end
+		if e == nil then
+			return p.seq
+		end
+		if e.key == "Escape" and not (e.shift or e.cmd or e.alt or e.ctrl or e.meta) then
+			away()
+			return true
+		end
+		-- (Into its words: the first, Shift: the last.)
+		if e.key == "Tab" and not (e.cmd or e.alt or e.ctrl or e.meta) then
+			for i = if e.shift then #words else 1, if e.shift then 1 else #words, if e.shift then -1 else 1 do
+				local el = words[i]:peek()
+				if el and el:focus() then
+					return true
+				end
+			end
+		end
+		return false
+	end
+	layers[key] = key
+	ui.on_cleanup(function()
+		layers[key] = nil
+	end)
 	function L.press()
 		if pinned:peek() then
 			pinned:set(nil)
@@ -435,9 +503,10 @@ function M.new(opts: {
 	end
 
 	-- A word on the pill: a pill in a pill, its curve parallel to the bar's.
-	local function word(id: string, label: Label, act: () -> ()): Node
+	local function word(id: string, label: Label, act: () -> (), ref: Ref): Node
 		return ui.button {
 			id = id,
+			ref = ref,
 			label = label,
 			h = WORD,
 			px = "$zeron.space.snug",
@@ -450,6 +519,12 @@ function M.new(opts: {
 			hover = { bg = "$hover" },
 			active = { bg = "$pressed" },
 			focus = control.ring,
+			on_focus = function()
+				holding = true
+			end,
+			on_blur = function()
+				holding = false
+			end,
 			on_click = act,
 			label,
 		}
@@ -457,10 +532,22 @@ function M.new(opts: {
 
 	local Pill = ui.component(function(props: { gen: number }): Node
 		local pill = ui.ref()
+		local mine = { ui.ref(), ui.ref(), ui.ref() }
+		-- (The pill shown last: where the keys go, and what lets go of them.)
+		bar, words, holding = pill, {}, false
+		if notes and notes.mention then
+			table.insert(words, mine[1])
+		end
+		table.insert(words, mine[2])
+		if notes and notes.side then
+			table.insert(words, mine[3])
+		end
 		-- However the selection went (a press elsewhere, its row rebuilt), the pill goes with it.
 		ui.every(WATCH, function()
 			if SelectionMenu.read() == nil then
-				pending:set(nil)
+				if pending:peek() and pending:peek().gen == props.gen then
+					away()
+				end
 				return false
 			end
 			return true
@@ -472,7 +559,7 @@ function M.new(opts: {
 			stood = if p and p.gen == props.gen then p.at else stood
 			return stood
 		end
-		local bar: { [any]: any } = {
+		local box: { [any]: any } = {
 			id = "annotation-pill",
 			ref = pill,
 			absolute = true,
@@ -493,29 +580,28 @@ function M.new(opts: {
 			items = "center",
 			shadow = "$shadow.md",
 			selectable = false,
-			-- (It holds the keys, so Tab walks its words and Escape puts it away.)
-			focusable = true,
-			focus = { outline = 0 },
-			on_mount = function(el: any)
-				el:focus()
-			end,
+			-- A key on a word Tab reached (Space and Enter press it).
 			on_key = function(e: any): boolean
 				if e.key == "Escape" and not (e.shift or e.cmd or e.alt or e.ctrl) then
-					pending:set(nil)
+					away()
 					return true
 				end
-				-- (Not taken: the window gives its text to the field just focused.)
-				if notes and notes.keys and not (e.cmd or e.ctrl or e.meta) and (utf8.len(e.key) == 1 or e.key == "Space") then
+				-- (A letter or a paste: the composer takes the keys, and the
+				-- window then gives it the text or the paste, as type to focus.
+				-- Space, " " here, presses the word.)
+				local paste = e.key == "v" and (e.cmd or e.ctrl) and not (e.shift or e.alt)
+				local letter = utf8.len(e.key) == 1 and e.key ~= " " and not (e.cmd or e.ctrl or e.meta)
+				if notes and notes.keys and not e["repeat"] and (paste or letter) then
 					notes.keys()
 				end
 				return false
 			end,
-			if notes and notes.mention then word("annotation-mention", locale.t("ds.annotation.mention"), mention) else nil,
-			word("annotation-add-to-chat", locale.t("ds.annotation.add_to_chat"), add),
-			if notes and notes.side then word("annotation-ask-side-chat", locale.t("ds.annotation.ask_side"), side) else nil,
+			if notes and notes.mention then word("annotation-mention", locale.t("ds.annotation.mention"), mention, mine[1]) else nil,
+			word("annotation-add-to-chat", locale.t("ds.annotation.add_to_chat"), add, mine[2]),
+			if notes and notes.side then word("annotation-ask-side-chat", locale.t("ds.annotation.ask_side"), side, mine[3]) else nil,
 		}
-		control.contain(glass.style(bar, "menu"), { radius = "$radius.full", inset = "$zeron.space.hair", border = 1 })
-		return ui.row(bar)
+		control.contain(glass.style(box, "menu"), { radius = "$radius.full", inset = "$zeron.space.hair", border = 1 })
+		return ui.row(box)
 	end)
 
 	-- A press on the comment card's own buttons (its field keeps the comment open).

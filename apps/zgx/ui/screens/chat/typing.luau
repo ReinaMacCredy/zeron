@@ -7,6 +7,7 @@
 local composer_surface = require("@ds/composer_surface")
 local route = require("@app/screens/shell/route")
 local lanes = require("@app/screens/chat/lanes")
+local annotation_layer = require("@ds/annotation_layer")
 
 local M = {}
 
@@ -40,6 +41,15 @@ function M.through_control()
 	ui.after(0, function()
 		through_control = false
 	end)
+end
+
+-- The window's on_key, first: a selection's pill takes its Escape and Tab
+-- while it shows, with nothing holding the keyboard (ds/annotation_layer).
+function M.pill_key(e: any): boolean
+	if through_control or e.editing then
+		return false
+	end
+	return annotation_layer.key(e)
 end
 
 -- The window's on_key, a key no one took. Never takes the key itself: the

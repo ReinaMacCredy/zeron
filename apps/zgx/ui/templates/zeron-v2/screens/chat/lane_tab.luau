@@ -1200,10 +1200,13 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 			lanes.ask_side(data.parent or lanes.unsent:peek()[chat] or chat, text)
 		end,
 		focus = keys_here,
-		-- (Into its own draft, at its own composer's caret.)
-		mention = function(q: any)
-			Shared.mention_in(chat, { text = q.text, who = q.who or "" }, fields[chat], keys_here)
-		end,
+		-- (Into its own draft, at its own composer's caret; a split's pane:
+		-- the window composer's, as the chat page's.)
+		mention = if split
+			then nil
+			else function(q: any)
+				Shared.mention_in(chat, { text = q.text, who = q.who or "" }, fields[chat], keys_here)
+			end,
 	})
 	local transcript = T.Transcript(RowProps.add({
 		-- (Its own glide, runway and place: never the chat page's.)

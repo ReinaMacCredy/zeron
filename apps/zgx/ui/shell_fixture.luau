@@ -1658,5 +1658,26 @@ ui.effect(function()
 		require("@app/screens/plugins")
 	end
 end)
+-- What's selected (the host reads it, which a fixture can't): a test sets
+-- `fake_selection` to `{ text, top, bottom }`, each line `{ x, y, w, h }`.
+do
+	local SelectionMenu = require("@ds/selection_menu")
+	local fake_selection = ui.state("fake_selection", nil :: any)
+	local read, clear = SelectionMenu.read, SelectionMenu.clear
+	SelectionMenu.read = function(): any
+		local sel = fake_selection:peek()
+		if sel == nil then
+			return read()
+		end
+		return if type(sel) == "table" and type(sel.text) == "string" and string.find(sel.text, "%S") then sel else nil
+	end
+	SelectionMenu.clear = function()
+		if fake_selection:peek() ~= nil then
+			fake_selection:set(nil)
+		else
+			clear()
+		end
+	end
+end
 local shell = require("@app/screens/shell")
 return shell()

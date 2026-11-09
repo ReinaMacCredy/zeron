@@ -337,25 +337,57 @@ test("annotations: Mention puts the passage in the draft at the caret, sent in f
 	expect(app:state("calls")).never.to_contain("Annotations (numbered")
 end)
 
-test("annotations: the pill holds the keys: Tab walks its words, Escape puts it away and keeps the selection", function()
+-- The focused node's line, or "" with focus parked.
+local function focused(app: any): string
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(" focused", 1, true) then
+			return line
+		end
+	end
+	return ""
+end
+
+test("annotations: the pill leaves the keys where they were: Tab walks its words, Space presses one, Escape or a scroll puts it away and parks them", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(960, 700)
 	open(app, "s2")
+	-- (The selection's press parks the keys; the pill takes none, so typing and a paste go on to the composer.)
 	select(app, "Hi! What shall we work on?", "What shall we work on?")
-	-- (The pill itself, not a word yet: no ring until the keys move.)
-	expect(app:tree("#annotation-pill"):match("^[^\n]*")).to_contain(" focused")
+	expect(app:has("#annotation-pill")).to_be(true)
+	expect(focused(app)).to_be("")
 	app:key("Tab")
 	expect(app:tree("#annotation-mention")).to_contain(" focused")
 	app:key("Tab")
 	expect(app:tree("#annotation-add-to-chat")).to_contain(" focused")
 	app:key("Tab")
 	expect(app:tree("#annotation-ask-side-chat")).to_contain(" focused")
+	-- Escape on a word: the pill goes and the keys are parked, not on the next control.
 	app:key("Escape")
 	settle(app)
 	expect(app:has("#annotation-pill")).to_be(false)
 	expect(app:state("fake_selection") ~= nil).to_be(true)
+	expect(focused(app)).to_be("")
 	expect(app:state("calls")).never.to_contain("stop:")
 	expect(app:text('role:textbox "Message"')).to_be("")
+	-- Escape with the keys parked: the window's root hands it to the pill.
+	select(app, "Hi! What shall we work on?", "What shall we work on?")
+	app:key("Escape")
+	settle(app)
+	expect(app:has("#annotation-pill")).to_be(false)
+	expect(app:state("fake_selection") ~= nil).to_be(true)
+	expect(focused(app)).to_be("")
+	-- Shift+Tab reaches its last word; Space presses the word that has the keys.
+	select(app, "Hi! What shall we work on?", "What shall we work on?")
+	app:key("shift+Tab")
+	expect(app:tree("#annotation-ask-side-chat")).to_contain(" focused")
+	app:key("shift+Tab")
+	app:key("shift+Tab")
+	expect(app:tree("#annotation-mention")).to_contain(" focused")
+	app:key("Space")
+	settle(app)
+	expect(app:has("#annotation-pill")).to_be(false)
+	expect(app:text('role:textbox "Message"')).to_contain("> Opus: What shall we work on?")
+	expect(app:tree('role:textbox "Message"')).to_contain(" focused")
 	-- Taken by the keys: Add to chat opens the input as a click does.
 	select(app, "Hi! What shall we work on?", "What shall we work on?")
 	app:key("Tab")
@@ -363,6 +395,17 @@ test("annotations: the pill holds the keys: Tab walks its words, Escape puts it 
 	app:key("Enter")
 	settle(app)
 	expect(app:tree("#annotation-comment")).to_contain(" focused")
+	-- A scroll with a word holding the keys: parked too.
+	app:key("Escape")
+	settle(app)
+	open(app, "s1")
+	select(app, "Part 29 works like this.", "Part 29 works like this.")
+	app:key("Tab")
+	expect(app:tree("#annotation-mention")).to_contain(" focused")
+	app:scroll("#transcript", -60)
+	settle(app)
+	expect(app:has("#annotation-pill")).to_be(false)
+	expect(focused(app)).to_be("")
 end)
 
 test("annotations: Ask in side chat stages the text on a side chat's draft, with nothing to badge here", function()

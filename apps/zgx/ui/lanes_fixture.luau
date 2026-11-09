@@ -522,6 +522,15 @@ return ui.row {
 	on_focus = function()
 		Panel.focus_moved()
 	end,
+	-- (As the shell's root: the selection pill's Escape and Tab, then type to focus.)
+	on_key = function(e: any): boolean
+		local typing = require("@app/screens/chat/typing")
+		if typing.pill_key(e) then
+			return true
+		end
+		typing.key(e)
+		return false
+	end,
 	ui.column {
 		shrink = 0,
 		p = "$space.3",
