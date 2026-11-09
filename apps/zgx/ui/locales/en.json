@@ -3416,6 +3416,24 @@
         "terms": "delegated tasks per chat running children limit"
       }
     },
+    "playbooks": {
+      "title": "Playbooks",
+      "description": "Recipes agents can follow.",
+      "terms": "playbook recipe triage debug bug",
+      "new": "New playbook",
+      "start": "Start",
+      "edit": "Edit",
+      "delete": "Delete",
+      "confirm_delete": "Confirm delete",
+      "reveal": "Reveal folder",
+      "built_in": "Built in",
+      "everywhere": "All projects",
+      "note": "Playbooks are markdown files with title and question in their frontmatter. Files in {folder} are offered everywhere; a project's own go in .zeron/playbooks.",
+      "outdated": "Update Zeron's engine to list playbooks here.",
+      "couldnt_create": "Could not create a playbook",
+      "couldnt_delete": "Could not delete the playbook",
+      "couldnt_open": "Could not open the playbook"
+    },
     "device_hub": {
       "title": "Device hub",
       "subtitle": "Simulators, emulators and device hosts for agents.",

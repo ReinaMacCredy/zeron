@@ -3416,6 +3416,24 @@
         "terms": "委派 任务 每个对话 同时 上限"
       }
     },
+    "playbooks": {
+      "title": "剧本",
+      "description": "智能体可以遵循的流程。",
+      "terms": "playbook recipe triage debug bug 剧本 流程 排查",
+      "new": "新建剧本",
+      "start": "开始",
+      "edit": "编辑",
+      "delete": "删除",
+      "confirm_delete": "确认删除",
+      "reveal": "在访达中显示文件夹",
+      "built_in": "内置",
+      "everywhere": "所有项目",
+      "note": "剧本是在前置元数据中写有 title 和 question 的 Markdown 文件。{folder} 中的文件在所有地方都可用；项目自己的剧本放在 .zeron/playbooks。",
+      "outdated": "请更新 Zeron 的引擎以在这里列出剧本。",
+      "couldnt_create": "无法创建剧本",
+      "couldnt_delete": "无法删除剧本",
+      "couldnt_open": "无法打开剧本"
+    },
     "device_hub": {
       "title": "设备中心",
       "subtitle": "供智能体使用的模拟器和设备主机。",

@@ -66,6 +66,7 @@ mod session_home;
 mod sessions;
 mod tasks;
 mod settings;
+mod playbooks;
 mod skills;
 mod terminal;
 mod tool_details;
@@ -767,6 +768,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         // The composer's `/` commands and `$` skills, from the engine.
         completion::install(&host);
         skills::install(&host);
+        playbooks::install(&host);
         // What a tool row opens to: its whole output or diff, fetched.
         tool_details::install(&host);
         // Appshots: the frontmost window, captured on its shortcut.
