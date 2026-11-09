@@ -189,7 +189,7 @@ pub const TABLE: &[(&str, Home)] = &[
     ("deviceAutoFloat", Home::Persist(&["screens/settings/device_hub.luau::device_auto_float"])),
     ("deviceFloatFrame", Home::None("no saved frame for the device preview here (U28 keeps none)")),
     ("homeWidgets", Home::None("no widget grid here (U27c)")),
-    ("smoothScrolling", Home::None("zgx scrolls its own way, no switch")),
+    ("smoothScrolling", Home::Persist(&["ds/motion.luau::smooth_scrolling"])),
     ("codexVoice", Home::Persist(&["screens/settings/voice.luau::codex_voice"])),
     ("codexVoiceDevice", Home::Persist(&["screens/settings/voice.luau::codex_voice_device"])),
 ];
@@ -259,6 +259,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("ds/motion.luau::motion_reduce", "false"),
     ("ds/motion.luau::motion_follow_system", "true"),
     ("ds/motion.luau::motion_pause_background", "false"),
+    ("ds/motion.luau::smooth_scrolling", "true"),
     ("screens/shell/appearance.luau::shell_wallpaper", "\"none\""),
     ("screens/shell/appearance.luau::shell_wallpaper_image", "null"),
     ("screens/shell/appearance.luau::shell_wallpaper_effect", "\"dither\""),
@@ -391,6 +392,7 @@ fn more(settings: &Json) -> Vec<(String, Json)> {
         ("diffWrap", "ds/git.luau::ds.git.diff_wrap"),
         ("codeFencesFitContent", "ds/markdown.luau::markdown_code_fit"),
         ("renderMath", "ds/math.luau::math_render"),
+        ("smoothScrolling", "ds/motion.luau::smooth_scrolling"),
     ] {
         if let Some(on) = settings[from].as_bool() {
             put(to, json!(on));
@@ -722,6 +724,7 @@ pub enum Refused {
     Broken(String),
     /// Carried, but the marker couldn't be written: it runs again next launch.
     Marker(String),
+    Partial(String),
 }
 
 /// The run itself: `data` (the engine's, with the other interface's files),
@@ -744,9 +747,17 @@ pub fn migrate(data: &Path, app: &Path) -> Result<(Outcome, Json), Refused> {
     };
     let settings = normalized(original.clone());
     let state = app.join("script-state").join("app.luau");
-    let held = |file: &str| match std::fs::read(state.join(file)).ok().and_then(|b| serde_json::from_slice::<Json>(&b).ok()) {
-        None => false,
-        Some(mine) => default_of(file).is_none_or(|d| !same(&d, &mine)),
+    let unreadable = std::cell::RefCell::new(Vec::<String>::new());
+    let held = |file: &str| match std::fs::read(state.join(file)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => {
+            unreadable.borrow_mut().push(file.to_owned());
+            true
+        }
+        Ok(bytes) => match serde_json::from_slice::<Json>(&bytes) {
+            Err(_) => false,
+            Ok(mine) => default_of(file).is_none_or(|d| !same(&d, &mine)),
+        },
     };
     let more = more(&settings);
     // (carried_settings still writes the pins the beta read once; nothing reads them now.)
@@ -756,10 +767,35 @@ pub fn migrate(data: &Path, app: &Path) -> Result<(Outcome, Json), Refused> {
     }
     let pictures = data.join(crate::settings::WALLPAPER_DIR);
     // (A value that is this app's default too is no choice to keep: left unwritten, so a later default follows.)
-    let worth = |file: &str, value: &Json| default_of(file).is_none_or(|d| !same(&d, value));
+    let attempted = std::cell::RefCell::new(Vec::<String>::new());
+    let worth = |file: &str, value: &Json| {
+        let worth = default_of(file).is_none_or(|d| !same(&d, value));
+        if worth {
+            attempted.borrow_mut().push(file.to_owned());
+        }
+        worth
+    };
+    let mut trouble = Vec::new();
+    if let Err(e) = std::fs::create_dir_all(&state) {
+        trouble.push(format!("{} can't be made ({e})", state.display()));
+    }
     let written = carried_settings::carry_with(&state, &pictures, &carried, more, &held, &worth);
+    let mut failed: Vec<String> = attempted.into_inner().into_iter().chain(unreadable.into_inner()).filter(|name| !written.contains(name)).collect();
+    failed.sort();
+    failed.dedup();
+    if !failed.is_empty() {
+        let more = failed.len().saturating_sub(5);
+        let named = failed[..failed.len() - more].join(", ");
+        trouble.push(match more {
+            0 => format!("{} settings couldn't be read or written ({named})", failed.len()),
+            more => format!("{} settings couldn't be read or written ({named} and {more} more)", failed.len()),
+        });
+    }
     let theme = carry_theme(data, &settings["themeSelection"]);
-    let (drafts, drafts_left) = drafts(data, &app.join("migrated-drafts"));
+    let (drafts, drafts_left) = drafts(data, &app.join("migrated-drafts")).unwrap_or_else(|why| {
+        trouble.push(why);
+        (Vec::new(), Map::new())
+    });
     let outcome = Outcome { written, theme, drafts: drafts.len(), drafts_left };
     let row = |key: &str| TABLE.iter().find(|(k, _)| *k == key).map(|(_, home)| *home);
     let keys: Vec<&String> = original.as_object().map(|m| m.keys().collect()).unwrap_or_default();
@@ -786,6 +822,9 @@ pub fn migrate(data: &Path, app: &Path) -> Result<(Outcome, Json), Refused> {
     let failed = |e: std::io::Error| Refused::Marker(e.to_string());
     std::fs::create_dir_all(app).map_err(failed)?;
     keep_pending(app, &drafts).map_err(failed)?;
+    if !trouble.is_empty() {
+        return Err(Refused::Partial(trouble.join("; ")));
+    }
     std::fs::write(&marker, serde_json::to_vec_pretty(&note).unwrap_or_default()).map_err(failed)?;
     Ok((outcome, Json::Array(drafts)))
 }
@@ -850,15 +889,16 @@ fn carry_theme(data: &Path, theirs: &Json) -> bool {
 /// into `kept` (the other app removes its own as they go); a linked file, an
 /// image or an Appshot whose file is gone is left out. A draft for a chat not
 /// yet made (a draft session) goes to the new chat's (""), the newest one.
-pub fn drafts(data: &Path, kept: &Path) -> (Vec<Json>, Map<String, Json>) {
+pub fn drafts(data: &Path, kept: &Path) -> Result<(Vec<Json>, Map<String, Json>), String> {
     let mut left = Map::new();
     let file = match std::fs::read(data.join("composer-drafts.json")) {
-        Err(_) => return (Vec::new(), left),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), left)),
+        Err(e) => return Err(format!("composer-drafts.json can't be read ({e})")),
         Ok(bytes) => match serde_json::from_slice::<Json>(&bytes) {
             Ok(file) => file,
             Err(e) => {
                 left.insert("composer-drafts.json".into(), json!(format!("can't be read ({e}): none carried")));
-                return (Vec::new(), left);
+                return Ok((Vec::new(), left));
             }
         },
     };
@@ -868,7 +908,7 @@ pub fn drafts(data: &Path, kept: &Path) -> (Vec<Json>, Map<String, Json>) {
         .unwrap_or_default();
     let newest_draft = draft_sessions.iter().max_by_key(|(_, at)| *at).map(|(id, _)| *id);
     let mut out = Vec::new();
-    let Some(all) = file["drafts"].as_object() else { return (out, left) };
+    let Some(all) = file["drafts"].as_object() else { return Ok((out, left)) };
     let mut keys: Vec<&String> = all.keys().collect();
     keys.sort();
     let mut made = 0;
@@ -935,7 +975,7 @@ pub fn drafts(data: &Path, kept: &Path) -> (Vec<Json>, Map<String, Json>) {
         }
         out.push(json!({ "key": key, "text": text, "cargo": cargo }));
     }
-    (out, left)
+    Ok((out, left))
 }
 
 fn attachment(a: &Json, kept: &Path, made: usize) -> Option<Json> {
@@ -1044,6 +1084,7 @@ fn said(data: &Path, app: &Path, result: &Result<(Outcome, Json), Refused>) -> O
             file.display(),
             app.join(MARKER).display()
         )),
+        Err(Refused::Partial(why)) => Some(format!("carried from {}, but {why}: it runs again next launch, keeping what it carried", file.display())),
     }
 }
 
@@ -1233,6 +1274,7 @@ mod tests {
         assert_eq!(s("screens/shell/sidebar.luau::shell_sidebar_organize"), json!(["project"]));
         assert_eq!(s("screens/settings/prefs.luau::settings_conversation_width"), json!(912.0));
         assert_eq!(s("ds/look.luau::accent"), json!("pink"));
+        assert_eq!(s("ds/motion.luau::smooth_scrolling"), json!(false));
         assert_eq!(s("ds/look.luau::interface_font"), json!("IBM Plex Sans"));
         assert_eq!(s("ds/look.luau::code_font"), json!("JetBrains Mono"));
         assert_eq!(s("ds/look.luau::text_size"), json!(15.0));
@@ -1411,7 +1453,7 @@ mod tests {
         assert!(by("draft-old").is_none() && by("chat-empty").is_none());
         // A linked file that's there stays linked, by its own path.
         std::fs::write(data.join("build.log"), "ok").unwrap();
-        let (again, _) = super::drafts(&data, &app.join("again"));
+        let (again, _) = super::drafts(&data, &app.join("again")).unwrap();
         let linked = again[0]["cargo"].as_array().unwrap().iter().find(|c| c["linked"] == json!(true)).cloned().unwrap();
         assert_eq!(linked["path"], json!(data.join("build.log").display().to_string()));
     }
@@ -1429,7 +1471,7 @@ mod tests {
             { "id": "y", "name": "Image 1.png", "path": path("b.png"), "mention": 1 },
         ], "appshots": [] } } });
         std::fs::write(data.join("composer-drafts.json"), file.to_string()).unwrap();
-        let (drafts, _) = super::drafts(&data, &app.join("kept"));
+        let (drafts, _) = super::drafts(&data, &app.join("kept")).unwrap();
         let numbers: Vec<u64> = drafts[0]["cargo"].as_array().unwrap().iter().map(|c| c["number"].as_u64().unwrap()).collect();
         assert_eq!(numbers, [2, 1]);
     }
@@ -1488,6 +1530,48 @@ mod tests {
         migrate(&data, &app).unwrap();
         assert_eq!(copies(), first, "the same copies, none made again");
         assert!(app.join(MARKER).is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_setting_or_drafts_file_that_fails_leaves_no_marker_and_runs_again() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |path: &Path, mode: u32| std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (_dir, data, app) = dirs("v0.2.132.json");
+        let state_dir = app.join("script-state/app.luau");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        mode(&state_dir, 0o555);
+        let result = migrate(&data, &app);
+        mode(&state_dir, 0o755);
+        assert!(matches!(&result, Err(Refused::Partial(why)) if why.contains("settings couldn't be read or written")), "{result:?}");
+        assert!(!app.join(MARKER).exists());
+        assert!(said(&data, &app, &result).unwrap().contains("runs again next launch"));
+        migrate(&data, &app).unwrap();
+        assert_eq!(state(&app, "ds/look.luau::accent"), Some(json!("pink")));
+
+        // A setting of yours that can't be read is neither overwritten nor taken as done.
+        let (_dir, data, app) = dirs("v0.2.132.json");
+        std::fs::create_dir_all(app.join("script-state/app.luau")).unwrap();
+        let accent = app.join("script-state/app.luau").join(file_of("ds/look.luau::accent"));
+        std::fs::write(&accent, "\"red\"").unwrap();
+        mode(&accent, 0o000);
+        let result = migrate(&data, &app);
+        mode(&accent, 0o644);
+        assert!(matches!(&result, Err(Refused::Partial(_))), "{result:?}");
+        assert_eq!(state(&app, "ds/look.luau::accent"), Some(json!("red")));
+        assert!(!app.join(MARKER).exists());
+
+        // The drafts file there but unreadable: not taken as none.
+        let (_dir, data, app) = dirs("empty.json");
+        let text = std::fs::read_to_string(Path::new(FIXTURES).join("composer-drafts.json")).unwrap();
+        let drafts_file = data.join("composer-drafts.json");
+        std::fs::write(&drafts_file, text.replace("$DATA", &data.display().to_string())).unwrap();
+        mode(&drafts_file, 0o000);
+        let result = migrate(&data, &app);
+        mode(&drafts_file, 0o644);
+        assert!(matches!(&result, Err(Refused::Partial(why)) if why.contains("composer-drafts.json")), "{result:?}");
+        assert!(!app.join(MARKER).exists());
+        assert_eq!(migrate(&data, &app).unwrap().0.drafts, 3);
     }
 
     /// A debug build of the Zeron app carries nothing unless asked
