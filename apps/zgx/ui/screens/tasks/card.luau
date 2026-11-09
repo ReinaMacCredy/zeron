@@ -258,16 +258,18 @@ function M.add_images(t: store.Task)
 	end)
 end
 
--- The new chat composer's agent, as a new chat would start (nil: none known).
+-- The agent a task starts on: the card's own pick (gpui's detached `Pickers::new_for_tasks`), first the new chat composer's, never written back to it.
 local function defaults(): { [string]: any }
 	local d = chat_store.new_defaults
 	return if d then d:get() else {}
 end
+local picked_model = ui.state("tasks_card_model", nil :: string?)
+local picked_effort = ui.state("tasks_card_effort", nil :: string?)
 local function new_chat_model(): any
-	local d = defaults()
+	local want = picked_model:get() or defaults().model
 	local catalog = chat_store.catalog:get()
 	for _, m in catalog.models or {} do
-		if m.value == d.model then
+		if m.value == want then
 			return m
 		end
 	end
@@ -288,7 +290,8 @@ function M.start(t: store.Task)
 			M.starting:set(nil)
 		end
 	end
-	store.start(t.id, { model = m.value, effort = defaults().effort, access = defaults().access }, t.project, over, over)
+	local effort = if picked_model:peek() == m.value then picked_effort:peek() else defaults().effort
+	store.start(t.id, { model = m.value, effort = effort, access = defaults().access }, t.project, over, over)
 end
 
 local function NewChat(t: store.Task): Node
@@ -298,20 +301,39 @@ local function NewChat(t: store.Task): Node
 	local function start()
 		M.start(t)
 	end
+	ui.effect(function()
+		if picked_model:get() ~= nil then
+			return
+		end
+		local m = new_chat_model()
+		if m and (m.value == defaults().model or chat_store.catalog:get().complete == true) then
+			ui.batch(function()
+				picked_model:set(m.value)
+				picked_effort:set(defaults().effort)
+			end)
+		end
+	end)
 	return ui.column {
 		gap = ui.raw(8, "gpui"),
 		ui.row {
 			id = "task-card-agent",
-			h = 30,
-			px = ui.raw(10, "gpui"),
-			rounded = ui.raw(10, "gpui"),
-			bg = "$hover",
-			items = "center",
-			text_size = ui.raw(12.5, "gpui"),
-			ui.text { function(): string
-				local m = new_chat_model()
-				return if m then m.label else locale.s("tasks.card.no_agent")
-			end, color = "$text.primary", truncate = true },
+			ml = ui.raw(-6, "gpui"),
+			min_w = 0,
+			ds.ModelPicker {
+				model = picked_model,
+				effort = picked_effort,
+				harnesses = function(): { any }
+					local c: any = chat_store.catalog:get()
+					return c.tabs or c.harnesses or {}
+				end,
+				models = function(): { any }
+					return chat_store.catalog:get().models or {}
+				end,
+				looking = function(): boolean
+					return chat_store.catalog:get().complete ~= true
+				end,
+				placement = { side = "bottom", align = "start", offset = 6 },
+			},
 		},
 		ui.row {
 			gap = ui.raw(8, "gpui"),

@@ -5330,7 +5330,6 @@
       "images": "图片",
       "images_max": "一个任务或步骤最多可放 {n} 张图片。",
       "image_failed": "无法添加 {name}。",
-      "no_agent": "还没有代理",
       "starting": "正在开始…",
       "start": "开始",
       "assign": "分配给线程",

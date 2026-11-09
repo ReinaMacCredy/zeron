@@ -5330,7 +5330,6 @@
       "images": "Images",
       "images_max": "A task or step holds up to {n} images.",
       "image_failed": "Couldn't add {name}.",
-      "no_agent": "No agent yet",
       "starting": "Starting…",
       "start": "Start",
       "assign": "Assign to a thread",

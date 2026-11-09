@@ -422,3 +422,31 @@ test("Start uses the new chat composer's last model, not the catalog's first", f
 	app:frames(20)
 	expect(calls(app)).to_contain("start:t4:gpt-5.5")
 end)
+
+test("the card's agent is a picker: what it shows starts the task, and the new chat composer keeps its own", function()
+	local app = open()
+	app:set_state("chat.catalog", {
+		state = "ready",
+		complete = true,
+		harnesses = { { id = "claude-code", label = "Claude", mark = "claude" }, { id = "codex", label = "Codex", mark = "openai" } },
+		models = { { value = "opus", label = "Opus", harness = "claude-code" }, { value = "gpt-5.5", label = "GPT-5.5", harness = "codex" } },
+	})
+	app:set_state("screens/chat/composer.luau::chat_new_defaults", { model = "gpt-5.5", effort = "high", fast = false, access = "full", plan = false, checkout = "worktree" })
+	app:frames(5)
+	app:click("#task-row-t4")
+	app:frames(20)
+	app:click('#task-card-agent >> role:button "Model"')
+	app:frames(30)
+	app:click("#model-picker-title")
+	app:frames(30)
+	app:click('role:option ~"Opus"')
+	app:frames(30)
+	expect(app:tree("#task-card-agent")).to_contain("Opus")
+	app:key("Escape")
+	app:frames(20)
+	app:click("#task-card-start")
+	app:frames(20)
+	expect(calls(app)).to_contain("start:t4:opus")
+	expect((app:state("screens/chat/composer.luau::chat_new_defaults") :: any).model).to_be("gpt-5.5")
+	expect(app:error()).to_be_nil()
+end)
