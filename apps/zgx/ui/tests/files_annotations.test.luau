@@ -35,6 +35,18 @@ test("preview annotations: a selection in a rendered file is annotated with its 
 	app:click('#file-viewer >> "Write it"')
 	app:frames(30)
 	expect(app:has('#annotation-pill >> role:button "Add to chat"')).to_be(true)
+	-- (Under the selection's end, 6 clear of its line, as in the conversation.)
+	local pill = box_of(app, "#file-viewer", "#annotation-pill") :: any
+	expect(`{pill.y},{pill.x + pill.w}`).to_be(`{b.y + b.h + 6},{b.x + b.w}`)
+	app:click("#annotation-add-to-chat")
+	app:frames(30)
+	local input = box_of(app, "#file-viewer", "#annotation-editor") :: any
+	expect(input.x >= b.x - 40 and input.y <= b.y + b.h + 40 and input.y + input.h >= b.y - 40).to_be(true)
+	app:key("Escape")
+	app:frames(30)
+	app:set_state("fake_selection", { text = "Write it", top = line, bottom = line })
+	app:click('#file-viewer >> "Write it"')
+	app:frames(30)
 	app:click("#annotation-add-to-chat")
 	app:frames(30)
 	app:type("#annotation-comment", "tick this")
@@ -65,6 +77,18 @@ test("preview annotations: a selection in a rendered file is annotated with its 
 	expect(table.concat(names, "|")).to_be("Mention|Add to chat|Ask in side chat")
 	app:click("#annotation-mention")
 	app:frames(30)
+	app:set_state("fake_selection", { text = "Write it", top = line, bottom = line })
+	app:click('#file-viewer >> "Write it"')
+	app:frames(30)
+	app:click("#annotation-ask-side-chat")
+	app:frames(30)
+	local asked = nil :: any
+	for key, d in app:state("chat.composer.drafts") do
+		if key ~= "chat-1" and d.cargo and d.cargo[1] then
+			asked = d.cargo[1]
+		end
+	end
+	expect(asked ~= nil and asked.text == "Write it" and asked.source == "docs/guide.md").to_be(true)
 	local kept = app:state("chat.composer.drafts")["chat-1"]
 	local text = if app:state("chat.composer.here") == "chat-1" then app:state("chat.composer.text") else kept and kept.text
 	expect(text).to_contain("> docs/guide.md: Write it")

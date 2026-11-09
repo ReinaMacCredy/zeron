@@ -1736,7 +1736,8 @@ local function component(props: Props): Node
 							scrolled:set(math.max(0, a.dy - over))
 						end,
 					}
-					return ui.overlay { w_full = true, h_full = true, SelectionMenu {
+					-- (The layer's pill and input are placed in the view's frame: this box is theirs.)
+					return ui.overlay { w_full = true, h_full = true, relative = true, SelectionMenu {
 						w_full = true,
 						h_full = true,
 						more = if notes then function(s: any): { any }

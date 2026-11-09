@@ -381,7 +381,7 @@ end
 -- `session`, else a new one, opened with the text staged on its draft as an
 -- annotation (no anchor there: no badge, no pencil), as Zeron's
 -- `take_annotation_requests` seeds one.
-function M.ask_side(session: string, text: string)
+function M.ask_side(session: string, text: string, source: string?)
 	local now = os.time()
 	local newest: any = nil
 	for _, c in M.side(session) do
@@ -395,7 +395,7 @@ function M.ask_side(session: string, text: string)
 	if not newest then
 		set_in(M.unsent, id, session)
 	end
-	require("@app/screens/chat/shared").add_annotation(id, { text = text })
+	require("@app/screens/chat/shared").add_annotation(id, { text = text, source = source })
 	M.open(session, { kind = "side_chat", id = id, title = if newest then newest.title else locale.s("chat.lanes.new_side_chat") })
 end
 

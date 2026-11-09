@@ -504,7 +504,7 @@ local function folder(w: Workspace, v: View, props: Props, here: () -> Where?): 
 							end)
 							local chat = w.target.chat
 							if ok and lanes and chat then
-								lanes.ask_side(chat, text)
+								lanes.ask_side(chat, text, rel)
 							end
 						end,
 					})
