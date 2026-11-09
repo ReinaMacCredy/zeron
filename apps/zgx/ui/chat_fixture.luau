@@ -2211,6 +2211,20 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "kinds_q3_secret",
+	title = "A pending question turns out a secret",
+	run = function()
+		for n, m in store.messages:peek() do
+			for i, b in m.blocks or {} do
+				if b.id == "q3" then
+					store.messages:set_key({ n, "blocks", i }, { id = "q3", kind = "line", line = "secret", request = "req-2", title = "Deploy key", reason = "", status = "pending" })
+					return
+				end
+			end
+		end
+	end,
+}
+ui.command {
 	id = "kinds_answer_above",
 	title = "A reply's question is answered",
 	run = function()

@@ -6578,6 +6578,12 @@ fn is_secret(question: &Json) -> bool {
     question["kind"]["type"].as_str() == Some("secret")
 }
 
+/// The composer's own question, as gpui's: a secret's is its transcript card's alone.
+fn composer_ask<'a>(newest_first: impl Iterator<Item = &'a Json>, answered: impl Fn(&str) -> usize) -> Option<Value> {
+    let part = asked(newest_first).filter(|p| !p["questions"].as_array().is_some_and(|qs| qs.iter().any(is_secret)))?;
+    ask_value(part, answered(part["requestId"].as_str().unwrap_or_default()))
+}
+
 fn ask_value(part: &Json, answered: usize) -> Option<Value> {
     let request = part["requestId"].as_str()?;
     let questions = part["questions"].as_array()?;
@@ -6678,9 +6684,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool) -> Va
     };
     let fast = fast_in(&config["modelOptions"]);
     let options = options_value(&config["modelOptions"]);
-    let ask = asked(open.entries.iter().rev().filter_map(|e| e.json.as_ref()))
-        .and_then(|p| ask_value(p, chats.pages_answered(&open.id, p["requestId"].as_str().unwrap_or_default())))
-        .unwrap_or(Value::Nil);
+    let ask = composer_ask(open.entries.iter().rev().filter_map(|e| e.json.as_ref()), |request| chats.pages_answered(&open.id, request)).unwrap_or(Value::Nil);
     let session = chats.sessions.borrow().get(&open.id).cloned().unwrap_or(Json::Null);
     let live = chats.running(&open.id);
     let tasks = background_tasks(&session);
@@ -8171,6 +8175,10 @@ mod tests {
         let session = |part: Json| json!({ "id": "a", "role": "assistant", "status": "streaming", "parts": [part] });
         assert!(ask_value(&session(ask(safari, "Front?", false, None))["parts"][0], 0).is_none(), "the composer doesn't ask it again");
         assert!(ask_value(&session(ask(Json::Null, "Pick?", false, None))["parts"][0], 0).is_some());
+        let secret = session(ask(json!({ "type": "secret" }), "Key?", false, None));
+        assert!(composer_ask([&secret].into_iter(), |_| 0).is_none(), "a secret is its card's, not the composer's");
+        let pick = session(ask(Json::Null, "Pick?", false, None));
+        assert!(composer_ask([&pick].into_iter(), |_| 0).is_some());
 
         let entry = |words: &[&str]| json!({ "id": "s", "role": "system", "parts": words.iter().enumerate().map(|(i, w)| json!({ "kind": "text", "id": format!("t{i}"), "text": w })).collect::<Vec<_>>() });
         let note = |words: &[&str]| message(&entry(words), None).unwrap();

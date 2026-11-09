@@ -809,25 +809,30 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			local function now_b(): any
 				return brow:get()
 			end
-			if b.line == "input" then
-				return Rows.Question { key = key, now = now_b, find = find }
-			elseif b.line == "secret" then
-				return Rows.Secret { key = key, now = now_b, find = find, on_answer = if view then view.on_secret else nil }
-			elseif b.line == "computer_consent" or b.line == "computer_foreground" then
-				return Rows.ComputerApproval {
-					key = key,
-					now = now_b,
-					find = find,
-					on_answer = if view then view.on_computer else nil,
-					disclosure = if view then view.computer_disclosure else nil,
-					on_approved = if view then view.on_computer_approved else nil,
-				}
-			elseif b.line == "computer_notice" then
-				return Rows.ComputerNotice { key = key, now = now_b, find = find, on_enable = if view then view.on_computer_enable else nil }
-			elseif b.line == "error" then
-				return Rows.Error { key = key, now = now_b, find = find, on_sign_in = if view then view.on_sign_in else nil }
-			end
-			return line_row(nil, now_b, key, find)
+			-- (An ask's row can name its kind only once its questions come: a secret's first publish may be a plain question.)
+			return ui.presence(function(): string
+				return brow:get().line or ""
+			end, function(line: string): Node
+				if line == "input" then
+					return Rows.Question { key = key, now = now_b, find = find }
+				elseif line == "secret" then
+					return Rows.Secret { key = key, now = now_b, find = find, on_answer = if view then view.on_secret else nil }
+				elseif line == "computer_consent" or line == "computer_foreground" then
+					return Rows.ComputerApproval {
+						key = key,
+						now = now_b,
+						find = find,
+						on_answer = if view then view.on_computer else nil,
+						disclosure = if view then view.computer_disclosure else nil,
+						on_approved = if view then view.on_computer_approved else nil,
+					}
+				elseif line == "computer_notice" then
+					return Rows.ComputerNotice { key = key, now = now_b, find = find, on_enable = if view then view.on_computer_enable else nil }
+				elseif line == "error" then
+					return Rows.Error { key = key, now = now_b, find = find, on_sign_in = if view then view.on_sign_in else nil }
+				end
+				return line_row(nil, now_b, key, find)
+			end, { w_full = true, min_w = 0 })
 		end
 		if b.kind == "sent" then
 			return Threads.Sent {

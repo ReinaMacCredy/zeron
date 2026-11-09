@@ -637,7 +637,6 @@
       "position": "{i} of {n}"
     },
     "composer": {
-      "secret_elsewhere": "The Zeron app's own card takes this secret: it isn't typed here.",
       "access": {
         "label": "Access",
         "supervised": "Supervised",

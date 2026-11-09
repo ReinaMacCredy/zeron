@@ -506,7 +506,6 @@ return {
 	["ds.lightbox.open_named"] = "Open {name}",
 	["ds.lightbox.open"] = "Open image",
 	["ds.lightbox.position"] = "{i} of {n}",
-	["ds.composer.secret_elsewhere"] = "The Zeron app's own card takes this secret: it isn't typed here.",
 	["ds.composer.access.label"] = "Access",
 	["ds.composer.access.supervised"] = "Supervised",
 	["ds.composer.access.supervised_hint"] = "Ask before commands and file changes.",

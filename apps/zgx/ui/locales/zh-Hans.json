@@ -637,7 +637,6 @@
       "position": "第 {i} 张，共 {n} 张"
     },
     "composer": {
-      "secret_elsewhere": "此密钥由 Zeron 应用自己的卡片接收，不在这里输入。",
       "access": {
         "label": "访问权限",
         "supervised": "需批准",
