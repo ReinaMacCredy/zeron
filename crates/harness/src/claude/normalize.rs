@@ -486,6 +486,22 @@ fn is_synthetic_user_text(text: &str) -> bool {
 
 const SKILL_BASE_DIR: &str = "Base directory for this skill: ";
 
+fn send_message(b: &ContentBlock) -> Option<(&str, &str)> {
+    if b.name != "SendMessage" {
+        return None;
+    }
+    let to = ["to", "recipient"]
+        .iter()
+        .find_map(|k| b.input.get(*k))
+        .and_then(Value::as_str)?;
+    let text = ["message", "content"]
+        .iter()
+        .find_map(|k| b.input.get(*k))
+        .and_then(Value::as_str)
+        .filter(|m| !m.trim().is_empty())?;
+    Some((to, text))
+}
+
 /// The opening prompt an `Agent`/`Task` tool_use block hands its subagent;
 /// `None` for any other tool or an empty prompt.
 fn spawn_prompt(b: &ContentBlock) -> Option<&str> {
@@ -560,6 +576,9 @@ pub(crate) struct Normalizer {
     /// SendMessage call; its frames and completion then carry that id. It
     /// maps back to the original spawn so the resumed run settles its chip.
     spawn_aliases: std::collections::HashMap<String, String>,
+    agent_names: std::collections::HashMap<String, String>,
+    // Only a resumed task's `task_started` names the spawn these were sent to.
+    unaddressed_sends: std::collections::HashMap<String, String>,
     live_tasks: Vec<zeron_proto::BackgroundTask>,
     nested_agent_tasks: std::collections::HashSet<String>,
     /// Parent-feed `Skill` calls, tool_use id → input, until their task
@@ -631,6 +650,8 @@ impl Normalizer {
             last_model: None,
             agent_tasks: std::collections::HashMap::new(),
             spawn_aliases: std::collections::HashMap::new(),
+            agent_names: std::collections::HashMap::new(),
+            unaddressed_sends: std::collections::HashMap::new(),
             live_tasks: Vec::new(),
             nested_agent_tasks: std::collections::HashSet::new(),
             skill_calls: std::collections::HashMap::new(),
@@ -689,6 +710,12 @@ impl Normalizer {
                 .cloned()
                 .unwrap_or_else(|| tool_use_id.to_owned()),
         }
+    }
+
+    fn steer_target(&self, to: &str) -> Option<&String> {
+        self.agent_tasks
+            .get(to)
+            .or_else(|| self.agent_names.get(to))
     }
 
     fn note_skill_call(&mut self, parent: Option<&str>, b: &ContentBlock) {
@@ -1094,7 +1121,11 @@ impl Normalizer {
                     {
                         match self.agent_tasks.get(task) {
                             Some(spawn) if spawn != tool => {
-                                self.spawn_aliases.insert(tool.to_owned(), spawn.clone());
+                                let spawn = spawn.clone();
+                                if let Some(text) = self.unaddressed_sends.remove(tool) {
+                                    out.push(tag(&spawn, AgentEvent::UserMessage { text }));
+                                }
+                                self.spawn_aliases.insert(tool.to_owned(), spawn);
                             }
                             _ => {
                                 self.agent_tasks.insert(task.to_owned(), tool.to_owned());
@@ -1352,6 +1383,21 @@ impl Normalizer {
                             if let Some(prompt) = spawn_prompt(&b) {
                                 self.seeded_prompts.insert(b.id.clone(), prompt.to_owned());
                             }
+                            if let Some(name) = b
+                                .input
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .filter(|n| !n.is_empty())
+                            {
+                                self.agent_names.insert(name.to_owned(), b.id.clone());
+                            }
+                        }
+                        "SendMessage" => {
+                            if let Some((to, text)) = send_message(&b)
+                                && self.steer_target(to).is_none()
+                            {
+                                self.unaddressed_sends.insert(b.id.clone(), text.to_owned());
+                            }
                         }
                         "Skill" => {
                             self.skill_calls.insert(b.id.clone(), b.input.clone());
@@ -1398,26 +1444,14 @@ impl Normalizer {
                             // A SendMessage steer never echoes on the child feed
                             // (live-verified) — surface it from the parent's own
                             // call, re-keyed onto the spawn it addresses.
-                            let steer = (b.name == "SendMessage")
-                                .then(|| {
-                                    let to = ["to", "recipient"]
-                                        .iter()
-                                        .find_map(|k| b.input.get(*k))
-                                        .and_then(Value::as_str)?;
-                                    let spawn = self.agent_tasks.get(to)?;
-                                    let text = ["message", "content"]
-                                        .iter()
-                                        .find_map(|k| b.input.get(*k))
-                                        .and_then(Value::as_str)
-                                        .filter(|m| !m.trim().is_empty())?;
-                                    Some(tag(
-                                        spawn,
-                                        AgentEvent::UserMessage {
-                                            text: text.to_owned(),
-                                        },
-                                    ))
-                                })
-                                .flatten();
+                            let steer = send_message(&b).and_then(|(to, text)| {
+                                Some(tag(
+                                    self.steer_target(to)?,
+                                    AgentEvent::UserMessage {
+                                        text: text.to_owned(),
+                                    },
+                                ))
+                            });
                             std::iter::once(call).chain(opening).chain(steer)
                         }),
                 );
@@ -3064,6 +3098,61 @@ mod tests {
             r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_send","status":"completed"}"#,
         );
         assert_eq!(settled_on(&second), ["toolu_spawn"]);
+    }
+
+    #[test]
+    fn a_settled_agent_resumed_by_name_is_steered_once() {
+        let steers = |events: &[AgentEvent]| -> Vec<(String, String)> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    AgentEvent::Subagent {
+                        parent_tool_use_id,
+                        event,
+                    } => match event.as_ref() {
+                        AgentEvent::UserMessage { text } => {
+                            Some((parent_tool_use_id.clone(), text.clone()))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect()
+        };
+        let spawn_named = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_spawn","name":"Agent","input":{"name":"u13","run_in_background":true}}]}}"#;
+        let spawn_unnamed = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_spawn","name":"Agent","input":{"run_in_background":true}}]}}"#;
+        let resume = |spawn: &str, to: &str| -> Vec<AgentEvent> {
+            let mut norm = Normalizer::new();
+            let mut feed = |line: &str| {
+                let frame = crate::claude::wire::parse_frame(line).expect("parses");
+                norm.normalize(frame, false)
+            };
+            feed(spawn);
+            feed(
+                r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_spawn","subagent_type":"general-purpose"}"#,
+            );
+            feed(
+                r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_spawn","status":"completed"}"#,
+            );
+            let mut out = feed(&format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"toolu_send","name":"SendMessage","input":{{"to":"{to}","message":"fix the findings"}}}}]}}}}"#
+            ));
+            out.extend(feed(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_send","content":"sent"}]}}"#));
+            out.extend(feed(r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_send","subagent_type":"general-purpose"}"#));
+            out
+        };
+        let want = vec![("toolu_spawn".to_owned(), "fix the findings".to_owned())];
+        assert_eq!(steers(&resume(spawn_named, "a1")), want, "by agent id");
+        assert_eq!(
+            steers(&resume(spawn_named, "u13")),
+            want,
+            "by the spawn's name"
+        );
+        assert_eq!(
+            steers(&resume(spawn_unnamed, "u13")),
+            want,
+            "by a name the spawn never gave"
+        );
     }
 
     #[test]
