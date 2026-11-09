@@ -1586,7 +1586,7 @@ return function(props: Props): Node
 		mine.wash = w
 		mine.find = if find and q and q ~= "" then { q = string.lower(q), cur = k, n = 0 } else nil
 		local node = block(b, ink,mine)
-		local reveal = (find :: Find).reveal
+		local reveal = if find then find.reveal else nil
 		if k == 0 or not reveal then
 			return boxed(node)
 		end

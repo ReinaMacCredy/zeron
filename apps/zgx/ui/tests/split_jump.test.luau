@@ -173,3 +173,50 @@ test("Add to chat in a split's pane gives the comment the keys: Enter takes the 
 	expect(app:state("chat.composer.here")).to_be("a1")
 	expect(focused(app)).to_contain('textbox "Message" ="hello"')
 end)
+
+test("Add to chat on a reply's text in a split's pane washes the line and keeps the reply whole, its input in the pane", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 900)
+	app:frames(30)
+	local text = "## Streaming pipeline\n\nThe second line of the reply runs a while to wrap.\n\n- one item\n- two item\n\nA closing paragraph."
+	local function chat(id: string): any
+		return {
+			session = { id = id, cwd = "/work/atlas", model = "opus", state = "ready" },
+			messages = {
+				{ id = `{id}-0`, role = "user", text = "Go on." },
+				{ id = `{id}-m`, role = "assistant", text = text, copy = text, blocks = { { id = "b0", kind = "tools", tools = { { id = "t1", kind = "bash", verb = "Ran", target = "ls" } } }, { id = "b1", kind = "text", text = text } } },
+			},
+		}
+	end
+	app:set_state("fixture.chats", { a1 = chat("a1"), a2 = chat("a2") })
+	app:set_state("inset_split_trees", { { kind = "row", children = { leaf("a1"), leaf("a2") } } })
+	app:click('#shell-sidebar >> role:button "Fix the build"')
+	app:frames(60)
+	local scope = "#lane-split-a1 >> #transcript"
+	local function height(): number
+		for l in app:tree(scope):gmatch("[^\n]+") do
+			if l:find('article "Reply"', 1, true) then
+				return tonumber(l:match(" %-?%d+,%-?%d+ %d+x(%d+)")) :: number
+			end
+		end
+		return 0
+	end
+	local line
+	for l in app:tree(scope):gmatch("[^\n]+") do
+		if l:find("The second line of the reply", 1, true) then
+			local x, y = l:match(" (%-?%d+),(%-?%d+) %d+x%d+")
+			line = { x = tonumber(x) :: number + 10, y = tonumber(y) :: number, w = 60, h = 20 }
+		end
+	end
+	local before = height()
+	app:set_state("fake_selection", { text = "The second line", top = line, bottom = line })
+	app:hover(scope)
+	app:frames(10)
+	app:click(`{scope} >> ~"The second line of the reply"`)
+	app:frames(30)
+	app:click("#lane-split-a1 >> #annotation-add-to-chat")
+	app:frames(60)
+	expect(app:error()).to_be(nil)
+	expect(height()).to_be(before)
+	expect(app:tree("#lane-split-a1")).to_contain("#annotation-editor")
+end)
