@@ -11,9 +11,23 @@ ui.theme.tokens {
 			wash_hover = "alpha({accent}, 0.18)",
 			remove = "alpha(#000000, 0.67)",
 			remove_hover = "alpha(#000000, 0.8)",
+			working = "{zeron.tab.working}",
 		},
 	},
 }
+-- gpui's `column_tone` and kanban card: Needs you as a chat's Asking (shell.rs `chat_status_tone`), the card its `surface_card` (dark: the window and ink 0.015, darker than its column).
+ui.effect(function()
+	local kind = ui.theme.kind()
+	local light = kind == "light" or kind == "high-contrast-light"
+	ui.theme.tokens {
+		zeron = {
+			tasks = {
+				needs = if light then "#4f39f6" else "#a3b3ff",
+				card = if light then "{surface.raised}" else "over({zeron.window}, alpha({text.primary}, 0.015))",
+			},
+		},
+	}
+end)
 
 local M = {}
 
@@ -278,7 +292,7 @@ function M.state(t: Task): State
 end
 
 M.COLUMNS = { "todo", "working", "needs", "done" }
-M.TONES = { todo = "$text.tertiary", working = "$zeron.status.working", needs = "$warning", done = "$success" }
+M.TONES = { todo = "$text.tertiary", working = "$zeron.tasks.working", needs = "$zeron.tasks.needs", done = "$success" }
 
 -- A linked thread's word (zeron_doc `linked_label`).
 function M.linked_word(c: any): string

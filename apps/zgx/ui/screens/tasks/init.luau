@@ -456,10 +456,10 @@ local function BoardCard(l: Line): Node
 		direction = "column",
 		items = "stretch",
 		rounded = ui.raw(12, "gpui"),
-		bg = "$surface.raised",
+		bg = "$zeron.tasks.card",
 		border = 1,
-		border_color = "$border.subtle",
-		hover = { bg = "$surface.raised", border_color = "$border" },
+		border_color = "$border",
+		hover = { border_color = "$border.strong" },
 		on_click = function()
 			open_card(t.id)
 		end,
