@@ -109,6 +109,8 @@ export type Props = {
 	-- (the side chat's tab): the folded pill stops short of it.
 	width: (() -> number)?,
 	clear_right: (() -> number)?,
+	-- Whether the other pill stands on the folded pill's line at all (false: it stands higher, and this one stays put).
+	pairs: (() -> boolean)?,
 	-- Where the folded pill's width is kept (a composer made again lays it out where it stood).
 	pill_w: State<number>?,
 }
@@ -271,7 +273,7 @@ M.PILL_H, M.PILL_GAP = PILL_H, 6
 -- composer's own top: a header of tabs (one alone reads as a title), the
 -- open tab's rows, a rule, then the pill. Returns the top, the pill,
 -- whether it shows, and its left edge at rest (from the width's left).
-local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: number }, narrow: () -> boolean, props: Props): (Node, Node, () -> boolean, () -> number?)
+local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: number }, narrow: () -> boolean, props: Props): (Node, Node, () -> boolean, () -> number?, () -> boolean)
 	local aside, on_pill_width = props.aside, props.on_pill_width
 	local inset, tab_h, gap = geometry.inset, geometry.tab, geometry.tab_gap
 	local function present(): { Tab }
@@ -728,19 +730,36 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 	-- to end", `aside` its width), the two glide apart into a centred pair,
 	-- this one on the right (the other moves left by as much: `on_pill_width`
 	-- says how wide this one is while it shows). Short of room before
-	-- `clear_right`, it stops there, and says it is wider by twice what it
-	-- gave up, so the other still clears it.
-	local function placed(): (number, number)
+	-- `clear_right`, the pair moves left, never past the width's left edge;
+	-- with no room for the pair at all, the other stands higher (`crowded`)
+	-- and this one alone stops short of `clear_right`. Returns its offset
+	-- from the centre, the width the other moves aside for (nil: it stands
+	-- centred), and whether the pair is crowded.
+	local function placed(): (number, number?, boolean)
 		local other = if aside then aside() else nil
-		local want = if other and other > 0 then (other + PILL_PAIR_GAP) / 2 else 0
-		local clear = if props.clear_right then props.clear_right() else 0
 		local w = if props.width then props.width() else 0
 		local pw = pill_w:get()
-		if clear <= 0 or w <= 0 or pw <= 0 then
-			return want, 0
+		local clear = if props.clear_right then props.clear_right() else 0
+		local beside = props.pairs == nil or props.pairs()
+		if w <= 0 or pw <= 0 then
+			local want = if beside and other and other > 0 then (other + PILL_PAIR_GAP) / 2 else 0
+			return want, if beside then pw else nil, false
 		end
-		local most = math.max(w / 2 - pw / 2 - clear, -(w - pw) / 2)
-		return math.min(want, most), math.max(0, want - most)
+		local room = if clear > 0 then w - clear else w
+		local centred = (w - pw) / 2
+		local alone = math.max(math.min(0, room - pw - centred), -centred)
+		if not beside then
+			return alone, nil, false
+		end
+		if not other or other <= 0 then
+			return alone, pw, false
+		end
+		local total = other + PILL_PAIR_GAP + pw
+		if total > room then
+			return alone, nil, true
+		end
+		local left = math.max(0, math.min((w - total) / 2, room - total))
+		return left + other + PILL_PAIR_GAP - centred, w - other - 2 * left - PILL_PAIR_GAP, false
 	end
 	local floating = ui.div {
 		shrink = 0,
@@ -758,8 +777,8 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 		local report = on_pill_width
 		ui.effect(function()
 			local w = pill_w:get()
-			local _, gave = placed()
-			report(if any() and not is_open() and w > 0 then w + gave * 2 else nil)
+			local _, wide = placed()
+			report(if any() and not is_open() and w > 0 then wide else nil)
 		end)
 	end
 	return top, floating, function(): boolean
@@ -771,6 +790,9 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 			return nil
 		end
 		return (w - pw) / 2 + (placed())
+	end, function(): boolean
+		local _, _, crowded = placed()
+		return any() and not is_open() and crowded
 	end
 end
 
@@ -1416,8 +1438,9 @@ end
 
 -- The deck's two parts, for the composer: its top (inside the frame, over
 -- the pill), and the folded pill (floating over the conversation); and
--- whether that pill shows, and its left edge at rest.
-function M.parts(props: Props): (Node, Node, () -> boolean, () -> number?)
+-- whether that pill shows, its left edge at rest, and whether the other
+-- pill is too crowded beside it to stand on its line.
+function M.parts(props: Props): (Node, Node, () -> boolean, () -> number?, () -> boolean)
 	local tabs, open, geometry, narrow = build(props)
 	return deck(tabs, open, geometry, narrow, props)
 end

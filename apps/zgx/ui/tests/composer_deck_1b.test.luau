@@ -265,6 +265,7 @@ test("the folded pill and the pill row stand over the notice line, never on it",
 	expect(failed:has(card)).to_be(true)
 	expect(failed:has(PILL)).to_be(true)
 	expect(apart(failed, PILL, card)).to_be(true)
+	expect(apart(failed, "#composer-side-chat", card)).to_be(true)
 	expect(failed:error()).to_be(nil)
 end)
 
@@ -285,6 +286,79 @@ test("beside the side chat's tab the folded pill stops short of it, and Scroll t
 		expect(app:has(jump)).to_be(true)
 		expect(apart(app, PILL, "#composer-side-chat")).to_be(true)
 		expect(apart(app, PILL, jump)).to_be(true)
+		expect(app:error()).to_be(nil)
+	end
+end)
+
+-- A long chat, running, with a shell and two agents on the pill row, at a width.
+local function busy(w: number): any
+	local app = mount("chat_fixture.luau")
+	app:resize(w, 700)
+	app:command("go_s1")
+	app:frames(30)
+	app:command("long_reply")
+	app:frames(10)
+	app:command("start_reply")
+	app:command("task_running")
+	app:command("subagents_running")
+	app:frames(40)
+	return app
+end
+
+-- Whether a node's bottom stands at or over another's top.
+local function over(app: any, a: string, b: string): boolean
+	local _, ay, _, ah = box(app, a)
+	local _, by = box(app, b)
+	return ay + ah <= by
+end
+
+test("at a narrow composer the pills, the side chat's tab, the folded pill and Jump to latest never meet, and the conversation's end clears the pill row", function()
+	local AGENTS, SHELLS, TAB, JUMP = "#pills-agents", "#pills-shells-pill", "#composer-side-chat", 'role:button "Jump to latest"'
+	for _, w in { 400, 460, 480, 600 } do
+		local app = busy(w)
+		expect(apart(app, AGENTS, SHELLS)).to_be(true)
+		expect(apart(app, AGENTS, TAB)).to_be(true)
+		expect(apart(app, SHELLS, TAB)).to_be(true)
+		expect(over(app, "#working-clock", "#composer-pills")).to_be(true)
+		app:command("queue_one")
+		app:frames(60)
+		for _, pill in { AGENTS, SHELLS } do
+			expect(apart(app, pill, PILL)).to_be(true)
+			expect(apart(app, pill, TAB)).to_be(true)
+		end
+		expect(over(app, "#working-clock", "#composer-pills")).to_be(true)
+		app:scroll("#transcript", -900)
+		app:frames(60)
+		expect(app:has(JUMP)).to_be(true)
+		for _, other in { AGENTS, SHELLS, PILL, TAB } do
+			expect(apart(app, JUMP, other)).to_be(true)
+		end
+		local left = box(app, "#composer-pills")
+		expect(box(app, JUMP) >= left).to_be(true)
+		expect(app:error()).to_be(nil)
+	end
+end)
+
+test("Jump to latest beside a folded pill held short of the side chat's tab stays over the composer, or stands over the pill when the two don't fit", function()
+	for _, w in { 400, 450, 520 } do
+		local app = mount("chat_fixture.luau")
+		app:resize(w, 700)
+		app:command("go_s1")
+		app:frames(30)
+		app:command("long_reply")
+		app:frames(10)
+		app:command("start_reply")
+		app:frames(10)
+		patch(app, { queue = { { id = "q1", text = "Words" } }, todos = plan(0, 2) })
+		app:scroll("#transcript", -900)
+		app:frames(60)
+		local jump = 'role:button "Jump to latest"'
+		expect(app:has(jump)).to_be(true)
+		local left = box(app, "#composer-pills")
+		expect(box(app, jump) >= left).to_be(true)
+		expect(apart(app, jump, PILL)).to_be(true)
+		expect(apart(app, jump, "#composer-side-chat")).to_be(true)
+		expect(apart(app, PILL, "#composer-side-chat")).to_be(true)
 		expect(app:error()).to_be(nil)
 	end
 end)

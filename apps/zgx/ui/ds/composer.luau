@@ -1030,7 +1030,7 @@ end
 -- (its words, its tone, a spinner, an action): a notice that moves on
 -- ("Uploading 2 of 5", "3 of 5") never fades out and in again. Going, it
 -- keeps the last it said as it fades.
-local function notice_line(notice: State<Notice?>, on_action: (() -> ())?, on_dismiss: (() -> ())?): Node
+local function notice_line(notice: State<Notice?>, on_action: (() -> ())?, on_dismiss: (() -> ())?, tab_under: (() -> boolean)?): Node
 	return ui.presence(function(): string?
 		return if notice:get() then "notice" else nil
 	end, function(): Node
@@ -1056,6 +1056,7 @@ local function notice_line(notice: State<Notice?>, on_action: (() -> ())?, on_di
 			role = "alert",
 			mx = ui.raw(4, "gpui's failure chip"),
 			mt = ui.raw(6, "gpui's failure chip"),
+			-- (Over the side chat's tab, whose top stands 24 over the composer's.)
 			mb = ui.raw(6, "gpui's failure chip"),
 			px = ui.raw(12, "gpui's failure chip"),
 			py = ui.raw(8, "gpui's failure chip"),
@@ -1067,6 +1068,22 @@ local function notice_line(notice: State<Notice?>, on_action: (() -> ())?, on_di
 			border_color = ink :: any,
 			cursor = "pointer",
 			on_click = on_dismiss,
+			-- (On the composer's own glass, as gpui's chip sits in its composer: the conversation never reads through.)
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				rounded = ui.raw(12, "gpui's failure chip"),
+				pointer_events = "none",
+				bg = function(): string
+					return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
+				end,
+				backdrop_blur = function(): number
+					return if material.see_through() then 16 else 0
+				end,
+			},
 			ui.div {
 				absolute = true,
 				left = 0,
@@ -1112,7 +1129,11 @@ local function notice_line(notice: State<Notice?>, on_action: (() -> ())?, on_di
 				color = ink :: any,
 			},
 		}
-		return ui.show(failure, card, ui.row {
+		-- (Clear of the side chat's tab, whose top stands 24 over the composer's.)
+		local clear = ui.show(function(): boolean
+			return tab_under ~= nil and tab_under()
+		end, ui.div { w_full = true, h = 18, shrink = 0 })
+		return ui.show(failure, ui.column { w_full = true, card, clear }, ui.row {
 			h = 24,
 			pl = "$zeron.composer.chip.inset",
 			pr = "$space.2",
@@ -2763,6 +2784,9 @@ return ui.component(function(props: Props): Node
 	local deck_left: () -> number? = function()
 		return nil
 	end
+	local deck_crowded: () -> boolean = function()
+		return false
+	end
 	local side_tab_w = kept("side_tab_w", 0)
 	-- The side chat's tab, its inset and a gap: the room the folded pill keeps clear of at the right.
 	local function tab_room(): number
@@ -2770,8 +2794,22 @@ return ui.component(function(props: Props): Node
 		local w = side_tab_w:get()
 		return if tab and tab.shown() and w > 0 then 16 + w + deck.PILL_PAIR_GAP else 0
 	end
+	-- The same for the pill row, before the tab has said its width.
+	local function row_tab_room(): number
+		local tab = props.side_tab
+		if not tab or not tab.shown() then
+			return 0
+		end
+		local room = tab_room()
+		return if room > 0 then room else 112
+	end
+	-- How far the pill row's pills reach: 0 with none (the empty slots' gaps alone reach less than a pill, which is as wide as it is tall).
+	local function pills_reach(): number
+		local reach = if props.pills_reach then props.pills_reach() else 0
+		return if reach >= 28 then reach else 0
+	end
 	if props.queue or props.todos then
-		trays, tray_pill, deck_folded, deck_left = deck.parts {
+		trays, tray_pill, deck_folded, deck_left, deck_crowded = deck.parts {
 			queue = props.queue,
 			can_steer = props.can_steer,
 			on_queue_send = props.on_queue_send,
@@ -2798,26 +2836,44 @@ return ui.component(function(props: Props): Node
 				return pill_w:get()
 			end,
 			clear_right = tab_room,
+			-- ("Scroll to end" stands beside the folded pill only with no pill row: with one, it stands over the row.)
+			pairs = function(): boolean
+				return pills_reach() <= 0
+			end,
 			pill_w = kept("deck_pill_w", 0),
 		}
 	end
-	-- The pill row rises over the folded pill only where its pills would meet it (the caller's transcript keeps the room, `on_lift`).
+	-- The pill row rises over the folded pill where its pills would meet it,
+	-- and over the side chat's tab where they would run under it. The
+	-- caller's transcript keeps the room (`on_lift`): the row's own while it
+	-- has pills, the rise, and the folded pill's line again when "Scroll to
+	-- end" has no room beside it (it stands over the pill, then).
 	local LIFT = deck.PILL_H + deck.PILL_GAP
+	local ROW_ROOM = 34
 	local lift = ui.computed(function(): number
+		if not props.pills_reach then
+			return if deck_folded() then LIFT else 0
+		end
+		local reach = pills_reach()
+		if reach <= 0 then
+			return 0
+		end
+		local room = row_tab_room()
+		local w = pill_w:get()
+		if room > 0 and w > 0 and reach >= w - room - 0.5 then
+			return LIFT
+		end
 		if not deck_folded() then
 			return 0
 		end
-		if not props.pills_reach then
-			return LIFT
-		end
 		local left = deck_left()
-		local reach = props.pills_reach()
-		return if left and reach > 0 and reach + deck.PILL_PAIR_GAP > left then LIFT else 0
+		return if left and reach + deck.PILL_PAIR_GAP > left then LIFT else 0
 	end)
 	if props.on_lift then
 		local report = props.on_lift
 		ui.effect(function()
-			report(lift:get())
+			local own = if pills_reach() > 0 then ROW_ROOM else 0
+			report(lift:get() + own + (if deck_crowded() then LIFT else 0))
 		end)
 	end
 
@@ -2903,9 +2959,10 @@ return ui.component(function(props: Props): Node
 			y = ui.tween(ui.computed(function(): number
 				return -34 - lift:get()
 			end), { duration = 180, ease = "out(3)" }),
+			-- (Raised, it stands over the tab: the composer's whole width.)
 			pr = if props.side_tab
 				then function(): any
-					return if (props.side_tab :: any).shown() then ui.raw(112, "clear of the side chat's tab") else 0
+					return if lift:get() > 0 then 0 else ui.raw(row_tab_room(), "clear of the side chat's tab")
 				end :: any
 				else nil,
 			props.pills,
@@ -3027,7 +3084,11 @@ return ui.component(function(props: Props): Node
 		gap = 0,
 		relative = true,
 		if props.pills then ui.div { w_full = true, h = 0, shrink = 0, opacity = dimmed, pill_row() } else nil,
-		if props.notice then notice_line(props.notice, props.on_notice_action, props.on_dismiss_notice) else nil,
+		if props.notice
+			then notice_line(props.notice, props.on_notice_action, props.on_dismiss_notice, function(): boolean
+				return props.side_tab ~= nil and props.side_tab.shown()
+			end)
+			else nil,
 		if props.compaction then Compaction.Chip { label = props.compaction.label } else nil,
 		if props.compaction
 			then Compaction.Resume {
