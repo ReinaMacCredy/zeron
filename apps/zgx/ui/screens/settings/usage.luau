@@ -349,7 +349,9 @@ local function spend(): Node
 									return scale:get().ticks
 								end), function(v: number): Node
 									return ui.text {
-										M.tick_label(v, metric:peek() == "cost"),
+										function(): string
+											return M.tick_label(v, metric:get() == "cost")
+										end,
 										absolute = true,
 										right = ui.raw(8, "gpui"),
 										top = function(): number
