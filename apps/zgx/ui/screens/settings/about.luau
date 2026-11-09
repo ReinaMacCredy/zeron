@@ -85,7 +85,8 @@ M.now = ui.shared("about", { app_version = "", available = false } :: About)
 
 -- What this window is doing about an update ("" nothing): "checking",
 -- "updating", "updated" (the engine starting again on `M.version`), or how
--- the last try ended: "current", "unmanaged", "offline", "failed".
+-- the last try ended: "current", "unmanaged", "offline", "check_failed",
+-- "failed".
 M.doing = ui.state("about_doing", "")
 -- The version an update went to.
 local updated_to = ui.state("about_updated_to", "")
@@ -136,7 +137,7 @@ function M.check()
 	host.call("about.check"):after(function()
 		M.doing:set("")
 	end, function(err: any)
-		M.doing:set(if err.message == "offline" then "offline" else "failed")
+		M.doing:set(if err.message == "offline" then "offline" else "check_failed")
 	end)
 end
 
@@ -196,6 +197,8 @@ function M.describe(a: About, doing: string): Update
 			return { title = s("held", { version = a.latest }), line = a.held, action = s("check_again") }
 		elseif doing == "offline" then
 			return { title = s("couldnt_check"), line = s("offline_line"), action = retry }
+		elseif doing == "check_failed" then
+			return { title = s("couldnt_check"), line = s("unreachable_line"), action = retry }
 		elseif doing == "failed" then
 			return { title = s("couldnt_update"), line = s("failed_line"), action = retry }
 		elseif a.available and a.latest then
@@ -228,6 +231,8 @@ function M.describe(a: About, doing: string): Update
 		}
 	elseif doing == "offline" then
 		return { title = s("couldnt_check"), line = s("offline_line"), action = retry }
+	elseif doing == "check_failed" then
+		return { title = s("couldnt_check"), line = s("unreachable_line"), action = retry }
 	elseif doing == "failed" then
 		return { title = s("couldnt_update"), line = s("failed_line"), action = retry }
 	end

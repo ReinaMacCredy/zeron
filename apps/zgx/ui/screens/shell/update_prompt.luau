@@ -11,7 +11,7 @@ function M.open()
 	M.shown:set(true)
 	local ok = pcall(about.check)
 	if not ok then
-		about.doing:set("failed")
+		about.doing:set("check_failed")
 	end
 end
 
