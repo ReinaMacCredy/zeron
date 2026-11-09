@@ -583,6 +583,9 @@ local answers: { [string]: (arg: any) -> any } = {
 		return settled("#3366cc")
 	end,
 	["wallpaper.blurred"] = function(arg: any)
+		if string.find(arg.path, "/elsewhere/", 1, true) then
+			return settled(nil, "invalid")
+		end
 		return settled(arg.path)
 	end,
 }

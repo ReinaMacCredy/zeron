@@ -124,14 +124,16 @@ local function blurred(path: string, radius: number): string?
 	end
 	if not asked[key] then
 		asked[key] = true
+		local function bake(file: string)
+			local next = table.clone(baked:peek())
+			next[key] = file
+			baked:set(next)
+		end
+		-- (Refused, as a picture outside the kept folder is: the picture unblurred, not no art at all.)
 		host.call("wallpaper.blurred", { path = path, radius = radius }):after(function(file: any)
-			if type(file) == "string" then
-				local next = table.clone(baked:peek())
-				next[key] = file
-				baked:set(next)
-			end
+			bake(if type(file) == "string" then file else path)
 		end, function()
-			asked[key] = nil
+			bake(path)
 		end)
 	end
 	return nil

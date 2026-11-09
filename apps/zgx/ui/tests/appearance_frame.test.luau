@@ -189,6 +189,21 @@ test("A chat shows the art only with Chat background on, by its placement", func
 	expect(app:error()).to_be(nil)
 end)
 
+test("A chat's art whose blur the host refuses (a picture outside the kept folder) shows unblurred, never none", function()
+	local app = shell()
+	local image = table.clone(IMAGE)
+	image.path = "/elsewhere/w1.png"
+	app:set_state("shell_wallpaper_image", image)
+	app:set_state("shell_wallpaper", "image")
+	app:set_state("shell_chat_background", true)
+	app:frames(20)
+	app:click('#shell-sidebar >> role:button "Fix the build"')
+	app:frames(30)
+	expect(app:has("#page-chat-art")).to_be(true)
+	expect((app:state("shell_art_baked") :: any)["/elsewhere/w1.png|24"]).to_be("/elsewhere/w1.png")
+	expect(app:error()).to_be(nil)
+end)
+
 test("Appearance: the frame's rows come and go as Zeron's", function()
 	local app = appearance()
 	expect(app:has(`{PAGE} >> "Window frame"`)).to_be(true)
