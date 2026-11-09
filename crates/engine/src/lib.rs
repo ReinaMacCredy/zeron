@@ -1335,7 +1335,7 @@ impl Engine {
         // dir (update-channel.json), so this report follows the app's choice.
         zeron_update::channel::set_data_dir(&config.data_dir);
         let updater =
-            zeron_update::Updater::spawn(zeron_update::RELEASES_FEED.to_owned(), Some(quiescent));
+            zeron_update::Updater::spawn(Some(quiescent));
         if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
             let updater_for_tokens = updater.clone();
             let wake = tokio::spawn(async move {

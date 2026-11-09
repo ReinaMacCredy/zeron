@@ -9,7 +9,7 @@
 #     Contents/MacOS/zeron           the zgx interface and `zeron`'s command line
 #     Contents/MacOS/Zeron Engine    the engine (the root workspace's)
 #     Contents/Resources/ui, plugins-builtin, cua-driver, zeron.icns, licenses
-#   target/package-zgx/zeron-<version>-macos-<arch>-app.tar.gz   (the updater's)
+#   target/package-zgx/zeron-zgx-<version>-macos-<arch>-app.tar.gz   (the updater's)
 #
 # Usage: scripts/package-zgx-cutover.sh   (from apps/zgx or anywhere; macOS only)
 #   ZGX_CUTOVER_ENGINE   a `zeron-engine` built already (else built here, release)
@@ -36,7 +36,7 @@ VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 ARCH="$(uname -m)"
 OUT_DIR="$ROOT/target/package-zgx"
 APP="$OUT_DIR/$APP_NAME.app"
-APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
+APP_TARBALL="$OUT_DIR/zeron-zgx-$VERSION-macos-$ARCH-app.tar.gz"
 ENTITLEMENTS="$ROOT/dist/macos/Zeron.entitlements"
 read -r -a CARGO_EXTRA <<<"${CARGO_FLAGS:-}"
 mkdir -p "$OUT_DIR"
@@ -82,6 +82,8 @@ plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$PLIST"
 plutil -replace CFBundleName -string "$APP_NAME" "$PLIST"
 plutil -replace CFBundleDisplayName -string "$APP_NAME" "$PLIST"
 plutil -replace LSMinimumSystemVersion -string "13.0" "$PLIST"
+# The updater installs only a release whose bundle carries this same mark (crates/update `bundle_interface`).
+plutil -replace ZeronInterface -string zgx "$PLIST"
 plutil -convert xml1 "$PLIST"
 plutil -lint "$PLIST" >/dev/null
 /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$PLIST" | grep -qx zeron || die "the bundle lost zeron://"

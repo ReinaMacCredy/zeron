@@ -127,6 +127,8 @@ pub struct Manifest {
     /// The channel this manifest was fetched from: where its files are.
     #[serde(skip)]
     pub channel: Channel,
+    #[serde(skip)]
+    source: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -177,9 +179,36 @@ pub fn headless_artifact(version: &str) -> String {
 }
 
 /// `zeron-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
-pub fn mac_app_artifact(version: &str) -> String {
+pub fn mac_app_artifact(version: &str, interface: Interface) -> String {
     let (_, arch) = platform_key();
-    format!("zeron-{version}-macos-{arch}-app.tar.gz")
+    match interface {
+        Interface::Gpui => format!("zeron-{version}-macos-{arch}-app.tar.gz"),
+        Interface::Zgx => format!("zeron-zgx-{version}-macos-{arch}-app.tar.gz"),
+    }
+}
+
+// Both binaries answer `zeron <version>`: only the bundle's Info.plist tells them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interface {
+    Gpui,
+    Zgx,
+}
+
+pub fn bundle_interface(bundle: &Path) -> Interface {
+    let plist = std::fs::read_to_string(bundle.join("Contents/Info.plist")).unwrap_or_default();
+    match plist_string(&plist, "ZeronInterface").as_deref() {
+        Some("zgx") => Interface::Zgx,
+        _ => Interface::Gpui,
+    }
+}
+
+fn ensure_same_interface(staged: &Path, installed: &Path) -> anyhow::Result<()> {
+    let (staged, installed) = (bundle_interface(staged), bundle_interface(installed));
+    anyhow::ensure!(
+        staged == installed,
+        "this release's app is the {staged:?} interface, not this Zeron's {installed:?}, so it wasn't installed"
+    );
+    Ok(())
 }
 
 /// A release version: dotted numbers and, for a prerelease, its semver
@@ -335,16 +364,29 @@ pub fn offer(
 }
 
 /// Fetch the newest release metadata from `manifest.json`.
-pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
+pub async fn fetch_latest() -> anyhow::Result<Manifest> {
     // The fork publishes no beta feed, whatever update-channel.json says.
-    fetch_latest_on(edge_url, Channel::Stable).await
+    fetch_latest_on(Channel::Stable).await
 }
 
 /// [`fetch_latest`] from `channel`'s feed.
-pub async fn fetch_latest_on(edge_url: &str, channel: Channel) -> anyhow::Result<Manifest> {
-    let mut manifest = fetch_latest_from(&channel.base(&release_base(edge_url)?)).await?;
+pub async fn fetch_latest_on(channel: Channel) -> anyhow::Result<Manifest> {
+    fetch_feed(RELEASES_FEED, channel).await
+}
+
+async fn fetch_feed(feed: &str, channel: Channel) -> anyhow::Result<Manifest> {
+    let base = channel.base(&release_base(feed)?);
+    let mut manifest = fetch_latest_from(&base).await?;
     manifest.channel = channel;
+    manifest.source = base;
     Ok(manifest)
+}
+
+fn files_base(manifest: &Manifest) -> anyhow::Result<String> {
+    if !manifest.source.is_empty() {
+        return Ok(manifest.source.clone());
+    }
+    Ok(manifest.channel.base(&release_base(RELEASES_FEED)?))
 }
 
 async fn fetch_latest_from(base: &str) -> anyhow::Result<Manifest> {
@@ -612,21 +654,14 @@ impl InstallKind {
         }
     }
 
-    pub async fn stage_desktop(
-        &self,
-        edge_url: &str,
-        manifest: &Manifest,
-        data_dir: &Path,
-    ) -> anyhow::Result<PathBuf> {
+    pub async fn stage_desktop(&self, manifest: &Manifest, data_dir: &Path) -> anyhow::Result<PathBuf> {
         match self {
-            Self::MacApp { .. } => stage_mac_app(edge_url, manifest, data_dir).await,
+            Self::MacApp { bundle } => stage_mac_app(manifest, data_dir, bundle).await,
             Self::Managed { app_root } if self.supports_desktop_update() => {
-                stage_headless(edge_url, manifest, app_root).await
+                stage_headless(manifest, app_root).await
             }
             #[cfg(windows)]
-            Self::WindowsPortable { directory } => {
-                windows::stage(edge_url, manifest, directory).await
-            }
+            Self::WindowsPortable { directory } => windows::stage(manifest, directory).await,
             _ => bail!("this installation does not support desktop updates"),
         }
     }
@@ -998,15 +1033,10 @@ pub fn expected_sha256<'a>(manifest: &'a Manifest, file: &str) -> anyhow::Result
 /// Stream `{RELEASES_FEED}/<file>` to `dest`, verifying the manifest sha256.
 /// Writes through a `.partial` sidecar so an interrupted download never leaves
 /// a plausible-looking artifact behind.
-pub async fn download_release_file(
-    edge_url: &str,
-    manifest: &Manifest,
-    file: &str,
-    dest: &Path,
-) -> anyhow::Result<()> {
+pub async fn download_release_file(manifest: &Manifest, file: &str, dest: &Path) -> anyhow::Result<()> {
     let expected = expected_sha256(manifest, file)?;
     // From the feed the manifest came from: a beta's files are beta's.
-    let url = format!("{}/{file}", manifest.channel.base(&release_base(edge_url)?));
+    let url = format!("{}/{file}", files_base(manifest)?);
     let partial = dest.with_extension("partial");
     let resp = http_client()?
         .get(&url)
@@ -1089,13 +1119,20 @@ async fn verify_staged_binary(binary: &Path, version: &str) -> anyhow::Result<()
 // Managed (symlink) installs — the daemon/VPS path and Linux desktop
 // ---------------------------------------------------------------------------
 
+const VERIFIED_MARK: &str = ".zeron-verified";
+
+fn verified_mark(file: &str, sha256: &str) -> String {
+    format!("{file} {}\n", sha256.to_ascii_lowercase())
+}
+
+fn stage_verified(dir: &Path, binary: &str, mark: &str) -> bool {
+    dir.join(binary).exists()
+        && std::fs::read_to_string(dir.join(VERIFIED_MARK)).is_ok_and(|found| found == mark)
+}
+
 /// Download + unpack the headless tarball into `app_root/<ver>` (idempotent —
 /// an already-staged version is reused). Returns the versioned dir.
-pub async fn stage_headless(
-    edge_url: &str,
-    manifest: &Manifest,
-    app_root: &Path,
-) -> anyhow::Result<PathBuf> {
+pub async fn stage_headless(manifest: &Manifest, app_root: &Path) -> anyhow::Result<PathBuf> {
     // Reject unsupported targets before creating a stage or making a request.
     require_managed_update_platform()?;
     let version = &manifest.version;
@@ -1104,16 +1141,17 @@ pub async fn stage_headless(
         "invalid release version {version:?}"
     );
     let dest = app_root.join(version);
-    if dest.join("zeron").exists() {
+    let file = headless_artifact(version);
+    let verified = verified_mark(&file, expected_sha256(manifest, &file)?);
+    if stage_verified(&dest, "zeron", &verified) {
         return Ok(dest);
     }
-    let file = headless_artifact(version);
     let stage = app_root.join(format!(".stage-{version}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&stage);
     std::fs::create_dir_all(&stage).with_context(|| format!("creating {}", stage.display()))?;
     let result = async {
         let tarball = stage.join(&file);
-        download_release_file(edge_url, manifest, &file, &tarball).await?;
+        download_release_file(manifest, &file, &tarball).await?;
         let unpacked = stage.join("unpacked");
         std::fs::create_dir_all(&unpacked)?;
         // Tarball root is the versioned stage dir (see scripts/package-linux.sh);
@@ -1132,10 +1170,20 @@ pub async fn stage_headless(
             bail!("tarball {file} did not contain a zeron binary");
         }
         verify_staged_binary(&unpacked.join("zeron"), version).await?;
+        std::fs::write(unpacked.join(VERIFIED_MARK), &verified)?;
+        if dest.exists() && !stage_verified(&dest, "zeron", &verified) {
+            // Not this release's bytes (another feed's install, or a hand-made one).
+            let replaced = app_root.join(format!(".{version}.replaced-{}", std::process::id()));
+            std::fs::rename(&dest, &replaced)
+                .with_context(|| format!("moving {} aside", dest.display()))?;
+            if !process_runs_from(&replaced) {
+                let _ = std::fs::remove_dir_all(&replaced);
+            }
+        }
         match std::fs::rename(&unpacked, &dest) {
             Ok(()) => {}
-            // Lost a race with another stager — the staged copy is equivalent.
-            Err(_) if dest.join("zeron").exists() => {}
+            // Lost a race with another stager of these very bytes.
+            Err(_) if stage_verified(&dest, "zeron", &verified) => {}
             Err(err) => {
                 return Err(err).with_context(|| format!("moving {} into place", dest.display()));
             }
@@ -1285,11 +1333,7 @@ fn restart_outcome(code: Option<i32>, stderr: &[u8]) -> anyhow::Result<()> {
 /// (idempotent). The bundle is unpacked beside its final name and renamed in
 /// only after its binary answers with the expected version, so an interrupted
 /// unpack can never be mistaken for a staged update. Returns the staged bundle.
-pub async fn stage_mac_app(
-    edge_url: &str,
-    manifest: &Manifest,
-    data_dir: &Path,
-) -> anyhow::Result<PathBuf> {
+pub async fn stage_mac_app(manifest: &Manifest, data_dir: &Path, installed: &Path) -> anyhow::Result<PathBuf> {
     // Reject unsupported targets before creating a stage or making a request.
     require_mac_app_update_platform()?;
     let version = &manifest.version;
@@ -1297,19 +1341,23 @@ pub async fn stage_mac_app(
         parse_version(version).is_some(),
         "invalid release version {version:?}"
     );
+    let file = mac_app_artifact(version, bundle_interface(installed));
+    let verified = verified_mark(&file, expected_sha256(manifest, &file)?);
     let updates = data_dir.join("updates");
     let dir = updates.join(version);
     let staged = dir.join("Zeron.app");
     let staged_binary = staged.join("Contents/MacOS/zeron");
-    if staged_binary.exists() && verify_staged_binary(&staged_binary, version).await.is_ok() {
+    if stage_verified(&dir, "Zeron.app/Contents/MacOS/zeron", &verified)
+        && ensure_same_interface(&staged, installed).is_ok()
+        && verify_staged_binary(&staged_binary, version).await.is_ok()
+    {
         return Ok(staged);
     }
     prune_stale_stages(&updates, version);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let file = mac_app_artifact(version);
     let tarball = dir.join(&file);
-    download_release_file(edge_url, manifest, &file, &tarball).await?;
+    download_release_file(manifest, &file, &tarball).await?;
     let unpack = dir.join(".unpack");
     std::fs::create_dir_all(&unpack)?;
     let unpacked = run(
@@ -1329,13 +1377,18 @@ pub async fn stage_mac_app(
         let _ = std::fs::remove_dir_all(&dir);
         bail!("app tarball {file} did not contain Zeron.app");
     }
-    if let Err(err) = verify_staged_binary(&unpacked_binary, version).await {
+    let checked = match verify_staged_binary(&unpacked_binary, version).await {
+        Ok(()) => ensure_same_interface(&unpacked, installed),
+        Err(err) => Err(err),
+    };
+    if let Err(err) = checked {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(err);
     }
     std::fs::rename(&unpacked, &staged)
         .with_context(|| format!("moving {} into place", staged.display()))?;
     let _ = std::fs::remove_dir_all(&unpack);
+    std::fs::write(dir.join(VERIFIED_MARK), &verified)?;
     Ok(staged)
 }
 
@@ -1444,6 +1497,7 @@ pub(crate) fn swap_mac_bundles(incoming: &Path, bundle: &Path) -> anyhow::Result
 /// old bundle is restored if the second rename fails.
 pub fn apply_mac_app(staged: &Path, bundle: &Path) -> anyhow::Result<()> {
     require_mac_app_update_platform()?;
+    ensure_same_interface(staged, bundle)?;
     let parent = bundle
         .parent()
         .context("app bundle has no parent directory")?;
@@ -1633,7 +1687,7 @@ enum Role {
 /// the apply defers and re-probes every [`IDLE_RECHECK`].
 #[derive(Clone)]
 pub struct Updater {
-    edge_url: String,
+    feed: Arc<str>,
     role: Arc<Role>,
     /// The version releases are compared with: the engine's own, or the app's
     /// ([`app_version`]).
@@ -1654,17 +1708,17 @@ pub struct Updater {
 
 impl Updater {
     /// Spawn the engine's check loop (must run on a tokio runtime).
-    pub fn spawn(edge_url: String, quiescent: Option<QuiescentCheck>) -> Self {
-        Self::spawn_role(edge_url, Role::Engine { quiescent })
+    pub fn spawn(quiescent: Option<QuiescentCheck>) -> Self {
+        Self::spawn_role(RELEASES_FEED, Role::Engine { quiescent })
     }
 
     /// Spawn the desktop app's report-only check loop (must run on a tokio
     /// runtime).
-    pub fn spawn_desktop(edge_url: String) -> Self {
-        Self::spawn_role(edge_url, Role::Desktop)
+    pub fn spawn_desktop() -> Self {
+        Self::spawn_role(RELEASES_FEED, Role::Desktop)
     }
 
-    fn spawn_role(edge_url: String, role: Role) -> Self {
+    fn spawn_role(feed: &str, role: Role) -> Self {
         let initial_delay = match role {
             Role::Engine { .. } => ENGINE_INITIAL_DELAY,
             Role::Desktop => DESKTOP_INITIAL_DELAY,
@@ -1686,7 +1740,7 @@ impl Updater {
         let (wake_tx, _) = watch::channel(0);
         let (shutdown_tx, _) = watch::channel(false);
         let updater = Self {
-            edge_url,
+            feed: feed.into(),
             role: Arc::new(role),
             version,
             status_tx: Arc::new(status_tx),
@@ -1755,7 +1809,7 @@ impl Updater {
     /// One user-requested check, awaited: publishes the result like a
     /// scheduled check and returns it.
     pub async fn check(&self) -> anyhow::Result<UpdateStatus> {
-        match fetch_latest(&self.edge_url).await {
+        match fetch_feed(&self.feed, Channel::Stable).await {
             Ok(manifest) => {
                 self.publish(manifest);
                 Ok(self.status_tx.borrow().clone())
@@ -1825,9 +1879,17 @@ impl Updater {
     /// idle→restart gap to well under a second.
     async fn auto_apply_when_idle(&self) {
         if let InstallKind::Managed { app_root } = detect_install() {
-            match fetch_latest(&self.edge_url).await {
-                Ok(manifest) if version_newer(&manifest.version, current_version()) => {
-                    if let Err(err) = stage_headless(&self.edge_url, &manifest, &app_root).await {
+            let installed = installed_version(&InstallKind::Managed {
+                app_root: app_root.clone(),
+            });
+            match fetch_feed(&self.feed, Channel::Stable).await {
+                Ok(manifest)
+                    if version_newer(
+                        &manifest.version,
+                        installed.as_deref().unwrap_or(current_version()),
+                    ) =>
+                {
+                    if let Err(err) = stage_headless(&manifest, &app_root).await {
                         tracing::warn!(error = %err, "auto-update staging failed");
                         return;
                     }
@@ -1935,7 +1997,7 @@ impl Updater {
         if let InstallKind::MacApp { bundle } = detect_install() {
             prune_retired_mac_bundles(&bundle);
         }
-        match fetch_latest(&self.edge_url).await {
+        match fetch_feed(&self.feed, Channel::Stable).await {
             Ok(manifest) => {
                 self.publish(manifest);
                 true
@@ -1997,9 +2059,8 @@ impl Updater {
         if transaction::read(&data_dir).is_some_and(|last| last.in_progress()) {
             bail!("An update is already in progress on this device.");
         }
-        let manifest = fetch_latest(&self.edge_url).await?;
-        let Some(prepared) =
-            prepare_this_install(&self.edge_url, &manifest, &data_dir).await?
+        let manifest = fetch_feed(&self.feed, Channel::Stable).await?;
+        let Some(prepared) = prepare_this_install(&manifest, &data_dir).await?
         else {
             bail!("already up to date ({})", current_version());
         };
@@ -2067,21 +2128,17 @@ struct PreparedInstall {
 /// Whatever this kind of install needs done before anything stops. `None`: nothing
 /// newer to install. A release that isn't installable here is an error, in words
 /// for the person.
-async fn prepare_this_install(
-    edge_url: &str,
-    manifest: &Manifest,
-    data_dir: &Path,
-) -> anyhow::Result<Option<PreparedInstall>> {
+async fn prepare_this_install(manifest: &Manifest, data_dir: &Path) -> anyhow::Result<Option<PreparedInstall>> {
     match detect_install() {
         InstallKind::Managed { app_root } => {
-            if !version_newer(&manifest.version, current_version()) {
-                return Ok(None);
-            }
-            prepare_install(edge_url, manifest, &app_root, data_dir).await?;
             let from = installed_version(&InstallKind::Managed {
                 app_root: app_root.clone(),
             })
             .unwrap_or_else(|| current_version().to_owned());
+            if !version_newer(&manifest.version, &from) {
+                return Ok(None);
+            }
+            prepare_install(manifest, &app_root, data_dir).await?;
             Ok(Some(PreparedInstall {
                 layout: (from != manifest.version)
                     .then_some(transaction::Layout::Versioned { app_root }),
@@ -2103,14 +2160,15 @@ async fn prepare_this_install(
                 Offer::Current => return Ok(None),
             }
             let parent = bundle.parent().context("app bundle has no parent directory")?;
-            let download = artifact_size(edge_url, manifest, &mac_app_artifact(&manifest.version))
+            let download = artifact_size(manifest, &mac_app_artifact(&manifest.version, bundle_interface(&bundle)))
                 .await
                 .unwrap_or(transaction::UNKNOWN_ARTIFACT_BYTES);
             // A staged copy and the one beside the installed app.
             if let Err(why) = transaction::ensure_room(data_dir, parent, download.saturating_mul(2)) {
                 bail!(why);
             }
-            let staged = stage_mac_app(edge_url, manifest, data_dir).await?;
+            let staged = stage_mac_app(manifest, data_dir, &bundle).await?;
+            ensure_same_interface(&staged, &bundle)?;
             let name = bundle.file_name().context("app bundle has no name")?.to_string_lossy();
             let incoming = parent.join(format!(".{name}.new-{}", transaction::new_id()));
             // Everything that can fail about installing it happens here, with
@@ -2136,13 +2194,13 @@ async fn prepare_this_install(
             if !version_newer(&manifest.version, &from) {
                 return Ok(None);
             }
-            let download = artifact_size(edge_url, manifest, &windows::artifact(&manifest.version))
+            let download = artifact_size(manifest, &windows::artifact(&manifest.version))
                 .await
                 .unwrap_or(transaction::UNKNOWN_ARTIFACT_BYTES);
             if let Err(why) = transaction::ensure_room(data_dir, &directory, download) {
                 bail!(why);
             }
-            let incoming = windows::stage(edge_url, manifest, &directory).await?;
+            let incoming = windows::stage(manifest, &directory).await?;
             Ok(Some(PreparedInstall {
                 from,
                 layout: Some(transaction::Layout::WindowsFolder { directory, incoming }),
@@ -2163,29 +2221,28 @@ pub struct AppliedUpdate {
 
 /// Everything before an update has to stop anything: refuse if there's no room,
 /// then download, verify and unpack the release beside the running one.
-pub async fn prepare_install(
-    edge_url: &str,
-    manifest: &Manifest,
-    app_root: &Path,
-    data_dir: &Path,
-) -> anyhow::Result<()> {
-    let download = if app_root.join(&manifest.version).join("zeron").exists() {
+pub async fn prepare_install(manifest: &Manifest, app_root: &Path, data_dir: &Path) -> anyhow::Result<()> {
+    let file = headless_artifact(&manifest.version);
+    let staged = expected_sha256(manifest, &file).is_ok_and(|sha| {
+        stage_verified(&app_root.join(&manifest.version), "zeron", &verified_mark(&file, sha))
+    });
+    let download = if staged {
         0
     } else {
-        artifact_size(edge_url, manifest, &headless_artifact(&manifest.version))
+        artifact_size(manifest, &file)
             .await
             .unwrap_or(transaction::UNKNOWN_ARTIFACT_BYTES)
     };
     if let Err(why) = transaction::ensure_room(data_dir, app_root, download) {
         bail!(why);
     }
-    stage_headless(edge_url, manifest, app_root).await?;
+    stage_headless(manifest, app_root).await?;
     Ok(())
 }
 
 /// What the feed says the release's download weighs, if it says.
-async fn artifact_size(edge_url: &str, manifest: &Manifest, file: &str) -> Option<u64> {
-    let base = manifest.channel.base(&release_base(edge_url).ok()?);
+async fn artifact_size(manifest: &Manifest, file: &str) -> Option<u64> {
+    let base = files_base(manifest).ok()?;
     let url = format!("{base}/{file}");
     let response = http_client().ok()?.head(&url).send().await.ok()?;
     response.status().is_success().then(|| response.content_length())?
@@ -2705,7 +2762,12 @@ mod tests {
             headless_artifact("0.2.0"),
             format!("zeron-0.2.0-{os}-{arch}.tar.gz")
         );
-        assert!(mac_app_artifact("0.2.0").ends_with("-app.tar.gz"));
+        assert!(mac_app_artifact("0.2.0", Interface::Gpui).ends_with("-app.tar.gz"));
+        assert_ne!(
+            mac_app_artifact("0.2.0", Interface::Gpui),
+            mac_app_artifact("0.2.0", Interface::Zgx)
+        );
+        assert!(mac_app_artifact("0.2.0", Interface::Zgx).starts_with("zeron-zgx-0.2.0-"));
     }
 
     #[cfg(windows)]
@@ -2737,13 +2799,13 @@ mod tests {
         let app_root = tmp.path().join("app");
         let data_dir = tmp.path().join("data");
 
-        let managed_err = stage_headless("http://127.0.0.1:1", &manifest, &app_root)
+        let managed_err = stage_headless(&manifest, &app_root)
             .await
             .unwrap_err();
         assert!(managed_err.to_string().contains("not supported on windows"));
         assert!(!app_root.exists(), "managed staging must not touch disk");
 
-        let mac_err = stage_mac_app("http://127.0.0.1:1", &manifest, &data_dir)
+        let mac_err = stage_mac_app(&manifest, &data_dir, &data_dir.join("Installed.app"))
             .await
             .unwrap_err();
         assert!(mac_err.to_string().contains("not supported on windows"));
@@ -3114,7 +3176,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_checker_reports_a_newer_release_on_demand() {
         let (base, server) = serve_forever(br#"{"version":"999.0.0","files":{}}"#.to_vec()).await;
-        let updater = Updater::spawn_desktop(base);
+        let updater = Updater::spawn_role(&base, Role::Desktop);
         let status = updater.check().await.unwrap();
         assert!(status.update_available);
         assert_eq!(status.latest_version.as_deref(), Some("999.0.0"));
@@ -3155,7 +3217,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let app_root = tmp.path().join("app");
         std::fs::create_dir_all(&app_root).unwrap();
-        let manifest = |bytes: &[u8]| Manifest {
+        let manifest = |bytes: &[u8], source: &str| Manifest {
             version: "9.9.9".into(),
             files: [(
                 headless_artifact("9.9.9"),
@@ -3164,6 +3226,7 @@ mod tests {
                 },
             )]
             .into(),
+            source: source.to_owned(),
             ..Manifest::default()
         };
 
@@ -3172,7 +3235,7 @@ mod tests {
             files: BTreeMap::new(),
             ..Manifest::default()
         };
-        let error = stage_headless("http://127.0.0.1:1", &unlisted, &app_root)
+        let error = stage_headless(&unlisted, &app_root)
             .await
             .unwrap_err();
         assert!(
@@ -3183,7 +3246,7 @@ mod tests {
 
         let wrong = fake_headless_tarball(&tmp.path().join("wrong"), "1.0.0");
         let (base, server) = serve_forever(wrong.clone()).await;
-        let error = stage_headless(&base, &manifest(&wrong), &app_root)
+        let error = stage_headless(&manifest(&wrong, &base), &app_root)
             .await
             .unwrap_err();
         server.abort();
@@ -3196,12 +3259,106 @@ mod tests {
 
         let right = fake_headless_tarball(&tmp.path().join("right"), "9.9.9");
         let (base, server) = serve_forever(right.clone()).await;
-        let staged = stage_headless(&base, &manifest(&right), &app_root)
+        let staged = stage_headless(&manifest(&right, &base), &app_root)
             .await
             .unwrap();
         server.abort();
         assert_eq!(staged, app_root.join("9.9.9"));
         assert!(staged.join("zeron").is_file());
+
+        // The same bytes are reused with no feed to ask.
+        let offline = manifest(&right, "http://127.0.0.1:1");
+        assert_eq!(stage_headless(&offline, &app_root).await.unwrap(), staged);
+        // A directory of that version from elsewhere is never trusted by its name.
+        std::fs::remove_file(staged.join(VERIFIED_MARK)).unwrap();
+        std::fs::write(staged.join("zeron"), "#!/bin/sh\necho \"zeron 9.9.9\"\n# not the release\n").unwrap();
+        assert!(stage_headless(&offline, &app_root).await.is_err());
+        let (base, server) = serve_forever(right.clone()).await;
+        let staged = stage_headless(&manifest(&right, &base), &app_root).await.unwrap();
+        server.abort();
+        assert!(!std::fs::read_to_string(staged.join("zeron")).unwrap().contains("not the release"));
+        assert_eq!(
+            std::fs::read_dir(&app_root).unwrap().count(),
+            1,
+            "the replaced directory is gone"
+        );
+    }
+
+    /// A `Zeron.app` tarball whose binary reports `reported`; `interface` is
+    /// its Info.plist's `ZeronInterface` (none: the gpui app's).
+    #[cfg(target_os = "macos")]
+    fn fake_app_tarball(dir: &Path, reported: &str, interface: Option<&str>) -> Vec<u8> {
+        fake_app(dir, reported, interface);
+        let tarball = dir.join("app.tar.gz");
+        run("tar", &["-czf", &tarball.to_string_lossy(), "-C", &dir.to_string_lossy(), "Zeron.app"]).unwrap();
+        std::fs::read(tarball).unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fake_app(dir: &Path, reported: &str, interface: Option<&str>) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let app = dir.join("Zeron.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        let binary = app.join("Contents/MacOS/zeron");
+        std::fs::write(&binary, format!("#!/bin/sh\necho \"zeron {reported}\"\n")).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mark = interface.map(|i| format!("<key>ZeronInterface</key><string>{i}</string>")).unwrap_or_default();
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            format!("<plist><dict><key>CFBundleShortVersionString</key><string>{reported}</string>{mark}</dict></plist>"),
+        )
+        .unwrap();
+        app
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_mac_app_only_ever_stages_its_own_interface() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let zgx = fake_app(&tmp.path().join("installed-zgx"), "1.0.0", Some("zgx"));
+        let gpui = fake_app(&tmp.path().join("installed-gpui"), "1.0.0", None);
+        assert_eq!(bundle_interface(&zgx), Interface::Zgx);
+        assert_eq!(bundle_interface(&gpui), Interface::Gpui);
+        let listed = |name: String, bytes: &[u8], source: &str| Manifest {
+            version: "9.9.9".into(),
+            files: [(name, FileMeta { sha256: Some(format!("{:x}", Sha256::digest(bytes))) })].into(),
+            source: source.to_owned(),
+            ..Manifest::default()
+        };
+        let gpui_release = fake_app_tarball(&tmp.path().join("gpui-release"), "9.9.9", None);
+        let zgx_release = fake_app_tarball(&tmp.path().join("zgx-release"), "9.9.9", Some("zgx"));
+
+        // A feed carrying only the gpui app offers the zgx app nothing to download.
+        let gpui_only = listed(mac_app_artifact("9.9.9", Interface::Gpui), &gpui_release, "http://127.0.0.1:1");
+        let error = stage_mac_app(&gpui_only, &data_dir, &zgx).await.unwrap_err();
+        assert!(format!("{error:#}").contains("zeron-zgx-9.9.9"), "{error:#}");
+
+        // A gpui bundle under the zgx name is refused once unpacked.
+        let (base, server) = serve_forever(gpui_release.clone()).await;
+        let mislabelled = listed(mac_app_artifact("9.9.9", Interface::Zgx), &gpui_release, &base);
+        let error = stage_mac_app(&mislabelled, &data_dir, &zgx).await.unwrap_err();
+        server.abort();
+        assert!(format!("{error:#}").contains("interface"), "{error:#}");
+        assert!(!data_dir.join("updates/9.9.9").exists());
+
+        // A bundle staged before under that version (an earlier upload of it) is not this release's.
+        let stale = fake_app(&data_dir.join("updates/9.9.9"), "9.9.9", Some("zgx"));
+        let stale_binary = stale.join("Contents/MacOS/zeron");
+        std::fs::write(&stale_binary, "#!/bin/sh\necho \"zeron 9.9.9\"\n# stale\n").unwrap();
+        let (base, server) = serve_forever(zgx_release.clone()).await;
+        let right = listed(mac_app_artifact("9.9.9", Interface::Zgx), &zgx_release, &base);
+        let staged = stage_mac_app(&right, &data_dir, &zgx).await.unwrap();
+        server.abort();
+        assert_eq!(staged, stale);
+        assert!(!std::fs::read_to_string(&stale_binary).unwrap().contains("# stale"));
+        let offline = listed(mac_app_artifact("9.9.9", Interface::Zgx), &zgx_release, "http://127.0.0.1:1");
+        assert_eq!(stage_mac_app(&offline, &data_dir, &zgx).await.unwrap(), staged, "reused, verified");
+
+        // And the gpui app never takes it.
+        let error = apply_mac_app(&staged, &gpui).unwrap_err();
+        assert!(format!("{error:#}").contains("interface"), "{error:#}");
+        assert_eq!(bundle_interface(&gpui), Interface::Gpui);
     }
 
     #[test]

@@ -292,11 +292,7 @@ pub fn run_app(config: UiConfig) {
                 appshots::set_enabled(ui_settings.appshots_enabled);
                 terminal::panel::init(cx);
                 app_menus::init(cx);
-                app_update::AppUpdate::init(
-                    zeron_update::RELEASES_FEED.to_owned(),
-                    data_dir.clone(),
-                    cx,
-                );
+                app_update::AppUpdate::init(data_dir.clone(), cx);
                 cx.register_url_scheme("zeron").detach();
 
                 let state = cx.new(|cx| {

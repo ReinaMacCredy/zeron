@@ -70,7 +70,6 @@ pub struct AppUpdate {
     /// Background download + install on quit: the Automatic updates setting,
     /// unless `ZERON_AUTO_UPDATE` is set.
     automatic: bool,
-    edge_url: String,
     data_dir: PathBuf,
     checker: Updater,
     status: Option<UpdateStatus>,
@@ -92,8 +91,8 @@ impl Global for GlobalAppUpdate {}
 impl AppUpdate {
     /// Start the desktop checker. Call once at boot, after `gpui_tokio` is
     /// initialized.
-    pub fn init(edge_url: String, data_dir: PathBuf, cx: &mut App) {
-        let entity = cx.new(|cx| Self::new(edge_url, data_dir, cx));
+    pub fn init(data_dir: PathBuf, cx: &mut App) {
+        let entity = cx.new(|cx| Self::new(data_dir, cx));
         cx.set_global(GlobalAppUpdate(entity));
     }
 
@@ -102,7 +101,7 @@ impl AppUpdate {
             .map(|global| global.0.clone())
     }
 
-    fn new(edge_url: String, data_dir: PathBuf, cx: &mut Context<Self>) -> Self {
+    fn new(data_dir: PathBuf, cx: &mut Context<Self>) -> Self {
         let install = zeron_update::detect_install();
         let blocker = install
             .supports_desktop_update()
@@ -113,7 +112,7 @@ impl AppUpdate {
         zeron_update::channel::set_data_dir(&data_dir);
         let checker = {
             let _runtime = Tokio::handle(cx).enter();
-            Updater::spawn_desktop(edge_url.clone())
+            Updater::spawn_desktop()
         };
         let mut statuses = checker.watch();
         let status_watch = cx.spawn(async move |this, cx| {
@@ -133,7 +132,6 @@ impl AppUpdate {
             blocker,
             automatic: zeron_update::desktop_auto_update_override()
                 .unwrap_or_else(|| crate::settings::current(cx).auto_update),
-            edge_url,
             data_dir,
             checker,
             status: None,
@@ -311,14 +309,13 @@ impl AppUpdate {
         let Some(version) = self.available().map(str::to_owned) else {
             return;
         };
-        let edge_url = self.edge_url.clone();
         let data_dir = self.data_dir.clone();
         let install = self.install.clone();
         self.flow = Flow::Downloading {
             version: version.clone(),
         };
         let stage = Tokio::spawn(cx, async move {
-            zeron_update::desktop::stage_offer(&edge_url, &data_dir, &install).await
+            zeron_update::desktop::stage_offer(&data_dir, &install).await
         });
         self.download = Some(cx.spawn(async move |this, cx| {
             let outcome = match stage.await {

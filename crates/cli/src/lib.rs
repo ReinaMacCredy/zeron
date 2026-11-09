@@ -366,7 +366,7 @@ pub fn run(version: &'static str, engines: Engines) -> Launch {
         Some(Command::Update { check }) => Launch::Done(
             tokio::runtime::Runtime::new()
                 .map_err(anyhow::Error::from)
-                .and_then(|runtime| runtime.block_on(update_cli::update(zeron_update::RELEASES_FEED, check))),
+                .and_then(|runtime| runtime.block_on(update_cli::update(check))),
         ),
         Some(Command::UpdateWatchdog) => Launch::Done(zeron_update::transaction::run_watchdog()),
         Some(Command::Daemon { command }) => Launch::Done(match command {

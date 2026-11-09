@@ -108,7 +108,6 @@ struct Desktop {
     blocker: Option<UpdateBlocker>,
     /// Background download and install on quit: the Zeron app's alone, as `automatic` decides.
     automatic: bool,
-    edge: String,
     data_dir: PathBuf,
     checker: Updater,
     status: RefCell<Option<UpdateStatus>>,
@@ -123,9 +122,9 @@ impl Desktop {
     fn start() -> Option<Rc<Self>> {
         // The beta: the fork's feed carries the other interface, which would install
         // over this bundle, and a beta's channel claim would land in the shared data dir.
-        let Some(feed) = app_feed(crate::identity::CURRENT) else {
+        if !updates_itself(crate::identity::CURRENT) {
             return None;
-        };
+        }
         let install = zeron_update::detect_install();
         if !install.supports_desktop_update() {
             return None;
@@ -142,17 +141,15 @@ impl Desktop {
                 Err(error) => eprintln!("zeron-zgx: updates: couldn't claim the beta channel: {error}"),
             }
         }
-        let edge = feed.unwrap_or_else(|| crate::auth::endpoint().edge);
         let checker = {
             let _runtime = tokio().enter();
-            Updater::spawn_desktop(edge.clone())
+            Updater::spawn_desktop()
         };
         let blocker = install.desktop_update_blocker();
         Some(Rc::new(Self {
             install,
             blocker,
             automatic: automatic(crate::identity::CURRENT, zeron_update::desktop_auto_update_override()),
-            edge,
             data_dir,
             checker,
             status: RefCell::default(),
@@ -212,11 +209,11 @@ impl Desktop {
         let Some(version) = self.available() else { return };
         *self.flow.borrow_mut() = Flow::Downloading { version: version.clone() };
         publish();
-        let (edge, data_dir, install) = (self.edge.clone(), self.data_dir.clone(), self.install.clone());
+        let (data_dir, install) = (self.data_dir.clone(), self.install.clone());
         let me = self.clone();
         engine::get().spawn(async move {
             let staged = on_tokio(async move {
-                zeron_update::desktop::stage_offer(&edge, &data_dir, &install)
+                zeron_update::desktop::stage_offer(&data_dir, &install)
                     .await
                     .map_err(|err| format!("{err:#}"))
             })
@@ -343,7 +340,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             }
             // A development build: the public stable feed, beside the
             // engine's own report.
-            let manifest = on_tokio(async { zeron_update::fetch_latest_on(zeron_cli::DEFAULT_EDGE_URL, Channel::Stable).await })
+            let manifest = on_tokio(zeron_update::fetch_latest())
                 .await
                 .ok_or("failed")?
                 .map_err(|err| feed_outcome(&format!("{err:#}")))?;
@@ -481,18 +478,9 @@ fn start(about: &Rc<About>) {
     });
 }
 
-/// Where the app's own updates come from: none for the beta (the Zeron app
-/// beside it updates) or a debug build of the Zeron app (never one to
-/// install over the real one); the fork's releases for a released Zeron app,
-/// as the other interface's (crates/ui lib.rs `RELEASES_FEED`); a development
-/// build's edge otherwise (never a bundle, so never asked).
-fn app_feed(identity: crate::identity::Identity) -> Option<Option<String>> {
-    match identity.build {
-        crate::identity::Build::Beta => None,
-        crate::identity::Build::Cutover if identity.updates_itself => Some(Some(zeron_update::RELEASES_FEED.to_owned())),
-        crate::identity::Build::Cutover => None,
-        crate::identity::Build::Development => Some(None),
-    }
+// The beta leaves updates to the Zeron app beside it; a debug or Dev bundle never installs over anything.
+fn updates_itself(identity: crate::identity::Identity) -> bool {
+    identity.build == crate::identity::Build::Cutover && identity.updates_itself
 }
 
 /// Whether a found release downloads by itself and installs on quit: only
@@ -744,11 +732,11 @@ mod update_tests {
     /// Zeron app never installs over the real one.
     #[test]
     fn the_zeron_app_updates_itself_from_the_fork_s_releases() {
-        assert_eq!(app_feed(of(Build::Cutover, true)), Some(Some(zeron_update::RELEASES_FEED.to_owned())));
+        assert!(updates_itself(of(Build::Cutover, true)));
         assert!(zeron_update::RELEASES_FEED.contains("ReinaMacCredy/zeron"));
-        assert_eq!(app_feed(of(Build::Cutover, false)), None);
-        assert_eq!(app_feed(of(Build::Beta, true)), None);
-        assert_eq!(app_feed(of(Build::Development, true)), Some(None));
+        assert!(!updates_itself(of(Build::Cutover, false)));
+        assert!(!updates_itself(of(Build::Beta, true)));
+        assert!(!updates_itself(of(Build::Development, true)));
         // It checks and offers; it downloads by itself and installs on quit only when ZERON_AUTO_UPDATE says so.
         let zeron = of(Build::Cutover, true);
         assert!(!automatic(zeron, None));

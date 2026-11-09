@@ -60,11 +60,7 @@ pub fn artifact(version: &str) -> String {
 /// Download next to the installation, verifying its mandatory checksum.
 /// Each attempt has its own directory, so failed or concurrent downloads cannot
 /// leave a reusable, partially staged executable.
-pub async fn stage(
-    edge_url: &str,
-    manifest: &super::Manifest,
-    directory: &Path,
-) -> anyhow::Result<PathBuf> {
+pub async fn stage(manifest: &super::Manifest, directory: &Path) -> anyhow::Result<PathBuf> {
     ensure!(
         manifest
             .version
@@ -78,7 +74,7 @@ pub async fn stage(
         .prefix(".zeron-update-")
         .tempdir_in(directory)?;
     let staged = temporary.path().join("zeron.exe");
-    super::download_release_file(edge_url, manifest, &file, &staged).await?;
+    super::download_release_file(manifest, &file, &staged).await?;
     std::fs::write(temporary.path().join("sha256"), expected)?;
     std::fs::write(temporary.path().join("version"), &manifest.version)?;
     verify(&staged)?;
