@@ -81,7 +81,10 @@ local function settled(value: any, word: string?): any
 			ok(value)
 		end
 	end
-	return p
+	-- (The host's promise is userdata, not a table.)
+	local u = newproxy(true)
+	getmetatable(u).__index = p
+	return u
 end
 
 -- A change: refused if asked to be, else `value`.

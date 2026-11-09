@@ -64,7 +64,7 @@ end
 -- (A host without these, a preview's, says so as an unread page.)
 local function ask(name: string, arg: any, ok: (v: any) -> (), bad: (err: any) -> ())
 	local fine, p = pcall(host.call, name, arg)
-	if fine and type(p) == "table" and p.after then
+	if fine and p ~= nil and p.after then
 		p:after(ok, bad)
 	else
 		bad(if fine then "failed" else p)
