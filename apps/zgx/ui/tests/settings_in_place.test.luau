@@ -37,6 +37,16 @@ end
 local PAGE = "#settings-page"
 local NAV = "#settings-nav"
 
+-- (A page under the list's fold is scrolled to first, as a person does.)
+local function press_tab(app: any, page: string)
+	if not pcall(app.click, app, `{NAV} >> role:tab "{page}"`) then
+		app:scroll(`{NAV} >> role:tab "General"`, 2000)
+		app:frames(10)
+		app:click(`{NAV} >> role:tab "{page}"`)
+	end
+	app:frames(30)
+end
+
 local function open(page: string?): any
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 1100)
@@ -45,13 +55,7 @@ local function open(page: string?): any
 	app:command("shell.settings")
 	app:frames(20)
 	if page then
-		-- (A page under the list's fold is scrolled to first, as a person does.)
-		if not pcall(app.click, app, `{NAV} >> role:tab "{page}"`) then
-			app:scroll(`{NAV} >> role:tab "General"`, 2000)
-			app:frames(10)
-			app:click(`{NAV} >> role:tab "{page}"`)
-		end
-		app:frames(30)
+		press_tab(app, page)
 	end
 	return app
 end
@@ -575,8 +579,7 @@ test("as the Zeron app itself, About says it updates itself and its release note
 		releases = "https://github.com/ReinaMacCredy/zeron/releases",
 		latest = "0.2.132",
 	})
-	app:click(`{NAV} >> role:tab "{ABOUT}"`)
-	app:frames(30)
+	press_tab(app, ABOUT)
 	expect(shows(app, PAGE, "Zeron updates itself")).to_be(true)
 	expect(shows(app, PAGE, "Updates go to the engine on this computer")).to_be(false)
 	expect(shows(app, PAGE, "Not packaged yet")).to_be(false)
