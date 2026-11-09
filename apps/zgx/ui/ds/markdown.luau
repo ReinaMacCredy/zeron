@@ -712,7 +712,7 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 		local after = list[i + 1]
 		if r.a and not r.img and not sole and file_link and (not after or after.a ~= r.a) and not string.match(r.a, "^zeron%-") and file_link(r.a) then
 			table.insert(props, ui.span {
-				"\u{2060}",
+				"",
 				class = "md-file-glyph",
 				padding = { FILE_GLYPH_GAP / 2, 0 },
 				icon = { src = "assets/icons/ui/arrow-up-right.svg", size = FILE_GLYPH_SIZE, gap = 0, tint = "$text.tertiary" },

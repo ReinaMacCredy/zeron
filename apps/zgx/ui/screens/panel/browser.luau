@@ -137,20 +137,17 @@ local function key_of(id: string, key: string): string | () -> string
 	return if shell_keys then shell_keys.key(id) else key
 end
 local function command(id: string, title: string, menu: string, key: string, act: (Showing) -> ())
-	local bound = key_of(id, key)
 	ui.command {
 		id = id,
 		title = title,
 		menu = menu,
-		-- (A built-in's, off in Settings → Plugins: no key, and it does nothing.)
-		key = (if Builtins.COMMANDS[id]
-			then function(): string
-				if not Builtins.command_on(id) then
-					return ""
-				end
-				return if type(bound) == "function" then bound() else bound
+		key = key_of(id, key) :: any,
+		-- (A built-in's, off in Settings → Plugins: out of the menus, its key with it, and it does nothing.)
+		hidden = if Builtins.COMMANDS[id]
+			then function(): boolean
+				return not Builtins.command_on(id)
 			end
-			else bound) :: any,
+			else nil,
 		run = function(): boolean
 			if showing and Builtins.command_on(id) then
 				act(showing)

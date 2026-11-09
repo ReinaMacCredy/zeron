@@ -137,7 +137,7 @@ test("a switch turned off stays off at the next launch, its door with it", funct
 	expect(nav_has(again, "Usage")).to_be(false)
 end)
 
-test("Browser annotate off takes the browser bar's Annotate and its key away, and on brings them back", function()
+test("Browser annotate off takes the browser bar's Annotate, its View menu item and its key away, and on brings them back", function()
 	local app = mount("panel_fixture.luau")
 	app:resize(900, 640)
 	app:frames(10)
@@ -150,16 +150,27 @@ test("Browser annotate off takes the browser bar's Annotate and its key away, an
 	local function started(): boolean
 		return string.find(app:state("test_web_calls") or "", "run:start", 1, true) ~= nil
 	end
+	local function listed(): boolean
+		for _, c in app:commands() do
+			if c.id == "panel.annotate" then
+				return c.menu == "View" and c.key == "cmd+shift+i"
+			end
+		end
+		return false
+	end
 	expect(app:has('role:checkbox "Annotate"')).to_be(true)
+	expect(listed()).to_be(true)
 	app:set_state("builtin_browser_annotate", false)
 	app:frames(10)
 	expect(app:has('role:checkbox "Annotate"')).to_be(false)
+	expect(listed()).to_be(false)
 	app:command("panel.annotate")
 	app:frames(5)
 	expect(started()).to_be(false)
 	app:set_state("builtin_browser_annotate", true)
 	app:frames(10)
 	expect(app:has('role:checkbox "Annotate"')).to_be(true)
+	expect(listed()).to_be(true)
 	app:command("panel.annotate")
 	app:frames(5)
 	expect(started()).to_be(true)
