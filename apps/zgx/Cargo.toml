@@ -143,7 +143,12 @@ zeron-zgx-pixels = { path = "pixels" }
 # The app's macOS appearance (`appearance`): the same objc2 zgx builds on.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSBundle"] }
+# Dictation (src/voice.rs): the shipping app's recorder and Parakeet v3
+# (cpal and an ONNX runtime), and the microphone's permission asked as
+# gpui's dictation asks it (AVFoundation, with a block).
+zeron-voice = { path = "../../crates/voice" }
+block2 = "0.6"
 # A Device tab's H.264 frames (src/device_video.rs), decoded by VideoToolbox
 # as the shipping app's device panel decodes them (crates/ui).
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }

@@ -26,6 +26,14 @@ fn main() {
         .unwrap_or_else(|| version.clone());
     println!("cargo:rustc-env=ZERON_VERSION={version}");
     println!("cargo:rustc-env=ZERON_APP_VERSION={app}");
+    // A binary run outside an .app (a Dev) has no Info.plist, and asking for
+    // the microphone without its purpose string ends the process: the
+    // shipping app's direct builds carry it in this section too.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        let plist = std::path::Path::new(&dir).join("../../dist/macos/Info-unbundled.plist");
+        println!("cargo:rerun-if-changed={}", plist.display());
+        println!("cargo:rustc-link-arg-bin=zeron-zgx=-Wl,-sectcreate,__TEXT,__info_plist,{}", plist.display());
+    }
 }
 
 /// `version = "…"` under `[workspace.package]`.

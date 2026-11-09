@@ -23,10 +23,11 @@
 //!                             kind listening, final, unavailable, failed
 //!   dictation.finish(n) / dictation.cancel(n)   (invoke)
 //!
-//! Recording and transcribing are the Mac's (crates/voice: cpal and
-//! Parakeet), not in this build yet: a session here says `unavailable`.
-//! `ZERON_ZGX_MOCK=1` (a mock Dev): two made-up microphones, a download
-//! that counts up without fetching, and a session that hears a fixed line.
+//! Recording and transcribing are crates/voice's (cpal and Parakeet), on
+//! the Mac: the microphone's permission asked first, as gpui asks it.
+//! Elsewhere a session says `unavailable`. `ZERON_ZGX_MOCK=1` (a mock
+//! Dev): two made-up microphones, a download that counts up without
+//! fetching, and a session that hears a fixed line.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -55,9 +56,11 @@ fn mock() -> bool {
     std::env::var("ZERON_ZGX_MOCK").is_ok_and(|v| v == "1")
 }
 
-/// Whether this build records and transcribes (crates/voice wired behind
-/// `dictation.start`): not yet, so only a mock Dev's made-up microphone.
-const RECORDER: bool = false;
+/// Whether this build records and transcribes (crates/voice behind
+/// `dictation.start`): the Mac's; elsewhere only a mock Dev's made-up microphone.
+const RECORDER: bool = cfg!(target_os = "macos");
+const POLL_EVERY: Duration = Duration::from_millis(30);
+const DENIED: &str = "Allow Microphone access for Zeron in System Settings → Privacy & Security, then retry.";
 
 fn capable() -> bool {
     RECORDER || mock()
@@ -173,6 +176,8 @@ struct Voice {
     next_session: Cell<u64>,
     seq: Cell<u64>,
     sessions: RefCell<HashMap<u64, Session>>,
+    #[cfg(target_os = "macos")]
+    recording: RefCell<HashMap<u64, zeron_voice::Session>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -295,9 +300,15 @@ impl Voice {
         });
     }
 
-    fn start(self: &Rc<Self>) -> u64 {
+    fn start(self: &Rc<Self>, input: Option<String>) -> u64 {
         let n = self.next_session.get() + 1;
         self.next_session.set(n);
+        #[cfg(target_os = "macos")]
+        if !mock() {
+            self.record(n, input);
+            return n;
+        }
+        let _ = input;
         if !mock() {
             let me = Rc::downgrade(self);
             engine::get().spawn(async move {
@@ -322,6 +333,11 @@ impl Voice {
     }
 
     fn finish(self: &Rc<Self>, n: u64) {
+        #[cfg(target_os = "macos")]
+        if let Some(session) = self.recording.borrow_mut().get_mut(&n) {
+            session.finish();
+            return;
+        }
         if self.sessions.borrow_mut().get_mut(&n).map(|s| std::mem::replace(s, Session::Finishing)) != Some(Session::Listening) {
             return;
         }
@@ -336,21 +352,160 @@ impl Voice {
         });
     }
 
+    fn cancel(&self, n: u64) {
+        self.sessions.borrow_mut().remove(&n);
+        #[cfg(target_os = "macos")]
+        self.recording.borrow_mut().remove(&n);
+    }
+
     fn busy(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if !self.recording.borrow().is_empty() || zeron_voice::busy() {
+            return true;
+        }
         !self.sessions.borrow().is_empty()
+    }
+
+    /// A take on this Mac: the microphone's permission (asked once, as
+    /// gpui's dictation asks it), then crates/voice records until
+    /// `dictation.finish` and transcribes, its events said as they come.
+    #[cfg(target_os = "macos")]
+    fn record(self: &Rc<Self>, n: u64, input: Option<String>) {
+        let me = Rc::downgrade(self);
+        engine::get().spawn(async move {
+            let granted = match microphone::access() {
+                microphone::Access::Granted => true,
+                microphone::Access::Denied => false,
+                microphone::Access::Unbundled => {
+                    if let Some(voice) = me.upgrade() {
+                        voice.event(n, "unavailable", Some("Dictation requires the packaged Zeron app."));
+                    }
+                    return;
+                }
+                microphone::Access::Asked(answer) => loop {
+                    zgx::timer::sleep(POLL_EVERY).await;
+                    match answer.try_recv() {
+                        Ok(granted) => break granted,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break false,
+                    }
+                },
+            };
+            let Some(voice) = me.upgrade() else { return };
+            if !granted {
+                voice.event(n, "denied", Some(DENIED));
+                return;
+            }
+            let Some(folder) = dir() else {
+                voice.event(n, "unavailable", None);
+                return;
+            };
+            match zeron_voice::Session::start(folder, input) {
+                Ok(session) => {
+                    voice.recording.borrow_mut().insert(n, session);
+                }
+                Err(e) => {
+                    voice.event(n, "failed", Some(&e.to_string()));
+                    return;
+                }
+            }
+            drop(voice);
+            loop {
+                zgx::timer::sleep(POLL_EVERY).await;
+                let Some(voice) = me.upgrade() else { return };
+                let Some(event) = voice.recording.borrow_mut().get_mut(&n).map(|s| s.poll()) else { return };
+                let (kind, text, done) = match event {
+                    None => continue,
+                    Some(zeron_voice::Event::Listening) => ("listening", None, false),
+                    Some(zeron_voice::Event::Finalizing) => ("finalizing", None, false),
+                    Some(zeron_voice::Event::Final(text)) => ("final", Some(text), true),
+                    Some(zeron_voice::Event::Failed(why)) => ("failed", Some(why), true),
+                };
+                if done {
+                    voice.recording.borrow_mut().remove(&n);
+                }
+                voice.event(n, kind, text.as_deref());
+                if done {
+                    return;
+                }
+            }
+        });
     }
 }
 
-/// Microphones: the mock's two; none known without the Mac's recorder.
-pub(crate) fn inputs(mock: bool) -> Value {
-    if !mock {
-        return Value::record([("devices", Value::List(Vec::new().into()))]);
+/// The microphone's permission (AVCaptureDevice), as gpui's
+/// crates/ui/src/voice/permissions.rs asks it.
+#[cfg(target_os = "macos")]
+mod microphone {
+    use block2::RcBlock;
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2_foundation::{NSBundle, ns_string};
+    use std::sync::Mutex;
+
+    #[link(name = "AVFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static AVMediaTypeAudio: *const AnyObject;
     }
-    let device = |id: &str, name: &str| Value::record([("id", Value::from(id)), ("name", Value::from(name))]);
-    Value::record([
-        ("devices", Value::List(vec![device("mock:built-in", "Mock Microphone"), device("mock:usb", "USB Microphone")].into())),
-        ("default", Value::from("mock:built-in")),
-    ])
+
+    pub(super) enum Access {
+        Granted,
+        Denied,
+        /// No purpose string: asking would end the process.
+        Unbundled,
+        Asked(std::sync::mpsc::Receiver<bool>),
+    }
+
+    pub(super) fn access() -> Access {
+        let Some(device) = AnyClass::get(c"AVCaptureDevice") else { return Access::Denied };
+        // SAFETY: a class method taking the media type constant AVFoundation exports.
+        let status: isize = unsafe { msg_send![device, authorizationStatusForMediaType: AVMediaTypeAudio] };
+        match status {
+            3 => return Access::Granted,
+            0 => {}
+            _ => return Access::Denied,
+        }
+        if NSBundle::mainBundle().objectForInfoDictionaryKey(ns_string!("NSMicrophoneUsageDescription")).is_none() {
+            return Access::Unbundled;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reply = Mutex::new(Some(tx));
+        // (AVFoundation copies the block and may call it on any queue.)
+        let completion = RcBlock::new(move |granted: Bool| {
+            if let Some(tx) = reply.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = tx.send(granted.as_bool());
+            }
+        });
+        // SAFETY: the block lives for the call; AVFoundation retains a copy.
+        unsafe {
+            let _: () = msg_send![device, requestAccessForMediaType: AVMediaTypeAudio, completionHandler: &*completion];
+        }
+        Access::Asked(rx)
+    }
+}
+
+/// Microphones (id, name) and the system's default: the mock's two; the
+/// Mac's own (crates/voice); none elsewhere.
+pub(crate) fn microphones(mock: bool) -> (Vec<(String, String)>, Option<String>) {
+    if mock {
+        return (
+            vec![("mock:built-in".into(), "Mock Microphone".into()), ("mock:usb".into(), "USB Microphone".into())],
+            Some("mock:built-in".into()),
+        );
+    }
+    #[cfg(target_os = "macos")]
+    return (zeron_voice::input_devices().into_iter().map(|d| (d.id, d.name)).collect(), zeron_voice::default_input_device());
+    #[cfg(not(target_os = "macos"))]
+    (Vec::new(), None)
+}
+
+pub(crate) fn inputs_value((devices, default): (Vec<(String, String)>, Option<String>)) -> Value {
+    let device = |(id, name): &(String, String)| Value::record([("id", Value::from(id.as_str())), ("name", Value::from(name.as_str()))]);
+    let mut fields = vec![("devices", Value::List(devices.iter().map(device).collect::<Vec<_>>().into()))];
+    if let Some(default) = default {
+        fields.push(("default", Value::from(default.as_str())));
+    }
+    Value::record(fields)
 }
 
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
@@ -383,13 +538,23 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         if mock() {
             v.mock_ready.set(false);
         } else if let Some(d) = dir() {
+            #[cfg(target_os = "macos")]
+            zeron_voice::unload();
             remove(&d).map_err(String::from)?;
         }
         v.error.set(None);
         v.publish();
         Ok(v.state())
     });
-    host.async_action("voice.inputs", |_| async { Ok(inputs(mock())) });
+    // (Listing them can wait on the audio server: off the window's thread.)
+    host.async_action("voice.inputs", |_| async {
+        let (tx, mut rx) = zgx::task::latest();
+        let mock = mock();
+        std::thread::spawn(move || {
+            tx.send(microphones(mock));
+        });
+        Ok(rx.recv().await.map(inputs_value).unwrap_or(Value::Nil))
+    });
     host.async_action("voice.remote", |args| {
         let ids: Vec<String> = match args.field("ids") {
             Some(Value::List(list)) => list.iter().map(text).collect(),
@@ -404,9 +569,12 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             Ok(Value::record(capable))
         }
     });
-    host.async_action("dictation.start", |_| async {
-        let v = VOICE.with(Rc::clone);
-        Ok(Value::from(v.start() as f64))
+    host.async_action("dictation.start", |args| {
+        let input = args.field("input").map(text).filter(|i| !i.is_empty());
+        async move {
+            let v = VOICE.with(Rc::clone);
+            Ok(Value::from(v.start(input) as f64))
+        }
     });
     host.action("dictation.finish", |n| {
         let n = n.as_f64().unwrap_or(0.0) as u64;
@@ -414,9 +582,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     });
     host.action("dictation.cancel", |n| {
         let n = n.as_f64().unwrap_or(0.0) as u64;
-        VOICE.with(|v| {
-            v.sessions.borrow_mut().remove(&n);
-        });
+        VOICE.with(|v| v.cancel(n));
     });
 }
 
@@ -503,7 +669,7 @@ mod tests {
 
     #[test]
     fn a_build_without_a_recorder_says_so_and_downloads_nothing() {
-        if mock() {
+        if mock() || RECORDER {
             return;
         }
         let v = Rc::new(Voice::default());
@@ -515,10 +681,12 @@ mod tests {
 
     #[test]
     fn microphones_are_the_mock_s_two_and_none_without_a_recorder() {
-        let mock = crate::plugins::value_json(&inputs(true));
+        let mock = crate::plugins::value_json(&inputs_value(microphones(true)));
         assert_eq!(mock["devices"].as_array().map(Vec::len), Some(2));
         assert_eq!(mock["default"], "mock:built-in");
-        let none = crate::plugins::value_json(&inputs(false));
-        assert_eq!(none["devices"], serde_json::json!([]));
+        if !RECORDER {
+            let none = crate::plugins::value_json(&inputs_value(microphones(false)));
+            assert_eq!(none["devices"], serde_json::json!([]));
+        }
     }
 }
