@@ -84,7 +84,7 @@ export type Empty = {
 -- The trigger's weight: `filled` (a control on its own, with a chevron),
 -- `ghost` (a chip among a bar's controls: no fill until touched), `chip` (a
 -- footer's small quiet label). Only `filled` shows a chevron.
-export type Tone = "filled" | "ghost" | "chip" | "model" | "access"
+export type Tone = "filled" | "ghost" | "chip" | "model_chip" | "model" | "access"
 export type Props = {
 	value: State<string?>,
 	-- The items: a list, or a state or function of one (items that come
@@ -347,11 +347,27 @@ local TRIGGER = {
 		-- (A margin under them of twice that.)
 		lift = "$zeron.space.hair",
 		bg = "#00000000",
-		color = "$text.tertiary",
-		hover = { bg = "$hover", color = "$text.secondary" },
-		active = { bg = "$pressed", color = "$text.secondary" },
+		color = "$text.secondary",
+		hover = { bg = "$hover", color = "$text.primary" },
+		active = { bg = "$pressed", color = "$text.primary" },
 		label = nil,
-		detail = "$text.disabled",
+		detail = "$text.tertiary",
+		glyph = 12,
+	},
+	-- The footer's model chip, as gpui's: the model's name bright, its effort a step quieter.
+	model_chip = {
+		h = 24,
+		px = "$zeron.space.tight",
+		gap = "$zeron.space.tight",
+		rounded = "$radius.lg",
+		text_size = "$font.size.sm",
+		lift = "$zeron.space.hair",
+		bg = "#00000000",
+		color = "$text.primary",
+		hover = { bg = "$hover" },
+		active = { bg = "$pressed" },
+		label = nil,
+		detail = "$text.tertiary",
 		glyph = 12,
 	},
 	-- In the pill, as gpui's: the model's name and its effort a quieter tone.

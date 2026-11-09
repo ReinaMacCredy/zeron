@@ -2224,7 +2224,7 @@ return ui.component(function(props: Props): Node
 		mark_when = props.mark_when,
 		value = props.model,
 		items = items :: any,
-		tone = props.tone or "chip",
+		tone = props.tone or "model_chip",
 		mark = true,
 		detail = function(): string
 			local e = slider_value:get()
