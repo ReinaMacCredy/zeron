@@ -121,11 +121,11 @@ impl Desktop {
     /// The app's own updater, in an install that updates itself (a macOS
     /// app bundle); none in a development build.
     fn start() -> Option<Rc<Self>> {
-        // The fork's feed carries the gpui app, which would install over this
-        // bundle, and a beta's channel claim would land in the shared data dir.
-        if cfg!(feature = "beta") {
+        // The beta: the fork's feed carries the other interface, which would install
+        // over this bundle, and a beta's channel claim would land in the shared data dir.
+        let Some(feed) = app_feed(crate::identity::CURRENT) else {
             return None;
-        }
+        };
         let install = zeron_update::detect_install();
         if !install.supports_desktop_update() {
             return None;
@@ -142,7 +142,7 @@ impl Desktop {
                 Err(error) => eprintln!("zeron-zgx: updates: couldn't claim the beta channel: {error}"),
             }
         }
-        let edge = crate::auth::endpoint().edge;
+        let edge = feed.unwrap_or_else(|| crate::auth::endpoint().edge);
         let checker = {
             let _runtime = tokio().enter();
             Updater::spawn_desktop(edge.clone())
@@ -151,8 +151,7 @@ impl Desktop {
         Some(Rc::new(Self {
             install,
             blocker,
-            // The fork's feed carries the gpui app, never this one's.
-            automatic: false,
+            automatic: automatic(crate::identity::CURRENT, zeron_update::desktop_auto_update_override(), auto_update_setting(&data_dir)),
             edge,
             data_dir,
             checker,
@@ -482,6 +481,39 @@ fn start(about: &Rc<About>) {
     });
 }
 
+/// Where the app's own updates come from: none for the beta (the Zeron app
+/// beside it updates); the fork's releases for the Zeron app itself, as the
+/// other interface's (crates/ui lib.rs `RELEASES_FEED`); a development build's
+/// edge otherwise (never a bundle, so never asked).
+fn app_feed(identity: crate::identity::Identity) -> Option<Option<String>> {
+    match identity.build {
+        crate::identity::Build::Beta => None,
+        crate::identity::Build::Cutover => Some(Some(zeron_update::RELEASES_FEED.to_owned())),
+        crate::identity::Build::Development => Some(None),
+    }
+}
+
+/// Whether a found release downloads by itself and installs on quit: the Zeron
+/// app's, as the other interface decides it (`ZERON_AUTO_UPDATE` when set,
+/// else its Automatic updates, `autoUpdate`, which this app reads in place).
+fn automatic(identity: crate::identity::Identity, forced: Option<bool>, setting: Option<bool>) -> bool {
+    identity.updates_itself && forced.unwrap_or_else(|| setting.unwrap_or(false))
+}
+
+fn auto_update_setting(data_dir: &std::path::Path) -> Option<bool> {
+    let bytes = std::fs::read(data_dir.join("ui-settings.json")).ok()?;
+    serde_json::from_slice::<Json>(&bytes).ok()?["autoUpdate"].as_bool()
+}
+
+/// What a release feed's manifest (its `manifest.json`, as published) offers
+/// this app, as its checker decides it (crates/update `offer`).
+#[cfg(test)]
+fn offer_of(manifest: &str, running: &str, chosen: Channel, engine: Option<&str>, macos: Option<&str>) -> zeron_update::Offer {
+    let mut manifest: zeron_update::Manifest = serde_json::from_str(manifest).expect("a manifest");
+    manifest.channel = chosen;
+    zeron_update::offer(&manifest, running, chosen, engine, macos)
+}
+
 /// Whether the bundle on disk has moved on from the app that's open, to what's
 /// on offer or past it. (Not when it's the app that's open: going back to
 /// stable from a beta offers an older version on purpose.)
@@ -557,6 +589,10 @@ impl About {
             ("switch", Value::Bool(false)),
             ("flow", Value::from("idle")),
         ];
+        if crate::identity::CURRENT.updates_itself {
+            fields.push(("app_name", Value::from(crate::identity::CURRENT.name)));
+            fields.push(("releases", Value::from(zeron_update::RELEASES_PAGE)));
+        }
         if let Some(desktop) = &desktop {
             fields.retain(|(key, _)| !matches!(*key, "self_updating" | "channels" | "switch" | "flow"));
             desktop.fields(&mut fields);
@@ -664,6 +700,9 @@ mod tests {
         assert!(!value.field("self_updating").is_some_and(Value::truthy));
         assert!(!value.field("channels").is_some_and(Value::truthy));
         assert_eq!(value.field("app_version").map(|v| v.to_json()).as_deref(), Some(format!("\"{APP_VERSION}\"").as_str()));
+        // Its name and its own release notes are the Zeron app's alone (About's copy and link stay as they were otherwise).
+        assert_eq!(value.field("releases").is_some(), cfg!(feature = "cutover"));
+        assert_eq!(value.field("app_name").is_some(), cfg!(feature = "cutover"));
     }
 
     #[test]
@@ -688,5 +727,54 @@ mod tests {
         assert_eq!(moved_on_to(&status("rolledBack", "0.3.0"), "0.2.0"), None);
         // A beta's engine ahead of its app, with no update: no restart offered.
         assert_eq!(moved_on_to(&json!({ "currentVersion": "0.3.0" }), "0.2.0"), None);
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+    use crate::identity::{Build, of};
+    use zeron_update::Offer;
+
+    fn manifest(name: &str) -> String {
+        std::fs::read_to_string(format!("{}/tests/fixtures/updates/{name}.json", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    /// Only the Zeron app itself updates itself, from the fork's releases; the
+    /// beta leaves it to the Zeron app beside it.
+    #[test]
+    fn the_zeron_app_updates_itself_from_the_fork_s_releases() {
+        assert_eq!(app_feed(of(Build::Cutover, true)), Some(Some(zeron_update::RELEASES_FEED.to_owned())));
+        assert!(zeron_update::RELEASES_FEED.contains("ReinaMacCredy/zeron"));
+        assert_eq!(app_feed(of(Build::Beta, true)), None);
+        assert_eq!(app_feed(of(Build::Development, true)), Some(None));
+        // Downloads by itself as the other interface decides: the variable, else its switch, else not.
+        let zeron = of(Build::Cutover, true);
+        assert!(!automatic(zeron, None, None));
+        assert!(automatic(zeron, None, Some(true)));
+        assert!(!automatic(zeron, Some(false), Some(true)));
+        assert!(automatic(zeron, Some(true), None));
+        assert!(!automatic(of(Build::Beta, true), Some(true), Some(true)));
+        assert!(!automatic(of(Build::Development, true), Some(true), Some(true)));
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(auto_update_setting(dir.path()), None);
+        std::fs::write(dir.path().join("ui-settings.json"), r#"{ "autoUpdate": true }"#).unwrap();
+        assert_eq!(auto_update_setting(dir.path()), Some(true));
+    }
+
+    #[test]
+    fn a_release_is_offered_as_the_checker_decides() {
+        let stable = Channel::Stable;
+        assert_eq!(offer_of(&manifest("stable-newer"), "0.2.132", stable, Some("0.2.132"), Some("15.1")), Offer::Newer);
+        assert_eq!(offer_of(&manifest("stable-same"), "0.2.132", stable, None, Some("15.1")), Offer::Current);
+        assert_eq!(offer_of(&manifest("stable-older"), "0.2.132", stable, None, Some("15.1")), Offer::Current);
+        assert_eq!(offer_of(&manifest("garbage-version"), "0.2.132", stable, None, Some("15.1")), Offer::Current);
+        assert!(matches!(offer_of(&manifest("needs-newer-macos"), "0.2.132", stable, None, Some("14.6")), Offer::Held(why) if why.contains("macOS 15.0")));
+        assert_eq!(offer_of(&manifest("needs-newer-macos"), "0.2.132", stable, None, Some("15.0")), Offer::Newer);
+        // Beta chosen on a stable build: a newer beta installs.
+        assert_eq!(offer_of(&manifest("beta-newer"), "0.2.132", Channel::Beta, Some("0.2.132"), Some("15.1")), Offer::Newer);
+        // Leaving beta: Stable's release replaces it though older, unless the beta's engine is newer than Stable's.
+        assert_eq!(offer_of(&manifest("stable-older"), "0.2.133-beta.1", stable, Some("0.2.131"), Some("15.1")), Offer::Switch);
+        assert!(matches!(offer_of(&manifest("stable-older"), "0.2.133-beta.1", stable, Some("0.2.132"), Some("15.1")), Offer::Held(_)));
     }
 }

@@ -1,0 +1,17 @@
+{
+  "sidebarWidth": 256.0,
+  "sidebarCompact": false,
+  "sidebarSort": "lastUpdated",
+  "accent": "themeDefault",
+  "accentColor": "teal",
+  "surface": "themeDefault",
+  "frost": { "tint": 0.2, "dimBackdrop": true, "backdropBrightness": 3.0 },
+  "codeFontFamily": "geist",
+  "uiFontFamily": "geist",
+  "mathFont": "newerThanThisBuild",
+  "mathSize": 99.6,
+  "themeSelection": { "light": "zeron-light", "dark": "zeron-dark" },
+  "htmlOpenApp": { "kind": "app", "path": "/Applications/Safari.app" },
+  "tasksView": "list",
+  "appearance": "system"
+}

@@ -960,7 +960,7 @@ end
 -- ---------------------------------------------------------------------------
 -- The page.
 
-type Choice = { id: string, icon: Icon.Name, label: string, key: string, run: () -> () }
+type Choice = { id: string, icon: Icon.Name, label: string, key: string, run: () -> (), shown: (() -> boolean)? }
 
 M.Page = ui.component(function(props: Props): Node
 	local sid = props.session
@@ -989,11 +989,47 @@ M.Page = ui.component(function(props: Props): Node
 			fork(sid)
 		end })
 	end
+	-- A Device tab (gpui's pane tool): while the Device built-in is on, from
+	-- a chat on this computer with an engine that has devices, and none open.
+	if sid then
+		local Device = (require :: any)("@app/screens/device/panel")
+		local Builtins = require("@app/screens/plugins/builtins")
+		table.insert(choices, {
+			id = "panel-open-device",
+			icon = "smartphone",
+			label = "panel.empty.device",
+			key = "D",
+			run = function()
+				props.open_kind("device")
+			end,
+			shown = function(): boolean
+				if not Builtins.on("device") or Device.unavailable(sid) ~= nil then
+					return false
+				end
+				for _, t in panel_state.of(props.key).tabs do
+					if t.kind == "device" then
+						return false
+					end
+				end
+				return true
+			end,
+		})
+	end
 	local letters: { [string]: () -> () } = {}
 	local rows: { Node } = {}
 	for _, c in choices do
-		letters[c.key] = c.run
-		table.insert(rows, PanelHome.Choice { id = c.id, icon = c.icon, label = locale.t(c.label), key = c.key, on_click = c.run })
+		local shown = c.shown
+		if shown then
+			letters[c.key] = function()
+				if shown() then
+					c.run()
+				end
+			end
+			table.insert(rows, ui.show(shown, PanelHome.Choice { id = c.id, icon = c.icon, label = locale.t(c.label), key = c.key, on_click = c.run }))
+		else
+			letters[c.key] = c.run
+			table.insert(rows, PanelHome.Choice { id = c.id, icon = c.icon, label = locale.t(c.label), key = c.key, on_click = c.run })
+		end
 	end
 	-- Its letters heard while it's here (one home at a time: the last made).
 	local mine: Live = {

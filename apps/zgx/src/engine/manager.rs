@@ -9,6 +9,10 @@
 //! none answering this app waits. A staging engine (port 27871,
 //! ~/.zeron-staging) or any other edge is refused.
 //!
+//! **The Zeron app itself** (`cutover`, src/identity.rs) is the beta's rule,
+//! except that a release build starts that engine when none answers, as
+//! Zeron.app does (`spawn_production`); a debug build never does.
+//!
 //! **Development builds** work through a staging engine: the one at
 //! `ZERON_ZGX_ENGINE_PORT` (27871) with its data in `ZERON_ZGX_ENGINE_DATA`
 //! (~/.zeron-staging), scripts/staging-app.sh's. One already serving that port
@@ -163,7 +167,8 @@ impl Config {
             data_dir,
             bin: exe.and_then(zeron_launch::engine_executable),
             home: None,
-            spawn: false,
+            // (The Zeron app itself, released: it starts its engine as Zeron.app does.)
+            spawn: matches!(crate::identity::CURRENT.engine, crate::identity::Engine::Production { starts: true }),
             edge: edge.into(),
             client: client.into(),
             callback_port,
@@ -276,6 +281,9 @@ impl Spawner {
 /// A development engine, detached (its own process group, no inherited
 /// pipes), so this app closing leaves it running; it logs to its data dir.
 fn spawn(config: &Config, bin: &Path) -> std::io::Result<()> {
+    if config.managed {
+        return spawn_production(config);
+    }
     std::fs::create_dir_all(&config.data_dir)?;
     // Which build it is, kept (an engine that reports it is this app's), as
     // its reaper asks below: off this thread, since asking runs the binary.
@@ -327,6 +335,23 @@ fn spawn(config: &Config, bin: &Path) -> std::io::Result<()> {
         let mut child = child;
         let _ = child.wait();
     });
+    Ok(())
+}
+
+/// The Zeron app's own engine (`cutover`, released), as Zeron.app starts it
+/// (crates/launch, the bundle's `Zeron Engine`): production's edge and
+/// sign-in, its port and data.
+fn spawn_production(config: &Config) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let launch = zeron_launch::LaunchConfig {
+        data_dir: config.data_dir.clone(),
+        ipc_port: config.port,
+        edge_url: config.edge.clone(),
+        workos_client_id: Some(config.client.clone()),
+        edge_token: None,
+        org_id: None,
+    };
+    zeron_launch::reap(zeron_launch::launch(&launch, &exe)?);
     Ok(())
 }
 
@@ -393,6 +418,7 @@ mod tests {
         let prod = crate::auth::production();
         let beta = config_of(&[], home, Some(&exe), &prod.edge).unwrap();
         assert_eq!((beta.port, beta.data_dir.clone()), (27654, home.join(".zeron")));
+        // (A debug build of the Zeron app itself never starts it either: src/identity.rs.)
         assert_eq!(beta.startable(), None, "never starts one: a restart or an update is the Zeron app's");
         assert_eq!((beta.edge.as_str(), beta.client.as_str(), beta.callback_port), (prod.edge.as_str(), prod.client.as_str(), 27641));
         assert!(beta.follows_bundle());

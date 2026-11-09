@@ -811,5 +811,9 @@ require("./cloud_stub")
 require("./usage_stub")
 -- The ACP registry's agents (Settings → Providers → Add an agent).
 require("./registry_stub")
+-- The device hub (Settings → Device hub, a chat's Device tab).
+require("./device_stub")
+-- Voice (Settings → Voice) and dictation's fake microphone.
+require("./voice_stub")
 
 return M

@@ -118,6 +118,10 @@ const ENGINE_METHODS: &[&str] = &[
     // Whether this window has the keys: banners set to "only when in the
     // background" hold while it does.
     "SetViewportFocus",
+    // Settings → Device hub (src/device.rs answers them, the mock's hub on a mock Dev).
+    "ListHubDevices",
+    "ConfigureDeviceHub",
+    "TestDeviceHost",
 ];
 
 pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
@@ -420,6 +424,9 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 return Err("refused".into());
             }
             let params = if params.is_object() { params } else { json!({}) };
+            if crate::device::is_hub_method(&method) {
+                return crate::device::call(method, params).await;
+            }
             engine::get()
                 .call(&method, params)
                 .await
@@ -1180,6 +1187,17 @@ mod tests {
         assert_eq!(threads["count"]["live_tools"].as_u64(), Some(n - 1));
         for method in ["GetToolSettings", "SetToolSettings", "GetPredictionSettings", "SetPredictionSettings"] {
             assert!(ENGINE_METHODS.contains(&method), "{method}");
+        }
+    }
+
+    #[test]
+    fn device_hub_s_methods_are_settings_and_go_to_the_hub() {
+        for method in ["ListHubDevices", "ConfigureDeviceHub", "TestDeviceHost"] {
+            assert!(ENGINE_METHODS.contains(&method), "{method}");
+            assert!(crate::device::is_hub_method(method), "{method}");
+        }
+        for method in ["OpenHubDevice", "SendHubDeviceInput", "WatchDeviceHub"] {
+            assert!(!ENGINE_METHODS.contains(&method), "{method} is the Device tab's (device.call), not Settings'");
         }
     }
 

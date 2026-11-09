@@ -38,6 +38,7 @@ mod cloud;
 mod dev;
 mod completion;
 mod desktop_blur;
+mod device;
 mod engine;
 mod engine_update;
 mod editor_menu;
@@ -47,12 +48,14 @@ mod fonts;
 mod github;
 mod haptics;
 mod heap;
+mod identity;
 mod html_pages;
 mod images;
 mod links;
 mod pasted;
 mod math;
 mod menu_bar;
+mod migration;
 mod mermaid;
 mod plugins;
 mod previews;
@@ -66,6 +69,7 @@ mod skills;
 mod terminal;
 mod tool_details;
 mod usage;
+mod voice;
 mod themes;
 mod transparency;
 mod visuals;
@@ -134,9 +138,8 @@ use zgx_desktop::{
 };
 use zgx_script::{ScriptHost, Shared, Value};
 
-/// Where `ui.persist` keeps its files: the beta's own, beside the Zeron app,
-/// apart from development builds', which are staging's.
-const APP_ID: &str = if cfg!(feature = "beta") { "zeron-beta" } else { "zeron-zgx" };
+/// Where `ui.persist` keeps its files (src/identity.rs).
+const APP_ID: &str = identity::CURRENT.app_id;
 
 /// Setup's window, in points: room for a step and its footer, no more.
 const ONBOARDING_SIZE: (f64, f64) = (680., 500.);
@@ -310,9 +313,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // The Zeron app's links (`zeron://`: a clicked banner, a chat's link),
     // delivered to the app as Zeron.app's are (src/links.rs).
-    if cfg!(feature = "beta") {
+    if let Some(id) = identity::CURRENT.application_id {
         application = application
-            .application_id("sh.zeron.app.zgx")?
+            .application_id(id)?
             .on_application_event(|event, _| {
                 if let zgx_desktop::ApplicationEvent::OpenUrls(urls) = event {
                     for url in urls {
@@ -509,13 +512,16 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     // (src/plugins/live.rs): the host's file is fixed as it's made, so it's
     // that folder's, whichever template is in use.
     // (A beta: the sidebar as it was in the app it replaces.)
-    if cfg!(feature = "beta") {
+    if cfg!(feature = "beta") && !identity::CURRENT.migrates {
         let from = engine::data_dir().map(|dir| dir.join("ui-settings.json"));
         let state = zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("script-state").join("app.luau"));
         carried_settings::carry(from.as_deref(), state.as_deref());
     }
+    // (The Zeron app, or `ZERON_ZGX_MIGRATE=1` on a debug build: the other interface's settings and drafts, once.)
+    let drafts = migration::at_launch(APP_ID);
     let host = script_host_at(cx, plugins::prepare_live(), "app.luau");
     host.shared("window", "main");
+    migration::seed_drafts(&host, drafts);
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
     // The host's own toasts over it (a template in preview, a switch you
@@ -780,6 +786,10 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         html_pages::install(&host);
         // Settings' account, organization and engine calls (src/settings.rs).
         settings::install(cx, &host);
+        // Settings → Device hub and a chat's Device tab (src/device.rs).
+        device::install(cx, &host);
+        // Settings → Voice and dictation (src/voice.rs).
+        voice::install(cx, &host);
         // The installed fonts, for Settings → Appearance's font pickers
         // (src/fonts.rs).
         fonts::install(&host);

@@ -25,6 +25,11 @@ path = "src/main.rs"
 # ~/.zeron, port 27654), managed as Zeron.app manages it. Without it, the app
 # stays on staging (src/auth.rs, src/engine/manager.rs).
 beta = []
+# The Zeron app itself, in Zeron.app's place (src/identity.rs,
+# scripts/package-zgx-cutover.sh): the beta's edge and engine, with
+# Zeron.app's bundle id, name and `zeron://`, its own updates, and the other
+# interface's settings and drafts carried in once (src/migration.rs).
+cutover = ["beta"]
 # The layout benchmarks that read a probed zgx (docs/zgx-layout-probe.patch;
 # `live_reflow_traced` in src/split_tests.rs says how). Off in every build.
 layout_probe = []

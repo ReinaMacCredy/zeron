@@ -734,7 +734,28 @@
       "footer_removed": "· 已移除",
       "notice_error": "错误",
       "notice_warning": "警告",
-      "notice_copy": "复制消息"
+      "notice_copy": "复制消息",
+      "dictation": {
+        "ready_title": "正在准备…",
+        "ready_line": "等出现“正在聆听”后再说话。",
+        "listening_title": "正在聆听",
+        "listening_line": "说完后松开 · 最长 1 分钟",
+        "finalizing_title": "正在转写…",
+        "finalizing_line": "正在本设备上处理。",
+        "no_speech_title": "未检测到语音",
+        "no_speech_line": "请检查麦克风，然后重试。",
+        "tapped_title": "按住以听写",
+        "tapped_line": "说话时请一直按住麦克风或快捷键。",
+        "unavailable_title": "听写不可用",
+        "stopped_title": "听写已停止",
+        "hold": "按住以听写",
+        "release": "松开以转写",
+        "transcribing": "正在转写",
+        "retry": "按住以重试听写",
+        "dismiss": "关闭",
+        "too_long": "听写耗时过长。你的草稿是安全的。请稍等片刻，然后尝试录制更短的内容。",
+        "no_host": "此版本无法使用听写。"
+      }
     },
     "markdown": {
       "fit_content": "适合内容",
@@ -3383,6 +3404,141 @@
         "description": "一个对话同时最多可以运行多少个委派任务。",
         "terms": "委派 任务 每个对话 同时 上限"
       }
+    },
+    "device_hub": {
+      "title": "设备中心",
+      "subtitle": "供智能体使用的模拟器和设备主机。",
+      "terms": "设备, 模拟器, ios, android, xcode",
+      "unread": "无法读取设备中心",
+      "loading": "正在加载…",
+      "hub": {
+        "label": "设备中心",
+        "terms": "模拟器, 版本"
+      },
+      "versions": {
+        "running": "运行中",
+        "required": "需要",
+        "installed": "已安装",
+        "none": "无",
+        "not_running": "未运行",
+        "unchecked": "尚未检查版本。",
+        "check": "检查版本",
+        "checking": "正在检查...",
+        "update": "更新到 v{version}",
+        "updating": "正在更新...",
+        "update_failed": "更新失败。请检查此主机的网络连接后重试。"
+      },
+      "platforms": {
+        "label": "平台支持",
+        "refresh": "刷新",
+        "terms": "xcode, android sdk"
+      },
+      "agent": {
+        "label": "智能体设备访问",
+        "terms": "智能体"
+      },
+      "float": {
+        "label": "自动显示浮动预览",
+        "hint": "智能体打开设备时显示浮动预览。",
+        "terms": "浮动"
+      },
+      "hosts": {
+        "label": "设备主机",
+        "hint": "添加装有模拟器运行时的远程电脑，所选环境会通过 SSH 连接并自动设置设备工具。",
+        "terms": "ssh, 远程, 添加主机, 测试连接",
+        "add": "添加主机",
+        "none": "没有设备主机。",
+        "same_machine": "同一台电脑上的主机会被跳过。",
+        "available": "{platform} 可用",
+        "test": "测试连接",
+        "remove": "移除",
+        "checking": "正在检查连接...",
+        "installing": "正在安装设备支持...",
+        "connecting": "正在连接...",
+        "failed": "连接失败：{detail}",
+        "local": "本机已可用",
+        "check_line": "{name}：{detail}"
+      },
+      "editor": {
+        "name": "名称",
+        "name_ph": "Mac mini",
+        "target": "SSH 目标",
+        "target_ph": "user@host 或 SSH 别名",
+        "identity": "身份文件",
+        "identity_ph": "SSH 配置默认",
+        "port": "端口",
+        "port_ph": "默认",
+        "test": "测试连接",
+        "checking": "正在检查...",
+        "save": "保存主机",
+        "saving": "正在保存..."
+      },
+      "errors": {
+        "port": "SSH 端口必须在 1 到 65535 之间。",
+        "id": "设备主机 ID 只能使用字母、数字、'-' 和 '_'。",
+        "reserved": "本地主机 ID 已被保留。",
+        "name": "设备主机需要名称。",
+        "target": "SSH 目标必须是 user@host 或 SSH 别名，不能包含空格或以 '-' 开头。",
+        "identity": "身份文件必须是绝对路径。"
+      }
+    },
+    "voice": {
+      "title": "语音",
+      "subtitle": "听写和 Codex 语音。",
+      "terms": "语音, 听写, 麦克风, codex",
+      "conversation": "语音对话",
+      "device": {
+        "label": "Codex 语音设备",
+        "hint": "运行 Codex；本设备把音频传送到 Codex 的语音服务",
+        "terms": "远程, 主机, 电脑",
+        "this": "本设备",
+        "local": "本地",
+        "offline": "离线",
+        "update": "更新 Zeron 以使用远程语音",
+        "available": "可用",
+        "unavailable": "不可用的设备",
+        "choose": "请选择其他设备"
+      },
+      "style": {
+        "label": "Codex 语音风格",
+        "hint": "在下一次语音会话中生效",
+        "terms": "语调",
+        "default": "Codex 默认"
+      },
+      "dictation": {
+        "section": "听写",
+        "label": "听写",
+        "terms": "语音转文字, 转写",
+        "downloading": "正在下载 · {done} / {total} MB",
+        "download": "需下载 {total} MB"
+      },
+      "mic": {
+        "label": "麦克风",
+        "terms": "输入, 音频",
+        "system": "系统默认",
+        "disconnected": "已断开的麦克风"
+      },
+      "shortcut": {
+        "label": "快捷键",
+        "hint": "按住说话，松开转写",
+        "terms": "热键, 按住"
+      },
+      "model": {
+        "section": "语音模型",
+        "label": "语音模型",
+        "terms": "parakeet, 模型, 下载, 移除",
+        "name": "Parakeet v3",
+        "size": "{total} MB",
+        "remove": "移除",
+        "remove_label": "移除语音模型"
+      },
+      "errors": {
+        "busy": "请先停止听写，再移除模型。",
+        "remove_failed": "无法移除模型。请检查文件夹权限后重试。",
+        "download_failed": "无法下载或校验模型。请检查网络连接和可用空间，然后重试。",
+        "cancelled": "下载已取消。",
+        "interrupted": "下载中断。请重试。"
+      }
     }
   },
   "common": {
@@ -4261,7 +4417,8 @@
       "terminal": "终端",
       "title": "打开标签页",
       "side_chat": "侧边对话",
-      "fork": "分叉对话"
+      "fork": "分叉对话",
+      "device": "设备"
     },
     "plugin_off": "其插件目前未启用。",
     "broken": {
@@ -5223,5 +5380,123 @@
     "move_to_trash": "移到废纸篓",
     "couldnt_trash": "无法将技能移到废纸篓：{why}",
     "try": "立即试用"
+  },
+  "device": {
+    "tab": "设备",
+    "off": "设备已在“设置 → 插件”中关闭。",
+    "rename": "重命名",
+    "rename_label": "设备标签名称",
+    "unavailable": {
+      "thread": "设备只能在会话中使用。",
+      "computer": "设备只能在会话所在的电脑上使用。",
+      "engine": "此 Zeron 引擎不支持设备。"
+    },
+    "description": "{host} · {version}",
+    "host_fallback": "设备主机",
+    "setup": {
+      "title": "设置设备",
+      "body": "使用模拟器之前，先查看此环境中将运行的内容。",
+      "steps_label": "设置步骤",
+      "step": {
+        "hub": "设备中心",
+        "simulators": "模拟器",
+        "agent": "智能体访问"
+      },
+      "hub_heading": "启用设备中心",
+      "hub_switch": "启用设备中心",
+      "hub_body": "让此环境可以打开模拟器，无论它们在本机还是远程设备主机上运行。",
+      "check_heading": "检查模拟器支持",
+      "check_note": "两个平台任选其一即可。修复缺失的平台不会影响另一个。",
+      "check_again": "重新检查",
+      "checking": "正在检查...",
+      "agent_heading": "允许智能体控制",
+      "agent_switch": "允许智能体控制设备",
+      "agent_body": "允许此环境中的新智能体会话启动并控制本地和远程设备，所需工具会自动设置。",
+      "agent_note": "保持关闭可以手动控制设备，而不让智能体访问。",
+      "cancel": "取消",
+      "back": "返回",
+      "continue": "继续",
+      "done": "完成",
+      "saving": "正在保存..."
+    },
+    "status": {
+      "installing_hub": "正在安装设备中心...",
+      "installing": "正在安装...",
+      "starting_hub": "正在启动设备中心...",
+      "starting": "正在启动...",
+      "updating_hub": "正在更新设备中心...",
+      "updating": "正在更新...",
+      "ready": "设备中心已就绪。",
+      "installing_agent": "正在安装智能体工具...",
+      "starting_agent": "正在启动智能体工具...",
+      "updating_agent": "正在更新智能体访问...",
+      "agent_failed": "智能体工具无法启动。"
+    },
+    "platform": {
+      "ios": "iOS",
+      "android": "Android",
+      "ready": "就绪",
+      "not_detected": "未检测到 {platform} 支持。",
+      "ios_no_sim": "已安装 Xcode，但没有可用的 iOS 模拟器。请在 Xcode 设置 → 组件中安装运行时。",
+      "android_no_avd": "已安装 Android SDK，但没有虚拟设备。请在 Android Studio → 设备管理器中创建一个。",
+      "ios_ok": "Xcode 和 iOS 模拟器可用。",
+      "android_ok": "Android SDK 和模拟器可用。"
+    },
+    "update": {
+      "failed_detail": "设备支持无法启动。",
+      "installing": "正在安装设备工具...",
+      "starting": "正在启动设备工具...",
+      "failed_note": "请检查主机连接和网络访问，然后重试。你的设备设置已保存。",
+      "retry": "重试"
+    },
+    "picker": {
+      "ios": "iOS 模拟器",
+      "android": "Android 模拟器",
+      "host_group": "{host} · {title}",
+      "running": "运行中",
+      "stopped": "已停止",
+      "open": "打开",
+      "start": "启动",
+      "opening": "正在打开...",
+      "row_label": "{action} {name}",
+      "detail": "{description} · {status}",
+      "empty": "此环境中没有找到模拟器。",
+      "failed": "设备中心启动失败。",
+      "android_hint": "没有找到 Android 虚拟设备。请在 Android Studio 的设备管理器中创建一个，然后刷新。",
+      "refresh": "刷新设备"
+    },
+    "host_note": {
+      "installing": "正在安装设备支持...",
+      "connecting": "正在连接...",
+      "failed": "连接失败：{detail}",
+      "failed_plain": "连接失败。",
+      "line": "{host} · {text}"
+    },
+    "booting": "正在启动 {names}... 这可能需要一分钟。",
+    "loading": {
+      "devices": "设备",
+      "finding": "正在查找设备...",
+      "opening": "正在打开设备...",
+      "starting": "正在启动设备...",
+      "installing": "正在安装设备支持...",
+      "step1": "第 1 步，共 2 步：打开设备",
+      "step2": "第 2 步，共 2 步：连接视频"
+    },
+    "powering_off": "正在关闭设备...",
+    "saved": "截图已保存到 {path}",
+    "dismiss_error": "关闭设备错误",
+    "stream": {
+      "connecting": "正在连接视频...",
+      "screen": "设备屏幕"
+    },
+    "rail": {
+      "home": "主屏幕",
+      "back": "返回",
+      "screenshot": "保存截图",
+      "capturing": "正在截图...",
+      "more": "更多",
+      "close": "关闭面板",
+      "power_off": "关机"
+    }
   }
 }

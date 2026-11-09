@@ -734,7 +734,28 @@
       "footer_removed": "· removed",
       "notice_error": "Error",
       "notice_warning": "Warning",
-      "notice_copy": "Copy message"
+      "notice_copy": "Copy message",
+      "dictation": {
+        "ready_title": "Getting ready…",
+        "ready_line": "Wait for Listening before speaking.",
+        "listening_title": "Listening",
+        "listening_line": "Release when you’re done · Up to 1 minute",
+        "finalizing_title": "Transcribing…",
+        "finalizing_line": "Processing on this device.",
+        "no_speech_title": "No speech detected",
+        "no_speech_line": "Check your microphone, then try again.",
+        "tapped_title": "Hold to dictate",
+        "tapped_line": "Keep holding the microphone or the shortcut while you speak.",
+        "unavailable_title": "Dictation unavailable",
+        "stopped_title": "Dictation stopped",
+        "hold": "Hold to dictate",
+        "release": "Release to transcribe",
+        "transcribing": "Transcribing",
+        "retry": "Hold to retry dictation",
+        "dismiss": "Dismiss",
+        "too_long": "Dictation took too long. Your draft is safe. Wait a moment, then try a shorter recording.",
+        "no_host": "Dictation isn't available in this build."
+      }
     },
     "markdown": {
       "fit_content": "Fit content",
@@ -3383,6 +3404,141 @@
         "description": "How many delegated tasks one chat may run at once.",
         "terms": "delegated tasks per chat running children limit"
       }
+    },
+    "device_hub": {
+      "title": "Device hub",
+      "subtitle": "Simulators, emulators and device hosts for agents.",
+      "terms": "device, simulator, emulator, ios, android, xcode",
+      "unread": "Couldn't read the device hub",
+      "loading": "Loading…",
+      "hub": {
+        "label": "Device hub",
+        "terms": "simulator, emulator, version"
+      },
+      "versions": {
+        "running": "Running",
+        "required": "Required",
+        "installed": "Installed",
+        "none": "None",
+        "not_running": "Not running",
+        "unchecked": "Versions have not been checked.",
+        "check": "Check versions",
+        "checking": "Checking...",
+        "update": "Update to v{version}",
+        "updating": "Updating...",
+        "update_failed": "Update failed. Check this host's network connection and try again."
+      },
+      "platforms": {
+        "label": "Platform support",
+        "refresh": "Refresh",
+        "terms": "xcode, android sdk"
+      },
+      "agent": {
+        "label": "Agent device access",
+        "terms": "agent"
+      },
+      "float": {
+        "label": "Auto-show floating preview",
+        "hint": "Show the floating preview when an agent opens a device.",
+        "terms": "float"
+      },
+      "hosts": {
+        "label": "Device hosts",
+        "hint": "Add remote machines with simulator or emulator runtimes installed, and the selected environments will connect over SSH and set up device tools automatically.",
+        "terms": "ssh, remote, add host, test connection",
+        "add": "Add host",
+        "none": "No device hosts.",
+        "same_machine": "Hosts on the same machine are skipped.",
+        "available": "{platform} available",
+        "test": "Test connection",
+        "remove": "Remove",
+        "checking": "Checking connection...",
+        "installing": "Installing device support...",
+        "connecting": "Connecting...",
+        "failed": "Connection failed: {detail}",
+        "local": "Already available locally",
+        "check_line": "{name}: {detail}"
+      },
+      "editor": {
+        "name": "Name",
+        "name_ph": "Mac mini",
+        "target": "SSH target",
+        "target_ph": "user@host or SSH alias",
+        "identity": "Identity file",
+        "identity_ph": "SSH config default",
+        "port": "Port",
+        "port_ph": "Default",
+        "test": "Test connection",
+        "checking": "Checking...",
+        "save": "Save host",
+        "saving": "Saving..."
+      },
+      "errors": {
+        "port": "The SSH port must be between 1 and 65535.",
+        "id": "A device host id uses letters, digits, '-' and '_' only.",
+        "reserved": "The local host id is reserved.",
+        "name": "A device host needs a name.",
+        "target": "The SSH target must be user@host or an SSH alias, without spaces or a leading '-'.",
+        "identity": "The identity file must be an absolute path."
+      }
+    },
+    "voice": {
+      "title": "Voice",
+      "subtitle": "Dictation and Codex voice.",
+      "terms": "voice, dictation, microphone, speech, codex",
+      "conversation": "Voice conversation",
+      "device": {
+        "label": "Codex voice device",
+        "hint": "Runs Codex; this device streams the audio to Codex's voice service",
+        "terms": "remote, host, machine",
+        "this": "This device",
+        "local": "Local",
+        "offline": "Offline",
+        "update": "Update Zeron to use remote voice",
+        "available": "Available",
+        "unavailable": "Unavailable device",
+        "choose": "Choose another device"
+      },
+      "style": {
+        "label": "Codex voice style",
+        "hint": "Applies to your next voice session",
+        "terms": "speech, tone",
+        "default": "Codex default"
+      },
+      "dictation": {
+        "section": "Dictation",
+        "label": "Dictation",
+        "terms": "dictate, speech to text, transcribe",
+        "downloading": "Downloading · {done} of {total} MB",
+        "download": "{total} MB download"
+      },
+      "mic": {
+        "label": "Microphone",
+        "terms": "input, audio",
+        "system": "System default",
+        "disconnected": "Disconnected microphone"
+      },
+      "shortcut": {
+        "label": "Shortcut",
+        "hint": "Hold to talk, release to transcribe",
+        "terms": "hotkey, hold"
+      },
+      "model": {
+        "section": "Speech model",
+        "label": "Speech model",
+        "terms": "parakeet, model, download, remove",
+        "name": "Parakeet v3",
+        "size": "{total} MB",
+        "remove": "Remove",
+        "remove_label": "Remove speech model"
+      },
+      "errors": {
+        "busy": "Stop dictation before removing the model.",
+        "remove_failed": "Could not remove the model. Check folder permissions and retry.",
+        "download_failed": "Couldn’t download or verify the model. Check your connection and free storage, then retry.",
+        "cancelled": "Download cancelled.",
+        "interrupted": "Download interrupted. Try again."
+      }
     }
   },
   "common": {
@@ -4261,7 +4417,8 @@
       "terminal": "Terminal",
       "title": "Open a tab",
       "side_chat": "Side chat",
-      "fork": "Fork chat"
+      "fork": "Fork chat",
+      "device": "Device"
     },
     "plugin_off": "Its plugin isn't on right now.",
     "broken": {
@@ -5223,5 +5380,123 @@
     "move_to_trash": "Move to Trash",
     "couldnt_trash": "Could not move the skill to the Trash: {why}",
     "try": "Try now"
+  },
+  "device": {
+    "tab": "Device",
+    "off": "Device is off in Settings → Plugins.",
+    "rename": "Rename",
+    "rename_label": "Device tab name",
+    "unavailable": {
+      "thread": "Devices are only available from a thread.",
+      "computer": "Devices are only available on the chat's own computer.",
+      "engine": "This Zeron engine does not support devices."
+    },
+    "description": "{host} · {version}",
+    "host_fallback": "Device host",
+    "setup": {
+      "title": "Set up devices",
+      "body": "Review what runs on this environment before using simulators and emulators.",
+      "steps_label": "Setup steps",
+      "step": {
+        "hub": "Device hub",
+        "simulators": "Simulators",
+        "agent": "Agent access"
+      },
+      "hub_heading": "Enable the device hub",
+      "hub_switch": "Enable device hub",
+      "hub_body": "Enable this environment to open simulators and emulators, whether they run here or on a remote device host.",
+      "check_heading": "Check simulator support",
+      "check_note": "You can use either platform. Fixing a missing platform does not block the other one.",
+      "check_again": "Check again",
+      "checking": "Checking...",
+      "agent_heading": "Allow agent control",
+      "agent_switch": "Allow agents to control devices",
+      "agent_body": "Allow new agent sessions in this environment to start and control local and remote devices, with required tools set up automatically.",
+      "agent_note": "Leave this off to keep manual device controls without giving agents access.",
+      "cancel": "Cancel",
+      "back": "Back",
+      "continue": "Continue",
+      "done": "Done",
+      "saving": "Saving..."
+    },
+    "status": {
+      "installing_hub": "Installing device hub...",
+      "installing": "Installing...",
+      "starting_hub": "Starting device hub...",
+      "starting": "Starting...",
+      "updating_hub": "Updating device hub...",
+      "updating": "Updating...",
+      "ready": "Device hub is ready.",
+      "installing_agent": "Installing agent tools...",
+      "starting_agent": "Starting agent tools...",
+      "updating_agent": "Updating agent access...",
+      "agent_failed": "Agent tools could not start."
+    },
+    "platform": {
+      "ios": "iOS",
+      "android": "Android",
+      "ready": "Ready",
+      "not_detected": "{platform} support was not detected.",
+      "ios_no_sim": "Xcode is installed, but no iOS Simulator is available. Install a runtime in Xcode Settings → Components.",
+      "android_no_avd": "The Android SDK is installed, but no virtual device exists. Create one in Android Studio → Device Manager.",
+      "ios_ok": "Xcode and iOS Simulator are available.",
+      "android_ok": "The Android SDK and Emulator are available."
+    },
+    "update": {
+      "failed_detail": "Device support could not start.",
+      "installing": "Installing device tools...",
+      "starting": "Starting device tools...",
+      "failed_note": "Check the host connection and network access, then retry. Your device settings are saved.",
+      "retry": "Retry"
+    },
+    "picker": {
+      "ios": "iOS Simulators",
+      "android": "Android Emulators",
+      "host_group": "{host} · {title}",
+      "running": "Running",
+      "stopped": "Stopped",
+      "open": "Open",
+      "start": "Start",
+      "opening": "Opening...",
+      "row_label": "{action} {name}",
+      "detail": "{description} · {status}",
+      "empty": "No simulators or emulators were found on this environment.",
+      "failed": "The device hub failed to start.",
+      "android_hint": "No Android virtual devices found. Create one in Android Studio's Device Manager, then refresh.",
+      "refresh": "Refresh devices"
+    },
+    "host_note": {
+      "installing": "Installing device support...",
+      "connecting": "Connecting...",
+      "failed": "Connection failed: {detail}",
+      "failed_plain": "Connection failed.",
+      "line": "{host} · {text}"
+    },
+    "booting": "Starting {names}... This can take a minute.",
+    "loading": {
+      "devices": "Devices",
+      "finding": "Finding devices...",
+      "opening": "Opening device...",
+      "starting": "Starting device...",
+      "installing": "Installing device support...",
+      "step1": "Step 1 of 2: open device",
+      "step2": "Step 2 of 2: connect video"
+    },
+    "powering_off": "Powering off device...",
+    "saved": "Saved screenshot to {path}",
+    "dismiss_error": "Dismiss device error",
+    "stream": {
+      "connecting": "Connecting video...",
+      "screen": "Device screen"
+    },
+    "rail": {
+      "home": "Home",
+      "back": "Back",
+      "screenshot": "Save screenshot",
+      "capturing": "Capturing...",
+      "more": "More",
+      "close": "Close panel",
+      "power_off": "Power off"
+    }
   }
 }

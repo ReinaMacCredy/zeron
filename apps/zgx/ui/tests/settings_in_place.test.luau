@@ -555,6 +555,38 @@ test("About says which Zeron this is, and that this app isn't what updates", fun
 	expect(asked(app, "open_url:https://github.com/zeronsh/comet/releases/tag/v0.2.131")).to_be(true)
 end)
 
+test("as the Zeron app itself, About says it updates itself and its release notes are the fork's", function()
+	-- (Whether the app updates itself is fixed for the process: known as the page opens.)
+	local app = open()
+	about(app, {
+		engine_version = "0.2.132",
+		app_version = "0.2.132",
+		self_updating = true,
+		channels = true,
+		flow = "idle",
+		app_name = "Zeron",
+		releases = "https://github.com/ReinaMacCredy/zeron/releases",
+		latest = "0.2.132",
+	})
+	app:click(`{NAV} >> role:tab "{ABOUT}"`)
+	app:frames(30)
+	expect(shows(app, PAGE, "Zeron updates itself")).to_be(true)
+	expect(shows(app, PAGE, "Updates go to the engine on this computer")).to_be(false)
+	expect(shows(app, PAGE, "Not packaged yet")).to_be(false)
+	expect(shows(app, PAGE, "Built ")).to_be(true)
+	app:scroll(PAGE, 2000)
+	app:frames(4)
+	app:click(`{PAGE} >> role:button "Release notes"`)
+	app:frames(4)
+	expect(asked(app, "open_url:https://github.com/ReinaMacCredy/zeron/releases/tag/v0.2.132")).to_be(true)
+	-- Version info for a bug report names this app.
+	app:scroll(PAGE, -2000)
+	app:frames(4)
+	app:click(`{PAGE} >> role:button "Copy"`)
+	app:frames(4)
+	expect(app:clipboard()).to_contain("App: Zeron 0.2.132")
+end)
+
 test("Updates lists each device's Zeron: this one updated above, one behind to update there, Cloud's left out", function()
 	local app = open(ABOUT)
 	app:command("device_versions")

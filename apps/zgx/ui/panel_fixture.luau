@@ -9,6 +9,8 @@ ui.theme.strict("warn")
 local ds = require("@ds")
 ds.setup()
 local stub = require("@app/files_stub")
+-- The device hub, as the host's mock answers it (a chat's Device tab).
+require("@app/device_stub")
 local settle = stub.settle
 
 -- The terminal's host and zgx's terminal, stood in for: an engine terminal

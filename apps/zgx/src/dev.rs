@@ -4,7 +4,8 @@
 //! - `ZERON_ZGX_DEV_PLUGINS` loads unsigned plugins with all they ask for;
 //! - `ZERON_ZGX_REVIEW` / `ZERON_ZGX_TEMPLATE_REVIEW` serve devtools (click,
 //!   type) on a consent window;
-//! - `ZGX_INSPECT_SOCKET` serves devtools on the main window.
+//! - `ZGX_INSPECT_SOCKET` serves devtools on the main window;
+//! - `ZERON_ZGX_MIGRATE` carries the engine's `ui-settings.json` and drafts in once (src/migration.rs).
 //!
 //! An agent (or anything else) launching Zeron sets its environment, so a
 //! shipped build reads none of them. Every read goes through `switch`
@@ -20,6 +21,7 @@ pub const SWITCHES: &[&str] = &[
     "ZERON_ZGX_REVIEW",
     "ZERON_ZGX_TEMPLATE_REVIEW",
     "ZGX_INSPECT_SOCKET",
+    "ZERON_ZGX_MIGRATE",
 ];
 
 /// The switches scripts/smoke.sh drives a release build with (as it does

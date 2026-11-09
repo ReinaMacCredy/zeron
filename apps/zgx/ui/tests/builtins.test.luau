@@ -57,10 +57,16 @@ end)
 test("each switch off takes its doors away at once, and on brings them back", function()
 	local app = open()
 	expect(app:has("#rail-usage")).to_be(true)
-	expect(app:has('role:button "Dictate"')).to_be(true)
+	-- (The mic, as gpui's, once Dictation is on and its model here: U28.)
+	expect(app:has('role:button "Hold to dictate"')).to_be(false)
+	app:command("voice_stub.dictation_on")
+	app:frames(10)
+	expect(app:has('role:button "Hold to dictate"')).to_be(true)
 	settings(app, "Plugins")
 	expect(nav_has(app, "Usage")).to_be(true)
 	expect(nav_has(app, "Appshots")).to_be(true)
+	expect(nav_has(app, "Voice")).to_be(true)
+	expect(nav_has(app, "Device hub")).to_be(true)
 
 	-- Usage: the rail's ring and its Settings page.
 	flip(app, "Usage")
@@ -77,18 +83,26 @@ test("each switch off takes its doors away at once, and on brings them back", fu
 	flip(app, "Appshots")
 	expect(nav_has(app, "Appshots")).to_be(true)
 
-	-- Voice: the composer's mic.
+	-- Voice: the composer's mic and Settings → Voice.
 	flip(app, "Voice")
-	expect(app:has('role:button "Dictate"')).to_be(false)
+	expect(app:has('role:button "Hold to dictate"')).to_be(false)
+	expect(nav_has(app, "Voice")).to_be(false)
 	flip(app, "Voice")
-	expect(app:has('role:button "Dictate"')).to_be(true)
+	expect(app:has('role:button "Hold to dictate"')).to_be(true)
+	expect(nav_has(app, "Voice")).to_be(true)
+
+	-- Device: Settings → Device hub (the panel's Device row is tests/device_tab's).
+	flip(app, "Device")
+	expect(nav_has(app, "Device hub")).to_be(false)
+	flip(app, "Device")
+	expect(nav_has(app, "Device hub")).to_be(true)
 
 	-- Keep awake: the engine's own key, through the host.
 	flip(app, "Keep awake")
 	expect(calls(app)).to_contain("keep_awake.set")
 	expect(switch_of(app, "Keep awake")).to_contain("unchecked")
 
-	-- Review, Home widgets and Device: their keys (Review's door is tests/review_plugin's; the other two have none yet).
+	-- Review, Home widgets and Device: their keys (Review's door is tests/review_plugin's, Home widgets has none yet, Device's above).
 	for _, name in { "Review", "Home widgets", "Device" } do
 		flip(app, name)
 		expect(switch_of(app, name)).to_contain("unchecked")

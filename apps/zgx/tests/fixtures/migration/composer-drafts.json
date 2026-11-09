@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "drafts": {
+    "chat-a": {
+      "prompt": "Look at [Image 1] and the log",
+      "attachments": [
+        { "id": "att-1", "name": "Image 1.png", "path": "$DATA/composer-drafts/shot.png", "mention": 1 },
+        { "id": "att-2", "name": "gone.png", "path": "$DATA/composer-drafts/gone.png" },
+        { "id": "att-3", "name": "build.log", "path": "$DATA/build.log", "linked": true }
+      ],
+      "appshots": [
+        {
+          "id": "shot-1", "appName": "Safari", "bundleIdentifier": "com.apple.Safari", "windowTitle": "Zeron",
+          "accessibilityFormatVersion": 1, "accessibilityContent": "Zeron — the page", "accessibilityTruncated": false,
+          "screenshot": { "id": "shot-1-png", "name": "Safari.png", "path": "$DATA/composer-drafts/safari.png" },
+          "screenshotDimensions": [1200, 800], "capturedAt": "2026-11-01T10:00:00Z"
+        }
+      ]
+    },
+    "side-1": { "prompt": "a side chat's words", "attachments": [], "appshots": [] },
+    "draft-old": { "prompt": "an older new chat", "attachments": [], "appshots": [] },
+    "draft-new": { "prompt": "the newest new chat", "attachments": [], "appshots": [] },
+    "chat-empty": { "prompt": "   ", "attachments": [], "appshots": [] }
+  },
+  "sessions": [
+    { "id": "draft-old", "noProject": true, "newWorktree": false, "createdAt": "2026-11-01T09:00:00Z" },
+    { "id": "draft-new", "spaceId": "space-zeron", "noProject": false, "newWorktree": true, "createdAt": "2026-11-02T09:00:00Z" }
+  ]
+}

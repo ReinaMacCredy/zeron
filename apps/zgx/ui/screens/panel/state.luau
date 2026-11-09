@@ -17,7 +17,7 @@
 
 local M = {}
 
-export type Kind = "files" | "terminal" | "plugin" | "browser" | "side_chat" | "subagent"
+export type Kind = "files" | "terminal" | "plugin" | "browser" | "side_chat" | "subagent" | "device"
 export type Tab = {
 	id: string,
 	kind: Kind,
@@ -48,6 +48,9 @@ export type Tab = {
 	-- A lane's (a side chat, a subagent: screens/chat/lane_tab): the chat
 	-- it shows (a side chat's id, a subagent's doc).
 	chat: string?,
+	-- A device tab's (screens/device/panel): the device it shows, once
+	-- bound, { host, id }; a name given it by Rename.
+	device_target: { host: string, id: string }?,
 }
 export type Session = { tabs: { Tab }, active: string?, visited: { string } }
 
@@ -312,6 +315,22 @@ function M.set_url(key: string, id: string, url: string?)
 		if t.id == id and t.url ~= url then
 			local next_tab = table.clone(t)
 			next_tab.url = url
+			s.tabs[i] = next_tab
+			write(key, s)
+		end
+	end
+end
+
+-- A tab's own fields changed (a device tab's device and name): kept with
+-- the tab, so a reload shows the same.
+function M.patch(key: string, id: string, fields: { [string]: any })
+	local s = copy(peek(key))
+	for i, t in s.tabs do
+		if t.id == id then
+			local next_tab = table.clone(t) :: any
+			for k, v in fields do
+				next_tab[k] = if v == false then nil else v
+			end
 			s.tabs[i] = next_tab
 			write(key, s)
 		end

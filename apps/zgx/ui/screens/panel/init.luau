@@ -186,6 +186,20 @@ do
 	end
 end
 
+-- A device tab's (screens/device/panel), loaded the same way.
+local Device: any = nil
+do
+	local ok, found = pcall(function(): any
+		return (require :: any)("@app/screens/device/panel")
+	end)
+	if ok then
+		Device = found
+	else
+		print(`zeron-zgx: the panel's device tab didn't load: {found}`)
+	end
+end
+local Builtins = require("@app/screens/plugins/builtins")
+
 type Tab = state.Tab
 
 local M = {}
@@ -705,7 +719,14 @@ end
 -- What a tab's menu has after Close and its kin: a side chat's, the
 -- sidebar's menu for its chat (rename, copy, archive, delete), once it's
 -- made; none for the rest (a subagent's has nothing of its own to do).
-function M.tab_menu(tab: Tab): { any }
+function M.tab_menu(tab: Tab, rename: (() -> ())?): { any }
+	if tab.kind == "device" then
+		-- (Rename, once it shows a device: gpui's `device_rename_menu_row`.)
+		if rename and Device and Device.bound(tab) then
+			return { { label = ui.t("device.rename"):get(), icon = "pen", on_select = rename } }
+		end
+		return {}
+	end
 	if tab.kind ~= "side_chat" or not tab.chat or not lanes_card then
 		return {}
 	end
@@ -723,6 +744,9 @@ local function title_of(tab: Tab): (string, boolean)
 	end
 	if tab.kind == "plugin" then
 		return tab.title or ui.t("panel.tab.plugin"):get(), false
+	end
+	if tab.kind == "device" then
+		return if Device then Device.title(tab) else ui.t("device.tab"):get(), false
 	end
 	if tab.kind == "browser" then
 		local t = if Browser then Browser.title(tab) else nil
@@ -792,6 +816,8 @@ M.Panel = ui.component(function(props: Props): Node
 			Terminal.close(tab)
 		elseif tab and tab.kind == "browser" and Browser then
 			Browser.close(tab)
+		elseif tab and tab.kind == "device" and Device then
+			Device.close(tab)
 		elseif tab and (tab.kind == "side_chat" or tab.kind == "subagent") and lanes_card then
 			-- Its chat let go (a reload never does this).
 			lanes_card.watch(tab.id, nil)
@@ -861,6 +887,63 @@ M.Panel = ui.component(function(props: Props): Node
 	-- Each tab's box, by id (for bringing the active one into view).
 	local chip_refs: { [string]: any } = {}
 
+	-- A device tab's Rename (gpui's `begin_rename`): its name in a field in
+	-- the tab, all of it chosen; Enter or leaving it keeps what's typed
+	-- (nothing typed: the device's own name again), Escape puts it back.
+	local renaming = ui.use_state(nil :: string?)
+	local function rename_field(id: string): Node
+		local k = key:peek() or ""
+		local t = state.find(k, id)
+		local initial = if t and Device then Device.title(t) else ""
+		local value = ui.use_state(initial)
+		local field = ui.ref()
+		local done = false
+		local function finish(commit: boolean)
+			if done then
+				return
+			end
+			done = true
+			if commit then
+				local typed = string.gsub(value:peek(), "^%s*(.-)%s*$", "%1")
+				state.patch(k, id, { title = if typed == "" then false else typed })
+			end
+			if renaming:peek() == id then
+				renaming:set(nil)
+			end
+		end
+		return ui.div {
+			id = "device-tab-rename",
+			w = LABEL_MAX,
+			on_press = function() end,
+			ui.input {
+				ref = field,
+				value = value,
+				label = ui.t("device.rename_label"),
+				select_on_focus = true,
+				on_mount = function(el)
+					el:focus()
+				end,
+				w_full = true,
+				h = 20,
+				text_size = "$font.size.sm",
+				color = "$text.primary",
+				on_blur = function()
+					finish(true)
+				end,
+				on_key = function(e): boolean
+					if e.key == "Enter" then
+						finish(true)
+						return true
+					elseif e.key == "Escape" then
+						finish(false)
+						return true
+					end
+					return false
+				end,
+			},
+		}
+	end
+
 	-- A tab in the strip.
 	local function chip(tab: Tab, _i: number): Node
 		local id = tab.id
@@ -894,6 +977,12 @@ M.Panel = ui.component(function(props: Props): Node
 					return ui.image { src = path, w = 14, h = 14, fit = "contain", rounded = "$radius.sm" }
 				end)
 			elseif tab.kind == "plugin" then Icon { name = (tab.icon or "widget") :: any, size = 14 }
+			elseif tab.kind == "device" then ui.presence(function(): string
+					local t = state.find(key:peek() or "", id) or tab
+					return if Device then Device.icon(t) else "smartphone"
+				end, function(name: string): Node
+					return Icon { name = name :: any, size = 14 }
+				end)
 			elseif (tab.kind == "side_chat" or tab.kind == "subagent") and Lanes then (if Lanes.TabIcon then Lanes.TabIcon(tab) else Icon { name = Lanes.icon(tab) :: any, size = 14 })
 			else ui.presence(function(): string
 				-- (A file tab's file by its name; none yet, "": by the file,
@@ -980,7 +1069,9 @@ M.Panel = ui.component(function(props: Props): Node
 						close_many(others("right"))
 					end },
 				}
-				local more = M.tab_menu(tab)
+				local more = M.tab_menu(tab, function()
+					renaming:set(id)
+				end)
 				if #more > 0 then
 					table.insert(entries, { separator = true })
 					for _, e in more do
@@ -1114,13 +1205,20 @@ M.Panel = ui.component(function(props: Props): Node
 				-- (Dropped: it's where it was dragged to already.)
 				on_drop = function(_payload: any) end,
 				make_tile(),
-				FadeText {
-					title,
-					max_w = LABEL_MAX,
-					min_w = 0,
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
-				},
+				ui.presence(function(): string
+					return if renaming:get() == id then "rename" else "title"
+				end, function(which: string): Node
+					if which == "rename" then
+						return rename_field(id)
+					end
+					return FadeText {
+						title,
+						max_w = LABEL_MAX,
+						min_w = 0,
+						text_size = "$font.size.sm",
+						weight = "$font.weight.medium",
+					}
+				end),
 				-- Its end: × under the pointer; else a dot while unsaved, or
 				-- whether a side chat awaits a person or is at work.
 				ui.row {
@@ -1399,6 +1497,23 @@ M.Panel = ui.component(function(props: Props): Node
 	local function body(k: string, tab: Tab): Node
 		if (tab.kind == "side_chat" or tab.kind == "subagent") and Lanes then
 			return Lanes.Tab { tab = tab, panel_key = k }
+		end
+		if tab.kind == "device" then
+			-- (The Device built-in off, the tab says so: Settings → Plugins brings it back.)
+			return ui.presence(function(): string
+				return if Device and Builtins.on("device") then "on" else "off"
+			end, function(which: string): Node
+				if which == "on" then
+					return Device.Tab { tab = tab, panel_key = k }
+				end
+				return ds.EmptyState {
+					icon = "smartphone",
+					size = "sm",
+					fill = true,
+					title = ui.t("device.tab") :: any,
+					body = ui.t("device.off") :: any,
+				}
+			end, { w_full = true, grow = 1, min_h = 0 })
 		end
 		if tab.kind == "plugin" then
 			-- What its plugin fills, by selector (`.plugin-tab`): until then,

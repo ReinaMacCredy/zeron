@@ -62,7 +62,7 @@ fn art_set() -> Vec<String> {
 
 /// `settings` (`ui-settings.json`) as files of `ui.persist`, each a name and
 /// its value; only what it says and this app has.
-fn carried(settings: &Json) -> Vec<(String, Json)> {
+pub(crate) fn carried(settings: &Json) -> Vec<(String, Json)> {
     let mut out = Vec::new();
     let sidebar = |name: &str| format!("{SIDEBAR}{name}.json");
     for (from, to) in [
@@ -251,7 +251,7 @@ fn carried_prefs(settings: &Json) -> Vec<(String, Json)> {
 }
 
 /// A copy in this app's own folder: the other app removes its file when it replaces it.
-fn carried_picture(settings: &Json, pictures: &Path) -> Vec<(String, Json)> {
+pub(crate) fn carried_picture(settings: &Json, pictures: &Path) -> Vec<(String, Json)> {
     let background = &settings["newThreadComposerBackground"];
     let Some((path, w, h)) = background["path"].as_str().and_then(|picture| crate::settings::keep_wallpaper_at_its_size(picture, pictures)) else {
         return Vec::new();
@@ -278,23 +278,39 @@ fn carried_picture(settings: &Json, pictures: &Path) -> Vec<(String, Json)> {
 /// says and `state` has no value for. A setting that can't be written is left
 /// at its default.
 fn carry_into(state: &Path, pictures: &Path, settings: &Json) {
-    let touched = |set: &[String]| set.iter().any(|name| state.join(name).exists());
+    carry_with(state, pictures, settings, Vec::new(), &|name| state.join(name).exists(), &|_, _| true);
+}
+
+/// `carry_into`, with `more` beside what `carried` says, `held` saying which
+/// of `state`'s files are a value of this app's own, and `worth` which values
+/// are worth writing: the names written.
+pub(crate) fn carry_with(
+    state: &Path,
+    pictures: &Path,
+    settings: &Json,
+    more: Vec<(String, Json)>,
+    held: &dyn Fn(&str) -> bool,
+    worth: &dyn Fn(&str, &Json) -> bool,
+) -> Vec<String> {
+    let touched = |set: &[String]| set.iter().any(|name| held(name));
     let (frame, art) = (frame_set(), art_set());
     let (frame_touched, art_touched) = (touched(&frame), touched(&art));
     let mut wanted = carried(settings);
+    wanted.extend(more);
     if !art_touched {
         wanted.extend(carried_picture(settings, pictures));
     }
     wanted.retain(|(name, _)| !(frame_touched && frame.contains(name)) && !(art_touched && art.contains(name)));
+    let mut written = Vec::new();
     if wanted.is_empty() || std::fs::create_dir_all(state).is_err() {
-        return;
+        return written;
     }
     for (name, value) in wanted {
-        let file = state.join(name);
-        if !file.exists() {
-            let _ = std::fs::write(file, value.to_string());
+        if !held(&name) && worth(&name, &value) && !written.contains(&name) && std::fs::write(state.join(&name), value.to_string()).is_ok() {
+            written.push(name);
         }
     }
+    written
 }
 
 /// Before the main window's scripts first read them.

@@ -15,7 +15,8 @@
 -- The host's `about` (shared): { app_version, app_build, engine_version?,
 -- engine_build?, latest?, available, checked_at?, error?, self_updating,
 -- channels, channel?, channel_note?, beta_minimum?, held?, switch, flow,
--- flow_version?, flow_error?, blocker? }.
+-- flow_version?, flow_error?, blocker?, app_name?, releases? (the Zeron
+-- app's own release notes, where they're not `M.RELEASES`) }.
 
 local ds = require("@ds")
 local host = require("@app/screens/settings/host")
@@ -76,6 +77,8 @@ export type About = {
 	flow_version: string?,
 	flow_error: string?,
 	blocker: string?,
+	app_name: string?,
+	releases: string?,
 }
 
 M.now = ui.shared("about", { app_version = "", available = false } :: About)
@@ -251,7 +254,7 @@ function M.summary(a: About): string
 	if a.engine_build then
 		table.insert(lines, `Engine build: {a.engine_build}`)
 	end
-	table.insert(lines, `App: zgx {a.app_version}{if a.app_build and a.app_build ~= "" then ` (built {a.app_build})` else ""}`)
+	table.insert(lines, `App: {a.app_name or "zgx"} {a.app_version}{if a.app_build and a.app_build ~= "" then ` (built {a.app_build})` else ""}`)
 	if a.latest then
 		table.insert(lines, `Newest release: {a.latest}`)
 	end
@@ -355,6 +358,13 @@ local function fact(text: () -> string): Node
 		color = "$text.secondary",
 		tabular = true,
 	}
+end
+
+-- The release notes of the newest version known, on this app's own releases page.
+function M.release_notes(a: About): string
+	local page = a.releases or M.RELEASES
+	local v = a.latest or a.engine_version
+	return if v then `{page}/tag/v{v}` else page
 end
 
 local function now_update(): Update
@@ -529,12 +539,10 @@ function M.view(): Node
 					label = ui.t("settings.about.release_notes.label"),
 					description = ui.t("settings.about.release_notes.description"),
 					on_click = function()
-						local v = M.now:peek().latest or M.now:peek().engine_version
-						host.invoke("open_url", if v then `{M.RELEASES}/tag/v{v}` else M.RELEASES)
+						host.invoke("open_url", M.release_notes(M.now:peek()))
 					end,
 					href = function(): string
-						local v = M.now:peek().latest or M.now:peek().engine_version
-						return if v then `{M.RELEASES}/tag/v{v}` else M.RELEASES
+						return M.release_notes(M.now:peek())
 					end,
 				}),
 				row("website", {

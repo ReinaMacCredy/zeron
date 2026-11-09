@@ -1,0 +1,22 @@
+{
+  "sidebarWidth": 270.0,
+  "sidebarCollapsed": true,
+  "sidebarOrganization": "inbox",
+  "sidebarSort": "lastUpdated",
+  "soundEnabled": false,
+  "accentColor": "violet",
+  "filesEditorFontSize": 15.0,
+  "pullRequestDestination": "browser",
+  "skillsInSlashMenu": true,
+  "uiFontFamily": "inter",
+  "uiFontSize": 14,
+  "mathSize": "big",
+  "keymap": {
+    "toggleSidebar": "mod-s",
+    "toggleChanges": "mod-b",
+    "newSession": "mod-t"
+  },
+  "transcriptWidth": 1600.0,
+  "reduceMotion": "system",
+  "onboardingCompleted": true
+}
