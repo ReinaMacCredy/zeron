@@ -175,7 +175,7 @@ export type Name =
 -- `glyph_stroke`: its lines in the theme's glyph stroke, not its own: for an
 -- icon that stands beside the panel toggles (ds/sidebar_icon), so it weighs as
 -- they do in either theme.
-export type Props = { name: Name | () -> Name, size: number?, glyph_stroke: boolean? }
+export type Props = { name: Name | () -> Name, size: number?, glyph_stroke: boolean?, color: any? }
 
 -- One glyph for search everywhere: the sidebar's (an older name for the
 -- magnifying glass draws it too).
@@ -213,6 +213,7 @@ return function(props: Props): Node
 		shrink = 0,
 		-- A glyph says nothing a screen reader needs: what holds it is named.
 		aria_hidden = true,
+		color = props.color,
 		tint = "currentColor",
 	}
 end

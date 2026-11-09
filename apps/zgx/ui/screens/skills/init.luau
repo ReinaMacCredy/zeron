@@ -280,10 +280,9 @@ local function Grid(width: State<number>): Node
 			id = "skills-grid",
 			w_full = true,
 			gap = "$space.2",
-			enter = motion.transition({ opacity = { 0, 1 }, duration = 150, ease = "out(3)" }),
 			table.unpack(rows),
 		}
-	end, { w_full = true })
+	end, { w_full = true, enter = motion.transition({ opacity = { 0, 1 }, duration = 150, ease = "out(3)" }) })
 end
 
 local function Badge(id: string): Node
