@@ -151,6 +151,10 @@ local function sidebar_limit(): number
 	runs["shell.quick_capture"] = function()
 		require("@app/screens/tasks/capture").toggle()
 	end
+	-- About Zeron: Settings → About & updates, which says which Zeron this is.
+	runs["shell.about"] = function()
+		route.settings("about")
+	end
 	-- Check for Updates…: Zeron's update prompt (crates/ui shell.rs `render_update_prompt`), its dialog loaded the first time it's asked for, from a timer.
 	runs["shell.check_updates"] = function()
 		ui.after(0, function()

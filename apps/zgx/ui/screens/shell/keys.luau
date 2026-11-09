@@ -62,6 +62,7 @@ for _, k in
 		{ id = "shell.palette", title = "Search", key = "cmd+k", group = "App", menu = "File", reserved = true },
 		-- (The application menu's, over Services, as Zeron's was: macOS's
 		-- first menu. `Application` is zgx-desktop's APPLICATION_MENU.)
+		{ id = "shell.about", title = "About Zeron", key = "", group = "App", menu = "Application" },
 		{ id = "shell.check_updates", title = "Check for Updates…", key = "", group = "App", menu = "Application", rule = true },
 		{ id = "shell.settings", title = "Settings", key = "cmd+,", group = "App", menu = "Application", reserved = true },
 		{ id = "shell.find", title = "Find", key = "cmd+f", group = "App", menu = "Edit" },
