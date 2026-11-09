@@ -4811,6 +4811,10 @@
         "github_write": {
           "title": "以你的身份评论拉取请求"
         },
+        "source_control_ai": {
+          "title": "用模型撰写提交信息",
+          "detail": "它会让模型读取检出的改动，这会消耗你的套餐用量。"
+        },
         "notifications": {
           "title": "向你发送通知",
           "detail": "与其他通知一样，可在“设置”→“通知”中管理。"

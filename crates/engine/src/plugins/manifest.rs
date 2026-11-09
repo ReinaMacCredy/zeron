@@ -24,6 +24,8 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "pages.add",
     "github",
     "github.write",
+    // Running a model on a checkout's changes (Write with AI): it spends usage.
+    "source_control.ai",
     "links.open",
     "notifications",
     "navigate",

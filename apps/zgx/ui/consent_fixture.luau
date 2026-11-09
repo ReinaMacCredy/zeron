@@ -152,6 +152,17 @@ local PLUGINS: { [string]: any } = {
 		commands = { "git" },
 		tools = { { name = "a", description = "First." } },
 	},
+	commits = {
+		id = "commits",
+		name = "Commits",
+		version = "1.0.0",
+		hash = "commits-1",
+		status = "pending",
+		author = { kind = "unknown" },
+		permissions = { "source_control.ai" },
+		allowed = {},
+		ask = { "source_control.ai" },
+	},
 }
 
 local said: { string } = {}
@@ -179,6 +190,7 @@ ui.actions {
 }
 
 ui.command { id = "focus", title = "Show Focus", run = function() show("focus") end }
+ui.command { id = "commits", title = "Show Commits", run = function() show("commits") end }
 ui.command { id = "ping", title = "Show Ping", run = function() show("ping") end }
 ui.command { id = "more", title = "Show Notes tool asking more", run = function() show("more") end }
 ui.command { id = "sync", title = "Show Checkout sync, here", run = function() show("sync") end }

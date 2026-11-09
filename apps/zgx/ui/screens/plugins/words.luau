@@ -273,6 +273,8 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "pull-request", "plugins.words.permission.github.title", "plugins.words.permission.github.detail")
 	elseif permission == "github.write" then
 		return line(false, "chat-round-line", "plugins.words.permission.github_write.title")
+	elseif permission == "source_control.ai" then
+		return line(false, "magic-stick", "plugins.words.permission.source_control_ai.title", "plugins.words.permission.source_control_ai.detail")
 	elseif permission == "notifications" then
 		return line(false, "bell", "plugins.words.permission.notifications.title", "plugins.words.permission.notifications.detail")
 	elseif permission == "links.open" then

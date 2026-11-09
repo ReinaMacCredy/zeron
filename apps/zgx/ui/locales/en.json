@@ -4811,6 +4811,10 @@
         "github_write": {
           "title": "Comment on pull requests as you"
         },
+        "source_control_ai": {
+          "title": "Write commit messages with a model",
+          "detail": "It runs a model on a checkout's changes, which uses your plan's usage."
+        },
         "notifications": {
           "title": "Send you notifications",
           "detail": "Like any other notification, set in Settings → Notifications."
