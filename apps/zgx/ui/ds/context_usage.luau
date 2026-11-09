@@ -7,8 +7,6 @@
 --   context_usage.fraction(u)  0 to 1, or nil while it can't be said
 --   context_usage.lines(u)     the card's two lines, as Zeron writes them
 --   context_usage.ink(f)       the ring's ink at `f`
---   Body { usage = fn }        "Context window" and the lines, followed as
---                              the usage changes
 --   Card { usage, stats?, working? }  the ring's card; given the chat's
 --                              stats (`chat.stats`), its last turn's rate and
 --                              output and the prompt cache's time left
@@ -83,47 +81,6 @@ end
 -- apart from the context ring; amber from four fifths, red from 95%.
 function M.usage_ink(f: number): string
 	return if f >= 0.95 then "$danger" elseif f >= 0.8 then "$warning" else "$accent"
-end
-
-function M.Body(props: { usage: () -> Usage?, more: Node? }): Node
-	local usage = props.usage
-	return ui.column {
-		id = "composer-context-card",
-		w = 248,
-		p = "$space.1",
-		gap = 0,
-		Menu.CardHeading { locale.t("ds.composer.context.heading") },
-		ui.column {
-			px = "$space.2",
-			pb = "$zeron.space.tight",
-			ui.text {
-				function(): string
-					return (M.lines(usage()))
-				end,
-				id = "composer-context-used",
-				tabular = true,
-				text_size = "$font.size.sm",
-				line_height = 19,
-				color = "$text.secondary",
-			},
-			ui.show(function(): boolean
-				local _, second = M.lines(usage())
-				return second ~= nil
-			end, ui.text {
-				function(): string
-					local _, second = M.lines(usage())
-					return second or ""
-				end,
-				id = "composer-context-left",
-				tabular = true,
-				text_size = "$font.size.sm",
-				line_height = 19,
-				color = "$text.secondary",
-			}),
-		},
-		-- (The compaction's part, under the numbers: ds/compaction's CardPart.)
-		props.more,
-	}
 end
 
 local function tone(f: number): progress.Tone

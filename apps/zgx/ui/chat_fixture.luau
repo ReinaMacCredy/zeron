@@ -1830,16 +1830,6 @@ ui.command {
 		end
 	end,
 }
--- The Review built-in, on or off in Settings → Plugins (the engine's plugin list).
-for _, status in { "on", "off" } do
-	ui.command {
-		id = `review_plugin_{status}`,
-		title = `Review: the built-in {status}`,
-		run = function()
-			ui.shared("plugins", {} :: any):set { state = "ready", list = { { id = "review", name = "Review", version = "1.0.0", author = { kind = "zeron" }, status = status, builtin = true, permissions = {}, allowed = {}, ask = {} } } }
-		end,
-	}
-end
 store.answer_secret = function(id: string, request: string, secret: string?): any
 	note(`secret:{id}:{request}:{secret or "declined"}`)
 	return settled(nil)

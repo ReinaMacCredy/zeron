@@ -1239,21 +1239,6 @@ local function Composer(): Node
 					local s: any = open()
 					return if s then s.compact_plan else nil
 				end,
-				blocked = function(): string?
-					local s: any = open()
-					local b = if s then s.compact_blocked else nil
-					if b == "compacting" then
-						return ui.t("chat.composer.compact_in_progress"):get()
-					elseif b == "running" then
-						return ui.t("chat.composer.compact_wait_turn"):get()
-					elseif type(b) == "table" then
-						return b.text
-					end
-					return nil
-				end,
-				on_compact = function()
-					compact("")
-				end,
 			},
 			footer_git = function(): boolean
 				local s = open()
