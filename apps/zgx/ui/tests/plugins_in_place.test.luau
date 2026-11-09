@@ -25,7 +25,8 @@ end
 
 local function open(): any
 	local app = mount("plugins_fixture.luau")
-	app:resize(1000, 900)
+	-- (Tall enough for Zeron's own nine above the plugins here.)
+	app:resize(1000, 1600)
 	app:frames(20)
 	return app
 end
@@ -196,18 +197,19 @@ test("a switch follows the engine's status without asking it", function()
 	expect(app:state("calls")).to_be("")
 end)
 
-test("with none installed, a search says nothing matches, and clearing it says how to get one", function()
+test("with none installed, Zeron's own still list, a search says nothing matches, and Yours says how to get one", function()
 	local app = open()
 	app:command("empty")
 	app:frames(20)
-	expect(app:tree()).to_contain("No plugins yet")
-	app:type('role:textbox "Search plugins"', "ping")
+	expect(app:has('role:switch "Usage"')).to_be(true)
+	app:type('role:textbox "Search plugins"', "pinger")
 	app:frames(20)
 	expect(app:tree()).to_contain("Nothing matches")
-	expect(app:tree()).never.to_contain("No plugins yet")
 	app:fill('role:textbox "Search plugins"', "")
 	app:frames(20)
-	expect(app:tree()).to_contain("No plugins yet")
+	app:click('role:tab "Yours"')
+	app:frames(20)
+	expect(app:tree()).to_contain("None of yours yet")
 end)
 
 test("Zeron's own says so, shows what it can do, and can be turned off, not removed", function()

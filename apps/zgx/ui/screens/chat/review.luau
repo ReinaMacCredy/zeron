@@ -1,5 +1,5 @@
 --!strict
--- The Review built-in (plugins-builtin/review): the chat header's Review button and the findings block in the transcript; its look, scopes and findings are the host's (src/chat/review.rs, zeron_proto's `ChatReview`, gpui's review chip's).
+-- The Review built-in (screens/plugins/builtins): the chat header's Review button and the findings block in the transcript; its look, scopes and findings are the host's (src/chat/review.rs, zeron_proto's `ChatReview`, gpui's review chip's).
 
 local Icon = require("@ds/icon")
 local Tooltip = require("@ds/tooltip")
@@ -11,21 +11,14 @@ local locale = require("@ds/locale")
 local M = {}
 
 local reviews = ui.shared("review.chats", {} :: { [string]: any })
-local plugins = ui.shared("plugins", { state = "loading", list = {} } :: any)
+local Builtins = require("@app/screens/plugins/builtins")
 
 function M.of(chat: string?): any
 	return if chat then reviews:get()[chat] else nil
 end
 
--- Whether the built-in is on in Settings → Plugins (on until the engine lists it off).
 function M.on(): boolean
-	local now = plugins:get()
-	for _, p in (if type(now) == "table" and type(now.list) == "table" then now.list else {}) :: { any } do
-		if p.id == "review" then
-			return p.status ~= "off"
-		end
-	end
-	return true
+	return Builtins.on("review")
 end
 
 -- (The host's calls: a fixture stands in for them.)

@@ -36,6 +36,7 @@ local data = require("@app/screens/panel/browser_data")
 local Suggest = require("@app/screens/panel/browser_suggest")
 local ContextMenu = require("@ds/context_menu")
 local SCRIPT = require("@app/screens/panel/annotate_script")
+local Builtins = require("@app/screens/plugins/builtins")
 local FIND_SCRIPT = require("@app/screens/panel/find_script")
 -- The composer's cargo (screens/chat/shared), if the chat page is here (a
 -- fixture mounts the panel alone).
@@ -136,13 +137,22 @@ local function key_of(id: string, key: string): string | () -> string
 	return if shell_keys then shell_keys.key(id) else key
 end
 local function command(id: string, title: string, menu: string, key: string, act: (Showing) -> ())
+	local bound = key_of(id, key)
 	ui.command {
 		id = id,
 		title = title,
 		menu = menu,
-		key = key_of(id, key) :: any,
+		-- (A built-in's, off in Settings → Plugins: no key, and it does nothing.)
+		key = (if Builtins.COMMANDS[id]
+			then function(): string
+				if not Builtins.command_on(id) then
+					return ""
+				end
+				return if type(bound) == "function" then bound() else bound
+			end
+			else bound) :: any,
 		run = function(): boolean
-			if showing then
+			if showing and Builtins.command_on(id) then
 				act(showing)
 				return true
 			end
@@ -623,6 +633,11 @@ Page = ui.component(function(props: Props): Node
 			stop_annotating()
 		end
 	end)
+	ui.effect(function()
+		if not Builtins.on("browser_annotate") and annotating:peek()[id] then
+			stop_annotating()
+		end
+	end)
 
 	local on_state: (ended: string) -> ()
 	local take_download: (d: any) -> ()
@@ -1053,7 +1068,9 @@ Page = ui.component(function(props: Props): Node
 		shrink = 0,
 		gap = "$space.1",
 		items = "center",
-		ds.ToggleButton {
+		ui.show(function(): boolean
+			return Builtins.on("browser_annotate")
+		end, ds.ToggleButton {
 			id = `panel-browser-annotate-{id}`,
 			on = mode,
 			icon = "cursor",
@@ -1073,7 +1090,7 @@ Page = ui.component(function(props: Props): Node
 					stop_annotating()
 				end
 			end,
-		},
+		}),
 		more_menu,
 		},
 	}

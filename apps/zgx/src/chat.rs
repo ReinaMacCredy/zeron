@@ -89,6 +89,8 @@ const CHUNK: usize = 680_000;
 
 thread_local! {
     static CHATS: Rc<Chats> = Rc::new(Chats::default());
+    // Off in Settings → Plugins: no chat is watched for a prediction, so the engine makes none.
+    static PREDICTIONS_ON: Cell<bool> = const { Cell::new(true) };
 }
 
 /// What every window shares: the engine's chats and sessions, this device,
@@ -576,6 +578,7 @@ struct Open {
     builds: bool,
     host_watched: bool,
     prediction: Option<String>,
+    prediction_watch: Option<Watch>,
     limit: Option<Json>,
     // (A delegate's limit card stands in its parent's transcript.)
     limits: Vec<Json>,
@@ -747,6 +750,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         pick(&args).consume_prediction(&args);
         async move { Ok::<Value, String>(Value::Nil) }
     });
+    host.action("chat.predictions", |on| set_predictions(!matches!(on, Value::Bool(false))));
     host.async_action("chat.limit", move |args| async move {
         crate::plugins::preview::refuse("chat.limit")?;
         limit_op(args).await.map_err(String::from)
@@ -1867,6 +1871,15 @@ fn mark(id: &str) -> String {
     crate::agents::glyph(id).unwrap_or_else(|| "pi".into())
 }
 
+/// Settings → Plugins' Predictions turned on or off, for every window's chat.
+fn set_predictions(on: bool) {
+    if PREDICTIONS_ON.with(|p| p.replace(on)) != on {
+        for view in CHATS.with(Rc::clone).views() {
+            view.predictions_changed(on);
+        }
+    }
+}
+
 // -- a window's open chat -----------------------------------------------------
 
 impl View {
@@ -1986,6 +1999,7 @@ impl View {
         });
         if let Some(open) = self.open.borrow_mut().as_mut() {
             open.watches = vec![transcript, queue];
+            open.prediction_watch = None;
             open.host_watched = false;
         }
         self.watch_host();
@@ -2024,25 +2038,63 @@ impl View {
                 view.publish_session();
             }
         });
-        let mut watches = vec![limit];
-        if self.predicts {
-            let weak = Rc::downgrade(self);
-            watches.push(rpc.watch("WatchComposerPrediction", routed(json!({ "chatId": id })), move |item| {
-                if let Some(view) = weak.upgrade()
-                    && view.generation.get() == generation
-                {
-                    if let Some(open) = view.open.borrow_mut().as_mut() {
-                        open.prediction = item["prediction"]["text"].as_str().map(str::to_owned);
-                    }
-                    view.publish_session();
-                }
-            }));
-        }
         if let Some(open) = self.open.borrow_mut().as_mut() {
-            open.watches.extend(watches);
+            open.watches.push(limit);
             open.host_watched = true;
         }
+        self.watch_prediction();
         chats.follow_rates();
+    }
+
+    /// The open chat's prediction, watched while this view predicts and Predictions is on.
+    fn watch_prediction(self: &Rc<Self>) {
+        if !self.predicts || !PREDICTIONS_ON.with(Cell::get) {
+            return;
+        }
+        let Some(rpc) = self.rpc.borrow().clone().filter(|r| !r.is_closed()) else {
+            return;
+        };
+        let Some(id) = self.open.borrow().as_ref().filter(|o| o.host_watched && o.prediction_watch.is_none()).map(|o| o.id.clone()) else {
+            return;
+        };
+        let chats = CHATS.with(Rc::clone);
+        let Some(chat) = chats.chat(&id) else { return };
+        let mut params = json!({ "chatId": id });
+        if let Some(t) = chats.target(&chat) {
+            params["targetDeviceId"] = json!(t);
+        }
+        let generation = self.generation.get();
+        let weak = Rc::downgrade(self);
+        let watch = rpc.watch("WatchComposerPrediction", params, move |item| {
+            if let Some(view) = weak.upgrade()
+                && view.generation.get() == generation
+            {
+                if let Some(open) = view.open.borrow_mut().as_mut() {
+                    open.prediction = item["prediction"]["text"].as_str().map(str::to_owned);
+                }
+                view.publish_session();
+            }
+        });
+        if let Some(open) = self.open.borrow_mut().as_mut() {
+            open.prediction_watch = Some(watch);
+        }
+    }
+
+    /// Predictions turned on or off: the watch starts, or goes with what it said.
+    fn predictions_changed(self: &Rc<Self>, on: bool) {
+        if on {
+            self.watch_prediction();
+            return;
+        }
+        let dropped = self.open.borrow_mut().as_mut().is_some_and(|o| {
+            let had = o.prediction.is_some();
+            o.prediction_watch = None;
+            o.prediction = None;
+            had
+        });
+        if dropped {
+            self.publish_session();
+        }
     }
 
     fn consume_prediction(&self, args: &Value) {

@@ -1,9 +1,0 @@
-{
-  "id": "review",
-  "name": "Review",
-  "version": "1.0.0",
-  "description": "A Review button in the chat header: a fresh agent reviews the chat's changes, and its findings land in the chat, each with Fix.",
-  "icon": "icon.svg",
-  "entry": "init.luau",
-  "permissions": []
-}

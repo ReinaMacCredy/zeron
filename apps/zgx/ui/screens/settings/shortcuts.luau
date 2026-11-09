@@ -14,6 +14,7 @@
 local ds = require("@ds")
 local Shortcut = require("@ds/shortcut_recorder")
 local search = require("@app/screens/settings/search")
+local Builtins = require("@app/screens/plugins/builtins")
 
 local M = {}
 
@@ -102,7 +103,18 @@ do
 	local rows = {}
 	for _, k in keys() do
 		if k.key then
-			table.insert(rows, { key = `key_{k.id}`, title = title_message(k), section = group_message(k.group), terms = ui.t("settings.shortcuts.row_terms") })
+			local id = k.id
+			table.insert(rows, {
+				key = `key_{id}`,
+				title = title_message(k),
+				section = group_message(k.group),
+				terms = ui.t("settings.shortcuts.row_terms"),
+				shown = if Builtins.COMMANDS[id]
+					then function(): boolean
+						return Builtins.command_on(id)
+					end
+					else nil,
+			})
 		end
 	end
 	table.insert(rows, {
@@ -110,6 +122,9 @@ do
 		title = ui.t("settings.shortcuts.appshot.label"),
 		section = ui.t("settings.shortcuts.appshot.section"),
 		terms = ui.t("settings.shortcuts.appshot.terms"),
+		shown = function(): boolean
+			return Builtins.on("appshots")
+		end,
 	})
 	search.index(M.ID, ui.t("settings.shortcuts.title"), ui.t("settings.shortcuts.terms"), rows)
 end
@@ -123,7 +138,7 @@ local function appshot(): Node?
 		return nil
 	end
 	local a = appshots :: any
-	return ui.show(a.enabled, ds.Settings.Section {
+	return ui.show(a.active or a.enabled, ds.Settings.Section {
 		title = ui.t("settings.shortcuts.appshot.section") :: any,
 		ds.Settings.Group {
 			search.anchor("key_appshot", ds.Settings.Row {
@@ -209,7 +224,7 @@ local function binding(k: Key): Node
 				-- (Appshots' hotkey is the host's, not the shell's: gpui names its page.)
 				local ok, appshots = pcall(require, "@app/screens/chat/appshots")
 				local a = if ok and type(appshots) == "table" then appshots :: any else nil
-				if a and a.shortcut and a.enabled and a.enabled:peek() and a.shortcut:peek() == combo then
+				if a and a.shortcut and a.active and a.active() and a.shortcut:peek() == combo then
 					notice:set(ui.t("settings.shortcuts.taken_on_page", {
 						keys = Shortcut.shown(combo),
 						name = ui.t("settings.shortcuts.appshot.label"):get(),
@@ -294,13 +309,19 @@ function M.view(): Node
 	for _, g in grouped() do
 		local rows: { Node } = {}
 		for _, k in g.keys do
-			table.insert(rows, search.anchor(`key_{k.id}`, ds.Settings.Row {
+			local row = search.anchor(`key_{k.id}`, ds.Settings.Row {
 				label = function(): string
 					return title_of(k)
 				end,
 				description = if k.id == "shell.next_session" or k.id == "shell.previous_session" then ui.t("settings.shortcuts.focused_pane") else nil,
 				control = binding(k),
-			}))
+			})
+			local id = k.id
+			table.insert(rows, if Builtins.COMMANDS[id]
+				then ui.show(function(): boolean
+					return Builtins.command_on(id)
+				end, row)
+				else row)
 		end
 		local name = g.name
 		table.insert(sections, ds.Settings.Section {

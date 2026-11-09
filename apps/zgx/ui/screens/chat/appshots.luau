@@ -19,6 +19,7 @@
 local route = require("@app/screens/shell/route")
 local shared = require("@app/screens/chat/shared")
 local toast = require("@ds/toast")
+local Builtins = require("@app/screens/plugins/builtins")
 
 local M = {}
 
@@ -42,9 +43,14 @@ local function invoke(name: string, arg: any?)
 	pcall(ui.invoke, name, arg)
 end
 
+-- Whether the capture shortcut works: Appshots on here and the built-in on in Settings → Plugins.
+function M.active(): boolean
+	return M.enabled:get() and Builtins.on("appshots")
+end
+
 -- The settings, to the host (as they change, and at launch).
 ui.effect(function()
-	invoke("appshots.configure", { enabled = M.enabled:get(), sound = M.sound:get(), shortcut = M.shortcut:get() })
+	invoke("appshots.configure", { enabled = M.active(), sound = M.sound:get(), shortcut = M.shortcut:get() })
 end)
 
 function M.set_recording(on: boolean)

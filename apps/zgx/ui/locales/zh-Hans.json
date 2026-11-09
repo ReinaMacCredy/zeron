@@ -4530,6 +4530,45 @@
     }
   },
   "plugins": {
+    "builtin": {
+      "tag": "内置",
+      "review": {
+        "name": "审查",
+        "about": "对话标题栏里的审查按钮，结果显示在对话中"
+      },
+      "usage": {
+        "name": "用量",
+        "about": "用量页面和侧栏上的额度圆环"
+      },
+      "home_widgets": {
+        "name": "主页小组件",
+        "about": "新对话下方的小组件网格"
+      },
+      "keep_awake": {
+        "name": "保持唤醒",
+        "about": "智能体工作时电脑不会休眠"
+      },
+      "appshots": {
+        "name": "Appshots",
+        "about": "用快捷键截取应用并放进对话"
+      },
+      "predictions": {
+        "name": "预测",
+        "about": "输入框里的淡色补全文字"
+      },
+      "browser_annotate": {
+        "name": "浏览器标注",
+        "about": "在网页上为智能体做标注"
+      },
+      "device": {
+        "name": "设备",
+        "about": "模拟器面板"
+      },
+      "voice": {
+        "name": "语音",
+        "about": "用麦克风说话代替打字"
+      }
+    },
     "words": {
       "place": {
         "window": "窗口",

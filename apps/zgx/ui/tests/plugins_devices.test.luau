@@ -7,7 +7,7 @@
 
 local function open(): any
 	local app = mount("plugins_devices_fixture.luau")
-	app:resize(1000, 900)
+	app:resize(1000, 1600)
 	app:frames(20)
 	return app
 end

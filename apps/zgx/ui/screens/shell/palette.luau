@@ -25,6 +25,7 @@ local templates = require("@app/screens/templates/state")
 local themes = require("@app/screens/themes/state")
 local keys = require("@app/screens/shell/keys")
 local host = require("@app/screens/settings/host")
+local Builtins = require("@app/screens/plugins/builtins")
 
 -- What was used lately, by id, the latest first (kept across launches).
 local recent = ui.persist("shell_palette_recent", {} :: { string })
@@ -298,7 +299,7 @@ local function command_items(): { Item }
 	local out: { Item } = {}
 	for _, c in menu_commands:get() do
 		local id = c.id :: string
-		if not LISTED[id] then
+		if not LISTED[id] and Builtins.command_on(id) then
 			local default = id == DEFAULT_INTERFACE
 			table.insert(out, {
 				id = `menu:{id}`,

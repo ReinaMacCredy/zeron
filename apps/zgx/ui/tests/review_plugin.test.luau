@@ -1,4 +1,4 @@
--- The Review built-in (screens/chat/review, plugins-builtin/review): a
+-- The Review built-in (screens/chat/review, its switch screens/plugins/builtins): a
 -- Review button in the chat's header, there only with something to review
 -- and the built-in on, running the review and saying so while it runs; the
 -- findings a block of the transcript where the review was asked, each with
@@ -54,10 +54,10 @@ test("the chat's Review stands in its header only with something to review and t
 	expect(app:has('#titlebar-actions >> #chat-review >> "Review"')).to_be(true)
 	expect(calls(app)).to_contain("review.watch:s2")
 	-- Off in Settings → Plugins: gone at once; on, back.
-	app:command("review_plugin_off")
+	app:command("review_builtin_off")
 	app:frames(20)
 	expect(app:has("#chat-review")).to_be(false)
-	app:command("review_plugin_on")
+	app:command("review_builtin_on")
 	app:frames(20)
 	expect(app:has("#chat-review")).to_be(true)
 	-- (No composer chip: the header's is the one door.)
@@ -133,7 +133,7 @@ test("the block stays through a reload and a chat switch; with the built-in off 
 	app:frames(30)
 	expect(app:has('#review-block >> "3 findings · Claude Code · haiku"')).to_be(true)
 	expect(app:has("#review-fix-F2")).to_be(true)
-	app:command("review_plugin_off")
+	app:command("review_builtin_off")
 	app:frames(20)
 	expect(app:has('#review-block >> "Fixed · abcdef1"')).to_be(true)
 	expect(app:has("#review-fix-F2")).to_be(false)

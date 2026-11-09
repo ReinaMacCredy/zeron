@@ -14,6 +14,7 @@ local route = require("@app/screens/shell/route")
 local auth = require("@account/auth")
 local search = require("@app/screens/settings/search")
 local store = require("@app/screens/settings/store")
+local Builtins = require("@app/screens/plugins/builtins")
 require("@app/screens/settings/chimes")
 
 -- (The window's language, which General picks: followed from the start.)
@@ -34,7 +35,8 @@ local function ahead(): string
 end
 
 -- (Each page by its module's `ID` and `TITLE`: the module loads as it's first shown or searched.)
-local function add(id: string, title: string, module: string, icon: string, group: string)
+-- `builtin`: the built-in plugin whose page it is, listed while that's on.
+local function add(id: string, title: string, module: string, icon: string, group: string, builtin: string?)
 	settings.add {
 		id = id,
 		title = title,
@@ -43,6 +45,11 @@ local function add(id: string, title: string, module: string, icon: string, grou
 		-- (The shell centres each page in the room beside the list.)
 		module = `@app/screens/settings/{module}`,
 		before = ahead(),
+		shown = if builtin
+			then function(): boolean
+				return Builtins.on(builtin)
+			end
+			else nil,
 	}
 end
 
@@ -52,11 +59,11 @@ add("appearance", "Appearance", "appearance", "tuning", "Personal")
 add("notifications", "Notifications", "notifications", "bell", "Personal")
 add("files", "Files", "files", "folder", "Personal")
 add("shortcuts", "Shortcuts", "shortcuts", "keyboard", "Personal")
-add("appshots", "Appshots", "appshots", "gallery", "Personal")
+add("appshots", "Appshots", "appshots", "gallery", "Personal", "appshots")
 -- (Zeron's This Mac > Computer use, beside Appshots as there.)
 add("computer", "Computer use", "computer", "computer-cursor", "Personal")
 add("profile", "Account", "profile", "user-rounded", "Personal")
-add("usage", "Usage", "usage", "wallet", "Personal")
+add("usage", "Usage", "usage", "wallet", "Personal", "usage")
 -- The panel's browser, under a heading of its own (room for what it grows:
 -- site data, permissions, downloads).
 add("browser", "Browsing", "browser", "global", "Browser")

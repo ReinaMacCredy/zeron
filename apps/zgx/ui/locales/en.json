@@ -4530,6 +4530,45 @@
     }
   },
   "plugins": {
+    "builtin": {
+      "tag": "Built-in",
+      "review": {
+        "name": "Review",
+        "about": "A Review button in the chat's header; its findings in the chat"
+      },
+      "usage": {
+        "name": "Usage",
+        "about": "The Usage page and the limit ring on the rail"
+      },
+      "home_widgets": {
+        "name": "Home widgets",
+        "about": "The widget grid under New chat"
+      },
+      "keep_awake": {
+        "name": "Keep awake",
+        "about": "This computer doesn't sleep while an agent is working"
+      },
+      "appshots": {
+        "name": "Appshots",
+        "about": "A shortcut that captures an app into the chat"
+      },
+      "predictions": {
+        "name": "Predictions",
+        "about": "Ghost text in the composer"
+      },
+      "browser_annotate": {
+        "name": "Browser annotate",
+        "about": "Notes on a web page for the agent"
+      },
+      "device": {
+        "name": "Device",
+        "about": "The simulator and emulator panel"
+      },
+      "voice": {
+        "name": "Voice",
+        "about": "The mic, to speak instead of typing"
+      }
+    },
     "words": {
       "place": {
         "window": "the window",

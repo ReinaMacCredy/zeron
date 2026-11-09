@@ -13,6 +13,7 @@ local keys = require("@app/screens/shell/keys")
 local route = require("@app/screens/shell/route")
 local art = require("@app/screens/shell/art")
 local tasks_store = require("@app/screens/tasks/store")
+local Builtins = require("@app/screens/plugins/builtins")
 
 local M = {}
 
@@ -647,7 +648,10 @@ M.Rail = ui.component(function(): Node
 		page_entry("skills", "magic-stick", "skills.title"),
 		pull_requests(),
 		ui.div { grow = 1 },
-		usage_ring(),
+		-- (Built as Usage is on: off, its watch of the agents' limits goes with it.)
+		ui.presence(function(): string?
+			return if Builtins.on("usage") then "usage" else nil
+		end, usage_ring),
 		help(),
 		update_entry(),
 		settings_entry(),

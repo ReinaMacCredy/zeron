@@ -1659,6 +1659,8 @@ return ui.component(function(props: Props): Node
 			placement = { side = "bottom", align = "start", offset = 6 },
 		}
 	end
+	-- Voice on in Settings → Plugins (screens/plugins/builtins says; asked here, as only the app builds a composer).
+	local voice_on = ui.shared("builtins.voice", true)
 	local mic = ui.show(dictating, Button {
 		tone = "accent",
 		shape = "pill",
@@ -2350,7 +2352,9 @@ return ui.component(function(props: Props): Node
 			end, ui.row {
 				items = "center",
 				gap = "$space.2",
-				mic,
+				ui.show(function(): boolean
+					return voice_on:get() ~= false or dictating()
+				end, mic),
 				ui.show(stopping, stop_button),
 				ui.show(function()
 					return not stopping()

@@ -19,7 +19,8 @@ local M = {}
 -- A row's words: a string, or a message (`ui.t`), read in the locale
 -- shown as the search runs.
 export type Words = string | Message
-export type Row = { key: string, title: Words, section: Words?, terms: Words? }
+-- `shown`: found only while it says so (a built-in's row, while it's on).
+export type Row = { key: string, title: Words, section: Words?, terms: Words?, shown: (() -> boolean)? }
 export type Hit = {
 	-- The page's id, and the row's key (none: the page itself).
 	page: string,
@@ -31,7 +32,7 @@ export type Hit = {
 	terms: string?,
 }
 
-type Entry = { page: string, key: string?, title: Words, page_title: Words, section: Words?, terms: Words }
+type Entry = { page: string, key: string?, title: Words, page_title: Words, section: Words?, terms: Words, shown: (() -> boolean)? }
 
 local TITLE, TERMS, SECTION, PAGE, EXACT = 100, 40, 30, 20, 100
 
@@ -54,6 +55,7 @@ function M.index(page: string, title: Words, terms: Words, rows: { Row })
 			page_title = title,
 			section = r.section,
 			terms = r.terms or "",
+			shown = r.shown,
 		})
 	end
 	if not pages[page] then
@@ -74,7 +76,12 @@ local function in_order(): { string }
 	for i, id in page_order do
 		rank[id] = rank[id] or (100000 + i)
 	end
-	local out = table.clone(page_order)
+	local out = {}
+	for _, id in page_order do
+		if shell.shown(id) then
+			table.insert(out, id)
+		end
+	end
 	table.sort(out, function(a: string, b: string): boolean
 		return rank[a] < rank[b]
 	end)
@@ -143,6 +150,9 @@ function M.find(query: string): { Hit }
 	local n = 0
 	for _, page in in_order() do
 		for _, e in pages[page] or {} do
+			if e.shown and not e.shown() then
+				continue
+			end
 			n += 1
 			local score = 0
 			local all = true
@@ -189,7 +199,7 @@ function M.rows(): { Hit }
 	local out: { Hit } = {}
 	for _, page in in_order() do
 		for _, e in pages[page] or {} do
-			if e.key then
+			if e.key and not (e.shown and not e.shown()) then
 				local page_title = said(e.page_title)
 				local section = if e.section then said(e.section) else nil
 				table.insert(out, {

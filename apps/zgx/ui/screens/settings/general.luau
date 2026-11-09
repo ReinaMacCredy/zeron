@@ -17,6 +17,11 @@ local visits = require("@app/screens/settings/visits")
 local chat = require("@app/screens/chat/store")
 local language = require("@app/screens/language")
 local predictions = require("@app/screens/settings/predictions")
+local Builtins = require("@app/screens/plugins/builtins")
+
+local function predicting(): boolean
+	return Builtins.on("predictions")
+end
 
 local M = {}
 
@@ -29,7 +34,7 @@ search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"
 	{ key = "key_switcher_window", title = ui.t("settings.shortcuts.switcher.window.label"), section = ui.t("settings.shortcuts.switcher.section") },
 	{ key = "key_switcher_limit", title = ui.t("settings.shortcuts.switcher.limit.label"), section = ui.t("settings.shortcuts.switcher.section") },
 	{ key = "key_switcher_cycles", title = ui.t("settings.shortcuts.switcher.cycles.label"), section = ui.t("settings.shortcuts.switcher.section") },
-	{ key = "predictions", title = ui.t("settings.predictions.show"), section = ui.t("settings.predictions.title"), terms = ui.t("settings.predictions.terms") },
+	{ key = "predictions", title = ui.t("settings.predictions.show"), section = ui.t("settings.predictions.title"), terms = ui.t("settings.predictions.terms"), shown = predicting },
 	{ key = "hide_emails", title = ui.t("settings.general.hide_emails.label"), section = ui.t("settings.general.privacy"), terms = ui.t("settings.general.hide_emails.terms") },
 	{ key = "worktrees", title = ui.t("settings.general.worktrees.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.worktrees.terms") },
 	{ key = "commit_credit", title = ui.t("settings.general.commit_credit.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.commit_credit.terms") },
@@ -260,7 +265,7 @@ function M.view(): Node
 			},
 		},
 		switcher,
-		predictions.section(),
+		ui.show(predicting, predictions.section()),
 		ds.Settings.Section {
 			title = ui.t("settings.general.privacy"),
 			ds.Settings.Group {

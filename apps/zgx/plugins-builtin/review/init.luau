@@ -1,2 +1,0 @@
---!strict
--- Review's switch in Settings → Plugins: Zeron draws it (screens/chat/review.luau) while this is on.

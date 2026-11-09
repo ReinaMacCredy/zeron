@@ -40,6 +40,7 @@ local Lanes = require("@app/screens/chat/lanes")
 local Pills = require("@app/screens/chat/pills")
 local AppCommands = require("@app/screens/chat/app_commands")
 local Outgoing = require("@app/screens/chat/outgoing")
+local Builtins = require("@app/screens/plugins/builtins")
 local Asks = require("@app/screens/chat/asks")
 
 -- The title bar's height (Zeron's): a new chat centres under it.
@@ -1114,7 +1115,7 @@ local function Composer(): Node
 			plan = plan,
 			prediction = function(): string?
 				local s = open()
-				if not s or editing:get() then
+				if not s or editing:get() or not Builtins.on("predictions") then
 					return nil
 				end
 				return (s :: any).prediction

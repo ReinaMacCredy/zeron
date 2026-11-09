@@ -298,6 +298,19 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         }
         async move { write_ui_settings(changes).map(|()| Value::Nil).map_err(|()| "failed".to_string()) }
     });
+    // Settings → Plugins' Keep awake: the engine's own switch (crates/engine
+    // keep_awake), read from this file as it holds the Mac awake.
+    host.async_action("keep_awake.get", |_| async {
+        let path = ui_settings_path().ok_or_else(|| "failed".to_string())?;
+        keep_awake_at(&path).map(Value::Bool).map_err(|()| "failed".to_string())
+    });
+    host.async_action("keep_awake.set", |args| {
+        let on = matches!(args.field("on"), Some(Value::Bool(true)));
+        async move {
+            let path = ui_settings_path().ok_or_else(|| "failed".to_string())?;
+            set_keep_awake_at(&path, on).map(|()| Value::Nil).map_err(|()| "failed".to_string())
+        }
+    });
     // A session's chime, the shipping app's own: "done", "request" (an
     // agent waiting on you) or "attention" (failed, or the connection gone).
     host.action("sound.play", |kind| {
@@ -737,6 +750,18 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
 const BANNERS: &str = "notificationsEnabled";
 const BACKGROUND_ONLY: &str = "notificationsBackgroundOnly";
 const AGENT_UPDATES: &str = "agentUpdateNotifications";
+const KEEP_AWAKE: &str = "keepAwakeWhileWorking";
+
+/// Whether the engine keeps the Mac awake while an agent works: on unless the file says otherwise, as the engine reads it.
+fn keep_awake_at(path: &std::path::Path) -> Result<bool, ()> {
+    Ok(read_settings_at(path)?.and_then(|prefs| prefs[KEEP_AWAKE].as_bool()).unwrap_or(true))
+}
+
+fn set_keep_awake_at(path: &std::path::Path, on: bool) -> Result<(), ()> {
+    let mut changes = serde_json::Map::new();
+    changes.insert(KEEP_AWAKE.into(), Json::Bool(on));
+    write_settings_at(path, changes)
+}
 
 static SOUND_DONE: &[u8] = include_bytes!("../sounds/done.wav");
 static SOUND_REQUEST: &[u8] = include_bytes!("../sounds/request.wav");
@@ -1252,6 +1277,26 @@ mod tests {
         std::fs::write(&path, "[1, 2]").unwrap();
         assert!(write_settings_at(&path, changes).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[1, 2]");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keep_awake_is_the_engine_s_own_key_on_until_turned_off() {
+        let dir = std::env::temp_dir().join(format!("zgx-keep-awake-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ui-settings.json");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(keep_awake_at(&path), Ok(true), "no file: on, as the engine takes it");
+        std::fs::write(&path, r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(keep_awake_at(&path), Ok(true));
+        set_keep_awake_at(&path, false).unwrap();
+        assert_eq!(read_settings_at(&path).unwrap(), Some(json!({ "theme": "dark", "keepAwakeWhileWorking": false })));
+        assert_eq!(keep_awake_at(&path), Ok(false));
+        set_keep_awake_at(&path, true).unwrap();
+        assert_eq!(keep_awake_at(&path), Ok(true));
+        std::fs::write(&path, "{\"theme\": ").unwrap();
+        assert_eq!(keep_awake_at(&path), Err(()), "a file that isn't settings isn't read as on");
+        assert!(set_keep_awake_at(&path, false).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

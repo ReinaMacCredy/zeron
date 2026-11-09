@@ -170,3 +170,45 @@ fn a_saved_first_prompt_stays_visible_after_the_sending_indicator_expires() {
     assert!(messages(&view)[0]["waiting"].is_null());
     assert!(!view.pending.borrow().contains_key("new-chat"));
 }
+
+#[test]
+fn predictions_turned_off_take_the_shown_one_and_watch_for_none_until_on() {
+    let app = TestApp::new(|runtime| {
+        ScriptHost::new(
+            runtime,
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/activity_fixture.luau"),
+        )
+    });
+    let view = Rc::new(View {
+        session: app.host.shared("test.session", Value::Nil),
+        messages: app.host.shared("test.messages", Value::Nil),
+        draft: app.host.shared("test.draft", Value::Nil),
+        stats: app.host.shared("test.stats", Value::Nil),
+        token_rate: app.host.shared("test.token_rate", Value::Nil),
+        turn_tokens: app.host.shared("test.turn_tokens", Value::Nil),
+        on_screen: Cell::new(true),
+        rpc: RefCell::default(),
+        open: RefCell::default(),
+        pending: RefCell::default(),
+        subagents: app.host.shared("test.subagents", Value::Nil),
+        generation: Cell::new(0),
+        snapshot: Cell::new(false),
+        predicts: true,
+    });
+    CHATS.with(|chats| {
+        chats.made("predicted-chat", json!({ "id": "predicted-chat" }));
+        chats.views.borrow_mut().push(Rc::downgrade(&view));
+    });
+    view.open_chat(Some("predicted-chat".into()));
+    view.open.borrow_mut().as_mut().unwrap().prediction = Some("Run the tests next.".into());
+    view.publish_session();
+    let shown = |view: &View| view.session.with_untracked(|s| s.field("prediction").cloned());
+    assert_eq!(shown(&view), Some(Value::from("Run the tests next.")));
+
+    set_predictions(false);
+    assert_eq!(shown(&view), Some(Value::Nil), "off: what it said goes at once");
+    assert!(!PREDICTIONS_ON.with(Cell::get), "off: watch_prediction starts none, so the engine predicts for no chat");
+
+    set_predictions(true);
+    assert!(PREDICTIONS_ON.with(Cell::get));
+}

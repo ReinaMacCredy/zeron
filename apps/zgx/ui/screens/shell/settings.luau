@@ -57,6 +57,8 @@ export type Page = {
 	-- In the icon's place in the list: a tile (a plugin's, as its row on
 	-- the Plugins page has it).
 	tile: { label: string, hue: string? }?,
+	-- Listed, found and opened only while this says so (a built-in's page, while it's on).
+	shown: (() -> boolean)?,
 }
 
 -- The pages: their ids in order (a state, so the list follows them), and
@@ -87,10 +89,16 @@ local function extra_pages(): { Page }
 	return out
 end
 
+-- Whether page `id` is listed now (tracked).
+function M.shown(id: string): boolean
+	local page = pages[id]
+	return not (page and page.shown) or (page.shown :: () -> boolean)()
+end
+
 -- A page added, by its id (or one listed by `extra`, while it's there).
 function M.page(id: string): Page?
 	if pages[id] then
-		return pages[id]
+		return if M.shown(id) then pages[id] else nil
 	end
 	for _, page in extra_pages() do
 		if page.id == id then
@@ -186,7 +194,7 @@ local function open_id(): string
 		return id
 	end
 	for _, first in order:get() do
-		if pages[first] then
+		if M.page(first) then
 			return first
 		end
 	end
@@ -437,7 +445,7 @@ function M.View(props: { inset: boolean? }?): Node
 						end
 					end
 					for _, id in order:get() do
-						local page = pages[id]
+						local page = if M.shown(id) then pages[id] else nil
 						if page then
 							if page.group == EXTRAS_BEFORE then
 								add_extras()

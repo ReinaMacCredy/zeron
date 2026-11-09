@@ -167,6 +167,8 @@ local MODELS = {
 	codex = { { id = "gpt-5.5", label = "GPT-5.5", levels = {} } },
 }
 local banners = { desktop = true, background_only = true, agent_updates = true }
+-- The engine's `keepAwakeWhileWorking` (Settings → Plugins' Keep awake).
+local keep_awake = true
 local TOOL_GROUPS = {
 	{ group = "threads", title = "Threads", summary = "Read, write and steer the chats in the sidebar.", tools = {
 		{ name = "list_threads", summary = "List the chats in the sidebar." },
@@ -501,6 +503,16 @@ local answers: { [string]: (arg: any) -> any } = {
 			for k, v in arg do
 				banners[k] = v
 			end
+		end
+		return r
+	end,
+	["keep_awake.get"] = function()
+		return settled(keep_awake)
+	end,
+	["keep_awake.set"] = function(arg: any)
+		local r = change(nil)
+		if not r.error then
+			keep_awake = arg.on == true
 		end
 		return r
 	end,

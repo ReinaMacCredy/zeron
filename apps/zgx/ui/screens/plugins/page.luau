@@ -34,6 +34,7 @@ local words = require("@app/screens/plugins/words")
 local plugin_settings = require("@app/screens/plugins/settings")
 local devices_page = require("@app/screens/settings/devices")
 local visits = require("@app/screens/settings/visits")
+local Builtins = require("@app/screens/plugins/builtins")
 
 local M = {}
 
@@ -220,15 +221,50 @@ local function matches(p: state.Item, q: string): boolean
 	return string.find(hay, q, 1, true) ~= nil
 end
 
--- The plugins the tab holds that the search finds, on the device shown.
+-- Zeron's own whose code is the app's (screens/plugins/builtins), as rows
+-- of this device's list: their words in the locale shown.
+local function core(): { any }
+	local out: { any } = {}
+	for _, b in Builtins.LIST do
+		table.insert(out, {
+			id = `builtin:{b.id}`,
+			core = b.id,
+			icon_name = b.icon,
+			name = ui.t(`plugins.builtin.{b.id}.name`):get(),
+			description = ui.t(`plugins.builtin.{b.id}.about`):get(),
+			version = "",
+			author = { kind = "zeron" },
+			status = if Builtins.on(b.id) then "on" else "off",
+			builtin = true,
+			permissions = {},
+			allowed = {},
+			ask = {},
+		})
+	end
+	return out
+end
+
+-- The plugins the tab holds that the search finds, on the device shown:
+-- Zeron's own first (the app's, then the engine's), then the rest.
 local found = ui.computed(function(): { state.Item }
 	local q = string.lower(query:get())
 	local mine = tab:get() == "yours"
 	local out: { state.Item } = {}
+	if not mine and not device() then
+		for _, p in core() do
+			if matches(p, q) then
+				table.insert(out, p)
+			end
+		end
+	end
+	local others: { state.Item } = {}
 	for _, p in state.shown:get() do
 		if (not mine or p.own or p.author.kind == "you") and matches(p, q) then
-			table.insert(out, p)
+			table.insert(if p.builtin then out else others, p)
 		end
+	end
+	for _, p in others do
+		table.insert(out, p)
 	end
 	return out
 end)
@@ -240,7 +276,7 @@ local function count(which: string): () -> number
 		if device() and (away() or state.remote:get().state ~= "ready") then
 			return "–" :: any
 		end
-		local n = 0
+		local n = if which == "installed" and not device() then #Builtins.LIST else 0
 		for _, p in state.shown:get() do
 			if which == "installed" or p.own or p.author.kind == "you" then
 				n += 1
@@ -425,7 +461,87 @@ local UpdateLink = ui.component(function(props: { now: State<any> }): Node
 	})
 end)
 
+-- The "Built-in" tag every one of Zeron's own carries.
+local function builtin_tag(): Node
+	return ds.Badge { ui.t("plugins.builtin.tag"), tone = "neutral", look = "outline", class = "plugin-builtin" }
+end
+
+-- One of the app's own: its switch is its built-in's (no reload, no
+-- engine), and like the engine's own it can't be removed.
+local CoreControl = ui.component(function(props: { now: State<any> }): Node
+	local now = props.now
+	local id: string = now:peek().core
+	local on = ui.use_state(Builtins.on(id))
+	ui.effect(function()
+		local want = Builtins.on(id)
+		if on:peek() ~= want then
+			on:set(want)
+		end
+	end)
+	return ui.row {
+		gap = "$space.2",
+		items = "center",
+		-- (The settings button's room, as every row keeps it.)
+		ui.div {
+			w = function(): number
+				return (ui.theme.get("zeron.icon_button.sm") :: number?) or 22
+			end,
+			shrink = 0,
+		},
+		ds.Switch {
+			value = on,
+			label = function(): string
+				return now:get().name
+			end,
+			on_change = function(value: boolean)
+				local name = now:peek().name
+				Builtins.set(id, value, failed(ui.t("plugins.page.couldnt_switch", { name = name })))
+			end,
+		},
+		ds.IconButton {
+			icon = "trash-bin-minimalistic",
+			label = function(): string
+				return ui.t("plugins.page.builtin", { name = now:get().name }):get()
+			end,
+			size = "sm",
+			tone = "quiet",
+			hook = false,
+			disabled = true,
+		},
+	}
+end)
+
+local function core_row(p: state.Item, now: State<any>): Node
+	local icon: any = (p :: any).icon_name
+	return ds.Settings.Row {
+		label = function(): string
+			return now:get().name
+		end,
+		description = function(): string
+			return now:get().description or ""
+		end,
+		byline = function(): string
+			return words.author(now:get())
+		end,
+		lead = ds.Tile {
+			label = p.name,
+			size = 32,
+			inside = ui.div { color = "$text.primary", ds.Icon { name = icon, size = 18 } },
+		},
+		truncate = true,
+		control = ui.row {
+			gap = "$space.3",
+			items = "center",
+			builtin_tag(),
+			CoreControl { now = now },
+		},
+	}
+end
+
 local function row(p: state.Item, _i: number, now: State<any>): Node
+	if (p :: any).core then
+		return core_row(p, now)
+	end
 	return ds.Settings.Row {
 		label = function(): string
 			return now:get().name
@@ -462,6 +578,9 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 			ui.show(function(): boolean
 				return words.unverified(now:get())
 			end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" }),
+			ui.show(function(): boolean
+				return now:get().builtin == true
+			end, builtin_tag()),
 			ds.Badge {
 				function(): string
 					return now:get().version
@@ -645,6 +764,7 @@ function M.View(): Node
 	-- Once a visit: another device shown is looked at again (its list as
 	-- it is now; it may have been away).
 	visits.once("plugins", function()
+		Builtins.load()
 		local d = device()
 		if d then
 			state.target(d)
