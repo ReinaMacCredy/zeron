@@ -136,10 +136,23 @@ local function touch(key: string)
 	end
 end
 
+-- A link leaving a stored page opens in the browser: an http(s) URL with a host and no user info, once a second at most.
+local function leave(e: any, url: string)
+	local host = string.match(url, "^https?://([^/?#]*)")
+	local t = ui.now()
+	if host and host ~= "" and not string.find(host, "@", 1, true) and t - (e.opened or -1e9) >= 1000 then
+		e.opened = t
+		api.open_url(url)
+	end
+end
+
 local function entry_of(key: string): any
 	local e = PAGES[key]
 	if not e then
 		e = { web = api.web(`html:{key}`), nonce = nil, loaded = false, html = nil, height = nil, capped = false, groups = {} }
+		api.keep_page(e.web, function(url: string)
+			leave(e, url)
+		end)
 		PAGES[key] = e
 	end
 	return e
@@ -277,6 +290,9 @@ local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 	local view = ui.state(`html_sheet_view:{props.key}`, "live")
 	if not live and not e.sheet then
 		e.sheet = api.web(`html:{props.key}#sheet`)
+		api.keep_page(e.sheet, function(url: string)
+			leave(e, url)
+		end)
 	end
 	local function size(): any
 		local s = (ui :: any).window.size:get()
@@ -609,14 +625,9 @@ local function Page(props: any): Node
 		end
 	end
 	local function open_out(url: string)
-		local host = string.match(url, "^https?://([^/?#]*)")
-		local t = ui.now()
-		if host and host ~= "" and not string.find(host, "@", 1, true) and t - (e.opened or -1e9) >= 1000 then
-			e.opened = t
-			api.open_url(url)
-		end
+		leave(e, url)
 	end
-	-- (zgx asks the view no navigation policy yet: a page leaving its document is put back, as gpui refuses it.)
+	-- (A backstop where `api.keep_page` couldn't refuse it first: a page leaving its document is put back.)
 	local function navigated(on_sheet: boolean): (any) -> ()
 		return function(nav: any)
 			if type(nav) ~= "table" or (nav.kind ~= "started" and nav.kind ~= "committed") or not e.html then

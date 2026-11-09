@@ -361,6 +361,28 @@ test("pages: a link leaving the page opens in the browser and the card keeps its
 	expect(string.find(app:state("calls"), "open_url:file", 1, true)).to_be(nil)
 end)
 
+test("pages: a stored page decides each navigation first: its own document goes, a link opens the browser and stays, a script's goes nowhere", function()
+	local app = mount("chat_fixture.luau")
+	seeded(app)
+	local function ask(kind: string, url: string, main_frame: boolean?): any
+		app:set_state("page_ask", { web = `html:{FRAME}`, kind = kind, url = url, main_frame = main_frame })
+		app:command("page_decide")
+		return app:state("page_decided")
+	end
+	expect(ask("other", "about:blank")).to_be(true)
+	expect(ask("link", "about:blank#top")).to_be(true)
+	expect(ask("link", "https://example.com/docs")).to_be(false)
+	expect(app:state("calls")).to_contain("open_url:https://example.com/docs")
+	-- A script's `location.href`: refused, and never opened.
+	expect(ask("other", "https://example.com/elsewhere")).to_be(false)
+	expect(string.find(app:state("calls"), "open_url:https://example.com/elsewhere", 1, true)).to_be(nil)
+	expect(ask("link", "file:///etc/hosts")).to_be(false)
+	expect(string.find(app:state("calls"), "open_url:file", 1, true)).to_be(nil)
+	-- A frame inside it may load, but not a file.
+	expect(ask("other", "https://example.com/embed", false)).to_be(true)
+	expect(ask("other", "file:///etc/hosts", false)).to_be(false)
+end)
+
 test("open in: a reply naming .html files shows Website cards: linked ones, found ones, a missing one disabled", function()
 	local app = mount("chat_fixture.luau")
 	seeded(app, "pages_seed_live")

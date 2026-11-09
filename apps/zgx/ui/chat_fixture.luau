@@ -2553,8 +2553,15 @@ do
 	local runs = ui.state("page_runs", {} :: { string })
 	local loaded = ui.state("page_loaded", {} :: { string })
 	local early = ui.state("page_early_script", false)
+	-- (Each page's `decide_navigation`, as zgx's web view asks it before a navigation starts.)
+	local deciders: { [string]: (any) -> boolean } = {}
 	html_api.web = function(id: string): any
-		return { id = id }
+		return {
+			id = id,
+			decide_navigation = function(_self: any, decide: (any) -> boolean)
+				deciders[id] = decide
+			end,
+		}
 	end
 	local real_load = html_api.load
 	html_api.load = function(web: any, html: string, ...)
@@ -2642,6 +2649,18 @@ do
 			if f then
 				f({ kind = n.kind, url = n.url })
 			end
+		end,
+	}
+	-- `{ web = <web id>, url, kind, main_frame? }`: asked of the page's decider; its answer in `page_decided`.
+	local page_ask = ui.state("page_ask", nil :: any)
+	local page_decided = ui.state("page_decided", nil :: any)
+	ui.command {
+		id = "page_decide",
+		title = "A page is about to navigate",
+		run = function()
+			local a = page_ask:peek()
+			local f = a and deciders[a.web]
+			page_decided:set(if f then f({ url = a.url, kind = a.kind, main_frame = a.main_frame ~= false, source_url = "about:blank" }) else "none")
 		end,
 	}
 	-- `{ id = <view id>, value, main? }`.

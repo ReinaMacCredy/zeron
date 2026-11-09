@@ -37,6 +37,31 @@ function M.web(id: string): any
 	return (ui :: any).web(id, { transparent = true, profile = "ephemeral" })
 end
 
+-- A stored page keeps its document, as gpui's `page_navigation` keeps it: a
+-- link goes to `on_link` (the browser) and nothing navigates the page, a
+-- script's `location.href` included, before it loads. (An old zgx has no
+-- `decide_navigation`: the card's `on_navigate` puts the page back.)
+function M.keep_page(web: any, on_link: (string) -> ())
+	local ok, decide = pcall(function()
+		return web.decide_navigation
+	end)
+	if not ok or decide == nil then
+		return
+	end
+	web:decide_navigation(function(r: any): boolean
+		if not r.main_frame then
+			return string.sub(r.url, 1, 5) ~= "file:"
+		end
+		if r.url == "about:blank" or string.sub(r.url, 1, 12) == "about:blank#" then
+			return true
+		end
+		if r.kind == "link" then
+			on_link(r.url)
+		end
+		return false
+	end)
+end
+
 -- (No base: `about:blank`, as gpui loads a page, so relative references fail closed.)
 function M.load(web: any, html: string)
 	web:html(html)
