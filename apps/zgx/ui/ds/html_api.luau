@@ -33,8 +33,11 @@ function M.view(props: any): Node
 	return (ui :: any).webview(props)
 end
 
-function M.web(id: string): any
-	return (ui :: any).web(id, { transparent = true, profile = "ephemeral" })
+-- `boot` runs in a world of the app's own (zgx `isolated`, macOS), where the page's scripts can't reach it.
+function M.web(id: string, boot: string?): any
+	-- (A keyed page outlives a reload with the scripts it was made with: a page read anew gets a new one.)
+	M.close((ui :: any).web(id))
+	return (ui :: any).web(id, { transparent = true, profile = "ephemeral", isolated = if boot then { boot } else nil })
 end
 
 -- A stored page keeps its document, as gpui's `page_navigation` keeps it: a

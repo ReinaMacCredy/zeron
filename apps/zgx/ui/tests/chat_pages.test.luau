@@ -361,6 +361,17 @@ test("pages: a link leaving the page opens in the browser and the card keeps its
 	expect(string.find(app:state("calls"), "open_url:file", 1, true)).to_be(nil)
 end)
 
+test("pages: each page's web is made once it is read, with its bootstrap for the app's own world, the sheet's too", function()
+	local app = mount("chat_fixture.luau")
+	seeded(app)
+	local boots = app:state("page_boots") or {}
+	expect(boots).to_contain(`html:{FRAME}|boot:/u/html/s2/frame.html`)
+	expect(boots).to_contain(`html:{PICTURES}|boot:/u/html/s2/pictures.html`)
+	app:click(`#html-card-expand-{FRAME}`)
+	settle(app)
+	expect(app:state("page_boots")).to_contain(`html:{FRAME}#sheet|boot:/u/html/s2/frame.html`)
+end)
+
 test("pages: a stored page decides each navigation first: its own document goes, a link opens the browser and stays, a script's goes nowhere", function()
 	local app = mount("chat_fixture.luau")
 	seeded(app)

@@ -2555,7 +2555,11 @@ do
 	local early = ui.state("page_early_script", false)
 	-- (Each page's `decide_navigation`, as zgx's web view asks it before a navigation starts.)
 	local deciders: { [string]: (any) -> boolean } = {}
-	html_api.web = function(id: string): any
+	local boots = ui.state("page_boots", {} :: { string })
+	html_api.web = function(id: string, boot: string?): any
+		local list = table.clone(boots:peek())
+		table.insert(list, `{id}|{boot or ""}`)
+		boots:set(list)
 		return {
 			id = id,
 			decide_navigation = function(_self: any, decide: (any) -> boolean)
@@ -2585,7 +2589,7 @@ do
 			done(nil, "not found")
 			return
 		end
-		done({ html = `<p>{args.path}</p>`, nonce = `n:{args.path}`, picks = if early:peek() then nil else `p:{args.path}` }, nil)
+		done({ html = `<p>{args.path}</p>`, nonce = `n:{args.path}`, picks = if early:peek() then nil else `p:{args.path}`, boot = `boot:{args.path}` }, nil)
 	end
 	html_api.view = function(props: any): Node
 		if props.id then

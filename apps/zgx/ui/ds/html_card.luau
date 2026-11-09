@@ -146,13 +146,19 @@ local function leave(e: any, url: string)
 	end
 end
 
+-- (Made once the page is read: its bootstrap goes in with it.)
+local function web_of(e: any, id: string): any
+	local web = api.web(id, e.boot)
+	api.keep_page(web, function(url: string)
+		leave(e, url)
+	end)
+	return web
+end
+
 local function entry_of(key: string): any
 	local e = PAGES[key]
 	if not e then
-		e = { web = api.web(`html:{key}`), nonce = nil, loaded = false, html = nil, height = nil, capped = false, groups = {} }
-		api.keep_page(e.web, function(url: string)
-			leave(e, url)
-		end)
+		e = { web = nil, nonce = nil, loaded = false, html = nil, height = nil, capped = false, groups = {} }
 		PAGES[key] = e
 	end
 	return e
@@ -288,12 +294,6 @@ end
 
 local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 	local view = ui.state(`html_sheet_view:{props.key}`, "live")
-	if not live and not e.sheet then
-		e.sheet = api.web(`html:{props.key}#sheet`)
-		api.keep_page(e.sheet, function(url: string)
-			leave(e, url)
-		end)
-	end
 	local function size(): any
 		local s = (ui :: any).window.size:get()
 		return s
@@ -318,6 +318,7 @@ local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 		bg = "$surface.overlay",
 		build = function(): Node
 			if not live and not e.sheet_loaded and e.html then
+				e.sheet = e.sheet or web_of(e, `html:{props.key}#sheet`)
 				api.load(e.sheet, e.html)
 				e.sheet_loaded, e.sheet_theme, e.sheet_shown = true, e.baked, nil
 			end
@@ -526,6 +527,8 @@ local function Page(props: any): Node
 			e.reading = false
 			if type(got) == "table" and type(got.html) == "string" then
 				e.nonce, e.picks, e.html, e.loaded, e.baked, e.theme = got.nonce, got.picks, got.html, true, baked, baked
+				e.boot = got.boot
+				e.web = web_of(e, `html:{key}`)
 				api.load(e.web, got.html)
 				status:set("ready")
 			else
