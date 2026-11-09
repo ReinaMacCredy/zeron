@@ -517,10 +517,7 @@ return ui.column {
 	end, { w_full = true, grow = 1, min_h = 0 }),
 	-- Something outside the panel that takes the keyboard (the chat's).
 	ui.div { id = "outside", label = "Outside", role = "button", focusable = true, h = 4, w_full = true },
-	-- The chat's column the floating device preview stands over, as the
-	-- shell's page places it: `test_float_column` its size, and
-	-- `test_float_chat_shown` whether the chat shows. `#float-to` is where a
-	-- test drags to: `test_float_to`, a point in the window.
+	-- The chat column the device float stands over, as screens/shell/page places it; `#float-to` is a drag's landing point.
 	ui.div {
 		id = "test-chat-column",
 		absolute = true,

@@ -1,7 +1,4 @@
--- The floating device preview (screens/device/float), over the chat column
--- ui/panel_fixture.luau stands in (600x600 at the window's top left), the
--- hub of ui/device_stub.luau under it. Numbers are gpui's (float.rs) for the
--- stub's 196x426 screen.
+-- Frames are gpui's float.rs numbers for the stub's 196x426 screen in the fixture's 600x600 chat column.
 
 local function eventually(app: any, ok: () -> boolean, ms: number?): boolean
 	local tries = math.ceil((ms or 5000) / 50)

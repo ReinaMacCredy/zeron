@@ -178,7 +178,7 @@ local function edge_box(edge: string): { [string]: any }
 end
 
 local function card(chat: string, target: Target, container: any): Node
-	local key = `float:{chat}`
+	local key = `float-{chat}`
 	local live = ui.use_state(nil :: Frame?)
 	local hovered = ui.use_state(false)
 	local gesture: { px: number, py: number, start: Frame, edge: string? }? = nil
