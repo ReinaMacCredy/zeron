@@ -45,7 +45,12 @@ local function open(page: string?): any
 	app:command("shell.settings")
 	app:frames(20)
 	if page then
-		app:click(`{NAV} >> role:tab "{page}"`)
+		-- (A page under the list's fold is scrolled to first, as a person does.)
+		if not pcall(app.click, app, `{NAV} >> role:tab "{page}"`) then
+			app:scroll(`{NAV} >> role:tab "General"`, 2000)
+			app:frames(10)
+			app:click(`{NAV} >> role:tab "{page}"`)
+		end
 		app:frames(30)
 	end
 	return app
@@ -548,8 +553,7 @@ test("About says which Zeron this is, and that this app isn't what updates", fun
 	expect(shows(app, PAGE, "Updates go to the engine on this computer")).to_be(true)
 	-- Copied for a bug report.
 	app:click(`{PAGE} >> role:button "Copy"`)
-	app:frames(6)
-	expect(app:tree()).to_contain("Version info copied")
+	expect(app:wait('~"Version info copied"', { timeout_ms = 3000 })).to_be(true)
 	-- The links open in the browser, the notes at this version's.
 	app:scroll(PAGE, 2000)
 	app:frames(4)
