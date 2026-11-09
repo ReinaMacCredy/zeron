@@ -442,7 +442,7 @@ local function Dialog(e: store.Entry): Node
 				rounded = "$radius.full",
 				bg = "$text.primary",
 				hover = { opacity = 0.9 },
-				color = "$bg",
+				color = "$background",
 				items = "center",
 				on_click = function()
 					M.try(e)

@@ -803,7 +803,7 @@ function M.LimitCard(props: { child: string, limit: () -> any, threads: Threads 
 				px = ui.raw(12, "limit_card.rs button"),
 				rounded = "$radius.full",
 				bg = "$text.primary",
-				color = "$bg",
+				color = "$background",
 				hover = { opacity = 0.9 },
 				on_click = function()
 					act(selected())
