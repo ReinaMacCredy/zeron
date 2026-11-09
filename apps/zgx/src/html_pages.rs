@@ -13,6 +13,11 @@ pub fn pick_script(nonce: &str, picks: &str) -> String {
     PICK_SCRIPT.replace("__HEIGHT__", nonce).replace("__PICKS__", picks)
 }
 
+/// The bootstrap again for the app's own world (zgx `isolated`, macOS), where the page's copy finds no channel.
+pub fn isolated_script(nonce: &str, picks: &str) -> String {
+    format!("{}{}", shared::SIZE_SCRIPT, pick_script(nonce, picks))
+}
+
 /// A page script before the bootstrap could hook what it captures, so picks stay off then.
 pub fn bootstrap_first(html: &str, themed: &str) -> bool {
     let same = html.bytes().zip(themed.bytes()).take_while(|(a, b)| a == b).count();
@@ -230,11 +235,12 @@ pub fn install(host: &ScriptHost) {
             let font = num(arg.field("font_size"), 16.) as f32;
             let pick = arg.field("theme").and_then(|t| t.field("pick")).map(crate::auth::text);
             let (nonce, picks) = (nonce(), nonce());
-            let (out, heard) = themed(&html, &theme, font, pick.as_deref(), &nonce, &picks);
+            let (out, _) = themed(&html, &theme, font, pick.as_deref(), &nonce, &picks);
             Ok(Value::record([
                 ("html", Value::from(out.as_str())),
                 ("nonce", Value::from(nonce.as_str())),
-                ("picks", if heard { Value::from(picks.as_str()) } else { Value::Nil }),
+                ("picks", Value::from(picks.as_str())),
+                ("boot", Value::from(isolated_script(&nonce, &picks).as_str())),
             ]))
         }
     });
@@ -409,6 +415,8 @@ mod tests {
         assert!(out.ends_with("</head><p>x</p>"));
         let (early, heard) = themed("<script>hook()</script><head></head><p>x</p>", &theme, 16., None, "n0", "p0");
         assert!(!heard && early.contains("H=\"n0\",N=\"\""), "a script before the bootstrap: no pick nonce in the page");
+        let boot = isolated_script("n0", "p0");
+        assert!(boot.starts_with(shared::SIZE_SCRIPT) && boot.contains("H=\"n0\",N=\"p0\""), "the app's world reports heights and picks");
     }
 
     #[test]

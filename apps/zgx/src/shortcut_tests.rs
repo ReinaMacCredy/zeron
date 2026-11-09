@@ -589,7 +589,7 @@ fn a_rebound_shortcut_takes_effect_at_once() {
 /// keeps ⌘, and isn't in File any more. Check for Updates… opens About &
 /// updates.
 #[test]
-fn check_for_updates_and_settings_lead_the_application_menu() {
+fn about_check_for_updates_and_settings_lead_the_application_menu() {
     let w = mount();
     let commands = w.app.host.commands().get();
     let bar = crate::menu_bar::Bar::of(&commands, &[], &[], None);
@@ -609,7 +609,7 @@ fn check_for_updates_and_settings_lead_the_application_menu() {
         .collect();
     assert_eq!(
         shown,
-        ["Check for Updates… [shell.check_updates]", "—", "Settings [shell.settings] ⌘"],
+        ["About Zeron [shell.about]", "Check for Updates… [shell.check_updates]", "—", "Settings [shell.settings] ⌘"],
         "{shown:?}"
     );
     let file = menu("File").expect("no File menu");
