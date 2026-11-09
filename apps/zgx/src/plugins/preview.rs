@@ -71,6 +71,7 @@ pub const BLOCKED: &[&str] = &[
     "skills.open",
     "skills.trash",
     "playbooks.create",
+    "playbooks.triage",
     "playbooks.open",
     "playbooks.trash",
     "chat.send",

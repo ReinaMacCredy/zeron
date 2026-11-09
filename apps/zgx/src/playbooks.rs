@@ -5,6 +5,7 @@
 //!   playbooks.list()          { folder, playbooks = { { id, title, question,
 //!                               subtitle?, source, root?, path?, prompt? } } }
 //!   playbooks.create()        a new one in the folder, opened with the system: its path
+//!   playbooks.triage()        a triage folder made (the source cloned beside it): the draft's link
 //!   playbooks.open(path)      opened with the system (Edit)
 //!   playbooks.reveal(folder)  the folder made and shown in Finder
 //!   playbooks.trash(path)     moved to the Trash
@@ -40,6 +41,11 @@ pub fn install(host: &ScriptHost) {
         let path = made["path"].as_str().ok_or("failed")?.to_owned();
         open::that_detached(&path).map_err(|e| e.to_string())?;
         Ok(Value::from(path.as_str()))
+    });
+    host.async_action("playbooks.triage", |_| async move {
+        crate::plugins::preview::refuse("playbooks.triage")?;
+        let started = engine::get().call("StartTriage", json!({})).await.map_err(|e| failed(&e))?;
+        Ok(Value::from(started["prompt"].as_str().ok_or("failed")?))
     });
     let k = known.clone();
     host.async_action("playbooks.open", move |arg| {

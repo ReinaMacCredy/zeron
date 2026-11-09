@@ -3431,6 +3431,7 @@
       "note": "Playbooks are markdown files with title and question in their frontmatter. Files in {folder} are offered everywhere; a project's own go in .zeron/playbooks.",
       "outdated": "Update Zeron's engine to list playbooks here.",
       "couldnt_create": "Could not create a playbook",
+      "couldnt_start": "Could not start triage",
       "couldnt_delete": "Could not delete the playbook",
       "couldnt_open": "Could not open the playbook"
     },

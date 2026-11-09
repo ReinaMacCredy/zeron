@@ -476,6 +476,7 @@ pub mod methods {
     pub const GET_TODAY_RUNS: &str = "GetTodayRuns";
     pub const LIST_PLAYBOOKS: &str = "ListPlaybooks";
     pub const CREATE_PLAYBOOK: &str = "CreatePlaybook";
+    pub const START_TRIAGE: &str = "StartTriage";
     /// One page of a repository's open pull requests (`filter`, `after`
     /// cursor), with the total count.
     pub const LIST_CHANGE_REQUEST_PAGE: &str = "ListChangeRequestPage";

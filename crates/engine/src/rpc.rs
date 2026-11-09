@@ -6422,6 +6422,16 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(format!("Could not create a playbook: {e}")))?;
                 RpcReply::value(&serde_json::json!({ "path": path.display().to_string() }))
             }
+            methods::START_TRIAGE => {
+                let data_dir = self.repos.data_dir().to_path_buf();
+                let prepared = crate::triage::prepare(&data_dir).map_err(|e| {
+                    RpcError::Failed(format!(
+                        "Could not start triage: {e}. Run zeron triage in a terminal instead."
+                    ))
+                })?;
+                crate::triage::spawn_app_background(data_dir, &prepared, option_env!("ZERON_GIT_HASH"));
+                RpcReply::value(&serde_json::json!({ "prompt": crate::playbooks::prompt(&prepared.playbook) }))
+            }
             methods::GET_CHANGE_REQUEST_REPOSITORY => {
                 #[derive(Deserialize)]
                 struct P {

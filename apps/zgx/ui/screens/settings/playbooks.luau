@@ -42,6 +42,9 @@ M.host = {
 	create = function(): any
 		return ui.call("playbooks.create")
 	end,
+	triage = function(): any
+		return ui.call("playbooks.triage")
+	end,
 	open = function(path: string): any
 		return ui.call("playbooks.open", path)
 	end,
@@ -101,7 +104,26 @@ local function file_name(path: string?): string?
 	return if path then string.match(path, "[^/]+$") else nil
 end
 
+local function seed(project: string?, prompt: string)
+	route.new_chat(project)
+	shared.set_draft_of("", "text", prompt .. shared.draft_peek("").text)
+	ui.after(0, function()
+		shared.focus:set(shared.focus:peek() + 1)
+	end)
+end
+
 function M.start(p: Playbook)
+	if p.source == "builtIn" then
+		local started = call("triage")
+		if started then
+			started:after(function(prompt: any)
+				seed(nil, tostring(prompt))
+			end, function(e: any)
+				failed("settings.playbooks.couldnt_start", e)
+			end)
+		end
+		return
+	end
 	if not p.prompt then
 		return
 	end
@@ -113,11 +135,7 @@ function M.start(p: Playbook)
 			end
 		end
 	end
-	route.new_chat(project)
-	shared.set_draft_of("", "text", p.prompt .. shared.draft_peek("").text)
-	ui.after(0, function()
-		shared.focus:set(shared.focus:peek() + 1)
-	end)
+	seed(project, p.prompt)
 end
 
 function M.create()
@@ -196,7 +214,7 @@ local function row(p: Playbook, i: State<number>): Node
 			},
 		})
 	end
-	if p.prompt then
+	if p.prompt or p.source == "builtIn" then
 		table.insert(controls, action(`playbook-start-{key}`, ui.t("settings.playbooks.start"), "secondary", function()
 			M.start(p)
 		end))

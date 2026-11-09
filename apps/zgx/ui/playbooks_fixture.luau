@@ -53,6 +53,10 @@ page.host = {
 		table.insert(rows, { id = FOLDER .. "/new-playbook.md", title = "New playbook", question = "What should we do?", source = "app", path = FOLDER .. "/new-playbook.md", prompt = "Read [new-playbook.md] and follow it.\n\n" })
 		return settled(FOLDER .. "/new-playbook.md")
 	end,
+	triage = function(): any
+		note("triage")
+		return settled("Read [playbook.md](/home/ada/.zeron/triage/1/playbook.md) and follow it.\n\n")
+	end,
 	open = function(path: string): any
 		note(`open:{path}`)
 		return settled(nil)

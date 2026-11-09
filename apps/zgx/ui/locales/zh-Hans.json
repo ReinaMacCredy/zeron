@@ -3431,6 +3431,7 @@
       "note": "剧本是在前置元数据中写有 title 和 question 的 Markdown 文件。{folder} 中的文件在所有地方都可用；项目自己的剧本放在 .zeron/playbooks。",
       "outdated": "请更新 Zeron 的引擎以在这里列出剧本。",
       "couldnt_create": "无法创建剧本",
+      "couldnt_start": "无法开始分诊",
       "couldnt_delete": "无法删除剧本",
       "couldnt_open": "无法打开剧本"
     },
