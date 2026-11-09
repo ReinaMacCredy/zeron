@@ -37,8 +37,8 @@ const PREFS: &str = "screens/settings/prefs.luau";
 
 /// Every key of crates/ui `UiSettings` (camelCase, as written) and the older ones it still reads.
 pub const TABLE: &[(&str, Home)] = &[
-    ("dictationEnabled", Home::None("dictation is Voice's (U28)")),
-    ("dictationInput", Home::None("dictation is Voice's (U28)")),
+    ("dictationEnabled", Home::Persist(&["ds/dictation.luau::dictation_enabled"])),
+    ("dictationInput", Home::Persist(&["ds/dictation.luau::dictation_input"])),
     ("windowGeometry", Home::None("the window's frame is the system's (frame autosave), not a file")),
     ("composerSendBehavior", Home::Persist(&["screens/settings/prefs.luau::settings_send_with"])),
     ("followUpBehavior", Home::Persist(&["screens/settings/prefs.luau::settings_follow_up"])),
@@ -89,7 +89,7 @@ pub const TABLE: &[(&str, Home)] = &[
     ("rightPaneWidth", Home::Persist(&["screens/shell/page.luau::shell_files_width", "screens/shell/page.luau::shell_panel_width_chosen"])),
     ("splitRatio", Home::None("a split's ratios are each tab's own here")),
     ("terminalHeight", Home::None("terminals are panel tabs here, no drawer")),
-    ("keymap", Home::Persist(&["screens/shell/keys.luau::shell_keymap", "screens/chat/appshots.luau::appshots_shortcut"])),
+    ("keymap", Home::Persist(&["screens/shell/keys.luau::shell_keymap", "screens/chat/appshots.luau::appshots_shortcut", "ds/dictation.luau::dictation_key"])),
     ("appshotsEnabled", Home::Persist(&["screens/chat/appshots.luau::appshots_enabled"])),
     ("appshotSoundEnabled", Home::Persist(&["screens/chat/appshots.luau::appshots_sound"])),
     ("appshotDestination", Home::Persist(&["screens/chat/appshots.luau::appshots_destination"])),
@@ -178,12 +178,12 @@ pub const TABLE: &[(&str, Home)] = &[
     ("prChatIdleExpiry", Home::None("no pull request chats here")),
     ("prChatSessions", Home::None("no pull request chats here")),
     ("gitAgentBusyPolicy", Home::None("no git busy policy here")),
-    ("deviceAutoFloat", Home::None("the device panel is U28's")),
-    ("deviceFloatFrame", Home::None("the device panel is U28's")),
+    ("deviceAutoFloat", Home::Persist(&["screens/settings/device_hub.luau::device_auto_float"])),
+    ("deviceFloatFrame", Home::None("no saved frame for the device preview here (U28 keeps none)")),
     ("homeWidgets", Home::None("no widget grid here (U27c)")),
     ("smoothScrolling", Home::None("zgx scrolls its own way, no switch")),
-    ("codexVoice", Home::None("voice is U28's")),
-    ("codexVoiceDevice", Home::None("voice is U28's")),
+    ("codexVoice", Home::Persist(&["screens/settings/voice.luau::codex_voice"])),
+    ("codexVoiceDevice", Home::Persist(&["screens/settings/voice.luau::codex_voice_device"])),
 ];
 
 /// The `ui.persist` file for `key` (`module::name`), as zgx names it.
@@ -302,6 +302,12 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("screens/shell/page.luau::shell_panel_width_chosen", "false"),
     ("screens/shell/split.luau::shell_session_tabs", "[]"),
     ("screens/shell/keys.luau::shell_keymap", "{}"),
+    ("ds/dictation.luau::dictation_enabled", "false"),
+    ("ds/dictation.luau::dictation_input", "\"\""),
+    ("ds/dictation.luau::dictation_key", "\"cmd+d\""),
+    ("screens/settings/voice.luau::codex_voice", "\"\""),
+    ("screens/settings/voice.luau::codex_voice_device", "\"\""),
+    ("screens/settings/device_hub.luau::device_auto_float", "true"),
 ];
 
 /// `settings` read as the shipping app reads older files of it
@@ -447,6 +453,23 @@ fn more(settings: &Json) -> Vec<(String, Json)> {
     }
     if let Some(combo) = appshot {
         put("screens/chat/appshots.luau::appshots_shortcut", json!(combo));
+    }
+    if let Some(hold) = settings["keymap"]["toggleDictation"].as_str().filter(|c| !c.is_empty() && *c != "mod-d").and_then(combo) {
+        put("ds/dictation.luau::dictation_key", json!(hold));
+    }
+    for (from, to) in [("dictationEnabled", "ds/dictation.luau::dictation_enabled"), ("deviceAutoFloat", "screens/settings/device_hub.luau::device_auto_float")] {
+        if let Some(on) = settings[from].as_bool() {
+            put(to, json!(on));
+        }
+    }
+    for (from, to) in [
+        ("dictationInput", "ds/dictation.luau::dictation_input"),
+        ("codexVoice", "screens/settings/voice.luau::codex_voice"),
+        ("codexVoiceDevice", "screens/settings/voice.luau::codex_voice_device"),
+    ] {
+        if let Some(word) = s(from).filter(|w| !w.is_empty()) {
+            put(to, json!(word));
+        }
     }
     out
 }
@@ -971,6 +994,12 @@ mod tests {
             json!({ "shell.toggle_sidebar": "cmd+shift+b", "shell.toggle_terminal": "cmd+`", "shell.session_9": "ctrl+9" })
         );
         assert_eq!(s("screens/chat/appshots.luau::appshots_shortcut"), json!("cmd+shift+2"));
+        // Voice and the device preview (U28's pages).
+        assert_eq!(s("ds/dictation.luau::dictation_key"), json!("cmd+shift+d"));
+        assert_eq!(s("ds/dictation.luau::dictation_enabled"), json!(true));
+        assert_eq!(s("ds/dictation.luau::dictation_input"), json!("BuiltInMicrophoneDevice"));
+        assert_eq!(s("screens/settings/voice.luau::codex_voice"), json!("juniper"));
+        assert_eq!(s("screens/settings/device_hub.luau::device_auto_float"), json!(false));
         // The theme, in the engine's own file both themes pages read.
         assert!(outcome.theme);
         let chosen = zeron_theme::catalog::chosen(&data);

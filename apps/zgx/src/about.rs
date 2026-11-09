@@ -106,7 +106,7 @@ enum Flow {
 struct Desktop {
     install: InstallKind,
     blocker: Option<UpdateBlocker>,
-    /// Background download and install on quit (`ZERON_AUTO_UPDATE` unset or on).
+    /// Background download and install on quit: the Zeron app's alone, as `automatic` decides.
     automatic: bool,
     edge: String,
     data_dir: PathBuf,

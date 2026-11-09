@@ -52,7 +52,7 @@
   "splitRatio": 0.6,
   "terminalHeight": 280.0,
   "keymap": {
-    "toggleDictation": "mod-d",
+    "toggleDictation": "mod-shift-d",
     "captureAppshot": "mod-shift-2",
     "quickCapture": "mod-alt-n",
     "randomWallpaper": "mod-u",
@@ -144,6 +144,6 @@
   "deviceFloatFrame": { "x": 10.0, "y": 10.0, "width": 400.0, "height": 300.0 },
   "homeWidgets": { "usage": true },
   "smoothScrolling": false,
-  "codexVoice": "alloy",
+  "codexVoice": "juniper",
   "codexVoiceDevice": "default"
 }

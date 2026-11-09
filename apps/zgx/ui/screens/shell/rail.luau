@@ -112,7 +112,7 @@ local RailButton = ui.component(function(props: ButtonProps): Node
 		hover = { bg = "#00000000" },
 		active = { bg = "$pressed" },
 		cursor = if props.on_click then "pointer" else nil,
-		color = ui.tween(bright, { from = "$text.secondary", to = "$text.primary", duration = motion.ms(150), ease = HOVER_FADE }),
+		color = ui.tween(bright, { from = "$text.secondary", to = "$text.primary", duration = math.max(motion.ms(150), 1), ease = HOVER_FADE }),
 		on_hover = function(inside: boolean)
 			over:set(inside)
 		end,
@@ -125,7 +125,7 @@ local RailButton = ui.component(function(props: ButtonProps): Node
 			bottom = 0,
 			rounded = "$radius.lg",
 			bg = "$hover",
-			opacity = ui.tween(bright, { duration = motion.ms(150), ease = HOVER_FADE }),
+			opacity = ui.tween(bright, { duration = math.max(motion.ms(150), 1), ease = HOVER_FADE }),
 			pointer_events = "none",
 		},
 		props[1],
@@ -467,7 +467,7 @@ local function usage_ring(): Node
 			bottom = 0,
 			rounded = "$radius.lg",
 			bg = "$hover",
-			opacity = ui.tween(bright, { duration = motion.ms(150), ease = HOVER_FADE }),
+			opacity = ui.tween(bright, { duration = math.max(motion.ms(150), 1), ease = HOVER_FADE }),
 			pointer_events = "none",
 		},
 		ui.canvas {

@@ -67,8 +67,8 @@ pub struct Config {
     edge: String,
     client: String,
     callback_port: u16,
-    /// The Zeron app's engine (the beta): attached to, never started or
-    /// stopped from here.
+    /// The Zeron app's engine (the beta, and the Zeron app itself): attached
+    /// to, never stopped from here; started only by a released Zeron app (`spawn`).
     managed: bool,
 }
 
