@@ -4,11 +4,14 @@
 //! stays in the host and never reaches the engine.
 //!
 //!   voice.model               { ready, cache, size, downloading, progress,
-//!                             error? }, also on the shared `voice_model` as
-//!                             it changes (a download's progress)
+//!                             capable, error? }, also on the shared
+//!                             `voice_model` as it changes (a download's
+//!                             progress); `capable` false: this build has no
+//!                             recorder, so no mic shows and nothing downloads
 //!   voice.download            (invoke) the model fetched and checked
 //!                             (crates/voice/model.json, the same folder as
-//!                             gpui's, so one download serves both)
+//!                             gpui's, so one download serves both);
+//!                             `unavailable` without a recorder
 //!   voice.cancel              (invoke) that stopped
 //!   voice.remove              the model's folder gone: the model's state;
 //!                             `busy` while dictating, `remove_failed`
@@ -50,6 +53,14 @@ const MODEL_FOLDER: &str = "models/parakeet-tdt-0.6b-v3-int8";
 
 fn mock() -> bool {
     std::env::var("ZERON_ZGX_MOCK").is_ok_and(|v| v == "1")
+}
+
+/// Whether this build records and transcribes (crates/voice wired behind
+/// `dictation.start`): not yet, so only a mock Dev's made-up microphone.
+const RECORDER: bool = false;
+
+fn capable() -> bool {
+    RECORDER || mock()
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -196,6 +207,7 @@ impl Voice {
             ("size", Value::from(m.size() as f64)),
             ("downloading", Value::Bool(downloading)),
             ("progress", Value::from(if downloading { self.progress.load(Ordering::Relaxed) as f64 } else { 0.0 })),
+            ("capable", Value::Bool(capable())),
         ];
         if let Some(word) = self.error.get() {
             fields.push(("error", Value::from(word)));
@@ -224,6 +236,12 @@ impl Voice {
 
     fn start_download(self: &Rc<Self>) {
         if self.downloading.borrow().is_some() {
+            return;
+        }
+        // (670 MB for a mic that could never record.)
+        if !capable() {
+            self.error.set(Some("unavailable"));
+            self.publish();
             return;
         }
         self.error.set(None);
@@ -481,6 +499,18 @@ mod tests {
         assert!(!dir.join("enc.onnx").exists() && !dir.join("enc.onnx.part").exists(), "a bad file is not kept");
         assert_eq!(download(&bad, &m, &dir, &AtomicBool::new(true), &AtomicU64::new(0)), Err("cancelled"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_build_without_a_recorder_says_so_and_downloads_nothing() {
+        if mock() {
+            return;
+        }
+        let v = Rc::new(Voice::default());
+        assert_eq!(v.state().field("capable"), Some(&Value::Bool(false)));
+        v.start_download();
+        assert!(v.downloading.borrow().is_none(), "nothing fetched");
+        assert_eq!(v.state().field("error"), Some(&Value::from("unavailable")));
     }
 
     #[test]

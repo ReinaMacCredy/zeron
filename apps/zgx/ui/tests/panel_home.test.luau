@@ -222,6 +222,16 @@ test("a letter the home has no row for is passed on to plugins' rows; none from 
 	app:type('role:textbox "Message"', "c")
 	app:frames(3)
 	expect((app:state("panel_home_key") :: any).n).to_be(n + 1)
+	-- A row that isn't showing has no letter: Device off, D is passed on too.
+	app:set_state("builtin_device", false)
+	app:frames(5)
+	expect(app:has("#panel-open-device")).to_be(false)
+	app:click("#outside")
+	app:key("d")
+	app:frames(3)
+	passed = app:state("panel_home_key") :: any
+	expect(passed.key).to_be("D")
+	expect(passed.n).to_be(n + 2)
 end)
 
 test("an action runs in a terminal tab of its own, titled by it, attached to the engine's terminal", function()

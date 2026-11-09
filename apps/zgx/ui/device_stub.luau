@@ -19,6 +19,9 @@
 --   device_stub.failed       the hub failed to start
 --   device_stub.hold_open    the next OpenHubDevice waits until device_stub.let_open
 --   device_stub.booting      chat-1's iPad Air is starting
+--   device_stub.hold_input   each SendHubDeviceInput waits until device_stub.let_input (one answered each)
+--   device_stub.reply_first  the next OpenHubDevice answers before the hub lists it (device_stub.late_push lists it)
+--   device_stub.stream_fails the engine ends every stream ("The device stopped.")
 
 local api = require("@app/screens/device/api") :: any
 local settings_host = require("@app/screens/settings/host") :: any
@@ -62,6 +65,10 @@ local hub = {
 	detail = nil :: string?,
 	held = nil :: any,
 	booting = {} :: { any },
+	hold_input = false,
+	inputs = {} :: { any },
+	reply_first = false,
+	late = nil :: any,
 }
 
 local function state(): any
@@ -157,6 +164,11 @@ local function answer(method: string, p: any): any
 		end
 		hub.booted[p.deviceId] = true
 		local s = { chatId = p.chatId, hostId = p.hostId or "local", deviceId = p.deviceId, platform = p.platform, openedAt = "2026-11-09T00:00:00Z", openedBy = "user" }
+		if hub.reply_first then
+			hub.reply_first = false
+			hub.late = s
+			return settled(s)
+		end
 		table.insert(hub.sessions, s)
 		return settled(s)
 	elseif method == "CloseHubDevice" then
@@ -174,6 +186,14 @@ local function answer(method: string, p: any): any
 	elseif method == "HubDeviceScreenshot" then
 		return settled({ path = "/tmp/zeron-mock-device-screenshot.png" })
 	elseif method == "SendHubDeviceInput" then
+		if hub.hold_input then
+			local waiting = { done = false, ok = nil :: any }
+			function waiting.after(_self: any, ok: ((any) -> ())?, _bad: ((any) -> ())?)
+				waiting.ok = ok
+			end
+			table.insert(hub.inputs, waiting)
+			return waiting
+		end
 		return settled({})
 	end
 	return settled(nil, "refused")
@@ -250,7 +270,7 @@ api.unstream = function(key: string)
 end
 api.frame_src = function(key: string): string
 	local f = api.frames:get()[key]
-	local n = if f then ((f.seq - 1) % 3) + 1 else 1
+	local n = if f and f.seq then ((f.seq - 1) % 3) + 1 else 1
 	local src = `assets/device/frame-{n}.png`
 	log(`src:{src}`)
 	return src
@@ -286,7 +306,7 @@ ui.command {
 	run = function()
 		local all = table.clone(api.frames:peek())
 		for k, f in all do
-			all[k] = { seq = f.seq + 1, w = f.w, h = f.h }
+			all[k] = { seq = (f.seq or 0) + 1, w = f.w or 196, h = f.h or 426 }
 		end
 		api.frames:set(all)
 	end,
@@ -368,6 +388,33 @@ ui.command { id = "device_stub.let_open", title = "The open that waits goes thro
 			held.promise.ok(x)
 		end
 	end
+end }
+ui.command { id = "device_stub.hold_input", title = "Device input waits", run = function()
+	hub.hold_input = true
+end }
+ui.command { id = "device_stub.let_input", title = "The oldest device input is answered", run = function()
+	local w = table.remove(hub.inputs, 1)
+	if w and w.ok then
+		w.ok({})
+	end
+end }
+ui.command { id = "device_stub.reply_first", title = "The next open answers before the hub lists it", run = function()
+	hub.reply_first = true
+end }
+ui.command { id = "device_stub.late_push", title = "The hub lists the open that answered first", run = function()
+	if hub.late then
+		table.insert(hub.sessions, hub.late)
+		hub.late = nil
+		hub.revision += 1
+		publish()
+	end
+end }
+ui.command { id = "device_stub.stream_fails", title = "The engine ends every stream", run = function()
+	local all = table.clone(api.frames:peek())
+	for k in all do
+		all[k] = { failed = "The device stopped." }
+	end
+	api.frames:set(all)
 end }
 ui.command { id = "device_stub.booting", title = "chat-1's iPad Air is starting", run = change(function()
 	hub.booting = { { chatId = "chat-1", hostId = "local", deviceId = "mock-ipad", name = "iPad Air" } }

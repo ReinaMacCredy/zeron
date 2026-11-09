@@ -17,7 +17,12 @@
 //!                                     frames (`WatchHubDeviceFrames`), each
 //!                                     decoded off the window's thread and shown
 //!                                     as `ui.image { src = "host:device/<key>" }`;
-//!                                     shared `device_frames`[key] = { seq, w, h }
+//!                                     shared `device_frames`[key] = { seq, w, h },
+//!                                     and `failed` (why) once the engine ends it
+//!
+//! The hub's watch and each stream are watched again on every connection to
+//! the engine (one that restarts, or comes late at launch), as gpui's
+//! WATCH_DEVICE_HUB is on each engine attach.
 //!   device.unstream(key)              that stream stopped, its picture let go
 //!
 //! `ZERON_ZGX_MOCK=1` (a mock Dev): a hub of the host's own instead of the
@@ -99,7 +104,11 @@ fn image_name(key: &str) -> String {
 
 struct Stream {
     generation: u64,
-    _watch: Option<engine::rpc::Watch>,
+    host_id: Option<String>,
+    device_id: String,
+    /// Its frames' way to the decoder (none on a mock Dev).
+    decode: Option<std::sync::mpsc::SyncSender<(u64, Vec<u8>)>>,
+    watch: Option<engine::rpc::Watch>,
 }
 
 struct Window {
@@ -107,8 +116,15 @@ struct Window {
     hub: Shared,
     frames: Shared,
     sizes: RefCell<HashMap<String, (u64, u32, u32)>>,
+    /// Streams the engine ended, and why.
+    failed: RefCell<HashMap<String, String>>,
+    /// The engine's connection last heard: each new one watches the hub and
+    /// every stream again (a watch ends with its connection).
+    rpc: RefCell<Option<engine::rpc::Rpc>>,
     watch: RefCell<Option<engine::rpc::Watch>>,
     watching: Cell<bool>,
+    /// Which arming of the hub's watch is the live one.
+    armed: Cell<u64>,
     streams: RefCell<HashMap<String, Stream>>,
     next: Cell<u64>,
 }
@@ -119,13 +135,37 @@ thread_local! {
 }
 
 impl Window {
+    fn new(host: &ScriptHost) -> Rc<Self> {
+        Rc::new(Window {
+            host: host.clone(),
+            hub: host.shared("device_hub", Value::Nil),
+            frames: host.shared("device_frames", Value::record(std::iter::empty::<(&str, Value)>())),
+            sizes: RefCell::default(),
+            failed: RefCell::default(),
+            rpc: RefCell::default(),
+            watch: RefCell::default(),
+            watching: Cell::new(false),
+            armed: Cell::new(0),
+            streams: RefCell::default(),
+            next: Cell::new(0),
+        })
+    }
+
     fn publish_frames(&self) {
         let sizes = self.sizes.borrow();
-        self.frames.set(Value::record(sizes.iter().map(|(k, (seq, w, h))| {
-            (
-                k.as_str(),
-                Value::record([("seq", Value::from(*seq as f64)), ("w", Value::from(*w as f64)), ("h", Value::from(*h as f64))]),
-            )
+        let failed = self.failed.borrow();
+        let mut keys: Vec<&String> = sizes.keys().chain(failed.keys()).collect();
+        keys.sort();
+        keys.dedup();
+        self.frames.set(Value::record(keys.into_iter().map(|k| {
+            let mut fields = Vec::new();
+            if let Some((seq, w, h)) = sizes.get(k) {
+                fields.extend([("seq", Value::from(*seq as f64)), ("w", Value::from(*w as f64)), ("h", Value::from(*h as f64))]);
+            }
+            if let Some(why) = failed.get(k) {
+                fields.push(("failed", Value::from(why.as_str())));
+            }
+            (k.as_str(), Value::record(fields))
         })));
     }
 
@@ -136,42 +176,80 @@ impl Window {
         let (w, h) = (image.width(), image.height());
         self.host.image(&image_name(key), Some(image));
         self.sizes.borrow_mut().insert(key.to_string(), (seq, w, h));
+        self.failed.borrow_mut().remove(key);
         self.publish_frames();
     }
 
     fn unstream(&self, key: &str) {
-        if self.streams.borrow_mut().remove(key).is_some() {
+        let failed = self.failed.borrow_mut().remove(key).is_some();
+        if self.streams.borrow_mut().remove(key).is_some() || failed {
             self.host.image(&image_name(key), None);
             self.sizes.borrow_mut().remove(key);
             self.publish_frames();
         }
     }
 
-    fn start_watch(self: &Rc<Self>) {
+    /// The hub followed (`device.watch`): on the connection there is now,
+    /// else on the next.
+    fn set_watching(self: &Rc<Self>, on: bool) {
+        if on == self.watching.get() {
+            return;
+        }
+        self.watching.set(on);
+        if !on {
+            self.armed.set(self.armed.get() + 1);
+            self.watch.borrow_mut().take();
+            return;
+        }
         if mock() {
             self.hub.set(json_value(&MOCK.with(|m| m.borrow().state())));
             return;
         }
+        let rpc = self.rpc.borrow().clone().filter(|rpc| !rpc.is_closed());
+        if let Some(work) = rpc.and_then(|rpc| self.arm(&rpc)) {
+            engine::get().spawn(work);
+        }
+    }
+
+    /// A new connection to the engine: the hub watched on it (while
+    /// followed), and each stream. What's handed back is the hub's watch
+    /// to run on the connection's tasks.
+    fn connected(self: &Rc<Self>, rpc: &engine::rpc::Rpc) -> Option<impl std::future::Future<Output = ()> + 'static + use<>> {
+        *self.rpc.borrow_mut() = Some(rpc.clone());
+        let mut keys: Vec<String> = self.streams.borrow().keys().cloned().collect();
+        keys.sort();
+        for key in keys {
+            self.watch_frames(&key, rpc);
+        }
+        self.arm(rpc)
+    }
+
+    /// `EngineInfo`'s capability, then `ListHubDevices { inspectOnly }` (the
+    /// hub starts lazily), then `WatchDeviceHub` into `device_hub`, on `rpc`.
+    fn arm(self: &Rc<Self>, rpc: &engine::rpc::Rpc) -> Option<impl std::future::Future<Output = ()> + 'static + use<>> {
+        if !self.watching.get() || mock() {
+            return None;
+        }
+        let generation = self.armed.get() + 1;
+        self.armed.set(generation);
+        self.watch.borrow_mut().take();
         let me = Rc::downgrade(self);
-        engine::get().spawn(async move {
-            let Some(rpc) = engine::get().connection(Duration::from_secs(5)).await else { return };
+        let rpc = rpc.clone();
+        Some(async move {
+            let live = |me: &std::rc::Weak<Window>| me.upgrade().filter(|w| w.watching.get() && w.armed.get() == generation && !rpc.is_closed());
             let info = rpc.call("EngineInfo", json!({})).await.unwrap_or(Json::Null);
-            let Some(window) = me.upgrade() else { return };
-            if !window.watching.get() {
-                return;
-            }
+            let Some(window) = live(&me) else { return };
             if !info.is_null() && !supports(&info) {
                 window.hub.set(Value::record([("outdated", Value::Bool(true))]));
                 return;
             }
+            drop(window);
             let listed = rpc.call("ListHubDevices", json!({ "inspectOnly": true })).await;
+            let Some(window) = live(&me) else { return };
             if let Err(error) = &listed
                 && said(error) == "outdated"
             {
                 window.hub.set(Value::record([("outdated", Value::Bool(true))]));
-                return;
-            }
-            if !window.watching.get() {
                 return;
             }
             let heard = Rc::downgrade(&window);
@@ -181,15 +259,67 @@ impl Window {
                 }
             });
             *window.watch.borrow_mut() = Some(watch);
-        });
+        })
+    }
+
+    /// The stream `key`'s frames watched on `rpc`. Ended by the engine, it
+    /// says why (`device_frames[key].failed`); ended with its connection,
+    /// the next one watches again.
+    fn watch_frames(self: &Rc<Self>, key: &str, rpc: &engine::rpc::Rpc) {
+        if mock() || rpc.is_closed() {
+            return;
+        }
+        let mut streams = self.streams.borrow_mut();
+        let Some(stream) = streams.get_mut(key) else { return };
+        let Some(decode) = stream.decode.clone() else { return };
+        let mut params = json!({ "deviceId": stream.device_id, "codec": "mjpeg" });
+        if let Some(host) = stream.host_id.as_ref().filter(|h| *h != zeron_proto::device_hub::LOCAL_DEVICE_HOST_ID) {
+            params["hostId"] = host.clone().into();
+        }
+        let generation = stream.generation;
+        let (me, ended) = (Rc::downgrade(self), key.to_string());
+        stream.watch.take();
+        // (Latest wins: a frame the decoder hasn't taken yet is passed over.)
+        stream.watch = Some(rpc.watch_ending(
+            "WatchHubDeviceFrames",
+            params,
+            move |item| {
+                if let Some(frame) = frame_bytes(&item) {
+                    let _ = decode.try_send(frame);
+                }
+            },
+            move |why| {
+                if why != "closed"
+                    && let Some(window) = me.upgrade()
+                {
+                    window.stream_ended(&ended, generation, &why);
+                }
+            },
+        ));
+        drop(streams);
+        if self.failed.borrow_mut().remove(key).is_some() {
+            self.publish_frames();
+        }
+    }
+
+    fn stream_ended(&self, key: &str, generation: u64, why: &str) {
+        let mut streams = self.streams.borrow_mut();
+        let Some(stream) = streams.get_mut(key).filter(|s| s.generation == generation) else { return };
+        stream.watch = None;
+        drop(streams);
+        self.failed.borrow_mut().insert(key.to_string(), said(why));
+        self.publish_frames();
     }
 
     fn stream(self: &Rc<Self>, key: String, host_id: Option<String>, device_id: String) {
         let generation = self.next.get() + 1;
         self.next.set(generation);
-        self.streams.borrow_mut().insert(key.clone(), Stream { generation, _watch: None });
+        if self.failed.borrow_mut().remove(&key).is_some() {
+            self.publish_frames();
+        }
         let me = Rc::downgrade(self);
         if mock() {
+            self.streams.borrow_mut().insert(key.clone(), Stream { generation, host_id, device_id, decode: None, watch: None });
             engine::get().spawn(async move {
                 for (n, png) in MOCK_FRAMES.iter().enumerate() {
                     let decoded = off_thread(move || zgx_gpu::assets::decode_image(png).ok()).await.flatten();
@@ -211,31 +341,18 @@ impl Window {
                 }
             }
         });
-        let showing = me.clone();
         let show_key = key.clone();
         engine::get().spawn(async move {
             while let Some((seq, image)) = decoded.recv().await {
-                let Some(window) = showing.upgrade() else { return };
+                let Some(window) = me.upgrade() else { return };
                 window.show(&show_key, generation, seq, image);
             }
         });
-        engine::get().spawn(async move {
-            let Some(rpc) = engine::get().connection(Duration::from_secs(5)).await else { return };
-            let mut params = json!({ "deviceId": device_id, "codec": "mjpeg" });
-            if let Some(host) = host_id.filter(|h| h != zeron_proto::device_hub::LOCAL_DEVICE_HOST_ID) {
-                params["hostId"] = host.into();
-            }
-            // (Latest wins: a frame the decoder hasn't taken yet is passed over.)
-            let watch = rpc.watch("WatchHubDeviceFrames", params, move |item| {
-                if let Some(frame) = frame_bytes(&item) {
-                    let _ = decode.try_send(frame);
-                }
-            });
-            let Some(window) = me.upgrade() else { return };
-            if let Some(stream) = window.streams.borrow_mut().get_mut(&key).filter(|s| s.generation == generation) {
-                stream._watch = Some(watch);
-            }
-        });
+        self.streams.borrow_mut().insert(key.clone(), Stream { generation, host_id, device_id, decode: Some(decode), watch: None });
+        let rpc = self.rpc.borrow().clone();
+        if let Some(rpc) = rpc {
+            self.watch_frames(&key, &rpc);
+        }
     }
 }
 
@@ -280,25 +397,26 @@ fn publish_mock() {
 }
 
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
-    let window = Rc::new(Window {
-        host: host.clone(),
-        hub: host.shared("device_hub", Value::Nil),
-        frames: host.shared("device_frames", Value::record(std::iter::empty::<(&str, Value)>())),
-        sizes: RefCell::default(),
-        watch: RefCell::default(),
-        watching: Cell::new(false),
-        streams: RefCell::default(),
-        next: Cell::new(0),
-    });
+    let window = Window::new(host);
     WINDOWS.with(|all| {
         let mut all = all.borrow_mut();
         all.retain(|w| w.strong_count() > 0);
         all.push(Rc::downgrade(&window));
     });
+    let heard = Rc::downgrade(&window);
+    engine::get().on_connect(move |rpc| {
+        if let Some(window) = heard.upgrade()
+            && let Some(work) = window.connected(rpc)
+        {
+            engine::get().spawn(work);
+        }
+    });
     let closing = window.clone();
     cx.on_closed(move || {
+        closing.watching.set(false);
         closing.watch.borrow_mut().take();
         closing.streams.borrow_mut().clear();
+        closing.rpc.borrow_mut().take();
     });
     host.async_action("device.call", |args| {
         let method = args.field("method").map(text).unwrap_or_default();
@@ -307,16 +425,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     });
     let w = window.clone();
     host.action("device.watch", move |on| {
-        let on = on.truthy();
-        if on == w.watching.get() {
-            return;
-        }
-        w.watching.set(on);
-        if on {
-            w.start_watch();
-        } else {
-            w.watch.borrow_mut().take();
-        }
+        w.set_watching(on.truthy());
     });
     let w = window.clone();
     host.action("device.stream", move |args| {
@@ -500,6 +609,93 @@ mod tests {
         for method in ["WatchDeviceHub", "RunHubDeviceAction", "DeviceToolOpen", "GetHubDeviceAxTree", "ComputerAction"] {
             assert!(!METHODS.contains(&method), "{method} is not a window's to call");
         }
+    }
+
+    /// The hub's watch and a tab's stream, asked for before the engine
+    /// answers (a slow launch), start on its first connection, and again on
+    /// each one after (a restart): what the old one says is no longer heard.
+    /// A stream the engine ends says why; the next connection watches it again.
+    #[cfg(unix)]
+    #[test]
+    fn the_hub_and_each_stream_are_watched_again_on_every_connection() {
+        use crate::engine::rpc::Rpc;
+        use std::future::Future;
+        if mock() {
+            return;
+        }
+        let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/activity_fixture.luau");
+        let mut made = None;
+        let _app = zgx_script::testing::TestApp::new(|runtime| {
+            let host = ScriptHost::new(runtime, entry);
+            made = Some(Window::new(&host));
+            host
+        });
+        let window = made.unwrap();
+        fn sent(rx: &std::sync::mpsc::Receiver<String>) -> Vec<Json> {
+            rx.try_iter().map(|f| serde_json::from_str(&f).unwrap()).collect()
+        }
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        // (Each step of the hub's watch answered as an engine with devices would.)
+        fn arm(rpc: &Rpc, rx: &std::sync::mpsc::Receiver<String>, work: Option<impl Future<Output = ()>>, cx: &mut std::task::Context) -> u64 {
+            let mut work = Box::pin(work.expect("the hub watched on this connection"));
+            assert!(work.as_mut().poll(cx).is_pending());
+            let info = sent(rx);
+            assert_eq!(info.last().unwrap()["method"], "EngineInfo", "{info:?}");
+            rpc.heard(json!({ "id": info.last().unwrap()["id"], "ok": { "capabilities": ["device-hub-v1"] } }));
+            assert!(work.as_mut().poll(cx).is_pending());
+            let listed = sent(rx);
+            assert_eq!((listed[0]["method"].as_str(), listed[0]["params"]["inspectOnly"].as_bool()), (Some("ListHubDevices"), Some(true)));
+            rpc.heard(json!({ "id": listed[0]["id"], "ok": {} }));
+            assert!(work.as_mut().poll(cx).is_ready());
+            let watched = sent(rx);
+            assert_eq!(watched.len(), 1, "{watched:?}");
+            assert_eq!(watched[0]["method"], "WatchDeviceHub");
+            watched[0]["id"].as_u64().unwrap()
+        }
+        let revision = |w: &Window| value_json(&w.hub.get())["revision"].as_u64();
+        let frames = |w: &Window| value_json(&w.frames.get());
+
+        window.set_watching(true);
+        window.stream("tab-1".into(), None, "Pixel_9".into());
+        assert_eq!(revision(&window), None, "no engine yet: nothing heard");
+
+        let (first, first_sent, _bell) = Rpc::recording();
+        let work = window.connected(&first);
+        let streamed = sent(&first_sent);
+        assert_eq!(streamed.len(), 1, "{streamed:?}");
+        assert_eq!(streamed[0]["method"], "WatchHubDeviceFrames");
+        assert_eq!((streamed[0]["params"]["deviceId"].as_str(), streamed[0]["params"]["codec"].as_str()), (Some("Pixel_9"), Some("mjpeg")));
+        let hub_watch = arm(&first, &first_sent, work, &mut cx);
+        first.heard(json!({ "id": hub_watch, "item": { "revision": 1 } }));
+        assert_eq!(revision(&window), Some(1));
+
+        // The engine restarted: a new connection, watched again.
+        let (second, second_sent, _bell) = Rpc::recording();
+        let work = window.connected(&second);
+        let restreamed = sent(&second_sent);
+        assert_eq!(restreamed[0]["method"], "WatchHubDeviceFrames");
+        let frames_watch = restreamed[0]["id"].as_u64().unwrap();
+        let hub_watch_again = arm(&second, &second_sent, work, &mut cx);
+        second.heard(json!({ "id": hub_watch_again, "item": { "revision": 2 } }));
+        assert_eq!(revision(&window), Some(2));
+        first.heard(json!({ "id": hub_watch, "item": { "revision": 9 } }));
+        assert_eq!(revision(&window), Some(2), "the old connection's watch let go");
+
+        // The engine ends the stream: it says why, and the next connection tries again.
+        second.heard(json!({ "id": frames_watch, "err": "The device stopped." }));
+        assert_eq!(frames(&window)["tab-1"]["failed"], "The device stopped.");
+        let (third, third_sent, _bell) = Rpc::recording();
+        let _ = window.connected(&third);
+        assert_eq!(sent(&third_sent)[0]["method"], "WatchHubDeviceFrames");
+        assert_eq!(frames(&window)["tab-1"]["failed"], Json::Null);
+
+        // Let go: no watch on the next connection.
+        window.set_watching(false);
+        window.unstream("tab-1");
+        let (fourth, fourth_sent, _bell) = Rpc::recording();
+        assert!(window.connected(&fourth).is_none());
+        assert!(sent(&fourth_sent).is_empty());
     }
 
     #[test]

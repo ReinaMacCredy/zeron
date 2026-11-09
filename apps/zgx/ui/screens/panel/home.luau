@@ -45,7 +45,9 @@ local M = {}
 
 -- The home showing now (one panel shows at a time): its letters, whether
 -- it shows, and where a letter it has no row for goes.
-type Live = { letters: { [string]: () -> () }, showing: () -> boolean, pass: (letter: string) -> () }
+-- (A letter whose row shows only sometimes is the home's only while it shows.)
+type Letter = { run: () -> (), shown: (() -> boolean)? }
+type Live = { letters: { [string]: Letter }, showing: () -> boolean, pass: (letter: string) -> () }
 local live: Live? = nil
 
 -- Each press of a letter the home has no row for (kept outside the views:
@@ -65,9 +67,9 @@ function M.key(e: any): boolean
 		return false
 	end
 	local letter = string.upper(k)
-	local run = now.letters[letter]
-	if run then
-		run()
+	local own = now.letters[letter]
+	if own and (own.shown == nil or own.shown()) then
+		own.run()
 		return true
 	end
 	now.pass(letter)
@@ -1015,19 +1017,14 @@ M.Page = ui.component(function(props: Props): Node
 			end,
 		})
 	end
-	local letters: { [string]: () -> () } = {}
+	local letters: { [string]: Letter } = {}
 	local rows: { Node } = {}
 	for _, c in choices do
 		local shown = c.shown
+		letters[c.key] = { run = c.run, shown = shown }
 		if shown then
-			letters[c.key] = function()
-				if shown() then
-					c.run()
-				end
-			end
 			table.insert(rows, ui.show(shown, PanelHome.Choice { id = c.id, icon = c.icon, label = locale.t(c.label), key = c.key, on_click = c.run }))
 		else
-			letters[c.key] = c.run
 			table.insert(rows, PanelHome.Choice { id = c.id, icon = c.icon, label = locale.t(c.label), key = c.key, on_click = c.run })
 		end
 	end

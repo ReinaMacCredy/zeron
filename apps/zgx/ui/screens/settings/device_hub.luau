@@ -3,7 +3,7 @@
 -- `TestDeviceHost` through `settings.engine`; its live state from
 -- screens/device/api's watch): the hub's switch and its versions with Check
 -- versions and Update, platform support with Refresh, agent device access,
--- the floating preview's switch, and the device hosts: each with its status,
+-- and the device hosts: each with its status,
 -- Test connection and Remove, and Add host's form with its checks.
 -- Listed while the Device built-in is on (Settings → Plugins).
 
@@ -31,10 +31,11 @@ search.index(M.ID, t("title"), t("terms"), {
 	{ key = "platforms", title = t("platforms.label"), section = t("title"), terms = t("platforms.terms") },
 	{ key = "agent", title = t("agent.label"), section = t("title"), terms = t("agent.terms") },
 	{ key = "hosts", title = t("hosts.label"), section = t("title"), terms = t("hosts.terms") },
-	{ key = "float", title = t("float.label"), section = t("title"), terms = t("float.terms") },
 })
 
--- The floating preview an agent's device shows in (gpui's `deviceAutoFloat`, on by default).
+-- The floating preview an agent's device shows in (gpui's `deviceAutoFloat`, on by default):
+-- kept (and migrated), its switch not listed until zgx has a floating device window,
+-- since an agent's device opens a tab either way.
 M.auto_float = ui.persist("device_auto_float", true)
 
 -- What's under way: "hub", "check", "agent", "update"; and what went wrong.
@@ -451,7 +452,6 @@ function M.view(): Node
 	local agent_switch = synced("agent", function(): boolean
 		return loaded() and hub().settings.agentAccessEnabled == true
 	end)
-	local float_switch = ui.state("settings_device_switch_float", M.auto_float:peek() ~= false)
 	local versions = ui.column {
 		w_full = true,
 		gap = "$space.2",
@@ -638,18 +638,6 @@ function M.view(): Node
 								return model.agent_failure(hub())
 							end,
 							control = agent_control,
-						}),
-						ds.Settings.Rule(),
-						row("float", {
-							label = t("float.label"),
-							description = t("float.hint"),
-							control = ds.Switch {
-								value = float_switch,
-								label = t("float.label"),
-								on_change = function(v: boolean)
-									M.auto_float:set(v)
-								end,
-							},
 						}),
 						ds.Settings.Rule(),
 						row("hosts", {

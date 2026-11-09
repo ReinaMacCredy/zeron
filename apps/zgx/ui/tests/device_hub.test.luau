@@ -2,7 +2,7 @@
 -- ui/shell_fixture.luau over the hub of ui/device_stub.luau: gpui's rows
 -- with the hub's values, the switch writing the engine and reading back,
 -- versions with Check versions and Update, platform support and Refresh,
--- agent access, the floating preview's switch kept over a launch, and
+-- agent access (no floating preview switch: zgx has no floating window), and
 -- device hosts: Add host's checks, Test connection's lines, Save and Remove.
 -- The page leaves the list while the Device built-in is off.
 
@@ -47,7 +47,7 @@ end
 test("device hub settings: gpui's rows, the hub's switch writes the engine and the page reads it back", function()
 	local app = open()
 	expect(calls(app)).to_contain("ListHubDevices")
-	for _, w in { "Device hub", "Agent device access", "Auto-show floating preview", "Device hosts", "No device hosts.", "Running", "Required", "Installed", "Not running", "0.12.1", "Check versions" } do
+	for _, w in { "Device hub", "Agent device access", "Device hosts", "No device hosts.", "Running", "Required", "Installed", "Not running", "0.12.1", "Check versions" } do
 		expect(`{w}: {has(app, w)}`).to_be(`{w}: true`)
 	end
 	expect(has(app, "Platform support")).to_be(false)
@@ -80,7 +80,7 @@ test("device hub settings: gpui's rows, the hub's switch writes the engine and t
 	expect(checked(app, "Agent device access")).to_be(false)
 end)
 
-test("device hub settings: a failed update says so; the floating preview's switch is kept over a launch", function()
+test("device hub settings: a failed update says so; no floating preview's switch, as zgx has no floating window", function()
 	local app = open()
 	app:click(`{PAGE} >> role:switch "Device hub"`)
 	expect(eventually(app, function()
@@ -92,18 +92,9 @@ test("device hub settings: a failed update says so; the floating preview's switc
 		return app:has("#settings-device-update-error")
 	end)).to_be(true)
 	expect(app:tree("#settings-device-update-error")).to_contain("Update failed. Check this host's network connection")
-	expect(checked(app, "Auto-show floating preview")).to_be(true)
-	app:click(`{PAGE} >> role:switch "Auto-show floating preview"`)
-	app:frames(5)
-	expect(checked(app, "Auto-show floating preview")).to_be(false)
-	local again = mount("shell_fixture.luau")
-	again:resize(1200, 1400)
-	again:frames(30)
-	again:command("shell.settings")
-	again:frames(10)
-	again:click('#settings-nav >> "Device hub"')
-	again:frames(30)
-	expect(checked(again, "Auto-show floating preview")).to_be(false)
+	-- (An agent's device opens a tab either way: a switch here would do nothing.)
+	expect(has(app, "Auto-show floating preview")).to_be(false)
+	expect(app:state("device_auto_float")).to_be(true)
 end)
 
 test("device hosts: Add host's form checks what's typed, tests it, saves it; a host's Test connection and Remove", function()

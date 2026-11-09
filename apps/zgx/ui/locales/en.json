@@ -3518,7 +3518,8 @@
         "label": "Dictation",
         "terms": "dictate, speech to text, transcribe",
         "downloading": "Downloading · {done} of {total} MB",
-        "download": "{total} MB download"
+        "download": "{total} MB download",
+        "no_recorder": "Dictation isn’t available in this build of Zeron: it has no recorder, so nothing is downloaded."
       },
       "mic": {
         "label": "Microphone",
@@ -3529,7 +3530,8 @@
       "shortcut": {
         "label": "Shortcut",
         "hint": "Hold to talk, release to transcribe",
-        "terms": "hotkey, hold"
+        "terms": "hotkey, hold",
+        "reserved": "{keys} is reserved for the composer."
       },
       "model": {
         "section": "Speech model",
@@ -5495,7 +5497,10 @@
     "dismiss_error": "Dismiss device error",
     "stream": {
       "connecting": "Connecting video...",
-      "screen": "Device screen"
+      "screen": "Device screen",
+      "failed": "Couldn’t show the device’s screen",
+      "ended": "The device stopped sending its screen.",
+      "retry": "Try again"
     },
     "rail": {
       "home": "Home",

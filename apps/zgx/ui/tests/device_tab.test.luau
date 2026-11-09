@@ -301,9 +301,136 @@ test("the Device built-in off takes the home's Device row away and the open tab 
 	app:command("device_stub.builtin_off")
 	app:frames(5)
 	expect(app:has("#device-setup")).to_be(false)
-	expect(app:tree("#panel-strip") ~= nil).to_be(true)
+	expect(app:wait('"Device is off in Settings → Plugins."', { timeout_ms = 3000 })).to_be(true)
+	expect(tab_titles(app)).to_be("Device")
 	app:command("device_stub.builtin_on")
 	expect(app:wait("#device-setup", { timeout_ms = 5000 })).to_be(true)
+	expect(app:has('"Device is off in Settings → Plugins."')).to_be(false)
+end)
+
+test("with Device off, a device's tab offers no Rename", function()
+	local app = open_panel()
+	set_up(app)
+	app:click('role:button "Open iPhone 17"')
+	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
+	app:right_click('role:tab "iPhone 17"')
+	expect(app:wait('role:menuitem "Rename"', { timeout_ms = 3000 })).to_be(true)
+	app:key("Escape")
+	app:frames(10)
+	app:command("device_stub.builtin_off")
+	app:frames(5)
+	app:right_click('#panel-strip >> role:tab')
+	app:frames(10)
+	expect(app:has('role:menuitem "Close"') or app:has('role:menuitem ~"Close"')).to_be(true)
+	expect(app:has('role:menuitem "Rename"')).to_be(false)
+end)
+
+test("a Device tab streams only while the panel shows it, and again once it shows", function()
+	local app = open_panel()
+	set_up(app)
+	app:click('role:button "Open iPhone 17"')
+	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
+	local function streams(): number
+		local n = 0
+		for _, c in app:state("device_stub_calls") or {} do
+			if c == "stream:mock-iphone" then
+				n += 1
+			end
+		end
+		return n
+	end
+	expect(streams()).to_be(1)
+	app:set_state("test_panel_visible", false)
+	expect(eventually(app, function()
+		return calls(app):find("unstream", 1, true) ~= nil
+	end)).to_be(true)
+	expect(next(app:state("device_frames") or {})).to_be_nil()
+	app:set_state("test_panel_visible", true)
+	expect(eventually(app, function()
+		return streams() == 2
+	end)).to_be(true)
+end)
+
+test("device input goes one call at a time, in order, a drag's moves merged into the newest", function()
+	local app = open_panel()
+	set_up(app)
+	app:click('role:button "Start Pixel 9"')
+	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
+	app:command("device_stub.hold_input")
+	local function inputs(): { string }
+		local out = {}
+		for _, c in app:state("device_stub_calls") or {} do
+			if string.find(c, "SendHubDeviceInput:", 1, true) then
+				table.insert(out, (string.gsub(c, "^SendHubDeviceInput:", "")))
+			end
+		end
+		return out
+	end
+	app:drag("#device-screen", "#device-screen")
+	app:frames(5)
+	expect(#inputs()).to_be(1)
+	expect(inputs()[1]).to_contain("touch:begin")
+	app:command("device_stub.let_input")
+	app:frames(3)
+	expect(#inputs()).to_be(2)
+	expect(inputs()[2]).to_contain("touch:move")
+	app:command("device_stub.let_input")
+	app:frames(3)
+	expect(#inputs()).to_be(3)
+	expect(inputs()[3]).to_contain("touch:end")
+	-- Keys behind a call in flight keep their order.
+	app:click("#device-screen")
+	app:frames(3)
+	for _ = 1, 3 do
+		app:command("device_stub.let_input")
+		app:frames(3)
+	end
+	local before = #inputs()
+	app:key("a")
+	app:key("Enter")
+	app:frames(3)
+	app:command("device_stub.let_input")
+	app:frames(3)
+	app:command("device_stub.let_input")
+	app:frames(3)
+	local all = inputs()
+	expect(#all).to_be(before + 2)
+	expect(`{all[before + 1]},{all[before + 2]}`).to_be("text:a,keycode:66")
+end)
+
+test("a device the engine opened before the hub lists it stays bound, not back to the picker", function()
+	local app = open_panel()
+	set_up(app)
+	app:command("device_stub.reply_first")
+	app:click('role:button "Start Pixel 9"')
+	app:frames(10)
+	expect(tab_titles(app)).to_be("Pixel 9")
+	app:command("device_stub.late_push")
+	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
+	expect(tab_titles(app)).to_be("Pixel 9")
+	expect(calls(app)).never.to_contain("unstream")
+end)
+
+test("a stream the engine ends says so, still, with Try again", function()
+	local app = open_panel()
+	set_up(app)
+	app:click('role:button "Open iPhone 17"')
+	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
+	app:command("device_stub.stream_fails")
+	expect(app:wait("#device-stream-failed", { timeout_ms = 3000 })).to_be(true)
+	expect(app:tree("#device-stream-failed")).to_contain("The device stopped.")
+	expect(app:has("#device-loading")).to_be(false)
+	app:click("#device-stream-retry")
+	expect(eventually(app, function()
+		return not app:has("#device-stream-failed")
+	end)).to_be(true)
+	local n = 0
+	for _, c in app:state("device_stub_calls") or {} do
+		if c == "stream:mock-iphone" then
+			n += 1
+		end
+	end
+	expect(n).to_be(2)
 end)
 
 test("an engine without devices: the tab says so, and Device leaves the home", function()
@@ -314,4 +441,9 @@ test("an engine without devices: the tab says so, and Device leaves the home", f
 	expect(eventually(app, function()
 		return app:tree():find("This Zeron engine does not support devices.", 1, true) ~= nil
 	end)).to_be(true)
+	-- The tab closed, the home has no Device row on this engine.
+	app:command("test.close_active_tab")
+	expect(app:wait("#panel-empty", { timeout_ms = 5000 })).to_be(true)
+	app:frames(5)
+	expect(app:has("#panel-open-device")).to_be(false)
 end)

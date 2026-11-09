@@ -10,6 +10,10 @@
 --   voice_stub.deny           the next take is refused the microphone
 --   voice_stub.press / .release   the last-touched composer's mic held / let go
 --   voice_stub.download_done  a download under way finishes
+--   voice_stub.no_recorder    the host has no recorder (`capable` false)
+--   voice_stub.old_host       a host without Voice's calls (each throws)
+--   voice_stub.short_limits   dictation's minute is a second, its transcribing 300 ms
+--   voice_stub.hang           the next take is never transcribed
 
 local settings_host = require("@app/screens/settings/host") :: any
 local Dictation = require("@ds/dictation") :: any
@@ -36,7 +40,8 @@ local function settled(value: any, word: string?): any
 end
 
 local SIZE = 670479942
-local model = { ready = false, cache = false, size = SIZE, downloading = false, progress = 0 }
+local model = { ready = false, cache = false, size = SIZE, downloading = false, progress = 0, capable = true }
+local old_host = false
 local function publish()
 	Dictation.model:set(table.clone(model))
 end
@@ -71,6 +76,8 @@ Dictation.backend = {
 		end)
 		if take == "silence" then
 			live[-n] = true
+		elseif take == "hang" then
+			live[-n] = "hang" :: any
 		end
 		return settled(n)
 	end,
@@ -80,6 +87,9 @@ Dictation.backend = {
 			return
 		end
 		live[n] = nil
+		if live[-n] == "hang" then
+			return
+		end
 		local heard = if live[-n] then "" else transcript:peek()
 		live[-n] = nil
 		ui.after(0, function()
@@ -115,6 +125,9 @@ local answers: { [string]: (arg: any) -> any } = {
 local before_call = settings_host.call
 settings_host.call = function(name: string, arg: any?): any
 	local a = answers[name]
+	if a and old_host then
+		error(`no host action named {name}`)
+	end
 	if a then
 		log(name)
 		return a(arg)
@@ -123,6 +136,9 @@ settings_host.call = function(name: string, arg: any?): any
 end
 local before_invoke = settings_host.invoke
 settings_host.invoke = function(name: string, arg: any?)
+	if old_host and string.sub(name, 1, 6) == "voice." then
+		error(`no host action named {name}`)
+	end
 	if name == "voice.download" then
 		log(name)
 		model.downloading, model.progress = true, math.floor(SIZE / 4)
@@ -154,6 +170,37 @@ ui.command {
 		model.ready, model.cache = true, true
 		publish()
 		Dictation.enabled:set(true)
+	end,
+}
+ui.command {
+	id = "voice_stub.no_recorder",
+	title = "A host with no recorder",
+	run = function()
+		model.capable = false
+		publish()
+	end,
+}
+ui.command {
+	id = "voice_stub.old_host",
+	title = "A host without Voice's calls",
+	run = function()
+		old_host = true
+		Dictation.model:set(nil)
+	end,
+}
+ui.command {
+	id = "voice_stub.short_limits",
+	title = "Dictation's limits made short",
+	run = function()
+		Dictation.LIMIT_S = 1
+		Dictation.FINALIZE_MS = 300
+	end,
+}
+ui.command {
+	id = "voice_stub.hang",
+	title = "The next take is never transcribed",
+	run = function()
+		next_take:set("hang")
 	end,
 }
 ui.command {

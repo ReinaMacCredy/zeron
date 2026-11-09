@@ -3518,7 +3518,8 @@
         "label": "听写",
         "terms": "语音转文字, 转写",
         "downloading": "正在下载 · {done} / {total} MB",
-        "download": "需下载 {total} MB"
+        "download": "需下载 {total} MB",
+        "no_recorder": "此版本的 Zeron 无法听写：它没有录音功能，因此不会下载任何内容。"
       },
       "mic": {
         "label": "麦克风",
@@ -3529,7 +3530,8 @@
       "shortcut": {
         "label": "快捷键",
         "hint": "按住说话，松开转写",
-        "terms": "热键, 按住"
+        "terms": "热键, 按住",
+        "reserved": "{keys} 已留给输入框使用。"
       },
       "model": {
         "section": "语音模型",
@@ -5495,7 +5497,10 @@
     "dismiss_error": "关闭设备错误",
     "stream": {
       "connecting": "正在连接视频...",
-      "screen": "设备屏幕"
+      "screen": "设备屏幕",
+      "failed": "无法显示设备屏幕",
+      "ended": "设备已停止发送屏幕画面。",
+      "retry": "重试"
     },
     "rail": {
       "home": "主屏幕",

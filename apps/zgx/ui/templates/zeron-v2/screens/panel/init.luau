@@ -683,7 +683,7 @@ end
 function M.tab_menu(tab: Tab, rename: (() -> ())?): { any }
 	if tab.kind == "device" then
 		-- (Rename, once it shows a device: gpui's `device_rename_menu_row`.)
-		if rename and Device and Device.bound(tab) then
+		if rename and Device and Builtins.on("device") and Device.bound(tab) then
 			return { { label = ui.t("device.rename"):get(), icon = "pen", on_select = rename } }
 		end
 		return {}
@@ -1495,7 +1495,7 @@ M.Panel = ui.component(function(props: Props): Node
 	-- A tab's body: its kind's view, keyed by the tab (a real swap: another
 	-- tab is another view; each keeps its state outside, so coming back
 	-- finds it as it was).
-	local function body(k: string, tab: Tab): Node
+	local function body(k: string, tab: Tab, shown: () -> boolean): Node
 		if (tab.kind == "side_chat" or tab.kind == "subagent") and Lanes then
 			return Lanes.Tab { tab = tab, panel_key = k }
 		end
@@ -1505,7 +1505,14 @@ M.Panel = ui.component(function(props: Props): Node
 				return if Device and Builtins.on("device") then "on" else "off"
 			end, function(which: string): Node
 				if which == "on" then
-					return Device.Tab { tab = tab, panel_key = k }
+					-- (Its screen streams only while the panel shows it.)
+					return Device.Tab {
+						tab = tab,
+						panel_key = k,
+						visible = function(): boolean
+							return shown() and (props.visible == nil or props.visible())
+						end,
+					}
 				end
 				return ds.EmptyState {
 					icon = "smartphone",
@@ -1646,7 +1653,7 @@ M.Panel = ui.component(function(props: Props): Node
 		if not tab then
 			return empty_page(k, showing)
 		end
-		local ok, built = pcall(body, k, tab)
+		local ok, built = pcall(body, k, tab, showing)
 		if ok then
 			return built
 		end

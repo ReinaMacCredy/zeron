@@ -10,7 +10,9 @@
 --   Dictation.key              the hold shortcut (gpui's `toggleDictation`, ⌘D)
 --   Dictation.model            the host's speech model ({ ready, cache, size,
 --                              downloading, progress, error? })
---   Dictation.available()      on, with the model there: the mic shows
+--   Dictation.available()      Voice on (Settings → Plugins), Dictation on,
+--                              the model there and a recorder in this build:
+--                              the mic shows, the shortcut holds
 --   Dictation.session(draft)   one composer's: its phase, press / release,
 --                              finish, cancel, dismiss
 --   Dictation.backend          the host's start / finish / cancel (a test's
@@ -33,6 +35,8 @@ M.input = ui.persist("dictation_input", "")
 M.key = ui.persist("dictation_key", "cmd+d")
 M.model = ui.shared("voice_model", nil :: any)
 M.events = ui.shared("dictation_events", nil :: any)
+-- The Voice built-in (screens/plugins/builtins publishes it: ds can't require it).
+M.voice_on = ui.shared("builtins.voice", true)
 -- Whether a composer's dictation is live now (Settings → Voice can't remove the model then).
 M.busy = ui.state("dictation_busy", false)
 M.last = nil :: any
@@ -56,7 +60,7 @@ end
 
 function M.available(): boolean
 	local m = M.model:get()
-	return M.enabled:get() == true and m ~= nil and m.ready == true
+	return M.voice_on:get() ~= false and M.enabled:get() == true and m ~= nil and m.ready == true and m.capable ~= false
 end
 
 local function promise_of(name: string, arg: any): any
@@ -279,6 +283,12 @@ function M.session(draft: State<string>, blocked: (() -> boolean)?): Session
 		elseif e.kind == "failed" then
 			complete("failed", e.text)
 		elseif e.kind == "cancelled" then
+			cancel()
+		end
+	end)
+	-- Voice turned off (or Dictation, or the model gone) while it listens: it lets go.
+	ui.effect(function()
+		if not M.available() and ACTIVE[phase:peek()] then
 			cancel()
 		end
 	end)

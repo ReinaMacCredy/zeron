@@ -4,7 +4,8 @@
 --   api.hub                 the hub's state (the engine's DeviceHubState,
 --                           camelCase), nil until heard; `{ outdated = true }`
 --                           from an engine without devices
---   api.frames              { [key] = { seq, w, h } }: each stream's last frame
+--   api.frames              { [key] = { seq?, w?, h?, failed? } }: each stream's
+--                           last frame, and why the engine ended it
 --   api.call(method, params) the host's promise of a hub method's answer
 --   api.watch()             the hub followed while what asked is on screen:
 --                           what it gives back lets go

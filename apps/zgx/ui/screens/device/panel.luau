@@ -5,7 +5,9 @@
 -- opens, then its screen: the device's frames as a picture, touch, keys,
 -- Home (Back on Android), Save screenshot and More (Close panel, Power off).
 --
---   Device.Tab { panel_key, tab }   a device tab's body
+--   Device.Tab { panel_key, tab, visible? }   a device tab's body; its
+--                                   screen streams only while `visible()`
+--                                   (the panel open), as gpui's `set_visible`
 --   Device.title(tab)               its name: Rename's, the device's, "Device"
 --   Device.icon(tab)                apple / android / smartphone
 --   Device.detail(tab)              its tooltip: the name and the device's line
@@ -116,6 +118,8 @@ type Run = {
 	error: State<string?>,
 	toast: State<string?>,
 	shooting: State<boolean>,
+	-- The device it was bound to, once the hub listed it open (gpui's `seen_live`).
+	seen_live: string?,
 }
 local runs: { [string]: Run } = {}
 local function run_of(id: string): Run
@@ -915,7 +919,11 @@ function M.key_inputs(platform: string, key: string): { any }
 	return out
 end
 
-local function stream(props: { tab: any, panel_key: string, r: Run }): Node
+local function is_move(input: any): boolean
+	return type(input.touch) == "table" and input.touch.phase == "move"
+end
+
+local function stream(props: { tab: any, panel_key: string, r: Run, visible: (() -> boolean)? }): Node
 	local r = props.r
 	local chat = chat_of(props.panel_key)
 	local t = target_of(props.tab) :: { string }
@@ -930,16 +938,53 @@ local function stream(props: { tab: any, panel_key: string, r: Run }): Node
 	local function device(): model.Device?
 		return model.device(hub(), host, id)
 	end
-	api.stream(key, host, id)
+	-- (Its frames only while it shows: the panel closed, nothing streams or decodes.)
+	local visible = props.visible or function(): boolean
+		return true
+	end
+	ui.effect(function()
+		if visible() then
+			api.stream(key, host, id)
+		else
+			api.unstream(key)
+		end
+	end)
+	-- One input at a time, in order, the moves queued behind one merged into
+	-- the newest (gpui's `send_inputs`): the engine answers each call apart.
+	local queue: { any } = {}
+	local sending = false
+	local function pump()
+		if sending then
+			return
+		end
+		local input = table.remove(queue, 1)
+		if input == nil then
+			return
+		end
+		sending = true
+		local p = target_params(host, id)
+		p.input = input
+		call("SendHubDeviceInput", p, function()
+			sending = false
+			pump()
+		end, function(why: string)
+			sending = false
+			r.error:set(why)
+			pump()
+		end)
+	end
 	ui.on_cleanup(function()
+		table.clear(queue)
 		api.unstream(key)
 	end)
 	local function send(input: any)
-		local p = target_params(host, id)
-		p.input = input
-		call("SendHubDeviceInput", p, nil, function(why: string)
-			r.error:set(why)
-		end)
+		local last = queue[#queue]
+		if last and is_move(last) and is_move(input) then
+			queue[#queue] = input
+		else
+			table.insert(queue, input)
+		end
+		pump()
 	end
 	local screen = ui.ref()
 	local down = false
@@ -1112,7 +1157,8 @@ local function stream(props: { tab: any, panel_key: string, r: Run }): Node
 				return #inputs > 0
 			end,
 			ui.presence(function(): string
-				return if frame() then "frame" else "none"
+				local f = frame()
+				return if f and f.seq then "frame" else "none"
 			end, function(which: string): Node
 				if which == "none" then
 					return ui.column {
@@ -1166,7 +1212,7 @@ local function stream(props: { tab: any, panel_key: string, r: Run }): Node
 	}
 end
 
-function M.Tab(props: { tab: any, panel_key: string }): Node
+function M.Tab(props: { tab: any, panel_key: string, visible: (() -> boolean)? }): Node
 	local id = props.tab.id
 	local r = run_of(id)
 	local chat = chat_of(props.panel_key)
@@ -1182,11 +1228,20 @@ function M.Tab(props: { tab: any, panel_key: string }): Node
 	local phase = ui.computed(function(): model.Phase
 		return model.phase(hub(), chat, target_of(tab()), r.opening:get())
 	end)
-	-- (A device that's gone from the hub's sessions: the tab goes back to the picker.)
+	-- (A device that's gone from the hub's sessions, once it was listed there:
+	-- the tab goes back to the picker. One the engine has opened but the hub
+	-- hasn't listed yet is kept: its push comes after the open's answer.)
 	ui.effect(function()
 		local h = hub()
 		local t = target_of(tab())
-		if h and not h.outdated and t and r.opening:peek() == nil and (h.settings or {}).onboardingCompleted and h.hostStatus == "ready" and not model.session(h, chat, t[1], t[2]) then
+		if not (h and not h.outdated and t and r.opening:peek() == nil and (h.settings or {}).onboardingCompleted and h.hostStatus == "ready") then
+			return
+		end
+		local k = model.key(t[1], t[2])
+		if model.session(h, chat, t[1], t[2]) then
+			r.seen_live = k
+		elseif r.seen_live == k then
+			r.seen_live = nil
 			api.unstream(id)
 			state.patch(props.panel_key, id, { device_target = false, title = false })
 		end
@@ -1285,9 +1340,10 @@ function M.Tab(props: { tab: any, panel_key: string }): Node
 				grow = 1,
 				min_h = 0,
 				relative = true,
-				stream { tab = current, panel_key = props.panel_key, r = r },
+				stream { tab = current, panel_key = props.panel_key, r = r, visible = props.visible },
 				ui.show(function(): boolean
-					return api.frames:get()[id] == nil
+					local f = api.frames:get()[id]
+					return f == nil or (f.seq == nil and f.failed == nil)
 				end, ui.column {
 					absolute = true,
 					left = 0,
@@ -1299,6 +1355,40 @@ function M.Tab(props: { tab: any, panel_key: string }): Node
 						return { kind = "loading", name = if d then d.name else s("tab"), description = if d then model.description(hub(), d) else "", message = s("stream.connecting") }
 					end, function(): number
 						return 2
+					end),
+				}),
+				-- (The engine ended the stream: said, still, with Try again; no spinner.)
+				ui.show(function(): boolean
+					local f = api.frames:get()[id]
+					return f ~= nil and f.failed ~= nil
+				end, ui.column {
+					id = "device-stream-failed",
+					role = "alert",
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = 0,
+					bottom = 0,
+					bg = "$background",
+					items = "center",
+					justify = "center",
+					gap = "$space.3",
+					px = "$space.6",
+					Icon { name = "smartphone", size = 24, color = "$text.secondary" },
+					heading(ui.t("device.stream.failed")),
+					small(function(): string
+						local f = api.frames:get()[id]
+						local why = f and f.failed
+						return if why == "done" then s("stream.ended") else words(why)
+					end),
+					button("device-stream-retry", ui.t("device.stream.retry"), function(): boolean
+						return true
+					end, function()
+						local t = target_of(tab())
+						if t then
+							api.unstream(id)
+							api.stream(id, t[1], t[2])
+						end
 					end),
 				}),
 			}

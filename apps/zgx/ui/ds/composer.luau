@@ -373,8 +373,8 @@ end
 -- A pill narrower than this is short of room: the trays' rows fold their
 -- thumbnails and actions.
 local NARROW = 480
--- Dictation's limit, and when its clock warns.
-local VOICE_LIMIT, VOICE_WARN = 60, 10
+-- When dictation's clock warns: its last seconds (the limit is Dictation.LIMIT_S).
+local VOICE_WARN = 10
 
 local function read<T>(v: T | () -> T): T
 	return if type(v) == "function" then (v :: () -> T)() else v :: T
@@ -1964,7 +1964,7 @@ return ui.component(function(props: Props): Node
 						font = "$font.mono",
 						text_size = "$font.size.xs",
 						color = function()
-							return if VOICE_LIMIT - voice_seconds:get() <= VOICE_WARN then "$warning" else "$text.secondary"
+							return if Dictation.LIMIT_S - voice_seconds:get() <= VOICE_WARN then "$warning" else "$text.secondary"
 						end,
 					},
 				}

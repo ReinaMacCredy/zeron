@@ -6,7 +6,10 @@
 -- Disconnected), and the hold shortcut. Speech model: Parakeet v3 and
 -- Remove. Words only ever leave this computer: the host records and
 -- transcribes here (src/voice.rs).
--- Listed while the Voice built-in is on (Settings → Plugins).
+-- Listed while the Voice built-in is on (Settings → Plugins). A host
+-- without these calls (older than this page), or a build with no recorder
+-- (`capable` false), says Dictation isn't available here and downloads
+-- nothing.
 
 local ds = require("@ds")
 local host = require("@app/screens/settings/host")
@@ -55,17 +58,52 @@ local function words(err: any): string
 	return if type(w) == "string" and w ~= "" then w else ui.t("common.something_went_wrong"):get()
 end
 
+-- A host call's promise, or nil from a host without it.
+local function ask(name: string, arg: any?): any
+	local ok, p = pcall(host.call, name, arg)
+	return if ok then p else nil
+end
+local function tell(name: string, arg: any?): boolean
+	return (pcall(host.invoke, name, arg))
+end
+
+-- (Only a list that changed: the same one again redraws nothing.)
+local function same_inputs(a: any, b: any): boolean
+	if a.default ~= b.default or #(a.devices or {}) ~= #(b.devices or {}) then
+		return false
+	end
+	for i, d in a.devices or {} do
+		local e = b.devices[i]
+		if d.id ~= e.id or d.name ~= e.name then
+			return false
+		end
+	end
+	return true
+end
+local function heard_inputs(v: any)
+	if type(v) == "table" and not same_inputs(inputs:peek(), v) then
+		inputs:set(v)
+	end
+end
+local function ask_inputs()
+	local p = ask("voice.inputs")
+	if p then
+		p:after(heard_inputs, function() end)
+	end
+end
+
 local function load()
-	host.call("voice.model"):after(function(v: any)
-		if v ~= nil then
-			Dictation.model:set(v)
-		end
-	end, function() end)
-	host.call("voice.inputs"):after(function(v: any)
-		if type(v) == "table" then
-			inputs:set(v)
-		end
-	end, function() end)
+	local p = ask("voice.model")
+	if p then
+		p:after(function(v: any)
+			if v ~= nil then
+				Dictation.model:set(v)
+			end
+		end, function() end)
+	elseif Dictation.model:peek() == nil then
+		Dictation.model:set({ ready = false, cache = false, size = 0, downloading = false, progress = 0, capable = false })
+	end
+	ask_inputs()
 end
 M.load = load
 
@@ -77,18 +115,79 @@ local function model(): any
 	return Dictation.model:get() or {}
 end
 
+-- Whether this build can dictate at all (a host with a recorder).
+local function capable(): boolean
+	return model().capable ~= false
+end
+
+-- Why Dictation's hold shortcut can't be `combo`: the composer's own keys,
+-- or a command's (the shell's, the palette's, a plugin's), in gpui's words.
+local EDIT_KEYS = { a = true, c = true, v = true, x = true, y = true, z = true }
+local MOVE_KEYS = { left = true, right = true, up = true, down = true, home = true, ["end"] = true }
+function M.refusal(combo: string): string?
+	if combo == "" then
+		return nil
+	end
+	local forms = { combo }
+	local ok, platform = pcall(function(): any
+		return ui.shared("platform", ""):peek()
+	end)
+	if not (ok and platform == "macos") then
+		local mac = string.gsub(combo, "ctrl", "cmd")
+		if mac ~= combo then
+			table.insert(forms, mac)
+		end
+	end
+	local shown = Recorder.shown(combo)
+	for _, c in forms do
+		local key = string.match(c, "([^+]+)$") or ""
+		local cmd = string.find(c, "cmd", 1, true) ~= nil
+		if key == "enter" or (EDIT_KEYS[key] and cmd) or (MOVE_KEYS[key] and (cmd or string.find(c, "alt", 1, true) ~= nil)) then
+			return ui.t("settings.voice.shortcut.reserved", { keys = shown }):get()
+		end
+	end
+	local found, shell_keys = pcall(require, "@app/screens/shell/keys")
+	for _, c in forms do
+		local owner = if ui.shortcut_owner then ui.shortcut_owner(c) else nil
+		if owner then
+			local name = owner
+			if found and type(shell_keys) == "table" then
+				local k = (shell_keys :: any).get(owner)
+				if k then
+					name = (shell_keys :: any).title(k)
+				end
+			end
+			return ui.t("settings.shortcuts.taken", { keys = shown, name = name }):get()
+		end
+	end
+	local has, appshots = pcall(require, "@app/screens/chat/appshots")
+	local a = if has and type(appshots) == "table" then appshots :: any else nil
+	if a and a.shortcut and a.active and a.active() and a.shortcut:peek() == combo then
+		return ui.t("settings.shortcuts.taken_on_page", {
+			keys = shown,
+			name = ui.t("settings.shortcuts.appshot.label"):get(),
+			page = ui.t("settings.appshots.title"):get(),
+		}):get()
+	end
+	return nil
+end
+
 -- The switch: Cancel while downloading, the download until the model is here, then on and off.
 local function primary()
 	local m = Dictation.model:peek() or {}
-	if m.downloading then
+	if m.capable == false then
+		return
+	elseif m.downloading then
 		enable_after:set(false)
-		host.invoke("voice.cancel")
+		tell("voice.cancel")
 	elseif m.ready then
 		Dictation.enabled:set(not Dictation.enabled:peek())
 	else
 		error_word:set(nil)
 		enable_after:set(true)
-		host.invoke("voice.download")
+		if not tell("voice.download") then
+			enable_after:set(false)
+		end
 	end
 end
 
@@ -110,7 +209,12 @@ local function remove()
 		return
 	end
 	Dictation.enabled:set(false)
-	host.call("voice.remove"):after(function(v: any)
+	local p = ask("voice.remove")
+	if p == nil then
+		error_word:set(t("errors.remove_failed"):get())
+		return
+	end
+	p:after(function(v: any)
 		if v ~= nil then
 			Dictation.model:set(v)
 		end
@@ -191,13 +295,7 @@ end
 function M.view(): Node
 	visits.once("voice", load)
 	-- (While it shows, a microphone plugged in turns up within a few seconds, as gpui's.)
-	local stop = ui.every(3000, function()
-		host.call("voice.inputs"):after(function(v: any)
-			if type(v) == "table" then
-				inputs:set(v)
-			end
-		end, function() end)
-	end)
+	local stop = ui.every(3000, ask_inputs)
 	ui.on_cleanup(stop)
 	ui.effect(function()
 		local ok, sessions = pcall(require, "@account/sessions")
@@ -208,8 +306,9 @@ function M.view(): Node
 				table.insert(ids, d.id)
 			end
 		end
-		if #ids > 0 then
-			host.call("voice.remote", { ids = ids }):after(function(v: any)
+		local p = if #ids > 0 then ask("voice.remote", { ids = ids }) else nil
+		if p then
+			p:after(function(v: any)
 				if type(v) == "table" then
 					remote:set(v)
 				end
@@ -219,14 +318,16 @@ function M.view(): Node
 	local switch_on = ui.state("settings_voice_switch", false)
 	ui.effect(function()
 		local m = model()
-		local on = m.downloading == true or (Dictation.enabled:get() == true and m.ready == true)
+		local on = m.capable ~= false and (m.downloading == true or (Dictation.enabled:get() == true and m.ready == true))
 		if switch_on:peek() ~= on then
 			switch_on:set(on)
 		end
 	end)
 	local function status(): string?
 		local m = model()
-		if m.downloading then
+		if m.capable == false then
+			return t("dictation.no_recorder"):get()
+		elseif m.downloading then
 			return t("dictation.downloading", { done = mb(m.progress), total = mb(m.size) }):get()
 		elseif not m.ready then
 			return t("dictation.download", { total = mb(m.size) }):get()
@@ -240,6 +341,12 @@ function M.view(): Node
 		end,
 		control = ui.div {
 			id = "voice-enable",
+			opacity = function(): number
+				return if capable() then 1 else 0.5
+			end,
+			pointer_events = function(): string
+				return if capable() then "auto" else "none"
+			end,
 			ds.Switch {
 				value = switch_on,
 				label = t("dictation.label"),
@@ -247,7 +354,7 @@ function M.view(): Node
 					primary()
 					-- (The switch follows the model and the setting, not the press.)
 					local m = Dictation.model:peek() or {}
-					switch_on:set(m.downloading == true or (Dictation.enabled:peek() == true and m.ready == true))
+					switch_on:set(m.capable ~= false and (m.downloading == true or (Dictation.enabled:peek() == true and m.ready == true)))
 				end,
 			},
 		},
@@ -268,7 +375,7 @@ function M.view(): Node
 		},
 	})
 	local mic_row = ui.show(function(): boolean
-		return Dictation.enabled:get() == true and model().ready == true
+		return Dictation.enabled:get() == true and model().ready == true and capable()
 	end, ui.column {
 		w_full = true,
 		ds.Settings.Rule(),
@@ -281,16 +388,29 @@ function M.view(): Node
 			end),
 		}),
 	})
+	-- (A refused combination says whose it is, as Settings → Shortcuts does.)
+	local notice = ui.state("settings_voice_shortcut_notice", nil :: string?)
 	local shortcut_row = row("shortcut", {
 		label = t("shortcut.label"),
-		description = t("shortcut.hint"),
+		description = function(): string
+			return notice:get() or t("shortcut.hint"):get()
+		end,
 		control = Recorder.Recorder {
 			value = function(): string
 				return Dictation.key:get()
 			end,
 			label = t("shortcut.label"),
+			on_listening = function(on: boolean)
+				if on then
+					notice:set(nil)
+				end
+			end,
 			on_change = function(combo: string)
-				Dictation.key:set(combo)
+				local why = M.refusal(combo)
+				notice:set(why)
+				if why == nil then
+					Dictation.key:set(combo)
+				end
 			end,
 		},
 	})
