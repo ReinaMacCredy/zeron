@@ -188,7 +188,17 @@ local function dictation(): Node
 		ds.Settings.Group {
 			search.anchor("key_dictation", ds.Settings.Row {
 				label = ui.t("settings.shortcuts.dictation.label") :: any,
-				description = ui.t("settings.shortcuts.dictation.description") :: any,
+				description = function(): string
+					-- (A command given these keys while Voice was off takes them from no one: say so.)
+					local combo = Dictation.key:get()
+					local owner = if combo ~= "" and ui.shortcut_owner then ui.shortcut_owner(combo) else nil
+					local keys = shell_keys()
+					local k = if owner and keys then keys.get(owner) else nil
+					if owner then
+						return ui.t("settings.shortcuts.taken", { keys = Shortcut.shown(combo), name = if k then title_of(k) else owner }):get()
+					end
+					return ui.t("settings.shortcuts.dictation.description"):get()
+				end,
 				control = ui.row {
 					gap = "$space.2",
 					items = "center",

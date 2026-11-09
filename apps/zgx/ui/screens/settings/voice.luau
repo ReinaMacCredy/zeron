@@ -172,6 +172,11 @@ function M.refusal(combo: string): string?
 	return nil
 end
 
+-- Why the hold shortcut kept from before collides now (a command given its keys while Voice was off).
+function M.conflict(): string?
+	return M.refusal(Dictation.key:get())
+end
+
 -- The switch: Cancel while downloading, the download until the model is here, then on and off.
 local function primary()
 	local m = Dictation.model:peek() or {}
@@ -200,6 +205,18 @@ ui.effect(function()
 	enable_after:set(false)
 	if m.ready then
 		Dictation.enabled:set(true)
+	end
+end)
+
+-- Voice turned off while the model downloads: the download stops, and nothing turns on after.
+ui.effect(function()
+	if Dictation.voice_on:get() ~= false then
+		return
+	end
+	enable_after:set(false)
+	local m = Dictation.model:peek()
+	if m and m.downloading then
+		tell("voice.cancel")
 	end
 end)
 
@@ -393,7 +410,7 @@ function M.view(): Node
 	local shortcut_row = row("shortcut", {
 		label = t("shortcut.label"),
 		description = function(): string
-			return notice:get() or t("shortcut.hint"):get()
+			return notice:get() or M.conflict() or t("shortcut.hint"):get()
 		end,
 		control = Recorder.Recorder {
 			value = function(): string

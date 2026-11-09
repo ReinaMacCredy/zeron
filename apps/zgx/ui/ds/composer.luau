@@ -1256,6 +1256,7 @@ return ui.component(function(props: Props): Node
 	local own = if props.on_dictate == nil and props.dictating == nil then Dictation.session(value, function(): boolean
 		return read(props.disabled) == true
 	end) else nil
+	local held_code: string? = nil
 	local dictating_state: State<boolean>? = props.dictating or (if own then own.dictating else nil)
 	local on_dictate: (() -> ())? = props.on_dictate or (if own then own.finish else nil)
 	local on_cancel_dictation: (() -> ())? = props.on_cancel_dictation or (if own then own.cancel else nil)
@@ -2325,7 +2326,12 @@ return ui.component(function(props: Props): Node
 					m.on_caret(line, column, anchor, focus)
 					caret_moved:set(caret_moved:peek() + 1)
 				end,
-				on_blur = m.on_blur,
+				on_blur = if own
+					then function()
+						own.release("key")
+						m.on_blur()
+					end
+					else m.on_blur,
 				on_press = m.on_press,
 				on_paste = function(e)
 					-- (Files first: a copied file puts its name in `text` too.)
@@ -2346,11 +2352,20 @@ return ui.component(function(props: Props): Node
 				-- first, then a question's (1 to 9 pick, Escape goes back
 				-- or closes), then ⌘Enter sending the newest queued row.
 				on_key_up = if own
-					then function(name: any): boolean
-						-- (Its letter let go, whatever's held with it.)
+					then function(name: any, code: any): boolean
+						-- (The key it was held by, whatever's held with it: by its physical key once both are known.)
+						local held = held_code
+						if held ~= nil and type(code) == "string" then
+							if code == held then
+								held_code = nil
+								own.release("key")
+							end
+							return false
+						end
 						local combo = Dictation.key:peek()
 						local letter = string.match(combo, "([^+]+)$")
 						if letter and type(name) == "string" and string.lower(name) == letter then
+							held_code = nil
 							own.release("key")
 						end
 						return false
@@ -2365,6 +2380,11 @@ return ui.component(function(props: Props): Node
 					end
 					-- The hold shortcut (⌘D): down starts, up (on_key_up) writes.
 					if own and (Dictation.available() or dictating()) and Dictation.matches(e, Recorder.combo_of) then
+						-- (A repeat while held never starts another take, one that failed at once too.)
+						if e["repeat"] then
+							return true
+						end
+						held_code = e.code
 						own.press("key")
 						return true
 					end

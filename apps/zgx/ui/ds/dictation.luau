@@ -147,6 +147,8 @@ function M.session(draft: State<string>, blocked: (() -> boolean)?): Session
 	local expected = ""
 	local seen = 0
 	local hold: { source: string, at: number? }? = nil
+	-- (Transcribing timed by the session: a timer made in an effect's run goes when that effect runs again.)
+	local deadline = ui.use_state(nil :: number?)
 
 	local function set(p: string, why: string?)
 		phase:set(p)
@@ -178,17 +180,10 @@ function M.session(draft: State<string>, blocked: (() -> boolean)?): Session
 			return
 		end
 		set("finalizing", nil)
-		local mine = generation
 		if n then
 			M.backend.finish(n)
 		end
-		ui.after(M.FINALIZE_MS, function()
-			if generation == mine and phase:peek() == "finalizing" then
-				generation += 1
-				stop_host()
-				set("failed", locale.s("ds.composer.dictation.too_long"))
-			end
-		end)
+		deadline:set(generation)
 	end
 	local function complete(p: string, why: string?)
 		generation += 1
@@ -341,6 +336,25 @@ function M.session(draft: State<string>, blocked: (() -> boolean)?): Session
 			finish()
 		end
 	end
+	ui.effect(function()
+		local mine = deadline:get()
+		if mine == nil then
+			return
+		end
+		ui.after(M.FINALIZE_MS, function()
+			if generation == mine and phase:peek() == "finalizing" then
+				generation += 1
+				stop_host()
+				set("failed", locale.s("ds.composer.dictation.too_long"))
+			end
+		end)
+	end)
+	-- The app gone to the back while held: its key's or button's let go may never come.
+	ui.effect(function()
+		if ui.window.active:get() == false and hold then
+			release(hold.source)
+		end
+	end)
 	local function toggle()
 		local p = phase:peek()
 		if p == "requesting" then
