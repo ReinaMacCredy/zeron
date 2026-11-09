@@ -661,6 +661,34 @@ function M.open_lane_tab(session: string, lane: { kind: string, id: string, titl
 		set_files(true)
 	end
 end
+-- A device opened in a chat by its agent (or another window): a Device tab
+-- for it in that chat's panel, the panel opened if that chat shows (gpui's
+-- `auto_open_devices`; zgx has no floating preview, so a tab either way).
+function M.open_device_tab(session: string, host: string, device: string)
+	local k = state.key(session, nil)
+	if not k or not Device or Device.dismissed(session, host, device) then
+		return
+	end
+	-- (Shown already: nothing; a tab on its picker takes it; else a new one.)
+	local idle: string? = nil
+	for _, t in state.of(k).tabs do
+		if t.kind == "device" and Device.shows(t, host, device) then
+			return
+		end
+		if t.kind == "device" and not idle and Device.idle(t) then
+			idle = t.id
+		end
+	end
+	local id = idle or state.open(k, "device")
+	state.patch(k, id, { device_target = { host = host, id = device } })
+	state.activate(k, id)
+	if shown_key and shown_key() == k then
+		set_panel(true)
+	end
+end
+if Device then
+	Device.follow(M.open_device_tab)
+end
 if lanes_card then
 	lanes_card.opener = M.open_lane_tab
 	lanes_card.hide_side = function(session: string): boolean
@@ -817,7 +845,7 @@ M.Panel = ui.component(function(props: Props): Node
 		elseif tab and tab.kind == "browser" and Browser then
 			Browser.close(tab)
 		elseif tab and tab.kind == "device" and Device then
-			Device.close(tab)
+			Device.close(tab, k)
 		elseif tab and (tab.kind == "side_chat" or tab.kind == "subagent") and lanes_card then
 			-- Its chat let go (a reload never does this).
 			lanes_card.watch(tab.id, nil)
@@ -1083,6 +1111,16 @@ M.Panel = ui.component(function(props: Props): Node
 			ui.row {
 				id = `panel-tab-{id}`,
 				ref = ref,
+				-- (A device tab's name and its device's line, as gpui's `device_tab_detail`.)
+				tooltip = if tab.kind == "device" and Device
+					then ui.text {
+						function(): string
+							local t = state.find(key:peek() or "", id) or tab
+							return Device.detail(t) or Device.title(t)
+						end,
+						text_size = "$font.size.sm",
+					}
+					else nil,
 				-- (What plugins place by, and what's under them: the tab, and a
 				-- file tab's file, as a token.)
 				class = if tab.kind == "files" then "panel-tab file-tab" else "panel-tab",

@@ -12,6 +12,13 @@
 --   device_stub.frame        the next frame lands on every stream
 --   device_stub.installing   the hub is installing (busy)
 --   device_stub.ready        the hub is ready again
+--   device_stub.agent_open   chat-1's agent opens the Pixel 9 (the hub on and set up)
+--   device_stub.agent_open_ipad / _iphone / .agent_close   the iPad Air, the iPhone; what the agent opened, closed
+--   device_stub.ssh_host     a Mac mini over SSH that can't be reached
+--   device_stub.no_devices   the hub finds no simulators or emulators
+--   device_stub.failed       the hub failed to start
+--   device_stub.hold_open    the next OpenHubDevice waits until device_stub.let_open
+--   device_stub.booting      chat-1's iPad Air is starting
 
 local api = require("@app/screens/device/api") :: any
 local settings_host = require("@app/screens/settings/host") :: any
@@ -51,6 +58,10 @@ local hub = {
 	booted = { ["mock-iphone"] = true } :: { [string]: boolean },
 	sessions = {} :: { any },
 	outdated = false,
+	none = false,
+	detail = nil :: string?,
+	held = nil :: any,
+	booting = {} :: { any },
 }
 
 local function state(): any
@@ -58,7 +69,7 @@ local function state(): any
 		return { outdated = true }
 	end
 	local devices = {}
-	if hub.enabled then
+	if hub.enabled and not hub.none then
 		for _, d in DEVICES do
 			table.insert(devices, { hostId = "local", id = d.id, platform = d.platform, name = d.name, version = d.version, booted = hub.booted[d.id] == true, physical = false })
 		end
@@ -83,10 +94,11 @@ local function state(): any
 		settings = { enabled = hub.enabled, agentAccessEnabled = hub.agent, onboardingCompleted = hub.onboarded, deviceHosts = table.clone(hub.hosts) },
 		hosts = hosts,
 		hostStatus = hub.status or (if hub.enabled then "ready" else "disabled"),
+		hostStatusDetail = hub.detail,
 		hostStatuses = statuses,
 		devices = devices,
 		sessions = table.clone(hub.sessions),
-		booting = {},
+		booting = table.clone(hub.booting),
 		streams = streams,
 		screens = screens,
 		agentStatus = if hub.agent then "ready" else "disabled",
@@ -133,6 +145,15 @@ local function answer(method: string, p: any): any
 	elseif method == "OpenHubDevice" then
 		if not hub.enabled then
 			return settled(nil, "The device hub is off.")
+		end
+		if hub.held == true then
+			-- (Its answer once let go: the loading steps show till then.)
+			local waiting = { done = false, ok = nil :: any }
+			function waiting.after(_self: any, ok: ((any) -> ())?, _bad: ((any) -> ())?)
+				waiting.ok = ok
+			end
+			hub.held = { p = p, promise = waiting }
+			return waiting
 		end
 		hub.booted[p.deviceId] = true
 		local s = { chatId = p.chatId, hostId = p.hostId or "local", deviceId = p.deviceId, platform = p.platform, openedAt = "2026-11-09T00:00:00Z", openedBy = "user" }
@@ -286,6 +307,71 @@ ui.command {
 		api.hub:set(state())
 	end,
 }
+-- chat-1's agent opening a device (the hub on and set up), and closing what it opened.
+local function agent_open(device: string, platform: string)
+	hub.enabled, hub.onboarded = true, true
+	hub.booted[device] = true
+	table.insert(hub.sessions, { chatId = "chat-1", hostId = "local", deviceId = device, platform = platform, openedAt = "2026-11-09T00:00:00Z", openedBy = "agent" })
+	hub.revision += 1
+	publish()
+end
+ui.command { id = "device_stub.agent_open", title = "chat-1's agent opens the Pixel 9", run = function()
+	agent_open("Pixel_9", "android")
+end }
+ui.command { id = "device_stub.agent_open_ipad", title = "chat-1's agent opens the iPad Air", run = function()
+	agent_open("mock-ipad", "ios")
+end }
+ui.command { id = "device_stub.agent_open_iphone", title = "chat-1's agent opens the iPhone 17", run = function()
+	agent_open("mock-iphone", "ios")
+end }
+ui.command { id = "device_stub.agent_close", title = "chat-1's agent closes its devices", run = function()
+	local keep = {}
+	for _, x in hub.sessions do
+		if x.openedBy ~= "agent" then
+			table.insert(keep, x)
+		end
+	end
+	hub.sessions = keep
+	hub.revision += 1
+	publish()
+end }
+local function change(run: () -> ())
+	return function()
+		run()
+		hub.revision += 1
+		publish()
+	end
+end
+ui.command { id = "device_stub.ssh_host", title = "An SSH host that can't be reached", run = change(function()
+	table.insert(hub.hosts, { id = "mini", label = "Mac mini", target = "me@mini" })
+end) }
+ui.command { id = "device_stub.no_devices", title = "No simulators or emulators", run = change(function()
+	hub.none = true
+end) }
+ui.command { id = "device_stub.failed", title = "The hub failed to start", run = change(function()
+	hub.status, hub.detail = "failed", "Device support could not start: node exited (1)."
+end) }
+ui.command { id = "device_stub.hold_open", title = "The next open waits", run = function()
+	hub.held = true
+end }
+ui.command { id = "device_stub.let_open", title = "The open that waits goes through", run = function()
+	local held = hub.held
+	hub.held = nil
+	if type(held) == "table" then
+		local p = held.p
+		hub.booted[p.deviceId] = true
+		local x = { chatId = p.chatId, hostId = p.hostId or "local", deviceId = p.deviceId, platform = p.platform, openedAt = "2026-11-09T00:00:00Z", openedBy = "user" }
+		table.insert(hub.sessions, x)
+		hub.revision += 1
+		publish()
+		if held.promise.ok then
+			held.promise.ok(x)
+		end
+	end
+end }
+ui.command { id = "device_stub.booting", title = "chat-1's iPad Air is starting", run = change(function()
+	hub.booting = { { chatId = "chat-1", hostId = "local", deviceId = "mock-ipad", name = "iPad Air" } }
+end) }
 -- The Device built-in (Settings → Plugins), as its switch sets it.
 for _, which in { "on", "off" } do
 	ui.command {

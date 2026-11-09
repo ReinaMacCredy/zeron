@@ -2088,6 +2088,14 @@
         "description": "其他 App 位于前台时也可使用。在 Appshots 中更改。",
         "change": "更改"
       },
+      "dictation": {
+        "section": "语音",
+        "label": "按住听写",
+        "terms": "快捷键 听写 麦克风 语音 按住 shortcut hotkey dictation microphone voice hold",
+        "description": "在输入框中按住说话，松开即写入。在“语音”中更改。",
+        "change": "更改",
+        "change_label": "在“语音”中更改按住听写"
+      },
       "switcher": {
         "section": "会话切换器",
         "window": {

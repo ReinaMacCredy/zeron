@@ -2088,6 +2088,14 @@
         "description": "Works while another app is in front. Change it in Appshots.",
         "change": "Change"
       },
+      "dictation": {
+        "section": "Voice",
+        "label": "Hold to dictate",
+        "terms": "shortcut hotkey dictation microphone voice hold",
+        "description": "Hold it in the composer to talk, let go to write. Change it in Voice.",
+        "change": "Change",
+        "change_label": "Change Hold to dictate in Voice"
+      },
       "switcher": {
         "section": "Session switcher",
         "window": {

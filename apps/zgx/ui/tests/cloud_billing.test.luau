@@ -40,6 +40,9 @@ local function open(page: string?, offer: boolean?): any
 	app:command("shell.settings")
 	app:frames(20)
 	if page then
+		-- (The list scrolls past a short window, as gpui's: its foot scrolled to first.)
+		app:scroll(NAV, 2000)
+		app:frames(5)
 		app:click(`{NAV} >> role:tab "{page}"`)
 		app:frames(30)
 	end
@@ -153,6 +156,8 @@ end)
 test("a billing read that fails says so, and tries again", function()
 	local app = open(nil)
 	app:command("cloud_stub.fail_next")
+	app:scroll(NAV, 2000)
+	app:frames(5)
 	app:click(`{NAV} >> role:tab "Billing"`)
 	app:frames(30)
 	expect(shows(app, PAGE, "Couldn't load billing")).to_be(true)

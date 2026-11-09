@@ -145,7 +145,6 @@ ui.command {
 	run = function()
 		model.downloading, model.progress, model.ready, model.cache = false, 0, true, true
 		publish()
-		Dictation.enabled:set(true)
 	end,
 }
 ui.command {

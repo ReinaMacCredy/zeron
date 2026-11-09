@@ -122,6 +122,9 @@ test("the picker groups simulators and emulators, Running first, says Open or St
 	expect(calls(app)).to_contain("OpenHubDevice:Pixel_9")
 	expect(calls(app)).to_contain("stream:Pixel_9")
 	expect(tab_titles(app)).to_be("Pixel 9")
+	-- Its title's tooltip: the name and the device's line.
+	app:hover('#panel-strip >> role:tab "Pixel 9"')
+	expect(app:wait('~"This machine · Android 16"', { timeout_ms = 5000 })).to_be(true)
 	expect(app:has("#device-back")).to_be(true)
 	-- Touch: a press and a release on the screen, as fractions of it.
 	app:click("#device-screen")
@@ -139,6 +142,36 @@ test("the picker groups simulators and emulators, Running first, says Open or St
 	app:key("Enter")
 	expect(calls(app)).to_contain("SendHubDeviceInput:text:a")
 	expect(calls(app)).to_contain("SendHubDeviceInput:keycode:66")
+end)
+
+test("the picker's states: a host's note, the empty and failed lines, the starting banner, the loading steps while one opens", function()
+	local app = open_panel()
+	set_up(app)
+	app:command("device_stub.ssh_host")
+	expect(app:wait('#device-host-note-mini >> "Mac mini · Connection failed: Connection refused"', { timeout_ms = 3000 })).to_be(true)
+	app:command("device_stub.booting")
+	expect(app:wait('#device-booting >> "Starting iPad Air... This can take a minute."', { timeout_ms = 3000 })).to_be(true)
+	-- Opening: the device's name, Starting, and the first of two steps, until the hub answers.
+	app:command("device_stub.hold_open")
+	app:click('role:button "Start Pixel 9"')
+	expect(app:wait("#device-loading", { timeout_ms = 3000 })).to_be(true)
+	local shown = app:tree("#device-loading")
+	for _, w in { "Pixel 9", "This machine · Android 16", "Starting device...", "Step 1 of 2: open device" } do
+		expect(`{w}: {shown:find(w, 1, true) ~= nil}`).to_be(`{w}: true`)
+	end
+	app:command("device_stub.let_open")
+	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
+	app:click("#device-more")
+	app:click('role:menuitem "Power off"')
+	expect(app:wait("#device-picker", { timeout_ms = 5000 })).to_be(true)
+	app:command("device_stub.no_devices")
+	expect(app:wait('#device-picker-empty >> "No simulators or emulators were found on this environment."', { timeout_ms = 3000 })).to_be(true)
+	-- Failed: the line says why, and the host's card offers Retry.
+	app:command("device_stub.failed")
+	expect(app:wait('#device-picker-empty >> "Device support could not start: node exited (1)."', { timeout_ms = 3000 })).to_be(true)
+	expect(app:has("#device-host-update >> #device-retry")).to_be(true)
+	app:click("#device-retry")
+	expect(calls(app)).to_contain("ListHubDevices")
 end)
 
 test("iOS keys go as HID usages, a frame replaces the picture, Save screenshot says where, and an error line dismisses", function()
@@ -207,6 +240,51 @@ test("Rename names the tab, Escape puts it back, nothing typed is the device's n
 	expect(calls(app)).to_contain("CloseHubDevice:mock-iphone:shutdown")
 	expect(tab_titles(app)).to_be("Device")
 	expect(app:has('role:button "Start iPhone 17"')).to_be(true)
+end)
+
+test("a device the chat's agent opens comes up in a Device tab, once: a tab on its picker takes it, one closed isn't opened again", function()
+	local app = open_panel()
+	set_up(app)
+	app:click('role:button "Open iPhone 17"')
+	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
+	app:frames(5)
+	expect(tab_titles(app)).to_be("iPhone 17")
+	app:command("device_stub.agent_open")
+	expect(eventually(app, function()
+		return tab_titles(app) == "iPhone 17,Pixel 9"
+	end)).to_be(true)
+	expect(calls(app)).to_contain("stream:Pixel_9")
+	-- (Heard again, it's shown: no second tab.)
+	app:command("device_stub.ready")
+	app:frames(10)
+	expect(tab_titles(app)).to_be("iPhone 17,Pixel 9")
+	-- Closed: the agent opening it again opens no tab.
+	app:click("#device-more")
+	app:click('role:menuitem "Close panel"')
+	expect(eventually(app, function()
+		return tab_titles(app) == "iPhone 17"
+	end)).to_be(true)
+	app:command("device_stub.agent_close")
+	app:command("device_stub.agent_open")
+	app:frames(10)
+	expect(tab_titles(app)).to_be("iPhone 17")
+	-- A tab on its picker takes the next one.
+	app:click("#device-more")
+	app:click('role:menuitem "Power off"')
+	expect(app:wait("#device-picker", { timeout_ms = 5000 })).to_be(true)
+	expect(tab_titles(app)).to_be("Device")
+	app:command("device_stub.agent_open_ipad")
+	expect(eventually(app, function()
+		return tab_titles(app) == "iPad Air"
+	end)).to_be(true)
+	-- Device off: an agent's device opens nothing.
+	app:command("device_stub.builtin_off")
+	app:frames(5)
+	app:command("device_stub.agent_open_iphone")
+	app:frames(10)
+	app:command("device_stub.builtin_on")
+	app:frames(10)
+	expect(tab_titles(app)).to_be("iPad Air")
 end)
 
 test("the Device built-in off takes the home's Device row away and the open tab says so; on brings both back", function()

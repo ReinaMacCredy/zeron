@@ -42,6 +42,8 @@ M.VOICES = { "juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "
 local inputs = ui.state("settings_voice_inputs", { devices = {}, default = nil } :: any)
 local remote = ui.state("settings_voice_remote", {} :: { [string]: boolean })
 local error_word = ui.state("settings_voice_error", nil :: string?)
+-- A download the switch started: Dictation turns on once the model is here (gpui's `pending_enable`).
+local enable_after = ui.state("settings_voice_enable_after", false)
 
 local function words(err: any): string
 	local w = if type(err) == "table" then err.message else err
@@ -79,14 +81,28 @@ end
 local function primary()
 	local m = Dictation.model:peek() or {}
 	if m.downloading then
+		enable_after:set(false)
 		host.invoke("voice.cancel")
 	elseif m.ready then
 		Dictation.enabled:set(not Dictation.enabled:peek())
 	else
 		error_word:set(nil)
+		enable_after:set(true)
 		host.invoke("voice.download")
 	end
 end
+
+-- (Heard here, not on the page: a download that ends after the page is left still turns Dictation on.)
+ui.effect(function()
+	local m = Dictation.model:get()
+	if not enable_after:peek() or m == nil or m.downloading then
+		return
+	end
+	enable_after:set(false)
+	if m.ready then
+		Dictation.enabled:set(true)
+	end
+end)
 
 local function remove()
 	if Dictation.busy:peek() then

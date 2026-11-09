@@ -11,6 +11,9 @@ local function open(mac: boolean?): any
 	app:frames(30)
 	app:command("shell.settings")
 	app:frames(10)
+	-- (The list scrolls past a short window, as gpui's: its foot scrolled to first.)
+	app:scroll("#settings-nav", 2000)
+	app:frames(5)
 	app:click('#settings-nav >> "Experimental"')
 	app:frames(30)
 	return app
@@ -33,8 +36,12 @@ local function has(app: any, words: string): boolean
 	return app:tree(PAGE):find(words, 1, true) ~= nil
 end
 local function again(app: any)
+	app:scroll("#settings-nav", -2000)
+	app:frames(5)
 	app:click('#settings-nav >> "General"')
 	app:frames(20)
+	app:scroll("#settings-nav", 2000)
+	app:frames(5)
 	app:click('#settings-nav >> "Experimental"')
 	app:frames(30)
 end

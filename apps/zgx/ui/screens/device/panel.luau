@@ -10,8 +10,13 @@
 --   Device.icon(tab)                apple / android / smartphone
 --   Device.detail(tab)              its tooltip: the name and the device's line
 --   Device.unavailable(session)     why a Device tab can't open here, or nil
---   Device.close(tab)               its stream let go (the device stays open,
+--   Device.close(tab, panel_key?)   its stream let go (the device stays open,
 --                                   as gpui's Close panel leaves it)
+--   Device.shows(tab, host, id)     whether a tab shows that device (or opens it)
+--   Device.idle(tab)                on its picker, opening nothing
+--   Device.dismissed(chat, host, id) its tab closed: not opened again by itself
+--   Device.follow(open)             devices opened in a chat elsewhere, to open
+--                                   a tab for (gpui's `auto_open_devices`)
 --
 -- The tab keeps its device and its name (screens/panel/state's tab), so a
 -- reload shows the same. What it opens, tries and fails is its own while it
@@ -130,6 +135,63 @@ local function run_of(id: string): Run
 	return r
 end
 
+-- Whether a tab shows this device, or is opening it.
+function M.shows(tab: any, host: string, id: string): boolean
+	local t = target_of(live(tab))
+	if t and t[1] == host and t[2] == id then
+		return true
+	end
+	local r = runs[tab.id]
+	return r ~= nil and r.opening:peek() == model.key(host, id)
+end
+
+-- A device opened in a chat elsewhere (an agent's, another window's), followed
+-- while the Device built-in is on, as gpui's `auto_open_devices`: each one
+-- new since the hub was first heard is handed to `open` (chat, host, device).
+function M.follow(open: (chat: string, host: string, id: string) -> ())
+	local Builtins = require("@app/screens/plugins/builtins")
+	local stop: (() -> ())? = nil
+	local seen: { [string]: boolean }? = nil
+	ui.effect(function()
+		local on = Builtins.on("device")
+		if on and not stop then
+			stop = api.watch()
+		elseif not on and stop then
+			stop()
+			stop = nil
+			seen = nil
+		end
+	end)
+	ui.effect(function()
+		local hub = api.hub:get()
+		if stop == nil or type(hub) ~= "table" or hub.outdated then
+			return
+		end
+		local now: { [string]: boolean } = {}
+		local fresh = {}
+		for _, x in hub.sessions or {} do
+			local host = x.hostId or model.LOCAL
+			if type(x.chatId) == "string" and model.device(hub, host, x.deviceId) then
+				local k = `{x.chatId}\0{model.key(host, x.deviceId)}`
+				now[k] = true
+				if seen and not seen[k] then
+					table.insert(fresh, { x.chatId, host, x.deviceId })
+				end
+			end
+		end
+		local first = seen == nil
+		seen = now
+		if not first and #fresh > 0 then
+			-- (Out of this effect: what opening reads isn't what it follows.)
+			ui.after(0, function()
+				for _, f in fresh do
+					open(f[1], f[2], f[3])
+				end
+			end)
+		end
+	end)
+end
+
 local function words(err: any): string
 	local w = if type(err) == "table" then err.message else err
 	if w == "outdated" then
@@ -167,12 +229,31 @@ local function target_params(host: string, id: string): { [string]: any }
 	return p
 end
 
-function M.close(tab: any)
-	local t = target_of(tab)
+-- Devices whose tab was closed, by chat: an agent opening one again opens no tab for it (gpui's `dismissed`).
+local dismissed: { [string]: boolean } = {}
+local function dismissal(chat: string, host: string, id: string): string
+	return `{chat}\0{model.key(host, id)}`
+end
+
+function M.close(tab: any, panel_key: string?)
+	local t = target_of(live(tab))
 	if t then
 		api.unstream(tab.id)
+		if panel_key then
+			dismissed[dismissal(chat_of(panel_key), t[1], t[2])] = true
+		end
 	end
 	runs[tab.id] = nil
+end
+
+function M.dismissed(chat: string, host: string, id: string): boolean
+	return dismissed[dismissal(chat, host, id)] == true
+end
+
+-- A Device tab on its picker, opening nothing: where a device opened from elsewhere goes.
+function M.idle(tab: any): boolean
+	local r = runs[tab.id]
+	return target_of(live(tab)) == nil and not (r and r.opening:peek() ~= nil)
 end
 
 -- Small words, in the quiet ink (or the danger's).
@@ -480,7 +561,7 @@ local function setup(props: { tab: any, panel_key: string, r: Run }): Node
 			rounded = "$radius.lg",
 			border = 1,
 			border_color = "$border",
-			bg = "$surface",
+			bg = "$surface.raised",
 			ui.column {
 				p = "$space.4",
 				gap = "$space.2",
@@ -528,7 +609,7 @@ local function setup(props: { tab: any, panel_key: string, r: Run }): Node
 							return true
 						end, function()
 							state.close(props.panel_key, props.tab.id)
-							M.close(props.tab)
+							M.close(props.tab, props.panel_key)
 						end)
 					end
 					return button("device-setup-back", ui.t("device.setup.back"), function(): boolean
@@ -642,6 +723,7 @@ local function picker(props: { tab: any, panel_key: string, r: Run }): Node
 			r.opening:set(nil)
 			local host = (session and session.hostId) or d.hostId or model.LOCAL
 			local id = (session and session.deviceId) or d.id
+			dismissed[dismissal(chat, host, id)] = nil
 			state.patch(props.panel_key, props.tab.id, { device_target = { host = host, id = id }, title = false })
 		end, function(why: string)
 			r.opening:set(nil)
@@ -958,7 +1040,7 @@ local function stream(props: { tab: any, panel_key: string, r: Run }): Node
 				return {
 					{ label = s("rail.close"), icon = "close", on_select = function()
 						state.close(props.panel_key, key)
-						M.close(props.tab)
+						M.close(props.tab, props.panel_key)
 					end },
 					{ separator = true },
 					{ label = s("rail.power_off"), icon = "stop", danger = true, on_select = power_off },
@@ -1065,7 +1147,7 @@ local function stream(props: { tab: any, panel_key: string, r: Run }): Node
 				px = "$space.3",
 				py = "$space.1",
 				rounded = "$radius.full",
-				bg = "$surface",
+				bg = "$surface.raised",
 				border = 1,
 				border_color = "$border",
 				small(function(): string
@@ -1090,8 +1172,9 @@ function M.Tab(props: { tab: any, panel_key: string }): Node
 	local chat = chat_of(props.panel_key)
 	local stop = api.watch()
 	ui.on_cleanup(stop)
+	-- (Followed: its device can be set from outside the tab, an agent's opened for it.)
 	local function tab(): any
-		return state.find(props.panel_key, id) or props.tab
+		return live(props.tab)
 	end
 	local function hub(): any
 		return api.hub:get()

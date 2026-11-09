@@ -950,29 +950,24 @@ fn fill(input: FillInput) -> vec4<f32> {
 -- Composers' lightbox groups, each its own.
 local lightboxes = 0
 
--- The notice line: its words on the draft's own left edge, in the tone's
--- ink (a warning amber, a failure red, the rest the secondary ink), a
--- spinner before them while something is on its way, an action, and the ×
--- that puts it away. No dot, no badge: the words say it.
--- One line while there is a notice, following it in place as it changes
--- (its words, its tone, a spinner, an action): a notice that moves on
--- ("Uploading 2 of 5", "3 of 5") never fades out and in again. Going, it
--- keeps the last it said as it fades.
 -- Dictation's outcome under the composer, until dismissed or the next try
 -- (gpui's `render_dictation_status`): no speech, a tap, unavailable, stopped.
 local function dictation_status(own: any): Node
+	-- (One line that changes what it says in place, fading in as gpui's and gone at once.)
+	local function said(): (string, string?)
+		return own.phase:get(), own.message:get()
+	end
+	local function failed(): boolean
+		local p = said()
+		return p == "denied" or p == "unavailable" or p == "failed"
+	end
 	return ui.presence(function(): string?
 		local p = own.phase:get()
-		if Dictation.active(p) or p == "idle" then
-			return nil
-		end
-		return `{p}\0{own.message:get() or ""}`
+		return if Dictation.active(p) or p == "idle" then nil else "status"
 	end, function(): Node
-		local title, line = Dictation.status(own.phase:peek(), own.message:peek())
-		local failed = own.phase:peek() == "denied" or own.phase:peek() == "unavailable" or own.phase:peek() == "failed"
 		return ui.row {
 			id = "dictation-status",
-			role = if failed then "alert" else "status",
+			role = "status",
 			w_full = true,
 			gap = "$space.2",
 			items = "start",
@@ -981,16 +976,36 @@ local function dictation_status(own: any): Node
 			ui.div {
 				w = 6,
 				h = 6,
-				mt = 6,
+				mt = ui.raw(6, "the dot centred on the title's first line"),
 				shrink = 0,
 				rounded = "$radius.full",
-				bg = if failed then "$warning" else "$text.tertiary",
+				bg = function(): string
+					return if failed() then "$warning" else "$text.tertiary"
+				end,
 			},
 			ui.column {
 				grow = 1,
 				min_w = 0,
-				ui.text { title or "", literal = true, text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.primary" },
-				ui.text { line or "", literal = true, wrap = true, text_size = "$font.size.sm", color = "$text.secondary" },
+				ui.text {
+					function(): string
+						local title = Dictation.status(said())
+						return title or ""
+					end,
+					literal = true,
+					text_size = "$font.size.sm",
+					weight = "$font.weight.medium",
+					color = "$text.primary",
+				},
+				ui.text {
+					function(): string
+						local _, line = Dictation.status(said())
+						return line or ""
+					end,
+					literal = true,
+					wrap = true,
+					text_size = "$font.size.sm",
+					color = "$text.secondary",
+				},
 			},
 			Button {
 				id = "dictation-dismiss",
@@ -1004,10 +1019,17 @@ local function dictation_status(own: any): Node
 	end, {
 		w_full = true,
 		enter = { opacity = { 0, 1 }, duration = 160 },
-		exit = { opacity = 0, duration = 120 },
 	})
 end
 
+-- The notice line: its words on the draft's own left edge, in the tone's
+-- ink (a warning amber, a failure red, the rest the secondary ink), a
+-- spinner before them while something is on its way, an action, and the ×
+-- that puts it away. No dot, no badge: the words say it.
+-- One line while there is a notice, following it in place as it changes
+-- (its words, its tone, a spinner, an action): a notice that moves on
+-- ("Uploading 2 of 5", "3 of 5") never fades out and in again. Going, it
+-- keeps the last it said as it fades.
 local function notice_line(notice: State<Notice?>, on_action: (() -> ())?, on_dismiss: (() -> ())?): Node
 	return ui.presence(function(): string?
 		return if notice:get() then "notice" else nil
@@ -2324,11 +2346,11 @@ return ui.component(function(props: Props): Node
 				-- first, then a question's (1 to 9 pick, Escape goes back
 				-- or closes), then ⌘Enter sending the newest queued row.
 				on_key_up = if own
-					then function(e): boolean
+					then function(name: any): boolean
 						-- (Its letter let go, whatever's held with it.)
 						local combo = Dictation.key:peek()
 						local letter = string.match(combo, "([^+]+)$")
-						if letter and string.lower(e.key or "") == letter then
+						if letter and type(name) == "string" and string.lower(name) == letter then
 							own.release("key")
 						end
 						return false
@@ -2342,7 +2364,7 @@ return ui.component(function(props: Props): Node
 						return true
 					end
 					-- The hold shortcut (⌘D): down starts, up (on_key_up) writes.
-					if own and (Dictation.available() or dictating()) and Recorder.combo_of(e) == Dictation.key:peek() then
+					if own and (Dictation.available() or dictating()) and Dictation.matches(e, Recorder.combo_of) then
 						own.press("key")
 						return true
 					end

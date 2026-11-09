@@ -37,6 +37,23 @@ M.events = ui.shared("dictation_events", nil :: any)
 M.busy = ui.state("dictation_busy", false)
 M.last = nil :: any
 
+-- Whether a combination recorded elsewhere is the hold shortcut (⌘ is Ctrl off the Mac).
+function M.is_key(combo: string): boolean
+	local key = M.key:peek()
+	if key == "" or combo == "" then
+		return false
+	end
+	local ok, platform = pcall(function(): any
+		return ui.shared("platform", ""):peek()
+	end)
+	return combo == key or (not (ok and platform == "macos") and combo == (string.gsub(key, "cmd", "ctrl")))
+end
+
+-- Whether a key down is the hold shortcut.
+function M.matches(e: KeyEvent, combo_of: (KeyEvent) -> string?): boolean
+	return M.is_key(combo_of(e) or "")
+end
+
 function M.available(): boolean
 	local m = M.model:get()
 	return M.enabled:get() == true and m ~= nil and m.ready == true
