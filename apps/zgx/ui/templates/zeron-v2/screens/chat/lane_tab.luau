@@ -1197,7 +1197,9 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		return chat
 	end, nil, {
 		side = function(text: string)
-			lanes.ask_side(data.parent or lanes.unsent:peek()[chat] or chat, text)
+			-- (A side chat already sent is no longer unsent: its parent is its row's.)
+			local row = if split then nil else lanes.child_row(chat)
+			lanes.ask_side(data.parent or lanes.unsent:peek()[chat] or (if row then row.parent else nil) or chat, text)
 		end,
 		focus = keys_here,
 		-- (Into its own draft, at its own composer's caret; a split's pane:

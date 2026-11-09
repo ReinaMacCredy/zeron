@@ -361,3 +361,14 @@ test("a side chat compacting says so in its transcript, as the chat page does", 
 	expect(app:has(".side-chat-tab >> #compaction-wait")).to_be(true)
 	expect(app:tree(".side-chat-tab >> #compaction-wait"):find("Compacting", 1, true) ~= nil).to_be(true)
 end)
+
+test("Ask in side chat from a side chat's reply stages the passage on its parent's newest side chat, the one shown", function()
+	local app = open()
+	select_in_side(app, "This is side-a")
+	app:click(".side-chat-tab >> #annotation-ask-side-chat")
+	app:frames(30)
+	local drafts = app:state("chat.composer.drafts") or {}
+	local d = drafts["side-a"]
+	expect(d ~= nil and d.cargo ~= nil and d.cargo[1] ~= nil and d.cargo[1].text == "This is side-a").to_be(true)
+	expect(app:has('.side-chat-tab >> "1 annotation"')).to_be(true)
+end)
