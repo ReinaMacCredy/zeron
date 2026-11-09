@@ -6,8 +6,9 @@
 //! answers, and the other interface's settings and drafts carried over once,
 //! src/migration.rs). scripts/package-zgx-cutover.sh packages it.
 //!
-//! A debug build of `cutover` never starts the production engine: only a
-//! release one does, as Zeron.app's.
+//! A debug build of `cutover` never starts the production engine, never
+//! updates itself and carries nothing over unless `ZERON_ZGX_MIGRATE=1`
+//! asks: only a release one does each, as Zeron.app's.
 
 /// The three builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,8 +85,8 @@ pub const fn of(build: Build, release: bool) -> Identity {
             app_id: "zeron",
             url_scheme: Some("zeron"),
             engine: Engine::Production { starts: release },
-            updates_itself: true,
-            migrates: true,
+            updates_itself: release,
+            migrates: release,
         },
     }
 }
@@ -120,8 +121,11 @@ mod tests {
         assert_eq!((zeron.name, zeron.bundle_id, zeron.application_id), ("Zeron", Some("sh.zeron.app"), Some("sh.zeron.app")));
         assert_eq!((zeron.url_scheme, zeron.engine), (Some("zeron"), Engine::Production { starts: true }));
         assert!(zeron.updates_itself && zeron.migrates);
-        // A debug build of it never starts production's engine.
-        assert_eq!(of(Build::Cutover, false).engine, Engine::Production { starts: false });
+        // A debug build of it never starts production's engine, updates itself or migrates by itself.
+        let debug = of(Build::Cutover, false);
+        assert_eq!(debug.engine, Engine::Production { starts: false });
+        assert!(!debug.updates_itself && !debug.migrates);
+        assert_eq!((debug.bundle_id, debug.app_id), (zeron.bundle_id, zeron.app_id));
     }
 
     #[test]
@@ -141,5 +145,7 @@ mod tests {
         assert!(script.contains(&format!("BUNDLE_ID={}", zeron.bundle_id.unwrap())), "the script's bundle id");
         assert!(script.contains(&format!("APP_NAME=\"{}\"", zeron.name)), "the script's name");
         assert!(script.contains("--features cutover"));
+        // Built apart from the Dev's release binary (scripts/run-zgx-dev.sh runs target/release/zeron-zgx).
+        assert!(script.contains("ZGX_TARGET_DIR:-$ZGX/target/package-zgx-cutover}"), "the script's own target dir");
     }
 }

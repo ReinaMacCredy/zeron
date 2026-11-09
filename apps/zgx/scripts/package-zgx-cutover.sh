@@ -14,7 +14,9 @@
 # Usage: scripts/package-zgx-cutover.sh   (from apps/zgx or anywhere; macOS only)
 #   ZGX_CUTOVER_ENGINE   a `zeron-engine` built already (else built here, release)
 #   ZGX_CUTOVER_ZGX_BIN  the interface built already with --features cutover
-#   ZGX_TARGET_DIR       where to build the interface (apps/zgx/target)
+#   ZGX_TARGET_DIR       where to build the interface (apps/zgx/target/package-zgx-cutover:
+#                        a target dir of its own, so a Dev's release binary,
+#                        apps/zgx/target/release/zeron-zgx, is never this build)
 #   CARGO_FLAGS          extra cargo flags (CI: --locked)
 # Signing as scripts/package-macos.sh: CODESIGN_IDENTITY; notarizing with
 # NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID.
@@ -49,7 +51,7 @@ fi
 
 ZGX_BIN="${ZGX_CUTOVER_ZGX_BIN:-}"
 if [[ -z "$ZGX_BIN" ]]; then
-  target_dir="${ZGX_TARGET_DIR:-$ZGX/target}"
+  target_dir="${ZGX_TARGET_DIR:-$ZGX/target/package-zgx-cutover}"
   # (From its folder: the build's flags are its .cargo/config.toml.)
   (cd "$ZGX" && env -u ZERON_BETA_VERSION cargo build --release ${CARGO_EXTRA[@]+"${CARGO_EXTRA[@]}"} --features cutover --target-dir "$target_dir")
   ZGX_BIN="$target_dir/release/zeron-zgx"

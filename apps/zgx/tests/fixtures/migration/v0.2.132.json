@@ -53,8 +53,8 @@
   "terminalHeight": 280.0,
   "keymap": {
     "toggleDictation": "mod-shift-d",
-    "captureAppshot": "mod-shift-2",
-    "quickCapture": "mod-alt-n",
+    "captureAppshot": "command-command",
+    "quickCapture": "option-option",
     "randomWallpaper": "mod-u",
     "saveFile": "mod-s",
     "browserReload": "mod-shift-r",

@@ -15,9 +15,10 @@
 //!   engine.restart     stop the engine this app started; the supervisor
 //!                      starts the one on disk in its place
 //!
-//! The beta runs beside the Zeron app, on the Zeron app's engine
-//! (src/engine/manager.rs): never this app's to judge or stop, and
-//! `engine.restart` refuses. Instead each connection asks whether the engine
+//! The beta (and a debug build of the Zeron app) runs on the Zeron app's
+//! engine (src/engine/manager.rs): never this app's to judge or stop, and
+//! `engine.restart` refuses. The released Zeron app owns that engine, so any
+//! engine on its port is its own to restart. Instead each connection asks whether the engine
 //! serves this interface (its `zgx-interface-v1` capability, crates/proto):
 //! shared `engine.interface`, `{ supported }`. An older engine can't: the
 //! scripts say so, and updating the Zeron app is what brings a newer one.
@@ -168,8 +169,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                 return;
             };
             tell_interface(serves_interface(&info["capabilities"]));
-            // Zeron.app's engine follows its bundle by itself.
-            if config.follows_bundle() {
+            // The Zeron app's engine, attached to: the Zeron app restarts it.
+            if config.attach_only() {
                 return;
             }
             let running = info["build"].as_str().map(str::to_owned);
@@ -180,8 +181,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                     Some(bin) => build_of(bin).await,
                     None => None,
                 };
-                let started = manager::started_build(config);
-                let judged = judge(running.as_deref(), on_disk.as_deref(), started.as_deref());
+                let judged = config.judge(running.as_deref(), on_disk.as_deref());
                 if said != Some(judged) {
                     let (stale, ours) = judged;
                     if stale {
@@ -207,18 +207,14 @@ fn install_restart(host: &ScriptHost) {
         let Some(config) = engine.config() else {
             return Err("Zeron isn't available here".into());
         };
-        // (Only one this app started, and only while it can start another;
-        // in the beta, Zeron.app's own, which its bundle's replaces.)
+        // (Only one this app started, or any the released Zeron app works
+        // through, and only while it can start another: src/engine/manager.rs.)
         let Some(rpc) = engine.current() else {
             return Err("offline".into());
         };
-        if config.follows_bundle() {
-            return Err("This engine is the Zeron app's: restart it from there.".into());
-        }
         let info = rpc.call("EngineInfo", json!({})).await?;
-        let running = info["build"].as_str().map(str::to_owned);
-        if config.startable().is_none() || running.is_none() || running != manager::started_build(config) {
-            return Err("This engine wasn't started by this app.".into());
+        if let Some(why) = config.restart_refusal(info["build"].as_str()) {
+            return Err(why.into());
         }
         eprintln!("zeron-zgx: engine: starting the engine on disk in place of an older one");
         engine.stop().await?;

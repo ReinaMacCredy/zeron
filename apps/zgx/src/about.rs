@@ -1,12 +1,12 @@
 //! Settings → About & updates (ui/screens/settings/about.luau): which Zeron
 //! this is, and its updates.
 //!
-//! **The Zeron app** (this interface in Zeron.app's bundle: the beta) updates
+//! **The Zeron app** (a released `cutover` build, src/identity.rs) updates
 //! itself, as Zeron.app does (crates/update `desktop`, shared with the GPUI
-//! app's `app_update.rs`): its own checker follows the release channel this
-//! Mac chose (`update-channel.json`), a found release downloads in the
-//! background, "Restart to update" installs it and relaunches, and one
-//! nobody restarted for installs when the app quits ([`install_on_quit`]).
+//! app's `app_update.rs`): its own checker reads the fork's feed, a found
+//! release is offered and downloads when asked, "Restart to update" installs
+//! it and relaunches. Only with `ZERON_AUTO_UPDATE` does one download by
+//! itself and, nobody restarting for it, install on quit ([`install_on_quit`]).
 //! "Get beta updates" chooses the channel; leaving beta installs Stable's
 //! release even when it's older. The engine follows the new bundle by
 //! itself once nothing runs.
@@ -151,7 +151,7 @@ impl Desktop {
         Some(Rc::new(Self {
             install,
             blocker,
-            automatic: automatic(crate::identity::CURRENT, zeron_update::desktop_auto_update_override(), auto_update_setting(&data_dir)),
+            automatic: automatic(crate::identity::CURRENT, zeron_update::desktop_auto_update_override()),
             edge,
             data_dir,
             checker,
@@ -482,36 +482,35 @@ fn start(about: &Rc<About>) {
 }
 
 /// Where the app's own updates come from: none for the beta (the Zeron app
-/// beside it updates); the fork's releases for the Zeron app itself, as the
-/// other interface's (crates/ui lib.rs `RELEASES_FEED`); a development build's
-/// edge otherwise (never a bundle, so never asked).
+/// beside it updates) or a debug build of the Zeron app (never one to
+/// install over the real one); the fork's releases for a released Zeron app,
+/// as the other interface's (crates/ui lib.rs `RELEASES_FEED`); a development
+/// build's edge otherwise (never a bundle, so never asked).
 fn app_feed(identity: crate::identity::Identity) -> Option<Option<String>> {
     match identity.build {
         crate::identity::Build::Beta => None,
-        crate::identity::Build::Cutover => Some(Some(zeron_update::RELEASES_FEED.to_owned())),
+        crate::identity::Build::Cutover if identity.updates_itself => Some(Some(zeron_update::RELEASES_FEED.to_owned())),
+        crate::identity::Build::Cutover => None,
         crate::identity::Build::Development => Some(None),
     }
 }
 
-/// Whether a found release downloads by itself and installs on quit: the Zeron
-/// app's, as the other interface decides it (`ZERON_AUTO_UPDATE` when set,
-/// else its Automatic updates, `autoUpdate`, which this app reads in place).
-fn automatic(identity: crate::identity::Identity, forced: Option<bool>, setting: Option<bool>) -> bool {
-    identity.updates_itself && forced.unwrap_or_else(|| setting.unwrap_or(false))
-}
-
-fn auto_update_setting(data_dir: &std::path::Path) -> Option<bool> {
-    let bytes = std::fs::read(data_dir.join("ui-settings.json")).ok()?;
-    serde_json::from_slice::<Json>(&bytes).ok()?["autoUpdate"].as_bool()
+/// Whether a found release downloads by itself and installs on quit: only
+/// when `ZERON_AUTO_UPDATE` says so, in the Zeron app. Not the other
+/// interface's `autoUpdate`: until the fork's feed tells this interface's
+/// releases from that one's, a release found may be the other app (U27-M14).
+fn automatic(identity: crate::identity::Identity, forced: Option<bool>) -> bool {
+    identity.updates_itself && forced == Some(true)
 }
 
 /// What a release feed's manifest (its `manifest.json`, as published) offers
-/// this app, as its checker decides it (crates/update `offer`).
+/// this app, as its checker decides it (crates/update `desktop::current_offer`:
+/// `fetch_latest` reads the fork's one feed as Stable's, whatever this Mac chose).
 #[cfg(test)]
-fn offer_of(manifest: &str, running: &str, chosen: Channel, engine: Option<&str>, macos: Option<&str>) -> zeron_update::Offer {
+fn offer_of(manifest: &str, running: &str, engine: Option<&str>, macos: Option<&str>) -> zeron_update::Offer {
     let mut manifest: zeron_update::Manifest = serde_json::from_str(manifest).expect("a manifest");
-    manifest.channel = chosen;
-    zeron_update::offer(&manifest, running, chosen, engine, macos)
+    manifest.channel = Channel::Stable;
+    zeron_update::offer(&manifest, running, manifest.channel, engine, macos)
 }
 
 /// Whether the bundle on disk has moved on from the app that's open, to what's
@@ -589,7 +588,7 @@ impl About {
             ("switch", Value::Bool(false)),
             ("flow", Value::from("idle")),
         ];
-        if crate::identity::CURRENT.updates_itself {
+        if crate::identity::CURRENT.build == crate::identity::Build::Cutover {
             fields.push(("app_name", Value::from(crate::identity::CURRENT.name)));
             fields.push(("releases", Value::from(zeron_update::RELEASES_PAGE)));
         }
@@ -740,41 +739,37 @@ mod update_tests {
         std::fs::read_to_string(format!("{}/tests/fixtures/updates/{name}.json", env!("CARGO_MANIFEST_DIR"))).unwrap()
     }
 
-    /// Only the Zeron app itself updates itself, from the fork's releases; the
-    /// beta leaves it to the Zeron app beside it.
+    /// Only a released Zeron app updates itself, from the fork's releases; the
+    /// beta leaves it to the Zeron app beside it, and a debug build of the
+    /// Zeron app never installs over the real one.
     #[test]
     fn the_zeron_app_updates_itself_from_the_fork_s_releases() {
         assert_eq!(app_feed(of(Build::Cutover, true)), Some(Some(zeron_update::RELEASES_FEED.to_owned())));
         assert!(zeron_update::RELEASES_FEED.contains("ReinaMacCredy/zeron"));
+        assert_eq!(app_feed(of(Build::Cutover, false)), None);
         assert_eq!(app_feed(of(Build::Beta, true)), None);
         assert_eq!(app_feed(of(Build::Development, true)), Some(None));
-        // Downloads by itself as the other interface decides: the variable, else its switch, else not.
+        // It checks and offers; it downloads by itself and installs on quit only when ZERON_AUTO_UPDATE says so.
         let zeron = of(Build::Cutover, true);
-        assert!(!automatic(zeron, None, None));
-        assert!(automatic(zeron, None, Some(true)));
-        assert!(!automatic(zeron, Some(false), Some(true)));
-        assert!(automatic(zeron, Some(true), None));
-        assert!(!automatic(of(Build::Beta, true), Some(true), Some(true)));
-        assert!(!automatic(of(Build::Development, true), Some(true), Some(true)));
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(auto_update_setting(dir.path()), None);
-        std::fs::write(dir.path().join("ui-settings.json"), r#"{ "autoUpdate": true }"#).unwrap();
-        assert_eq!(auto_update_setting(dir.path()), Some(true));
+        assert!(!automatic(zeron, None));
+        assert!(!automatic(zeron, Some(false)));
+        assert!(automatic(zeron, Some(true)));
+        assert!(!automatic(of(Build::Cutover, false), Some(true)));
+        assert!(!automatic(of(Build::Beta, true), Some(true)));
+        assert!(!automatic(of(Build::Development, true), Some(true)));
     }
 
     #[test]
     fn a_release_is_offered_as_the_checker_decides() {
-        let stable = Channel::Stable;
-        assert_eq!(offer_of(&manifest("stable-newer"), "0.2.132", stable, Some("0.2.132"), Some("15.1")), Offer::Newer);
-        assert_eq!(offer_of(&manifest("stable-same"), "0.2.132", stable, None, Some("15.1")), Offer::Current);
-        assert_eq!(offer_of(&manifest("stable-older"), "0.2.132", stable, None, Some("15.1")), Offer::Current);
-        assert_eq!(offer_of(&manifest("garbage-version"), "0.2.132", stable, None, Some("15.1")), Offer::Current);
-        assert!(matches!(offer_of(&manifest("needs-newer-macos"), "0.2.132", stable, None, Some("14.6")), Offer::Held(why) if why.contains("macOS 15.0")));
-        assert_eq!(offer_of(&manifest("needs-newer-macos"), "0.2.132", stable, None, Some("15.0")), Offer::Newer);
-        // Beta chosen on a stable build: a newer beta installs.
-        assert_eq!(offer_of(&manifest("beta-newer"), "0.2.132", Channel::Beta, Some("0.2.132"), Some("15.1")), Offer::Newer);
-        // Leaving beta: Stable's release replaces it though older, unless the beta's engine is newer than Stable's.
-        assert_eq!(offer_of(&manifest("stable-older"), "0.2.133-beta.1", stable, Some("0.2.131"), Some("15.1")), Offer::Switch);
-        assert!(matches!(offer_of(&manifest("stable-older"), "0.2.133-beta.1", stable, Some("0.2.132"), Some("15.1")), Offer::Held(_)));
+        assert_eq!(offer_of(&manifest("stable-newer"), "0.2.132", Some("0.2.132"), Some("15.1")), Offer::Newer);
+        assert_eq!(offer_of(&manifest("stable-same"), "0.2.132", None, Some("15.1")), Offer::Current);
+        assert_eq!(offer_of(&manifest("stable-older"), "0.2.132", None, Some("15.1")), Offer::Current);
+        assert_eq!(offer_of(&manifest("garbage-version"), "0.2.132", None, Some("15.1")), Offer::Current);
+        assert!(matches!(offer_of(&manifest("needs-newer-macos"), "0.2.132", None, Some("14.6")), Offer::Held(why) if why.contains("macOS 15.0")));
+        assert_eq!(offer_of(&manifest("needs-newer-macos"), "0.2.132", None, Some("15.0")), Offer::Newer);
+        // A beta build on the fork's one feed (Stable's): its release replaces the beta though older,
+        // unless the beta's engine is newer than that release's.
+        assert_eq!(offer_of(&manifest("stable-older"), "0.2.133-beta.1", Some("0.2.131"), Some("15.1")), Offer::Switch);
+        assert!(matches!(offer_of(&manifest("stable-older"), "0.2.133-beta.1", Some("0.2.132"), Some("15.1")), Offer::Held(_)));
     }
 }

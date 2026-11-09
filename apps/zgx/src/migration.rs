@@ -7,17 +7,25 @@
 //! unless it's this app's default. Older shapes of the file are read too
 //! ([`normalized`]). A file that isn't JSON changes nothing and says so; with
 //! no marker kept, a launch after it's mended carries it then. Drafts
-//! (`composer-drafts.json`) go into the composer's drafts for the run, each
-//! with the attachments whose files are still there.
+//! (`composer-drafts.json`) go into the composer's drafts, each with the
+//! attachments whose files are still there, and are kept in [`PENDING`] until
+//! each is sent or cleared: put back at every launch till then.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value as Json, json};
+use zgx_script::Value;
 
 use crate::carried_settings;
 
 /// In this app's own folder: what was carried, and when. There, it never runs again.
 pub const MARKER: &str = "migrated-from-zeron.json";
+
+/// In this app's own folder: the carried drafts not yet sent or cleared.
+pub const PENDING: &str = "migrated-drafts.json";
+
+/// Whose defaults and spellings the other interface's keymap has (crates/ui `default_combo_on`).
+const MAC: bool = cfg!(target_os = "macos");
 
 /// Where a key of `ui-settings.json` goes.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,7 +93,7 @@ pub const TABLE: &[(&str, Home)] = &[
     ("notificationsEnabled", Home::InPlace("the engine's banners read it there (src/settings.rs notifications.*)")),
     ("notificationsBackgroundOnly", Home::InPlace("the engine's banners read it there (src/settings.rs notifications.*)")),
     ("agentUpdateNotifications", Home::InPlace("the engine's banners read it there (src/settings.rs notifications.*)")),
-    ("autoUpdate", Home::InPlace("the Zeron app's updater reads it there (src/about.rs)")),
+    ("autoUpdate", Home::None("not followed: a found release installs by itself only with ZERON_AUTO_UPDATE, till the feed tells this app's releases from the other's")),
     ("rightPaneWidth", Home::Persist(&["screens/shell/page.luau::shell_files_width", "screens/shell/page.luau::shell_panel_width_chosen"])),
     ("splitRatio", Home::None("a split's ratios are each tab's own here")),
     ("terminalHeight", Home::None("terminals are panel tabs here, no drawer")),
@@ -376,7 +384,7 @@ fn more(settings: &Json) -> Vec<(String, Json)> {
         put("ds/look.luau::text_size", json!(nearest(px * 13.0 / 16.0, &[12.0, 13.0, 14.0, 15.0, 16.0])));
     }
     if let Some(px) = settings["codeFontSize"].as_f64().filter(|px| px.is_finite()) {
-        put("screens/settings/prefs.luau::settings_code_font_size", json!(nearest(px, &[11.0, 12.0, 13.0, 14.0, 15.0, 16.0])));
+        put("screens/settings/prefs.luau::settings_code_font_size", json!(at_or_above(px, &CODE_SIZES)));
     }
     for (from, to) in [
         ("diffSplit", "ds/git.luau::ds.git.diff_split"),
@@ -447,14 +455,14 @@ fn more(settings: &Json) -> Vec<(String, Json)> {
     if let Some(completion) = skill_completion(settings) {
         put(&format!("{PREFS}::settings_skill_completion"), completion);
     }
-    let (bound, appshot) = keymap(&settings["keymap"]);
-    if !bound.is_empty() {
-        put("screens/shell/keys.luau::shell_keymap", Json::Object(bound));
+    let keys = keymap(&settings["keymap"], MAC);
+    if !keys.bound.is_empty() {
+        put("screens/shell/keys.luau::shell_keymap", Json::Object(keys.bound));
     }
-    if let Some(combo) = appshot {
+    if let Some(combo) = keys.appshot {
         put("screens/chat/appshots.luau::appshots_shortcut", json!(combo));
     }
-    if let Some(hold) = settings["keymap"]["toggleDictation"].as_str().filter(|c| !c.is_empty() && *c != "mod-d").and_then(combo) {
+    if let Some(hold) = settings["keymap"]["toggleDictation"].as_str().filter(|c| *c != "mod-d").and_then(combo) {
         put("ds/dictation.luau::dictation_key", json!(hold));
     }
     for (from, to) in [("dictationEnabled", "ds/dictation.luau::dictation_enabled"), ("deviceAutoFloat", "screens/settings/device_hub.luau::device_auto_float")] {
@@ -490,6 +498,36 @@ fn font(word: &str, own: &str) -> Option<String> {
 
 fn nearest(value: f64, choices: &[f64]) -> f64 {
     choices.iter().copied().min_by(|a, b| (a - value).abs().total_cmp(&(b - value).abs())).unwrap_or(value)
+}
+
+/// This app's Code sizes.
+const CODE_SIZES: [f64; 6] = [11.0, 12.0, 13.0, 14.0, 15.0, 16.0];
+
+/// The first of `choices` (ascending) at or above `value`, else the largest:
+/// code never comes out smaller than it was (gpui's default 12.5 is 13 here).
+fn at_or_above(value: f64, choices: &[f64]) -> f64 {
+    choices.iter().copied().find(|c| *c >= value - 1e-9).or_else(|| choices.last().copied()).unwrap_or(value)
+}
+
+/// What the other interface's file holds that has a home here but can't land
+/// in it, by `key` (`keymap.<id>` for a shortcut): the value, and why.
+fn left_out(settings: &Json, mac: bool) -> Map<String, Json> {
+    let mut left = keymap(&settings["keymap"], mac).left;
+    let mut say = |key: &str, value: &Json, why: &str| {
+        left.insert(key.into(), json!({ "value": value, "why": why }));
+    };
+    for (key, own) in [("uiFontFamily", "geist"), ("codeFontFamily", "geistMono")] {
+        if let Some(word) = settings[key].as_str().filter(|w| font(w, own).is_none()) {
+            say(key, &json!(word), "a font this app doesn't offer: its own stays");
+        }
+    }
+    if let Some(face) = settings["mathFont"].as_str().filter(|f| !matches!(*f, "fira" | "stixTwo" | "computerModern" | "libertinus" | "pagella" | "euler")) {
+        say("mathFont", &json!(face), "a math face this app doesn't offer: its own stays");
+    }
+    if let Some(kind) = settings["htmlOpenApp"]["kind"].as_str().filter(|k| !matches!(*k, "systemDefault" | "zeron")) {
+        say("htmlOpenApp", &settings["htmlOpenApp"], &format!("{kind}: this app opens HTML in Zeron or the system's app only"));
+    }
+    left
 }
 
 /// The agents that read the old `skillsInSlashMenu` (crates/ui settings.rs SKILL_COMPLETION_HARNESSES).
@@ -531,9 +569,17 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("browserReload", "panel.reload_page"),
 ];
 
-/// Its defaults, either platform's spelling (crates/ui settings.rs `default_combo_on`).
-fn default_combo(field: &str) -> &'static [&'static str] {
+/// Its defaults on the Mac (`mac`) or elsewhere, in either platform's
+/// spelling, and older ones (crates/ui settings.rs `default_combo_on`,
+/// `default_quick_capture`).
+fn default_combo(field: &str, mac: bool) -> &'static [&'static str] {
     match field {
+        "quickCapture" if mac => &["option-option", "mod-alt-n", "mod-shift-space", "alt-space"],
+        "quickCapture" => &["none", "mod-alt-n", "mod-shift-space", "alt-space"],
+        "captureAppshot" if mac => &["command-command"],
+        "captureAppshot" => &["mod-alt-space", ""],
+        "saveFile" => &["mod-s"],
+        "toggleTray" => &["mod-i"],
         "toggleSidebar" => &["mod-b"],
         "toggleChanges" => &["mod-r"],
         "toggleFiles" => &["mod-e"],
@@ -545,17 +591,22 @@ fn default_combo(field: &str) -> &'static [&'static str] {
         "nextSession" => &["ctrl-tab", "mod-tab"],
         "prevSession" => &["ctrl-shift-tab", "mod-shift-tab"],
         "archiveSession" => &["mod-shift-a"],
-        "quickCapture" => &["mod-alt-n", "mod-shift-space", "alt-space"],
         "randomWallpaper" => &["mod-u"],
         "browserReload" => &["mod-shift-r"],
-        "captureAppshot" => &["mod-alt-space", "cmd-cmd", "both-cmd", ""],
         _ => &[],
     }
 }
 
 const JUMP_DEFAULTS: [&str; 9] = ["mod-1", "mod-2", "mod-3", "mod-4", "mod-5", "mod-6", "mod-7", "mod-8", "mod-9"];
 
-/// A combination as this app writes it (`cmd+shift+b`), from the shipping app's (`mod-shift-b`).
+/// The macOS double-tap chords the other interface's Appshot and Quick
+/// capture menus offer (crates/ui appshots `ChordModifier`), and "none".
+const CHORDS: [&str; 3] = ["command-command", "option-option", "shift-shift"];
+const NO_HOTKEY: &str = "none";
+
+/// A combination as this app writes it (`cmd+shift+b`), from the shipping
+/// app's (`mod-shift-b`); none for one this app can't bind (a modifier
+/// alone, as a double-tap chord is, or "none").
 pub fn combo(theirs: &str) -> Option<String> {
     if theirs.is_empty() {
         return Some(String::new());
@@ -564,7 +615,7 @@ pub fn combo(theirs: &str) -> Option<String> {
         Some(rest) => (rest, "-"),
         None => theirs.rsplit_once('-').unwrap_or(("", theirs)),
     };
-    if key.is_empty() {
+    if key.is_empty() || matches!(key, "mod" | "cmd" | "command" | "super" | "ctrl" | "control" | "alt" | "option" | "shift" | "fn" | NO_HOTKEY) {
         return None;
     }
     let mut out: Vec<&str> = Vec::new();
@@ -581,38 +632,75 @@ pub fn combo(theirs: &str) -> Option<String> {
     Some(out.join("+"))
 }
 
-/// The shortcuts the shipping app's keymap rebinds, by this app's command, and Appshots' combination.
-fn keymap(map: &Json) -> (Map<String, Json>, Option<String>) {
-    let mut bound = Map::new();
-    let Some(keys) = map.as_object() else { return (bound, None) };
+/// What the shipping app's keymap rebinds: by this app's command, Appshots'
+/// combination, and what can't be bound here (by `keymap.<id>`, with why).
+#[derive(Debug, Default, PartialEq)]
+struct Keys {
+    bound: Map<String, Json>,
+    appshot: Option<String>,
+    left: Map<String, Json>,
+}
+
+const UNBINDABLE: &str = "a double-tap chord (or a modifier alone), which this app's shortcuts can't hold: its own stays";
+
+/// The keymap as the Mac's (`mac`) or another platform's other interface wrote it.
+fn keymap(map: &Json, mac: bool) -> Keys {
+    let mut keys = Keys::default();
+    let Some(theirs_all) = map.as_object() else { return keys };
+    let mut leave = |field: &str, theirs: &str, why: &str| {
+        keys.left.insert(format!("keymap.{field}"), json!({ "value": theirs, "why": why }));
+    };
     // A map from before Save File held Cmd+S and Cmd+B as Toggle sidebar's and Toggle changes' defaults.
-    let older = !keys.contains_key("saveFile");
+    let older = !theirs_all.contains_key("saveFile");
     for (field, command) in SHORTCUTS {
-        let Some(theirs) = keys.get(*field).and_then(Json::as_str) else { continue };
+        let Some(theirs) = theirs_all.get(*field).and_then(Json::as_str) else { continue };
         let old_default = older && matches!((*field, theirs), ("toggleSidebar", "mod-s") | ("toggleChanges", "mod-b"));
-        if default_combo(field).contains(&theirs) || old_default {
+        if default_combo(field, mac).contains(&theirs) || old_default {
             continue;
         }
-        if let Some(ours) = combo(theirs) {
-            bound.insert((*command).into(), json!(ours));
+        // (A shortcut cleared there: none here either.)
+        let ours = if theirs == NO_HOTKEY { Some(String::new()) } else { combo(theirs) };
+        match ours {
+            Some(ours) => {
+                keys.bound.insert((*command).into(), json!(ours));
+            }
+            None => leave(field, theirs, UNBINDABLE),
         }
     }
-    if let Some(jumps) = keys.get("jumpSession").and_then(Json::as_array) {
+    if let Some(jumps) = theirs_all.get("jumpSession").and_then(Json::as_array) {
         for (i, theirs) in jumps.iter().filter_map(Json::as_str).enumerate().take(9) {
-            if theirs != JUMP_DEFAULTS[i]
-                && let Some(ours) = combo(theirs)
-            {
-                bound.insert(format!("shell.session_{}", i + 1), json!(ours));
+            if theirs == JUMP_DEFAULTS[i] {
+                continue;
+            }
+            match combo(theirs) {
+                Some(ours) => {
+                    keys.bound.insert(format!("shell.session_{}", i + 1), json!(ours));
+                }
+                None => leave(&format!("jumpSession.{}", i + 1), theirs, UNBINDABLE),
             }
         }
     }
-    // A key with modifiers, not macOS's two-Command tap (which this app's recorder can't hold).
-    let appshot = keys
-        .get("captureAppshot")
-        .and_then(Json::as_str)
-        .filter(|c| !default_combo("captureAppshot").contains(c) && c.contains('-') && !c.ends_with("cmd"))
-        .and_then(combo);
-    (bound, appshot)
+    for field in ["saveFile", "toggleTray"] {
+        if let Some(theirs) = theirs_all.get(field).and_then(Json::as_str).filter(|c| !default_combo(field, mac).contains(c)) {
+            leave(field, theirs, "no such command here to bind");
+        }
+    }
+    if let Some(theirs) = theirs_all.get("toggleDictation").and_then(Json::as_str).filter(|c| combo(c).is_none()) {
+        leave("toggleDictation", theirs, UNBINDABLE);
+    }
+    if let Some(theirs) = theirs_all.get("captureAppshot").and_then(Json::as_str) {
+        // On the Mac the other interface keeps only a chord or none, and reads a key it recorded before as its default.
+        let theirs_default = default_combo("captureAppshot", mac).contains(&theirs) || (mac && theirs != NO_HOTKEY && !CHORDS.contains(&theirs));
+        if theirs == NO_HOTKEY {
+            leave("captureAppshot", theirs, "Appshots here always have a shortcut: turn Appshots off for none");
+        } else if !theirs_default {
+            match combo(theirs) {
+                Some(ours) => keys.appshot = Some(ours),
+                None => leave("captureAppshot", theirs, UNBINDABLE),
+            }
+        }
+    }
+    keys
 }
 
 /// What the run found and did, as the marker keeps it.
@@ -621,13 +709,19 @@ pub struct Outcome {
     pub written: Vec<String>,
     pub theme: bool,
     pub drafts: usize,
+    /// The drafts not carried, by the other interface's key, with why.
+    pub drafts_left: Map<String, Json>,
 }
 
-/// Why nothing was carried.
+/// Why the run didn't finish.
 #[derive(Debug, PartialEq)]
 pub enum Refused {
+    /// It ran before (the marker is there).
     Done,
+    /// The other interface's `ui-settings.json` can't be read: nothing carried.
     Broken(String),
+    /// Carried, but the marker couldn't be written: it runs again next launch.
+    Marker(String),
 }
 
 /// The run itself: `data` (the engine's, with the other interface's files),
@@ -665,8 +759,8 @@ pub fn migrate(data: &Path, app: &Path) -> Result<(Outcome, Json), Refused> {
     let worth = |file: &str, value: &Json| default_of(file).is_none_or(|d| !same(&d, value));
     let written = carried_settings::carry_with(&state, &pictures, &carried, more, &held, &worth);
     let theme = carry_theme(data, &settings["themeSelection"]);
-    let drafts = drafts(data, &app.join("migrated-drafts"));
-    let outcome = Outcome { written, theme, drafts: drafts.len() };
+    let (drafts, drafts_left) = drafts(data, &app.join("migrated-drafts"));
+    let outcome = Outcome { written, theme, drafts: drafts.len(), drafts_left };
     let row = |key: &str| TABLE.iter().find(|(k, _)| *k == key).map(|(_, home)| *home);
     let keys: Vec<&String> = original.as_object().map(|m| m.keys().collect()).unwrap_or_default();
     let left: Map<String, Json> = keys
@@ -684,12 +778,50 @@ pub fn migrate(data: &Path, app: &Path) -> Result<(Outcome, Json), Refused> {
         "written": outcome.written,
         "theme": outcome.theme,
         "drafts": outcome.drafts,
+        "drafts_left": outcome.drafts_left,
         "no_home": left,
+        "not_carried": left_out(&settings, MAC),
         "unknown": unknown,
     });
-    std::fs::create_dir_all(app).map_err(|e| Refused::Broken(e.to_string()))?;
-    std::fs::write(&marker, serde_json::to_vec_pretty(&note).unwrap_or_default()).map_err(|e| Refused::Broken(e.to_string()))?;
+    let failed = |e: std::io::Error| Refused::Marker(e.to_string());
+    std::fs::create_dir_all(app).map_err(failed)?;
+    keep_pending(app, &drafts).map_err(failed)?;
+    std::fs::write(&marker, serde_json::to_vec_pretty(&note).unwrap_or_default()).map_err(failed)?;
     Ok((outcome, Json::Array(drafts)))
+}
+
+/// The carried drafts not yet sent or cleared, as [`PENDING`] keeps them (none: the file goes).
+fn keep_pending(app: &Path, drafts: &[Json]) -> std::io::Result<()> {
+    let file = app.join(PENDING);
+    if drafts.is_empty() {
+        return match std::fs::remove_file(&file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    std::fs::write(file, serde_json::to_vec_pretty(drafts).unwrap_or_default())
+}
+
+/// [`PENDING`]'s drafts, at a launch after the one that carried them.
+pub fn pending(app: &Path) -> Vec<Json> {
+    std::fs::read(app.join(PENDING))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Json>(&b).ok())
+        .and_then(|d| d.as_array().cloned())
+        .unwrap_or_default()
+}
+
+/// [`PENDING`] less the drafts `held` no longer holds (sent or cleared); whether any went.
+fn prune(app: &Path, drafts: &mut Vec<Json>, held: impl Fn(&str) -> bool) -> bool {
+    let before = drafts.len();
+    drafts.retain(|d| held(d["key"].as_str().unwrap_or("")));
+    if drafts.len() == before {
+        return false;
+    }
+    if let Err(e) = keep_pending(app, drafts) {
+        eprintln!("zeron-zgx: migration: {} couldn't be updated: {e}", app.join(PENDING).display());
+    }
+    true
 }
 
 /// gpui's theme pick into the engine's `theme-choice.json`, when that holds none.
@@ -718,9 +850,17 @@ fn carry_theme(data: &Path, theirs: &Json) -> bool {
 /// into `kept` (the other app removes its own as they go); a linked file, an
 /// image or an Appshot whose file is gone is left out. A draft for a chat not
 /// yet made (a draft session) goes to the new chat's (""), the newest one.
-pub fn drafts(data: &Path, kept: &Path) -> Vec<Json> {
-    let Some(file) = std::fs::read(data.join("composer-drafts.json")).ok().and_then(|b| serde_json::from_slice::<Json>(&b).ok()) else {
-        return Vec::new();
+pub fn drafts(data: &Path, kept: &Path) -> (Vec<Json>, Map<String, Json>) {
+    let mut left = Map::new();
+    let file = match std::fs::read(data.join("composer-drafts.json")) {
+        Err(_) => return (Vec::new(), left),
+        Ok(bytes) => match serde_json::from_slice::<Json>(&bytes) {
+            Ok(file) => file,
+            Err(e) => {
+                left.insert("composer-drafts.json".into(), json!(format!("can't be read ({e}): none carried")));
+                return (Vec::new(), left);
+            }
+        },
     };
     let draft_sessions: Vec<(&str, &str)> = file["sessions"]
         .as_array()
@@ -728,21 +868,30 @@ pub fn drafts(data: &Path, kept: &Path) -> Vec<Json> {
         .unwrap_or_default();
     let newest_draft = draft_sessions.iter().max_by_key(|(_, at)| *at).map(|(id, _)| *id);
     let mut out = Vec::new();
-    let Some(all) = file["drafts"].as_object() else { return out };
+    let Some(all) = file["drafts"].as_object() else { return (out, left) };
     let mut keys: Vec<&String> = all.keys().collect();
     keys.sort();
     let mut made = 0;
-    for key in keys {
-        let entry = &all[key];
-        let is_draft_session = draft_sessions.iter().any(|(id, _)| id == key);
-        let key = if key.is_empty() || Some(key.as_str()) == newest_draft {
+    for theirs in keys {
+        let entry = &all[theirs];
+        let worth = !entry["prompt"].as_str().unwrap_or("").trim().is_empty()
+            || entry["attachments"].as_array().is_some_and(|a| !a.is_empty())
+            || entry["appshots"].as_array().is_some_and(|a| !a.is_empty());
+        let is_draft_session = draft_sessions.iter().any(|(id, _)| id == theirs);
+        let key = if theirs.is_empty() || Some(theirs.as_str()) == newest_draft {
             ""
         } else if is_draft_session {
+            if worth {
+                left.insert(theirs.clone(), json!("an older new chat's draft: only the newest new chat's comes over"));
+            }
             continue;
         } else {
-            key.as_str()
+            theirs.as_str()
         };
         if key.is_empty() && out.iter().any(|d: &Json| d["key"] == "") {
+            if worth {
+                left.insert(theirs.clone(), json!("another new chat's draft holds the new chat's place"));
+            }
             continue;
         }
         let mut cargo = Vec::new();
@@ -771,16 +920,22 @@ pub fn drafts(data: &Path, kept: &Path) -> Vec<Json> {
         }
         let text = entry["prompt"].as_str().unwrap_or("");
         if text.trim().is_empty() && cargo.is_empty() {
+            if worth {
+                left.insert(theirs.clone(), json!("only files, and they're gone"));
+            }
             continue;
         }
-        for (i, item) in cargo.iter_mut().enumerate() {
+        // (Numbered past its mentions, so no two chips share a number.)
+        let mut next = cargo.iter().filter_map(|item| item["number"].as_u64()).max().unwrap_or(0);
+        for item in cargo.iter_mut() {
             if item["number"].is_null() {
-                item["number"] = json!(i + 1);
+                next += 1;
+                item["number"] = json!(next);
             }
         }
         out.push(json!({ "key": key, "text": text, "cargo": cargo }));
     }
-    out
+    (out, left)
 }
 
 fn attachment(a: &Json, kept: &Path, made: usize) -> Option<Json> {
@@ -813,12 +968,14 @@ fn attachment(a: &Json, kept: &Path, made: usize) -> Option<Json> {
     Some(item)
 }
 
+/// A picture the composer draws (screens/chat/shared.luau `is_image`: zgx decodes no GIF or HEIC yet).
 fn is_picture(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp", ".tiff"].iter().any(|ext| lower.ends_with(ext))
+    [".png", ".jpg", ".jpeg", ".webp"].iter().any(|ext| lower.ends_with(ext))
 }
 
-/// A staged file, copied into `kept` under a name of its own; none when it's gone.
+/// A staged file, copied into `kept` under a name of its own (the copy made
+/// before, by a run that didn't finish, is that one); none when it's gone.
 fn keep_file(a: &Json, kept: &Path) -> Option<String> {
     let from = PathBuf::from(a["path"].as_str()?);
     if !from.is_file() {
@@ -826,67 +983,130 @@ fn keep_file(a: &Json, kept: &Path) -> Option<String> {
     }
     std::fs::create_dir_all(kept).ok()?;
     let name = from.file_name()?.to_string_lossy().into_owned();
+    let bytes = std::fs::read(&from).ok()?;
     let mut to = kept.join(&name);
     let mut n = 1;
     while to.exists() {
+        if std::fs::read(&to).is_ok_and(|there| there == bytes) {
+            return Some(to.display().to_string());
+        }
         n += 1;
         to = kept.join(format!("{n}-{name}"));
     }
-    std::fs::copy(&from, &to).ok()?;
+    std::fs::write(&to, &bytes).ok()?;
     Some(to.display().to_string())
 }
 
+/// Whether this launch carries the other interface's files in: a released
+/// Zeron app does; a debug build only when `ZERON_ZGX_MIGRATE=1` asks (`switch`).
+fn asked(identity: crate::identity::Identity, switch: Option<&std::ffi::OsStr>) -> bool {
+    identity.migrates || switch.is_some_and(|v| v == "1")
+}
+
 /// At the main window's opening: the run, if this build migrates (or a debug
-/// build is asked to), said in the log. The drafts to seed.
+/// build is asked to), said in the log. The drafts to seed: those carried
+/// now, or at a later launch those still pending.
 pub fn at_launch(app_id: &str) -> Json {
-    let asked = crate::identity::CURRENT.migrates || crate::dev::switch("ZERON_ZGX_MIGRATE").is_some_and(|v| v != "0");
-    let (Some(data), Some(app)) = (crate::engine::data_dir(), zgx_script::app_data_dir(app_id)) else {
-        return Json::Null;
-    };
-    if !asked {
-        return Json::Null;
+    let Some(app) = zgx_script::app_data_dir(app_id) else { return Json::Null };
+    if asked(crate::identity::CURRENT, crate::dev::switch("ZERON_ZGX_MIGRATE").as_deref())
+        && let Some(data) = crate::engine::data_dir()
+    {
+        let result = migrate(&data, &app);
+        if let Some(line) = said(&data, &app, &result) {
+            eprintln!("zeron-zgx: migration: {line}");
+        }
+        if let Ok((_, drafts)) = result {
+            return drafts;
+        }
     }
-    let result = migrate(&data, &app);
-    if let Some(line) = said(&data, &result) {
-        eprintln!("zeron-zgx: migration: {line}");
-    }
-    result.map(|(_, drafts)| drafts).unwrap_or(Json::Null)
+    Json::Array(pending(&app))
 }
 
 /// The log's line for a run (none once it has run).
-fn said(data: &Path, result: &Result<(Outcome, Json), Refused>) -> Option<String> {
+fn said(data: &Path, app: &Path, result: &Result<(Outcome, Json), Refused>) -> Option<String> {
     let file = data.join("ui-settings.json");
     match result {
         Ok((outcome, _)) => Some(format!(
-            "carried {} settings{} and {} drafts from {}",
+            "carried {} settings{} and {} drafts from {}{}",
             outcome.written.len(),
             if outcome.theme { " and the themes" } else { "" },
             outcome.drafts,
-            file.display()
+            file.display(),
+            match outcome.drafts_left.len() {
+                0 => String::new(),
+                n => format!(" ({n} drafts left out, named in {})", app.join(MARKER).display()),
+            }
         )),
         Err(Refused::Done) => None,
         Err(Refused::Broken(why)) => Some(format!("{} can't be read ({why}): nothing carried, and it's tried again next launch", file.display())),
+        Err(Refused::Marker(why)) => Some(format!(
+            "carried from {}, but {} couldn't be written ({why}): it runs again next launch, keeping what it carried",
+            file.display(),
+            app.join(MARKER).display()
+        )),
     }
+}
+
+/// Whether a draft's text and cargo are nothing (as screens/chat/shared.luau keeps none for it).
+fn nothing(text: Option<&Value>, cargo: Option<&Value>) -> bool {
+    let empty = |v: Option<&Value>| match v {
+        None | Some(Value::Nil) => true,
+        Some(Value::Str(s)) => s.is_empty(),
+        Some(Value::List(items)) => items.is_empty(),
+        Some(Value::Map(fields)) => fields.is_empty(),
+        Some(other) => matches!(other.to_json().as_str(), "" | "[]" | "{}" | "null"),
+    };
+    empty(text) && empty(cargo)
+}
+
+/// Whether the composer holds a draft under `key`: the one shown (`here`'s,
+/// as `text` and `cargo`), or one put away in `kept` (screens/chat/shared.luau).
+fn held_in(key: &str, here: &Value, text: &Value, cargo: &Value, kept: &Value) -> bool {
+    if matches!(here, Value::Str(shown) if &**shown == key) || (key.is_empty() && matches!(here, Value::Nil)) {
+        return !nothing(Some(text), Some(cargo));
+    }
+    kept.field(key).is_some_and(|d| !nothing(d.field("text"), d.field("cargo")))
+}
+
+thread_local! {
+    /// What keeps [`PENDING`] following the composer: the main window's.
+    static FOLLOWING: std::cell::RefCell<Option<zgx::reactive::Effect>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The drafts into the composer's own, before its scripts first read them
 /// (screens/chat/shared.luau: `chat.composer.drafts` by chat, the new chat's
-/// as the composer's own text and cargo).
-pub fn seed_drafts(host: &zgx_script::ScriptHost, drafts: Json) {
-    let Some(all) = drafts.as_array().filter(|a| !a.is_empty()) else { return };
-    let mut kept = Map::new();
+/// as the composer's own text and cargo), where it holds none for that chat.
+/// Then each leaves [`PENDING`] once it's sent or cleared.
+pub fn seed_drafts(cx: &mut zgx_desktop::WindowContext, host: &zgx_script::ScriptHost, app_id: &str, drafts: Json) {
+    let (Some(app), Some(all)) = (zgx_script::app_data_dir(app_id), drafts.as_array().filter(|a| !a.is_empty())) else { return };
+    let here = host.shared("chat.composer.here", "");
+    let text = host.shared("chat.composer.text", "");
+    let cargo = host.shared("chat.composer.cargo", crate::plugins::json_value(&json!([])));
+    let kept = host.shared("chat.composer.drafts", crate::plugins::json_value(&json!({})));
+    let holds = |key: &str| held_in(key, &here.get(), &text.get(), &cargo.get(), &kept.get());
+    let mut put = crate::plugins::value_json(&kept.get()).as_object().cloned().unwrap_or_default();
     for d in all {
         let key = d["key"].as_str().unwrap_or("");
-        if key.is_empty() {
-            host.shared("chat.composer.text", crate::plugins::json_value(&d["text"]));
-            host.shared("chat.composer.cargo", crate::plugins::json_value(&d["cargo"]));
+        if holds(key) {
+            continue;
+        }
+        if key.is_empty() && here.with_untracked(|h| matches!(h, Value::Str(s) if s.is_empty())) {
+            text.set(crate::plugins::json_value(&d["text"]));
+            cargo.set(crate::plugins::json_value(&d["cargo"]));
         } else {
-            kept.insert(key.into(), json!({ "text": d["text"], "cargo": d["cargo"], "quotes": {} }));
+            put.insert(key.into(), json!({ "text": d["text"], "cargo": d["cargo"], "quotes": {} }));
         }
     }
-    if !kept.is_empty() {
-        host.shared("chat.composer.drafts", crate::plugins::json_value(&Json::Object(kept)));
-    }
+    kept.set(crate::plugins::json_value(&Json::Object(put)));
+    let mut waiting: Vec<Json> = all.clone();
+    let effect = cx.ui.runtime.effect(move || {
+        if waiting.is_empty() {
+            return;
+        }
+        let (h, t, c, k) = (here.get(), text.get(), cargo.get(), kept.get());
+        prune(&app, &mut waiting, |key| held_in(key, &h, &t, &c, &k));
+    });
+    FOLLOWING.with(|f| *f.borrow_mut() = Some(effect));
 }
 
 #[cfg(test)]
@@ -916,16 +1136,50 @@ mod tests {
         serde_json::from_str::<Json>(&text).unwrap().as_object().unwrap().keys().cloned().collect()
     }
 
+    /// `UiSettings`'s keys as crates/ui/src/settings.rs declares them (each
+    /// field camelCased, or its `rename`), read from the source now.
+    fn ui_settings_keys() -> Vec<String> {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../crates/ui/src/settings.rs")).unwrap();
+        let body = source.split("pub struct UiSettings {").nth(1).expect("the struct").split("\n}").next().unwrap();
+        let mut keys = Vec::new();
+        let mut renamed = None;
+        for line in body.lines().map(str::trim) {
+            if line.starts_with("#[") {
+                if let Some(at) = line.find("rename = \"") {
+                    renamed = line[at + 10..].split('"').next().map(String::from);
+                }
+                continue;
+            }
+            let line = line.strip_prefix("pub ").unwrap_or(line);
+            let Some((field, rest)) = line.split_once(':') else { continue };
+            if rest.starts_with(':') || field.is_empty() || !field.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+                continue;
+            }
+            let camel: String = field
+                .split('_')
+                .enumerate()
+                .map(|(i, part)| if i == 0 { part.to_string() } else { part[..1].to_uppercase() + &part[1..] })
+                .collect();
+            keys.push(renamed.take().unwrap_or(camel));
+        }
+        keys
+    }
+
     #[test]
     fn every_key_the_other_interface_writes_has_a_row() {
-        let written = keys_of("v0.2.132.json");
+        let theirs = ui_settings_keys();
+        assert!(theirs.len() > 100 && theirs.contains(&"accentColor".to_string()) && theirs.contains(&"pullRequestOpenIn".to_string()), "{theirs:?}");
         let rows: Vec<&str> = TABLE.iter().map(|(k, _)| *k).collect();
-        for key in &written {
+        for key in &theirs {
             assert!(rows.contains(&key.as_str()), "{key} has no row");
         }
-        // What it writes no more: read in older files.
-        for key in rows {
-            assert!(written.iter().any(|k| k == key) || ["accentColor", "filesEditorFontSize"].contains(&key), "{key} is in no file of today's");
+        // What it writes no more: read in older files (crates/ui settings.rs `load`).
+        for key in &rows {
+            assert!(theirs.iter().any(|k| k == key) || ["filesEditorFontSize", "pullRequestDestination"].contains(key), "{key} is no key of UiSettings");
+        }
+        // Today's fixture is such a file.
+        for key in keys_of("v0.2.132.json") {
+            assert!(rows.contains(&key.as_str()), "{key} has no row");
         }
     }
 
@@ -963,6 +1217,10 @@ mod tests {
                     continue;
                 }
                 for home in *homes {
+                    // (Today's Appshot shortcut is the other interface's default: nothing to carry.)
+                    if *home == "screens/chat/appshots.luau::appshots_shortcut" {
+                        continue;
+                    }
                     let (_, value) = wanted.iter().find(|(name, _)| *name == file_of(home)).unwrap_or_else(|| panic!("{key} → {home} isn't read"));
                     let default = default_of(&file_of(home)).is_some_and(|d| same(&d, value));
                     assert_eq!(state(&app, home).is_some(), !default, "{key} → {home}");
@@ -993,7 +1251,9 @@ mod tests {
             s("screens/shell/keys.luau::shell_keymap"),
             json!({ "shell.toggle_sidebar": "cmd+shift+b", "shell.toggle_terminal": "cmd+`", "shell.session_9": "ctrl+9" })
         );
-        assert_eq!(s("screens/chat/appshots.luau::appshots_shortcut"), json!("cmd+shift+2"));
+        // The other interface's own defaults (the Mac's: a double tap of Option, of both Commands) aren't rebinds.
+        assert!(state(&app, "screens/chat/appshots.luau::appshots_shortcut").is_none());
+        assert!(s("screens/shell/keys.luau::shell_keymap").get("shell.quick_capture").is_none());
         // Voice and the device preview (U28's pages).
         assert_eq!(s("ds/dictation.luau::dictation_key"), json!("cmd+shift+d"));
         assert_eq!(s("ds/dictation.luau::dictation_enabled"), json!(true));
@@ -1010,6 +1270,8 @@ mod tests {
         let marker: Json = serde_json::from_slice(&std::fs::read(app.join(MARKER)).unwrap()).unwrap();
         assert_eq!(marker["no_home"]["splitRatio"], json!("a split's ratios are each tab's own here"));
         assert_eq!(marker["unknown"], json!([]));
+        // Off the Mac those chords are no default: named, not bound.
+        assert_eq!(marker["not_carried"]["keymap.quickCapture"].is_null(), cfg!(target_os = "macos"));
     }
 
     #[test]
@@ -1087,7 +1349,7 @@ mod tests {
         assert_eq!(migrate(&data, &app).unwrap_err(), Refused::Done);
         assert_eq!(state(&app, "screens/shell/sidebar.luau::shell_sidebar_compact"), Some(json!(true)));
         assert_eq!(state(&app, "ds/look.luau::accent"), None);
-        assert_eq!(said(&data, &Err(Refused::Done)), None, "nothing said once it has run");
+        assert_eq!(said(&data, &app, &Err(Refused::Done)), None, "nothing said once it has run");
     }
 
     #[test]
@@ -1096,7 +1358,7 @@ mod tests {
         let result = migrate(&data, &app);
         assert!(matches!(result, Err(Refused::Broken(_))));
         assert!(!app.exists(), "no setting, no marker: a mended file is carried next launch");
-        let line = said(&data, &result).unwrap();
+        let line = said(&data, &app, &result).unwrap();
         assert!(line.contains("ui-settings.json can't be read") && line.contains("nothing carried"), "{line}");
         // Mended, it's carried.
         std::fs::write(data.join("ui-settings.json"), r#"{ "sidebarCompact": true }"#).unwrap();
@@ -1124,6 +1386,10 @@ mod tests {
         image::RgbaImage::new(2, 2).save(data.join("composer-drafts/safari.png")).unwrap();
         let (outcome, drafts) = migrate(&data, &app).unwrap();
         assert_eq!(outcome.drafts, 3);
+        // The older new chat's draft is named where it's left out.
+        assert_eq!(outcome.drafts_left.keys().collect::<Vec<_>>(), ["draft-old"]);
+        let marker: Json = serde_json::from_slice(&std::fs::read(app.join(MARKER)).unwrap()).unwrap();
+        assert!(marker["drafts_left"]["draft-old"].as_str().unwrap().contains("only the newest"));
         let by = |key: &str| drafts.as_array().unwrap().iter().find(|d| d["key"] == key).cloned();
         let chat = by("chat-a").unwrap();
         assert_eq!(chat["text"], json!("Look at [Image 1] and the log"));
@@ -1135,15 +1401,146 @@ mod tests {
         assert!(copy.starts_with(app.join("migrated-drafts")) && copy.is_file(), "a copy of its own");
         assert_eq!(cargo[1]["kind"], json!("appshot"));
         assert_eq!(cargo[1]["appshot"]["text"], json!("Zeron — the page"));
+        // Numbered past the picture's mention, not over it.
+        assert_eq!(cargo[1]["number"], json!(2));
+        // A picture only where the composer draws one: a GIF or HEIC is a file.
+        assert!(is_picture("a.PNG") && is_picture("b.webp") && !is_picture("c.gif") && !is_picture("d.heic"));
         assert_eq!(by("side-1").unwrap()["text"], json!("a side chat's words"));
         // The newest chat not yet made is the new chat's; an older one, and an empty one, aren't kept.
         assert_eq!(by("").unwrap()["text"], json!("the newest new chat"));
         assert!(by("draft-old").is_none() && by("chat-empty").is_none());
         // A linked file that's there stays linked, by its own path.
         std::fs::write(data.join("build.log"), "ok").unwrap();
-        let again = super::drafts(&data, &app.join("again"));
+        let (again, _) = super::drafts(&data, &app.join("again"));
         let linked = again[0]["cargo"].as_array().unwrap().iter().find(|c| c["linked"] == json!(true)).cloned().unwrap();
         assert_eq!(linked["path"], json!(data.join("build.log").display().to_string()));
+    }
+
+    /// A chip with no mention of its own is numbered past the draft's mentions, never onto one.
+    #[test]
+    fn chips_are_numbered_past_their_mentions() {
+        let (_dir, data, app) = dirs("empty.json");
+        for name in ["a.png", "b.png"] {
+            image::RgbaImage::new(2, 2).save(data.join("composer-drafts").join(name)).unwrap();
+        }
+        let path = |name: &str| data.join("composer-drafts").join(name).display().to_string();
+        let file = json!({ "version": 1, "drafts": { "chat-a": { "prompt": "see [Image 1]", "attachments": [
+            { "id": "x", "name": "a.png", "path": path("a.png") },
+            { "id": "y", "name": "Image 1.png", "path": path("b.png"), "mention": 1 },
+        ], "appshots": [] } } });
+        std::fs::write(data.join("composer-drafts.json"), file.to_string()).unwrap();
+        let (drafts, _) = super::drafts(&data, &app.join("kept"));
+        let numbers: Vec<u64> = drafts[0]["cargo"].as_array().unwrap().iter().map(|c| c["number"].as_u64().unwrap()).collect();
+        assert_eq!(numbers, [2, 1]);
+    }
+
+    /// A draft carried stays carried till it's sent or cleared: kept on disk,
+    /// put back at each launch after, never twice.
+    #[test]
+    fn a_carried_draft_comes_back_each_launch_till_it_s_sent_or_cleared() {
+        let (_dir, data, app) = dirs("empty.json");
+        let text = std::fs::read_to_string(Path::new(FIXTURES).join("composer-drafts.json")).unwrap();
+        std::fs::write(data.join("composer-drafts.json"), text.replace("$DATA", &data.display().to_string())).unwrap();
+        image::RgbaImage::new(2, 2).save(data.join("composer-drafts/shot.png")).unwrap();
+        let (_, carried) = migrate(&data, &app).unwrap();
+        let keys = |all: &[Json]| all.iter().map(|d| d["key"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(keys(&pending(&app)), keys(carried.as_array().unwrap()));
+        // The next launch: not carried again (the marker), but still there to seed.
+        assert_eq!(migrate(&data, &app).unwrap_err(), Refused::Done);
+        let mut waiting = pending(&app);
+        assert_eq!(keys(&waiting), ["chat-a", "", "side-1"]);
+        // As the composer holds them: the new chat's shown (sent: emptied), chat-a's put away, side-1's cleared.
+        let here = Value::from("");
+        let kept = crate::plugins::json_value(&json!({ "chat-a": { "text": "Look at [Image 1] and the log", "cargo": [], "quotes": {} } }));
+        let none = crate::plugins::json_value(&json!([]));
+        assert!(held_in("chat-a", &here, &Value::from(""), &none, &kept));
+        assert!(!held_in("", &here, &Value::from(""), &none, &kept));
+        assert!(held_in("", &here, &Value::from("still typing"), &none, &kept));
+        assert!(!held_in("side-1", &here, &Value::from(""), &none, &kept));
+        assert!(prune(&app, &mut waiting, |key| held_in(key, &here, &Value::from(""), &none, &kept)));
+        assert_eq!(keys(&pending(&app)), ["chat-a"]);
+        // Nothing more gone: the file isn't written again.
+        assert!(!prune(&app, &mut waiting, |_| true));
+        // The last one sent: the file goes.
+        assert!(prune(&app, &mut waiting, |_| false));
+        assert!(!app.join(PENDING).exists() && pending(&app).is_empty());
+    }
+
+    /// The marker can't be written: said as that (not as a file that can't be
+    /// read), and the run again next launch makes no second copy of a draft's file.
+    #[test]
+    fn a_marker_that_can_t_be_written_says_so_and_copies_nothing_twice() {
+        let (dir, data, app) = dirs("v0.2.132.json");
+        let text = std::fs::read_to_string(Path::new(FIXTURES).join("composer-drafts.json")).unwrap();
+        std::fs::write(data.join("composer-drafts.json"), text.replace("$DATA", &data.display().to_string())).unwrap();
+        image::RgbaImage::new(2, 2).save(data.join("composer-drafts/shot.png")).unwrap();
+        std::fs::create_dir_all(&app).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path().join("nowhere/marker.json"), app.join(MARKER)).unwrap();
+        let result = migrate(&data, &app);
+        assert!(matches!(result, Err(Refused::Marker(_))), "{result:?}");
+        let line = said(&data, &app, &result).unwrap();
+        assert!(line.contains("couldn't be written") && !line.contains("can't be read"), "{line}");
+        let copies = || std::fs::read_dir(app.join("migrated-drafts")).unwrap().count();
+        let first = copies();
+        assert!(first > 0);
+        std::fs::remove_file(app.join(MARKER)).unwrap();
+        migrate(&data, &app).unwrap();
+        assert_eq!(copies(), first, "the same copies, none made again");
+        assert!(app.join(MARKER).is_file());
+    }
+
+    /// A debug build of the Zeron app carries nothing unless asked
+    /// (`ZERON_ZGX_MIGRATE=1`); a released one does by itself.
+    #[test]
+    fn a_debug_zeron_app_migrates_only_when_asked() {
+        use crate::identity::{Build, of};
+        let one = std::ffi::OsStr::new("1");
+        assert!(!asked(of(Build::Cutover, false), None));
+        assert!(asked(of(Build::Cutover, false), Some(one)));
+        assert!(!asked(of(Build::Cutover, false), Some(std::ffi::OsStr::new("0"))));
+        assert!(asked(of(Build::Cutover, true), None));
+        assert!(!asked(of(Build::Development, false), None));
+        assert!(!asked(of(Build::Beta, true), None));
+    }
+
+    /// gpui's default Code size (12.5) is this app's 13, not 12: never smaller than it was.
+    #[test]
+    fn a_code_size_comes_out_no_smaller() {
+        let size = |px: f64| more(&json!({ "codeFontSize": px })).into_iter().find(|(f, _)| f.contains("settings_code_font_size")).map(|(_, v)| v);
+        assert_eq!(size(12.5), Some(json!(13.0)));
+        assert_eq!(size(12.0), Some(json!(12.0)));
+        assert_eq!(size(14.0), Some(json!(14.0)));
+        assert_eq!(size(8.0), Some(json!(11.0)));
+        assert_eq!(size(20.0), Some(json!(16.0)));
+    }
+
+    /// The other interface's keymap as each platform writes it: its defaults
+    /// stay defaults, a chord this app can't bind is named, never bound.
+    #[test]
+    fn the_other_interface_s_defaults_on_each_platform_stay_defaults() {
+        let keys = |map: Json, mac: bool| keymap(&map, mac);
+        // The Mac's defaults (crates/ui `default_quick_capture`, `default_combo_on(true)`).
+        assert_eq!(keys(json!({ "quickCapture": "option-option", "captureAppshot": "command-command", "saveFile": "mod-s" }), true), Keys::default());
+        // Elsewhere's.
+        assert_eq!(keys(json!({ "quickCapture": "none", "captureAppshot": "mod-alt-space", "saveFile": "mod-s" }), false), Keys::default());
+        // The Mac's other chords: named, not bound.
+        let mac = keys(json!({ "quickCapture": "shift-shift", "captureAppshot": "option-option", "saveFile": "mod-s" }), true);
+        assert!(mac.bound.is_empty() && mac.appshot.is_none());
+        assert_eq!(mac.left.keys().collect::<Vec<_>>(), ["keymap.captureAppshot", "keymap.quickCapture"]);
+        // A key the Mac's recorded before chords: its default there (crates/ui `migrated`); elsewhere a rebind.
+        assert_eq!(keys(json!({ "captureAppshot": "mod-shift-2", "saveFile": "mod-s" }), true).appshot, None);
+        assert_eq!(keys(json!({ "captureAppshot": "mod-shift-2", "saveFile": "mod-s" }), false).appshot.as_deref(), Some("cmd+shift+2"));
+        // Quick capture cleared on the Mac: cleared here ("" is none); Appshots can't be: named.
+        let cleared = keys(json!({ "quickCapture": "none", "captureAppshot": "none", "saveFile": "mod-s" }), true);
+        assert_eq!(cleared.bound, json!({ "shell.quick_capture": "" }).as_object().cloned().unwrap());
+        assert!(cleared.left.contains_key("keymap.captureAppshot"));
+        // A rebind of a command this app hasn't: named.
+        let other = keys(json!({ "saveFile": "mod-shift-s", "toggleTray": "mod-shift-i" }), true);
+        assert!(other.left.contains_key("keymap.saveFile") && other.left.contains_key("keymap.toggleTray"));
+        // A font, a math face and an app to open HTML with that this app hasn't: named.
+        let left = left_out(&json!({ "uiFontFamily": "system", "mathFont": "garamond", "htmlOpenApp": { "kind": "app", "path": "/x" } }), true);
+        assert!(left.contains_key("uiFontFamily") && left.contains_key("mathFont") && left.contains_key("htmlOpenApp"), "{left:?}");
     }
 
     #[test]
@@ -1153,5 +1550,10 @@ mod tests {
         assert_eq!(combo("mod--").as_deref(), Some("cmd+-"));
         assert_eq!(combo("").as_deref(), Some(""));
         assert_eq!(combo("hyper-k"), None);
+        // Modifiers alone (a double-tap chord) or "none": nothing a key can press.
+        assert_eq!(combo("option-option"), None);
+        assert_eq!(combo("shift-shift"), None);
+        assert_eq!(combo("command-command"), None);
+        assert_eq!(combo("none"), None);
     }
 }

@@ -512,7 +512,7 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     // (src/plugins/live.rs): the host's file is fixed as it's made, so it's
     // that folder's, whichever template is in use.
     // (A beta: the sidebar as it was in the app it replaces.)
-    if cfg!(feature = "beta") && !identity::CURRENT.migrates {
+    if identity::CURRENT.build == identity::Build::Beta {
         let from = engine::data_dir().map(|dir| dir.join("ui-settings.json"));
         let state = zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("script-state").join("app.luau"));
         carried_settings::carry(from.as_deref(), state.as_deref());
@@ -521,7 +521,7 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     let drafts = migration::at_launch(APP_ID);
     let host = script_host_at(cx, plugins::prepare_live(), "app.luau");
     host.shared("window", "main");
-    migration::seed_drafts(&host, drafts);
+    migration::seed_drafts(cx, &host, APP_ID, drafts);
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
     // The host's own toasts over it (a template in preview, a switch you

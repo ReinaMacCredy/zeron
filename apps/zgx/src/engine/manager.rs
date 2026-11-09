@@ -9,9 +9,11 @@
 //! none answering this app waits. A staging engine (port 27871,
 //! ~/.zeron-staging) or any other edge is refused.
 //!
-//! **The Zeron app itself** (`cutover`, src/identity.rs) is the beta's rule,
-//! except that a release build starts that engine when none answers, as
-//! Zeron.app does (`spawn_production`); a debug build never does.
+//! **The Zeron app itself** (`cutover`, src/identity.rs) works through the
+//! same engine. A release build owns it, as Zeron.app does: it starts it
+//! when none answers (`spawn_production`), restarts it to sync after a
+//! sign-in, and restarts a stale one or on "Restart engine", whoever started
+//! it ([`Config::owns_every_engine`]). A debug build only attaches, as the beta.
 //!
 //! **Development builds** work through a staging engine: the one at
 //! `ZERON_ZGX_ENGINE_PORT` (27871) with its data in `ZERON_ZGX_ENGINE_DATA`
@@ -67,8 +69,8 @@ pub struct Config {
     edge: String,
     client: String,
     callback_port: u16,
-    /// The Zeron app's engine (the beta, and the Zeron app itself): attached
-    /// to, never stopped from here; started only by a released Zeron app (`spawn`).
+    /// The Zeron app's engine (the beta, and the Zeron app itself): started,
+    /// restarted and stopped from here only by a released Zeron app (`spawn`).
     managed: bool,
 }
 
@@ -86,10 +88,39 @@ impl Config {
         if self.spawn { self.bin.as_deref() } else { None }
     }
 
-    /// Whether this is the Zeron app's engine (no "older than the one on
-    /// disk" of this app's to judge, and never this app's to stop).
+    /// Whether this is the Zeron app's engine, which follows its bundle (an
+    /// update's restart stops it, so the new bundle's starts).
     pub fn follows_bundle(&self) -> bool {
         self.managed
+    }
+
+    /// Whether this app only attaches to its engine: the beta, and a debug
+    /// build of the Zeron app. Restarting it (to sync, stale, or asked) is
+    /// the Zeron app's, with its terminals and turns in view.
+    pub fn attach_only(&self) -> bool {
+        self.managed && !self.spawn
+    }
+
+    /// Whether every engine on this config's port is this app's own: the
+    /// released Zeron app's, as Zeron.app's are, whoever started it last.
+    pub fn owns_every_engine(&self) -> bool {
+        self.managed && self.spawn
+    }
+
+    /// Whether an engine reporting `running` is stale against the binary's
+    /// `on_disk` build, and whether it's this app's to restart.
+    pub fn judge(&self, running: Option<&str>, on_disk: Option<&str>) -> (bool, bool) {
+        let (stale, ours) = crate::engine_update::judge(running, on_disk, started_build(self).as_deref());
+        (stale, ours || self.owns_every_engine())
+    }
+
+    /// Why "Restart engine" can't restart an engine reporting `running`, if it can't.
+    pub fn restart_refusal(&self, running: Option<&str>) -> Option<&'static str> {
+        if self.attach_only() {
+            return Some("This engine is the Zeron app's: restart it from there.");
+        }
+        let ours = self.owns_every_engine() || (running.is_some() && running == started_build(self).as_deref());
+        (self.startable().is_none() || !ours).then_some("This engine wasn't started by this app.")
     }
 }
 
@@ -132,13 +163,15 @@ impl Config {
         callback_port: u16,
     ) -> Result<Self, Refusal> {
         if BETA {
-            Self::zeron_app(var, home, exe, edge, client, callback_port)
+            let starts = matches!(crate::identity::CURRENT.engine, crate::identity::Engine::Production { starts: true });
+            Self::zeron_app(var, home, exe, edge, client, callback_port, starts)
         } else {
             Self::staging(var, home, edge, client, callback_port)
         }
     }
 
-    /// The beta's: Zeron.app's engine, resolved as Zeron.app resolves it.
+    /// The beta's and the Zeron app's: Zeron.app's engine, resolved as
+    /// Zeron.app resolves it; started (and owned) only if `starts`.
     fn zeron_app(
         var: impl Fn(&str) -> Option<String>,
         home: &Path,
@@ -146,6 +179,7 @@ impl Config {
         edge: &str,
         client: &str,
         callback_port: u16,
+        starts: bool,
     ) -> Result<Self, Refusal> {
         let production = crate::auth::production();
         if (edge, client, callback_port) != (production.edge.as_str(), production.client.as_str(), production.port) {
@@ -167,8 +201,7 @@ impl Config {
             data_dir,
             bin: exe.and_then(zeron_launch::engine_executable),
             home: None,
-            // (The Zeron app itself, released: it starts its engine as Zeron.app does.)
-            spawn: matches!(crate::identity::CURRENT.engine, crate::identity::Engine::Production { starts: true }),
+            spawn: starts,
             edge: edge.into(),
             client: client.into(),
             callback_port,
@@ -431,6 +464,47 @@ mod tests {
         assert!(config_of(&[("ZERON_DATA_DIR", "/Users/someone/.zeron-staging")], home, Some(&exe), &prod.edge).is_err());
         assert!(config_of(&[], home, Some(&exe), "https://staging.zeron.sh").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The released Zeron app owns its engine as Zeron.app does: it restarts
+    /// it to sync, when stale and when asked, whoever started it. The beta
+    /// and a debug Zeron app only attach.
+    #[test]
+    fn the_released_zeron_app_owns_its_engine_and_the_rest_attach() {
+        let dir = tempfile::tempdir().unwrap();
+        let macos = dir.path().join("Zeron.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let exe = macos.join("zeron");
+        let engine = macos.join(zeron_launch::ENGINE_EXECUTABLES[0]);
+        std::fs::write(&engine, "").unwrap();
+        let home = dir.path().join("home");
+        let prod = crate::auth::production();
+        let vars = |key: &str| (key == "ZERON_DATA_DIR").then(|| dir.path().join("data").display().to_string());
+        let of = |starts: bool| Config::zeron_app(vars, &home, Some(&exe), &prod.edge, &prod.client, prod.port, starts).unwrap();
+        let owner = of(true);
+        assert!(owner.owns_every_engine() && !owner.attach_only() && owner.follows_bundle());
+        assert_eq!(owner.startable(), Some(engine.as_path()));
+        // A stale engine is its own to restart, whoever started it, and so is one on "Restart engine".
+        assert_eq!(owner.judge(Some("old"), Some("new")), (true, true));
+        assert_eq!(owner.judge(None, Some("new")), (true, true));
+        assert_eq!(owner.judge(Some("new"), Some("new")), (false, true));
+        assert_eq!(owner.restart_refusal(Some("someone-else-s")), None);
+        // The beta's and a debug Zeron app's: attached to, never judged, restarted or started here.
+        let attached = of(false);
+        assert!(attached.attach_only() && !attached.owns_every_engine());
+        assert_eq!(attached.startable(), None);
+        assert_eq!(attached.judge(Some("old"), Some("new")), (true, false));
+        assert!(attached.restart_refusal(Some("old")).unwrap().contains("the Zeron app's"));
+        // A development build's: only the one it started.
+        let staging = config_of(&[("ZERON_ZGX_ENGINE_DATA", &dir.path().join("staging").display().to_string()), ("ZERON_ZGX_ENGINE_BIN", "/bin/true")], &home, None, "https://staging.zeron.sh");
+        if let Ok(staging) = staging {
+            assert!(!staging.attach_only() && !staging.owns_every_engine());
+            std::fs::create_dir_all(&staging.data_dir).unwrap();
+            std::fs::write(staging.data_dir.join(STARTED), "mine").unwrap();
+            assert_eq!(staging.restart_refusal(Some("mine")), None);
+            assert!(staging.restart_refusal(Some("theirs")).is_some());
+            assert_eq!(staging.judge(Some("theirs"), Some("new")), (true, false));
+        }
     }
 
     #[test]
