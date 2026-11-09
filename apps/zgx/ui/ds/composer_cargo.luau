@@ -929,6 +929,13 @@ end
 -- its card, which the pointer can move into, lists each.
 local function quotes_chip(list: State<{ Item }>, notes: boolean, props: Props): Node
 	local hovered = ui.use_state(false)
+	-- (Its card goes once an annotation is being edited, until the pointer comes back, as gpui's.)
+	local put_away = ui.use_state(false)
+	ui.effect(function()
+		if notes and editing:get() ~= nil then
+			put_away:set(true)
+		end
+	end)
 	local function label(): string
 		local count = #list:get()
 		return if notes then locale.s("ds.composer_cargo.annotations", { n = count }) else locale.s("ds.composer_cargo.selections", { n = count })
@@ -972,63 +979,71 @@ local function quotes_chip(list: State<{ Item }>, notes: boolean, props: Props):
 			},
 		},
 	}
-	return ui.row {
-		id = if notes then "composer-annotations" else "composer-selections",
-		role = "group",
-		label = label,
-		h = NOTE_H,
-		min_w = NOTE_W,
-		shrink = 0,
-		gap = ui.raw(5, "Zeron's annotation chip"),
-		pl = ui.raw(10, "Zeron's annotation chip"),
-		pr = "$space.1",
-		items = "center",
-		rounded = ui.raw(12, "Zeron's annotation chip"),
-		border = 1,
-		border_color = "$border",
-		color = "$text.primary",
-		text_size = ui.raw(13, "Zeron's annotation chip"),
-		tooltip = card,
-		tooltip_interactive = true,
-		tooltip_delay = 0,
-		tooltip_placement = { side = "top", align = "start", offset = 4.5 },
-		on_hover = function(inside: boolean)
-			hovered:set(inside)
-		end,
-		ui.div { color = "$text.secondary", Icon { name = if notes then "chat-round-line" else "wrap-text", size = 12 } },
-		ui.text { label, literal = true, grow = 1 },
-		ui.button {
-			id = if notes then "composer-annotations-remove" else "composer-selections-remove",
-			label = if notes then locale.t("ds.composer_cargo.annotations_remove") else locale.t("ds.composer_cargo.selections_remove"),
-			w = 19,
-			h = 19,
-			p = 0,
+	local function chip(with_card: boolean): Node
+		return ui.row {
+			id = if notes then "composer-annotations" else "composer-selections",
+			role = "group",
+			label = label,
+			h = NOTE_H,
+			min_w = NOTE_W,
 			shrink = 0,
+			gap = ui.raw(5, "Zeron's annotation chip"),
+			pl = ui.raw(10, "Zeron's annotation chip"),
+			pr = "$space.1",
 			items = "center",
-			justify = "center",
-			rounded = "$radius.full",
+			rounded = ui.raw(12, "Zeron's annotation chip"),
 			border = 1,
-			border_color = "$background",
-			bg = "$text.primary",
-			color = "$background",
-			cursor = "pointer",
-			hover = { bg = "$text.primary" },
-			focus = control.ring,
-			opacity = ui.tween(ui.computed(function(): number
-				return if hovered:get() then 1 else 0
-			end), SWAP),
-			on_click = function()
-				ui.batch(function()
-					for _, it in list:peek() do
-						if props.on_remove then
-							props.on_remove(it.id)
-						end
-					end
-				end)
+			border_color = "$border",
+			color = "$text.primary",
+			text_size = ui.raw(13, "Zeron's annotation chip"),
+			tooltip = if with_card then card else nil,
+			tooltip_interactive = true,
+			tooltip_delay = 0,
+			tooltip_placement = { side = "top", align = "start", offset = 4.5 },
+			on_hover = function(inside: boolean)
+				hovered:set(inside)
+				if inside then
+					put_away:set(false)
+				end
 			end,
-			Icon { name = "close", size = 10 },
-		},
-	}
+			ui.div { color = "$text.secondary", Icon { name = if notes then "chat-round-line" else "wrap-text", size = 12 } },
+			ui.text { label, literal = true, grow = 1 },
+			ui.button {
+				id = if notes then "composer-annotations-remove" else "composer-selections-remove",
+				label = if notes then locale.t("ds.composer_cargo.annotations_remove") else locale.t("ds.composer_cargo.selections_remove"),
+				w = 19,
+				h = 19,
+				p = 0,
+				shrink = 0,
+				items = "center",
+				justify = "center",
+				rounded = "$radius.full",
+				border = 1,
+				border_color = "$background",
+				bg = "$text.primary",
+				color = "$background",
+				cursor = "pointer",
+				hover = { bg = "$text.primary" },
+				focus = control.ring,
+				opacity = ui.tween(ui.computed(function(): number
+					return if hovered:get() then 1 else 0
+				end), SWAP),
+				on_click = function()
+					ui.batch(function()
+						for _, it in list:peek() do
+							if props.on_remove then
+								props.on_remove(it.id)
+							end
+						end
+					end)
+				end,
+				Icon { name = "close", size = 10 },
+			},
+		}
+	end
+	return ui.switch(function(): string
+		return if put_away:get() then "away" else "card"
+	end, { card = chip(true), away = chip(false) })
 end
 
 local function row_chip(item: Item, row: State<Item>, props: Props): Node

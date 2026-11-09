@@ -207,6 +207,8 @@ test("annotations: the card's pencil opens the comment again; Cancel keeps it an
 	card(app)
 	app:click('role:button "Edit annotation 1"')
 	settle(app)
+	-- (Its card goes, as gpui's does, so it never covers the edit card's Cancel and Save.)
+	expect(app:has("#composer-annotations-card")).to_be(false)
 	expect(app:has("#annotation-save")).to_be(true)
 	expect(app:text("#annotation-comment")).to_be("first thought")
 	expect(app:tree("#annotation-comment")).to_contain(" focused")
