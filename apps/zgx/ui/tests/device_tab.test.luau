@@ -483,3 +483,92 @@ test("Rotate turns the device: the picture and its box turn, and a touch lands w
 	w, h = box()
 	expect(h > w).to_be(true)
 end)
+
+test("after the engine comes back with its hub idle, the tab asks it to list: Finding devices, then the picker's rows, never 'no devices'", function()
+	local app = open_panel()
+	set_up(app)
+	app:click('role:button "Open iPhone 17"')
+	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
+	local before = #(app:state("device_stub_calls") or {})
+	app:command("device_stub.engine_restart")
+	expect(eventually(app, function()
+		return app:has('role:button "Open iPhone 17"')
+	end)).to_be(true)
+	local asked = false
+	for i, c in app:state("device_stub_calls") or {} do
+		if i > before and c == "ListHubDevices" then
+			asked = true
+		end
+	end
+	expect(asked).to_be(true)
+	expect(app:has("#device-picker-empty")).to_be(false)
+end)
+
+test("a hub the engine hasn't started: a refused list says why, and Refresh lists it", function()
+	local app = open_panel()
+	set_up(app)
+	app:command("device_stub.fail_next")
+	app:command("device_stub.engine_restart")
+	app:frames(5)
+	-- (The list was refused: its words, and the picker to Refresh from.)
+	expect(eventually(app, function()
+		return app:has("#device-panel-error")
+	end)).to_be(true)
+	expect(app:tree("#device-panel-error")).to_contain("The device hub failed to start.")
+	app:click("#device-refresh")
+	expect(eventually(app, function()
+		return app:has('role:button "Open iPhone 17"')
+	end)).to_be(true)
+end)
+
+test("a device shut down outside Zeron says its screen stopped, and Try again opens it again", function()
+	local app = open_panel()
+	set_up(app)
+	app:click('role:button "Open iPhone 17"')
+	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
+	app:command("device_stub.shut_down")
+	expect(app:wait("#device-stream-failed", { timeout_ms = 3000 })).to_be(true)
+	expect(app:tree("#device-stream-failed")).to_contain("The device stopped sending its screen.")
+	local before = #(app:state("device_stub_calls") or {})
+	app:click("#device-stream-retry")
+	expect(eventually(app, function()
+		return not app:has("#device-stream-failed")
+	end)).to_be(true)
+	local opened, streamed = false, false
+	for i, c in app:state("device_stub_calls") or {} do
+		if i > before and c == "OpenHubDevice:mock-iphone" then
+			opened = true
+		elseif i > before and opened and c == "stream:mock-iphone" then
+			streamed = true
+		end
+	end
+	expect(opened).to_be(true)
+	expect(streamed).to_be(true)
+end)
+
+test("in a narrow, tall panel the screen's box keeps the picture's shape, so a touch's fraction is the picture's", function()
+	local app = open_panel()
+	set_up(app)
+	app:click('role:button "Open iPhone 17"')
+	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
+	for _, size in { { 900, 760 }, { 520, 1400 } } do
+		app:resize(size[1], size[2])
+		app:frames(10)
+		local w, h = string.match(app:tree("#device-screen"), " (%d+)x(%d+)")
+		local ratio = (tonumber(w) or 0) / math.max(tonumber(h) or 1, 1)
+		expect(`{size[1]}x{size[2]}: {math.abs(ratio - 196 / 426) < 0.02}`).to_be(`{size[1]}x{size[2]}: true`)
+	end
+end)
+
+test("an engine's refusal reaches the tab's error line in its own words", function()
+	local app = open_panel()
+	set_up(app)
+	app:click('role:button "Open iPhone 17"')
+	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
+	app:command("device_stub.refuse_next")
+	app:click("#device-screenshot")
+	expect(eventually(app, function()
+		return app:has("#device-panel-error")
+	end)).to_be(true)
+	expect(app:tree("#device-panel-error")).to_contain("Could not save the screenshot: No such file or directory")
+end)

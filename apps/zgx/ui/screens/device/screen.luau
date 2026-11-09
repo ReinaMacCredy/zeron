@@ -8,7 +8,8 @@ local M = {}
 local s = model.s
 
 function M.words(err: any): string
-	local w = if type(err) == "table" then err.message else err
+	-- (A host action's rejection is a UiError, userdata: its words are its message.)
+	local w = if type(err) == "table" or type(err) == "userdata" then err.message else err
 	if w == "outdated" then
 		return s("unavailable.engine")
 	elseif w == "offline" then

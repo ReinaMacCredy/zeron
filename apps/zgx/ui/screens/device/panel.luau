@@ -1051,8 +1051,39 @@ function M.Tab(props: { tab: any, panel_key: string, visible: (() -> boolean)? }
 	local function hub(): any
 		return api.hub:get()
 	end
+	-- (A hub the engine hasn't started, as after an engine restart, is asked to list once while the tab
+	-- shows, as gpui's panel does on its first hub; till it answers the tab is finding, not "no devices".)
+	local listed = ui.state(`device_tab_listed_{id}`, false)
+	local asked = false
+	local function idle_hub(h: any): boolean
+		return h ~= nil and not h.outdated and h.hostStatus == "idle" and (h.settings or {}).enabled == true and (h.settings or {}).onboardingCompleted == true
+	end
+	ui.effect(function()
+		local h = hub()
+		if not idle_hub(h) then
+			if h and h.hostStatus ~= "idle" and asked then
+				asked = false
+				listed:set(false)
+			end
+			return
+		end
+		if asked or (props.visible and not props.visible()) then
+			return
+		end
+		asked = true
+		call("ListHubDevices", {}, function()
+			listed:set(true)
+		end, function(why: string)
+			listed:set(true)
+			r.error:set(why)
+		end)
+	end)
 	local phase = ui.computed(function(): model.Phase
-		return model.phase(hub(), chat, target_of(tab()), r.opening:get())
+		local p = model.phase(hub(), chat, target_of(tab()), r.opening:get())
+		if p.kind == "picker" and idle_hub(hub()) and not listed:get() then
+			return { kind = "loading", name = s("loading.devices"), description = "", message = s("loading.finding") }
+		end
+		return p
 	end)
 	-- (A device that's gone from the hub's sessions, once it was listed there:
 	-- the tab goes back to the picker. One the engine has opened but the hub
@@ -1161,6 +1192,15 @@ function M.Tab(props: { tab: any, panel_key: string, visible: (() -> boolean)? }
 			-- (Its screen once, the loading's second step over it until the first frame lands.)
 			local current = tab()
 			local d = device_of(current)
+			local bound = target_of(current)
+			-- (Shut down outside Zeron, the device is listed not booted while its session and stream stay:
+			-- the picture would only freeze.)
+			local function stopped(): boolean
+				local h = hub()
+				local listed = if bound and h and h.hostStatus == "ready" then model.device(h, bound[1], bound[2]) else nil
+				return listed ~= nil and listed.booted == false
+			end
+			local reopening = ui.state(`device_tab_reopening_{id}`, false)
 			return ui.column {
 				w_full = true,
 				grow = 1,
@@ -1169,7 +1209,7 @@ function M.Tab(props: { tab: any, panel_key: string, visible: (() -> boolean)? }
 				stream { tab = current, panel_key = props.panel_key, r = r, visible = props.visible },
 				ui.show(function(): boolean
 					local f = api.frames:get()[id]
-					return f == nil or (f.seq == nil and f.failed == nil)
+					return (f == nil or (f.seq == nil and f.failed == nil)) and not stopped()
 				end, ui.column {
 					absolute = true,
 					left = 0,
@@ -1186,7 +1226,7 @@ function M.Tab(props: { tab: any, panel_key: string, visible: (() -> boolean)? }
 				-- (The engine ended the stream: said, still, with Try again; no spinner.)
 				ui.show(function(): boolean
 					local f = api.frames:get()[id]
-					return f ~= nil and f.failed ~= nil
+					return (f ~= nil and f.failed ~= nil) or stopped()
 				end, ui.column {
 					id = "device-stream-failed",
 					role = "alert",
@@ -1205,16 +1245,34 @@ function M.Tab(props: { tab: any, panel_key: string, visible: (() -> boolean)? }
 					small(function(): string
 						local f = api.frames:get()[id]
 						local why = f and f.failed
-						return if why == "done" then s("stream.ended") else words(why)
+						return if why == "done" or (why == nil and stopped()) then s("stream.ended") else words(why)
 					end),
 					button("device-stream-retry", ui.t("device.stream.retry"), function(): boolean
-						return true
+						return not reopening:get()
 					end, function()
 						local t = target_of(tab())
-						if t then
+						if not t then
+							return
+						end
+						local function again()
 							api.unstream(id)
 							api.stream(id, t[1], t[2])
 						end
+						if not stopped() then
+							again()
+							return
+						end
+						-- (Booted again, the hub's helper is attached anew only by an open.)
+						local listed = model.device(hub(), t[1], t[2])
+						reopening:set(true)
+						r.error:set(nil)
+						call("OpenHubDevice", { chatId = chat, hostId = t[1], deviceId = t[2], platform = listed and listed.platform }, function()
+							reopening:set(false)
+							again()
+						end, function(why: string)
+							reopening:set(false)
+							r.error:set(why)
+						end)
 					end),
 				}),
 			}

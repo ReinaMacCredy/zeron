@@ -22,12 +22,16 @@
 --   device_stub.hold_input   each SendHubDeviceInput waits until device_stub.let_input (one answered each)
 --   device_stub.reply_first  the next OpenHubDevice answers before the hub lists it (device_stub.late_push lists it)
 --   device_stub.stream_fails the engine ends every stream ("The device stopped.")
+--   device_stub.engine_restart the engine came back: its hub idle, nothing open or listed until a ListHubDevices
+--   device_stub.shut_down    every open device is shut down outside Zeron: listed not booted, its session kept
+--   device_stub.refuse_next  the next call is refused as the host refuses one (a UiError, the engine's words)
 
 local api = require("@app/screens/device/api") :: any
 local settings_host = require("@app/screens/settings/host") :: any
 
 local calls = ui.state("device_stub_calls", {} :: { string })
 local fail = ui.state("device_stub_fail", false)
+local refuse = false
 local function log(entry: string)
 	calls:push(entry)
 end
@@ -76,7 +80,7 @@ local function state(): any
 		return { outdated = true }
 	end
 	local devices = {}
-	if hub.enabled and not hub.none then
+	if hub.enabled and not hub.none and hub.status ~= "idle" then
 		for _, d in DEVICES do
 			table.insert(devices, { hostId = "local", id = d.id, platform = d.platform, name = d.name, version = d.version, booted = hub.booted[d.id] == true, physical = false })
 		end
@@ -121,6 +125,17 @@ end
 
 local function answer(method: string, p: any): any
 	hub.revision += 1
+	if refuse then
+		refuse = false
+		local _, err = ui.try(function()
+			error("Could not save the screenshot: No such file or directory (os error 2)", 0)
+		end)
+		return { done = true, after = function(_self: any, _ok: any, bad: ((any) -> ())?)
+			if bad then
+				bad(err)
+			end
+		end }
+	end
 	if fail:peek() then
 		fail:set(false)
 		return settled(nil, "The device hub failed to start.")
@@ -129,6 +144,9 @@ local function answer(method: string, p: any): any
 		return settled(nil, "outdated")
 	end
 	if method == "ListHubDevices" then
+		if hub.status == "idle" then
+			hub.status = nil
+		end
 		return settled(state())
 	elseif method == "ConfigureDeviceHub" then
 		if p.deviceHosts ~= nil then
@@ -164,6 +182,12 @@ local function answer(method: string, p: any): any
 		end
 		hub.booted[p.deviceId] = true
 		local s = { chatId = p.chatId, hostId = p.hostId or "local", deviceId = p.deviceId, platform = p.platform, openedAt = "2026-11-09T00:00:00Z", openedBy = "user" }
+		for i, x in hub.sessions do
+			if x.chatId == s.chatId and x.deviceId == s.deviceId then
+				table.remove(hub.sessions, i)
+				break
+			end
+		end
 		if hub.reply_first then
 			hub.reply_first = false
 			hub.late = s
@@ -431,6 +455,18 @@ ui.command { id = "device_stub.stream_fails", title = "The engine ends every str
 	end
 	api.frames:set(all)
 end }
+ui.command { id = "device_stub.refuse_next", title = "The next device call is refused", run = function()
+	refuse = true
+end }
+ui.command { id = "device_stub.engine_restart", title = "The engine came back with its hub idle", run = change(function()
+	hub.status = "idle"
+	hub.sessions = {}
+end) }
+ui.command { id = "device_stub.shut_down", title = "The open devices are shut down outside Zeron", run = change(function()
+	for _, x in hub.sessions do
+		hub.booted[x.deviceId] = nil
+	end
+end) }
 ui.command { id = "device_stub.booting", title = "chat-1's iPad Air is starting", run = change(function()
 	hub.booting = { { chatId = "chat-1", hostId = "local", deviceId = "mock-ipad", name = "iPad Air" } }
 end) }

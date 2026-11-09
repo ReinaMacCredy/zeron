@@ -154,6 +154,7 @@ pub(crate) enum Decoded {
 /// to the device's orientation. After a fallback it decodes JPEG only.
 pub(crate) fn decode_frames(frames: std::sync::mpsc::Receiver<Payload>, orientation: Arc<AtomicU8>, mut out: impl FnMut(Decoded)) {
     let mut last: Option<(u64, u32, u32, Arc<[u8]>)> = None;
+    let mut last_jpeg: Option<Vec<u8>> = None;
     let mut demuxer = zeron_proto::device_hub::AvccDemuxer::default();
     #[cfg(target_os = "macos")]
     let mut pipeline = device_video::Pipeline::default();
@@ -203,6 +204,7 @@ pub(crate) fn decode_frames(frames: std::sync::mpsc::Receiver<Payload>, orientat
                 }
                 Ok(batch) => {
                     if let Some(p) = batch.picture {
+                        last_jpeg = None;
                         picture = Some((avcc_seq, p));
                     } else if let Some(seed) = batch.seed {
                         jpeg = jpeg.or(Some((avcc_seq, seed)));
@@ -212,10 +214,13 @@ pub(crate) fn decode_frames(frames: std::sync::mpsc::Receiver<Payload>, orientat
         }
         #[cfg(not(target_os = "macos"))]
         let _ = (envelopes, pending, avcc_seq);
+        // (A still screen's MJPEG resends the same picture: decoded and shown once.)
         if picture.is_none()
             && let Some((seq, bytes)) = jpeg
+            && last_jpeg.as_deref() != Some(bytes.as_slice())
         {
             picture = device_video::decode_still(&bytes).map(|p| (seq, p));
+            last_jpeg = Some(bytes);
         }
         let rotation = byte_orientation(orientation.load(Ordering::Acquire));
         let (seq, width, height, pixels): (u64, u32, u32, Arc<[u8]>) = match picture {
@@ -940,6 +945,29 @@ mod tests {
             assert!(seen.contains(&"fallback:NoDescription".to_string()), "{seen:?}");
         }
         assert_eq!(seen.last().unwrap(), "4:426x196", "{seen:?}");
+    }
+
+    #[test]
+    fn a_still_screen_s_repeated_jpeg_is_shown_once() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let orientation = Arc::new(AtomicU8::new(orientation_byte(DeviceOrientation::Portrait)));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let out = seen.clone();
+        let worker = std::thread::spawn(move || {
+            decode_frames(rx, orientation, |d| {
+                if let Decoded::Picture(seq, _) = d {
+                    out.lock().unwrap().push(seq);
+                }
+            })
+        });
+        for (seq, frame) in [(1, 0), (2, 0), (3, 0), (4, 1), (5, 1), (6, 0)] {
+            tx.send(Payload::Jpeg(seq, MOCK_FRAMES[frame].to_vec())).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        tx.send(Payload::Turn).unwrap();
+        drop(tx);
+        worker.join().unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![1, 4, 6, 6], "a repeat is skipped, a turn still turns the last");
     }
 
     #[test]
