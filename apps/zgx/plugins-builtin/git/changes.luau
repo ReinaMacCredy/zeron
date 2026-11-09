@@ -69,8 +69,8 @@ return function(zeron: any, Repo: any, words: any)
 		local discard_open = ui.use_state(false)
 		local discard_paths = ui.use_state({} :: { string })
 		local push_after = ui.use_state(false)
-		local writing = ui.use_state(false)
-		local written = ui.use_state(false)
+		local writing = ui.state(`git.{id}.writing`, false)
+		local written = ui.state(`git.{id}.written`, false)
 
 		local function status(): any
 			return m.status:get()

@@ -303,8 +303,24 @@ impl Harness for MockHarness {
         &self,
         request: RunRequest,
         controls: RunControls,
-        _instructions: &'static str,
+        instructions: &'static str,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        // The demo run calls tools, which a commit message's one-shot refuses.
+        if instructions == crate::COMMIT_MESSAGE_INSTRUCTIONS {
+            return Ok(futures::stream::iter([
+                Ok(AgentEvent::TextDelta {
+                    text: "Mock commit message\n\nWritten by the mock harness for the staged change."
+                        .into(),
+                }),
+                Ok(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                }),
+            ])
+            .boxed());
+        }
         // Titles, commit messages and compaction must not consume script turns or hang on awaitInterrupt.
         let request = RunRequest {
             access: zeron_proto::AccessMode::FullAccess,
