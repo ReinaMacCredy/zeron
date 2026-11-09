@@ -62,7 +62,7 @@ end
 -- gpui's `severity_colors`: a Bug red on red, a Risk muted red (never yellow), a Nit quiet.
 local SEVERITY: { [string]: { ink: string, wash: string } } = {
 	Bug = { ink = "$danger", wash = "$zeron.tone.danger.wash" },
-	Risk = { ink = "$zeron.tone.danger.ink", wash = "$zeron.tone.neutral.wash" },
+	Risk = { ink = "$zeron.finding.risk.ink", wash = "$zeron.finding.risk.wash" },
 	Nit = { ink = "$text.tertiary", wash = "$zeron.tone.neutral.wash" },
 }
 

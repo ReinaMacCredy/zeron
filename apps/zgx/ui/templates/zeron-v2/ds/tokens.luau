@@ -467,6 +467,8 @@ function M.setup()
 			badge = { wash = 0.12, ink = 0.9, lit = { wash = 0.22, ink = 1 } },
 			-- A review's verdict, as a chip: its hue.
 			review = { approved = "{success}", changes = "{danger}", commented = "{text.secondary}", pending = "{warning}" },
+			-- A review finding's Risk: the danger hue muted under a Bug's (gpui's `severity_colors`).
+			finding = { risk = { ink = "alpha({danger}, 0.6)", wash = "alpha({danger}, 0.08)" } },
 			-- Checks on a commit: passing, failing, running.
 			checks = { passing = "{success}", failing = "{danger}", running = "{warning}" },
 			-- A diff's counts: what it adds and what it takes away.
