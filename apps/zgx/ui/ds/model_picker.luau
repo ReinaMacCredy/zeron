@@ -721,7 +721,17 @@ return ui.component(function(props: Props): Node
 		end
 	end
 	ui.effect(function()
-		if not on_list() or compact() then
+		if not on_list() then
+			return
+		end
+		if compact() then
+			local now = group_at()
+			for i, g in groups:get() do
+				if g.id == now then
+					reveal_strip(i)
+					return
+				end
+			end
 			return
 		end
 		local v = viewed()

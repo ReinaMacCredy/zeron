@@ -98,6 +98,16 @@ table.insert(MORE_HARNESSES, { id = "fx", label = "Fx", mark = "pi", state = "er
 local MORE_MODELS = table.clone(MODELS)
 table.insert(MORE_MODELS, { value = "sol", label = "Sol", harness = "codex", new = true })
 table.insert(MORE_MODELS, { value = "codex-auto", label = "Auto", harness = "codex", description = "Codex picks" })
+-- Agents past the compact strip's room (`test_picker_many`), each with a model.
+local many = ui.state("test_picker_many", false)
+local MANY_HARNESSES = table.clone(HARNESSES)
+local MANY_MODELS = table.clone(MODELS)
+for i = 1, 6 do
+	table.insert(MANY_HARNESSES, { id = `agent{i}`, label = `Agent {i}`, mark = "pi" })
+	for k = 1, (if i == 6 then 12 else 1) do
+		table.insert(MANY_MODELS, { value = `agent{i}-model{k}`, label = `Model {i}.{k}`, harness = `agent{i}` })
+	end
+end
 -- Room over the picker (its trigger moving, as a composer growing over a
 -- chip moves it).
 local above = ui.state("test_picker_above", 0)
@@ -120,10 +130,10 @@ return ui.column {
 		options = ui.state("test_picker_options", {} :: { [string]: string }),
 		favorites = ui.state("test_picker_favorites", {} :: { [string]: boolean }),
 		harnesses = function(): { any }
-			return if more:get() then MORE_HARNESSES else HARNESSES
+			return if many:get() then MANY_HARNESSES elseif more:get() then MORE_HARNESSES else HARNESSES
 		end,
 		models = function(): { ModelPicker.Model }
-			return if more:get() then MORE_MODELS else MODELS
+			return if many:get() then MANY_MODELS elseif more:get() then MORE_MODELS else MODELS
 		end,
 		on_retry = function()
 			retried:set(retried:peek() + 1)

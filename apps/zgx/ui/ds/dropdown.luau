@@ -1249,7 +1249,10 @@ return ui.component(function(props: Props): Node
 						gap = "$zeron.space.tight",
 						items = "center",
 						justify = "center",
-						ui.div {
+						-- (A failed state's action and hint stand taller than the art's clearing.)
+						ui.show(function(): boolean
+							return said().action == nil
+						end, ui.div {
 							absolute = true,
 							left = 0,
 							right = 0,
@@ -1259,7 +1262,7 @@ return ui.component(function(props: Props): Node
 							bg_shader = ascii.QUIET,
 							shader_params = ascii.quiet("$text.tertiary", 0.15, { 100, 20 }),
 							on_mount = ascii.drift,
-						},
+						}),
 						ui.text {
 							function(): string
 								return string.upper(control.text(said().title) or "")
