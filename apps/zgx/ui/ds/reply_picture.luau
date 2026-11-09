@@ -85,6 +85,7 @@ export type Props = {
 	-- and its context menu's entries (ds/markdown's `link_menu`).
 	open_link: ((target: string) -> ())?,
 	link_menu: ((target: string) -> { Links.Entry }?)?,
+	tool: boolean?,
 }
 export type RunProps = {
 	pictures: Pictures,
@@ -724,6 +725,42 @@ local Missing = ui.component(function(props: { pictures: Pictures, entry: Entry,
 	}
 end)
 
+local TOOL_H, TOOL_MIN_W, TOOL_MAX_W = 220, 48, 560
+
+local function tool_fit(nw: number?, nh: number?): Fit
+	if not nw or not nh then
+		return { w = TOOL_H * 4 / 3, h = TOOL_H, crop = "none" }
+	end
+	local w = TOOL_H * nw / nh
+	if w >= TOOL_MIN_W and w <= TOOL_MAX_W then
+		return { w = w, h = TOOL_H, crop = "none" }
+	end
+	w = math.clamp(w, TOOL_MIN_W, TOOL_MAX_W)
+	local k = math.min(w / nw, TOOL_H / nh)
+	return { w = w, h = TOOL_H, crop = "small", pw = nw * k, ph = nh * k }
+end
+
+local function tool_missing(e: Entry): Node
+	return ui.column {
+		class = "tool-picture-missing",
+		w = TOOL_H * 4 / 3,
+		h = TOOL_H,
+		max_w = "100%",
+		rounded = 8,
+		border = 1,
+		border_color = "$border",
+		bg = "$hover",
+		items = "center",
+		justify = "center",
+		gap = 4,
+		px = 12,
+		color = "$text.tertiary",
+		text_size = "$font.size.sm",
+		ui.text(locale.t("ds.reply_picture.unavailable")),
+		ui.text { name_of(e), literal = true, truncate = true, max_w = "100%" },
+	}
+end
+
 -- One picture alone.
 function M.Single(props: Props): Node
 	return ui.component(function(): Node
@@ -733,6 +770,9 @@ function M.Single(props: Props): Node
 			local m = measures()
 			local p = now_of(pictures, e.src)
 			local w, h = size_of(if p.state == "ready" then p.src else nil)
+			if props.tool then
+				return tool_fit(w, h)
+			end
 			if not w or not h then
 				return { w = m.W, h = math.min(m.H, m.W / m.PLACE), crop = "none" }
 			end
@@ -747,6 +787,9 @@ function M.Single(props: Props): Node
 				return if now_of(pictures, e.src).state == "failed" then "failed" else "frame"
 			end, function(kind: string): Node
 				if kind == "failed" then
+					if props.tool then
+						return tool_missing(e)
+					end
 					return Missing { pictures = pictures, entry = e, open_link = props.open_link, link_menu = props.link_menu }
 				end
 				return Frame {

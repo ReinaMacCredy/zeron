@@ -445,7 +445,7 @@ local function tool_pictures(now: () -> Tool, pictures: ReplyPicture.Pictures): 
 		local group = `tool:{now().id}`
 		local body = if kind == "run"
 			then ReplyPicture.Run { pictures = pictures, items = entries, group = group, set = entries }
-			else ReplyPicture.Single { pictures = pictures, src = entries()[1].src, alt = entries()[1].alt, group = group, set = entries }
+			else ReplyPicture.Single { pictures = pictures, src = entries()[1].src, alt = entries()[1].alt, group = group, set = entries, tool = true }
 		return ui.div {
 			class = "tool-pictures",
 			ml = ui.raw(GUTTER, "under the line's words, past the tree's gutter"),
