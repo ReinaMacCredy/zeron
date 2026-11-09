@@ -23,10 +23,14 @@ local function item(name: string): string
 	return `menuitem "{name}"`
 end
 
--- The menu rows drawn now (a closed menu's are listed `hidden`).
+-- The menu rows drawn now (a closed menu's are listed `hidden`). Read from the
+-- menu itself: the whole window's tree stops at a budget the shell's Settings passes.
 local function rows(app: any): { string }
 	local out = {}
-	for line in string.gmatch(app:tree(), "[^\n]+") do
+	if app:count("role:menu") == 0 then
+		return out
+	end
+	for line in string.gmatch(app:tree("role:menu"), "[^\n]+") do
 		if string.find(line, " menuitem ", 1, true) and not string.find(line, "hidden", 1, true) then
 			table.insert(out, line)
 		end
@@ -235,6 +239,8 @@ test("a settings link (About's rows): Open, as its click, and Copy link", functi
 	app:command("settings_stub.sign_in")
 	app:command("shell.settings")
 	app:frames(20)
+	app:scroll("#settings-nav", 2000)
+	app:frames(4)
 	app:click('#settings-nav >> role:tab "About & updates"')
 	app:frames(30)
 	app:set_state("about", { app_version = "0.2.131", app_build = "1793000000", available = false, engine_version = "0.2.131" })
