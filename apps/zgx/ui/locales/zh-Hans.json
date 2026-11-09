@@ -631,6 +631,7 @@
       "not_shown_named": "无法显示 {name}",
       "not_shown": "无法显示图片",
       "gone": "文件已不存在。",
+      "unreadable": "无法加载此图片。",
       "viewer": "图像查看器",
       "open_named": "打开 {name}",
       "open": "打开图像",

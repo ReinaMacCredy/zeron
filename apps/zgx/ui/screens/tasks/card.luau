@@ -111,6 +111,31 @@ local function due_value(t: store.Task): string
 	return t.due
 end
 
+-- A task's picture in its thumb; one that can't be drawn (gone, or not a picture) is the gallery glyph and says so (tasks/images.rs `strip`).
+function M.picture(path: string, size: number, glyph: number): Node
+	return ui.show(function(): boolean
+		return not store.image_failed(path)
+	end, ui.image {
+		src = function(): string
+			return store.image_src(path) or ""
+		end,
+		w = size,
+		h = size,
+		fit = "cover",
+		aria_hidden = true,
+		on_error = function()
+			store.image_broke(path)
+		end,
+	}, ui.div { w = size, h = size, items = "center", justify = "center", ds.Icon { name = "gallery", size = glyph, color = "$text.tertiary" } })
+end
+function M.missing_tip(path: string): Node
+	return ui.show(function(): boolean
+		return store.image_failed(path)
+	end, ds.Tooltip { function(): string
+		return locale.s("tasks.image_missing")
+	end })
+end
+
 local function Images(t: store.Task): Node
 	local list = t.images or {}
 	local function items(): { any }
@@ -138,11 +163,10 @@ local function Images(t: store.Task): Node
 			on_hover = function(inside: boolean)
 				over:set(inside)
 			end,
+			tooltip = M.missing_tip(path),
 			ui.show(function(): boolean
 				return store.image_src(path) ~= nil
-			end, Lightbox.Thumb { group = `task-card-{t.id}`, index = i, items = items, radius = 10, w = THUMB, h = THUMB, ui.image { src = function(): string
-				return store.image_src(path) or ""
-			end, w = THUMB, h = THUMB, fit = "cover", aria_hidden = true } }, ds.Icon { name = "gallery", size = 16, color = "$text.tertiary" }),
+			end, Lightbox.Thumb { group = `task-card-{t.id}`, index = i, items = items, radius = 10, w = THUMB, h = THUMB, M.picture(path, THUMB, 16) }, ds.Icon { name = "gallery", size = 16, color = "$text.tertiary" }),
 			ui.show(function(): boolean
 				return over:get()
 			end, ui.button {

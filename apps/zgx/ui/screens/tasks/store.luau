@@ -431,8 +431,15 @@ function M.image_src(path: string): string?
 	end
 	return nil
 end
+-- Pictures read but not drawn (not a picture after all, or gone since).
+local broken = ui.state("tasks_images_broken", {} :: { [string]: boolean })
+function M.image_broke(path: string)
+	if not broken:peek()[path] then
+		broken:set_key(path, true)
+	end
+end
 function M.image_failed(path: string): boolean
-	return images:get()[path] == ""
+	return images:get()[path] == "" or broken:get()[path] == true
 end
 
 M.IMAGES_MAX = 12

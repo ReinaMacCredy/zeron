@@ -502,6 +502,7 @@ return {
 	["ds.lightbox.not_shown_named"] = "{name} couldn't be shown",
 	["ds.lightbox.not_shown"] = "The picture couldn't be shown",
 	["ds.lightbox.gone"] = "Its file has gone.",
+	["ds.lightbox.unreadable"] = "This image could not be loaded.",
 	["ds.lightbox.viewer"] = "Image viewer",
 	["ds.lightbox.open_named"] = "Open {name}",
 	["ds.lightbox.open"] = "Open image",

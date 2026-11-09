@@ -257,6 +257,16 @@ ui.command { id = "fixture.t4_eleven_images", title = "Fixture: Draft the onboar
 	end
 	publish()
 end }
+ui.command { id = "fixture.t2_broken_images", title = "Fixture: Port the sidebar fold holds a file that isn't a picture and one that's gone", menu = "Fixture", run = function()
+	for i, t in tasks do
+		if t.id == "t2" then
+			local m = table.clone(t)
+			m.images = { "tasks_fixture.luau", "assets/pictures/gone.png" }
+			tasks[i] = m
+		end
+	end
+	publish()
+end }
 ui.command { id = "fixture.mention_title", title = "Fixture: a task titled with a mention", menu = "Fixture", run = function()
 	for i, t in tasks do
 		if t.id == "t4" then

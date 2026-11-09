@@ -578,10 +578,10 @@ local StageView = ui.component(function(st: Stage): Node
 	end
 	-- Its file gone (a sent picture deleted) or not a picture: nothing to
 	-- draw, and it says so in the picture's place (`ui.image`'s `on_error`).
-	local broken = ui.use_state({} :: { [string]: boolean })
+	local broken = ui.use_state({} :: { [string]: string })
 	local function gone(): boolean
 		local it = item()
-		return it ~= nil and broken:get()[it.src] == true
+		return it ~= nil and broken:get()[it.src] ~= nil
 	end
 	ui.effect(function()
 		if gone() and not ready then
@@ -1259,10 +1259,10 @@ local StageView = ui.component(function(st: Stage): Node
 					return if it then it.src else ""
 				end,
 				on_load = loaded,
-				on_error = function()
+				on_error = function(why: any)
 					local it = item()
 					if it and not broken:peek()[it.src] then
-						broken:set_key(it.src, true)
+						broken:set_key(it.src, if string.find(tostring(why), "No such file", 1, true) then "gone" else "unreadable")
 					end
 				end,
 				label = function(): string
@@ -1361,7 +1361,14 @@ local StageView = ui.component(function(st: Stage): Node
 					text_size = "$font.size.md",
 					color = "$text.primary",
 				},
-				ui.text { locale.t("ds.lightbox.gone"), text_size = "$font.size.sm", color = "$text.secondary" },
+				ui.text {
+					function(): string
+						local it = item()
+						return locale.s(if it and broken:get()[it.src] == "unreadable" then "ds.lightbox.unreadable" else "ds.lightbox.gone")
+					end,
+					text_size = "$font.size.sm",
+					color = "$text.secondary",
+				},
 			}
 		),
 		-- The controls.

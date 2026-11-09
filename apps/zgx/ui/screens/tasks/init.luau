@@ -3,7 +3,6 @@
 local ds = require("@ds")
 local locale = require("@ds/locale")
 local Lightbox = require("@ds/lightbox")
-local Tooltip = require("@ds/tooltip")
 local store = require("@app/screens/tasks/store")
 local card = require("@app/screens/tasks/card")
 
@@ -99,14 +98,6 @@ function M.Check(props: { task: store.Task, id: string }): Node
 	}
 end
 
-local function missing_tip(path: string): Node
-	return ui.show(function(): boolean
-		return store.image_failed(path)
-	end, Tooltip { function(): string
-		return locale.s("tasks.image_missing")
-	end })
-end
-
 function M.Thumbs(props: { task: store.Task, size: number?, group: string }): Node?
 	local list = props.task.images or {}
 	if #list == 0 then
@@ -137,7 +128,7 @@ function M.Thumbs(props: { task: store.Task, size: number?, group: string }): No
 			bg = "$hover",
 			items = "center",
 			justify = "center",
-			tooltip = missing_tip(path),
+			tooltip = card.missing_tip(path),
 			ui.show(function(): boolean
 				return store.image_src(path) ~= nil
 			end, Lightbox.Thumb {
@@ -147,9 +138,7 @@ function M.Thumbs(props: { task: store.Task, size: number?, group: string }): No
 				radius = 6,
 				w = size,
 				h = size,
-				ui.image { src = function(): string
-					return store.image_src(path) or ""
-				end, w = size, h = size, fit = "cover", aria_hidden = true },
+				card.picture(path, size, 14),
 			}, ds.Icon { name = "gallery", size = 14, color = "$text.tertiary" }),
 		})
 	end

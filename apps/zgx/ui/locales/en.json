@@ -631,6 +631,7 @@
       "not_shown_named": "{name} couldn't be shown",
       "not_shown": "The picture couldn't be shown",
       "gone": "Its file has gone.",
+      "unreadable": "This image could not be loaded.",
       "viewer": "Image viewer",
       "open_named": "Open {name}",
       "open": "Open image",
