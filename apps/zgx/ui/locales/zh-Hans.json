@@ -5537,7 +5537,21 @@
       "close": "关闭面板",
       "power_off": "关机",
       "rotate": "旋转设备",
-      "float": "在聊天上方浮动显示设备"
+      "float": "在聊天上方浮动显示设备",
+      "view_3d": "3D 视图",
+      "view_flat": "平面视图",
+      "view_restore": "还原 3D 视图",
+      "fold_shape": "折叠形态",
+      "pose_closed": "合上放置",
+      "pose_book": "书本式放置",
+      "pose_open": "展开放置",
+      "pose_laptop": "笔记本式放置",
+      "pose_tent": "帐篷式放置",
+      "tip_closed": "合上",
+      "tip_book": "书本 / 书架",
+      "tip_open": "展开",
+      "tip_laptop": "笔记本",
+      "tip_tent": "帐篷"
     },
     "float": {
       "label": "浮动设备预览",

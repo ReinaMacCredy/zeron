@@ -5537,7 +5537,21 @@
       "close": "Close panel",
       "power_off": "Power off",
       "rotate": "Rotate device",
-      "float": "Float device over chat"
+      "float": "Float device over chat",
+      "view_3d": "3D view",
+      "view_flat": "Flat view",
+      "view_restore": "Restore 3D view",
+      "fold_shape": "Fold shape",
+      "pose_closed": "Closed stand",
+      "pose_book": "Book stand",
+      "pose_open": "Open stand",
+      "pose_laptop": "Laptop stand",
+      "pose_tent": "Tent stand",
+      "tip_closed": "Closed",
+      "tip_book": "Book / bookshelf",
+      "tip_open": "Open",
+      "tip_laptop": "Laptop",
+      "tip_tent": "Tent"
     },
     "float": {
       "label": "Floating device preview",
