@@ -755,7 +755,11 @@
         "dismiss": "关闭",
         "too_long": "听写耗时过长。你的草稿是安全的。请稍等片刻，然后尝试录制更短的内容。",
         "no_host": "此版本无法使用听写。"
-      }
+      },
+      "send_options": "发送选项",
+      "send": "发送",
+      "move_draft": "将草稿移到新对话",
+      "send_new": "在新对话中发送"
     },
     "markdown": {
       "fit_content": "适合内容",
@@ -2641,7 +2645,9 @@
       "title": "用量",
       "terms": "usage tokens cost spend money dollars price agents 用量 费用 令牌",
       "description": "此设备上聊天的令牌花费，读取自各智能体自己的会话日志。",
-      "spend": { "title": "令牌用量" },
+      "spend": {
+        "title": "令牌用量"
+      },
       "reading": "正在读取智能体记录…",
       "failed": "无法读取用量",
       "sessions": "{n} 个会话",
@@ -3856,7 +3862,9 @@
         "shell_about": "关于 Zeron",
         "shell_check_updates": "检查更新…",
         "shell_whats_new": "新功能…",
-        "shell_toggle_tray": "需要你的和正在运行的"
+        "shell_toggle_tray": "需要你的和正在运行的",
+        "chat_move_draft": "将草稿移到新对话",
+        "chat_send_new": "在新对话中发送"
       },
       "group": {
         "sessions": "会话",
@@ -4443,7 +4451,10 @@
       "credits_tip": "云端额度已用完",
       "new_models": {
         "title": "{n, plural, other {有新模型可用}}"
-      }
+      },
+      "draft_moved": "草稿已移到新对话",
+      "sent_new": "已在新对话中发送",
+      "undo_move": "撤销"
     },
     "completions": {
       "search_failed": "文件搜索失败",

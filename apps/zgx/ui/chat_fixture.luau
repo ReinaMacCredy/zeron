@@ -332,6 +332,7 @@ stub.send = function(req: any)
 	end
 	if req.fresh then
 		note(`run:{req.cwd or "-"}|{if req.worktree then "worktree" else "local"}|{req.branch or "-"}`)
+		note(`fresh:{req.model or "-"}|{req.effort or "-"}|{req.access or "-"}`)
 	end
 	if req.fresh then
 		TRANSCRIPTS[req.session] = { { id = req.message_id or `{req.session}u`, role = "user", text = req.text } }
@@ -1050,6 +1051,15 @@ ui.command {
 	title = "A plain selection staged",
 	run = function()
 		chat.shared.cargo:push { id = "plain1", kind = "quote", name = "Layout", text = "Layout dominates on both machines." }
+	end,
+}
+ui.command {
+	id = "stage_two_files_and_quote",
+	title = "A picture, a file and a quote staged",
+	run = function()
+		chat.shared.cargo:push { id = "pic1", kind = "image", name = "shot.png", src = "assets/pictures/wide.png", path = "/work/atlas/shot.png", number = 1 }
+		chat.shared.cargo:push { id = "doc1", kind = "file", name = "notes.md", path = "/work/atlas/notes.md", number = 2 }
+		chat.shared.attach_quote { text = "Layout dominates on both machines.", who = "Claude" }
 	end,
 }
 -- What's selected in the panel's terminal, staged as the terminal tab stages it.

@@ -38,6 +38,9 @@ M.LIST = {
 	{ id = "shell.archive", title = "Archive session", key = "cmd+shift+a", group = "Sessions", menu = "File", reserved = true },
 	{ id = "shell.pin", title = "Pin or unpin this session", key = "cmd+shift+p", group = "Sessions", menu = "File", reserved = true },
 	{ id = "shell.model_picker", title = "Choose model", key = "cmd+/", group = "Sessions", menu = "View", reserved = true },
+	-- (⌘⇧N, the mockup's, is New project's.)
+	{ id = "chat.move_draft", title = "Move draft to new thread", key = "cmd+shift+m", group = "Sessions", menu = "File", elsewhere = true },
+	{ id = "chat.send_new", title = "Send in new thread", key = "cmd+shift+enter", group = "Sessions", menu = "File", elsewhere = true },
 	{ id = "shell.toggle_sidebar", title = "Toggle sidebar", key = "cmd+b", group = "Panels", menu = "View", reserved = true },
 	{ id = "shell.toggle_files", title = "Toggle panel", key = "cmd+r", group = "Panels", menu = "View", reserved = true },
 	{ id = "shell.toggle_files_tab", title = "Toggle files", key = "cmd+e", group = "Panels", menu = "View", reserved = true },

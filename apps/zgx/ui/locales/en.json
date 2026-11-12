@@ -755,7 +755,11 @@
         "dismiss": "Dismiss",
         "too_long": "Dictation took too long. Your draft is safe. Wait a moment, then try a shorter recording.",
         "no_host": "Dictation isn't available in this build."
-      }
+      },
+      "send_options": "Send options",
+      "send": "Send",
+      "move_draft": "Move draft to new thread",
+      "send_new": "Send in new thread"
     },
     "markdown": {
       "fit_content": "Fit content",
@@ -2641,7 +2645,9 @@
       "title": "Usage",
       "terms": "usage tokens cost spend money dollars price agents",
       "description": "Token spend from chats on this device, read from your agents' own session logs.",
-      "spend": { "title": "Token usage" },
+      "spend": {
+        "title": "Token usage"
+      },
       "reading": "Reading agent transcripts…",
       "failed": "Couldn't read usage",
       "sessions": "{n, plural, one {# session} other {# sessions}}",
@@ -3856,7 +3862,9 @@
         "shell_about": "About Zeron",
         "shell_check_updates": "Check for Updates…",
         "shell_whats_new": "What's New…",
-        "shell_toggle_tray": "Needs you and running"
+        "shell_toggle_tray": "Needs you and running",
+        "chat_move_draft": "Move draft to new thread",
+        "chat_send_new": "Send in new thread"
       },
       "group": {
         "sessions": "Sessions",
@@ -4443,7 +4451,10 @@
       "credits_tip": "Out of Cloud credits",
       "new_models": {
         "title": "{n, plural, one {New model available} other {New models available}}"
-      }
+      },
+      "draft_moved": "Draft moved to a new thread",
+      "sent_new": "Sent in a new thread",
+      "undo_move": "Undo"
     },
     "completions": {
       "search_failed": "File search failed",

@@ -1,0 +1,87 @@
+local function settle(app: any)
+	app:frames(30)
+end
+
+local function count(haystack: string, needle: string): number
+	local n, at = 0, 1
+	while true do
+		local s, e = string.find(haystack, needle, at, true)
+		if not s or not e then
+			return n
+		end
+		n += 1
+		at = e + 1
+	end
+end
+
+local function drafted(app: any, chat: string?)
+	app:command(`go_{chat or "s1"}`)
+	settle(app)
+	expect(app:has('role:button "Send options"')).to_be(false)
+	app:type('role:textbox "Message"', "Redo the footer")
+	app:command("stage_two_files_and_quote")
+	settle(app)
+end
+
+test("the send menu moves the whole draft to a new chat unsent, and Undo puts it back", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	drafted(app)
+	app:click('role:button "Send options"')
+	settle(app)
+	expect(app:has('role:menuitem "Send"')).to_be(true)
+	app:click('role:menuitem "Move draft to new thread"')
+	app:frames(60)
+	expect(app:has("#new-chat-headline")).to_be(true)
+	expect(app:text('role:textbox "Message"')).to_be("Redo the footer")
+	expect(app:has('~"shot.png"')).to_be(true)
+	expect(app:has('~"notes.md"')).to_be(true)
+	expect(app:has('~"Layout dominates"')).to_be(true)
+	expect(app:has('~"Draft moved to a new thread"')).to_be(true)
+	expect(app:has('role:button "Send options"')).to_be(false)
+	local calls = app:state("calls")
+	expect(count(calls, "send:")).to_be(0)
+	expect(count(calls, "create:")).to_be(0)
+	app:type('role:textbox "Message"', "!")
+	expect(app:text('role:textbox "Message"')).to_be("Redo the footer!")
+	app:command("go_s1")
+	settle(app)
+	expect(app:text('role:textbox "Message"')).to_be("")
+	expect(app:has('~"shot.png"')).to_be(false)
+	app:command("go_home")
+	settle(app)
+	app:click('role:button "Undo"')
+	settle(app)
+	expect(app:has('~"Question number 30"')).to_be(true)
+	expect(app:text('role:textbox "Message"')).to_be("Redo the footer")
+	expect(app:has('~"shot.png"')).to_be(true)
+	expect(app:has('~"notes.md"')).to_be(true)
+	expect(app:has('~"Layout dominates"')).to_be(true)
+	expect(app:has('~"Draft moved to a new thread"')).to_be(false)
+	app:command("go_home")
+	settle(app)
+	expect(app:text('role:textbox "Message"')).to_be("")
+	expect(app:has('~"shot.png"')).to_be(false)
+end)
+
+test("Send in new thread sends once, with what the draft carries, on the chat's model and access", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	drafted(app, "s2")
+	app:command("chat.send_new")
+	app:frames(60)
+	settle(app)
+	local calls = app:state("calls")
+	expect(count(calls, "create:atlas")).to_be(1)
+	expect(count(calls, "send:new1:Redo the footer")).to_be(1)
+	expect(calls).to_contain("Layout dominates on both machines.")
+	expect(count(calls, "att:/work/atlas/shot.png|upload")).to_be(1)
+	expect(count(calls, "att:/work/atlas/notes.md|upload")).to_be(1)
+	expect(calls).to_contain("fresh:sonnet|medium|edits")
+	expect(count(calls, "send:s2")).to_be(0)
+	expect(app:has('~"Sent in a new thread"')).to_be(true)
+	expect(app:has('role:button "Undo"')).to_be(false)
+	app:command("go_s2")
+	settle(app)
+	expect(app:text('role:textbox "Message"')).to_be("")
+end)
