@@ -190,8 +190,9 @@ export type Props = {
 	on_remove_cargo: ((id: string) -> ())?,
 	on_retry_cargo: ((id: string) -> ())?,
 	on_open_cargo: ((id: string) -> ())?,
-	-- Text pasted in: true takes it (the caller made a chip of it).
-	on_paste_text: ((text: string) -> boolean)?,
+	-- Text pasted in: true takes it (the caller made a chip of it, put at
+	-- the caret by `insert`).
+	on_paste_text: ((text: string, insert: (shown: string) -> boolean) -> boolean)?,
 	-- A paste with no text (a picture on the clipboard): the caller's to
 	-- read, true taking it. Files copied in a file manager go to `on_files`.
 	on_paste_image: (() -> boolean)?,
@@ -1278,8 +1279,18 @@ return ui.component(function(props: Props): Node
 	local function asking(): boolean
 		return question() ~= nil or approval() ~= nil
 	end
+	-- The cargo the strip shows: a pasted text whose chip stands in the draft isn't tiled too.
+	local strip_cargo = ui.computed(function(): { cargo.Item }
+		local out: { cargo.Item } = {}
+		for _, c in if props.cargo then props.cargo:get() else {} do
+			if not (c :: any).inline then
+				table.insert(out, c)
+			end
+		end
+		return out
+	end)
 	local function has_cargo(): boolean
-		return props.cargo ~= nil and #props.cargo:get() > 0
+		return #strip_cargo:get() > 0
 	end
 	local function has_limit(): boolean
 		return props.limit ~= nil and props.limit() ~= nil
@@ -2034,7 +2045,7 @@ return ui.component(function(props: Props): Node
 			-- through the chips' pictures.
 			lightboxes += 1
 			local group = `composer{lightboxes}`
-			local items = props.cargo :: State<{ cargo.Item }>
+			local items = strip_cargo
 			local function open_image(id: string)
 				local images: { Lightbox.Item } = {}
 				local at = nil
@@ -2357,7 +2368,13 @@ return ui.component(function(props: Props): Node
 						return true
 					end
 					if e.text and props.on_paste_text then
-						return props.on_paste_text(e.text)
+						return props.on_paste_text(e.text, function(shown: string): boolean
+							local el = field:peek()
+							if el then
+								el:replace_selection(shown)
+							end
+							return el ~= nil
+						end)
 					end
 					if e.text == nil and props.on_paste_image then
 						return props.on_paste_image()

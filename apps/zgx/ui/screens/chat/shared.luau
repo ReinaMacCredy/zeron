@@ -221,7 +221,13 @@ function M.take(of: string?): (string, { any })
 	local raw = if mine then M.text:peek() else M.draft_peek(key).text
 	local quotes = if mine then M.quotes:peek() elseif stored and stored.quotes then stored.quotes else {}
 	local text = references.encode(M.refs_key(key), Quote.expand(raw, Quote.kept(raw, quotes)))
-	local cargo = table.clone(cargo_in(key))
+	-- (A pasted text whose chip was deleted stays behind, as gpui's does.)
+	local cargo = {}
+	for _, item in cargo_in(key) do
+		if not item.inline or string.find(text, `(zeron-attachment:{item.number})`, 1, true) then
+			table.insert(cargo, item)
+		end
+	end
 	taken[cargo] = { key = key, raw = raw, quotes = quotes }
 	ui.batch(function()
 		if mine then
@@ -828,7 +834,11 @@ function M.paste_label(text: string): string?
 	return nil
 end
 
-function M.paste_text(text: string, of: string?): boolean
+-- A long paste, as gpui's composer takes it: a file of its own, carried
+-- with the message, and a chip at the caret standing for it (its first
+-- line), sent as `[Pasted text N.txt](zeron-attachment:N)`. `insert` puts
+-- the chip at the caret; without it the chip ends the draft.
+function M.paste_text(text: string, of: string?, insert: ((shown: string) -> boolean)?): boolean
 	local key = of or here:peek()
 	if not pastes_as_file(text, M.draft_peek(key).text) then
 		return false
@@ -845,20 +855,50 @@ function M.paste_text(text: string, of: string?): boolean
 	end
 	refuse_in(key, nil)
 	note_number(key, number)
+	local function put(words: string)
+		if not ((of == nil or here:peek() == key) and insert and insert(words)) then
+			M.set_draft_of(key, "text", M.draft_peek(key).text .. words)
+		end
+	end
+	local label = M.paste_label(text)
+	local shown: string? = nil
+	local written: string? = nil
+	local failed = false
+	local bytes = #text
+	local function landed(path: string)
+		push_cargo(key, { { id = chip_id("paste"), kind = "file", name = name, label = label, path = path, pasted = true, inline = true, shown = shown, bytes = bytes, number = number } })
+	end
+	-- (Not written: the words themselves where the chip stands.)
+	local function unwritten()
+		failed = true
+		if not shown then
+			return
+		end
+		local draft = M.draft_peek(key).text
+		local at, to = string.find(draft, shown, 1, true)
+		M.set_draft_of(key, "text", if at and to then string.sub(draft, 1, at - 1) .. text .. string.sub(draft, to + 1) else draft .. text)
+	end
+	asked:after(function(path: any)
+		if type(path) ~= "string" or path == "" then
+			unwritten()
+		elseif shown then
+			landed(path)
+		else
+			written = path
+		end
+	end, unwritten)
+	if failed then
+		put(text)
+	else
+		shown = references.add(M.refs_key(key), { kind = "pasted", name = label or name, link = `[{name}](zeron-attachment:{number})` })
+		put(shown :: string)
+		if written then
+			landed(written)
+		end
+	end
 	if not of then
 		M.focus:add(1)
 	end
-	local label = M.paste_label(text)
-	local bytes = #text
-	asked:after(function(path: any)
-		if type(path) == "string" and path ~= "" then
-			push_cargo(key, { { id = chip_id("paste"), kind = "file", name = name, label = label, path = path, pasted = true, bytes = bytes, number = number } })
-		else
-			M.set_draft_of(key, "text", M.draft_peek(key).text .. text)
-		end
-	end, function()
-		M.set_draft_of(key, "text", M.draft_peek(key).text .. text)
-	end)
 	return true
 end
 
@@ -896,8 +936,15 @@ function M.open_pasted(id: string, insert: ((text: string) -> boolean)?, of: str
 		end
 		ui.batch(function()
 			M.remove_cargo_of(key, id)
-			if not ((of or here:peek() == key) and insert and insert(read.text)) then
-				M.set_draft_of(key, "text", M.draft_peek(key).text .. read.text)
+			local draft = M.draft_peek(key).text
+			local at, to = nil, nil
+			if item.shown then
+				at, to = string.find(draft, item.shown, 1, true)
+			end
+			if at and to then
+				M.set_draft_of(key, "text", string.sub(draft, 1, at - 1) .. read.text .. string.sub(draft, to + 1))
+			elseif not ((of or here:peek() == key) and insert and insert(read.text)) then
+				M.set_draft_of(key, "text", draft .. read.text)
 			end
 		end)
 		if not of then
@@ -910,8 +957,8 @@ end
 -- pasted, picked and dropped. `dropped` runs before a drop is taken.
 function M.cargo_props(of: string?, dropped: (() -> ())?): { [string]: any }
 	return {
-		on_paste_text = function(text: string): boolean
-			return M.paste_text(text, of)
+		on_paste_text = function(text: string, insert: ((shown: string) -> boolean)?): boolean
+			return M.paste_text(text, of, insert)
 		end,
 		on_open_pasted = function(id: string, insert: ((text: string) -> boolean)?)
 			M.open_pasted(id, insert, of)
@@ -1528,11 +1575,22 @@ function M.update_comment(id: string, body: string)
 	end
 end
 
+-- A pasted text's chip leaves the words with it (gpui's `remove_attachment_chips`).
+local function without_chip(text: string, item: any): string
+	local at, to = nil, nil
+	if item.inline and item.shown then
+		at, to = string.find(text, item.shown, 1, true)
+	end
+	return if at and to then string.sub(text, 1, at - 1) .. string.sub(text, to + 1) else text
+end
+
 function M.remove_cargo(id: string)
 	local left = {}
 	for _, item in M.cargo:peek() do
 		if item.id ~= id then
 			table.insert(left, item)
+		else
+			M.text:set(without_chip(M.text:peek(), item))
 		end
 	end
 	M.cargo:set(M.renumber(left))
@@ -1619,6 +1677,8 @@ function M.remove_cargo_of(key: string, id: string)
 	for _, item in d.cargo or {} do
 		if item.id ~= id then
 			table.insert(left, item)
+		elseif type(d.text) == "string" then
+			d.text = without_chip(d.text, item)
 		end
 	end
 	d.cargo = M.renumber(left)

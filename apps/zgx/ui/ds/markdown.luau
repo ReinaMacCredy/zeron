@@ -678,7 +678,7 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			span.underline = true
 			span.underline_offset = 4
 			span.hover = { underline = true, color = "$accent" }
-			if string.match(r.a, "^zeron%-file:") or string.match(r.a, "^zeron%-chat:") then
+			if string.match(r.a, "^zeron%-file:") or string.match(r.a, "^zeron%-chat:") or string.match(r.a, "^zeron%-attachment:%d+$") then
 				mention_chip(span, r.a, r.x, ctx)
 			elseif ctx and ctx.invocations and string.match(r.a, "^zeron%-invoke:") and string.match(r.x, "^[/$]") then
 				invocation_chip(span, r.x)

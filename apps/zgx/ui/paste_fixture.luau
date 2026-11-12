@@ -168,6 +168,11 @@ ui.command {
 	title = "Take the draft, as a send does",
 	run = function()
 		failed_text, failed_cargo = shared.take()
+		local names = {}
+		for _, item in failed_cargo do
+			table.insert(names, item.name)
+		end
+		ui.state("test_taken", nil :: any):set({ text = failed_text, names = names })
 	end,
 }
 ui.command {
