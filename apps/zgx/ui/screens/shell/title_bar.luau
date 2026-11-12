@@ -14,6 +14,7 @@ local boundary = require("@app/screens/shell/boundary")
 local locale = require("@ds/locale")
 local art = require("@app/screens/shell/art")
 local updates = require("@app/screens/shell/updates")
+local live_pill = require("@app/screens/shell/live_pill")
 
 export type Props = {
 	collapsed: State<boolean>,
@@ -157,6 +158,7 @@ return function(props: Props): Node
 				),
 			}
 		),
+		ui.show(live_pill.shown, live_pill.Button {}),
 		ui.show(updates.shown, updates.Button {}),
 		ui.show(
 			function(): boolean

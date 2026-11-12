@@ -147,12 +147,7 @@ local function device_icon(d: sessions.Device?): { asset: string?, name: string?
 end
 
 local function model_label(harness: string?, model: string): string
-	for _, m in store.catalog:get().models or {} do
-		if m.value == `{harness or ""}/{model}` and m.label then
-			return m.label
-		end
-	end
-	return model
+	return store.model_label(harness, model) or model
 end
 
 

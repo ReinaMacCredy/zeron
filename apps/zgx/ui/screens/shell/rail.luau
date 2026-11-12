@@ -238,6 +238,8 @@ local function most_used(account: any): number
 	end
 	return most
 end
+M.live_accounts = live_accounts
+M.most_used = most_used
 
 local function tightest(list: { Live }): Live?
 	local best: Live? = nil

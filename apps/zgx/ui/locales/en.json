@@ -3855,7 +3855,8 @@
         "chat_side_chat": "Side chat",
         "shell_about": "About Zeron",
         "shell_check_updates": "Check for Updates…",
-        "shell_whats_new": "What's New…"
+        "shell_whats_new": "What's New…",
+        "shell_toggle_tray": "Needs you and running"
       },
       "group": {
         "sessions": "Sessions",
@@ -4005,6 +4006,33 @@
       "skipped_body": "You'll see it again when there's a newer version",
       "undo": "Undo",
       "skip_hint": "Hide until there's a newer version"
+    },
+    "live": {
+      "needs": "{n, plural, one {# needs you} other {# need you}}",
+      "working": "{n} working",
+      "tooltip": "What needs you and what is running · {key}",
+      "title": "Needs you and running",
+      "summary": "{working} working · {needs, plural, one {# needs you} other {# need you}}",
+      "seen_all": "Seen all",
+      "group": {
+        "needs": "Needs you",
+        "working": "Working",
+        "done": "Done since you left"
+      },
+      "viewing": "· viewing",
+      "open": "Open",
+      "answer": "Answer",
+      "view": "View",
+      "approve": "Approve",
+      "dismiss": "Dismiss",
+      "retry": "Retry",
+      "asking": "Asking",
+      "plan": "Plan ready · {n, plural, one {# step} other {# steps}}",
+      "failed": "Failed",
+      "done": "Done",
+      "agents": "{n, plural, one {# agent} other {# agents}}",
+      "shells": "Background shells",
+      "failed_named": "Couldn't retry {name}"
     },
     "activity": {
       "wake": "Wake",

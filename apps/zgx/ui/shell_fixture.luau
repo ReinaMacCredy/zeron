@@ -209,9 +209,11 @@ files_api.search = function(): any
 	})
 end
 local chat_store = store :: any
+-- (Not what the cards want watched: that only gathers, and the host calls it ends in are stubbed here too.)
+local gathers = { want_docs = true, want_shells = true }
 for name, f in chat_store do
 	-- (`new_chat_model` reads the catalog, not the host.)
-	if type(f) == "function" and name ~= "new_chat_model" then
+	if type(f) == "function" and name ~= "new_chat_model" and not gathers[name] then
 		chat_store[name] = function() end
 	end
 end

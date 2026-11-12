@@ -119,6 +119,19 @@ M.stats = ui.shared("chat.stats", nil :: any)
 M.token_rate = ui.shared("chat.token_rate", nil :: number?)
 M.turn_tokens = ui.shared("chat.turn_tokens", nil :: string?)
 M.catalog = ui.shared("chat.catalog", { state = "looking", harnesses = {}, models = {} } :: Catalog)
+
+function M.model_label(harness: string?, model: string): string?
+	for _, m in M.catalog:get().models do
+		if harness == nil or m.harness == harness then
+			-- (The host's catalog says `<harness>/<id>`; a child says its bare id.)
+			local bare = string.match(m.value, "^[^/]+/(.+)$")
+			if m.value == model or bare == model then
+				return m.label
+			end
+		end
+	end
+	return nil
+end
 -- A call nothing waits on: its failure lands in the session's notice (the
 -- host sets it), so the script needn't hear it.
 local function quietly(p: any)
@@ -311,6 +324,52 @@ end
 function M.shell_watch(shells: { any })
 	pcall(ui.invoke, "chat.shell_watch", { shells = shells })
 end
+
+-- The host holds one set a window, and a closing card's cleanup runs after the next card has said what it wants.
+local function wants(send: ({ any }) -> ()): () -> (({ [string]: any }) -> ())
+	local by: { [any]: { [string]: any } } = {}
+	local sent = ""
+	local function flush()
+		local all: { [string]: any } = {}
+		for _, items in by do
+			for key, item in items do
+				all[key] = item
+			end
+		end
+		local keys: { string } = {}
+		for key in all do
+			table.insert(keys, key)
+		end
+		table.sort(keys)
+		local joined = table.concat(keys, "\0")
+		if joined ~= sent then
+			sent = joined
+			local out: { any } = {}
+			for _, key in keys do
+				table.insert(out, all[key])
+			end
+			send(out)
+		end
+	end
+	return function()
+		local me = {}
+		ui.on_cleanup(function()
+			by[me] = nil
+			flush()
+		end)
+		return function(items: { [string]: any })
+			by[me] = items
+			flush()
+		end
+	end
+end
+
+M.want_docs = wants(function(docs: { any })
+	M.roster_watch(docs)
+end)
+M.want_shells = wants(function(shells: { any })
+	M.shell_watch(shells)
+end)
 
 -- The device the composer runs on (nil: this one): `M.catalog` is its
 -- agents and models from now on (src/chat.rs `catalog_on`).
