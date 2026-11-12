@@ -1020,30 +1020,36 @@ local function Composer(): Node
 			local wholes = shared.move_draft(id, "")
 			carry_next = carry
 			route.new_chat(s.project)
+			-- (The route's project lands on arrival and a project change clears the branch: each is set a tick later.)
 			ui.after(0, function()
-				if new_chat() and carry.branch and branch:peek() ~= carry.branch then
-					branch:set(carry.branch)
+				if new_chat() and project:peek() ~= carry.project then
+					project:set(carry.project)
 				end
-				fx_y:set(if reduced then 0 else 16)
-				fx_to(1, 0, ms)
-				moving = false
-				shared.focus:add(1)
-				if send_now then
-					send(shared.text:peek())
-					local left = shared.draft_peek("")
-					local went = left.text == "" and #left.cargo == 0
-					if holds and went then
-						held_back = held
-					elseif holds then
-						shared.join_draft_before("", held)
+				ui.after(0, function()
+					if new_chat() and carry.branch and branch:peek() ~= carry.branch then
+						branch:set(carry.branch)
 					end
-					if went then
-						say_moved("chat.composer.sent_new", false)
+					fx_y:set(if reduced then 0 else 16)
+					fx_to(1, 0, ms)
+					moving = false
+					shared.focus:add(1)
+					if send_now then
+						send(shared.text:peek())
+						local left = shared.draft_peek("")
+						local went = left.text == "" and #left.cargo == 0
+						if holds and went then
+							held_back = held
+						elseif holds then
+							shared.join_draft_before("", held)
+						end
+						if went then
+							say_moved("chat.composer.sent_new", false)
+						end
+						return
 					end
-					return
-				end
-				undoable = { from = id, wholes = wholes, before = before }
-				say_moved("chat.composer.draft_moved", true)
+					undoable = { from = id, wholes = wholes, before = before }
+					say_moved("chat.composer.draft_moved", true)
+				end)
 			end)
 		end)
 		return true
