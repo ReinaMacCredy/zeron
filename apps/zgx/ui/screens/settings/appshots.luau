@@ -179,7 +179,7 @@ local function restore(): Node
 		on_click = function()
 			refused:set(nil)
 			ui.batch(function()
-				for k, v in Appshots.DEFAULTS do
+				for k, v in Appshots.DEFAULTS :: { [string]: any } do
 					(Appshots :: any)[k]:set(v)
 				end
 			end)
@@ -190,7 +190,7 @@ local function restore(): Node
 end
 
 local CHOICES = { "command-command", "option-option", "shift-shift", "none" }
-local function hotkey_menu(id: string, which: "appshot" | "quick"): Node
+local function hotkey_menu(which: "appshot" | "quick"): Node
 	local mine: State<string> = if which == "appshot" then Appshots.hotkey else Appshots.quick_capture
 	local other: State<string> = if which == "appshot" then Appshots.quick_capture else Appshots.hotkey
 	local shown = ui.use_state(mine:peek())
@@ -498,7 +498,7 @@ M.view = ui.component(function(_: {}): Node
 							refused:set(nil)
 							Appshots.hotkey:set(d.hotkey)
 						end),
-						hotkey_menu("appshots-hotkey", "appshot"),
+						hotkey_menu("appshot"),
 					},
 				}),
 				row("destination", {
@@ -577,7 +577,7 @@ M.view = ui.component(function(_: {}): Node
 							refused:set(nil)
 							Appshots.quick_capture:set(d.quick_capture)
 						end),
-						hotkey_menu("appshots-quick", "quick"),
+						hotkey_menu("quick"),
 					},
 				}),
 			},

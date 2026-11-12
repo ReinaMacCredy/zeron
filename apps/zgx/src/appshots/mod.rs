@@ -491,7 +491,12 @@ impl Prefs {
             // (A file from before the Appshot chime had one: it followed the chimes.)
             sound: f["appshotSoundEnabled"].as_bool().or_else(|| f["soundEnabled"].as_bool()).unwrap_or(d.sound),
             hotkey: hotkey_or(keymap["captureAppshot"].as_str(), ChordModifier::Command.combo()),
-            quick_capture: hotkey_or(keymap["quickCapture"].as_str(), ChordModifier::Option.combo()),
+            // (gpui watches no chord for any other Quick capture value, and keeps it.)
+            quick_capture: match keymap["quickCapture"].as_str() {
+                None => ChordModifier::Option.combo().into(),
+                Some(v) if ChordModifier::from_combo(v).is_some() => v.into(),
+                Some(_) => NO_HOTKEY.into(),
+            },
             destination: f["appshotDestination"]
                 .as_str()
                 .filter(|d| DESTINATIONS.contains(d))
@@ -910,6 +915,7 @@ mod tests {
         assert_eq!((p.hotkey.as_str(), p.destination.as_str()), ("command-command", "automatic"));
         assert_eq!(Prefs::read(Some(&serde_json::json!({ "keymap": { "captureAppshot": "none" } }))).hotkey, "none");
         assert!(!Prefs::read(Some(&serde_json::json!({ "soundEnabled": false }))).sound);
+        assert_eq!(Prefs::read(Some(&serde_json::json!({ "keymap": { "quickCapture": "mod-alt-n" } }))).quick_capture, "none");
     }
 
     #[test]

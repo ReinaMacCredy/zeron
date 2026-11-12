@@ -31,7 +31,6 @@ local failed = ui.shared("appshots.failed", nil :: any)
 local quick = ui.shared("appshots.quick", nil :: any)
 
 M.NO_HOTKEY = "none"
-M.CHORDS = { "command-command", "option-option", "shift-shift" }
 local GLYPHS: { [string]: string } = { ["command-command"] = "⌘", ["option-option"] = "⌥", ["shift-shift"] = "⇧" }
 -- The shipping app's defaults (crates/ui settings.rs).
 M.DEFAULTS = { enabled = false, sound = true, hotkey = "command-command", quick_capture = "option-option", destination = "automatic" }
