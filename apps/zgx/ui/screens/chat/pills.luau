@@ -135,7 +135,6 @@ function M.runs_of(bind: any): any
 			harness = if s then s.harness else nil,
 			agent = if row then (row :: any).mark or row.agent else nil,
 			icon = if row then (row :: any).agent_icon else nil,
-			reasoning = if s then s.effort else nil,
 		}
 	end)
 end
