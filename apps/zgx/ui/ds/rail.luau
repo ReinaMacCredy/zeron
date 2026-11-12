@@ -36,8 +36,6 @@ export type Props = {
 	track: Length?,
 	-- An id for the strip, for tools that look for it.
 	id: string?,
-	-- Whether the view is placing itself now (its rows rewrapping to a new
-	-- width): its offset's changes then are no one scrolling either.
 	placing: (() -> boolean)?,
 }
 

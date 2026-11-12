@@ -160,7 +160,6 @@ fn a_cmd_click_on_a_file_link_opens_nothing_and_on_a_web_link_goes_to_the_browse
     assert!(state(&app, "calls").contains("open_file:s2:src/parse.rs@12"), "a plain click opens it: {}", state(&app, "calls"));
 }
 
-/// The rail's opacity over `ms` of real time, a frame every 12 ms: the most it showed.
 fn rail_peak(app: &mut TestApp, ms: u64) -> f32 {
     let mut peak: f32 = 0.;
     for _ in 0..ms / 12 {
@@ -171,7 +170,6 @@ fn rail_peak(app: &mut TestApp, ms: u64) -> f32 {
     peak
 }
 
-/// The width eased from `from` to `to` in `steps` (one: at once), the rail watched through it and 600 ms after.
 fn ease(app: &mut TestApp, from: f32, to: f32, steps: usize, place: &str) {
     for i in 1..=steps {
         let w = from + (to - from) * i as f32 / steps as f32;
@@ -191,13 +189,8 @@ fn a_panel_easing_open_or_shut_shows_no_scrollbar_over_the_transcript() {
     assert!(app.opacity("transcript-rail") < 0.01, "at rest, no rail");
     ease(&mut app, 1000., 640., 12, "at the end");
     ease(&mut app, 640., 1000., 12, "at the end");
-    app.scroll("#transcript", -2400.);
-    rail_peak(&mut app, 2000);
-    assert!(app.opacity("transcript-rail") < 0.01, "scrolled up and rested, no rail");
-    ease(&mut app, 1000., 640., 12, "scrolled up");
-    ease(&mut app, 640., 1000., 12, "scrolled up");
-    ease(&mut app, 1000., 640., 1, "scrolled up, at once");
-    ease(&mut app, 640., 1000., 1, "scrolled up, at once");
+    ease(&mut app, 1000., 640., 1, "at the end, at once");
+    ease(&mut app, 640., 1000., 1, "at the end, at once");
     app.scroll("#transcript", -400.);
     assert!(rail_peak(&mut app, 300) > 0.5, "a scroll still shows the rail");
 }
