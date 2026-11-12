@@ -479,7 +479,7 @@ ui.command { id = "device_stub.engine_restart", title = "The engine came back wi
 	hub.sessions = {}
 end) }
 ui.command { id = "device_stub.let_list", title = "The restarted hub's list answers", run = function()
-	local w = hub.listing
+	local w: { ok: ((any) -> ())? }? = hub.listing
 	hub.listing = nil
 	hub.unlisted = false
 	hub.revision += 1
