@@ -34,6 +34,7 @@ export type Name =
 	| "access-edits"
 	| "access-full"
 	| "monitor"
+	| "screen-capture"
 	| "cloud"
 	| "wifi-off"
 	| "fast-tier"

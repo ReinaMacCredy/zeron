@@ -8,8 +8,8 @@
 //! paired with the other app's rest. New project's pinned folders come with it. Pinned chats and sections
 //! aren't here: the engine keeps them, for either app.
 //! Computer use's click sounds and its guide's Got it come too, and so do
-//! Chat's, the session switcher's, Files', the chimes', Appshots', the motion and the
-//! conversation's width.
+//! Chat's, the session switcher's, Files', the chimes', the motion and the
+//! conversation's width (Appshots' are read in place: src/appshots).
 
 use std::path::Path;
 
@@ -26,7 +26,6 @@ const MODEL_PICKER_COMPACT: &str = "ds%2Fmodel_picker.luau%3A%3Amodel_picker_com
 const COMPUTER: &str = "screens%2Fsettings%2Fcomputer.luau%3A%3A";
 const PREFS: &str = "screens%2Fsettings%2Fprefs.luau%3A%3A";
 const SWITCHER: &str = "screens%2Fshell%2Fswitcher.luau%3A%3A";
-const APPSHOTS: &str = "screens%2Fchat%2Fappshots.luau%3A%3A";
 const MOTION: &str = "ds%2Fmotion.luau%3A%3A";
 const SKILLS_OFF: &str = "screens%2Fchat%2Finvocations.luau%3A%3Askills_disabled.json";
 
@@ -214,20 +213,6 @@ fn carried_prefs(settings: &Json) -> Vec<(String, Json)> {
     if let Some(on) = settings["switcherCyclesTabs"].as_bool() {
         out.push((format!("{SWITCHER}shell_switcher_cycles_tabs.json"), json!(on)));
     }
-    for (from, to) in [("appshotsEnabled", "appshots_enabled"), ("appshotSoundEnabled", "appshots_sound")] {
-        if let Some(on) = settings[from].as_bool() {
-            out.push((format!("{APPSHOTS}{to}.json"), json!(on)));
-        }
-    }
-    let destination = match settings["appshotDestination"].as_str() {
-        Some("automatic") => Some("automatic"),
-        Some("last-session") => Some("last"),
-        Some("new-session") => Some("new"),
-        _ => None,
-    };
-    if let Some(destination) = destination {
-        out.push((format!("{APPSHOTS}appshots_destination.json"), json!(destination)));
-    }
     let (reduce, follow) = match settings["reduceMotion"].as_str() {
         Some("system") => (Some(false), Some(true)),
         Some("on") => (Some(true), Some(false)),
@@ -384,7 +369,6 @@ mod tests {
                 "switcherWindow": "hours12", "switcherLimit": 8, "switcherCyclesTabs": true,
                 "filesAutosaveEnabled": true, "filesAutosaveDelayMs": 1500, "filesWordWrap": true, "filesShowAll": false,
                 "soundEnabled": true, "soundCompletionEnabled": false, "soundInputEnabled": true, "soundAttentionEnabled": false,
-                "appshotsEnabled": true, "appshotSoundEnabled": false, "appshotDestination": "last-session",
                 "transcriptWidth": 736.0, "reduceMotion": "on", "pauseAnimationsInBackground": true,
                 "disabledSkills": ["/u/.claude/skills/pdf/SKILL.md"],
             }),
@@ -405,16 +389,13 @@ mod tests {
         assert_eq!(file(format!("{SWITCHER}shell_switcher_window.json")), json!("12h"));
         assert_eq!(file(format!("{SWITCHER}shell_switcher_limit.json")), json!(8));
         assert_eq!(file(format!("{SWITCHER}shell_switcher_cycles_tabs.json")), json!(true));
-        assert_eq!(file(format!("{APPSHOTS}appshots_enabled.json")), json!(true));
-        assert_eq!(file(format!("{APPSHOTS}appshots_sound.json")), json!(false));
-        assert_eq!(file(format!("{APPSHOTS}appshots_destination.json")), json!("last"));
         assert_eq!((file(format!("{MOTION}motion_reduce.json")), file(format!("{MOTION}motion_follow_system.json"))), (json!(true), json!(false)));
         assert_eq!(file(format!("{MOTION}motion_pause_background.json")), json!(true));
         assert_eq!(file(SKILLS_OFF.to_string()), json!({ "/u/.claude/skills/pdf/SKILL.md": true }));
         // A word or a number this app doesn't take stays its default.
         let odd = tempfile::tempdir().unwrap();
-        carry_into(odd.path(), &odd.path().join("kept"), &json!({ "composerSendBehavior": "shift-enter", "switcherWindow": "weeks2", "appshotDestination": "elsewhere", "filesAutosaveDelayMs": 0, "transcriptWidth": 99999.0 }));
-        for name in [format!("{PREFS}settings_send_with.json"), format!("{SWITCHER}shell_switcher_window.json"), format!("{APPSHOTS}appshots_destination.json"), format!("{PREFS}settings_files_autosave_delay.json")] {
+        carry_into(odd.path(), &odd.path().join("kept"), &json!({ "composerSendBehavior": "shift-enter", "switcherWindow": "weeks2", "filesAutosaveDelayMs": 0, "transcriptWidth": 99999.0 }));
+        for name in [format!("{PREFS}settings_send_with.json"), format!("{SWITCHER}shell_switcher_window.json"), format!("{PREFS}settings_files_autosave_delay.json")] {
             assert!(!odd.path().join(&name).exists(), "{name}");
         }
         let wide = serde_json::from_slice::<Json>(&std::fs::read(odd.path().join(format!("{PREFS}settings_conversation_width.json"))).unwrap()).unwrap();

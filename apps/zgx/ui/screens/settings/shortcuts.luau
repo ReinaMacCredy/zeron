@@ -144,7 +144,7 @@ end
 -- Shown while Appshots are on, as it stands; changed in Settings → Appshots.
 local function appshot(): Node?
 	local ok, appshots = pcall(require, "@app/screens/chat/appshots")
-	if not ok or type(appshots) ~= "table" or not (appshots :: any).shortcut then
+	if not ok or type(appshots) ~= "table" or not (appshots :: any).hotkey then
 		return nil
 	end
 	local a = appshots :: any
@@ -157,12 +157,14 @@ local function appshot(): Node?
 				control = ui.row {
 					gap = "$space.2",
 					items = "center",
-					-- (The keys as set: a new one is a new Kbd.)
-					ui.presence(function(): string
-						return a.shortcut:get()
-					end, function(keys: string): Node
-						return ds.Kbd { keys = keys }
-					end),
+					ui.text {
+						function(): string
+							return a.label(a.hotkey:get())
+						end,
+						text_size = "$font.size.sm",
+						weight = "$font.weight.medium",
+						color = "$text.primary",
+					},
 					ds.Button {
 						ui.t("settings.shortcuts.appshot.change"),
 						tone = "ghost",
@@ -276,17 +278,6 @@ local function binding(k: Key): Node
 				end
 			end,
 			on_change = function(combo: string)
-				-- (Appshots' hotkey is the host's, not the shell's: gpui names its page.)
-				local ok, appshots = pcall(require, "@app/screens/chat/appshots")
-				local a = if ok and type(appshots) == "table" then appshots :: any else nil
-				if a and a.shortcut and a.active and a.active() and a.shortcut:peek() == combo then
-					notice:set(ui.t("settings.shortcuts.taken_on_page", {
-						keys = Shortcut.shown(combo),
-						name = ui.t("settings.shortcuts.appshot.label"):get(),
-						page = ui.t("settings.appshots.title"):get(),
-					}):get())
-					return
-				end
 				if Builtins.on("voice") and Dictation.is_key(combo) then
 					notice:set(ui.t("settings.shortcuts.taken_on_page", {
 						keys = Shortcut.shown(combo),

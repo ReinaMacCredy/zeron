@@ -6,64 +6,143 @@
 -- the words as untrusted observed content (the host writes that block).
 --
 -- Where a capture lands (Settings → Appshots → Destination):
--- - Automatic: the open session's composer, or a new chat's when none is
---   open;
+-- - Automatic (Synara's rule, the shipping app's `resolve_automatic_target`):
+--   the session you were in within the last minute, else the one the last
+--   Appshot went to within the last minute, else a new chat's composer;
 -- - Last session: the open session, or back to the last one an Appshot
 --   went to;
 -- - New session: a new chat's composer, the drafts there are kept.
 -- What's staged is held to 96 MB of Appshots, as the shipping app's.
 --
--- The settings are this Mac's (kept on disk) and handed to the host at
--- launch: whether Appshots are on, the sound, the shortcut.
+-- The choices are the engine's `ui-settings.json`, where the shipping app
+-- keeps them (the host reads and writes them: src/appshots), so both apps
+-- read the same ones. The hotkey is a double-modifier chord or none.
 
 local route = require("@app/screens/shell/route")
 local shared = require("@app/screens/chat/shared")
 local toast = require("@ds/toast")
-local Builtins = require("@app/screens/plugins/builtins")
+local host = require("@app/screens/settings/host")
 
 local M = {}
 
 M.state = ui.shared("appshots.state", nil :: any)
 local captured = ui.shared("appshots.captured", nil :: any)
 local failed = ui.shared("appshots.failed", nil :: any)
+local quick = ui.shared("appshots.quick", nil :: any)
 
-M.enabled = ui.persist("appshots_enabled", false)
-M.sound = ui.persist("appshots_sound", true)
-M.shortcut = ui.persist("appshots_shortcut", "ctrl+alt+space")
-M.destination = ui.persist("appshots_destination", "automatic")
+M.NO_HOTKEY = "none"
+M.CHORDS = { "command-command", "option-option", "shift-shift" }
+local GLYPHS: { [string]: string } = { ["command-command"] = "⌘", ["option-option"] = "⌥", ["shift-shift"] = "⇧" }
+-- The shipping app's defaults (crates/ui settings.rs).
+M.DEFAULTS = { enabled = false, sound = true, hotkey = "command-command", quick_capture = "option-option", destination = "automatic" }
+
+M.enabled = ui.state("appshots_enabled", M.DEFAULTS.enabled)
+M.sound = ui.state("appshots_sound", M.DEFAULTS.sound)
+M.hotkey = ui.state("appshots_hotkey", M.DEFAULTS.hotkey)
+M.quick_capture = ui.state("appshots_quick_capture", M.DEFAULTS.quick_capture)
+M.destination = ui.state("appshots_destination", M.DEFAULTS.destination)
+local KEYS = { "enabled", "sound", "hotkey", "quick_capture", "destination" }
 -- The last session an Appshot went to (Last session's).
 local last_session = ui.persist("appshots_last_session", "")
+-- Automatic's two clues: where you last were, and where the last Appshot went ({ session, at }).
+local interaction = ui.state("appshots_interaction", nil :: any)
+local last_snap = ui.state("appshots_last_snap", nil :: any)
 -- The capture last taken in (kept: a reload takes none twice).
 local taken = ui.state("appshots_taken", 0)
 
 -- The staged Appshots' limit (the shipping app's MAX_STAGED_APPSHOT_BYTES).
 M.MAX_STAGED = 96 * 1024 * 1024
+-- Synara's APPSNAP_RECENT_TARGET_WINDOW_MS.
+M.RECENT_MS = 60 * 1000
 
 local function invoke(name: string, arg: any?)
-	pcall(ui.invoke, name, arg)
+	pcall(host.invoke, name, arg)
 end
 
--- Whether the capture shortcut works: Appshots on here and the built-in on in Settings → Plugins.
+function M.glyph(combo: string): string?
+	return GLYPHS[combo]
+end
+function M.label(combo: string): string
+	local g = GLYPHS[combo]
+	return if g then `{g} + {g}` else ui.t("settings.appshots.hotkey.none"):get()
+end
+
+-- Whether captures are on (Settings → Appshots' Enable switch is the only gate).
 function M.active(): boolean
-	return M.enabled:get() and Builtins.on("appshots")
+	return M.enabled:get()
 end
 
--- The settings, to the host (as they change, and at launch).
 ui.effect(function()
-	invoke("appshots.configure", { enabled = M.active(), sound = M.sound:get(), shortcut = M.shortcut:get() })
+	local st = M.state:get()
+	if type(st) ~= "table" or st.loaded ~= true then
+		return
+	end
+	for _, k in KEYS do
+		if st[k] ~= nil then
+			(M :: any)[k]:set(st[k])
+		end
+	end
+end)
+ui.effect(function()
+	local now = {}
+	for _, k in KEYS do
+		now[k] = (M :: any)[k]:get()
+	end
+	local st = M.state:peek()
+	if type(st) ~= "table" or st.loaded ~= true then
+		return
+	end
+	local changed, any = {}, false
+	for _, k in KEYS do
+		if now[k] ~= st[k] then
+			changed[k] = now[k]
+			any = true
+		end
+	end
+	if any then
+		invoke("appshots.configure", changed)
+	end
 end)
 
-function M.set_recording(on: boolean)
-	invoke("appshots.configure", { recording = on })
-end
 function M.refresh()
 	invoke("appshots.refresh")
 end
--- Asks for a permission ("capture" or "text"); asked once already, opens
--- System Settings at it.
-function M.request(which: string)
-	invoke("appshots.request", { which = which })
+-- Asks macOS for a permission ("capture", "text" or "input"); `open` also
+-- opens System Settings at it.
+function M.request(which: string, open: boolean?)
+	invoke("appshots.request", { which = which, open = open == true })
 end
+function M.open_settings(which: string)
+	invoke("appshots.open_settings", { which = which })
+end
+
+function M.resolve_automatic(now: number, seen: any?, snap: any?): string?
+	local function fresh(c: any?): any?
+		return if c and c.session and c.session ~= "" and now - c.at <= M.RECENT_MS then c else nil
+	end
+	local i, a = fresh(seen), fresh(snap)
+	if i and a then
+		return if i.at >= a.at then i.session else a.session
+	end
+	return if i then i.session elseif a then a.session else nil
+end
+
+-- What counts as being somewhere: going to a session or a new chat, and
+-- typing in its composer (a new chat is nowhere to send to yet).
+local function seen(at: any)
+	if at.name == "session" and at.session then
+		interaction:set({ session = at.session, at = ui.now() })
+	elseif at.name == "home" then
+		interaction:set({ session = "", at = ui.now() })
+	end
+end
+ui.effect(function()
+	seen(route.current:get())
+end)
+ui.effect(function()
+	shared.text:get()
+	seen(route.current:peek())
+end)
 
 -- A capture as the composer carries it.
 function M.chip(shot: any, id: string): any
@@ -120,19 +199,32 @@ function M.land(shot: any)
 	end
 	local now = route.current:peek()
 	local where = M.destination:peek()
-	if where == "new" then
+	if where == "new-session" then
 		route.new_chat()
-	elseif where == "last" and now.name ~= "session" and last_session:peek() ~= "" then
-		route.open_session(last_session:peek())
-	elseif now.name ~= "session" and now.name ~= "new" then
-		route.new_chat()
+	elseif where == "last-session" then
+		if now.name ~= "session" and last_session:peek() ~= "" then
+			route.open_session(last_session:peek())
+		elseif now.name ~= "session" and now.name ~= "home" then
+			route.new_chat()
+		end
+	else
+		local target = M.resolve_automatic(ui.now(), interaction:peek(), last_snap:peek())
+		if target then
+			if not (now.name == "session" and now.session == target) then
+				route.open_session(target)
+			end
+		elseif now.name ~= "home" then
+			route.new_chat()
+		end
 	end
 	local at = route.current:peek()
 	if at.name == "session" and at.session then
 		last_session:set(at.session)
 	end
+	last_snap:set({ session = if at.name == "session" then at.session else "", at = ui.now() })
 	chips += 1
-	shared.cargo:push(M.chip(shot, `appshot{chips}-{shot.id}`))
+	-- (Into the destination's own draft: the page shown may not have taken it out yet.)
+	shared.push_cargo(if at.name == "session" and at.session then at.session else "", M.chip(shot, `appshot{chips}-{shot.id}`))
 	shared.focus:add(1)
 end
 
@@ -154,6 +246,15 @@ ui.effect(function()
 	end
 	said:set(f.n)
 	toast.show { title = ui.t("chat.appshots.couldnt_capture"):get(), body = f.message, tone = "danger" }
+end)
+local quick_seen = ui.state("appshots_quick_seen", 0)
+ui.effect(function()
+	local q = quick:get()
+	if type(q) ~= "number" or q <= quick_seen:peek() then
+		return
+	end
+	quick_seen:set(q)
+	require("@app/screens/tasks/capture").toggle()
 end)
 
 return M
