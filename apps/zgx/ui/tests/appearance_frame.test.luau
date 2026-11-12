@@ -111,7 +111,7 @@ test("Choose folder keeps the dialog's folder, and Shuffle shows with one", func
 	expect(app:has(`{PAGE} >> role:button "Shuffle"`)).to_be(false)
 	app:write_file("art-folder/a.png", "x")
 	app:pick_folder("art-folder")
-	app:scroll(PAGE, 800)
+	app:scroll(PAGE, 1000)
 	app:frames(6)
 	app:click(`{PAGE} >> role:button "Choose folder"`)
 	expect(app:wait(`{PAGE} >> role:button "Shuffle"`)).to_be(true)
