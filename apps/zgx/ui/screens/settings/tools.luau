@@ -283,7 +283,7 @@ end
 
 local CHEVRON, TILE = 14, 28
 local WORDS = ui.raw(16 + CHEVRON + 12 + TILE + 12, "where a group's words start: its inset, chevron and tile and their gaps")
-local COUNT = 132
+local COUNT = 168
 
 local function tool_row(g: any, tool: any): Node
 	local function editable(): boolean
@@ -407,6 +407,7 @@ local function group_row(g: any): Node
 				items = "center",
 				-- (Its own: a click on the count or the switch doesn't open the group.)
 				on_click = function() end,
+				role = "group",
 				ui.row {
 					min_w = COUNT,
 					justify = "end",
