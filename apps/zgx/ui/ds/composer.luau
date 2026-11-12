@@ -316,6 +316,7 @@ export type Props = {
 -- side and the foot as the pill's corner (inside its hairline) is round
 -- less theirs.
 local LINE = 22
+local LONG_LINES, COLLAPSED_LINES, TOGGLE_ROOM = 6, 3, 24
 local ONE_LINE = 47
 local TEXT_TOP, TEXT_BOTTOM, TEXT_MIN, TEXT_MAX = 16, 4, 76, 260
 local ACTIONS = 42
@@ -1429,19 +1430,63 @@ return ui.component(function(props: Props): Node
 		end
 		return head_h_seen:get()
 	end)
+	-- A long draft (14A): more than LONG_LINES rows of words, or its chips
+	-- wrapping past a row, can be collapsed to its last COLLAPSED_LINES rows
+	-- and one strip of small thumbnails. It opens again by its toggle,
+	-- ⌘⇧↓, a send (the draft emptied) or the composer shown for another chat.
+	local collapsed = ui.use_state(false)
+	-- (The strip's height as it stands opened: collapsed, it's the small one.)
+	local strip_h = ui.use_state(0)
+	ui.effect(function()
+		local h = head_h_seen:get()
+		if not collapsed:get() and strip_h:peek() ~= h then
+			strip_h:set(h)
+		end
+	end)
+	local function strip_wraps(): boolean
+		local tall = false
+		for _, c in strip_cargo:get() do
+			tall = tall or c.kind == "image" or c.kind == "appshot"
+		end
+		local row = if tall then 120 else 56
+		return strip_h:get() > row * 1.5 + 12
+	end
+	local long = ui.computed(function(): boolean
+		return open:get() and (wrapped_h:get() > LONG_LINES * LINE + 0.5 or (has_cargo() and strip_wraps()))
+	end)
+	ui.effect(function()
+		local ends = not long:get() or value:get() == ""
+		if ends and collapsed:peek() then
+			collapsed:set(false)
+		end
+	end)
+	if props.snap then
+		local snap = props.snap
+		ui.effect(function()
+			snap:get()
+			collapsed:set(false)
+		end)
+	end
 	-- The text box opened out: the wrapped text with its insets, between
-	-- the floor and the cap.
+	-- the floor and the cap; collapsed, its last rows.
 	local box = ui.computed(function(): number
+		if collapsed:get() then
+			return COLLAPSED_LINES * LINE + TEXT_TOP + TEXT_BOTTOM
+		end
 		local h = math.max(wrapped_h:get(), LINE)
 		return math.clamp(h + TEXT_TOP + TEXT_BOTTOM, TEXT_MIN, TEXT_MAX)
 	end)
 	local HEAD_GAP = head_gap()
+	-- With nothing over the words, the toggle takes a row of its own above them.
+	local function toggle_room(): number
+		return if long:get() and head_h:get() == 0 then TOGGLE_ROOM else 0
+	end
 	local height = ui.computed(function(): number
 		if open:get() then
 			local head = head_h:get()
 			-- With something over it, the draft's box starts under that
 			-- with the strip's own gap rather than the pill's top.
-			return head + (if head > 0 then box:get() - TEXT_TOP + HEAD_GAP else box:get()) + actions() + HAIRLINES
+			return head + (if head > 0 then box:get() - TEXT_TOP + HEAD_GAP else box:get()) + toggle_room() + actions() + HAIRLINES
 		end
 		return ONE_LINE + HAIRLINES
 	end)
@@ -1458,7 +1503,7 @@ return ui.component(function(props: Props): Node
 			return (ONE_LINE - LINE) / 2
 		end
 		local head = head_h:get()
-		return if head > 0 then head + HEAD_GAP else TEXT_TOP
+		return if head > 0 then head + HEAD_GAP else TEXT_TOP + toggle_room()
 	end)
 	local text_h = ui.computed(function(): number
 		return if open:get() then box:get() - TEXT_TOP - TEXT_BOTTOM else LINE
@@ -2000,6 +2045,101 @@ return ui.component(function(props: Props): Node
 	-- Files over the pill: its own sense of it, or the caller's.
 	local dropping = props.dropping or ui.use_state(false)
 
+	-- Collapsed, the chips as one strip of small thumbnails, the rest counted.
+	local MINI = 28
+	local function mini_strip(): Node
+		local function fits(): number
+			return math.max(1, math.floor((pill_w:get() - 140) / (MINI + 5)))
+		end
+		local function items(): { cargo.Item }
+			local list = strip_cargo:get()
+			local out: { cargo.Item } = {}
+			for i = 1, math.min(#list, fits()) do
+				table.insert(out, list[i])
+			end
+			return out
+		end
+		return ui.row {
+			id = "composer-mini-strip",
+			w_full = true,
+			h = MINI + 12,
+			pt = "$space.3",
+			px = "$zeron.composer.chip.inset",
+			gap = ui.raw(5, "the mockup's strip gap"),
+			items = "center",
+			ui.each(ui.computed(items), function(c: cargo.Item): Node
+				local picture = (c.kind == "image" or c.kind == "appshot") and c.src ~= nil and c.src ~= ""
+				return ui.div {
+					w = MINI,
+					h = MINI,
+					shrink = 0,
+					rounded = "$radius.lg",
+					overflow = "hidden",
+					bg = "$hover",
+					items = "center",
+					justify = "center",
+					if picture
+						then ui.image { src = c.src or "", fit = "cover", w_full = true, h_full = true }
+						else Icon { name = "document", size = 14 },
+				}
+			end),
+			ui.show(function(): boolean
+				return #strip_cargo:get() > fits()
+			end, ui.text {
+				function(): string
+					return locale.s("ds.composer.more", { n = #strip_cargo:get() - fits() })
+				end,
+				id = "composer-mini-more",
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
+				px = "$zeron.space.hair",
+			}),
+		}
+	end
+	local function toggle_collapsed()
+		if long:peek() then
+			collapsed:set(not collapsed:peek())
+			-- (The keys back in the words: the field keeps its caret's rows in view.)
+			local el = field:peek()
+			if el then
+				el:focus()
+			end
+		end
+	end
+	-- The toggle (14A): at the pill's top right while the draft is long.
+	local collapse = ui.show(function(): boolean
+		return long:get()
+	end, ui.button {
+		id = "composer-collapse",
+		absolute = true,
+		top = 6,
+		right = 8,
+		h = 24,
+		px = "$space.2",
+		gap = ui.raw(5, "the mockup's toggle gap"),
+		items = "center",
+		rounded = "$radius.lg",
+		color = "$text.tertiary",
+		hover = { bg = "$hover", color = "$text.primary" },
+		text_size = "$font.size.xs",
+		label = function(): string
+			return locale.s(if collapsed:get() then "ds.composer.expand" else "ds.composer.collapse")
+		end,
+		on_click = toggle_collapsed,
+		ui.text {
+			function(): string
+				return locale.s(if collapsed:get() then "ds.composer.expand" else "ds.composer.collapse")
+			end,
+		},
+		ui.div {
+			shrink = 0,
+			rotate = function(): number
+				return if collapsed:get() then 180 else 0
+			end :: any,
+			Icon { name = "alt-arrow-down", size = 12 },
+		},
+	})
+
 	-- What sits over the draft: the agent's ask, or the cargo strip.
 	local head: Node = ui.column {
 		on_resize = measure(head_h_seen, "h"),
@@ -2021,11 +2161,14 @@ return ui.component(function(props: Props): Node
 			elseif approval() then
 				return "approval"
 			elseif has_cargo() then
-				return "cargo"
+				return if collapsed:get() then "mini" else "cargo"
 			end
 			return nil
 		end, function(key: string): Node
 			local kind = string.match(key, "^(%a+)")
+			if kind == "mini" then
+				return mini_strip()
+			end
 			if kind == "question" then
 				local q = question() :: ask.Question
 				return ask.Question {
@@ -2267,6 +2410,7 @@ return ui.component(function(props: Props): Node
 			end,
 		},
 		head,
+		collapse,
 		-- The draft.
 		ui.div {
 			absolute = true,
@@ -2274,6 +2418,11 @@ return ui.component(function(props: Props): Node
 			right = eased(text_right),
 			top = eased(text_top),
 			h = eased(text_h),
+			-- Collapsed, its top fades over a row's height.
+			overflow = "hidden",
+			fade = function(): { number }
+				return if collapsed:get() then { LINE, 0 } else { 0, 0 }
+			end :: any,
 			-- Its placeholder, the composer's own (it changes with what is
 			-- asked): over the empty draft, taking no pointer.
 			ui.show(
@@ -2406,6 +2555,10 @@ return ui.component(function(props: Props): Node
 					end
 					else nil,
 				on_key = function(e)
+					if e.cmd and e.shift and e.key == "ArrowDown" and long:peek() then
+						toggle_collapsed()
+						return true
+					end
 					if dictating() and e.key == "Escape" then
 						if on_cancel_dictation then
 							on_cancel_dictation()
