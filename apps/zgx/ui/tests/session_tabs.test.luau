@@ -217,14 +217,23 @@ test("each tab opened is in view, with the panel open and the strip narrow", fun
 	local app = all_open()
 	app:click('#titlebar >> role:button "Panel"')
 	app:frames(60)
-	-- (By the keys: with two panes and the panel, the sidebar has stepped aside.)
+	-- (By the keys, Ctrl held through Ctrl+Tab's cards to the one wanted: with two
+	-- panes and the panel, the sidebar has stepped aside.)
 	local function go(id: string)
+		app:hold("ctrl")
+		app:frames(3)
 		for _ = 1, 12 do
-			if tostring(app:state("shell_route_path")):find(id, 1, true) then
+			if app:state("shell_switcher_cards") == nil then
+				app:command("shell.next_session")
+			elseif (app:state("shell_switcher_cards") :: any)[app:state("shell_switcher_hi") :: number] == id then
+				app:release()
+				app:frames(30)
+				expect(tostring(app:state("shell_route_path")):find(id, 1, true) ~= nil).to_be(true)
 				return
+			else
+				app:command("shell.next_session")
 			end
-			app:command("shell.next_session")
-			app:frames(30)
+			app:frames(10)
 		end
 		error(`never reached {id}`)
 	end
