@@ -16,10 +16,10 @@ fn mount() -> TestApp {
     app
 }
 
-/// Whether `target` is there and shows: its line in the tree (`line`
-/// names it there) not marked hidden.
-fn showing(app: &mut TestApp, target: &str, line: &str) -> bool {
-    app.find(target).is_some() && app.tree().lines().any(|l| l.contains(line) && !l.contains(" hidden"))
+/// Whether `target` is there and shows, as the tree would mark it (asked of
+/// the node: the tree's text stops at its line budget).
+fn showing(app: &mut TestApp, target: &str) -> bool {
+    app.find(target).is_some_and(|node| zgx_script::driver::shows(&app.ui.scene.borrow(), node))
 }
 
 /// The overlay (a modal's, a popover's panel) `node` shows in, if any.
@@ -37,7 +37,6 @@ fn overlay_of(app: &TestApp, node: NodeId) -> Option<NodeId> {
 }
 
 const BRANCHES: &str = "role:textbox \"Search branches…\"";
-const BRANCHES_LINE: &str = "textbox \"Search branches…\"";
 
 #[test]
 fn a_modal_opening_closes_the_popups_and_draws_over_them() {
@@ -47,7 +46,7 @@ fn a_modal_opening_closes_the_popups_and_draws_over_them() {
     // A new chat's branch list, open.
     app.click("role:button \"Branch\"");
     app.frames(30);
-    assert!(showing(&mut app, BRANCHES, BRANCHES_LINE), "the branch list opened");
+    assert!(showing(&mut app, BRANCHES), "the branch list opened");
     let row = app.find(BRANCHES).unwrap();
     let r = app.ui.scene.borrow().transformed_bounds(row);
     let (x, y) = (r.x + r.width / 2., r.y + r.height / 2.);
@@ -55,8 +54,8 @@ fn a_modal_opening_closes_the_popups_and_draws_over_them() {
     // ⌘K: the palette opens, and the list has closed first.
     assert!(app.host.run_command("shell.palette"));
     app.frames(30);
-    assert!(showing(&mut app, "#palette-search", "#palette-search"), "the palette opened");
-    assert!(!showing(&mut app, BRANCHES, BRANCHES_LINE), "the branch list closed as the palette opened");
+    assert!(showing(&mut app, "#palette-search"), "the palette opened");
+    assert!(!showing(&mut app, BRANCHES), "the branch list closed as the palette opened");
     // And where the list was, the palette (its card or its scrim) is what
     // the pointer meets: nothing floats over it.
     let palette = app.find("#palette-search").unwrap();

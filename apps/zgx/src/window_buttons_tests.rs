@@ -73,6 +73,7 @@ const PANEL: &str = "#titlebar >> role:button \"Panel\"";
 const VIEW: &str = "role:button \"Sidebar view options\"";
 const TAB: &str = "#session-tabs >> role:tab";
 const NEW_TAB: &str = "#titlebar-new-tab";
+const LIVE: &str = "#live-pill";
 // (The bar's 12 past what stands last, the strip's 8 before its first tab.)
 const PAST_NEW_TAB: f32 = 20.;
 
@@ -138,7 +139,7 @@ fn beside_windows_caption_buttons_zerons_controls_start_at_the_left_on_their_lin
     // but for the controls and the tab.
     for x in [60., 400., 700., caption - 60.] {
         let mut boxes = Vec::new();
-        for t in [TOGGLE, BACK, FORWARD, PANEL, TAB] {
+        for t in [TOGGLE, BACK, FORWARD, PANEL, TAB, LIVE] {
             if app.find(t).is_some() {
                 boxes.push(app.bounds(t));
             }
