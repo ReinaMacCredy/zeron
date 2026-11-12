@@ -17,7 +17,8 @@ return {
 	under_rail = ui.state("shell_art_under_rail", false),
 	split = ui.state("shell_art_split", false),
 	expanded = ui.state("shell_art_expanded", false),
-	shade = ui.ref(),
+	strip = ui.ref(),
+	tab = ui.ref(),
 	px = ui.state("shell_wallpaper_px", 0.5),
 	py = ui.state("shell_wallpaper_py", 0.5),
 }
