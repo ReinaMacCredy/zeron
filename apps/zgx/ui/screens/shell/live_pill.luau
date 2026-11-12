@@ -475,7 +475,7 @@ local function row(r: any, clock: State<number>, here: string?, expanded: any, c
 					then ui.text { ui.t("shell.live.viewing"), shrink = 0, wrap = false, text_size = "$font.size.xs", color = "$text.tertiary" }
 					else nil,
 			},
-			ds.FadeText { words, literal = true, w_full = true, text_size = "$font.size.xs", color = ink, tabular = true },
+			ui.text { words, literal = true, w_full = true, min_w = 0, truncate = true, text_size = "$font.size.xs", color = ink, tabular = true },
 		},
 		right_of(r, clock, expanded, close),
 	}
