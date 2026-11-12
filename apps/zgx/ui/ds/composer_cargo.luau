@@ -26,7 +26,6 @@ local Menu = require("@self/menu")
 local control = require("@self/control")
 local locale = require("@self/locale")
 local motion = require("@self/motion")
-local HtmlPicks = require("@self/html_picks")
 
 local M = {}
 
@@ -1411,16 +1410,6 @@ M.Strip = ui.component(function(props: Props): Node
 		end
 	end)
 	local h = n("zeron.composer.chip.h", 40)
-	local function picked(): { Item }
-		local out: { Item } = {}
-		for _, it in all:get() do
-			if it.kind == "pick" then
-				table.insert(out, it)
-			end
-		end
-		return out
-	end
-	local lit = ui.shared("chat.picks.lit", nil :: string?)
 	-- A chip follows its item (its progress climbing, its failure): zgx's
 	-- animated rows get no state of their own, so each finds its item in
 	-- the list by its id.
@@ -1464,22 +1453,6 @@ M.Strip = ui.component(function(props: Props): Node
 						else { opacity = { 0, 1 }, y = { 8, 0 }, duration = 240, ease = "outExpo" },
 					exit = { opacity = 0, duration = 140, ease = "outCubic" },
 				}),
-			}
-		),
-		ui.show(
-			function(): boolean
-				return #picked() > 0
-			end,
-			HtmlPicks.Tray {
-				items = picked,
-				on_clear = function(id: string)
-					if props.on_remove then
-						props.on_remove(id)
-					end
-				end,
-				lit = function(): string?
-					return lit:get()
-				end,
 			}
 		),
 		ui.show(

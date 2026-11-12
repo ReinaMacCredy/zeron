@@ -888,7 +888,7 @@ test("a dropped GIF or HEIC is a file chip, with no script error", function()
 		return 0
 	end
 	-- A picture is a tile of 120; a file's is 56.
-	expect(chip_w("zgx.png")).to_be(120)
+	expect(chip_w("Image 3.png")).to_be(120)
 	expect(chip_w("spin.gif")).to_be(56)
 	expect(chip_w("photo.heic")).to_be(56)
 	expect(app:error()).to_be(nil)

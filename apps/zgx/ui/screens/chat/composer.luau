@@ -1277,6 +1277,9 @@ local function Composer(): Node
 				bind = Pills.window_bind(),
 				tasks = asks.tasks,
 				waiting = true,
+				picks = function(): string?
+					return session_id:get()
+				end,
 				on_extent = function(w: number)
 					if math.abs(pills_reach:peek() - w) >= 0.5 then
 						pills_reach:set(w)

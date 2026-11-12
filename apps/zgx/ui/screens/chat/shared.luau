@@ -248,15 +248,17 @@ function M.take(of: string?): (string, { any })
 		local link = `[{item.name}](zeron-attachment:{item.number})`
 		if not item.inline or string.find(text, link, 1, true) then
 			table.insert(cargo, item)
-			if item.inline then
+			if item.number then
 				carried[tostring(item.number)] = true
 			end
 		end
 	end
 	-- (A paste still being written goes as its name, gpui's `demote_unattached_mentions`.)
-	text = string.gsub(text, "%[(Pasted text (%d+)%.txt)%]%(zeron%-attachment:%d+%)", function(name: string, n: string): string?
+	local function demote(name: string, n: string): string?
 		return if carried[n] then nil else name
-	end)
+	end
+	text = string.gsub(text, "%[([^%]]*)%]%(zeron%-attachment:(%d+)%)", demote)
+	text = string.gsub(text, "%[([^%]]*)%]%(zeron%-image:(%d+)%)", demote)
 	taken[cargo] = { key = key, raw = raw, quotes = quotes }
 	ui.batch(function()
 		if mine then
@@ -714,19 +716,44 @@ local function stage_files(key: string, base: number, files: { any }, stats: { [
 				})
 			else
 				local picture = is_image(name)
-				local ext = if f.clipboard then string.match(string.lower(name), "%.(%a+)$") else nil
+				local ext = if picture then string.match(string.lower(name), "%.(%a+)$") else nil
+				local escaped = string.gsub(name, "([%[%]\\])", "\\%1")
+				local link = if picture then `[Image {number}](zeron-image:{number})` else `[{escaped}](zeron-attachment:{number})`
 				table.insert(items, {
 					id = chip_id("file"),
 					kind = if picture then "image" else "file",
-					name = if f.clipboard then `Image {number}.{ext}` else name,
+					name = if picture then `Image {number}.{ext}` else name,
 					src = if picture then f.path else nil,
 					path = f.path,
 					number = number,
+					shown = references.add(M.refs_key(key), { kind = if picture then "image" else "file", name = if picture then `Image {number}` else name, link = link }),
 				})
 			end
 		end
 	end
+	local refs = M.refs_key(key)
+	for _, item in items do
+		if item.kind == "image" and item.shown then
+			local asked = M.ask("chat.thumb", item.path)
+			if asked then
+				asked:after(function(svg: any)
+					if type(svg) == "string" then
+						references.set_thumb(refs, item.shown, "code:" .. svg)
+					end
+				end, function() end)
+			end
+		end
+	end
 	ui.batch(function()
+		local words: { string } = {}
+		for _, item in items do
+			if item.shown then
+				table.insert(words, item.shown)
+			end
+		end
+		if #words > 0 then
+			M.put_words(key, table.concat(words, " "))
+		end
 		push_cargo(key, items)
 		if #refused > 0 then
 			refuse_in(key, table.concat(refused, " "))
@@ -863,26 +890,7 @@ function M.paste_label(text: string): string?
 	return nil
 end
 
--- Where a chip's words stand in `text`: not inside a longer twin (a second
--- chip of the same first line is the first's words and an NBSP or few more),
--- though a next chip's lead (six NBSPs) may follow it.
-function M.find_chip(text: string, shown: string): (number?, number?)
-	local from = 1
-	while true do
-		local at, to = string.find(text, shown, from, true)
-		if not at or not to then
-			return nil, nil
-		end
-		local more = 0
-		while string.sub(text, to + 1 + more * 2, to + 2 + more * 2) == "\u{a0}" do
-			more += 1
-		end
-		if more == 0 or more >= 6 then
-			return at, to
-		end
-		from = at + 1
-	end
-end
+M.find_chip = references.find_chip
 
 -- A long paste, as gpui's composer takes it: a file of its own, carried
 -- with the message, and a chip at the caret standing for it (its first
@@ -1633,10 +1641,28 @@ end
 -- A pasted text's chip leaves the words with it (gpui's `remove_attachment_chips`).
 local function without_chip(text: string, item: any): string
 	local at, to = nil, nil
-	if item.inline and item.shown then
+	if item.shown then
 		at, to = M.find_chip(text, item.shown)
 	end
 	return if at and to then string.sub(text, 1, at - 1) .. string.sub(text, to + 1) else text
+end
+
+function M.put_words(key: string, words: string)
+	local refs = M.refs_key(key)
+	local text = M.draft_peek(key).text
+	local at = math.clamp(references.caret(refs) or #text, 0, #text)
+	for _, span in references.spans(refs, text) do
+		if at > span.from - 1 and at < span.to then
+			at = span.to
+		end
+	end
+	while at < #text and (string.byte(text, at + 1) or 0) >= 0x80 and (string.byte(text, at + 1) or 0) < 0xC0 do
+		at += 1
+	end
+	local tail = if at == #text then " " else ""
+	local lead = if at > 0 and not string.find(string.sub(text, at, at), "%s") then " " else ""
+	M.set_draft_of(key, "text", string.sub(text, 1, at) .. lead .. words .. tail .. string.sub(text, at + 1))
+	references.caret(refs, at + #lead + #words + #tail)
 end
 
 function M.remove_cargo(id: string)

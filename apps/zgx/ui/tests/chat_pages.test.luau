@@ -56,6 +56,20 @@ end
 local GROUPS = { { code = "A", name = "Góc trang" }, { code = "B", name = "Thanh tab" }, { code = "C", name = "Rail" } }
 local LABELS = { A1 = "Bo góc thường", A2 = "Nổi sát đỉnh", B1 = "Có viền", B2 = "Không viền", C1 = "Ảnh sát mép", C2 = "Cùng tông" }
 
+local NB = "\\u{a0}"
+
+local function token(code: string, label: string?): string
+	return NB .. code .. NB .. (string.gsub(label or LABELS[code], " ", NB)) .. NB
+end
+
+local function draft(app: any): string
+	return app:tree('role:textbox "Message"')
+end
+
+local function picked_any(app: any): boolean
+	return string.find(draft(app), NB, 1, true) ~= nil
+end
+
 local function pick(app: any, code: string)
 	post(app, FRAME, { pick = { group = string.sub(code, 1, 1), code = code, label = LABELS[code], groups = GROUPS, rect = { 10, 10, 120, 34 }, covered = false } })
 end
@@ -158,36 +172,60 @@ test("pages: expand opens the sheet with Live and Source and Save .html; Escape 
 	expect(app:has("#html-sheet-source-text")).to_be(false)
 end)
 
-test("picks: a click fills its group's slot in the tray; another option swaps it in place; the chosen one again or its x clears it", function()
+test("picks: a click puts its token in the draft; another option of its group swaps it in place; the chosen one again or deleting the token clears it", function()
 	local app = mount("chat_fixture.luau")
 	seeded(app)
-	expect(app:has("#composer-picks")).to_be(false)
+	expect(picked_any(app)).to_be(false)
 	pick(app, "A2")
-	expect(app:has("#composer-picks")).to_be(true)
-	local tray = app:tree("#composer-picks")
-	expect(tray).to_contain(LABELS.A2)
-	-- The groups not yet picked keep their empty slots, by name.
-	expect(tray).to_contain('"Thanh tab"')
-	expect(tray).to_contain('"Rail"')
+	expect(draft(app)).to_contain(token("A2"))
 	-- The page's buttons follow: A2 chosen, the count.
 	expect(last_run(app, FRAME)).to_contain('{"code":"A2","group":"A"}')
 	expect(last_run(app, FRAME)).to_contain("1/3 chosen")
-	local slot = box_of(app, "#composer-picks", `#pick-slot-{FRAME}-A`) :: any
-	pick(app, "A1")
-	tray = app:tree("#composer-picks")
-	expect(tray).to_contain(LABELS.A1)
-	expect(string.find(tray, LABELS.A2, 1, true)).to_be(nil)
-	-- In place: the same slot.
-	local again = box_of(app, "#composer-picks", `#pick-slot-{FRAME}-A`) :: any
-	expect(again.x).to_be(slot.x)
-	pick(app, "A1")
-	expect(app:has("#composer-picks")).to_be(false)
 	pick(app, "B2")
-	app:click(`#pick-clear-{FRAME}-B`)
+	pick(app, "A1")
+	local d = draft(app)
+	local a1, b2 = string.find(d, token("A1"), 1, true), string.find(d, token("B2"), 1, true)
+	expect(a1 ~= nil and b2 ~= nil and a1 < b2).to_be(true)
+	expect(string.find(d, token("A2"), 1, true)).to_be(nil)
+	pick(app, "A1")
+	expect(string.find(draft(app), token("A1"), 1, true)).to_be(nil)
+	app:click('role:textbox "Message"')
+	app:key("End")
+	app:key("Backspace")
+	app:key("Backspace")
 	settle(app)
-	expect(app:has("#composer-picks")).to_be(false)
-	-- Picking never sends nor takes the keys.
+	expect(picked_any(app)).to_be(false)
+	expect(last_run(app, FRAME)).to_contain('"chosen":[]')
 	expect(string.find(app:state("calls"), "send:", 1, true)).to_be(nil)
+end)
+
+test("picks: a page's groups left to pick show as a pill over the composer; its card lists each option and picks it as the page does", function()
+	local app = mount("chat_fixture.luau")
+	seeded(app)
+	expect(app:has("#pills-picks")).to_be(false)
+	local ready = {}
+	for _, g in GROUPS do
+		local options = {}
+		for _, n in { "1", "2" } do
+			table.insert(options, { code = g.code .. n, label = LABELS[g.code .. n], desc = `about {g.code}{n}` })
+		end
+		table.insert(ready, { code = g.code, name = g.name, options = options })
+	end
+	post(app, FRAME, { ready = ready })
+	expect(app:tree("#pills-picks")).to_contain("Khung app")
+	expect(app:tree("#pills-picks")).to_contain("3 groups to pick")
+	pick(app, "A2")
+	expect(app:tree("#pills-picks")).to_contain("2 groups to pick")
+	app:click("#pills-picks")
+	settle(app)
+	expect(app:tree("#picks-card")).to_contain("about B1")
+	app:click("#picks-option-B-B1")
+	settle(app)
+	expect(draft(app)).to_contain(token("B1"))
+	expect(last_run(app, FRAME)).to_contain('{"code":"B1","group":"B"}')
+	expect(app:tree("#pills-picks")).to_contain("1 group to pick")
+	pick(app, "C2")
+	expect(app:has("#pills-picks")).to_be(false)
 end)
 
 test("picks: the prompt carries the note then each group's pick and what's left; sent groups lock, the rest stay open", function()
@@ -196,8 +234,8 @@ test("picks: the prompt carries the note then each group's pick and what's left;
 	pick(app, "A2")
 	pick(app, "B2")
 	send(app, "+ header của C2")
-	expect(app:state("calls")).to_contain('send:s2:+ header của C2\n\nĐã chọn trong "Khung app":\nA = A2 (Nổi sát đỉnh)\nB = B2 (Không viền)\nChưa chọn: C (Rail)')
-	expect(app:has("#composer-picks")).to_be(false)
+	expect(app:state("calls")).to_contain('send:s2:A2 B2 + header của C2\n\nĐã chọn trong "Khung app":\nA = A2 (Nổi sát đỉnh)\nB = B2 (Không viền)\nChưa chọn: C (Rail)')
+	expect(picked_any(app)).to_be(false)
 	app:command("picks_echo")
 	settle(app)
 	-- The sent message carries its chips and its note.
@@ -207,14 +245,12 @@ test("picks: the prompt carries the note then each group's pick and what's left;
 	expect(last_run(app, FRAME)).to_contain('"locked":["A","B"]')
 	-- A sent group's options do nothing; the one left is still open.
 	pick(app, "A1")
-	expect(app:has("#composer-picks")).to_be(false)
+	expect(picked_any(app)).to_be(false)
 	pick(app, "C1")
-	expect(app:tree("#composer-picks")).to_contain(LABELS.C1)
+	expect(draft(app)).to_contain(token("C1"))
 	expect(last_run(app, FRAME)).to_contain("2/3 sent · 1 chosen")
-	-- Only the open group has a slot.
-	expect(app:has(`#pick-slot-{FRAME}-A`)).to_be(false)
 	send(app, "")
-	expect(app:state("calls")).to_contain('send:s2:Đã chọn trong "Khung app":\nC = C1 (Ảnh sát mép)')
+	expect(app:state("calls")).to_contain('send:s2:C1\n\nĐã chọn trong "Khung app":\nC = C1 (Ảnh sát mép)')
 	app:command("picks_echo")
 	settle(app)
 	expect(last_run(app, FRAME)).to_contain('"count":"Sent"')
@@ -230,25 +266,10 @@ test("picks: a page without groups adds free chips, several, sent as label lines
 	free("p3", "Hill")
 	free("p2", "Field")
 	free("p2", "Field")
-	expect(app:tree("#composer-picks")).to_contain('"Sea"')
-	expect(string.find(app:tree("#composer-picks"), "Field", 1, true)).to_be(nil)
+	expect(draft(app)).to_contain(token("·", "Sea"))
+	expect(string.find(draft(app), "Field", 1, true)).to_be(nil)
 	send(app, "")
-	expect(app:state("calls")).to_contain('send:s2:Đã chọn trong "Ảnh":\n- Sea\n- Hill')
-end)
-
-test("picks: six groups wrap the tray to two rows", function()
-	local app = mount("chat_fixture.luau")
-	seeded(app)
-	local six = {}
-	for _, g in { "A", "B", "C", "D", "E", "F" } do
-		table.insert(six, { code = g, name = `Group {g}` })
-	end
-	post(app, FRAME, { pick = { group = "A", code = "A1", label = "One", groups = six } })
-	local a = box_of(app, "#composer-picks", `#pick-slot-{FRAME}-A`) :: any
-	local d = box_of(app, "#composer-picks", `#pick-slot-{FRAME}-D`) :: any
-	local c = box_of(app, "#composer-picks", `#pick-slot-{FRAME}-C`) :: any
-	expect(c.y).to_be(a.y)
-	expect(d.y).to_be(a.y + a.h + 6)
+	expect(app:state("calls")).to_contain('send:s2:p1 p3\n\nĐã chọn trong "Ảnh":\n- Sea\n- Hill')
 end)
 
 test("picks: unsent picks stay in the draft over a reload and the page is told them again", function()
@@ -257,14 +278,14 @@ test("picks: unsent picks stay in the draft over a reload and the page is told t
 	pick(app, "A2")
 	app:command("remake_session")
 	settle(app)
-	expect(app:tree("#composer-picks")).to_contain(LABELS.A2)
+	expect(draft(app)).to_contain(token("A2"))
 	-- And over a switch to another chat and back.
 	app:command("go_s1")
 	settle(app)
-	expect(app:has("#composer-picks")).to_be(false)
+	expect(picked_any(app)).to_be(false)
 	app:command("go_s2")
 	settle(app)
-	expect(app:tree("#composer-picks")).to_contain(LABELS.A2)
+	expect(draft(app)).to_contain(token("A2"))
 	expect(last_run(app, FRAME)).to_contain('{"code":"A2","group":"A"}')
 end)
 
@@ -273,18 +294,18 @@ test("pages: what a page posts without its pick nonce, from a frame, or asking t
 	seeded(app)
 	-- Forged: no nonce, another's nonce, an iframe's.
 	post(app, FRAME, { nonce = "", pick = { group = "A", code = "A2", label = "x", groups = GROUPS } })
-	expect(app:has("#composer-picks")).to_be(false)
+	expect(picked_any(app)).to_be(false)
 	post(app, FRAME, { nonce = "p:/u/html/s2/pictures.html", pick = { group = "B", code = "B2", label = "x", groups = GROUPS } })
-	expect(app:has("#composer-picks")).to_be(false)
+	expect(picked_any(app)).to_be(false)
 	app:set_state("page_message", { id = `html-page-{FRAME}`, main = false, value = { kind = "zeron.page", nonce = "p:/u/html/s2/frame.html", pick = { group = "C", code = "C2", label = "x", groups = GROUPS } } })
 	app:command("page_post")
 	settle(app)
-	expect(app:has("#composer-picks")).to_be(false)
+	expect(picked_any(app)).to_be(false)
 	-- The review's two leak routes (a setter on Object.prototype, a wrapped JSON.stringify) and their
 	-- neighbours are refused in the page itself (html_pages `a_pages_own_script_never_reads_the_nonces…`,
 	-- under node); what a leak of the height channel would still give, its nonce, places no pick.
 	post(app, FRAME, { nonce = "n:/u/html/s2/frame.html", pick = { group = "A", code = "A1", label = "x", groups = GROUPS } })
-	expect(app:has("#composer-picks")).to_be(false)
+	expect(picked_any(app)).to_be(false)
 	-- Signed, asking the app to send, focus the composer or click its send.
 	post(app, FRAME, { send = true, focus = true, click = "#composer-send", text = "go" })
 	post(app, FRAME, { nonce = "p:/u/html/s2/frame.html", send = true, focus = true, click = "#composer-send", text = "go" })
@@ -292,10 +313,10 @@ test("pages: what a page posts without its pick nonce, from a frame, or asking t
 	expect(app:tree('role:textbox "Message"')).never.to_contain(" focused")
 	-- A `ready` that isn't a list, as a page's own toJSON could make it, is no error.
 	post(app, FRAME, { ready = { pick = { group = "A", code = "A1" } } })
-	expect(app:has("#composer-picks")).to_be(false)
+	expect(picked_any(app)).to_be(false)
 	-- A signed pick only places it.
 	pick(app, "A2")
-	expect(app:has("#composer-picks")).to_be(true)
+	expect(picked_any(app)).to_be(true)
 	expect(string.find(app:state("calls"), "send:", 1, true)).to_be(nil)
 	expect(app:tree('role:textbox "Message"')).never.to_contain(" focused")
 end)
@@ -305,7 +326,7 @@ test("pages: a page with a script before its bootstrap gets no pick nonce, and i
 	app:set_state("page_early_script", true)
 	seeded(app)
 	pick(app, "A2")
-	expect(app:has("#composer-picks")).to_be(false)
+	expect(picked_any(app)).to_be(false)
 	-- Its height still follows.
 	post(app, FRAME, { height = 420 })
 	local page = `#html-page-{FRAME}`
@@ -327,7 +348,7 @@ test("pages: the sheet's page never sizes the card, and gets the ticks, locks an
 	expect((box_of(app, page, page) :: any).h).to_be(420)
 	-- A pick on either page shows on both.
 	post_to(app, "html-sheet-page", FRAME, { pick = { group = "A", code = "A2", label = LABELS.A2, groups = GROUPS } })
-	expect(app:tree("#composer-picks")).to_contain(LABELS.A2)
+	expect(draft(app)).to_contain(token("A2"))
 	expect(last_run(app, `{FRAME}#sheet`)).to_contain('{"code":"A2","group":"A"}')
 	expect(last_run(app, FRAME)).to_contain('{"code":"A2","group":"A"}')
 	-- The theme switched while the sheet was closed: its page follows too.

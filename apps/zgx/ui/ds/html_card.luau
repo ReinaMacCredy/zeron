@@ -184,6 +184,39 @@ local function word(v: any, most: number): string?
 	return s
 end
 
+local function code_of(v: any): string?
+	local c = word(v, 32)
+	return if c and c ~= "" and not string.find(c, "%s") then c else nil
+end
+
+local function groups_of(list: any, options: boolean): { any }
+	local groups = {}
+	for i, g in list do
+		if type(i) ~= "number" or i > 12 or type(g) ~= "table" then
+			break
+		end
+		local c = code_of(g.code)
+		if c then
+			local n = word(g.name, 60)
+			local group: any = { code = c, name = if n and n ~= "" then n else c }
+			if options then
+				group.options = {}
+				for j, o in if type(g.options) == "table" then g.options else {} do
+					if type(j) ~= "number" or j > 24 or type(o) ~= "table" then
+						break
+					end
+					local oc, label = code_of(o.code), word(o.label, 120)
+					if oc then
+						table.insert(group.options, { code = oc, label = if label and label ~= "" then label else oc, desc = word(o.desc, 160) or "" })
+					end
+				end
+			end
+			table.insert(groups, group)
+		end
+	end
+	return groups
+end
+
 local function clean_pick(p: any): any?
 	if type(p) ~= "table" then
 		return nil
@@ -195,19 +228,7 @@ local function clean_pick(p: any): any?
 	if label == "" then
 		label = code
 	end
-	local groups = {}
-	if type(p.groups) == "table" then
-		for i, g in p.groups do
-			if type(i) ~= "number" or i > 12 or type(g) ~= "table" then
-				break
-			end
-			local c, n = word(g.code, 32), word(g.name, 60)
-			if c and c ~= "" and not string.find(c, "%s") then
-				table.insert(groups, { code = c, name = if n and n ~= "" then n else c })
-			end
-		end
-	end
-	return { code = code, group = group, label = label, groups = groups }
+	return { code = code, group = group, label = label, groups = if type(p.groups) == "table" then groups_of(p.groups, false) else {} }
 end
 
 function M.count(groups: { any }, chosen: { any }, sent: { list: { any }, locked: { [string]: boolean } }): string
@@ -495,21 +516,6 @@ local function signed(value: any, main_frame: any, nonce: string?): boolean
 	return main_frame == true and type(value) == "table" and value.kind == "zeron.page" and type(nonce) == "string" and nonce ~= "" and value.nonce == nonce
 end
 
-local function groups_of(ready: any): { any }
-	local groups = {}
-	for i, g in ready do
-		if type(i) ~= "number" or i > 12 or type(g) ~= "table" then
-			break
-		end
-		local c = word(g.code, 32)
-		if c and c ~= "" and not string.find(c, "%s") then
-			local n = word(g.name, 60)
-			table.insert(groups, { code = c, name = if n and n ~= "" then n else c })
-		end
-	end
-	return groups
-end
-
 local function Page(props: any): Node
 	local key = props.key
 	local e = entry_of(key)
@@ -616,7 +622,10 @@ local function Page(props: any): Node
 			end
 		end
 		if type(value.ready) == "table" then
-			e.groups = groups_of(value.ready)
+			e.groups = groups_of(value.ready, true)
+			if pages and pages.ready then
+				pages.ready(key, props.title, props.message, e.groups)
+			end
 			e.shown = nil
 			e.theme = retheme(e.web, e.theme)
 			sync_picks()

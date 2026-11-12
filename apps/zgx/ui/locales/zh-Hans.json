@@ -1526,8 +1526,9 @@
       "mention": "提及"
     },
     "html_picks": {
-      "tray": "已选选项",
-      "clear": "移除所选",
+      "close": "关闭",
+      "pill": "{title} · {n} 组待选",
+      "left": "{n} 组待选",
       "sent": "已选选项"
     },
     "html_card": {

@@ -13,6 +13,7 @@ local store = require("@app/screens/chat/store")
 local lanes = require("@app/screens/chat/lanes")
 local Roster = require("@app/screens/chat/roster")
 local Waiting = require("@app/screens/chat/waiting")
+local PicksPill = require("@app/screens/chat/picks_pill")
 local typing = require("@app/screens/chat/typing")
 local glass = require("@ds/glass")
 local route = require("@app/screens/shell/route")
@@ -1058,7 +1059,7 @@ local ShellsBody = ui.component(function(props: { bind: any, tasks: any, detail:
 	end, { w_full = true })
 end)
 
-M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?, id: string?, keys: (() -> ())?, on_extent: ((w: number) -> ())? }): Node
+M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?, picks: (() -> string?)?, id: string?, keys: (() -> ())?, on_extent: ((w: number) -> ())? }): Node
 	local bind = props.bind
 	local keys = props.keys or typing.take
 	local runs = M.runs_of(bind)
@@ -1078,6 +1079,7 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 	local roster_open = ui.use_state(false)
 	local shells_open = ui.use_state(false)
 	local waiting_open = ui.use_state(false)
+	local picks_open = ui.use_state(false)
 	local shell_detail = ui.use_state(nil :: string?)
 	ui.effect(function()
 		if not shells_open:get() then
@@ -1087,6 +1089,7 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 	tracked(roster_open)
 	tracked(shells_open)
 	tracked(waiting_open)
+	tracked(picks_open)
 	floating[roster_open] = true
 	floating[shells_open] = true
 	ui.on_cleanup(function()
@@ -1094,6 +1097,7 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 		floating[shells_open] = nil
 	end)
 	keys_back(waiting_open, keys)
+	keys_back(picks_open, keys)
 	local function toggle(open: any)
 		open:set(not open:peek())
 		ui.after(0, keys)
@@ -1102,7 +1106,7 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 	local row_ref = ui.ref()
 	local width = ui.use_state(640)
 	ui.effect(function()
-		if shells_open:get() or waiting_open:get() then
+		if shells_open:get() or waiting_open:get() or picks_open:get() then
 			ui.after(0, function()
 				local w = row_ref.width
 				if w and w > 0 and width:peek() ~= w then
@@ -1112,7 +1116,7 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 		end
 	end)
 	local function only(open: any)
-		for _, other in { roster_open, shells_open, waiting_open } do
+		for _, other in { roster_open, shells_open, waiting_open, picks_open } do
 			if other ~= open and other:peek() then
 				other:set(false)
 			end
@@ -1131,6 +1135,11 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 	ui.effect(function()
 		if waiting_open:get() then
 			only(waiting_open)
+		end
+	end)
+	ui.effect(function()
+		if picks_open:get() then
+			only(picks_open)
 		end
 	end)
 	local seen = bind.id()
@@ -1333,6 +1342,15 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 			return ShellsBody { bind = bind, tasks = shells, detail = shell_detail, clock = clock }
 		end),
 	}
+	if props.picks then
+		table.insert(children, PicksPill.Pill {
+			open = picks_open,
+			width = function(): number
+				return width:get()
+			end,
+			chat = props.picks,
+		})
+	end
 	if props.waiting then
 		table.insert(children, Waiting.Pill {
 			open = waiting_open,

@@ -1526,8 +1526,9 @@
       "mention": "Mention"
     },
     "html_picks": {
-      "tray": "Picked options",
-      "clear": "Remove pick",
+      "close": "Close",
+      "pill": "{title} · {n, plural, one {# group to pick} other {# groups to pick}}",
+      "left": "{n, plural, one {# group to pick} other {# groups to pick}}",
       "sent": "Picked options"
     },
     "html_card": {

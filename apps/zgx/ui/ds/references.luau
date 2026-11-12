@@ -10,8 +10,8 @@ local TRAIL = string.rep(NB, 2)
 local TASK_MAX = 32
 
 -- (`pasted`: a long paste carried as a file, gpui's `[Pasted text N.txt](zeron-attachment:N)`, shown as its first line.)
-export type Kind = "skill" | "command" | "task" | "pasted"
-export type Ref = { kind: Kind, link: string, task: string? }
+export type Kind = "skill" | "command" | "task" | "pasted" | "pick" | "image" | "file"
+export type Ref = { kind: Kind, link: string, task: string?, code: string?, thumb: string? }
 
 local shared: State<{ [string]: { [string]: Ref } }>? = nil
 -- (Made on first use, not at load: a plugin's markdown requires this module for `humanize` alone, and a plugin may not hold app state.)
@@ -39,7 +39,10 @@ local function cut(title: string): string
 	return string.sub(title, 1, (utf8.offset(title, TASK_MAX) or #title + 1) - 1) .. "…"
 end
 
-function M.label(kind: Kind, name: string): string
+function M.label(kind: Kind, name: string, code: string?): string
+	if kind == "pick" then
+		return NB .. (string.gsub(`{code or ""} {cut(name)}`, " ", NB)) .. NB
+	end
 	local words = if kind == "skill" then M.humanize(name) elseif kind == "command" then "/" .. name else cut(name)
 	words = (string.gsub(words, " ", NB))
 	if kind == "task" then
@@ -52,20 +55,34 @@ local function map_of(key: string): { [string]: Ref }
 	return maps():peek()[key] or {}
 end
 
-function M.add(key: string, ref: { kind: Kind, name: string, link: string, task: string? }): string
+function M.add(key: string, ref: { kind: Kind, name: string, link: string, task: string?, code: string?, thumb: string? }): string
 	local map = map_of(key)
-	local shown = M.label(ref.kind, ref.name)
+	local shown = M.label(ref.kind, ref.name, ref.code)
 	while map[shown] and map[shown].link ~= ref.link do
 		shown ..= NB
 	end
 	if not map[shown] then
 		local next = table.clone(map)
-		next[shown] = { kind = ref.kind, link = ref.link, task = ref.task }
+		next[shown] = { kind = ref.kind, link = ref.link, task = ref.task, code = ref.code, thumb = ref.thumb }
 		local all = table.clone(maps():peek())
 		all[key] = next
 		maps():set(all)
 	end
 	return shown
+end
+
+function M.set_thumb(key: string, shown: string, thumb: string)
+	local map = map_of(key)
+	local ref = map[shown]
+	if ref and ref.thumb ~= thumb then
+		local next = table.clone(map)
+		local with = table.clone(ref)
+		with.thumb = thumb
+		next[shown] = with
+		local all = table.clone(maps():peek())
+		all[key] = next
+		maps():set(all)
+	end
 end
 
 function M.clear(key: string)
@@ -74,6 +91,37 @@ function M.clear(key: string)
 		all[key] = nil
 		maps():set(all)
 	end
+end
+
+-- Where a chip's words stand in `text`: not inside a longer twin (a second
+-- chip of the same first line is the first's words and an NBSP or few more),
+-- though a next chip's lead (six NBSPs) may follow it.
+function M.find_chip(text: string, shown: string): (number?, number?)
+	local from = 1
+	while true do
+		local at, to = string.find(text, shown, from, true)
+		if not at or not to then
+			return nil, nil
+		end
+		local more = 0
+		while string.sub(text, to + 1 + more * 2, to + 2 + more * 2) == "\u{a0}" do
+			more += 1
+		end
+		if more == 0 or more >= 6 then
+			return at, to
+		end
+		from = at + 1
+	end
+end
+
+function M.gone(text: string, cargo: { any }): { string }
+	local out: { string } = {}
+	for _, it in cargo do
+		if it.shown and (it.kind == "pick" or (it.kind == "file" and not it.inline)) and not M.find_chip(text, it.shown) then
+			table.insert(out, it.id)
+		end
+	end
+	return out
 end
 
 local function labels(map: { [string]: Ref }): { string }
@@ -146,6 +194,10 @@ function M.decode(key: string, raw: string): string
 				shown = M.add(key, { kind = "task", name = label, link = link, task = target })
 			elseif scheme == "attachment" and string.match(label, "^Pasted text %d+%.txt$") then
 				shown = M.add(key, { kind = "pasted", name = label, link = link })
+			elseif scheme == "attachment" and string.match(target, "^%d+$") then
+				shown = M.add(key, { kind = "file", name = label, link = link })
+			elseif scheme == "image" and string.match(target, "^%d+$") then
+				shown = M.add(key, { kind = "image", name = label, link = link })
 			end
 		end
 		if shown and open then
@@ -194,7 +246,12 @@ function M.highlight(key_of: () -> string): (line: string, state: number) -> ({ 
 			return spans, next_state
 		end
 		for _, at in M.spans(key_of(), line) do
-			if at.ref.kind == "pasted" then
+			if at.ref.kind == "pasted" or at.ref.kind == "image" or at.ref.kind == "file" then
+				continue
+			end
+			if at.ref.kind == "pick" then
+				local from = at.from + #NB
+				table.insert(spans, 1, { from, from + #(at.ref.code or "") - 1, "$text.primary", weight = 600 } :: any)
 				continue
 			end
 			local ink = if at.ref.kind == "skill" then "$zeron.reference.skill" else "$zeron.reference.command"
@@ -204,6 +261,10 @@ function M.highlight(key_of: () -> string): (line: string, state: number) -> ({ 
 		end
 		return spans, next_state
 	end
+end
+
+function M.pick_wash(): string
+	return ((require("@ds/html_picks") :: any).ink() :: string) .. "29"
 end
 
 local TASK_MARKS = {
@@ -226,22 +287,27 @@ end
 function M.chips(key_of: () -> string, value: State<string>, line: number, column_of: ((id: string) -> string?)?): () -> { any }
 	local size = math.min(14, line - 3 - 6)
 	return function(): { any }
+		maps():get()
 		local out = {}
 		for _, at in M.spans(key_of(), value:get()) do
 			if at.ref.kind == "task" then
 				local mark = TASK_MARKS[(column_of and at.ref.task and column_of(at.ref.task)) or "todo"] or TASK_MARKS.todo
 				table.insert(out, { from = at.from, to = at.to, icon = src(mark[1]), icon_color = mark[2], icon_size = 14, icon_x = 3.4 })
-			elseif at.ref.kind == "pasted" then
-				local set = if string.find(ui.theme.kind(), "dark", 1, true) then "dark" else "light"
+			elseif at.ref.kind == "pick" then
+				table.insert(out, { from = at.from, to = at.to, bg = M.pick_wash(), radius = 5, inset = 1.5 })
+			elseif at.ref.kind == "pasted" or at.ref.kind == "image" or at.ref.kind == "file" then
+				local dark = string.find(ui.theme.kind(), "dark", 1, true) ~= nil
+				local name = if at.ref.kind == "pasted" then "Pasted text.txt" elseif at.ref.kind == "image" then "image.png" else (string.match(at.ref.link, "^%[(.-)%]") or "")
+				local thumb = at.ref.kind == "image" and at.ref.thumb
 				table.insert(out, {
 					from = at.from,
 					to = at.to,
 					bg = "$zeron.composer.chip.bg",
 					radius = 5,
 					inset = 1.5,
-					icon = `assets/icons/files/{set}/{FileIcon.of("Pasted text.txt", false)}.svg`,
-					icon_size = size,
-					icon_x = 4,
+					icon = if thumb then thumb else FileIcon.src(name, false, dark),
+					icon_size = if thumb then 16 else size,
+					icon_x = if thumb then 3 else 4,
 				})
 			else
 				local skill = at.ref.kind == "skill"
@@ -287,11 +353,28 @@ local function grown(key: string, text: string, from: number, to: number): (numb
 	return a, b
 end
 
-function M.unit(key_of: () -> string, value: State<string>, field: any)
+local carets: { [string]: number } = {}
+
+function M.caret(key: string, set: number?): number?
+	if set then
+		carets[key] = set
+	end
+	return carets[key]
+end
+
+function M.unit(key_of: () -> string, value: State<string>, field: any, on_chip: ((ref: Ref, shown: string) -> boolean)?)
 	local snapping = false
 	local function on_caret(_line: number, _column: number, anchor: number, focus: number)
 		if snapping then
 			return
+		end
+		carets[key_of()] = math.max(anchor, focus)
+		if on_chip and anchor == focus then
+			for _, at in M.spans(key_of(), value:peek()) do
+				if anchor > at.from - 1 and anchor < at.to and on_chip(at.ref, at.shown) then
+					return
+				end
+			end
 		end
 		local el = field:peek()
 		if not el then
