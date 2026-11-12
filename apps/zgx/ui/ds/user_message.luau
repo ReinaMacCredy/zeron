@@ -333,7 +333,30 @@ return ui.component(function(props: Props): Node
 	local shown = 0
 	local badges: { Node } = {}
 	local chosen: { any } = {}
+	-- A pasted text its words name by a chip (gpui's `zeron-attachment:N`)
+	-- is that chip, opening it, not a chip in the strip as well.
+	local inline: { [number]: () -> () } = {}
 	for _, a in props.attachments or {} do
+		local n = if a.kind == "file" then PastedText.number_of(a.name) else nil
+		if n and string.find(props.text, `(zeron-attachment:{n})`, 1, true) then
+			inline[n] = (PastedText.opener(a :: any, if props.session then props.session() else nil) :: any) or function() end
+		end
+	end
+	local function open(target: string)
+		local n = tonumber(string.match(target, "^zeron%-attachment:(%d+)$"))
+		if n then
+			if inline[n] then
+				inline[n]()
+			end
+		elseif props.open then
+			props.open(target)
+		end
+	end
+	for _, a in props.attachments or {} do
+		local n = if a.kind == "file" then PastedText.number_of(a.name) else nil
+		if n and inline[n] then
+			continue
+		end
 		if (a :: any).kind == "badge" then
 			table.insert(badges, badge(a))
 		elseif (a :: any).kind == "pick" then
@@ -406,7 +429,7 @@ return ui.component(function(props: Props): Node
 					ref = body,
 					w_full = true,
 					shrink = 0,
-					Markdown { text = props.text, breaks = true, open = props.open, link_menu = props.link_menu, chat_mark = props.chat_mark, invocations = true, find = props.find, wash = props.wash },
+					Markdown { text = props.text, breaks = true, open = open, link_menu = props.link_menu, chat_mark = props.chat_mark, invocations = true, find = props.find, wash = props.wash },
 				},
 			},
 			-- The way to open it: a plain link under the text, at its left

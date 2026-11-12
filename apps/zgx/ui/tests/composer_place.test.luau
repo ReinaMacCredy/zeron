@@ -161,9 +161,10 @@ test("composer place: the footer's chips are one height, the ring one of them", 
 	expect(place).to_be(24)
 	expect(model).to_be(24)
 	expect(ring).to_be(24)
-	-- The ring at the chips' glyph size (12), 6 in all round: a square.
+	-- The ring at gpui's footer size (16) and the percent, 6 in at each side.
 	local w = box("#composer-context")
-	expect(w).to_be(24)
+	local pct = box("#composer-context-percent")
+	expect(w).to_be(6 + 16 + 5 + pct + 6)
 end)
 
 -- A hover card is framed once (ds/hover_card): zgx's layer hugs the card
@@ -295,7 +296,7 @@ test("composer footer: everything else folded, the model keeps its name's start,
 	app:set_state("test_place_w", 800)
 	rested(app)
 	local name, effort = text_w(app, "Model", "Claude Sonnet 4.5"), text_w(app, "Model", "High")
-	app:set_state("test_place_w", 260)
+	app:set_state("test_place_w", 310)
 	rested(app)
 	expect(chip_text(app, "Access")).to_be("")
 	expect(chip_text(app, "Branch")).to_be("")
@@ -303,7 +304,7 @@ test("composer footer: everything else folded, the model keeps its name's start,
 	expect(kept > 32 and kept < name).to_be(true)
 	expect(text_w(app, "Model", "High")).to_be(effort)
 	-- Past that: the name at its least, never gone; the effort and the ring stay.
-	app:set_state("test_place_w", 180)
+	app:set_state("test_place_w", 230)
 	rested(app)
 	local least = text_w(app, "Model", "Claude Sonnet 4.5")
 	expect(least > 0 and least < kept).to_be(true)
@@ -332,4 +333,54 @@ test("composer footer: narrowed at once past the place chip, it still folds", fu
 	expect(chip_text(app, "Branch")).to_be("")
 	expect(text_w(app, "Model", "High")).to_be(effort)
 	expect(app:error()).to_be_nil()
+end)
+
+test("composer place: a long draft collapses to its last rows by its toggle or ⌘⇧↓, keeps taking words, and a send opens it again", function()
+	local app = mounted()
+	app:set_state("test_place_art", false)
+	local function lines(n: number): string
+		local out = {}
+		for i = 1, n do
+			table.insert(out, `line {i}`)
+		end
+		return table.concat(out, "\n")
+	end
+	local function said(): string
+		return string.match(app:tree("#composer-collapse"), '"([^"]+)"') or ""
+	end
+	local function height(sel: string): number
+		local first = string.match(app:tree(sel), "[^\n]+") or ""
+		return tonumber(string.match(first, " %-?%d+,%-?%d+ %d+x(%d+)")) or -1
+	end
+	app:set_state("test_place_draft", lines(6))
+	rested(app)
+	expect(showing(app, "#composer-collapse")).to_be(false)
+	app:set_state("test_place_draft", lines(12))
+	rested(app)
+	expect(showing(app, "#composer-collapse")).to_be(true)
+	expect(said()).to_be("Collapse")
+	local tall = height("role:textbox")
+	app:click("#composer-collapse")
+	rested(app)
+	expect(said()).to_be("Expand")
+	expect(height("role:textbox")).to_be(66)
+	expect(tall > 66).to_be(true)
+	-- Typed into while collapsed: still collapsed, the words at its end.
+	app:set_state("test_place_draft", lines(13))
+	rested(app)
+	expect(height("role:textbox")).to_be(66)
+	app:click("role:textbox")
+	app:key("cmd+shift+ArrowDown")
+	rested(app)
+	expect(said()).to_be("Collapse")
+	app:key("cmd+shift+ArrowDown")
+	rested(app)
+	expect(said()).to_be("Expand")
+	-- Sent (the draft emptied): the next draft starts opened.
+	app:set_state("test_place_draft", "")
+	rested(app)
+	app:set_state("test_place_draft", lines(12))
+	rested(app)
+	expect(said()).to_be("Collapse")
+	expect(app:error()).to_be(nil)
 end)

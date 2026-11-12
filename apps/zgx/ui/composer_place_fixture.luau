@@ -10,6 +10,8 @@
 --   test_place_branch    the branch chosen
 --   test_place_checkout  "worktree" | "local"
 --   test_place_usage     { tokens, window } or nil
+--   test_place_stats     the chat's stats (`chat.stats`: cache_ttl, cache_touched) or nil
+--   test_place_windows   the account in use's plan windows ({ label, used, resets? }) or nil
 --   test_place_w         the composer's width
 --   test_place_model     "opus", or "sonnet" (a long name with an effort)
 --   test_place_card      the ring's card, drawn in place over the composer
@@ -39,6 +41,15 @@ local bare = ui.state("test_place_bare", false)
 -- (The picture: "plate-1-night" dark, "plate-3-sunrise" bright.)
 local picture = ui.state("test_place_picture", "plate-1-night")
 local usage = ui.state("test_place_usage", { tokens = 408389, window = 1000000 } :: Composer.Usage?)
+local stats = ui.state("test_place_stats", nil :: any)
+local windows = ui.state("test_place_windows", nil :: any)
+local function accounts(_harness: string, _model: string): { any }?
+	local w = windows:get()
+	if not w then
+		return nil
+	end
+	return { { id = "a1", email = "wing@example.test", plan = "Max", active = true, can_switch = false, used = 0, detail = "", windows = w } }
+end
 
 -- The theme, as the app sets it (the window's, global), so what reads the
 -- theme's values follows it too.
@@ -164,6 +175,13 @@ return ui.column {
 				usage = function(): Composer.Usage?
 					return usage:get()
 				end,
+				stats = function(): any
+					return stats:get()
+				end,
+				plan = function(): any
+					local w = windows:get()
+					return if w then { agent = HARNESSES[1], plan = "Max", windows = w } else nil
+				end,
 			},
 		}),
 		ds.Composer {
@@ -189,6 +207,10 @@ return ui.column {
 			usage = function(): Composer.Usage?
 				return usage:get()
 			end,
+			stats = function(): any
+				return stats:get()
+			end,
+			accounts = accounts,
 			over_art = function(): boolean
 				return art:get()
 			end,

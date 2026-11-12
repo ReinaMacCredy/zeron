@@ -1,7 +1,8 @@
--- The model picker's accounts, as Zeron's composer has them: an Account row and
--- a usage ring on the chip, for the composer's device (this one or another),
--- reading the fuller window (Cursor's, the pool of the model chosen); no usage
--- reported, no ring; one that can't be switched to, not offered.
+-- The model picker's accounts, as Zeron's composer has them: an Account row,
+-- for the composer's device (this one or another), reading the fuller window
+-- (Cursor's, the pool of the model chosen); the plan on the footer only once
+-- a window nears its limit (13A), never a ring on the model chip; one that
+-- can't be switched to, not offered.
 
 local function window(label: string, used: number): any
 	return { label = label, used = used }
@@ -30,7 +31,8 @@ end
 
 test("an agent with accounts has the row, the address and how much is used", function()
 	local app = with_accounts(here(accounts()))
-	expect(app:has("#model-picker-usage")).to_be(true)
+	expect(app:has("#model-picker-usage")).to_be(false)
+	expect(app:has("#composer-plan")).to_be(false)
 	app:click('role:button "Model"')
 	app:frames(30)
 	local row = app:tree("#model-picker-account")
@@ -56,6 +58,23 @@ test("Hide email addresses hides them in the row and the list, and a press still
 	expect(app:state("calls")).to_contain("switch_on::claude-code:a2")
 end)
 
+test("the plan shows on the footer from 80% of a window, its card listing each", function()
+	local list = accounts()
+	list[1].windows = { window("5h", 0.79), window("Week", 0.41) }
+	local app = with_accounts(here(list))
+	expect(app:has("#composer-plan")).to_be(false)
+	list[1].windows = { window("5h", 0.82), window("Week", 0.41) }
+	app:set_state("agents.on_device", here(list))
+	app:frames(10)
+	expect(app:text("#composer-plan-word")).to_be("5h 82%")
+	app:hover("#composer-plan")
+	app:wait("#composer-context-plan", { timeout_ms = 2000 })
+	expect(app:has('#composer-context-plan >> "Claude Max · plan"')).to_be(true)
+	expect(app:text("#composer-context-plan-5h")).to_be("82%")
+	expect(app:text("#composer-context-plan-Weekly")).to_be("41%")
+	expect(app:error()).to_be_nil()
+end)
+
 test("the fullest window is the figure shown, whichever and however many", function()
 	local list = accounts()
 	list[1].windows = { window("5h", 0.2), window("Opus", 0.8), window("Week", 0.3) }
@@ -70,19 +89,19 @@ test("a chat on another computer reads that computer's accounts", function()
 		[""] = { ["claude-code"] = accounts() },
 		box = {
 			["claude-code"] = {
-				{ id = "b1", email = "box@example.test", plan = "Max", active = true, can_switch = true, windows = { window("Week", 0.77) } },
+				{ id = "b1", email = "box@example.test", plan = "Max", active = true, can_switch = true, windows = { window("Week", 0.87) } },
 				{ id = "b2", email = "spare@example.test", plan = "Pro", active = false, can_switch = true, windows = {} },
 			},
 		},
 	})
 	app:set_state("chat_device", "box")
 	app:frames(10)
-	expect(app:has("#model-picker-usage")).to_be(true)
+	expect(app:text("#composer-plan-word")).to_be("Weekly 87%")
 	app:click('role:button "Model"')
 	app:frames(30)
 	local row = app:tree("#model-picker-account")
 	expect(row).to_contain("box@example.test")
-	expect(row).to_contain("77%")
+	expect(row).to_contain("87%")
 	expect(app:state("calls")).to_contain("watch_device:box")
 	app:click("#model-picker-account")
 	app:frames(30)
@@ -95,7 +114,7 @@ test("a computer whose accounts haven't come has neither, and is asked", functio
 	local app = with_accounts(here(accounts()))
 	app:set_state("chat_device", "somewhere-else")
 	app:frames(10)
-	expect(app:has("#model-picker-usage")).to_be(false)
+	expect(app:has("#composer-plan")).to_be(false)
 	expect(app:state("calls")).to_contain("watch_device:somewhere-else")
 end)
 
@@ -110,7 +129,7 @@ test("no usage reported: the account shows, no percentage and no ring", function
 	local list = accounts()
 	list[1].windows = {}
 	local app = with_accounts(here(list))
-	expect(app:has("#model-picker-usage")).to_be(false)
+	expect(app:has("#composer-plan")).to_be(false)
 	app:click('role:button "Model"')
 	app:frames(30)
 	local row = app:tree("#model-picker-account")
@@ -163,7 +182,7 @@ end)
 
 test("an agent with no accounts has neither", function()
 	local app = with_accounts(here({}))
-	expect(app:has("#model-picker-usage")).to_be(false)
+	expect(app:has("#composer-plan")).to_be(false)
 	app:click('role:button "Model"')
 	app:frames(30)
 	expect(app:has("#model-picker-account")).to_be(false)

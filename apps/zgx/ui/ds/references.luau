@@ -1,4 +1,5 @@
 local tokens = require("@ds/mention_tokens")
+local FileIcon = require("@ds/file_icons")
 local SVGS: { [string]: string } = require("@ds/icon_svgs")
 
 local M = {}
@@ -8,7 +9,8 @@ local LEAD = string.rep(NB, 6)
 local TRAIL = string.rep(NB, 2)
 local TASK_MAX = 32
 
-export type Kind = "skill" | "command" | "task"
+-- (`pasted`: a long paste carried as a file, gpui's `[Pasted text N.txt](zeron-attachment:N)`, shown as its first line.)
+export type Kind = "skill" | "command" | "task" | "pasted"
 export type Ref = { kind: Kind, link: string, task: string? }
 
 local shared: State<{ [string]: { [string]: Ref } }>? = nil
@@ -142,6 +144,8 @@ function M.decode(key: string, raw: string): string
 				shown = M.add(key, { kind = if trigger == "$" then "skill" else "command", name = string.sub(label, 2), link = link })
 			elseif scheme == "task" then
 				shown = M.add(key, { kind = "task", name = label, link = link, task = target })
+			elseif scheme == "attachment" and string.match(label, "^Pasted text %d+%.txt$") then
+				shown = M.add(key, { kind = "pasted", name = label, link = link })
 			end
 		end
 		if shown and open then
@@ -190,6 +194,9 @@ function M.highlight(key_of: () -> string): (line: string, state: number) -> ({ 
 			return spans, next_state
 		end
 		for _, at in M.spans(key_of(), line) do
+			if at.ref.kind == "pasted" then
+				continue
+			end
 			local ink = if at.ref.kind == "skill" then "$zeron.reference.skill" else "$zeron.reference.command"
 			local from = if at.ref.kind == "task" then at.from else at.from + #LEAD
 			local to = if at.ref.kind == "task" then at.to else at.to - #TRAIL
@@ -209,6 +216,13 @@ local function src(name: string): string
 	return `code:{SVGS[name] or ""}`
 end
 
+-- A skill's or command's icon drawn `dy` points lower in its `size` square:
+-- its row centres it on the caps, and a label mostly in lowercase reads lower.
+function M.lowered(name: string, size: number, dy: number): string
+	local svg = SVGS[name] or ""
+	return "code:" .. (string.gsub(svg, 'viewBox="0 0 24 24"', string.format('viewBox="0 %.2f 24 24"', -dy * 24 / size), 1))
+end
+
 function M.chips(key_of: () -> string, value: State<string>, line: number, column_of: ((id: string) -> string?)?): () -> { any }
 	local size = math.min(14, line - 3 - 6)
 	return function(): { any }
@@ -217,6 +231,18 @@ function M.chips(key_of: () -> string, value: State<string>, line: number, colum
 			if at.ref.kind == "task" then
 				local mark = TASK_MARKS[(column_of and at.ref.task and column_of(at.ref.task)) or "todo"] or TASK_MARKS.todo
 				table.insert(out, { from = at.from, to = at.to, icon = src(mark[1]), icon_color = mark[2], icon_size = 14, icon_x = 3.4 })
+			elseif at.ref.kind == "pasted" then
+				local set = if string.find(ui.theme.kind(), "dark", 1, true) then "dark" else "light"
+				table.insert(out, {
+					from = at.from,
+					to = at.to,
+					bg = "$zeron.composer.chip.bg",
+					radius = 5,
+					inset = 1.5,
+					icon = `assets/icons/files/{set}/{FileIcon.of("Pasted text.txt", false)}.svg`,
+					icon_size = size,
+					icon_x = 4,
+				})
 			else
 				local skill = at.ref.kind == "skill"
 				table.insert(out, {
@@ -225,7 +251,7 @@ function M.chips(key_of: () -> string, value: State<string>, line: number, colum
 					bg = if skill then "$zeron.reference.skill_fill" else "$zeron.reference.command_fill",
 					radius = 5,
 					inset = 1.5,
-					icon = src(if skill then "magic-stick" else "command"),
+					icon = M.lowered(if skill then "magic-stick" else "command", size, 0.5),
 					icon_color = if skill then "$zeron.reference.skill" else "$zeron.reference.command",
 					icon_size = size,
 					icon_x = 4,

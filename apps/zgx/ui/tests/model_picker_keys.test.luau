@@ -243,6 +243,8 @@ test("the context card: long context and its stops write one pick, the readout f
 	app:click("#model-picker-long")
 	settle(app)
 	expect((app:state("test_picker_options") or {}).contextWindow).to_be(nil)
+	expect((app:state("test_picker_options") or {}).autoCompact).to_be("600k")
+	expect(app:has('~"compacts at ~567K"')).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 

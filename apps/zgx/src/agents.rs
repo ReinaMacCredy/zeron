@@ -1669,7 +1669,7 @@ fn mark_switched(accounts: &mut [Json], harness: &str, account: &str) {
 
 /// A device's accounts as the composer reads them, by agent: only an agent
 /// that signs in and reports its usage. `{ id, email, plan, active,
-/// can_switch, error?, windows = { { label, used } } }`.
+/// can_switch, error?, windows = { { label, used, resets? } } }`.
 fn device_accounts_value(accounts: &[Json]) -> Value {
     let mut by: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
     for account in accounts {
@@ -1685,10 +1685,14 @@ fn device_accounts_value(accounts: &[Json]) -> Value {
             .into_iter()
             .flatten()
             .map(|w| {
-                Value::record([
+                let mut fields = vec![
                     ("label", Value::from(w["label"].as_str().unwrap_or_default())),
                     ("used", Value::from(w["usedFraction"].as_f64().unwrap_or(0.).clamp(0., 1.))),
-                ])
+                ];
+                if let Some(at) = w["resetsAt"].as_str().and_then(epoch_secs) {
+                    fields.push(("resets", Value::from(at as f64)));
+                }
+                Value::record(fields)
             })
             .collect();
         let mut fields = vec![
@@ -1802,7 +1806,7 @@ mod tests {
     fn a_device_lists_only_agents_that_sign_in_and_report_usage() {
         let value = device_accounts_value(&[
             json!({ "id": "a", "harness": "claude-code", "email": "a@example.test", "active": true, "switchable": true,
-                "planLabel": "Max", "usageWindows": [{ "label": "Week", "usedFraction": 1.4 }] }),
+                "planLabel": "Max", "usageWindows": [{ "label": "Week", "usedFraction": 1.4, "resetsAt": "2026-11-13T05:00:00Z" }] }),
             json!({ "id": "b", "harness": "antigravity", "active": true, "switchable": true }),
             json!({ "id": "c", "harness": "hermes", "active": true, "switchable": true, "usageError": "no" }),
             json!({ "id": "d", "harness": "acp.someone", "active": true }),
@@ -1814,6 +1818,7 @@ mod tests {
         assert!(rows[0].field("can_switch").is_some_and(Value::truthy));
         let windows = rows[0].field("windows").unwrap().list().to_vec();
         assert_eq!(windows[0].field("used").and_then(Value::as_f64), Some(1.0));
+        assert_eq!(windows[0].field("resets").and_then(Value::as_f64), Some(1_794_546_000.));
         assert!(value.field("antigravity").is_none());
         assert!(value.field("acp.someone").is_none());
         // Hermes rotates its own logins: listed, not switched.
