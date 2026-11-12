@@ -39,6 +39,7 @@ local M = {}
 
 local s = model.s
 local TOAST_MS = 4000
+local STALL_MS = 3000
 
 local function chat_of(panel_key: string): string
 	return if string.sub(panel_key, 1, 5) == "chat:" then string.sub(panel_key, 6) else ""
@@ -1204,6 +1205,26 @@ function M.Tab(props: { tab: any, panel_key: string, visible: (() -> boolean)? }
 				local listed = if bound and h and h.hostStatus == "ready" then model.device(h, bound[1], bound[2]) else nil
 				return listed ~= nil and listed.booted == false
 			end
+			-- (The hub lists a device shut down outside Zeron as booted until asked; a live stream sends frames every second.)
+			local asked_at: number? = nil
+			ui.effect(function()
+				local f = api.frames:get()[id]
+				local seq = f and f.seq
+				if seq == nil or f.failed ~= nil then
+					return
+				end
+				ui.after(STALL_MS, function()
+					local now = api.frames:peek()[id]
+					if now == nil or now.seq ~= seq or now.failed ~= nil or asked_at == seq or stopped() then
+						return
+					end
+					if props.visible and not props.visible() then
+						return
+					end
+					asked_at = seq
+					call("ListHubDevices", {}, nil, function() end)
+				end)
+			end)
 			local reopening = ui.state(`device_tab_reopening_{id}`, false)
 			return ui.column {
 				w_full = true,

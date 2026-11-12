@@ -24,7 +24,8 @@
 --   device_stub.stream_fails the engine ends every stream ("The device stopped.")
 --   device_stub.engine_restart the engine came back: its hub idle, nothing open or listed until a ListHubDevices,
 --                            which reads ready with nothing listed until device_stub.let_list answers it
---   device_stub.shut_down    every open device is shut down outside Zeron: listed not booted, its session kept
+--   device_stub.shut_down    every open device is shut down outside Zeron: its session kept, listed booted
+--                            until the next ListHubDevices (as the hub's), then not
 --   device_stub.refuse_next  the next call is refused as the host refuses one (a UiError, the engine's words)
 
 local api = require("@app/screens/device/api") :: any
@@ -77,6 +78,7 @@ local hub = {
 	orientation = nil :: string?,
 	unlisted = false,
 	listing = nil :: any,
+	unnoticed = {} :: { [string]: boolean },
 }
 
 local function state(): any
@@ -86,7 +88,7 @@ local function state(): any
 	local devices = {}
 	if hub.enabled and not hub.none and hub.status ~= "idle" and not hub.unlisted then
 		for _, d in DEVICES do
-			table.insert(devices, { hostId = "local", id = d.id, platform = d.platform, name = d.name, version = d.version, booted = hub.booted[d.id] == true, physical = false })
+			table.insert(devices, { hostId = "local", id = d.id, platform = d.platform, name = d.name, version = d.version, booted = hub.booted[d.id] == true or hub.unnoticed[d.id] == true, physical = false })
 		end
 	end
 	local hosts: { any } = {
@@ -160,6 +162,7 @@ local function answer(method: string, p: any): any
 			hub.listing = waiting
 			return waiting
 		end
+		hub.unnoticed = {}
 		return settled(state())
 	elseif method == "ConfigureDeviceHub" then
 		if p.deviceHosts ~= nil then
@@ -488,6 +491,7 @@ end }
 ui.command { id = "device_stub.shut_down", title = "The open devices are shut down outside Zeron", run = change(function()
 	for _, x in hub.sessions do
 		hub.booted[x.deviceId] = nil
+		hub.unnoticed[x.deviceId] = true
 	end
 end) }
 ui.command { id = "device_stub.booting", title = "chat-1's iPad Air is starting", run = change(function()
