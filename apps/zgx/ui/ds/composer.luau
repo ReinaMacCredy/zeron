@@ -168,6 +168,7 @@ export type Props = {
 	-- chat): the picker.
 	branch_fixed: (() -> Fixed?)?,
 	on_send: ((text: string) -> ())?,
+	draft_moves: { shown: () -> boolean, move: () -> (), send_new: () -> (), keys: () -> { move: string, send_new: string } }?,
 	on_stop: (() -> ())?,
 	-- A bare Escape no one else took (no mention list, question or
 	-- dictation): true if it did something with it.
@@ -1827,6 +1828,77 @@ return ui.component(function(props: Props): Node
 		on_click = props.on_stop,
 		ui.div { w = 10, h = 10, rounded = ui.raw(3, "the stop glyph's corner"), bg = "$zeron.primary.text" },
 	}
+	local moves = props.draft_moves
+	local send_menu: Node? = nil
+	if moves then
+		local menu_open = ui.use_state(false)
+		local chevron = Button {
+			tone = "ghost",
+			size = "sm",
+			icon = true,
+			w = 18,
+			id = "composer-send-menu",
+			label = locale.t("ds.composer.send_options"),
+			expanded = function()
+				return menu_open:get()
+			end,
+			on_click = function()
+				menu_open:toggle()
+			end,
+			Icon { name = "alt-arrow-down", size = 14 },
+		}
+		local lit = ui.use_state(0)
+		local els: { any } = {}
+		local function item(i: number, label: string, icon: Icon.Name, keys: () -> string, run: () -> ()): Node
+			return ui.menu_item(Menu.lights(Menu.look {
+				label = locale.t(label),
+				on_click = function()
+					menu_open:set(false)
+					run()
+				end,
+				Menu.glyph(icon),
+				FadeText { locale.t(label), grow = 1, text_size = "$font.size.md", color = "$text.primary" },
+				ui.text {
+					function(): string
+						return ui.shortcut_text(keys())
+					end,
+					shrink = 0,
+					text_size = "$font.size.md",
+					color = "$text.tertiary",
+				},
+			}, i, lit, els))
+		end
+		send_menu = ui.show(function(): boolean
+			return moves.shown() and (has_text() or has_cargo())
+		end, ui.row {
+			shrink = 0,
+			items = "center",
+			mr = ui.raw(-6, "2 from the send button, its group's gap is 8"),
+			ui.menu(Menu.panel {
+				open = menu_open,
+				anchor = chevron,
+				placement = { side = "top", align = "end", offset = 6 },
+				w = 268,
+				ui.column {
+					w_full = true,
+					p = "$space.1",
+					gap = "$zeron.list.gap",
+					item(1, "ds.composer.send", "arrow-up", function(): string
+						return if props.send_with and props.send_with() == "mod_enter" then "cmd+enter" else "enter"
+					end, function()
+						send()
+					end),
+					Menu.Rule {},
+					item(2, "ds.composer.move_draft", "arrow-up-right", function(): string
+						return moves.keys().move
+					end, moves.move),
+					item(3, "ds.composer.send_new", "chat-add", function(): string
+						return moves.keys().send_new
+					end, moves.send_new),
+				},
+			}),
+		})
+	end
 	-- A question's way through: Back (from the second page), then Submit
 	-- (or Next, with pages to come), dimmed until something is picked or
 	-- typed. An approval's: Deny, Always allow, Allow.
@@ -2535,6 +2607,7 @@ return ui.component(function(props: Props): Node
 					return voice_on:get() ~= false and (own == nil or Dictation.available())
 				end, mic),
 				ui.show(stopping, stop_button),
+				send_menu,
 				ui.show(function()
 					return not stopping()
 				end, send_button),

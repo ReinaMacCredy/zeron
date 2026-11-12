@@ -66,6 +66,22 @@ ui.command {
 	end,
 }
 
+local draft_mover: ((send: boolean) -> boolean)? = nil
+for _, c in { { id = "chat.move_draft", title = "ds.composer.move_draft", send = false }, { id = "chat.send_new", title = "ds.composer.send_new", send = true } } do
+	ui.command {
+		id = c.id,
+		title = ui.t(c.title):get(),
+		menu = "File",
+		key = function(): string
+			local ok, keys = pcall(require, "@app/screens/shell/keys")
+			return if ok and type(keys) == "table" then (keys :: any).key(c.id)() else ""
+		end :: any,
+		run = function(): boolean
+			return draft_mover ~= nil and draft_mover(c.send)
+		end,
+	}
+end
+
 local RESUME_PROMPT = "Resume without asking to continue."
 ds.toast.action("chat.add_credits", function()
 	route.settings("billing")
@@ -185,12 +201,24 @@ local function Composer(): Node
 	-- The chat it last followed ("?" before any): kept, so a reload isn't
 	-- an arrival (a new chat's choices put back to its defaults).
 	local was = ui.state("chat_composer_was", "?" :: string?)
+	local carry_next: { [string]: any }? = nil
+	local undoable: { [string]: any }? = nil
+	local held_back: shared.Whole? = nil
+	local moved_note = ui.state("chat_moved_note", nil :: { key: string, undo: boolean, n: number }?)
+	moved_note:set(nil)
 	ui.effect(function()
 		local id = session_id:get()
 		local s = open()
 		ui.batch(function()
 			if id == nil then
-				if was:peek() ~= nil then
+				local c = carry_next
+				carry_next = nil
+				if c then
+					checkout:set(c.checkout)
+					device:set(c.device)
+					project:set(c.project)
+					draft_profile:set(c.profile)
+				elseif was:peek() ~= nil then
 					local d = defaults:peek()
 					for _, k in FIELDS do
 						local v = (d :: any)[k]
@@ -594,6 +622,10 @@ local function Composer(): Node
 			end_edit("cancel")
 		end
 		shared.show(key)
+		if held_back and key ~= "" then
+			shared.join_draft_before("", held_back)
+			held_back = nil
+		end
 	end)
 
 	-- A side chat of this one: a bare ask opens one that's open or lives,
@@ -783,6 +815,10 @@ local function Composer(): Node
 			end, mid)
 			return false
 		end
+		if undoable then
+			undoable = nil
+			moved_note:set(nil)
+		end
 		local req: store.Request = {
 			text = text_out,
 			attachments = attachments,
@@ -932,6 +968,110 @@ local function Composer(): Node
 			emoji = if project and s.project then (route.look(s.project) or {}).emoji else nil,
 		}
 	end
+	local fx_o = ui.state("chat_composer_fx_o", 1)
+	local fx_y = ui.state("chat_composer_fx_y", 0)
+	fx_o:set(1)
+	fx_y:set(0)
+	local moving = false
+	local note_n = 0
+	local function say_moved(key: string, undo: boolean)
+		note_n += 1
+		local n = note_n
+		moved_note:set { key = key, undo = undo, n = n }
+		ui.after(5000, function()
+			local now = moved_note:peek()
+			if now and now.n == n then
+				moved_note:set(nil)
+				undoable = nil
+			end
+		end)
+	end
+	local function fx_to(o: number, y: number, ms: number)
+		anime.animate(fx_o, { value = o, duration = ms, ease = "out(3)" })
+		anime.animate(fx_y, { value = y, duration = ms, ease = "out(3)" })
+	end
+	local function move_draft(send_now: boolean): boolean
+		local id = session_id:peek()
+		local s: any = open()
+		local d = if id then shared.draft_peek(id) else nil
+		if moving or not id or not s or not d or editing:peek() or (string.find(d.text, "%S") == nil and #d.cargo == 0) then
+			return false
+		end
+		moving = true
+		local fixed = branch_fixed()
+		local carry = {
+			checkout = if fixed and fixed.worktree then "worktree" else "local",
+			device = s.device,
+			project = s.project or Where.NO_PROJECT,
+			profile = if type(s.profile) == "table" then s.profile.id else nil,
+			branch = if fixed then fixed.name else nil,
+		}
+		local before = { defaults = defaults:peek(), profile = draft_profile:peek() }
+		local reduced = motion.reduced_now()
+		local ms = if reduced then 120 else 320
+		fx_to(0, if reduced then 0 else -12, ms)
+		ui.after(ms, function()
+			local held = shared.whole_of("")
+			local holds = held.text ~= "" or #held.cargo > 0
+			-- (Sent at once, the new chat's own draft isn't sent with it: put back after.)
+			if send_now and holds then
+				shared.put_whole("", { text = "", cargo = {}, quotes = {} })
+			end
+			local wholes = shared.move_draft(id, "")
+			carry_next = carry
+			route.new_chat(s.project)
+			-- (The route's project lands on arrival and a project change clears the branch: each is set a tick later.)
+			ui.after(0, function()
+				if new_chat() and project:peek() ~= carry.project then
+					project:set(carry.project)
+				end
+				ui.after(0, function()
+					if new_chat() and carry.branch and branch:peek() ~= carry.branch then
+						branch:set(carry.branch)
+					end
+					fx_y:set(if reduced then 0 else 16)
+					fx_to(1, 0, ms)
+					moving = false
+					shared.focus:add(1)
+					if send_now then
+						send(shared.text:peek())
+						local left = shared.draft_peek("")
+						local went = left.text == "" and #left.cargo == 0
+						if holds and went then
+							held_back = held
+						elseif holds then
+							shared.join_draft_before("", held)
+						end
+						if went then
+							say_moved("chat.composer.sent_new", false)
+						end
+						return
+					end
+					undoable = { from = id, wholes = wholes, before = before }
+					say_moved("chat.composer.draft_moved", true)
+				end)
+			end)
+		end)
+		return true
+	end
+	draft_mover = move_draft
+	local function undo_move()
+		local u = undoable
+		undoable = nil
+		moved_note:set(nil)
+		if not u then
+			return
+		end
+		ui.batch(function()
+			shared.put_whole("", u.wholes.to)
+			shared.put_whole(u.from, u.wholes.from)
+			defaults:set(u.before.defaults)
+			draft_profile:set(u.before.profile)
+			route.open_session(u.from)
+		end)
+		shared.focus:add(1)
+	end
+
 	-- The agent the composer runs, as its catalog lists it.
 	local function harness_row(): any
 		local id = agent()
@@ -1278,6 +1418,24 @@ local function Composer(): Node
 			on_paste_image = cargo_props.on_paste_image,
 			drop_overlay = false,
 			on_send = send,
+			draft_moves = {
+				shown = function(): boolean
+					return session_id:get() ~= nil and editing:get() == nil
+				end,
+				move = function()
+					move_draft(false)
+				end,
+				send_new = function()
+					move_draft(true)
+				end,
+				keys = function(): { move: string, send_new: string }
+					local ok, keys = pcall(require, "@app/screens/shell/keys")
+					if not ok or type(keys) ~= "table" then
+						return { move = "", send_new = "" }
+					end
+					return { move = (keys :: any).combo("chat.move_draft"), send_new = (keys :: any).combo("chat.send_new") }
+				end,
+			},
 			on_stop = function()
 				local id = session_id:peek()
 				if id then
@@ -1582,6 +1740,12 @@ local function Composer(): Node
 				provide = { session = session_id },
 				w_full = true,
 				pointer_events = "auto",
+				opacity = function(): number
+					return fx_o:get()
+				end,
+				y = function(): number
+					return fx_y:get()
+				end,
 				max_w = ui.spring(
 					ui.computed(function(): number
 						return prefs.conversation_width:get()
@@ -1640,6 +1804,36 @@ local function Composer(): Node
 		-- (shell.rs `attachment_drop_overlay`: the scrim, the words in the
 		-- text's ink, at once and gone at once; no accent).
 		DropOverlay { shown = shared.carrying, id = "chat-drop" },
+		ui.presence(function(): string?
+			local n = moved_note:get()
+			return if n then tostring(n.n) else nil
+		end, function(_: string): Node
+			local n = moved_note:peek()
+			return ui.row {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 48,
+				justify = "center",
+				pointer_events = "none",
+				ui.row(require("@ds/glass").style({
+					id = "chat-moved-toast",
+					pointer_events = "auto",
+					items = "center",
+					gap = "$space.3",
+					pl = "$space.3",
+					pr = "$space.2",
+					py = "$space.2",
+					ui.text { ui.t(if n then n.key else "chat.composer.draft_moved"), text_size = "$font.size.sm", color = "$text.primary", wrap = false },
+					if n and n.undo
+						then ds.Button { ui.t("chat.composer.undo_move"), tone = "secondary", size = "xs", on_click = undo_move }
+						else nil,
+				}, "popup")),
+			}
+		end, {
+			enter = { opacity = { 0, 1 }, y = { 8, 0 }, duration = 180, ease = "outCubic" },
+			exit = { opacity = 0, duration = 180 },
+		}),
 		switch_dialog,
 		profile_dialog,
 		-- (A sidebar session carried: dropped, a mention; production's words.)

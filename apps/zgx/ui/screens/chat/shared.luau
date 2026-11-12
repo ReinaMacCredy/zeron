@@ -1585,6 +1585,73 @@ function M.discard_draft_of(key: string)
 	kept:set(all)
 end
 
+export type Whole = { text: string, cargo: { any }, quotes: { [string]: string }, number: number? }
+function M.whole_of(key: string): Whole
+	local mine = here:peek() == key
+	local d = if mine then nil else kept:peek()[key]
+	return {
+		text = if mine then M.text:peek() elseif d and type(d.text) == "string" then d.text else "",
+		cargo = table.clone(cargo_in(key)),
+		quotes = if mine then M.quotes:peek() elseif d and type(d.quotes) == "table" then d.quotes else {},
+		number = numbered:peek()[key],
+	}
+end
+
+function M.put_whole(key: string, w: Whole)
+	ui.batch(function()
+		if numbered:peek()[key] ~= w.number then
+			local numbers = table.clone(numbered:peek())
+			numbers[key] = w.number
+			numbered:set(numbers)
+		end
+		if here:peek() == key then
+			M.text:set(w.text)
+			M.cargo:set(w.cargo)
+			M.quotes:set(w.quotes)
+			return
+		end
+		local all = table.clone(kept:peek())
+		local d = table.clone(all[key] or {})
+		d.text, d.cargo, d.quotes = w.text, w.cargo, w.quotes
+		local empty = w.text == "" and #w.cargo == 0 and next(d.chosen or {}) == nil and d.refused == nil
+		all[key] = if empty then nil else d
+		kept:set(all)
+	end)
+end
+
+local function joined(first: Whole, second: Whole): Whole
+	local cargo = table.clone(first.cargo)
+	for _, item in second.cargo do
+		table.insert(cargo, item)
+	end
+	local quotes = table.clone(first.quotes)
+	for line, passage in second.quotes do
+		quotes[line] = passage
+	end
+	local top = math.max(first.number or 0, second.number or 0)
+	return {
+		text = if first.text == "" then second.text elseif second.text == "" then first.text else `{first.text}\n\n{second.text}`,
+		cargo = M.renumber(cargo),
+		quotes = quotes,
+		number = if top > 0 then top else nil,
+	}
+end
+
+function M.move_draft(from: string, to: string): { from: Whole, to: Whole }
+	local a, b = M.whole_of(from), M.whole_of(to)
+	-- (Skill and command chips are named per chat: carried as their links.)
+	local words = references.decode(M.refs_key(to), references.encode(M.refs_key(from), a.text))
+	ui.batch(function()
+		M.put_whole(to, joined(b, { text = words, cargo = a.cargo, quotes = a.quotes, number = a.number }))
+		M.put_whole(from, { text = "", cargo = {}, quotes = {} })
+	end)
+	return { from = a, to = b }
+end
+
+function M.join_draft_before(key: string, w: Whole)
+	M.put_whole(key, joined(w, M.whole_of(key)))
+end
+
 -- Chat `key`'s draft changed where it's shown by its id (`field`: "text"
 -- or "chosen"): written wherever it is, as `draft_of` reads it.
 function M.set_draft_of(key: string, field: string, value: any)
