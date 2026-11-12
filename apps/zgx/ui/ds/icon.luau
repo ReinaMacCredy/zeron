@@ -79,6 +79,7 @@ export type Name =
 	| "document-add"
 	| "global"
 	| "checklist"
+	| "tasks"
 	| "chat-round-line"
 	| "side-chat"
 	| "folder-with-files"
