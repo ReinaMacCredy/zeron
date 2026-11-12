@@ -35,8 +35,9 @@ export type Props = {
 	viewer: FileViewer.Props,
 	-- The file's header shape (ds/file_viewer): one line by default.
 	head: FileViewer.Head?,
-	-- The tree's width beside the file (the theme's).
-	width: number?,
+	-- The tree's width beside the file: the theme's, or a state the caller keeps,
+	-- dragged at the tree's edge as the sidebar's is (0: the theme's).
+	width: (number | State<number>)?,
 	-- The pane's last width, if the caller keeps it: a pane made again starts
 	-- exactly as it was.
 	room: State<number>?,
@@ -54,6 +55,8 @@ local INK = { duration = 160 }
 local KEYS = "cmd+shift+e"
 -- The least a file's side is worth having, with no file to show yet.
 local FILE_LEAST = 240
+-- How far its edge drags the tree.
+local TREE_MIN, TREE_MAX = 200, 480
 
 local function num(token: string, fallback: number): number
 	return (ui.theme.get(token) :: number?) or fallback
@@ -64,7 +67,9 @@ M.keys = KEYS
 
 local made = ui.component(function(props: Props): Node
 	local shown = props.shown
-	local tree_w = props.width or num("zeron.files.tree", 288)
+	local theme_w = num("zeron.files.tree", 288)
+	local kept_w: State<number>? = if props.width ~= nil and type(props.width) ~= "number" then props.width :: any else nil
+	local fixed_w: number = if type(props.width) == "number" then props.width else theme_w
 	local head_h = num(if props.head == "stack" then "zeron.files.stack" else "zeron.files.head", 40)
 	local square = num("zeron.icon_button.lg", 28)
 	local pad = num("space.2", 8)
@@ -75,6 +80,14 @@ local made = ui.component(function(props: Props): Node
 	-- first frame, so nothing opens, closes or fades that was at rest.)
 	local room = props.room or ui.use_state(0)
 	local settled = false
+	local function tree_w(): number
+		local w = if kept_w then kept_w:get() else fixed_w
+		return if w <= 0 then theme_w elseif kept_w then math.clamp(w, TREE_MIN, TREE_MAX) else w
+	end
+	-- Its edge being dragged: the tree follows the pointer at once.
+	local resizing = ui.use_state(false)
+	local edge_over = ui.use_state(false)
+	local bump = ui.use_state(0)
 	local function out(): boolean
 		return shown:get()
 	end
@@ -83,12 +96,12 @@ local made = ui.component(function(props: Props): Node
 	local function whole(): boolean
 		local open = if type(doc) == "function" then doc() else doc:get()
 		local w = room:get()
-		return shown:get() and open == nil and w > 0 and w < tree_w + FILE_LEAST
+		return shown:get() and open == nil and w > 0 and w < tree_w() + FILE_LEAST
 	end
 	-- The tree's room beside the file, eased as it comes and goes by the tree's own
 	-- slide.
 	local function dock_target(): number
-		return if whole() then room:get() elseif shown:get() then tree_w else 0
+		return if whole() then room:get() elseif shown:get() then tree_w() else 0
 	end
 	local dock_w = ui.use_state(dock_target())
 	local dock_easing: any = nil
@@ -103,7 +116,7 @@ local made = ui.component(function(props: Props): Node
 			dock_easing:cancel()
 			dock_easing = nil
 		end
-		if not settled or follows then
+		if not settled or follows or resizing:get() then
 			dock_w:set(to)
 		else
 			dock_easing = anime.animate(dock_w, motion.params({ value = to, duration = SLIDE.duration, ease = SLIDE.ease }))
@@ -138,7 +151,7 @@ local made = ui.component(function(props: Props): Node
 	-- The tree's width: its own, or all it's been given (it never slides narrower,
 	-- only away).
 	local function tree_now(): number
-		return math.max(tree_w, dock_w:get())
+		return math.max(tree_w(), dock_w:get())
 	end
 	-- The tree's props, beside the file.
 	local function tree_props(): FileTree.Props
@@ -187,7 +200,13 @@ local made = ui.component(function(props: Props): Node
 				top = head_h,
 				bottom = 0,
 				w = 1,
-				bg = "$border.subtle",
+				x = function(): number
+					return bump:get()
+				end,
+				-- (Stronger under the pointer at its edge, and as it's dragged: the sidebar's.)
+				bg = function(): string
+					return if edge_over:get() or resizing:get() then "$border.strong" else "$border.subtle"
+				end,
 				opacity = function(): number
 					return if dock_w:get() >= room:get() - 0.5 then 0 else 1
 				end,
@@ -195,6 +214,59 @@ local made = ui.component(function(props: Props): Node
 		}
 	end
 	local tree = ui.div { absolute = true, left = 0, top = 0, right = 0, bottom = 0, pointer_events = "none", beside() }
+
+	-- Its edge, with a width kept: dragged, the tree widens or narrows (200 to 480, a
+	-- file keeping its least beside it), following the pointer at once; double-clicked,
+	-- the theme's again. (Pressed itself, so it keeps the pointer as it's dragged.)
+	local from_x, from_w, at_limit = 0, 0, 0
+	local function can_resize(): boolean
+		return shown:get() and not whole() and dock_w:get() > 0.5
+	end
+	local width_kept = kept_w
+	local edge = if width_kept
+		then ui.div {
+			id = "files-tree-edge",
+			absolute = true,
+			z = 2,
+			top = head_h,
+			bottom = 0,
+			left = function(): number
+				return dock_w:get() - 3
+			end,
+			w = 6,
+			cursor = "col_resize",
+			label = locale.t("ds.files_pane.resize_tree"),
+			pointer_events = function(): PointerEvents
+				return if can_resize() then "auto" else "none"
+			end,
+			on_hover = function(inside: boolean)
+				edge_over:set(inside)
+			end,
+			on_press = function(e)
+				from_x, from_w, at_limit = e.x, tree_w(), 0
+				resizing:set(true)
+			end,
+			on_pointer_move = function(e)
+				if not resizing:peek() then
+					return
+				end
+				local most = math.max(TREE_MIN, math.min(TREE_MAX, room:peek() - FILE_LEAST))
+				local want = from_w + e.x - from_x
+				width_kept:set(math.clamp(want, TREE_MIN, most))
+				local limit = if want > most then 1 elseif want < TREE_MIN then -1 else 0
+				if limit ~= 0 and limit ~= at_limit then
+					motion.edge_bounce(bump, limit)
+				end
+				at_limit = limit
+			end,
+			on_release = function()
+				resizing:set(false)
+			end,
+			on_double_click = function()
+				width_kept:set(0)
+			end,
+		}
+		else nil
 
 	-- The file, beside the tree's room; as the tree goes, its header keeps
 	-- room for the toggle instead, so its name comes to meet it.
@@ -265,6 +337,7 @@ local made = ui.component(function(props: Props): Node
 	box[#box + 1] = toggle_button
 	box[#box + 1] = tree
 	box[#box + 1] = FileViewer(viewer_props)
+	box[#box + 1] = edge
 	return ui.row(box)
 end)
 
