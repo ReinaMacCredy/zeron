@@ -237,7 +237,7 @@ end
 
 local function badge(pane: string): Node
 	return ui.row {
-		gap = "$space.1.5",
+		gap = ui.raw(6, "the shipping app's badge: dot, then its word"),
 		items = "center",
 		ds.Dot {
 			size = 6,
@@ -503,6 +503,8 @@ M.view = ui.component(function(_: {}): Node
 				}),
 				row("destination", {
 					label = t("destination.label"),
+					-- (Beside a three-line description the chips overlap it: Row's text keeps 350 and the row doesn't wrap them under.)
+					stacked = true,
 					description = destination_description,
 					control = ui.row {
 						gap = "$space.2",
