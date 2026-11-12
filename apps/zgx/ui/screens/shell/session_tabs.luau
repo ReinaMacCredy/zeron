@@ -9,7 +9,7 @@ local look = require("@app/screens/shell/project_look")
 local route = require("@app/screens/shell/route")
 local sessions = require("@account/sessions")
 local splits = require("@app/screens/shell/split")
-local folder = require("@app/screens/shell/folder_tab")
+local frame = require("@app/screens/shell/frame")
 local art = require("@app/screens/shell/art")
 local chat_shared = require("@app/screens/chat/shared")
 local AgentFan = require("@ds/agent_fan")
@@ -18,11 +18,12 @@ require("@app/screens/shell/tab_rules")
 
 local M = {}
 
-local TAB_H, SLOT, TILE = 32, 24, 20
+local TAB_H, SLOT, TILE = 36, 24, 20
 local TAB_MAX, TAB_MIN, TAB_GAP = 216, 144, 4
 local TITLE_SIZE = ui.raw(12, "Zeron's tab title, at any text size")
 local BAR, LIFT = 42, 30
-local DROP = (BAR - TAB_H) / 2
+local DROP = BAR - TAB_H
+local LINE = BAR / 2
 local THUMB_W, THUMB_H = 150, 92
 local SLIDE = { duration = 150, ease = "out(3)" }
 local FADE, FADE_RATE = 36, 12
@@ -122,7 +123,8 @@ local landed = false
 -- (Frozen for a drag, or the strip would shrink as the slot closes.)
 local tab_w = ui.state("shell_session_tab_w", TAB_MAX)
 local SHADE_PARAMS = { "layerParam0", "layerParam1", "layerParam2", "layerParam3", "layerParam4", "layerParam5", "layerParam6", "layerParam8", "layerParam9" }
-local PAD = folder.FLARE
+local FOOT = frame.TAB_FOOT
+local PAD = FOOT
 
 -- A tab's panes, as many as show (`STACK`), the one focused last first: the ones
 -- focused in that order, then the rest as they stand in the split.
@@ -608,23 +610,69 @@ local function face_row(id: string, hovered: any, active: () -> boolean): { any 
 	}
 end
 
+local hover_key = ui.state("shell_session_tab_hover", nil :: string?)
+local function hover(key: string, inside: boolean)
+	if inside then
+		hover_key:set(key)
+	elseif hover_key:peek() == key then
+		hover_key:set(nil)
+	end
+end
+
+local function before(key: string): string?
+	local list = shown:get()
+	local at = if key == DRAFT then #list + 1 else table.find(list, key)
+	return if at and at > 1 then list[at - 1] else nil
+end
+
+local function rule(key: string): Node
+	return ui.div {
+		absolute = true,
+		left = ui.raw(-TAB_GAP / 2 - 0.5, "in the gap before the tab"),
+		w = 1,
+		top = ui.raw(LINE - 8 - DROP, "option A's 16-point rule, on the lights' line"),
+		bottom = ui.raw(TAB_H + DROP - LINE - 8, "option A's 16-point rule, on the lights' line"),
+		bg = function(): string
+			return frame.strip_token("rule")
+		end,
+		opacity = function(): number
+			local prev = before(key)
+			local sel, over, d = selected_key(), hover_key:get(), drag:get()
+			if not prev or sel == key or sel == prev or over == key or over == prev or d ~= nil then
+				return 0
+			end
+			return 1
+		end,
+	}
+end
+
 local function tab_box(props: { [any]: any }, active: () -> boolean, washed: () -> boolean): { [any]: any }
 	props.h = TAB_H
-	props.rounded = "$radius.md"
 	props.shrink = 0
+	props.relative = true
 	props.pl = ui.raw(10, "Zeron's tab's start")
 	props.pr = ui.raw(4, "Zeron's tab's end")
+	props.pb = ui.raw(TAB_H - 2 * (LINE - DROP), "on the lights' line")
 	props.gap = ui.raw(8, "Zeron's tab's gaps")
 	props.items = "center"
 	props.cursor = "pointer"
-	props.bg = function(): string
-		return if washed() and not active() then "$hover" else "#00000000"
-	end
-	props.border = 1
-	props.border_color = "#00000000"
 	props.color = function(): string
-		return if active() or washed() then "$text.primary" else "$text.secondary"
+		return if active() then "$text.primary" else frame.strip_token("ink")
 	end
+	table.insert(props, 1, ui.div {
+		absolute = true,
+		left = 0,
+		right = 0,
+		top = ui.raw(LINE - 15 - DROP, "option A's 30-point hover pill, on the lights' line"),
+		bottom = ui.raw(TAB_H + DROP - LINE - 15, "option A's 30-point hover pill, on the lights' line"),
+		rounded = "$radius.md",
+		bg = function(): string
+			return frame.strip_token("hover")
+		end,
+		opacity = ui.tween(ui.computed(function(): number
+			return if washed() and not active() then 1 else 0
+		end), { duration = math.max(motion.ms(120), 1), ease = "out(3)" }),
+	})
 	return props
 end
 
@@ -722,6 +770,7 @@ local Tab = ui.component(function(props: { chat: string }): Node
 		end,
 		on_hover = function(inside: boolean)
 			hovered:set(inside)
+			hover(id, inside)
 		end,
 		on_click = function()
 			route.open_session(face(id))
@@ -799,9 +848,7 @@ local Tab = ui.component(function(props: { chat: string }): Node
 	row.pr = function(): any
 		return ui.raw(if riding() then 0 else 4, "Zeron's tab's end")
 	end
-	row.border = function(): number
-		return if riding() then 0 else 1
-	end
+	table.insert(row, rule(id))
 	for _, part in face_row(id, hovered, active) do
 		table.insert(row, part)
 	end
@@ -831,6 +878,7 @@ local DraftTab = ui.component(function(_: {}): Node
 		end,
 		on_hover = function(inside: boolean)
 			hovered:set(inside)
+			hover(DRAFT, inside)
 		end,
 		on_click = function()
 			route.new_chat()
@@ -840,6 +888,7 @@ local DraftTab = ui.component(function(_: {}): Node
 				close_draft()
 			end
 		end,
+		rule(DRAFT),
 		ui.div { shrink = 0, color = "$warning", ds.Icon { name = "pen", size = 13 } },
 		ds.FadeText { ui.t("shell.tabs.new_session"), grow = 1, min_w = 0, text_size = TITLE_SIZE },
 		ui.row {
@@ -922,11 +971,10 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		local d = drag:get()
 		return d ~= nil and d.key == selected_key()
 	end
-	local shade_params: { [string]: number } = {}
+	local cut_params: { [any]: { [string]: number } } = {}
 	ui.effect(function()
-		local el = art.shade:get()
-		if not el then
-			shade_params = {}
+		local els = { art.strip:get(), art.tab:get() }
+		if next(els) == nil then
 			return
 		end
 		local want: { [string]: number } = {}
@@ -936,29 +984,35 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		local d = drag:get()
 		local fades = bands()
 		if here ~= nil and not dragging_selected() then
-			want.layerParam0 = from + slot_left(here :: number) - folder.FLARE
-			want.layerParam1 = tab_w:get() + folder.FLARE * 2
+			want.layerParam0 = from + slot_left(here :: number) - FOOT
+			want.layerParam1 = tab_w:get() + FOOT * 2
 		end
 		if d ~= nil and not d.out then
-			want.layerParam2 = from + rider_x:get() - folder.FLARE
-			want.layerParam3 = (d :: Drag).w + folder.FLARE * 2
+			want.layerParam2 = from + rider_x:get() - FOOT
+			want.layerParam3 = (d :: Drag).w + FOOT * 2
 		end
 		want.layerParam4 = at
 		want.layerParam5 = at + (view.width or 0)
 		want.layerParam6 = ds.TitleBar.middle() - BAR / 2 + DROP
 		want.layerParam8 = fades[1]
 		want.layerParam9 = fades[2]
-		local changed: { [string]: number } = {}
-		for _, key in SHADE_PARAMS do
-			local v = want[key] or 0
-			if shade_params[key] ~= v then
-				shade_params[key] = v
-				changed[key] = v
+		local seen: { [any]: { [string]: number } } = {}
+		for _, el in els do
+			local had = cut_params[el] or {}
+			seen[el] = had
+			local changed: { [string]: number } = {}
+			for _, key in SHADE_PARAMS do
+				local v = want[key] or 0
+				if had[key] ~= v then
+					had[key] = v
+					changed[key] = v
+				end
+			end
+			if next(changed) then
+				anime.utils.set(el, changed)
 			end
 		end
-		if next(changed) then
-			anime.utils.set(el, changed)
-		end
+		cut_params = seen
 	end)
 	local function over_band(_: any, e: any)
 		local d = drag:peek()
@@ -1038,26 +1092,10 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 					ref = content,
 					relative = true,
 					h_full = true,
-					px = ui.raw(PAD, "room for a selected tab's flare"),
+					px = ui.raw(PAD, "room for a selected tab's feet"),
 					pt = ui.raw(DROP, "a tab stands on the bar's line"),
-					ui.show(
-						function(): boolean
-							return showing_at() ~= nil and not dragging_selected()
-						end,
-						folder.Shape {
-							id = "session-tab-folder",
-							left = function(): number
-								return slot_left(showing_at() or 1) - folder.FLARE
-							end,
-							top = DROP,
-							w = function(): number
-								return tab_w:get() + folder.FLARE * 2
-							end,
-							h = TAB_H + DROP + 1,
-						}
-					),
 					ui.row {
-						-- (An empty `ui.each` still takes 16 points, which the folder behind the tab doesn't count.)
+						-- (An empty `ui.each` still takes 16 points.)
 						w = function(): any
 							return if #shown:get() == 0 then 0 else nil
 						end,
@@ -1117,15 +1155,6 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 							end,
 							top = DROP,
 							pointer_events = "none",
-							folder.Shape {
-								left = -folder.FLARE,
-								top = 0,
-								w = function(): number
-									local d = drag:get()
-									return (if d then d.w else tab_w:peek()) + folder.FLARE * 2
-								end,
-								h = TAB_H + DROP + 1,
-							},
 							ui.row(rider),
 						}
 					end)),

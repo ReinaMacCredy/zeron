@@ -71,10 +71,10 @@ function M.solid_theme(): { [string]: any }?
 		return nil
 	end
 	return {
-		["zeron.inset.bg"] = "$zeron.solid.card",
-		["zeron.inset.edge"] = "$zeron.solid.edge",
-		["text.secondary"] = "$zeron.solid.secondary",
-		["text.tertiary"] = "$zeron.solid.tertiary",
+		["zeron.inset.bg"] = ui.theme.get("zeron.solid.card"),
+		["zeron.inset.edge"] = ui.theme.get("zeron.solid.edge"),
+		["text.secondary"] = ui.theme.get("zeron.solid.secondary"),
+		["text.tertiary"] = ui.theme.get("zeron.solid.tertiary"),
 	}
 end
 

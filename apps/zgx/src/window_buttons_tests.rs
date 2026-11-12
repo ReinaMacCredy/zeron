@@ -72,10 +72,11 @@ const FORWARD: &str = "#titlebar >> role:button \"Forward\"";
 const PANEL: &str = "#titlebar >> role:button \"Panel\"";
 const VIEW: &str = "role:button \"Sidebar view options\"";
 const TAB: &str = "#session-tabs >> role:tab";
+const TAB_TITLE: &str = "#session-tabs >> role:tab >> \"Fix the build\"";
 const NEW_TAB: &str = "#titlebar-new-tab";
 const LIVE: &str = "#live-pill";
-// (The bar's 12 past what stands last, the strip's 8 before its first tab.)
-const PAST_NEW_TAB: f32 = 20.;
+// (The bar's 12 past what stands last, the strip's 10 before its first tab.)
+const PAST_NEW_TAB: f32 = 22.;
 
 /// What a press (and release) at `(x, y)` asks of the window.
 fn press(app: &mut TestApp, x: f32, y: f32) -> Option<WindowGesture> {
@@ -170,7 +171,8 @@ fn the_panels_strip_clears_windows_caption_buttons_on_their_line() {
     assert!(expand.x + expand.width <= W - 138., "Expand {expand:?} under the caption buttons");
     let tab = app.bounds(TAB);
     assert!(tab.x + tab.width <= W - 138., "a tab {tab:?} under the caption buttons");
-    assert!((mid(tab) - 16.).abs() <= 0.5, "a tab {tab:?} off the caption buttons' line");
+    let title = app.bounds(TAB_TITLE);
+    assert!((mid(title) - 16.).abs() <= 0.5, "a tab's title {title:?} off the caption buttons' line");
 }
 
 #[test]
@@ -201,7 +203,8 @@ fn beside_the_traffic_lights_nothing_moves() {
         app.frames(40);
         let (tab, new_tab) = (app.bounds(TAB), app.bounds(NEW_TAB));
         assert!((tab.x - (new_tab.x + new_tab.width + PAST_NEW_TAB)).abs() <= 1., "{when}: the tab {tab:?} (New tab {new_tab:?})");
-        assert!((mid(tab) - MAC_LINE).abs() <= 0.5, "{when}: the tab {tab:?} isn't on the line");
+        let title = app.bounds(TAB_TITLE);
+        assert!((mid(title) - MAC_LINE).abs() <= 0.5, "{when}: the tab's title {title:?} isn't on the line");
     }
 }
 
@@ -380,7 +383,7 @@ fn the_cards_corner_follows_the_windows() {
     let corner = |app: &mut TestApp| {
         let node = app.find("#shell-page-card").expect("the page's card");
         match app.ui.scene.borrow().kind(node) {
-            zgx::scene::NodeKind::Panel { quad, .. } | zgx::scene::NodeKind::Quad(quad) => quad.radius,
+            zgx::scene::NodeKind::Panel { quad, .. } | zgx::scene::NodeKind::Quad(quad) => quad.decoration.as_ref().and_then(|d| d.corners).map_or(quad.radius, |c| c.bottom_left),
             _ => f32::NAN,
         }
     };

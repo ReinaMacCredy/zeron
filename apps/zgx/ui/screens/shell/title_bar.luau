@@ -204,10 +204,9 @@ return function(props: Props): Node
 			on_new_tab = function()
 				route.new_chat()
 			end,
-			-- (No glass behind the window's buttons and the controls: they stand on
-			-- the top bar, over nothing but the window.)
 			island = function(): boolean
-				return false
+				local frame: any = boundary.load("@app/screens/shell/frame")
+				return frame ~= nil and frame.island()
 			end,
 			can_back = route.can_back,
 			can_forward = route.can_forward,

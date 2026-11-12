@@ -988,7 +988,7 @@ test("the foot's you opens your profile, and only the rail has settings' button"
 	app:click('#shell-sidebar >> role:button "Local"')
 	app:frames(20)
 	expect(app:has("#settings-nav")).to_be(true)
-	expect(app:tree()).to_contain('heading "Account"')
+	expect(app:tree("#settings")).to_contain('heading "Account"')
 	-- (Signed out, the page shows the card yours will be: a headless host
 	-- draws no WebP art, and says so. Nothing else may go wrong.)
 	local err = app:error()
