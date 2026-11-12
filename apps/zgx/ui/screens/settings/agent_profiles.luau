@@ -1024,136 +1024,133 @@ function M.view(): Node
 		local first = agents()[1]
 		return if first then first.id else "claude-code"
 	end
-	return ui.column {
-		w_full = true,
-		ds.Settings.Page {
-			title = ui.t("settings.agent_profiles.title"),
-			description = ui.t("settings.agent_profiles.description"),
-			trail = search.anchor("new_profile", ui.row { ui.show(function(): boolean
-				return not profiles.absent:get()
-			end, ds.Button {
-				id = "profile-new",
-				tone = "primary",
-				size = "sm",
-				on_click = function()
-					M.open_editor(nil, look.blank(default_harness()))
-				end,
-				ui.text { t("new") },
-			}) }),
-			ui.show(function(): boolean
-				return page_error:get() ~= nil
-			end, ui.button {
-				id = "agent-profiles-error",
-				label = function(): string
+	return ds.Settings.Page {
+		title = ui.t("settings.agent_profiles.title"),
+		description = ui.t("settings.agent_profiles.description"),
+		trail = search.anchor("new_profile", ui.row { ui.show(function(): boolean
+			return not profiles.absent:get()
+		end, ds.Button {
+			id = "profile-new",
+			tone = "primary",
+			size = "sm",
+			on_click = function()
+				M.open_editor(nil, look.blank(default_harness()))
+			end,
+			ui.text { t("new") },
+		}) }),
+		ui.show(function(): boolean
+			return page_error:get() ~= nil
+		end, ui.button {
+			id = "agent-profiles-error",
+			label = function(): string
+				return page_error:get() or ""
+			end,
+			w_full = true,
+			p = "$space.2",
+			rounded = "$radius.md",
+			bg = "$zeron.tone.danger.wash",
+			on_click = function()
+				page_error:set(nil)
+			end,
+			ui.text {
+				function(): string
 					return page_error:get() or ""
 				end,
-				w_full = true,
-				p = "$space.2",
-				rounded = "$radius.md",
-				bg = "$zeron.tone.danger.wash",
-				on_click = function()
-					page_error:set(nil)
-				end,
-				ui.text {
-					function(): string
-						return page_error:get() or ""
-					end,
-					wrap = true,
-					text_size = "$font.size.sm",
-					color = "$danger",
-				},
-			}),
-			ds.Settings.Section {
-				ui.presence(function(): string
-					local l = profiles.list:get()
-					if l.state == "error" then
-						return "error"
-					elseif #l.profiles == 0 then
-						if l.state == "ready" then
-							return "empty"
-						end
-						return if profiles.absent:get() then "absent" else "loading"
-					end
-					return "list"
-				end, function(state: string): Node
-					if state == "loading" then
-						return ui.text { t("loading"), id = "agent-profiles-loading", text_size = "$font.size.md", color = "$text.tertiary" }
-					elseif state == "absent" then
-						return ui.text { t("unavailable_host"), id = "agent-profiles-absent", wrap = true, text_size = "$font.size.md", color = "$text.tertiary" }
-					elseif state == "error" then
-						return ui.text {
-							function(): string
-								return profiles.list:get().error or ""
-							end,
-							id = "agent-profiles-list-error",
-							wrap = true,
-							text_size = "$font.size.md",
-							color = "$danger",
-						}
-					elseif state == "empty" then
-						return ds.Settings.Group {
-							ds.Settings.Row { label = t("empty"), id = "agent-profiles-empty" },
-						}
-					end
-					return ds.Settings.Each(listed, profile_row, {
-						key = function(p: look.Profile): string
-							return p.id
-						end,
-					})
-				end, { w_full = true }),
+				wrap = true,
+				text_size = "$font.size.sm",
+				color = "$danger",
 			},
-			search.anchor("system_prompt", ds.Settings.Section {
-				title = ui.t("settings.agent_profiles.system_prompt"),
-				description = ui.t("settings.agent_profiles.system_prompt_hint"),
-				ds.Settings.Group {
-					ds.Settings.Row {
-						label = t("system_prompt"),
-						stacked = true,
-						control = ui.column {
+		}),
+		ds.Settings.Section {
+			ui.presence(function(): string
+				local l = profiles.list:get()
+				if l.state == "error" then
+					return "error"
+				elseif #l.profiles == 0 then
+					if l.state == "ready" then
+						return "empty"
+					end
+					return if profiles.absent:get() then "absent" else "loading"
+				end
+				return "list"
+			end, function(state: string): Node
+				if state == "loading" then
+					return ui.text { t("loading"), id = "agent-profiles-loading", text_size = "$font.size.md", color = "$text.tertiary" }
+				elseif state == "absent" then
+					return ui.text { t("unavailable_host"), id = "agent-profiles-absent", wrap = true, text_size = "$font.size.md", color = "$text.tertiary" }
+				elseif state == "error" then
+					return ui.text {
+						function(): string
+							return profiles.list:get().error or ""
+						end,
+						id = "agent-profiles-list-error",
+						wrap = true,
+						text_size = "$font.size.md",
+						color = "$danger",
+					}
+				elseif state == "empty" then
+					return ds.Settings.Group {
+						ds.Settings.Row { label = t("empty"), id = "agent-profiles-empty" },
+					}
+				end
+				return ds.Settings.Each(listed, profile_row, {
+					key = function(p: look.Profile): string
+						return p.id
+					end,
+				})
+			end, { w_full = true }),
+		},
+		search.anchor("system_prompt", ds.Settings.Section {
+			title = ui.t("settings.agent_profiles.system_prompt"),
+			description = ui.t("settings.agent_profiles.system_prompt_hint"),
+			ds.Settings.Group {
+				ds.Settings.Row {
+					label = t("system_prompt"),
+					stacked = true,
+					control = ui.column {
+						w_full = true,
+						gap = "$space.2",
+						ds.TextArea {
+							value = prompt_text,
+							name = t("system_prompt"),
+							placeholder = t("system_prompt_placeholder"),
+							rows = 3,
+							max_rows = 10,
 							w_full = true,
-							gap = "$space.2",
-							ds.TextArea {
-								value = prompt_text,
-								name = t("system_prompt"),
-								placeholder = t("system_prompt_placeholder"),
-								rows = 3,
-								max_rows = 10,
-								w_full = true,
-							},
-							ui.row {
-								w_full = true,
-								justify = "end",
-								ds.Button {
-									id = "profile-system-prompt-save",
-									tone = "secondary",
-									size = "sm",
-									disabled = function(): boolean
-										return prompt_saving:get() or prompt:get() == nil or trimmed(prompt_text:get()) == trimmed(prompt:get() or "")
-									end,
-									on_click = function()
-										local p = host.set_system_prompt({ prompt = prompt_text:peek() })
-										if not p then
-											return
-										end
-										prompt_saving:set(true)
-										p:after(function(v: any)
-											prompt_saving:set(false)
-											local text = if type(v) == "string" then v else ""
-											prompt:set(text)
-											prompt_text:set(text)
-										end, function(err: any)
-											prompt_saving:set(false)
-											page_error:set(t("couldnt_save", { error = message_of(err) }))
-										end)
-									end,
-									ui.text { t("save") },
-								},
+						},
+						ui.row {
+							w_full = true,
+							justify = "end",
+							ds.Button {
+								id = "profile-system-prompt-save",
+								tone = "secondary",
+								size = "sm",
+								disabled = function(): boolean
+									return prompt_saving:get() or prompt:get() == nil or trimmed(prompt_text:get()) == trimmed(prompt:get() or "")
+								end,
+								on_click = function()
+									local p = host.set_system_prompt({ prompt = prompt_text:peek() })
+									if not p then
+										return
+									end
+									prompt_saving:set(true)
+									p:after(function(v: any)
+										prompt_saving:set(false)
+										local text = if type(v) == "string" then v else ""
+										prompt:set(text)
+										prompt_text:set(text)
+									end, function(err: any)
+										prompt_saving:set(false)
+										page_error:set(t("couldnt_save", { error = message_of(err) }))
+									end)
+								end,
+								ui.text { t("save") },
 							},
 						},
 					},
 				},
-			}),
-		},
+			},
+		}),
 		ds.Dialog {
 			open = editor_open,
 			title = function(): string
