@@ -98,8 +98,9 @@ ui.effect(function()
 	ui.after(if motion.reduced_now() then 0 else 500, spring)
 end)
 
+local card_in_view = ui.state("whats_new_card_in_view", false)
 local card_clock = visuals.clock("whats_new_card_clock", function(): boolean
-	return card_visual() ~= nil and up:get() and not M.dismissed:get() and not M.open_now:get()
+	return card_visual() ~= nil and up:get() and card_in_view:get() and not M.dismissed:get() and not M.open_now:get()
 end)
 local dialog_clock = visuals.clock("whats_new_dialog_clock", function(): boolean
 	local e = entry:get()
@@ -123,6 +124,9 @@ local function hero(props: { h: number, version: (() -> string)?, rounded: any?,
 					right = 0,
 					bottom = 0,
 					fade = { 0, 40 },
+					on_visible = function(visible: boolean)
+						card_in_view:set(visible)
+					end,
 					ui.div { w_full = true, h_full = true, bg = "$zeron.whats_new.frame", visuals.Stage { visual = id, clock = card_clock } },
 				}
 			end)
