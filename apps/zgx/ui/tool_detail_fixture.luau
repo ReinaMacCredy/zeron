@@ -11,7 +11,7 @@
 -- moves), or a failure's word ("offline", "update", "unavailable"). Fetches are stubbed (`test_tool_fetches`, one line
 -- each; the output's first fetch fails while `test_tool_fail` is set). The
 -- work is made again, as a reload makes it, when `test_tool_generation`
--- moves.
+-- moves; it is the reply's live tail while `test_tool_live` is set.
 -- Here, beside app.luau, as a mounted script loads modules from its own
 -- directory down.
 
@@ -27,6 +27,7 @@ local generation = ui.state("test_tool_generation", 1)
 local stream = ui.state("test_tool_stream", "Compiling zeron\n")
 local whole = ui.state("test_tool_whole", "ok")
 local release = ui.state("test_tool_release", 0)
+local live = ui.state("test_tool_live", false)
 
 local function settled(value: any, err: any?): any
 	return {
@@ -48,18 +49,22 @@ end
 ToolDetail.fetch = function(blob_ref: string): any
 	fetches:set(fetches:peek() .. blob_ref .. "\n")
 	if blob_ref == "c/p1.diff" then
+		local lines = {
+			{ kind = "hunk", text = "@@ -1,43 +1,43 @@" },
+			{ kind = " ", old = 1, new = 1, text = "fn main() {" },
+			{ kind = "-", old = 2, text = "    old_call();" },
+			{ kind = "+", new = 2, text = "    new_call();" },
+		}
+		for i = 3, 42 do
+			table.insert(lines, { kind = " ", old = i, new = i, text = `    step({i});` })
+		end
+		table.insert(lines, { kind = " ", old = 43, new = 43, text = "}" })
 		return settled({
 			kind = "diff",
 			path = "src/app.rs",
 			added = 1,
 			removed = 1,
-			lines = {
-				{ kind = "hunk", text = "@@ -1,3 +1,3 @@" },
-				{ kind = " ", old = 1, new = 1, text = "fn main() {" },
-				{ kind = "-", old = 2, text = "    old_call();" },
-				{ kind = "+", new = 2, text = "    new_call();" },
-				{ kind = " ", old = 3, new = 3, text = "}" },
-			},
+			lines = lines,
 		})
 	end
 	if fail:peek() then
@@ -165,6 +170,9 @@ return ui.column {
 			Activity {
 				key = "work-1",
 				tools = tools,
+				live = function(): boolean
+					return live:get()
+				end,
 			},
 		}
 	end),

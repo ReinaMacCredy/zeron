@@ -4558,14 +4558,16 @@ fn apply(entries: &mut Vec<Entry>, frame: &mut Json) -> Result<Change, ()> {
 
 /// `entry` with what its parts read from the chat's host: each visual names
 /// `device`, its host, when that isn't this one; each command whose output
-/// the doc cut to its last lines names `doc`, the doc it is in, so its row
-/// can ask the host for the rest (`chat.tool_output`). Nil when it has
+/// the doc cut to its last lines, and each file change it kept only as its
+/// counts, names `doc`, the doc it is in, so its row can ask the host for
+/// the rest (`chat.tool_output`, `chat.tool_blob`). Nil when it has
 /// neither: the entry as it is.
 fn with_host(entry: &Json, doc: &str, device: Option<&str>) -> Option<Json> {
     let parts = entry["parts"].as_array()?;
     let visual = |p: &Json| device.is_some() && (p["kind"].as_str() == Some("visual") || p["htmlRender"].is_object());
     let cut = |p: &Json| p["kind"].as_str() == Some("tool") && p["outputTruncated"].as_bool() == Some(true);
-    if !parts.iter().any(|p| visual(p) || cut(p)) {
+    let counted = |p: &Json| crate::tool_details::diff_counted_only(p);
+    if !parts.iter().any(|p| visual(p) || cut(p) || counted(p)) {
         return None;
     }
     let mut entry = entry.clone();
@@ -4575,7 +4577,7 @@ fn with_host(entry: &Json, doc: &str, device: Option<&str>) -> Option<Json> {
         {
             part["device"] = Json::String(device.to_owned());
         }
-        if cut(part) {
+        if cut(part) || counted(part) {
             part["chat"] = Json::String(doc.to_owned());
         }
     }
@@ -8828,6 +8830,10 @@ mod tests {
         let whole = tool(&stamped["parts"][1]).unwrap();
         assert!(whole.field("chat").is_none() && whole.field("output_truncated").is_none());
         assert!(with_host(&json!({ "parts": [exec("t2", false)] }), "c1", None).is_none());
+        let edit = json!({ "kind": "tool", "id": "e1", "resolved": true, "call": { "kind": "editFile", "path": "a.rs" },
+                           "diffStats": [{ "path": "a.rs", "additions": 2, "deletions": 0 }] });
+        let counted = with_host(&json!({ "parts": [edit] }), "c1", None).expect("an edit kept as its counts");
+        assert_eq!(tool(&counted["parts"][0]).unwrap().field("diff_ref"), Some(&Value::from("c1/e1.diff")));
     }
 
     #[test]

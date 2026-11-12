@@ -1,6 +1,6 @@
 -- A tool row opens to what it did (ds/tool_detail through ds/activity;
--- ui/tool_detail_fixture.luau): an edit to its files' counts, and its
--- whole diff when asked; a command to its output, its first ten lines and
+-- ui/tool_detail_fixture.luau): an edit to its whole diff, fetched as it
+-- opens, and while the work is the reply's live tail, open by itself; a command to its output, its first ten lines and
 -- "Show all N lines" (its whole output fetched as it opens: a failure says
 -- so, and a tap tries again); a short one whole; a failed one with its exit
 -- code, escapes out; a huge one's end only; a running one's output growing
@@ -30,22 +30,50 @@ local function fetched(app: any): number
 	return n
 end
 
+-- The height of the first detail under the row whose line has `label`.
+local function detail_h(app: any, label: string): number
+	local seen = false
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(label, 1, true) then
+			seen = true
+		elseif seen and line:match("^%s*@%d+ scroll ") then
+			return tonumber(line:match(" %-?%d+,%-?%d+ %d+x(%d+)")) or -1
+		end
+	end
+	return -1
+end
+
 local function open_row(app: any, label: string)
 	app:click(`role:button "{label}"`)
 	app:frames(20)
 end
 
-test("an edit opens to its files' counts, and to its whole diff when asked", function()
+test("an edit opens to its whole diff, fetched as it opens", function()
 	local app = work()
-	open_row(app, "Edited app.rs")
-	expect(app:has('.tool-stats >> ~"src/app.rs"')).to_be(true)
-	expect(app:has('role:button "Show full diff"')).to_be(true)
 	expect(fetched(app)).to_be(0)
-	app:click('role:button "Show full diff"')
-	app:frames(20)
+	open_row(app, "Edited app.rs")
 	expect(app:has('.tool-diff >> ~"new_call();"')).to_be(true)
 	expect(app:has('.tool-diff >> ~"old_call();"')).to_be(true)
 	expect(app:has('role:button "Show full diff"')).to_be(false)
+	expect(fetched(app)).to_be(1)
+end)
+
+test("while the work is the reply's live tail, an edit opens by itself to its diff, and folds when it settles", function()
+	local app = work()
+	expect(app:has('.tool-diff >> ~"new_call();"')).to_be(false)
+	app:set_state("test_tool_live", true)
+	app:frames(20)
+	expect(app:has('.tool-diff >> ~"new_call();"')).to_be(true)
+	expect(app:has('.tool-diff >> ~"after"')).to_be(true)
+	-- (A long diff, at most 240 points of it, scrolling.)
+	expect(detail_h(app, "Edited app.rs")).to_be(240)
+	expect(app:has('.tool-output >> ~"The first line."')).to_be(false)
+	app:set_state("test_tool_live", false)
+	app:frames(30)
+	expect(app:has('.tool-diff >> ~"new_call();"')).to_be(false)
+	open_row(app, "Edited app.rs")
+	expect(app:has('.tool-diff >> ~"new_call();"')).to_be(true)
+	expect(detail_h(app, "Edited app.rs") > 240).to_be(true)
 	expect(fetched(app)).to_be(1)
 end)
 
@@ -75,9 +103,11 @@ test("a command opens to its output's first ten lines and all of them when asked
 	expect(app:has('~"Couldn\'t load full output"')).to_be(false)
 	-- (The fold is the tool's: the whole output comes folded too.)
 	expect(app:has('.tool-output >> ~"line 11"')).to_be(false)
+	local folded = detail_h(app, "Ran cargo test")
 	app:click('role:button "Show all 30 lines"')
 	app:frames(20)
 	expect(app:has('.tool-output >> ~"line 30"')).to_be(true)
+	expect(detail_h(app, "Ran cargo test") > folded + 200).to_be(true)
 	expect(app:has('~"more lines"')).to_be(false)
 	app:click('role:button "Show fewer lines"')
 	app:frames(20)
@@ -141,8 +171,6 @@ end)
 test("what was fetched is kept: the work made again (as a reload makes it) fetches nothing twice", function()
 	local app = work()
 	open_row(app, "Edited app.rs")
-	app:click('role:button "Show full diff"')
-	app:frames(20)
 	expect(fetched(app)).to_be(1)
 	app:set_state("test_tool_generation", 2)
 	app:frames(30)

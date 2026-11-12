@@ -250,6 +250,8 @@ end
 -- map each, holding only what's open (or, for a group, chosen), not a
 -- state per tool.
 local CALLS_OPEN = ui.state("activity_calls_open", {} :: { [string]: boolean })
+local CHANGES: { [string]: boolean } = { edit = true, write = true }
+local LIVE_CHANGE_H = 240
 local GROUPS_CHOSEN = ui.state("activity_groups_chosen", {} :: { [string]: boolean })
 
 -- A thought's row: no glyph, no branch, no header, its words themselves
@@ -467,7 +469,8 @@ local function row(
 	group: string?,
 	open_file: ((path: string) -> ())?,
 	pictures: ReplyPicture.Pictures?,
-	file_opens: ((path: string) -> boolean)?
+	file_opens: ((path: string) -> boolean)?,
+	live: () -> boolean
 ): Node
 	if now().kind == "thought" then
 		return thought_row(now, below, writing, group)
@@ -487,12 +490,23 @@ local function row(
 	local function has_pictures(): boolean
 		return pictures ~= nil and #(now().images or {}) > 0
 	end
-	-- Open as the reader left it (opened or closed), else closed.
+	local detail = ui.ref()
+	local function chosen(): boolean?
+		return CALLS_OPEN:get()[id]
+	end
+	local function live_change(): boolean
+		local t = now()
+		return chosen() == nil and live() and CHANGES[t.kind] == true and (t.diff ~= nil or (t.stats ~= nil and #t.stats > 0))
+	end
 	local function showing(): boolean
 		if not (has_call() or has_detail() or has_pictures()) then
 			return false
 		end
-		return CALLS_OPEN:get()[id] == true
+		local c = chosen()
+		if c ~= nil then
+			return c
+		end
+		return live_change()
 	end
 	-- A subagent's spawn, with somewhere to open it: the row opens its lane.
 	local function lane(): any
@@ -661,10 +675,14 @@ local function row(
 				ui.show(has_call, call_block(now)),
 				ui.show(
 					has_detail,
-					ui.div {
+					ui.scroll {
 						ml = ui.raw(GUTTER, "under the line's words, past the tree's gutter"),
 						mb = "$space.1",
-						ToolDetail.ToolDetail { tool = now :: any },
+						h = function(): number
+							local whole = detail.height or 0
+							return if live_change() then math.min(whole, LIVE_CHANGE_H) else whole
+						end,
+						ui.column { ref = detail, w_full = true, ToolDetail.ToolDetail { tool = now :: any } },
 					}
 				),
 				if pictures then tool_pictures(now, pictures) else nil,
@@ -880,7 +898,7 @@ return ui.component(function(props: Props): Node
 						return now:get()
 					end, below_of(t), function(): boolean
 						return live() and last()
-					end, props.open_subagent, props.thought, props.key, props.open_file, props.pictures, props.file_opens)
+					end, props.open_subagent, props.thought, props.key, props.open_file, props.pictures, props.file_opens, live)
 				end, {
 					key = function(t: Tool): string
 						return t.id

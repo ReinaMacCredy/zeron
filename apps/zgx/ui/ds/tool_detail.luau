@@ -26,10 +26,10 @@
 --
 -- The chat keeps little of a tool: its output as the harness gave it (or a
 -- summary of it), each file's counts, and refs to the whole output and the
--- whole diff, which come only when asked for. The whole output comes as
--- the row opens; a diff, from a line under the detail: "Show full diff",
--- while it comes "Loading full diff…", failed "Couldn't load full diff —
--- tap to retry". Fetched, the whole of it shows (a diff up to 600 lines, an
+-- whole diff, which come only when asked for. The whole output, or an
+-- edit's whole diff, comes as the row opens; otherwise a diff comes from a
+-- line under the detail: "Show full diff", while it comes "Loading full
+-- diff…", failed "Couldn't load full diff — tap to retry". Fetched, the whole of it shows (a diff up to 600 lines, an
 -- output up to 400) in the detail's place; with both fetched, the one asked
 -- for last shows and the line offers the other. What was fetched is kept by
 -- its ref (a reload, the row scrolled back, nothing fetched again).
@@ -162,9 +162,13 @@ local function shown_ref(t: Tool, blobs: { [string]: Blob }): string?
 end
 
 -- The whole output comes as the row opens, for a tool with nothing else to
--- show (a command, a read): an edit's diff stays a click away.
+-- show (a command, a read); an edit kept as its counts, its diff (gpui's
+-- `pending_diff`: the change is what opening it asks to see).
 local function fetches_output(t: Tool): boolean
 	return t.output_ref ~= nil and t.diff_ref == nil and t.diff == nil and not (t.stats and #t.stats > 0)
+end
+local function fetches_diff(t: Tool): boolean
+	return t.diff_ref ~= nil and t.diff == nil and t.stats ~= nil and #t.stats > 0
 end
 
 -- The end of `text`: its last KEEP_BYTES, from a line's start (or, in one
@@ -651,8 +655,8 @@ M.ToolDetail = ui.component(function(props: { tool: () -> Tool }): Node
 	-- opens (once: what was fetched is kept by its ref, a reload too).
 	ui.effect(function()
 		local t = now()
-		local r = t.output_ref
-		if r and fetches_output(t) and BLOBS:peek()[r] == nil then
+		local r = if fetches_diff(t) then t.diff_ref elseif fetches_output(t) then t.output_ref else nil
+		if r and BLOBS:peek()[r] == nil then
 			request(r)
 		end
 	end)
