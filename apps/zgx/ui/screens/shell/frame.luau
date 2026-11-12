@@ -44,42 +44,82 @@ local function scrim_of(placement: string): any
 	return { angle = 180, stops = { { 0, at("top") }, { 0.45, at("mid") }, { 1, at(if placement == "full" then "foot" else "none") } } }
 end
 local RAIL_SCRIM = { angle = 90, stops = { { 0, "#000000b8" }, { 1, "#00000000" } } }
--- The bar's shade, and crates/ui's `tab_fade` under it, with the selected tab's folder left out of it, so that tab is the card's own picture.
-local BAR_SHADE = ui.layer_shader([[
-fn folder(p: vec2<f32>, x0: f32, w: f32, top: f32, scale: f32) -> f32 {
-	let flare = 8.0;
-	let corner = 8.0;
-	let foot = 37.0;
+-- (params as session_tabs sets them, in the window's points: [0] each tab's x and width, feet in; [1] the strip's visible span, the tabs' top; [2] its edge fades.)
+M.TAB_FOOT = 10
+local TAB_HOLE = [[
+fn tab(p: vec2<f32>, x0: f32, w: f32, top: f32, scale: f32) -> f32 {
+	let foot = 10.0;
+	let corner = 10.0;
+	let h = 36.0;
 	var x = p.x - x0;
 	let y = p.y - top;
-	if (w <= 0.0 || x < 0.0 || x > w || y > foot + 1.0) {
+	if (w <= 0.0 || x < 0.0 || x > w || y < -1.0 || y > h + 1.0) {
 		return 0.0;
 	}
 	if (x > w * 0.5) {
 		x = w - x;
 	}
-	var edge = 0.0;
-	if (x < flare) {
-		let t = 1.0 - sqrt(max(1.0 - x / flare, 0.0));
-		edge = foot - t * t * flare;
-	} else if (x < flare + corner) {
-		let t = 1.0 - sqrt((x - flare) / corner);
-		edge = t * t * corner;
+	if (x < foot) {
+		let d = length(vec2<f32>(x, y - (h - foot)));
+		return select(0.0, clamp((d - foot) * scale + 0.5, 0.0, 1.0), y > h - foot);
 	}
-	return clamp((y - edge) * scale + 0.5, 0.0, 1.0);
+	let cx = foot + corner;
+	if (x < cx && y < corner) {
+		let d = length(vec2<f32>(cx - x, corner - y));
+		return clamp((corner - d) * scale + 0.5, 0.0, 1.0);
+	}
+	return clamp((x - foot) * scale + 0.5, 0.0, 1.0) * clamp(y * scale + 0.5, 0.0, 1.0);
 }
-fn layer(input: LayerInput) -> vec4<f32> {
+fn hole(input: LayerInput) -> f32 {
 	let a = input.params[0];
 	let b = input.params[1];
 	let c = input.params[2];
+	let h = max(tab(input.p, a.x, a.y, b.z, input.scale), tab(input.p, a.z, a.w, b.z, input.scale));
+	return h * clamp((input.p.x - b.x) / max(c.x, 0.5), 0.0, 1.0) * clamp((b.y - input.p.x) / max(c.y, 0.5), 0.0, 1.0);
+}
+]]
+-- The bar's shade, and crates/ui's `tab_fade` under it, with the selected tab left out of it, so that tab is the card's own picture.
+local BAR_SHADE = ui.layer_shader(TAB_HOLE .. [[
+fn layer(input: LayerInput) -> vec4<f32> {
 	let y = input.p.y;
 	let fade = 0.55 * clamp((88.0 - y) / 82.0, 0.0, 1.0);
 	let bar = clamp((42.0 - y) * input.scale + 0.5, 0.0, 1.0);
-	var hole = max(folder(input.p, a.x, a.y, b.z, input.scale), folder(input.p, a.z, a.w, b.z, input.scale));
-	hole *= clamp((input.p.x - b.x) / max(c.x, 0.5), 0.0, 1.0) * clamp((b.y - input.p.x) / max(c.y, 0.5), 0.0, 1.0);
-	let v = mix(mix(fade, 1.0, bar), fade, hole);
+	let v = mix(mix(fade, 1.0, bar), fade, hole(input));
 	return vec4<f32>(input.color.rgb, input.color.a * v);
 }]])
+local STRIP_CUT = ui.layer_shader(TAB_HOLE .. [[
+fn layer(input: LayerInput) -> vec4<f32> {
+	return vec4<f32>(input.color.rgb, input.color.a * (1.0 - hole(input)));
+}]])
+local TAB_KEEP = ui.layer_shader(TAB_HOLE .. [[
+fn layer(input: LayerInput) -> vec4<f32> {
+	return vec4<f32>(input.color.rgb, input.color.a * hole(input));
+}]])
+local STRIP_BLUR = 28
+local TINT_IN = { angle = 90, stops = { { 0, "#00000000" }, { 0.12, "#000000ff" }, { 1, "#000000ff" } } }
+ui.theme.tokens {
+	zeron = {
+		strip = {
+			bg_light = "mix({zeron.window}, {accent}, 0.18)",
+			bg_dark = "mix({zeron.window}, {accent}, 0.16)",
+			art_light = "alpha({accent}, 0.22)",
+			art_dark = "alpha(mix({zeron.window}, {accent}, 0.25), 0.47)",
+			ink_light = "alpha({text.primary}, 0.72)",
+			ink_dark = "alpha({text.primary}, 0.7)",
+			hover_light = "#ffffff59",
+			hover_dark = "#ffffff14",
+			rule_light = "alpha({text.primary}, 0.18)",
+			rule_dark = "#ffffff24",
+			tab_top = "alpha({zeron.window}, 0.55)",
+			tab_foot = "alpha({zeron.window}, 0.31)",
+		},
+	},
+}
+function M.strip_token(name: string): string
+	local kind = ui.theme.kind()
+	local light = kind == "light" or kind == "high-contrast-light"
+	return `$zeron.strip.{name}_{if light then "light" else "dark"}`
+end
 
 M.page_art = ui.computed(function(): string?
 	local page = route.current:get().name
@@ -96,10 +136,6 @@ end)
 local drawn = ui.state("shell_frame_drawn", false)
 M.framed = ui.computed(function(): boolean
 	return drawn:get() and appearance.inset_card:get() and appearance.frame_style:get() ~= "off" and M.page_art:get() ~= nil
-end)
--- (The selected tab's outline, on the same art with Inset card on or off.)
-M.tab_framed = ui.computed(function(): boolean
-	return drawn:get() and appearance.frame_style:get() ~= "off" and M.page_art:get() ~= nil
 end)
 
 function M.hero_height(vh: number): number
@@ -375,6 +411,10 @@ function M.bar_theme(): any
 	return if shows_art() then { ["text.secondary"] = "$text.primary" } else nil
 end
 
+function M.island(): boolean
+	return folded() and (M.page_art:get() == "hero" or plugin_wallpaper())
+end
+
 local function page_x(): number
 	if route.current:get().name == "settings" then
 		local settings: any = require("@app/screens/shell/settings")
@@ -404,6 +444,9 @@ local function left_gap(): number
 end
 
 local function top_gap(): number
+	if M.framed:get() then
+		return TOP_BAR
+	end
 	return if appearance.inset_card:get() then GAP else 0
 end
 
@@ -431,6 +474,50 @@ local function bar_shade(): Node
 		end),
 		ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, bg = "$zeron.window" },
 	}
+end
+
+local CUT_PARAMS = { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } }
+
+local function card_strip(): Node
+	return ui.show(function(): boolean
+		return not M.framed:get()
+	end, ui.div {
+		id = "shell-strip",
+		ref = art.strip,
+		absolute = true,
+		left = 0,
+		right = 0,
+		top = 0,
+		h = ui.raw(TOP_BAR, "the top bar"),
+		overflow = "hidden",
+		layer_shader = STRIP_CUT,
+		layer_params = CUT_PARAMS,
+		bg = function(): string
+			if M.page_art:get() ~= nil then
+				return fill_token()
+			end
+			return if shows_art() then "#00000000" else M.strip_token("bg")
+		end,
+		ui.show(function(): boolean
+			return M.page_art:get() ~= nil
+		end, M.Layer {
+			id = "shell-strip-art",
+			blur = function(): number
+				return STRIP_BLUR
+			end,
+			unfaded = true,
+		}),
+		ui.show(shows_art, ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			bg = function(): string
+				return M.strip_token("art")
+			end,
+		}),
+	})
 end
 
 -- What the card shows, laid out in the window's own coordinates: it holds still as the card's edges move over it.
@@ -512,6 +599,7 @@ local function card_picture(): Node
 			},
 		},
 		bar_shade(),
+		card_strip(),
 		ui.div {
 			id = "shell-rail-scrim",
 			absolute = true,
@@ -526,6 +614,104 @@ local function card_picture(): Node
 			end),
 		},
 	}
+end
+
+local function frame_strip(): Node
+	return ui.show(M.framed, ui.div {
+		absolute = true,
+		left = 0,
+		right = art.panel_gap,
+		top = 0,
+		h = ui.raw(TOP_BAR, "the top bar"),
+		pointer_events = "none",
+		hidden = function(): boolean
+			return art.expanded:get()
+		end,
+		ui.div {
+			id = "shell-strip-tint",
+			ref = art.tint,
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			layer_shader = STRIP_CUT,
+			layer_params = CUT_PARAMS,
+			ui.div {
+				absolute = true,
+				left = page_x,
+				ml = moved(left_gap),
+				right = 0,
+				top = 0,
+				bottom = 0,
+				overflow = "hidden",
+				bg = "$zeron.window",
+				mask_gradient = TINT_IN,
+				ui.div {
+					absolute = true,
+					left = function(): number
+						return -page_x()
+					end,
+					ml = moved(function(): number
+						return -left_gap()
+					end),
+					top = 0,
+					bottom = 0,
+					w = function(): number
+						return art.window:get().w
+					end,
+					M.Layer {
+						id = "shell-strip-art",
+						blur = function(): number
+							return STRIP_BLUR
+						end,
+						unfaded = true,
+					},
+					quad(function(): number
+						return if fades() then appearance.frame_shade:get() else 1 - (1 - appearance.frame_shade:get()) * (1 - extra_shade())
+					end),
+					ui.div {
+						absolute = true,
+						left = 0,
+						right = 0,
+						top = 0,
+						bottom = 0,
+						bg = function(): string
+							return M.strip_token("art")
+						end,
+					},
+				},
+			},
+		},
+		ui.div {
+			id = "shell-tab-surface",
+			ref = art.tab,
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			overflow = "hidden",
+			layer_shader = TAB_KEEP,
+			layer_params = CUT_PARAMS,
+			bg = fill_token,
+			-- (Unfaded: a faded picture inside this cut layer draws nothing.)
+			M.Layer { id = "shell-tab-art", unfaded = true },
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				gradient = function(): any
+					return { angle = 180, stops = { { 0, ui.theme.get("zeron.strip.tab_top") }, { 1, ui.theme.get("zeron.strip.tab_foot") } } }
+				end,
+				opacity = function(): number
+					return appearance.chat_tab_shade:get()
+				end,
+			},
+		},
+	})
 end
 
 local function card_view(): Node
@@ -622,6 +808,9 @@ local function card_view(): Node
 			bottom = 0,
 			rounded = radius,
 			border = 1,
+			border_sides = function(): any
+				return if M.framed:get() then { 0, 1, 1, 1 } else { 1, 1, 1, 1 }
+			end,
 			border_color = function(): string
 				return if M.framed:get() then "$zeron.inset.framed_edge" else "$border.subtle"
 			end,
@@ -667,6 +856,7 @@ function M.View(): Node
 				return card_view()
 			end, { absolute = true, left = 0, right = 0, top = 0, bottom = 0, pointer_events = "none" }),
 		},
+		frame_strip(),
 	}
 end
 

@@ -131,7 +131,7 @@ test("The frame runs under the whole window with art on the page and nothing wit
 	expect(whole.height).to_be(800)
 	expect(app:has("#shell-frame-shade")).to_be(true)
 	expect(app:has("#shell-frame-look")).to_be(false)
-	expect(box(app, "#shell-page-card").y).to_be(4)
+	expect(box(app, "#shell-page-card").y).to_be(42)
 	app:set_state("shell_frame_blend", "fade")
 	app:frames(10)
 	local fading = box(app, "#shell-frame-look")
