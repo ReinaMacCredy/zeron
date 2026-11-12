@@ -29,6 +29,7 @@ local locale = require("@self/locale")
 local FoldButton = require("@self/fold_button")
 local ReplyPicture = require("@self/reply_picture")
 local Threads = require("@self/transcript_threads")
+local FileIcon = require("@self/file_icons")
 
 export type Kind = "exec" | "read" | "edit" | "write" | "search" | "glob" | "web" | "todo" | "agent" | "delegate" | "thread" | "thought" | "mcp" | "skill" | "wait" | "advisor" | "cloud" | "cloud_git"
 -- One tool: what kind, what it did ("Read", "transcript.rs"), and for an
@@ -214,6 +215,52 @@ local function line_of(t: Tool): string
 	return (string.gsub(t.target or "", "%s+", " "))
 end
 
+local function base_name(path: string): string
+	return string.match(path, "([^/\\]+)[/\\]*$") or path
+end
+
+-- gpui's file badge: the file's own icon on its well, then its name.
+local function file_badge(now: () -> Tool, opens: boolean, open_file: ((path: string) -> ())?): Node
+	local function name(): string
+		return base_name(now().path or "")
+	end
+	return ui.row {
+		class = "tool-file-badge",
+		min_w = 0,
+		shrink = 1,
+		h = 22,
+		items = "center",
+		gap = ui.raw(6, "gpui's file badge"),
+		pl = 1,
+		pr = ui.raw(6, "gpui's file badge"),
+		rounded = ui.raw(5, "gpui's file badge"),
+		bg = "$zeron.tool_badge.bg",
+		cursor = if opens then "pointer" else nil,
+		hover = if opens then { bg = "$zeron.tool_badge.hover" } else nil,
+		on_click = if opens and open_file
+			then function()
+				local path = now().path
+				if path then
+					open_file(path)
+				end
+			end
+			else nil,
+		ui.row {
+			w = 20,
+			h = 20,
+			shrink = 0,
+			items = "center",
+			justify = "center",
+			rounded = ui.raw(4, "gpui's file badge well"),
+			bg = "$zeron.tool_badge.well",
+			FileIcon { name = name, size = 14 },
+		},
+		FadeText { name, literal = true, shrink = 1, text_size = "$font.size.sm", color = function(): string
+			return if now().failed then "$danger" else "$text.primary"
+		end },
+	}
+end
+
 -- A row opened: the whole call, in its own block under the line, wrapping,
 -- as tall as it is.
 local function call_block(now: () -> Tool): Node
@@ -252,6 +299,7 @@ end
 local CALLS_OPEN = ui.state("activity_calls_open", {} :: { [string]: boolean })
 local CHANGES: { [string]: boolean } = { edit = true, write = true }
 local LIVE_CHANGE_H = 240
+local BADGED: { [string]: boolean } = { read = true, edit = true, write = true }
 local GROUPS_CHOSEN = ui.state("activity_groups_chosen", {} :: { [string]: boolean })
 
 -- A thought's row: no glyph, no branch, no header, its words themselves
@@ -602,37 +650,43 @@ local function row(
 				},
 				ui.show(
 					function(): boolean
-						return now().target ~= nil
+						return now().path ~= nil and BADGED[now().kind] == true
 					end,
-					ui.row {
-						class = "tool-target",
-						min_w = 0,
-						shrink = 1,
-						-- (Only a name whose file opens takes the click, as gpui's `opener.opens`: elsewhere it's the row's.)
-						cursor = if name_opens then "pointer" else nil,
-						on_click = if name_opens
-							then function()
-								local path = now().path
-								if path then
-									open_file(path)
-								end
-							end
-							else nil,
-						FadeText {
-							function(): string
-								return line_of(now())
-							end,
-							literal = true,
+					file_badge(now, name_opens, open_file),
+					ui.show(
+						function(): boolean
+							return now().target ~= nil
+						end,
+						ui.row {
+							class = "tool-target",
+							min_w = 0,
 							shrink = 1,
-							font = function(): string?
-								return if now().kind == "skill" then nil else "$font.mono"
-							end,
-							text_size = "$font.size.sm",
-							color = function(): string
-								return if now().kind == "skill" then skill_ink() else "$text.primary"
-							end,
-						},
-					}
+							-- (Only a name whose file opens takes the click, as gpui's `opener.opens`: elsewhere it's the row's.)
+							cursor = if name_opens then "pointer" else nil,
+							on_click = if name_opens
+								then function()
+									local path = now().path
+									if path then
+										open_file(path)
+									end
+								end
+								else nil,
+							FadeText {
+								function(): string
+									return line_of(now())
+								end,
+								literal = true,
+								shrink = 1,
+								font = function(): string?
+									return if now().kind == "skill" then nil else "$font.mono"
+								end,
+								text_size = "$font.size.sm",
+								color = function(): string
+									return if now().kind == "skill" then skill_ink() else "$text.primary"
+								end,
+							},
+						}
+					)
 				),
 				-- An edit's lines, added and removed, in their hues.
 				ui.show(

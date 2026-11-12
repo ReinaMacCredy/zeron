@@ -691,6 +691,12 @@ function M.setup()
 					option = { radius = option, key_radius = control.nest(option, "$space.2") },
 					tray = { row_radius = tray_row, thumb_radius = control.nest(tray_row, "$space.1") },
 				},
+				-- gpui's file badge on a tool's row: its plate, and the well its icon sits on (`file_icons::well_bg`).
+				tool_badge = {
+					bg = "alpha({text.primary}, 0.06)",
+					hover = "alpha({text.primary}, 0.1)",
+					well = if dark then "#00000029" else "#ffffff29",
+				},
 				reference = {
 					skill = if dark then "#c4b4ff" else "#7f22fe",
 					skill_fill = if dark then "#c4b4ff29" else "#7f22fe29",
