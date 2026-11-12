@@ -911,7 +911,8 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		elseif right + FADE > at + room then
 			want = right + FADE - room
 		end
-		want = math.clamp(want, 0, math.max(0, total - room))
+		-- (No further than what's laid out, which the scroll would clamp it to: its width is followed, so it goes on as the tabs widen.)
+		want = math.clamp(want, 0, math.max(0, math.min(total, content.width or 0) - room))
 		if math.abs(want - at) > 0.5 then
 			offset:set(want)
 		end
