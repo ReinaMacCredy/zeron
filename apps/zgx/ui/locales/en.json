@@ -3342,6 +3342,38 @@
       "show_tools": "Show {group}'s tools",
       "group_off": "The whole group is off. Your choices below are kept for when you turn it back on."
     },
+    "features": {
+      "usage": {
+        "label": "Usage on the rail",
+        "description": "The limit ring on the rail, which opens this page",
+        "terms": "usage ring rail limit"
+      },
+      "home_widgets": {
+        "label": "Home widgets",
+        "description": "The widget grid under New chat",
+        "terms": "home widgets grid new chat"
+      },
+      "keep_awake": {
+        "label": "Keep this Mac awake while agents work",
+        "description": "Blocks idle sleep until a minute after the last agent stops. The display still sleeps, and closing the lid still sleeps the Mac.",
+        "terms": "keep awake sleep caffeinate"
+      },
+      "browser_annotate": {
+        "label": "Annotate",
+        "description": "Notes on a web page for the agent: the browser bar's Annotate, its menu item and its key",
+        "terms": "annotate notes browser"
+      },
+      "device": {
+        "label": "Device panel",
+        "description": "The simulator and emulator panel",
+        "terms": "device simulator emulator panel"
+      },
+      "voice": {
+        "label": "Voice",
+        "description": "The mic, to speak instead of typing",
+        "terms": "voice mic microphone dictation"
+      }
+    },
     "predictions": {
       "title": "Predictions",
       "terms": "predictions suggest next message tab accept autocomplete",

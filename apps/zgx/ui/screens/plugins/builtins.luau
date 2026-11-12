@@ -1,5 +1,5 @@
 --!strict
--- Zeron's own plugins (DECISIONS 2026-11-08): each door reads `M.on(id)`, so a switch in Settings → Plugins takes it away or brings it back at once.
+-- Zeron's own features (DECISIONS 2026-11-08): each door reads `M.on(id)`, so a switch (Review's in Settings → Plugins, the rest on their own Settings pages) takes it away or brings it back at once.
 -- One key each: `builtin_<id>` (ui.persist), but Keep awake's is the engine's own `keepAwakeWhileWorking` in its ui-settings.json, which it reads as it holds the Mac awake.
 
 local M = {}
@@ -8,15 +8,10 @@ export type Builtin = { id: string, icon: string }
 
 M.LIST = {
 	{ id = "review", icon = "checklist" },
-	{ id = "usage", icon = "usage-chart" },
-	{ id = "home_widgets", icon = "widget" },
-	{ id = "keep_awake", icon = "sun" },
-	{ id = "appshots", icon = "gallery" },
-	{ id = "predictions", icon = "magic-stick" },
-	{ id = "browser_annotate", icon = "cursor" },
-	{ id = "device", icon = "smartphone" },
-	{ id = "voice", icon = "microphone" },
 } :: { Builtin }
+
+-- Switched on the Settings page that owns each (Reina, 2026-11-12), not on Plugins.
+M.SETTINGS = { "usage", "home_widgets", "keep_awake", "predictions", "browser_annotate", "device", "voice" }
 
 -- Commands a built-in owns: off, they have no key, do nothing, and the palette and Shortcuts leave them out.
 M.COMMANDS = {
@@ -27,11 +22,14 @@ local KEEP_AWAKE = "keep_awake"
 
 local stores: { [string]: State<boolean> } = {}
 for _, b in M.LIST do
-	if b.id ~= KEEP_AWAKE then
-		stores[b.id] = ui.persist(`builtin_{b.id}`, true)
+	stores[b.id] = ui.persist(`builtin_{b.id}`, true)
+end
+for _, id in M.SETTINGS do
+	if id ~= KEEP_AWAKE then
+		stores[id] = ui.persist(`builtin_{id}`, true)
 	end
 end
--- (nil until the Plugins page asks: on, as the engine takes a file without it.)
+-- (nil until General asks: on, as the engine takes a file without it.)
 local keep_awake = ui.state("builtins_keep_awake", nil :: boolean?)
 
 function M.on(id: string): boolean
@@ -85,6 +83,48 @@ function M.set(id: string, on: boolean, failed: ((err: any) -> ())?)
 		return
 	end
 	p:after(function(_: any) end, refused)
+end
+
+-- A Settings row's switch for one of M.SETTINGS, labelled `label`.
+function M.Switch(id: string, label: Message): Node
+	return ui.component(function(): Node
+		local on = ui.use_state(M.on(id))
+		ui.effect(function()
+			local want = M.on(id)
+			if on:peek() ~= want then
+				on:set(want)
+			end
+		end)
+		return ui.div {
+			id = `feature-{id}`,
+			require("@ds").Switch {
+				value = on,
+				label = label,
+				on_change = function(value: boolean)
+					M.set(id, value, function(err: any)
+						require("@ds").toast.show {
+							title = ui.t("plugins.page.couldnt_switch", { name = label:get() }),
+							body = if type(err) == "table" and err.message then tostring(err.message) else nil,
+							tone = "warning",
+						}
+					end)
+				end,
+			},
+		}
+	end)()
+end
+
+-- One of M.SETTINGS as a card of its own, its words `settings.features.<id>`.
+function M.Row(id: string): Node
+	local ds = require("@ds")
+	local label = ui.t(`settings.features.{id}.label`)
+	return ds.Settings.Group {
+		ds.Settings.Row {
+			label = label,
+			description = ui.t(`settings.features.{id}.description`),
+			control = M.Switch(id, label),
+		},
+	}
 end
 
 -- (Voice's door is the design system's composer's mic, a lane's too: ds can't require this module.)

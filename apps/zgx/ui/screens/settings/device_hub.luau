@@ -10,6 +10,7 @@
 local ds = require("@ds")
 local host = require("@app/screens/settings/host")
 local search = require("@app/screens/settings/search")
+local Builtins = require("@app/screens/plugins/builtins")
 local visits = require("@app/screens/settings/visits")
 local api = require("@app/screens/device/api")
 local model = require("@app/screens/device/model")
@@ -27,6 +28,7 @@ local function t(key: string, args: { [string]: any }?): Message
 end
 
 search.index(M.ID, t("title"), t("terms"), {
+	{ key = "device_panel", title = ui.t("settings.features.device.label"), terms = ui.t("settings.features.device.terms") },
 	{ key = "hub", title = t("hub.label"), section = t("title"), terms = t("hub.terms") },
 	{ key = "platforms", title = t("platforms.label"), section = t("title"), terms = t("platforms.terms") },
 	{ key = "agent", title = t("agent.label"), section = t("title"), terms = t("agent.terms") },
@@ -576,6 +578,7 @@ function M.view(): Node
 	return ds.Settings.Page {
 		title = t("title"),
 		description = t("subtitle"),
+		search.anchor("device_panel", Builtins.Row("device")),
 		ui.show(function(): boolean
 			return unread:get() ~= nil
 		end, ds.Callout {

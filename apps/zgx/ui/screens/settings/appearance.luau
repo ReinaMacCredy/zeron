@@ -10,6 +10,7 @@ local material = require("@ds/material")
 local math_ = require("@ds/math")
 local appearance = require("@app/screens/shell/appearance")
 local search = require("@app/screens/settings/search")
+local Builtins = require("@app/screens/plugins/builtins")
 local prefs = require("@app/screens/settings/prefs")
 local host = require("@app/screens/settings/host")
 local wallpaper = require("@app/screens/settings/wallpaper")
@@ -44,6 +45,7 @@ search.index(M.ID, ui.t("settings.appearance.title"), ui.t("settings.appearance.
 	{ key = "render_math", title = ui.t("settings.appearance.render_math.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.render_math.terms") },
 	{ key = "math_font", title = ui.t("settings.appearance.math_font.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.math_font.terms") },
 	{ key = "math_size", title = ui.t("settings.appearance.math_size.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.math_size.terms") },
+	{ key = "home_widgets", title = ui.t("settings.features.home_widgets.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.features.home_widgets.terms") },
 	{ key = "wallpaper", title = ui.t("settings.appearance.wallpaper.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.appearance.wallpaper.terms") },
 	{ key = "wallpaper_image", title = ui.t("settings.appearance.wallpaper.image.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.appearance.wallpaper.image.terms") },
 	{ key = "effect", title = ui.t("settings.appearance.effect.label"), section = ui.t("settings.appearance.new_chat"), terms = ui.t("settings.appearance.effect.terms") },
@@ -822,6 +824,7 @@ function M.view(): Node
 		ds.Settings.Section {
 			title = ui.t("settings.appearance.new_chat"),
 			description = ui.t("settings.appearance.new_chat_description"),
+			search.anchor("home_widgets", Builtins.Row("home_widgets")),
 			-- (One card, its later rows bringing their own rules.)
 			ui.column {
 				id = "appearance-new-chat",

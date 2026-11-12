@@ -19,10 +19,6 @@ local language = require("@app/screens/language")
 local predictions = require("@app/screens/settings/predictions")
 local Builtins = require("@app/screens/plugins/builtins")
 
-local function predicting(): boolean
-	return Builtins.on("predictions")
-end
-
 local M = {}
 
 M.ID = "general"
@@ -31,10 +27,11 @@ M.TITLE = "General"
 search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"), {
 	{ key = "language", title = ui.t("settings.general.language.label"), terms = ui.t("settings.general.language.terms") },
 	{ key = "close_panel", title = ui.t("settings.general.close_panel.label"), terms = ui.t("settings.general.close_panel.terms") },
+	{ key = "keep_awake", title = ui.t("settings.features.keep_awake.label"), terms = ui.t("settings.features.keep_awake.terms") },
 	{ key = "key_switcher_window", title = ui.t("settings.shortcuts.switcher.window.label"), section = ui.t("settings.shortcuts.switcher.section") },
 	{ key = "key_switcher_limit", title = ui.t("settings.shortcuts.switcher.limit.label"), section = ui.t("settings.shortcuts.switcher.section") },
 	{ key = "key_switcher_cycles", title = ui.t("settings.shortcuts.switcher.cycles.label"), section = ui.t("settings.shortcuts.switcher.section") },
-	{ key = "predictions", title = ui.t("settings.predictions.show"), section = ui.t("settings.predictions.title"), terms = ui.t("settings.predictions.terms"), shown = predicting },
+	{ key = "predictions", title = ui.t("settings.predictions.show"), section = ui.t("settings.predictions.title"), terms = ui.t("settings.predictions.terms") },
 	{ key = "hide_emails", title = ui.t("settings.general.hide_emails.label"), section = ui.t("settings.general.privacy"), terms = ui.t("settings.general.hide_emails.terms") },
 	{ key = "worktrees", title = ui.t("settings.general.worktrees.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.worktrees.terms") },
 	{ key = "commit_credit", title = ui.t("settings.general.commit_credit.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.commit_credit.terms") },
@@ -233,6 +230,7 @@ end
 function M.view(): Node
 	visits.once("general", function()
 		load_all()
+		Builtins.load()
 		predictions.load()
 		if chat.catalog:peek().state ~= "ready" then
 			chat.load_catalog()
@@ -262,10 +260,15 @@ function M.view(): Node
 					description = ui.t("settings.general.close_panel.description"),
 					control = ds.Switch { value = prefs.close_panel_with_last_tab, label = ui.t("settings.general.close_panel.label") },
 				}),
+				row("keep_awake", {
+					label = ui.t("settings.features.keep_awake.label"),
+					description = ui.t("settings.features.keep_awake.description"),
+					control = Builtins.Switch("keep_awake", ui.t("settings.features.keep_awake.label")),
+				}),
 			},
 		},
 		switcher,
-		ui.show(predicting, predictions.section()),
+		predictions.section(),
 		ds.Settings.Section {
 			title = ui.t("settings.general.privacy"),
 			ds.Settings.Group {

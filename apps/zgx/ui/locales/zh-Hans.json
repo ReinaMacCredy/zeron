@@ -3342,6 +3342,38 @@
       "show_tools": "显示{group}的工具",
       "group_off": "整个分组已关闭。你在下方的选择会保留，等你重新打开时生效。"
     },
+    "features": {
+      "usage": {
+        "label": "侧栏上的用量",
+        "description": "侧栏上的额度圆环，点击打开此页面",
+        "terms": "用量 圆环 侧栏 额度"
+      },
+      "home_widgets": {
+        "label": "主页小组件",
+        "description": "新对话下方的小组件网格",
+        "terms": "主页 小组件 新对话"
+      },
+      "keep_awake": {
+        "label": "智能体工作时保持这台 Mac 唤醒",
+        "description": "在最后一个智能体停止后一分钟内阻止闲置休眠。显示器仍会休眠，合上盖子仍会让 Mac 休眠。",
+        "terms": "保持唤醒 休眠"
+      },
+      "browser_annotate": {
+        "label": "标注",
+        "description": "在网页上为智能体做标注：浏览器栏的标注按钮、菜单项和快捷键",
+        "terms": "标注 浏览器"
+      },
+      "device": {
+        "label": "设备面板",
+        "description": "模拟器面板",
+        "terms": "设备 模拟器 面板"
+      },
+      "voice": {
+        "label": "语音",
+        "description": "用麦克风说话代替打字",
+        "terms": "语音 麦克风 听写"
+      }
+    },
     "predictions": {
       "title": "预测",
       "terms": "预测 建议 下一条 消息 tab 接受 自动补全 predictions",

@@ -9,6 +9,7 @@
 local ds = require("@ds")
 local usage = require("@account/usage")
 local search = require("@app/screens/settings/search")
+local Builtins = require("@app/screens/plugins/builtins")
 
 local M = {}
 
@@ -16,6 +17,7 @@ M.ID = "usage"
 M.TITLE = "Usage"
 
 search.index(M.ID, ui.t("settings.usage.title"), ui.t("settings.usage.terms"), {
+	{ key = "feature_usage", title = ui.t("settings.features.usage.label"), terms = ui.t("settings.features.usage.terms") },
 	{ key = "spend", title = ui.t("settings.usage.spend.title"), terms = ui.t("settings.usage.terms") },
 	{ key = "breakdown", title = ui.t("settings.usage.breakdown.title"), terms = ui.t("settings.usage.breakdown.terms") },
 })
@@ -524,6 +526,7 @@ function M.view(): Node
 	return ds.Settings.Page {
 		title = ui.t("settings.usage.title"),
 		description = ui.t("settings.usage.description"),
+		search.anchor("feature_usage", Builtins.Row("usage")),
 		spend(),
 		totals(),
 		breakdown(),
