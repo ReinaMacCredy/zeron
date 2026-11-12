@@ -654,11 +654,7 @@ pub(crate) fn play_sound() {
     std::thread::spawn(|| {
         let path = std::env::temp_dir().join(format!("zeron-zgx-appshot-{}.wav", std::process::id()));
         if std::fs::write(&path, SOUND).is_ok() {
-            let _ = std::process::Command::new(if cfg!(target_os = "macos") { "afplay" } else { "paplay" })
-                .arg(&path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+            crate::settings::play_file(&path);
         }
     });
 }

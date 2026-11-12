@@ -827,13 +827,58 @@ fn play(data: &[u8]) {
     if std::fs::write(&path, data).is_err() {
         return;
     }
-    let player = if cfg!(target_os = "macos") { "afplay" } else { "paplay" };
-    let _ = std::process::Command::new(player)
-        .arg(&path)
+    play_file(&path);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn play_file(path: &std::path::Path) {
+    let _ = std::process::Command::new("paplay")
+        .arg(path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
-    let _ = std::fs::remove_file(&path);
+}
+
+// Not an afplay child: its CoreAudio assertion moves the app's coalition, which can deadlock the kernel on macOS 27.2 (zeron #1333).
+#[cfg(target_os = "macos")]
+pub(crate) fn play_file(path: &std::path::Path) {
+    use core_foundation::base::TCFType;
+    use core_foundation::url::{CFURL, CFURLRef};
+
+    #[link(name = "AudioToolbox", kind = "framework")]
+    unsafe extern "C" {
+        fn AudioServicesCreateSystemSoundID(url: CFURLRef, id: *mut u32) -> i32;
+        fn AudioServicesDisposeSystemSoundID(id: u32) -> i32;
+        fn AudioServicesSetProperty(property: u32, specifier_size: u32, specifier: *const std::ffi::c_void, data_size: u32, data: *const std::ffi::c_void) -> i32;
+        fn AudioServicesPlaySystemSoundWithCompletion(id: u32, completion: &block2::Block<dyn Fn()>);
+    }
+
+    let Some(url) = CFURL::from_path(path, false) else { return };
+    let mut id = 0u32;
+    if unsafe { AudioServicesCreateSystemSoundID(url.as_concrete_TypeRef(), &mut id) } != 0 {
+        return;
+    }
+    // A system sound is otherwise interface feedback, silent when the user turns interface sounds off.
+    let ui_sound = 0u32;
+    unsafe {
+        AudioServicesSetProperty(
+            u32::from_be_bytes(*b"isui"),
+            4,
+            (&raw const id).cast(),
+            4,
+            (&raw const ui_sound).cast(),
+        );
+    }
+    let (finished, wait) = std::sync::mpsc::channel();
+    let completion = block2::RcBlock::new(move || {
+        let _ = finished.send(());
+    });
+    unsafe { AudioServicesPlaySystemSoundWithCompletion(id, &completion) };
+    let _ = wait.recv_timeout(std::time::Duration::from_secs(10));
+    unsafe {
+        AudioServicesDisposeSystemSoundID(id);
+    }
 }
 
 /// `/auth/orgs/{organization_id}/{kind}/{id}[/{then}]`.
