@@ -382,6 +382,9 @@ M.Chip = ui.component(function(props: {
 	local function fraction(): number?
 		return M.fraction(props.usage())
 	end
+	local function card(): Node
+		return M.Card { usage = props.usage, stats = props.stats, working = props.working, plan = props.plan }
+	end
 	return ui.show(function(): boolean
 		return windowed() or word:get() ~= nil
 	end, ui.presence(props.side, function(at: string): Node
@@ -398,7 +401,7 @@ M.Chip = ui.component(function(props: {
 			selectable = false,
 			text_size = "$font.size.xs",
 			label = locale.t("ds.composer.context_used"),
-			tooltip = M.Card { usage = props.usage, stats = props.stats, working = props.working, plan = props.plan },
+			tooltip = card(),
 			tooltip_placement = { side = at, align = "end", offset = 8 },
 			tooltip_delay = 150,
 			ui.show(windowed, M.Ring {
