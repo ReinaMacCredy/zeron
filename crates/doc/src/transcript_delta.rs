@@ -783,6 +783,8 @@ mod context_update_tests {
             questions: Vec::new(),
             resolved: false,
             answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
         });
         let (slice, info) = TranscriptWindow::tail(1).apply(&entries);
         assert_eq!(slice[0].id, "after");
