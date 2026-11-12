@@ -793,7 +793,9 @@ function M.switch(v: string)
 			return
 		end
 		local to = boxes(if to_kanban then card_refs else row_refs, origin, false)
-		if next(to) == nil and #order > 0 and tries < 10 then
+		local p = store.parts:peek()
+		local expected = #p.open > 0 or (#p.done > 0 and (to_kanban or M.done_open:peek()))
+		if next(to) == nil and expected and tries < 10 then
 			tries += 1
 			ui.after(16, land)
 			return

@@ -552,3 +552,39 @@ test("the List/Kanban switch shows each task once: the old view goes at once, th
 	app:frames(20)
 	expect(app:has("#task-card")).to_be(true)
 end)
+
+test("the List/Kanban switch, frame by frame: a task never shows twice and never goes blank, and leaving the page mid-way leaves it whole", function()
+	local app = open()
+	local function step(real: string)
+		for _ = 1, 45 do
+			app:frames(1)
+			local shown = 0
+			for line in app:tree("#tasks-page"):gmatch("[^\n]+") do
+				if line:find("Draft the onboarding copy", 1, true) and not line:find("hidden", 1, true) then
+					shown += 1
+				end
+			end
+			local real_shown = app:has(real) and not (app:tree(real):match("[^\n]+") or ""):find("hidden", 1, true)
+			if app:state("tasks_morphing") then
+				expect(real_shown).to_be(false)
+			end
+			expect(shown > 0).to_be(true)
+		end
+	end
+	app:click('#tasks-view >> "Kanban"')
+	step("#task-kanban-t4")
+	app:frames(30)
+	app:click('#tasks-view >> "List"')
+	step("#task-row-t4")
+	app:frames(30)
+	app:click('#tasks-view >> "Kanban"')
+	app:frames(2)
+	app:click("#rail-skills")
+	app:frames(30)
+	app:click("#rail-tasks")
+	app:frames(30)
+	expect(app:state("tasks_morphing")).to_be(false)
+	app:click("#task-kanban-t4")
+	app:frames(20)
+	expect(app:has("#task-card")).to_be(true)
+end)
