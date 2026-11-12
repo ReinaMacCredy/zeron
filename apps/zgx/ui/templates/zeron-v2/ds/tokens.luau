@@ -627,6 +627,22 @@ function M.setup()
 				hunk = "{accent}",
 				meta = "{text.secondary}",
 			},
+			-- gpui's inks for What's New's visuals (screens/shell/whats_new_visuals), in standard terms.
+			whats_new = {
+				frame = "alpha({text.primary}, 0.04)",
+				block = "alpha({text.primary}, 0.045)",
+				wash_06 = "alpha({text.primary}, 0.06)",
+				wash_08 = "alpha({text.primary}, 0.08)",
+				wash_10 = "alpha({text.primary}, 0.1)",
+				accent_wash = "alpha({accent}, 0.12)",
+				accent_edge = "alpha({accent}, 0.8)",
+				success_line = "alpha({success}, 0.8)",
+				working = "{zeron.tab.working}",
+				done = "#00bc7d",
+				track = "alpha({zeron.whats_new.working}, 0.25)",
+				raised = "{surface.overlay}",
+				split = { fill = "{popover.bg}", rule = "alpha({text.primary}, 0.15)" },
+			},
 		},
 	}
 	ui.theme.load("ds/themes/zeron-dark.json")

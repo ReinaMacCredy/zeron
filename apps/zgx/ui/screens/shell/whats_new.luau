@@ -5,6 +5,7 @@ local material = require("@ds/material")
 local Icon = require("@ds/icon")
 local host = require("@app/screens/settings/host")
 local arrival = require("@app/screens/shell/arrival")
+local visuals = require("@app/screens/shell/whats_new_visuals")
 
 local M = {}
 
@@ -26,6 +27,11 @@ local shine = ui.state("whats_new_shine", 0)
 local function card_entry(): any
 	local d = M.data:get()
 	return d and d.card
+end
+
+local function card_visual(): string?
+	local e = card_entry()
+	return if e and visuals.has(e.hero_visual) then e.hero_visual else nil
 end
 
 local function seen()
@@ -92,14 +98,35 @@ ui.effect(function()
 	ui.after(if motion.reduced_now() then 0 else 500, spring)
 end)
 
-local function hero(props: { h: number, version: (() -> string)?, rounded: any?, shine: boolean? }): Node
+local card_clock = visuals.clock("whats_new_card_clock", function(): boolean
+	return card_visual() ~= nil and up:get() and not M.dismissed:get() and not M.open_now:get()
+end)
+local dialog_clock = visuals.clock("whats_new_dialog_clock", function(): boolean
+	local e = entry:get()
+	return M.open_now:get() and M.view:get() == "highlights" and e ~= nil and visuals.any(e)
+end)
+
+local function hero(props: { h: number, version: (() -> string)?, rounded: any?, shine: boolean?, visual: (() -> string?)? }): Node
 	return ui.div {
 		relative = true,
 		w_full = true,
 		h = props.h,
 		overflow = "hidden",
 		rounded = props.rounded,
-		gradient = HERO,
+		gradient = if props.visual then nil else HERO,
+		if props.visual
+			then ui.presence(props.visual, function(id: string): Node
+				return ui.div {
+					absolute = true,
+					top = 0,
+					left = 0,
+					right = 0,
+					bottom = 0,
+					fade = { 0, 40 },
+					ui.div { w_full = true, h_full = true, bg = "$zeron.whats_new.frame", visuals.Stage { visual = id, clock = card_clock } },
+				}
+			end)
+			else nil,
 		if props.shine
 			then ui.div {
 				absolute = true,
@@ -151,14 +178,19 @@ function M.Card(): Node
 		on_click = function()
 			M.open(card_entry())
 		end,
-		hero {
-			h = 76,
-			shine = true,
-			version = function(): string
-				local e = card_entry()
-				return if e then e.version else ""
-			end,
-		},
+		ui.switch(function(): string
+			return if card_visual() then "visual" else "gradient"
+		end, {
+			visual = hero { h = 96, shine = true, visual = card_visual },
+			gradient = hero {
+				h = 76,
+				shine = true,
+				version = function(): string
+					local e = card_entry()
+					return if e then e.version else ""
+				end,
+			},
+		}),
 		ui.column {
 			px = "$space.3",
 			pt = "$space.2",
@@ -245,8 +277,9 @@ local function highlights(e: any): Node
 	for i, f in e.features do
 		table.insert(items, Enter {
 			index = i - 1,
-			if f.image
-				then ui.image { src = f.image, w_full = true, h = 104, fit = "cover", rounded = "$radius.lg", border = 1, border_color = "$border" }
+			if visuals.has(f.visual)
+				then visuals.Frame { visual = f.visual, clock = dialog_clock, h = 172 }
+				elseif f.image then ui.image { src = f.image, w_full = true, h = 104, fit = "cover", rounded = "$radius.lg", border = 1, border_color = "$border" }
 				else hero { h = 104, rounded = "$radius.lg" },
 			ui.text { f.title, text_size = "$font.size.md", weight = "$font.weight.semibold", color = "$text.primary", wrap = true },
 			ui.text { f.description, text_size = "$font.size.sm", color = "$text.secondary", wrap = true },
@@ -254,8 +287,11 @@ local function highlights(e: any): Node
 	end
 	if #e.improvements > 0 then
 		local lines: { Node } = { ui.text { ui.t("shell.whats_new.improvements"), text_size = "$font.size.md", weight = "$font.weight.semibold", color = "$text.primary" } }
-		for _, text in e.improvements do
-			table.insert(lines, improvement(text, "$success"))
+		for _, item in e.improvements do
+			table.insert(lines, improvement(item.text, "$success"))
+			if visuals.has(item.visual) then
+				table.insert(lines, ui.div { w_full = true, pl = "$space.3", visuals.Frame { visual = item.visual, clock = dialog_clock, h = 104 } })
+			end
 		end
 		table.insert(items, Enter { index = #e.features, table.unpack(lines) })
 	end
@@ -275,8 +311,8 @@ local function changelog(): Node
 		for _, f in r.features do
 			table.insert(items, improvement(f.title, "$text.tertiary"))
 		end
-		for _, text in r.improvements do
-			table.insert(items, improvement(text, "$text.tertiary"))
+		for _, item in r.improvements do
+			table.insert(items, improvement(item.text, "$text.tertiary"))
 		end
 	end
 	return ui.column { id = "whats-new-changelog", w_full = true, gap = "$space.1", table.unpack(items) }

@@ -76,6 +76,8 @@
 		"control.height": 32,
 
 		"zeron": {
+			// What's New's visuals: gpui's raised card, and its split cards white on light, black on dark.
+			"whats_new": { "raised": "mix({popover.bg}, {text.primary}, 0.06)", "split": { "fill": "#ffffff", "rule": "#00000024" } },
 			"window": "#eeeef0",
 			// Where nothing shows through: the page a white card on that
 			// window, its edge a hairline you can see, and muted text about

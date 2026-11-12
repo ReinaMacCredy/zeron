@@ -170,6 +170,7 @@ export type Name =
 	| "lucide-x"
 	| "lucide-archive"
 	| "lucide-monitor"
+	| "lucide-shield"
 	| "lucide-bot"
 	| "lucide-chevron-down"
 	| "usage-chart"

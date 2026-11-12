@@ -13,7 +13,7 @@ local ENTRY = {
 		{ id = "zgx", title = "A faster interface", description = "Zeron runs on zgx now." },
 		{ id = "settings", title = "Settings, tidied", description = "Usage and Appshots have their own pages." },
 	},
-	improvements = { "Chimes no longer stall the Mac" },
+	improvements = { { text = "Chimes no longer stall the Mac" } },
 }
 
 local function data(card: boolean): any
@@ -144,4 +144,65 @@ test("the card opens the dialog; without a card to show, none springs", function
 	local none = launch(nil, false)
 	none:frames(90)
 	expect(none:has(CARD)).to_be(false)
+end)
+
+local VISUALS = {
+	version = "0.2.132",
+	date = "Nov 1",
+	hero_visual = "answer-pill-hero",
+	features = {
+		{ id = "answer-pill", title = "Answer from the composer", description = "", visual = "answer-pill" },
+		{ id = "keep-awake", title = "Stays awake", description = "", visual = "keep-awake" },
+		{ id = "plain", title = "No visual of ours", description = "", visual = "not-ported" },
+	},
+	improvements = {
+		{ text = "Compaction morphs", visual = "compaction-morph" },
+		{ text = "Swipes", visual = "swipe-dot" },
+		{ text = "Tabs drag", visual = "tab-drag" },
+		{ text = "Plain" },
+	},
+}
+
+local function clock(app: any, which: string): number
+	return app:state(`whats_new_{which}_clock`) or 0
+end
+
+test("every visual the entry names draws in the dialog and the card's hero; a clock runs only while its visuals show", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 800)
+	app:set_state("whats_new", { version = "0.2.132", card = VISUALS, highlights = VISUALS, releases = { VISUALS } })
+	expect(app:wait(CARD, { timeout_ms = 600 })).to_be(true)
+	expect(app:has(`{CARD} >> #whats-new-visual-answer-pill-hero`)).to_be(true)
+	app:frames(30)
+	expect(clock(app, "card") > 0).to_be(true)
+	expect(clock(app, "dialog")).to_be(0)
+	app:click(CARD)
+	app:frames(30)
+	for _, id in { "answer-pill", "keep-awake", "compaction-morph", "swipe-dot", "tab-drag" } do
+		expect(app:has(`#whats-new-highlights >> #whats-new-visual-{id}`)).to_be(true)
+	end
+	expect(app:has("#whats-new-visual-not-ported")).to_be(false)
+	local card_at = clock(app, "card")
+	local open_at = clock(app, "dialog")
+	app:frames(20)
+	expect(clock(app, "card")).to_be(card_at)
+	expect(clock(app, "dialog") > open_at).to_be(true)
+	app:key("Escape")
+	app:frames(20)
+	local closed_at = clock(app, "dialog")
+	app:frames(30)
+	expect(clock(app, "dialog")).to_be(closed_at)
+end)
+
+test("with motion reduced no clock runs and each visual holds its still frame", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 800)
+	app:set_state("motion_reduce", true)
+	app:set_state("whats_new", { version = "0.2.132", card = nil, highlights = VISUALS, releases = { VISUALS } })
+	app:command("shell.whats_new")
+	app:frames(40)
+	expect(app:has("#whats-new-visual-keep-awake")).to_be(true)
+	expect(clock(app, "dialog")).to_be(0)
+	expect(app:has(`#whats-new-visual-keep-awake >> "Working 43s"`)).to_be(true)
+	expect(app:has(`#whats-new-visual-answer-pill >> "Which provider first?"`)).to_be(true)
 end)

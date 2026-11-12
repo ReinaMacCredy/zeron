@@ -49,14 +49,16 @@ fn entry_json(entry: &Entry, pictures: Option<&Path>) -> Json {
         "version": entry.version,
         "date": entry.date,
         "hero": image(entry.hero.as_ref()),
+        "hero_visual": entry.hero_visual,
         "features": entry.features.iter().map(|f| json!({
             "id": f.id,
             "title": f.title,
             "description": f.description,
             "details": f.details,
             "image": image(f.image.as_ref()),
+            "visual": f.visual,
         })).collect::<Vec<_>>(),
-        "improvements": entry.improvements.iter().map(|i| i.text.clone()).collect::<Vec<_>>(),
+        "improvements": entry.improvements.iter().map(|i| json!({ "text": i.text, "visual": i.visual })).collect::<Vec<_>>(),
     })
 }
 
@@ -103,10 +105,15 @@ description = "Faster."
 [[entry]]
 version = "0.2.132"
 date = "Nov 1"
+hero_visual = "tabs-hero"
 [[entry.features]]
 id = "tabs"
 title = "Tabs"
 description = "Drag them."
+visual = "tabs"
+[[entry.improvements]]
+text = "Swipes slide."
+visual = "swipe"
 "#;
 
     #[test]
@@ -139,6 +146,9 @@ description = "Drag them."
         let dir = tempfile::tempdir().unwrap();
         let read = state(&entries, "0.2.132", None, dir.path());
         assert_eq!(read["highlights"]["version"], json!("0.2.132"));
+        assert_eq!(read["highlights"]["hero_visual"], json!("tabs-hero"));
+        assert_eq!(read["highlights"]["features"][0]["visual"], json!("tabs"));
+        assert_eq!(read["highlights"]["improvements"][0], json!({ "text": "Swipes slide.", "visual": "swipe" }));
         assert_eq!(read["releases"].as_array().unwrap().len(), 1);
         assert_eq!(read["card"], Json::Null);
     }
