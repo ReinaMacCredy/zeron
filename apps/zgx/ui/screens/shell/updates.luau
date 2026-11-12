@@ -18,23 +18,11 @@ local Menu = require("@ds/menu")
 local toast = require("@ds/toast")
 local status = require("@ds/status")
 local route = require("@app/screens/shell/route")
+local MarkStack = require("@ds/mark_stack")
 
 local M = {}
 
--- The bar's tab height and its tile, as a session's tab (shell/session_tabs).
--- The gap between circles is cut out of the one behind, not painted: what's
--- under the button shows through it, whatever the button's state or the theme.
-local BUTTON_H, TILE, GAP_CUT = 28, 20, 2.5
--- How far along each circle stands: enough of the one behind shows to know it.
-local STEP = 15
--- A circle's mark: a little right of its middle on those behind, to sit in the
--- middle of what shows of them.
-local MARK_SIDE, MARK_NUDGE = 11, 2
-local MOST = 3
-local GLYPH = 16
--- The button's insets: its circles as far in as they are from its top, its
--- glyph clear of its end.
-local INSET_L, INSET_R, GAP = 4, 6, 5
+local MOST, GLYPH = MarkStack.MOST, MarkStack.GLYPH
 local WIDTH, MARK, ACTION_H = 340, 28, 26
 -- The most the list stands, Update all's strip included; past that it scrolls.
 local MOST_LIST_H = 240
@@ -211,12 +199,8 @@ local marks = ui.computed(function(): { any }
 	return out
 end)
 
-local function stack_w(): number
-	return TILE + STEP * (math.max(#marks:get(), 1) - 1)
-end
-
 function M.width(): number
-	return if shown() then INSET_L + stack_w() + GAP + GLYPH + INSET_R else 0
+	return if shown() then MarkStack.width(#marks:get(), GLYPH) else 0
 end
 
 -- What the button's glyph says of them all.
@@ -834,56 +818,6 @@ local function panel(open: any, anchor: any, reviewing: any): Node
 	})
 end
 
--- A circle behind another, as a crescent: the whole circle less the one in
--- front of it and the gap around that.
-local CRESCENT = (function(): string
-	local r, far = TILE / 2, TILE / 2 + GAP_CUT
-	local a = (STEP * STEP + r * r - far * far) / (2 * STEP)
-	local h = math.sqrt(r * r - a * a)
-	local x, top, bottom = r - a, r - h, r + h
-	return `code:<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {TILE} {TILE}"><path fill="#ffffff" d="M{x} {top}A{r} {r} 0 1 1 {x} {bottom}A{far} {far} 0 0 0 {x} {top}Z"/></svg>`
-end)()
-
--- A circle of the stack: the mark's own tile colour, the mark on it. Ink-only
--- marks take their tile's ink, as on the list's tiles.
-local function tile(at: number): Node
-	local behind = at > 1
-	return ui.show(function(): boolean
-		return #marks:get() >= at
-	end, ui.div {
-		id = `updates-mark-{at}`,
-		absolute = true,
-		top = 0,
-		left = (at - 1) * STEP,
-		w = TILE,
-		h = TILE,
-		if behind
-			then ui.svg { src = CRESCENT, tint = "$zeron.mark.bg", absolute = true, left = 0, top = 0, w = TILE, h = TILE }
-			else ui.div { absolute = true, left = 0, top = 0, w = TILE, h = TILE, rounded = "$radius.full", bg = "$zeron.mark.bg" },
-		ui.row {
-			absolute = true,
-			left = if behind then MARK_NUDGE else 0,
-			top = 0,
-			w = TILE,
-			h = TILE,
-			items = "center",
-			justify = "center",
-			color = "#000000",
-			ui.presence(function(): string
-				local r = marks:get()[at]
-				return if r then r.id else ""
-			end, function(id: string): Node
-				for _, r in marks:peek() do
-					if r.id == id then
-						return mark_of(r, MARK_SIDE, true)
-					end
-				end
-				return ui.div {}
-			end),
-		},
-	})
-end
-
 M.Button = ui.component(function(): Node
 	local open = ui.use_state(false)
 	local reviewing = ui.use_state(false)
@@ -894,48 +828,34 @@ M.Button = ui.component(function(): Node
 			open:set(false)
 		end
 	end)
-	local stack: { any } = { relative = true, shrink = 0, h = TILE, w = stack_w }
-	-- (Those behind first: each paints under the one after it.)
-	for at = MOST, 1, -1 do
-		table.insert(stack, tile(at))
-	end
-	local trigger = ui.row {
-			id = "updates-button",
-			role = "button",
-			label = function(): string
-				return locale.s("shell.updates.button", { n = #rows:get() })
+	local trigger = MarkStack.Trigger {
+		id = "updates-button",
+		label = function(): string
+			return locale.s("shell.updates.button", { n = #rows:get() })
+		end,
+		open = open,
+		hovered = hovered,
+		on_click = function()
+			open:set(not open:peek())
+		end,
+		stack = MarkStack.Stack {
+			id = "updates-mark",
+			marks = function(): { any }
+				return marks:get()
 			end,
-			expanded = open,
-			h = BUTTON_H,
-			pl = ui.raw(INSET_L, "as far in as they are from its top"),
-			pr = ui.raw(INSET_R, "clear of its end"),
-			gap = ui.raw(GAP, "its marks and its glyph"),
-			items = "center",
-			rounded = "$radius.lg",
-			cursor = "pointer",
-			pointer_events = "auto",
-			bg = function(): string
-				if open:get() then
-					return "$zeron.selected.flat.bg"
-				end
-				return if hovered:get() then "$hover" else "#00000000"
+			key = function(r: any): string
+				return r.id
 			end,
-			color = function(): string
-				return if open:get() or hovered:get() then "$text.primary" else "$text.secondary"
+			mark = function(r: any, size: number): Node
+				return mark_of(r, size, true)
 			end,
-			on_hover = function(inside: boolean)
-				hovered:set(inside)
-			end,
-			on_click = function()
-				open:set(not open:peek())
-			end,
-			ui.div(stack),
-			ui.presence(state, function(which: string): Node
-				if which == "working" then
-					return status.StatusIcon { kind = "working", size = GLYPH }
-				end
-				return ds.Icon { name = if which == "done" then "check" else "download", size = GLYPH }
-			end, { w = GLYPH, h = GLYPH, shrink = 0 }),
+		},
+		ui.presence(state, function(which: string): Node
+			if which == "working" then
+				return status.StatusIcon { kind = "working", size = GLYPH }
+			end
+			return ds.Icon { name = if which == "done" then "check" else "download", size = GLYPH }
+		end, { w = GLYPH, h = GLYPH, shrink = 0 }),
 	}
 	-- (The popover draws its anchor. The dialog stands apart from it: a press
 	-- in one reads as a press outside the other.)
