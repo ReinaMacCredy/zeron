@@ -10,6 +10,7 @@
 -- the next one's (empty if none), in place: the composer stays one node.
 
 local Quote = require("@ds/quote")
+local references = require("@ds/references")
 local Annotation = require("@ds/annotation")
 local sessions = require("@account/sessions")
 local agents = require("@account/agents")
@@ -208,6 +209,10 @@ end
 -- (By the list `take` hands out, so `restore` needs no key from its caller.)
 local taken: { [any]: { key: string, raw: string, quotes: { [string]: string } } } = setmetatable({}, { __mode = "k" }) :: any
 
+function M.refs_key(of: string?): string
+	return `chat:{of or here:peek()}`
+end
+
 -- What was typed and carried, taken for sending (the composer cleared).
 function M.take(of: string?): (string, { any })
 	local key = of or here:peek()
@@ -215,7 +220,7 @@ function M.take(of: string?): (string, { any })
 	local stored = if mine then nil else kept:peek()[key]
 	local raw = if mine then M.text:peek() else M.draft_peek(key).text
 	local quotes = if mine then M.quotes:peek() elseif stored and stored.quotes then stored.quotes else {}
-	local text = Quote.expand(raw, Quote.kept(raw, quotes))
+	local text = references.encode(M.refs_key(key), Quote.expand(raw, Quote.kept(raw, quotes)))
 	local cargo = table.clone(cargo_in(key))
 	taken[cargo] = { key = key, raw = raw, quotes = quotes }
 	ui.batch(function()

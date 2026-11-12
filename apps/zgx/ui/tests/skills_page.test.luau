@@ -174,6 +174,8 @@ test("Skills: Move to Trash takes every copy and the card; a refusal says so and
 	expect(app:tree("#skills-subtitle")).to_contain("0 skills")
 end)
 
+local CODE_REVIEW = string.rep("\u{a0}", 6) .. "Code\u{a0}Review" .. string.rep("\u{a0}", 2)
+
 test("Skills: Try now starts a new chat on an agent that has it, the one shown first, the skill at the draft's head", function()
 	local app = open()
 	app:click("#skills-tab-codex")
@@ -183,7 +185,7 @@ test("Skills: Try now starts a new chat on an agent that has it, the one shown f
 	app:frames(30)
 	expect(app:state("shell_route_path")).to_be("/")
 	expect(app:has("#skill-dialog")).to_be(false)
-	expect(app:state("chat.composer.text")).to_be("$code-review ")
+	expect(app:state("chat.composer.text")).to_be(CODE_REVIEW .. " ")
 	expect(app:state("chat_model")).to_be("gpt-5.5")
 end)
 
@@ -195,6 +197,6 @@ test("Skills: Try now with no filter keeps the new chat's agent when it has the 
 	app:click("#skill-try-now")
 	app:frames(30)
 	expect(app:state("shell_route_path")).to_be("/")
-	expect(app:state("chat.composer.text")).to_be("$code-review ")
+	expect(app:state("chat.composer.text")).to_be(CODE_REVIEW .. " ")
 	expect(app:state("chat_model")).to_be("gpt-5.5")
 end)

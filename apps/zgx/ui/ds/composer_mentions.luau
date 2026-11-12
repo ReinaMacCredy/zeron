@@ -38,6 +38,7 @@ M.debug = false
 
 local tokens = require("@self/mention_tokens")
 local locale = require("@self/locale")
+local references = require("@self/references")
 
 export type Trigger = tokens.Trigger
 export type Item = tokens.Item
@@ -75,6 +76,7 @@ export type Use = {
 	enabled: ((trigger: Trigger) -> boolean)?,
 	-- Whether its composer is in view (by default, it is).
 	in_view: (() -> boolean)?,
+	refs: (() -> string)?,
 }
 
 -- Wires the mentions to a draft: returns what the composer needs.
@@ -200,6 +202,22 @@ function M.use(opts: Use)
 		local from, to, text, tok = M.pick(now, t.to, item, sources())
 		if not from or not to or not text or not tok then
 			return
+		end
+		local key = item.key or ""
+		local kind = if item.task then "task"
+			elseif string.sub(key, 1, 6) == "skill:" then "skill"
+			elseif string.sub(key, 1, 8) == "command:" then "command"
+			else nil
+		if opts.refs and kind and type((item :: any).link) == "string" and not (item :: any).consume then
+			local shown = references.add(opts.refs(), {
+				kind = kind,
+				name = if kind == "task" then item.label else item.value,
+				link = (item :: any).link,
+				task = item.task,
+			})
+			local after = string.sub(now, t.to + 1, t.to + 1)
+			text = if after == " " then shown else shown .. " "
+			tok = shown
 		end
 		if M.debug then
 			local a, b = el:selection_bytes()
@@ -411,7 +429,46 @@ function M.use(opts: Use)
 			},
 		}
 	end
+	local function paste(text: string): boolean
+		local el = opts.field:peek()
+		if not opts.refs or not el then
+			return false
+		end
+		local key = opts.refs()
+		local shown_text = references.decode(key, text)
+		if shown_text == text then
+			local trigger, name = string.match(text, "^([/$])([%w%._:%-]+)$")
+			if not trigger then
+				return false
+			end
+			local found: any = nil
+			for _, item in sources()["/"] or {} do
+				local kind = if string.sub(item.key or "", 1, 6) == "skill:" then "skill" else "command"
+				if item.value == name and type(item.link) == "string" and (kind == "skill") == (trigger == "$") then
+					if found and found.link ~= item.link then
+						return false
+					end
+					found = { kind = kind, name = name, link = item.link }
+				end
+			end
+			for _, item in sources()["$"] or {} do
+				if trigger == "$" and item.value == name and type(item.link) == "string" then
+					if found and found.link ~= item.link then
+						return false
+					end
+					found = { kind = "skill", name = name, link = item.link }
+				end
+			end
+			if not found then
+				return false
+			end
+			shown_text = references.add(key, found)
+		end
+		el:replace_selection(shown_text)
+		return true
+	end
 	return {
+		paste = paste,
 		token = token,
 		shown = shown,
 		active = active,

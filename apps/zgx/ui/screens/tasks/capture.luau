@@ -2,20 +2,15 @@
 
 local ds = require("@ds")
 local locale = require("@ds/locale")
-local mentions = require("@ds/composer_mentions")
 local store = require("@app/screens/tasks/store")
 local card = require("@app/screens/tasks/card")
 local glass = require("@ds/glass")
-local chat_store = require("@app/screens/chat/store")
-local Completions = require("@app/screens/chat/completions")
-local Invocations = require("@app/screens/chat/invocations")
+local references = require("@ds/references")
+local field_kit = require("@app/screens/tasks/field")
 
 local M = {}
 
 local CARD_W = 640
-local TASK_LIMIT, TASK_IDLE_LIMIT, DEPENDS_MAX = 8, 5, 20
-local TASK_COLUMNS = { todo = "tasks.column.todo", working = "tasks.column.working", needs = "tasks.column.needs", done = "tasks.column.done" }
-local TASK_GLYPHS = { todo = "check-circle", working = "refresh", needs = "danger-triangle", done = "check" }
 
 M.open = ui.state("tasks_capture_open", false)
 M.text = ui.state("tasks_capture_text", "")
@@ -37,75 +32,6 @@ end
 function M.split(text: string): (string, string)
 	local title, rest = string.match(text, "^([^\n]*)\n?(.*)$")
 	return string.match(title or "", "^%s*(.-)%s*$") or "", string.match(rest or "", "^%s*(.-)%s*$") or ""
-end
-
-local function depends(words: string): { string }
-	local known = store.parts:peek().by_id
-	local out: { string } = {}
-	for id in string.gmatch(words, "%]%(zeron%-task:([^%)%s]+)%)") do
-		if known[id] and not table.find(out, id) and #out < DEPENDS_MAX then
-			table.insert(out, id)
-		end
-	end
-	return out
-end
-
-local function token_of(title: string): string
-	local words: { string } = {}
-	local size = 0
-	for word in string.gmatch(title, "[^%s%p]+") do
-		if #words > 0 and size + #word > 32 then
-			break
-		end
-		table.insert(words, word)
-		size += #word + 1
-	end
-	return if #words > 0 then table.concat(words, "-") else "task"
-end
-
-local function task_rows(query: string): { any }
-	local scoped = string.lower(string.sub(query, 1, 5)) == "task "
-	local q = string.lower(string.match(if scoped then string.sub(query, 6) else query, "^%s*(.-)%s*$") or "")
-	local p = store.parts:get()
-	local found: { store.Task } = {}
-	local function take(list: { store.Task })
-		for _, t in list do
-			if q == "" or string.find(string.lower(store.title_of(t)), q, 1, true) then
-				table.insert(found, t)
-			end
-		end
-	end
-	take(p.open)
-	local limit = TASK_IDLE_LIMIT
-	if q ~= "" or scoped then
-		take(p.done)
-		limit = TASK_LIMIT
-	end
-	local out: { any } = {}
-	local used: { [string]: boolean } = {}
-	for i, t in found do
-		if i > limit then
-			break
-		end
-		local title = store.title_of(t)
-		local word = token_of(title)
-		if used[word] then
-			word = `{word}-{string.sub(t.id, 1, 4)}`
-		end
-		used[word] = true
-		local column = store.state(t).column
-		local where = store.project_name(t.project) or locale.s("tasks.no_project")
-		table.insert(out, {
-			value = word,
-			key = `task-{t.id}`,
-			label = title,
-			detail = if column == "todo" then where else `{locale.s(TASK_COLUMNS[column])} · {where}`,
-			icon = TASK_GLYPHS[column],
-			link = `[{(string.gsub(title, "([%[%]\\])", "\\%1"))}](zeron-task:{t.id})`,
-			searched = true,
-		})
-	end
-	return out
 end
 
 local function upload_done()
@@ -146,7 +72,7 @@ end
 
 function M.save(): boolean
 	local typed = M.text:peek()
-	local words = Invocations.encode(typed)
+	local words = references.encode("capture", typed)
 	local title, notes = M.split(words)
 	if title == "" then
 		return false
@@ -161,7 +87,10 @@ function M.save(): boolean
 		M.images:set({})
 		M.open:set(false)
 	end)
-	store.create({ title = title, notes = notes, images = images, depends = depends(words) }, function(id: string)
+	store.create({ title = title, notes = notes, images = images, depends = field_kit.depends(words) }, function(id: string)
+		if M.text:peek() == "" then
+			references.clear("capture")
+		end
 		store.note_captured(id)
 		ds.toast.show({
 			title = locale.s("tasks.capture.added", { title = store.plain(title) }),
@@ -210,74 +139,25 @@ local function Images(): Node
 	end, { w_full = true })
 end
 
+local function capture_key(): string
+	return "capture"
+end
+
 local Body = ui.component(function(): Node
-	local field = ui.ref()
-	local c = Completions.bind {
+	local f = field_kit.use {
 		key = "tasks_capture",
+		refs = capture_key,
 		text = M.text,
-		agent = function(): string?
-			local m = chat_store.new_chat_model()
-			return if m then m.harness else nil
-		end,
-		target = function(): Invocations.Target?
-			return { home = true }
-		end,
-		files = function(): any
-			return nil
-		end,
-		in_chat = function(): boolean
-			return false
-		end,
-		run = function() end,
-		task = true,
+		field = ui.ref(),
+		line = 24,
+		on_files = M.add_files,
 	}
-	local sources = ui.computed(function(): any
-		local given = table.clone(c.lists:get() or {})
-		local text = M.text:get()
-		local t = mentions.token(text, #text)
-		given["@"] = if t and t.trigger == "@" then task_rows(t.query) else {}
-		return given
-	end)
-	local m = mentions.use {
-		field = field,
-		value = M.text,
-		sources = sources,
-		titles = { ["@"] = locale.s("tasks.capture.tasks") },
-		empty = setmetatable({ ["@"] = locale.s("tasks.capture.what_tasks") }, { __index = c.empty }) :: any,
-		enabled = c.enabled,
-		on_choose = c.on_mention,
-	}
-	local input = ui.textarea {
-		ref = field,
+	local input = f.textarea {
 		id = "quick-capture-input",
 		label = locale.s("tasks.capture.placeholder"),
 		placeholder = locale.s("tasks.capture.placeholder"),
 		placeholder_color = "$text.tertiary",
-		value = M.text,
-		highlight = mentions.highlight,
-		active_descendant = m.descendant,
-		on_caret = m.on_caret,
-		on_blur = m.on_blur,
-		on_press = m.on_press,
-		on_paste = function(e: any): boolean
-			if e.files and #e.files > 0 then
-				M.add_files(e.files)
-				return true
-			end
-			if e.text == nil then
-				chat_store.paste_image():after(function(path: string?)
-					if type(path) == "string" and path ~= "" then
-						M.add_files({ { name = "image.png", path = path } })
-					end
-				end, function() end)
-				return true
-			end
-			return false
-		end,
 		on_key = function(e: any): boolean
-			if m.keys(e) then
-				return true
-			end
 			if e.key == "Enter" and not e.shift then
 				M.save()
 				return true
@@ -306,7 +186,7 @@ local Body = ui.component(function(): Node
 		py = ui.raw(16, "gpui"),
 		gap = ui.raw(12, "gpui"),
 		on_file_drop = M.add_files,
-		ui.popover(m.popover(input)),
+		input,
 		Images(),
 		ui.row {
 			gap = ui.raw(14, "gpui"),

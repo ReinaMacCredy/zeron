@@ -6,6 +6,7 @@ ui.theme.strict("warn")
 local ds = require("@ds")
 local Mentions = require("@ds/composer_mentions")
 local Invocations = require("@app/screens/chat/invocations")
+local references = require("@ds/references")
 local files = require("@app/screens/files/api")
 local Completions = require("@app/screens/chat/completions")
 ds.setup()
@@ -81,7 +82,7 @@ ui.command {
 	id = "encode",
 	title = "Note the draft as it would be sent",
 	run = function()
-		note(`encoded:{Invocations.encode(draft:peek())}`)
+		note(`encoded:{Invocations.encode(references.encode("fixture", draft:peek()))}`)
 	end,
 }
 local place = ui.state("place", "s1")
@@ -114,7 +115,13 @@ local Field = ui.component(function(): Node
 		enabled = completions.enabled,
 		empty = completions.empty,
 		on_choose = completions.on_mention,
+		refs = function(): string
+			return "fixture"
+		end,
 	}
+	local unit = references.unit(function(): string
+		return "fixture"
+	end, draft, field)
 	local pill = ui.div {
 		id = "pill",
 		w_full = true,
@@ -127,11 +134,14 @@ local Field = ui.component(function(): Node
 			h = 60,
 			highlight = Mentions.highlight,
 			active_descendant = m.descendant,
-			on_caret = m.on_caret,
+			on_caret = function(line: number, column: number, anchor: number, focus: number)
+				unit.on_caret(line, column, anchor, focus)
+				m.on_caret(line, column, anchor, focus)
+			end,
 			on_blur = m.on_blur,
 			on_press = m.on_press,
 			on_key = function(e)
-				return m.keys(e)
+				return m.keys(e) or unit.keys(e)
 			end,
 		},
 	}

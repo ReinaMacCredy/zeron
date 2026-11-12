@@ -136,7 +136,7 @@ function M.items(catalog: Catalog?, kind: "command" | "skill"): { any }?
 				link = if r.plain then nil else r.link,
 				blocked = r.blocked,
 				terminal_only = r.terminal_only,
-				task = r.task,
+				in_task = r.task,
 			})
 		end
 	end

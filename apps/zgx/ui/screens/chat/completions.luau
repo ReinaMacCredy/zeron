@@ -52,7 +52,7 @@ function M.bind(b: Bind): { [string]: any }
 				if all then
 					local kept = {}
 					for _, item in all do
-						if item.task then
+						if item.in_task then
 							table.insert(kept, item)
 						end
 					end
@@ -159,8 +159,6 @@ function M.bind(b: Bind): { [string]: any }
 				b.run(item.zeron)
 			elseif trigger == "@" then
 				Invocations.remember(item, trigger, token)
-			else
-				Invocations.remember(item, trigger)
 			end
 		end,
 		-- The agent's completion settings: `$` opens the skills only while "Use

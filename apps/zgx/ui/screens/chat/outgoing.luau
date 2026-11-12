@@ -114,7 +114,6 @@ function M.parts(typed: string, text: string, carried: { any }): { [string]: any
 			typed = if typed ~= "" then `{typed} {link}` elseif text ~= "" then `{text} {link}` else link
 		end
 	end
-	-- (Each command or skill picked: its canonical reference.)
 	local words = Invocations.encode(if typed ~= "" then typed else text)
 	local cards = HtmlPicks.cards(chosen)
 	return {

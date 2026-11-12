@@ -880,6 +880,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		-- (What's dropped on it is its tab's to take, or a split pane's card,
 		-- under their own overlays.)
 		drop_overlay = false,
+		refs = function(): string
+			return Shared.refs_key(chat)
+		end,
 		-- Its + and a picture pasted: chips on its own draft, as the chat page's.
 		-- (A split's pane: a press focuses it, the window's composer taking
 		-- over.)

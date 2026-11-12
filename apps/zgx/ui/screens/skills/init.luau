@@ -12,7 +12,7 @@ local store = require("@app/screens/skills/store")
 local route = require("@app/screens/shell/route")
 local shared = require("@app/screens/chat/shared")
 local chat_store = require("@app/screens/chat/store")
-local Invocations = require("@app/screens/chat/invocations")
+local references = require("@ds/references")
 
 local M = {}
 
@@ -112,8 +112,8 @@ function M.try(e: store.Entry)
 		shared.want_agent:set(agent)
 	end
 	local draft = shared.draft_peek("").text
-	shared.set_draft_of("", "text", `${e.name} {draft}`)
-	Invocations.remember({ value = e.name, link = link }, "$")
+	local shown = references.add(shared.refs_key(""), { kind = "skill", name = e.name, link = link })
+	shared.set_draft_of("", "text", `{shown} {draft}`)
 	ui.after(0, function()
 		shared.focus:set(shared.focus:peek() + 1)
 	end)

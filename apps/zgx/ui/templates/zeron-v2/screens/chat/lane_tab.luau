@@ -716,6 +716,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		on_open_pasted = cargo_props.on_open_pasted,
 		-- (What's dropped on it is its tab's to take, under its own overlays.)
 		drop_overlay = false,
+		refs = function(): string
+			return Shared.refs_key(chat)
+		end,
 		-- Its + and a picture pasted: chips on its own draft, as the chat page's.
 		on_attach = function()
 			ui.open_files({ title = ui.t("chat.composer.attach_files"):get(), multiple = true }):after(function(files: any)
