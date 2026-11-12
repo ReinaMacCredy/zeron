@@ -285,9 +285,13 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             return Err("no agent".to_string());
         }
         let chat = crate::sessions::new_id();
-        let mut params = json!({ "op": "startTask", "taskId": id, "chatId": chat, "config": config });
-        if let Some(project) = args.field("project").map(text).filter(|s| !s.is_empty()) {
-            params["spaceId"] = json!(project);
+        let plan = args.field("orchestrate").is_some_and(Value::truthy);
+        let mut params = json!({
+            "op": "startTask", "taskId": id, "chatId": chat, "config": config,
+            "orchestrate": plan, "approvePlan": true, "sameAgents": false, "planDoc": plan,
+        });
+        if let Some(project) = args.field("project").map(text) {
+            params["spaceId"] = if project.is_empty() { Json::Null } else { json!(project) };
         }
         mutate(params).await?;
         Ok(Value::from(chat.as_str()))

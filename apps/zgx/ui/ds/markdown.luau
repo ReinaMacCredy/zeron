@@ -52,6 +52,7 @@ local AnnotationLayer = require("@self/annotation_layer")
 type Wash = { lines: { string }, used: { [string]: boolean }, color: string }
 local locale = require("@self/locale")
 local look = require("@self/look")
+local References = require("@self/references")
 
 -- A link's context menu entry (ds/links, ds/context_menu's).
 export type LinkEntry = Links.Entry
@@ -86,6 +87,7 @@ export type Props = {
 	file_link: ((target: string) -> boolean)?,
 	-- A thread mention's agent mark, by its chat (`zeron-chat:<id>`).
 	chat_mark: ((chat: string) -> string?)?,
+	invocations: boolean?,
 	-- A task list's box ticked or cleared: the `k`th task in the text (in
 	-- the order they're written, from 1), and whether it's done now. With
 	-- it, tasks are boxes; without, their ☐ and ☑.
@@ -266,6 +268,7 @@ type Ctx = {
 	link_menu: ((target: string) -> { Links.Entry }?)?,
 	file_link: ((target: string) -> boolean)?,
 	chat_mark: ((chat: string) -> string?)?,
+	invocations: boolean?,
 	task: ((k: number, done: boolean) -> ())?,
 	tasks: { [any]: number },
 	pictures: ReplyPicture.Pictures?,
@@ -407,6 +410,20 @@ local function mention_chip(span: { [any]: any }, target: string, name: string, 
 	span.icon = if own then own
 		elseif chat then { src = "assets/icons/ui/chat-round-line.svg", size = 14, gap = 3, tint = "currentColor" }
 		else { src = `assets/icons/files/{set}/{FileIcon.of(name, dir)}.svg`, size = 14, gap = 3 }
+end
+
+local function invocation_chip(span: { [any]: any }, name: string)
+	local skill = string.sub(name, 1, 1) == "$"
+	span.underline = false
+	span.underline_offset = nil
+	span.hover = nil
+	span.bg = if skill then "$zeron.reference.skill_fill" else "$zeron.reference.command_fill"
+	span.color = if skill then "$zeron.reference.skill" else "$zeron.reference.command"
+	span.weight = ui.raw(500, "gpui's MEDIUM; a span's weight takes no token")
+	span[1] = if skill then References.humanize(string.sub(name, 2)) else name
+	span.padding = { 4, 2 }
+	span.radius = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
+	span.icon = { src = `assets/icons/ui/{if skill then "magic-stick" else "command"}.svg`, size = 14, gap = 4, tint = "currentColor" }
 end
 
 -- A web address written bare in a run's words (not in code, not a link
@@ -663,6 +680,8 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			span.hover = { underline = true, color = "$accent" }
 			if string.match(r.a, "^zeron%-file:") or string.match(r.a, "^zeron%-chat:") then
 				mention_chip(span, r.a, r.x, ctx)
+			elseif ctx and ctx.invocations and string.match(r.a, "^zeron%-invoke:") and string.match(r.x, "^[/$]") then
+				invocation_chip(span, r.x)
 			end
 			local target = r.a
 			local open = if ctx then ctx.open else nil
@@ -1507,8 +1526,8 @@ end
 return function(props: Props): Node
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
-	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.task or props.pictures or props.small
-		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, file_link = props.file_link, chat_mark = props.chat_mark, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
+	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.task or props.pictures or props.small or props.invocations
+		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, file_link = props.file_link, chat_mark = props.chat_mark, invocations = props.invocations, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
 		else nil
 	-- A text that grows: what a ```mermaid fence reads to know whether
 	-- it's still being written (ds/mermaid).

@@ -5425,7 +5425,13 @@
       "no_date": "无日期",
       "today": "今天",
       "tomorrow": "明天",
-      "project": "项目"
+      "project": "项目",
+      "add_image": "添加图片",
+      "run_in": "在",
+      "run_in_name": "运行位置",
+      "folder": "文件夹…",
+      "plan_first": "先做计划",
+      "plan_first_help": "负责人先写出步骤再开始。你也可以稍后再添加计划。"
     },
     "capture": {
       "added": "已添加到待办：{title}",
@@ -5435,7 +5441,10 @@
       "save": "保存",
       "notes": "备注",
       "close": "关闭",
-      "where": "待办 · 无项目"
+      "where": "待办 · 无项目",
+      "tasks": "任务",
+      "what_tasks": "任务",
+      "not_image": "{name} 不是图片。"
     }
   },
   "inbox": {

@@ -322,6 +322,17 @@ M.dismiss_cards = nil :: (() -> boolean)?
 -- The composer's `chat_new_defaults`, set as it loads (a module's persist is its own).
 M.new_defaults = nil :: any
 
+function M.new_chat_model(want: string?): any
+	local wanted = want or (if M.new_defaults then M.new_defaults:get().model else nil)
+	local models = M.catalog:get().models or {}
+	for _, m in models do
+		if m.value == wanted then
+			return m
+		end
+	end
+	return models[1]
+end
+
 -- A bare Escape no one else took (a menu, a dialog, a mention list, a
 -- question): with Settings' "Escape stops the agent" on, it stops the
 -- chat shown's running turn, as Zeron's does (settings.rs

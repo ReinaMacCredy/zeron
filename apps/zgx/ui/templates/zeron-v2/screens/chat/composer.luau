@@ -1080,6 +1080,9 @@ local function Composer(): Node
 				return session_id:get() ~= nil
 			end,
 			model_take = take_model,
+			refs = function(): string
+				return shared.refs_key()
+			end,
 			model_looking = function(): boolean
 				return store.catalog:get().state ~= "ready"
 			end,

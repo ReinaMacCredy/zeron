@@ -26,6 +26,8 @@ export type Item = {
 	heading: string?,
 	attached: boolean?,
 	searched: boolean?,
+	task: string?,
+	in_task: boolean?,
 	blocked: string?,
 	terminal_only: boolean?,
 }
@@ -218,7 +220,7 @@ end
 
 -- The draft's highlight: markdown as it is typed, and each token
 -- mentioned in its type. A span's state is the markdown's (a fenced block).
-function M.highlight(line: string, state: number): ({ { any } }, number)
+function M.highlight(line: string, state: number, files_only: boolean?): ({ { any } }, number)
 	-- (A pasted megabyte on one line, shown in the field: plain, as Zeron's past 128 KiB.)
 	if #line > 128 * 1024 then
 		return {}, state
@@ -238,6 +240,9 @@ function M.highlight(line: string, state: number): ({ { any } }, number)
 		local prev = if from > 1 then string.sub(line, from - 1, from - 1) else ""
 		local ok = prev == "" or string.match(prev, "[%s%(%[{>]") ~= nil
 		local trigger = string.sub(token, 1, 1)
+		if files_only and trigger ~= "@" then
+			ok = false
+		end
 		if ok and trigger == "$" and (string.match(token, "^%$[%d%u]") or string.find(token, "/", 2, true)) then
 			ok = false
 		end

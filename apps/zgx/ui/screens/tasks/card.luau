@@ -10,16 +10,25 @@ local sessions = require("@account/sessions")
 local store = require("@app/screens/tasks/store")
 local route = require("@app/screens/shell/route")
 local chat_store = require("@app/screens/chat/store")
+local references = require("@ds/references")
+local field_kit = require("@app/screens/tasks/field")
+local add_project = require("@app/screens/shell/add_project")
 
 local M = {}
 
-local W, RADIUS, SAVE_MS, THUMB = 340, 24, 500, 56
+local W, RADIUS, SAVE_MS, THUMB = 324, 24, 500, 56
+local DRAWER, SHARP = "cubicBezier(.32,.72,0,1)", "cubicBezier(.4,0,1,1)"
 
 M.current = ui.state("tasks_card", nil :: string?)
 M.focus = ui.state("tasks_card_focus", "title")
 
 function M.open(id: string, focus: string?)
 	ui.batch(function()
+		if M.current:peek() ~= id then
+			M.run_in:set(nil)
+			M.plan_first:set(false)
+			M.hand_off:set("new")
+		end
 		M.focus:set(focus or "title")
 		M.current:set(id)
 	end)
@@ -48,30 +57,33 @@ function M.press_outside()
 end
 
 -- A field that saves `key` as typed, a pause after the last key.
-local function saved(t: store.Task, key: string): (State<string>, () -> ())
-	local value = ui.use_state((t :: any)[key] or "")
+local function saved(t: store.Task, key: string): (State<string>, string)
+	local refs = `task:{t.id}:{key}`
+	local value = ui.use_state(field_kit.shown(refs, (t :: any)[key] or ""))
+	local committed = value:peek()
 	local seq = 0
-	local pending = false
 	local function flush()
-		if pending then
-			pending = false
-			local v = value:peek()
-			if key ~= "title" or not string.match(v, "^%s*$") then
-				store.update(t.id, { [key] = v })
-			end
+		local v = value:peek()
+		if v == committed then
+			return
+		end
+		committed = v
+		if key ~= "title" or not string.match(v, "^%s*$") then
+			store.update(t.id, { [key] = references.encode(refs, v) })
 		end
 	end
-	local function typed(v: string)
-		value:set(v)
+	ui.effect(function()
+		if value:get() == committed then
+			return
+		end
 		seq += 1
-		pending = true
 		local mine = seq
 		ui.after(SAVE_MS, function()
 			if mine == seq then
 				flush()
 			end
 		end)
-	end
+	end)
 	table.insert(flushers, flush)
 	ui.on_cleanup(function()
 		flush()
@@ -80,24 +92,80 @@ local function saved(t: store.Task, key: string): (State<string>, () -> ())
 			table.remove(flushers, at)
 		end
 	end)
-	return value, typed :: any
+	return value, refs
 end
 
-local function Pick(props: { id: string, label: string, value: () -> string, options: () -> { any }, on_pick: (string) -> () }): Node
-	local chosen = ui.use_state(props.value())
-	ui.effect(function()
+local function Pick(props: { id: string, label: string, icon: string, value: () -> string, options: () -> { any }, on_pick: (string) -> (), w: number, quiet: boolean? }): Node
+	local open = ui.use_state(false)
+	local function shown(): string
 		local v = props.value()
-		if chosen:peek() ~= v then
-			chosen:set(v)
+		for _, o in props.options() do
+			if o.value == v then
+				return o.label
+			end
 		end
-	end)
-	ui.effect(function()
-		local v = chosen:get()
-		if v ~= props.value() then
-			props.on_pick(v)
-		end
-	end)
-	return ds.Select { id = props.id, value = chosen, options = props.options, name = props.label, size = "sm" }
+		return v
+	end
+	local trigger = ui.button {
+		id = props.id,
+		label = props.label,
+		h = if props.quiet then 32 else 28,
+		max_w = if props.quiet then 170 else nil,
+		min_w = 0,
+		pl = ui.raw(10, "gpui"),
+		pr = ui.raw(8, "gpui"),
+		gap = ui.raw(8, "gpui"),
+		items = "center",
+		rounded = if props.quiet then ui.raw(8, "gpui") else "$radius.full",
+		bg = function(): string
+			if open:get() then
+				return "$zeron.tasks.chip_hover"
+			end
+			return if props.quiet then "#00000000" else "$zeron.tasks.chip"
+		end,
+		hover = { bg = "$zeron.tasks.chip_hover", color = "$text.primary" },
+		color = if props.quiet then "$text.secondary" else "$text.primary",
+		text_size = ui.raw(12.5, "gpui"),
+		expanded = function(): boolean
+			return open:get()
+		end,
+		on_click = function()
+			open:set(not open:peek())
+		end,
+		ds.Icon { name = props.icon, size = 14, color = "$text.secondary" },
+		ui.text { shown, literal = true, truncate = true, min_w = 0, shrink = 1 },
+		ds.Icon { name = "alt-arrow-down", size = 14, color = function(): string
+			return if open:get() then "$text.primary" else "$text.secondary"
+		end },
+	}
+	return ui.row {
+		min_w = 0,
+		shrink = 1,
+		ui.popover(Menu.panel {
+			open = open,
+			anchor = trigger,
+			w = props.w,
+			placement = { side = "bottom", align = "start", offset = 6 },
+			build = function(): Node
+				local rows = {}
+				for _, o in props.options() do
+					table.insert(rows, Menu.Row {
+						id = `{props.id}-{o.value}`,
+						icon = props.icon,
+						label = o.label,
+						checked = function(): boolean
+							return props.value() == o.value
+						end,
+						on_click = function()
+							open:set(false)
+							props.on_pick(o.value)
+						end,
+					})
+				end
+				return Menu.Group(rows)
+			end,
+		}),
+	}
 end
 
 local function due_value(t: store.Task): string
@@ -112,7 +180,7 @@ local function due_value(t: store.Task): string
 end
 
 -- A task's picture in its thumb; one that can't be drawn (gone, or not a picture) is the gallery glyph and says so (tasks/images.rs `strip`).
-function M.picture(path: string, size: number, glyph: number): Node
+function M.picture(path: string, size: number, glyph: number, h: number?): Node
 	return ui.show(function(): boolean
 		return not store.image_failed(path)
 	end, ui.image {
@@ -120,13 +188,13 @@ function M.picture(path: string, size: number, glyph: number): Node
 			return store.image_src(path) or ""
 		end,
 		w = size,
-		h = size,
+		h = h or size,
 		fit = "cover",
 		aria_hidden = true,
 		on_error = function()
 			store.image_broke(path)
 		end,
-	}, ui.div { w = size, h = size, items = "center", justify = "center", ds.Icon { name = "gallery", size = glyph, color = "$text.tertiary" } })
+	}, ui.div { w = size, h = h or size, items = "center", justify = "center", ds.Icon { name = "gallery", size = glyph, color = "$text.tertiary" } })
 end
 function M.missing_tip(path: string): Node
 	return ui.show(function(): boolean
@@ -136,8 +204,8 @@ function M.missing_tip(path: string): Node
 	end })
 end
 
-local function Images(t: store.Task): Node
-	local list = t.images or {}
+function M.thumbs(list: { string }, prefix: string, group: string, on_remove: (i: number) -> (), size: { w: number, h: number, radius: number }?): { Node }
+	local tw, th, tr = if size then size.w else THUMB, if size then size.h else THUMB, if size then size.radius else 10
 	local function items(): { any }
 		local out = {}
 		for i, path in list do
@@ -148,14 +216,15 @@ local function Images(t: store.Task): Node
 		end
 		return out
 	end
-	local row: { [any]: any } = { id = "task-card-images", gap = ui.raw(6, "gpui"), wrap = true }
+	local out: { Node } = {}
 	for i, path in list do
 		local over = ui.use_state(false)
-		table.insert(row, ui.div {
+		table.insert(out, ui.div {
+			id = `{prefix}-image-{i}`,
 			relative = true,
-			w = THUMB,
-			h = THUMB,
-			rounded = ui.raw(10, "gpui"),
+			w = tw,
+			h = th,
+			rounded = ui.raw(tr, "gpui"),
 			overflow = "hidden",
 			bg = "$hover",
 			items = "center",
@@ -166,11 +235,11 @@ local function Images(t: store.Task): Node
 			tooltip = M.missing_tip(path),
 			ui.show(function(): boolean
 				return store.image_src(path) ~= nil
-			end, Lightbox.Thumb { group = `task-card-{t.id}`, index = i, items = items, radius = 10, w = THUMB, h = THUMB, M.picture(path, THUMB, 16) }, ds.Icon { name = "gallery", size = 16, color = "$text.tertiary" }),
+			end, Lightbox.Thumb { group = group, index = i, items = items, radius = tr, w = tw, h = th, M.picture(path, tw, 16, th) }, ds.Icon { name = "gallery", size = 16, color = "$text.tertiary" }),
 			ui.show(function(): boolean
 				return over:get()
 			end, ui.button {
-				id = `task-card-remove-image-{i}`,
+				id = `{prefix}-remove-image-{i}`,
 				label = locale.s("tasks.card.remove_image"),
 				absolute = true,
 				top = 3,
@@ -184,46 +253,35 @@ local function Images(t: store.Task): Node
 				bg = "$zeron.tasks.remove",
 				hover = { bg = "$zeron.tasks.remove_hover" },
 				on_click = function()
-					local next = table.clone(list)
-					table.remove(next, i)
-					store.update(t.id, { images = next })
+					on_remove(i)
 				end,
 				ds.Icon { name = "close", size = 10, color = ui.raw("#ffffff", "white on the accent, as gpui") },
 			}),
 		})
 	end
-	if #list < store.IMAGES_MAX then
-		table.insert(row, ui.button {
-			id = "task-card-add-image",
-			label = locale.s("tasks.add_image"),
-			w = THUMB,
-			h = THUMB,
-			p = 0,
-			rounded = ui.raw(10, "gpui"),
-			border = 1,
-			border_style = "dotted",
-			border_color = "$text.tertiary",
-			bg = "#00000000",
-			hover = { bg = "$hover" },
-			color = "$text.secondary",
-			items = "center",
-			justify = "center",
-			text_size = ui.raw(11, "gpui"),
-			on_click = function()
-				M.add_images(t)
-			end,
-			ui.text { locale.s("tasks.card.add_image_tile"), align = "center", wrap = true },
-		})
+	return out
+end
+
+local function Images(t: store.Task): Node
+	local list = t.images or {}
+	local row: { [any]: any } = { id = "task-card-images", gap = ui.raw(8, "gpui"), wrap = true, pt = ui.raw(6, "gpui") }
+	for _, thumb in M.thumbs(list, "task-card", `task-card-{t.id}`, function(i: number)
+		local next = table.clone(list)
+		table.remove(next, i)
+		store.update(t.id, { images = next })
+	end, { w = 72, h = 52, radius = 9 }) do
+		table.insert(row, thumb)
 	end
 	return ui.row(row)
 end
 
-function M.add_images(t: store.Task)
-	ui.open_files({
-		title = locale.s("tasks.add_image"),
-		multiple = true,
-		filters = { { locale.s("tasks.card.images"), { "png", "jpg", "jpeg", "webp", "gif" } } },
-	}):after(function(files: { any })
+function M.add_files(id: string, files: { any })
+	local t0 = store.find(id)
+	if not t0 then
+		return
+	end
+	local t = t0 :: store.Task
+	do
 		local next = table.clone(t.images or {})
 		local left = #files
 		if left == 0 then
@@ -255,6 +313,16 @@ function M.add_images(t: store.Task)
 				one_done()
 			end
 		end
+	end
+end
+
+function M.add_images(t: store.Task)
+	ui.open_files({
+		title = locale.s("tasks.add_image"),
+		multiple = true,
+		filters = { { locale.s("tasks.card.images"), { "png", "jpg", "jpeg", "webp", "gif" } } },
+	}):after(function(files: { any })
+		M.add_files(t.id, files)
 	end)
 end
 
@@ -266,19 +334,31 @@ end
 local picked_model = ui.state("tasks_card_model", nil :: string?)
 local picked_effort = ui.state("tasks_card_effort", nil :: string?)
 local function new_chat_model(): any
-	local want = picked_model:get() or defaults().model
-	local catalog = chat_store.catalog:get()
-	for _, m in catalog.models or {} do
-		if m.value == want then
-			return m
-		end
-	end
-	return (catalog.models or {})[1]
+	return chat_store.new_chat_model(picked_model:get())
 end
 
 M.starting = ui.state("tasks_card_starting", nil :: string?)
+M.plan_first = ui.state("tasks_card_plan_first", false)
+M.run_in = ui.state("tasks_card_run_in", nil :: string?)
 
--- Start a task in a new chat on the new chat composer's agent; refused, the button comes back.
+local function open_when_landed(chat: string)
+	local tries = 0
+	local function look()
+		for _, c in sessions.now:peek().chats or {} do
+			if c.id == chat then
+				M.close()
+				route.open_session(chat)
+				return
+			end
+		end
+		tries += 1
+		if tries < 100 then
+			ui.after(100, look)
+		end
+	end
+	look()
+end
+
 function M.start(t: store.Task)
 	local m = new_chat_model()
 	if not m or M.starting:peek() == t.id then
@@ -291,7 +371,99 @@ function M.start(t: store.Task)
 		end
 	end
 	local effort = if picked_model:peek() == m.value then picked_effort:peek() else defaults().effort
-	store.start(t.id, { model = m.value, effort = effort, access = defaults().access }, t.project, over, over)
+	local project = M.run_in:peek()
+	if project == nil then
+		project = t.project
+	end
+	store.start(t.id, { model = m.value, effort = effort, access = defaults().access }, project, M.plan_first:peek(), function(chat: any)
+		over()
+		if type(chat) == "string" then
+			open_when_landed(chat)
+		end
+	end, over)
+end
+
+local function Pill(props: { [string]: any }): Node
+	props.h = 28
+	props.min_w = 28
+	props.px = ui.raw(9, "gpui")
+	props.rounded = "$radius.full"
+	props.bg = "$zeron.tasks.chip"
+	props.hover = { bg = "$zeron.tasks.chip_hover", color = "$text.primary" }
+	props.items = "center"
+	props.justify = "center"
+	props.gap = ui.raw(6, "gpui")
+	props.color = "$text.secondary"
+	props.text_size = ui.raw(12.5, "gpui")
+	return ui.button(props)
+end
+
+local function RunIn(t: store.Task): Node
+	if M.run_in:peek() == nil then
+		M.run_in:set(t.project or "")
+	end
+	return ui.row {
+		id = "task-card-run-in",
+		h = 32,
+		gap = ui.raw(2, "gpui"),
+		items = "center",
+		text_size = ui.raw(12.5, "gpui"),
+		color = "$text.secondary",
+		ui.text { locale.s("tasks.card.run_in"), pl = ui.raw(2, "gpui") },
+		Pick {
+			id = "task-card-run-in-select",
+			label = locale.s("tasks.card.run_in_name"),
+			icon = "folder",
+			w = 220,
+			quiet = true,
+			value = function(): string
+				return M.run_in:get() or ""
+			end,
+			options = function(): { any }
+				local now = sessions.now:get()
+				local out = { { value = "", label = locale.s("tasks.no_project") } }
+				for _, p in now.projects or {} do
+					if p.device == nil or now.here == nil or p.device == now.here then
+						table.insert(out, { value = p.id, label = p.name })
+					end
+				end
+				return out
+			end,
+			on_pick = function(v: string)
+				M.run_in:set(v)
+			end,
+		},
+		ui.button {
+			id = "task-card-folder",
+			label = locale.s("tasks.card.folder"),
+			px = ui.raw(8, "gpui"),
+			py = ui.raw(4, "gpui"),
+			rounded = ui.raw(8, "gpui"),
+			bg = "#00000000",
+			hover = { bg = "$hover", color = "$text.primary" },
+			color = "$text.secondary",
+			on_click = function()
+				add_project.open()
+			end,
+			ui.text { locale.s("tasks.card.folder") },
+		},
+	}
+end
+
+local function PlanFirst(): Node
+	return ui.row {
+		id = "task-card-plan-first-row",
+		gap = ui.raw(10, "gpui"),
+		items = "start",
+		ui.column {
+			grow = 1,
+			min_w = 0,
+			gap = ui.raw(2, "gpui"),
+			ui.text { locale.s("tasks.card.plan_first"), text_size = ui.raw(12.5, "gpui"), color = "$text.primary" },
+			ui.text { locale.s("tasks.card.plan_first_help"), text_size = ui.raw(12, "gpui"), color = "$text.secondary", wrap = true },
+		},
+		ui.div { id = "task-card-plan-first", ds.Switch { value = M.plan_first, label = locale.s("tasks.card.plan_first") } },
+	}
 end
 
 local function NewChat(t: store.Task): Node
@@ -315,43 +487,65 @@ local function NewChat(t: store.Task): Node
 	end)
 	return ui.column {
 		gap = ui.raw(8, "gpui"),
-		ui.row {
-			id = "task-card-agent",
-			ml = ui.raw(-6, "gpui"),
-			min_w = 0,
-			ds.ModelPicker {
-				model = picked_model,
-				effort = picked_effort,
-				harnesses = function(): { any }
-					local c: any = chat_store.catalog:get()
-					return c.tabs or c.harnesses or {}
-				end,
-				models = function(): { any }
-					return chat_store.catalog:get().models or {}
-				end,
-				looking = function(): boolean
-					return chat_store.catalog:get().complete ~= true
-				end,
-				placement = { side = "bottom", align = "start", offset = 6 },
+		ui.column {
+			gap = ui.raw(2, "gpui"),
+			ui.row {
+				id = "task-card-agent",
+				ml = ui.raw(-6, "gpui"),
+				min_w = 0,
+				h = 32,
+				items = "center",
+				ds.ModelPicker {
+					model = picked_model,
+					effort = picked_effort,
+					harnesses = function(): { any }
+						local c: any = chat_store.catalog:get()
+						return c.tabs or c.harnesses or {}
+					end,
+					models = function(): { any }
+						return chat_store.catalog:get().models or {}
+					end,
+					looking = function(): boolean
+						return chat_store.catalog:get().complete ~= true
+					end,
+					placement = { side = "bottom", align = "start", offset = 6 },
+				},
 			},
+			RunIn(t),
 		},
+		PlanFirst(),
 		ui.row {
-			gap = ui.raw(8, "gpui"),
-			items = "center",
-			ds.Button {
-				function(): string
+			pt = ui.raw(6, "gpui"),
+			justify = "end",
+			gap = ui.raw(6, "gpui"),
+			ui.button {
+				id = "task-card-start",
+				label = function(): string
 					return locale.s(if starting() then "tasks.card.starting" else "tasks.card.start")
 				end,
-				id = "task-card-start",
-				
-				tone = "primary",
-				size = "sm",
+				min_h = 30,
+				px = ui.raw(14, "gpui"),
+				py = ui.raw(5, "gpui"),
+				gap = ui.raw(6, "gpui"),
+				rounded = "$radius.full",
+				items = "center",
+				bg = "$text.primary",
+				color = "$background",
+				hover = { opacity = 0.9 },
+				text_size = ui.raw(12.5, "gpui"),
+				weight = "$font.weight.medium",
 				disabled = function(): boolean
 					return new_chat_model() == nil or starting()
 				end,
+				opacity = function(): number
+					return if new_chat_model() == nil or starting() then 0.4 else 1
+				end,
 				on_click = start,
+				ui.text { function(): string
+					return locale.s(if starting() then "tasks.card.starting" else "tasks.card.start")
+				end },
+				ui.text { ui.shortcut_text("cmd+enter"), text_size = ui.raw(11, "gpui"), opacity = 0.5 },
 			},
-			ui.text { ui.shortcut_text("cmd+enter"), text_size = ui.raw(11.5, "gpui"), color = "$text.secondary" },
 		},
 	}
 end
@@ -491,14 +685,9 @@ local function Thread(t: store.Task): Node
 			},
 		}),
 		ui.row {
-			gap = ui.raw(8, "gpui"),
-			ds.Button {
-				locale.t("tasks.card.send"),
-				id = "task-card-send", tone = "primary", size = "sm", disabled = function(): boolean
-				return picked:get() == nil
-			end, on_click = function()
-				send(true)
-			end },
+			pt = ui.raw(6, "gpui"),
+			justify = "end",
+			gap = ui.raw(6, "gpui"),
 			ds.Button {
 				locale.t("tasks.card.link_only"),
 				id = "task-card-link", size = "sm", disabled = function(): boolean
@@ -506,17 +695,25 @@ local function Thread(t: store.Task): Node
 			end, on_click = function()
 				send(false)
 			end },
+			ds.Button {
+				locale.t("tasks.card.send"),
+				id = "task-card-send", tone = "primary", size = "sm", disabled = function(): boolean
+				return picked:get() == nil
+			end, on_click = function()
+				send(true)
+			end },
 		},
 	}
 end
 
-local hand_off = ui.persist("tasks_card_hand_off", "new")
+M.hand_off = ui.state("tasks_card_hand_off", "new")
+local hand_off = M.hand_off
 
 local function HandOff(t: store.Task): Node
 	return ui.column {
 		gap = ui.raw(8, "gpui"),
-		ui.text { locale.s("tasks.card.hand_it_to"), text_size = ui.raw(11.5, "gpui"), weight = "$font.weight.semibold", color = "$text.secondary" },
-		ds.Segmented { id = "task-card-hand-off", value = hand_off, label = locale.t("tasks.card.hand_it_to"), options = { { value = "new", label = locale.t("tasks.card.new_chat") }, { value = "thread", label = locale.t("tasks.card.thread") } } },
+		ui.text { locale.s("tasks.card.hand_it_to"), text_size = ui.raw(12.5, "gpui"), color = "$text.secondary" },
+		ds.Segmented { id = "task-card-hand-off", fill = true, value = hand_off, label = locale.t("tasks.card.hand_it_to"), options = { { value = "new", label = locale.t("tasks.card.new_chat") }, { value = "thread", label = locale.t("tasks.card.thread") } } },
 		ui.presence(function(): string
 			return hand_off:get()
 		end, function(v: string): Node
@@ -577,16 +774,17 @@ end
 local function Done(t: store.Task): Node
 	local c = store.chat_of(t.chat)
 	return ui.row {
-		gap = ui.raw(8, "gpui"),
+		justify = "end",
+		gap = ui.raw(6, "gpui"),
 		if c then ds.Button {
 				locale.t("tasks.card.open_chat"),
-				id = "task-card-open-chat", size = "sm", on_click = function()
+				id = "task-card-open-chat", size = "sm", tone = "primary", on_click = function()
 			M.close()
 			route.open_session(c.id)
 		end } else nil,
 		ds.Button {
 				locale.t("tasks.mark_not_done"),
-				id = "task-card-reopen", size = "sm", tone = "primary", on_click = function()
+				id = "task-card-reopen", size = "sm", on_click = function()
 			store.set_done(t.id, false)
 		end },
 	}
@@ -598,8 +796,8 @@ local function Body(id: string): Node
 		return ui.div {}
 	end
 	local t = t0 :: store.Task
-	local title, type_title = saved(t, "title")
-	local notes, type_notes = saved(t, "notes")
+	local title, title_refs = saved(t, "title")
+	local notes, notes_refs = saved(t, "notes")
 	local menu = ui.use_state(false)
 	local title_ref, notes_ref = ui.ref(), ui.ref()
 	ui.after(0, function()
@@ -611,118 +809,145 @@ local function Body(id: string): Node
 	local function live(): store.Task
 		return store.find(id) or t
 	end
-	local more = ui.button {
+	local function on_files(files: { any })
+		M.add_files(id, files)
+	end
+	local title_field = field_kit.use {
+		key = "tasks_card_title",
+		refs = function(): string
+			return title_refs
+		end,
+		text = title,
+		field = title_ref,
+		line = 22,
+		on_files = on_files,
+	}
+	local notes_field = field_kit.use {
+		key = "tasks_card_notes",
+		refs = function(): string
+			return notes_refs
+		end,
+		text = notes,
+		field = notes_ref,
+		line = 20,
+		on_files = on_files,
+	}
+	local function icon_button(props: { [string]: any }, icon: string): Node
+		props.w = 24
+		props.h = 24
+		props.p = 0
+		props.shrink = 0
+		props.rounded = ui.raw(6, "gpui")
+		props.bg = "#00000000"
+		props.hover = { bg = "$hover" }
+		props.items = "center"
+		props.justify = "center"
+		table.insert(props, ds.Icon { name = icon, size = 14, color = "$text.secondary" })
+		return ui.button(props)
+	end
+	local more = icon_button({
 		id = "task-card-menu",
 		label = locale.s("tasks.card.more"),
-		w = 28,
-		h = 28,
-		p = 0,
-		rounded = ui.raw(8, "gpui"),
-		bg = "#00000000",
-		hover = { bg = "$hover" },
-		items = "center",
-		justify = "center",
 		expanded = function(): boolean
 			return menu:get()
 		end,
 		on_click = function()
 			menu:set(not menu:peek())
 		end,
-		ds.Icon { name = "more-horizontal", size = 16 },
-	}
+	}, "more-horizontal")
 	return ui.column {
 		w_full = true,
-		gap = ui.raw(12, "gpui"),
-		ui.row {
-			justify = "end",
+		gap = ui.raw(14, "gpui"),
+		ui.column {
+			w_full = true,
 			gap = ui.raw(4, "gpui"),
-			ui.popover(Menu.panel {
-				open = menu,
-				anchor = more,
-				w = 200,
-				placement = { side = "bottom", align = "end", offset = 4 },
-				build = function(): Node
-					return Menu.Group {
-						Menu.Row { id = "task-card-toggle-done", icon = "check-circle", label = locale.s(if live().completed then "tasks.mark_not_done" else "tasks.mark_done"), on_click = function()
-							menu:set(false)
-							store.set_done(id, live().completed == nil)
-						end },
-						Menu.Row { id = "task-card-delete", icon = "trash-bin-minimalistic", label = locale.s("tasks.card.delete"), danger = true, on_click = function()
-							menu:set(false)
-							store.delete(id)
-							M.current:set(nil)
-						end },
-					}
-				end,
-			}),
-			ui.button {
-				id = "task-card-close",
-				label = locale.s("tasks.card.close"),
-				w = 28,
-				h = 28,
-				p = 0,
-				rounded = ui.raw(8, "gpui"),
-				bg = "#00000000",
-				hover = { bg = "$hover" },
-				items = "center",
-				justify = "center",
-				on_click = M.close,
-				ds.Icon { name = "close", size = 14 },
+			ui.row {
+				w_full = true,
+				items = "start",
+				gap = ui.raw(4, "gpui"),
+				ui.div {
+					grow = 1,
+					min_w = 0,
+					title_field.textarea {
+						id = "task-card-title",
+						label = locale.s("tasks.card.title"),
+						placeholder = locale.s("tasks.card.title"),
+						placeholder_color = "$text.tertiary",
+						on_key = function(e: any): boolean
+							if e.key == "Enter" and not (e.meta or e.cmd or e.ctrl) then
+								local el = notes_ref:peek()
+								if el then
+									el:focus()
+								end
+								return true
+							end
+							return false
+						end,
+						wrap = false,
+						w_full = true,
+						h = 22,
+						px = 0,
+						py = 0,
+						border = 0,
+						bg = "#00000000",
+						focus = { border = 0, outline = 0 },
+						text_size = ui.raw(15, "gpui"),
+						weight = "$font.weight.medium",
+					},
+				},
+				ui.popover(Menu.panel {
+					open = menu,
+					anchor = more,
+					w = 170,
+					placement = { side = "bottom", align = "end", offset = 6 },
+					build = function(): Node
+						return Menu.Group {
+							Menu.Row { id = "task-card-toggle-done", icon = "check-circle", label = locale.s(if live().completed then "tasks.mark_not_done" else "tasks.mark_done"), on_click = function()
+								menu:set(false)
+								store.set_done(id, live().completed == nil)
+							end },
+							Menu.Row { id = "task-card-delete", icon = "trash-bin-minimalistic", label = locale.s("tasks.card.delete"), danger = true, on_click = function()
+								menu:set(false)
+								store.delete(id)
+								M.current:set(nil)
+							end },
+						}
+					end,
+				}),
+				icon_button({ id = "task-card-close", label = locale.s("tasks.card.close"), on_click = M.close }, "close"),
 			},
-		},
-		ui.input {
-			id = "task-card-title",
-			ref = title_ref,
-			label = locale.s("tasks.card.title"),
-			placeholder = locale.s("tasks.card.title"),
-			placeholder_color = "$text.tertiary",
-			value = function(): string
-				return title:get()
-			end,
-			on_change = type_title,
-			on_key = function(e: any): boolean
-				if e.key == "Enter" and not (e.meta or e.cmd or e.ctrl) then
-					local el = notes_ref:peek()
-					if el then
-						el:focus()
-					end
-					return true
-				end
-				return false
-			end,
-			w_full = true,
-			h = 24,
-			px = 0,
-			border = 0,
-			bg = "#00000000",
-			focus = { border = 0, outline = 0 },
-			text_size = ui.raw(17, "gpui"),
-			weight = "$font.weight.semibold",
-		},
-		ui.textarea {
-			id = "task-card-notes",
-			ref = notes_ref,
-			label = locale.s("tasks.card.notes"),
-			placeholder = locale.s("tasks.card.notes"),
-			placeholder_color = "$text.tertiary",
-			value = function(): string
-				return notes:get()
-			end,
-			on_change = type_notes,
-			w_full = true,
-			min_h = 60,
-			px = 0,
-			border = 0,
-			bg = "#00000000",
-			focus = { border = 0, outline = 0 },
-			text_size = ui.raw(13, "gpui"),
+			notes_field.textarea {
+				id = "task-card-notes",
+				label = locale.s("tasks.card.notes"),
+				placeholder = locale.s("tasks.card.notes"),
+				placeholder_color = "$text.tertiary",
+				wrap = true,
+				w_full = true,
+				grow = { min = 20, max = 220 },
+				px = 0,
+				py = 0,
+				border = 0,
+				bg = "#00000000",
+				focus = { border = 0, outline = 0 },
+				text_size = ui.raw(13, "gpui"),
+			},
+			ui.presence(function(): string?
+				local list = live().images or {}
+				return if #list > 0 then table.concat(list, "\n") else nil
+			end, function(): Node
+				return Images(live())
+			end, { w_full = true }),
 		},
 		ui.row {
+			id = "task-card-chips",
 			gap = ui.raw(6, "gpui"),
 			wrap = true,
+			items = "center",
 			Pick {
 				id = "task-card-due",
 				label = locale.s("tasks.card.due"),
+				icon = "calendar",
+				w = 180,
 				value = function(): string
 					return due_value(live())
 				end,
@@ -742,6 +967,8 @@ local function Body(id: string): Node
 			Pick {
 				id = "task-card-project",
 				label = locale.s("tasks.card.project"),
+				icon = "folder",
+				w = 220,
 				value = function(): string
 					return live().project or ""
 				end,
@@ -756,12 +983,18 @@ local function Body(id: string): Node
 					store.update(id, { project = v })
 				end,
 			},
+			ui.show(function(): boolean
+				return #(live().images or {}) < store.IMAGES_MAX
+			end, Pill {
+				id = "task-card-add-image",
+				label = locale.s("tasks.card.add_image"),
+				tooltip = ds.Tooltip { locale.s("tasks.card.add_image") },
+				on_click = function()
+					M.add_images(live())
+				end,
+				ds.Icon { name = "gallery", size = 14, color = "$text.secondary" },
+			}),
 		},
-		ui.presence(function(): string
-			return table.concat(live().images or {}, "\n")
-		end, function(): Node
-			return Images(live())
-		end, { w_full = true }),
 		ui.presence(function(): string
 			local l = live()
 			if l.completed then
@@ -779,73 +1012,118 @@ local function Body(id: string): Node
 	}
 end
 
-M.Card = ui.component(function(): Node
-	return ui.show(function(): boolean
-		return M.current:get() ~= nil
-	end, ui.div {
-		absolute = true,
-		left = 0,
-		right = 0,
-		top = 0,
-		bottom = 0,
-		ui.div {
-			id = "task-card-backdrop",
+local function Overlay(reduced: boolean): Node
+	local room = ui.use_state(0)
+	local content_h = ui.use_state(0)
+	local function measure(into: State<number>): (size: any) -> ()
+		return function(size: any)
+			if math.abs(into:peek() - size.h) >= 0.5 then
+				into:set(size.h)
+			end
+		end
+	end
+	return ui.presence(function(): string?
+		return if M.current:get() ~= nil then "open" else nil
+	end, function(): Node
+		return ui.div {
 			absolute = true,
 			left = 0,
 			right = 0,
 			top = 0,
 			bottom = 0,
-			on_click = M.close,
-		},
-		ui.column(glass.style({
-			id = "task-card",
-			role = "dialog",
-			label = function(): string
-				local t = store.find(M.current:get())
-				return if t then title_of(t) else locale.s("tasks.card.title")
-			end,
-			absolute = true,
-			top = 16,
-			right = 16,
-			bottom = 16,
-			w = W,
-			p = ui.raw(18, "gpui"),
-			rounded = ui.raw(RADIUS, "gpui"),
-			overflow = "hidden",
-			on_key = function(e: any): boolean
-				if e.key == "Escape" then
-					M.close()
-					return true
-				elseif e.key == "Enter" and (e.meta or e.cmd) then
-					local t = store.find(M.current:peek())
-					if t and not t.completed and not t.chat and not t.send_error and hand_off:peek() == "new" then
-						M.start(t)
-						return true
-					end
-				end
-				return false
-			end,
-			on_press = function()
-				pressed_in = true
-				ui.after(0, function()
-					pressed_in = false
-				end)
-			end,
-			enter = motion.transition({ opacity = { 0, 1 }, x = { 28, 0 }, duration = 200 }),
-			exit = motion.transition({ opacity = 0, x = 20, duration = 140 }),
-			ui.scroll {
-				w_full = true,
-				grow = 1,
-				-- (The engine may answer a create before its watch brings the task: the body is built again as it comes.)
-				ui.presence(function(): string
-					local id = M.current:get() or ""
-					return if store.find(id) then id else `{id}?`
-				end, function(key: string): Node
-					return Body((string.gsub(key, "%?$", "")))
-				end, { w_full = true }),
+			ui.div {
+				id = "task-card-backdrop",
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				on_click = M.close,
 			},
-		}, "popup")),
+			ui.column {
+				absolute = true,
+				top = 16,
+				right = 16,
+				bottom = 16,
+				w = W,
+				pointer_events = "none",
+				on_resize = measure(room),
+				ui.column {
+					id = "task-card",
+					role = "dialog",
+					label = function(): string
+						local t = store.find(M.current:get())
+						return if t then title_of(t) else locale.s("tasks.card.title")
+					end,
+					w_full = true,
+					p = ui.raw(16, "gpui"),
+					rounded = ui.raw(RADIUS, "gpui"),
+					bg = "$zeron.tasks.panel",
+					border = 1,
+					border_color = "$zeron.tasks.panel_edge",
+					overflow = "hidden",
+					on_key = function(e: any): boolean
+						if e.key == "Escape" then
+							M.close()
+							return true
+						elseif e.key == "Enter" and (e.meta or e.cmd or e.ctrl) then
+							local t = store.find(M.current:peek())
+							if t and not t.completed and not t.chat and not t.send_error and hand_off:peek() == "new" then
+								M.start(t)
+								return true
+							end
+						end
+						return false
+					end,
+					on_press = function()
+						pressed_in = true
+						ui.after(0, function()
+							pressed_in = false
+						end)
+					end,
+					on_file_drop = function(files: { any })
+						local id = M.current:peek()
+						if id then
+							M.add_files(id, files)
+						end
+					end,
+					ui.scroll {
+						w_full = true,
+						h = function(): number
+							return math.min(content_h:get(), math.max(room:get() - 34, 0))
+						end,
+						ui.presence(function(): string
+							local id = M.current:get() or ""
+							return if store.find(id) then id else `{id}?`
+						end, function(key: string): Node
+							return ui.column {
+								w_full = true,
+								on_resize = measure(content_h),
+								Body((string.gsub(key, "%?$", ""))),
+							}
+						end, {
+							w_full = true,
+							mode = "wait",
+							initial = true,
+							enter = if reduced then nil else { opacity = { 0, 1 }, y = { 6, 0 }, duration = 180, ease = DRAWER },
+							exit = if reduced then nil else { opacity = 0, y = -4, duration = 90, ease = "linear" },
+						}),
+					},
+				},
+			},
+		}
+	end, {
+		enter = if reduced then nil else { opacity = { 0, 1 }, x = { 28, 0 }, duration = 300, ease = DRAWER },
+		exit = if reduced then nil else { opacity = 0, x = 20, duration = 220, ease = SHARP },
 	})
+end
+
+M.Card = ui.component(function(): Node
+	return ui.presence(function(): string
+		return if motion.reduced() then "still" else "moving"
+	end, function(mode: string): Node
+		return Overlay(mode == "still")
+	end, { absolute = true, left = 0, right = 0, top = 0, bottom = 0, pointer_events = "none" })
 end)
 
 return M

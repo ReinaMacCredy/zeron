@@ -11,7 +11,8 @@
 -- draft, `agent` the harness its model runs on, `target` where its commands and
 -- skills are read (`{ chat, device }`, or a new chat's `{ space, device }`),
 -- `files` where `@` searches, `in_chat` whether the chat is made yet, and `run`
--- runs one of Zeron's commands.
+-- runs one of Zeron's commands. `task`: `/` and `$` keep only what a task's words
+-- can carry (gpui's `SlashScope::Task`).
 
 local files = require("@app/screens/files/api")
 local mentions = require("@ds/composer_mentions")
@@ -29,6 +30,7 @@ export type Bind = {
 	files: () -> any?,
 	in_chat: () -> boolean,
 	run: (name: string) -> (),
+	task: boolean?,
 }
 
 function M.bind(b: Bind): { [string]: any }
@@ -44,6 +46,20 @@ function M.bind(b: Bind): { [string]: any }
 		local catalog = Invocations.catalog(invocation_key())
 		given["/"] = Invocations.items(catalog, "command")
 		given["$"] = Invocations.items(catalog, "skill")
+		if b.task then
+			for _, trigger in { "/", "$" } do
+				local all = given[trigger]
+				if all then
+					local kept = {}
+					for _, item in all do
+						if item.in_task then
+							table.insert(kept, item)
+						end
+					end
+					given[trigger] = kept
+				end
+			end
+		end
 		-- No agent to ask, or nowhere to ask it: Zeron's own alone. Its list still coming: nil.
 		if b.agent() == nil or invocation_key() == nil then
 			given["/"] = {}
@@ -61,7 +77,7 @@ function M.bind(b: Bind): { [string]: any }
 			end
 		end
 		-- Then Zeron's own (named clear of the agent's).
-		for _, row in ZeronCommands.rows(taken, b.in_chat()) do
+		for _, row in if b.task then {} else ZeronCommands.rows(taken, b.in_chat()) do
 			table.insert(slash, row)
 		end
 		given["/"] = slash
@@ -143,8 +159,6 @@ function M.bind(b: Bind): { [string]: any }
 				b.run(item.zeron)
 			elseif trigger == "@" then
 				Invocations.remember(item, trigger, token)
-			else
-				Invocations.remember(item, trigger)
 			end
 		end,
 		-- The agent's completion settings: `$` opens the skills only while "Use

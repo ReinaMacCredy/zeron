@@ -79,7 +79,7 @@ test("a command picked lands as its token and is sent as its reference; one type
 	settle(app)
 	app:key("Enter")
 	settle(app)
-	expect(app:text("role:textbox")).to_be("/review ")
+	expect(app:text("role:textbox")).to_be(string.rep("\u{a0}", 6) .. "/review" .. string.rep("\u{a0}", 2) .. " ")
 	app:type("role:textbox", "the branch, then /compact by hand")
 	settle(app)
 	-- (No menu over it: Enter sends. Escape here would give the keyboard

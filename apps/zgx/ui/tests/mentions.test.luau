@@ -141,6 +141,8 @@ local function shown(app: any, target: string): boolean
 	return string.find(string.match(app:tree("#mention-popover"), "^[^\n]*") or "", " hidden", 1, true) == nil
 end
 
+local REVIEW = string.rep("\u{a0}", 6) .. "/review" .. string.rep("\u{a0}", 2)
+
 local function menu_app(): any
 	local app = mount("completions_fixture.luau")
 	app:resize(900, 700)
@@ -171,7 +173,7 @@ test("the mention menu: a row pressed is picked and closes it", function()
 	app:frames(2)
 	app:click('role:option "/review"')
 	app:frames(2)
-	expect(app:text("#field")).to_be("/review ")
+	expect(app:text("#field")).to_be(REVIEW .. " ")
 	expect(shown(app, 'role:option "/review"')).to_be(false)
 	app:key("ArrowLeft")
 	app:key("ArrowLeft")
@@ -210,14 +212,14 @@ test("the mention menu: a row pressed leaves the keys in the draft, the caret wh
 	app:frames(2)
 	app:click('role:option "/review"')
 	app:frames(2)
-	expect(app:text("#field")).to_be("/review ")
+	expect(app:text("#field")).to_be(REVIEW .. " ")
 	expect(app:tree("#field")).to_contain(" focused")
-	expect(app:selection("#field")).to_be(8)
-	-- Two steps back from past the space: the keys never left the draft.
+	expect(app:selection("#field")).to_be(#REVIEW + 1)
+	-- Two steps back from past the space, the second over the chip whole: the keys never left the draft.
 	app:key("ArrowLeft")
 	app:key("ArrowLeft")
 	app:frames(2)
-	expect(app:selection("#field")).to_be(6)
+	expect(app:selection("#field")).to_be(0)
 	expect(app:tree("#field")).to_contain(" focused")
 end)
 
@@ -227,7 +229,7 @@ test("the mention menu: a new draft's token where the last one's was opens it", 
 	app:frames(2)
 	app:key("Enter")
 	app:frames(2)
-	expect(app:text("#field")).to_be("/review ")
+	expect(app:text("#field")).to_be(REVIEW .. " ")
 	app:fill("#field", "")
 	app:frames(1)
 	app:type("#field", "/rev")

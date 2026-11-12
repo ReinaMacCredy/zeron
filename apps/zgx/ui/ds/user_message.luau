@@ -406,7 +406,7 @@ return ui.component(function(props: Props): Node
 					ref = body,
 					w_full = true,
 					shrink = 0,
-					Markdown { text = props.text, breaks = true, open = props.open, link_menu = props.link_menu, chat_mark = props.chat_mark, find = props.find, wash = props.wash },
+					Markdown { text = props.text, breaks = true, open = props.open, link_menu = props.link_menu, chat_mark = props.chat_mark, invocations = true, find = props.find, wash = props.wash },
 				},
 			},
 			-- The way to open it: a plain link under the text, at its left

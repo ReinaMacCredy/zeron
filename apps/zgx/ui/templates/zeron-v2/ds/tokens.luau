@@ -691,6 +691,15 @@ function M.setup()
 					option = { radius = option, key_radius = control.nest(option, "$space.2") },
 					tray = { row_radius = tray_row, thumb_radius = control.nest(tray_row, "$space.1") },
 				},
+				reference = {
+					skill = if dark then "#c4b4ff" else "#7f22fe",
+					skill_fill = if dark then "#c4b4ff29" else "#7f22fe29",
+					command = "{accent}",
+					command_fill = "alpha({accent}, 0.16)",
+					working = "#2b7fff",
+					needs = if dark then "#a3b3ff" else "#4f39f6",
+					done = "#00bc7d",
+				},
 			},
 		}
 	end)

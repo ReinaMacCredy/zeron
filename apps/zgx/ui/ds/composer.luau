@@ -55,6 +55,7 @@ local limit_notice = require("@self/composer_limit")
 local composer_surface = require("@self/composer_surface")
 local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
+local references = require("@self/references")
 local locale = require("@self/locale")
 local Dictation = require("@self/dictation")
 local Recorder = require("@self/shortcut_recorder")
@@ -279,6 +280,7 @@ export type Props = {
 	-- send).
 	on_mention: ((item: any, trigger: string, token: string) -> ())?,
 	mention_empty: { [string]: string }?,
+	refs: (() -> string)?,
 	field: any?,
 	prediction: (() -> string?)?,
 	limit: (() -> any)?,
@@ -1361,7 +1363,9 @@ return ui.component(function(props: Props): Node
 		in_view = function(): boolean
 			return pill_shown:get()
 		end,
+		refs = props.refs,
 	}
+	local unit = if props.refs then references.unit(props.refs, value, field) else nil
 	-- Asked to: the keys, the caret at the end.
 	if props.focus then
 		local focus = props.focus
@@ -2341,9 +2345,13 @@ return ui.component(function(props: Props): Node
 				-- Markdown as it is typed: its markers greyed, bold, italic
 				-- and struck text in their faces, code washed; and a wash
 				-- behind each file, command or skill mentioned.
-				highlight = mentions.highlight,
+				highlight = if props.refs then references.highlight(props.refs) else mentions.highlight,
+				chips = if props.refs then references.chips(props.refs, value, (ui.theme.get("zeron.composer.line") :: number?) or 22) else nil,
 				active_descendant = m.descendant,
 				on_caret = function(line: number, column: number, anchor: number, focus: number)
+					if unit then
+						unit.on_caret(line, column, anchor, focus)
+					end
 					m.on_caret(line, column, anchor, focus)
 					caret_moved:set(caret_moved:peek() + 1)
 				end,
@@ -2358,6 +2366,9 @@ return ui.component(function(props: Props): Node
 					-- (Files first: a copied file puts its name in `text` too.)
 					if e.files and #e.files > 0 and props.on_files then
 						props.on_files(e.files)
+						return true
+					end
+					if e.text and m.paste(e.text) then
 						return true
 					end
 					if e.text and props.on_paste_text then
@@ -2410,6 +2421,9 @@ return ui.component(function(props: Props): Node
 						return true
 					end
 					if m.keys(e) then
+						return true
+					end
+					if unit and unit.keys(e) then
 						return true
 					end
 					if e.key == "Tab" and not e.shift and not e.cmd and not e.alt and accept_prediction() then

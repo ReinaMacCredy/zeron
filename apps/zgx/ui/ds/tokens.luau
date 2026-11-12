@@ -717,6 +717,15 @@ function M.setup()
 					accent_wash = if dark then "alpha({accent}, 0.45)" else "alpha({accent}, 0.1)",
 					faint = if dark then "#858589" else "#797980",
 				},
+				reference = {
+					skill = if dark then "#c4b4ff" else "#7f22fe",
+					skill_fill = if dark then "#c4b4ff29" else "#7f22fe29",
+					command = "{accent}",
+					command_fill = "alpha({accent}, 0.16)",
+					working = "#2b7fff",
+					needs = if dark then "#a3b3ff" else "#4f39f6",
+					done = "#00bc7d",
+				},
 				inset = {
 					-- (Lifted by its edge, not its tone: Zeron's, 13 on 17 dark, 255 on 245 light.)
 					bg = if dark then "{zeron.window}" else "over({zeron.window}, {surface.raised})",

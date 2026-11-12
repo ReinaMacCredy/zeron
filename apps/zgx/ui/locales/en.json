@@ -5425,7 +5425,13 @@
       "no_date": "No date",
       "today": "Today",
       "tomorrow": "Tomorrow",
-      "project": "Project"
+      "project": "Project",
+      "add_image": "Add image",
+      "run_in": "in",
+      "run_in_name": "Run in",
+      "folder": "Folder…",
+      "plan_first": "Plan first",
+      "plan_first_help": "The lead writes steps before it starts. You can also Add plan later."
     },
     "capture": {
       "added": "Added to To do: {title}",
@@ -5435,7 +5441,10 @@
       "save": "save",
       "notes": "notes",
       "close": "close",
-      "where": "To do · No project"
+      "where": "To do · No project",
+      "tasks": "Tasks",
+      "what_tasks": "tasks",
+      "not_image": "{name} is not an image."
     }
   },
   "inbox": {

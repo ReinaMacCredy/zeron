@@ -28,9 +28,10 @@ export type Row = {
 	blocked: string?,
 	terminal_only: boolean?,
 	path: string?,
+	task: boolean?,
 }
 export type Catalog = { state: "loading" | "ready" | "failed", rows: { Row }, failed: string?, why: string?, warning: string? }
-export type Target = { chat: string?, space: string?, device: string?, path: string? }
+export type Target = { chat: string?, space: string?, device: string?, path: string?, home: boolean? }
 
 -- Every list, by `harness|device|place`.
 local CATALOGS = ui.state("chat_invocations", {} :: { [string]: Catalog })
@@ -48,7 +49,7 @@ function M.key(harness: string?, target: Target?): string?
 	if not harness or not target then
 		return nil
 	end
-	local place = target.chat or target.space or target.path
+	local place = target.chat or target.space or target.path or (if target.home then "~" else nil)
 	if not place then
 		return nil
 	end
@@ -135,6 +136,7 @@ function M.items(catalog: Catalog?, kind: "command" | "skill"): { any }?
 				link = if r.plain then nil else r.link,
 				blocked = r.blocked,
 				terminal_only = r.terminal_only,
+				in_task = r.task,
 			})
 		end
 	end
