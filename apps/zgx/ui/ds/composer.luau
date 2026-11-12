@@ -316,7 +316,7 @@ export type Props = {
 -- side and the foot as the pill's corner (inside its hairline) is round
 -- less theirs.
 local LINE = 22
-local LONG_LINES, COLLAPSED_LINES, TOGGLE_ROOM = 6, 3, 24
+local LONG_LINES, COLLAPSED_LINES, TOGGLE_ROOM, TOGGLE_CLEAR = 6, 3, 24, 72
 local ONE_LINE = 47
 local TEXT_TOP, TEXT_BOTTOM, TEXT_MIN, TEXT_MAX = 16, 4, 76, 260
 local ACTIONS = 42
@@ -1470,11 +1470,12 @@ return ui.component(function(props: Props): Node
 	-- The text box opened out: the wrapped text with its insets, between
 	-- the floor and the cap; collapsed, its last rows.
 	local box = ui.computed(function(): number
-		if collapsed:get() then
-			return COLLAPSED_LINES * LINE + TEXT_TOP + TEXT_BOTTOM
-		end
 		local h = math.max(wrapped_h:get(), LINE)
-		return math.clamp(h + TEXT_TOP + TEXT_BOTTOM, TEXT_MIN, TEXT_MAX)
+		local natural = math.clamp(h + TEXT_TOP + TEXT_BOTTOM, TEXT_MIN, TEXT_MAX)
+		if collapsed:get() then
+			return math.min(natural, COLLAPSED_LINES * LINE + TEXT_TOP + TEXT_BOTTOM)
+		end
+		return natural
 	end)
 	local HEAD_GAP = head_gap()
 	-- With nothing over the words, the toggle takes a row of its own above them.
@@ -2148,6 +2149,10 @@ return ui.component(function(props: Props): Node
 		right = 0,
 		top = 0,
 		w_full = true,
+		-- (Clear of the collapse toggle at its top right, as the mockup keeps it.)
+		pr = function(): number
+			return if long:get() then TOGGLE_CLEAR else 0
+		end :: any,
 		ui.show(has_limit, limit_notice.Notice {
 			limit = function(): any
 				return if props.limit then props.limit() else nil
@@ -2421,7 +2426,7 @@ return ui.component(function(props: Props): Node
 			-- Collapsed, its top fades over a row's height.
 			overflow = "hidden",
 			fade = function(): { number }
-				return if collapsed:get() then { LINE, 0 } else { 0, 0 }
+				return if collapsed:get() and wrapped_h:get() > COLLAPSED_LINES * LINE + 0.5 then { LINE, 0 } else { 0, 0 }
 			end :: any,
 			-- Its placeholder, the composer's own (it changes with what is
 			-- asked): over the empty draft, taking no pointer.
