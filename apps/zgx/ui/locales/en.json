@@ -3338,7 +3338,6 @@
         "computer": "Same switch as Settings > Computer use",
         "devices": "Same switch as agent access in Settings > Device hub"
       },
-      "open": "Open",
       "show_tools": "Show {group}'s tools",
       "group_off": "The whole group is off. Your choices below are kept for when you turn it back on."
     },
