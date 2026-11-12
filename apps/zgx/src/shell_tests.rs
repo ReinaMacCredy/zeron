@@ -127,7 +127,8 @@ fn the_title_bar_moves_the_window_across_its_width() {
     let forward = app.bounds("#titlebar >> role:button \"Forward\"");
     assert!(tab.x >= forward.x + forward.width, "the tab {tab:?} runs under the controls (Forward {forward:?})");
     let mid = |b: Rect| b.y + b.height / 2.;
-    assert!((mid(tab) - mid(forward)).abs() <= 1., "the tab {tab:?} isn't on the controls' line ({forward:?})");
+    let title = app.bounds("#session-tabs >> role:tab \"Fix the build\" >> \"Fix the build\"");
+    assert!((mid(title) - mid(forward)).abs() <= 1., "the tab's title {title:?} isn't on the controls' line ({forward:?})");
     // Nor after the scripts reload, or the route moves (a new chat).
     app.host.reload().expect("the reload failed");
     app.frames(40);
