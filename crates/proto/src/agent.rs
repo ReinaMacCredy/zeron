@@ -1318,14 +1318,18 @@ fn strip_spawn_prefix(text: &str) -> &str {
 }
 
 /// The spawn-input keys [`sanitize_tool_call`](crate::) must preserve so the
-/// chip can name the child's model. Deliberately tiny: everything else on a
+/// chip can name the child's model and effort. Deliberately tiny: everything else on a
 /// spawn's input (the whole prompt, most of all) stays host-local.
-pub const SUBAGENT_INPUT_KEEP: [&str; 5] = [
+pub const SUBAGENT_INPUT_KEEP: [&str; 9] = [
     "model",
     "modelId",
     "model_id",
     "subagent_model",
     "subagent_type",
+    "effort",
+    "reasoning_effort",
+    "reasoningEffort",
+    "reasoning",
 ];
 
 /// Bounds on an agent's inline visual ([`AgentEvent::Visual`]): a Luau

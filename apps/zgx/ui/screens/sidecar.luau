@@ -28,7 +28,6 @@ M.RAIL = 40
 M.AUTO_RAIL_AT = 640
 local TOP = 6
 local POPOVER_W = 262
-local CAP = 8
 local RAIL_BUTTON = 32
 local RAIL_GAP = 4
 local LAYOUT = { duration = 300, ease = "cubicBezier(0.32, 0.72, 0, 1)" }
@@ -39,7 +38,6 @@ local TOOLTIP_MS, RAIL_TOOLTIP_MS = 500, 260
 
 M.collapsed = ui.persist("sidecar_collapsed", false)
 local previous_open = ui.state("sidecar_previous_open", false)
-local beside_all = ui.state("sidecar_beside_all", false)
 
 local function icon_at(file: string, size: number): Node
 	return ui.svg { src = `assets/sidecar/{file}.svg`, w = size, h = size, shrink = 0, aria_hidden = true, tint = "currentColor" }
@@ -156,6 +154,9 @@ local DONE = "$zeron.sidecar.done"
 local FAILED = "$danger"
 local FAINT = "$zeron.sidecar.faint"
 local HEADING = "$zeron.sidecar.heading"
+local KINDS = { "agent", "thread", "shell" }
+local ASKING = { input = true, approval = true, plan = true }
+local MOVING = { working = true, connecting = true, waiting = true }
 
 export type Entry = {
 	key: string,
@@ -435,10 +436,15 @@ type Data = {
 	session: () -> string?,
 	workspace: () -> { Entry },
 	beside: () -> { Entry },
+	tab: () -> string,
+	kinds: () -> { string },
+	count_of: (kind: string) -> number,
+	asking: () -> number,
 	previous: () -> { Entry },
 	foot: () -> { Entry },
 	failed: () -> number,
 	running: () -> number,
+	previous_count: () -> number,
 	actions: () -> { Entry },
 	actions_shown: () -> boolean,
 	slot_session: State<any>,
@@ -627,8 +633,8 @@ local function make_data(props: { session: () -> string?, open_panel: () -> () }
 			icon = { asset = "fork" }
 		elseif kind == "side_chat" then
 			icon = { asset = "chat-round-line" }
-		elseif k.agent then
-			icon = { mark = k.agent }
+		elseif k.mark or k.agent then
+			icon = { mark = k.mark or k.agent }
 		end
 		return {
 			key = `child-{k.id}`,
@@ -671,47 +677,106 @@ local function make_data(props: { session: () -> string?, open_panel: () -> () }
 		end
 	end
 
-	local beside = ui.computed(function(): { Entry }
+	local kinds = ui.computed(function(): any
 		local opened = open_tabs()
 		local c = chat:get()
 		local harness = if c then c.harness else nil
-		local mark = if c then c.agent else nil
-		local out: { Entry } = {}
-		for i, a in split:get().running do
-			if i > CAP then
-				break
+		local mark = if c then (c :: any).mark or c.agent else nil
+		local s = split:get()
+		local agent = { live = {}, previous = s.previous, count = #s.running, failed = 0 }
+		for _, a in s.running do
+			table.insert(agent.live, agent_entry(a, opened, harness, mark))
+		end
+		for _, a in s.previous do
+			if a.status == "failed" then
+				agent.failed += 1
 			end
-			table.insert(out, agent_entry(a, opened, harness, mark))
 		end
-		local list = children:get()
-		local all = beside_all:get()
-		local shown = if all then #list else math.min(#list, CAP)
-		for i = 1, shown do
-			table.insert(out, child_entry(list[i], opened))
-		end
-		local hidden = #list - CAP
-		if hidden > 0 then
-			table.insert(out, {
-				key = "children-more",
-				icon = { name = "more-horizontal" },
-				label = if all then locale.s("sidecar.show_fewer") else locale.s("sidecar.more", { n = hidden }),
-				act = { what = "more" },
-			})
-		end
-		for i, t in shells:get() do
-			if i > CAP then
-				break
+		local asking, working, rest = {}, {}, {}
+		for _, k in children:get() do
+			local st = k.status or ""
+			if ASKING[st] then
+				table.insert(asking, k)
+			elseif MOVING[st] then
+				table.insert(working, k)
+			else
+				table.insert(rest, k)
 			end
-			table.insert(out, {
+		end
+		local function newest(a: any, b: any): boolean
+			local x, y = a.updated or a.created or 0, b.updated or b.created or 0
+			if x ~= y then
+				return x > y
+			end
+			return a.id < b.id
+		end
+		table.sort(asking, newest)
+		table.sort(working, newest)
+		table.sort(rest, newest)
+		local thread = { live = {}, previous = rest, count = #asking + #working, asking = #asking, failed = 0 }
+		for _, k in asking do
+			table.insert(thread.live, child_entry(k, opened))
+		end
+		for _, k in working do
+			table.insert(thread.live, child_entry(k, opened))
+		end
+		local shell = { live = {}, previous = {}, count = #shells:get(), failed = 0 }
+		local live = store.session:get()
+		local can_stop = live ~= nil and (live :: any).shells_stoppable ~= false
+		for _, t in shells:get() do
+			table.insert(shell.live, {
 				key = `shell-{t.id}`,
 				icon = { asset = "astra-terminal" },
-				label = t.detail or t.name or "",
+				label = t.name or t.detail or "",
+				hint = t.detail or t.name,
 				value = if t.since then { kind = "dot", since = t.since, color = WORKING } else { kind = "dot", text = locale.s("ds.status.working"), color = WORKING },
-				trail = if (store.session:get() :: any).shells_stoppable ~= false then { icon = "stop", label = locale.s("sidecar.stop"), act = { what = "stop_task", id = t.id } } else nil,
+				trail = if can_stop then { icon = "stop", label = locale.s("sidecar.stop"), act = { what = "stop_task", id = t.id } } else nil,
 			})
 		end
-		return out
+		return { agent = agent, thread = thread, shell = shell }
 	end)
+	local function shown_kinds(): { string }
+		local k = kinds:get()
+		local out: { string } = {}
+		for _, name in KINDS do
+			if #k[name].live + #k[name].previous > 0 then
+				table.insert(out, name)
+			end
+		end
+		return out
+	end
+	-- Pinned once there's work, so a count moving later doesn't move the tab; let go as the chat goes.
+	local picked = ui.state("sidecar_beside_tab", {} :: { [string]: string })
+	local left_sid: string? = nil
+	ui.effect(function()
+		local sid = session()
+		if left_sid and left_sid ~= sid and picked:peek()[left_sid] then
+			picked:set_key(left_sid, nil :: any)
+		end
+		left_sid = sid
+		local k = kinds:get()
+		if not sid or picked:peek()[sid] then
+			return
+		end
+		local first: string? = if k.thread.asking > 0 then "thread" else nil
+		for _, name in KINDS do
+			if not first and k[name].count > 0 then
+				first = name
+			end
+		end
+		if first then
+			picked:set_key(sid, first)
+		end
+	end)
+	local function tab(): string
+		local shown = shown_kinds()
+		local sid = session()
+		local p = if sid then picked:get()[sid] else nil
+		if p and table.find(shown, p) then
+			return p
+		end
+		return if table.find(shown, "agent") then "agent" else shown[1] or "agent"
+	end
 
 	local tick_of, ticking = 0, ""
 	ui.effect(function()
@@ -758,9 +823,10 @@ local function make_data(props: { session: () -> string?, open_panel: () -> () }
 		end
 		local opened = open_tabs()
 		local c = chat:get()
+		local now = tab()
 		local out: { Entry } = {}
-		for _, a in split:get().previous do
-			table.insert(out, agent_entry(a, opened, if c then c.harness else nil, if c then c.agent else nil))
+		for _, item in kinds:get()[now].previous do
+			table.insert(out, if now == "agent" then agent_entry(item, opened, if c then c.harness else nil, if c then (c :: any).mark or c.agent else nil) else child_entry(item, opened))
 		end
 		return out
 	end)
@@ -778,23 +844,9 @@ local function make_data(props: { session: () -> string?, open_panel: () -> () }
 			},
 		}
 	end)
-	local failed = ui.computed(function(): number
-		local n = 0
-		for _, a in split:get().previous do
-			if a.status == "failed" then
-				n += 1
-			end
-		end
-		return n
-	end)
 	local running = ui.computed(function(): number
-		local n = #split:get().running
-		for _, k in children:get() do
-			if k.status == "working" then
-				n += 1
-			end
-		end
-		return n
+		local k = kinds:get()
+		return k.agent.count + k.thread.count + k.shell.count
 	end)
 
 	local bound = Actions.bind(session, function(title: string, run: { [string]: any })
@@ -907,8 +959,12 @@ local function make_data(props: { session: () -> string?, open_panel: () -> () }
 			lanes.open_subagent(sid, act.sub)
 		elseif what == "child" and sid then
 			lanes.open(sid, { kind = "side_chat", id = act.id, title = act.title })
-		elseif what == "more" then
-			beside_all:set(not beside_all:peek())
+		elseif what == "tab" then
+			local sid = session()
+			if sid then
+				picked:set_key(sid, act.kind)
+			end
+			previous_open:set(false)
 		elseif what == "stop_task" then
 			stop_task(act.id)
 		elseif what == "stop_all" then
@@ -951,7 +1007,15 @@ local function make_data(props: { session: () -> string?, open_panel: () -> () }
 			return workspace:get()
 		end,
 		beside = function(): { Entry }
-			return beside:get()
+			return kinds:get()[tab()].live
+		end,
+		tab = tab,
+		kinds = shown_kinds,
+		count_of = function(kind: string): number
+			return kinds:get()[kind].count
+		end,
+		asking = function(): number
+			return kinds:get().thread.asking
 		end,
 		previous = function(): { Entry }
 			return previous:get()
@@ -960,13 +1024,13 @@ local function make_data(props: { session: () -> string?, open_panel: () -> () }
 			return foot:get()
 		end,
 		failed = function(): number
-			return failed:get()
+			return kinds:get()[tab()].failed
 		end,
 		running = function(): number
 			return running:get()
 		end,
 		previous_count = function(): number
-			return #split:get().previous
+			return #kinds:get()[tab()].previous
 		end,
 		actions = function(): { Entry }
 			return actions:get()
@@ -1122,9 +1186,89 @@ local function fold_row(data: any, surface: string): Node
 	})
 end
 
+local function kind_tab(data: any, surface: string, kind: string): Node
+	local function chosen(): boolean
+		return data.tab() == kind
+	end
+	return ui.show(function(): boolean
+		return table.find(data.kinds(), kind) ~= nil
+	end, ui.button {
+		id = `sidecar-{surface}-tab-{kind}`,
+		role = "tab",
+		selected = chosen,
+		label = function(): string
+			local n = data.count_of(kind)
+			local word = locale.s(`sidecar.tab.{kind}`)
+			return if n > 0 then `{word} {n}` else word
+		end,
+		grow = 1,
+		basis = 0,
+		min_w = 0,
+		h = 24,
+		gap = ui.raw(5, "the mockup's segment"),
+		items = "center",
+		justify = "center",
+		rounded = ui.raw(6, "the mockup's segment"),
+		cursor = "pointer",
+		bg = function(): string
+			return if chosen() then "$popover.bg" else "#00000000"
+		end,
+		shadow = function(): any
+			return if chosen() then "$shadow.sm" else false
+		end,
+		color = function(): string
+			return if chosen() then "$text.primary" else "$text.secondary"
+		end,
+		hover = { color = "$text.primary" },
+		focus = control.ring,
+		on_click = function()
+			data.run({ what = "tab", kind = kind })
+		end,
+		ui.text { locale.t(`sidecar.tab.{kind}`), shrink = 0, text_size = "$font.size.sm" },
+		ui.show(function(): boolean
+			return data.count_of(kind) > 0
+		end, ui.text {
+			function(): string
+				return tostring(data.count_of(kind))
+			end,
+			literal = true,
+			shrink = 0,
+			tabular = true,
+			text_size = "$font.size.xs",
+			color = FAINT,
+		}),
+		if kind == "thread"
+			then ui.show(function(): boolean
+				return data.asking() > 0
+			end, ui.div { class = "sidecar-tab-asking", w = 6, h = 6, shrink = 0, rounded = "$radius.full", bg = "$warning" })
+			else nil,
+	})
+end
+
+local function kind_tabs(data: any, surface: string): Node
+	return ui.show(function(): boolean
+		return #data.kinds() >= 2
+	end, ui.row {
+		id = `sidecar-{surface}-tabs`,
+		role = "tablist",
+		label = locale.t("sidecar.tabs"),
+		w_full = true,
+		shrink = 0,
+		p = ui.raw(2, "the mockup's well"),
+		gap = ui.raw(2, "the mockup's well"),
+		mt = "$space.1",
+		mb = ui.raw(6, "the mockup's well"),
+		rounded = ui.raw(8, "the mockup's well"),
+		bg = "$zeron.secondary.bg",
+		kind_tab(data, surface, "agent"),
+		kind_tab(data, surface, "thread"),
+		kind_tab(data, surface, "shell"),
+	})
+end
+
 local function beside_section(data: any, surface: string, after: (() -> ())?): Node
 	local function nothing(): boolean
-		return #data.beside() == 0 and data.previous_count() == 0
+		return #data.kinds() == 0
 	end
 	return ui.column {
 		id = `sidecar-{surface}-section-beside`,
@@ -1149,6 +1293,7 @@ local function beside_section(data: any, surface: string, after: (() -> ())?): N
 			end,
 			place = { side = "left", align = "start", offset = 8 },
 		})),
+		kind_tabs(data, surface),
 		rows(data.beside, surface, data, after),
 		ui.show(nothing, ui.row {
 			id = `sidecar-{surface}-empty`,

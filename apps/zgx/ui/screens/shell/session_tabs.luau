@@ -19,6 +19,7 @@ require("@app/screens/shell/tab_rules")
 local M = {}
 
 local TAB_H, SLOT, TILE = 36, 24, 20
+local MARK = 14
 local TAB_MAX, TAB_MIN, TAB_GAP = 216, 144, 4
 local TITLE_SIZE = ui.raw(12, "Zeron's tab title, at any text size")
 local BAR, LIFT = 42, 30
@@ -41,6 +42,7 @@ local rows = splits.tree.steady(function(): { [string]: any }
 			title = c.title,
 			status = c.status,
 			agent = c.agent,
+			mark = (c :: any).mark,
 			harness = c.harness,
 			agent_icon = (c :: any).agent_icon,
 			project = c.project,
@@ -412,26 +414,64 @@ local function agents_of(id: string): { any }
 	return Pills.fan_of(panes[1], if c then c.fan else nil) or {}
 end
 
-local function agents_lead(id: string): Node
+local function own_of(id: string): any
+	local c = chat_of(face(id))
+	return if c and (c.agent or c.mark) then c else nil
+end
+
+-- Model maker first, as the roster marks its agents.
+local function own_mark(id: string, size: number?): Node
+	return SessionRow.mark(function(): any
+		local c = own_of(id) or {}
+		return { agent = c.mark or c.agent, harness = c.harness, agent_icon = c.agent_icon }
+	end, function(): boolean
+		return true
+	end, size)
+end
+
+local function foreign_of(id: string): { any }
+	return Pills.foreign(agents_of(id), own_of(id))
+end
+
+local function fan_tiles(id: string): { any }
+	local own = own_of(id)
+	local front = { key = "lead", lead = true, asking = false }
+	local out: { any } = { front }
+	local others = if own then foreign_of(id) else agents_of(id)
+	if own then
+		for _, t in agents_of(id) do
+			if not table.find(others, t) then
+				front.asking = front.asking or t.asking == true
+			end
+		end
+	end
+	for _, t in others do
+		if #out >= AgentFan.MAX then
+			break
+		end
+		table.insert(out, t)
+	end
+	return out
+end
+
+local function agents_lead(id: string, bare: boolean): Node
 	local chat = face(id)
 	local tile_of = project_tile(chat)
 	return Pills.Fan {
 		name = `session-tab-{id}-agents`,
 		chat = chat,
-		size = TILE,
-		lead = tile_of,
+		size = if bare then MARK else TILE,
+		bare = bare,
+		lead = if bare
+			then function(size: number): Node
+				return own_mark(id, size)
+			end
+			else tile_of,
 		words = function(): { any }
 			return agents_of(id)
 		end,
 		tiles = function(): { any }
-			local out: { any } = { { key = "project", lead = true } }
-			for i, t in agents_of(id) do
-				if i > AgentFan.MAX - 1 then
-					break
-				end
-				table.insert(out, t)
-			end
-			return out
+			return fan_tiles(id)
 		end,
 		place = { side = "bottom", align = "start", offset = 6 },
 	}
@@ -451,7 +491,12 @@ local function lead(id: string, hovered: any): Node
 			return "stack"
 		end
 		if #agents_of(id) > 0 then
-			return "agents"
+			if not own_of(id) then
+				return "agents"
+			elseif #foreign_of(id) > 0 then
+				return "fan"
+			end
+			return if hovered:get() then "grip" else "own"
 		end
 		local c = chat()
 		if c and (c.status == "working" or c.status == "connecting") then
@@ -461,8 +506,10 @@ local function lead(id: string, hovered: any): Node
 	end, function(which: string): Node
 		if which == "stack" then
 			return tile(id)
-		elseif which == "agents" then
-			return agents_lead(id)
+		elseif which == "agents" or which == "fan" then
+			return agents_lead(id, which == "fan")
+		elseif which == "own" then
+			return own_mark(id)
 		elseif which == "grip" then
 			return ui.div { color = "$text.secondary", ds.Icon { name = "drag-handle", size = 14 } }
 		elseif which == "mark" then
@@ -481,8 +528,14 @@ local function lead(id: string, hovered: any): Node
 			if n >= 2 then
 				return TILE + FAN[math.clamp(n, 1, STACK)].x
 			end
-			local agents = #agents_of(id)
-			return if agents > 0 then AgentFan.width(agents + 1, TILE) else 16
+			if #agents_of(id) == 0 then
+				return 16
+			end
+			local own = own_of(id)
+			if own and #foreign_of(id) == 0 then
+				return 16
+			end
+			return AgentFan.width(#fan_tiles(id), if own then MARK else TILE, own ~= nil)
 		end,
 		h = 16,
 		items = "center",

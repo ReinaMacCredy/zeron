@@ -135,7 +135,6 @@ function M.runs_of(bind: any): any
 			harness = if s then s.harness else nil,
 			agent = if row then (row :: any).mark or row.agent else nil,
 			icon = if row then (row :: any).agent_icon else nil,
-			reasoning = if s then s.effort else nil,
 		}
 	end)
 end
@@ -171,6 +170,17 @@ function M.fan_of(id: string?, row_fan: { any }?): { any }?
 		return if #open.tiles > 0 then open.tiles else row_fan
 	end
 	return row_fan
+end
+
+-- A chat's own (native) agents wear its mark already.
+function M.foreign(tiles: { any }?, chat: any): { any }
+	local out: { any } = {}
+	for _, t in tiles or {} do
+		if not (chat and t.mark and (t.mark == chat.mark or t.mark == chat.agent)) then
+			table.insert(out, t)
+		end
+	end
+	return out
 end
 
 local function stop_run(r: any)
@@ -681,7 +691,7 @@ local function fan_words(tiles: { any }): string
 	return Roster.fan_label(n, k)
 end
 
-M.Fan = ui.component(function(props: { chat: string | () -> string?, tiles: () -> { any }, words: (() -> { any })?, lead: ((number) -> Node)?, size: number?, place: any?, name: string? }): Node
+M.Fan = ui.component(function(props: { chat: string | () -> string?, tiles: () -> { any }, words: (() -> { any })?, lead: ((number) -> Node)?, size: number?, bare: boolean?, place: any?, name: string? }): Node
 	local open = ui.use_state(false)
 	local function chat_of(): string?
 		return if type(props.chat) == "function" then props.chat() else props.chat
@@ -708,6 +718,7 @@ M.Fan = ui.component(function(props: { chat: string | () -> string?, tiles: () -
 			tiles = props.tiles,
 			lead = props.lead,
 			size = props.size,
+			bare = props.bare,
 			label = function(): string
 				return fan_words(if props.words then props.words() else props.tiles())
 			end,

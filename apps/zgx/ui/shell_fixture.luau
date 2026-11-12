@@ -1144,6 +1144,18 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "agents_at_work",
+	title = "Claude agents at work under a Claude chat and under a Codex chat",
+	run = function()
+		for _, c in model.chats do
+			if c.id == "a1" or c.id == "a2" then
+				c.fan = { { key = "claude", mark = "claude", asking = false, count = 2 } }
+			end
+		end
+		publish()
+	end,
+}
+ui.command {
 	id = "arrive",
 	title = "A new session arrives",
 	run = function()

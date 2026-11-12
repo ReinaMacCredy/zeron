@@ -1594,6 +1594,7 @@ mod tests {
                 "description": "Explore theme system",
                 "subagent_type": "Explore",
                 "model": "haiku",
+                "effort": "high",
                 "prompt": "a very long private prompt",
             })),
         };
@@ -1605,10 +1606,12 @@ mod tests {
                 input: Some(serde_json::json!({
                     "model": "haiku",
                     "subagent_type": "Explore",
+                    "effort": "high",
                 })),
             }
         );
         assert_eq!(clean.subagent_model(), Some("haiku"));
+        assert_eq!(clean.subagent_reasoning(), Some(zeron_proto::ReasoningLevel::High));
         assert_eq!(sanitize_tool_call(&clean), clean);
     }
 

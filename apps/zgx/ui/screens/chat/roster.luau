@@ -47,7 +47,7 @@ local function spawn_row(sub: any, depth: number, input: any): Row?
 		mark = mark,
 		provider = mark or input.harness or "agent",
 		icon = if sub.agent then nil else input.icon,
-		reasoning = sub.reasoning or input.reasoning,
+		reasoning = sub.reasoning,
 		state = state :: any,
 		started = sub.at,
 		depth = depth,
