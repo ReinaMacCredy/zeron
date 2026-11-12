@@ -777,7 +777,7 @@ function M.view(): Node
 							step = prefs.CONVERSATION_WIDTH.step,
 							-- (The slider's name joins its value as a string: read as
 							-- the page is built.)
-							label = ui.t("settings.appearance.conversation_width.label"):get(),
+							label = ui.t("settings.appearance.conversation_width.label"),
 							format = function(v: number): string
 								return ui.t("settings.appearance.pt", { n = math.floor(v) }):get()
 							end,

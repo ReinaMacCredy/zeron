@@ -1753,9 +1753,9 @@ M.Sidebar = ui.component(function(props: Props): Node
 		end,
 		on_discard_draft = M.discard_draft,
 		search_label = function(): string
-			local id = only_project()
+			local only = only_project()
 			for _, p in sessions.now:get().projects do
-				if p.id == id then
+				if p.id == only then
 					return locale.s("ds.sidebar.search_in", { name = p.name })
 				end
 			end

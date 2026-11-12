@@ -480,7 +480,7 @@ local function fallback_list(): Node
 					icon = "close",
 					size = "sm",
 					tone = "quiet",
-					label = ui.t("settings.routing.fallback.remove", { name = target_label(item.target) }):get(),
+					label = ui.t("settings.routing.fallback.remove", { name = target_label(item.target) }),
 					on_click = function()
 						save(function(s: any)
 							table.remove(s.fallback, item.i)

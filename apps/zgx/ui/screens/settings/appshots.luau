@@ -264,7 +264,7 @@ end
 
 local function step(n: number, body: Node): Node
 	return ui.row {
-		gap = "$space.2.5",
+		gap = 10,
 		items = "start",
 		ui.div {
 			w = 20,
@@ -297,7 +297,7 @@ local function guide(pane: string): Node
 		border_color = "$border",
 		bg = "$background",
 		ui.column {
-			gap = "$space.2.5",
+			gap = 10,
 			step(
 				1,
 				ui.row {
@@ -308,7 +308,7 @@ local function guide(pane: string): Node
 						on_click = function()
 							Appshots.open_settings(pane)
 						end,
-						t("guide.open", { pane = t(`{pane}.label`):get() }),
+						t("guide.open", { pane = function() return t(`{pane}.label`):get() end }),
 					} :: any,
 				}
 			),
