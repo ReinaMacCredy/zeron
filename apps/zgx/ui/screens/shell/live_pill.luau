@@ -366,7 +366,8 @@ local function right_of(r: any, clock: State<number>, expanded: any, close: () -
 				color = "$text.tertiary",
 				tabular = true,
 			},
-			status.Spinner { size = 12, ink = "$accent" },
+			-- (Still: a ring here turns the tray's own window over every frame, beside the pill's.)
+			ui.div { shrink = 0, color = "$accent", ds.Icon { name = "status-working", size = 12 } },
 		}
 	elseif r.kind == "done" then
 		return ui.row {
