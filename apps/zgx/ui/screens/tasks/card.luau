@@ -1025,6 +1025,15 @@ local function Overlay(reduced: boolean): Node
 	return ui.presence(function(): string?
 		return if M.current:get() ~= nil then "open" else nil
 	end, function(): Node
+		-- Closing keeps the last task's content while the card leaves (gpui's `Leaving`), so it fades out whole.
+		local last = M.current:peek() :: string
+		local function shown(): string
+			local id = M.current:get()
+			if id then
+				last = id
+			end
+			return last
+		end
 		return ui.div {
 			absolute = true,
 			left = 0,
@@ -1052,7 +1061,7 @@ local function Overlay(reduced: boolean): Node
 					id = "task-card",
 					role = "dialog",
 					label = function(): string
-						local t = store.find(M.current:get())
+						local t = store.find(shown())
 						return if t then title_of(t) else locale.s("tasks.card.title")
 					end,
 					w_full = true,
@@ -1093,7 +1102,7 @@ local function Overlay(reduced: boolean): Node
 							return math.min(content_h:get(), math.max(room:get() - 34, 0))
 						end,
 						ui.presence(function(): string
-							local id = M.current:get() or ""
+							local id = shown()
 							return if store.find(id) then id else `{id}?`
 						end, function(key: string): Node
 							return ui.column {
