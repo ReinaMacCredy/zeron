@@ -1619,29 +1619,37 @@ function M.put_whole(key: string, w: Whole)
 	end)
 end
 
+local function joined(first: Whole, second: Whole): Whole
+	local cargo = table.clone(first.cargo)
+	for _, item in second.cargo do
+		table.insert(cargo, item)
+	end
+	local quotes = table.clone(first.quotes)
+	for line, passage in second.quotes do
+		quotes[line] = passage
+	end
+	local top = math.max(first.number or 0, second.number or 0)
+	return {
+		text = if first.text == "" then second.text elseif second.text == "" then first.text else `{first.text}\n\n{second.text}`,
+		cargo = M.renumber(cargo),
+		quotes = quotes,
+		number = if top > 0 then top else nil,
+	}
+end
+
 function M.move_draft(from: string, to: string): { from: Whole, to: Whole }
 	local a, b = M.whole_of(from), M.whole_of(to)
 	-- (Skill and command chips are named per chat: carried as their links.)
 	local words = references.decode(M.refs_key(to), references.encode(M.refs_key(from), a.text))
-	local cargo = table.clone(b.cargo)
-	for _, item in a.cargo do
-		table.insert(cargo, item)
-	end
-	local quotes = table.clone(b.quotes)
-	for line, passage in a.quotes do
-		quotes[line] = passage
-	end
-	local top = math.max(a.number or 0, b.number or 0)
 	ui.batch(function()
-		M.put_whole(to, {
-			text = if b.text == "" then words elseif words == "" then b.text else `{b.text}\n\n{words}`,
-			cargo = M.renumber(cargo),
-			quotes = quotes,
-			number = if top > 0 then top else nil,
-		})
+		M.put_whole(to, joined(b, { text = words, cargo = a.cargo, quotes = a.quotes, number = a.number }))
 		M.put_whole(from, { text = "", cargo = {}, quotes = {} })
 	end)
 	return { from = a, to = b }
+end
+
+function M.join_draft_before(key: string, w: Whole)
+	M.put_whole(key, joined(w, M.whole_of(key)))
 end
 
 -- Chat `key`'s draft changed where it's shown by its id (`field`: "text"

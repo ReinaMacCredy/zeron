@@ -203,6 +203,7 @@ local function Composer(): Node
 	local was = ui.state("chat_composer_was", "?" :: string?)
 	local carry_next: { [string]: any }? = nil
 	local undoable: { [string]: any }? = nil
+	local held_back: shared.Whole? = nil
 	local moved_note = ui.state("chat_moved_note", nil :: { key: string, undo: boolean, n: number }?)
 	moved_note:set(nil)
 	ui.effect(function()
@@ -621,6 +622,10 @@ local function Composer(): Node
 			end_edit("cancel")
 		end
 		shared.show(key)
+		if held_back and key ~= "" then
+			shared.join_draft_before("", held_back)
+			held_back = nil
+		end
 	end)
 
 	-- A side chat of this one: a bare ask opens one that's open or lives,
@@ -1006,6 +1011,12 @@ local function Composer(): Node
 		local ms = if reduced then 120 else 320
 		fx_to(0, if reduced then 0 else -12, ms)
 		ui.after(ms, function()
+			local held = shared.whole_of("")
+			local holds = held.text ~= "" or #held.cargo > 0
+			-- (Sent at once, the new chat's own draft isn't sent with it: put back after.)
+			if send_now and holds then
+				shared.put_whole("", { text = "", cargo = {}, quotes = {} })
+			end
 			local wholes = shared.move_draft(id, "")
 			carry_next = carry
 			route.new_chat(s.project)
@@ -1019,7 +1030,14 @@ local function Composer(): Node
 				shared.focus:add(1)
 				if send_now then
 					send(shared.text:peek())
-					if shared.draft_peek("").text == "" then
+					local left = shared.draft_peek("")
+					local went = left.text == "" and #left.cargo == 0
+					if holds and went then
+						held_back = held
+					elseif holds then
+						shared.join_draft_before("", held)
+					end
+					if went then
 						say_moved("chat.composer.sent_new", false)
 					end
 					return
