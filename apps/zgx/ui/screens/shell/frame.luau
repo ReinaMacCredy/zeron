@@ -138,7 +138,12 @@ local function layer_height(kind: string?, vh: number): number
 	if kind == "chat" and appearance.chat_placement:get() == "full" then
 		return math.max(vh, 0)
 	end
-	return M.hero_height(vh)
+	local full = M.hero_height(vh)
+	local lift, foot = composer_surface.lift:get(), composer_surface.foot:get()
+	if kind == "hero" and lift > 0 and foot > 0 then
+		return math.floor(full + (math.min(full, foot + 24) - full) * lift)
+	end
+	return full
 end
 
 local baked = ui.state("shell_art_baked", {} :: { [string]: string })

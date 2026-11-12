@@ -7,6 +7,7 @@ local shared = require("@app/screens/chat/shared")
 local EmptyState = require("@ds/empty_state")
 local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
+local home_panel = require("@app/screens/chat/home_panel")
 
 -- No project yet (Zeron's first launch): one thing to do, in the
 -- composer's place (the shell holds the composer back meanwhile).
@@ -34,6 +35,7 @@ local function Home(): Node
 	return ui.column {
 		id = "chat-home",
 		hook = "chat.home",
+		relative = true,
 		w_full = true,
 		h_full = true,
 		min_h = 0,
@@ -56,6 +58,7 @@ local function Home(): Node
 		ui.show(function(): boolean
 			return route.needs_project:get()
 		end, ui.div { mt = ui.raw(-38, "half the title strip up: centred on the window, as the eye reads it"), first_project() }),
+		ui.show(home_panel.shown, home_panel.Panel {}),
 	}
 end
 

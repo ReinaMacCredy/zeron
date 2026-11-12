@@ -122,6 +122,10 @@ const ENGINE_METHODS: &[&str] = &[
     "ListHubDevices",
     "ConfigureDeviceHub",
     "TestDeviceHost",
+    // A new chat's Home widgets (ui/screens/chat/home_widgets.luau): read only.
+    "GetSystemStats",
+    "ListListeningServices",
+    "GetGitActivity",
 ];
 
 pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {

@@ -717,6 +717,15 @@ function M.setup()
 					accent_wash = if dark then "alpha({accent}, 0.45)" else "alpha({accent}, 0.1)",
 					faint = if dark then "#858589" else "#797980",
 				},
+				-- (gpui's surface_card and card_fill: the Home panel under a new chat's composer, and its widgets.)
+				home = {
+					panel = if dark then "#111111" else "#ffffff",
+					card = if dark then "#ffffff0b" else "#00000000",
+					answer = "alpha({accent}, 0.12)",
+					answer_hover = "alpha({accent}, 0.18)",
+					bar = "alpha({accent}, 0.7)",
+					choice_edge = "alpha({text.primary}, 0.24)",
+				},
 				reference = {
 					skill = if dark then "#c4b4ff" else "#7f22fe",
 					skill_fill = if dark then "#c4b4ff29" else "#7f22fe29",

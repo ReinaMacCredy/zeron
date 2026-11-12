@@ -77,6 +77,7 @@ local DOCK: SpringOptions = { stiffness = 730, damping = 54 }
 -- composer lines up with the conversation over it (its edges on the
 -- column's).
 local FOOT = require("@app/screens/chat/dock").GAP
+local composer_surface = require("@ds/composer_surface")
 store.dismiss_cards = Pills.dismiss
 
 -- What a new chat starts with: what the last one used.
@@ -1387,6 +1388,10 @@ local function Composer(): Node
 			take()
 		end
 	end)
+	-- (gpui's hero anchor: 0.5 of the room the pill leaves, 0.3 while the Home widgets are open.)
+	local function raised_by(h: number, rest: number): number
+		return composer_surface.lift:get() * 0.2 * math.max(0, h - rest)
+	end
 	-- Where it stands: mid-page on a new chat (centred under the title bar),
 	-- else docked at the foot (0), as laid out now.
 	local function target_y(): number
@@ -1407,7 +1412,7 @@ local function Composer(): Node
 		-- and grows down from there. Only a draft that would run off the
 		-- page's foot moves it, up by as much.)
 		local rest = rest_tall:get() or tall
-		local hero = TITLE_H + (h - TITLE_H - 96) / 2
+		local hero = TITLE_H + (h - TITLE_H - 96) / 2 - raised_by(h, rest)
 		local docked = h - FOOT - rest / 2
 		return math.min(hero - docked, rest - tall)
 	end
@@ -1429,6 +1434,36 @@ local function Composer(): Node
 	-- (Its model picker open on a new chat: how far its top gives way so its
 	-- chip stays, the picker hanging from it, as what's written grows.)
 	local hold = ui.state("chat_composer_hold", 0)
+	local function new_y(): number
+		local tall = dock.height or 0
+		if tall <= 0 then
+			tall = shared.dock_h:get()
+		end
+		local rest = rest_tall:get() or tall
+		local h = page.height or 0
+		local at = TITLE_H / 2 - 48 - rest / 2 - raised_by(if h > 0 then h else page_h:get(), rest)
+		-- (Only a draft that would run off the page's foot moves it.)
+		if h > 0 then
+			at = math.min(at, h / 2 - FOOT - tall)
+		end
+		return at + hold:get()
+	end
+	ui.effect(function()
+		if not new_chat() then
+			return
+		end
+		local _ = composer_surface.moved:get()
+		local h = page.height or page_h:get()
+		local pg, d, pill = page:peek(), dock:peek(), composer_surface.element
+		local inner = dock.height or 0
+		if d and pill and d.y and pill.y and pill.height then
+			inner = pill.y + pill.height - d.y
+		end
+		local foot = (if pg and pg.y then pg.y else 0) + h / 2 + new_y() + inner
+		if math.abs(composer_surface.foot:peek() - foot) >= 0.5 then
+			composer_surface.foot:set(foot)
+		end
+	end)
 	local held_tall: number? = nil
 	local gliding: any = nil
 	local snap_until = 0
@@ -1557,21 +1592,7 @@ local function Composer(): Node
 			-- (another chat, a new chat: `place`).
 			id = "chat-composer-dock",
 			y = function(): number
-				if not new_chat() then
-					return place:get()
-				end
-				local tall = dock.height or 0
-				if tall <= 0 then
-					tall = shared.dock_h:get()
-				end
-				local rest = rest_tall:get() or tall
-				local at = TITLE_H / 2 - 48 - rest / 2
-				-- (Only a draft that would run off the page's foot moves it.)
-				local h = page.height or 0
-				if h > 0 then
-					at = math.min(at, h / 2 - FOOT - tall)
-				end
-				return at + hold:get()
+				return if new_chat() then new_y() else place:get()
 			end,
 			ui.div {
 				ref = dock,

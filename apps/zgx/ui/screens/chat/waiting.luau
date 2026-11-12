@@ -278,8 +278,21 @@ local function plan_body(item: any): Node
 	}
 end
 
+M.want = ui.state("chat_waiting_want", nil :: string?)
+
+function M.open_at(key: string)
+	M.want:set(key)
+end
+
 local Card = ui.component(function(props: { items: any, on_close: () -> () }): Node
 	local current = ui.use_state(nil :: string?)
+	ui.effect(function()
+		local key = M.want:get()
+		if key then
+			current:set(key)
+			M.want:set(nil)
+		end
+	end)
 	local ix = 1
 	local function now(): any
 		local items = props.items:get()
@@ -439,6 +452,11 @@ function M.Pill(props: { open: any, width: () -> number, elsewhere_of: () -> str
 	ui.effect(function()
 		if #items:get() == 0 and props.open:peek() then
 			props.open:set(false)
+		end
+	end)
+	ui.effect(function()
+		if M.want:get() and not props.open:peek() then
+			props.open:set(true)
 		end
 	end)
 	local pill = P.Pill {
