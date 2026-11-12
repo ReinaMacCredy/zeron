@@ -80,6 +80,7 @@ local board = ui.computed(function(): any
 	end)
 	return out
 end)
+M.board = board
 
 local needs_n = ui.computed(function(): number
 	return #board:get().needs

@@ -77,6 +77,32 @@ M.CODE_FONT_SIZES = { 11, 12, 13, 14, 15, 16 }
 M.CONVERSATION_WIDTH = { min = 560, max = 1200, step = 20, default = 660 }
 M.conversation_width = ui.persist("settings_conversation_width", 660)
 
+-- (Read field by field: a key a later build adds takes its default.)
+local HOME_WIDGETS = {
+	pull_requests = true,
+	git_activity = true,
+	this_mac = true,
+	running_services = true,
+	ci_failures = true,
+	services_all_ports = false,
+	collapsed = true,
+}
+M.home_widgets = ui.persist("settings_home_widgets", HOME_WIDGETS :: { [string]: boolean })
+
+function M.home_widget(key: string): boolean
+	local v = M.home_widgets:get()[key]
+	if v == nil then
+		return HOME_WIDGETS[key] == true
+	end
+	return v
+end
+
+function M.set_home_widget(key: string, on: boolean)
+	local now = table.clone(M.home_widgets:peek())
+	now[key] = on
+	M.home_widgets:set(now)
+end
+
 -- The chimes: all of them, then each (each counts only while all are on).
 M.sounds = ui.persist("settings_sounds", true)
 local each = {

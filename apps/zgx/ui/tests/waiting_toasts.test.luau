@@ -33,12 +33,14 @@ end
 -- In the card that says `words`, the first node of `kind` called `name`: the
 -- tree lists a card's words, then its buttons.
 local function in_card(app: any, words: string, kind: string, name: string): string
-	local seen = false
-	for line in string.gmatch(app:tree(), "[^\n]+") do
-		if string.find(line, `"{words}"`, 1, true) then
-			seen = true
-		elseif seen and string.find(line, ` {kind} "{name}"`, 1, true) then
-			return "@" .. (string.match(line, "@(%d+)") :: string)
+	for i = 1, app:count("role:status") do
+		local card = app:tree(`role:status[{i}]`)
+		if string.find(card, `"{words}"`, 1, true) then
+			for line in string.gmatch(card, "[^\n]+") do
+				if string.find(line, ` {kind} "{name}"`, 1, true) then
+					return "@" .. (string.match(line, "@(%d+)") :: string)
+				end
+			end
 		end
 	end
 	error(`no {name} in the card saying {words}:\n{app:tree()}`)
