@@ -113,16 +113,23 @@ pub mod claude {
     pub fn static_models() -> Vec<Model> {
         vec![
             model(
+                "claude-fable-5-2",
+                "Fable 5.2",
+                "Most intelligent model for building agents",
+                FULL_LADDER,
+                vec![context_window(), auto_compact()],
+            ),
+            model(
                 "claude-fable-5-1",
                 "Fable 5.1",
-                "Most intelligent model for building agents",
+                "Previous generation Fable",
                 FULL_LADDER,
                 vec![context_window(), auto_compact()],
             ),
             model(
                 "claude-fable-5",
                 "Fable 5",
-                "Previous generation Fable",
+                "Older generation Fable",
                 FULL_LADDER,
                 vec![context_window(), auto_compact()],
             ),

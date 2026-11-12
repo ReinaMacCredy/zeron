@@ -8302,7 +8302,7 @@ mod tests {
         let models = models_from_session(&response, &crate::claude::catalog::static_models());
         assert_eq!(
             models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
-            vec!["Opus 5.5", "Fable 5.1", "Sonnet 5.5", "Haiku 5.5"]
+            vec!["Opus 5.5", "Fable 5.2", "Sonnet 5.5", "Haiku 5.5"]
         );
         // The alias rows carry the catalog's per-model ladders.
         assert!(
