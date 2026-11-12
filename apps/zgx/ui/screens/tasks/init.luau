@@ -5,13 +5,46 @@ local locale = require("@ds/locale")
 local Lightbox = require("@ds/lightbox")
 local store = require("@app/screens/tasks/store")
 local card = require("@app/screens/tasks/card")
+local motion = require("@ds/motion")
 
 local M = {}
 
 local LIST_W, ROW_H, META_H, ROW_GAP, DONE_H, CHECK = 640, 44, 46, 2, 36, 18
 local THUMB, THUMBS = 28, 3
+local DRAWER = "cubicBezier(.32,.72,0,1)"
+local MORPH, FADE, EXTRA_AT, EXTRA = 320, 176, 128, 192
+
+local function morph_id(t: store.Task): (string?, number?, string?)
+	if motion.reduced_now() then
+		return nil, nil, nil
+	end
+	return `task-morph-{t.id}`, MORPH, DRAWER
+end
+
+local switched_at = -1e9
+
+local function arrive(build: () -> Node, enter: { [string]: any }, box: { [string]: any }?): Node
+	if motion.reduced_now() or ui.now() - switched_at > 600 then
+		return build()
+	end
+	local opts: { [string]: any } = { initial = true, enter = enter }
+	for k, v in box or {} do
+		opts[k] = v
+	end
+	return ui.presence(function(): string
+		return "in"
+	end, build, opts)
+end
 
 M.view = ui.persist("tasks_view", "list")
+local seen_view = M.view:peek()
+ui.effect(function()
+	local v = M.view:get()
+	if v ~= seen_view then
+		seen_view = v
+		switched_at = ui.now()
+	end
+end)
 M.done_open = ui.persist("tasks_done_open", false)
 M.lit = ui.state("tasks_lit", nil :: string?)
 M.scroll = ui.state("tasks_scroll", 0)
@@ -170,6 +203,9 @@ local function Row(t: store.Task, s: store.State): Node
 		id = `task-row-{t.id}`,
 		role = "listitem",
 		label = title_of(t),
+		layout_id = (morph_id(t)),
+		layout_duration = select(2, morph_id(t)),
+		layout_ease = select(3, morph_id(t)),
 		w_full = true,
 		min_h = ROW_H,
 		px = ui.raw(12, "gpui"),
@@ -390,6 +426,9 @@ end
 
 local function Header(): Node
 	return ui.row {
+		layout = if motion.reduced_now() then nil else "position",
+		layout_duration = MORPH,
+		layout_ease = DRAWER,
 		w_full = true,
 		px = ui.raw(12, "gpui"),
 		pb = ui.raw(16, "gpui"),
@@ -453,6 +492,9 @@ local function BoardCard(l: Line): Node
 	return ui.button {
 		id = `task-kanban-{t.id}`,
 		label = title_of(t),
+		layout_id = (morph_id(t)),
+		layout_duration = select(2, morph_id(t)),
+		layout_ease = select(3, morph_id(t)),
 		w_full = true,
 		p = ui.raw(10, "gpui"),
 		gap = ui.raw(8, "gpui"),
@@ -496,11 +538,13 @@ end)
 
 local function Board(): Node
 	local cols: { [any]: any } = { id = "tasks-board", w_full = true, grow = 1, gap = ui.raw(12, "gpui"), items = "stretch", px = ui.raw(12, "gpui") }
-	for _, col in store.COLUMNS do
+	for i, col in store.COLUMNS do
 		local tasks = ui.computed(function(): { Line }
 			return columns:get()[col]
 		end)
-		table.insert(cols, ui.column {
+		local step = 30 * (i - 1)
+		table.insert(cols, arrive(function(): Node
+			return ui.column {
 			id = `tasks-column-{col}`,
 			role = "group",
 			label = locale.s(`tasks.column.{col}`),
@@ -511,7 +555,8 @@ local function Board(): Node
 			bg = "$hover",
 			p = ui.raw(10, "gpui"),
 			gap = ui.raw(8, "gpui"),
-			ui.row {
+			arrive(function(): Node
+				return ui.row {
 				gap = ui.raw(6, "gpui"),
 				items = "center",
 				px = ui.raw(4, "gpui"),
@@ -520,7 +565,8 @@ local function Board(): Node
 				ui.text { function(): string
 					return tostring(#tasks:get())
 				end, color = "$text.secondary", text_size = ui.raw(13, "gpui") },
-			},
+			}
+			end, { opacity = { 0, 1 }, y = { -6, 0 }, duration = 256, delay = 120 + step, ease = DRAWER }, { w_full = true }),
 			ui.list {
 				w_full = true,
 				grow = 1,
@@ -535,7 +581,8 @@ local function Board(): Node
 					return ui.div { w_full = true, pb = ui.raw(8, "gpui"), BoardCard(l) }
 				end,
 			},
-		})
+		}
+		end, { opacity = { 0, 1 }, y = { 8, 0 }, duration = MORPH, delay = 40 + step, ease = DRAWER }, { grow = 1, basis = 0, min_w = 180, h_full = true }))
 	end
 	return ui.row(cols)
 end
@@ -590,10 +637,12 @@ M.Page = ui.component(function(): Node
 						w_full = true,
 						grow = 1,
 						min_h = 0,
-						M.AddRow { id = "tasks-add", placeholder = locale.s("tasks.add_placeholder") },
+						arrive(function(): Node
+							return M.AddRow { id = "tasks-add", placeholder = locale.s("tasks.add_placeholder") }
+						end, { opacity = { 0, 1 }, duration = EXTRA, delay = EXTRA_AT, ease = "linear" }, { w_full = true }),
 						List(),
 					}
-				end, { w_full = true, grow = 1, min_h = 0 }),
+				end, { w_full = true, grow = 1, min_h = 0, exit = if motion.reduced_now() then nil else { opacity = 0, duration = FADE, ease = "out(2)" } }),
 			},
 		},
 		card.Card {},
