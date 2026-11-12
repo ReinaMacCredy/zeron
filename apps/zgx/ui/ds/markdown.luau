@@ -423,7 +423,7 @@ local function invocation_chip(span: { [any]: any }, name: string)
 	span[1] = if skill then References.humanize(string.sub(name, 2)) else name
 	span.padding = { 4, 2 }
 	span.radius = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
-	span.icon = { src = `assets/icons/ui/{if skill then "magic-stick" else "command"}.svg`, size = 14, gap = 4, tint = "currentColor" }
+	span.icon = { src = References.lowered(if skill then "magic-stick" else "command", 14, 1), size = 14, gap = 4, tint = "currentColor" }
 end
 
 -- A web address written bare in a run's words (not in code, not a link

@@ -209,6 +209,13 @@ local function src(name: string): string
 	return `code:{SVGS[name] or ""}`
 end
 
+-- A skill's or command's icon drawn `dy` points lower in its `size` square:
+-- its row centres it on the caps, and a label mostly in lowercase reads lower.
+function M.lowered(name: string, size: number, dy: number): string
+	local svg = SVGS[name] or ""
+	return "code:" .. (string.gsub(svg, 'viewBox="0 0 24 24"', string.format('viewBox="0 %.2f 24 24"', -dy * 24 / size), 1))
+end
+
 function M.chips(key_of: () -> string, value: State<string>, line: number, column_of: ((id: string) -> string?)?): () -> { any }
 	local size = math.min(14, line - 3 - 6)
 	return function(): { any }
@@ -225,7 +232,7 @@ function M.chips(key_of: () -> string, value: State<string>, line: number, colum
 					bg = if skill then "$zeron.reference.skill_fill" else "$zeron.reference.command_fill",
 					radius = 5,
 					inset = 1.5,
-					icon = src(if skill then "magic-stick" else "command"),
+					icon = M.lowered(if skill then "magic-stick" else "command", size, 0.5),
 					icon_color = if skill then "$zeron.reference.skill" else "$zeron.reference.command",
 					icon_size = size,
 					icon_x = 4,
