@@ -1054,6 +1054,7 @@ function M.Tab(props: { tab: any, panel_key: string, visible: (() -> boolean)? }
 	-- (A hub the engine hasn't started, as after an engine restart, is asked to list once while the tab
 	-- shows, as gpui's panel does on its first hub; till it answers the tab is finding, not "no devices".)
 	local listed = ui.state(`device_tab_listed_{id}`, false)
+	local finding = ui.state(`device_tab_finding_{id}`, false)
 	local asked = false
 	local function idle_hub(h: any): boolean
 		return h ~= nil and not h.outdated and h.hostStatus == "idle" and (h.settings or {}).enabled == true and (h.settings or {}).onboardingCompleted == true
@@ -1071,16 +1072,19 @@ function M.Tab(props: { tab: any, panel_key: string, visible: (() -> boolean)? }
 			return
 		end
 		asked = true
+		finding:set(true)
 		call("ListHubDevices", {}, function()
+			finding:set(false)
 			listed:set(true)
 		end, function(why: string)
+			finding:set(false)
 			listed:set(true)
 			r.error:set(why)
 		end)
 	end)
 	local phase = ui.computed(function(): model.Phase
 		local p = model.phase(hub(), chat, target_of(tab()), r.opening:get())
-		if p.kind == "picker" and idle_hub(hub()) and not listed:get() then
+		if p.kind == "picker" and ((idle_hub(hub()) and not listed:get()) or finding:get()) then
 			return { kind = "loading", name = s("loading.devices"), description = "", message = s("loading.finding") }
 		end
 		return p
