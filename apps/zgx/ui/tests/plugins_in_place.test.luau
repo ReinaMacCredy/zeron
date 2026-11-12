@@ -25,7 +25,7 @@ end
 
 local function open(): any
 	local app = mount("plugins_fixture.luau")
-	-- (Tall enough for Zeron's own nine above the plugins here.)
+	-- (Tall enough for Zeron's own above the plugins here.)
 	app:resize(1000, 1600)
 	app:frames(20)
 	return app
@@ -201,7 +201,7 @@ test("with none installed, Zeron's own still list, a search says nothing matches
 	local app = open()
 	app:command("empty")
 	app:frames(20)
-	expect(app:has('role:switch "Usage"')).to_be(true)
+	expect(app:has('role:switch "Review"')).to_be(true)
 	app:type('role:textbox "Search plugins"', "pinger")
 	app:frames(20)
 	expect(app:tree()).to_contain("Nothing matches")
