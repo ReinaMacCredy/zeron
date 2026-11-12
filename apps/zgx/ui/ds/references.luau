@@ -11,7 +11,14 @@ local TASK_MAX = 32
 export type Kind = "skill" | "command" | "task"
 export type Ref = { kind: Kind, link: string, task: string? }
 
-M.maps = ui.shared("ds.references", {} :: { [string]: { [string]: Ref } })
+local shared: State<{ [string]: { [string]: Ref } }>? = nil
+-- (Made on first use, not at load: a plugin's markdown requires this module for `humanize` alone, and a plugin may not hold app state.)
+local function maps(): State<{ [string]: { [string]: Ref } }>
+	if not shared then
+		shared = ui.shared("ds.references", {} :: { [string]: { [string]: Ref } })
+	end
+	return shared :: State<{ [string]: { [string]: Ref } }>
+end
 
 function M.humanize(name: string): string
 	local tail = string.match(name, "([^:]*)$") or name
@@ -40,7 +47,7 @@ function M.label(kind: Kind, name: string): string
 end
 
 local function map_of(key: string): { [string]: Ref }
-	return M.maps:peek()[key] or {}
+	return maps():peek()[key] or {}
 end
 
 function M.add(key: string, ref: { kind: Kind, name: string, link: string, task: string? }): string
@@ -52,18 +59,18 @@ function M.add(key: string, ref: { kind: Kind, name: string, link: string, task:
 	if not map[shown] then
 		local next = table.clone(map)
 		next[shown] = { kind = ref.kind, link = ref.link, task = ref.task }
-		local all = table.clone(M.maps:peek())
+		local all = table.clone(maps():peek())
 		all[key] = next
-		M.maps:set(all)
+		maps():set(all)
 	end
 	return shown
 end
 
 function M.clear(key: string)
-	if M.maps:peek()[key] then
-		local all = table.clone(M.maps:peek())
+	if maps():peek()[key] then
+		local all = table.clone(maps():peek())
 		all[key] = nil
-		M.maps:set(all)
+		maps():set(all)
 	end
 end
 
