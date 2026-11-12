@@ -787,6 +787,8 @@ local Tab = ui.component(function(props: { chat: string }): Node
 			slot_w:set(w)
 			landed = false
 			drag:set({ key = id, w = w, order = list, grab = nil, out = false })
+			-- (Zeron's: a tab carried into the page splits it, as a sidebar row does.)
+			splits.dragging:set(true)
 			return { session_tab = id, session = face(id) }
 		end,
 		drag_preview = function(): Node
@@ -804,6 +806,7 @@ local Tab = ui.component(function(props: { chat: string }): Node
 		on_drag_end = function()
 			local d = drag:peek()
 			drag:set(nil)
+			splits.dragging:set(false)
 			if d and not landed then
 				splits.set_order(d.order)
 			end

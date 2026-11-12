@@ -925,3 +925,28 @@ test("a plain navigation to where Forward would go plays no slide", function()
 	expect((app:state("shell_route_stepped") :: any).seq).to_be(seq + 2)
 	expect(app:error()).to_be_nil()
 end)
+
+test("a tab carried into the page lands beside the chat there, as a sidebar row does", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 800)
+	app:frames(30)
+	open(app, "Fix the build")
+	open(app, "Write the docs")
+	-- (A test's drag runs no frame between press and release: the landing a carried tab puts up is put up first.)
+	app:set_state("split.dragging", true)
+	app:frames(10)
+	app:drag("#session-tab-a1", "#split-zone-a2-right")
+	app:frames(40)
+	local kept = app:state("inset_split_trees") :: any
+	local pair = nil
+	for _, t in kept do
+		if t.kind == "row" then
+			pair = t
+		end
+	end
+	expect(pair ~= nil).to_be(true)
+	expect(pair.children[1].id).to_be("a2")
+	expect(pair.children[2].id).to_be("a1")
+	expect(app:state("split.dragging")).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
