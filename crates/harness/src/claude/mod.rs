@@ -549,6 +549,7 @@ impl ClaudeHarness {
             hook: None,
             one_shot: None,
             tool_server: None,
+            prompt_suggestions: false,
         }
     }
 
@@ -1030,6 +1031,12 @@ impl ClaudeHarness {
             .and_then(|server| server.hook_command());
         launcher.one_shot = one_shot;
         launcher.tool_server = controls.tool_server.clone();
+        launcher.prompt_suggestions = one_shot.is_none() && controls.turn.prompt_suggestions() && {
+            let exe = exe.clone();
+            tokio::task::spawn_blocking(move || suggests_prompts(&exe))
+                .await
+                .unwrap_or(false)
+        };
         // A session whose transcript holds no conversation cannot be
         // resumed: the CLI says so and exits, every time. Start fresh
         // instead — the chat's history is gone either way, and the user is
@@ -1137,6 +1144,7 @@ struct Launcher {
     hook: Option<String>,
     one_shot: Option<&'static str>,
     tool_server: Option<crate::ToolServer>,
+    prompt_suggestions: bool,
 }
 
 impl Launcher {
@@ -1166,6 +1174,9 @@ impl Launcher {
         // subscription token: those stay inside the CLI's own login.
         crate::apply_run_env(&mut cmd, &request.env);
         cmd.args(ClaudeHarness::launch_args(request, self.hook.as_deref()));
+        if self.prompt_suggestions {
+            cmd.arg("--prompt-suggestions=true");
+        }
         cmd.args(&self.overrides.args);
         // File checkpoints are only recorded for sessions that ran with this
         // set; a chat that never had it can never restore code later.
@@ -1286,6 +1297,12 @@ impl Launcher {
             stderr_tail,
         })
     }
+}
+
+// An older CLI exits on the flag; 2.1.319 is the oldest seen to take it.
+fn suggests_prompts(exe: &std::path::Path) -> bool {
+    crate::executable::binary_version(exe)
+        .is_some_and(|version| version >= semver::Version::new(2, 1, 319))
 }
 
 /// The run's env wins over the instance's, as it does on the command line.
@@ -1760,6 +1777,17 @@ async fn run_session(session: Session) {
                     }
                     if let Frame::ControlRequest(req) = frame {
                         handle_control_request(req, title_only, &config, &request_input, &stdin.tx);
+                        continue;
+                    }
+                    if let Frame::PromptSuggestion(text) = frame {
+                        if !text.is_empty()
+                            && !turn_open
+                            && held_done.is_none()
+                            && pending_steers.is_empty()
+                            && event_tx.send(Ok(AgentEvent::PromptSuggestion { text })).await.is_err()
+                        {
+                            break 'main;
+                        }
                         continue;
                     }
                     // Only the CLI confirms that a prompt joined its

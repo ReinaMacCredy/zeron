@@ -1843,6 +1843,7 @@ impl Normalizer {
             Frame::ControlRequest(_)
             | Frame::ControlResponse(_)
             | Frame::CommandLifecycle(_)
+            | Frame::PromptSuggestion(_)
             | Frame::Other => Vec::new(),
         }
     }

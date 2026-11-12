@@ -1526,6 +1526,7 @@ impl EngineRpc {
         self.workspace
             .delete_chat(chat_id)
             .map_err(|e| RpcError::Failed(e.to_string()))?;
+        self.sessions.forget_prediction(chat_id);
         self.doc_host.purge_chat(chat_id);
         crate::html_render::remove_chat_pages(&self.uploads, chat_id);
         for child in &children {
@@ -1533,6 +1534,7 @@ impl EngineRpc {
             if let Err(err) = self.workspace.delete_chat(child) {
                 tracing::warn!(chat = %child, error = %err, "deleting a Cloud chat's child failed");
             }
+            self.sessions.forget_prediction(child);
             self.doc_host.purge_chat(child);
             crate::html_render::remove_chat_pages(&self.uploads, child);
         }
@@ -4779,16 +4781,12 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&self.registry.title_settings())
             }
             methods::GET_PREDICTION_SETTINGS => {
-                RpcReply::value(&self.sessions.prediction_settings().await)
+                RpcReply::value(&self.sessions.prediction_settings())
             }
             methods::SET_PREDICTION_SETTINGS => {
-                let p: crate::predictions::PredictionSettingsUpdate = parse_params(params)?;
-                let state = self
-                    .sessions
-                    .update_prediction_settings(p)
-                    .await
-                    .map_err(RpcError::Failed)?;
-                RpcReply::value(&state)
+                let p: crate::registry::PredictionSettings = parse_params(params)?;
+                self.sessions.set_prediction_settings(p.clone());
+                RpcReply::value(&p)
             }
             methods::GET_DELEGATION_SETTINGS => {
                 RpcReply::value(&self.registry.delegation_settings())

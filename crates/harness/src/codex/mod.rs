@@ -2036,6 +2036,7 @@ async fn run_session(session: Session) {
     // Each carries the configuration it was sent with, adopted when its own
     // `turn/start` goes out.
     let mut queued_steers: VecDeque<(String, Option<Box<RunRequest>>)> = VecDeque::new();
+    let sends = Arc::new(std::sync::atomic::AtomicU64::new(0));
     // Steers the app-server accepted into the running turn, by the
     // `clientUserMessageId` they were sent with. Each is confirmed
     // (`Steered`) when its userMessage item joins the turn — not when
@@ -2376,6 +2377,15 @@ async fn run_session(session: Session) {
                             done_after_interrupt = true;
                             break 'main;
                         }
+                        if status == DoneStatus::Completed
+                            && !title_only
+                            && !current_native
+                            && queued_steers.is_empty()
+                            && steering_open
+                            && turn.prompt_suggestions()
+                        {
+                            sample_prompt_suggestion(&client, &thread_id, id.clone(), sends.clone(), event_tx.clone());
+                        }
                         // Persistent session: a steer that lost the race with
                         // this turn's end becomes the next turn now; otherwise
                         // stay alive for the mailbox — the caller owns teardown.
@@ -2563,6 +2573,7 @@ async fn run_session(session: Session) {
 
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
+                    sends.fetch_add(1, std::sync::atomic::Ordering::Release);
                     let text = msg.prompt;
                     // Native operations run at a turn boundary, never as text
                     // injected into an already running model turn. So does a
@@ -3285,6 +3296,55 @@ fn process_alive(pid: &str) -> bool {
         let _ = pid;
         false
     }
+}
+
+const SAMPLE_TIMEOUT: Duration = Duration::from_secs(60);
+const PROMPT_SUGGESTION_PROMPT: &str = "Predict the next message the user will send in this conversation. Reply with only that message, written as the user would type it, in under 20 words. Do not use tools. If there is no clear next step, reply with nothing.";
+
+// Best effort: an older Codex has no `thread/sample`, and a reply after the person sent again (`sends` moved) is an older turn's.
+fn sample_prompt_suggestion(
+    client: &RpcClient,
+    thread_id: &str,
+    turn: String,
+    sends: Arc<std::sync::atomic::AtomicU64>,
+    events: mpsc::Sender<Result<AgentEvent, HarnessError>>,
+) {
+    let client = client.clone();
+    let params = json!({
+        "threadId": thread_id,
+        "expectedTurnId": turn,
+        "prompt": PROMPT_SUGGESTION_PROMPT,
+        "effort": "low",
+    });
+    let sent = sends.load(std::sync::atomic::Ordering::Acquire);
+    tokio::spawn(async move {
+        let reply =
+            match tokio::time::timeout(SAMPLE_TIMEOUT, client.request("thread/sample", params))
+                .await
+            {
+                Ok(Ok(reply)) => reply,
+                Ok(Err(e)) => {
+                    tracing::debug!(target: "zeron_harness::codex", "thread/sample failed: {e}");
+                    return;
+                }
+                Err(_) => return,
+            };
+        tracing::debug!(
+            target: "zeron_harness::codex",
+            input = ?reply.get("inputTokens"),
+            cached = ?reply.get("cachedInputTokens"),
+            output = ?reply.get("outputTokens"),
+            "prompt suggestion sampled"
+        );
+        let text = reply["text"].as_str().unwrap_or_default().trim();
+        if !text.is_empty() && sends.load(std::sync::atomic::Ordering::Acquire) == sent {
+            let _ = events
+                .send(Ok(AgentEvent::PromptSuggestion {
+                    text: text.to_owned(),
+                }))
+                .await;
+        }
+    });
 }
 
 /// Ask the app-server to end `turn` (fire-and-forget: its end arrives as the

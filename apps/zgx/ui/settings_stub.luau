@@ -150,7 +150,7 @@ local engine: { [string]: any } = {
 		alwaysAllowedApps = { { bundleId = "com.mitchellh.ghostty", name = "Ghostty" }, { bundleId = "com.example.tool" } },
 	},
 	-- (General → Predictions: the engine's defaults.)
-	GetPredictionSettings = { enabled = false, hasApiKey = false },
+	GetPredictionSettings = { enabled = false },
 	-- (Settings → Routing: the engine's defaults, nothing routed; delegate_task's limits.)
 	GetRoutingSettings = { roles = {}, outOfQuota = "native", fallback = {}, midRun = "after30s", native = "sameModelOnly" },
 	GetDelegationSettings = { maxDepth = 2, maxRunningChildren = 8 },
@@ -392,16 +392,7 @@ local answers: { [string]: (arg: any) -> any } = {
 			elseif m == "SetToolSettings" then
 				engine[get] = { settings = arg.params, disabled = {} }
 				engine[get].disabled = tool_off("")
-			elseif m == "SetPredictionSettings" then
-				local p = table.clone(arg.params)
-				local key = p.apiKey
-				p.apiKey = nil
-				p.hasApiKey = if key ~= nil then key ~= "" else (engine[get].hasApiKey == true)
-				if key ~= nil then
-					log(`prediction_key:{key}`)
-				end
-				engine[get] = p
-			elseif m == "SetComputerSettings" or m == "SetReviewSettings" then
+			elseif m == "SetComputerSettings" or m == "SetReviewSettings" or m == "SetPredictionSettings" then
 				engine[get] = table.clone(arg.params)
 			elseif m == "SetRoutingSettings" or m == "SetDelegationSettings" then
 				local roles = arg.params.roles

@@ -81,8 +81,8 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
-    /// Composer predictions. No params / `PredictionSettingsUpdate` (settings
-    /// plus a write-only `apiKey`) → `PredictionSettingsState`.
+    /// Suggested next prompts after Claude and Codex turns. No params /
+    /// `{enabled}` → `{enabled}`.
     pub const GET_PREDICTION_SETTINGS: &str = "GetPredictionSettings";
     pub const SET_PREDICTION_SETTINGS: &str = "SetPredictionSettings";
     /// `delegate_task` limits (d69). No params / `DelegationSettings` → `{}`.

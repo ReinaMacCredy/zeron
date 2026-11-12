@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use zeron_doc::{ClassifierRecord, ClassifierVerdict};
 
 use crate::agent_accounts::keychain;
-use crate::predictions::{head, key_account, valid_api_key};
+use crate::compact_boundary::head;
 use crate::registry::{CompactionSettings, HarnessRegistry, JevSource};
 
 const MODEL_LABEL: &str = "Jev 1.14";
@@ -18,6 +18,20 @@ const BODY_CHARS: usize = 300;
 const NEW_MIN: f64 = 0.55;
 const NEW_TASK_MIN: f64 = 0.55;
 const CONTINUE_SHARE_MIN: f64 = 0.85;
+
+pub(crate) fn valid_api_key(key: &str) -> bool {
+    (1..=512).contains(&key.len())
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._~+/=-".contains(c))
+}
+
+/// One key per engine data dir, so a Dev bundle never replaces the app's.
+pub(crate) fn key_account(registry: &HarnessRegistry) -> Option<String> {
+    registry
+        .data_dir()
+        .map(|dir| dir.to_string_lossy().into_owned())
+}
 
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
@@ -273,6 +287,16 @@ mod tests {
             p: Probabilities { new, carry, cont },
             new_task,
         }
+    }
+
+    #[test]
+    fn api_keys_are_plain_tokens() {
+        assert!(valid_api_key("sk-or-v1-abc123"));
+        assert!(valid_api_key("gsk_AbC.def~ghi+jk/l="));
+        assert!(!valid_api_key(""));
+        assert!(!valid_api_key("sk abc"));
+        assert!(!valid_api_key("sk\"; rm"));
+        assert!(!valid_api_key(&"a".repeat(513)));
     }
 
     #[test]

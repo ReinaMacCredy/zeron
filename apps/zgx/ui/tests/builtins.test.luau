@@ -80,16 +80,6 @@ test("each feature's switch on its own page takes its doors away at once, and on
 	expect(calls(app)).to_contain("keep_awake.set")
 	expect(switch_of(app, "Keep this Mac awake while agents work")).to_contain("unchecked")
 
-	-- Predictions: General's Show predictions is the built-in's switch too.
-	app:set_state("builtin_predictions", false)
-	app:frames(10)
-	flip(app, "Show predictions")
-	expect(app:state("builtin_predictions")).to_be(true)
-	expect(switch_of(app, "Show predictions")).never.to_contain("unchecked")
-	flip(app, "Show predictions")
-	expect(app:state("builtin_predictions")).to_be(false)
-	expect(switch_of(app, "Show predictions")).to_contain("unchecked")
-
 	-- Home widgets (no door yet; Appearance's New chat, under Advanced), Browser annotate and Device: their keys.
 	for _, it in { { "Appearance", "Home widgets", "builtin_home_widgets" }, { "Browsing", "Annotate", "builtin_browser_annotate" }, { "Device hub", "Device panel", "builtin_device" } } do
 		settings(app, it[1])

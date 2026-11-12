@@ -59,10 +59,7 @@ When a turn stopped short (you stopped it, or it ended with an error) and the co
 
 ## Predictions
 
-Turn on **Show predictions** in Settings > General and Zeron suggests your next message after each reply. The suggestion appears in the empty composer; press Tab to accept it. Under **Predict with**, choose **Agent** or **Custom API**.
-
-- **Agent**: the **Agent model** row reads **Session agent** by default. A Claude Code or Codex chat then predicts with its own agent on that agent's cheapest model; any other chat uses the first enabled of Claude Code or Codex, and gets no predictions if neither is enabled. Click the chip to pick one model for every chat instead, and **Reset** to go back to **Session agent**.
-- **Custom API**: any OpenAI-compatible API. Fill in **Base URL** (such as `https://api.openai.com/v1`) and **Model**, then click **Save**. The URL must use https; plain http works only for localhost. Copy your API key and click **Paste key** to store it in the Keychain, or **Remove key** to delete it. Local servers like Ollama need no key.
+Turn on **Show predictions** in Settings > General. After a Claude Code or Codex turn completes, the empty composer shows the message the agent predicts you will send next. Press Tab to fill it in, then edit or send it, or press Escape to dismiss it. The turn's own agent writes the suggestion: each is one extra request that reuses the turn's prompt cache, so it uses a little of your plan's usage. Claude Code skips the first turn of a chat and turns near a usage limit. Chats another agent opened or delegated get no suggestions, nor do other agents. Codex follows a change to the setting at once; an open Claude Code chat follows it once its agent restarts.
 
 ## Plan first
 
