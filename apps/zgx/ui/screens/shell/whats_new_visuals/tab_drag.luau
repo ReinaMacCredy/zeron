@@ -104,7 +104,10 @@ local function build(clock: K.Clock): Node
 			},
 		}
 	end
-	local page = ui.row {
+	local function edge(): number
+		return WIDTH / 2 * split()
+	end
+	local page = ui.div {
 		absolute = true,
 		top = STRIP,
 		left = 0,
@@ -113,15 +116,34 @@ local function build(clock: K.Clock): Node
 		bg = PAGE,
 		ui.show(function(): boolean
 			return split() > 0
-		end, column("Ship the shop", {
-			shrink = 0,
-			w = function(): number
-				return WIDTH / 2 * split()
-			end,
-			border_sides = { 0, 1, 0, 0 },
-			border_color = "$border",
-		})),
-		column("Fix login redirect", { grow = 1 }),
+		end, ui.overlay {
+			absolute = true,
+			top = 0,
+			left = 0,
+			right = 0,
+			bottom = 0,
+			column("Ship the shop", {
+				absolute = true,
+				top = 0,
+				bottom = 0,
+				left = 0,
+				w = WIDTH / 2,
+				clip_inset = function(): { number }
+					return { 0, WIDTH / 2 - edge(), 0, 0 }
+				end,
+			}),
+			ui.div {
+				absolute = true,
+				top = 0,
+				bottom = 0,
+				w = 1,
+				left = function(): number
+					return edge() - 1
+				end,
+				bg = "$border",
+			},
+		}),
+		column("Fix login redirect", { absolute = true, top = 0, bottom = 0, right = 0, left = edge }),
 	}
 	local thumb = ui.column {
 		absolute = true,

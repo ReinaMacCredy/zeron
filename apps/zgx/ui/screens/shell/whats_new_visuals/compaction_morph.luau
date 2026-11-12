@@ -85,6 +85,9 @@ local function build(clock: K.Clock): Node
 		ui.div {
 			shrink = 0,
 			overflow = "hidden",
+			hidden = function(): boolean
+				return swap() <= 0
+			end,
 			w = function(): number
 				return 16 * swap()
 			end,

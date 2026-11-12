@@ -13,7 +13,7 @@ local function page(title: string, x: (() -> number)?, opacity: (() -> number)?)
 		top = 0,
 		bottom = 0,
 		left = 0,
-		w = WIDTH,
+		right = 0,
 		p = K.sp(12),
 		pl = K.raw(24),
 		gap = K.raw(7),
