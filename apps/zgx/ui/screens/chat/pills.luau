@@ -109,52 +109,6 @@ function M.window_bind(): any
 	}
 end
 
--- The host holds one set a window, and a closing card's cleanup runs after the next card has said what it wants.
-local function wants(send: ({ any }) -> ()): () -> (({ [string]: any }) -> ())
-	local by: { [any]: { [string]: any } } = {}
-	local sent = ""
-	local function flush()
-		local all: { [string]: any } = {}
-		for _, items in by do
-			for key, item in items do
-				all[key] = item
-			end
-		end
-		local keys: { string } = {}
-		for key in all do
-			table.insert(keys, key)
-		end
-		table.sort(keys)
-		local joined = table.concat(keys, "\0")
-		if joined ~= sent then
-			sent = joined
-			local out: { any } = {}
-			for _, key in keys do
-				table.insert(out, all[key])
-			end
-			send(out)
-		end
-	end
-	return function()
-		local me = {}
-		ui.on_cleanup(function()
-			by[me] = nil
-			flush()
-		end)
-		return function(items: { [string]: any })
-			by[me] = items
-			flush()
-		end
-	end
-end
-
-local want_docs = wants(function(docs: { any })
-	store.roster_watch(docs)
-end)
-local want_shells = wants(function(shells: { any })
-	store.shell_watch(shells)
-end)
-
 local function chat_row(id: string?): any
 	if not id then
 		return nil
@@ -534,7 +488,7 @@ M.RosterBody = ui.component(function(props: { bind: any, clock: any?, on_close: 
 	local clock = props.clock or P.clock(function(): boolean
 		return Roster.working(runs:get().listed) > 0
 	end)
-	local say_docs = want_docs()
+	local say_docs = store.want_docs()
 	ui.effect(function()
 		local docs: { [string]: string } = {}
 		for _, r in runs:get().listed do
@@ -946,7 +900,7 @@ local ShellsBody = ui.component(function(props: { bind: any, tasks: any, detail:
 		local s = bind.session()
 		return not s or s.shells_stoppable ~= false
 	end
-	local say_shells = want_shells()
+	local say_shells = store.want_shells()
 	local session = bind.id()
 	ui.effect(function()
 		local shells: { [string]: any } = {}

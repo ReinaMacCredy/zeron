@@ -1,21 +1,10 @@
--- A title bar button wearing a stack of marks (Updates', the live pill's):
--- up to three circles, each behind the one before it cut to a crescent, then
--- whatever the button says after them.
---
---   MarkStack.Stack { id = "updates-mark", marks = fn, key = fn, mark = fn }
---   MarkStack.Trigger { id, label, open, hovered, on_click, stack, ...after }
---   MarkStack.width(n, after)   the button's width with n marks and `after`
---                               points of what follows them
-
 local M = {}
 
 M.H, M.TILE, M.MOST, M.GLYPH = 28, 20, 3, 16
--- The gap between circles is cut out of the one behind, not painted: what's
--- under the button shows through it, whatever the button's state or the theme.
+-- (The gap is cut out of the circle behind, not painted: what's under the button shows through.)
 local GAP_CUT = 2.5
 local STEP = 15
--- A circle's mark: a little right of its middle on those behind, to sit in the
--- middle of what shows of them.
+-- (Nudged right on those behind, to sit in the middle of what shows of them.)
 local MARK_SIDE, MARK_NUDGE = 11, 2
 local INSET_L, INSET_R = 4, 6
 M.GAP = 5
@@ -42,7 +31,6 @@ export type StackProps = {
 	marks: () -> { any },
 	key: (any) -> string,
 	mark: (any, number) -> Node,
-	-- Played on the front circle's mark as another takes its place.
 	enter: any?,
 }
 
@@ -68,7 +56,7 @@ local function tile(props: StackProps, at: number): Node
 			h = M.TILE,
 			items = "center",
 			justify = "center",
-			color = "#000000",
+			color = ui.raw("#000000", "an ink-only mark on its white tile, whatever the theme"),
 			ui.presence(function(): string
 				local r = props.marks()[at]
 				return if r then props.key(r) else ""
@@ -103,7 +91,7 @@ end
 export type TriggerProps = {
 	id: string,
 	label: () -> string,
-	tooltip: any?,
+	tooltip: string?,
 	open: State<boolean>,
 	hovered: State<boolean>,
 	on_click: () -> (),

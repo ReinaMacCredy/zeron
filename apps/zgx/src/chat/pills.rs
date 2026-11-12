@@ -39,6 +39,8 @@ struct DocLook {
     entries: Vec<Entry>,
     tokens: Option<f64>,
     spawns: Vec<Value>,
+    doing: Option<String>,
+    error: Option<String>,
 }
 
 struct ShellLook {
@@ -129,7 +131,7 @@ impl Pills {
                         me.heard_doc(&heard, frame);
                     }
                 });
-                self.docs.borrow_mut().insert(doc.clone(), DocLook { _watch: Some(watch), entries: Vec::new(), tokens: None, spawns: Vec::new() });
+                self.docs.borrow_mut().insert(doc.clone(), DocLook { _watch: Some(watch), entries: Vec::new(), tokens: None, spawns: Vec::new(), doing: None, error: None });
             }
         }
         *self.wanted_docs.borrow_mut() = docs;
@@ -149,6 +151,11 @@ impl Pills {
                     look.spawns = spawns;
                     moved = true;
                 }
+                let (doing, error) = (doing_of(&look.entries), error_of(&look.entries));
+                if doing != look.doing || error != look.error {
+                    (look.doing, look.error) = (doing, error);
+                    moved = true;
+                }
             }
             moved
         };
@@ -159,7 +166,7 @@ impl Pills {
 
     fn publish_usage(&self) {
         let docs = self.docs.borrow();
-        self.roster_usage.set(usage_value(docs.iter().map(|(doc, look)| (doc.as_str(), look.tokens, look.spawns.as_slice()))));
+        self.roster_usage.set(usage_value(docs.iter().map(|(doc, look)| (doc.as_str(), look))));
     }
 
     fn follow_shells(self: &Rc<Self>, wanted: Vec<(String, String)>) {
@@ -201,10 +208,39 @@ impl Pills {
     }
 }
 
-fn usage_value<'a>(docs: impl Iterator<Item = (&'a str, Option<f64>, &'a [Value])>) -> Value {
-    Value::record(docs.map(|(doc, tokens, spawns)| {
-        (doc, Value::record([("tokens", tokens.map_or(Value::Nil, Value::Num)), ("spawns", Value::List(spawns.to_vec().into()))]))
+fn usage_value<'a>(docs: impl Iterator<Item = (&'a str, &'a DocLook)>) -> Value {
+    let words = |w: &Option<String>| w.as_deref().map_or(Value::Nil, Value::from);
+    Value::record(docs.map(|(doc, look)| {
+        (
+            doc,
+            Value::record([
+                ("tokens", look.tokens.map_or(Value::Nil, Value::Num)),
+                ("spawns", Value::List(look.spawns.clone().into())),
+                ("doing", words(&look.doing)),
+                ("error", words(&look.error)),
+            ]),
+        )
     }))
+}
+
+fn newest(entries: &[Entry]) -> Option<&Json> {
+    entries.iter().rev().find_map(|e| e.json.as_ref())
+}
+
+fn doing_of(entries: &[Entry]) -> Option<String> {
+    let last = newest(entries).filter(|j| j["role"].as_str() == Some("assistant"))?;
+    let row = last["parts"].as_array()?.iter().rev().filter(|p| p["kind"].as_str() == Some("tool")).find_map(tool)?;
+    let verb = row.field("verb").map(text)?;
+    Some(match row.field("target").map(text) {
+        Some(target) => format!("{verb} {target}"),
+        None => verb,
+    })
+}
+
+fn error_of(entries: &[Entry]) -> Option<String> {
+    let last = newest(entries)?;
+    let part = last["parts"].as_array()?.last().filter(|p| p["kind"].as_str() == Some("error"))?;
+    part["message"].as_str().map(single_line).filter(|m| !m.is_empty())
 }
 
 fn spawns_of(entries: &[Entry]) -> Vec<Value> {
@@ -604,6 +640,21 @@ pub(super) mod tests {
         assert_eq!(rows[0].field("kind").map(text).as_deref(), Some("plan"));
         let Some(Value::List(steps)) = rows[0].field("steps") else { panic!("steps") };
         assert_eq!(steps.iter().map(text).collect::<Vec<_>>(), ["Do it", "Then that"]);
+    }
+
+    #[test]
+    fn a_doc_says_the_tool_it_is_on_and_why_it_stopped() {
+        let working = vec![Entry::new(json!({ "id": "e1", "role": "assistant", "parts": [
+            { "kind": "tool", "id": "t1", "call": { "kind": "readFile", "path": "src/a.rs" } },
+            { "kind": "tool", "id": "t2", "call": { "kind": "exec", "command": "cargo test" } },
+            { "kind": "text", "text": "Running the tests." },
+        ] }))];
+        assert_eq!(doing_of(&working).as_deref(), Some("Ran cargo test"));
+        assert_eq!(error_of(&working), None);
+        let failed = vec![Entry::new(json!({ "id": "e2", "role": "assistant", "parts": [{ "kind": "error", "message": "Usage limit\nreached" }] }))];
+        assert_eq!(error_of(&failed).as_deref(), Some("Usage limit reached"));
+        let asked = vec![Entry::new(json!({ "id": "u1", "role": "user", "parts": [] }))];
+        assert_eq!(doing_of(&asked), None);
     }
 
     #[test]

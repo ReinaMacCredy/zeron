@@ -3855,7 +3855,8 @@
         "chat_side_chat": "侧边对话",
         "shell_about": "关于 Zeron",
         "shell_check_updates": "检查更新…",
-        "shell_whats_new": "新功能…"
+        "shell_whats_new": "新功能…",
+        "shell_toggle_tray": "需要你的和正在运行的"
       },
       "group": {
         "sessions": "会话",
@@ -4005,6 +4006,33 @@
       "skipped_body": "有更新的版本时会再次显示",
       "undo": "撤销",
       "skip_hint": "有新版本之前不再显示"
+    },
+    "live": {
+      "needs": "{n} 个需要你",
+      "working": "{n} 个进行中",
+      "tooltip": "需要你的和正在运行的 · {key}",
+      "title": "需要你的和正在运行的",
+      "summary": "{working} 个进行中 · {needs} 个需要你",
+      "seen_all": "全部已读",
+      "group": {
+        "needs": "需要你",
+        "working": "进行中",
+        "done": "你离开后完成的"
+      },
+      "viewing": "· 正在查看",
+      "open": "打开",
+      "answer": "回答",
+      "view": "查看",
+      "approve": "批准",
+      "dismiss": "忽略",
+      "retry": "重试",
+      "asking": "正在提问",
+      "plan": "计划就绪 · {n} 步",
+      "failed": "失败",
+      "done": "完成",
+      "agents": "{n} 个智能体",
+      "shells": "后台 shell",
+      "failed_named": "无法重试 {name}"
     },
     "activity": {
       "wake": "唤醒",
