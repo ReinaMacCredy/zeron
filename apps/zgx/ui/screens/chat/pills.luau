@@ -172,6 +172,17 @@ function M.fan_of(id: string?, row_fan: { any }?): { any }?
 	return row_fan
 end
 
+-- A chat's own (native) agents wear its mark already.
+function M.foreign(tiles: { any }?, chat: any): { any }
+	local out: { any } = {}
+	for _, t in tiles or {} do
+		if not (chat and t.mark and (t.mark == chat.mark or t.mark == chat.agent)) then
+			table.insert(out, t)
+		end
+	end
+	return out
+end
+
 local function stop_run(r: any)
 	local id = r.chat
 	if not id then
@@ -680,7 +691,7 @@ local function fan_words(tiles: { any }): string
 	return Roster.fan_label(n, k)
 end
 
-M.Fan = ui.component(function(props: { chat: string | () -> string?, tiles: () -> { any }, words: (() -> { any })?, lead: ((number) -> Node)?, size: number?, place: any?, name: string? }): Node
+M.Fan = ui.component(function(props: { chat: string | () -> string?, tiles: () -> { any }, words: (() -> { any })?, lead: ((number) -> Node)?, size: number?, bare: boolean?, place: any?, name: string? }): Node
 	local open = ui.use_state(false)
 	local function chat_of(): string?
 		return if type(props.chat) == "function" then props.chat() else props.chat
@@ -707,6 +718,7 @@ M.Fan = ui.component(function(props: { chat: string | () -> string?, tiles: () -
 			tiles = props.tiles,
 			lead = props.lead,
 			size = props.size,
+			bare = props.bare,
 			label = function(): string
 				return fan_words(if props.words then props.words() else props.tiles())
 			end,

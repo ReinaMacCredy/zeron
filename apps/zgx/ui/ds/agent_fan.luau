@@ -12,6 +12,7 @@ export type Props = {
 	tiles: () -> { Tile },
 	lead: ((size: number) -> Node)?,
 	size: number?,
+	bare: boolean?,
 	label: (() -> string)?,
 	on_click: (() -> ())?,
 	id: string?,
@@ -32,19 +33,29 @@ function M.shown(tiles: { Tile }): { Tile }
 	return out
 end
 
-function M.width(n: number, size: number): number
+-- Bare marks stand side by side, this far apart: unframed glyphs overlapped run together.
+local BARE_GAP = 3
+
+local function offset(at: number, size: number, bare: boolean?): number
+	return if bare then (at - 1) * (size + BARE_GAP) else M.WIDE[at].x * size / 20
+end
+
+function M.width(n: number, size: number, bare: boolean?): number
 	if n <= 0 then
 		return 0
 	end
-	return size + M.WIDE[math.min(n, M.MAX)].x * size / 20
+	return size + offset(math.min(n, M.MAX), size, bare)
 end
 
-local function look_tile(t: Tile, size: number, lead: ((size: number) -> Node)?): Node
+local function look_tile(t: Tile, size: number, lead: ((size: number) -> Node)?, bare: boolean?): Node
 	if t.lead and lead then
 		return lead(size)
 	end
 	if t.mark or t.icon then
-		return AgentMark { label = t.key, mark = t.mark, icon = t.icon, seed = t.key, size = size }
+		return AgentMark { label = t.key, mark = t.mark, icon = t.icon, seed = t.key, size = size, bare = bare }
+	end
+	if bare then
+		return ui.div { color = "$text.secondary", Icon { name = "bot", size = size } }
 	end
 	return ui.column {
 		w = size,
@@ -62,7 +73,7 @@ end
 
 function M.Fan(props: Props): Node
 	local size = props.size or 20
-	local k = size / 20
+	local bare = props.bare
 	local list = ui.computed(function(): { Tile }
 		return M.shown(props.tiles())
 	end)
@@ -98,7 +109,7 @@ function M.Fan(props: Props): Node
 		shrink = 0,
 		h = size,
 		w = motion.tween(ui.computed(function(): number
-			return M.width(#list:get(), size)
+			return M.width(#list:get(), size, bare)
 		end), SLIDE),
 		ui.each(behind_first, function(t: Tile): Node
 			local at = ui.computed(function(): number
@@ -110,16 +121,16 @@ function M.Fan(props: Props): Node
 				w = size,
 				h = size,
 				left = motion.tween(ui.computed(function(): number
-					return M.WIDE[at:get()].x * k
+					return offset(at:get(), size, bare)
 				end), SLIDE),
 				rotate = motion.tween(ui.computed(function(): number
-					return if #list:get() > 1 then M.WIDE[at:get()].turn else 0
+					return if #list:get() > 1 and not bare then M.WIDE[at:get()].turn else 0
 				end), SLIDE),
 				shadow = function(): any
-					return if #list:get() > 1 and at:get() == 1 then "$shadow.sm" else false
+					return if #list:get() > 1 and at:get() == 1 and not bare then "$shadow.sm" else false
 				end,
 				rounded = ui.raw(size * 0.25, "a mark tile's radius scales with it"),
-				look_tile(t, size, props.lead),
+				look_tile(t, size, props.lead, bare),
 				ui.show(function(): boolean
 					for _, other in list:get() do
 						if other.key == t.key then
