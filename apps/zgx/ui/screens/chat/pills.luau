@@ -492,12 +492,8 @@ local Detail = ui.component(function(props: { runs: any, run_id: string, clock: 
 	}
 end)
 
-M.RosterBody = ui.component(function(props: { bind: any, clock: any?, on_close: () -> () }): Node
-	local runs = M.runs_of(props.bind)
-	local detail = ui.use_state(nil :: string?)
-	local clock = props.clock or P.clock(function(): boolean
-		return Roster.working(runs:get().listed) > 0
-	end)
+-- Their docs carry the agents they start in turn, which the pill counts too.
+local function watch_docs(runs: any)
 	local say_docs = store.want_docs()
 	ui.effect(function()
 		local docs: { [string]: string } = {}
@@ -508,6 +504,15 @@ M.RosterBody = ui.component(function(props: { bind: any, clock: any?, on_close: 
 		end
 		say_docs(docs)
 	end)
+end
+
+M.RosterBody = ui.component(function(props: { bind: any, clock: any?, on_close: () -> () }): Node
+	local runs = M.runs_of(props.bind)
+	local detail = ui.use_state(nil :: string?)
+	local clock = props.clock or P.clock(function(): boolean
+		return Roster.working(runs:get().listed) > 0
+	end)
+	watch_docs(runs)
 	ui.effect(function()
 		local id = detail:get()
 		if id then
@@ -1057,6 +1062,7 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 	local bind = props.bind
 	local keys = props.keys or typing.take
 	local runs = M.runs_of(bind)
+	watch_docs(runs)
 	local shells = ui.computed(function(): { any }
 		local out: { any } = {}
 		for _, t in props.tasks:get() do
@@ -1255,7 +1261,8 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 		end, { enter = enter, exit = exit, shrink = if gives then 100 else 0, min_w = if gives then 0 else nil })
 	end
 	local function card(open: any, class: string, inset: any, place: { [string]: any }, body: () -> Node): Node
-		local opts: { [string]: any } = { absolute = true, left = 0, bottom = P.HEIGHT + PLACE.offset, enter = enter, exit = exit }
+		-- No exit: a leaving entry is pinned at its box's top, and this box hangs from its bottom, so the card would drop over the composer as it fades.
+		local opts: { [string]: any } = { absolute = true, left = 0, bottom = P.HEIGHT + PLACE.offset, enter = enter }
 		for k, v in place do
 			opts[k] = v
 		end
