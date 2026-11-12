@@ -5,9 +5,9 @@
 //! reference a pick puts in the prompt (`zeron_proto::invocation`'s
 //! `Invocation::link`), which the engine reads at send.
 //!
-//!   chat.invocations { harness, target = { chat? | space?, device?, path? } }
+//!   chat.invocations { harness, target = { chat? | space?, device?, path?, home? } }
 //!       { rows = { { kind = "command" | "skill", name, label, detail, link,
-//!                    plain?, terminal_only?, blocked? } },
+//!                    plain?, terminal_only?, blocked?, task? } },
 //!         failed?, warning? }  the list that couldn't be had ("commands" or
 //!                        "skills") when the other came, and that in words;
 //!                        or an error when neither could be
@@ -18,7 +18,8 @@
 //! Names and paths the canonical reference couldn't carry are left out. A row
 //! `plain` inserts its `link` as typed (`/name`, which the send reads); one
 //! `terminal_only` runs only in Claude Code's terminal; one `blocked` says why
-//! it can't run, in place of its description.
+//! it can't run, in place of its description; one `task` can ride a task's
+//! words (proto `inserts_message_text`). `home` lists for the home folder.
 
 use std::{cell::RefCell, future::Future, pin::Pin, rc::Rc, task::Poll};
 
@@ -26,7 +27,10 @@ use serde_json::{Map, Value as Json, json};
 use zeron_proto::{
     HarnessId, SlashCommand,
     app_commands::{COMPACT_COMMAND, COMPUTER_USE_COMMAND, TERMINAL_ONLY_COMMANDS},
-    command_catalog::{invocation_detail, skill_display_name, with_zeron_commands, zeron_owned_command},
+    command_catalog::{
+        InvocationCandidate, inserts_message_text, invocation_detail, skill_display_name, with_zeron_commands, zeron_owned_command,
+    },
+    invocation::Invocation,
 };
 use zgx_script::{ScriptHost, Value};
 
@@ -73,7 +77,7 @@ async fn invocations(arg: Value, local: Rc<RefCell<Option<String>>>) -> Result<V
         params.insert("spaceId".into(), Json::String(space));
     } else if !path.is_empty() {
         params.insert("path".into(), Json::String(path));
-    } else {
+    } else if !target.field("home").is_some_and(Value::truthy) {
         return Err("no session or project".into());
     }
     let device = text(target.field("device"));
@@ -136,6 +140,7 @@ struct Row {
     terminal_only: bool,
     blocked: Option<String>,
     path: Option<String>,
+    task: bool,
 }
 
 fn row_value(row: Row) -> Value {
@@ -157,6 +162,9 @@ fn row_value(row: Row) -> Value {
     }
     if let Some(path) = &row.path {
         fields.push(("path", Value::from(path.as_str())));
+    }
+    if row.task {
+        fields.push(("task", Value::Bool(true)));
     }
     Value::record(fields)
 }
@@ -182,6 +190,20 @@ fn flagged(mut rows: Vec<Row>, harness: Option<HarnessId>, unsupported: Option<S
             row.detail = reason.clone();
             row.blocked = Some(reason.clone());
         }
+    }
+    for row in &mut rows {
+        let invocation = if row.kind == "skill" {
+            Invocation::Skill { name: row.name.clone(), path: row.path.clone().unwrap_or_default(), command: None }
+        } else {
+            Invocation::Command { name: row.name.clone() }
+        };
+        row.task = inserts_message_text(&InvocationCandidate {
+            name: row.name.clone(),
+            description: String::new(),
+            input_hint: None,
+            invocation,
+            workspace_command: None,
+        });
     }
     rows
 }
@@ -260,6 +282,7 @@ fn candidates(commands: &[Json], skills: &[Json]) -> Vec<Row> {
             terminal_only: false,
             blocked: None,
             path: None,
+            task: false,
         });
     }
     for s in skills {
@@ -287,6 +310,7 @@ fn candidates(commands: &[Json], skills: &[Json]) -> Vec<Row> {
             terminal_only: false,
             blocked: None,
             path: Some(path.to_string()),
+            task: false,
         });
     }
     rows
@@ -405,6 +429,10 @@ mod tests {
         assert!(row("review").blocked.is_none());
         let terminal = TERMINAL_ONLY_COMMANDS.iter().find(|n| rows.iter().any(|r| r.name == **n)).unwrap();
         assert!(row(terminal).terminal_only && !row("review").terminal_only);
+        assert!(row("review").task, "the agent's own command goes into a task's words");
+        assert!(!row("btw").task && !row("compact").task && !row(terminal).task, "Zeron's own and the terminal's don't");
+        let rows = menu(HarnessId::Codex, json!([{ "name": "clear" }]), None);
+        assert!(!rows.iter().find(|r| r.name == "clear").unwrap().task, "nor one that acts on a session");
         // The same name another agent runs itself isn't Claude's terminal's.
         let rows = menu(HarnessId::Codex, json!([{ "name": terminal }]), None);
         assert!(!rows.iter().find(|r| r.name == *terminal).unwrap().terminal_only);

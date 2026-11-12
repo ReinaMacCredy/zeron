@@ -210,7 +210,8 @@ files_api.search = function(): any
 end
 local chat_store = store :: any
 for name, f in chat_store do
-	if type(f) == "function" then
+	-- (`new_chat_model` reads the catalog, not the host.)
+	if type(f) == "function" and name ~= "new_chat_model" then
 		chat_store[name] = function() end
 	end
 end

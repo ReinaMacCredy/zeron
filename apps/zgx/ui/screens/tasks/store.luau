@@ -445,6 +445,11 @@ function M.image_src(path: string): string?
 	end
 	return nil
 end
+-- (Drawn from the file uploaded, not read back: attachments.rs `seed_staged`.)
+function M.seed_image(path: string, src: string)
+	asked[path] = true
+	images:set_key(path, src)
+end
 -- Pictures read but not drawn (not a picture after all, or gone since).
 local broken = ui.state("tasks_images_broken", {} :: { [string]: boolean })
 function M.image_broke(path: string)

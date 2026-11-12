@@ -136,8 +136,7 @@ function M.missing_tip(path: string): Node
 	end })
 end
 
-local function Images(t: store.Task): Node
-	local list = t.images or {}
+function M.thumbs(list: { string }, prefix: string, group: string, on_remove: (i: number) -> ()): { Node }
 	local function items(): { any }
 		local out = {}
 		for i, path in list do
@@ -148,10 +147,11 @@ local function Images(t: store.Task): Node
 		end
 		return out
 	end
-	local row: { [any]: any } = { id = "task-card-images", gap = ui.raw(6, "gpui"), wrap = true }
+	local out: { Node } = {}
 	for i, path in list do
 		local over = ui.use_state(false)
-		table.insert(row, ui.div {
+		table.insert(out, ui.div {
+			id = `{prefix}-image-{i}`,
 			relative = true,
 			w = THUMB,
 			h = THUMB,
@@ -166,11 +166,11 @@ local function Images(t: store.Task): Node
 			tooltip = M.missing_tip(path),
 			ui.show(function(): boolean
 				return store.image_src(path) ~= nil
-			end, Lightbox.Thumb { group = `task-card-{t.id}`, index = i, items = items, radius = 10, w = THUMB, h = THUMB, M.picture(path, THUMB, 16) }, ds.Icon { name = "gallery", size = 16, color = "$text.tertiary" }),
+			end, Lightbox.Thumb { group = group, index = i, items = items, radius = 10, w = THUMB, h = THUMB, M.picture(path, THUMB, 16) }, ds.Icon { name = "gallery", size = 16, color = "$text.tertiary" }),
 			ui.show(function(): boolean
 				return over:get()
 			end, ui.button {
-				id = `task-card-remove-image-{i}`,
+				id = `{prefix}-remove-image-{i}`,
 				label = locale.s("tasks.card.remove_image"),
 				absolute = true,
 				top = 3,
@@ -184,13 +184,24 @@ local function Images(t: store.Task): Node
 				bg = "$zeron.tasks.remove",
 				hover = { bg = "$zeron.tasks.remove_hover" },
 				on_click = function()
-					local next = table.clone(list)
-					table.remove(next, i)
-					store.update(t.id, { images = next })
+					on_remove(i)
 				end,
 				ds.Icon { name = "close", size = 10, color = ui.raw("#ffffff", "white on the accent, as gpui") },
 			}),
 		})
+	end
+	return out
+end
+
+local function Images(t: store.Task): Node
+	local list = t.images or {}
+	local row: { [any]: any } = { id = "task-card-images", gap = ui.raw(6, "gpui"), wrap = true }
+	for _, thumb in M.thumbs(list, "task-card", `task-card-{t.id}`, function(i: number)
+		local next = table.clone(list)
+		table.remove(next, i)
+		store.update(t.id, { images = next })
+	end) do
+		table.insert(row, thumb)
 	end
 	if #list < store.IMAGES_MAX then
 		table.insert(row, ui.button {
@@ -266,14 +277,7 @@ end
 local picked_model = ui.state("tasks_card_model", nil :: string?)
 local picked_effort = ui.state("tasks_card_effort", nil :: string?)
 local function new_chat_model(): any
-	local want = picked_model:get() or defaults().model
-	local catalog = chat_store.catalog:get()
-	for _, m in catalog.models or {} do
-		if m.value == want then
-			return m
-		end
-	end
-	return (catalog.models or {})[1]
+	return chat_store.new_chat_model(picked_model:get())
 end
 
 M.starting = ui.state("tasks_card_starting", nil :: string?)

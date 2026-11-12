@@ -5435,7 +5435,10 @@
       "save": "save",
       "notes": "notes",
       "close": "close",
-      "where": "To do · No project"
+      "where": "To do · No project",
+      "tasks": "Tasks",
+      "what_tasks": "tasks",
+      "not_image": "{name} is not an image."
     }
   },
   "inbox": {

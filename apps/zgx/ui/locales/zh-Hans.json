@@ -5435,7 +5435,10 @@
       "save": "保存",
       "notes": "备注",
       "close": "关闭",
-      "where": "待办 · 无项目"
+      "where": "待办 · 无项目",
+      "tasks": "任务",
+      "what_tasks": "任务",
+      "not_image": "{name} 不是图片。"
     }
   },
   "inbox": {

@@ -70,7 +70,9 @@ local next_id = 100
 store.host.create = function(args: any): any
 	next_id += 1
 	local id = `n{next_id}`
-	note(`create:{args.title}{if args.notes and args.notes ~= "" then "|" .. args.notes else ""}{if args.due then "@" .. args.due else ""}`)
+	local images = if args.images and #args.images > 0 then ` images={table.concat(args.images, "+")}` else ""
+	local depends = if args.depends and #args.depends > 0 then ` depends={table.concat(args.depends, "+")}` else ""
+	note(`create:{args.title}{if args.notes and args.notes ~= "" then "|" .. args.notes else ""}{if args.due then "@" .. args.due else ""}{images}{depends}`)
 	if refuse then
 		return done(nil)
 	end
@@ -152,10 +154,45 @@ end
 store.host.image = function(args: any): any
 	return done({ src = args.path })
 end
+local slow_upload = false
 store.host.upload = function(args: any): any
 	note(`upload:{args.path}`)
+	if slow_upload then
+		return {
+			after = function(_self: any, ok: ((any) -> ())?)
+				ui.after(300, function()
+					if ok then
+						ok(`/uploads/{args.path}`)
+					end
+				end)
+			end,
+		}
+	end
 	return done(`/uploads/{args.path}`)
 end
+
+local Invocations = require("@app/screens/chat/invocations")
+local invocations_stub = Invocations :: any
+invocations_stub.read = function(harness: string, target: any): any
+	note(`invocations:{harness}:{if target.home then "home" else target.chat or target.space or "?"}`)
+	return done({
+		rows = {
+			{ kind = "command", name = "review", label = "/review", detail = "Review the diff", link = "[/review](zeron-invoke:7b7d)", task = true },
+			{ kind = "command", name = "btw", label = "/btw", detail = "Side chat", link = "/btw", plain = true },
+			{ kind = "command", name = "clear", label = "/clear", detail = "Clear the conversation", link = "[/clear](zeron-invoke:7b7d)" },
+			{ kind = "skill", name = "code-review", label = "Code Review", detail = "Careful review", link = "[$code-review](zeron-invoke:7b7d)", path = "/s/code-review/SKILL.md", task = true },
+		},
+	})
+end
+local capture = require("@app/screens/tasks/capture")
+ui.command { id = "fixture.capture_image", title = "Fixture: a picture pasted into quick capture", menu = "Fixture", run = function()
+	capture.add_files({ { name = "circles.png", path = "assets/pictures/circles.png" }, { name = "notes.txt", path = "assets/notes.txt" } })
+end }
+ui.command { id = "fixture.capture_image_slow", title = "Fixture: a picture pasted, its upload slow", menu = "Fixture", run = function()
+	slow_upload = true
+	capture.add_files({ { name = "wide.png", path = "assets/pictures/wide.png" } })
+	slow_upload = false
+end }
 
 ui.command { id = "fixture.tasks_many", title = "Fixture: a thousand tasks", menu = "Fixture", run = function()
 	tasks = {}
