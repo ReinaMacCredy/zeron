@@ -676,11 +676,11 @@ fn app_is_active() -> bool {
 
 /// When the window goes: its chords are let go of (a capture asked by a
 /// window that has closed can't land anywhere).
-struct Unregister;
+struct Unregister(#[allow(dead_code)] u64);
 impl Drop for Unregister {
     fn drop(&mut self) {
         #[cfg(target_os = "macos")]
-        macos::refresh_chords(None, None);
+        macos::stop_chords(self.0);
     }
 }
 
@@ -706,8 +706,10 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         quick_counter: std::cell::Cell::new(0),
         tasks: cx.tasks.clone(),
     });
+    #[cfg(not(target_os = "macos"))]
+    let owner = 0;
     #[cfg(target_os = "macos")]
-    {
+    let owner = {
         let me = Rc::downgrade(&shots);
         macos::start_chords(Box::new(move |chord| {
             let Some(me) = me.upgrade() else { return };
@@ -716,11 +718,11 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                 macos::Chord::Appshot => {}
                 macos::Chord::QuickCapture => me.quick_capture(),
             }
-        }));
-    }
+        }))
+    };
     shots.publish();
     cx.tasks.spawn(async move {
-        let _unregister = Unregister;
+        let _unregister = Unregister(owner);
         std::future::pending::<()>().await
     });
     let me = shots.clone();

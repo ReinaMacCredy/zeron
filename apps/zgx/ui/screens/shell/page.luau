@@ -1205,6 +1205,7 @@ return function(props: Props): Node
 	-- the focused one; a pane's own over another.
 	local function zone(id: string, side: string): Node
 		local props: { [any]: any } = table.clone(ZONES[side])
+		props.id = `split-zone-{id}-{side}`
 		props.absolute = true
 		if side ~= "top" then
 			-- (A pane's own, as its lane measures it: a draft with a chip stands taller.)

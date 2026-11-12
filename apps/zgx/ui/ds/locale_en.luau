@@ -293,6 +293,7 @@ return {
 	["ds.files_pane.toggle_tree"] = "Toggle File Tree",
 	["ds.files_pane.toggle_tree_tip"] = "Toggle File Tree  {keys}",
 	["ds.files_pane.close_tree"] = "Close the file tree",
+	["ds.files_pane.resize_tree"] = "Resize file tree",
 	["ds.code_editor.pattern.ends_in_backslash"] = "Ends in \\",
 	["ds.code_editor.pattern.bracket_open"] = "A [ isn't closed",
 	["ds.code_editor.pattern.nothing_to_repeat"] = "Nothing to repeat before {c}",

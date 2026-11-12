@@ -93,6 +93,8 @@ local LIMIT = 8 * 1024 * 1024
 
 -- Whether the tree shows beside the file: remembered, as the app would.
 local tree_shown = ui.persist("files_tree", true)
+-- Its width beside the file, as dragged at its edge (0: the theme's).
+local tree_width = ui.persist("files_tree_width", 0)
 
 type Where = { key: string, target: api.Target, name: string }
 
@@ -324,6 +326,7 @@ local function folder(w: Workspace, v: View, props: Props, here: () -> Where?): 
 		id = "files-pane",
 		hook = "files.pane",
 		shown = tree_shown,
+		width = tree_width,
 		room = w.pane_room,
 		head = "line",
 		w_full = true,

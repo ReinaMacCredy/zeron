@@ -399,7 +399,8 @@
     "files_pane": {
       "toggle_tree": "切换文件树",
       "toggle_tree_tip": "切换文件树  {keys}",
-      "close_tree": "关闭文件树"
+      "close_tree": "关闭文件树",
+      "resize_tree": "调整文件树宽度"
     },
     "code_editor": {
       "pattern": {

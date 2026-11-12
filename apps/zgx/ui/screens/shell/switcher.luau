@@ -56,9 +56,6 @@ local card_list = ui.computed(function(): { string }
 end)
 local hi = ui.state("shell_switcher_hi", 1)
 local held = ui.modifiers
-local function holding(): boolean
-	return held.control:peek() or held.meta:peek() or held.alt:peek()
-end
 
 local pictures = Pictures.Book(PICTURES)
 local column: any = nil
@@ -217,7 +214,8 @@ ui.effect(function()
 	local down = held.control:get() or held.meta:get() or held.alt:get()
 	-- (The window losing focus lets go of what's held here; nobody let go on a card.)
 	local away = active ~= nil and active:get() == false
-	if not cards:peek() then
+	-- (Up with nothing held, a tap or the Go menu: it lands at once, as Zeron's.)
+	if not cards:get() then
 		return
 	end
 	if away then
@@ -253,9 +251,6 @@ function M.step(by: number): boolean
 		local i = if at then (at - 1 + by) % #strip_now + 1 elseif by > 0 then 1 else #strip_now
 		go(strip_now[i])
 		return true
-	end
-	if not holding() then
-		return false
 	end
 	local sidebar: any = boundary.load("@app/screens/shell/sidebar")
 	local order = order_now(if sidebar then sidebar.order:peek() else {}, where == "plugin")
