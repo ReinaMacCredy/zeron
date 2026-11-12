@@ -81,6 +81,8 @@ sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$PLIST"
 plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$PLIST"
 plutil -replace CFBundleName -string "$APP_NAME" "$PLIST"
 plutil -replace CFBundleDisplayName -string "$APP_NAME" "$PLIST"
+# Above the gpui app's plain x.y.z: LaunchServices opens the highest of two bundles with this id.
+plutil -replace CFBundleVersion -string "$VERSION.9999" "$PLIST"
 plutil -replace LSMinimumSystemVersion -string "13.0" "$PLIST"
 # The updater installs only a release whose bundle carries this same mark (crates/update `bundle_interface`).
 plutil -replace ZeronInterface -string zgx "$PLIST"
