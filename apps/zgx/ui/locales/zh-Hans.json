@@ -123,7 +123,9 @@
     "session_stats": {
       "refreshing": "刷新中 · {tier}",
       "left": "剩余 {left} · {tier}",
-      "expired": "{ago}前已过期"
+      "expired": "{ago}前已过期",
+      "cold": "已过期",
+      "cache": "提示缓存：{left}"
     },
     "session_card": {
       "ago": "{when}前",
@@ -725,7 +727,12 @@
         "cache": "缓存",
         "cache_left": "剩余 {left}",
         "cache_refreshing": "刷新中",
-        "cache_expired": "已过期"
+        "cache_expired": "已过期",
+        "window_session": "5 小时",
+        "window_week": "每周",
+        "window_day": "每日",
+        "plan": "{name} · 套餐",
+        "plan_window": "{percent} · {when}重置"
       },
       "terminal": "终端",
       "resume": "继续",

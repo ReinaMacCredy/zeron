@@ -1,7 +1,7 @@
 -- The prompt cache's time, as the host's `chat.stats` gives it (its TTL and
 -- when a turn last touched it), for the context card and the compaction's
--- rows. The countdown stays in Luau: a host action answers no script
--- synchronously.
+-- rows, and the footer's context chip (`use_word`). The countdown
+-- stays in Luau: a host action answers no script synchronously.
 
 local locale = require("@self/locale")
 
@@ -82,6 +82,67 @@ function M.cache_countdown(c: Cache): string
 		return locale.s("ds.composer.context.cache_expired")
 	end
 	return locale.s("ds.composer.context.cache_left", { left = M.clock(c.left) })
+end
+
+-- The footer's word for it, gpui's `Cache::short`: "1h" refreshing, "4m", "30s", "cold".
+function M.cache_short(c: Cache): string
+	if c.kind == "refreshing" then
+		return tier(c.ttl)
+	elseif c.kind == "cold" then
+		return locale.s("ds.session_stats.cold")
+	elseif c.left >= 60000 then
+		return `{c.left // 60000}m`
+	end
+	return `{c.left // 1000}s`
+end
+
+function M.running_low(c: Cache): boolean
+	return c.kind == "warm" and c.left * 5 < c.ttl * 1000
+end
+
+-- gpui's chip looks every ten seconds, so under a minute the word steps by ten.
+function M.next_change(c: Cache): number?
+	if c.kind ~= "warm" then
+		return nil
+	elseif c.left >= 60000 then
+		return c.left % 60000 + 1
+	end
+	return math.min(10000, c.left + 1)
+end
+
+-- The prompt cache's word as gpui's stats chip ends (session_stats.rs
+-- `chip`): short, long (its tooltip and label), and its ink, the warning's
+-- under a fifth of the TTL, quiet once cold; nil until a turn has told the
+-- cache's TTL. Called in a component's body: it wakes only when the word
+-- changes, one `ui.after` at a time.
+export type Word = { short: string, long: string, tone: string }
+
+function M.use_word(stats: () -> Stats?, working: () -> boolean): State<Word?>
+	local word = ui.use_state(nil :: Word?)
+	local beat = ui.use_state(0)
+	ui.effect(function()
+		beat:get()
+		local s = stats()
+		local c = if s then M.cache_of(s, working(), ui.now()) else nil
+		local next_word = if c
+			then {
+				short = M.cache_short(c),
+				long = M.cache_long(c),
+				tone = if M.running_low(c) then "$warning" elseif c.kind == "cold" then "$zeron.composer.faint" else "$text.tertiary",
+			}
+			else nil
+		local old = word:peek()
+		if (old == nil) ~= (next_word == nil) or (old and next_word and (old.short ~= next_word.short or old.tone ~= next_word.tone)) then
+			word:set(next_word)
+		end
+		local wait = if c then M.next_change(c) else nil
+		if wait then
+			ui.after(wait, function()
+				beat:set(beat:peek() + 1)
+			end)
+		end
+	end)
+	return word
 end
 
 return M

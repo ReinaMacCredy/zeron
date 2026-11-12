@@ -74,6 +74,8 @@ export type Account = {
 	detail: string,
 	active: boolean,
 	can_switch: boolean,
+	-- Its plan's windows, for the footer's plan chip and card.
+	windows: { { label: string, used: number, resets: number? } }?,
 }
 export type Props = {
 	-- The accounts of a model's agent (nil or none: no row, no ring), followed
@@ -1180,31 +1182,6 @@ return ui.component(function(props: Props): Node
 		}
 	end
 
-	-- The ring on the chip, right of the effort: how near the account in use
-	-- is to a limit. (Nothing reported: no ring.)
-	local function usage_ring(): Node
-		return ui.show(function(): boolean
-			local a = in_use()
-			return a ~= nil and a.used ~= nil
-		end, ui.div {
-			id = "model-picker-usage",
-			self = "center",
-			shrink = 0,
-			tooltip = Tooltip {
-				function(): string
-					local a = in_use()
-					return if a then a.detail else ""
-				end,
-			},
-			context_usage.Ring {
-				ink = context_usage.usage_ink,
-				fraction = function(): number
-					return used(in_use())
-				end,
-			},
-		})
-	end
-
 	-- The model's context options, when it has both: a card of their own.
 	local function context_pair(): (Option?, Option?)
 		local m = current()
@@ -2267,12 +2244,8 @@ return ui.component(function(props: Props): Node
 			return ""
 		end,
 		trail = ui.show(function(): boolean
-			if fast and fast:get() and has_fast() then
-				return true
-			end
-			local a = in_use()
-			return a ~= nil and a.used ~= nil
-		end, ui.row { shrink = 0, gap = "$zeron.space.tight", items = "center", chip_fast, usage_ring() }),
+			return fast ~= nil and fast:get() and has_fast()
+		end, ui.row { shrink = 0, gap = "$zeron.space.tight", items = "center", chip_fast }),
 		-- (Another chat's model and effort, shown as it's moved to: at once.)
 		roll_in_panel = true,
 		-- (Dropdown hands its label on, as the trigger's name.)

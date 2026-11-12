@@ -161,9 +161,10 @@ test("composer place: the footer's chips are one height, the ring one of them", 
 	expect(place).to_be(24)
 	expect(model).to_be(24)
 	expect(ring).to_be(24)
-	-- The ring at the chips' glyph size (12), 6 in all round: a square.
+	-- The ring at gpui's footer size (16) and the percent, 6 in at each side.
 	local w = box("#composer-context")
-	expect(w).to_be(24)
+	local pct = box("#composer-context-percent")
+	expect(w).to_be(6 + 16 + 5 + pct + 6)
 end)
 
 -- A hover card is framed once (ds/hover_card): zgx's layer hugs the card

@@ -123,7 +123,9 @@
     "session_stats": {
       "refreshing": "Refreshing · {tier}",
       "left": "{left} left · {tier}",
-      "expired": "Expired {ago} ago"
+      "expired": "Expired {ago} ago",
+      "cold": "cold",
+      "cache": "Prompt cache: {left}"
     },
     "session_card": {
       "ago": "{when} ago",
@@ -725,7 +727,12 @@
         "cache": "Cache",
         "cache_left": "{left} left",
         "cache_refreshing": "Refreshing",
-        "cache_expired": "Expired"
+        "cache_expired": "Expired",
+        "window_session": "5-hour",
+        "window_week": "Weekly",
+        "window_day": "Daily",
+        "plan": "{name} · plan",
+        "plan_window": "{percent} · resets {when}"
       },
       "terminal": "Terminal",
       "resume": "Resume",

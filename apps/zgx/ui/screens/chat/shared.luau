@@ -1734,6 +1734,7 @@ function M.model_accounts(device: () -> string?): any
 					can_switch = a.can_switch,
 					used = account_used(a, harness, model),
 					detail = account_detail(a),
+					windows = a.windows,
 				}
 			end
 			return out

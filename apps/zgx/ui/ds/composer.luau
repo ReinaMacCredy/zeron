@@ -724,39 +724,21 @@ local function work_in(
 	return ui.column { w_full = true, table.unpack(rows) }
 end
 
--- The ring, in a chip-high box of its own, washed under the pointer as the
--- chips beside it are. Given what the context holds, it opens the card
--- above (below, with the menus below) as the pointer rests on it or the
--- keys reach it.
-local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: () -> string, stats: (() -> any)?, working: (() -> boolean)?): Node
-	local function fraction(): number
-		if usage then
-			return context_usage.fraction(usage()) or 0
-		end
-		return math.clamp(if type(used) == "function" then used() else used, 0, 1)
-	end
-	local function build(at: string?): Node
-		return ui.row {
-			id = "composer-context",
-			h = CHIP_H,
-			px = "$zeron.space.tight",
-			items = "center",
-			rounded = CHIP_RADIUS,
-			hover = { bg = "$hover" },
-			focusable = usage ~= nil,
-			label = locale.t("ds.composer.context_used"),
-			tooltip = if usage then context_usage.Card { usage = usage, stats = stats, working = working } else nil,
-			tooltip_placement = if at then { side = at, align = "end", offset = 8 } else nil,
-			tooltip_delay = 150,
-			context_usage.Ring { fraction = fraction },
-		}
-	end
-	if not usage then
-		return build(nil)
-	end
-	-- (A placement is read as it's built: one following the composer is
-	-- built again as it changes sides.)
-	return ui.presence(side, build)
+-- The ring, in a chip-high box of its own (a demo's, its fraction given).
+local function ring(used: number | () -> number): Node
+	return ui.row {
+		id = "composer-context",
+		h = CHIP_H,
+		px = "$zeron.space.tight",
+		items = "center",
+		rounded = CHIP_RADIUS,
+		label = locale.t("ds.composer.context_used"),
+		context_usage.Ring {
+			fraction = function(): number
+				return math.clamp(if type(used) == "function" then used() else used, 0, 1)
+			end,
+		},
+	}
 end
 
 -- Where it works, as a line: where it runs (a worktree's glyph, Cloud's,
@@ -2738,6 +2720,51 @@ return ui.component(function(props: Props): Node
 				}
 			)
 		end
+		-- The plan of the account the chosen model's agent is using (ModelPicker's `accounts`).
+		local function plan(): context_usage.Plan?
+			local v = props.model:get()
+			if not props.accounts or not v then
+				return nil
+			end
+			local m: any = nil
+			for _, it in list_of(props.models) do
+				if it.value == v then
+					m = it
+				end
+			end
+			if not m then
+				return nil
+			end
+			local a: any = nil
+			for _, it in props.accounts(m.harness, m.value) or {} do
+				if it.active then
+					a = it
+				end
+			end
+			if not a or not a.windows or #a.windows == 0 then
+				return nil
+			end
+			local agent: any = { id = m.harness, label = m.harness }
+			for _, h in list_of(props.harnesses) do
+				if h.id == m.harness then
+					agent = h
+				end
+			end
+			return { agent = agent, plan = a.plan, windows = a.windows }
+		end
+		local function working(): boolean
+			return props.running ~= nil and props.running:get()
+		end
+		local function context_card(): Node
+			return context_usage.Card {
+				usage = props.usage or function(): Usage?
+					return nil
+				end,
+				stats = props.stats,
+				working = working,
+				plan = plan,
+			}
+		end
 		footer = ui.row {
 			id = props.toolbar_id,
 			h = 24,
@@ -2778,14 +2805,16 @@ return ui.component(function(props: Props): Node
 				items = "center",
 				shrink = 0,
 				ui.row { on_resize = measure(model_w, "w"), items = "center", shrink = 0, model },
+				context_usage.PlanChip { plan = plan, card = context_card(), side = side },
 				if props.usage
-					then ui.show(function(): boolean
-						local u = (props.usage :: () -> Usage?)()
-						return u ~= nil and u.window ~= nil and u.window > 0
-					end, ring(0, props.usage, side, props.stats, function(): boolean
-						return props.running ~= nil and props.running:get()
-					end))
-					elseif props.context then ring(props.context, nil, side)
+					then context_usage.Chip {
+						usage = props.usage,
+						stats = props.stats,
+						working = working,
+						plan = plan,
+						side = side,
+					}
+					elseif props.context then ring(props.context)
 					else nil,
 			},
 		}

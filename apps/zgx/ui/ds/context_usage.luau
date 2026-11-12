@@ -7,19 +7,35 @@
 --   context_usage.fraction(u)  0 to 1, or nil while it can't be said
 --   context_usage.lines(u)     the card's two lines, as Zeron writes them
 --   context_usage.ink(f)       the ring's ink at `f`
---   Card { usage, stats?, working? }  the ring's card; given the chat's
---                              stats (`chat.stats`), its last turn's rate and
---                              output and the prompt cache's time left
+--   Card { usage, stats?, working?, plan? }  the ring's card; given the
+--                              chat's stats (`chat.stats`), its last turn's
+--                              rate and output and the prompt cache's time
+--                              left; given the account's plan, its windows
+--   Chip { usage, stats?, working?, plan?, side }  the footer's one chip:
+--                              ring, percent, " · ", the cache's clock
+--   PlanChip { plan, side }    the plan's window nearest its limit, only
+--                              from 80% (PLAN_NEAR)
 
 local locale = require("@self/locale")
 local Menu = require("@self/menu")
 local HoverCard = require("@self/hover_card")
 local progress = require("@self/progress")
 local SessionStats = require("@self/session_stats")
+local Icon = require("@self/icon")
+local ProviderCard = require("@self/provider_card")
+local AgentMark = require("@self/agent_mark")
 
 export type Usage = { tokens: number?, window: number? }
+-- The account in use's plan: its agent (the model picker's harness: name
+-- and mark), its plan's name, and its windows (each 0 to 1, when it starts
+-- over in seconds).
+export type Window = { label: string, used: number, resets: number? }
+export type Plan = { agent: { id: string, label: string, mark: any?, icon: string? }, plan: string?, windows: { Window } }
 
 local M = {}
+
+-- From here a plan's window shows on the footer (Zeron's account ring turns amber).
+M.PLAN_NEAR = 0.8
 
 -- A count of tokens, its thousands grouped ("408,389").
 function M.grouped(n: number): string
@@ -156,7 +172,101 @@ local TurnPart = ui.component(function(props: { stats: () -> SessionStats.Stats?
 	})
 end)
 
-function M.Card(props: { usage: () -> Usage?, stats: (() -> SessionStats.Stats?)?, working: (() -> boolean)? }): Node
+-- A plan's window as the footer names it (account_usage.rs `window_label`), and as the card's row does.
+local SHORT = { Session = "5h", Week = "Weekly", Day = "Daily" }
+local LONG = { Session = "ds.composer.context.window_session", ["5h"] = "ds.composer.context.window_session", Week = "ds.composer.context.window_week", Weekly = "ds.composer.context.window_week", Day = "ds.composer.context.window_day", Daily = "ds.composer.context.window_day" }
+
+function M.window_short(label: string): string
+	return SHORT[label] or label
+end
+
+function M.window_long(label: string): string
+	local key = LONG[label]
+	return if key then locale.s(key) else label
+end
+
+-- The plan's window nearest its limit, from PLAN_NEAR; nil below it.
+function M.near(plan: Plan?): Window?
+	local most: Window? = nil
+	for _, w in if plan then plan.windows else {} do
+		if w.used >= M.PLAN_NEAR and (most == nil or w.used > most.used) then
+			most = w
+		end
+	end
+	return most
+end
+
+local function percent(f: number): string
+	return locale.s("ds.composer.context.percent", { n = math.floor(f * 100 + 0.5) })
+end
+
+-- The card's plan: "<agent> <plan> · plan", then a row and a meter a window.
+local function PlanPart(plan: () -> Plan?): Node
+	local function windows(): { Window }
+		local p = plan()
+		return if p then p.windows else {}
+	end
+	return ui.show(function(): boolean
+		return #windows() > 0
+	end, ui.column {
+		id = "composer-context-plan",
+		w_full = true,
+		pb = "$space.1",
+		ui.div { mx = ui.raw(-4, "the card's inset: the rule runs edge to edge"), my = "$space.1", Menu.Rule {} },
+		ui.row {
+			h = "$zeron.menu.heading",
+			px = "$space.2",
+			items = "center",
+			ui.text {
+				function(): string
+					local p = plan()
+					if not p then
+						return ""
+					end
+					local name = if p.plan and p.plan ~= "" then `{p.agent.label} {p.plan}` else p.agent.label
+					return locale.s("ds.composer.context.plan", { name = name })
+				end,
+				text_size = "$font.size.xs",
+				weight = "$font.weight.medium",
+				color = "$text.tertiary",
+			},
+		},
+		ui.each(ui.computed(windows), function(w: Window): Node
+			local resets = ProviderCard.when_words(w.resets, ui.now() / 1000)
+			return ui.column {
+				w_full = true,
+				ui.row {
+					h = 22,
+					px = "$space.2",
+					gap = "$space.2",
+					items = "center",
+					justify = "between",
+					text_size = "$font.size.sm",
+					color = "$text.tertiary",
+					ui.text { M.window_long(w.label) },
+					ui.text {
+						if resets then locale.s("ds.composer.context.plan_window", { percent = percent(w.used), when = resets }) else percent(w.used),
+						id = `composer-context-plan-{M.window_short(w.label)}`,
+						tabular = true,
+						color = M.usage_ink(w.used),
+					},
+				},
+				ui.div {
+					mx = "$space.2",
+					mt = "$zeron.space.hair",
+					mb = "$space.1",
+					h = 4,
+					rounded = ui.raw(2, "the 4 px meter's round ends"),
+					overflow = "hidden",
+					bg = "$hover",
+					ui.div { h = "100%", w = `{math.clamp(w.used, 0, 1) * 100}%`, rounded = ui.raw(2, "the 4 px meter's round ends"), bg = M.usage_ink(w.used) },
+				},
+			}
+		end),
+	})
+end
+
+function M.Card(props: { usage: () -> Usage?, stats: (() -> SessionStats.Stats?)?, working: (() -> boolean)?, plan: (() -> Plan?)? }): Node
 	local usage = props.usage
 	local function fraction(): number?
 		return M.fraction(usage())
@@ -244,7 +354,147 @@ function M.Card(props: { usage: () -> Usage?, stats: (() -> SessionStats.Stats?)
 				end,
 			}
 			else nil,
+		if props.plan then PlanPart(props.plan) else nil,
 	}
+end
+
+-- The footer's one chip (gpui's `ring_chip`, context_usage.rs): the ring
+-- and how full the context is once a window is told, then " · " and the
+-- prompt cache's clock once a turn told its TTL. Resting on it (or the keys
+-- reaching it) opens the card.
+M.Chip = ui.component(function(props: {
+	usage: () -> Usage?,
+	stats: (() -> SessionStats.Stats?)?,
+	working: (() -> boolean)?,
+	plan: (() -> Plan?)?,
+	side: () -> string,
+}): Node
+	local working = props.working or function(): boolean
+		return false
+	end
+	local word = SessionStats.use_word(props.stats or function(): SessionStats.Stats?
+		return nil
+	end, working)
+	local function windowed(): boolean
+		local u = props.usage()
+		return u ~= nil and u.window ~= nil and u.window > 0
+	end
+	local function fraction(): number?
+		return M.fraction(props.usage())
+	end
+	return ui.show(function(): boolean
+		return windowed() or word:get() ~= nil
+	end, ui.presence(props.side, function(at: string): Node
+		return ui.row {
+			id = "composer-context",
+			h = 24,
+			px = "$zeron.space.tight",
+			gap = ui.raw(5, "gpui's ring_chip gap"),
+			items = "center",
+			shrink = 0,
+			rounded = "$radius.lg",
+			hover = { bg = "$hover" },
+			focusable = true,
+			selectable = false,
+			text_size = "$font.size.xs",
+			label = locale.t("ds.composer.context_used"),
+			tooltip = M.Card { usage = props.usage, stats = props.stats, working = props.working, plan = props.plan },
+			tooltip_placement = { side = at, align = "end", offset = 8 },
+			tooltip_delay = 150,
+			ui.show(windowed, M.Ring {
+				footer = true,
+				fraction = function(): number
+					return fraction() or 0
+				end,
+			}),
+			ui.show(function(): boolean
+				return fraction() ~= nil
+			end, ui.text {
+				function(): string
+					return percent(fraction() or 0)
+				end,
+				id = "composer-context-percent",
+				tabular = true,
+				color = function(): string
+					return M.ink(fraction() or 0)
+				end,
+			}),
+			ui.show(function(): boolean
+				return windowed() and word:get() ~= nil
+			end, ui.text { "·", color = "$text.tertiary", opacity = 0.5 }),
+			ui.show(function(): boolean
+				return word:get() ~= nil
+			end, ui.row {
+				gap = "$zeron.space.hair",
+				items = "center",
+				color = function(): string
+					local w = word:get()
+					return if w then w.tone else "$text.tertiary"
+				end,
+				label = function(): string
+					local w = word:get()
+					return locale.s("ds.session_stats.cache", { left = if w then w.long else "" })
+				end,
+				ui.div { shrink = 0, Icon { name = "clock-circle", size = 11 } },
+				ui.text {
+					function(): string
+						local w = word:get()
+						return if w then w.short else ""
+					end,
+					id = "composer-context-clock",
+					tabular = true,
+				},
+			}),
+		}
+	end))
+end)
+
+-- The plan nearing its limit, left of the context chip: the agent's mark and
+-- "5h 82%" in the plan's ink. Below PLAN_NEAR, nothing. It opens the same card.
+function M.PlanChip(props: { plan: () -> Plan?, card: Node, side: () -> string }): Node
+	return ui.show(function(): boolean
+		return M.near(props.plan()) ~= nil
+	end, ui.presence(props.side, function(at: string): Node
+		return ui.row {
+			id = "composer-plan",
+			h = 24,
+			px = "$zeron.space.tight",
+			gap = ui.raw(5, "gpui's ring_chip gap"),
+			items = "center",
+			shrink = 0,
+			rounded = "$radius.lg",
+			hover = { bg = "$hover" },
+			focusable = true,
+			selectable = false,
+			text_size = "$font.size.xs",
+			color = function(): string
+				local w = M.near(props.plan())
+				return M.usage_ink(if w then w.used else 0)
+			end,
+			label = function(): string
+				local p = props.plan()
+				return locale.s("ds.composer.context.plan", { name = if p then p.agent.label else "" })
+			end,
+			tooltip = props.card,
+			tooltip_placement = { side = at, align = "end", offset = 8 },
+			tooltip_delay = 150,
+			ui.presence(function(): string?
+				local p = props.plan()
+				return if p then p.agent.id else nil
+			end, function(): Node
+				local a = (props.plan() :: Plan).agent
+				return AgentMark { label = a.label, seed = a.id, mark = if a.icon then nil else a.mark, icon = a.icon, size = 14, bare = true }
+			end, { shrink = 0 }),
+			ui.text {
+				function(): string
+					local w = M.near(props.plan())
+					return if w then `{M.window_short(w.label)} {percent(w.used)}` else ""
+				end,
+				id = "composer-plan-word",
+				tabular = true,
+			},
+		}
+	end))
 end
 
 return M
