@@ -34,6 +34,13 @@ pub fn install(host: &ScriptHost, platform: Rc<RefCell<Option<PlatformService>>>
             Ok(Value::from(path.to_string_lossy().as_ref()))
         }
     });
+    host.async_action("chat.thumb", move |args| {
+        let path = crate::auth::text(&args);
+        async move {
+            let svg = off_thread(move || std::fs::read(&path).ok().and_then(|bytes| thumb_svg(&bytes))).await.flatten();
+            Ok(svg.map_or(Value::Nil, |svg| Value::from(svg.as_str())))
+        }
+    });
     host.async_action("chat.paste_text", move |args| {
         let words = args.field("text").map(crate::auth::text).unwrap_or_default();
         let name = args.field("name").map(crate::auth::text).unwrap_or_default();
@@ -109,6 +116,43 @@ fn write_png(dir: &Path, w: u32, h: u32, pixels: &[u8]) -> Result<PathBuf, Strin
     Ok(path)
 }
 
+const THUMB: u32 = 32;
+
+/// A picture as an SVG of its centre square in 32×32 cells, corners rounded: an editor chip's icon is an SVG, and the fork's resvg draws no embedded pictures.
+fn thumb_svg(bytes: &[u8]) -> Option<String> {
+    let image = zgx_gpu::assets::decode_image(bytes).ok()?;
+    let (w, h) = (image.width(), image.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let pixels = image.pixels();
+    let side = w.min(h);
+    let (x0, y0) = ((w - side) / 2, (h - side) / 2);
+    let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {THUMB} {THUMB}\"><clipPath id=\"r\"><rect width=\"{THUMB}\" height=\"{THUMB}\" rx=\"6\"/></clipPath><g clip-path=\"url(#r)\" shape-rendering=\"crispEdges\">");
+    for cy in 0..THUMB {
+        for cx in 0..THUMB {
+            let (from_x, to_x) = (x0 + cx * side / THUMB, (x0 + (cx + 1) * side / THUMB).max(x0 + cx * side / THUMB + 1));
+            let (from_y, to_y) = (y0 + cy * side / THUMB, (y0 + (cy + 1) * side / THUMB).max(y0 + cy * side / THUMB + 1));
+            let mut sum = [0u64; 4];
+            let mut n = 0u64;
+            for y in from_y..to_y.min(h) {
+                for x in from_x..to_x.min(w) {
+                    let at = (y as usize * w as usize + x as usize) * 4;
+                    for (i, s) in sum.iter_mut().enumerate() {
+                        *s += u64::from(pixels[at + i]);
+                    }
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            let [r, g, b, a] = sum.map(|s| s / n);
+            svg.push_str(&format!("<rect x=\"{cx}\" y=\"{cy}\" width=\"1\" height=\"1\" fill=\"#{r:02x}{g:02x}{b:02x}\" fill-opacity=\"{:.2}\"/>", a as f32 / 255.));
+        }
+    }
+    svg.push_str("</g></svg>");
+    Some(svg)
+}
+
 /// `work` on a thread of its own, its answer awaited here (None only if it
 /// panicked), as images.rs's.
 async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
@@ -141,5 +185,20 @@ mod tests {
         assert_ne!(text, write_text(&dir, "Pasted text 1.txt", "more").expect("written again"));
         assert_eq!(std::fs::read_to_string(&text).unwrap(), "words");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_thumbnail_is_the_pictures_centre_square_in_cells() {
+        let dir = std::env::temp_dir().join(format!("zeron-zgx-thumb-test-{}", std::process::id()));
+        let mut pixels = Vec::new();
+        for x in 0..64 {
+            pixels.extend_from_slice(if x < 32 { &[255, 0, 0, 255] } else { &[0, 0, 255, 255] });
+        }
+        let path = write_png(&dir, 64, 1, &pixels).expect("written");
+        let svg = thumb_svg(&std::fs::read(&path).unwrap()).expect("a thumbnail");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(svg.matches("<rect x=").count(), (THUMB * THUMB) as usize);
+        assert!(svg.contains("fill=\"#ff0000\"") && !svg.contains("fill=\"#0000ff\""), "a 64×1 strip's centre square is its 32nd pixel");
+        assert!(thumb_svg(b"not a picture").is_none());
     }
 }

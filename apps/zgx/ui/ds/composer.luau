@@ -1362,7 +1362,31 @@ return ui.component(function(props: Props): Node
 		end,
 		refs = props.refs,
 	}
-	local unit = if props.refs then references.unit(props.refs, value, field) else nil
+	if props.refs and props.cargo and props.on_remove_cargo then
+		local cargo_state, remove = props.cargo, props.on_remove_cargo
+		ui.effect(function()
+			local text = value:get()
+			for _, id in references.gone(text, cargo_state:peek() :: any) do
+				remove(id)
+			end
+		end)
+	end
+	local unit = if props.refs
+		then references.unit(props.refs, value, field, function(ref: any, shown: string): boolean
+			if ref.kind ~= "pasted" or not props.on_open_pasted or not props.cargo then
+				return false
+			end
+			for _, c in props.cargo:peek() do
+				if (c :: any).shown == shown then
+					(props.on_open_pasted :: any)(c.id, function(): boolean
+						return false
+					end)
+					return true
+				end
+			end
+			return false
+		end)
+		else nil
 	-- Asked to: the keys, the caret at the end.
 	if props.focus then
 		local focus = props.focus

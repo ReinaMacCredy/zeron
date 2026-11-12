@@ -342,15 +342,49 @@ return ui.component(function(props: Props): Node
 			inline[n] = (PastedText.opener(a :: any, if props.session then props.session() else nil) :: any) or function() end
 		end
 	end
+	local pictured: { [number]: number } = {}
+	local thumbs = ui.use_state({} :: { [number]: string })
+	do
+		local k = 0
+		for _, a in props.attachments or {} do
+			if a.kind == "image" and a.src and a.src ~= "" then
+				k += 1
+				local base = string.match(a.name, "^%x%x%x%x%x%x%x%x%-(.+)$") or a.name
+				local n = tonumber(string.match(base, "^Image[ _](%d+)%.%w+$"))
+				if n and string.find(props.text, `(zeron-image:{n})`, 1, true) then
+					pictured[n] = k
+					local ok, asked = pcall(ui.call, "chat.thumb", a.src)
+					if ok and asked then
+						asked:after(function(svg: any)
+							if type(svg) == "string" then
+								local next = table.clone(thumbs:peek())
+								next[n] = "code:" .. svg
+								thumbs:set(next)
+							end
+						end, function() end)
+					end
+				end
+			end
+		end
+	end
 	local function open(target: string)
 		local n = tonumber(string.match(target, "^zeron%-attachment:(%d+)$"))
+		local picture = tonumber(string.match(target, "^zeron%-image:(%d+)$"))
 		if n then
 			if inline[n] then
 				inline[n]()
 			end
+		elseif picture then
+			if pictured[picture] then
+				Lightbox.open(images(), pictured[picture], group)
+			end
 		elseif props.open then
 			props.open(target)
 		end
+	end
+	local function attachment_icon(target: string): string?
+		local n = tonumber(string.match(target, "^zeron%-image:(%d+)$"))
+		return if n then thumbs:peek()[n] else nil
 	end
 	for _, a in props.attachments or {} do
 		local n = if a.kind == "file" then PastedText.number_of(a.name) else nil
@@ -429,7 +463,15 @@ return ui.component(function(props: Props): Node
 					ref = body,
 					w_full = true,
 					shrink = 0,
-					Markdown { text = props.text, breaks = true, open = open, link_menu = props.link_menu, chat_mark = props.chat_mark, invocations = true, find = props.find, wash = props.wash },
+					ui.presence(function(): string
+						local n = 0
+						for _ in thumbs:get() do
+							n += 1
+						end
+						return tostring(n)
+					end, function(): Node
+						return Markdown { text = props.text, breaks = true, open = open, link_menu = props.link_menu, chat_mark = props.chat_mark, attachment_icon = attachment_icon, invocations = true, find = props.find, wash = props.wash }
+					end, { w_full = true }),
 				},
 			},
 			-- The way to open it: a plain link under the text, at its left

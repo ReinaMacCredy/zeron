@@ -7,7 +7,7 @@ use zeron_proto::html_render::{self as shared, PageTheme, Rgba};
 use zgx_script::{ScriptHost, Value};
 
 /// Locks what the channel calls and posts null-prototype objects: the page shares this world until zgx gives it an isolated one.
-const PICK_SCRIPT: &str = r#"(function(){var s=document.currentScript,W=window,z=W.zgx,H="__HEIGHT__",N="__PICKS__";if(!z)return;var O=Object,DP=O.defineProperty,OC=O.create,J=W.JSON,P=J.parse,post=z.postMessage;function fix(o,k,v){try{var d=OC(null);d.value=v;d.writable=false;d.configurable=false;DP(o,k,d);}catch(e){}}fix(W,"JSON",J);fix(J,"stringify",J.stringify);var h=W.webkit&&W.webkit.messageHandlers&&W.webkit.messageHandlers.zgx;if(h)fix(h,"postMessage",h.postMessage);function rec(a){var o=OC(null);for(var i=0;i+1<a.length;i+=2){var d=OC(null);d.value=a[i+1];d.enumerable=true;DP(o,a[i],d);}return o;}function send(n,k,v){if(n)post(rec(["kind","zeron.page","nonce",n,k,v]));}W.ipc={postMessage:function(t){try{var m=P(t);if(m&&typeof m.height==="number")send(H,"height",m.height);if(m&&typeof m.edges==="number")send(H,"edges",m.edges);}catch(e){}}};var st={chosen:[],sent:[],locked:[],count:""};function g(b){return b.getAttribute("data-zeron-group")||"";}function label(b){return b.getAttribute("data-zeron-label")||(b.textContent||"").replace(/\s+/g," ").trim().slice(0,80);}function has(l,gr,c){for(var i=0;i<l.length;i++){if(l[i][0]===gr&&l[i][1]===c)return true;}return false;}function groups(){var out=[],seen=OC(null),all=document.querySelectorAll("[data-zeron-pick]");for(var i=0;i<all.length;i++){var b=all[i],gr=g(b);if(gr&&!seen[gr]){seen[gr]=1;var l=b.closest("[data-zeron-group-label]");out[out.length]=rec(["code",gr,"name",(l&&l.getAttribute("data-zeron-group-label"))||gr]);}}return out;}function apply(){var all=document.querySelectorAll("[data-zeron-pick]");for(var i=0;i<all.length;i++){var b=all[i],gr=g(b),c=b.getAttribute("data-zeron-pick"),sent=has(st.sent,gr,gr?c:label(b)),on=sent||has(st.chosen,gr,c),locked=gr?st.locked.indexOf(gr)>=0:sent;if(on)b.setAttribute("data-zeron-chosen","");else b.removeAttribute("data-zeron-chosen");if(locked)b.setAttribute("data-zeron-locked","");else b.removeAttribute("data-zeron-locked");b.setAttribute("aria-pressed",on?"true":"false");}var n=document.querySelectorAll("[data-zeron-count]");for(var j=0;j<n.length;j++)n[j].textContent=st.count;}fix(W,"__zeronPicks",function(next){if(next)st=next;apply();});document.addEventListener("click",function(e){if(!e.isTrusted||!N)return;var b=e.target&&e.target.closest?e.target.closest("[data-zeron-pick]"):null;if(!b)return;e.preventDefault();var gr=g(b),c=b.getAttribute("data-zeron-pick"),r=b.getBoundingClientRect(),at=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);send(N,"pick",rec(["group",gr,"code",c,"label",label(b),"groups",groups(),"rect",[r.left,r.top,r.width,r.height],"covered",!(at&&(b===at||b.contains(at)))]));},true);document.addEventListener("DOMContentLoaded",function(){apply();send(H,"ready",groups());});var css=document.createElement("style");css.id="zeron-picks";css.textContent="[data-zeron-pick]{cursor:pointer}[data-zeron-pick][data-zeron-chosen]{box-shadow:inset 0 0 0 1.5px var(--zeron-pick,var(--accent))}[data-zeron-pick][data-zeron-locked]{cursor:default}[data-zeron-pick][data-zeron-locked]:not([data-zeron-chosen]){opacity:.45}";if(s&&s.parentNode){s.parentNode.insertBefore(css,s);s.remove();}else{(document.head||document.documentElement).appendChild(css);}})();"#;
+const PICK_SCRIPT: &str = r#"(function(){var s=document.currentScript,W=window,z=W.zgx,H="__HEIGHT__",N="__PICKS__";if(!z)return;var O=Object,DP=O.defineProperty,OC=O.create,J=W.JSON,P=J.parse,post=z.postMessage;function fix(o,k,v){try{var d=OC(null);d.value=v;d.writable=false;d.configurable=false;DP(o,k,d);}catch(e){}}fix(W,"JSON",J);fix(J,"stringify",J.stringify);var h=W.webkit&&W.webkit.messageHandlers&&W.webkit.messageHandlers.zgx;if(h)fix(h,"postMessage",h.postMessage);function rec(a){var o=OC(null);for(var i=0;i+1<a.length;i+=2){var d=OC(null);d.value=a[i+1];d.enumerable=true;DP(o,a[i],d);}return o;}function send(n,k,v){if(n)post(rec(["kind","zeron.page","nonce",n,k,v]));}W.ipc={postMessage:function(t){try{var m=P(t);if(m&&typeof m.height==="number")send(H,"height",m.height);if(m&&typeof m.edges==="number")send(H,"edges",m.edges);}catch(e){}}};var st={chosen:[],sent:[],locked:[],count:""};function g(b){return b.getAttribute("data-zeron-group")||"";}function label(b){return b.getAttribute("data-zeron-label")||(b.textContent||"").replace(/\s+/g," ").trim().slice(0,80);}function has(l,gr,c){for(var i=0;i<l.length;i++){if(l[i][0]===gr&&l[i][1]===c)return true;}return false;}function groups(){var out=[],seen=OC(null),all=document.querySelectorAll("[data-zeron-pick]");for(var i=0;i<all.length;i++){var b=all[i],gr=g(b);if(gr&&!seen[gr]){seen[gr]=1;var l=b.closest("[data-zeron-group-label]");out[out.length]=rec(["code",gr,"name",(l&&l.getAttribute("data-zeron-group-label"))||gr]);}}return out;}function menu(){var out=[],at=OC(null),all=document.querySelectorAll("[data-zeron-pick]");for(var i=0;i<all.length;i++){var b=all[i],gr=g(b);if(!gr)continue;var e=at[gr];if(!e){var l=b.closest("[data-zeron-group-label]");e=at[gr]=rec(["code",gr,"name",(l&&l.getAttribute("data-zeron-group-label"))||gr,"options",[]]);out[out.length]=e;}e.options[e.options.length]=rec(["code",b.getAttribute("data-zeron-pick"),"label",label(b),"desc",b.getAttribute("data-zeron-desc")||b.getAttribute("title")||""]);}return out;}function apply(){var all=document.querySelectorAll("[data-zeron-pick]");for(var i=0;i<all.length;i++){var b=all[i],gr=g(b),c=b.getAttribute("data-zeron-pick"),sent=has(st.sent,gr,gr?c:label(b)),on=sent||has(st.chosen,gr,c),locked=gr?st.locked.indexOf(gr)>=0:sent;if(on)b.setAttribute("data-zeron-chosen","");else b.removeAttribute("data-zeron-chosen");if(locked)b.setAttribute("data-zeron-locked","");else b.removeAttribute("data-zeron-locked");b.setAttribute("aria-pressed",on?"true":"false");}var n=document.querySelectorAll("[data-zeron-count]");for(var j=0;j<n.length;j++)n[j].textContent=st.count;}fix(W,"__zeronPicks",function(next){if(next)st=next;apply();});document.addEventListener("click",function(e){if(!e.isTrusted||!N)return;var b=e.target&&e.target.closest?e.target.closest("[data-zeron-pick]"):null;if(!b)return;e.preventDefault();var gr=g(b),c=b.getAttribute("data-zeron-pick"),r=b.getBoundingClientRect(),at=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);send(N,"pick",rec(["group",gr,"code",c,"label",label(b),"groups",groups(),"rect",[r.left,r.top,r.width,r.height],"covered",!(at&&(b===at||b.contains(at)))]));},true);document.addEventListener("DOMContentLoaded",function(){apply();send(H,"ready",menu());});var css=document.createElement("style");css.id="zeron-picks";css.textContent="[data-zeron-pick]{cursor:pointer}[data-zeron-pick][data-zeron-chosen]{box-shadow:inset 0 0 0 1.5px var(--zeron-pick,var(--accent))}[data-zeron-pick][data-zeron-locked]{cursor:default}[data-zeron-pick][data-zeron-locked]:not([data-zeron-chosen]){opacity:.45}";if(s&&s.parentNode){s.parentNode.insertBefore(css,s);s.remove();}else{(document.head||document.documentElement).appendChild(css);}})();"#;
 
 pub fn pick_script(nonce: &str, picks: &str) -> String {
     PICK_SCRIPT.replace("__HEIGHT__", nonce).replace("__PICKS__", picks)
@@ -356,16 +356,24 @@ mod tests {
     }
 
     #[test]
-    fn settled_pages_and_the_tray_at_rest_run_no_script() {
+    fn settled_pages_and_the_picks_pill_at_rest_run_no_script() {
         let mut app = mount();
         let groups = Value::List(vec![Value::record([("code", Value::from("A")), ("name", Value::from("Góc trang"))])].into());
         let pick = Value::record([("group", Value::from("A")), ("code", Value::from("A2")), ("label", Value::from("Nổi sát đỉnh")), ("groups", groups)]);
         post(&mut app, "p1-tc1-html", "/u/html/s2/frame.html", pick);
-        assert!(app.find("#composer-picks").is_some(), "the tray shows");
+        let ready = Value::List(vec![Value::record([("code", Value::from("B")), ("name", Value::from("Thanh tab")), ("options", Value::List(Vec::new().into()))])].into());
+        let message = Value::record([
+            ("id", Value::from("html-page-p1-tc1-html")),
+            ("value", Value::record([("kind", Value::from("zeron.page")), ("nonce", Value::from("n:/u/html/s2/frame.html")), ("ready", ready)])),
+        ]);
+        app.host.set_state("page_message", message).unwrap();
+        assert!(app.host.run_command("page_post"));
+        app.frames(20);
+        assert!(app.find("#pills-picks").is_some(), "the pill shows");
         app.frames(120);
         let before = app.calls();
         app.frames(180);
-        assert_eq!(app.calls() - before, 0, "pages, cards and the tray at rest run no script");
+        assert_eq!(app.calls() - before, 0, "pages, cards and the pill at rest run no script");
     }
 
     #[test]
@@ -386,7 +394,7 @@ mod tests {
         app.frames(60);
         let p = |group: Option<&str>, code: &str, label: &str| Pick { group: group.map(str::to_owned), code: code.into(), label: label.into() };
         let zeron = with_picks(
-            "+ header của C2",
+            "B2 A2 p1 + header của C2",
             &[
                 (
                     "Khung app".into(),
@@ -399,7 +407,7 @@ mod tests {
         let calls = sent(&app);
         assert!(calls.contains(&format!("send:s2:{zeron}")), "sent as zeron_proto writes it:\n{zeron}\n---\n{calls}");
         let (words, cards) = shared::extract_picks(&zeron);
-        assert_eq!(words, "+ header của C2");
+        assert_eq!(words, "B2 A2 p1 + header của C2", "each pick's token goes as its code");
         assert_eq!(cards.len(), 2, "and read back by the host as two cards' picks");
     }
 

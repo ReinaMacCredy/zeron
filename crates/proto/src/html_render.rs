@@ -267,7 +267,7 @@ pub fn stale_engine_reply(error: &str, sent: RenderInput<'_>) -> Option<String> 
     })
 }
 
-pub const PICK_GUIDE: &str = "Options: when the page offers choices to pick from, make each option a <button> with data-zeron-pick=\"A2\" (its code), data-zeron-group=\"A\" (one pick per group; leave it out for options picked freely) and data-zeron-label=\"Floating tab\"; data-zeron-group-label names a group. A click puts the pick in the person's composer; the host marks chosen buttons data-zeron-chosen and sent ones data-zeron-locked, and fills an element with data-zeron-count. You receive the picks with their message.";
+pub const PICK_GUIDE: &str = "Options: when the page offers choices to pick from, make each option a <button> with data-zeron-pick=\"A2\" (its code), data-zeron-group=\"A\" (one pick per group; leave it out for options picked freely) and data-zeron-label=\"Floating tab\", and data-zeron-desc for a one-line description; data-zeron-group-label names a group. A click puts the pick in the person's composer; the host marks chosen buttons data-zeron-chosen and sent ones data-zeron-locked, and fills an element with data-zeron-count. You receive the picks with their message.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pick {
