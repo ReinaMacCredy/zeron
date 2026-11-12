@@ -261,7 +261,7 @@ local function platform_card(hub: () -> any, platform: string, compact: boolean)
 			local ready = model.platform_status(hub(), platform)
 			return if ready then "ready" else "not"
 		end, function(which: string): Node
-			return Icon { name = if which == "ready" then "check-circle" else "info-circle", size = 16, color = if which == "ready" then "$success" else "$text.secondary" }
+			return Icon { name = if which == "ready" then "check" else "info-circle", size = 16, color = if which == "ready" then "$success" else "$text.secondary" }
 		end, { shrink = 0 }),
 		ui.column {
 			grow = 1,
