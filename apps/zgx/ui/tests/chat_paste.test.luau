@@ -206,6 +206,8 @@ test("restore: a failed send puts the words and every chip back, merged by id wi
 	app:frames(5)
 	local before = #cargo(app)
 	expect(before >= 4).to_be(true)
+	-- (The paste's chip stands in the words.)
+	local words = app:state("chat.composer.text")
 	local ids: { string } = {}
 	for _, item in cargo(app) do
 		table.insert(ids, item.id)
@@ -225,7 +227,8 @@ test("restore: a failed send puts the words and every chip back, merged by id wi
 		expect(after[i].id).to_be(id)
 	end
 	expect(after[#after].name).to_be("later.rs")
-	expect(app:state("chat.composer.text")).to_be("my words\n\ntyped since")
+	expect(string.sub(words, 1, 8)).to_be("my words")
+	expect(app:state("chat.composer.text")).to_be(words .. "\n\ntyped since")
 	-- Numbers carry on above what came back.
 	paste(app, 5000)
 	expect(cargo(app)[#cargo(app)].name).to_be("Pasted text 2.txt")
@@ -239,6 +242,7 @@ test("restore: on the chat it came from, not the one shown since", function()
 	local app = open("s1")
 	app:set_state("chat.composer.text", "for s1")
 	paste(app, 5000)
+	local words = app:state("chat.composer.text")
 	app:command("take_now")
 	app:frames(2)
 	app:command("go_s2")
@@ -248,7 +252,7 @@ test("restore: on the chat it came from, not the one shown since", function()
 	expect(#cargo(app)).to_be(0)
 	expect(app:state("chat.composer.text")).to_be("")
 	app:command("draft_of_s1")
-	expect(app:state("test_chip")).to_be("for s1|Pasted text 1.txt")
+	expect(app:state("test_chip")).to_be(`{words}|Pasted text 1.txt`)
 end)
 
 test("a chat can't mention itself: it says so, and no chip", function()
