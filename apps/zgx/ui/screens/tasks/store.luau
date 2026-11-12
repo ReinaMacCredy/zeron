@@ -24,6 +24,11 @@ ui.effect(function()
 			tasks = {
 				needs = if light then "#4f39f6" else "#a3b3ff",
 				card = if light then "{surface.raised}" else "over({zeron.window}, alpha({text.primary}, 0.015))",
+				panel = if light then "#ededf0" else "#343438",
+				panel_edge = if light then "#0000001a" else "#ffffff14",
+				selected = if light then "#1a1a1a14" else "#ebebeb14",
+				chip = if light then "#1a1a1a0f" else "#ebebeb0f",
+				chip_hover = if light then "#1a1a1a1a" else "#ebebeb1a",
 			},
 		},
 	}
@@ -149,8 +154,8 @@ function M.assign(id: string, chat: string, send: boolean): any
 	return settle(M.host.assign({ id = id, chat = chat, send = send }))
 end
 
-function M.start(id: string, picks: any, project: string?, done: ((string) -> ())?, fail: ((any) -> ())?): any
-	return settle(M.host.start({ id = id, picks = picks, project = project }), done, fail)
+function M.start(id: string, picks: any, project: string?, plan: boolean, done: ((string) -> ())?, fail: ((any) -> ())?): any
+	return settle(M.host.start({ id = id, picks = picks, project = project, orchestrate = plan }), done, fail)
 end
 
 -- Open first in their order, then done, latest first (proto `split_tasks`).

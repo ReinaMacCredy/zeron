@@ -179,7 +179,10 @@ local function Row(t: store.Task, s: store.State): Node
 		rounded = ui.raw(12, "gpui"),
 		cursor = "pointer",
 		bg = function(): string
-			return if M.lit:get() == t.id or card.current:get() == t.id then "$zeron.selected.flat.bg" else "#00000000"
+			if card.current:get() == t.id then
+				return "$zeron.tasks.selected"
+			end
+			return if M.lit:get() == t.id then "$zeron.selected.flat.bg" else "#00000000"
 		end,
 		hover = { bg = "$hover" },
 		on_click = function()
@@ -458,7 +461,9 @@ local function BoardCard(l: Line): Node
 		rounded = ui.raw(12, "gpui"),
 		bg = "$zeron.tasks.card",
 		border = 1,
-		border_color = "$border",
+		border_color = function(): string
+			return if card.current:get() == t.id then "$accent" else "$border"
+		end,
 		hover = { border_color = "$border.strong" },
 		on_click = function()
 			open_card(t.id)

@@ -162,7 +162,42 @@ function M.use(opts: Opts)
 			end
 			return if own_key then own_key(e) else false
 		end
-		return ui.popover(m.popover(ui.textarea(props)))
+		local grow = props.grow
+		props.grow = nil
+		if not grow then
+			return ui.popover(m.popover(ui.textarea(props)))
+		end
+		local measured = ui.use_state(grow.min)
+		props.line_height = opts.line
+		props.h = function(): number
+			return math.clamp(measured:get(), grow.min, grow.max)
+		end
+		return ui.div {
+			relative = true,
+			w_full = true,
+			ui.text {
+				function(): string
+					return opts.text:get() .. "\u{200b}"
+				end,
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				opacity = 0,
+				pointer_events = "none",
+				aria_hidden = true,
+				wrap = true,
+				text_size = props.text_size,
+				weight = props.weight,
+				line_height = opts.line,
+				on_resize = function(size: any)
+					if math.abs(measured:peek() - size.h) >= 0.5 then
+						measured:set(size.h)
+					end
+				end,
+			},
+			ui.popover(m.popover(ui.textarea(props))),
+		}
 	end
 	return { textarea = textarea, menu = m }
 end

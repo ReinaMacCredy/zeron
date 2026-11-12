@@ -136,7 +136,7 @@ store.host.assign = function(args: any): any
 	return done(nil)
 end
 store.host.start = function(args: any): any
-	note(`start:{args.id}:{args.picks and args.picks.model or ""}`)
+	note(`start:{args.id}:{args.picks and args.picks.model or ""}{if args.orchestrate then ":plan" else ""}{if args.project then ` in {args.project}` else ""}`)
 	return done("new-chat")
 end
 store.host.today = function(): any
@@ -213,6 +213,13 @@ ui.command { id = "fixture.tasks_old_host", title = "Fixture: a host without tas
 		return call(name, ...)
 	end
 	store.list:set({ state = "idle", tasks = {} })
+end }
+ui.command { id = "fixture.t4_linked", title = "Fixture: the onboarding copy's title holds a command's link", menu = "Fixture", run = function()
+	local i = at("t4") :: number
+	local t = table.clone(tasks[i])
+	t.title = "[/review](zeron-invoke:7b7d) the copy"
+	tasks[i] = t
+	publish()
 end }
 ui.command { id = "fixture.tasks_refuse", title = "Fixture: the engine refuses", menu = "Fixture", run = function()
 	refuse = "Start the task on the device that owns its project"
