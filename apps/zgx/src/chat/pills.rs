@@ -40,6 +40,7 @@ struct DocLook {
     tokens: Option<f64>,
     spawns: Vec<Value>,
     doing: Option<String>,
+    doing_part: Option<String>,
     error: Option<String>,
 }
 
@@ -131,7 +132,7 @@ impl Pills {
                         me.heard_doc(&heard, frame);
                     }
                 });
-                self.docs.borrow_mut().insert(doc.clone(), DocLook { _watch: Some(watch), entries: Vec::new(), tokens: None, spawns: Vec::new(), doing: None, error: None });
+                self.docs.borrow_mut().insert(doc.clone(), DocLook { _watch: Some(watch), entries: Vec::new(), tokens: None, spawns: Vec::new(), doing: None, doing_part: None, error: None });
             }
         }
         *self.wanted_docs.borrow_mut() = docs;
@@ -151,9 +152,17 @@ impl Pills {
                     look.spawns = spawns;
                     moved = true;
                 }
-                let (doing, error) = (doing_of(&look.entries), error_of(&look.entries));
-                if doing != look.doing || error != look.error {
-                    (look.doing, look.error) = (doing, error);
+                let part = last_tool(&look.entries);
+                let part_id = part.and_then(|p| p["id"].as_str()).map(str::to_owned);
+                if part_id != look.doing_part {
+                    let doing = part.and_then(tool_words);
+                    look.doing_part = part_id;
+                    moved |= doing != look.doing;
+                    look.doing = doing;
+                }
+                let error = error_of(&look.entries);
+                if error != look.error {
+                    look.error = error;
                     moved = true;
                 }
             }
@@ -227,9 +236,13 @@ fn newest(entries: &[Entry]) -> Option<&Json> {
     entries.iter().rev().find_map(|e| e.json.as_ref())
 }
 
-fn doing_of(entries: &[Entry]) -> Option<String> {
+fn last_tool(entries: &[Entry]) -> Option<&Json> {
     let last = newest(entries).filter(|j| j["role"].as_str() == Some("assistant"))?;
-    let row = last["parts"].as_array()?.iter().rev().filter(|p| p["kind"].as_str() == Some("tool")).find_map(tool)?;
+    last["parts"].as_array()?.iter().rev().find(|p| p["kind"].as_str() == Some("tool"))
+}
+
+fn tool_words(part: &Json) -> Option<String> {
+    let row = tool(part)?;
     let verb = row.field("verb").map(text)?;
     Some(match row.field("target").map(text) {
         Some(target) => format!("{verb} {target}"),
@@ -649,12 +662,12 @@ pub(super) mod tests {
             { "kind": "tool", "id": "t2", "call": { "kind": "exec", "command": "cargo test" } },
             { "kind": "text", "text": "Running the tests." },
         ] }))];
-        assert_eq!(doing_of(&working).as_deref(), Some("Ran cargo test"));
+        assert_eq!(last_tool(&working).and_then(tool_words).as_deref(), Some("Ran cargo test"));
         assert_eq!(error_of(&working), None);
         let failed = vec![Entry::new(json!({ "id": "e2", "role": "assistant", "parts": [{ "kind": "error", "message": "Usage limit\nreached" }] }))];
         assert_eq!(error_of(&failed).as_deref(), Some("Usage limit reached"));
         let asked = vec![Entry::new(json!({ "id": "u1", "role": "user", "parts": [] }))];
-        assert_eq!(doing_of(&asked), None);
+        assert_eq!(last_tool(&asked), None);
     }
 
     #[test]
