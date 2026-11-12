@@ -89,8 +89,8 @@ function M.screen3d(key: string, screen: any): { any }
 	return touches("device.screen3d", { key = key, screen = screen })
 end
 
-function M.pointer3d(key: string, phase: string, x: number, y: number): { any }
-	return touches("device.pointer3d", { key = key, phase = phase, x = x, y = y })
+function M.pointer3d(key: string, phase: string, x: number, y: number, orbit: boolean?): { any }
+	return touches("device.pointer3d", { key = key, phase = phase, x = x, y = y, orbit = orbit })
 end
 
 function M.wheel3d(key: string, e: { dx: number, dy: number, x: number?, y: number?, ctrl: boolean? }): boolean

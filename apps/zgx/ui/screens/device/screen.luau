@@ -294,7 +294,7 @@ function M.make(props: { key: string, host: string, id: string, visible: (() -> 
 		on_press = function(e: any)
 			down = true
 			if three_d() then
-				send_all(api.pointer3d(key, "begin", e.local_x or 0, e.local_y or 0))
+				send_all(api.pointer3d(key, "begin", e.local_x or 0, e.local_y or 0, e.alt == true))
 				return
 			end
 			local x, y = point(e)
