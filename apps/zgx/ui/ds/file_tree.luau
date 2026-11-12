@@ -2260,7 +2260,10 @@ local function component(props: Props): Node
 				shrink = 0,
 				items = "center",
 				if n.dir then chevron(id) else ui.div { w = CHEV, shrink = 0 },
-				FileIcon { name = n.name, dir = n.dir, size = ICON },
+				FileIcon { name = n.name, dir = n.dir, open = if n.dir then function(): boolean
+					version:get()
+					return wants_open(id)
+				end else nil, size = ICON },
 			},
 			-- (The field is built only while it's renamed.)
 			ui.presence(function(): string
@@ -2566,7 +2569,7 @@ local function component(props: Props): Node
 						rotate = 90,
 						Icon { name = "alt-arrow-right", size = 12 },
 					},
-					FileIcon { name = n.name, dir = true, size = ICON },
+					FileIcon { name = n.name, dir = true, open = true, size = ICON },
 				},
 				name_node(id, function(): boolean
 					return false

@@ -384,8 +384,8 @@ function M.setup()
 				stack = 48,
 				tree = 288,
 				view = 360,
-				-- Which of a file icon's two drawings shows (as drawn, for
-				-- light; its accents lifted, for dark).
+				-- Which of a file icon's two drawings shows (its light
+				-- theme's, for light; as drawn, for dark).
 				light = 1,
 				dark = 0,
 			},
