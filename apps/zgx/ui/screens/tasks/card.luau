@@ -57,31 +57,33 @@ function M.press_outside()
 end
 
 -- A field that saves `key` as typed, a pause after the last key.
-local function saved(t: store.Task, key: string): (State<string>, () -> (), string)
+local function saved(t: store.Task, key: string): (State<string>, string)
 	local refs = `task:{t.id}:{key}`
 	local value = ui.use_state(field_kit.shown(refs, (t :: any)[key] or ""))
+	local committed = value:peek()
 	local seq = 0
-	local pending = false
 	local function flush()
-		if pending then
-			pending = false
-			local v = value:peek()
-			if key ~= "title" or not string.match(v, "^%s*$") then
-				store.update(t.id, { [key] = references.encode(refs, v) })
-			end
+		local v = value:peek()
+		if v == committed then
+			return
+		end
+		committed = v
+		if key ~= "title" or not string.match(v, "^%s*$") then
+			store.update(t.id, { [key] = references.encode(refs, v) })
 		end
 	end
-	local function typed(v: string)
-		value:set(v)
+	ui.effect(function()
+		if value:get() == committed then
+			return
+		end
 		seq += 1
-		pending = true
 		local mine = seq
 		ui.after(SAVE_MS, function()
 			if mine == seq then
 				flush()
 			end
 		end)
-	end
+	end)
 	table.insert(flushers, flush)
 	ui.on_cleanup(function()
 		flush()
@@ -90,7 +92,7 @@ local function saved(t: store.Task, key: string): (State<string>, () -> (), stri
 			table.remove(flushers, at)
 		end
 	end)
-	return value, typed :: any, refs
+	return value, refs
 end
 
 local function Pick(props: { id: string, label: string, icon: string, value: () -> string, options: () -> { any }, on_pick: (string) -> (), w: number, quiet: boolean? }): Node
@@ -373,7 +375,7 @@ function M.start(t: store.Task)
 	if project == nil then
 		project = t.project
 	end
-	store.start(t.id, { model = m.value, effort = effort, access = defaults().access }, if project == "" then nil else project, M.plan_first:peek(), function(chat: any)
+	store.start(t.id, { model = m.value, effort = effort, access = defaults().access }, project, M.plan_first:peek(), function(chat: any)
 		over()
 		if type(chat) == "string" then
 			open_when_landed(chat)
@@ -794,8 +796,8 @@ local function Body(id: string): Node
 		return ui.div {}
 	end
 	local t = t0 :: store.Task
-	local title, type_title, title_refs = saved(t, "title")
-	local notes, type_notes, notes_refs = saved(t, "notes")
+	local title, title_refs = saved(t, "title")
+	local notes, notes_refs = saved(t, "notes")
 	local menu = ui.use_state(false)
 	local title_ref, notes_ref = ui.ref(), ui.ref()
 	ui.after(0, function()
@@ -803,12 +805,6 @@ local function Body(id: string): Node
 		if el then
 			el:focus()
 		end
-	end)
-	ui.effect(function()
-		type_title(title:get())
-	end)
-	ui.effect(function()
-		type_notes(notes:get())
 	end)
 	local function live(): store.Task
 		return store.find(id) or t
@@ -1016,8 +1012,7 @@ local function Body(id: string): Node
 	}
 end
 
-M.Card = ui.component(function(): Node
-	local reduced = motion.reduced_now()
+local function Overlay(reduced: boolean): Node
 	local room = ui.use_state(0)
 	local content_h = ui.use_state(0)
 	local function measure(into: State<number>): (size: any) -> ()
@@ -1121,6 +1116,14 @@ M.Card = ui.component(function(): Node
 		enter = if reduced then nil else { opacity = { 0, 1 }, x = { 28, 0 }, duration = 300, ease = DRAWER },
 		exit = if reduced then nil else { opacity = 0, x = 20, duration = 220, ease = SHARP },
 	})
+end
+
+M.Card = ui.component(function(): Node
+	return ui.presence(function(): string
+		return if motion.reduced() then "still" else "moving"
+	end, function(mode: string): Node
+		return Overlay(mode == "still")
+	end, { absolute = true, left = 0, right = 0, top = 0, bottom = 0, pointer_events = "none" })
 end)
 
 return M

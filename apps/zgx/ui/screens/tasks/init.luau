@@ -628,21 +628,26 @@ M.Page = ui.component(function(): Node
 				px = ui.raw(24, "gpui"),
 				Header(),
 				ui.presence(function(): string
-					return M.view:get()
-				end, function(v: string): Node
-					if v == "board" then
-						return Board()
-					end
-					return ui.column {
-						w_full = true,
-						grow = 1,
-						min_h = 0,
-						arrive(function(): Node
-							return M.AddRow { id = "tasks-add", placeholder = locale.s("tasks.add_placeholder") }
-						end, { opacity = { 0, 1 }, duration = EXTRA, delay = EXTRA_AT, ease = "linear" }, { w_full = true }),
-						List(),
-					}
-				end, { w_full = true, grow = 1, min_h = 0, exit = if motion.reduced_now() then nil else { opacity = 0, duration = FADE, ease = "out(2)" } }),
+					return if motion.reduced() then "still" else "moving"
+				end, function(mode: string): Node
+					local still = mode == "still"
+					return ui.presence(function(): string
+						return M.view:get()
+					end, function(v: string): Node
+						if v == "board" then
+							return Board()
+						end
+						return ui.column {
+							w_full = true,
+							grow = 1,
+							min_h = 0,
+							arrive(function(): Node
+								return M.AddRow { id = "tasks-add", placeholder = locale.s("tasks.add_placeholder") }
+							end, { opacity = { 0, 1 }, duration = EXTRA, delay = EXTRA_AT, ease = "linear" }, { w_full = true }),
+							List(),
+						}
+					end, { w_full = true, grow = 1, min_h = 0, exit = if still then nil else { opacity = 0, duration = FADE, ease = "out(2)" } })
+				end, { w_full = true, grow = 1, min_h = 0 }),
 			},
 		},
 		card.Card {},
