@@ -1114,7 +1114,7 @@ local function stream(props: { tab: any, panel_key: string, r: Run, visible: (()
 				label = why,
 				tooltip = why,
 				px = "$space.1",
-				ui.text { "!", text_size = "$font.size.sm", weight = "bold", color = "$danger" },
+				ui.text { "!", text_size = "$font.size.sm", weight = "$font.weight.bold", color = "$danger" },
 			}
 		end),
 	}
