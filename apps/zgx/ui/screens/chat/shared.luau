@@ -221,13 +221,42 @@ function M.take(of: string?): (string, { any })
 	local raw = if mine then M.text:peek() else M.draft_peek(key).text
 	local quotes = if mine then M.quotes:peek() elseif stored and stored.quotes then stored.quotes else {}
 	local text = references.encode(M.refs_key(key), Quote.expand(raw, Quote.kept(raw, quotes)))
-	-- (A pasted text whose chip was deleted stays behind, as gpui's does.)
+	-- A pasted text whose chip was deleted stays behind, as gpui's does; one
+	-- whose chip's map is gone (a reload) is found by its words.
 	local cargo = {}
+	local carried: { [string]: boolean } = {}
+	local lost = {}
 	for _, item in cargo_in(key) do
-		if not item.inline or string.find(text, `(zeron-attachment:{item.number})`, 1, true) then
-			table.insert(cargo, item)
+		if item.inline and item.shown then
+			table.insert(lost, item)
 		end
 	end
+	-- (Longest first: a twin's words hold its first's.)
+	table.sort(lost, function(a: any, b: any): boolean
+		return #a.shown > #b.shown
+	end)
+	for _, item in lost do
+		local link = `[{item.name}](zeron-attachment:{item.number})`
+		if not string.find(text, link, 1, true) then
+			local at, to = M.find_chip(text, item.shown)
+			if at and to then
+				text = string.sub(text, 1, at - 1) .. link .. string.sub(text, to + 1)
+			end
+		end
+	end
+	for _, item in cargo_in(key) do
+		local link = `[{item.name}](zeron-attachment:{item.number})`
+		if not item.inline or string.find(text, link, 1, true) then
+			table.insert(cargo, item)
+			if item.inline then
+				carried[tostring(item.number)] = true
+			end
+		end
+	end
+	-- (A paste still being written goes as its name, gpui's `demote_unattached_mentions`.)
+	text = string.gsub(text, "%[(Pasted text (%d+)%.txt)%]%(zeron%-attachment:%d+%)", function(name: string, n: string): string?
+		return if carried[n] then nil else name
+	end)
 	taken[cargo] = { key = key, raw = raw, quotes = quotes }
 	ui.batch(function()
 		if mine then
@@ -834,6 +863,27 @@ function M.paste_label(text: string): string?
 	return nil
 end
 
+-- Where a chip's words stand in `text`: not inside a longer twin (a second
+-- chip of the same first line is the first's words and an NBSP or few more),
+-- though a next chip's lead (six NBSPs) may follow it.
+function M.find_chip(text: string, shown: string): (number?, number?)
+	local from = 1
+	while true do
+		local at, to = string.find(text, shown, from, true)
+		if not at or not to then
+			return nil, nil
+		end
+		local more = 0
+		while string.sub(text, to + 1 + more * 2, to + 2 + more * 2) == "\u{a0}" do
+			more += 1
+		end
+		if more == 0 or more >= 6 then
+			return at, to
+		end
+		from = at + 1
+	end
+end
+
 -- A long paste, as gpui's composer takes it: a file of its own, carried
 -- with the message, and a chip at the caret standing for it (its first
 -- line), sent as `[Pasted text N.txt](zeron-attachment:N)`. `insert` puts
@@ -856,7 +906,7 @@ function M.paste_text(text: string, of: string?, insert: ((shown: string) -> boo
 	refuse_in(key, nil)
 	note_number(key, number)
 	local function put(words: string)
-		if not ((of == nil or here:peek() == key) and insert and insert(words)) then
+		if not (insert and insert(words)) then
 			M.set_draft_of(key, "text", M.draft_peek(key).text .. words)
 		end
 	end
@@ -865,18 +915,23 @@ function M.paste_text(text: string, of: string?, insert: ((shown: string) -> boo
 	local written: string? = nil
 	local failed = false
 	local bytes = #text
+	-- (Landing after the draft was sent or the chip deleted: nothing to carry.)
 	local function landed(path: string)
-		push_cargo(key, { { id = chip_id("paste"), kind = "file", name = name, label = label, path = path, pasted = true, inline = true, shown = shown, bytes = bytes, number = number } })
+		if M.find_chip(M.draft_peek(key).text, shown :: string) then
+			push_cargo(key, { { id = chip_id("paste"), kind = "file", name = name, label = label, path = path, pasted = true, inline = true, shown = shown, bytes = bytes, number = number } })
+		end
 	end
-	-- (Not written: the words themselves where the chip stands.)
+	-- (Not written: the words themselves where the chip stands, if it still does.)
 	local function unwritten()
 		failed = true
 		if not shown then
 			return
 		end
 		local draft = M.draft_peek(key).text
-		local at, to = string.find(draft, shown, 1, true)
-		M.set_draft_of(key, "text", if at and to then string.sub(draft, 1, at - 1) .. text .. string.sub(draft, to + 1) else draft .. text)
+		local at, to = M.find_chip(draft, shown)
+		if at and to then
+			M.set_draft_of(key, "text", string.sub(draft, 1, at - 1) .. text .. string.sub(draft, to + 1))
+		end
 	end
 	asked:after(function(path: any)
 		if type(path) ~= "string" or path == "" then
@@ -939,7 +994,7 @@ function M.open_pasted(id: string, insert: ((text: string) -> boolean)?, of: str
 			local draft = M.draft_peek(key).text
 			local at, to = nil, nil
 			if item.shown then
-				at, to = string.find(draft, item.shown, 1, true)
+				at, to = M.find_chip(draft, item.shown)
 			end
 			if at and to then
 				M.set_draft_of(key, "text", string.sub(draft, 1, at - 1) .. read.text .. string.sub(draft, to + 1))
@@ -1579,7 +1634,7 @@ end
 local function without_chip(text: string, item: any): string
 	local at, to = nil, nil
 	if item.inline and item.shown then
-		at, to = string.find(text, item.shown, 1, true)
+		at, to = M.find_chip(text, item.shown)
 	end
 	return if at and to then string.sub(text, 1, at - 1) .. string.sub(text, to + 1) else text
 end
