@@ -247,7 +247,7 @@ local function status_card(): Node
 				end, on_click = function()
 					turn_all(false)
 				end, ui.t("settings.tools.all_off") },
-			}),
+			}, true),
 		},
 	}
 end
@@ -281,26 +281,40 @@ local function switch(label: string, read: () -> boolean, write: (on: boolean) -
 	end)()
 end
 
+local CHEVRON, TILE = 14, 28
+local WORDS = ui.raw(16 + CHEVRON + 12 + TILE + 12, "where a group's words start: its inset, chevron and tile and their gaps")
+local COUNT = 168
+
 local function tool_row(g: any, tool: any): Node
 	local function editable(): boolean
 		return group_on(g) and not LINKED[g.group] and (tool.needs == nil or live(tool.needs))
 	end
+	local function dim(): any
+		return if group_on(g) and (tool.needs == nil or live(tool.needs)) then nil else "$zeron.disabled"
+	end
 	return ui.column {
 		w_full = true,
-		ds.Settings.Rule(),
-		ds.Settings.Row {
-			label = tool.name,
-			description = if tool.summary ~= "" then tool.summary else nil,
-			detail = function(): string?
-				if tool.needs and group_on(g) and not live(tool.needs) then
-					return ui.t("settings.tools.needs", { tool = tool.needs }):get()
-				end
-				return nil
-			end,
-			disabled = function(): boolean
-				return not editable()
-			end,
-			control = switch(tool.name, function(): boolean
+		pl = WORDS,
+		pr = "$space.4",
+		ui.div { h = 1, w_full = true, bg = "$zeron.settings.rule", aria_hidden = true },
+		ui.row {
+			w_full = true,
+			min_h = if tool.summary ~= "" then 44 else 32,
+			py = "$space.2",
+			gap = "$space.3",
+			items = "center",
+			ui.column {
+				grow = 1,
+				min_w = 0,
+				gap = "$zeron.space.hair",
+				opacity = dim,
+				ui.text { tool.name, font = "$font.mono", text_size = "$font.size.sm", color = "$text.primary" },
+				if tool.summary ~= "" then ui.text { tool.summary, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.secondary", wrap = true } else nil,
+				ui.show(function(): boolean
+					return tool.needs ~= nil and group_on(g) and not live(tool.needs)
+				end, ui.text { ui.t("settings.tools.needs", { tool = tool.needs or "" }), text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$zeron.tone.warning.ink", wrap = true }),
+			},
+			switch(tool.name, function(): boolean
 				return tool_on(tool.name)
 			end, function(v: boolean)
 				save(function(next: any)
@@ -320,30 +334,91 @@ local function group_row(g: any): Node
 	local function is_open(): boolean
 		return open_groups:get()[g.group] == true
 	end
+	local function toggle()
+		open_groups:set_key(g.group, if is_open() then nil else true)
+	end
 	local linked = LINKED[g.group]
 	return ui.column {
 		id = `tools-group-{g.group}`,
 		w_full = true,
-		ds.Settings.Row {
-			icon = (ICONS[g.group] or "widget") :: any,
-			label = g.title,
-			description = g.summary,
-			detail = if linked then ui.t(`settings.tools.linked.{g.group}`) else nil,
-			detail_action = if linked == "computer"
-				then ds.Button { id = "tools-link-computer", tone = "ghost", size = "sm", on_click = function()
-					route.settings("computer")
-				end, ui.t("settings.tools.open") }
-				else nil,
-			control = ui.row {
+		ui.row {
+			id = `tools-open-{g.group}`,
+			w_full = true,
+			min_h = "$zeron.settings.row",
+			px = "$space.4",
+			py = "$space.3",
+			gap = "$space.3",
+			items = "center",
+			role = "button",
+			label = ui.t("settings.tools.show_tools", { group = g.title }),
+			expanded = is_open,
+			focusable = true,
+			focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = -2 },
+			cursor = "pointer",
+			hover = { bg = "$hover" },
+			on_click = toggle,
+			ui.div {
+				w = CHEVRON,
+				shrink = 0,
+				color = "$text.tertiary",
+				aria_hidden = true,
+				ds.Icon { name = function(): any
+					return if is_open() then "alt-arrow-down" else "alt-arrow-right"
+				end, size = CHEVRON },
+			},
+			ui.row {
+				w = TILE,
+				h = TILE,
+				shrink = 0,
+				items = "center",
+				justify = "center",
+				rounded = "$radius.lg",
+				bg = "$zeron.secondary.bg",
+				color = function(): string
+					return if group_on(g) then "$text.primary" else "$text.secondary"
+				end,
+				aria_hidden = true,
+				ds.Icon { name = (ICONS[g.group] or "widget") :: any, size = 16 },
+			},
+			ui.column {
+				grow = 1,
+				basis = 0,
+				min_w = 0,
+				gap = "$zeron.space.hair",
+				ui.text { g.title, text_size = "$font.size.md", line_height = "$font.line.md", weight = "$font.weight.medium", color = "$text.primary", wrap = true },
+				ui.text { g.summary, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.secondary", wrap = true },
+				if linked
+					then ui.row {
+						id = `tools-link-{g.group}`,
+						ds.Link {
+							ui.t(`settings.tools.linked.{g.group}`),
+							tone = "quiet",
+							size = "sm",
+							on_click = function()
+								route.settings(if linked == "devices" then "device_hub" else linked)
+							end,
+						},
+					}
+					else nil,
+			},
+			ui.row {
+				shrink = 0,
 				gap = "$space.2",
 				items = "center",
-				ui.text {
-					function(): string
-						return counted(g)
-					end,
-					font = "$font.mono",
-					text_size = "$font.size.xs",
-					color = "$text.tertiary",
+				-- (Its own: a click on the count or the switch doesn't open the group.)
+				on_click = function() end,
+				role = "group",
+				ui.row {
+					min_w = COUNT,
+					justify = "end",
+					ui.text {
+						function(): string
+							return counted(g)
+						end,
+						font = "$font.mono",
+						text_size = "$font.size.xs",
+						color = "$text.tertiary",
+					},
 				},
 				switch(g.title, function(): boolean
 					return group_on(g)
@@ -357,18 +432,6 @@ local function group_row(g: any): Node
 				end, function(): boolean
 					return linked ~= nil or saving:get() > 0
 				end),
-				ds.IconButton {
-					id = `tools-open-{g.group}`,
-					icon = function(): any
-						return if is_open() then "alt-arrow-down" else "alt-arrow-right"
-					end,
-					size = "sm",
-					tone = "quiet",
-					label = ui.t("settings.tools.show_tools", { group = g.title }),
-					on_click = function()
-						open_groups:set_key(g.group, if is_open() then nil else true)
-					end,
-				},
 			},
 		},
 		ui.show(is_open, ui.column {
@@ -377,14 +440,17 @@ local function group_row(g: any): Node
 				return not group_on(g)
 			end, ui.column {
 				w_full = true,
-				ds.Settings.Rule(),
-				ui.text { ui.t("settings.tools.group_off"), id = `tools-off-{g.group}`, px = "$space.4", py = "$space.2", text_size = "$font.size.sm", color = "$text.secondary", wrap = true },
+				pl = WORDS,
+				pr = "$space.4",
+				ui.div { h = 1, w_full = true, bg = "$zeron.settings.rule", aria_hidden = true },
+				ui.text { ui.t("settings.tools.group_off"), id = `tools-off-{g.group}`, py = "$space.2", text_size = "$font.size.sm", color = "$text.secondary", wrap = true },
 			}),
 			ui.each(g.tools, function(tool: any): Node
 				return tool_row(g, tool)
 			end, { key = function(tool: any): string
 				return tool.name
 			end }),
+			ui.div { h = 6 },
 		}),
 	}
 end
@@ -411,7 +477,7 @@ function M.view(): Node
 		}),
 		ui.show(function(): boolean
 			return groups:get() == nil and failed:get() == nil
-		end, ui.text { ui.t("settings.compaction.loading"), color = "$text.secondary", text_size = "$font.size.sm" }),
+		end, ui.text { ui.t("settings.compaction.loading"), px = ds.Settings.inset(), color = "$text.secondary", text_size = "$font.size.sm" }),
 		ui.show(function(): boolean
 			return groups:get() ~= nil
 		end, ui.column {

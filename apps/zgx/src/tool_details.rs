@@ -269,6 +269,14 @@ pub fn computer_row(part: &Json) -> Option<ComputerRow> {
     })
 }
 
+/// A file change kept only as its counts; the host still serves its diff as `{chat}/{part}.diff` (gpui's `diff_ref_of`).
+pub fn diff_counted_only(part: &Json) -> bool {
+    part["kind"].as_str() == Some("tool")
+        && part["diffStats"].as_array().is_some_and(|s| !s.is_empty())
+        && part["diffRef"].as_str().is_none_or(str::is_empty)
+        && !part["diff"].is_object()
+}
+
 /// What a tool part carries for its row to open to, beyond its line: its
 /// output's summary, its files' counts, the sidecar's refs, and an older
 /// doc's diff itself.
@@ -300,6 +308,10 @@ pub fn tool_fields(part: &Json) -> Vec<(&'static str, Value)> {
     }
     if let Some(r) = text("diffRef") {
         fields.push(("diff_ref", Value::from(r)));
+    } else if diff_counted_only(part)
+        && let (Some(doc), Some(id)) = (text("chat"), text("id"))
+    {
+        fields.push(("diff_ref", Value::from(format!("{doc}/{id}.diff").as_str())));
     }
     if let Some(stats) = part["diffStats"].as_array().filter(|s| !s.is_empty()) {
         let rows: Vec<Value> = stats
@@ -366,6 +378,10 @@ mod tests {
         assert_eq!(names, vec!["output", "output_ref", "output_bytes", "diff_ref", "stats"]);
         let old = json!({ "diff": { "path": "a.txt", "oldText": "a\n", "newText": "b\n" } });
         assert_eq!(tool_fields(&old).into_iter().map(|(k, _)| k).collect::<Vec<_>>(), vec!["diff"]);
+        let counted = json!({ "kind": "tool", "id": "p2", "chat": "c1",
+                              "diffStats": [{ "path": "src/a.rs", "additions": 3, "deletions": 0 }] });
+        let derived = tool_fields(&counted).into_iter().find(|(k, _)| *k == "diff_ref").map(|(_, v)| v);
+        assert_eq!(derived, Some(Value::from("c1/p2.diff")));
     }
 
     const SECRET: &str = "hunter2-secret";

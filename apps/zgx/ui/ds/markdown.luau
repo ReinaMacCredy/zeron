@@ -394,7 +394,7 @@ end
 local function mention_chip(span: { [any]: any }, target: string, name: string, ctx: Ctx?)
 	local chat = string.match(target, "^zeron%-chat:") ~= nil
 	local dir = string.sub(target, -1) == "/"
-	local set = if string.find(ui.theme.kind(), "dark", 1, true) then "dark" else "light"
+	local dark = string.find(ui.theme.kind(), "dark", 1, true) ~= nil
 	-- (One pill, zgx d6582b32: icon, gap, name and padding on one wash,
 	-- not underlined at rest; its text is the name alone, so a selection
 	-- across it copies the name.)
@@ -409,7 +409,7 @@ local function mention_chip(span: { [any]: any }, target: string, name: string, 
 	local own = if chat then Mark.chip_icon(mark, 14, 3) else nil
 	span.icon = if own then own
 		elseif chat then { src = "assets/icons/ui/chat-round-line.svg", size = 14, gap = 3, tint = "currentColor" }
-		else { src = `assets/icons/files/{set}/{FileIcon.of(name, dir)}.svg`, size = 14, gap = 3 }
+		else { src = FileIcon.src(name, dir, dark), size = 14, gap = 3 }
 end
 
 local function invocation_chip(span: { [any]: any }, name: string)
