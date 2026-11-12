@@ -700,7 +700,7 @@ local function appshot_tile(item: Item, props: Props): Node
 					if over_x:get() then
 						return 1
 					end
-					return if hovered:get() then 0.8 else 0.56
+					return if hovered:get() then 1 else 0.7
 				end), { duration = 150 }),
 				on_click = function()
 					remove(item.id)
