@@ -860,20 +860,81 @@ local function stream(props: { tab: any, panel_key: string, r: Run, visible: (()
 	local host, id = t[1], t[2]
 	local key = props.tab.id
 	local area = ui.use_state({ w = 0, h = 0 })
+	-- 3D is the tab's default, as gpui's panel opens in 3D; Flat view turns it off.
+	local flat = ui.state(`device_flat_{key}`, false)
+	local function three_d(): boolean
+		return not flat:get()
+	end
 	local screen = Screen.make {
 		key = key,
 		host = host,
 		id = id,
 		area = area,
+		three_d = three_d,
 		visible = props.visible,
 		on_error = function(why: string)
 			r.error:set(why)
 		end,
 	}
 	local send, device, screen_config = screen.send, screen.device, screen.screen_config
+	local function hinged(): boolean
+		local sc = screen_config()
+		return sc ~= nil and sc.supportsHingeAngle == true
+	end
 	local function rotate()
 		local sc = screen_config()
-		send({ orientation = { orientation = M.next_orientation(if sc then sc.orientation else nil) } })
+		local next = M.next_orientation(if sc then sc.orientation else nil)
+		if hinged() then
+			local p = target_params(host, id)
+			p.orientation = next
+			call("SetHubDeviceHinge", p, nil, function(why: string)
+				r.error:set(why)
+			end)
+			return
+		end
+		send({ orientation = { orientation = next } })
+	end
+	local function streaming(): boolean
+		local f = api.frames:get()[key]
+		return f ~= nil and f.seq ~= nil
+	end
+	local function restore()
+		local sc = screen_config()
+		if not hinged() and sc and sc.orientation and sc.orientation ~= "portrait" then
+			send({ orientation = { orientation = "portrait" } })
+		end
+		api.restore3d(key)
+	end
+	local function fold_error(): string?
+		local f = api.folds:get()[key]
+		return if f then f.fold_error else nil
+	end
+	local function pose_selected(pose: string): boolean
+		local sc = screen_config()
+		if not sc then
+			return false
+		end
+		if pose == "laptop" or pose == "tent" then
+			return sc.hingePose == pose
+		end
+		local angle = sc.hingeAngle
+		local at = if angle == 0 then "closed" elseif angle == 180 then "open" elseif angle ~= nil then "book" else nil
+		return at == pose
+	end
+	local function pose_button(pose: string, icon: string): Node
+		return IconButton {
+			id = `device-pose-{pose}`,
+			label = s(`rail.pose_{pose}`),
+			tooltip = s(`rail.tip_{pose}`),
+			tone = "quiet",
+			lit = function(): boolean
+				return pose_selected(pose)
+			end,
+			on_click = function()
+				api.pose3d(key, pose)
+			end,
+			Icon { name = icon :: any, size = 16 },
+		}
 	end
 	local more_open = ui.state(`device_more_{key}`, false)
 	local function power_off()
@@ -986,6 +1047,76 @@ local function stream(props: { tab: any, panel_key: string, r: Run, visible: (()
 				Icon { name = "more-horizontal", size = 16 },
 			},
 		},
+		ui.div { w = 20, h = 1, my = "$space.1", bg = "$border" },
+		IconButton {
+			id = "device-view-3d",
+			label = s("rail.view_3d"),
+			tone = "quiet",
+			lit = three_d,
+			disabled = function(): boolean
+				return not streaming()
+			end,
+			on_click = function()
+				flat:set(false)
+			end,
+			Icon { name = "lucide-box", size = 16 },
+		},
+		IconButton {
+			id = "device-view-flat",
+			label = s("rail.view_flat"),
+			tone = "quiet",
+			lit = function(): boolean
+				return flat:get()
+			end,
+			disabled = function(): boolean
+				return not streaming()
+			end,
+			on_click = function()
+				flat:set(true)
+			end,
+			Icon { name = "smartphone", size = 16 },
+		},
+		ui.show(function(): boolean
+			return three_d() and streaming()
+		end, IconButton {
+			id = "device-view-restore",
+			label = s("rail.view_restore"),
+			tone = "quiet",
+			on_click = restore,
+			Icon { name = "lucide-maximize-2", size = 16 },
+		}),
+		ui.show(function(): boolean
+			local d = device()
+			return hinged() and three_d() and d ~= nil and d.platform ~= "android"
+		end, ui.column {
+			id = "device-fold-shape",
+			role = "group",
+			label = s("rail.fold_shape"),
+			items = "center",
+			gap = "$space.1",
+			ui.div { w = 20, h = 1, my = "$space.1", bg = "$border" },
+			pose_button("closed", "duo-closed"),
+			pose_button("book", "duo-book"),
+			pose_button("open", "duo-open"),
+			ui.div { w = 20, h = 1, my = "$space.1", bg = "$border" },
+			pose_button("laptop", "duo-laptop"),
+			pose_button("tent", "duo-tent"),
+		}),
+		ui.presence(function(): string
+			return fold_error() or ""
+		end, function(why: string): Node
+			if why == "" then
+				return ui.div {}
+			end
+			return ui.div {
+				id = "device-fold-error",
+				role = "alert",
+				label = why,
+				tooltip = why,
+				px = "$space.1",
+				ui.text { "!", text_size = "$font.size.sm", weight = "bold", color = "$danger" },
+			}
+		end),
 	}
 	local view = ui.column {
 		grow = 1,
