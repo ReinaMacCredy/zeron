@@ -350,7 +350,7 @@ test("a Device tab streams only while the panel shows it, and again once it show
 	expect(eventually(app, function()
 		return calls(app):find("unstream", 1, true) ~= nil
 	end)).to_be(true)
-	expect(next(app:state("device_frames") or {})).to_be_nil()
+	expect((next(app:state("device_frames") or {}))).to_be_nil()
 	app:set_state("test_panel_visible", true)
 	expect(eventually(app, function()
 		return streams() == 2

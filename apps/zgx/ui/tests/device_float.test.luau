@@ -93,7 +93,7 @@ test("an agent's device floats over its chat with Auto-show floating preview on:
 	expect(eventually(app, function()
 		return not floating(app)
 	end)).to_be(true)
-	expect(next(app:state("device_floats") or {})).to_be_nil()
+	expect((next(app:state("device_floats") or {}))).to_be_nil()
 end)
 
 test("with Auto-show floating preview off, an agent's device opens a tab and no float", function()
@@ -106,7 +106,7 @@ test("with Auto-show floating preview off, an agent's device opens a tab and no 
 	end)).to_be(true)
 	app:frames(5)
 	expect(floating(app)).to_be(false)
-	expect(next(app:state("device_floats") or {})).to_be_nil()
+	expect((next(app:state("device_floats") or {}))).to_be_nil()
 end)
 
 test("the device float hides while the panel shows the same device or the chat isn't shown, streaming only while it shows", function()
@@ -131,7 +131,7 @@ test("the device float hides while the panel shows the same device or the chat i
 	expect(eventually(app, function()
 		return not floating(app)
 	end)).to_be(true)
-	expect(next(app:state("device_frames") or {})).to_be_nil()
+	expect((next(app:state("device_frames") or {}))).to_be_nil()
 	app:set_state("test_float_chat_shown", true)
 	expect(eventually(app, function()
 		return floating(app)
@@ -182,7 +182,7 @@ test("the device float's Close takes it away; Open in right panel puts it in a D
 	expect(eventually(app, function()
 		return not floating(app)
 	end)).to_be(true)
-	expect(next(app:state("device_floats") or {})).to_be_nil()
+	expect((next(app:state("device_floats") or {}))).to_be_nil()
 	expect(tab_titles(app)).to_be("Device")
 	-- The agent opening another floats it; Open in right panel binds the picker's tab to it.
 	app:command("device_stub.agent_open_ipad")
@@ -196,7 +196,7 @@ test("the device float's Close takes it away; Open in right panel puts it in a D
 		return tab_titles(app) == "iPad Air"
 	end)).to_be(true)
 	expect(floating(app)).to_be(false)
-	expect(next(app:state("device_floats") or {})).to_be_nil()
+	expect((next(app:state("device_floats") or {}))).to_be_nil()
 	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
 end)
 
@@ -205,7 +205,7 @@ test("the pane's toggle closing it floats the device its active Device tab shows
 	set_up(app)
 	app:command("test.float_active_device_tab")
 	app:frames(3)
-	expect(next(app:state("device_floats") or {})).to_be_nil()
+	expect((next(app:state("device_floats") or {}))).to_be_nil()
 	app:click('role:button "Start Pixel 9"')
 	expect(app:wait("#device-screen", { timeout_ms = 5000 })).to_be(true)
 	app:command("test.float_active_device_tab")

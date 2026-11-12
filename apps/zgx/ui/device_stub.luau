@@ -73,6 +73,7 @@ local hub = {
 	inputs = {} :: { any },
 	reply_first = false,
 	late = nil :: any,
+	orientation = nil :: string?,
 }
 
 local function state(): any
@@ -85,7 +86,7 @@ local function state(): any
 			table.insert(devices, { hostId = "local", id = d.id, platform = d.platform, name = d.name, version = d.version, booted = hub.booted[d.id] == true, physical = false })
 		end
 	end
-	local hosts = {
+	local hosts: { any } = {
 		{ id = "local", kind = "local", label = "This machine", hubInstalled = true,
 			platforms = { { platform = "ios", available = true }, { platform = "android", available = true } },
 			tools = { hub = { required = "0.12.1", installed = { "0.12.0" }, running = if hub.enabled then "0.12.0" else nil } } },
@@ -285,13 +286,13 @@ api.watch = function(): () -> ()
 end
 api.stream = function(key: string, _host: string, device: string)
 	log(`stream:{device}`)
-	local all = table.clone(api.frames:peek())
+	local all = table.clone((api.frames:peek()))
 	all[key] = { seq = 1, w = 196, h = 426 }
 	api.frames:set(all)
 end
 api.orient = function(key: string, orientation: string)
 	log(`orient:{orientation}`)
-	local all = table.clone(api.frames:peek())
+	local all = table.clone((api.frames:peek()))
 	local f = all[key]
 	if f and f.w then
 		local side = orientation == "landscape_left" or orientation == "landscape_right"
@@ -300,7 +301,7 @@ api.orient = function(key: string, orientation: string)
 	end
 end
 api.unstream = function(key: string)
-	local all = table.clone(api.frames:peek())
+	local all = table.clone((api.frames:peek()))
 	if all[key] then
 		log("unstream")
 		all[key] = nil
@@ -343,7 +344,7 @@ ui.command {
 	id = "device_stub.frame",
 	title = "The next frame",
 	run = function()
-		local all = table.clone(api.frames:peek())
+		local all = table.clone((api.frames:peek()))
 		for k, f in all do
 			all[k] = { seq = (f.seq or 0) + 1, w = f.w or 196, h = f.h or 426 }
 		end
@@ -432,7 +433,7 @@ ui.command { id = "device_stub.hold_input", title = "Device input waits", run = 
 	hub.hold_input = true
 end }
 ui.command { id = "device_stub.let_input", title = "The oldest device input is answered", run = function()
-	local w = table.remove(hub.inputs, 1)
+	local w: { ok: ((any) -> ())? }? = table.remove(hub.inputs, 1)
 	if w and w.ok then
 		w.ok({})
 	end
@@ -449,7 +450,7 @@ ui.command { id = "device_stub.late_push", title = "The hub lists the open that 
 	end
 end }
 ui.command { id = "device_stub.stream_fails", title = "The engine ends every stream", run = function()
-	local all = table.clone(api.frames:peek())
+	local all = table.clone((api.frames:peek()))
 	for k in all do
 		all[k] = { failed = "The device stopped." }
 	end
