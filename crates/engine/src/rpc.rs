@@ -4342,17 +4342,18 @@ async fn windowed_doc_messages_stream(
                     None => TranscriptFrame::reset(slice),
                     Some(prev) => diff_transcript(prev, slice),
                 };
-                let usage = doc.context_usage();
+                let usage = (doc.context_usage(), doc.session_stats());
                 let unchanged = frame.is_empty_delta()
                     && prev_info.as_ref() == Some(&info)
-                    && prev_usage == Some(usage);
+                    && prev_usage.as_ref() == Some(&usage);
                 prev = Some(slice.to_vec());
                 if unchanged {
                     continue;
                 }
                 let mut value = serde_json::to_value(zeron_doc::TranscriptUpdate {
                     frame,
-                    context_usage: usage,
+                    context_usage: usage.0,
+                    session_stats: usage.1.clone(),
                     replay_baseline: None,
                 })
                 .ok()?;
