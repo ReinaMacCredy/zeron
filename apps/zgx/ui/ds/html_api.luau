@@ -74,6 +74,17 @@ function M.run(web: any, js: string)
 	web:run(js)
 end
 
+function M.chain(web: any, edges: number)
+	pcall(function()
+		web:scroll_chain({
+			up = bit32.btest(edges, 1),
+			down = bit32.btest(edges, 2),
+			left = bit32.btest(edges, 4),
+			right = bit32.btest(edges, 8),
+		})
+	end)
+end
+
 function M.close(web: any)
 	pcall(function()
 		web:close()

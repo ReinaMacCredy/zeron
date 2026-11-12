@@ -2590,6 +2590,7 @@ do
 	-- (Each page's `decide_navigation`, as zgx's web view asks it before a navigation starts.)
 	local deciders: { [string]: (any) -> boolean } = {}
 	local boots = ui.state("page_boots", {} :: { string })
+	local chains = ui.state("page_chains", {} :: { string })
 	html_api.web = function(id: string, boot: string?): any
 		local list = table.clone(boots:peek())
 		table.insert(list, `{id}|{boot or ""}`)
@@ -2598,6 +2599,17 @@ do
 			id = id,
 			decide_navigation = function(_self: any, decide: (any) -> boolean)
 				deciders[id] = decide
+			end,
+			scroll_chain = function(_self: any, c: any)
+				local ways = {}
+				for _, way in { "up", "down", "left", "right" } do
+					if c and c[way] then
+						table.insert(ways, way)
+					end
+				end
+				local list = table.clone(chains:peek())
+				table.insert(list, `{id}|{table.concat(ways, ",")}`)
+				chains:set(list)
 			end,
 		}
 	end

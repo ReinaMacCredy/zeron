@@ -606,6 +606,9 @@ local function Page(props: any): Node
 		if not signed(value, main_frame, e.nonce) then
 			return
 		end
+		if type(value.edges) == "number" then
+			api.chain(e.web, value.edges)
+		end
 		if type(value.height) == "number" and value.height == value.height and value.height >= 0 then
 			e.height = value.height
 			if math.abs(content:peek() - value.height) >= 1 then

@@ -384,6 +384,27 @@ test("pages: each page's web is made once it is read, with its bootstrap for the
 	expect(app:state("page_boots")).to_contain(`html:{FRAME}#sheet|boot:/u/html/s2/frame.html`)
 end)
 
+test("pages: a page hands the transcript the scrolls it can't use, as its edges say", function()
+	local app = mount("chat_fixture.luau")
+	seeded(app)
+	local function last_chain(): string
+		local list = app:state("page_chains") or {}
+		return list[#list] or ""
+	end
+	post(app, FRAME, { edges = 15 })
+	expect(last_chain()).to_be(`html:{FRAME}|up,down,left,right`)
+	post(app, FRAME, { edges = 1 + 4 + 8 })
+	expect(last_chain()).to_be(`html:{FRAME}|up,left,right`)
+	post(app, FRAME, { edges = 2 })
+	expect(last_chain()).to_be(`html:{FRAME}|down`)
+	local count = #(app:state("page_chains") or {})
+	post(app, FRAME, { edges = 15, nonce = "forged" })
+	app:set_state("page_message", { id = `html-page-{FRAME}`, main = false, value = { kind = "zeron.page", nonce = "n:/u/html/s2/frame.html", edges = 15 } })
+	app:command("page_post")
+	settle(app)
+	expect(#(app:state("page_chains") or {})).to_be(count)
+end)
+
 test("pages: a stored page decides each navigation first: its own document goes, a link opens the browser and stays, a script's goes nowhere", function()
 	local app = mount("chat_fixture.luau")
 	seeded(app)
