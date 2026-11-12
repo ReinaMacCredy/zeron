@@ -201,11 +201,13 @@ fn the_shortcuts_reach_their_commands_from_any_focus() {
         // ⌘R the panel, closed and open again.
         press(&mut w, "cmd+r", "shell.toggle_files", false, &|w| w.app.bounds("#shell-files").width == 0.);
         press(&mut w, "cmd+r", "shell.toggle_files", true, &|w| w.app.bounds("#shell-files").width > 0.);
-        // ⌃Tab the next session, ⌃⇧Tab back. (In the panel, Zeron's cycle
-        // its tabs instead: not the editor's.)
+        // ⌃Tab away and back, ⌃⇧Tab away and ⌃Tab back. (In the panel, Zeron's
+        // cycle its tabs instead: not the editor's.)
         if !matches!(at, Focus::Editor) {
             press(&mut w, "ctrl+tab", "shell.next_session", false, &|w| w.route() != session);
-            press(&mut w, "ctrl+shift+tab", "shell.previous_session", true, &|w| w.route() == session);
+            press(&mut w, "ctrl+tab", "shell.next_session", true, &|w| w.route() == session);
+            press(&mut w, "ctrl+shift+tab", "shell.previous_session", false, &|w| w.route() != session);
+            press(&mut w, "ctrl+tab", "shell.next_session", true, &|w| w.route() == session);
         }
         // ⌘N a new chat, then ⌘[ back, ⌘] forward and ⌘[ back again from
         // where focus went (putting it back would move the history).
@@ -343,27 +345,22 @@ fn command_digits_jump_to_the_sidebars_sessions_in_order() {
     assert_eq!(w.route(), "/session/b2", "Atlas's idle sessions are out of reach");
 }
 
-/// ⌃Tab and ⌃⇧Tab go round the sidebar's sessions in its order, from a new
-/// chat to its first or last; ⌘⇧A archives the session open (and the
-/// window goes to a new chat), but not one whose agent is working.
+/// ⌃Tab and ⌃⇧Tab with nothing held land where the switcher would, most recent
+/// first; ⌘⇧A archives the session open (and the window goes to a new chat),
+/// but not one whose agent is working.
 #[test]
 fn the_next_previous_and_archive_shortcuts() {
     let mut w = mount();
-    // (The one list, by last update: a1, a2, a3, b1, b2.)
-    let order = ["a1", "a2", "a3", "b1", "b2"];
     assert_eq!(w.press("ctrl+tab").as_deref(), Some("shell.next_session"));
-    assert_eq!(w.route(), "/session/a1", "from a new chat, ⌃Tab opens the first");
-    for id in &order[1..] {
-        w.press("ctrl+tab");
-        assert_eq!(w.route(), format!("/session/{id}"));
-    }
+    assert_eq!(w.route(), "/session/a1", "from a new chat, ⌃Tab opens the latest");
+    w.press("cmd+3");
+    assert_eq!(w.route(), "/session/a3");
     w.press("ctrl+tab");
-    assert_eq!(w.route(), "/session/a1", "past the last, round to the first");
-    w.press("ctrl+shift+tab");
-    assert_eq!(w.route(), "/session/b2", "before the first, round to the last");
-    w.press("cmd+n");
-    w.press("ctrl+shift+tab");
-    assert_eq!(w.route(), "/session/b2", "from a new chat, ⌃⇧Tab opens the last");
+    assert_eq!(w.route(), "/session/a1", "⌃Tab goes to the chat used before");
+    w.press("ctrl+tab");
+    assert_eq!(w.route(), "/session/a3", "and back again");
+    assert_eq!(w.press("ctrl+shift+tab").as_deref(), Some("shell.previous_session"));
+    assert_eq!(w.route(), "/session/b2", "⌃⇧Tab goes to the switcher's last");
     // ⌘⇧A: archived, and on to a new chat.
     assert_eq!(w.press("cmd+shift+a").as_deref(), Some("shell.archive"));
     assert_eq!(w.route(), "/", "the session archived, a new chat");
