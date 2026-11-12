@@ -1,6 +1,6 @@
--- Zeron's own plugins in Settings → Plugins (screens/plugins/builtins): the nine listed first, each Built-in and on in a fresh store; each switch takes its doors away at once and brings them back with no reload; a launch after keeps a switch off. On ui/shell_fixture.luau (Settings, the rail, a new chat's composer) and ui/panel_fixture.luau (the browser).
+-- Zeron's own features (screens/plugins/builtins): Review is the one built-in left on Settings → Plugins; the rest are switches on the Settings page that owns each, and off still takes the feature's doors away at once, with no reload; a launch after keeps a switch off. On ui/shell_fixture.luau (Settings, the rail, a new chat's composer) and ui/panel_fixture.luau (the browser).
 
-local NINE = { "Review", "Usage", "Home widgets", "Keep awake", "Appshots", "Predictions", "Browser annotate", "Device", "Voice" }
+local MOVED = { "Usage", "Home widgets", "Keep awake", "Appshots", "Predictions", "Browser annotate", "Device", "Voice" }
 
 local function open(): any
 	local app = mount("shell_fixture.luau")
@@ -11,8 +11,10 @@ local function open(): any
 end
 
 local function settings(app: any, page: string)
-	app:command("shell.settings")
-	app:frames(10)
+	if not app:has("#settings-nav") then
+		app:command("shell.settings")
+		app:frames(10)
+	end
 	app:click(`#settings-nav >> role:tab "{page}"`)
 	app:frames(30)
 end
@@ -34,107 +36,89 @@ local function nav_has(app: any, page: string): boolean
 	return app:has(`#settings-nav >> role:tab "{page}"`)
 end
 
-test("Settings → Plugins lists Zeron's nine first, in order, each Built-in and on, none removable", function()
+test("Settings → Plugins lists Review alone of Zeron's own, Built-in and on; the rest aren't there", function()
 	local app = open()
 	settings(app, "Plugins")
 	local tree = app:tree("#settings-page")
-	local at = 0
-	for _, name in NINE do
-		local found = string.find(tree, `switch "{name}"`, 1, true)
-		expect(found ~= nil).to_be(true)
-		expect(found > at).to_be(true)
-		at = found :: number
-		expect(switch_of(app, name)).to_contain("checked")
-		expect(app:has(`#settings-page >> role:button "{name} is part of Zeron"`)).to_be(true)
-	end
+	expect(switch_of(app, "Review")).to_contain("checked")
+	expect(app:has('#settings-page >> role:button "Review is part of Zeron"')).to_be(true)
 	local _, tags = string.gsub(tree, '"Built%-in"', "")
-	expect(tags).to_be(9)
-	expect(tree).to_contain("The Usage page and the limit ring on the rail")
-	-- (Keep awake as the engine's file has it.)
-	expect(calls(app)).to_contain("keep_awake.get")
+	expect(tags).to_be(1)
+	for _, name in MOVED do
+		expect(tree).never.to_contain(`switch "{name}"`)
+	end
 end)
 
-test("each switch off takes its doors away at once, and on brings them back", function()
+test("each feature's switch on its own page takes its doors away at once, and on brings them back; the page stays listed", function()
 	local app = open()
 	expect(app:has("#rail-usage")).to_be(true)
-	-- (The mic, as gpui's, once Dictation is on and its model here: U28.)
-	expect(app:has('role:button "Hold to dictate"')).to_be(false)
 	app:command("voice_stub.dictation_on")
 	app:frames(10)
 	expect(app:has('role:button "Hold to dictate"')).to_be(true)
-	settings(app, "Plugins")
-	expect(nav_has(app, "Usage")).to_be(true)
-	expect(nav_has(app, "Appshots")).to_be(true)
-	expect(nav_has(app, "Voice")).to_be(true)
-	expect(nav_has(app, "Device hub")).to_be(true)
 
-	-- Usage: the rail's ring and its Settings page.
-	flip(app, "Usage")
-	expect(switch_of(app, "Usage")).to_contain("unchecked")
+	-- Usage: the rail's ring.
+	settings(app, "Usage")
+	flip(app, "Usage on the rail")
+	expect(switch_of(app, "Usage on the rail")).to_contain("unchecked")
 	expect(app:has("#rail-usage")).to_be(false)
-	expect(nav_has(app, "Usage")).to_be(false)
-	flip(app, "Usage")
-	expect(app:has("#rail-usage")).to_be(true)
 	expect(nav_has(app, "Usage")).to_be(true)
+	flip(app, "Usage on the rail")
+	expect(app:has("#rail-usage")).to_be(true)
 
-	-- Appshots: its Settings page.
-	flip(app, "Appshots")
-	expect(nav_has(app, "Appshots")).to_be(false)
-	flip(app, "Appshots")
-	expect(nav_has(app, "Appshots")).to_be(true)
-
-	-- Voice: the composer's mic and Settings → Voice.
+	-- Voice: the composer's mic.
+	settings(app, "Voice")
 	flip(app, "Voice")
 	expect(app:has('role:button "Hold to dictate"')).to_be(false)
-	expect(nav_has(app, "Voice")).to_be(false)
+	expect(nav_has(app, "Voice")).to_be(true)
 	flip(app, "Voice")
 	expect(app:has('role:button "Hold to dictate"')).to_be(true)
-	expect(nav_has(app, "Voice")).to_be(true)
 
-	-- Device: Settings → Device hub (the panel's Device row is tests/device_tab's).
-	flip(app, "Device")
-	expect(nav_has(app, "Device hub")).to_be(false)
-	flip(app, "Device")
-	expect(nav_has(app, "Device hub")).to_be(true)
-
-	-- Keep awake: the engine's own key, through the host.
-	flip(app, "Keep awake")
+	-- Keep awake: the engine's own key, through the host, on General.
+	settings(app, "General")
+	expect(calls(app)).to_contain("keep_awake.get")
+	flip(app, "Keep this Mac awake while agents work")
 	expect(calls(app)).to_contain("keep_awake.set")
-	expect(switch_of(app, "Keep awake")).to_contain("unchecked")
+	expect(switch_of(app, "Keep this Mac awake while agents work")).to_contain("unchecked")
 
-	-- Review, Home widgets and Device: their keys (Review's door is tests/review_plugin's, Home widgets has none yet, Device's above).
-	for _, name in { "Review", "Home widgets", "Device" } do
-		flip(app, name)
-		expect(switch_of(app, name)).to_contain("unchecked")
+	-- Predictions: General's Show predictions is the built-in's switch too.
+	app:set_state("builtin_predictions", false)
+	app:frames(10)
+	flip(app, "Show predictions")
+	expect(app:state("builtin_predictions")).to_be(true)
+	expect(switch_of(app, "Show predictions")).never.to_contain("unchecked")
+	flip(app, "Show predictions")
+	expect(app:state("builtin_predictions")).to_be(false)
+	expect(switch_of(app, "Show predictions")).to_contain("unchecked")
+
+	-- Home widgets (no door yet; Appearance's New chat, under Advanced), Browser annotate and Device: their keys.
+	for _, it in { { "Appearance", "Home widgets", "builtin_home_widgets" }, { "Browsing", "Annotate", "builtin_browser_annotate" }, { "Device hub", "Device panel", "builtin_device" } } do
+		settings(app, it[1])
+		if it[1] == "Appearance" then
+			app:set_state("settings_appearance_advanced", true)
+			app:frames(20)
+			app:scroll("#settings-page", 3000)
+			app:frames(20)
+		end
+		flip(app, it[2])
+		expect(switch_of(app, it[2])).to_contain("unchecked")
+		expect(app:state(it[3])).to_be(false)
+		expect(nav_has(app, it[1])).to_be(true)
 	end
-	expect(app:state("builtin_review")).to_be(false)
-	expect(app:state("builtin_home_widgets")).to_be(false)
-	expect(app:state("builtin_device")).to_be(false)
 
-	-- Predictions: General's Predictions, and the search finds it no more.
-	flip(app, "Predictions")
-	app:click('#settings-nav >> role:tab "General"')
-	app:frames(30)
-	expect(app:tree("#settings-page")).never.to_contain("Show predictions")
-	app:click('#settings-nav >> role:tab "Plugins"')
-	app:frames(30)
-	flip(app, "Predictions")
-	app:click('#settings-nav >> role:tab "General"')
-	app:frames(30)
-	expect(app:tree("#settings-page")).to_contain("Show predictions")
+	-- Appshots: no built-in of its own any more (its Enable switch is the page's), so always listed.
+	expect(nav_has(app, "Appshots")).to_be(true)
 end)
 
 test("a switch turned off stays off at the next launch, its door with it", function()
 	local app = open()
-	settings(app, "Plugins")
-	flip(app, "Usage")
+	settings(app, "Usage")
+	flip(app, "Usage on the rail")
 	expect(app:has("#rail-usage")).to_be(false)
 	local again = open()
 	expect(again:has("#rail-usage")).to_be(false)
-	settings(again, "Plugins")
-	expect(switch_of(again, "Usage")).to_contain("unchecked")
-	expect(switch_of(again, "Review")).to_contain("checked")
-	expect(nav_has(again, "Usage")).to_be(false)
+	settings(again, "Usage")
+	expect(switch_of(again, "Usage on the rail")).to_contain("unchecked")
+	expect(nav_has(again, "Usage")).to_be(true)
 end)
 
 test("Browser annotate off takes the browser bar's Annotate, its View menu item and its key away, and on brings them back", function()

@@ -78,7 +78,7 @@ export type Session = {
 	-- A line about it (a failed send, a run that stopped), or nil; `refused` replaces `text`.
 	notice: any?,
 }
-export type Catalog = { state: string, harnesses: { ds.Harness }, models: { ds.Model } }
+export type Catalog = { state: string, complete: boolean?, harnesses: { ds.Harness }, models: { ds.Model } }
 export type Request = {
 	-- The session it goes to; nil for a new chat.
 	session: string?,

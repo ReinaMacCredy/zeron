@@ -36,6 +36,7 @@ export type Props = {
 	track: Length?,
 	-- An id for the strip, for tools that look for it.
 	id: string?,
+	placing: (() -> boolean)?,
 }
 
 -- The rail's geometry: the strip that takes the pointer, the thumb at rest
@@ -101,7 +102,7 @@ return ui.component(function(props: Props): Node
 	local cancel: (() -> ())? = nil
 	ui.effect(function()
 		offset:get()
-		if not settled then
+		if not settled or (props.placing and props.placing()) then
 			return
 		end
 		recent:set(true)

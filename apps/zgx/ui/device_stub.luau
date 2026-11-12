@@ -22,9 +22,16 @@
 --   device_stub.hold_input   each SendHubDeviceInput waits until device_stub.let_input (one answered each)
 --   device_stub.reply_first  the next OpenHubDevice answers before the hub lists it (device_stub.late_push lists it)
 --   device_stub.stream_fails the engine ends every stream ("The device stopped.")
---   device_stub.engine_restart the engine came back: its hub idle, nothing open or listed until a ListHubDevices
---   device_stub.shut_down    every open device is shut down outside Zeron: listed not booted, its session kept
+--   device_stub.engine_restart the engine came back: its hub idle, nothing open or listed until a ListHubDevices,
+--                            which reads ready with nothing listed until device_stub.let_list answers it
+--   device_stub.shut_down    every open device is shut down outside Zeron: its session kept, listed booted
+--                            until the next ListHubDevices (as the hub's), then not
 --   device_stub.refuse_next  the next call is refused as the host refuses one (a UiError, the engine's words)
+--   device_stub.hinged       every open device is an iPhone Duo: its screen has a hinge, closed on the cover
+--   device_stub.fold_refused the hub refused a 3D tab's hinge ("The hub refused the hinge.")
+-- The 3D view (api.three_d and the rest) is the host's: here each call is
+-- logged (`3d:on`, `3d:off`, `pointer3d:begin`, `wheel3d`, `pinch3d`, `restore3d`,
+-- `pose:book`), and a press on it is a touch at (0.25, 0.75) of the screen.
 
 local api = require("@app/screens/device/api") :: any
 local settings_host = require("@app/screens/settings/host") :: any
@@ -73,6 +80,11 @@ local hub = {
 	inputs = {} :: { any },
 	reply_first = false,
 	late = nil :: any,
+	orientation = nil :: string?,
+	hinged = false,
+	unlisted = false,
+	listing = nil :: any,
+	unnoticed = {} :: { [string]: boolean },
 }
 
 local function state(): any
@@ -80,12 +92,12 @@ local function state(): any
 		return { outdated = true }
 	end
 	local devices = {}
-	if hub.enabled and not hub.none and hub.status ~= "idle" then
+	if hub.enabled and not hub.none and hub.status ~= "idle" and not hub.unlisted then
 		for _, d in DEVICES do
-			table.insert(devices, { hostId = "local", id = d.id, platform = d.platform, name = d.name, version = d.version, booted = hub.booted[d.id] == true, physical = false })
+			table.insert(devices, { hostId = "local", id = d.id, platform = d.platform, name = d.name, version = d.version, booted = hub.booted[d.id] == true or hub.unnoticed[d.id] == true, physical = false })
 		end
 	end
-	local hosts = {
+	local hosts: { any } = {
 		{ id = "local", kind = "local", label = "This machine", hubInstalled = true,
 			platforms = { { platform = "ios", available = true }, { platform = "android", available = true } },
 			tools = { hub = { required = "0.12.1", installed = { "0.12.0" }, running = if hub.enabled then "0.12.0" else nil } } },
@@ -97,7 +109,9 @@ local function state(): any
 	end
 	local screens, streams = {}, {}
 	for _, x in hub.sessions do
-		screens[x.deviceId] = { width = 196, height = 426, orientation = hub.orientation or "portrait" }
+		screens[x.deviceId] = if hub.hinged
+			then { width = 1398, height = 2034, orientation = hub.orientation or "portrait", supportsHingeAngle = true, screenId = 1, hingeAngle = 0, hingePose = "closed" }
+			else { width = 196, height = 426, orientation = hub.orientation or "portrait" }
 		streams[x.deviceId] = { video = "live", input = "live", subscribers = 1 }
 	end
 	return {
@@ -145,8 +159,18 @@ local function answer(method: string, p: any): any
 	end
 	if method == "ListHubDevices" then
 		if hub.status == "idle" then
+			-- (As the engine's: its hub reads ready, with nothing listed, before the list answers.)
 			hub.status = nil
+			hub.unlisted = true
+			publish()
+			local waiting = { done = false, ok = nil :: any }
+			function waiting.after(_self: any, ok: ((any) -> ())?, _bad: ((any) -> ())?)
+				waiting.ok = ok
+			end
+			hub.listing = waiting
+			return waiting
 		end
+		hub.unnoticed = {}
 		return settled(state())
 	elseif method == "ConfigureDeviceHub" then
 		if p.deviceHosts ~= nil then
@@ -222,6 +246,8 @@ local function answer(method: string, p: any): any
 			return waiting
 		end
 		return settled({})
+	elseif method == "SetHubDeviceHinge" then
+		return settled({})
 	end
 	return settled(nil, "refused")
 end
@@ -256,6 +282,9 @@ local function detail(method: string, p: any): string
 		end
 		return `{method}:{table.concat(parts, ",")}`
 	end
+	if method == "SetHubDeviceHinge" then
+		return `{method}:{p.orientation or p.pose or tostring(p.angle)}`
+	end
 	if p.deviceId then
 		return `{method}:{p.deviceId}{if p.shutdown then ":shutdown" else ""}`
 	end
@@ -285,13 +314,13 @@ api.watch = function(): () -> ()
 end
 api.stream = function(key: string, _host: string, device: string)
 	log(`stream:{device}`)
-	local all = table.clone(api.frames:peek())
+	local all = table.clone((api.frames:peek()))
 	all[key] = { seq = 1, w = 196, h = 426 }
 	api.frames:set(all)
 end
 api.orient = function(key: string, orientation: string)
 	log(`orient:{orientation}`)
-	local all = table.clone(api.frames:peek())
+	local all = table.clone((api.frames:peek()))
 	local f = all[key]
 	if f and f.w then
 		local side = orientation == "landscape_left" or orientation == "landscape_right"
@@ -300,12 +329,36 @@ api.orient = function(key: string, orientation: string)
 	end
 end
 api.unstream = function(key: string)
-	local all = table.clone(api.frames:peek())
+	local all = table.clone((api.frames:peek()))
 	if all[key] then
 		log("unstream")
 		all[key] = nil
 		api.frames:set(all)
 	end
+end
+api.three_d = function(_key: string, on: boolean)
+	log(if on then "3d:on" else "3d:off")
+end
+api.screen3d = function(_key: string, _screen: any): { any }
+	return {}
+end
+api.pointer3d = function(_key: string, phase: string, _x: number, _y: number): { any }
+	log(`pointer3d:{phase}`)
+	return { { phase = phase, x = 0.25, y = 0.75 } }
+end
+api.wheel3d = function(_key: string, _e: any): boolean
+	log("wheel3d")
+	return true
+end
+api.pinch3d = function(_key: string, _scale: number, _x: number, _y: number): boolean
+	log("pinch3d")
+	return true
+end
+api.restore3d = function(_key: string)
+	log("restore3d")
+end
+api.pose3d = function(_key: string, pose: string)
+	log(`pose:{pose}`)
 end
 api.frame_src = function(key: string): string
 	local f = api.frames:get()[key]
@@ -343,7 +396,7 @@ ui.command {
 	id = "device_stub.frame",
 	title = "The next frame",
 	run = function()
-		local all = table.clone(api.frames:peek())
+		local all = table.clone((api.frames:peek()))
 		for k, f in all do
 			all[k] = { seq = (f.seq or 0) + 1, w = f.w or 196, h = f.h or 426 }
 		end
@@ -432,7 +485,7 @@ ui.command { id = "device_stub.hold_input", title = "Device input waits", run = 
 	hub.hold_input = true
 end }
 ui.command { id = "device_stub.let_input", title = "The oldest device input is answered", run = function()
-	local w = table.remove(hub.inputs, 1)
+	local w: { ok: ((any) -> ())? }? = table.remove(hub.inputs, 1)
 	if w and w.ok then
 		w.ok({})
 	end
@@ -449,11 +502,22 @@ ui.command { id = "device_stub.late_push", title = "The hub lists the open that 
 	end
 end }
 ui.command { id = "device_stub.stream_fails", title = "The engine ends every stream", run = function()
-	local all = table.clone(api.frames:peek())
+	local all = table.clone((api.frames:peek()))
 	for k in all do
 		all[k] = { failed = "The device stopped." }
 	end
 	api.frames:set(all)
+end }
+ui.command { id = "device_stub.hinged", title = "Every open device is an iPhone Duo", run = change(function()
+	hub.hinged = true
+end) }
+ui.command { id = "device_stub.fold_refused", title = "The hub refused a 3D tab's hinge", run = function()
+	local all = {}
+	for k in api.frames:peek() do
+		all[k] = { fold_error = "The hub refused the hinge." }
+		log(`fold_refused:{k}`)
+	end
+	api.folds:set(all)
 end }
 ui.command { id = "device_stub.refuse_next", title = "The next device call is refused", run = function()
 	refuse = true
@@ -462,9 +526,20 @@ ui.command { id = "device_stub.engine_restart", title = "The engine came back wi
 	hub.status = "idle"
 	hub.sessions = {}
 end) }
+ui.command { id = "device_stub.let_list", title = "The restarted hub's list answers", run = function()
+	local w: { ok: ((any) -> ())? }? = hub.listing
+	hub.listing = nil
+	hub.unlisted = false
+	hub.revision += 1
+	publish()
+	if w and w.ok then
+		w.ok(state())
+	end
+end }
 ui.command { id = "device_stub.shut_down", title = "The open devices are shut down outside Zeron", run = change(function()
 	for _, x in hub.sessions do
 		hub.booted[x.deviceId] = nil
+		hub.unnoticed[x.deviceId] = true
 	end
 end) }
 ui.command { id = "device_stub.booting", title = "chat-1's iPad Air is starting", run = change(function()

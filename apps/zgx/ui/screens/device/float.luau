@@ -122,8 +122,9 @@ function M.float_tab(chat: string, host: string, id: string)
 	local ok, view = pcall(function(): any
 		return (require :: any)("@app/screens/shell/view")
 	end)
-	if ok and view and view.set_files then
-		view.set_files(false)
+	local shell: { set_files: ((boolean) -> ())? }? = if ok then view else nil
+	if shell and shell.set_files then
+		shell.set_files(false)
 	end
 end
 
@@ -160,19 +161,30 @@ local EDGE_CURSOR = {
 	["bottom-left"] = "nesw_resize",
 }
 
-local function edge_box(edge: string): { [string]: any }
-	local b: { [string]: any } = { absolute = true }
+local function edge_box(edge: string): ContainerProps
+	local b: ContainerProps = { absolute = true }
+	local function at(side: string, by: number)
+		if side == "top" then
+			b.top = by
+		elseif side == "bottom" then
+			b.bottom = by
+		elseif side == "left" then
+			b.left = by
+		else
+			b.right = by
+		end
+	end
 	if edge == "top" or edge == "bottom" then
 		b.left, b.right, b.h = 0, 0, 8
-		b[edge] = -4
+		at(edge, -4)
 	elseif edge == "left" or edge == "right" then
 		b.top, b.bottom, b.w = 0, 0, 8
-		b[edge] = -4
+		at(edge, -4)
 	else
 		local v, h = string.match(edge, "^(%a+)-(%a+)$")
 		b.w, b.h = 16, 16
-		b[v :: string] = -8
-		b[h :: string] = -8
+		at(v :: string, -8)
+		at(h :: string, -8)
 	end
 	return b
 end
@@ -243,7 +255,7 @@ local function card(chat: string, target: Target, container: any): Node
 			M.frame:set(f)
 		end
 	end
-	local function gestures(props: { [string]: any }, edge: string?): { [string]: any }
+	local function gestures(props: ContainerProps, edge: string?): ContainerProps
 		props.on_press = function(e: any)
 			begin(edge, e)
 		end
@@ -300,7 +312,7 @@ local function card(chat: string, target: Target, container: any): Node
 		shadow = function(): any
 			return if shown() == 1 then "$shadow.lg" else false
 		end,
-		cursor = function(): string
+		cursor = function(): Cursor
 			return if grabbing:get() then "grabbing" else "grab"
 		end,
 		on_hover = function(inside: boolean)

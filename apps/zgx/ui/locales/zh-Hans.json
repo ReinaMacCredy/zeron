@@ -2121,80 +2121,115 @@
     },
     "appshots": {
       "title": "Appshots",
-      "terms": "截取 截图 窗口 应用 快捷键 capture screenshot window app shortcut",
-      "description": "逐项设置权限。屏幕录制用于截取窗口；辅助功能可选，用于添加屏幕外的应用文本。",
+      "terms": "截取 截图 窗口 应用 快捷键 capture screenshot window app shortcut hotkey",
+      "description": "把另一个应用最前方的窗口直接截取到会话中。",
       "capture_section": "截取",
-      "permissions": "权限",
-      "permissions_description": "macOS 会向打开 Zeron 的 App 请求这些权限：可能是 Zeron 本身，也可能是启动它的终端或编辑器。请在“系统设置”→“隐私与安全性”中为该 App 授权，然后退出并重新打开一次。",
-      "ready": "已就绪",
-      "required": "必需",
-      "set_up": "设置",
-      "press": "按下快捷键",
-      "press_now": "按下快捷键…",
-      "change_shortcut": "更改快捷键，当前为 {keys}",
-      "open_system_settings": "打开系统设置",
-      "changed": "更改了权限？返回 Zeron 后再次检查。",
-      "check_again": "再次检查",
+      "quick_section": "快速记录到任务",
+      "permissions": "macOS 权限",
+      "intro": {
+        "title": "拍一张 Appshot，把另一个应用的窗口给智能体看",
+        "body": "在任意应用处于最前方时按下快捷键。{app} 会把该窗口截取为图片，切回前台，并把截图附加到会话输入框；在你发送消息之前，截图只保存在这台设备上。",
+        "desktop_only": "Appshots 仅在桌面应用中可用。",
+        "terms": "概览 截图 窗口 overview screenshot window"
+      },
       "enabled": {
-        "label": "截取 Appshots",
-        "terms": "截图 窗口 screenshot window",
-        "description": "截取的内容会设为待提交，供查看，绝不会自动发送。"
+        "label": "启用 Appshots",
+        "terms": "截图 窗口 监听 screenshot window listener",
+        "description": "在 {app} 打开期间于后台运行截取监听。"
       },
-      "sound": {
-        "label": "截取声音",
-        "terms": "提示音 chime",
-        "description": "Appshot 准备就绪时播放声音。"
+      "hotkey": {
+        "label": "快捷键",
+        "terms": "快捷键 按键 组合 双击 shortcut keys chord",
+        "description": "同时按下两个 {glyph} 键",
+        "none_description": "无快捷键。选择一个组合键即可从其他应用截取。",
+        "none": "无",
+        "name": "{chord}快捷键：{choice}",
+        "appshot": "Appshot ",
+        "taken": "{choice} 已是{other}快捷键。"
       },
-      "shortcut": {
-        "label": "全局快捷键",
-        "terms": "快捷键 按键 hotkey keys",
-        "ready": "其他应用处于前台时也可使用此快捷键。",
-        "unavailable": "此快捷键不可用。请选择其他组合键。"
+      "quick": {
+        "label": "快速记录",
+        "terms": "任务 待办 想法 组合键 tasks to do idea chord",
+        "description": "在任意应用中同时按下两个 {glyph} 键，无需离开即可把想法记入待办。",
+        "none_description": "无快捷键。侧栏“任务”下的 + 仍可打开快速记录。",
+        "input": "请在 macOS 系统设置中允许输入监控，然后重试。"
       },
       "destination": {
         "label": "目标位置",
         "terms": "会话 输入框 session composer",
+        "automatic_description": "截图会加入你在最近一分钟内操作过的会话，连续的截图会留在一起。否则 {app} 会打开一个附带截图的新会话。",
         "last_description": "使用已打开的会话，或返回上次用于 Appshot 的会话。",
         "new_description": "在新会话的输入框中将截取内容设为待提交，保留现有草稿。",
-        "automatic_description": "使用已打开的会话；没有打开的会话时使用新会话输入框。",
         "automatic": "自动",
         "last": "上次会话",
         "new": "新建会话"
       },
+      "sound": {
+        "label": "截取声音",
+        "terms": "提示音 快门 chime shutter",
+        "description": "截取窗口时播放简短的快门声。"
+      },
+      "preview": "试听",
+      "preview_label": "试听截取声音",
+      "input": {
+        "label": "输入监控",
+        "terms": "输入监控 权限 键盘 input monitoring permission keyboard",
+        "description": "让 {app} 在其他应用占用键盘时也能察觉组合快捷键。不会记录你输入的任何内容。"
+      },
       "capture": {
-        "label": "窗口截取",
-        "terms": "屏幕录制 权限 screen recording permission",
-        "description": "屏幕录制允许 Zeron 截取最前方的窗口。macOS 可能要求重新启动一次。",
-        "allow": "允许截取窗口"
+        "label": "屏幕录制",
+        "terms": "屏幕录制 窗口截取 权限 screen recording window capture permission",
+        "description": "让 {app} 截取最前方窗口的图像。只在你按下组合键的那一刻截取你选中的那个窗口。"
       },
       "text": {
-        "label": "应用文本",
-        "terms": "辅助功能 权限 accessibility permission",
-        "description": "辅助功能可添加可见及屏幕外的应用文本。不启用也可以截图。",
-        "allow": "启用文本截取"
+        "label": "辅助功能",
+        "terms": "辅助功能 应用文本 权限 accessibility application text permission",
+        "description": "可选。让 {app} 读取被截取窗口中可见和屏幕外的文本，使智能体获得的不只是像素。不启用也可以截图。"
       },
-      "intro": {
-        "title": "拍一张 Appshot，把另一个应用的窗口给智能体看",
-        "body": "在任何应用位于最前时按下你的快捷键。Zeron 会把该窗口截成图片，切到前台，并把截图附加到会话输入框；在你发送消息之前，截图只保存在这台设备上。",
-        "desktop_only": "Appshots 仅在桌面应用中可用。"
+      "badge": {
+        "granted": "已授权",
+        "denied": "已拒绝",
+        "not_requested": "尚未请求"
       },
+      "grant": "授权",
+      "hide_steps": "隐藏步骤",
+      "grant_label": "{action}：{pane}",
+      "guide": {
+        "open": "打开{pane}设置",
+        "listed": "如果列表中已有这份 {app}，请将其打开。否则，请用 + 选择这份已安装的副本，然后将其打开。",
+        "auth": "完成 macOS 的身份验证。如果 macOS 要求退出并重新打开，请先照做再检查。",
+        "watching": "正在等待更改：此页面会自动更新。",
+        "granted": "已授权。",
+        "stale": "更新或重新构建后仍被拒绝？请从列表中移除此应用并重新添加这份副本。完成 macOS 的身份验证，并在 macOS 要求退出并重新打开时重新启动。"
+      },
+      "status_row": {
+        "label": "权限状态",
+        "terms": "权限 重新检查 permissions recheck",
+        "description": "按上面的步骤逐项授权。如果超过 10 分钟，请再次点按“授权”。"
+      },
+      "recheck": "重新检查权限",
+      "rechecking": "正在重新检查…",
+      "unchanged": "权限未变化。点按权限旁的“授权”按步骤完成设置。",
+      "now_granted": "已授权。{pane}已可用于 Appshots。",
       "status": {
         "unsupported": "仅在 macOS 和 Linux 上可用",
         "off": "关闭",
+        "no_hotkey": "未选择快捷键",
+        "input": "请在 macOS 系统设置中允许输入监控，然后重试。",
         "capture": "请在 macOS 系统设置中允许屏幕录制，然后重试。",
         "unavailable": "此快捷键不可用。请选择其他组合键。",
-        "listening": "正在监听：按 {keys} 截图"
+        "listening": "正在监听：按 {keys} 截取"
       },
-      "preview": "试听",
-      "restore": "恢复默认",
-      "reset": "将{what}重置为默认",
+      "restore": "恢复默认设置",
+      "restore_label": "恢复 Appshot 默认设置",
+      "reset": "将{what}重置为默认值",
       "reset_what": {
         "enabled": "Appshots",
-        "sound": "截图提示音",
-        "shortcut": "快捷键",
+        "sound": "截取声音",
+        "hotkey": "快捷键",
+        "quick": "快速记录快捷键",
         "destination": "目标位置"
-      },
-      "key_rule": "请将 Control、Option 或 Command 与字母、数字、功能键或导航键组合使用。"
+      }
     },
     "providers": {
       "title": "提供方",
@@ -3306,6 +3341,38 @@
       "open": "打开",
       "show_tools": "显示{group}的工具",
       "group_off": "整个分组已关闭。你在下方的选择会保留，等你重新打开时生效。"
+    },
+    "features": {
+      "usage": {
+        "label": "侧栏上的用量",
+        "description": "侧栏上的额度圆环，点击打开此页面",
+        "terms": "用量 圆环 侧栏 额度"
+      },
+      "home_widgets": {
+        "label": "主页小组件",
+        "description": "新对话下方的小组件网格",
+        "terms": "主页 小组件 新对话"
+      },
+      "keep_awake": {
+        "label": "智能体工作时保持这台 Mac 唤醒",
+        "description": "在最后一个智能体停止后一分钟内阻止闲置休眠。显示器仍会休眠，合上盖子仍会让 Mac 休眠。",
+        "terms": "保持唤醒 休眠"
+      },
+      "browser_annotate": {
+        "label": "标注",
+        "description": "在网页上为智能体做标注：浏览器栏的标注按钮、菜单项和快捷键",
+        "terms": "标注 浏览器"
+      },
+      "device": {
+        "label": "设备面板",
+        "description": "模拟器面板",
+        "terms": "设备 模拟器 面板"
+      },
+      "voice": {
+        "label": "语音",
+        "description": "用麦克风说话代替打字",
+        "terms": "语音 麦克风 听写"
+      }
     },
     "predictions": {
       "title": "预测",
@@ -5537,7 +5604,21 @@
       "close": "关闭面板",
       "power_off": "关机",
       "rotate": "旋转设备",
-      "float": "在聊天上方浮动显示设备"
+      "float": "在聊天上方浮动显示设备",
+      "view_3d": "3D 视图",
+      "view_flat": "平面视图",
+      "view_restore": "还原 3D 视图",
+      "fold_shape": "折叠形态",
+      "pose_closed": "合上放置",
+      "pose_book": "书本式放置",
+      "pose_open": "展开放置",
+      "pose_laptop": "笔记本式放置",
+      "pose_tent": "帐篷式放置",
+      "tip_closed": "合上",
+      "tip_book": "书本 / 书架",
+      "tip_open": "展开",
+      "tip_laptop": "笔记本",
+      "tip_tent": "帐篷"
     },
     "float": {
       "label": "浮动设备预览",

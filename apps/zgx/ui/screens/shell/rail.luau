@@ -644,7 +644,7 @@ M.Rail = ui.component(function(): Node
 	local entries: { any } = {
 		new_chat(),
 		page_entry("inbox", "inbox", "inbox.title"),
-		page_entry("tasks", "checklist", "tasks.title"),
+		page_entry("tasks", "tasks", "tasks.title"),
 		page_entry("skills", "magic-stick", "skills.title"),
 		pull_requests(),
 		ui.div { grow = 1 },

@@ -4,6 +4,7 @@ local ds = require("@ds")
 local host = require("@app/screens/settings/host")
 local search = require("@app/screens/settings/search")
 local chat = require("@app/screens/chat/store")
+local Builtins = require("@app/screens/plugins/builtins")
 
 local M = {}
 
@@ -81,9 +82,14 @@ local function save(patch: { [string]: any }, clear: { string }?, key: string?)
 	end)
 end
 
-local function enabled(): boolean
+local function engine_on(): boolean
 	local s = settings:get()
 	return s ~= nil and s.enabled == true
+end
+
+-- One switch for both: the engine's setting and the built-in that has the host watch chats for one.
+local function enabled(): boolean
+	return engine_on() and Builtins.on("predictions")
 end
 
 local AUTO = "auto"
@@ -150,7 +156,10 @@ local function switch(): Node
 			on_change = function(v: boolean)
 				if settings:peek() == nil then
 					on:set(false)
-				elseif v ~= enabled() then
+					return
+				end
+				Builtins.set("predictions", v)
+				if v ~= engine_on() then
 					save({ enabled = v })
 				end
 			end,

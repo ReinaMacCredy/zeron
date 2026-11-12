@@ -22,7 +22,7 @@ local function settled(value: any): any
 end
 
 local FOLDER = "/home/ada/.zeron/playbooks"
-local rows = {
+local rows: { page.Playbook } = {
 	{ id = "triage", title = "Triage an issue", question = "What went wrong?", subtitle = "or run `zeron triage`", source = "builtIn" },
 	{
 		id = FOLDER .. "/release.md",
@@ -50,7 +50,8 @@ page.host = {
 	end,
 	create = function(): any
 		note("create")
-		table.insert(rows, { id = FOLDER .. "/new-playbook.md", title = "New playbook", question = "What should we do?", source = "app", path = FOLDER .. "/new-playbook.md", prompt = "Read [new-playbook.md] and follow it.\n\n" })
+		local made: page.Playbook = { id = FOLDER .. "/new-playbook.md", title = "New playbook", question = "What should we do?", source = "app", path = FOLDER .. "/new-playbook.md", prompt = "Read [new-playbook.md] and follow it.\n\n" }
+		table.insert(rows, made)
 		return settled(FOLDER .. "/new-playbook.md")
 	end,
 	triage = function(): any

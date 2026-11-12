@@ -5,11 +5,11 @@
 //! its global shortcut unchanged; only the edges differ (a callback for the
 //! shortcut, the capture handed back unstaged).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::ffi::{CStr, c_void};
 use std::ptr;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use block::ConcreteBlock;
@@ -19,7 +19,12 @@ use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::number::CFNumber;
 use core_foundation::string::{CFString, CFStringRef};
+use core_foundation::runloop::{CFRunLoop, CFRunLoopSource, kCFRunLoopCommonModes};
 use core_graphics::access::ScreenCaptureAccess;
+use core_graphics::event::{
+    CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CGEventType, EventField,
+};
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use core_graphics::window::{
     CGWindowID, copy_window_info, create_image, kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds,
@@ -31,15 +36,8 @@ use objc::rc::autoreleasepool;
 use objc::runtime::{Class, Object};
 use objc::{class, msg_send, sel, sel_impl};
 
-use super::{AccessibilitySnapshot, CaptureError, Captured, Shortcut};
+use super::{AccessibilitySnapshot, CaptureError, Captured, ChordModifier};
 
-const COMMAND_KEY: u32 = 1 << 8;
-const SHIFT_KEY: u32 = 1 << 9;
-const OPTION_KEY: u32 = 1 << 11;
-const CONTROL_KEY: u32 = 1 << 12;
-const EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
-const EVENT_HOT_KEY_PRESSED: u32 = 5;
-const APPSHOT_HOT_KEY_SIGNATURE: u32 = u32::from_be_bytes(*b"ZAPS");
 const MAX_AX_DEPTH: usize = 24;
 const MAX_AX_NODES: usize = 1_500;
 const MAX_AX_BYTES: usize = 96 * 1024;
@@ -47,28 +45,10 @@ const MAX_AX_VALUE_CHARS: usize = 4_096;
 const AX_DEADLINE: Duration = Duration::from_millis(900);
 const SCREEN_CAPTURE_KIT_TIMEOUT: Duration = Duration::from_secs(4);
 const MAX_CAPTURE_DIMENSION: f64 = 4_096.0;
-static SHORTCUT_READY: AtomicBool = AtomicBool::new(true);
 
 type AXUIElementRef = *const c_void;
 type AXError = i32;
 const AX_SUCCESS: AXError = 0;
-
-type EventTargetRef = *mut c_void;
-type EventHandlerCallRef = *mut c_void;
-type EventRef = *mut c_void;
-type EventHotKeyRef = *mut c_void;
-
-#[repr(C)]
-struct EventTypeSpec {
-    event_class: u32,
-    event_kind: u32,
-}
-
-#[repr(C)]
-struct EventHotKeyId {
-    signature: u32,
-    id: u32,
-}
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -84,44 +64,6 @@ unsafe extern "C" {
     fn AXValueGetTypeID() -> core_foundation::base::CFTypeID;
     fn AXValueGetValue(value: CFTypeRef, kind: u32, result: *mut c_void) -> bool;
     static kAXTrustedCheckOptionPrompt: CFStringRef;
-}
-
-#[link(name = "Carbon", kind = "framework")]
-unsafe extern "C" {
-    fn TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> CFTypeRef;
-    fn TISGetInputSourceProperty(source: CFTypeRef, property: CFStringRef) -> *const c_void;
-    static kTISPropertyUnicodeKeyLayoutData: CFStringRef;
-    fn UCKeyTranslate(
-        layout: *const c_void,
-        key_code: u16,
-        action: u16,
-        modifiers: u32,
-        keyboard_type: u32,
-        options: u32,
-        dead_key_state: *mut u32,
-        max_length: usize,
-        actual_length: *mut usize,
-        output: *mut u16,
-    ) -> i32;
-    fn LMGetKbdType() -> u16;
-    fn UnregisterEventHotKey(hot_key: EventHotKeyRef) -> i32;
-    fn GetApplicationEventTarget() -> EventTargetRef;
-    fn InstallEventHandler(
-        target: EventTargetRef,
-        handler: Option<unsafe extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> i32>,
-        event_type_count: u32,
-        event_types: *const EventTypeSpec,
-        user_data: *mut c_void,
-        out_handler: *mut *mut c_void,
-    ) -> i32;
-    fn RegisterEventHotKey(
-        key_code: u32,
-        modifiers: u32,
-        hot_key_id: EventHotKeyId,
-        target: EventTargetRef,
-        options: u32,
-        out_ref: *mut EventHotKeyRef,
-    ) -> i32;
 }
 
 unsafe extern "C" {
@@ -140,14 +82,9 @@ struct FrontmostWindow {
     title: Option<String>,
 }
 
-/// Whether the shortcut registered, Screen Recording is granted, and
-/// Accessibility is granted.
+/// Whether Screen Recording, Accessibility and Input Monitoring are granted.
 pub(super) fn capabilities() -> (bool, bool, bool) {
-    (
-        SHORTCUT_READY.load(Ordering::Relaxed),
-        ScreenCaptureAccess.preflight(),
-        unsafe { AXIsProcessTrusted() },
-    )
+    (ScreenCaptureAccess.preflight(), unsafe { AXIsProcessTrusted() }, input_monitoring())
 }
 
 pub(super) fn request_capture_access() {
@@ -173,194 +110,201 @@ fn request_screen_recording_permission() {
     let _ = ScreenCaptureAccess.request();
 }
 
-struct HotKeyRegistration {
-    target: EventTargetRef,
-    hot_key: EventHotKeyRef,
-    shortcut: Option<Shortcut>,
+/// Per modifier: the virtual key codes of its left and right keys, their
+/// device-specific flag bits (`NX_DEVICEL*KEYMASK` / `NX_DEVICER*KEYMASK`),
+/// and the generic flag that clears once neither key is held.
+#[derive(Clone, Copy)]
+struct ChordKeys {
+    left_code: i64,
+    right_code: i64,
+    left_mask: u64,
+    right_mask: u64,
+    flag: u64,
+}
+
+impl ChordKeys {
+    fn for_modifier(modifier: ChordModifier) -> Self {
+        match modifier {
+            ChordModifier::Command => Self {
+                left_code: 0x37,
+                right_code: 0x36,
+                left_mask: 0x08,
+                right_mask: 0x10,
+                flag: CGEventFlags::CGEventFlagCommand.bits(),
+            },
+            ChordModifier::Option => Self {
+                left_code: 0x3A,
+                right_code: 0x3D,
+                left_mask: 0x20,
+                right_mask: 0x40,
+                flag: CGEventFlags::CGEventFlagAlternate.bits(),
+            },
+            ChordModifier::Shift => Self {
+                left_code: 0x38,
+                right_code: 0x3C,
+                left_mask: 0x02,
+                right_mask: 0x04,
+                flag: CGEventFlags::CGEventFlagShift.bits(),
+            },
+        }
+    }
+}
+
+struct ChordWatch {
+    keys: ChordKeys,
+    latched: Cell<bool>,
+    fired: Chord,
+}
+
+impl ChordWatch {
+    fn new(modifier: ChordModifier, fired: Chord) -> Self {
+        Self { keys: ChordKeys::for_modifier(modifier), latched: Cell::new(false), fired }
+    }
+
+    fn reset(&self) {
+        self.latched.set(false);
+    }
+
+    fn flags_changed(&self, code: i64, flags: u64) -> bool {
+        let keys = &self.keys;
+        if code != keys.left_code && code != keys.right_code {
+            return false;
+        }
+        let both = flags & keys.flag != 0 && flags & keys.left_mask != 0 && flags & keys.right_mask != 0;
+        if both && !self.latched.get() {
+            self.latched.set(true);
+            return true;
+        }
+        if !both {
+            self.latched.set(false);
+        }
+        false
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Chord {
+    Appshot,
+    QuickCapture,
+}
+
+/// The shipping app's `ModifierChordTap` (Synara's `OptionChordMonitor`): a
+/// listen-only session event tap on `flagsChanged` that serves the Appshot
+/// and Quick capture chords. macOS disables a tap it considers slow; the
+/// callback re-enables it in place.
+struct ModifierChordTap {
+    tap: CGEventTap<'static>,
+    source: CFRunLoopSource,
+}
+
+impl ModifierChordTap {
+    fn install(watches: Vec<ChordWatch>) -> Option<Self> {
+        if watches.is_empty() || !unsafe { CGPreflightListenEventAccess() } {
+            return None;
+        }
+        let port: Rc<Cell<Option<core_foundation::mach_port::CFMachPortRef>>> = Rc::new(Cell::new(None));
+        let port_for_callback = port.clone();
+        let tap = CGEventTap::new(
+            CGEventTapLocation::Session,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::ListenOnly,
+            // Only the modifier changes; the tap-disabled notices arrive
+            // regardless of the mask (and their raw values overflow it).
+            vec![CGEventType::FlagsChanged],
+            move |_, kind, event| {
+                match kind {
+                    CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
+                        watches.iter().for_each(ChordWatch::reset);
+                        if let Some(port) = port_for_callback.get() {
+                            unsafe { CGEventTapEnable(port, true) };
+                        }
+                        return None;
+                    }
+                    CGEventType::FlagsChanged => {}
+                    _ => return None,
+                }
+                let flags = event.get_flags().bits();
+                let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+                for watch in &watches {
+                    if watch.flags_changed(code, flags) {
+                        let fired = watch.fired;
+                        ON_CHORD.with(|slot| {
+                            if let Some(on_chord) = slot.borrow().as_ref() {
+                                on_chord(fired);
+                            }
+                        });
+                    }
+                }
+                None
+            },
+        )
+        .ok()?;
+        port.set(Some(tap.mach_port.as_concrete_TypeRef()));
+        let source = tap.mach_port.create_runloop_source(0).ok()?;
+        CFRunLoop::get_main().add_source(&source, unsafe { kCFRunLoopCommonModes });
+        tap.enable();
+        Some(Self { tap, source })
+    }
+}
+
+impl Drop for ModifierChordTap {
+    fn drop(&mut self) {
+        CFRunLoop::get_main().remove_source(&self.source, unsafe { kCFRunLoopCommonModes });
+        unsafe { CFMachPortInvalidate(self.tap.mach_port.as_concrete_TypeRef()) };
+    }
+}
+
+unsafe extern "C" {
+    fn CGEventTapEnable(tap: core_foundation::mach_port::CFMachPortRef, enable: bool);
+    fn CFMachPortInvalidate(port: core_foundation::mach_port::CFMachPortRef);
+    fn CGPreflightListenEventAccess() -> bool;
+    fn CGRequestListenEventAccess() -> bool;
+}
+
+struct Registration {
+    appshot: Option<ChordModifier>,
+    quick_capture: Option<ChordModifier>,
+    tap: Option<ModifierChordTap>,
 }
 
 thread_local! {
-    // Carbon registration and replacement always run on GPUI's main thread.
-    static HOT_KEY: RefCell<Option<HotKeyRegistration>> = const { RefCell::new(None) };
-    // What a press does: set once, as the handler is installed.
-    static ON_PRESS: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    // The tap's run loop source is the main thread's; it is replaced there.
+    static REGISTRATION: RefCell<Registration> = const { RefCell::new(Registration { appshot: None, quick_capture: None, tap: None }) };
+    static ON_CHORD: RefCell<Option<Box<dyn Fn(Chord)>>> = const { RefCell::new(None) };
 }
 
-/// Installs the handler for the Carbon hot key (once a process), `on_press`
-/// running on the main thread at each press, and registers `shortcut`.
-pub(super) fn start_global_shortcut(on_press: Box<dyn Fn()>, shortcut: Option<Shortcut>) {
-    ON_PRESS.with(|slot| *slot.borrow_mut() = Some(on_press));
-    if HOT_KEY.with(|r| r.borrow().is_some()) {
-        refresh_global_shortcut(shortcut);
-        return;
-    }
-    let event_type = EventTypeSpec {
-        event_class: EVENT_CLASS_KEYBOARD,
-        event_kind: EVENT_HOT_KEY_PRESSED,
-    };
-    let target = unsafe { GetApplicationEventTarget() };
-    let status = unsafe {
-        InstallEventHandler(
-            target,
-            Some(appshot_hot_key_handler),
-            1,
-            &event_type,
-            ptr::null_mut(),
-            ptr::null_mut(),
-        )
-    };
-    if status != 0 {
-        SHORTCUT_READY.store(false, Ordering::Relaxed);
-        eprintln!("zeron-zgx: the Appshot shortcut's handler is unavailable ({status})");
-        return;
-    }
-    HOT_KEY.with(|registration| {
-        *registration.borrow_mut() = Some(HotKeyRegistration {
-            target,
-            hot_key: ptr::null_mut(),
-            shortcut: None,
-        })
-    });
-    refresh_global_shortcut(shortcut);
+pub(super) fn start_chords(on_chord: Box<dyn Fn(Chord)>) {
+    ON_CHORD.with(|slot| *slot.borrow_mut() = Some(on_chord));
 }
 
-pub(super) fn refresh_global_shortcut(shortcut: Option<Shortcut>) {
-    HOT_KEY.with(|registration| {
-        let mut registration = registration.borrow_mut();
-        let Some(registration) = registration.as_mut() else {
-            return;
-        };
-        if registration.shortcut == shortcut {
-            return;
-        }
-        if !registration.hot_key.is_null() {
-            unsafe {
-                UnregisterEventHotKey(registration.hot_key);
+pub(super) fn refresh_chords(appshot: Option<ChordModifier>, quick_capture: Option<ChordModifier>) -> bool {
+    let quick_capture = quick_capture.filter(|q| Some(*q) != appshot);
+    REGISTRATION.with(|registration| {
+        let mut r = registration.borrow_mut();
+        let wanted = appshot.is_some() || quick_capture.is_some();
+        if r.appshot != appshot || r.quick_capture != quick_capture || (wanted && r.tap.is_none()) {
+            r.tap = None;
+            r.appshot = appshot;
+            r.quick_capture = quick_capture;
+            let mut watches = Vec::new();
+            if let Some(m) = appshot {
+                watches.push(ChordWatch::new(m, Chord::Appshot));
             }
-            registration.hot_key = ptr::null_mut();
-        }
-        registration.shortcut = shortcut.clone();
-        let Some(shortcut) = shortcut else {
-            return;
-        };
-        let Some(key_code) = shortcut_keycode(&shortcut.key) else {
-            SHORTCUT_READY.store(false, Ordering::Relaxed);
-            return;
-        };
-        let modifiers = (if shortcut.control { CONTROL_KEY } else { 0 })
-            | (if shortcut.alt { OPTION_KEY } else { 0 })
-            | (if shortcut.shift { SHIFT_KEY } else { 0 })
-            | (if shortcut.platform { COMMAND_KEY } else { 0 });
-        let status = unsafe {
-            RegisterEventHotKey(
-                key_code,
-                modifiers,
-                EventHotKeyId {
-                    signature: APPSHOT_HOT_KEY_SIGNATURE,
-                    id: 1,
-                },
-                registration.target,
-                0,
-                &mut registration.hot_key,
-            )
-        };
-        SHORTCUT_READY.store(status == 0, Ordering::Relaxed);
-        if status != 0 {
-            eprintln!("zeron-zgx: the Appshot shortcut isn't available ({status})");
-        }
-    });
-}
-
-fn shortcut_keycode(key: &str) -> Option<u32> {
-    let named = match key {
-        "space" => 49,
-        "tab" => 48,
-        "enter" => 36,
-        "backspace" => 51,
-        "delete" => 117,
-        "insert" => 114,
-        "up" => 126,
-        "down" => 125,
-        "left" => 123,
-        "right" => 124,
-        "home" => 115,
-        "end" => 119,
-        "pageup" => 116,
-        "pagedown" => 121,
-        _ => {
-            if let Some(index) = key.strip_prefix('f').and_then(|n| n.parse::<usize>().ok()) {
-                return index.checked_sub(1).and_then(|index| {
-                    [
-                        122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106,
-                        64, 79, 80, 90,
-                    ]
-                    .get(index)
-                    .copied()
-                });
+            if let Some(m) = quick_capture {
+                watches.push(ChordWatch::new(m, Chord::QuickCapture));
             }
-            return layout_keycode(key);
+            r.tap = if wanted { ModifierChordTap::install(watches) } else { None };
         }
-    };
-    Some(named)
+        appshot.is_some() && r.tap.is_some()
+    })
 }
 
-fn layout_keycode(key: &str) -> Option<u32> {
-    // Resolve the printed key against the active ASCII-capable layout. A US
-    // positional table would capture Q when an AZERTY user records A.
-    unsafe {
-        let source = TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
-        if source.is_null() {
-            return None;
-        }
-        let data = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData);
-        let result = if data.is_null() {
-            None
-        } else {
-            let layout = core_foundation::data::CFDataGetBytePtr(data.cast()).cast();
-            let mut found = None;
-            'levels: for modifiers in [0, 2] {
-                for code in 0..128_u16 {
-                    let mut output = [0_u16; 4];
-                    let mut length = 0;
-                    let mut dead = 0;
-                    if UCKeyTranslate(
-                        layout,
-                        code,
-                        0,
-                        modifiers,
-                        u32::from(LMGetKbdType()),
-                        1,
-                        &mut dead,
-                        output.len(),
-                        &mut length,
-                        output.as_mut_ptr(),
-                    ) == 0
-                        && length <= output.len()
-                        && String::from_utf16_lossy(&output[..length]).to_lowercase() == key
-                    {
-                        found = Some(u32::from(code));
-                        break 'levels;
-                    }
-                }
-            }
-            found
-        };
-        CFRelease(source);
-        result
-    }
+pub(super) fn input_monitoring() -> bool {
+    unsafe { CGPreflightListenEventAccess() }
 }
 
-unsafe extern "C" fn appshot_hot_key_handler(
-    _call: EventHandlerCallRef,
-    _event: EventRef,
-    _user_data: *mut c_void,
-) -> i32 {
-    ON_PRESS.with(|slot| {
-        if let Some(on_press) = slot.borrow().as_ref() {
-            on_press();
-        }
-    });
-    0
+pub(super) fn request_input_monitoring() {
+    let _ = unsafe { CGRequestListenEventAccess() };
 }
 
 pub(super) fn capture_frontmost_window() -> Result<Captured, CaptureError> {
@@ -407,6 +351,7 @@ pub(super) fn capture_frontmost_window() -> Result<Captured, CaptureError> {
             accessibility,
             png,
             icon_png: app.icon_png,
+            bounds: window_bounds(window.id).map(|r| [r.origin.x, r.origin.y, r.size.width, r.size.height]),
         })
     })
 }
@@ -589,6 +534,190 @@ fn same_window_bounds(window: CGRect, focused: CGRect) -> bool {
     ]
     .iter()
     .all(|(a, b)| (a - b).abs() <= 2.0)
+}
+
+/// Synara's `CaptureFeedback.swift`: 35ms ease-out to 34% white, 170ms
+/// ease-in back to clear, on a click-through, non-activating panel at the
+/// screen-saver level over the captured window's frame.
+const FLASH_IN_SECONDS: f64 = 0.035;
+const FLASH_OUT_SECONDS: f64 = 0.17;
+const FLASH_PEAK_OPACITY: f64 = 0.34;
+
+/// `CGRect` as Objective-C sees it: `msg_send!` needs the struct encoding,
+/// which `core_graphics::CGRect` does not provide.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NSRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+unsafe impl objc::Encode for NSRect {
+    fn encode() -> objc::Encoding {
+        unsafe { objc::Encoding::from_str("{CGRect={CGPoint=dd}{CGSize=dd}}") }
+    }
+}
+
+fn appkit_flash_frame(bounds: CGRect) -> Option<NSRect> {
+    unsafe {
+        let screens: *mut Object = msg_send![class!(NSScreen), screens];
+        let count: usize = msg_send![screens, count];
+        let key: *mut Object =
+            msg_send![class!(NSString), stringWithUTF8String: c"NSScreenNumber".as_ptr()];
+        let mut best: Option<(NSRect, CGRect, f64)> = None;
+        for index in 0..count {
+            let screen: *mut Object = msg_send![screens, objectAtIndex: index];
+            let description: *mut Object = msg_send![screen, deviceDescription];
+            let number: *mut Object = msg_send![description, objectForKey: key];
+            if number.is_null() {
+                continue;
+            }
+            let display_id: u32 = msg_send![number, unsignedIntValue];
+            let display = core_graphics::display::CGDisplay::new(display_id).bounds();
+            let overlap_width = (display.origin.x + display.size.width)
+                .min(bounds.origin.x + bounds.size.width)
+                - display.origin.x.max(bounds.origin.x);
+            let overlap_height = (display.origin.y + display.size.height)
+                .min(bounds.origin.y + bounds.size.height)
+                - display.origin.y.max(bounds.origin.y);
+            let area = overlap_width.max(0.0) * overlap_height.max(0.0);
+            if area <= 0.0
+                || best
+                    .as_ref()
+                    .is_some_and(|(_, _, best_area)| *best_area >= area)
+            {
+                continue;
+            }
+            let frame: NSRect = msg_send![screen, frame];
+            best = Some((frame, display, area));
+        }
+        let (frame, display, _) = best?;
+        if display.size.width <= 0.0 || display.size.height <= 0.0 {
+            return None;
+        }
+        let horizontal = frame.width / display.size.width;
+        let vertical = frame.height / display.size.height;
+        Some(NSRect {
+            x: frame.x + (bounds.origin.x - display.origin.x) * horizontal,
+            y: frame.y + frame.height
+                - (bounds.origin.y + bounds.size.height - display.origin.y) * vertical,
+            width: bounds.size.width * horizontal,
+            height: bounds.size.height * vertical,
+        })
+    }
+}
+
+pub(super) fn play_capture_flash(
+    bounds: [f64; 4],
+    done: Box<dyn FnOnce()>,
+) -> bool {
+    let bounds = CGRect::new(
+        &CGPoint::new(bounds[0], bounds[1]),
+        &CGSize::new(bounds[2], bounds[3]),
+    );
+    unsafe {
+        let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let reduce_motion: i8 = msg_send![workspace, accessibilityDisplayShouldReduceMotion];
+        if reduce_motion != 0 {
+            return false;
+        }
+        let Some(frame) = appkit_flash_frame(bounds) else { return false };
+
+        let panel: *mut Object = msg_send![class!(NSPanel), alloc];
+        // NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel,
+        // NSBackingStoreBuffered.
+        let panel: *mut Object = msg_send![panel, initWithContentRect: frame styleMask: (1u64 << 7) backing: 2u64 defer: 0i8];
+        if panel.is_null() {
+            return false;
+        }
+        // NSScreenSaverWindowLevel; canJoinAllSpaces | stationary |
+        // ignoresCycle | fullScreenAuxiliary.
+        let _: () = msg_send![panel, setLevel: 1000i64];
+        let _: () = msg_send![panel, setCollectionBehavior: ((1u64 << 0) | (1u64 << 4) | (1u64 << 6) | (1u64 << 8))];
+        let clear: *mut Object = msg_send![class!(NSColor), clearColor];
+        let _: () = msg_send![panel, setBackgroundColor: clear];
+        let _: () = msg_send![panel, setOpaque: 0i8];
+        let _: () = msg_send![panel, setHasShadow: 0i8];
+        let _: () = msg_send![panel, setHidesOnDeactivate: 0i8];
+        let _: () = msg_send![panel, setIgnoresMouseEvents: 1i8];
+        let _: () = msg_send![panel, setSharingType: 0u64];
+        let _: () = msg_send![panel, setReleasedWhenClosed: 0i8];
+        let _: () = msg_send![panel, setAlphaValue: 0.0f64];
+
+        let view: *mut Object = msg_send![class!(NSView), alloc];
+        let view: *mut Object = msg_send![view, initWithFrame: NSRect { x: 0.0, y: 0.0, width: frame.width, height: frame.height }];
+        let _: () = msg_send![view, setWantsLayer: 1i8];
+        let layer: *mut Object = msg_send![view, layer];
+        let white: *mut Object = msg_send![class!(NSColor), whiteColor];
+        let white_cg: *const c_void = msg_send![white, CGColor];
+        let _: () = msg_send![layer, setBackgroundColor: white_cg];
+        let _: () = msg_send![layer, setCornerRadius: 10.0f64];
+        let _: () = msg_send![layer, setMasksToBounds: 1i8];
+        let _: () = msg_send![panel, setContentView: view];
+        let _: () = msg_send![view, release];
+        let _: () = msg_send![panel, orderFrontRegardless];
+
+        let done = Rc::new(RefCell::new(Some(done)));
+        let panel_addr = panel as usize;
+        let timing = |name: &std::ffi::CStr| -> *mut Object {
+            let name: *mut Object =
+                msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
+            msg_send![class!(CAMediaTimingFunction), functionWithName: name]
+        };
+        let ease_out = timing(c"easeOut");
+        let ease_in = timing(c"easeIn");
+
+        let fade_out_done = ConcreteBlock::new(move || {
+            let panel = panel_addr as *mut Object;
+            let _: () = msg_send![panel, orderOut: ptr::null_mut::<Object>()];
+            let _: () = msg_send![panel, close];
+            let _: () = msg_send![panel, release];
+            if let Some(done) = done.borrow_mut().take() {
+                done();
+            }
+        })
+        .copy();
+        let fade_out = ConcreteBlock::new(move |context: *mut Object| {
+            let _: () = msg_send![context, setDuration: FLASH_OUT_SECONDS];
+            let _: () = msg_send![context, setTimingFunction: ease_in];
+            let animator: *mut Object = msg_send![panel_addr as *mut Object, animator];
+            let _: () = msg_send![animator, setAlphaValue: 0.0f64];
+        })
+        .copy();
+        let fade_in_done = ConcreteBlock::new(move || {
+            let _: () = msg_send![class!(NSAnimationContext), runAnimationGroup: &*fade_out completionHandler: &*fade_out_done];
+        })
+        .copy();
+        let fade_in = ConcreteBlock::new(move |context: *mut Object| {
+            let _: () = msg_send![context, setDuration: FLASH_IN_SECONDS];
+            let _: () = msg_send![context, setTimingFunction: ease_out];
+            let animator: *mut Object = msg_send![panel_addr as *mut Object, animator];
+            let _: () = msg_send![animator, setAlphaValue: FLASH_PEAK_OPACITY];
+        })
+        .copy();
+        let _: () = msg_send![class!(NSAnimationContext), runAnimationGroup: &*fade_in completionHandler: &*fade_in_done];
+        true
+    }
+}
+
+/// The name macOS lists this copy under in System Settings: the bundle's
+/// ("Zeron", "Beta Dev 77"), else Zeron.
+pub(super) fn app_display_name() -> String {
+    unsafe {
+        let bundle: *mut Object = msg_send![class!(NSBundle), mainBundle];
+        let url: *mut Object = msg_send![bundle, bundleURL];
+        let extension: *mut Object = msg_send![url, pathExtension];
+        if nsstring(extension).as_deref() == Some("app") {
+            let stem: *mut Object = msg_send![url, URLByDeletingPathExtension];
+            let name: *mut Object = msg_send![stem, lastPathComponent];
+            if let Some(name) = nsstring(name).filter(|n| !n.is_empty()) {
+                return name;
+            }
+        }
+    }
+    "Zeron".into()
 }
 
 /// Use LaunchServices to bring this app back after the explicit capture
@@ -1126,7 +1255,8 @@ unsafe fn nsstring(value: *mut Object) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_dimensions, is_secure_ax_element, same_window_bounds, visible_capture_window,
+        Chord, ChordModifier, ChordWatch, capture_dimensions, is_secure_ax_element, same_window_bounds,
+        visible_capture_window,
     };
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 
@@ -1207,5 +1337,27 @@ mod tests {
         ));
         assert!(is_secure_ax_element("AXSecureTextField", None));
         assert!(!is_secure_ax_element("AXTextField", Some("AXSearchField")));
+    }
+
+    #[test]
+    fn a_chord_fires_once_both_keys_are_down_and_again_only_after_a_release() {
+        let w = ChordWatch::new(ChordModifier::Command, Chord::Appshot);
+        let cmd = core_graphics::event::CGEventFlags::CGEventFlagCommand.bits();
+        let (left, right) = (cmd | 0x08, cmd | 0x10);
+        assert!(!w.flags_changed(0x37, left), "one key alone");
+        assert!(w.flags_changed(0x36, left | 0x10), "both down");
+        assert!(!w.flags_changed(0x36, left | 0x10), "held: no repeat");
+        assert!(!w.flags_changed(0x36, left), "right let go");
+        assert!(w.flags_changed(0x36, left | 0x10), "pressed again");
+        assert!(!w.flags_changed(0x36, 0), "both let go");
+        assert!(!w.flags_changed(0x3A, right | 0x08 | 0x20), "another modifier's key");
+        assert!(!w.flags_changed(0x37, right), "left let go of after a release");
+        assert!(w.flags_changed(0x37, left | 0x10));
+        w.reset();
+        assert!(w.flags_changed(0x37, left | 0x10), "a disabled tap's reset re-arms it");
+        let shift = ChordWatch::new(ChordModifier::Shift, Chord::QuickCapture);
+        assert!(!shift.flags_changed(0x37, left | 0x10), "the Command keys don't make a Shift chord");
+        let s = core_graphics::event::CGEventFlags::CGEventFlagShift.bits();
+        assert!(shift.flags_changed(0x3C, s | 0x02 | 0x04));
     }
 }

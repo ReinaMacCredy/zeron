@@ -2121,80 +2121,115 @@
     },
     "appshots": {
       "title": "Appshots",
-      "terms": "capture screenshot window app shortcut",
-      "description": "Set up once, one permission at a time. Screen Recording captures the window; Accessibility optionally adds off-screen application text.",
+      "terms": "capture screenshot window app shortcut hotkey",
+      "description": "Capture another app's frontmost window directly into a session.",
       "capture_section": "Capture",
-      "permissions": "Permissions",
-      "permissions_description": "macOS asks for these for the app that opened Zeron: Zeron itself, or, run from a terminal or an editor, that app. Grant them there in System Settings → Privacy & Security, then quit and reopen it once.",
-      "ready": "Ready",
-      "required": "Required",
-      "set_up": "Set up",
-      "press": "Press a shortcut",
-      "press_now": "Press a shortcut…",
-      "change_shortcut": "Change shortcut, now {keys}",
-      "open_system_settings": "Open System Settings",
-      "changed": "Changed a permission? Check again after returning to Zeron.",
-      "check_again": "Check again",
+      "quick_section": "Quick capture to Tasks",
+      "permissions": "macOS permissions",
+      "intro": {
+        "title": "Take an Appshot to show your agent another app's window",
+        "body": "Press your hotkey while any app is frontmost. {app} captures that window as an image, brings itself forward, and attaches the snap to a session composer; the capture stays on this device until you send the message.",
+        "desktop_only": "Appshots are available only in the desktop app.",
+        "terms": "overview screenshot window"
+      },
       "enabled": {
-        "label": "Capture Appshots",
-        "terms": "screenshot window",
-        "description": "Captures are staged for review and never sent automatically."
+        "label": "Enable Appshots",
+        "terms": "screenshot window listener",
+        "description": "Run the capture listener in the background while {app} is open."
       },
-      "sound": {
-        "label": "Capture sound",
-        "terms": "chime",
-        "description": "Play a sound when an Appshot is ready."
+      "hotkey": {
+        "label": "Hotkey",
+        "terms": "shortcut keys chord double",
+        "description": "Press both {glyph} keys simultaneously",
+        "none_description": "No hotkey. Choose a chord to capture from other apps.",
+        "none": "None",
+        "name": "{chord} hotkey: {choice}",
+        "appshot": "Appshot",
+        "taken": "{choice} is already the {other} hotkey."
       },
-      "shortcut": {
-        "label": "Global shortcut",
-        "terms": "hotkey keys",
-        "ready": "The shortcut works while another application has focus.",
-        "unavailable": "This shortcut is unavailable. Choose a different key combination."
+      "quick": {
+        "label": "Quick capture",
+        "terms": "tasks to do idea chord",
+        "description": "Press both {glyph} keys in any app to file an idea into To do without leaving it.",
+        "none_description": "No hotkey. The + under Tasks on the rail still opens quick capture.",
+        "input": "Allow Input Monitoring in macOS System Settings, then try again."
       },
       "destination": {
         "label": "Destination",
         "terms": "session composer",
+        "automatic_description": "Snaps join the session you interacted with in the last minute, and consecutive snaps stay together. Otherwise {app} opens a fresh session with the capture attached.",
         "last_description": "Use the open session, or return to the last session used for an Appshot.",
         "new_description": "Stage captures in a new-session composer, keeping existing drafts intact.",
-        "automatic_description": "Use the open session, or the new-session composer when no session is open.",
         "automatic": "Automatic",
         "last": "Last session",
         "new": "New session"
       },
+      "sound": {
+        "label": "Capture sound",
+        "terms": "chime shutter",
+        "description": "Play a short shutter cue when a window is captured."
+      },
+      "preview": "Preview",
+      "preview_label": "Preview the capture sound",
+      "input": {
+        "label": "Input Monitoring",
+        "terms": "input monitoring permission keyboard",
+        "description": "Lets {app} notice the hotkey chord while another app owns the keyboard. Nothing you type is recorded."
+      },
       "capture": {
-        "label": "Window capture",
-        "terms": "screen recording permission",
-        "description": "Screen Recording lets Zeron capture the frontmost window. macOS may request one restart.",
-        "allow": "Allow window capture"
+        "label": "Screen Recording",
+        "terms": "screen recording window capture permission",
+        "description": "Lets {app} capture an image of the frontmost window. Only the single window you snap is captured, only at the moment you press the chord."
       },
       "text": {
-        "label": "Application text",
-        "terms": "accessibility permission",
-        "description": "Accessibility adds visible and off-screen application text. Screenshots work without it.",
-        "allow": "Enable text capture"
+        "label": "Accessibility",
+        "terms": "accessibility application text permission",
+        "description": "Optional. Lets {app} read the captured window's visible and off-screen text so the agent gets more than pixels. Screenshots work without it."
       },
-      "intro": {
-        "title": "Take an Appshot to show your agent another app's window",
-        "body": "Press your hotkey while any app is frontmost. Zeron captures that window as an image, brings itself forward, and attaches the snap to a session composer; the capture stays on this device until you send the message.",
-        "desktop_only": "Appshots are available only in the desktop app."
+      "badge": {
+        "granted": "Granted",
+        "denied": "Denied",
+        "not_requested": "Not requested yet"
       },
+      "grant": "Grant",
+      "hide_steps": "Hide steps",
+      "grant_label": "{action}: {pane}",
+      "guide": {
+        "open": "Open {pane} settings",
+        "listed": "If this copy of {app} is already listed, turn it on. Otherwise, use + to choose this installed copy, then turn it on.",
+        "auth": "Complete any macOS authentication. If macOS asks you to quit and reopen, do so before checking again.",
+        "watching": "Watching for the change: this page updates automatically.",
+        "granted": "Permission granted.",
+        "stale": "Still denied after an update or rebuild? Remove this app from the list and add this copy again. Complete any macOS authentication, and restart if macOS asks you to quit and reopen."
+      },
+      "status_row": {
+        "label": "Permission status",
+        "terms": "permissions recheck",
+        "description": "Grant each permission with the steps above. If you take longer than 10 minutes, press Grant again."
+      },
+      "recheck": "Recheck permissions",
+      "rechecking": "Rechecking…",
+      "unchanged": "Permissions unchanged. Use Grant next to a permission to walk through setup.",
+      "now_granted": "Permission granted. {pane} is ready for Appshots.",
       "status": {
         "unsupported": "Available on macOS and Linux only",
         "off": "Off",
+        "no_hotkey": "No hotkey selected",
+        "input": "Allow Input Monitoring in macOS System Settings, then try again.",
         "capture": "Allow Screen Recording in macOS System Settings, then try again.",
         "unavailable": "This shortcut is unavailable. Choose a different key combination.",
         "listening": "Listening: press {keys} to snap"
       },
-      "preview": "Preview",
       "restore": "Restore defaults",
+      "restore_label": "Restore Appshot defaults",
       "reset": "Reset {what} to default",
       "reset_what": {
         "enabled": "Appshots",
         "sound": "capture sound",
-        "shortcut": "hotkey",
+        "hotkey": "hotkey",
+        "quick": "quick capture hotkey",
         "destination": "destination"
-      },
-      "key_rule": "Use Control, Option or Command with a letter, number, function key or navigation key."
+      }
     },
     "providers": {
       "title": "Providers",
@@ -3306,6 +3341,38 @@
       "open": "Open",
       "show_tools": "Show {group}'s tools",
       "group_off": "The whole group is off. Your choices below are kept for when you turn it back on."
+    },
+    "features": {
+      "usage": {
+        "label": "Usage on the rail",
+        "description": "The limit ring on the rail, which opens this page",
+        "terms": "usage ring rail limit"
+      },
+      "home_widgets": {
+        "label": "Home widgets",
+        "description": "The widget grid under New chat",
+        "terms": "home widgets grid new chat"
+      },
+      "keep_awake": {
+        "label": "Keep this Mac awake while agents work",
+        "description": "Blocks idle sleep until a minute after the last agent stops. The display still sleeps, and closing the lid still sleeps the Mac.",
+        "terms": "keep awake sleep caffeinate"
+      },
+      "browser_annotate": {
+        "label": "Annotate",
+        "description": "Notes on a web page for the agent: the browser bar's Annotate, its menu item and its key",
+        "terms": "annotate notes browser"
+      },
+      "device": {
+        "label": "Device panel",
+        "description": "The simulator and emulator panel",
+        "terms": "device simulator emulator panel"
+      },
+      "voice": {
+        "label": "Voice",
+        "description": "The mic, to speak instead of typing",
+        "terms": "voice mic microphone dictation"
+      }
     },
     "predictions": {
       "title": "Predictions",
@@ -5537,7 +5604,21 @@
       "close": "Close panel",
       "power_off": "Power off",
       "rotate": "Rotate device",
-      "float": "Float device over chat"
+      "float": "Float device over chat",
+      "view_3d": "3D view",
+      "view_flat": "Flat view",
+      "view_restore": "Restore 3D view",
+      "fold_shape": "Fold shape",
+      "pose_closed": "Closed stand",
+      "pose_book": "Book stand",
+      "pose_open": "Open stand",
+      "pose_laptop": "Laptop stand",
+      "pose_tent": "Tent stand",
+      "tip_closed": "Closed",
+      "tip_book": "Book / bookshelf",
+      "tip_open": "Open",
+      "tip_laptop": "Laptop",
+      "tip_tent": "Tent"
     },
     "float": {
       "label": "Floating device preview",

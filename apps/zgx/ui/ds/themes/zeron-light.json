@@ -35,6 +35,7 @@
 		"accent": "#7a55c4",
 		"accent.hover": "#6d48b8",
 		"accent.text": "#ffffff",
+		"success": "#15803d",
 		"hover": "#0000000a",
 		"pressed": "#00000012",
 		"selection.item": "#ffffffeb",

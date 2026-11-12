@@ -97,10 +97,10 @@ pub const TABLE: &[(&str, Home)] = &[
     ("rightPaneWidth", Home::Persist(&["screens/shell/page.luau::shell_files_width", "screens/shell/page.luau::shell_panel_width_chosen"])),
     ("splitRatio", Home::None("a split's ratios are each tab's own here")),
     ("terminalHeight", Home::None("terminals are panel tabs here, no drawer")),
-    ("keymap", Home::Persist(&["screens/shell/keys.luau::shell_keymap", "screens/chat/appshots.luau::appshots_shortcut", "ds/dictation.luau::dictation_key"])),
-    ("appshotsEnabled", Home::Persist(&["screens/chat/appshots.luau::appshots_enabled"])),
-    ("appshotSoundEnabled", Home::Persist(&["screens/chat/appshots.luau::appshots_sound"])),
-    ("appshotDestination", Home::Persist(&["screens/chat/appshots.luau::appshots_destination"])),
+    ("keymap", Home::Persist(&["screens/shell/keys.luau::shell_keymap", "ds/dictation.luau::dictation_key"])),
+    ("appshotsEnabled", Home::InPlace("Settings → Appshots reads and writes it there (src/appshots Prefs)")),
+    ("appshotSoundEnabled", Home::InPlace("Settings → Appshots reads and writes it there (src/appshots Prefs)")),
+    ("appshotDestination", Home::InPlace("Settings → Appshots reads and writes it there (src/appshots Prefs)")),
     ("computerGettingStartedAcknowledged", Home::Persist(&["screens/settings/computer.luau::guide_acknowledged"])),
     ("computerEffortHintDismissed", Home::None("no effort hint on computer use here")),
     ("escapeStopsActiveAgent", Home::Persist(&["screens/settings/prefs.luau::settings_escape_stops"])),
@@ -300,10 +300,6 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("screens/shell/switcher.luau::shell_switcher_window", "\"all\""),
     ("screens/shell/switcher.luau::shell_switcher_limit", "0"),
     ("screens/shell/switcher.luau::shell_switcher_cycles_tabs", "false"),
-    ("screens/chat/appshots.luau::appshots_enabled", "false"),
-    ("screens/chat/appshots.luau::appshots_sound", "true"),
-    ("screens/chat/appshots.luau::appshots_destination", "\"automatic\""),
-    ("screens/chat/appshots.luau::appshots_shortcut", "\"ctrl+alt+space\""),
     ("screens/chat/invocations.luau::skills_disabled", "{}"),
     ("screens/tasks/init.luau::tasks_view", "\"list\""),
     ("screens/onboarding/state.luau::appearance", "\"system\""),
@@ -466,9 +462,6 @@ fn more(settings: &Json) -> Vec<(String, Json)> {
     let keys = keymap(&settings["keymap"], MAC);
     if !keys.bound.is_empty() {
         put("screens/shell/keys.luau::shell_keymap", Json::Object(keys.bound));
-    }
-    if let Some(combo) = keys.appshot {
-        put("screens/chat/appshots.luau::appshots_shortcut", json!(combo));
     }
     if let Some(hold) = settings["keymap"]["toggleDictation"].as_str().filter(|c| *c != "mod-d").and_then(combo) {
         put("ds/dictation.luau::dictation_key", json!(hold));
@@ -640,12 +633,11 @@ pub fn combo(theirs: &str) -> Option<String> {
     Some(out.join("+"))
 }
 
-/// What the shipping app's keymap rebinds: by this app's command, Appshots'
-/// combination, and what can't be bound here (by `keymap.<id>`, with why).
+/// What the shipping app's keymap rebinds: by this app's command, and what
+/// can't be bound here (by `keymap.<id>`, with why).
 #[derive(Debug, Default, PartialEq)]
 struct Keys {
     bound: Map<String, Json>,
-    appshot: Option<String>,
     left: Map<String, Json>,
 }
 
@@ -663,7 +655,9 @@ fn keymap(map: &Json, mac: bool) -> Keys {
     for (field, command) in SHORTCUTS {
         let Some(theirs) = theirs_all.get(*field).and_then(Json::as_str) else { continue };
         let old_default = older && matches!((*field, theirs), ("toggleSidebar", "mod-s") | ("toggleChanges", "mod-b"));
-        if default_combo(field, mac).contains(&theirs) || old_default {
+        // (A Quick capture chord on the Mac: Settings → Appshots reads it in place.)
+        let chord_in_place = mac && *field == "quickCapture" && CHORDS.contains(&theirs);
+        if default_combo(field, mac).contains(&theirs) || old_default || chord_in_place {
             continue;
         }
         // (A shortcut cleared there: none here either.)
@@ -695,18 +689,6 @@ fn keymap(map: &Json, mac: bool) -> Keys {
     }
     if let Some(theirs) = theirs_all.get("toggleDictation").and_then(Json::as_str).filter(|c| combo(c).is_none()) {
         leave("toggleDictation", theirs, UNBINDABLE);
-    }
-    if let Some(theirs) = theirs_all.get("captureAppshot").and_then(Json::as_str) {
-        // On the Mac the other interface keeps only a chord or none, and reads a key it recorded before as its default.
-        let theirs_default = default_combo("captureAppshot", mac).contains(&theirs) || (mac && theirs != NO_HOTKEY && !CHORDS.contains(&theirs));
-        if theirs == NO_HOTKEY {
-            leave("captureAppshot", theirs, "Appshots here always have a shortcut: turn Appshots off for none");
-        } else if !theirs_default {
-            match combo(theirs) {
-                Some(ours) => keys.appshot = Some(ours),
-                None => leave("captureAppshot", theirs, UNBINDABLE),
-            }
-        }
     }
     keys
 }
@@ -1264,10 +1246,6 @@ mod tests {
                     continue;
                 }
                 for home in *homes {
-                    // (Today's Appshot shortcut is the other interface's default: nothing to carry.)
-                    if *home == "screens/chat/appshots.luau::appshots_shortcut" {
-                        continue;
-                    }
                     let (_, value) = wanted.iter().find(|(name, _)| *name == file_of(home)).unwrap_or_else(|| panic!("{key} → {home} isn't read"));
                     let default = default_of(&file_of(home)).is_some_and(|d| same(&d, value));
                     assert_eq!(state(&app, home).is_some(), !default, "{key} → {home}");
@@ -1301,7 +1279,6 @@ mod tests {
             json!({ "shell.toggle_sidebar": "cmd+shift+b", "shell.toggle_terminal": "cmd+`", "shell.session_9": "ctrl+9" })
         );
         // The other interface's own defaults (the Mac's: a double tap of Option, of both Commands) aren't rebinds.
-        assert!(state(&app, "screens/chat/appshots.luau::appshots_shortcut").is_none());
         assert!(s("screens/shell/keys.luau::shell_keymap").get("shell.quick_capture").is_none());
         // Voice and the device preview (U28's pages).
         assert_eq!(s("ds/dictation.luau::dictation_key"), json!("cmd+shift+d"));
@@ -1328,10 +1305,9 @@ mod tests {
         let (_dir, data, app) = dirs("v0.2.100.json");
         migrate(&data, &app).unwrap();
         let s = |k: &str| state(&app, k);
-        // `accentColor` "violet" was Zeron's; the editor's size became Code's; the Appshot chime followed the chimes.
+        // `accentColor` "violet" was Zeron's; the editor's size became Code's.
         assert_eq!(s("ds/look.luau::accent"), Some(json!("zeron")));
         assert_eq!(s("screens/settings/prefs.luau::settings_code_font_size"), Some(json!(15.0)));
-        assert_eq!(s("screens/chat/appshots.luau::appshots_sound"), Some(json!(false)));
         assert_eq!(s("ds/look.luau::interface_font"), Some(json!("Inter")));
         assert_eq!(s("ds/look.luau::text_size"), Some(json!(12.0)));
         assert_eq!(s("screens/shell/sidebar.luau::shell_sidebar_inbox"), Some(json!(true)));
@@ -1617,15 +1593,11 @@ mod tests {
         assert_eq!(keys(json!({ "quickCapture": "none", "captureAppshot": "mod-alt-space", "saveFile": "mod-s" }), false), Keys::default());
         // The Mac's other chords: named, not bound.
         let mac = keys(json!({ "quickCapture": "shift-shift", "captureAppshot": "option-option", "saveFile": "mod-s" }), true);
-        assert!(mac.bound.is_empty() && mac.appshot.is_none());
-        assert_eq!(mac.left.keys().collect::<Vec<_>>(), ["keymap.captureAppshot", "keymap.quickCapture"]);
-        // A key the Mac's recorded before chords: its default there (crates/ui `migrated`); elsewhere a rebind.
-        assert_eq!(keys(json!({ "captureAppshot": "mod-shift-2", "saveFile": "mod-s" }), true).appshot, None);
-        assert_eq!(keys(json!({ "captureAppshot": "mod-shift-2", "saveFile": "mod-s" }), false).appshot.as_deref(), Some("cmd+shift+2"));
+        // (Settings → Appshots reads both chords in place.)
+        assert!(mac.bound.is_empty() && mac.left.is_empty(), "{mac:?}");
         // Quick capture cleared on the Mac: cleared here ("" is none); Appshots can't be: named.
         let cleared = keys(json!({ "quickCapture": "none", "captureAppshot": "none", "saveFile": "mod-s" }), true);
         assert_eq!(cleared.bound, json!({ "shell.quick_capture": "" }).as_object().cloned().unwrap());
-        assert!(cleared.left.contains_key("keymap.captureAppshot"));
         // A rebind of a command this app hasn't: named.
         let other = keys(json!({ "saveFile": "mod-shift-s", "toggleTray": "mod-shift-i" }), true);
         assert!(other.left.contains_key("keymap.saveFile") && other.left.contains_key("keymap.toggleTray"));

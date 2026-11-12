@@ -34,6 +34,7 @@ export type Name =
 	| "access-edits"
 	| "access-full"
 	| "monitor"
+	| "screen-capture"
 	| "cloud"
 	| "wifi-off"
 	| "fast-tier"
@@ -78,6 +79,7 @@ export type Name =
 	| "document-add"
 	| "global"
 	| "checklist"
+	| "tasks"
 	| "chat-round-line"
 	| "side-chat"
 	| "folder-with-files"
@@ -135,6 +137,14 @@ export type Name =
 	| "smartphone"
 	-- A picture to keep (saving a card as an image).
 	| "gallery"
+	| "rotate"
+	| "lucide-box"
+	| "lucide-maximize-2"
+	| "duo-closed"
+	| "duo-book"
+	| "duo-open"
+	| "duo-laptop"
+	| "duo-tent"
 	-- The composer's cargo and trays: an element picked on a page (an
 	-- annotation), a skill, a command, a queued row's grip, a file attached,
 	-- and trying again.

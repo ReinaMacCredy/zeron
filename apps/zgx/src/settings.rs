@@ -776,14 +776,14 @@ static SOUND_ATTENTION: &[u8] = include_bytes!("../sounds/attention.wav");
 
 /// The engine's `ui-settings.json` (the shipping app's file, in the engine's
 /// data folder), or none.
-fn ui_settings_path() -> Option<std::path::PathBuf> {
+pub(crate) fn ui_settings_path() -> Option<std::path::PathBuf> {
     engine::get().ipc_endpoint().map(|(_, dir)| dir.join("ui-settings.json"))
 }
 
 /// The file as it stands: `None` when there is none yet; an error when it
 /// is there but isn't a JSON object (or can't be read), so a write never
 /// replaces the shipping app's settings with ours alone.
-fn read_settings_at(path: &std::path::Path) -> Result<Option<Json>, ()> {
+pub(crate) fn read_settings_at(path: &std::path::Path) -> Result<Option<Json>, ()> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -802,7 +802,7 @@ fn write_ui_settings(changes: serde_json::Map<String, Json>) -> Result<(), ()> {
     write_settings_at(&ui_settings_path().ok_or(())?, changes)
 }
 
-fn write_settings_at(path: &std::path::Path, changes: serde_json::Map<String, Json>) -> Result<(), ()> {
+pub(crate) fn write_settings_at(path: &std::path::Path, changes: serde_json::Map<String, Json>) -> Result<(), ()> {
     let mut prefs = read_settings_at(path)?.unwrap_or_else(|| json!({}));
     let object = prefs.as_object_mut().ok_or(())?;
     for (key, value) in changes {

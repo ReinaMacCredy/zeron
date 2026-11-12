@@ -413,7 +413,7 @@ test("open in: a reply naming .html files shows Website cards: linked ones, foun
 	expect(cards).to_contain('"Demo page"')
 	expect(cards).to_contain("Website · out/demo.html")
 	-- In inline code and not on disk: no card.
-	expect(string.find(cards, "other.html", 1, true)).to_be(nil)
+	expect((string.find(cards, "other.html", 1, true))).to_be(nil)
 	-- Linked and gone: disabled, says so.
 	expect(cards).to_contain("Website · no longer on disk")
 	expect(app:tree("#html-card-open-p3-3")).to_contain("disabled")
@@ -454,6 +454,6 @@ test("pages: a chat on another device says where its dev server runs, and its We
 	local cards = app:tree("#html-open-p3")
 	expect(cards).to_contain("Website · on another device")
 	-- (A code span's file can't be looked for there: only linked ones.)
-	expect(string.find(cards, "other.html", 1, true)).to_be(nil)
+	expect((string.find(cards, "other.html", 1, true))).to_be(nil)
 	expect(app:tree("#html-card-open-p3-1")).to_contain("disabled")
 end)

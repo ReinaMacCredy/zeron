@@ -2677,7 +2677,7 @@ do
 		title = "A page is about to navigate",
 		run = function()
 			local a = page_ask:peek()
-			local f = a and deciders[a.web]
+			local f = if a then deciders[a.web] else nil
 			page_decided:set(if f then f({ url = a.url, kind = a.kind, main_frame = a.main_frame ~= false, source_url = "about:blank" }) else "none")
 		end,
 	}

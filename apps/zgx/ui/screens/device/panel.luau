@@ -39,6 +39,7 @@ local M = {}
 
 local s = model.s
 local TOAST_MS = 4000
+local STALL_MS = 3000
 
 local function chat_of(panel_key: string): string
 	return if string.sub(panel_key, 1, 5) == "chat:" then string.sub(panel_key, 6) else ""
@@ -260,7 +261,7 @@ local function platform_card(hub: () -> any, platform: string, compact: boolean)
 			local ready = model.platform_status(hub(), platform)
 			return if ready then "ready" else "not"
 		end, function(which: string): Node
-			return Icon { name = if which == "ready" then "check-circle" else "info-circle", size = 16, color = if which == "ready" then "$success" else "$text.secondary" }
+			return Icon { name = if which == "ready" then "check" else "info-circle", size = 16, color = if which == "ready" then "$success" else "$text.secondary" }
 		end, { shrink = 0 }),
 		ui.column {
 			grow = 1,
@@ -859,20 +860,81 @@ local function stream(props: { tab: any, panel_key: string, r: Run, visible: (()
 	local host, id = t[1], t[2]
 	local key = props.tab.id
 	local area = ui.use_state({ w = 0, h = 0 })
+	-- 3D is the tab's default, as gpui's panel opens in 3D; Flat view turns it off.
+	local flat = ui.state(`device_flat_{key}`, false)
+	local function three_d(): boolean
+		return not flat:get()
+	end
 	local screen = Screen.make {
 		key = key,
 		host = host,
 		id = id,
 		area = area,
+		three_d = three_d,
 		visible = props.visible,
 		on_error = function(why: string)
 			r.error:set(why)
 		end,
 	}
 	local send, device, screen_config = screen.send, screen.device, screen.screen_config
+	local function hinged(): boolean
+		local sc = screen_config()
+		return sc ~= nil and sc.supportsHingeAngle == true
+	end
 	local function rotate()
 		local sc = screen_config()
-		send({ orientation = { orientation = M.next_orientation(if sc then sc.orientation else nil) } })
+		local next = M.next_orientation(if sc then sc.orientation else nil)
+		if hinged() then
+			local p = target_params(host, id)
+			p.orientation = next
+			call("SetHubDeviceHinge", p, nil, function(why: string)
+				r.error:set(why)
+			end)
+			return
+		end
+		send({ orientation = { orientation = next } })
+	end
+	local function streaming(): boolean
+		local f = api.frames:get()[key]
+		return f ~= nil and f.seq ~= nil
+	end
+	local function restore()
+		local sc = screen_config()
+		if not hinged() and sc and sc.orientation and sc.orientation ~= "portrait" then
+			send({ orientation = { orientation = "portrait" } })
+		end
+		api.restore3d(key)
+	end
+	local function fold_error(): string?
+		local f = api.folds:get()[key]
+		return if f then f.fold_error else nil
+	end
+	local function pose_selected(pose: string): boolean
+		local sc = screen_config()
+		if not sc then
+			return false
+		end
+		if pose == "laptop" or pose == "tent" then
+			return sc.hingePose == pose
+		end
+		local angle = sc.hingeAngle
+		local at = if angle == 0 then "closed" elseif angle == 180 then "open" elseif angle ~= nil then "book" else nil
+		return at == pose
+	end
+	local function pose_button(pose: string, icon: string): Node
+		return IconButton {
+			id = `device-pose-{pose}`,
+			label = s(`rail.pose_{pose}`),
+			tooltip = s(`rail.tip_{pose}`),
+			tone = "quiet",
+			lit = function(): boolean
+				return pose_selected(pose)
+			end,
+			on_click = function()
+				api.pose3d(key, pose)
+			end,
+			Icon { name = icon :: any, size = 16 },
+		}
 	end
 	local more_open = ui.state(`device_more_{key}`, false)
 	local function power_off()
@@ -985,6 +1047,76 @@ local function stream(props: { tab: any, panel_key: string, r: Run, visible: (()
 				Icon { name = "more-horizontal", size = 16 },
 			},
 		},
+		ui.div { w = 20, h = 1, my = "$space.1", bg = "$border" },
+		IconButton {
+			id = "device-view-3d",
+			label = s("rail.view_3d"),
+			tone = "quiet",
+			lit = three_d,
+			disabled = function(): boolean
+				return not streaming()
+			end,
+			on_click = function()
+				flat:set(false)
+			end,
+			Icon { name = "lucide-box", size = 16 },
+		},
+		IconButton {
+			id = "device-view-flat",
+			label = s("rail.view_flat"),
+			tone = "quiet",
+			lit = function(): boolean
+				return flat:get()
+			end,
+			disabled = function(): boolean
+				return not streaming()
+			end,
+			on_click = function()
+				flat:set(true)
+			end,
+			Icon { name = "smartphone", size = 16 },
+		},
+		ui.show(function(): boolean
+			return three_d() and streaming()
+		end, IconButton {
+			id = "device-view-restore",
+			label = s("rail.view_restore"),
+			tone = "quiet",
+			on_click = restore,
+			Icon { name = "lucide-maximize-2", size = 16 },
+		}),
+		ui.show(function(): boolean
+			local d = device()
+			return hinged() and three_d() and d ~= nil and d.platform ~= "android"
+		end, ui.column {
+			id = "device-fold-shape",
+			role = "group",
+			label = s("rail.fold_shape"),
+			items = "center",
+			gap = "$space.1",
+			ui.div { w = 20, h = 1, my = "$space.1", bg = "$border" },
+			pose_button("closed", "duo-closed"),
+			pose_button("book", "duo-book"),
+			pose_button("open", "duo-open"),
+			ui.div { w = 20, h = 1, my = "$space.1", bg = "$border" },
+			pose_button("laptop", "duo-laptop"),
+			pose_button("tent", "duo-tent"),
+		}),
+		ui.presence(function(): string
+			return fold_error() or ""
+		end, function(why: string): Node
+			if why == "" then
+				return ui.div {}
+			end
+			return ui.div {
+				id = "device-fold-error",
+				role = "alert",
+				label = why,
+				tooltip = why,
+				px = "$space.1",
+				ui.text { "!", text_size = "$font.size.sm", weight = "$font.weight.bold", color = "$danger" },
+			}
+		end),
 	}
 	local view = ui.column {
 		grow = 1,
@@ -1054,6 +1186,7 @@ function M.Tab(props: { tab: any, panel_key: string, visible: (() -> boolean)? }
 	-- (A hub the engine hasn't started, as after an engine restart, is asked to list once while the tab
 	-- shows, as gpui's panel does on its first hub; till it answers the tab is finding, not "no devices".)
 	local listed = ui.state(`device_tab_listed_{id}`, false)
+	local finding = ui.state(`device_tab_finding_{id}`, false)
 	local asked = false
 	local function idle_hub(h: any): boolean
 		return h ~= nil and not h.outdated and h.hostStatus == "idle" and (h.settings or {}).enabled == true and (h.settings or {}).onboardingCompleted == true
@@ -1071,16 +1204,19 @@ function M.Tab(props: { tab: any, panel_key: string, visible: (() -> boolean)? }
 			return
 		end
 		asked = true
+		finding:set(true)
 		call("ListHubDevices", {}, function()
+			finding:set(false)
 			listed:set(true)
 		end, function(why: string)
+			finding:set(false)
 			listed:set(true)
 			r.error:set(why)
 		end)
 	end)
 	local phase = ui.computed(function(): model.Phase
 		local p = model.phase(hub(), chat, target_of(tab()), r.opening:get())
-		if p.kind == "picker" and idle_hub(hub()) and not listed:get() then
+		if p.kind == "picker" and ((idle_hub(hub()) and not listed:get()) or finding:get()) then
 			return { kind = "loading", name = s("loading.devices"), description = "", message = s("loading.finding") }
 		end
 		return p
@@ -1200,6 +1336,26 @@ function M.Tab(props: { tab: any, panel_key: string, visible: (() -> boolean)? }
 				local listed = if bound and h and h.hostStatus == "ready" then model.device(h, bound[1], bound[2]) else nil
 				return listed ~= nil and listed.booted == false
 			end
+			-- (The hub lists a device shut down outside Zeron as booted until asked; a live stream sends frames every second.)
+			local asked_at: number? = nil
+			ui.effect(function()
+				local f = api.frames:get()[id]
+				local seq = f and f.seq
+				if seq == nil or f.failed ~= nil then
+					return
+				end
+				ui.after(STALL_MS, function()
+					local now = api.frames:peek()[id]
+					if now == nil or now.seq ~= seq or now.failed ~= nil or asked_at == seq or stopped() then
+						return
+					end
+					if props.visible and not props.visible() then
+						return
+					end
+					asked_at = seq
+					call("ListHubDevices", {}, nil, function() end)
+				end)
+			end)
 			local reopening = ui.state(`device_tab_reopening_{id}`, false)
 			return ui.column {
 				w_full = true,

@@ -20,6 +20,7 @@ local ds = require("@ds")
 local IconButton = require("@ds/icon_button").IconButton
 local prefs = require("@app/screens/settings/prefs")
 local search = require("@app/screens/settings/search")
+local Builtins = require("@app/screens/plugins/builtins")
 local data = require("@app/screens/panel/browser_data")
 
 local M = {}
@@ -28,6 +29,7 @@ M.ID = "browser"
 M.TITLE = "Browsing"
 
 search.index(M.ID, ui.t("settings.browser.page_title"), ui.t("settings.browser.terms"), {
+	{ key = "browser_annotate", title = ui.t("settings.features.browser_annotate.label"), terms = ui.t("settings.features.browser_annotate.terms") },
 	{ key = "open_links", title = ui.t("settings.general.open_links.label"), terms = ui.t("settings.general.open_links.terms") },
 	{ key = "search_engine", title = ui.t("settings.browser.search_engine.label"), terms = ui.t("settings.browser.search_engine.terms") },
 	{ key = "default_zoom", title = ui.t("settings.browser.default_zoom.label"), section = ui.t("settings.browser.zoom"), terms = ui.t("settings.browser.default_zoom.terms") },
@@ -93,6 +95,7 @@ function M.view(): Node
 	return ds.Settings.Page {
 		title = ui.t("settings.browser.page_title"),
 		description = ui.t("settings.browser.description"),
+		search.anchor("browser_annotate", Builtins.Row("browser_annotate")),
 		ds.Settings.Section {
 			title = ui.t("settings.browser.links_and_search"),
 			ds.Settings.Group {

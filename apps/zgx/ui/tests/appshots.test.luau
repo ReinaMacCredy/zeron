@@ -4,7 +4,7 @@
 -- goes with the next send as a picture and its context; never sent on its
 -- own; a capture that would pass 96 MB of staged Appshots says so; a
 -- failure says why; and one taken in is never taken twice. On the chat page
--- of ui/chat_fixture.luau. Settings → Appshots reads the host's state.
+-- of ui/chat_fixture.luau; and where it lands, by Destination.
 
 local function settle(app: any)
 	app:frames(30)
@@ -108,53 +108,25 @@ test("a capture's chip opens its picture in the lightbox", function()
 	expect(app:state("ds/lightbox.luau::open")).to_be_nil()
 end)
 
--- Settings → Appshots, over the host's state as it publishes it.
-local function settings(state: any): any
-	local app = mount("shell_fixture.luau")
-	app:resize(1200, 900)
-	app:frames(30)
-	app:command("settings_stub.sign_in")
-	app:command("shell.settings")
-	app:frames(20)
-	app:set_state("appshots.state", state)
-	app:click('#settings-nav >> role:tab "Appshots"')
-	app:frames(30)
-	expect(app:error()).to_be_nil()
-	return app
-end
-
-test("Settings → Appshots says what each permission needs, and nothing once granted", function()
-	local app = settings { platform = true, enabled = true, shortcut_ready = true, capture = "missing", text = "missing" }
-	local page = app:tree("#settings-page")
-	for _, words in { "Capture Appshots", "Capture sound", "Global shortcut", "Destination", "Window capture", "Application text", "Allow window capture", "Enable text capture", "Check again", "macOS asks for these for the app that opened Zeron" } do
-		expect(if page:find(words, 1, true) then words else `missing: {words}`).to_be(words)
-	end
-	expect(page:find("⌃⌥Space", 1, true) ~= nil).to_be(true)
-	app:set_state("appshots.state", { platform = true, enabled = true, shortcut_ready = true, capture = "ready", text = "ready" })
-	app:frames(20)
-	page = app:tree("#settings-page")
-	expect(page:find("Allow window capture", 1, true)).to_be_nil()
-	expect(page:find("Enable text capture", 1, true)).to_be_nil()
-	expect(page:find("Ready", 1, true) ~= nil).to_be(true)
+-- Where a capture lands, by Destination (the shipping app's rules).
+test("Automatic: within a minute of a snap to a session, the next one goes back there from a new chat", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s2")
+	capture(app, { title = "First snap" })
+	open(app, "home")
+	capture(app, { title = "Second snap" })
+	expect(app:has('#chat-composer >> ~"First snap"')).to_be(true)
+	expect(app:has('#chat-composer >> ~"Second snap"')).to_be(true)
 end)
 
-test("Settings → Appshots records a new shortcut, and Escape keeps the old one", function()
-	local app = settings { platform = true, enabled = true, shortcut_ready = true, capture = "ready", text = "ready" }
-	local before = app:state("appshots_shortcut")
-	app:click('#settings-page >> role:button ~"Change shortcut"')
-	app:frames(10)
-	expect(app:has('#settings-page >> "Press a shortcut…"')).to_be(true)
-	app:key("Escape")
-	app:frames(10)
-	expect(app:state("appshots_shortcut")).to_be(before)
-	app:click('#settings-page >> role:button ~"Change shortcut"')
-	app:frames(10)
-	-- A key with no modifier is refused, saying what it takes (gpui's rule).
-	app:key("k")
-	app:frames(10)
-	expect(app:has('#settings-page >> ~"Use Control, Option or Command"')).to_be(true)
-	expect(app:state("appshots_shortcut")).to_be(before)
-	app:key("cmd+shift+k")
-	app:frames(10)
-	expect(app:state("appshots_shortcut")).to_be("shift+cmd+k")
+test("New session: a capture goes to a new chat's composer, the session's draft kept", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:set_state("appshots_destination", "new-session")
+	open(app, "s2")
+	capture(app, { title = "To a new chat" })
+	expect(app:has('#chat-composer >> ~"To a new chat"')).to_be(true)
+	open(app, "s2")
+	expect(app:has('#chat-composer >> ~"To a new chat"')).to_be(false)
 end)

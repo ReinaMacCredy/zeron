@@ -113,13 +113,15 @@ local function is_move(input: any): boolean
 	return type(input.touch) == "table" and input.touch.phase == "move"
 end
 
+local BLACK = ui.raw("#000000", "a device's screen is black behind its picture, in either theme")
+
 local function small(text: any): Node
 	return ui.text { text, wrap = true, text_size = "$font.size.sm", color = "$text.secondary" }
 end
 
 export type Screen = { node: Node, send: (input: any) -> (), device: () -> model.Device?, screen_config: () -> any }
 
-function M.make(props: { key: string, host: string, id: string, visible: (() -> boolean)?, on_error: (string) -> (), node_id: string?, rounded: any?, area: State<{ w: number, h: number }>? }): Screen
+function M.make(props: { key: string, host: string, id: string, visible: (() -> boolean)?, on_error: (string) -> (), node_id: string?, rounded: any?, area: State<{ w: number, h: number }>?, three_d: (() -> boolean)? }): Screen
 	local key, host, id = props.key, props.host, props.id
 	local function hub(): any
 		return api.hub:get() or {}
@@ -146,10 +148,14 @@ function M.make(props: { key: string, host: string, id: string, visible: (() -> 
 	local visible = props.visible or function(): boolean
 		return true
 	end
+	-- (The stream follows the platform alone: re-asked on every hub push, its own subscription's push asked it again.)
+	local platform = ui.computed(function(): string?
+		local d = device()
+		return if d then d.platform else nil
+	end)
 	ui.effect(function()
 		if visible() then
-			local d = device()
-			api.stream(key, host, id, if d then d.platform else nil, rotation:peek())
+			api.stream(key, host, id, platform:get(), rotation:peek())
 		else
 			api.unstream(key)
 		end
@@ -194,6 +200,29 @@ function M.make(props: { key: string, host: string, id: string, visible: (() -> 
 	ui.effect(function()
 		api.orient(key, rotation:get())
 	end)
+	local three_d = props.three_d or function(): boolean
+		return false
+	end
+	local function send_all(touches: { any })
+		for _, t in touches do
+			send({ touch = t })
+		end
+	end
+	local name = ui.computed(function(): string?
+		local d = device()
+		return if d then d.name else nil
+	end)
+	ui.effect(function()
+		api.three_d(key, three_d(), { platform = platform:get(), name = name:get(), host = host, id = id })
+	end)
+	ui.effect(function()
+		if three_d() then
+			send_all(api.screen3d(key, screen_config()))
+		end
+	end)
+	ui.on_cleanup(function()
+		api.three_d(key, false)
+	end)
 	local screen = ui.ref()
 	local down = false
 	local function point(e: any): (number, number)
@@ -220,6 +249,9 @@ function M.make(props: { key: string, host: string, id: string, visible: (() -> 
 	-- clamped on one side alone would letterbox the picture and put touches off it.
 	local function fit(): (number, number)
 		local a = (props.area :: any):get()
+		if three_d() then
+			return a.w, a.h
+		end
 		local r = aspect()
 		if a.h * r <= a.w then
 			return a.h * r, a.h
@@ -251,17 +283,29 @@ function M.make(props: { key: string, host: string, id: string, visible: (() -> 
 				return h
 			end
 			else nil,
-		rounded = props.rounded or "$radius.lg",
+		rounded = function(): any
+			return if three_d() then 0 else props.rounded or "$radius.lg"
+		end,
 		overflow = "hidden",
-		bg = ui.raw("#000000", "a device's screen is black behind its picture, in either theme"),
+		bg = function(): any
+			return if three_d() then "transparent" else BLACK
+		end,
 		cursor = "pointer",
 		on_press = function(e: any)
 			down = true
+			if three_d() then
+				send_all(api.pointer3d(key, "begin", e.local_x or 0, e.local_y or 0, e.alt == true))
+				return
+			end
 			local x, y = point(e)
 			send({ touch = { phase = "begin", x = x, y = y } })
 		end,
 		on_pointer_move = function(e: any)
 			if down then
+				if three_d() then
+					send_all(api.pointer3d(key, "move", e.local_x or 0, e.local_y or 0))
+					return
+				end
 				local x, y = point(e)
 				send({ touch = { phase = "move", x = x, y = y } })
 			end
@@ -269,9 +313,19 @@ function M.make(props: { key: string, host: string, id: string, visible: (() -> 
 		on_release = function(e: any)
 			if down then
 				down = false
+				if three_d() then
+					send_all(api.pointer3d(key, "end", e.local_x or 0, e.local_y or 0))
+					return
+				end
 				local x, y = point(e)
 				send({ touch = { phase = "end", x = x, y = y } })
 			end
+		end,
+		on_wheel = function(e: any): boolean
+			return three_d() and api.wheel3d(key, { dx = e.dx, dy = e.dy, x = e.local_x, y = e.local_y, ctrl = e.ctrl })
+		end,
+		on_pinch = function(e: any): boolean
+			return three_d() and api.pinch3d(key, e.scale, e.local_x or 0, e.local_y or 0)
 		end,
 		on_key = function(e: any): boolean
 			if e.cmd or e.ctrl then
@@ -286,8 +340,14 @@ function M.make(props: { key: string, host: string, id: string, visible: (() -> 
 		end,
 		ui.presence(function(): string
 			local f = frame()
-			return if f and f.seq then "frame" else "none"
+			if not (f and f.seq) then
+				return "none"
+			end
+			return if three_d() then "3d" else "frame"
 		end, function(which: string): Node
+			if which == "3d" then
+				return ui.gpu_view { id = "device-3d", view = api.view3d(key), label = s("stream.screen"), w_full = true, h_full = true }
+			end
 			if which == "none" then
 				return ui.column {
 					w_full = true,

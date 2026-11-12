@@ -45,7 +45,8 @@ use zgx_script::{ScriptHost, Shared, Value};
 use crate::auth::text;
 use crate::device_video::{self, FallbackReason};
 use crate::engine;
-use zeron_proto::device_hub::DeviceOrientation;
+use zeron_proto::device_hub::{DeviceOrientation, DevicePlatform, DeviceScreenConfig, HingeCommand, HingePose};
+use crate::device3d::{self, ThreeD};
 use crate::plugins::{json_value, value_json};
 
 /// The engine's device methods a window may call (the hub's settings, a
@@ -59,6 +60,8 @@ const METHODS: &[&str] = &[
     "CloseHubDevice",
     "HubDeviceScreenshot",
     "SendHubDeviceInput",
+    "SetHubDeviceHinge",
+    "HubDeviceFold",
 ];
 
 /// The frames a mock stream shows before it holds still.
@@ -267,6 +270,7 @@ struct Window {
     hub: Shared,
     frames: Shared,
     sizes: RefCell<HashMap<String, (u64, u32, u32)>>,
+    shown: RefCell<HashMap<String, (u64, Arc<zgx::image::ImageData>)>>,
     /// Streams the engine ended, and why.
     failed: RefCell<HashMap<String, String>>,
     /// The engine's connection last heard: each new one watches the hub and
@@ -278,6 +282,9 @@ struct Window {
     armed: Cell<u64>,
     streams: RefCell<HashMap<String, Stream>>,
     next: Cell<u64>,
+    three_d: RefCell<HashMap<String, Rc<ThreeD>>>,
+    folds: Shared,
+    fold_errors: RefCell<HashMap<String, String>>,
 }
 
 thread_local! {
@@ -292,6 +299,7 @@ impl Window {
             hub: host.shared("device_hub", Value::Nil),
             frames: host.shared("device_frames", Value::record(std::iter::empty::<(&str, Value)>())),
             sizes: RefCell::default(),
+            shown: RefCell::default(),
             failed: RefCell::default(),
             rpc: RefCell::default(),
             watch: RefCell::default(),
@@ -299,7 +307,47 @@ impl Window {
             armed: Cell::new(0),
             streams: RefCell::default(),
             next: Cell::new(0),
+            three_d: RefCell::default(),
+            folds: host.shared("device_3d", Value::record(std::iter::empty::<(&str, Value)>())),
+            fold_errors: RefCell::default(),
         })
+    }
+
+    fn set_fold_error(&self, key: &str, error: Option<String>) {
+        let mut errors = self.fold_errors.borrow_mut();
+        let changed = match error {
+            Some(error) => errors.insert(key.to_string(), error.clone()).as_ref() != Some(&error),
+            None => errors.remove(key).is_some(),
+        };
+        if changed {
+            self.folds.set(Value::record(errors.iter().map(|(k, why)| (k.as_str(), Value::record([("fold_error", Value::from(why.as_str()))])))));
+        }
+    }
+
+    fn set_three_d(self: &Rc<Self>, key: &str, on: bool, platform: DevicePlatform, name: String, host_id: Option<String>, device_id: String) {
+        if !on {
+            if self.three_d.borrow_mut().remove(key).is_some() {
+                self.host.gpu_view(&device3d::view_name(key), None);
+                self.set_fold_error(key, None);
+            }
+            return;
+        }
+        if let Some(shown) = self.three_d.borrow().get(key) {
+            shown.set_device(platform, name);
+            return;
+        }
+        let hinge = Rc::new(Hinge { window: Rc::downgrade(self), key: key.to_string(), host_id, device_id });
+        let shown = ThreeD::new(platform, name, hinge);
+        let current = self.streams.borrow().get(key).map(|s| byte_orientation(s.orientation.load(Ordering::Acquire)));
+        if let (Some(rotation), Some((_, image))) = (current, self.shown.borrow().get(key).cloned()) {
+            shown.show(image, rotation);
+        }
+        self.host.gpu_view(&device3d::view_name(key), Some(shown.view()));
+        self.three_d.borrow_mut().insert(key.to_string(), shown);
+    }
+
+    fn shown_3d(&self, key: &str) -> Option<Rc<ThreeD>> {
+        self.three_d.borrow().get(key).cloned()
     }
 
     fn publish_frames(&self) {
@@ -326,6 +374,11 @@ impl Window {
         }
         let ended = self.streams.borrow().get(key).is_some_and(|s| s.ended);
         let (w, h) = (image.width(), image.height());
+        if let Some(shown) = self.shown_3d(key) {
+            let rotation = self.streams.borrow().get(key).map_or(DeviceOrientation::Portrait, |s| byte_orientation(s.orientation.load(Ordering::Acquire)));
+            shown.show(image.clone(), rotation);
+        }
+        self.shown.borrow_mut().insert(key.to_string(), (seq, image.clone()));
         self.host.image(&image_name(key), Some(image));
         self.sizes.borrow_mut().insert(key.to_string(), (seq, w, h));
         if !ended {
@@ -338,6 +391,7 @@ impl Window {
         let failed = self.failed.borrow_mut().remove(key).is_some();
         if self.streams.borrow_mut().remove(key).is_some() || failed {
             self.host.image(&image_name(key), None);
+            self.shown.borrow_mut().remove(key);
             self.sizes.borrow_mut().remove(key);
             self.publish_frames();
         }
@@ -491,7 +545,14 @@ impl Window {
                 }
             }
         });
-        if mock() {
+        if mock() && device_id == MOCK_DUO {
+            let (me, key) = (Rc::downgrade(self), key.clone());
+            engine::get().spawn(async move {
+                if let Some(window) = me.upgrade() {
+                    window.show_mock_duo(&key, generation);
+                }
+            });
+        } else if mock() {
             let feed = decode.clone();
             engine::get().spawn(async move {
                 for (n, png) in MOCK_FRAMES.iter().enumerate() {
@@ -509,6 +570,14 @@ impl Window {
         let rpc = self.rpc.borrow().clone();
         if let Some(rpc) = rpc {
             self.watch_frames(&key, &rpc);
+        }
+    }
+
+    fn show_mock_duo(&self, key: &str, generation: u64) {
+        let angle = MOCK.with(|m| m.borrow().hinge.0);
+        if let Some(image) = mock_duo_frame(angle) {
+            let seq = self.sizes.borrow().get(key).map_or(1, |(seq, ..)| seq + 1);
+            self.show(key, generation, seq, image);
         }
     }
 
@@ -543,6 +612,45 @@ impl Window {
     }
 }
 
+struct Hinge {
+    window: std::rc::Weak<Window>,
+    key: String,
+    host_id: Option<String>,
+    device_id: String,
+}
+
+impl device3d::Host for Hinge {
+    fn set_hinge(&self, command: HingeCommand, done: Box<dyn FnOnce(Result<(), String>)>) {
+        let mut params = json!({ "deviceId": self.device_id });
+        if let Some(host) = self.host_id.as_ref().filter(|h| *h != zeron_proto::device_hub::LOCAL_DEVICE_HOST_ID) {
+            params["hostId"] = host.clone().into();
+        }
+        if let (Some(target), Ok(Json::Object(fields))) = (params.as_object_mut(), serde_json::to_value(command)) {
+            target.extend(fields);
+        }
+        engine::get().spawn(async move {
+            done(call("SetHubDeviceHinge".into(), params).await.map(|_| ()));
+        });
+    }
+
+    fn fold_error(&self, error: Option<String>) {
+        if let Some(window) = self.window.upgrade() {
+            window.set_fold_error(&self.key, error);
+        }
+    }
+}
+
+fn touches_value(touches: Vec<(zeron_proto::device_hub::TouchPhase, (f32, f32))>) -> Value {
+    Value::List(
+        touches
+            .into_iter()
+            .map(|(phase, (x, y))| {
+                Value::record([("phase", Value::from(device3d::phase_word(phase))), ("x", Value::from(f64::from(x))), ("y", Value::from(f64::from(y)))])
+            })
+            .collect(),
+    )
+}
+
 /// One of the hub's methods (METHODS), as `device.call` and Settings'
 /// `settings.engine` ask it: the mock's hub on a mock Dev.
 pub(crate) async fn call(method: String, params: Json) -> Result<Value, String> {
@@ -571,6 +679,11 @@ fn publish_mock() {
             if window.watching.get() {
                 window.hub.set(state.clone());
             }
+            let duos: Vec<(String, u64)> =
+                window.streams.borrow().iter().filter(|(_, s)| s.device_id == MOCK_DUO).map(|(k, s)| (k.clone(), s.generation)).collect();
+            for (key, generation) in duos {
+                window.show_mock_duo(&key, generation);
+            }
         }
     });
 }
@@ -595,6 +708,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         closing.watching.set(false);
         closing.watch.borrow_mut().take();
         closing.streams.borrow_mut().clear();
+        closing.three_d.borrow_mut().clear();
         closing.rpc.borrow_mut().take();
     });
     host.async_action("device.call", |args| {
@@ -623,9 +737,63 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         let key = args.field("key").map(text).unwrap_or_default();
         w.orient(&key, orientation_of(&args.field("orientation").map(text).unwrap_or_default()));
     });
-    let w = window;
+    let w = window.clone();
     host.action("device.unstream", move |key| {
         w.unstream(&text(&key));
+    });
+    install_three_d(host, &window);
+}
+
+fn install_three_d(host: &ScriptHost, window: &Rc<Window>) {
+    let num = |args: &Value, name: &str| args.field(name).and_then(Value::as_f64).unwrap_or(0.);
+    let key_of = |args: &Value| args.field("key").map(text).unwrap_or_default();
+    let w = window.clone();
+    host.action("device.three_d", move |args| {
+        let key = key_of(&args);
+        if key.is_empty() {
+            return;
+        }
+        let platform = if args.field("platform").map(text).as_deref() == Some("android") { DevicePlatform::Android } else { DevicePlatform::Ios };
+        let name = args.field("name").map(text).unwrap_or_default();
+        let host_id = args.field("host_id").map(text).filter(|h| !h.is_empty());
+        let device = args.field("device_id").map(text).unwrap_or_default();
+        w.set_three_d(&key, args.field("on").is_some_and(Value::truthy), platform, name, host_id, device);
+    });
+    let w = window.clone();
+    host.function("device.screen3d", move |args| {
+        let Some(shown) = w.shown_3d(&key_of(&args)) else { return Value::List(Rc::from([])) };
+        let screen = args.field("screen").map(value_json).and_then(|j| serde_json::from_value::<DeviceScreenConfig>(j).ok());
+        touches_value(shown.set_screen(screen))
+    });
+    let w = window.clone();
+    host.function("device.pointer3d", move |args| {
+        let (Some(shown), Some(phase)) = (w.shown_3d(&key_of(&args)), device3d::touch_phase(&args.field("phase").map(text).unwrap_or_default())) else {
+            return Value::List(Rc::from([]));
+        };
+        touches_value(shown.pointer(phase, num(&args, "x"), num(&args, "y"), args.field("orbit").is_some_and(Value::truthy)))
+    });
+    let w = window.clone();
+    host.function("device.wheel3d", move |args| {
+        let Some(shown) = w.shown_3d(&key_of(&args)) else { return Value::Bool(false) };
+        Value::Bool(shown.wheel(num(&args, "dx"), num(&args, "dy"), num(&args, "x"), num(&args, "y"), args.field("ctrl").is_some_and(Value::truthy)))
+    });
+    let w = window.clone();
+    host.function("device.pinch3d", move |args| {
+        let Some(shown) = w.shown_3d(&key_of(&args)) else { return Value::Bool(false) };
+        Value::Bool(shown.pinch(num(&args, "scale"), num(&args, "x"), num(&args, "y")))
+    });
+    let w = window.clone();
+    host.action("device.restore3d", move |key| {
+        if let Some(shown) = w.shown_3d(&text(&key)) {
+            shown.restore();
+        }
+    });
+    let w = window.clone();
+    host.action("device.pose3d", move |args| {
+        let pose = serde_json::from_value::<HingePose>(Json::from(args.field("pose").map(text).unwrap_or_default()));
+        if let (Some(shown), Ok(pose)) = (w.shown_3d(&key_of(&args)), pose) {
+            shown.pose(pose);
+        }
     });
 }
 
@@ -641,6 +809,7 @@ pub(crate) struct Mock {
     sessions: Vec<Json>,
     pub(crate) inputs: Vec<Json>,
     orientation: String,
+    hinge: (u8, Option<HingePose>),
 }
 
 impl Default for Mock {
@@ -655,15 +824,38 @@ impl Default for Mock {
             sessions: Vec::new(),
             inputs: Vec::new(),
             orientation: "portrait".into(),
+            hinge: (0, Some(HingePose::Closed)),
         }
     }
 }
 
-const MOCK_DEVICES: [(&str, &str, &str, &str); 3] = [
+const MOCK_DEVICES: [(&str, &str, &str, &str); 4] = [
     ("mock-iphone", "ios", "iPhone 17", "iOS 27.0"),
     ("mock-ipad", "ios", "iPad Air", "iOS 27.0"),
     ("Pixel_9", "android", "Pixel 9", "Android 16"),
+    (MOCK_DUO, "ios", "iPhone Duo", "iOS 27.0"),
 ];
+const MOCK_DUO: &str = "mock-duo";
+
+fn mock_duo_panel(angle: u8) -> (u32, u32, u32) {
+    if angle == 0 { (1, device3d::duo3d::COVER_SIZE.0, device3d::duo3d::COVER_SIZE.1) } else { (3, device3d::duo3d::INNER_SIZE.0, device3d::duo3d::INNER_SIZE.1) }
+}
+
+fn mock_duo_frame(angle: u8) -> Option<Arc<zgx::image::ImageData>> {
+    let (screen, w, h) = mock_duo_panel(angle);
+    let (w, h) = (w / 4, h / 4);
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
+            let grid = x % 40 < 2 || y % 40 < 2;
+            let (r, g, b) = if screen == 1 { (40.0 + 60.0 * fx, 80.0 + 80.0 * fy, 200.0) } else { (220.0, 120.0 + 80.0 * fx, 60.0 + 60.0 * fy) };
+            let shade = if grid { 0.6 } else { 1.0 };
+            rgba.extend([(r * shade) as u8, (g * shade) as u8, (b * shade) as u8, 255]);
+        }
+    }
+    zgx::image::ImageData::new(w, h, rgba).ok().map(Arc::new)
+}
 
 impl Mock {
     pub(crate) fn state(&self) -> Json {
@@ -689,6 +881,13 @@ impl Mock {
         let mut streams = serde_json::Map::new();
         for s in &self.sessions {
             let key = s["deviceId"].as_str().unwrap_or_default().to_string();
+            if key == MOCK_DUO {
+                let (screen, width, height) = mock_duo_panel(self.hinge.0);
+                screens.insert(key.clone(), json!({ "width": width, "height": height, "orientation": self.orientation,
+                    "supportsHingeAngle": true, "screenId": screen, "hingeAngle": self.hinge.0, "hingePose": self.hinge.1 }));
+                streams.insert(key, json!({ "video": "live", "input": "live", "subscribers": 1 }));
+                continue;
+            }
             screens.insert(key.clone(), json!({ "width": 196, "height": 426, "orientation": self.orientation }));
             streams.insert(key, json!({ "video": "live", "input": "live", "subscribers": 1 }));
         }
@@ -778,6 +977,26 @@ impl Mock {
                     self.orientation = turned.to_string();
                 }
                 self.inputs.push(params["input"].clone());
+                Ok(json!({}))
+            }
+            "SetHubDeviceHinge" => {
+                if params["deviceId"].as_str() != Some(MOCK_DUO) {
+                    return Err("This device has no hinge.".into());
+                }
+                if let Ok(pose) = serde_json::from_value::<HingePose>(params["pose"].clone()) {
+                    let angle = match pose {
+                        HingePose::Closed => 0,
+                        HingePose::Book => 90,
+                        HingePose::Open => 180,
+                        HingePose::Laptop => 110,
+                        HingePose::Tent => 60,
+                    };
+                    self.hinge = (angle, Some(pose));
+                } else if let Some(angle) = params["angle"].as_f64() {
+                    self.hinge = (angle.round().clamp(0.0, 180.0) as u8, None);
+                } else if let Some(turned) = params["orientation"].as_str() {
+                    self.orientation = turned.to_string();
+                }
                 Ok(json!({}))
             }
             _ => Err("refused".into()),
@@ -977,7 +1196,7 @@ mod tests {
         assert_eq!(off["hostStatus"], "disabled");
         assert_eq!(off["devices"], json!([]), "off, it lists nothing");
         let on = hub.call("ConfigureDeviceHub", &json!({ "enabled": true })).unwrap();
-        assert_eq!((on["hostStatus"].as_str(), on["devices"].as_array().map(Vec::len)), (Some("ready"), Some(3)));
+        assert_eq!((on["hostStatus"].as_str(), on["devices"].as_array().map(Vec::len)), (Some("ready"), Some(4)));
         assert_eq!(on["devices"][0]["booted"], true);
         assert_eq!(on["devices"][2]["booted"], false);
         let state: zeron_proto::device_hub::DeviceHubState = serde_json::from_value(on).unwrap();

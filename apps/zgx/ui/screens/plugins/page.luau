@@ -764,7 +764,6 @@ function M.View(): Node
 	-- Once a visit: another device shown is looked at again (its list as
 	-- it is now; it may have been away).
 	visits.once("plugins", function()
-		Builtins.load()
 		local d = device()
 		if d then
 			state.target(d)

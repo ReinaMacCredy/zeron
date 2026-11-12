@@ -14,6 +14,7 @@
 local ds = require("@ds")
 local host = require("@app/screens/settings/host")
 local search = require("@app/screens/settings/search")
+local Builtins = require("@app/screens/plugins/builtins")
 local visits = require("@app/screens/settings/visits")
 local Dictation = require("@ds/dictation")
 local Recorder = require("@ds/shortcut_recorder")
@@ -28,6 +29,7 @@ local function t(key: string, args: { [string]: any }?): Message
 end
 
 search.index(M.ID, t("title"), t("terms"), {
+	{ key = "feature_voice", title = ui.t("settings.features.voice.label"), terms = ui.t("settings.features.voice.terms") },
 	{ key = "device", title = t("device.label"), section = t("conversation"), terms = t("device.terms") },
 	{ key = "style", title = t("style.label"), section = t("conversation"), terms = t("style.terms") },
 	{ key = "dictation", title = t("dictation.label"), section = t("dictation.section"), terms = t("dictation.terms") },
@@ -434,6 +436,7 @@ function M.view(): Node
 	return ds.Settings.Page {
 		title = t("title"),
 		description = t("subtitle"),
+		search.anchor("feature_voice", Builtins.Row("voice")),
 		ds.Settings.Section {
 			title = t("conversation"),
 			ds.Settings.Group {

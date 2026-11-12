@@ -39,6 +39,7 @@ mod dev;
 mod completion;
 mod desktop_blur;
 mod device;
+mod device3d;
 mod device_video;
 mod engine;
 mod engine_update;

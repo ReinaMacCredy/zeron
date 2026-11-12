@@ -14,7 +14,6 @@ local route = require("@app/screens/shell/route")
 local auth = require("@account/auth")
 local search = require("@app/screens/settings/search")
 local store = require("@app/screens/settings/store")
-local Builtins = require("@app/screens/plugins/builtins")
 require("@app/screens/settings/chimes")
 
 -- (The window's language, which General picks: followed from the start.)
@@ -35,8 +34,7 @@ local function ahead(): string
 end
 
 -- (Each page by its module's `ID` and `TITLE`: the module loads as it's first shown or searched.)
--- `builtin`: the built-in plugin whose page it is, listed while that's on.
-local function add(id: string, title: string, module: string, icon: string, group: string, builtin: string?)
+local function add(id: string, title: string, module: string, icon: string, group: string)
 	settings.add {
 		id = id,
 		title = title,
@@ -45,11 +43,6 @@ local function add(id: string, title: string, module: string, icon: string, grou
 		-- (The shell centres each page in the room beside the list.)
 		module = `@app/screens/settings/{module}`,
 		before = ahead(),
-		shown = if builtin
-			then function(): boolean
-				return Builtins.on(builtin)
-			end
-			else nil,
 	}
 end
 
@@ -59,13 +52,13 @@ add("appearance", "Appearance", "appearance", "tuning", "Personal")
 add("notifications", "Notifications", "notifications", "bell", "Personal")
 add("files", "Files", "files", "folder", "Personal")
 add("shortcuts", "Shortcuts", "shortcuts", "keyboard", "Personal")
-add("appshots", "Appshots", "appshots", "gallery", "Personal", "appshots")
+add("appshots", "Appshots", "appshots", "gallery", "Personal")
 -- (Zeron's This Mac > Computer use, beside Appshots as there.)
 add("computer", "Computer use", "computer", "computer-cursor", "Personal")
 -- (Zeron's This Mac > Voice, beside Computer use as there.)
-add("voice", "Voice", "voice", "microphone", "Personal", "voice")
+add("voice", "Voice", "voice", "microphone", "Personal")
 add("profile", "Account", "profile", "user-rounded", "Personal")
-add("usage", "Usage", "usage", "wallet", "Personal", "usage")
+add("usage", "Usage", "usage", "wallet", "Personal")
 -- The panel's browser, under a heading of its own (room for what it grows:
 -- site data, permissions, downloads).
 add("browser", "Browsing", "browser", "global", "Browser")
@@ -86,7 +79,7 @@ add("routing", "Routing", "routing", "map-arrow-right", "Devices")
 add("playbooks", "Playbooks", "playbooks", "document", "Devices")
 add("devices", "Devices", "devices", "laptop", "Devices")
 -- (Zeron's Devices & updates > Device hub, beside Devices here.)
-add("device_hub", "Device hub", "device_hub", "smartphone", "Devices", "device")
+add("device_hub", "Device hub", "device_hub", "smartphone", "Devices")
 add("members", "Members", "members", "users-group-rounded", "Organization")
 add("experimental", "Experimental", "lab", "action-test", "Lab")
 -- Last, under Zeron's own heading (the shipping app's About and its

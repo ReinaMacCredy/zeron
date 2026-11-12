@@ -1,27 +1,35 @@
 //! Appshots: a capture of the frontmost application's window, staged on the
 //! composer as a picture, never sent on its own, as the shipping app's
-//! (crates/ui/src/appshots.rs). A global shortcut (⌃⌥Space by default)
-//! captures the window in front while another app has focus; Screen
-//! Recording is needed for the picture, Accessibility optionally adds the
-//! window's text, which goes with the message as untrusted observed content.
+//! (crates/ui/src/appshots.rs, its AppSnap flow). The hotkey is a
+//! double-modifier chord (both ⌘ keys by default) watched by one listen-only
+//! event tap, which also serves the Quick capture chord; the tap needs Input
+//! Monitoring, the picture Screen Recording, and Accessibility optionally
+//! adds the window's text, which goes with the message as untrusted
+//! observed content. The choices live in the engine's `ui-settings.json`,
+//! where the shipping app keeps them, so both apps read the same ones.
 //!
 //! The capture and the accessibility walk run off the window's thread; the
 //! picture is trimmed of transparent padding and kept as a file here
-//! (`{App} Appshot.png`), with the app's icon beside it for the chip.
+//! (`{App} Appshot.png`), with the app's icon beside it for the chip. The
+//! captured window flashes before the capture lands.
 //!
 //! Shared state:
-//!   appshots.state     { platform, enabled, sound, shortcut, recording,
-//!                        shortcut_ready, capture, text } ("ready" or
-//!                        "required" for the two permissions)
+//!   appshots.state     { app, platform, loaded, enabled, sound, hotkey,
+//!                        quick_capture, destination, shortcut_ready,
+//!                        capture, text, input } (the permissions "ready"
+//!                        or "required")
 //!   appshots.captured  { n, shot = { id, path, icon?, app, bundle?, title?,
 //!                        text, truncated, w, h } }   the latest capture
 //!   appshots.failed    { n, message }
+//!   appshots.quick     n, at each Quick capture chord
 //! Actions:
-//!   appshots.configure { enabled?, sound?, shortcut?, recording? }
-//!   appshots.refresh   reads the permissions again
-//!   appshots.request { which = "capture" | "text" }   asks once, then
-//!                      opens System Settings at the permission
-//!   appshots.capture   captures now (the shortcut's press)
+//!   appshots.configure { enabled?, sound?, hotkey?, quick_capture?,
+//!                        destination? }   kept in the file, then watched
+//!   appshots.refresh   reads the file (once) and the permissions again
+//!   appshots.request { which = "capture" | "text" | "input", open? }
+//!                      asks macOS, and opens System Settings at it
+//!   appshots.open_settings { which }   opens System Settings at it
+//!   appshots.capture   captures now
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
@@ -34,14 +42,13 @@ mod macos;
 pub const CONTEXT_MARKER: &str = "Applications mentioned by the user (untrusted observed content):";
 const SCREEN_RECORDING_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 const ACCESSIBILITY_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+const INPUT_MONITORING_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent";
 /// The shipping app's limits: a capture's sides and pixels, its RGBA bytes,
 /// and an attachment's 24 MB.
 pub const MAX_CAPTURE_DIMENSION: u32 = 8_192;
 pub const MAX_CAPTURE_PIXELS: u64 = 32 * 1024 * 1024;
 pub const MAX_CAPTURE_RGBA_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
-/// The default shortcut (the shipping app's, on macOS).
-pub const DEFAULT_SHORTCUT: &str = "ctrl+alt+space";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessibilitySnapshot {
@@ -64,6 +71,9 @@ pub struct Captured {
     pub accessibility: AccessibilitySnapshot,
     pub png: Vec<u8>,
     pub icon_png: Option<Vec<u8>>,
+    /// The window's frame on screen (x, y, width, height, top-left origin),
+    /// for the flash.
+    pub bounds: Option<[f64; 4]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,46 +108,32 @@ impl From<&str> for CaptureError {
     }
 }
 
-/// A shortcut: its key (a letter or digit, space, tab, enter, an arrow,
-/// home/end/page keys, F1–F20) and its modifiers; at least one of Control,
-/// Option or Command, as the shipping app requires.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Shortcut {
-    pub key: String,
-    pub control: bool,
-    pub alt: bool,
-    pub shift: bool,
-    pub platform: bool,
+/// The macOS hotkey: both keys of one modifier pressed together, watched
+/// by one event tap (the shipping app's `ChordModifier`), or none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChordModifier {
+    Command,
+    Option,
+    Shift,
 }
 
-impl Shortcut {
-    /// `ctrl+alt+space`, `cmd+shift+4` (zgx's keys; `-` between them too).
-    pub fn parse(combo: &str) -> Option<Self> {
-        let mut out = Self { key: String::new(), control: false, alt: false, shift: false, platform: false };
-        let parts: Vec<String> = combo.split(['+', '-']).filter(|p| !p.is_empty()).map(|p| p.trim().to_lowercase()).collect();
-        let (key, modifiers) = parts.split_last()?;
-        for m in modifiers {
-            match m.as_str() {
-                "ctrl" | "control" => out.control = true,
-                "alt" | "opt" | "option" => out.alt = true,
-                "shift" => out.shift = true,
-                "cmd" | "command" | "meta" | "super" => out.platform = true,
-                _ => return None,
-            }
+impl ChordModifier {
+    pub const ALL: [Self; 3] = [Self::Command, Self::Option, Self::Shift];
+
+    pub fn combo(self) -> &'static str {
+        match self {
+            Self::Command => "command-command",
+            Self::Option => "option-option",
+            Self::Shift => "shift-shift",
         }
-        let named = matches!(
-            key.as_str(),
-            "space" | "tab" | "enter" | "backspace" | "delete" | "insert" | "up" | "down" | "left" | "right" | "home" | "end" | "pageup" | "pagedown"
-        );
-        let function = key.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| (1..=20).contains(&n));
-        let printable = key.len() == 1 && key.as_bytes()[0].is_ascii_alphanumeric();
-        if !(named || function || printable) || !(out.control || out.alt || out.platform) {
-            return None;
-        }
-        out.key = key.clone();
-        Some(out)
+    }
+
+    pub fn from_combo(combo: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|chord| chord.combo() == combo)
     }
 }
+
+pub const NO_HOTKEY: &str = "none";
 
 pub fn validate_capture_dimensions(width: u32, height: u32) -> Result<usize, CaptureError> {
     if width == 0 || height == 0 || width > MAX_CAPTURE_DIMENSION || height > MAX_CAPTURE_DIMENSION {
@@ -230,6 +226,7 @@ pub struct Staged {
     pub text: String,
     pub truncated: bool,
     pub size: (u32, u32),
+    pub bounds: Option<[f64; 4]>,
 }
 
 pub fn stage(captured: Captured, dir: &std::path::Path) -> Result<Staged, CaptureError> {
@@ -261,6 +258,7 @@ pub fn stage(captured: Captured, dir: &std::path::Path) -> Result<Staged, Captur
         text: captured.accessibility.content,
         truncated: captured.accessibility.truncated,
         size,
+        bounds: captured.bounds,
     })
 }
 
@@ -449,64 +447,165 @@ fn staged_value(s: &Staged) -> Value {
     Value::record(fields)
 }
 
-/// The settings that decide the shortcut, kept for the window's life.
-struct Prefs {
-    enabled: bool,
-    sound: bool,
-    shortcut: String,
-    recording: bool,
-    /// Asked once already: the second ask opens System Settings.
-    asked_capture: bool,
-    asked_text: bool,
+/// The choices, as the shipping app keeps them in its `ui-settings.json`
+/// (crates/ui settings.rs), so both apps read the same ones.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Prefs {
+    pub enabled: bool,
+    pub sound: bool,
+    pub hotkey: String,
+    pub quick_capture: String,
+    pub destination: String,
+}
+
+const DESTINATIONS: [&str; 3] = ["automatic", "last-session", "new-session"];
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sound: true,
+            hotkey: ChordModifier::Command.combo().into(),
+            quick_capture: ChordModifier::Option.combo().into(),
+            destination: "automatic".into(),
+        }
+    }
+}
+
+/// A hotkey as the shipping app reads it on the Mac: a chord or none; any
+/// other (a key recorded before the chords) is the default.
+fn hotkey_or(value: Option<&str>, default: &'static str) -> String {
+    match value {
+        Some(v) if v == NO_HOTKEY || ChordModifier::from_combo(v).is_some() => v.into(),
+        _ => default.into(),
+    }
+}
+
+impl Prefs {
+    pub fn read(file: Option<&serde_json::Value>) -> Self {
+        let d = Self::default();
+        let Some(f) = file else { return d };
+        let keymap = &f["keymap"];
+        Self {
+            enabled: f["appshotsEnabled"].as_bool().unwrap_or(d.enabled),
+            // (A file from before the Appshot chime had one: it followed the chimes.)
+            sound: f["appshotSoundEnabled"].as_bool().or_else(|| f["soundEnabled"].as_bool()).unwrap_or(d.sound),
+            hotkey: hotkey_or(keymap["captureAppshot"].as_str(), ChordModifier::Command.combo()),
+            // (gpui watches no chord for any other Quick capture value, and keeps it.)
+            quick_capture: match keymap["quickCapture"].as_str() {
+                None => ChordModifier::Option.combo().into(),
+                Some(v) if ChordModifier::from_combo(v).is_some() => v.into(),
+                Some(_) => NO_HOTKEY.into(),
+            },
+            destination: f["appshotDestination"]
+                .as_str()
+                .filter(|d| DESTINATIONS.contains(d))
+                .unwrap_or("automatic")
+                .into(),
+        }
+    }
+
+    pub fn changes(&self, next: &Self, file: Option<&serde_json::Value>) -> serde_json::Map<String, serde_json::Value> {
+        use serde_json::Value as Json;
+        let mut out = serde_json::Map::new();
+        if next.enabled != self.enabled {
+            out.insert("appshotsEnabled".into(), Json::Bool(next.enabled));
+        }
+        if next.sound != self.sound {
+            out.insert("appshotSoundEnabled".into(), Json::Bool(next.sound));
+        }
+        if next.destination != self.destination {
+            out.insert("appshotDestination".into(), Json::from(next.destination.as_str()));
+        }
+        if next.hotkey != self.hotkey || next.quick_capture != self.quick_capture {
+            let mut keymap = file.and_then(|f| f["keymap"].as_object().cloned()).unwrap_or_default();
+            if next.hotkey != self.hotkey {
+                keymap.insert("captureAppshot".into(), Json::from(next.hotkey.as_str()));
+            }
+            if next.quick_capture != self.quick_capture {
+                keymap.insert("quickCapture".into(), Json::from(next.quick_capture.as_str()));
+            }
+            out.insert("keymap".into(), Json::Object(keymap));
+        }
+        out
+    }
+
+    fn appshot_chord(&self) -> Option<ChordModifier> {
+        self.enabled.then(|| ChordModifier::from_combo(&self.hotkey)).flatten()
+    }
 }
 
 struct Appshots {
     prefs: RefCell<Prefs>,
+    loaded: std::cell::Cell<bool>,
+    listening: std::cell::Cell<bool>,
     state: Shared,
     captured: Shared,
     failed: Shared,
+    quick: Shared,
     capturing: std::cell::Cell<bool>,
     counter: std::cell::Cell<u64>,
+    quick_counter: std::cell::Cell<u64>,
     tasks: TaskSpawner,
 }
 
 impl Appshots {
-    /// The shortcut that should be registered now: none while off or while
-    /// a new one is being recorded (so pressing it doesn't capture).
-    fn active(&self) -> Option<Shortcut> {
-        let p = self.prefs.borrow();
-        if !p.enabled || p.recording {
-            return None;
+    fn load(&self) {
+        if self.loaded.get() {
+            return;
         }
-        Shortcut::parse(&p.shortcut).or_else(|| Shortcut::parse(DEFAULT_SHORTCUT))
+        let Some(path) = crate::settings::ui_settings_path() else { return };
+        let Ok(file) = crate::settings::read_settings_at(&path) else { return };
+        *self.prefs.borrow_mut() = Prefs::read(file.as_ref());
+        self.loaded.set(true);
+    }
+
+    fn save(&self, next: Prefs) {
+        let Some(path) = crate::settings::ui_settings_path() else { return };
+        let Ok(file) = crate::settings::read_settings_at(&path) else { return };
+        let changes = self.prefs.borrow().changes(&next, file.as_ref());
+        if !changes.is_empty() && crate::settings::write_settings_at(&path, changes).is_err() {
+            return;
+        }
+        *self.prefs.borrow_mut() = next;
     }
 
     fn publish(&self) {
+        self.load();
+        let p = self.prefs.borrow().clone();
         #[cfg(target_os = "macos")]
-        let (ready, capture, text) = macos::capabilities();
+        {
+            self.listening.set(macos::refresh_chords(p.appshot_chord(), ChordModifier::from_combo(&p.quick_capture)));
+        }
+        #[cfg(target_os = "macos")]
+        let (capture, text, input) = macos::capabilities();
         #[cfg(not(target_os = "macos"))]
-        let (ready, capture, text) = (false, false, false);
-        let p = self.prefs.borrow();
+        let (capture, text, input) = (false, false, false);
+        #[cfg(target_os = "macos")]
+        let app = macos::app_display_name();
+        #[cfg(not(target_os = "macos"))]
+        let app = String::from("Zeron");
         let said = |on: bool| Value::from(if on { "ready" } else { "required" });
         self.state.set(Value::record([
+            ("app", Value::from(app.as_str())),
             ("platform", Value::from(if cfg!(target_os = "macos") { "macos" } else { "unsupported" })),
+            ("loaded", Value::Bool(self.loaded.get())),
             ("enabled", Value::Bool(p.enabled)),
             ("sound", Value::Bool(p.sound)),
-            ("shortcut", Value::from(p.shortcut.as_str())),
-            ("recording", Value::Bool(p.recording)),
-            ("shortcut_ready", Value::Bool(ready && Shortcut::parse(&p.shortcut).is_some())),
+            ("hotkey", Value::from(p.hotkey.as_str())),
+            ("quick_capture", Value::from(p.quick_capture.as_str())),
+            ("destination", Value::from(p.destination.as_str())),
+            ("shortcut_ready", Value::Bool(self.listening.get())),
             ("capture", said(capture)),
             ("text", said(text)),
+            ("input", said(input)),
         ]));
     }
 
-    fn register(&self) {
-        #[cfg(target_os = "macos")]
-        macos::refresh_global_shortcut(self.active());
-    }
-
-    /// A capture, as the shortcut asks for one: never while Zeron is in
-    /// front (the window there is Zeron's own), one at a time.
+    /// A capture, as the chord asks for one: never while Zeron is in front
+    /// (the window there is Zeron's own), one at a time. Once the pixels are
+    /// safe the captured window flashes, the sound plays as it fades, then
+    /// the capture lands and Zeron comes forward (the shipping app's order).
     fn capture(self: &Rc<Self>, capturer: Capturer) {
         if self.capturing.get() || !self.prefs.borrow().enabled {
             return;
@@ -515,6 +614,13 @@ impl Appshots {
         let me = self.clone();
         self.tasks.spawn(async move {
             let result = capture_off_thread(capturer, appshot_dir()).await;
+            #[cfg(target_os = "macos")]
+            if let Some(bounds) = result.as_ref().ok().and_then(|s| s.bounds) {
+                let (tx, mut rx) = zgx::task::latest();
+                if macos::play_capture_flash(bounds, Box::new(move || { tx.send(()); })) {
+                    let _ = rx.recv().await;
+                }
+            }
             me.capturing.set(false);
             let n = me.counter.get() + 1;
             me.counter.set(n);
@@ -532,6 +638,14 @@ impl Appshots {
                 }
             }
         });
+    }
+
+    fn quick_capture(&self) {
+        let n = self.quick_counter.get() + 1;
+        self.quick_counter.set(n);
+        self.quick.set(Value::Num(n as f64));
+        #[cfg(target_os = "macos")]
+        macos::foreground_after_capture();
     }
 }
 
@@ -564,71 +678,87 @@ fn app_is_active() -> bool {
     false
 }
 
-/// When the window goes: its shortcut is let go of (a capture asked by a
+/// When the window goes: its chords are let go of (a capture asked by a
 /// window that has closed can't land anywhere).
 struct Unregister;
 impl Drop for Unregister {
     fn drop(&mut self) {
         #[cfg(target_os = "macos")]
-        macos::refresh_global_shortcut(None);
+        macos::refresh_chords(None, None);
+    }
+}
+
+fn settings_url(which: &str) -> &'static str {
+    match which {
+        "text" => ACCESSIBILITY_SETTINGS_URL,
+        "input" => INPUT_MONITORING_SETTINGS_URL,
+        _ => SCREEN_RECORDING_SETTINGS_URL,
     }
 }
 
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let shots = Rc::new(Appshots {
-        prefs: RefCell::new(Prefs {
-            enabled: false,
-            sound: true,
-            shortcut: DEFAULT_SHORTCUT.into(),
-            recording: false,
-            asked_capture: false,
-            asked_text: false,
-        }),
+        prefs: RefCell::new(Prefs::default()),
+        loaded: std::cell::Cell::new(false),
+        listening: std::cell::Cell::new(false),
         state: host.shared("appshots.state", Value::Nil),
         captured: host.shared("appshots.captured", Value::Nil),
         failed: host.shared("appshots.failed", Value::Nil),
+        quick: host.shared("appshots.quick", Value::Nil),
         capturing: std::cell::Cell::new(false),
         counter: std::cell::Cell::new(0),
+        quick_counter: std::cell::Cell::new(0),
         tasks: cx.tasks.clone(),
     });
-    shots.publish();
     #[cfg(target_os = "macos")]
     {
         let me = Rc::downgrade(&shots);
-        macos::start_global_shortcut(
-            Box::new(move || {
-                if let Some(me) = me.upgrade()
-                    && !app_is_active()
-                {
-                    me.capture(platform_capturer());
-                }
-            }),
-            shots.active(),
-        );
+        macos::start_chords(Box::new(move |chord| {
+            let Some(me) = me.upgrade() else { return };
+            match chord {
+                macos::Chord::Appshot if !app_is_active() => me.capture(platform_capturer()),
+                macos::Chord::Appshot => {}
+                macos::Chord::QuickCapture => me.quick_capture(),
+            }
+        }));
     }
+    shots.publish();
     cx.tasks.spawn(async move {
         let _unregister = Unregister;
         std::future::pending::<()>().await
     });
     let me = shots.clone();
     host.action("appshots.configure", move |arg| {
-        {
-            let mut p = me.prefs.borrow_mut();
-            if let Some(Value::Bool(on)) = arg.field("enabled") {
-                p.enabled = *on;
-            }
-            if let Some(Value::Bool(on)) = arg.field("sound") {
-                p.sound = *on;
-            }
-            if let Some(Value::Bool(on)) = arg.field("recording") {
-                p.recording = *on;
-            }
-            let combo = arg.field("shortcut").map(crate::auth::text).unwrap_or_default();
-            if !combo.is_empty() {
-                p.shortcut = combo;
-            }
+        me.load();
+        if !me.loaded.get() {
+            return;
         }
-        me.register();
+        let mut next = me.prefs.borrow().clone();
+        if let Some(Value::Bool(on)) = arg.field("enabled") {
+            next.enabled = *on;
+        }
+        if let Some(Value::Bool(on)) = arg.field("sound") {
+            next.sound = *on;
+        }
+        let text = |name: &str| arg.field(name).map(crate::auth::text).unwrap_or_default();
+        let hotkey = text("hotkey");
+        if hotkey == NO_HOTKEY || ChordModifier::from_combo(&hotkey).is_some() {
+            next.hotkey = hotkey;
+        }
+        let quick = text("quick_capture");
+        if quick == NO_HOTKEY || ChordModifier::from_combo(&quick).is_some() {
+            next.quick_capture = quick;
+        }
+        let destination = text("destination");
+        if DESTINATIONS.contains(&destination.as_str()) {
+            next.destination = destination;
+        }
+        // (One chord can't be both: the shipping app refuses it the same way.)
+        if ChordModifier::from_combo(&next.hotkey).is_some() && next.hotkey == next.quick_capture {
+            me.publish();
+            return;
+        }
+        me.save(next);
         me.publish();
     });
     let me = shots.clone();
@@ -636,26 +766,27 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let me = shots.clone();
     host.action("appshots.request", move |arg| {
         let which = arg.field("which").map(crate::auth::text).unwrap_or_default();
-        let text = which == "text";
-        let first = {
-            let mut p = me.prefs.borrow_mut();
-            let asked = if text { &mut p.asked_text } else { &mut p.asked_capture };
-            !std::mem::replace(asked, true)
-        };
         #[cfg(target_os = "macos")]
-        if first {
-            if text {
-                macos::request_semantic_access();
-            } else {
-                macos::request_capture_access();
-            }
-        } else {
+        match which.as_str() {
+            "text" => macos::request_semantic_access(),
+            "input" => macos::request_input_monitoring(),
+            _ => macos::request_capture_access(),
+        }
+        if matches!(arg.field("open"), Some(Value::Bool(true))) {
             let _ = std::process::Command::new("/usr/bin/open")
-                .arg(if text { ACCESSIBILITY_SETTINGS_URL } else { SCREEN_RECORDING_SETTINGS_URL })
+                .arg(settings_url(&which))
                 .spawn()
                 .map(|mut child| std::thread::spawn(move || child.wait()));
         }
-        let _ = first;
+        me.publish();
+    });
+    let me = shots.clone();
+    host.action("appshots.open_settings", move |arg| {
+        let which = arg.field("which").map(crate::auth::text).unwrap_or_default();
+        let _ = std::process::Command::new("/usr/bin/open")
+            .arg(settings_url(&which))
+            .spawn()
+            .map(|mut child| std::thread::spawn(move || child.wait()));
         me.publish();
     });
     let me = shots.clone();
@@ -709,6 +840,7 @@ mod tests {
                 accessibility: AccessibilitySnapshot { format_version: 1, content: "AXWindow title=Docs".into(), truncated: false },
                 png: png.clone(),
                 icon_png: Some(vec![1, 2, 3]),
+                bounds: None,
             })
         })
     }
@@ -767,12 +899,52 @@ mod tests {
     }
 
     #[test]
-    fn shortcuts_need_a_modifier_and_a_supported_key() {
-        let s = Shortcut::parse("ctrl+alt+space").unwrap();
-        assert!(s.control && s.alt && !s.platform && s.key == "space");
-        assert!(Shortcut::parse("cmd-shift-4").is_some());
-        assert!(Shortcut::parse("shift+a").is_none(), "shift alone isn't enough");
-        assert!(Shortcut::parse("ctrl+=").is_none());
-        assert!(Shortcut::parse("ctrl+f13").is_some());
+    fn the_choices_are_read_as_the_shipping_app_keeps_them() {
+        assert_eq!(Prefs::read(None), Prefs::default());
+        assert_eq!(Prefs::default().hotkey, "command-command");
+        let file = serde_json::json!({
+            "appshotsEnabled": true, "appshotSoundEnabled": false, "appshotDestination": "last-session",
+            "keymap": { "captureAppshot": "shift-shift", "quickCapture": "none" },
+        });
+        let p = Prefs::read(Some(&file));
+        assert!(p.enabled && !p.sound);
+        assert_eq!((p.hotkey.as_str(), p.quick_capture.as_str(), p.destination.as_str()), ("shift-shift", "none", "last-session"));
+        // A key recorded before the chords, or a word it doesn't know: the defaults.
+        let old = serde_json::json!({ "appshotDestination": "elsewhere", "keymap": { "captureAppshot": "mod-alt-space" } });
+        let p = Prefs::read(Some(&old));
+        assert_eq!((p.hotkey.as_str(), p.destination.as_str()), ("command-command", "automatic"));
+        assert_eq!(Prefs::read(Some(&serde_json::json!({ "keymap": { "captureAppshot": "none" } }))).hotkey, "none");
+        assert!(!Prefs::read(Some(&serde_json::json!({ "soundEnabled": false }))).sound);
+        assert_eq!(Prefs::read(Some(&serde_json::json!({ "keymap": { "quickCapture": "mod-alt-n" } }))).quick_capture, "none");
+    }
+
+    #[test]
+    fn a_change_is_written_in_place_and_keeps_every_other_shortcut() {
+        let dir = std::env::temp_dir().join(format!("zgx-appshot-prefs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ui-settings.json");
+        std::fs::write(&path, r#"{"sidebarWidth": 300, "keymap": {"newSession": "mod-shift-n", "quickCapture": "option-option"}}"#).unwrap();
+        let file = crate::settings::read_settings_at(&path).unwrap();
+        let was = Prefs::read(file.as_ref());
+        let next = Prefs { enabled: true, hotkey: "option-option".into(), quick_capture: "shift-shift".into(), destination: "new-session".into(), ..was.clone() };
+        assert_eq!(was.changes(&was, file.as_ref()), serde_json::Map::new(), "nothing changed: nothing written");
+        crate::settings::write_settings_at(&path, was.changes(&next, file.as_ref())).unwrap();
+        let written = crate::settings::read_settings_at(&path).unwrap().unwrap();
+        assert_eq!(written["sidebarWidth"], 300);
+        assert_eq!(written["keymap"]["newSession"], "mod-shift-n");
+        assert_eq!(written["keymap"]["captureAppshot"], "option-option");
+        assert_eq!(written["keymap"]["quickCapture"], "shift-shift");
+        assert_eq!(written["appshotsEnabled"], true);
+        assert!(written.get("appshotSoundEnabled").is_none(), "an unchanged choice isn't written");
+        assert_eq!(Prefs::read(Some(&written)), next);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_appshot_chord_is_watched_only_while_on() {
+        let on = Prefs { enabled: true, ..Prefs::default() };
+        assert_eq!(on.appshot_chord(), Some(ChordModifier::Command));
+        assert_eq!(Prefs::default().appshot_chord(), None);
+        assert_eq!(Prefs { hotkey: NO_HOTKEY.into(), ..on }.appshot_chord(), None);
     }
 }

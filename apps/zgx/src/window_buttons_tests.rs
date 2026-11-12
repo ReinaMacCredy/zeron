@@ -336,7 +336,11 @@ fn every_menu_item_is_in_the_command_palette() {
         let label = if id == crate::plugins::USE_ZERON_TEMPLATE { "Use Zeron v3".to_owned() } else { title.clone() };
         app.type_text(field, &label);
         app.frames(20);
-        let row = format!("role:option \"{label}\"");
+        let mut row = format!("role:option \"{label}\"");
+        // (A Settings row with the same words lists under the commands, as Appshots' Quick capture.)
+        if app.target(&row).is_err_and(|e| e.contains(" nodes:")) {
+            row.push_str(" [1]");
+        }
         assert!(app.find(&row).is_some(), "{id} (\"{title}\") isn't in the palette: {}", app.texts().join("|"));
         // (Run through the menu item's id: checked on rows no other of the
         // palette's shares a label with, Zeron's Pin and the host's way back.)

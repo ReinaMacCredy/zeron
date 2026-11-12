@@ -723,9 +723,18 @@ impl DeviceHub {
                 tracing::warn!(%error, "reattaching a device stream failed");
             }
         }
+        self.resume_streams(host_id, origin, &host_scope(host_id))
+    }
+
+    fn resume_streams(
+        &self,
+        host_id: &str,
+        origin: &str,
+        scope: &dyn Fn(&str) -> bool,
+    ) -> Result<(), String> {
         let resume = || {
             self.streams.resume(
-                &host_scope(host_id),
+                scope,
                 |key, frames, link| self.start_reader(origin, key, frames, link),
                 |key, panel, feed, link| self.start_avcc_reader(origin, key, panel, feed, link),
             )
@@ -1205,6 +1214,10 @@ impl DeviceHub {
             let booted = {
                 let _clear = OnDrop(Some(|| self.publish(|state| state.booting.retain(other))));
                 async {
+                    if ios {
+                        // An outside shutdown leaves the hub a dead capture that start reuses; only its shutdown frees it (500 when already off).
+                        let _ = client.shutdown_simulator(&device.id).await;
+                    }
                     let id = client.boot(&device).await?;
                     if !hub_client::valid_device_id(&id) {
                         return Err(UNKNOWN_DEVICE.to_string());
@@ -1217,6 +1230,10 @@ impl DeviceHub {
                 .await
             };
             let id = booted?;
+            if ios {
+                let key = device_key(&host_id, &id);
+                let _ = self.resume_streams(&host_id, &origin, &|candidate| candidate == key);
+            }
             self.refresh(&host_id, &origin).await?;
             if let Some(listed) = self.snapshot().device(&host_id, &id)
                 && !ios
@@ -1955,12 +1972,17 @@ mod tests {
         let seen = requests.clone();
         let booted = Arc::new(std::sync::atomic::AtomicBool::new(fake.booted));
         let emulator = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let capture = Arc::new((
+            std::sync::atomic::AtomicU32::new(0),
+            std::sync::atomic::AtomicBool::new(true),
+        ));
         tokio::spawn(async move {
             loop {
                 let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
                 let seen = seen.clone();
                 let booted = booted.clone();
                 let emulator = emulator.clone();
+                let capture = capture.clone();
                 tokio::spawn(async move {
                     use std::sync::atomic::Ordering::SeqCst;
                     let mut head = [0u8; 32];
@@ -2002,20 +2024,28 @@ mod tests {
                             None => AVCC_RECORD.to_vec(),
                         };
                         let mut stream = b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n".to_vec();
+                        let (epoch, released) = (&capture.0, &capture.1);
+                        let mine = epoch.load(SeqCst);
+                        let live = |mine| released.load(SeqCst) && epoch.load(SeqCst) == mine;
                         for (tag, payload) in
                             [(4, &b"seed"[..]), (1, &description[..]), (2, b"key")]
                         {
-                            stream.extend(avcc_envelope(tag, payload));
+                            if tag == 4 || live(mine) {
+                                stream.extend(avcc_envelope(tag, payload));
+                            }
                         }
                         let mut alive = socket.write_all(&stream).await.is_ok();
                         let mut delta = 0u32;
-                        while alive {
+                        while alive && live(mine) {
                             delta += 1;
                             alive = socket
                                 .write_all(&avcc_envelope(3, &delta.to_be_bytes()))
                                 .await
                                 .is_ok();
                             tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        if alive {
+                            std::future::pending::<()>().await;
                         }
                         return;
                     }
@@ -2078,7 +2108,13 @@ mod tests {
                             "errors": errors
                         });
                         (fake.list_status, body)
+                    } else if line.starts_with("POST /test/outside-shutdown ") {
+                        booted.store(false, SeqCst);
+                        capture.0.fetch_add(1, SeqCst);
+                        capture.1.store(false, SeqCst);
+                        (200, serde_json::json!({"ok": true}))
                     } else if line.starts_with("POST /vendor/serve-sim/grid/api/shutdown ") {
+                        capture.1.store(true, SeqCst);
                         if fake.shutdown_flips {
                             booted.store(false, SeqCst);
                         }
@@ -2107,6 +2143,9 @@ mod tests {
                             std::future::pending::<()>().await;
                             return;
                         };
+                        if status == 200 {
+                            booted.store(true, SeqCst);
+                        }
                         (status, serde_json::json!({"ok": true, "id": "SIM-1"}))
                     } else if line.contains(" /vendor/serve-emu/api/fold?device=emulator-5558 ") {
                         (404, serde_json::json!("not found"))
@@ -3406,6 +3445,73 @@ mod tests {
             next_tags(&mut again, 1).await[0],
             1,
             "cached description first"
+        );
+        hub.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reopening_a_simulator_shut_down_outside_zeron_streams_live_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = super::DeviceHub::start(dir.path());
+        let (origin, requests) = fake_hub_with(HEALTHY).await;
+        hub.attach_hub_for_test(origin.clone());
+        hub.configure(zeron_proto::device_hub::ConfigureDeviceHubParams {
+            enabled: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        hub.open(open_params("SIM-1")).await.unwrap();
+        let mut held = Box::pin(super::avcc_batches(
+            hub.watch_avcc(None, "SIM-1", None).unwrap(),
+        ));
+        assert_eq!(next_tags(&mut held, 4).await, [4, 1, 2, 3]);
+        reqwest::Client::new()
+            .post(format!("{origin}/test/outside-shutdown"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        hub.open(open_params("SIM-1")).await.unwrap();
+        let keyframe_then_delta =
+            async |tab: &mut (dyn futures::Stream<Item = Vec<u8>> + Unpin)| {
+                use futures::StreamExt as _;
+                let mut demuxer = zeron_proto::device_hub::AvccDemuxer::default();
+                let mut keyframe = false;
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        for envelope in demuxer.push(&tab.next().await.unwrap()).unwrap() {
+                            match envelope.tag {
+                                2 => keyframe = true,
+                                3 if keyframe => return,
+                                _ => {}
+                            }
+                        }
+                    }
+                })
+                .await
+                .is_ok()
+            };
+        assert!(
+            keyframe_then_delta(&mut held).await,
+            "the watch held across the shutdown gets a live picture"
+        );
+        drop(held);
+        let mut fresh = Box::pin(super::avcc_batches(
+            hub.watch_avcc(None, "SIM-1", None).unwrap(),
+        ));
+        assert!(
+            keyframe_then_delta(&mut fresh).await,
+            "a new watch gets a live picture"
+        );
+        let requests = requests.lock().unwrap().clone();
+        let at = |route: &str| requests.iter().rposition(|line| line.starts_with(route));
+        assert!(
+            matches!(
+                (at("POST /vendor/serve-sim/grid/api/shutdown "), at("POST /api/devices/boot ")),
+                (Some(release), Some(boot)) if release < boot
+            ),
+            "the dead capture is released before the boot: {requests:?}"
         );
         hub.shutdown().await;
     }
