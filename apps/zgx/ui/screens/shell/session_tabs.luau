@@ -972,7 +972,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 	end
 	local cut_params: { [any]: { [string]: number } } = {}
 	ui.effect(function()
-		local els = { art.shade:get(), art.strip:get(), art.tint:get(), art.tab:get() }
+		local els = { art.strip:get(), art.tab:get() }
 		if next(els) == nil then
 			return
 		end
