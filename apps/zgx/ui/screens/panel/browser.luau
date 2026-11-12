@@ -186,7 +186,8 @@ command("panel.reload_page", ui.t("panel.browser.command.reload"):get(), "View",
 	s.reload()
 end)
 -- ⌘+ ⌘− ⌘0, the page's while it has the keyboard (each site keeps its
--- own: browser_data), else the window's, as before. (Binding them takes
+-- own: browser_data); else ⌘+ ⌘− step a shown composer's effort (Zeron's);
+-- else the window's, as before. (Binding them takes
 -- zgx's own window-zoom items out of the View menu: these stand in.)
 local function zoom_window(by: number)
 	local ok = pcall(function()
@@ -208,6 +209,9 @@ local function zoom_command(id: string, title: string, key: string, by: number)
 		run = function(): boolean
 			if showing and showing.keyboard() then
 				showing.zoom(by)
+				return true
+			end
+			if by ~= 0 and shared and shared.step_effort_by(by) then
 				return true
 			end
 			zoom_window(by)

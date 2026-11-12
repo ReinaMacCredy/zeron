@@ -1083,6 +1083,7 @@ local function Composer(): Node
 			keep = "chat",
 			toolbar_id = "composer-toolbar",
 			open_model = shared.open_model,
+			step_effort = shared.step_effort,
 			model_open = model_open,
 			model_committed = function(): boolean
 				return session_id:get() ~= nil
@@ -1346,10 +1347,11 @@ local function Composer(): Node
 	local composer_zone = shared.drop_zone("composer")
 	-- There to open the model picker in (the shell's ⌘/), while it is.
 	ui.on_mount(function()
-		shared.composer_shown:set(true)
+		shared.composer_shown:set(shared.composer_shown:peek() + 1)
 	end)
+	-- (Counted: a composer made again mounts before the old one goes.)
 	ui.on_cleanup(function()
-		shared.composer_shown:set(false)
+		shared.composer_shown:set(shared.composer_shown:peek() - 1)
 	end)
 	local dock = ui.ref()
 	-- How tall a new chat's composer is with nothing in it (what it's placed

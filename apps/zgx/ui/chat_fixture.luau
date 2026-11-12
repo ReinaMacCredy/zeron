@@ -132,6 +132,16 @@ ui.command {
 		end
 	end,
 }
+-- ⌘= and ⌘− as the browser panel's zoom commands hand them on (`stepped`: whether a composer took it).
+for name, by in { effort_up = 1, effort_down = -1 } do
+	ui.command {
+		id = name,
+		title = name,
+		run = function()
+			ui.shared("stepped", false):set(require("@app/screens/chat/shared").step_effort_by(by))
+		end,
+	}
+end
 -- How the draft colours a fenced block (`test_fence`).
 local test_fence = ui.state("test_fence", "")
 ui.command {

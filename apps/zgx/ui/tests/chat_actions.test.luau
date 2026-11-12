@@ -90,6 +90,22 @@ test("a model picked in a session lands on it at once", function()
 	expect(app:state("chat_effort")).to_be("high")
 end)
 
+test("⌘= and ⌘− step the composer's effort along its model's levels, held at the ends", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s1")
+	expect(app:state("chat_effort")).to_be("high")
+	local seen = {}
+	for _, cmd in { "effort_up", "effort_down", "effort_down", "effort_down" } do
+		app:command(cmd)
+		settle(app)
+		table.insert(seen, app:state("chat_effort"))
+	end
+	expect(table.concat(seen, " ")).to_be("high medium low low")
+	expect(app:state("stepped")).to_be(true)
+	expect(configured(app, "s1")).to_be(true)
+end)
+
 test("what a chat shows on arriving is not written back to it", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)

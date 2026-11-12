@@ -1,7 +1,8 @@
 -- Mentions in the draft: `@` a file or folder, `/` a command, `$` a skill
 -- (Zeron's triggers, crates/ui/src/composer.rs: `@` and `/` after a space
 -- or at a start, `$` not before a digit, none inside code). As one is
--- typed, a popover opens at the caret with what matches, its first row
+-- typed, a popover opens at the caret (docked: over the pill, its full
+-- width) with what matches, its first row
 -- lit; ↑ and ↓ move, Enter or Tab take the row (with no row, Enter sends
 -- the draft), Escape puts the popover
 -- away until the token is typed at again. A row chosen lands in the draft
@@ -77,6 +78,8 @@ export type Use = {
 	-- Whether its composer is in view (by default, it is).
 	in_view: (() -> boolean)?,
 	refs: (() -> string)?,
+	-- Over the anchor, its full width (Zeron's composer), not at the caret.
+	docked: boolean?,
 }
 
 -- Wires the mentions to a draft: returns what the composer needs.
@@ -394,10 +397,12 @@ function M.use(opts: Use)
 					closed(t.from)
 				end
 			end,
-			at_caret = true,
+			at_caret = not opts.docked,
+			keep_focus = opts.docked,
+			match_anchor_width = opts.docked,
 			autofocus = false,
 			w = WIDTH,
-			placement = { side = "top", align = "start", offset = 8 },
+			placement = { side = "top", align = "start", offset = if opts.docked then 6 else 8 },
 			anchor = anchor,
 			ui.column {
 				id = "mention-panel",

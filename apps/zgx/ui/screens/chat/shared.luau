@@ -996,12 +996,22 @@ end
 M.open_model = ui.shared("chat.composer.open_model", 0)
 -- A new chat's agent asked for from elsewhere (the Skills page's Try now): an agent's id; the composer takes its first model unless it runs that agent already, then clears it.
 M.want_agent = ui.shared("chat.composer.want_agent", nil :: string?)
-M.composer_shown = ui.shared("chat.composer.shown", false)
+M.composer_shown = ui.shared("chat.composer.shown", 0)
 function M.open_model_picker(): boolean
-	if not M.composer_shown:peek() then
+	if M.composer_shown:peek() <= 0 then
 		return false
 	end
 	M.open_model:set(M.open_model:peek() + 1)
+	return true
+end
+
+-- ⌘− ⌘=: the composer's effort a stop down or up. Whether there was a composer to step.
+M.step_effort = ui.shared("chat.composer.step_effort", { n = 0, by = 0 })
+function M.step_effort_by(by: number): boolean
+	if M.composer_shown:peek() <= 0 then
+		return false
+	end
+	M.step_effort:set({ n = M.step_effort:peek().n + 1, by = by })
 	return true
 end
 

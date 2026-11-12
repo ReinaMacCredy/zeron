@@ -103,6 +103,8 @@ export type Props = {
 	-- Bumped, it opens (a shortcut to it; Dropdown's `open_with`).
 	open_with: State<number>?,
 	close_with: State<number>?,
+	-- Bumped, the effort moves `by` stops along the slider, held at its ends (Zeron's ⌘− ⌘=).
+	step_with: State<{ n: number, by: number }>?,
 	-- Set to whether it is open (Dropdown's `showing`).
 	showing: State<boolean>?,
 	-- Set as it closes: whether from outside it (Dropdown's `outside`).
@@ -394,6 +396,31 @@ return ui.component(function(props: Props): Node
 		props.effort:set(m.effort or m.efforts[1].value)
 	end
 	ui.effect(fit_effort)
+	if props.step_with then
+		local asked = props.step_with
+		local seen = asked:peek().n
+		ui.effect(function()
+			local s = asked:get()
+			if s.n == seen then
+				return
+			end
+			seen = s.n
+			-- (After the effect: the slider's reads would track.)
+			ui.after(0, function()
+				local ls = levels()
+				local at = 0
+				for i, l in ls do
+					if l.value == slider_value:peek() then
+						at = i
+					end
+				end
+				local to = ls[math.clamp(at + s.by, 1, #ls)]
+				if at > 0 and to and to.value ~= slider_value:peek() then
+					set_level(to.value)
+				end
+			end)
+		end)
+	end
 
 	-- The models as the dropdown's items, each in its agent's mark. A model the
 	-- chat runs that the catalog no longer lists has a row of its own, there to

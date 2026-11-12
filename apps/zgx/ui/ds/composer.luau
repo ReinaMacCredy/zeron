@@ -26,7 +26,7 @@
 -- queue and the plan): folded, a pill floating over it; opened, its own
 -- top. Above that, the pill row (what runs, what's asked), and a notice
 -- (offline, a failed send, a draft restored) in its own line.
--- Mentions (ds/composer_mentions) open at the caret. Dictating, a track
+-- Mentions (ds/composer_mentions) open over the pill, its full width. Dictating, a track
 -- unrolls from the microphone over the controls: a dot, "Listening", the
 -- voice, a clock.
 --
@@ -270,6 +270,7 @@ export type Props = {
 	drop_overlay: boolean?,
 	-- Bumped, the model picker opens (a shortcut to it).
 	open_model: State<number>?,
+	step_effort: State<{ n: number, by: number }>?,
 	-- Set to whether the model picker is open.
 	model_open: State<boolean>?,
 	-- Which of `@`, `/`, `$` open their list (an agent's completion
@@ -1352,8 +1353,9 @@ return ui.component(function(props: Props): Node
 		return running ~= nil and running:get() and not has_text() and not has_cargo() and not asking()
 	end
 
-	-- Mentions at the caret.
+	-- Mentions over the pill, its full width (Zeron's).
 	local m = mentions.use {
+		docked = true,
 		field = field,
 		value = value,
 		sources = props.mentions or {},
@@ -1725,6 +1727,7 @@ return ui.component(function(props: Props): Node
 			on_accounts_open = props.on_accounts_open,
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
+			step_with = props.step_effort,
 			close_with = props.model_close,
 			showing = picker_open,
 			outside = picker_outside,
