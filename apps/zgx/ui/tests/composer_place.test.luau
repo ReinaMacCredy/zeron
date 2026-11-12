@@ -296,7 +296,7 @@ test("composer footer: everything else folded, the model keeps its name's start,
 	app:set_state("test_place_w", 800)
 	rested(app)
 	local name, effort = text_w(app, "Model", "Claude Sonnet 4.5"), text_w(app, "Model", "High")
-	app:set_state("test_place_w", 260)
+	app:set_state("test_place_w", 310)
 	rested(app)
 	expect(chip_text(app, "Access")).to_be("")
 	expect(chip_text(app, "Branch")).to_be("")
@@ -304,7 +304,7 @@ test("composer footer: everything else folded, the model keeps its name's start,
 	expect(kept > 32 and kept < name).to_be(true)
 	expect(text_w(app, "Model", "High")).to_be(effort)
 	-- Past that: the name at its least, never gone; the effort and the ring stay.
-	app:set_state("test_place_w", 180)
+	app:set_state("test_place_w", 230)
 	rested(app)
 	local least = text_w(app, "Model", "Claude Sonnet 4.5")
 	expect(least > 0 and least < kept).to_be(true)
