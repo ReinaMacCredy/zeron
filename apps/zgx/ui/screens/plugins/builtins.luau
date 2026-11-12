@@ -11,7 +11,7 @@ M.LIST = {
 } :: { Builtin }
 
 -- Switched on the Settings page that owns each (Reina, 2026-11-12), not on Plugins.
-M.SETTINGS = { "usage", "home_widgets", "keep_awake", "predictions", "browser_annotate", "device", "voice" }
+M.SETTINGS = { "usage", "home_widgets", "keep_awake", "browser_annotate", "device", "voice" }
 
 -- Commands a built-in owns: off, they have no key, do nothing, and the palette and Shortcuts leave them out.
 M.COMMANDS = {
@@ -133,16 +133,6 @@ ui.effect(function()
 	local on = M.on("voice")
 	if voice:peek() ~= on then
 		voice:set(on)
-	end
-end)
-
--- Off, the host watches no chat for a prediction, so the engine makes none; the host starts on.
-local told_predictions = true
-ui.effect(function()
-	local on = M.on("predictions")
-	if on ~= told_predictions then
-		told_predictions = on
-		pcall(ui.invoke, "chat.predictions", on)
 	end
 end)
 

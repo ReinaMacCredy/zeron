@@ -1182,27 +1182,11 @@ impl SettingsSection {
                 ),
                 (
                     "Show predictions",
-                    &["next message", "autocomplete", "suggestions"],
-                    Some(Target::Setting(SettingId::ShowPredictions)),
-                ),
-                (
-                    "Predict with",
-                    &["predictions", "agent", "custom api"],
-                    Some(Target::Setting(SettingId::ShowPredictions)),
-                ),
-                (
-                    "Agent model",
-                    &["predictions"],
-                    Some(Target::Setting(SettingId::ShowPredictions)),
-                ),
-                (
-                    "Base URL",
                     &[
-                        "predictions",
-                        "custom api",
-                        "model id",
-                        "endpoint",
-                        "api key",
+                        "next message",
+                        "autocomplete",
+                        "suggestions",
+                        "suggest next prompt",
                     ],
                     Some(Target::Setting(SettingId::ShowPredictions)),
                 ),

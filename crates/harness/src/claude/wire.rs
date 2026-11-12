@@ -21,6 +21,7 @@ pub(crate) enum Frame {
     ControlResponse(ControlResponseFrame),
     /// Where the CLI has taken one of our stdin user messages.
     CommandLifecycle(CommandLifecycleFrame),
+    PromptSuggestion(String),
     /// control_cancel_request / anything unknown.
     Other,
 }
@@ -472,6 +473,13 @@ fn typed_frame(value: Value) -> Result<Frame, serde_json::Error> {
         "control_request" => Frame::ControlRequest(serde_json::from_value(value)?),
         "control_response" => Frame::ControlResponse(serde_json::from_value(value)?),
         "command_lifecycle" => Frame::CommandLifecycle(serde_json::from_value(value)?),
+        "prompt_suggestion" => Frame::PromptSuggestion(
+            value["suggestion"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        ),
         _ => Frame::Other,
     };
     Ok(frame)
@@ -783,6 +791,11 @@ mod tests {
             Frame::Other
         ));
         assert!(parse_frame("not json").is_err());
+        assert!(matches!(
+            parse_frame(r#"{"type":"prompt_suggestion","suggestion":"  add tests\n","uuid":"u","session_id":"s"}"#)
+                .expect("parses"),
+            Frame::PromptSuggestion(text) if text == "add tests"
+        ));
     }
 
     #[test]

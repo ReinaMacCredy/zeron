@@ -17,7 +17,7 @@ pub struct MockHarness {
     pub script: Vec<AgentEvent>,
 }
 
-/// Dev knobs: `ZERON_MOCK_COMPACT=claude|codex`, `ZERON_MOCK_CONTEXT` tokens, `ZERON_MOCK_SHELL=1`, `ZERON_MOCK_COMPACT_MS`.
+/// Dev knobs: `ZERON_MOCK_COMPACT=claude|codex`, `ZERON_MOCK_CONTEXT` tokens, `ZERON_MOCK_SHELL=1`, `ZERON_MOCK_COMPACT_MS`, `ZERON_MOCK_SUGGESTION=<text>` after Done (`ZERON_MOCK_SUGGESTION_MS` later: 0 is Claude's shape, more is Codex's).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CompactKnob {
     Claude,
@@ -1227,8 +1227,17 @@ impl MockHarness {
         let sub_delay_ms = std::env::var("ZERON_MOCK_SUBAGENT_DELAY_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok());
+        let suggestion_ms = knob_number("ZERON_MOCK_SUGGESTION_MS", 0);
+        let suggestion = std::env::var("ZERON_MOCK_SUGGESTION")
+            .ok()
+            .filter(|text| !text.is_empty() && controls.turn.prompt_suggestions())
+            .map(|text| AgentEvent::PromptSuggestion { text });
+        let suggestion = futures::stream::iter(suggestion).then(move |event| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(suggestion_ms)).await;
+            Ok(event)
+        });
         if delay.is_zero() && sub_delay_ms.is_none() {
-            return Ok(futures::stream::iter(events).boxed());
+            return Ok(futures::stream::iter(events).chain(suggestion).boxed());
         }
         Ok(futures::stream::iter(events)
             .then(move |event| async move {
@@ -1241,6 +1250,7 @@ impl MockHarness {
                 tokio::time::sleep(pause).await;
                 event
             })
+            .chain(suggestion)
             .boxed())
     }
 }

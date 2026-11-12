@@ -11,8 +11,6 @@ struct Frame {
     prediction: Option<ComposerPrediction>,
 }
 
-/// The engine predicts only while someone watches the chat, so the watch
-/// lives exactly as long as the view is on screen.
 pub(super) fn start(core: &Arc<SessionCore>) -> Option<CancellationToken> {
     let client = core.client().ok()?;
     if let Some(demo) = client.demo() {

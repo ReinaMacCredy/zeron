@@ -3376,24 +3376,9 @@
     },
     "predictions": {
       "title": "预测",
-      "terms": "预测 建议 下一条 消息 tab 接受 自动补全 predictions",
+      "terms": "预测 建议 下一条 消息 提示 tab 接受 自动补全 claude codex predictions",
       "show": "显示预测",
-      "show_description": "在输入框中建议你的下一条消息。按 Tab 接受。",
-      "predict_with": "预测方式",
-      "predict_with_description": "编程智能体，或任何兼容 OpenAI 的 API。",
-      "agent": "智能体",
-      "custom": "自定义 API",
-      "agent_model": "智能体模型",
-      "follows_session": "每个聊天自己的智能体，使用其最便宜的模型。",
-      "one_model": "所有聊天都使用此模型。",
-      "session_agent": "会话智能体",
-      "reset": "重置",
-      "custom_api": "自定义 API",
-      "no_key": "没有密钥。Ollama 等本地服务器不需要密钥。",
-      "base_url": "基础 URL",
-      "model": "模型",
-      "model_placeholder": "模型 ID",
-      "save": "保存"
+      "show_description": "在 Claude 和 Codex 回合结束后建议你的下一条消息。按 Tab 接受。每条建议是一次额外请求，会复用该回合的缓存。"
     },
     "routing": {
       "title": "路由",

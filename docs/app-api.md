@@ -783,6 +783,10 @@ the script.
   split into turns at each top-level `done`, with engine-written records dropped,
   `inputRequested` turned into an `ask` and `done.sessionId` cleared. Journals carry real
   paths and output; do not replay a private one in a shared demo.
+- A suggested next prompt is a `{"type": "promptSuggestion", "text": "..."}` step after the
+  turn's `done`: right after it is Claude's shape, after a `sleep` Codex's. It shows only while
+  Show predictions is on. Without a script, `ZERON_MOCK_SUGGESTION=<text>` adds one after each
+  knob run's `done` (`ZERON_MOCK_SUGGESTION_MS` later).
 - `ZERON_MOCK_DELAY_MS` and `ZERON_MOCK_CHARS` still pace the script; other knobs are ignored.
 
 A scenario file seeds the engine, drives the UI, asserts and snapshots:

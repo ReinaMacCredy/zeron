@@ -993,6 +993,15 @@ impl Inner {
         ))
     }
 
+    // Delegated chats and chats another agent opened have no one typing.
+    fn suggests_prompts(&self, chat_id: &str) -> bool {
+        self.registry.prediction_settings().enabled
+            && self
+                .workspace()
+                .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+                .is_some_and(|chat| chat.is_person_opened())
+    }
+
     /// Claude Code under native policy Off loses its sub-agent tools while Delegation is live, so it still has a way to delegate; its tool server then says so (`ZERON_SIDE_CHATS_ONLY`).
     fn side_chats_only(&self, chat_id: &str, harness: HarnessId) -> bool {
         if !crate::routing::guidance::native_tools_off(&self.registry.routing_settings(), harness) {
@@ -1189,7 +1198,7 @@ impl SessionsEngine {
                 rejected_resumes: Mutex::new(HashMap::new()),
                 fresh_start_notices: Mutex::new(std::collections::HashSet::new()),
                 titles: OnceLock::new(),
-                predictions: crate::predictions::Predictions::new(registry),
+                predictions: Arc::default(),
                 generated_images: OnceLock::new(),
                 provider_instances: OnceLock::new(),
                 scratch_root: OnceLock::new(),
@@ -1363,6 +1372,10 @@ impl SessionsEngine {
 
     fn note_turn_start(&self, chat_id: &str, cwd: &str) {
         self.inner.predictions.clear(chat_id);
+        let suggests = self.inner.suggests_prompts(chat_id);
+        if let Some(run) = lock(&self.inner.runs).get(chat_id) {
+            run.turn.set_prompt_suggestions(suggests);
+        }
         if let Some(listener) = self.inner.turn_listener.get() {
             listener(chat_id, cwd);
         }
@@ -1637,50 +1650,44 @@ impl SessionsEngine {
         lock(&self.inner.last_requests).get(chat_id).cloned()
     }
 
-    /// The chat's live output tokens/s; never persisted.
-    /// Subscribing predicts a reply that completed while nobody watched.
     pub fn watch_prediction(
         &self,
         chat_id: &str,
     ) -> watch::Receiver<Option<crate::predictions::Prediction>> {
-        let rx = self.inner.predictions.watch(chat_id);
-        let harness = self
-            .last_request(chat_id)
-            .and_then(|request| request.harness)
-            .or_else(|| {
-                self.workspace()?
-                    .chat(chat_id)
-                    .ok()
-                    .flatten()?
-                    .config
-                    .map(|config| config.harness)
-            });
-        if let Some(harness) = harness
-            && let Ok(instance) = self.inner.instance_harness(chat_id, harness)
+        if self
+            .workspace()
+            .is_some_and(|workspace| matches!(workspace.chat(chat_id), Ok(None)))
         {
-            self.inner
-                .predictions
-                .refresh(chat_id, harness, instance, || {
-                    self.doc_handle(chat_id)
-                        .ok()
-                        .and_then(|handle| handle.doc().read_entries().ok())
-                        .unwrap_or_default()
-                });
+            self.inner.predictions.forget(chat_id);
         }
-        rx
+        self.inner.predictions.watch(chat_id)
     }
 
-    pub async fn prediction_settings(&self) -> crate::predictions::PredictionSettingsState {
-        self.inner.predictions.settings_state().await
+    pub fn forget_prediction(&self, chat_id: &str) {
+        self.inner.predictions.forget(chat_id);
     }
 
-    pub async fn update_prediction_settings(
-        &self,
-        update: crate::predictions::PredictionSettingsUpdate,
-    ) -> Result<crate::predictions::PredictionSettingsState, String> {
-        self.inner.predictions.update_settings(update).await
+    pub fn prediction_settings(&self) -> crate::registry::PredictionSettings {
+        self.inner.registry.prediction_settings()
     }
 
+    pub fn set_prediction_settings(&self, settings: crate::registry::PredictionSettings) {
+        self.inner
+            .registry
+            .set_prediction_settings(settings.clone());
+        if !settings.enabled {
+            self.inner.predictions.clear_all();
+        }
+        let chats: Vec<String> = lock(&self.inner.runs).keys().cloned().collect();
+        for chat_id in chats {
+            let on = self.inner.suggests_prompts(&chat_id);
+            if let Some(run) = lock(&self.inner.runs).get(&chat_id) {
+                run.turn.set_prompt_suggestions(on);
+            }
+        }
+    }
+
+    /// The chat's live output tokens/s; never persisted.
     pub fn watch_token_rate(&self, chat_id: &str) -> watch::Receiver<Option<u32>> {
         lock(&self.inner.token_rates)
             .entry(chat_id.to_string())
@@ -2218,6 +2225,8 @@ impl SessionsEngine {
         );
         run.runtime_config.instructions = instructions;
         run.runtime_config.instance = launch;
+        run.turn
+            .set_prompt_suggestions(self.inner.suggests_prompts(chat_id));
         let run_computer = run.computer.clone();
         let fork_history_sent = run.fork_history_sent.clone();
         let run_id = run.run_id.clone();
@@ -2978,7 +2987,7 @@ impl SessionsEngine {
             return false;
         };
         if let Some(at) = message_id.and_then(|id| entries.iter().position(|e| e.id == id)) {
-            if !crate::predictions::is_person_prompt(&entries[at]) {
+            if !crate::compact_boundary::is_person_prompt(&entries[at]) {
                 return false;
             }
             entries.truncate(at);
@@ -3075,7 +3084,7 @@ impl SessionsEngine {
         }
         let focus = format!(
             "{focus} The message: {}",
-            crate::predictions::tail(prompt.trim(), 2000)
+            crate::compact_boundary::tail(prompt.trim(), 2000)
         );
         match self
             .compact_noting(chat_id, Some(focus), note, carry.clone())
@@ -5255,7 +5264,7 @@ fn bounded_source_copy(entries: &[SessionMessageEntry], budget: usize) -> String
         };
         if !text.is_empty() {
             let separator = if selected.is_empty() { 0 } else { 2 };
-            let retained = crate::predictions::tail(&text, remaining);
+            let retained = crate::compact_boundary::tail(&text, remaining);
             remaining = remaining.saturating_sub(retained.chars().count() + separator);
             selected.push(retained);
         }
@@ -8729,6 +8738,7 @@ async fn drive_run(
             None => Some(std::time::Duration::from_secs(20)),
         };
     let mut self_continued_turn = false;
+    let mut suggestion_for: Option<(String, u64)> = None;
     // Spawn chips that have SETTLED (tagged Done seen). Content events for a
     // settled chip with no live sink are dropped — a straggler frame after
     // the freeze must not mint a new doc entry or wedge the transcript back
@@ -9468,6 +9478,18 @@ async fn drive_run(
             }
             continue;
         }
+        if let AgentEvent::PromptSuggestion { text } = &event {
+            if let Some((entry_id, ticket)) = suggestion_for.take()
+                && idle_since.is_some()
+                && wait.is_none()
+                && inner.registry.prediction_settings().enabled
+            {
+                inner
+                    .predictions
+                    .offer(&chat_id, ticket, entry_id, text.clone());
+            }
+            continue;
+        }
         // Capacity/occupancy can settle after Done; updating it must not reopen a turn.
         if let AgentEvent::ContextUsage { tokens, window } = &event {
             if let Err(err) = doc_ref.update_context_usage(*tokens, *window) {
@@ -10086,19 +10108,8 @@ async fn drive_run(
                 && let Ok(instance) = inner.instance_harness(&chat_id, harness_id)
             {
                 if let Some(titles) = inner.titles.get() {
-                    titles.maybe_generate(
-                        &chat_id,
-                        harness_id,
-                        instance.clone(),
-                        &user_prompt,
-                        &run_cwd,
-                    );
+                    titles.maybe_generate(&chat_id, harness_id, instance, &user_prompt, &run_cwd);
                 }
-                inner
-                    .predictions
-                    .refresh(&chat_id, harness_id, instance, || {
-                        doc_ref.read_entries().unwrap_or_default()
-                    });
             }
             // A turn stopped in place: the runtime lives on, parked like a
             // completed turn. Steers it had accepted but not yet delivered
@@ -10140,6 +10151,14 @@ async fn drive_run(
                 && !pending_steer
                 && !inner.continues_with_sent_message(&chat_id))
             .then(|| entry_id.clone());
+            // A continuation can settle before the turn it continued, so its suggestion may be that turn's.
+            suggestion_for = completed_turn
+                .clone()
+                .filter(|_| !self_continued_turn)
+                .map(|entry| {
+                    let ticket = inner.predictions.ticket(&chat_id);
+                    (entry, ticket)
+                });
             // PERSISTENT SESSION: a cleanly completed turn on a steerable
             // harness PARKS instead of ending — child + mailbox stay warm for
             // the next routed dispatch; per-turn state resets for it.
@@ -11891,6 +11910,91 @@ mod tests {
         core.sessions.shutdown().await;
     }
 
+    async fn suggestion_rig(
+        chat: &str,
+    ) -> (
+        crate::EngineCore,
+        mpsc::UnboundedSender<AgentEvent>,
+        watch::Receiver<Option<crate::predictions::Prediction>>,
+        tempfile::TempDir,
+    ) {
+        let (feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(FeedHarness {
+            id: HarnessId::Mock,
+            feed: Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        core.sessions
+            .set_prediction_settings(crate::registry::PredictionSettings { enabled: true });
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        let watch = core.sessions.watch_prediction(chat);
+        (core, feed, watch, dir)
+    }
+
+    async fn suggested(
+        watch: &mut watch::Receiver<Option<crate::predictions::Prediction>>,
+    ) -> Option<String> {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), watch.changed()).await;
+        watch.borrow_and_update().as_ref().map(|p| p.text.clone())
+    }
+
+    #[tokio::test]
+    async fn a_steered_turn_still_gets_its_suggestion() {
+        let (core, feed, mut watch, _dir) = suggestion_rig("chat-suggest-steer").await;
+        for event in [
+            started(),
+            text("Reading the parser."),
+            AgentEvent::Steered {
+                assistant_message_id: None,
+                next_assistant_message_id: Some("a2".into()),
+            },
+            text("Tests added."),
+            done(DoneStatus::Completed),
+            AgentEvent::PromptSuggestion {
+                text: "run them".into(),
+            },
+        ] {
+            feed.send(event).unwrap();
+        }
+        assert_eq!(suggested(&mut watch).await.as_deref(), Some("run them"));
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn no_suggestion_for_an_unfinished_turn_or_a_continuation() {
+        let (core, feed, mut watch, _dir) = suggestion_rig("chat-suggest-skip").await;
+        for event in [
+            started(),
+            text("Working."),
+            AgentEvent::PromptSuggestion {
+                text: "mid-turn".into(),
+            },
+            done(DoneStatus::Completed),
+        ] {
+            feed.send(event).unwrap();
+        }
+        assert_eq!(suggested(&mut watch).await, None);
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        for event in [
+            text("The build finished."),
+            done(DoneStatus::Completed),
+            AgentEvent::PromptSuggestion {
+                text: "the continued turn's".into(),
+            },
+        ] {
+            feed.send(event).unwrap();
+        }
+        assert_eq!(suggested(&mut watch).await, None);
+        core.sessions.shutdown().await;
+    }
+
     fn done(status: DoneStatus) -> AgentEvent {
         AgentEvent::Done {
             status,
@@ -12343,6 +12447,54 @@ mod tests {
         assert!(s.waiting.is_none(), "nothing wakes this agent: its end is the end");
         assert!(s.last_completed_turn.is_some());
         rig.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn only_a_chat_a_person_opened_asks_for_suggestions() {
+        for (chat, opened_by, asks) in [
+            ("chat-person", None, true),
+            ("chat-agent", Some("chat-creator"), false),
+        ] {
+            let (feed, rx) = mpsc::unbounded_channel();
+            let turn_slot = Arc::new(Mutex::new(None));
+            let registry = HarnessRegistry::new();
+            registry.register(Arc::new(WakeHarness {
+                feed: Mutex::new(Some(rx)),
+                turn: turn_slot.clone(),
+            }));
+            let dir = tempfile::tempdir().unwrap();
+            let core =
+                crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                    .unwrap();
+            core.sessions
+                .set_prediction_settings(crate::registry::PredictionSettings { enabled: true });
+            let device = Some(core.device_id.as_str());
+            core.workspace
+                .create_chat("chat-creator", None, device, None, None)
+                .unwrap();
+            core.workspace
+                .create_chat_from(chat, None, device, None, None, opened_by)
+                .unwrap();
+            core.sessions
+                .dispatch(chat, HarnessId::Mock, request(), None)
+                .await
+                .unwrap();
+            feed.send(started()).unwrap();
+            let turn = loop {
+                if let Some(turn) = turn_slot.lock().unwrap().clone() {
+                    break turn;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            };
+            assert_eq!(turn.prompt_suggestions(), asks, "{chat}");
+            core.sessions
+                .set_prediction_settings(crate::registry::PredictionSettings { enabled: false });
+            assert!(
+                !turn.prompt_suggestions(),
+                "{chat}: off reaches the live run"
+            );
+            core.sessions.shutdown().await;
+        }
     }
 
     #[tokio::test]

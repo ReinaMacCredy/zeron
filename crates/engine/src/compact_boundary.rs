@@ -6,9 +6,37 @@ use zeron_doc::{
 };
 use zeron_proto::{HarnessId, ToolCall};
 
-use crate::predictions::{entry_text, is_person_prompt, tail};
 use crate::registry::{HarnessRegistry, TitleSettings};
 use crate::titles::{OneShot, OneShotTarget, mid_tier_model, one_shot_target, run_one_shot};
+
+pub(crate) fn is_person_prompt(entry: &SessionMessageEntry) -> bool {
+    entry.role == MessageRole::User
+        && entry.from_chat_id.is_none()
+        && entry.answers_request_id.is_none()
+}
+
+pub(crate) fn entry_text(entry: &SessionMessageEntry) -> String {
+    entry
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .trim()
+        .to_string()
+}
+
+pub(crate) fn head(text: &str, chars: usize) -> String {
+    text.chars().take(chars).collect()
+}
+
+pub(crate) fn tail(text: &str, chars: usize) -> String {
+    let skip = text.chars().count().saturating_sub(chars);
+    text.chars().skip(skip).collect()
+}
 
 const INSTRUCTIONS: &str = "You decide whether a chat should be compacted before its next message is answered, and how. Compacting replaces the conversation so far with a short summary of its conclusions (requests, decisions, files touched, pending work); the specific details (numbers, steps, commands, file contents, exact wording) are lost.
 

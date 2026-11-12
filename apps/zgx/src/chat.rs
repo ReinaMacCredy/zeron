@@ -89,8 +89,6 @@ const CHUNK: usize = 680_000;
 
 thread_local! {
     static CHATS: Rc<Chats> = Rc::new(Chats::default());
-    // Off in Settings → Plugins: no chat is watched for a prediction, so the engine makes none.
-    static PREDICTIONS_ON: Cell<bool> = const { Cell::new(true) };
 }
 
 /// What every window shares: the engine's chats and sessions, this device,
@@ -449,7 +447,7 @@ struct View {
     /// A finished subagent's transcript, read whole from its uploaded blob
     /// (a lane's): nothing to watch while it stands.
     snapshot: Cell<bool>,
-    // Watching makes the engine predict for that chat, so only the window's selected chat does, as gpui's.
+    // Only the window's selected chat shows a prediction, as gpui's.
     predicts: bool,
 }
 
@@ -750,7 +748,6 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         pick(&args).consume_prediction(&args);
         async move { Ok::<Value, String>(Value::Nil) }
     });
-    host.action("chat.predictions", |on| set_predictions(!matches!(on, Value::Bool(false))));
     host.async_action("chat.limit", move |args| async move {
         crate::plugins::preview::refuse("chat.limit")?;
         limit_op(args).await.map_err(String::from)
@@ -1871,15 +1868,6 @@ fn mark(id: &str) -> String {
     crate::agents::glyph(id).unwrap_or_else(|| "pi".into())
 }
 
-/// Settings → Plugins' Predictions turned on or off, for every window's chat.
-fn set_predictions(on: bool) {
-    if PREDICTIONS_ON.with(|p| p.replace(on)) != on {
-        for view in CHATS.with(Rc::clone).views() {
-            view.predictions_changed(on);
-        }
-    }
-}
-
 // -- a window's open chat -----------------------------------------------------
 
 impl View {
@@ -2046,9 +2034,9 @@ impl View {
         chats.follow_rates();
     }
 
-    /// The open chat's prediction, watched while this view predicts and Predictions is on.
+    /// The open chat's prediction, watched while this view predicts.
     fn watch_prediction(self: &Rc<Self>) {
-        if !self.predicts || !PREDICTIONS_ON.with(Cell::get) {
+        if !self.predicts {
             return;
         }
         let Some(rpc) = self.rpc.borrow().clone().filter(|r| !r.is_closed()) else {
@@ -2077,23 +2065,6 @@ impl View {
         });
         if let Some(open) = self.open.borrow_mut().as_mut() {
             open.prediction_watch = Some(watch);
-        }
-    }
-
-    /// Predictions turned on or off: the watch starts, or goes with what it said.
-    fn predictions_changed(self: &Rc<Self>, on: bool) {
-        if on {
-            self.watch_prediction();
-            return;
-        }
-        let dropped = self.open.borrow_mut().as_mut().is_some_and(|o| {
-            let had = o.prediction.is_some();
-            o.prediction_watch = None;
-            o.prediction = None;
-            had
-        });
-        if dropped {
-            self.publish_session();
         }
     }
 

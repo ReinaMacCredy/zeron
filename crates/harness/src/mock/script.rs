@@ -536,6 +536,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_suggestion_after_done_plays_late_without_a_second_done() {
+        let turn = parse_script(
+            "s.json",
+            r#"[{"type": "textDelta", "text": "Built."}, {"type": "done", "status": "completed",
+                "result": null, "error": null, "sessionId": null}, {"sleep": 30},
+                {"type": "promptSuggestion", "text": "run the tests"}]"#,
+        )
+        .unwrap();
+        let events: Vec<AgentEvent> = play_turn(
+            turn_steps(&turn[0]),
+            controls_with(
+                tokio::sync::mpsc::channel(1).1,
+                tokio::sync::oneshot::channel().1,
+                Default::default(),
+                Default::default(),
+            ),
+        )
+        .map(Result::unwrap)
+        .collect()
+        .await;
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    AgentEvent::TextDelta { .. },
+                    AgentEvent::Done { .. },
+                    AgentEvent::PromptSuggestion { text },
+                ] if text == "run the tests"
+            ),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_held_turn_takes_a_steer_and_keeps_holding_until_stopped() {
         let (steer_tx, steering) = tokio::sync::mpsc::channel(4);
         let interrupt = tokio_util::sync::CancellationToken::new();

@@ -3376,24 +3376,9 @@
     },
     "predictions": {
       "title": "Predictions",
-      "terms": "predictions suggest next message tab accept autocomplete",
+      "terms": "predictions suggest next prompt message tab accept autocomplete claude codex",
       "show": "Show predictions",
-      "show_description": "Suggest your next message in the composer. Tab accepts it.",
-      "predict_with": "Predict with",
-      "predict_with_description": "A coding agent, or any OpenAI-compatible API.",
-      "agent": "Agent",
-      "custom": "Custom API",
-      "agent_model": "Agent model",
-      "follows_session": "Each chat's own agent, on its cheapest model.",
-      "one_model": "Every chat uses this model.",
-      "session_agent": "Session agent",
-      "reset": "Reset",
-      "custom_api": "Custom API",
-      "no_key": "No key. Local servers like Ollama need none.",
-      "base_url": "Base URL",
-      "model": "Model",
-      "model_placeholder": "Model id",
-      "save": "Save"
+      "show_description": "Suggest your next message after Claude and Codex turns. Tab accepts it. Each is one extra request that reuses the turn's cache."
     },
     "routing": {
       "title": "Routing",

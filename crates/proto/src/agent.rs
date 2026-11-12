@@ -1730,6 +1730,9 @@ pub enum AgentEvent {
     /// The agent advertised (or changed) its slash-command set — ACP
     /// `available_commands_update`. The engine caches the latest list per
     /// harness for the composer's `/` popup; never persisted to docs.
+    PromptSuggestion {
+        text: String,
+    },
     #[serde(rename_all = "camelCase")]
     AvailableCommands {
         commands: Vec<SlashCommand>,
