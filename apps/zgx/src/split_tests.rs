@@ -55,7 +55,7 @@ fn open(app: &mut TestApp, title: &str) {
 }
 
 /// The whole interface, a node a line (`tree` stops at 200).
-fn full_tree(app: &mut TestApp) -> String {
+pub(crate) fn full_tree(app: &mut TestApp) -> String {
     app.ui.prepare_frame();
     let opts = zgx_script::driver::TreeOptions { depth: None, budget: usize::MAX, all: false };
     let (lines, hidden) = zgx_script::driver::tree_lines(&app.ui, &app.handle, None, &opts);

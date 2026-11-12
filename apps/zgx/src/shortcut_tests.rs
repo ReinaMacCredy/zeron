@@ -313,18 +313,15 @@ fn command_digits_jump_to_the_sidebars_sessions_in_order() {
         ("Answer the review", "b2"),
     ];
     // The rows top to bottom, as the sidebar shows them.
-    let tree = w.app.tree();
     let mut rows: Vec<(f32, &str)> = Vec::new();
-    for line in tree.lines() {
-        for (title, id) in ids {
-            if line.contains(&format!("button \"{title}\"")) {
-                let y: f32 = line.rsplit(' ').nth(1).and_then(|xy| xy.split(',').nth(1)).and_then(|y| y.parse().ok()).unwrap();
-                rows.push((y, id));
-            }
+    for (title, id) in ids {
+        let row = format!("#shell-sidebar >> role:button \"{title}\"");
+        if w.app.find(&row).is_some() {
+            rows.push((w.app.bounds(&row).y, id));
         }
     }
     rows.sort_by(|a, b| a.0.total_cmp(&b.0));
-    assert_eq!(rows.len(), ids.len(), "every session shows:\n{tree}");
+    assert_eq!(rows.len(), ids.len(), "every session shows:\n{}", crate::split_tests::full_tree(&mut w.app));
     for (i, (_, id)) in rows.iter().enumerate() {
         assert_eq!(w.press(&format!("cmd+{}", i + 1)).as_deref(), Some(format!("shell.session_{}", i + 1).as_str()));
         assert_eq!(w.route(), format!("/session/{id}"), "⌘{} opens the row {}", i + 1, i + 1);

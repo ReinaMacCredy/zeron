@@ -37,13 +37,13 @@ fn storage(name: &str) -> PathBuf {
 
 /// How many times the tree says `words`.
 fn count(app: &mut TestApp, words: &str) -> usize {
-    app.tree().matches(words).count()
+    crate::split_tests::full_tree(app).matches(words).count()
 }
 
 /// How many cards have a Review. (A card is a `status`, and the shell has no
 /// other: the tree lists a card's words, then its buttons.)
 fn review_count(app: &mut TestApp) -> usize {
-    let tree = app.tree();
+    let tree = crate::split_tests::full_tree(app);
     let mut in_card = false;
     let mut n = 0;
     for line in tree.lines() {
@@ -59,7 +59,7 @@ fn review_count(app: &mut TestApp) -> usize {
 
 /// A card's words, then the first button so called after them.
 fn button_in_card(app: &mut TestApp, words: &str, name: &str) -> String {
-    let tree = app.tree();
+    let tree = crate::split_tests::full_tree(app);
     let mut seen = false;
     for line in tree.lines() {
         if line.contains(&format!("\"{words}\"")) {
@@ -88,7 +88,7 @@ fn a_notice_shown_as_the_scripts_reload_keeps_its_review_and_it_opens_each() {
     app.frames(20);
     assert_eq!(app.error(), None);
     assert_eq!(review_count(&mut app), 2, "no Review after the reload:\n{}", app.tree());
-    assert_eq!(app.tree().matches("is waiting for you to allow it").count(), 2, "a notice each, once:\n{}", app.tree());
+    assert_eq!(count(&mut app, "is waiting for you to allow it"), 2, "a notice each, once:\n{}", app.tree());
 
     let cua = button_in_card(&mut app, "Cua is waiting for you to allow it", "Review");
     app.click(&cua);

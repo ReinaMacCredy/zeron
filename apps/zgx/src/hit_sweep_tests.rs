@@ -118,7 +118,7 @@ fn sweep(app: &mut TestApp, w: f32, h: f32) -> (usize, Vec<Covered>) {
             controls.push((id, format!("edge {edge}")));
         }
     }
-    let tree = app.tree();
+    let tree = crate::split_tests::full_tree(app);
     let mut checked = 0;
     let mut gone = 0;
     let mut covered = Vec::new();
