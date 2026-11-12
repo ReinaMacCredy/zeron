@@ -1340,12 +1340,7 @@ return ui.component(function(props: Props): Node
 					text_size = "$font.size.xs",
 					on_click = function()
 						local w, a = pair()
-						if long_on() then
-							set_context(w, a, nil)
-						else
-							local stops = long_stops(a)
-							set_context(w, a, stops[#stops].id)
-						end
+						set_context(w, a, if long_on() then nil else chosen(a).id)
 					end,
 					ui.div {
 						w = 24,
@@ -2202,8 +2197,7 @@ return ui.component(function(props: Props): Node
 				elseif not on_slider and has_context() then
 					local w, a = context_pair()
 					if w and a then
-						local stopsl = long_stops(a)
-						set_context(w, a, if chosen(w).id == "1m" then nil else stopsl[#stopsl].id)
+						set_context(w, a, if chosen(w).id == "1m" then nil else chosen(a).id)
 					end
 				end
 				return true
