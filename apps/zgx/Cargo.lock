@@ -8249,6 +8249,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zgx-3d"
+version = "0.1.10"
+source = "git+https://github.com/ReinaMacCredy/zgx?rev=d4ab8d9ebda913d21f2c0d49b97bbca204c5ede1#d4ab8d9ebda913d21f2c0d49b97bbca204c5ede1"
+dependencies = [
+ "bytemuck",
+ "zgx",
+ "zgx-gpu",
+]
+
+[[package]]
 name = "zgx-alacritty-terminal"
 version = "0.26.1"
 source = "git+https://github.com/ReinaMacCredy/zgx?rev=d4ab8d9ebda913d21f2c0d49b97bbca204c5ede1#d4ab8d9ebda913d21f2c0d49b97bbca204c5ede1"
@@ -8445,6 +8455,7 @@ dependencies = [
  "smallvec",
  "windows",
  "zgx",
+ "zgx-3d",
  "zgx-components",
  "zgx-gpu",
  "zgx-mlua",

@@ -50,7 +50,11 @@ zgx-desktop = { git = "https://github.com/ReinaMacCredy/zgx", rev = "d4ab8d9ebda
 # `inspect`: devtools for `zgx inspect` (and its MCP server), asked for
 # with `--inspect`. `i18n`: `ui.t`'s plurals and numbers by each locale's
 # own rules (ICU4X's data, about 90 KB), for ui/locales' translations.
-zgx-script = { git = "https://github.com/ReinaMacCredy/zgx", rev = "d4ab8d9ebda913d21f2c0d49b97bbca204c5ede1", features = ["inspect", "i18n"] }
+# `scene3d`: `ui.scene3d`, `ui.mesh`, `ui.light`, `ui.group` (zgx-3d on the
+# wgpu this app already links), for plugins that show 3D: the CAD plugin
+# hands it its own triangles (`geometry = { positions, indices, … }`). It
+# asks no grant; a scene draws a frame only when something in it changes.
+zgx-script = { git = "https://github.com/ReinaMacCredy/zgx", rev = "d4ab8d9ebda913d21f2c0d49b97bbca204c5ede1", features = ["inspect", "i18n", "scene3d"] }
 # A picture's pixels for the clipboard (src/images.rs): zgx's own decoder,
 # the formats `ui.image` shows (no features of its own: the ones zgx-desktop
 # turns on).
