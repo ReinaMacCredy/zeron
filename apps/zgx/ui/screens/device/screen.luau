@@ -146,10 +146,14 @@ function M.make(props: { key: string, host: string, id: string, visible: (() -> 
 	local visible = props.visible or function(): boolean
 		return true
 	end
+	-- (The stream follows the platform alone: re-asked on every hub push, its own subscription's push asked it again.)
+	local platform = ui.computed(function(): string?
+		local d = device()
+		return if d then d.platform else nil
+	end)
 	ui.effect(function()
 		if visible() then
-			local d = device()
-			api.stream(key, host, id, if d then d.platform else nil, rotation:peek())
+			api.stream(key, host, id, platform:get(), rotation:peek())
 		else
 			api.unstream(key)
 		end

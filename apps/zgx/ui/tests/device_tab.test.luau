@@ -342,6 +342,10 @@ test("a Device tab streams only while the panel shows it, and again once it show
 		return n
 	end
 	expect(streams()).to_be(1)
+	-- (A hub push asks no stream again: the engine pushes each new subscription, which would ask again.)
+	app:command("device_stub.booting")
+	app:frames(5)
+	expect(streams()).to_be(1)
 	app:set_state("test_panel_visible", false)
 	expect(eventually(app, function()
 		return calls(app):find("unstream", 1, true) ~= nil
