@@ -271,10 +271,29 @@ thread_local! {
     // The tap's run loop source is the main thread's; it is replaced there.
     static REGISTRATION: RefCell<Registration> = const { RefCell::new(Registration { appshot: None, quick_capture: None, tap: None }) };
     static ON_CHORD: RefCell<Option<Box<dyn Fn(Chord)>>> = const { RefCell::new(None) };
+    static OWNER: Cell<u64> = const { Cell::new(0) };
 }
 
-pub(super) fn start_chords(on_chord: Box<dyn Fn(Chord)>) {
+/// The chords go to the window that started them last; the token lets only
+/// that window stop them.
+pub(super) fn start_chords(on_chord: Box<dyn Fn(Chord)>) -> u64 {
     ON_CHORD.with(|slot| *slot.borrow_mut() = Some(on_chord));
+    OWNER.with(|owner| {
+        owner.set(owner.get() + 1);
+        owner.get()
+    })
+}
+
+/// A window going stops the chords only if they are still its: setup's
+/// window closing after the main one opened would otherwise drop the main
+/// window's tap.
+pub(super) fn stop_chords(token: u64) -> bool {
+    if OWNER.with(Cell::get) != token {
+        return false;
+    }
+    ON_CHORD.with(|slot| *slot.borrow_mut() = None);
+    refresh_chords(None, None);
+    true
 }
 
 pub(super) fn refresh_chords(appshot: Option<ChordModifier>, quick_capture: Option<ChordModifier>) -> bool {
@@ -1255,8 +1274,8 @@ unsafe fn nsstring(value: *mut Object) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Chord, ChordModifier, ChordWatch, capture_dimensions, is_secure_ax_element, same_window_bounds,
-        visible_capture_window,
+        Chord, ChordModifier, ChordWatch, ON_CHORD, capture_dimensions, is_secure_ax_element, same_window_bounds,
+        start_chords, stop_chords, visible_capture_window,
     };
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 
@@ -1359,5 +1378,15 @@ mod tests {
         assert!(!shift.flags_changed(0x37, left | 0x10), "the Command keys don't make a Shift chord");
         let s = core_graphics::event::CGEventFlags::CGEventFlagShift.bits();
         assert!(shift.flags_changed(0x3C, s | 0x02 | 0x04));
+    }
+
+    #[test]
+    fn a_window_closing_after_another_started_the_chords_leaves_them() {
+        let setup = start_chords(Box::new(|_| {}));
+        let main = start_chords(Box::new(|_| {}));
+        assert!(!stop_chords(setup), "setup's window going");
+        assert!(ON_CHORD.with(|slot| slot.borrow().is_some()));
+        assert!(stop_chords(main));
+        assert!(ON_CHORD.with(|slot| slot.borrow().is_none()));
     }
 }

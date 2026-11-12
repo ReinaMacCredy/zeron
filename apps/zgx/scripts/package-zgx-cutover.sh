@@ -97,8 +97,15 @@ cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$APP/Contents/Resources/licen
 cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses/parakeet-v3.txt"
 "$ROOT/scripts/macos-app-icon.sh" "$APP/Contents/Resources"
 
-if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
-  SIGN=(--options runtime --timestamp --sign "$CODESIGN_IDENTITY")
+# As scripts/package-macos.sh: ad-hoc pins TCC grants to the cdhash, so the gpui app's grants (and Appshots' tap) would not carry over.
+IDENTITY="${CODESIGN_IDENTITY:-}"
+if [[ -z "$IDENTITY" ]]; then
+  IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  IDENTITY="$(sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' <<<"$IDENTITIES" | head -1)"
+  [[ -n "$IDENTITY" ]] || IDENTITY="$(sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' <<<"$IDENTITIES" | head -1)"
+fi
+if [[ -n "$IDENTITY" ]]; then
+  SIGN=(--options runtime --timestamp --sign "$IDENTITY")
 else
   SIGN=(--sign -)
   echo "warning: ad-hoc signed: macOS privacy grants don't survive a rebuild" >&2
