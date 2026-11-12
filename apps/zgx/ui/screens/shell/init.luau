@@ -45,6 +45,7 @@ local host = require("@app/screens/settings/host")
 -- (The look chosen, applied as it loads.)
 local appearance = require("@app/screens/shell/appearance")
 local motion = require("@ds/motion")
+local arrival = require("@app/screens/shell/arrival")
 local rail = require("@app/screens/shell/rail")
 local art = require("@app/screens/shell/art")
 
@@ -156,6 +157,9 @@ local function sidebar_limit(): number
 		route.settings("about")
 	end
 	-- Check for Updates…: Zeron's update prompt (crates/ui shell.rs `render_update_prompt`), its dialog loaded the first time it's asked for, from a timer.
+	runs["shell.whats_new"] = function()
+		require("@app/screens/shell/whats_new").open()
+	end
 	runs["shell.check_updates"] = function()
 		ui.after(0, function()
 			local prompt: any = boundary.load("@app/screens/shell/update_prompt")
@@ -608,7 +612,7 @@ local function sidebar_limit(): number
 		-- the rail and the title bar. Kept while settings shows, out of
 		-- sight and out of the way, so they come back as they were (scroll,
 		-- draft, files and all).
-		ui.column {
+		ui.column(arrival.frame_props({
 			id = "shell-chats",
 			w_full = true,
 			h_full = true,
@@ -687,7 +691,7 @@ local function sidebar_limit(): number
 					}
 				end, { pass = true }),
 			},
-		},
+		})),
 		-- A session's card, its row rested on (Zeron's hover card): over the
 		-- window beside the row, one surface of the menus' glass blurring
 		-- what's under it. (Not zgx's tooltip, whose popup frames it again
@@ -851,6 +855,9 @@ local function sidebar_limit(): number
 				return switcher.Overlay()
 			end),
 			require("@ds/pasted_text").Host(),
+			boundary.screen(boundary.named("shell.boundary.screen.whats_new"), "@app/screens/shell/whats_new", function(whats_new): Node
+				return whats_new.Dialog()
+			end),
 			boundary.screen(boundary.named("shell.boundary.screen.quick_capture"), "@app/screens/tasks/capture", function(capture): Node
 				return capture.Overlay()
 			end),

@@ -1604,6 +1604,7 @@ local function Composer(): Node
 				-- the pane, left a box over the transcript taking its wheel.)
 				-- (And not over a plugin's page: the chat's page is kept unseen
 				-- under it, and so is this.)
+				require("@app/screens/shell/arrival").Pill(),
 				ui.show(function(): boolean
 					return shown_new() and not route.needs_project:get() and route.current:get().name ~= "plugin"
 				end, ui.row {

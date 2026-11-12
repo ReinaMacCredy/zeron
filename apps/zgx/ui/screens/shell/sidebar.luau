@@ -920,6 +920,7 @@ local function foot_notes(): Node
 	return ui.column {
 		w_full = true,
 		shrink = 0,
+		require("@app/screens/shell/whats_new").Card(),
 		connection_line(),
 		boundary.screen(boundary.named("shell.boundary.screen.update_notice"), "@app/screens/engine/update", function(update): Node
 			return update.Notice()

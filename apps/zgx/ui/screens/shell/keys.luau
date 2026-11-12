@@ -72,6 +72,7 @@ for _, k in
 		-- (No key of their own: Settings → Shortcuts can give them one.)
 		{ id = "shell.reload", title = "Reload Zeron", key = "", group = "App", menu = "View" },
 		{ id = "shell.reload_interface", title = "Reload interface", key = "", group = "App", menu = "View" },
+		{ id = "shell.whats_new", title = "What's New…", key = "", group = "App", menu = "Help" },
 	} :: { Key }
 do
 	table.insert(M.LIST, k)

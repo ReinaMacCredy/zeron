@@ -3826,7 +3826,8 @@
         "inbox": "收件箱",
         "quick_capture": "快速记录",
         "skills": "技能",
-        "update_prompt": "更新对话框"
+        "update_prompt": "更新对话框",
+        "whats_new": "新功能"
       }
     },
     "title_bar": {
@@ -3868,7 +3869,8 @@
         "shell_random_wallpaper": "随机壁纸",
         "chat_side_chat": "侧边对话",
         "shell_about": "关于 Zeron",
-        "shell_check_updates": "检查更新…"
+        "shell_check_updates": "检查更新…",
+        "shell_whats_new": "新功能…"
       },
       "group": {
         "sessions": "会话",
@@ -4092,6 +4094,22 @@
       "bad": "无法打开该链接",
       "other_workspace": "此对话链接属于另一个工作区",
       "not_found": "找不到链接的对话"
+    },
+    "arrival": {
+      "moving": "正在迁移你的设置… {n}/{total}",
+      "moved": "已迁移 {settings, plural, other {# 项设置}}和 {drafts, plural, other {# 份草稿}}",
+      "moved_settings": "已迁移 {settings, plural, other {# 项设置}}",
+      "moved_drafts": "已迁移 {drafts, plural, other {# 份草稿}}",
+      "whats_new": "新功能"
+    },
+    "whats_new": {
+      "open_card": "打开 {version} 的新功能",
+      "dismiss": "关闭",
+      "title": "{version} 的新功能",
+      "view": "新功能",
+      "highlights": "亮点",
+      "changelog": "更新日志",
+      "improvements": "改进与修复"
     }
   },
   "onboarding": {

@@ -3826,7 +3826,8 @@
         "inbox": "Inbox",
         "quick_capture": "Quick capture",
         "skills": "Skills",
-        "update_prompt": "The update dialog"
+        "update_prompt": "The update dialog",
+        "whats_new": "What's New"
       }
     },
     "title_bar": {
@@ -3868,7 +3869,8 @@
         "shell_random_wallpaper": "Random wallpaper",
         "chat_side_chat": "Side chat",
         "shell_about": "About Zeron",
-        "shell_check_updates": "Check for Updates…"
+        "shell_check_updates": "Check for Updates…",
+        "shell_whats_new": "What's New…"
       },
       "group": {
         "sessions": "Sessions",
@@ -4092,6 +4094,22 @@
       "bad": "That link can't be opened",
       "other_workspace": "This conversation link belongs to another workspace",
       "not_found": "The linked conversation was not found"
+    },
+    "arrival": {
+      "moving": "Moving your settings… {n}/{total}",
+      "moved": "Moved {settings, plural, one {# setting} other {# settings}} and {drafts, plural, one {# draft} other {# drafts}}",
+      "moved_settings": "Moved {settings, plural, one {# setting} other {# settings}}",
+      "moved_drafts": "Moved {drafts, plural, one {# draft} other {# drafts}}",
+      "whats_new": "What's new"
+    },
+    "whats_new": {
+      "open_card": "Open What's new in {version}",
+      "dismiss": "Dismiss",
+      "title": "What's new in {version}",
+      "view": "What's new",
+      "highlights": "Highlights",
+      "changelog": "Changelog",
+      "improvements": "Improvements and fixes"
     }
   },
   "onboarding": {

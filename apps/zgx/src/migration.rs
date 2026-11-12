@@ -77,7 +77,7 @@ pub const TABLE: &[(&str, Home)] = &[
     ("sidebarShowProjectFilter", Home::Persist(&["screens/shell/sidebar.luau::shell_sidebar_show_project_filter"])),
     ("sidebarShowArchived", Home::Persist(&["screens/shell/sidebar.luau::shell_sidebar_show_archived"])),
     ("sidebarCollapsedLeads", Home::None("no sub-agent lead rows in the sidebar here")),
-    ("whatsNewSeenVersion", Home::None("no What's New card here")),
+    ("whatsNewSeenVersion", Home::InPlace("What's New reads and writes it there (src/whats_new.rs)")),
     ("lastSpaceId", Home::Persist(&["screens/shell/route.luau::shell_project"])),
     ("lastProjectActionBySpaceId", Home::None("no project Actions here")),
     ("openTabs", Home::Persist(&["screens/shell/split.luau::shell_session_tabs"])),
@@ -1034,8 +1034,8 @@ fn asked(identity: crate::identity::Identity, switch: Option<&std::ffi::OsStr>) 
 /// At the main window's opening: the run, if this build migrates (or a debug
 /// build is asked to), said in the log. The drafts to seed: those carried
 /// now, or at a later launch those still pending.
-pub fn at_launch(app_id: &str) -> Json {
-    let Some(app) = zgx_script::app_data_dir(app_id) else { return Json::Null };
+pub fn at_launch(app_id: &str) -> (Json, Option<Json>) {
+    let Some(app) = zgx_script::app_data_dir(app_id) else { return (Json::Null, None) };
     if asked(crate::identity::CURRENT, crate::dev::switch("ZERON_ZGX_MIGRATE").as_deref())
         && let Some(data) = crate::engine::data_dir()
     {
@@ -1043,11 +1043,16 @@ pub fn at_launch(app_id: &str) -> Json {
         if let Some(line) = said(&data, &app, &result) {
             eprintln!("zeron-zgx: migration: {line}");
         }
-        if let Ok((_, drafts)) = result {
-            return drafts;
+        if let Ok((outcome, drafts)) = result {
+            return (drafts, carried(&outcome));
         }
     }
-    Json::Array(pending(&app))
+    (Json::Array(pending(&app)), None)
+}
+
+fn carried(outcome: &Outcome) -> Option<Json> {
+    let settings = outcome.written.len() + usize::from(outcome.theme);
+    (settings + outcome.drafts > 0).then(|| json!({ "settings": settings, "drafts": outcome.drafts }))
 }
 
 /// The log's line for a run (none once it has run).
@@ -1362,6 +1367,15 @@ mod tests {
         assert_eq!(s("screens/settings/prefs.luau::settings_conversation_width"), json!(912.0));
         assert_eq!(s("screens/shell/appearance.luau::shell_frame_shade"), json!(0.7));
         assert!(state(&app, "screens/shell/appearance.luau::shell_frame_style").is_none());
+    }
+
+    #[test]
+    fn the_launch_s_pill_is_told_only_what_was_carried() {
+        assert_eq!(carried(&Outcome::default()), None);
+        let theme = Outcome { theme: true, ..Outcome::default() };
+        assert_eq!(carried(&theme), Some(json!({ "settings": 1, "drafts": 0 })));
+        let both = Outcome { written: vec!["a".into(), "b".into()], drafts: 3, ..Outcome::default() };
+        assert_eq!(carried(&both), Some(json!({ "settings": 2, "drafts": 3 })));
     }
 
     #[test]

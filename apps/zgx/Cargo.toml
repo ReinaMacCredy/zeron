@@ -130,6 +130,7 @@ zeron-proto = { path = "../../crates/proto" }
 chrono = "0.4"
 serde = "1"
 zeron-update = { path = "../../crates/update" }
+zeron-docs = { path = "../../crates/docs" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 # Templates' theme files, JSON with comments, read for their previews
 # (src/plugins/looks.rs), as the theme crate reads them.

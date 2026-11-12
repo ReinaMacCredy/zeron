@@ -76,6 +76,7 @@ mod voice;
 mod themes;
 mod transparency;
 mod visuals;
+mod whats_new;
 #[cfg(test)]
 mod audit_shots;
 #[cfg(test)]
@@ -523,10 +524,14 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
         carried_settings::carry(from.as_deref(), state.as_deref());
     }
     // (The Zeron app, or `ZERON_ZGX_MIGRATE=1` on a debug build: the other interface's settings and drafts, once.)
-    let drafts = migration::at_launch(APP_ID);
+    let (drafts, carried) = migration::at_launch(APP_ID);
     let host = script_host_at(cx, plugins::prepare_live(), "app.luau");
     host.shared("window", "main");
+    if let Some(carried) = carried {
+        host.shared("migration.carried", plugins::json_value(&carried));
+    }
     migration::seed_drafts(cx, &host, APP_ID, drafts);
+    whats_new::install(&host, APP_ID);
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
     // The host's own toasts over it (a template in preview, a switch you
