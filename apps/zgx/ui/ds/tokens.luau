@@ -236,7 +236,7 @@ function M.setup()
 				-- is, a file's name in the text's own ink and a command's or a
 				-- skill's in the accent, both a weight up. And the track that
 				-- unrolls from the microphone while dictating.
-				token = { trigger = "{text.tertiary}", file = "{text.primary}", action = "{accent}", weight = 500 },
+				token = { trigger = "{text.tertiary}", file = "{text.primary}", action = "{accent}", skill = "{accent}", weight = 500 },
 				voice = { h = 28, ink = "{accent}", bg = "{zeron.secondary.bg}" },
 			},
 			-- A line glyph's stroke, in points at 16 (the sidebar icon's). The
