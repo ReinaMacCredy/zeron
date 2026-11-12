@@ -171,22 +171,33 @@ fn rail_peak(app: &mut TestApp, ms: u64) -> f32 {
     peak
 }
 
+/// The width eased from `from` to `to` in `steps` (one: at once), the rail watched through it and 600 ms after.
+fn ease(app: &mut TestApp, from: f32, to: f32, steps: usize, place: &str) {
+    for i in 1..=steps {
+        let w = from + (to - from) * i as f32 / steps as f32;
+        app.ui.scene.borrow_mut().resize(w, 700.);
+        let peak = rail_peak(app, 24);
+        assert!(peak < 0.01, "{place}: the rows rewrapping to {w} wide lit the rail ({peak})");
+    }
+    let peak = rail_peak(app, 600);
+    assert!(peak < 0.01, "{place}: after the width came to {to}, the rail lit ({peak})");
+}
+
 #[test]
 fn a_panel_easing_open_or_shut_shows_no_scrollbar_over_the_transcript() {
     let mut app = mount(1000., 700.);
     assert!(app.host.run_command("go_s1"));
     rail_peak(&mut app, 2000);
     assert!(app.opacity("transcript-rail") < 0.01, "at rest, no rail");
-    for (from, to) in [(1000., 640.), (640., 1000.)] {
-        for i in 1..=12 {
-            let w = from + (to - from) * i as f32 / 12.;
-            app.ui.scene.borrow_mut().resize(w, 700.);
-            let peak = rail_peak(&mut app, 24);
-            assert!(peak < 0.01, "the rows rewrapping to {w} wide lit the rail ({peak})");
-        }
-        let peak = rail_peak(&mut app, 600);
-        assert!(peak < 0.01, "after the width came to {to}, the rail lit ({peak})");
-    }
+    ease(&mut app, 1000., 640., 12, "at the end");
+    ease(&mut app, 640., 1000., 12, "at the end");
+    app.scroll("#transcript", -2400.);
+    rail_peak(&mut app, 2000);
+    assert!(app.opacity("transcript-rail") < 0.01, "scrolled up and rested, no rail");
+    ease(&mut app, 1000., 640., 12, "scrolled up");
+    ease(&mut app, 640., 1000., 12, "scrolled up");
+    ease(&mut app, 1000., 640., 1, "scrolled up, at once");
+    ease(&mut app, 640., 1000., 1, "scrolled up, at once");
     app.scroll("#transcript", -400.);
     assert!(rail_peak(&mut app, 300) > 0.5, "a scroll still shows the rail");
 }
