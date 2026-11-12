@@ -159,3 +159,34 @@ fn a_cmd_click_on_a_file_link_opens_nothing_and_on_a_web_link_goes_to_the_browse
     click(&mut app, "role:link \"parse.rs\"", Modifiers::default());
     assert!(state(&app, "calls").contains("open_file:s2:src/parse.rs@12"), "a plain click opens it: {}", state(&app, "calls"));
 }
+
+/// The rail's opacity over `ms` of real time, a frame every 12 ms: the most it showed.
+fn rail_peak(app: &mut TestApp, ms: u64) -> f32 {
+    let mut peak: f32 = 0.;
+    for _ in 0..ms / 12 {
+        app.frames(1);
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        peak = peak.max(app.opacity("transcript-rail"));
+    }
+    peak
+}
+
+#[test]
+fn a_panel_easing_open_or_shut_shows_no_scrollbar_over_the_transcript() {
+    let mut app = mount(1000., 700.);
+    assert!(app.host.run_command("go_s1"));
+    rail_peak(&mut app, 2000);
+    assert!(app.opacity("transcript-rail") < 0.01, "at rest, no rail");
+    for (from, to) in [(1000., 640.), (640., 1000.)] {
+        for i in 1..=12 {
+            let w = from + (to - from) * i as f32 / 12.;
+            app.ui.scene.borrow_mut().resize(w, 700.);
+            let peak = rail_peak(&mut app, 24);
+            assert!(peak < 0.01, "the rows rewrapping to {w} wide lit the rail ({peak})");
+        }
+        let peak = rail_peak(&mut app, 600);
+        assert!(peak < 0.01, "after the width came to {to}, the rail lit ({peak})");
+    }
+    app.scroll("#transcript", -400.);
+    assert!(rail_peak(&mut app, 300) > 0.5, "a scroll still shows the rail");
+}

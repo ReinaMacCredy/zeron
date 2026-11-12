@@ -2113,6 +2113,9 @@ local function Transcript(props: Props): Node
 			id = "transcript-rail",
 			offset = offset,
 			extent = extent,
+			placing = function(): boolean
+				return ui.now() < resizing_until
+			end,
 			view = function(): number
 				return list.height or 0
 			end,
