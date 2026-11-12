@@ -84,6 +84,12 @@ local made = ui.component(function(props: Props): Node
 		local w = if kept_w then kept_w:get() else fixed_w
 		return if w <= 0 then theme_w elseif kept_w then math.clamp(w, TREE_MIN, TREE_MAX) else w
 	end
+	-- Beside a file: a width dragged gives way to the file's least as the pane narrows
+	-- (the theme's stands as it always has).
+	local function beside_w(): number
+		local w = tree_w()
+		return if kept_w and kept_w:get() > 0 then math.min(w, math.max(TREE_MIN, room:get() - FILE_LEAST)) else w
+	end
 	-- Its edge being dragged: the tree follows the pointer at once.
 	local resizing = ui.use_state(false)
 	local edge_over = ui.use_state(false)
@@ -101,7 +107,7 @@ local made = ui.component(function(props: Props): Node
 	-- The tree's room beside the file, eased as it comes and goes by the tree's own
 	-- slide.
 	local function dock_target(): number
-		return if whole() then room:get() elseif shown:get() then tree_w() else 0
+		return if whole() then room:get() elseif shown:get() then beside_w() else 0
 	end
 	local dock_w = ui.use_state(dock_target())
 	local dock_easing: any = nil
@@ -151,7 +157,7 @@ local made = ui.component(function(props: Props): Node
 	-- The tree's width: its own, or all it's been given (it never slides narrower,
 	-- only away).
 	local function tree_now(): number
-		return math.max(tree_w(), dock_w:get())
+		return math.max(beside_w(), dock_w:get())
 	end
 	-- The tree's props, beside the file.
 	local function tree_props(): FileTree.Props
@@ -243,7 +249,7 @@ local made = ui.component(function(props: Props): Node
 				edge_over:set(inside)
 			end,
 			on_press = function(e)
-				from_x, from_w, at_limit = e.x, tree_w(), 0
+				from_x, from_w, at_limit = e.x, beside_w(), 0
 				resizing:set(true)
 			end,
 			on_pointer_move = function(e)
