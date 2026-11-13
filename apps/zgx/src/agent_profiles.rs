@@ -267,11 +267,11 @@ fn model_label(harness: HarnessId, model: &str) -> String {
         .unwrap_or_else(|| model.to_owned())
 }
 
-/// A brand's mark (the shipping app's `harness_brand_icon`: the mock drawn
-/// as Claude), and an ACP registry agent's own icon.
+/// A brand's mark (the shipping app's `harness_brand_icon`), and an ACP
+/// registry agent's own icon.
 fn mark_fields(harness: HarnessId) -> [(&'static str, Value); 2] {
     let id = harness.as_str();
-    let mark = if id == "mock" { "claude".to_owned() } else { crate::agents::glyph(id).unwrap_or_else(|| "pi".into()) };
+    let mark = crate::agents::glyph(id).unwrap_or_else(|| "pi".into());
     [("mark", Value::from(mark.as_str())), ("icon", crate::chat::agent_icon(id).map_or(Value::Nil, |i| Value::from(i.as_str())))]
 }
 

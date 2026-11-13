@@ -3232,6 +3232,10 @@ mod tests {
         let spawned = super::fan_tiles(Some("claude-code"), Some("claude-sonnet-4-5"), 3, &["gpt-5.5".into()], &[]);
         let worn: Vec<(&str, u32)> = spawned.iter().map(|t| (t.key.as_str(), t.count)).collect();
         assert_eq!(worn, [("openai", 1), ("claude", 2)], "a spawn that named its model wears that model's maker");
+        for (harness, model, mark) in [("pi", Some("kimi-k3"), "pi"), ("opencode", None, "opencode"), ("fx", None, "fx"), ("mock", Some("mock-1"), "claude")] {
+            let own = super::fan_tiles(Some(harness), model, 1, &[], &[]);
+            assert_eq!(own[0].mark.as_deref(), Some(mark), "{harness}'s subagents wear its mark");
+        }
     }
 
     #[test]

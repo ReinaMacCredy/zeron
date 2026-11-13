@@ -806,6 +806,10 @@ local function sidebar_limit(): number
 								local name = (HARNESS_NAMES :: any)[c.harness] or c.harness
 								return if c.model then `{name} · {c.model}` else name
 							end,
+							mark = (function(): string?
+								local c: any = chat()
+								return if c then c.agent else nil
+							end)(),
 							opened_by = function(): string?
 								local c: any = chat()
 								return if c then c.created_by else nil
