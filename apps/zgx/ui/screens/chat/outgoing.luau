@@ -81,6 +81,14 @@ local function shown(list: { any }, quotes: { Quote.Staged }, picks: { { [string
 	return out
 end
 
+-- crates/proto/src/agent.rs `RESUME_PROMPT`.
+M.RESUME_PROMPT = "Resume without asking to continue."
+
+-- The pending row src/chat.rs `resumed_row` publishes for it, so the prompt never shows as a bubble.
+function M.resumed(id: string): { [string]: any }
+	return { id = id, role = "system", line = "resumed", text = "Resumed", hint = M.RESUME_PROMPT, waiting = "sending" }
+end
+
 -- `typed`, `carried`: what `shared.take` handed out; `text`: the words when
 -- nothing was typed (a prompt sent without being typed).
 function M.parts(typed: string, text: string, carried: { any }, open: { { title: string, left: { HtmlPicks.Group } } }?): { [string]: any }

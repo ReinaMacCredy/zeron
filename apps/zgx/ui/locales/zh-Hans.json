@@ -4594,6 +4594,12 @@
       "terminal_only": "只能在 Claude Code 的终端中运行",
       "limit": {
         "reached": "{name} 已达到用量上限。",
+        "reached_window": "{name} 已达到{window}上限。",
+        "window": {
+          "5h": "5 小时",
+          "weekly": "每周",
+          "daily": "每日"
+        },
         "resets": "{at}重置。",
         "unknown": "重置时间未知。",
         "waiting": "正在等待 {name} 在{at}重置。",

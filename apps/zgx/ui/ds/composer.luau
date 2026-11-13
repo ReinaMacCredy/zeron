@@ -183,6 +183,8 @@ export type Props = {
 	on_send: ((text: string) -> ())?,
 	draft_moves: { shown: () -> boolean, move: () -> (), send_new: () -> (), keys: () -> { move: string, send_new: string } }?,
 	on_stop: (() -> ())?,
+	resume: (() -> boolean)?,
+	on_resume: (() -> ())?,
 	-- A bare Escape no one else took (no mention list, question or
 	-- dictation): true if it did something with it.
 	on_escape: (() -> boolean)?,
@@ -1345,6 +1347,9 @@ return ui.component(function(props: Props): Node
 	local function stopping(): boolean
 		return running ~= nil and running:get() and not has_text() and not has_cargo() and not asking() and not dictating()
 	end
+	local function resuming(): boolean
+		return props.resume ~= nil and props.resume() and not (running and running:get()) and not has_text() and not has_cargo() and not asking() and not dictating()
+	end
 
 	-- Mentions over the pill, its full width (Zeron's).
 	local m = mentions.use {
@@ -1878,6 +1883,15 @@ return ui.component(function(props: Props): Node
 		label = locale.t("ds.composer.stop"),
 		on_click = props.on_stop,
 		ui.div { w = 10, h = 10, rounded = ui.raw(3, "the stop glyph's corner"), bg = "$zeron.primary.text" },
+	}
+	local resume_button = Button {
+		id = "composer-resume-turn",
+		shape = "pill",
+		size = "sm",
+		icon = true,
+		label = locale.t("ds.composer.resume"),
+		on_click = props.on_resume,
+		Icon { name = "action-play", size = 12 },
 	}
 	local moves = props.draft_moves
 	local send_menu: Node? = nil
@@ -2759,8 +2773,9 @@ return ui.component(function(props: Props): Node
 					return dictating() or (props.on_dictate ~= nil and voice_on:get() ~= false)
 				end, mic),
 				ui.show(stopping, stop_button),
+				ui.show(resuming, resume_button),
 				ui.show(function()
-					return not stopping()
+					return not stopping() and not resuming()
 				end, send_menu or send_button),
 			}),
 		},

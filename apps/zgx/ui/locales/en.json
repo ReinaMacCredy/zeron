@@ -4594,6 +4594,12 @@
       "terminal_only": "Runs only in Claude Code's terminal",
       "limit": {
         "reached": "{name} usage limit reached.",
+        "reached_window": "{name} {window} limit reached.",
+        "window": {
+          "5h": "5-hour",
+          "weekly": "weekly",
+          "daily": "daily"
+        },
         "resets": "Resets {at}.",
         "unknown": "Reset time unknown.",
         "waiting": "Waiting for the {name} reset {at}.",
