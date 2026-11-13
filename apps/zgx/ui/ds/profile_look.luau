@@ -95,7 +95,7 @@ M.access_word = access_word
 -- it isn't listed, Full access alone when its catalog names none.
 function M.modes(agent: { access_modes: { string }? }?): { string }
 	if agent == nil or agent.access_modes == nil then
-		return { "supervised", "edits", "full" }
+		return { "supervised", "edits", "auto", "full" }
 	end
 	return if #agent.access_modes > 0 then agent.access_modes else { "full" }
 end

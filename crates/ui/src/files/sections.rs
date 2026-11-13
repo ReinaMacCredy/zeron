@@ -1380,6 +1380,7 @@ mod tests {
             exit_code: None,
             output_lines: None,
             output_truncated: false,
+            preview_paths: Vec::new(),
         }
     }
 

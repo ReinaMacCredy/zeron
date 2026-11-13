@@ -4821,6 +4821,8 @@ fn part_snapshot_events(
                     is_error: status == "error",
                     output,
                     diff,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 });
             }
@@ -6519,7 +6521,7 @@ http.createServer((req, res) => {
             match access {
                 // Full access passes the run's config through untouched.
                 AccessMode::FullAccess => assert_eq!(config, json!({"model": "keep"})),
-                AccessMode::AutoAcceptEdits => {
+                AccessMode::AutoAcceptEdits | AccessMode::AutoReview => {
                     assert_eq!((edit, bash), (&json!("allow"), &json!("ask")))
                 }
                 AccessMode::Supervised => assert_eq!((edit, bash), (&json!("ask"), &json!("ask"))),

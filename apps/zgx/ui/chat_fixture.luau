@@ -1807,6 +1807,17 @@ ui.command {
 		seed()
 	end,
 }
+-- The agent's catalog row naming the access modes it takes: Auto among them, or not.
+local test_access_modes = ui.state("test_access_modes", {} :: { string })
+ui.command {
+	id = "agent_access_modes",
+	title = "The agent's access modes",
+	run = function()
+		local cat = table.clone(store.catalog:peek())
+		cat.harnesses = { { id = "claude-code", label = "Claude", mark = "claude", access_modes = test_access_modes:peek() } }
+		store.catalog:set(cat)
+	end,
+}
 -- Sessions holding only a handoff: from another chat (s5), and from another
 -- agent, its seam (s6); and the open session's transcript not come yet.
 ui.command {
@@ -1829,6 +1840,17 @@ ui.command {
 			store.messages:set({})
 			publish(s.id, { state = "loading" })
 		end
+	end,
+}
+-- A Codex session on its agent's default model (none set, so none the
+-- catalog names): its agent only the one its config records.
+ui.command {
+	id = "codex_model_less",
+	title = "A Codex session with no model",
+	run = function()
+		META.s3 = { title = "Codex chat", project = "atlas", agent = "codex", harness = "codex", access = "full", plan = false }
+		TRANSCRIPTS.s3 = { { id = "z1", role = "user", text = "Hi" } }
+		seed()
 	end,
 }
 -- A session of long messages (each folds to five lines).
@@ -2732,7 +2754,7 @@ local function kinds_messages(): { any }
 					summary = "Read 1 file · called 4 tools",
 					tools = {
 						tool("k1", "read", "Read", "parse.rs", { path = "src/parse.rs", output = "fn parse_all() {}" }),
-						tool("k2", "mcp", "Used", "zeron.device_screenshot", { images = { "assets/composer/shell.png", "assets/composer/transcript.png" } }),
+						tool("k2", "mcp", "Used", "zeron.device_screenshot", { pictures = { { path = "assets/composer/shell.png", name = "shell.png" }, { path = "assets/composer/transcript.png", name = "transcript.png" } } }),
 						tool("k3", "wait", "Waited for agents"),
 						tool("k4", "skill", "Used", "zgx-port", { path = "/work/atlas/skills/zgx-port/SKILL.md" }),
 						tool("k5", "todo", "Updated the plan", "1/3 done", { call = "[x] a\n[ ] b\n[ ] c" }),
@@ -3913,9 +3935,11 @@ return ui.overlay {
 	on_press = function()
 		require("@app/screens/chat/pills").press_outside()
 	end,
-	-- (As the shell's root: the selection pill's Escape and Tab first.)
+	-- (As the shell's root: the selection pill's Escape and Tab first, then a
+	-- prediction's Tab or Right arrow.)
 	on_key = function(e: any): boolean
-		return require("@app/screens/chat/typing").pill_key(e)
+		local typing = require("@app/screens/chat/typing")
+		return typing.pill_key(e) or typing.prediction_key(e)
 	end,
 	w_full = true,
 	h_full = true,

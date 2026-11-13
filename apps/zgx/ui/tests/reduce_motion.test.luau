@@ -133,3 +133,56 @@ test("with motion reduced, a send's prompt lands at the top without gliding", fu
 	expect(rest < 120).to_be(true)
 	expect(between <= 1).to_be(true)
 end)
+
+-- A switch's knob, left of its track (`x` from its line): off at the
+-- track's inset, on across it.
+local function knob_x(app: any, scope: string): (number, number)
+	local lines = {}
+	for line in app:tree(scope):gmatch("[^\n]+") do
+		table.insert(lines, line)
+	end
+	local track = tonumber(lines[1]:match(" (%-?%d+),%-?%d+ %d+x%d+")) or -1
+	local knob = tonumber((lines[#lines] or ""):match(" (%-?%d+),%-?%d+ %d+x%d+")) or -1
+	return knob - track, #lines
+end
+
+test("with motion reduced, a switch built on stands its knob on the right", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 900)
+	app:frames(30)
+	app:command("settings_stub.sign_in")
+	app:command("shell.settings")
+	app:frames(20)
+	app:click('#settings-nav >> role:tab "Appearance"')
+	app:frames(30)
+	app:scroll("#settings-page", 3000)
+	app:frames(6)
+	app:click("#appearance-advanced")
+	app:frames(20)
+	app:resize(1200, 2400)
+	app:frames(20)
+	app:scroll("#settings-page", 1200)
+	app:frames(6)
+	app:click('#settings-page >> role:button "Reduce motion"')
+	app:frames(20)
+	app:click('role:menuitem "On"')
+	app:frames(20)
+	local reduce = '#settings-page >> role:switch "Pause animations in background"'
+	local off = knob_x(app, reduce)
+	app:click(reduce)
+	app:frames(30)
+	local on = knob_x(app, reduce)
+	expect(on > off).to_be(true)
+	-- Away and back: the page builds again, now with motion reduced.
+	app:click('#settings-nav >> role:tab "General"')
+	app:frames(20)
+	app:click('#settings-nav >> role:tab "Appearance"')
+	app:frames(20)
+	expect(app:tree(reduce)).never.to_contain("unchecked")
+	expect(knob_x(app, reduce)).to_be(on)
+	-- And it still moves: off at once, back where it started.
+	app:click(reduce)
+	app:frames(2)
+	expect(app:tree(reduce)).to_contain("unchecked")
+	expect(knob_x(app, reduce)).to_be(off)
+end)

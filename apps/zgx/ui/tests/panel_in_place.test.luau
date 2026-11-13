@@ -273,6 +273,54 @@ local function term_calls(app: any): string
 	return app:state("test_term_calls") or ""
 end
 
+-- A reply's shell block sent to the chat's terminal (Panel.run_in_terminal).
+local function run_block(app: any, text: string)
+	app:set_state("test_run_text", text)
+	app:command("test.run_in_terminal")
+	app:frames(10)
+end
+
+local function claimed(app: any, n: number): boolean
+	return eventually(app, function(): boolean
+		local s = app:state("panel_sessions")["chat:chat-1"]
+		return s ~= nil and s.tabs[n] ~= nil and s.tabs[n].terminal ~= nil
+	end)
+end
+
+test("a shell block is pasted into a new terminal tab, then Entered, never into the terminal already open", function()
+	for _, busy in { false, true } do
+		local app = open_panel()
+		app:click("#panel-open-terminal")
+		expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
+		expect(claimed(app, 1)).to_be(true)
+		app:set_state("test_term_busy", busy)
+		run_block(app, "cargo build\n\tcargo test")
+		expect(eventually(app, function(): boolean
+			return string.find(term_calls(app), "input:tab2:⏎", 1, true) ~= nil
+		end)).to_be(true)
+		local calls = term_calls(app)
+		expect(calls).to_contain("open:term-2")
+		expect(calls).to_contain("paste:tab2:cargo build\n\tcargo test,input:tab2:⏎")
+		expect(calls).never.to_contain("write:")
+		expect(calls).never.to_contain("paste:tab1")
+		expect(calls).never.to_contain("input:tab1")
+		expect(tab_titles(app)).to_contain("Terminal 2")
+	end
+end)
+
+test("a shell still starting gets the block once it's up, or after two seconds", function()
+	local app = open_panel()
+	app:set_state("test_term_pwd", nil)
+	run_block(app, "pwd")
+	expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
+	app:frames(5)
+	expect(term_calls(app)).never.to_contain("paste:")
+	expect(eventually(app, function(): boolean
+		return string.find(term_calls(app), "paste:tab1:pwd,input:tab1:⏎", 1, true) ~= nil
+	end)).to_be(true)
+	expect(term_calls(app)).to_contain("open:term-1")
+end)
+
 test("a terminal tab opens one engine terminal and keeps it across switches and a reload", function()
 	local app = open_panel()
 	app:click("#panel-open-terminal")

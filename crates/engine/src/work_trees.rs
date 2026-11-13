@@ -116,7 +116,12 @@ fn made_commits(reflog: &str) -> Option<bool> {
 }
 
 fn canonical(path: &Path) -> PathBuf {
-    if let Ok(path) = std::fs::canonicalize(path) {
+    // Windows' `\\?\` verbatim form is refused by git and differs from the paths chats store.
+    #[cfg(windows)]
+    let found = dunce::canonicalize(path);
+    #[cfg(not(windows))]
+    let found = std::fs::canonicalize(path);
+    if let Ok(path) = found {
         return path;
     }
     match (path.parent(), path.file_name()) {

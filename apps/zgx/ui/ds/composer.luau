@@ -63,6 +63,7 @@ local VoiceWave = require("@self/voice_wave").VoiceWave
 local context_usage = require("@self/context_usage")
 local motion = require("@self/motion")
 local EditorMenu = require("@self/editor_menu")
+local Kbd = require("@self/kbd")
 
 -- What the model's context holds, as its agent reports it: the tokens in
 -- it and the window's size (either may be missing).
@@ -123,7 +124,7 @@ export type Props = {
 	-- A turn is running: Send becomes Stop while the draft is empty, and
 	-- queues what is typed.
 	running: State<boolean>?,
-	-- What the agent may do unasked: "supervised", "edits" or "full"; and
+	-- What the agent may do unasked: "supervised", "edits", "auto" or "full"; and
 	-- plan mode (explore and propose before changing anything).
 	access: State<string?>?,
 	plan: State<boolean>?,
@@ -309,6 +310,9 @@ export type Props = {
 	refs: (() -> string)?,
 	field: any?,
 	prediction: (() -> string?)?,
+	-- The access modes the chat's agent takes ("supervised", "edits", "auto",
+	-- "full"); nil while it isn't known: every one.
+	access_modes: (() -> { string }?)?,
 	limit: (() -> any)?,
 	side_tab: any?,
 	pills: Node?,
@@ -431,7 +435,8 @@ end
 -- The access modes, as Zeron offers them; their icons (Central Icons,
 -- centralicons.com, round outlined, radius 2, stroke 1.5) say what each
 -- does: it waits for you (a raised hand), edits go through (a pencil with
--- sparkles), nothing is held back (an open padlock). (Made as they're
+-- sparkles), a model checks the rest first (a shield's check), nothing is
+-- held back (an open padlock). (Made as they're
 -- read, in the locale's words.)
 local function ACCESS(): { Dropdown.Item }
 	return {
@@ -442,6 +447,10 @@ local function ACCESS(): { Dropdown.Item }
 	worded({ value = "edits", icon = "access-edits" }, {
 		label = "ds.composer.access.edits",
 		description = "ds.composer.access.edits_hint",
+	}),
+	worded({ value = "auto", icon = "shield-check" }, {
+		label = "ds.composer.access.auto",
+		description = "ds.composer.access.auto_hint",
 	}),
 	worded({ value = "full", icon = "access-full" }, {
 		label = "ds.composer.access.full",
@@ -1829,7 +1838,20 @@ return ui.component(function(props: Props): Node
 				end
 				else nil,
 			value = props.access,
-			items = ACCESS,
+			items = function(): { Dropdown.Item }
+				local all = ACCESS()
+				local offered = if props.access_modes then props.access_modes() else nil
+				if offered == nil then
+					return all
+				end
+				local out: { Dropdown.Item } = {}
+				for _, item in all do
+					if table.find(offered, (item :: any).value) then
+						table.insert(out, item)
+					end
+				end
+				return out
+			end,
 			tone = "chip",
 			label = locale.t("ds.composer.access.label") :: any,
 			search = false,
@@ -2374,9 +2396,8 @@ return ui.component(function(props: Props): Node
 		elseif approval() then
 			return locale.s("ds.composer.placeholder.instead")
 		end
-		local whole = shown_prediction()
-		if whole then
-			return whole
+		if shown_prediction() then
+			return ""
 		end
 		-- (A message follows the language: read here, as it's drawn.)
 		local own = props.placeholder :: any
@@ -2406,10 +2427,14 @@ return ui.component(function(props: Props): Node
 		local text = value:get()
 		local whole = shown_prediction()
 		local el = field:peek() :: any
-		if not whole or text == "" or not el then
+		if not whole or not el then
 			if ghost:peek() then
 				ghost:set(nil)
 			end
+			return
+		end
+		if text == "" then
+			ghost:set { x = 0, y = 0, text = whole }
 			return
 		end
 		local a, b = el:selection_bytes()
@@ -2444,6 +2469,23 @@ return ui.component(function(props: Props): Node
 		value:set(whole)
 		el:set_selection_bytes(#whole, #whole)
 		return true
+	end
+
+	-- Tab or Right arrow with nothing holding the keys: the draft becomes the
+	-- whole prediction and takes the keys, its caret at its end.
+	local function fill_prediction(): boolean
+		local whole = shown_prediction()
+		local el = field:peek()
+		if not whole or not el then
+			return false
+		end
+		value:set(whole)
+		el:focus()
+		el:set_selection_bytes(#whole, #whole)
+		return true
+	end
+	if props.toolbar_id then
+		composer_surface.fill_prediction = fill_prediction
 	end
 
 	-- A press on the composer's blank room (the pill's padding, its controls'
@@ -2553,14 +2595,11 @@ return ui.component(function(props: Props): Node
 			fade = function(): { number }
 				return if collapsed:get() and wrapped_h:get() > COLLAPSED_LINES * LINE + 0.5 then { LINE, 0 } else { 0, 0 }
 			end :: any,
+			-- The prediction past the draft, and its keys (Tab, →) on the same
+			-- line: the words give way before the keys do.
 			ui.show(function(): boolean
 				return ghost:get() ~= nil
-			end, ui.text {
-				function(): string
-					local g = ghost:get()
-					return if g then g.text else ""
-				end,
-				id = "composer-ghost",
+			end, ui.row {
 				absolute = true,
 				left = function(): number
 					local g = ghost:get()
@@ -2570,11 +2609,34 @@ return ui.component(function(props: Props): Node
 					local g = ghost:get()
 					return if g then g.y else 0
 				end :: any,
+				right = 0,
+				h = "$zeron.composer.line",
+				items = "center",
+				gap = "$space.2",
 				pointer_events = "none",
 				aria_hidden = true,
-				text_size = "$zeron.composer.text",
-				line_height = "$zeron.composer.line",
-				color = "$text.tertiary",
+				ui.text {
+					function(): string
+						local g = ghost:get()
+						return if g then g.text else ""
+					end,
+					id = "composer-ghost",
+					literal = true,
+					truncate = true,
+					shrink = 1,
+					min_w = 0,
+					text_size = "$zeron.composer.text",
+					line_height = "$zeron.composer.line",
+					color = "$text.tertiary",
+				},
+				ui.row {
+					id = "composer-prediction-keys",
+					shrink = 0,
+					items = "center",
+					gap = "$space.1",
+					Kbd { text = "Tab", tone = "quiet" },
+					Kbd { text = "→", tone = "quiet" },
+				},
 			}),
 			ui.textarea(EditorMenu.on({
 				ref = field,
@@ -2672,7 +2734,7 @@ return ui.component(function(props: Props): Node
 					if unit and unit.keys(e) then
 						return true
 					end
-					if e.key == "Tab" and not e.shift and not e.cmd and not e.alt and accept_prediction() then
+					if (e.key == "Tab" or e.key == "ArrowRight") and not e.shift and not e.cmd and not e.alt and not e.ctrl and accept_prediction() then
 						return true
 					end
 					local q = question()

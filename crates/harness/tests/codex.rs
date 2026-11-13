@@ -249,6 +249,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: true,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
         exit_code: Some(1),
     }));
 
@@ -272,6 +274,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: false,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
         exit_code: None,
     }));
 
@@ -289,6 +293,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: true,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
         exit_code: None,
     }));
 
@@ -304,6 +310,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: false,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
         exit_code: None,
     }));
 
@@ -322,6 +330,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: false,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
         exit_code: None,
     }));
 
@@ -1566,6 +1576,8 @@ async fn child_thread_routing_tags_and_never_settles_parent() {
             is_error: false,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
             exit_code: Some(0),
         }),
     }));
@@ -2264,6 +2276,8 @@ async fn view_image_reads_as_a_file_read() {
                 is_error: false,
                 output: None,
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: None,
             },
         ]

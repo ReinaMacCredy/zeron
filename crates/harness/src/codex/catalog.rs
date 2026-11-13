@@ -46,7 +46,9 @@ pub(crate) fn permissions(access: AccessMode, title_only: bool) -> (&'static str
     match access {
         _ if title_only => ("never", SandboxLevel::ReadOnly),
         AccessMode::FullAccess => ("never", SandboxLevel::DangerFullAccess),
-        AccessMode::AutoAcceptEdits => ("untrusted", SandboxLevel::WorkspaceWrite),
+        AccessMode::AutoAcceptEdits | AccessMode::AutoReview => {
+            ("untrusted", SandboxLevel::WorkspaceWrite)
+        }
         AccessMode::Supervised => ("untrusted", SandboxLevel::ReadOnly),
     }
 }

@@ -21,6 +21,7 @@ pub fn access_modes(offered: Option<Vec<AccessMode>>) -> Vec<AccessModeInfo> {
     let offered = proto_modes(offered);
     zeron_proto::AccessMode::ALL
         .into_iter()
+        .filter(|mode| *mode != zeron_proto::AccessMode::AutoReview)
         .filter(|mode| {
             offered
                 .as_ref()

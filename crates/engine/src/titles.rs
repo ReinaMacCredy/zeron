@@ -226,6 +226,17 @@ pub(crate) async fn one_shot_target(
             None,
         ),
     };
+    on_harness(registry, harness_id, instance, model, fallback).await
+}
+
+/// A one-shot on `harness_id` itself: `instance` when given, else its default install.
+pub(crate) async fn on_harness(
+    registry: &HarnessRegistry,
+    harness_id: HarnessId,
+    instance: Option<Arc<dyn zeron_harness::Harness>>,
+    model: Option<String>,
+    fallback: fn(&[Model]) -> Option<String>,
+) -> Option<OneShotTarget> {
     if !zeron_harness::supports_titles(harness_id) {
         return None;
     }
@@ -712,12 +723,25 @@ mod tests {
             &default
         ));
         assert!(Arc::ptr_eq(
-            &target(Some(HarnessId::Mock), Some(instance))
+            &target(Some(HarnessId::Mock), Some(instance.clone()))
                 .await
                 .unwrap()
                 .harness,
             &default
         ));
+        let own = on_harness(
+            &registry,
+            HarnessId::Mock,
+            Some(instance.clone()),
+            None,
+            cheapest_model,
+        )
+        .await
+        .unwrap();
+        assert!(
+            Arc::ptr_eq(&own.harness, &instance),
+            "the chat's own instance"
+        );
     }
 
     #[test]

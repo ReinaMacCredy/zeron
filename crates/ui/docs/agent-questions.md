@@ -44,13 +44,20 @@ How often agents ask is set by the access chip in the composer bar, before the m
 | --- | --- |
 | **Supervised** | Ask before commands and file changes. |
 | **Auto-accept edits** | Apply edits, ask before other actions. |
+| **Auto** | A model approves safe actions; asks you about the rest. |
 | **Full access** | Run commands and edits without asking. |
 
 **Full access** is the default. The mode applies to the selected chat, or to the next new chat. Only the modes the chat's agent supports are listed: Grok, Devin, Hermes and other ACP agents can't ask before acting, so they always run with **Full access**. fx is the exception: it offers **Supervised** and **Full access**.
 
-**Auto-accept edits** applies file changes on its own and still asks before commands. Chats set to **Ask for approval**, **Approve for me** or **Full** in earlier versions open as **Supervised**, **Auto-accept edits** and **Full access**.
+**Auto-accept edits** applies file changes on its own and still asks before commands.
+
+**Auto** applies file changes on its own too. Anything else it would ask about goes first to a quick check by the chat's agent on its cheapest model, which sees the request, the chat's folder and your latest message, and answers allow or ask. Allowed requests run, and the chat shows them as answered **by Auto**. Everything else, and anything the check can't decide in time, comes to you as usual. In a Claude Code chat, Claude Code's own auto mode decides first. Auto is offered by Claude Code, Codex and OpenCode chats on this Mac and your other devices once they run this version; a Cloud machine's chats don't list it yet.
+
+Chats set to **Ask for approval**, **Approve for me** or **Full** in earlier versions open as **Supervised**, **Auto-accept edits** and **Full access**.
 
 The **Plan** switch next to the access chip, or Shift+Tab, has the agent explore and propose a plan before changing anything. In a Claude Code chat, Send then reads **Start plan**, and the plan arrives as a card with **Approve**, which runs it in this chat in the chat's mode, **Approve as Task**, which tracks its steps in [Tasks](zeron://docs/tasks), and **Edit plan**, which tells the agent no so you can say what to change. Codex and OpenCode write a plan and change nothing; they show no card.
+
+A lead agent that started a thread or subagent can raise that chat's mode while it runs, up to the lead's own mode. The raise reaches the running turn at once: whatever is waiting that the new mode covers is answered. A lead at **Full access** can also approve one of its threads' requests for the rest of that turn, so the same kind of request isn't asked again until the turn ends. Lowering a mode applies from the chat's next turn.
 
 ## Where waiting chats show up
 

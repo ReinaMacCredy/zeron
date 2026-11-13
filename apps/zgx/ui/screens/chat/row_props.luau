@@ -5,6 +5,8 @@ local route = require("@app/screens/shell/route")
 local FileLinks = require("@app/screens/chat/file_links")
 local Shared = require("@app/screens/chat/shared")
 local Computer = require("@app/screens/settings/computer")
+local FilePaths = require("@app/screens/files/paths")
+local boundary = require("@app/screens/shell/boundary")
 
 local M = {}
 
@@ -48,6 +50,20 @@ function M.add(props: { [string]: any }, chat: () -> string?, session: () -> any
 	props.review_block = function(_m: any): Node
 		return (require :: any)("@app/screens/chat/review").Block({ chat = chat, open_link = props.open_link })
 	end
+	-- A shell block's Run: the chat's own terminal, on its device, wherever the panel can open one.
+	props.run_code = {
+		can = function(): boolean
+			local s = session()
+			return s ~= nil and FilePaths.target_of(nil, s) ~= nil
+		end,
+		run = function(text: string)
+			local panel: any = boundary.load("@app/screens/panel")
+			local s = peek()
+			if panel and panel.run_in_terminal and s then
+				panel.run_in_terminal(s, text)
+			end
+		end,
+	}
 	if props.open_link then
 		props.file_link = function(target: string): boolean
 			local s = peek()

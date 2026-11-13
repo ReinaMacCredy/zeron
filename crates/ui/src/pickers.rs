@@ -63,6 +63,7 @@ fn permission_icon(mode: AccessMode) -> &'static str {
     match mode {
         AccessMode::Supervised => crate::icons::CHECKLIST,
         AccessMode::AutoAcceptEdits => crate::icons::BOT,
+        AccessMode::AutoReview => crate::icons::LUCIDE_SHIELD,
         AccessMode::FullAccess => crate::icons::DANGER_TRIANGLE,
     }
 }
@@ -10683,7 +10684,7 @@ mod tests {
         assert_eq!(resolve_access(Supervised, &[]), FullAccess);
     }
 
-    const ALL_MODES: [AccessMode; 3] = AccessMode::ALL;
+    const ALL_MODES: [AccessMode; 4] = AccessMode::ALL;
 
     struct ModelShortcutHost {
         focus_sub: Option<gpui::Subscription>,

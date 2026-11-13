@@ -649,7 +649,9 @@
         "edits": "Auto-accept edits",
         "edits_hint": "Apply edits, ask before other actions.",
         "full": "Full access",
-        "full_hint": "Run commands and edits without asking."
+        "full_hint": "Run commands and edits without asking.",
+        "auto": "Auto",
+        "auto_hint": "A model approves safe actions; asks you about the rest."
       },
       "plan": {
         "mode": "Plan mode",
@@ -758,7 +760,9 @@
       "copy_code": "Copy code",
       "copied": "Copied",
       "view_named": "View {name}",
-      "done": "Done"
+      "done": "Done",
+      "run_code": "Run in terminal",
+      "run": "Run"
     },
     "mermaid": {
       "show_source": "Show source",

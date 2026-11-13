@@ -235,6 +235,8 @@ async fn park_after_spawn() -> Parked {
         is_error: false,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
         exit_code: None,
     })
     .unwrap();
@@ -433,6 +435,8 @@ async fn task_cancel_tears_down_a_child_parked_on_its_subagents() {
             output: None,
             diff: None,
             exit_code: None,
+            image_payloads: Vec::new(),
+            preview_paths: Vec::new(),
         },
         done(DoneStatus::Completed),
         tagged(AgentEvent::TextDelta {

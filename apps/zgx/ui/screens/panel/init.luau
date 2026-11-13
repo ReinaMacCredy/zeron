@@ -577,6 +577,23 @@ end
 -- empty browser tab. The panel opens for the session showing (or, with
 -- `page`, a plugin page's own panel). Whether a tab took it (a session or a
 -- page must be open).
+-- A chat's shell block run in a new terminal tab in the chat's folder,
+-- pasted once its shell is up and then Entered (screens/panel/terminal):
+-- never into a terminal that might hold a half-typed line or a running
+-- program.
+function M.run_in_terminal(session: any, text: string): boolean
+	local k = state.key(session)
+	if not k then
+		return false
+	end
+	state.open(k, "terminal", { input = text })
+	local set_files = (if shell_view then shell_view.set_files else nil) :: ((boolean) -> ())?
+	if set_files then
+		set_files(true)
+	end
+	return true
+end
+
 function M.open_url(session: any, url: string?, project: any?, page: any?): boolean
 	local k = state.key(session, project, page)
 	if not k then

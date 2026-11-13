@@ -135,6 +135,8 @@ impl Harness for StallHarness {
                         output: None,
                         diff: None,
                         exit_code: None,
+                        image_payloads: Vec::new(),
+                        preview_paths: Vec::new(),
                     },
                 ] {
                     let _ = tx.send(Ok(event)).await;
@@ -158,6 +160,8 @@ impl Harness for StallHarness {
                         output: None,
                         diff: None,
                         exit_code: None,
+                        image_payloads: Vec::new(),
+                        preview_paths: Vec::new(),
                     },
                 ] {
                     let _ = tx.send(Ok(event)).await;

@@ -870,6 +870,7 @@ mod tests {
                 exit_code: None,
                 output_truncated: false,
                 output_lines: None,
+                preview_paths: Vec::new(),
             }],
             created_at: 0,
             device_id: "dev".into(),

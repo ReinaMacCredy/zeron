@@ -163,6 +163,7 @@ fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
         subagent_tail: None,
         delegate_route: None,
         html_render: None,
+        preview_paths: Vec::new(),
         exit_code: None,
         output_truncated: false,
         output_lines: None,
@@ -773,6 +774,7 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
         subagent_tail: None,
         html_render: None,
         delegate_route: None,
+        preview_paths: Vec::new(),
         exit_code: None,
         output_truncated: false,
         output_lines: None,
@@ -891,6 +893,7 @@ fn computer_part(id: &str, tool: &str, input: Option<serde_json::Value>, is_erro
         exit_code: None,
         output_lines: None,
         output_truncated: false,
+        preview_paths: Vec::new(),
     }
 }
 
@@ -2177,6 +2180,7 @@ fn page_rows_sit_outside_the_fold_and_take_the_height_their_page_reports() {
         exit_code: None,
         output_lines: None,
         output_truncated: false,
+        preview_paths: Vec::new(),
     };
     view.set_viewport(390.0, 1.0);
     view.set_input(TranscriptInput {

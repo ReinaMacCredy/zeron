@@ -134,6 +134,32 @@ fn compact_knob_run(
     .boxed()
 }
 
+/// The Auto access mode's check, scripted by the action's words:
+/// `auto-allow` ALLOW, `auto-garbage` neither word, `auto-hang` no answer
+/// at all; anything else ASK.
+fn auto_review_reply(prompt: &str) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    if prompt.contains("auto-hang") {
+        return futures::stream::pending().boxed();
+    }
+    let reply = if prompt.contains("auto-allow") {
+        "ALLOW"
+    } else if prompt.contains("auto-garbage") {
+        "Looks fine to me, go ahead."
+    } else {
+        "ASK"
+    };
+    futures::stream::iter([
+        Ok(AgentEvent::TextDelta { text: reply.into() }),
+        Ok(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: None,
+        }),
+    ])
+    .boxed()
+}
+
 fn uuid_like() -> String {
     format!(
         "{:x}",
@@ -309,6 +335,9 @@ impl Harness for MockHarness {
         controls: RunControls,
         instructions: &'static str,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        if instructions == crate::AUTO_REVIEW_INSTRUCTIONS {
+            return Ok(auto_review_reply(&request.prompt));
+        }
         // The demo run calls tools, which a commit message's one-shot refuses.
         if instructions == crate::COMMIT_MESSAGE_INSTRUCTIONS {
             return Ok(futures::stream::iter([
@@ -464,6 +493,8 @@ impl MockHarness {
                             is_error: false,
                             output: Some("test result: ok. 128 passed; 0 failed".into()),
                             diff: None,
+                            preview_paths: Vec::new(),
+                            image_payloads: Vec::new(),
                             exit_code: None,
                         });
                         send("All 128 tests pass.");
@@ -709,6 +740,8 @@ impl MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                         exit_code: None,
                     },
                 ]
@@ -760,6 +793,8 @@ impl MockHarness {
                         output: Some(mock_mcp_text(&preview)),
                         diff: None,
                         exit_code: None,
+                        image_payloads: Vec::new(),
+                        preview_paths: Vec::new(),
                     },
                     AgentEvent::ToolCall {
                         id: "mock-html-render".into(),
@@ -775,6 +810,8 @@ impl MockHarness {
                         output: Some(mock_mcp_text(&result)),
                         diff: None,
                         exit_code: None,
+                        image_payloads: Vec::new(),
+                        preview_paths: Vec::new(),
                     },
                 ]
             }
@@ -809,6 +846,8 @@ impl MockHarness {
                         output: Some(mock_mcp_text(&result)),
                         diff: None,
                         exit_code: None,
+                        image_payloads: Vec::new(),
+                        preview_paths: Vec::new(),
                     },
                 ]);
             }
@@ -846,6 +885,8 @@ impl MockHarness {
                     is_error: false,
                     output: None,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 };
                 let done = AgentEvent::Done {
@@ -1026,6 +1067,8 @@ impl MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                         exit_code: None,
                     },
                 ]
@@ -1050,6 +1093,8 @@ impl MockHarness {
                         output: None,
                         diff: None,
                         exit_code: None,
+                        image_payloads: Vec::new(),
+                        preview_paths: Vec::new(),
                     },
                 ]
             })
@@ -1082,6 +1127,8 @@ impl MockHarness {
                             line_offset: None,
                         }),
                         exit_code: None,
+                        image_payloads: Vec::new(),
+                        preview_paths: Vec::new(),
                     },
                     AgentEvent::ToolCall {
                         id: "mock-edit".into(),
@@ -1102,6 +1149,8 @@ impl MockHarness {
                             line_offset: None,
                         }),
                         exit_code: None,
+                        image_payloads: Vec::new(),
+                        preview_paths: Vec::new(),
                     },
                 ]
             })
@@ -1173,6 +1222,8 @@ impl MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                         exit_code: None,
                     });
                     events.push(AgentEvent::TextDelta {
@@ -1489,6 +1540,8 @@ fn background_run(
                 },
             });
             let _ = tx.send(AgentEvent::ToolResult {
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
                 id: format!("{id}-call"),
                 is_error: false,
                 output: Some(format!("Command running in background with ID: {id}")),
@@ -1707,6 +1760,8 @@ fn long_tool_run(
                         pid.unwrap_or(0)
                     )),
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 });
                 turn.set_background_processes(vec![zeron_proto::BackgroundTask {
@@ -1769,6 +1824,8 @@ fn long_tool_run(
                     String::new()
                 }),
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: (!stopped).then_some(0),
             });
             if stopped {

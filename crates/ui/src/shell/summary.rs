@@ -2210,6 +2210,7 @@ mod sidecar_regressions {
             exit_code: None,
             output_lines: None,
             output_truncated: false,
+            preview_paths: Vec::new(),
         };
         let agent = |id: &str, status| {
             spawn(

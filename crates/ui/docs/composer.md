@@ -1,6 +1,6 @@
 The composer is the message box at the bottom of every chat. You type your prompt there, attach files, and decide what happens when you send while the agent is still working.
 
-Its bar carries, from left to right, the paperclip, the **Plan** switch, the access chip (**Supervised**, **Auto-accept edits** or **Full access**), the model chip with the model and effort, and the send button. The access chip is always there, in the same spot on New chat and in a chat; below a narrow width it shows as an icon. See [When an agent asks](zeron://docs/agent-questions) and [Models and effort](zeron://docs/models-and-effort). The **Side chat** tab on the composer's top edge opens a [side chat](zeron://docs/side-chat).
+Its bar carries, from left to right, the paperclip, the **Plan** switch, the access chip (**Supervised**, **Auto-accept edits**, **Auto** or **Full access**), the model chip with the model and effort, and the send button. The access chip is always there, in the same spot on New chat and in a chat; below a narrow width it shows as an icon. See [When an agent asks](zeron://docs/agent-questions) and [Models and effort](zeron://docs/models-and-effort). The **Side chat** tab on the composer's top edge opens a [side chat](zeron://docs/side-chat).
 
 ## Sending
 

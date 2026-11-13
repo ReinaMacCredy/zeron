@@ -23,6 +23,8 @@ local function term_note(what: string)
 	term_calls:set(table.concat(term_said, ","))
 end
 local busy = ui.state("test_term_busy", false)
+-- Where its shell says it is (zgx's `term.pwd`): nil while it's still starting.
+local term_pwd = ui.state("test_term_pwd", "/proj" :: string?)
 -- What's selected in its shell (zgx's `term.selection`).
 local term_selection = ui.state("test_term_selection", nil :: string?)
 local opened = 0
@@ -49,6 +51,11 @@ tapi.close = function(id: string, _device: string?): any
 	term_note(`close:{id}`)
 	return settle(nil)
 end
+-- What's typed into one: the text as it would reach the shell, its Enter `⏎`.
+tapi.write = function(id: string, _device: string?, text: string): any
+	term_note(`write:{id}:{string.gsub(text, "\r", "⏎")}`)
+	return settle(nil)
+end
 tapi.term = function(key: string, options: any?): any
 	local s = sessions[key]
 	if not s and options then
@@ -67,8 +74,20 @@ tapi.term = function(key: string, options: any?): any
 				el:focus()
 			end
 		end
+		-- A paste and a key typed into it (`paste:` and `input:`, Enter as `⏎`).
+		s.paste = function(_: any, text: string)
+			term_note(`paste:{key}:{text}`)
+		end
+		s.input = function(_: any, text: string)
+			term_note(`input:{key}:{string.gsub(text, "\r", "⏎")}`)
+		end
 		setmetatable(s, { __index = function(_: any, field: string): any
-			return if field == "selection" then term_selection:get() else nil
+			if field == "selection" then
+				return term_selection:get()
+			elseif field == "pwd" then
+				return term_pwd:get()
+			end
+			return nil
 		end })
 		sessions[key] = s
 	end
@@ -428,6 +447,15 @@ ui.command {
 	title = "Open Link",
 	run = function()
 		Panel.open_url(session:peek(), open_url:peek())
+	end,
+}
+-- A reply's shell block run in its session's terminal (Panel.run_in_terminal).
+local run_text = ui.state("test_run_text", "")
+ui.command {
+	id = "test.run_in_terminal",
+	title = "Run in Terminal",
+	run = function()
+		Panel.run_in_terminal(session:peek(), run_text:peek())
 	end,
 }
 -- A file mentioned in a chat, opened in its session's panel (Panel.open_file).

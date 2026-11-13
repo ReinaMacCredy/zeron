@@ -585,6 +585,9 @@ pub enum AccessMode {
     /// Apply file changes without asking; ask before anything else.
     #[serde(alias = "auto")]
     AutoAcceptEdits,
+    /// Apply file changes without asking; a model approves what else looks
+    /// safe, and asks about the rest.
+    AutoReview,
     /// Run commands and change files without asking. Every run before modes
     /// existed ran this way, so it is the default.
     #[default]
@@ -594,9 +597,10 @@ pub enum AccessMode {
 
 impl AccessMode {
     /// Every mode, least to most trusting (the picker's order).
-    pub const ALL: [AccessMode; 3] = [
+    pub const ALL: [AccessMode; 4] = [
         AccessMode::Supervised,
         AccessMode::AutoAcceptEdits,
+        AccessMode::AutoReview,
         AccessMode::FullAccess,
     ];
 
@@ -608,6 +612,7 @@ impl AccessMode {
         match self {
             AccessMode::Supervised => "Supervised",
             AccessMode::AutoAcceptEdits => "Auto-accept edits",
+            AccessMode::AutoReview => "Auto",
             AccessMode::FullAccess => "Full access",
         }
     }
@@ -616,6 +621,7 @@ impl AccessMode {
         match self {
             AccessMode::Supervised => "Ask before commands and file changes.",
             AccessMode::AutoAcceptEdits => "Apply edits, ask before other actions.",
+            AccessMode::AutoReview => "A model approves safe actions; asks you about the rest.",
             AccessMode::FullAccess => "Run commands and edits without asking.",
         }
     }
@@ -900,12 +906,21 @@ impl<'de> Deserialize<'de> for RunRequest {
     }
 }
 
-/// Builds before access modes wrote `permissionMode`, the source of truth on their rows.
+/// Builds before access modes wrote `permissionMode`: read only where `access` is absent.
+/// A mode this build doesn't know (a newer peer's) reads as the most cautious, never as
+/// the full access an absent one means.
 pub fn legacy_access(value: &mut serde_json::Value) {
-    if let Some(map) = value.as_object_mut()
-        && let Some(mode) = map.remove("permissionMode")
-    {
-        map.insert("access".into(), mode);
+    if let Some(map) = value.as_object_mut() {
+        if let Some(mode) = map.remove("permissionMode")
+            && !map.contains_key("access")
+        {
+            map.insert("access".into(), mode);
+        }
+        if map.get("access").is_some_and(|mode| {
+            mode.is_string() && serde_json::from_value::<AccessMode>(mode.clone()).is_err()
+        }) {
+            map.insert("access".into(), "supervised".into());
+        }
     }
 }
 
@@ -1519,6 +1534,14 @@ pub struct HarnessCompactionResult {
     pub branching: bool,
 }
 
+/// One image embedded in a tool result, held only until the engine stores
+/// a copy under the profile uploads directory. Never journaled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolResultImage {
+    pub name: String,
+    pub data_base64: String,
+}
+
 /// A file modification carried inline on a tool result (ACP
 /// `ToolCallContent::Diff`). `old_text: None` means a new file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1577,6 +1600,8 @@ pub enum ApprovalAction {
 
 pub const APPROVAL_ALLOW: &str = "Yes";
 pub const APPROVAL_DENY: &str = "No";
+/// Recorded beside the yes of an approval the Auto access mode's check gave.
+pub const APPROVAL_BY_AUTO: &str = "by Auto";
 pub const PLAN_APPROVAL_HEADER: &str = "Approve plan";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1698,6 +1723,13 @@ pub enum AgentEvent {
         /// Inline file diff for edit-shaped tools (ACP `Diff` content).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<ToolDiff>,
+        /// Uploads paths of images that were embedded in this result. The
+        /// engine fills this before journaling; adapters leave it empty.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        preview_paths: Vec<String>,
+        /// In-memory image bytes for the engine to store. Never serialized.
+        #[serde(skip)]
+        image_payloads: Vec<ToolResultImage>,
         /// A command's exit status, when the harness reported one (Claude
         /// Code's Bash, Codex's command execution). Absent for other tools,
         /// a command still running in the background, or one that never ran.

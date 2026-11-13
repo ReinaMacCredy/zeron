@@ -919,6 +919,7 @@ mod tests {
             exit_code: None,
             output_truncated: false,
             output_lines: None,
+            preview_paths: Vec::new(),
         }
     }
 

@@ -1166,7 +1166,11 @@ pub fn input_outcome(
                 .find(|a| a.question_id == question.id)
                 .map(|a| a.labels.iter().filter(|l| !l.trim().is_empty()).collect())
                 .unwrap_or_default();
-            let typed = given.iter().any(|l| !question.options.contains(l));
+            let offered = |l: &String| {
+                question.options.contains(l)
+                    || (question.approval && l.as_str() == crate::APPROVAL_BY_AUTO)
+            };
+            let typed = given.iter().any(|l| !offered(l));
             let answer = if given.is_empty() {
                 "Skipped".to_owned()
             } else {
@@ -1174,7 +1178,7 @@ pub fn input_outcome(
                     .iter()
                     .map(|l| {
                         let text = clip(&single_line(l), ANSWER_DISPLAY_MAX);
-                        if question.options.contains(l) {
+                        if offered(l) {
                             text
                         } else {
                             format!("“{text}”")
@@ -1506,6 +1510,15 @@ mod input_outcome_tests {
         assert_eq!(
             lines(input_outcome(&qs, true, Some(&given))),
             vec!["File name → “Landing v2”", "Make it public? → No"]
+        );
+        let approval = crate::UserInputQuestion {
+            approval: true,
+            ..question("c", "Approve command", "Run `ls`?", &["Yes", "No"])
+        };
+        let by_auto = [answer("c", &["Yes", crate::APPROVAL_BY_AUTO])];
+        assert_eq!(
+            lines(input_outcome(&[approval], true, Some(&by_auto))),
+            vec!["Approve command → Yes, by Auto"]
         );
     }
 

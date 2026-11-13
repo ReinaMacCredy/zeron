@@ -236,6 +236,8 @@ export type Props = {
 	on_model: ((model: string) -> ())?,
 	-- Whether a link's target is a file of the chat's that opens.
 	file_link: ((target: string) -> boolean)?,
+	-- A shell block's Run: the chat's terminal (ds/markdown's `run_code`).
+	run_code: Markdown.RunCode?,
 	-- A review's findings, where the host put its `review` row (screens/chat/review's Block); without it the row is empty.
 	review_block: ((m: Message) -> Node)?,
 	over: ((t: Handle) -> Node)?,
@@ -813,6 +815,7 @@ type View = {
 	open_file: ((path: string) -> ())?,
 	file_opens: ((path: string) -> boolean)?,
 	on_sign_in: (() -> ())?,
+	run_code: Markdown.RunCode?,
 }
 
 -- A reply's thought being written, for its row (ds/activity's `thought`): the
@@ -1005,6 +1008,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				else nil,
 			pictures = if view then view.pictures else nil,
 			open = if view then view.open else nil,
+			run_code = if view then view.run_code else nil,
 			file_link = if view then view.file_link else nil,
 			link_menu = if view then view.link_menu else nil,
 			link_chip = if view then view.link_chip else nil,
@@ -1069,6 +1073,7 @@ local function reply(
 				open_subagent = if view then view.open_subagent else nil,
 				threads = if view then view.threads else nil,
 				agent = if view and view.threads then view.threads.agent else nil,
+				pictures = if view then view.shown_pictures else nil,
 				thought = thought_of(m, now, draft),
 				tools = function()
 					return now().tools or {}
@@ -1089,6 +1094,7 @@ local function reply(
 			veil_seed = ui.now() - opened_at < 300,
 			pictures = if view then view.pictures else nil,
 			open = if view then view.open else nil,
+			run_code = if view then view.run_code else nil,
 			file_link = if view then view.file_link else nil,
 			link_menu = if view then view.link_menu else nil,
 			link_chip = if view then view.link_chip else nil,
@@ -2621,7 +2627,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered, branch_actions(m, state)),
 						waiting_line(state, props.on_retry, props.working, props.compaction_wait, props.turn_state),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state) }),
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code }),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?
