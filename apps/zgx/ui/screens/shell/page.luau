@@ -674,7 +674,8 @@ return function(props: Props): Node
 	-- panel at "half" each. (The leasts count them already: the chat's 300
 	-- and a split's floor are its column's, gaps and all, as Wing set them.)
 	local function less_gaps(v: number, sd: number): number
-		local before = if sd > 0 then SIDEBAR_GAP + INSET else WINDOW_EDGE
+		-- (Folded, our rail stands before the page: the gap between cards, as the row's `pl` has it.)
+		local before = if sd > 0 then SIDEBAR_GAP + INSET else INSET
 		return v - before - INSET - WINDOW_EDGE
 	end
 	-- (Expanded over the session (the panel's Expand): all of the page's

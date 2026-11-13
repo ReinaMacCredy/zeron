@@ -152,7 +152,9 @@ test("the sidebar opened beside panes under their least with the panel closed: t
 end)
 
 -- (The panel's share: half of what the sidebar and the window's gaps round
--- the cards leave, 18 beside the sidebar, 14 without: chat and panel equal.)
+-- the cards leave, 18 beside the sidebar, 13 without (our rail before the
+-- page: the gap between cards, not the window's edge): chat and panel equal.
+-- At 880, 433.5 each, the tree's 434.)
 test("a chat alone goes as it always has: the sidebar stays, or hides for room and comes back", function()
 	local app = split(1100)
 	toggle(app)
@@ -162,7 +164,7 @@ test("a chat alone goes as it always has: the sidebar stays, or hides for room a
 	app:resize(880 + RAIL, 800)
 	app:frames(30)
 	toggle(app)
-	expect(panel_w(app)).to_be(433)
+	expect(panel_w(app)).to_be(434)
 	expect(sidebar_shows(app)).to_be(false)
 	expect(app:state("shell_collapsed")).to_be(false)
 	toggle(app)
@@ -176,7 +178,7 @@ test("a chat alone in a narrow window: anything opening its panel shows it, as i
 	expect(sidebar_shows(app)).to_be(true)
 	app:command("shell.toggle_files_tab")
 	app:frames(60)
-	expect(panel_w(app)).to_be(433)
+	expect(panel_w(app)).to_be(434)
 	expect(sidebar_shows(app)).to_be(false)
 	-- Closed by its toggle, the sidebar's back, as ever.
 	toggle(app)

@@ -310,9 +310,10 @@ fn content_split(available: f32) -> f32 {
 /// gap before the sidebar's card and the gap between cards after it, or the
 /// window's edge alone; the gap before the panel and the window's edge
 /// after it. Zeron's columns had none.)
-/// (Ours: `vw` less the rail, which stands at the window's left edge.)
+/// (Ours: `vw` less the rail, which stands at the window's left edge; folded,
+/// the gap between cards beside it, not the window's edge.)
 fn share_of(vw: f32, side: f32) -> f32 {
-    let gaps = if side > 0.5 { SIDEBAR_EDGE + 4. } else { 5. } + 4. + 5.;
+    let gaps = if side > 0.5 { SIDEBAR_EDGE + 4. } else { 4. } + 4. + 5.;
     content_split(vw - side - gaps)
 }
 
@@ -516,7 +517,8 @@ fn the_sidebar_toggled_splits_the_chat_and_the_panel_again_easing() {
             app.frames(40);
         }
         for (folding, card) in [(true, 0.), (false, SIDEBAR_DEFAULT)] {
-            let chat = |app: &mut TestApp| app.bounds("#shell-page-room").width;
+            // (The chat's half holds our Sidecar's column beside its page.)
+            let chat = |app: &mut TestApp| app.bounds("#shell-page-room").width + app.bounds("#sidecar-slot").width;
             let mut chats = vec![chat(&mut app)];
             let mut panels = vec![app.bounds("#shell-files").width];
             assert!(app.host.run_command("shell.toggle_sidebar"));
