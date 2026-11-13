@@ -11,7 +11,7 @@ local Icon = require("@self/icon")
 local FileIcon = require("@self/file_icons")
 local Menu = require("@self/menu")
 local Kbd = require("@self/kbd")
-local Tile = require("@self/tile")
+local AgentMark = require("@self/agent_mark")
 local locale = require("@self/locale")
 
 local M = {}
@@ -185,16 +185,14 @@ local function place(text: string): string
 	return "…" .. string.sub(text, from)
 end
 
--- A row's tile: its file's icon, or its own glyph, on a quiet well (a menu
--- row's glyph box, the icon two points in).
+-- A row's tile: its file's icon, a chat's agent's mark, or its own glyph,
+-- on a quiet well (a menu row's glyph box, the icon two points in).
 local function tile(item: any): Node
-	-- A chat in a project: its project's tile, as the sidebar draws it.
-	local t = item.tile
-	if t then
-		return Tile { label = t.label, hue = t.hue, src = t.src, emoji = t.emoji, project = t.project, size = 18 }
-	end
 	local lead: Node
-	if item.file or item.dir or item.file_icon then
+	local agent = item.agent
+	if agent then
+		lead = AgentMark { label = item.label, mark = agent.mark, icon = agent.icon, seed = agent.harness, size = 14, bare = true }
+	elseif item.file or item.dir or item.file_icon then
 		lead = FileIcon { name = item.file_icon or item.label, dir = item.dir, size = 14 }
 	else
 		lead = Icon { name = item.icon or "paperclip", size = 14 }

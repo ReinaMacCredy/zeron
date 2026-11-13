@@ -19,7 +19,6 @@ local sessions = require("@account/sessions")
 local Carried = require("@app/screens/chat/carried")
 local ChatLinks = require("@app/screens/chat/chat_links")
 local locale = require("@ds/locale")
-local route = require("@app/screens/shell/route")
 local mentions = require("@ds/composer_mentions")
 local prefs = require("@app/screens/settings/prefs")
 local Invocations = require("@app/screens/chat/invocations")
@@ -84,14 +83,11 @@ function M.bind(b: Bind): { [string]: any }
 					label = title,
 					-- (When it last moved: "5m", "3d".)
 					side = if type(c.updated) == "number" then locale.ago_short(os.time() - c.updated) else nil,
-					-- (Where it is: its project; and its project's tile, as the
-					-- sidebar draws it. None: the side chat's glyph.)
+					-- (Where it is: its project; its agent's mark, as its tab and
+					-- the live pill draw it. None known: the side chat's glyph.)
 					detail = if c.project then names[c.project] else nil,
-					tile = if c.project and names[c.project]
-						then (function(): any
-							local l: any = route.look(c.project) or { hue = route.hue(c.project) }
-							return { label = names[c.project], hue = l.hue, src = l.src, emoji = l.emoji, project = c.project }
-						end)()
+					agent = if c.mark or c.agent or c.harness
+						then { mark = c.mark or c.agent, icon = c.agent_icon, harness = c.harness }
 						else nil,
 					icon = "side-chat",
 					link = ChatLinks.link(title, c.id),
