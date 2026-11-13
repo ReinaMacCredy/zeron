@@ -811,7 +811,8 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         ("agent_icon", with.agent_icon.as_deref().map_or(Value::Nil, Value::from)),
         // Started by a Zeron chat through Zeron's tools ("subagent" or
         // "side"); none for a side chat the person started.
-        ("child_kind", opt(c["childKind"].as_str())),
+        // (The fork marks a person's side chat "side"; upstream marks only an agent's.)
+        ("child_kind", opt(c["childKind"].as_str().filter(|kind| *kind != "side"))),
         ("kind", Value::from(child_kind(c))),
         ("model", opt(c["config"]["model"].as_str())),
         ("reasoning", opt(c["config"]["reasoning"].as_str())),
@@ -3023,7 +3024,7 @@ mod tests {
             { "id": "a", "parentChatId": "p", "title": "", "lastMessagePreview": "Looking at the tests", "deviceId": "d",
               "createdAt": "2026-11-01T10:05:00Z", "lastMessageAt": "2026-11-01T10:06:00Z", "config": { "harness": "codex" },
               "childKind": "subagent" },
-            { "id": "b", "parentChatId": "p", "deviceId": "d", "createdAt": "2026-11-01T10:07:00Z" },
+            { "id": "b", "parentChatId": "p", "createdByChatId": "p", "childKind": "side", "deviceId": "d", "createdAt": "2026-11-01T10:07:00Z" },
             { "id": "gone", "parentChatId": "p", "archived": true, "deviceId": "d", "createdAt": "2026-11-01T10:08:00Z" },
         ]));
         s.set_live(serde_json::json!([
