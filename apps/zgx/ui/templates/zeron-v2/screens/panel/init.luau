@@ -513,8 +513,9 @@ end
 -- `page`, a plugin page's own panel). Whether a tab took it (a session or a
 -- page must be open).
 -- A chat's shell block run in its terminal, with its Enter: the terminal
--- shown (else the newest) when it waits at its prompt; a new tab in the
--- chat's folder when it's busy or there's none. Never typed into a program.
+-- shown (else the newest) when its host says it waits at its prompt; a new
+-- tab in the chat's folder when it's busy, can't tell (Windows, an older
+-- engine) or there's none. Never typed into a program.
 function M.run_in_terminal(session: any, text: string): boolean
 	local k = state.key(session)
 	if not k then
@@ -549,7 +550,7 @@ function M.run_in_terminal(session: any, text: string): boolean
 	end
 	local tab = pick :: Tab
 	terminal_api.status(tab.terminal :: string, tab.device):after(function(st: any)
-		if st and st.busy ~= true and st.exited ~= true and state.find(k, tab.id) then
+		if st and st.at_prompt == true and st.busy ~= true and st.exited ~= true and state.find(k, tab.id) then
 			terminal_api.write(tab.terminal :: string, tab.device, line):after(function() end, function() end)
 			show(tab.id)
 		else

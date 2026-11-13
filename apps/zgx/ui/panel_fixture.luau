@@ -23,6 +23,8 @@ local function term_note(what: string)
 	term_calls:set(table.concat(term_said, ","))
 end
 local busy = ui.state("test_term_busy", false)
+-- A host that can't tell whether its shell is at its prompt (Windows, an older engine).
+local unknown_prompt = ui.state("test_term_prompt_unknown", false)
 -- What's selected in its shell (zgx's `term.selection`).
 local term_selection = ui.state("test_term_selection", nil :: string?)
 local opened = 0
@@ -43,7 +45,7 @@ tapi.run_report = function(): any
 	return { after = function() end }
 end
 tapi.status = function(_id: string, _device: string?): any
-	return settle({ busy = busy:peek(), exited = false })
+	return settle({ busy = busy:peek(), exited = false, at_prompt = not busy:peek() and not unknown_prompt:peek() })
 end
 tapi.close = function(id: string, _device: string?): any
 	term_note(`close:{id}`)

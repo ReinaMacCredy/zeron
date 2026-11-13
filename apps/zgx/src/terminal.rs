@@ -80,6 +80,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         Ok(Value::record([
             ("busy", Value::Bool(reply["busy"].as_bool().unwrap_or(false))),
             ("exited", Value::Bool(reply["exited"].as_bool().unwrap_or(false))),
+            ("at_prompt", Value::Bool(reply["atPrompt"].as_bool().unwrap_or(false))),
         ]))
     });
     host.async_action("terminal.run_report", |arg| async move { run_report(arg).await });

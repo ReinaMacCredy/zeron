@@ -3071,6 +3071,10 @@ pub const COMMAND_EXIT_OSC: &str = "7502";
 pub struct TerminalStatus {
     pub busy: bool,
     pub exited: bool,
+    /// Its shell is known to be at its prompt: nothing else in the
+    /// foreground. False where that can't be told (Windows, older engines).
+    #[serde(default)]
+    pub at_prompt: bool,
 }
 
 /// One `SubscribeTerminal` stream item. `seq` is a per-terminal monotonic counter

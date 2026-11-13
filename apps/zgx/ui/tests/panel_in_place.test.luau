@@ -315,6 +315,19 @@ test("a busy terminal is left alone: the block runs in a new tab in the chat's f
 	expect(tab_titles(app)).to_contain("Terminal 2")
 end)
 
+test("a terminal that can't say it's at its prompt is left alone too: the block runs in a new tab", function()
+	local app = open_panel()
+	app:click("#panel-open-terminal")
+	expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
+	expect(claimed(app, 1)).to_be(true)
+	app:set_state("test_term_prompt_unknown", true)
+	run_block(app, "ls -la")
+	expect(eventually(app, function(): boolean
+		return string.find(term_calls(app), "write:term-2:ls -la⏎", 1, true) ~= nil
+	end)).to_be(true)
+	expect(term_calls(app)).never.to_contain("write:term-1")
+end)
+
 test("with no terminal yet, a shell block opens one and runs there", function()
 	local app = open_panel()
 	run_block(app, "pwd")

@@ -9,7 +9,7 @@ use futures::future::BoxFuture;
 use zeron_proto::{HarnessId, UserInputQuestion};
 
 use crate::registry::HarnessRegistry;
-use crate::titles::{OneShot, cheapest_model, one_shot_target, run_one_shot};
+use crate::titles::{OneShot, cheapest_model, on_harness, run_one_shot};
 
 /// Decides one approval request: `true` lets it through.
 pub(crate) type Review =
@@ -66,15 +66,7 @@ pub(crate) async fn review(
 ) -> bool {
     let limit = timeout();
     let ask = async {
-        let target = one_shot_target(
-            &registry,
-            Some(harness_id),
-            None,
-            harness_id,
-            instance,
-            cheapest_model,
-        )
-        .await?;
+        let target = on_harness(&registry, harness_id, instance, None, cheapest_model).await?;
         run_one_shot(
             &registry,
             target.harness.as_ref(),
