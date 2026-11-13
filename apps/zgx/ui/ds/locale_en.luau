@@ -604,6 +604,7 @@ return {
 	["ds.composer.move_draft"] = "Move draft to new thread",
 	["ds.composer.send_new"] = "Send in new thread",
 	["ds.markdown.fit_content"] = "Fit content",
+	["ds.markdown.render_markdown"] = "Render Markdown",
 	["ds.markdown.copy_code"] = "Copy code",
 	["ds.markdown.copied"] = "Copied",
 	["ds.markdown.view_named"] = "View {name}",

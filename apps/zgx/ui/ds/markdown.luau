@@ -1220,8 +1220,9 @@ end
 -- quiet panel.
 -- (`class` and `provide`: what plugins place it by, and read where they
 -- do; `block` gives them.)
-local CodeBlock = ui.component(function(props: { lang: string, text: string, class: string?, provide: { [string]: any }?, find: CodeFind?, veil: CodeVeil? }): Node
+local CodeBlock = ui.component(function(props: { lang: string, text: string, class: string?, provide: { [string]: any }?, find: CodeFind?, veil: CodeVeil?, render: (() -> Node)? }): Node
 	local copied = ui.use_state(false)
+	local rendered = ui.use_state(props.render ~= nil)
 	local stop: (() -> ())? = nil
 	local text = code_shown(props.text)
 	local function copy()
@@ -1265,14 +1266,26 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 				grow = 1,
 				min_w = 0,
 			},
-			ToggleButton {
+			if props.render
+				then ToggleButton {
+					on = rendered,
+					label = locale.t("ds.markdown.render_markdown") :: any,
+					icon = "eye",
+					size = "sm",
+					tooltip = locale.s("ds.markdown.render_markdown"),
+					rounded = ui.raw(control.nest("$radius.xl", 1, 5), "concentric with the code block, as Copy"),
+				}
+				else nil,
+			ui.show(function(): boolean
+				return not rendered:get()
+			end, ToggleButton {
 				on = fit,
 				label = locale.t("ds.markdown.fit_content") :: any,
 				icon = "wrap-text",
 				size = "sm",
 				tooltip = locale.s("ds.markdown.fit_content"),
 				rounded = ui.raw(control.nest("$radius.xl", 1, 5), "concentric with the code block, as Copy"),
-			},
+			}),
 			ui.button {
 				label = locale.t("ds.markdown.copy_code"),
 				h = 24,
@@ -1298,10 +1311,12 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 				end),
 			},
 		},
-		ui.presence(function(): boolean
-			return fit:get()
-		end, function(fitted: boolean): Node
-			if fitted then
+		ui.presence(function(): string
+			return if rendered:get() then "rendered" elseif fit:get() then "fit" else "code"
+		end, function(shown: string): Node
+			if shown == "rendered" and props.render then
+				return ui.column { w_full = true, min_w = 0, px = "$space.4", pt = "$space.1", pb = "$space.4", props.render() }
+			elseif shown == "fit" then
 				return ui.column { w_full = true, min_w = 0, code_text(text, props.lang, true, props.find, props.veil) }
 			end
 			return ui.scroll_x {
@@ -1612,6 +1627,17 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 				find = find,
 				veil = code_veil,
 				class = if lang ~= "" then `md-code lang-{lang}` else "md-code",
+				render = if lang == "markdown" or lang == "md"
+					then function(): Node
+						local inner: any = if ctx then table.clone(ctx) else { tasks = {} }
+						inner.find, inner.veil, inner.source, inner.task, inner.tasks = nil, nil, nil, nil, {}
+						local nodes: { [any]: any } = { w_full = true, min_w = 0, gap = if inner.small then "$space.3" else "$space.4" }
+						for _, sub in parse(b.text, {}) do
+							table.insert(nodes, block(sub, ink, inner))
+						end
+						return ui.column(nodes)
+					end
+					else nil,
 			},
 		}
 	elseif b.t == "ul" or b.t == "ol" then

@@ -753,6 +753,7 @@
     },
     "markdown": {
       "fit_content": "Fit content",
+      "render_markdown": "Render Markdown",
       "copy_code": "Copy code",
       "copied": "Copied",
       "view_named": "View {name}",

@@ -753,6 +753,7 @@
     },
     "markdown": {
       "fit_content": "适合内容",
+      "render_markdown": "渲染 Markdown",
       "copy_code": "拷贝代码",
       "copied": "已拷贝",
       "view_named": "查看 {name}",
