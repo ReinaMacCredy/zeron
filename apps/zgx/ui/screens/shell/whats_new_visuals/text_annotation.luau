@@ -2,8 +2,8 @@ local K = require("@app/screens/shell/whats_new_visuals/kit")
 
 local SELECT_AT, PILL_AT, ADD_AT, SAVE_AT = 0.4, 1.2, 2.1, 3.7
 
-local function segment(label: string): Node
-	return ui.row { h_full = true, px = K.sp(10), items = "center", K.text(11, "$text.primary", label) }
+local function segment(label: string, pad: number): Node
+	return ui.row { h_full = true, px = K.sp(pad), items = "center", K.text(11, "$text.primary", label) }
 end
 
 local function float(props: { [any]: any }): Node
@@ -35,6 +35,7 @@ local function visual(clock: K.Clock, hero: boolean): Node
 		return K.typed("Use the real total", clock.t(), ADD_AT + 0.25, 0.05)
 	end
 	local inset = if hero then 8 else 38
+	local pad = if hero then 8 else 10
 	local badge = ui.row {
 		absolute = true,
 		top = function(): number
@@ -79,9 +80,9 @@ local function visual(clock: K.Clock, hero: boolean): Node
 		h = 26,
 		rounded = K.raw(13),
 		opacity = pill_in,
-		segment("Add to chat"),
+		segment("Add to chat", pad),
 		ui.div { w = 1, h_full = true, bg = "$border" },
-		segment("Ask in side chat"),
+		segment("Ask in side chat", pad),
 	}
 	local editor = float {
 		top = function(): number
@@ -174,7 +175,7 @@ local function visual(clock: K.Clock, hero: boolean): Node
 		if hero then nil else composer,
 	}
 	if hero then
-		return ui.column { w_full = true, px = K.sp(8), card }
+		return ui.column { w_full = true, px = K.sp(6), card }
 	end
 	return card
 end
