@@ -788,6 +788,8 @@ struct Open {
     // (A delegate's limit card stands in its parent's transcript.)
     limits: Vec<Json>,
     cut: Option<String>,
+    // An edited prompt's replacement keeps the edited row's id, so the transcript keeps its row (and its measured height) through the swap.
+    shown_as: HashMap<String, String>,
 }
 
 pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
@@ -2940,7 +2942,7 @@ impl View {
             let context = build_context(open, &chats);
             let whole_from = open.entries.len().saturating_sub(WHOLE_TAIL);
             let source = chats.chat(&open.id).and_then(|c| c["forkedFromChatId"].as_str().map(str::to_owned));
-            let Open { entries, older_todo, built, cut, .. } = open;
+            let Open { entries, older_todo, built, cut, shown_as: aliases, .. } = open;
             if cut.as_ref().is_some_and(|cut| !entries.iter().any(|e| &*e.id == cut.as_str())) {
                 *cut = None;
             }
@@ -2974,7 +2976,7 @@ impl View {
                 if let Some(row) = &row.row {
                     seen.row(row);
                 }
-                list.extend(row.row);
+                list.extend(row.row.map(|row| shown_as(row, aliases)));
                 seen.add(row.subagents.as_deref());
                 if e.fork_import {
                     seam = Some(list.len());
@@ -3025,7 +3027,7 @@ impl View {
             }
             if let Some(pending) = self.pending.borrow().get(&open.id) {
                 // (A queue row on its way already shows in the queue; failed, it shows here with its retry.)
-                for row in pending.iter().filter(|p| !(p.row && p.waiting == "sending")).map(Pending::value) {
+                for row in pending.iter().filter(|p| !(p.row && p.waiting == "sending")).map(|p| shown_as(p.value(), &open.shown_as)) {
                     seen.row(&row);
                     list.push(row);
                 }
@@ -3409,13 +3411,13 @@ impl View {
         let entry = req.field("entry").map(text).filter(|e| !e.is_empty()).ok_or("That prompt is no longer in the chat.")?;
         let message_id = req.field("message_id").map(text).filter(|s| !s.is_empty()).unwrap_or_else(new_id);
         let words = req.field("text").map(text).unwrap_or_default();
-        self.cut(&id, Some(entry.clone()));
+        self.cut(&id, Some(entry.clone()), Some(&message_id));
         self.pending.borrow_mut().entry(id.clone()).or_default().push(Pending::sending(&message_id, &words, &req));
         self.publish_messages();
         let target = chats.target(&chats.chat(&id).unwrap_or(Json::Null));
         let rewound = engine::get().call("RewindChat", crate::sessions::rewind_params(&id, &entry, target.as_deref())).await;
         if let Err(why) = rewound {
-            self.cut(&id, None);
+            self.cut(&id, None, Some(&message_id));
             self.forget_pending(&id, &message_id);
             self.publish_messages();
             return Err(why);
@@ -3425,8 +3427,17 @@ impl View {
         Ok(Value::from(message_id.as_str()))
     }
 
-    fn cut(&self, id: &str, entry: Option<String>) {
+    fn cut(&self, id: &str, entry: Option<String>, replacement: Option<&str>) {
         if let Some(open) = self.open.borrow_mut().as_mut().filter(|o| o.id == id) {
+            match (&entry, replacement) {
+                (Some(old), Some(new)) => {
+                    open.shown_as.insert(new.to_owned(), old.clone());
+                }
+                (None, Some(new)) => {
+                    open.shown_as.remove(new);
+                }
+                _ => {}
+            }
             open.cut = entry;
         }
     }
@@ -5941,6 +5952,17 @@ fn fork_seam(source: Option<&Json>) -> Value {
         ("text", Value::from("")),
         ("title", Value::from(single_line(title).as_str())),
     ])
+}
+
+fn shown_as(row: Value, shown_as: &HashMap<String, String>) -> Value {
+    let alias = match row.field("id") {
+        Some(Value::Str(id)) => shown_as.get(&**id).cloned(),
+        _ => None,
+    };
+    match alias {
+        Some(alias) => with_fields(row, [("id", Value::from(alias.as_str()))]),
+        None => row,
+    }
 }
 
 fn resumed_row(id: &str) -> Value {
@@ -11372,18 +11394,24 @@ mod tests {
         assert_eq!(rows[2].field("line"), Some(&Value::from("fork")));
         assert_eq!(rows[2].field("title"), Some(&Value::from("Checkout copy")));
 
-        view.cut("fork", Some("u2".into()));
+        view.cut("fork", Some("u2".into()), Some("new"));
         view.pending.borrow_mut().entry("fork".into()).or_default().push(Pending::sending("new", "Edited", &Value::Nil));
         view.publish_messages();
-        assert_eq!(ids(&view), ["u1", "a1", "fork-seam", "new"]);
-        view.cut("fork", None);
+        assert_eq!(ids(&view), ["u1", "a1", "fork-seam", "u2"]);
+        let Value::List(rows) = view.messages.get() else { unreachable!() };
+        assert_eq!(rows[3].field("text"), Some(&Value::from("Edited")));
+        view.cut("fork", None, Some("new"));
         view.publish_messages();
         assert_eq!(ids(&view), ["u1", "a1", "fork-seam", "u2", "a2", "new"]);
-        view.cut("fork", Some("u2".into()));
+        view.cut("fork", Some("u2".into()), Some("new"));
         view.open.borrow_mut().as_mut().unwrap().entries.truncate(2);
         view.publish_messages();
-        assert_eq!(ids(&view), ["u1", "a1", "fork-seam", "new"]);
+        assert_eq!(ids(&view), ["u1", "a1", "fork-seam", "u2"]);
         assert!(view.open.borrow().as_ref().unwrap().cut.is_none());
+        view.pending.borrow_mut().clear();
+        view.open.borrow_mut().as_mut().unwrap().entries.push(entry("new", "user", false));
+        view.publish_messages();
+        assert_eq!(ids(&view), ["u1", "a1", "fork-seam", "u2"]);
         CHATS.with(|c| c.chats.borrow_mut().clear());
     }
 

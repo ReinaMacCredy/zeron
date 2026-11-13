@@ -2085,10 +2085,11 @@ local function Transcript(props: Props): Node
 	}
 
 	local branch = props.branch
-	local editing = ui.use_state(nil :: { id: string, index: number, phase: MessageEdit.Phase, at_end: boolean, sent: boolean? }?)
+	local editing = ui.use_state(nil :: { id: string, index: number, phase: MessageEdit.Phase, at_end: boolean }?)
 	local edit_text = ui.use_state("")
 	local dim = ui.use_state(0)
-	local fold = ui.use_state(nil :: { first: string, from: number, heights: { [string]: number } }?)
+	local fold = ui.use_state(nil :: { first: string, from: number, holds: boolean, inners: { [string]: number }, lost: number }?)
+	local runway = ui.use_state(nil :: { id: string, dy: number }?)
 	local fold_h = ui.use_state(0)
 	local fold_o = ui.use_state(0)
 	local fold_runs: { any } = {}
@@ -2125,26 +2126,30 @@ local function Transcript(props: Props): Node
 		})
 		fold_runs = { this, anime.animate(fold_o, { value = { fold_o:peek(), to }, duration = FOLD_FADE_MS, ease = "linear" }) }
 	end
-	local function fold_from(from: number, done: () -> ())
+	local function fold_from(from: number, holds: boolean, done: () -> ())
 		local first = messages:at(from)
 		if not first then
 			done()
 			return
 		end
-		local heights = {}
+		local inners, lost = {}, 0
 		for id, r in rows do
 			if r.index:peek() >= from then
-				heights[id] = sizes[id] or ESTIMATE
+				inners[id] = r.inner.height or 0
+				lost += (r.inner.height or 0) + TURN_GAP
 			end
 		end
 		fold_h:set(0)
 		fold_o:set(0)
-		fold:set { first = first.id, from = from, heights = heights }
+		fold:set { first = first.id, from = from, holds = holds, inners = inners, lost = lost }
 		run_fold(1, done)
 	end
-	local function unfold()
+	local function unfold(done: (() -> ())?)
 		run_fold(0, function()
 			fold:set(nil)
+			if done then
+				done()
+			end
 		end)
 	end
 	ui.effect(function()
@@ -2152,7 +2157,7 @@ local function Transcript(props: Props): Node
 		if f and messages:index_of("id", f.first) == nil then
 			fold:set(nil)
 		end
-		if e and (e.phase ~= "send" or e.sent) and messages:index_of("id", e.id) == nil then
+		if e and e.phase ~= "send" and messages:index_of("id", e.id) == nil then
 			editing:set(nil)
 			dim:set(0)
 		end
@@ -2209,19 +2214,28 @@ local function Transcript(props: Props): Node
 			return
 		end
 		phase_to("send")
+		local r = rows[e.id]
+		local row_el, list_el = r and r.outer:peek(), list:peek()
+		local dy = if row_el and list_el and row_el.y ~= nil and list_el.y ~= nil then (row_el.y :: number) - (list_el.y :: number) else 0
 		local b = branch :: Branch
-		fold_from(e.index + 1, function()
+		fold_from(e.index + 1, true, function()
 			local m = messages:at(e.index)
 			if not m or m.id ~= e.id then
 				return
 			end
+			ui.batch(function()
+				runway:set { id = e.id, dy = math.max(0, dy) }
+				mark_sent(e.id)
+			end)
 			b.edit(m, text, function()
 				phase_to("open")
+				runway:set(nil)
 				unfold()
 			end, function()
 				local now = editing:peek()
 				if now and now.id == e.id then
-					editing:set { id = now.id, index = now.index, phase = now.phase, at_end = now.at_end, sent = true }
+					editing:set(nil)
+					dim:set(0)
 				end
 			end)
 		end)
@@ -2307,7 +2321,7 @@ local function Transcript(props: Props): Node
 						start = function(done: () -> ())
 							local index = messages:index_of("id", m.id)
 							if index then
-								fold_from(index, done)
+								fold_from(index, false, done)
 							end
 						end,
 						back = unfold,
@@ -2315,6 +2329,11 @@ local function Transcript(props: Props): Node
 				end),
 			}
 		end
+	end
+
+	local function placed(id: string): number
+		local r = runway:get()
+		return if r and r.id == id then r.dy else 0
 	end
 
 	local function row(m: Message, index: State<number>, state: State<Message>): Node
@@ -2335,7 +2354,7 @@ local function Transcript(props: Props): Node
 				return 0
 			end
 			if mine then
-				return if sent_here(m.id) then list.height or 0 else 0
+				return if sent_here(m.id) then (list.height or 0) - placed(m.id) else 0
 			end
 			if i < 2 then
 				return 0
@@ -2345,7 +2364,7 @@ local function Transcript(props: Props): Node
 			if not prompt or prompt.id ~= p.id or not sent_here(prompt.id) then
 				return 0
 			end
-			return math.max(0, (list.height or 0) - p.h)
+			return math.max(0, (list.height or 0) - placed(prompt.id) - p.h)
 		end
 		local function last(): boolean
 			return index:get() == count:get()
@@ -2430,18 +2449,12 @@ local function Transcript(props: Props): Node
 			end,
 			relative = true,
 			min_h = function(): number
-				return if folded() then 0 else need()
-			end,
-			max_h = function(): number
 				local p = folded()
-				local f = fold:peek()
+				local f = fold:get()
 				if p and f then
-					return (f.heights[m.id] or sizes[m.id] or ESTIMATE) * (1 - p)
+					return if f.holds and last() then ((f.inners[m.id] or 0) + TURN_GAP) * (1 - p) + TAIL + math.max(foot(), foot_held:get()) + f.lost * p else 0
 				end
-				return 1e6
-			end,
-			overflow = function(): string
-				return if folded() then "hidden" else "visible"
+				return need()
 			end,
 			opacity = function(): number
 				local e = editing:get()
@@ -2450,6 +2463,14 @@ local function Transcript(props: Props): Node
 			end,
 			ui.column {
 				ref = inner,
+				max_h = function(): number
+					local p = folded()
+					local f = fold:peek()
+					return if p and f then (f.inners[m.id] or 0) * (1 - p) else 1e6
+				end,
+				overflow = function(): string
+					return if folded() then "hidden" else "visible"
+				end,
 				relative = true,
 				-- A prompt's own height (its words, and the room above it, not
 				-- the runway it may hold): what its reply's runway leaves it.

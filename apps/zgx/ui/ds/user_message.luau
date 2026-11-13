@@ -479,6 +479,12 @@ return ui.component(function(props: Props): Node
 		end
 	end
 	local bubble_size = { w = 0, h = 0 }
+	local words_now: any = if props.editing and props.now
+		then function(): string
+			local n: any = (props.now :: () -> Now?)()
+			return if n and type(n.text) == "string" then n.text else props.text
+		end
+		else props.text
 	local function words(): Node
 		return ui.column {
 			on_resize = function(size: { w: number, h: number })
@@ -516,7 +522,7 @@ return ui.component(function(props: Props): Node
 						end
 						return tostring(n)
 					end, function(): Node
-						return Markdown { text = props.text, breaks = true, open = open, link_menu = props.link_menu, chat_mark = props.chat_mark, attachment_icon = attachment_icon, invocations = true, find = props.find, wash = props.wash, attached = attached_by_name(props.attachments) }
+						return Markdown { text = words_now, breaks = true, open = open, link_menu = props.link_menu, chat_mark = props.chat_mark, attachment_icon = attachment_icon, invocations = true, find = props.find, wash = props.wash, attached = attached_by_name(props.attachments) }
 					end, { w_full = true }),
 				},
 			},

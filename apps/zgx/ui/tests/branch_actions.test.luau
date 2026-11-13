@@ -58,11 +58,8 @@ test("branch actions: an edit sent rewinds at that prompt and sends the new word
 	app:key("Enter")
 	wait(app, 500)
 	expect(app:state("calls")).to_contain("rewind_send:b1:bu2:Make it warmer and mention free shipping.:true")
-	local now = ids(app)
-	expect(now).to_contain("bu1,ba1,")
-	expect(now).never.to_contain("bu2")
-	expect(now).never.to_contain("ba2")
-	expect(now).never.to_contain("bu3")
+	expect(ids(app)).to_be("bu1,ba1,bu2")
+	expect(app:state("chat.messages")[3].text).to_be("Make it warmer and mention free shipping.")
 	expect(app:has('~"Make it warmer and mention free shipping."')).to_be(true)
 	expect(app:has("#message-edit")).to_be(false)
 end)
@@ -222,38 +219,66 @@ local function edit_and_send(app: any, words: string, own_words: string): (numbe
 	return before, ys, owns
 end
 
-test("branch actions: with the turns in view, nothing above the edited message moves, open, send or landing", function()
-	local app = mount("chat_fixture.luau")
-	app:resize(1000, 900)
+local REPLY = "Here is the banner, friendlier: Free shipping on every order, and returns are easy for thirty days."
+
+local function stream_reply(app: any, ys: { number })
+	local ms = table.clone(app:state("chat.messages"))
+	ms[#ms] = table.clone(ms[#ms])
+	ms[#ms].waiting = nil
+	table.insert(ms, { id = "r1", role = "assistant", text = "", model = "Opus", streaming = true, started = 0, blocks = { { id = "t0", kind = "text", text = "" } } })
+	app:set_state("chat.messages", ms)
+	app:frames(2)
+	table.insert(ys, y_of(app, "Here is a short version:") :: number)
+	for k = 8, #REPLY, 8 do
+		local part = string.sub(REPLY, 1, k)
+		app:set_state("chat.draft", { id = "r1", text = part, part = "t0", part_text = part })
+		app:frames(1)
+		table.insert(ys, y_of(app, "Here is a short version:") :: number)
+	end
+end
+
+local function still_through(app: any, h: number)
+	app:resize(1000, h)
 	app:command("go_b1")
 	app:frames(30)
-	local before, ys, owns = edit_and_send(app, "Now one for the mobile banner, under 30 characters.", "Now a version for the mobile banner")
+	app:hover('~"Make it friendlier"')
+	app:frames(20)
+	local before = y_of(app, "Here is a short version:")
+	app:click('role:button "Edit message"')
+	local ys: { number } = {}
+	local heights: { number } = {}
+	for _ = 1, 16 do
+		app:frames(1)
+		table.insert(ys, y_of(app, "Here is a short version:") :: number)
+		local _, bh = box_of(app, "#message-edit-box")
+		table.insert(heights, bh or 0)
+	end
+	expect(heights[#heights] > heights[1]).to_be(true)
+	app:fill('role:textbox "Your message"', "Make it warmer and mention free shipping.")
+	app:key("Enter")
+	for _ = 1, 24 do
+		app:frames(1)
+		table.insert(ys, y_of(app, "Here is a short version:") :: number)
+	end
+	expect(app:state("calls")).to_contain("rewind_send:b1:bu2:")
+	expect(ids(app)).to_be("bu1,ba1,bu2")
+	stream_reply(app, ys)
+	return before :: number, ys
+end
+
+test("branch actions: with the turns in view, nothing above the edited message moves through open, send, collapse, landing and the reply", function()
+	local app = mount("chat_fixture.luau")
+	local before, ys = still_through(app, 900)
 	for _, y in ys do
 		expect(y).to_be(before)
 	end
-	for _, d in owns do
-		expect(d).to_be(0)
-	end
-	app:frames(4)
-	expect(app:state("calls")).to_contain("rewind_send:b1:bu3:")
-	expect(y_of(app, "Friendlier, with shipping:")).to_be(before)
 end)
 
-test("branch actions: scrolled to the end, the open holds still but for a point stepped off the end, and the fold settles the view smoothly", function()
+test("branch actions: scrolled to the end, nothing above moves after the point stepped off the end, through the collapse, landing and the reply", function()
 	local app = mount("chat_fixture.luau")
-	app:resize(1000, 460)
-	app:command("go_b1")
-	app:frames(30)
-	local before, ys = edit_and_send(app, "Now one for the mobile banner, under 30 characters.", "Now a version for the mobile banner")
-	for _ = 1, 6 do
-		app:frames(1)
-		table.insert(ys, y_of(app, "Friendlier, with shipping:") :: number)
-	end
-	expect(ys[1] - (before :: number) <= 1).to_be(true)
-	for i = 2, 16 do
-		expect(ys[i]).to_be(ys[1])
-	end
-	for i = 17, #ys do
-		expect(math.abs(ys[i] - ys[i - 1]) <= 45).to_be(true)
+	local before, ys = still_through(app, 600)
+	expect(ys[1] - before <= 1).to_be(true)
+	for _, y in ys do
+		expect(y).to_be(ys[1])
 	end
 end)

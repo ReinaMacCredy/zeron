@@ -3315,7 +3315,7 @@ do
 		note(`rewind_send:{req.session}:{req.entry}:{req.text}:{req.message_id ~= nil}`)
 		local was = TRANSCRIPTS[req.session] or {}
 		local kept = upto(was, req.entry, false)
-		table.insert(kept, { id = req.message_id, role = "user", text = req.text, attachments = {}, waiting = "sending" })
+		table.insert(kept, { id = req.entry, role = "user", text = req.text, attachments = {}, waiting = "sending" })
 		if opened == req.session then
 			store.messages:set(kept)
 		end
