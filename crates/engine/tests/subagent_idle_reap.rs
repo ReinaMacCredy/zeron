@@ -356,7 +356,9 @@ async fn reaper_still_ends_a_session_whose_subagent_went_silent() {
 
 #[tokio::test]
 async fn a_teardown_stamps_a_live_subagent_stopped_not_failed() {
-    let Parked { core, feed, _dir } = park_after_spawn().await;
+    let Parked {
+        core, feed, _dir, ..
+    } = park_after_spawn().await;
 
     feed.send(tagged(AgentEvent::TextDelta {
         text: "starting. ".into(),
@@ -387,6 +389,7 @@ async fn task_cancel_tears_down_a_child_parked_on_its_subagents() {
     registry.register(Arc::new(FeedHarness {
         main_prompt: "probe the cache".into(),
         feed: Mutex::new(Some(rx)),
+        turn: Default::default(),
     }));
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();

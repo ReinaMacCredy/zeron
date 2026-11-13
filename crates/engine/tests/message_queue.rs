@@ -2226,6 +2226,7 @@ async fn a_send_issued_before_the_running_turn_started_is_the_next_turn_not_a_st
             expires_at: Some(issued_at + 3_600_000),
             status: zeron_doc::SessionCommandStatus::Pending,
             resolution: None,
+            computer_generation: None,
         }
     };
     let doc = core.doc_host.open(CHAT).unwrap();

@@ -2098,6 +2098,10 @@ async fn a_run_from_another_device_names_the_hosts_copy_of_its_upload() {
                 resume: None,
                 env: Default::default(),
                 extra_mcp: Vec::new(),
+                branch: None,
+                forked_at: None,
+                computer_control: false,
+                disabled_tools: Vec::new(),
             },
             message_id: "m-foreign-1".into(),
         },
@@ -2107,6 +2111,7 @@ async fn a_run_from_another_device_names_the_hosts_copy_of_its_upload() {
         expires_at: None,
         status: SessionCommandStatus::Pending,
         resolution: None,
+        computer_generation: None,
     };
     core_b
         .doc_host

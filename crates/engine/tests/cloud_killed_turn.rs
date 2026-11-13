@@ -54,6 +54,10 @@ fn run_request(prompt: &str) -> RunRequest {
         resume: None,
         env: Default::default(),
         extra_mcp: Vec::new(),
+        branch: None,
+        forked_at: None,
+        computer_control: false,
+        disabled_tools: Vec::new(),
     }
 }
 
@@ -151,6 +155,9 @@ impl Disk {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                answers_request_id: None,
+                fork_import: false,
+                from_chat_id: None,
             })
             .unwrap();
         self
@@ -170,6 +177,9 @@ impl Disk {
                 status: Some(MessageStatus::Streaming),
                 continuation_of: None,
                 duration_ms: None,
+                answers_request_id: None,
+                fork_import: false,
+                from_chat_id: None,
             })
             .unwrap();
         self
@@ -189,6 +199,7 @@ impl Disk {
                 expires_at: None,
                 status: SessionCommandStatus::Pending,
                 resolution: None,
+                computer_generation: None,
             })
             .unwrap();
         if status != SessionCommandStatus::Pending {

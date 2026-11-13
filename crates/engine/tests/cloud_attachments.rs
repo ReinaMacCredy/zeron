@@ -403,8 +403,12 @@ fn text_request(prompt: &str) -> RunRequest {
         plan: false,
         attachments: Vec::new(),
         worktree: None,
+        branch: None,
+        forked_at: None,
+        computer_control: false,
         resume: None,
         env: Default::default(),
+        disabled_tools: Vec::new(),
         extra_mcp: Vec::new(),
     }
 }
@@ -429,6 +433,7 @@ fn entry(id: &str, payload: SessionCommandPayload, issued_at: i64) -> SessionCom
         expires_at: None,
         status: SessionCommandStatus::Pending,
         resolution: None,
+        computer_generation: None,
     }
 }
 
@@ -777,6 +782,9 @@ async fn a_row_on_a_machines_disk_waits_for_the_turn_the_kill_cut_off() {
         status: Some(MessageStatus::Complete),
         continuation_of: None,
         duration_ms: None,
+        answers_request_id: None,
+        fork_import: false,
+        from_chat_id: None,
     })
     .unwrap();
     doc.push_message(&zeron_doc::SessionMessageEntry {
@@ -791,6 +799,9 @@ async fn a_row_on_a_machines_disk_waits_for_the_turn_the_kill_cut_off() {
         status: Some(MessageStatus::Streaming),
         continuation_of: None,
         duration_ms: None,
+        answers_request_id: None,
+        fork_import: false,
+        from_chat_id: None,
     })
     .unwrap();
     doc.push_queued(&QueuedMessage::new("row-1", "and then this", "phone"))

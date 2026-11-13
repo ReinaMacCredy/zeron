@@ -123,6 +123,10 @@ fn run_request() -> RunRequest {
         resume: None,
         env: Default::default(),
         extra_mcp: Vec::new(),
+        branch: None,
+        forked_at: None,
+        computer_control: false,
+        disabled_tools: Vec::new(),
     }
 }
 
@@ -313,6 +317,7 @@ async fn registry_writes_per_turn_and_parked_minute() {
             expires_at: None,
             status: SessionCommandStatus::Pending,
             resolution: None,
+            computer_generation: None,
         })
         .expect("queue run");
     wait_for(

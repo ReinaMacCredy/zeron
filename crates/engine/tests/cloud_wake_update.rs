@@ -175,6 +175,10 @@ fn send(core: &EngineCore, id: &str, prompt: &str) {
                     resume: None,
                     env: Default::default(),
                     extra_mcp: Vec::new(),
+                    branch: None,
+                    forked_at: None,
+                    computer_control: false,
+                    disabled_tools: Vec::new(),
                 },
                 message_id: id.into(),
             },
@@ -505,6 +509,9 @@ async fn a_killed_turn_waits_for_the_check_too() {
             status: Some(status),
             continuation_of: None,
             duration_ms: None,
+            answers_request_id: None,
+            fork_import: false,
+            from_chat_id: None,
         })
         .unwrap();
     }

@@ -1020,6 +1020,10 @@ async fn a_message_that_waited_days_for_its_machine_goes_once_when_woken() {
             resume: None,
             env: Default::default(),
             extra_mcp: Vec::new(),
+            branch: None,
+            forked_at: None,
+            computer_control: false,
+            disabled_tools: Vec::new(),
         },
         message_id: message.into(),
     };
@@ -1040,6 +1044,7 @@ async fn a_message_that_waited_days_for_its_machine_goes_once_when_woken() {
                 expires_at: Some(issued_at + DAY),
                 status: SessionCommandStatus::Pending,
                 resolution: None,
+                computer_generation: None,
             })
             .unwrap();
     }

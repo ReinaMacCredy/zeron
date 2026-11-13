@@ -194,6 +194,10 @@ fn request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         extra_mcp: Vec::new(),
+        branch: None,
+        forked_at: None,
+        computer_control: false,
+        disabled_tools: Vec::new(),
     }
 }
 
