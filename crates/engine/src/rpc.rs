@@ -8988,6 +8988,7 @@ impl RpcService for EngineRpc {
                     p.url.as_deref(),
                 )
                 .map_err(RpcError::BadParams)?;
+                let mut message = zeron_proto::html_render::RENDERED_MESSAGE.to_owned();
                 let page = match input {
                     zeron_proto::html_render::RenderInput::Url(url) => {
                         crate::html_render::live_page(url, &p.title, p.height)
@@ -9001,6 +9002,7 @@ impl RpcService for EngineRpc {
                             }
                             _ => p.html.clone().unwrap_or_default(),
                         };
+                        message = zeron_proto::html_render::rendered_message(&html);
                         let uploads = self.uploads.clone();
                         let (chat_id, title, height) = (p.chat_id.clone(), p.title.clone(), p.height);
                         tokio::task::spawn_blocking(move || {
@@ -9023,7 +9025,7 @@ impl RpcService for EngineRpc {
                 self.sessions.bind_html_render(&p.chat_id, key, page.clone());
                 RpcReply::value(&serde_json::json!({
                     "htmlRender": page,
-                    "message": zeron_proto::html_render::RENDERED_MESSAGE,
+                    "message": message,
                 }))
             }
             methods::HTML_PREVIEW => {

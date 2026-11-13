@@ -267,7 +267,7 @@ pub fn stale_engine_reply(error: &str, sent: RenderInput<'_>) -> Option<String> 
     })
 }
 
-pub const PICK_GUIDE: &str = "Options: when the page offers choices to pick from, make each option a <button> with data-zeron-pick=\"A2\" (its code), data-zeron-group=\"A\" (one pick per group; leave it out for options picked freely) and data-zeron-label=\"Floating tab\", and data-zeron-desc for a one-line description; data-zeron-group-label names a group. A click puts the pick in the person's composer; the host marks chosen buttons data-zeron-chosen and sent ones data-zeron-locked, and fills an element with data-zeron-count. You receive the picks with their message.";
+pub const PICK_GUIDE: &str = "Options: when the person is to decide between options (A/B variants, including toggles that switch what the page shows), make each option a <button> with data-zeron-pick=\"A2\" (its code), data-zeron-group=\"A\" (one pick per group; leave it out for options picked freely) and data-zeron-label=\"Floating tab\", and data-zeron-desc for a one-line description; data-zeron-group-label names a group. Controls that only change the view, such as Reset or slow motion, stay plain buttons. A click puts the pick in the person's composer; the host marks chosen buttons data-zeron-chosen and sent ones data-zeron-locked, and fills an element with data-zeron-count. You receive the picks with their message.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pick {
@@ -960,10 +960,22 @@ pub const LAYOUT_GUIDE: &str = "Layout: the frame is borderless on the thread's 
 pub const THEME_GUIDE: &str = "Theme: CSS variables on :root that follow the person's theme and light or dark mode live: --background (the thread's), --foreground, --muted, --muted-foreground, --card, --card-foreground, --popover, --popover-foreground, --secondary, --secondary-foreground, --border, --input, --ring, --primary, --primary-foreground, --accent, --accent-foreground, --accent-surface, --accent-surface-foreground, --destructive, --destructive-foreground, --destructive-surface, --warning, --warning-foreground, --warning-surface, --success, --success-foreground, --success-surface, --info, --info-foreground, --code-background, --code-foreground, --chart-1 … --chart-6 (series), --radius, --font-sans, --font-mono, --faint-foreground, --hover, --border-strong, --selection, --danger, --surface-treatment, and type sizes in px: --font-size-xs, --font-size-sm, --font-size, --font-size-lg, --font-size-xl, --font-size-2xl, --font-size-code, --line-height. <html> carries data-surface (glass|opaque) and data-appearance (light|dark). The base stylesheet sets color and font, body margin 0, and hides the scrollbar.";
 
 /// Run guidance: when to answer with a page instead of only text.
-pub const GUIDANCE: &str = "When a visual says more than prose, show it before your final reply: a chart, table, dashboard, diagram, simulation or 3D view as a Luau script with the zeron `show_visual` tool; an image collage or UI mockup as one self-contained HTML page with `html_render`. It appears live above your reply in the person's theme; the reply adds only what it doesn't say.";
+pub const GUIDANCE: &str = "When a visual says more than prose, show it before your final reply: a chart, table, dashboard, diagram, simulation or 3D view as a Luau script with the zeron `show_visual` tool; an image collage or UI mockup as one self-contained HTML page with `html_render`, its options marked `data-zeron-pick` so a click lands in the person's composer. It appears live above your reply in the person's theme; the reply adds only what it doesn't say.";
 
 /// What `html_render` tells the agent once the page is shown.
 pub const RENDERED_MESSAGE: &str = "Shown to the reader above your reply. Don't mention or describe the page; reply with only what it doesn't already say.";
+
+const UNPICKED_HINT: &str = "The page has buttons but none carries data-zeron-pick: if any of them is an option the person decides between, add the pick attributes and show the page again.";
+
+pub fn rendered_message(html: &str) -> String {
+    let page = html.to_ascii_lowercase();
+    let clickable = page.contains("<button") || page.contains("role=\"button\"");
+    if clickable && !page.contains("data-zeron-pick") {
+        format!("{RENDERED_MESSAGE} {UNPICKED_HINT}")
+    } else {
+        RENDERED_MESSAGE.to_owned()
+    }
+}
 
 pub const CHAT_FOLDER: &str = "this chat's folder";
 pub const CURRENT_FOLDER: &str = "the current folder";
@@ -1140,6 +1152,16 @@ pub fn title_from_html(html: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_of_buttons_without_picks_is_told_to_mark_them() {
+        let unpicked =
+            rendered_message("<body><button>A · fixed</button><button>B · fluid</button></body>");
+        assert!(unpicked.starts_with(RENDERED_MESSAGE) && unpicked.contains("data-zeron-pick"));
+        let picked = "<button data-zeron-pick=\"A1\" data-zeron-group=\"A\">A</button><button>Reset</button>";
+        assert_eq!(rendered_message(picked), RENDERED_MESSAGE);
+        assert_eq!(rendered_message("<svg><rect/></svg>"), RENDERED_MESSAGE);
+    }
 
     fn fixed_theme() -> PageTheme {
         let g = |v: u8, a: f32| Rgba {
