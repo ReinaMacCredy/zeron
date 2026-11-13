@@ -117,7 +117,7 @@ end
 function M.gone(text: string, cargo: { any }): { string }
 	local out: { string } = {}
 	for _, it in cargo do
-		if it.shown and (it.kind == "pick" or (it.kind == "file" and not it.inline)) and not M.find_chip(text, it.shown) then
+		if it.shown and not it.inline and not M.find_chip(text, it.shown) then
 			table.insert(out, it.id)
 		end
 	end
