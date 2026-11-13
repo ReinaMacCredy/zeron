@@ -200,7 +200,9 @@ return ui.component(function(props: Props): Node
 				end,
 				w_full = true,
 				h = function(): number
-					return lerp(text_h:get(), math.max(0, twin:get().h - 2 * pad_top), sent:get())
+					local o = opened:get()
+					local open_h = math.max(text_h:get(), lerp(props.from.h, natural_h(), o) - pad_top - BAR_H * o)
+					return lerp(open_h, math.max(0, twin:get().h - 2 * pad_top), sent:get())
 				end,
 				shrink = 0,
 				mt = "$zeron.space.snug",
