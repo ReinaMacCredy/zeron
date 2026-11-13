@@ -1230,8 +1230,8 @@ local RUNS: { [string]: boolean } = {
 
 -- A shell block as a terminal is to get it, nil for one it doesn't run: its
 -- source without the trailing newline; a `console` block's commands only,
--- the lines after a prompt (`$ `, `% `, `❯ `), its output left out. (The
--- one Enter after it is the runner's.)
+-- the lines after a prompt (`$ `, `% `, `❯ `) and their `> ` continuations,
+-- its output left out. (The one Enter after it is the runner's.)
 local function run_text(lang: string?, text: string): string?
 	local kind = string.lower(lang or "")
 	if not RUNS[kind] then
@@ -1242,11 +1242,14 @@ local function run_text(lang: string?, text: string): string?
 		return out
 	end
 	local lines: { string } = {}
+	local in_command = false
 	for line in string.gmatch(out .. "\n", "([^\n]*)\n") do
 		local command = string.match(line, "^%$ (.*)$") or string.match(line, "^%% (.*)$") or string.match(line, "^❯ (.*)$")
-		if command then
-			table.insert(lines, command)
+		local continued = if in_command then string.match(line, "^> (.*)$") else nil
+		if command or continued then
+			table.insert(lines, command or continued)
 		end
+		in_command = command ~= nil or continued ~= nil
 	end
 	return if #lines > 0 then table.concat(lines, "\n") else nil
 end

@@ -57,7 +57,7 @@ test("Run hands over the block's exact text, and of a session only the commands 
 	local ran = app:state("test_ran")
 	expect(#ran).to_be(2)
 	expect(ran[1]).to_be("cargo test -p zeron-engine\tquiet")
-	expect(ran[2]).to_be("cd /tmp\nmake all\n./run")
+	expect(ran[2]).to_be("cd /tmp\nmake all\n./run\nprintf '%s\\n' \\\nhello")
 end)
 
 test("Copy of a long command wrapped to fit gives its line as written", function()
