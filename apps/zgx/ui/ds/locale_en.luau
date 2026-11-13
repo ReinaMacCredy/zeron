@@ -611,6 +611,8 @@ return {
 	["ds.markdown.copied"] = "Copied",
 	["ds.markdown.view_named"] = "View {name}",
 	["ds.markdown.done"] = "Done",
+	["ds.markdown.run_code"] = "Run in terminal",
+	["ds.markdown.run"] = "Run",
 	["ds.mermaid.show_source"] = "Show source",
 	["ds.mermaid.show_diagram"] = "Show diagram",
 	["ds.mermaid.failed"] = "Couldn't draw this diagram: {reason}",

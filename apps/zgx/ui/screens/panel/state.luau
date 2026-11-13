@@ -38,6 +38,9 @@ export type Tab = {
 	-- chat and action it runs ({ space, device, chat, action }), run once
 	-- as the tab first shows; its name is the tab's `title`.
 	run: { [string]: any }?,
+	-- What's typed into a new terminal once it's open (a chat's shell
+	-- block, its Enter with it), then forgotten.
+	input: string?,
 	-- A plugin's tab: which plugin, its own kind, its title and icon, and
 	-- what it carries (screens/plugins opens it; the plugin draws it).
 	plugin: string?,
@@ -200,7 +203,7 @@ function M.open(key: string, kind: Kind, extra: { [string]: any }?): string
 	end
 	if kind == "terminal" and extra then
 		-- (A run action's: its name, and what runs it.)
-		tab.title, tab.run = extra.title, extra.run
+		tab.title, tab.run, tab.input = extra.title, extra.run, extra.input
 	end
 	if kind == "terminal" then
 		local count = 0

@@ -66,6 +66,7 @@ local ContextMenu = require("@ds/context_menu")
 local IconButton = require("@ds/icon_button").IconButton
 
 local state = require("@app/screens/panel/state")
+local terminal_api = require("@app/screens/panel/terminal_api")
 -- Tab groups. A panel's tabs can be split into groups laid out side
 -- by side and above one another (the tree of screens/shell/split), each
 -- with a strip of its own and the tab it shows; the focused one lifted,
@@ -577,6 +578,53 @@ end
 -- empty browser tab. The panel opens for the session showing (or, with
 -- `page`, a plugin page's own panel). Whether a tab took it (a session or a
 -- page must be open).
+-- A chat's shell block run in its terminal, with its Enter: the terminal
+-- shown (else the newest) when it waits at its prompt; a new tab in the
+-- chat's folder when it's busy or there's none. Never typed into a program.
+function M.run_in_terminal(session: any, text: string): boolean
+	local k = state.key(session)
+	if not k then
+		return false
+	end
+	local line = text .. "\r"
+	local function show(id: string)
+		state.activate(k, id)
+		local set_files = (if shell_view then shell_view.set_files else nil) :: ((boolean) -> ())?
+		if set_files then
+			set_files(true)
+		end
+	end
+	local function fresh()
+		show(state.open(k, "terminal", { input = line }))
+	end
+	local s = state.of(k)
+	local active = if s.active then state.find(k, s.active) else nil
+	local pick: Tab? = nil
+	if active and active.kind == "terminal" and active.terminal and not active.run then
+		pick = active
+	else
+		for _, t in s.tabs do
+			if t.kind == "terminal" and t.terminal and not t.run then
+				pick = t
+			end
+		end
+	end
+	if not pick then
+		fresh()
+		return true
+	end
+	local tab = pick :: Tab
+	terminal_api.status(tab.terminal :: string, tab.device):after(function(st: any)
+		if st and st.busy ~= true and st.exited ~= true and state.find(k, tab.id) then
+			terminal_api.write(tab.terminal :: string, tab.device, line):after(function() end, function() end)
+			show(tab.id)
+		else
+			fresh()
+		end
+	end, fresh)
+	return true
+end
+
 function M.open_url(session: any, url: string?, project: any?, page: any?): boolean
 	local k = state.key(session, project, page)
 	if not k then

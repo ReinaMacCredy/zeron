@@ -759,7 +759,9 @@
       "copy_code": "Copy code",
       "copied": "Copied",
       "view_named": "View {name}",
-      "done": "Done"
+      "done": "Done",
+      "run_code": "Run in terminal",
+      "run": "Run"
     },
     "mermaid": {
       "show_source": "Show source",

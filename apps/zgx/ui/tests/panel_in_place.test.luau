@@ -273,6 +273,57 @@ local function term_calls(app: any): string
 	return app:state("test_term_calls") or ""
 end
 
+-- A reply's shell block sent to the chat's terminal (Panel.run_in_terminal).
+local function run_block(app: any, text: string)
+	app:set_state("test_run_text", text)
+	app:command("test.run_in_terminal")
+	app:frames(10)
+end
+
+local function claimed(app: any, n: number): boolean
+	return eventually(app, function(): boolean
+		local s = app:state("panel_sessions")["chat:chat-1"]
+		return s ~= nil and s.tabs[n] ~= nil and s.tabs[n].terminal ~= nil
+	end)
+end
+
+test("a shell block runs in the chat's terminal waiting at its prompt: its text and one Enter, no new tab", function()
+	local app = open_panel()
+	app:click("#panel-open-terminal")
+	expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
+	expect(claimed(app, 1)).to_be(true)
+	run_block(app, "cargo build\ncargo test")
+	expect(eventually(app, function(): boolean
+		return string.find(term_calls(app), "write:term-1:", 1, true) ~= nil
+	end)).to_be(true)
+	expect(term_calls(app)).to_contain("write:term-1:cargo build\ncargo test⏎")
+	expect(term_calls(app)).never.to_contain("open:term-2")
+end)
+
+test("a busy terminal is left alone: the block runs in a new tab in the chat's folder", function()
+	local app = open_panel()
+	app:click("#panel-open-terminal")
+	expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
+	expect(claimed(app, 1)).to_be(true)
+	app:set_state("test_term_busy", true)
+	run_block(app, "ls -la")
+	expect(eventually(app, function(): boolean
+		return string.find(term_calls(app), "write:term-2:ls -la⏎", 1, true) ~= nil
+	end)).to_be(true)
+	expect(term_calls(app)).to_contain("open:term-2")
+	expect(term_calls(app)).never.to_contain("write:term-1")
+	expect(tab_titles(app)).to_contain("Terminal 2")
+end)
+
+test("with no terminal yet, a shell block opens one and runs there", function()
+	local app = open_panel()
+	run_block(app, "pwd")
+	expect(eventually(app, function(): boolean
+		return string.find(term_calls(app), "write:term-1:pwd⏎", 1, true) ~= nil
+	end)).to_be(true)
+	expect(term_calls(app)).to_contain("open:term-1")
+end)
+
 test("a terminal tab opens one engine terminal and keeps it across switches and a reload", function()
 	local app = open_panel()
 	app:click("#panel-open-terminal")

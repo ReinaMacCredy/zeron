@@ -89,6 +89,9 @@ export type Props = {
 	file_link: ((target: string) -> boolean)?,
 	-- A thread mention's agent mark, by its chat (`zeron-chat:<id>`).
 	chat_mark: ((chat: string) -> string?)?,
+	-- The chat's terminal: whether it can run a shell block now, and what
+	-- runs one (its text as it is to be typed). Without it, no Run.
+	run_code: RunCode?,
 	attachment_icon: ((target: string) -> string?)?,
 	invocations: boolean?,
 	-- What a link is drawn as, rather than as a link: one of the chat's
@@ -290,8 +293,11 @@ local function veil_pieces(fading: { VeilChunk }, from: number, to: number, piec
 end
 
 -- (`tasks`: each task item's place among them, from the latest parse.)
+export type RunCode = { can: () -> boolean, run: (text: string) -> () }
+
 type Ctx = {
 	veil: Veil?,
+	run_code: RunCode?,
 	image: ((src: string) -> string?)?,
 	image_size: ((src: string) -> (number?, number?))?,
 	open: ((target: string) -> ())?,
@@ -1216,11 +1222,37 @@ local function code_shown(text: string): string
 	return shown
 end
 
--- A code block: a strip with its language and Copy over its lines, one
--- quiet panel.
+-- The fences a terminal runs: a shell's, a session's, or none said.
+local RUNS: { [string]: boolean } = {
+	[""] = true, text = true, bash = true, sh = true, zsh = true, shell = true,
+	console = true, fish = true, powershell = true, pwsh = true, ps1 = true,
+}
+
+local function runs_in_terminal(lang: string?): boolean
+	return RUNS[string.lower(lang or "")] == true
+end
+
+-- A shell block as a terminal is to get it: its source without the
+-- trailing newline, a `console` block's prompts (`$ `, `% `, `❯ `) off each
+-- line's start. (The one Enter after it is the runner's.)
+local function run_text(lang: string?, text: string): string
+	local out = string.gsub(text, "\n+$", "")
+	if string.lower(lang or "") ~= "console" then
+		return out
+	end
+	local lines: { string } = {}
+	for line in string.gmatch(out .. "\n", "([^\n]*)\n") do
+		local bare = string.match(line, "^%$ (.*)$") or string.match(line, "^%% (.*)$") or string.match(line, "^❯ (.*)$")
+		table.insert(lines, bare or line)
+	end
+	return table.concat(lines, "\n")
+end
+
+-- A code block: a strip with its language, Run (a shell's, in the chat's
+-- terminal) and Copy over its lines, one quiet panel.
 -- (`class` and `provide`: what plugins place it by, and read where they
 -- do; `block` gives them.)
-local CodeBlock = ui.component(function(props: { lang: string, text: string, class: string?, provide: { [string]: any }?, find: CodeFind?, veil: CodeVeil?, render: (() -> Node)? }): Node
+local CodeBlock = ui.component(function(props: { lang: string, text: string, class: string?, provide: { [string]: any }?, find: CodeFind?, veil: CodeVeil?, render: (() -> Node)?, run: RunCode? }): Node
 	local copied = ui.use_state(false)
 	local rendered = ui.use_state(props.render ~= nil)
 	-- (A find shows the source, where its matches are highlighted.)
@@ -1230,7 +1262,7 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 	local stop: (() -> ())? = nil
 	local text = code_shown(props.text)
 	local function copy()
-		ui.clipboard.write(text)
+		ui.clipboard.write((string.gsub(props.text, "\n$", "")))
 		copied:set(true)
 		if stop then
 			stop()
@@ -1290,6 +1322,32 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 				tooltip = locale.s("ds.markdown.fit_content"),
 				rounded = ui.raw(control.nest("$radius.xl", 1, 5), "concentric with the code block, as Copy"),
 			}),
+			if props.run and runs_in_terminal(props.lang)
+				then ui.show(props.run.can, ui.button {
+					id = "md-code-run",
+					label = locale.t("ds.markdown.run_code"),
+					tooltip = locale.s("ds.markdown.run_code"),
+					h = 24,
+					px = "$space.2",
+					gap = "$space.1",
+					items = "center",
+					rounded = ui.raw(control.nest("$radius.xl", 1, 5), "concentric with the code block, as Copy"),
+					bg = "#00000000",
+					color = "$text.tertiary",
+					text_size = "$font.size.xs",
+					hover = { bg = "$hover", color = "$text.primary" },
+					active = { bg = "$pressed" },
+					focus = { border = 0 },
+					on_click = function()
+						local run = props.run :: RunCode
+						run.run(run_text(props.lang, props.text))
+					end,
+					Icon { name = "terminal", size = 12 },
+					ui.text(function()
+						return locale.s("ds.markdown.run")
+					end),
+				})
+				else nil,
 			ui.button {
 				label = locale.t("ds.markdown.copy_code"),
 				h = 24,
@@ -1630,6 +1688,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 				text = b.text,
 				find = find,
 				veil = code_veil,
+				run = if ctx then ctx.run_code else nil,
 				class = if lang ~= "" then `md-code lang-{lang}` else "md-code",
 				render = if lang == "markdown" or lang == "md"
 					then function(): Node
@@ -1924,8 +1983,8 @@ end
 return function(props: Props): Node
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
-	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small or props.invocations
-		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, attached = props.attached, file_link = props.file_link, chat_mark = props.chat_mark, attachment_icon = props.attachment_icon, invocations = props.invocations, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
+	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small or props.invocations or props.run_code
+		then { run_code = props.run_code, image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, attached = props.attached, file_link = props.file_link, chat_mark = props.chat_mark, attachment_icon = props.attachment_icon, invocations = props.invocations, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
 		else nil
 	-- A text that grows: what a ```mermaid fence reads to know whether
 	-- it's still being written (ds/mermaid).

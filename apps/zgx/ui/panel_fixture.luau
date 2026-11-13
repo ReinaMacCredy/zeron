@@ -49,6 +49,11 @@ tapi.close = function(id: string, _device: string?): any
 	term_note(`close:{id}`)
 	return settle(nil)
 end
+-- What's typed into one: the text as it would reach the shell, its Enter `⏎`.
+tapi.write = function(id: string, _device: string?, text: string): any
+	term_note(`write:{id}:{string.gsub(text, "\r", "⏎")}`)
+	return settle(nil)
+end
 tapi.term = function(key: string, options: any?): any
 	local s = sessions[key]
 	if not s and options then
@@ -428,6 +433,15 @@ ui.command {
 	title = "Open Link",
 	run = function()
 		Panel.open_url(session:peek(), open_url:peek())
+	end,
+}
+-- A reply's shell block run in its session's terminal (Panel.run_in_terminal).
+local run_text = ui.state("test_run_text", "")
+ui.command {
+	id = "test.run_in_terminal",
+	title = "Run in Terminal",
+	run = function()
+		Panel.run_in_terminal(session:peek(), run_text:peek())
 	end,
 }
 -- A file mentioned in a chat, opened in its session's panel (Panel.open_file).

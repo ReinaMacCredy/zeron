@@ -759,7 +759,9 @@
       "copy_code": "拷贝代码",
       "copied": "已拷贝",
       "view_named": "查看 {name}",
-      "done": "完成"
+      "done": "完成",
+      "run_code": "Run in terminal",
+      "run": "Run"
     },
     "mermaid": {
       "show_source": "显示源代码",

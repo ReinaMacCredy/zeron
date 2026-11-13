@@ -196,6 +196,10 @@ M.Terminal = ui.component(function(props: Props): Node
 						local now = state.find(key, id)
 						if now then
 							state.set_terminal(key, id, terminal, now.device, now.command)
+							if now.input then
+								api.write(terminal, target.device, now.input):after(function() end, function() end)
+								state.patch(key, id, { input = false })
+							end
 							-- (From now on, a bridge started for it attaches to
 							-- this one rather than opening another.)
 							api.command(terminal, target.device):after(function(command: string)
