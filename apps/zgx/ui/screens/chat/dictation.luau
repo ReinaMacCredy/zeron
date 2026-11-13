@@ -16,6 +16,8 @@ local prefs = require("@app/screens/settings/prefs")
 local route = require("@app/screens/shell/route")
 
 local M = {}
+-- (The Voice built-in, Settings → Voice's switch: off, no microphone and the shortcut does nothing.)
+local voice_on = ui.shared("builtins.voice", true)
 M.state = ui.shared("dictation", { phase = "idle" } :: any)
 M.active = ui.computed(function(): boolean
 	local p = M.state:get().phase
@@ -106,6 +108,7 @@ local function finish()
 	end
 end
 local function start(combo: string?, target: string?)
+	if voice_on:peek() == false then return end
 	-- (Not on yet: Settings → Voice says how.)
 	if not prefs.dictation:peek() then route.settings("voice") return end
 	if starting or M.active:peek() then return end
@@ -152,8 +155,10 @@ local function Mic(target: string): Node
 			if e.key == "Enter" or e.key == "Space" then if not e["repeat"] then start(e.key, target) end; return true end
 			return false
 		end,
-		on_key_up = function(e)
-			if e.key == "Enter" or e.key == "Space" then finish(); return true end
+		-- (A key let go comes as its name, as zgx gives it.)
+		on_key_up = function(e: any)
+			local key = if type(e) == "table" then e.key else e
+			if key == "Enter" or key == "Space" then finish(); return true end
 			return false
 		end,
 		-- An accessible click has no held press: once to start, again to finish.
@@ -170,7 +175,11 @@ function M.bind(value: any, key: () -> string, blocked: () -> boolean, id: strin
 	local own: any = {
 		editor = ui.ref(), value = value, key = key, blocked = blocked, id = id,
 		dictating = active_for(id),
-		mic = function(): Node return Mic(id) end,
+		mic = function(): Node
+			return ui.show(function(): boolean
+				return voice_on:get() ~= false or M.active:get()
+			end, Mic(id))
+		end,
 		levels = M.levels, phase = M.phase,
 		status = function(): string
 			local p = M.state:get().phase
@@ -187,8 +196,9 @@ function M.bind(value: any, key: () -> string, blocked: () -> boolean, id: strin
 		end,
 		on_key_up = function(e: any): boolean
 			local hold = M.state:peek().hold
-			if not (pending and hold) or type(e.key) ~= "string" then return false end
-			if string.lower(e.key) ~= string.lower(string.match(hold, "([^+]+)$") or hold) then return false end
+			local key = if type(e) == "table" then e.key else e
+			if not (pending and hold) or type(key) ~= "string" then return false end
+			if string.lower(key) ~= string.lower(string.match(hold, "([^+]+)$") or hold) then return false end
 			finish()
 			return true
 		end,

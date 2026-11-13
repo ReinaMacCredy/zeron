@@ -57,8 +57,6 @@ local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
 local references = require("@self/references")
 local locale = require("@self/locale")
-local Dictation = require("@self/dictation")
-local Recorder = require("@self/shortcut_recorder")
 local VoiceWave = require("@self/voice_wave").VoiceWave
 local context_usage = require("@self/context_usage")
 local motion = require("@self/motion")
@@ -400,8 +398,8 @@ end
 -- A pill narrower than this is short of room: the trays' rows fold their
 -- thumbnails and actions.
 local NARROW = 480
--- When dictation's clock warns: its last seconds (the limit is Dictation.LIMIT_S).
-local VOICE_WARN = 10
+-- Dictation's limit, and when its clock warns.
+local VOICE_LIMIT, VOICE_WARN = 60, 10
 
 local function read<T>(v: T | () -> T): T
 	return if type(v) == "function" then (v :: () -> T)() else v :: T
@@ -1000,78 +998,6 @@ fn fill(input: FillInput) -> vec4<f32> {
 -- Composers' lightbox groups, each its own.
 local lightboxes = 0
 
--- Dictation's outcome under the composer, until dismissed or the next try
--- (gpui's `render_dictation_status`): no speech, a tap, unavailable, stopped.
-local function dictation_status(own: any): Node
-	-- (One line that changes what it says in place, fading in as gpui's and gone at once.)
-	local function said(): (string, string?)
-		return own.phase:get(), own.message:get()
-	end
-	local function failed(): boolean
-		local p = said()
-		return p == "denied" or p == "unavailable" or p == "failed"
-	end
-	return ui.presence(function(): string?
-		local p = own.phase:get()
-		return if Dictation.active(p) or p == "idle" then nil else "status"
-	end, function(): Node
-		return ui.row {
-			id = "dictation-status",
-			role = "status",
-			w_full = true,
-			gap = "$space.2",
-			items = "start",
-			px = "$space.3",
-			pt = "$space.2",
-			ui.div {
-				w = 6,
-				h = 6,
-				mt = ui.raw(6, "the dot centred on the title's first line"),
-				shrink = 0,
-				rounded = "$radius.full",
-				bg = function(): string
-					return if failed() then "$warning" else "$text.tertiary"
-				end,
-			},
-			ui.column {
-				grow = 1,
-				min_w = 0,
-				ui.text {
-					function(): string
-						local title = Dictation.status(said())
-						return title or ""
-					end,
-					literal = true,
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
-					color = "$text.primary",
-				},
-				ui.text {
-					function(): string
-						local _, line = Dictation.status(said())
-						return line or ""
-					end,
-					literal = true,
-					wrap = true,
-					text_size = "$font.size.sm",
-					color = "$text.secondary",
-				},
-			},
-			Button {
-				id = "dictation-dismiss",
-				tone = "ghost",
-				size = "xs",
-				label = locale.t("ds.composer.dictation.dismiss"),
-				on_click = own.dismiss,
-				locale.t("ds.composer.dictation.dismiss"),
-			},
-		}
-	end, {
-		w_full = true,
-		enter = { opacity = { 0, 1 }, duration = 160 },
-	})
-end
-
 -- The notice line: its words on the draft's own left edge, in the tone's
 -- ink (a warning amber, a failure red, the rest the secondary ink), a
 -- spinner before them while something is on its way, an action, and the ×
@@ -1329,16 +1255,9 @@ return ui.component(function(props: Props): Node
 	local function disabled(): boolean
 		return read(props.disabled) == true
 	end
-	-- Dictation: the screen's, or the composer's own over its draft while
-	-- Voice is on and Settings → Voice has Dictation (ds/dictation): hold the
-	-- mic or the shortcut to talk, let go to write.
-	local own = if props.on_dictate == nil and props.dictating == nil then Dictation.session(value, function(): boolean
-		return read(props.disabled) == true
-	end) else nil
-	local held_code: string? = nil
-	local dictating_state: State<boolean>? = props.dictating or (if own then own.dictating else nil)
-	local on_dictate: (() -> ())? = props.on_dictate or (if own then own.finish else nil)
-	local on_cancel_dictation: (() -> ())? = props.on_cancel_dictation or (if own then own.cancel else nil)
+	local dictating_state: State<boolean>? = props.dictating
+	local on_dictate: (() -> ())? = props.on_dictate
+	local on_cancel_dictation: (() -> ())? = props.on_cancel_dictation
 	local function dictating(): boolean
 		return dictating_state ~= nil and dictating_state:get()
 	end
@@ -1930,26 +1849,11 @@ return ui.component(function(props: Props): Node
 		shape = "pill",
 		size = "sm",
 		icon = true,
-		label = function(): string
-			return if own then Dictation.action_label(own.phase:get()) else locale.s("ds.composer.dictate")
-		end,
+		label = locale.t("ds.composer.dictate"),
 		disabled = disabled,
-		on_click = if own then nil else props.on_dictate,
+		on_click = props.on_dictate,
 		Icon { name = "microphone", size = 18 },
 	})
-	-- (Held: the press and its release on what stays, as the mic turns into Stop under the finger.)
-	if own then
-		mic = ui.div {
-			shrink = 0,
-			on_press = function()
-				own.press("button")
-			end,
-			on_release = function()
-				own.release("button")
-			end,
-			mic,
-		}
-	end
 	local send_button = Button {
 		shape = "pill",
 		size = "sm",
@@ -2187,8 +2091,7 @@ return ui.component(function(props: Props): Node
 					},
 					ui.text {
 						function(): string
-							local p = if own then own.phase:get() else "listening"
-							return if p == "requesting" then locale.s("ds.composer.dictation.ready_title") elseif p == "finalizing" then locale.s("ds.composer.dictation.finalizing_title") else locale.s("ds.composer.listening")
+							return if spoken and spoken.status then spoken.status() else locale.s("ds.composer.listening")
 						end,
 						shrink = 0,
 						text_size = "$font.size.sm",
@@ -2214,7 +2117,7 @@ return ui.component(function(props: Props): Node
 						font = "$font.mono",
 						text_size = "$font.size.xs",
 						color = function()
-							return if Dictation.LIMIT_S - voice_seconds:get() <= VOICE_WARN then "$warning" else "$text.secondary"
+							return if VOICE_LIMIT - voice_seconds:get() <= VOICE_WARN then "$warning" else "$text.secondary"
 						end,
 					},
 				}
@@ -2691,9 +2594,6 @@ return ui.component(function(props: Props): Node
 					end
 				end,
 				on_blur = function()
-					if own then
-						own.release("key")
-					end
 					m.on_focus(false)
 					if spoken and spoken.on_blur then
 						spoken.on_blur()
@@ -2726,27 +2626,7 @@ return ui.component(function(props: Props): Node
 				-- list (or undoing an empty item). The mentions' keys come
 				-- first, then a question's (1 to 9 pick, Escape goes back
 				-- or closes), then ⌘Enter sending the newest queued row.
-				on_key_up = if own
-					then function(name: any, code: any): boolean
-						-- (The key it was held by, whatever's held with it: by its physical key once both are known.)
-						local held = held_code
-						if held ~= nil and type(code) == "string" then
-							if code == held then
-								held_code = nil
-								own.release("key")
-							end
-							return false
-						end
-						local combo = Dictation.key:peek()
-						local letter = string.match(combo, "([^+]+)$")
-						if letter and type(name) == "string" and string.lower(name) == letter then
-							held_code = nil
-							own.release("key")
-						end
-						return false
-					end
-					elseif spoken then spoken.on_key_up
-					else nil,
+				on_key_up = if spoken then spoken.on_key_up else nil,
 				on_key = function(e)
 					if e.cmd and e.shift and e.key == "ArrowDown" and long:peek() then
 						toggle_collapsed()
@@ -2756,16 +2636,6 @@ return ui.component(function(props: Props): Node
 						if on_cancel_dictation then
 							on_cancel_dictation()
 						end
-						return true
-					end
-					-- The hold shortcut (⌘D): down starts, up (on_key_up) writes.
-					if own and (Dictation.available() or dictating()) and Dictation.matches(e, Recorder.combo_of) then
-						-- (A repeat while held never starts another take, one that failed at once too.)
-						if e["repeat"] then
-							return true
-						end
-						held_code = e.code
-						own.press("key")
 						return true
 					end
 					if m.keys(e) then
@@ -2873,11 +2743,7 @@ return ui.component(function(props: Props): Node
 				items = "center",
 				gap = "$space.2",
 				if spoken then spoken.mic() else ui.show(function(): boolean
-					if dictating() then
-						return true
-					end
-					-- (Gpui's: the mic only once Dictation is on and its model is here.)
-					return voice_on:get() ~= false and (own == nil or Dictation.available())
+					return dictating() or (props.on_dictate ~= nil and voice_on:get() ~= false)
 				end, mic),
 				ui.show(stopping, stop_button),
 				send_menu,
@@ -3524,7 +3390,6 @@ return ui.component(function(props: Props): Node
 			}
 			else nil,
 		body,
-		if own then dictation_status(own) else nil,
 		-- Folded, what waits on the agent: a pill floating just over the
 		-- composer's middle, out of the layout (the conversation shows under
 		-- it, as under "Scroll to end", which it moves aside for).

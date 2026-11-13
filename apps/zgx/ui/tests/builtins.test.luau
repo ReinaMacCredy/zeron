@@ -52,8 +52,6 @@ end)
 test("each feature's switch on its own page takes its doors away at once, and on brings them back; the page stays listed", function()
 	local app = open()
 	expect(app:has("#rail-usage")).to_be(true)
-	app:command("voice_stub.dictation_on")
-	app:frames(10)
 	expect(app:has('role:button "Hold to dictate"')).to_be(true)
 
 	-- Usage: the rail's ring.

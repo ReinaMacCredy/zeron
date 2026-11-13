@@ -1811,7 +1811,8 @@ fn v2_s_title_bar_island_shows_over_art_with_the_sidebar_closed() {
         app.frames(60);
     }
     assert!(v2.opacity("#titlebar-island") > 0.99, "v2, closed over a new chat's art: its island");
-    assert!(v3.opacity("#titlebar-island") < 0.01, "v3 has its top bar: no island");
+    // (The fork's v3 folds over a new chat's art too: screens/shell/frame.luau `island`.)
+    assert!(v3.opacity("#titlebar-island") > 0.99, "v3, closed over a new chat's art: its island too");
 }
 
 /// Frames' work as a column moves, and where it went: p50/p95 (ms), the

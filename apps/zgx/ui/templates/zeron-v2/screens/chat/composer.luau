@@ -1090,7 +1090,7 @@ local function Composer(): Node
 			local lane = foot_lane(id)
 			local lists = { store.messages }
 			if lane then
-				table.insert(lists, lanes.view(lane).messages)
+				table.insert(lists, Lanes.view(lane).messages)
 			end
 			T.send(function()
 				for _, list in lists do

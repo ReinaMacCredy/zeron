@@ -155,6 +155,8 @@ test("closing a panel tab with the keyboard in the panel keeps it there, not on 
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 800)
 	app:frames(30)
+	-- (The panel set to stay with no tab; on by default since 0.3.2.)
+	app:set_state("screens/settings/prefs.luau::settings_close_panel_with_last_tab", false)
 	show_chat(app, "Fix the build")
 	open_files_tab(app)
 	app:click("#panel-strip >> role:tab")
@@ -237,6 +239,9 @@ test("the panel opening and closing leaves the transcript where it was read: the
 	app:frames(40)
 	app:scroll("#transcript", -900)
 	app:frames(40)
+	-- (The view's rest is told on real time, not frames: waited past, so
+	-- the end it scrolled away from is let go.)
+	app:wait('"never shown, only waited past"', { timeout_ms = 300 })
 	local seen: string? = nil
 	local y0: number? = nil
 	for i = 40, 1, -1 do

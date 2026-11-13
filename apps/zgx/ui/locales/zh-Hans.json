@@ -746,27 +746,6 @@
       "notice_error": "错误",
       "notice_warning": "警告",
       "notice_copy": "复制消息",
-      "dictation": {
-        "ready_title": "正在准备…",
-        "ready_line": "等出现“正在聆听”后再说话。",
-        "listening_title": "正在聆听",
-        "listening_line": "说完后松开 · 最长 1 分钟",
-        "finalizing_title": "正在转写…",
-        "finalizing_line": "正在本设备上处理。",
-        "no_speech_title": "未检测到语音",
-        "no_speech_line": "请检查麦克风，然后重试。",
-        "tapped_title": "按住以听写",
-        "tapped_line": "说话时请一直按住麦克风或快捷键。",
-        "unavailable_title": "听写不可用",
-        "stopped_title": "听写已停止",
-        "hold": "按住以听写",
-        "release": "松开以转写",
-        "transcribing": "正在转写",
-        "retry": "按住以重试听写",
-        "dismiss": "关闭",
-        "too_long": "听写耗时过长。你的草稿是安全的。请稍等片刻，然后尝试录制更短的内容。",
-        "no_host": "此版本无法使用听写。"
-      },
       "send_options": "发送选项",
       "send": "发送",
       "move_draft": "将草稿移到新对话",
@@ -2134,14 +2113,6 @@
         "terms": "快捷键 截图 捕获 shortcut hotkey screenshot capture",
         "description": "其他 App 位于前台时也可使用。在 Appshots 中更改。",
         "change": "更改"
-      },
-      "dictation": {
-        "section": "语音",
-        "label": "按住听写",
-        "terms": "快捷键 听写 麦克风 语音 按住 shortcut hotkey dictation microphone voice hold",
-        "description": "在输入框中按住说话，松开即写入。在“语音”中更改。",
-        "change": "更改",
-        "change_label": "在“语音”中更改按住听写"
       },
       "switcher": {
         "section": "会话切换器",
@@ -3688,7 +3659,6 @@
     },
     "voice": {
       "title": "语音",
-      "subtitle": "听写和 Codex 语音。",
       "terms": "语音 听写 麦克风 模型 parakeet speech dictation microphone",
       "description": "对着输入框说话。转写在本设备上完成,音频不会被保存或发送。",
       "couldnt": "语音无法完成此操作",
@@ -3719,40 +3689,16 @@
         "label": "听写",
         "description": "按住麦克风说话,松开即可。发送前可以编辑文字。",
         "needs_download": "开启后将下载 {total} MB 的语音模型。",
-        "terms": "语音转文字, 转写",
-        "downloading": "正在下载 · {done} / {total} MB。关闭以取消。",
-        "download": "需下载 {total} MB",
-        "no_recorder": "此版本的 Zeron 无法听写：它没有录音功能，因此不会下载任何内容。"
-      },
-      "mic": {
-        "label": "麦克风",
-        "terms": "输入, 音频",
-        "system": "系统默认",
-        "disconnected": "已断开的麦克风"
+        "downloading": "正在下载 · {done} / {total} MB。关闭以取消。"
       },
       "shortcut": {
         "label": "快捷键",
-        "description": "按住说话,松开转写。",
-        "hint": "按住说话，松开转写",
-        "terms": "热键, 按住",
-        "reserved": "{keys} 已留给输入框使用。"
+        "description": "按住说话,松开转写。"
       },
       "model": {
-        "section": "语音模型",
         "label": "语音模型",
         "description": "Parakeet v3 · {total} MB",
-        "terms": "parakeet, 模型, 下载, 移除",
-        "name": "Parakeet v3",
-        "size": "{total} MB",
-        "remove": "移除",
-        "remove_label": "移除语音模型"
-      },
-      "errors": {
-        "busy": "请先停止听写，再移除模型。",
-        "remove_failed": "无法移除模型。请检查文件夹权限后重试。",
-        "download_failed": "无法下载或校验模型。请检查网络连接和可用空间，然后重试。",
-        "cancelled": "下载已取消。",
-        "interrupted": "下载中断。请重试。"
+        "remove": "移除"
       }
     }
   },

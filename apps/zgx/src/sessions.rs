@@ -329,6 +329,13 @@ fn live_branch(c: &Json) -> Option<&str> {
     c["sourceContext"]["branch"].as_str().or(c["branch"].as_str()).filter(|branch| !branch.is_empty())
 }
 
+/// A side chat's row in `rows`, apart from its top row: a side chat stands
+/// at the top too, and each is kept as it was last built.
+const SIDE_ROW: &str = "\u{0}side";
+fn side_key(id: &str) -> String {
+    format!("{id}{SIDE_ROW}")
+}
+
 /// Drops the rows of chats that aren't in `new`, or aren't the same there.
 fn forget_changed(rows: &mut HashMap<String, Row>, old: &Json, new: &Json) {
     let by_id = |list: &'_ Json| -> HashMap<String, usize> {
@@ -341,7 +348,7 @@ fn forget_changed(rows: &mut HashMap<String, Row>, old: &Json, new: &Json) {
         at
     };
     let (was, is) = (by_id(old), by_id(new));
-    rows.retain(|id, _| match (was.get(id), is.get(id)) {
+    rows.retain(|id, _| match (was.get(id.strip_suffix(SIDE_ROW).unwrap_or(id)), is.get(id.strip_suffix(SIDE_ROW).unwrap_or(id))) {
         (Some(&a), Some(&b)) => old[a] == new[b],
         _ => false,
     });
@@ -600,7 +607,7 @@ impl Kids {
         self.working = 0;
         self.fan.clear();
         for id in &self.ids {
-            let Some(row) = rows.get(id) else { continue };
+            let Some(row) = rows.get(&side_key(id)) else { continue };
             // (Under way: running, or waiting on work that will wake it.)
             if matches!(row.with.status, Some("working" | "waiting")) {
                 self.working += 1;
@@ -753,7 +760,8 @@ impl Layout {
 
 /// A side chat's row, built again if what it shows moved.
 fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, session: Option<&Session>, at: chrono::DateTime<chrono::Utc>) {
-    let status = status_of(rows.get(id).map_or_else(|| seen_marks(c), |row| row.marks), session, at);
+    let key = side_key(id);
+    let status = status_of(rows.get(&key).map_or_else(|| seen_marks(c), |row| row.marks), session, at);
     let harness = c["config"]["harness"].as_str();
     let with = RowWith {
         status,
@@ -771,7 +779,7 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         fan: Vec::new(),
         errored: session.is_some_and(errored),
     };
-    if rows.get(id).is_some_and(|row| row.with == with) {
+    if rows.get(&key).is_some_and(|row| row.with == with) {
         return;
     }
     let created = c["createdAt"].as_str().and_then(unix_seconds).unwrap_or(0);
@@ -817,7 +825,7 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         }),
     ]);
     let run = FanRun::of_child(c, status);
-    rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks: seen_marks(c), with, value, run });
+    rows.insert(key, Row { moved: moved(c), updated: updated as f64, marks: seen_marks(c), with, value, run });
 }
 
 /// What `opener` is called on a row it opened (`created_by`).
@@ -1260,6 +1268,7 @@ impl Sessions {
                 let mut rows = self.rows.borrow_mut();
                 for id in &touched {
                     rows.remove(*id);
+                    rows.remove(&side_key(id));
                 }
                 drop(rows);
                 frame.apply_to_list(&mut self.chats.borrow_mut(), &mut self.chats_at.borrow_mut());
@@ -3389,6 +3398,7 @@ mod bench {
         fresh.set_live(live.clone());
         *fresh.devices.borrow_mut() = devices.clone();
         fresh.heard.set(true);
+        fresh.live_heard.set(true);
         fresh.value()
     }
 
@@ -3662,6 +3672,8 @@ mod bench {
         let mut live = json!([row("a", "idle", now - 900), row("b", "idle", now - 900)]);
         s.set_live(live.clone());
         s.heard.set(true);
+        // (Live states heard: the fork's first live frame always shows.)
+        s.live_heard.set(true);
         s.publish();
         let heard = |s: &Sessions, live: &Json, at: usize| {
             let changes = Changes { changed: vec![live[at].clone()], removed: vec![], reordered: false };
@@ -3675,13 +3687,14 @@ mod bench {
         live[0] = row("a", "working", started);
         let before = s.published.get();
         heard(&s, &live, 0);
-        assert_eq!(s.published.get(), before, "stale: shows nothing new");
+        // (The fork's rows mark a stale run: that much shows.)
+        assert_eq!(s.published.get(), before + 1, "stale: shown stale");
         // The clock is put back to while a's run is fresh, and b beats.
         now -= 50;
         CLOCK.with(|c| c.set(Some(now)));
         live[1] = row("b", "idle", now - 1);
         heard(&s, &live, 1);
-        assert_eq!(s.published.get(), before + 1, "a's run shows");
+        assert_eq!(s.published.get(), before + 2, "a's run shows");
         assert_eq!(*s.shown_live.borrow(), live_states(&live, now));
         CLOCK.with(|c| c.set(None));
     }

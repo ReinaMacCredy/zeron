@@ -102,7 +102,8 @@ test("narrowing the list lights the row now at its top, and the arrows move the 
 		local draft = app:text("role:textbox")
 		app:key("Enter")
 		settle(app)
-		local taken = app:text("role:textbox"):match("^(%S+) $")
+		-- (What's taken is a chip: its name padded with no-break spaces.)
+		local taken = (app:text("role:textbox"):gsub("\u{a0}", "")):match("^(%S+) $")
 		app:fill("role:textbox", draft)
 		settle(app)
 		if taken then

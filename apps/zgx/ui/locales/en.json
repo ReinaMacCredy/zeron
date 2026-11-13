@@ -746,27 +746,6 @@
       "notice_error": "Error",
       "notice_warning": "Warning",
       "notice_copy": "Copy message",
-      "dictation": {
-        "ready_title": "Getting ready…",
-        "ready_line": "Wait for Listening before speaking.",
-        "listening_title": "Listening",
-        "listening_line": "Release when you’re done · Up to 1 minute",
-        "finalizing_title": "Transcribing…",
-        "finalizing_line": "Processing on this device.",
-        "no_speech_title": "No speech detected",
-        "no_speech_line": "Check your microphone, then try again.",
-        "tapped_title": "Hold to dictate",
-        "tapped_line": "Keep holding the microphone or the shortcut while you speak.",
-        "unavailable_title": "Dictation unavailable",
-        "stopped_title": "Dictation stopped",
-        "hold": "Hold to dictate",
-        "release": "Release to transcribe",
-        "transcribing": "Transcribing",
-        "retry": "Hold to retry dictation",
-        "dismiss": "Dismiss",
-        "too_long": "Dictation took too long. Your draft is safe. Wait a moment, then try a shorter recording.",
-        "no_host": "Dictation isn't available in this build."
-      },
       "send_options": "Send options",
       "send": "Send",
       "move_draft": "Move draft to new thread",
@@ -2134,14 +2113,6 @@
         "terms": "shortcut hotkey screenshot capture",
         "description": "Works while another app is in front. Change it in Appshots.",
         "change": "Change"
-      },
-      "dictation": {
-        "section": "Voice",
-        "label": "Hold to dictate",
-        "terms": "shortcut hotkey dictation microphone voice hold",
-        "description": "Hold it in the composer to talk, let go to write. Change it in Voice.",
-        "change": "Change",
-        "change_label": "Change Hold to dictate in Voice"
       },
       "switcher": {
         "section": "Session switcher",
@@ -3688,7 +3659,6 @@
     },
     "voice": {
       "title": "Voice",
-      "subtitle": "Dictation and Codex voice.",
       "terms": "speech dictation microphone model parakeet",
       "description": "Speak into the composer. Transcription runs on this device; audio is never saved or sent.",
       "couldnt": "Voice couldn't do that",
@@ -3719,40 +3689,16 @@
         "label": "Dictation",
         "description": "Hold the microphone, speak, and let go. You edit the words before sending.",
         "needs_download": "Turning this on downloads a {total} MB speech model.",
-        "terms": "dictate, speech to text, transcribe",
-        "downloading": "Downloading · {done} of {total} MB. Turn off to cancel.",
-        "download": "{total} MB download",
-        "no_recorder": "Dictation isn’t available in this build of Zeron: it has no recorder, so nothing is downloaded."
-      },
-      "mic": {
-        "label": "Microphone",
-        "terms": "input, audio",
-        "system": "System default",
-        "disconnected": "Disconnected microphone"
+        "downloading": "Downloading · {done} of {total} MB. Turn off to cancel."
       },
       "shortcut": {
         "label": "Shortcut",
-        "description": "Hold to talk, release to transcribe.",
-        "hint": "Hold to talk, release to transcribe",
-        "terms": "hotkey, hold",
-        "reserved": "{keys} is reserved for the composer."
+        "description": "Hold to talk, release to transcribe."
       },
       "model": {
-        "section": "Speech model",
         "label": "Speech model",
         "description": "Parakeet v3 · {total} MB",
-        "terms": "parakeet, model, download, remove",
-        "name": "Parakeet v3",
-        "size": "{total} MB",
-        "remove": "Remove",
-        "remove_label": "Remove speech model"
-      },
-      "errors": {
-        "busy": "Stop dictation before removing the model.",
-        "remove_failed": "Could not remove the model. Check folder permissions and retry.",
-        "download_failed": "Couldn’t download or verify the model. Check your connection and free storage, then retry.",
-        "cancelled": "Download cancelled.",
-        "interrupted": "Download interrupted. Try again."
+        "remove": "Remove"
       }
     }
   },

@@ -12,8 +12,13 @@ end
 -- The focused node's line, as the tree says. (The window's dump stops
 -- past a budget: the title bar, drawn last, is read on its own too.)
 local function focused(app: any): string
-	-- (The whole tree stops at 200 nodes, and the title bar comes last.)
-	for _, tree in { app:tree(), app:tree("#titlebar") } do
+	-- (The whole tree stops at 200 nodes, and the title bar and the panel's
+	-- edge, layers drawn last, can fall past that.)
+	local trees = { app:tree(), app:tree("#titlebar") }
+	if app:has('role:slider "Resize files"') then
+		table.insert(trees, app:tree('role:slider "Resize files"'))
+	end
+	for _, tree in trees do
 		for line in tree:gmatch("[^\n]+") do
 			if line:find(" focused", 1, true) then
 				return line

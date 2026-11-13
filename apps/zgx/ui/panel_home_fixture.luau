@@ -19,6 +19,9 @@ local route = require("@app/screens/shell/route")
 -- where a chat's menu has Move to; Activity off.)
 require("@app/screens/shell/activity").on:set(false)
 require("@app/screens/shell/sidebar").options.organize:set({})
+-- (Compact rows, which these tests measure: the sidebar's view now reaches
+-- the home here too, and ours opens with full rows.)
+require("@app/screens/shell/sidebar").options.compact:set(true)
 local lanes = require("@app/screens/chat/lanes")
 
 local said = ui.state("calls", "")
@@ -114,6 +117,8 @@ stub_sessions.fork = function(source: string, _parent: string?, id: string?): an
 	note(`fork:{source}:{id}`)
 	return settled(true, id)
 end
+-- (The sidebar warms the chat shown on its host: nothing to warm here.)
+stub_sessions.warm = function(_id: string) end
 local stub_store = store :: any
 stub_store.send = function(req: any): any
 	note(`send:{req.session}:{req.text}`)

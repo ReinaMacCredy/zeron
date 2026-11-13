@@ -866,10 +866,10 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     // only while it's on, so each of its changes builds what shows. Turned
     // on, those replies are built again with it. (Kept as long as the
     // window's runtime: one watch a window.)
-    let compact = host.shared("chat.compact", Value::Bool(false)).signal();
+    let compact_on = host.shared("chat.compact", Value::Bool(false)).signal();
     let c = chats.clone();
     std::mem::forget(_cx.ui.runtime.effect(move || {
-        let on = compact.get().truthy();
+        let on = compact_on.get().truthy();
         c.compact_shown(on);
     }));
     // A new chat on Cloud, opened before Cloud has made it (the shipping app
@@ -11168,6 +11168,11 @@ mod tests {
                 pending: RefCell::default(),
                 generation: Cell::new(0),
                 snapshot: Cell::new(false),
+                stats: app.host.shared("t.stats", Value::Nil),
+                token_rate: app.host.shared("t.rate", Value::Nil),
+                turn_tokens: app.host.shared("t.turn_tokens", Value::Nil),
+                on_screen: Cell::new(true),
+                predicts: false,
             })
         };
         let time = |label: &str, view: &Rc<View>, frame: serde_json::Value| {
@@ -11224,6 +11229,11 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
+            stats: app.host.shared("t.stats", Value::Nil),
+            token_rate: app.host.shared("t.rate", Value::Nil),
+            turn_tokens: app.host.shared("t.turn_tokens", Value::Nil),
+            on_screen: Cell::new(true),
+            predicts: false,
         });
         for (n, step) in fixture["steps"].as_array().unwrap().iter().enumerate() {
             view.heard_frame(step["frame"].clone());
@@ -11265,6 +11275,11 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
+            stats: app.host.shared("t.stats", Value::Nil),
+            token_rate: app.host.shared("t.rate", Value::Nil),
+            turn_tokens: app.host.shared("t.turn_tokens", Value::Nil),
+            on_screen: Cell::new(true),
+            predicts: false,
         });
         let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
         // What it holds, as it would tell the engine: ids and the engine's sums.
@@ -11353,6 +11368,11 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
+            stats: app.host.shared("t.stats", Value::Nil),
+            token_rate: app.host.shared("t.rate", Value::Nil),
+            turn_tokens: app.host.shared("t.turn_tokens", Value::Nil),
+            on_screen: Cell::new(true),
+            predicts: false,
         });
         let draft = || format!("{:?}", view.draft.signal().with_untracked(Clone::clone));
         let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
@@ -11385,7 +11405,7 @@ mod tests {
         use super::{Chats, Entry, Open, session_value, text};
         use serde_json::json;
         let chats = Chats::default();
-        let state = |chats: &Chats, open: &Open| session_value(chats, open, false).field("state").map(text).unwrap_or_default();
+        let state = |chats: &Chats, open: &Open| session_value(chats, open, false, false).field("state").map(text).unwrap_or_default();
         let rows = vec![Entry::new(json!({ "id": "u0", "role": "user", "parts": [] }))];
         let mut open = Open { id: "c".into(), ..Open::default() };
         assert_eq!(state(&chats, &open), "loading", "nothing come yet");

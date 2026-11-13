@@ -63,7 +63,7 @@ fn complete(directory: &Path) -> Result<Completion, String> {
         .build()
         .map_err(|error| error.to_string())?;
     runtime
-        .block_on(windows::complete_install(zeron_cli::DEFAULT_EDGE_URL, directory, APP_VERSION))
+        .block_on(windows::complete_install(directory, APP_VERSION))
         .map_err(|error| format!("{error:#}"))
 }
 

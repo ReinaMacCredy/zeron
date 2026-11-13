@@ -136,8 +136,12 @@ function M.use(opts: Opts)
 			unit.on_caret(line, column, anchor, focus)
 			m.on_caret(line, column, anchor, focus)
 		end
-		props.on_blur = m.on_blur
-		props.on_press = m.on_press
+		props.on_focus = function()
+			m.on_focus(true)
+		end
+		props.on_blur = function()
+			m.on_focus(false)
+		end
 		props.on_paste = function(e: any): boolean
 			if e.files and #e.files > 0 then
 				opts.on_files(e.files)

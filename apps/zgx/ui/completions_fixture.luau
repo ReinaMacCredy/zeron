@@ -138,8 +138,12 @@ local Field = ui.component(function(): Node
 				unit.on_caret(line, column, anchor, focus)
 				m.on_caret(line, column, anchor, focus)
 			end,
-			on_blur = m.on_blur,
-			on_press = m.on_press,
+			on_focus = function()
+				m.on_focus(true)
+			end,
+			on_blur = function()
+				m.on_focus(false)
+			end,
 			on_key = function(e)
 				return m.keys(e) or unit.keys(e)
 			end,

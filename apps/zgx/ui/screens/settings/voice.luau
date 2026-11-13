@@ -1,6 +1,10 @@
 -- Settings → Voice: dictation, as the shipping app's page has it (crates/ui
 -- dictation/model.rs): turning it on downloads the speech model the first time,
--- then the microphone, the shortcut, and the model to remove.
+-- then the microphone, the shortcut, and the model to remove. Above it, the
+-- Voice built-in's switch (screens/plugins/builtins: off, no microphone and
+-- no shortcut) and Codex's voice conversation (gpui's `codexVoice`,
+-- `codexVoiceDevice`: this device, or another of yours that can stream
+-- audio to Codex there, and the style; kept for a call, none in zgx yet).
 
 local host = require("@app/screens/settings/host")
 local ds = require("@ds")
@@ -11,6 +15,7 @@ local search = require("@app/screens/settings/search")
 local visits = require("@app/screens/settings/visits")
 local keys = require("@app/screens/shell/keys")
 local dictation = require("@app/screens/chat/dictation")
+local Builtins = require("@app/screens/plugins/builtins")
 
 local M = {}
 
@@ -19,11 +24,22 @@ M.TITLE = "Voice"
 local SHORTCUT = "shell.dictate"
 
 search.index(M.ID, ui.t("settings.voice.title"), ui.t("settings.voice.terms"), {
+	{ key = "feature_voice", title = ui.t("settings.features.voice.label"), terms = ui.t("settings.features.voice.terms") },
+	{ key = "device", title = ui.t("settings.voice.device.label"), section = ui.t("settings.voice.conversation"), terms = ui.t("settings.voice.device.terms") },
+	{ key = "style", title = ui.t("settings.voice.style.label"), section = ui.t("settings.voice.conversation"), terms = ui.t("settings.voice.style.terms") },
 	{ key = "dictation", title = ui.t("settings.voice.dictation.label") },
 	{ key = "microphone", title = ui.t("settings.voice.microphone") },
 	{ key = "shortcut", title = ui.t("settings.voice.shortcut.label") },
 	{ key = "model", title = ui.t("settings.voice.model.label") },
 })
+
+-- Codex's voice: "" its default and this device.
+M.codex_voice = ui.persist("codex_voice", "")
+M.codex_voice_device = ui.persist("codex_voice_device", "")
+-- (gpui's `zeron_proto::voice::DEFAULT_VOICES`, until a live session names its own.)
+M.VOICES = { "juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove" }
+-- Your other devices that can stream voice to Codex (src/voice.rs `voice.remote`).
+local remote = ui.state("settings_voice_remote", {} :: { [string]: boolean })
 
 local installed = ui.state("settings_voice_installed", false)
 local size = ui.state("settings_voice_size", 0)
@@ -120,12 +136,92 @@ local function microphones(): { any }
 	return options
 end
 
+-- Codex voice's devices (gpui's `set_hosts`): this one, then each other of yours, usable when online with remote voice.
+local function voice_hosts(): { any }
+	local function t(key: string): string
+		return ui.t(`settings.voice.device.{key}`):get()
+	end
+	local out = { { value = "", label = t("this"), description = t("local") } }
+	local ok, sessions = pcall(require, "@account/sessions")
+	local now = if ok then (sessions :: any).now:get() else nil
+	local saved = M.codex_voice_device:get()
+	local found = saved == ""
+	for _, d in (now and now.devices) or {} do
+		if not d.here and not d.cloud then
+			local compatible = remote:get()[d.id] == true
+			local detail = if d.online == false then t("offline") elseif not compatible then t("update") else t("available")
+			table.insert(out, { value = d.id, label = d.name, description = detail, disabled = d.online == false or not compatible })
+			found = found or d.id == saved
+		end
+	end
+	if not found then
+		table.insert(out, { value = saved, label = t("unavailable"), description = t("choose"), disabled = true })
+	end
+	return out
+end
+local function voice_styles(): { any }
+	local function named(v: string): string
+		return string.upper(string.sub(v, 1, 1)) .. string.sub(v, 2)
+	end
+	local out = { { value = "", label = ui.t("settings.voice.style.default"):get() } }
+	local saved = M.codex_voice:get()
+	local found = saved == ""
+	for _, v in M.VOICES do
+		table.insert(out, { value = v, label = named(v) })
+		found = found or v == saved
+	end
+	if not found then
+		table.insert(out, { value = saved, label = named(saved) })
+	end
+	return out
+end
+-- Which of your other devices can stream voice (asked as the page opens and as they change).
+local function ask_remote()
+	local ok, sessions = pcall(require, "@account/sessions")
+	local now = if ok then (sessions :: any).now:get() else nil
+	local ids = {}
+	for _, d in (now and now.devices) or {} do
+		if not d.here then
+			table.insert(ids, d.id)
+		end
+	end
+	if #ids == 0 then
+		return
+	end
+	local asked, p = pcall(host.call, "voice.remote", { ids = ids })
+	if asked and p then
+		p:after(function(v: any)
+			if type(v) == "table" then
+				remote:set(v)
+			end
+		end, function() end)
+	end
+end
+
 function M.view(): Node
 	visits.once(M.ID, refresh)
+	ui.effect(ask_remote)
 	return ds.Settings.Page {
 		title = ui.t("settings.voice.title"),
 		description = ui.t("settings.voice.description"),
+		search.anchor("feature_voice", Builtins.Row("voice")),
 		ds.Settings.Section {
+			title = ui.t("settings.voice.conversation"),
+			ds.Settings.Group {
+				row("device", {
+					label = ui.t("settings.voice.device.label"),
+					description = ui.t("settings.voice.device.hint"),
+					control = ds.Select { value = M.codex_voice_device, options = voice_hosts, name = ui.t("settings.voice.device.label"), w = 200 },
+				}),
+				row("style", {
+					label = ui.t("settings.voice.style.label"),
+					description = ui.t("settings.voice.style.hint"),
+					control = ds.Select { value = M.codex_voice, options = voice_styles, name = ui.t("settings.voice.style.label"), w = 200 },
+				}),
+			},
+		},
+		ds.Settings.Section {
+			title = ui.t("settings.voice.dictation.section"),
 			ds.Settings.Group {
 				row("dictation", {
 					label = ui.t("settings.voice.dictation.label"),

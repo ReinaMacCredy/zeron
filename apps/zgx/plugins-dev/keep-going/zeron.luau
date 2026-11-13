@@ -75,7 +75,10 @@
 --                        Zeron's review comments block (file:line, the note,
 --                        the code under it)                              ("compose")
 --   zeron.composed()     in a build: your comments still on a draft, by key
---                        ({ [key] = { session, hovered } }), reactive    ("compose")
+--                        ({ [key] = { session, hovered, note } }), reactive
+--                        (asked again under a key, its chip takes the new
+--                        note)                                           ("compose")
+--   zeron.uncompose_comment(key)  that comment taken off its draft      ("compose")
 --   zeron.toast(text)    a short note at the window's foot   (always)
 --   zeron.notify { title, body?, session? }  a notification, as Zeron's
 --                        own (Settings → Notifications)     ("notifications")
@@ -111,6 +114,9 @@
 --   zeron.github.watch_pr(session_id)  in a build function: a function
 --       reading that session's pull request as it changes ("github"; your
 --       GitHub sign-in stays Zeron's: no token reaches the plugin)
+--   zeron.commit_message(session_id)  a promise of { message, harness,
+--       model }: a commit message for that session's staged changes, written
+--       by its own agent on its device ("source_control.ai")
 --
 -- zgx's own plugin API works too (ui.contribute, ui.filter, ui.override);
 -- zeron.place is ui.contribute with what's above around it. Some elements
@@ -717,6 +723,10 @@ return function(id: string): any
 	-- (what to notify of), never for a row's drawing (`watch_pr`'s, its own).
 	function M.github.heard(): any
 		return github_heard:get() or {}
+	end
+
+	function M.commit_message(session: string): any
+		return ui.call(`{prefix}.commit_message`, { session = session })
 	end
 
 	-- A program its manifest names (`"commands": ["gh"]`, "commands"), run
@@ -1370,8 +1380,13 @@ return function(id: string): any
 	-- `key`: the session's draft each is on, and whether its chip is under
 	-- the pointer. Read in a build: it changes as they do.
 	local composed = ui.shared(`{prefix}.composed`, {} :: { [string]: any })
-	function M.composed(): { [string]: { session: string?, hovered: boolean } }
+	function M.composed(): { [string]: { session: string?, hovered: boolean, note: string? } }
 		return composed:get() or {}
+	end
+
+	-- (pcall: a Zeron older than this has no such action.)
+	function M.uncompose_comment(key: string)
+		pcall(ui.invoke, `{prefix}.uncompose_comment`, key)
 	end
 
 	function M.toast(text: string)

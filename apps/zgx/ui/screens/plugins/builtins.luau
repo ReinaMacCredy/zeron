@@ -16,6 +16,7 @@ M.SETTINGS = { "usage", "home_widgets", "keep_awake", "browser_annotate", "devic
 -- Commands a built-in owns: off, they have no key, do nothing, and the palette and Shortcuts leave them out.
 M.COMMANDS = {
 	["panel.annotate"] = "browser_annotate",
+	["shell.dictate"] = "voice",
 } :: { [string]: string }
 
 local KEEP_AWAKE = "keep_awake"

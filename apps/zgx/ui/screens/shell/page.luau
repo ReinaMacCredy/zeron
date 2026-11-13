@@ -1365,11 +1365,6 @@ return function(props: Props): Node
 				drag_held:set(nil)
 				edge_drag.release()
 			end,
-			on_double_click = function()
-				chosen:set(false)
-				local keep = reserve()
-				files_w:set(keep + fit.content_split(math.max(fit.viewport:peek() - sidebar_settled() - keep, 0), fit.page_floor:peek()))
-			end,
 			-- What lights: the gap, as between two panes.
 			ui.div {
 				absolute = true,

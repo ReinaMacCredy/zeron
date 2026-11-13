@@ -20,6 +20,11 @@ fn open_chat() -> (TestApp, Rc<View>) {
         subagents: app.host.shared("test.subagents", Value::Nil),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
+        stats: app.host.shared("test.stats", Value::Nil),
+        token_rate: app.host.shared("test.rate", Value::Nil),
+        turn_tokens: app.host.shared("test.turn_tokens", Value::Nil),
+        on_screen: Cell::new(true),
+        predicts: false,
     });
     CHATS.with(|chats| chats.made("stream-chat", json!({ "id": "stream-chat" })));
     view.open_chat(Some("stream-chat".into()));

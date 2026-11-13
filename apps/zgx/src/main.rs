@@ -855,7 +855,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         settings::install(cx, &host);
         // Settings → Device hub and a chat's Device tab (src/device.rs).
         device::install(cx, &host);
-        // Settings → Voice and dictation (src/voice.rs).
+        // Settings → Voice's Codex voice rows (src/voice.rs).
         voice::install(cx, &host);
         // The installed fonts, for Settings → Appearance's font pickers
         // (src/fonts.rs).

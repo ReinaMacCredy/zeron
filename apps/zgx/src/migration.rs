@@ -45,8 +45,8 @@ const PREFS: &str = "screens/settings/prefs.luau";
 
 /// Every key of crates/ui `UiSettings` (camelCase, as written) and the older ones it still reads.
 pub const TABLE: &[(&str, Home)] = &[
-    ("dictationEnabled", Home::Persist(&["ds/dictation.luau::dictation_enabled"])),
-    ("dictationInput", Home::Persist(&["ds/dictation.luau::dictation_input"])),
+    ("dictationEnabled", Home::Persist(&["screens/settings/prefs.luau::settings_dictation"])),
+    ("dictationInput", Home::Persist(&["screens/settings/prefs.luau::settings_dictation_input"])),
     ("windowGeometry", Home::None("the window's frame is the system's (frame autosave), not a file")),
     ("composerSendBehavior", Home::Persist(&["screens/settings/prefs.luau::settings_send_with"])),
     ("followUpBehavior", Home::Persist(&["screens/settings/prefs.luau::settings_follow_up"])),
@@ -97,7 +97,7 @@ pub const TABLE: &[(&str, Home)] = &[
     ("rightPaneWidth", Home::Persist(&["screens/shell/page.luau::shell_files_width", "screens/shell/page.luau::shell_panel_width_chosen"])),
     ("splitRatio", Home::None("a split's ratios are each tab's own here")),
     ("terminalHeight", Home::None("terminals are panel tabs here, no drawer")),
-    ("keymap", Home::Persist(&["screens/shell/keys.luau::shell_keymap", "ds/dictation.luau::dictation_key"])),
+    ("keymap", Home::Persist(&["screens/shell/keys.luau::shell_keymap"])),
     ("appshotsEnabled", Home::InPlace("Settings → Appshots reads and writes it there (src/appshots Prefs)")),
     ("appshotSoundEnabled", Home::InPlace("Settings → Appshots reads and writes it there (src/appshots Prefs)")),
     ("appshotDestination", Home::InPlace("Settings → Appshots reads and writes it there (src/appshots Prefs)")),
@@ -225,7 +225,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("screens/shell/sidebar.luau::shell_sidebar_active_first", "false"),
     ("screens/shell/sidebar.luau::shell_sidebar_organize", "[]"),
     ("screens/shell/sidebar.luau::shell_sidebar_sort", "\"updated\""),
-    ("screens/shell/sidebar.luau::shell_sidebar_width", "256"),
+    ("screens/shell/sidebar.luau::shell_sidebar_width", "272"),
     ("screens/shell/sidebar.luau::shell_sidebar_show_branch", "true"),
     ("screens/shell/sidebar.luau::shell_sidebar_show_pr", "true"),
     ("screens/shell/sidebar.luau::shell_sidebar_show_harness", "true"),
@@ -308,9 +308,8 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("screens/shell/page.luau::shell_panel_width_chosen", "false"),
     ("screens/shell/split.luau::shell_session_tabs", "[]"),
     ("screens/shell/keys.luau::shell_keymap", "{}"),
-    ("ds/dictation.luau::dictation_enabled", "false"),
-    ("ds/dictation.luau::dictation_input", "\"\""),
-    ("ds/dictation.luau::dictation_key", "\"cmd+d\""),
+    ("screens/settings/prefs.luau::settings_dictation", "false"),
+    ("screens/settings/prefs.luau::settings_dictation_input", "\"system\""),
     ("screens/settings/voice.luau::codex_voice", "\"\""),
     ("screens/settings/voice.luau::codex_voice_device", "\"\""),
     ("screens/settings/device_hub.luau::device_auto_float", "true"),
@@ -459,20 +458,21 @@ fn more(settings: &Json) -> Vec<(String, Json)> {
     if let Some(completion) = skill_completion(settings) {
         put(&format!("{PREFS}::settings_skill_completion"), completion);
     }
-    let keys = keymap(&settings["keymap"], MAC);
+    let mut keys = keymap(&settings["keymap"], MAC);
+    // (Hold to dictate is the shell's `shell.dictate` here.)
+    if let Some(hold) = settings["keymap"]["toggleDictation"].as_str().filter(|c| *c != "mod-d").and_then(combo) {
+        keys.bound.insert("shell.dictate".into(), json!(hold));
+    }
     if !keys.bound.is_empty() {
         put("screens/shell/keys.luau::shell_keymap", Json::Object(keys.bound));
     }
-    if let Some(hold) = settings["keymap"]["toggleDictation"].as_str().filter(|c| *c != "mod-d").and_then(combo) {
-        put("ds/dictation.luau::dictation_key", json!(hold));
-    }
-    for (from, to) in [("dictationEnabled", "ds/dictation.luau::dictation_enabled"), ("deviceAutoFloat", "screens/settings/device_hub.luau::device_auto_float")] {
+    for (from, to) in [("dictationEnabled", "screens/settings/prefs.luau::settings_dictation"), ("deviceAutoFloat", "screens/settings/device_hub.luau::device_auto_float")] {
         if let Some(on) = settings[from].as_bool() {
             put(to, json!(on));
         }
     }
     for (from, to) in [
-        ("dictationInput", "ds/dictation.luau::dictation_input"),
+        ("dictationInput", "screens/settings/prefs.luau::settings_dictation_input"),
         ("codexVoice", "screens/settings/voice.luau::codex_voice"),
         ("codexVoiceDevice", "screens/settings/voice.luau::codex_voice_device"),
     ] {
@@ -1230,7 +1230,8 @@ mod tests {
             let at = source.find(&call).unwrap_or_else(|| panic!("{module} reads no {name}"));
             let Some((_, default)) = DEFAULTS.iter().find(|(k, _)| *k == key) else { panic!("{key} has no default here") };
             let theirs = source[at + call.len()..].split([')', ' ', ',']).next().unwrap();
-            if matches!(theirs.chars().next(), Some('"' | 't' | 'f' | '0'..='9')) {
+            // (A name, as fit.SIDEBAR_DEFAULT, is no literal to compare.)
+            if matches!(theirs.chars().next(), Some('"' | '0'..='9')) || matches!(theirs, "true" | "false") {
                 assert_eq!(theirs, *default, "{key}'s default");
             }
         }
@@ -1281,14 +1282,14 @@ mod tests {
         assert_eq!(s("screens/settings/prefs.luau::settings_skill_completion"), json!({ "codex": { "dollar": false, "separate": true } }));
         assert_eq!(
             s("screens/shell/keys.luau::shell_keymap"),
-            json!({ "shell.toggle_sidebar": "cmd+shift+b", "shell.toggle_terminal": "cmd+`", "shell.session_9": "ctrl+9" })
+            json!({ "shell.toggle_sidebar": "cmd+shift+b", "shell.toggle_terminal": "cmd+`", "shell.session_9": "ctrl+9", "shell.dictate": "cmd+shift+d" })
         );
         // The other interface's own defaults (the Mac's: a double tap of Option, of both Commands) aren't rebinds.
         assert!(s("screens/shell/keys.luau::shell_keymap").get("shell.quick_capture").is_none());
         // Voice and the device preview (U28's pages).
-        assert_eq!(s("ds/dictation.luau::dictation_key"), json!("cmd+shift+d"));
-        assert_eq!(s("ds/dictation.luau::dictation_enabled"), json!(true));
-        assert_eq!(s("ds/dictation.luau::dictation_input"), json!("BuiltInMicrophoneDevice"));
+        assert_eq!(s("screens/shell/keys.luau::shell_keymap")["shell.dictate"], json!("cmd+shift+d"));
+        assert_eq!(s("screens/settings/prefs.luau::settings_dictation"), json!(true));
+        assert_eq!(s("screens/settings/prefs.luau::settings_dictation_input"), json!("BuiltInMicrophoneDevice"));
         assert_eq!(s("screens/settings/voice.luau::codex_voice"), json!("juniper"));
         assert_eq!(s("screens/settings/device_hub.luau::device_auto_float"), json!(false));
         // The theme, in the engine's own file both themes pages read.
