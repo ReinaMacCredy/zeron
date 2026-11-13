@@ -284,6 +284,7 @@ local TAIL = 32
 -- a prompt's under the switch seam over it.
 local TURN_GAP = 16
 local SEAM_GAP = 6
+local JUMP_H = 30
 
 -- `ZERON_ZGX_TRACE_TRANSCRIPT=1`: the transcript's hover and layout, a line
 -- each to the app's output (off, nothing is made or printed).
@@ -1444,11 +1445,12 @@ local function Transcript(props: Props): Node
 	end
 	local away = ui.state(`transcript_away{kept}`, false)
 	-- The way back's width, as last laid out; said while it shows.
-	local jump_w: number? = nil
+	local jump_w = ui.use_state(0)
 	ui.effect(function()
 		local shown = away:get()
 		if props.on_jump_width then
-			props.on_jump_width(if shown then jump_w else nil)
+			local w = jump_w:peek()
+			props.on_jump_width(if shown and w > 0 then w else nil)
 		end
 	end)
 	-- (Gone with it: a pill beside it no longer moves aside for it.)
@@ -2348,56 +2350,70 @@ local function Transcript(props: Props): Node
 				local other = if props.beside then props.beside() else nil
 				return if other and other > 0 then -(other + 8) / 2 else 0
 			end), { stiffness = 380, damping = 30 }),
-			ui.presence(function()
-				return if away:get() then "away" else nil
-			end, function()
-				-- The menus' glass (solid when opaque), a closer shadow: a pill
-				-- over the reply, firming to the solid fill as it is touched.
-				local pill = glass.style({
-					label = locale.t("ds.transcript.jump_to_latest"),
-					h = 30,
-					px = "$space.3",
-					gap = "$space.2",
-					items = "center",
-					rounded = "$zeron.prose.bubble.radius",
-					cursor = "pointer",
-					color = "$text.primary",
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
-					hover = { bg = "$zeron.menu.solid" },
-					active = { bg = "$zeron.menu.solid" },
-				}, "menu")
-				pill.shadow = "$shadow.md"
-				local pill_ref = ui.ref()
-				pill.ref = pill_ref
-				pill.on_resize = function(size: { w: number, h: number })
-					jump_w = size.w
-					if props.on_jump_width and away:peek() then
-						props.on_jump_width(size.w)
-					end
-				end
-				pill.on_click = function()
-					-- (It leaves as the view arrives: the keys go where it's
-					-- told, not on to the next control.)
-					if props.on_jump then
-						local el = pill_ref:peek()
-						if el then
-							el:blur()
+			-- (Held at the pill's size: a leaving presence is pinned at its holder's corner, which collapsed to the row's middle.)
+			ui.div {
+				relative = true,
+				shrink = 0,
+				h = JUMP_H,
+				w = function(): number | string
+					local w = jump_w:get()
+					return if w > 0 then w else "auto"
+				end,
+				pointer_events = "none",
+				ui.presence(function()
+					return if away:get() then "away" else nil
+				end, function()
+					-- The menus' glass (solid when opaque), a closer shadow: a pill
+					-- over the reply, firming to the solid fill as it is touched.
+					local pill = glass.style({
+						label = locale.t("ds.transcript.jump_to_latest"),
+						h = JUMP_H,
+						shrink = 0,
+						px = "$space.3",
+						gap = "$space.2",
+						items = "center",
+						rounded = "$zeron.prose.bubble.radius",
+						cursor = "pointer",
+						color = "$text.primary",
+						text_size = "$font.size.sm",
+						weight = "$font.weight.medium",
+						hover = { bg = "$zeron.menu.solid" },
+						active = { bg = "$zeron.menu.solid" },
+					}, "menu")
+					pill.shadow = "$shadow.md"
+					local pill_ref = ui.ref()
+					pill.ref = pill_ref
+					pill.on_resize = function(size: { w: number, h: number })
+						if math.abs(jump_w:peek() - size.w) >= 0.5 then
+							jump_w:set(size.w)
 						end
-						props.on_jump()
+						if props.on_jump_width and away:peek() then
+							props.on_jump_width(size.w)
+						end
 					end
-					show_end()
-				end
-				pill[1] = ui.show(writing, status.StatusDot { kind = "working" })
-				pill[2] = ui.text(function()
-					return if writing:get() then locale.s("ds.transcript.new_reply") else locale.s("ds.transcript.jump_to_latest")
-				end)
-				pill[3] = Icon { name = "arrow-down", size = 14 }
-				return ui.button(pill)
-			end, {
-				enter = { opacity = { 0, 1 }, y = { 8, 0 }, duration = 180, ease = "outQuad" },
-				exit = { opacity = 0, y = 8, duration = 120 },
-			}),
+					pill.on_click = function()
+						-- (It leaves as the view arrives: the keys go where it's
+						-- told, not on to the next control.)
+						if props.on_jump then
+							local el = pill_ref:peek()
+							if el then
+								el:blur()
+							end
+							props.on_jump()
+						end
+						show_end()
+					end
+					pill[1] = ui.show(writing, status.StatusDot { kind = "working" })
+					pill[2] = ui.text(function()
+						return if writing:get() then locale.s("ds.transcript.new_reply") else locale.s("ds.transcript.jump_to_latest")
+					end)
+					pill[3] = Icon { name = "arrow-down", size = 14 }
+					return ui.button(pill)
+				end, {
+					enter = { opacity = { 0, 1 }, y = { 8, 0 }, duration = 180, ease = "outQuad" },
+					exit = { opacity = 0, y = 8, duration = 120 },
+				}),
+			},
 		},
 	}
 end

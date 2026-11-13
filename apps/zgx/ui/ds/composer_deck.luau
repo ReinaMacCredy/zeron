@@ -795,6 +795,13 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 	end
 	local floating = ui.div {
 		shrink = 0,
+		-- (Held at the pill's size: a leaving presence is pinned at its holder's corner, which collapsed to the row's middle.)
+		relative = true,
+		h = PILL_H,
+		w = function(): number | string
+			local pw = pill_w:get()
+			return if pw > 0 then pw else "auto"
+		end,
 		x = motion.spring(ui.computed(function(): number
 			return (placed())
 		end), THUMB_SPRING),
