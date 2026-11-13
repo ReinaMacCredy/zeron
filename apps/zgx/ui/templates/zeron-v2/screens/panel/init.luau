@@ -57,6 +57,7 @@ local ds = require("@ds")
 local control = require("@ds/control")
 local token = require("@ds/token")
 local motion = require("@ds/motion")
+local TabStrip = require("@ds/tab_strip")
 local Icon = require("@ds/icon")
 local FileIcon = require("@ds/file_icons")
 local FadeText = require("@ds/fade_text")
@@ -447,7 +448,6 @@ local BAND_H = 38
 local STRIP_START = "$space.2"
 local TOGGLE_ROOM = 34
 local STRIP_FADE = 36
-local SLIDE: Motion = { duration = 150, ease = "out(3)" }
 -- The title bar's controls' size (the Expand button stands with them).
 local CONTROL = ds.island.metrics().control
 
@@ -826,6 +826,11 @@ M.Panel = ui.component(function(props: Props): Node
 	local tab_list = ui.computed(function(): { Tab }
 		return tabs()
 	end)
+	local tab_motion = TabStrip.motion(function(): { Tab }
+		return tab_list:get()
+	end, function(t: Tab): string
+		return t.id
+	end)
 	local function active(): string?
 		return state.of(key:get()).active
 	end
@@ -1106,7 +1111,7 @@ M.Panel = ui.component(function(props: Props): Node
 				end
 				return entries
 			end,
-			ui.row {
+			ui.row(tab_motion.apply({
 				id = `panel-tab-{id}`,
 				ref = ref,
 				-- (A device tab's name and its device's line, as gpui's `device_tab_detail`.)
@@ -1294,7 +1299,7 @@ M.Panel = ui.component(function(props: Props): Node
 						bg = "$accent",
 					}),
 				},
-			},
+			}, id)),
 		}
 	end
 
@@ -1468,13 +1473,13 @@ M.Panel = ui.component(function(props: Props): Node
 				ref = strip_content,
 				gap = "$zeron.space.hair",
 				items = "center",
-				ui.each(tab_list, chip, {
+				ui.each(tab_motion.list, chip, {
 					key = function(t: Tab): string
 						return t.id
 					end,
 					direction = "row",
 					gap = "$zeron.space.hair",
-					animate = motion.layout(SLIDE),
+					animate = motion.layout(motion.DRAG_SLIDE),
 				}),
 				-- (Only with a tab open, as Zeron's: the empty page is what it
 				-- opens. Here, after the last tab, while they all fit; pinned at

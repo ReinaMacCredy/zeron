@@ -46,6 +46,8 @@ local Pills = require("@app/screens/chat/pills")
 local AppCommands = require("@app/screens/chat/app_commands")
 local Outgoing = require("@app/screens/chat/outgoing")
 local Asks = require("@app/screens/chat/asks")
+local Pages = require("@app/screens/chat/pages")
+local Branch = require("@app/screens/chat/branch")
 
 -- gpui's hero headline: its line, and its gap over the 28 of chips above the pill.
 local HEADLINE_LINE, HEADLINE_GAP = 38, 18
@@ -859,6 +861,9 @@ local function Composer(): Node
 		set_cargo = function(list: { any })
 			shared.cargo:set(list)
 		end,
+		refs = function(): string
+			return shared.refs_key()
+		end,
 	}
 	local end_edit = edits.finish
 	-- Moving to another chat: an edit under way is left as it was (its
@@ -1018,7 +1023,7 @@ local function Composer(): Node
 			return false
 		end
 		local typed, carried = shared.take()
-		local parts = Outgoing.parts(if resume then "" else typed, text, carried)
+		local parts = Outgoing.parts(if resume then "" else typed, text, carried, Pages.open(session_id:peek(), store.messages:peek(), carried))
 		local words, text_out, attachments = parts.words, parts.text, parts.attachments
 		local id = session_id:peek()
 		own_notice:set(nil)
@@ -1588,6 +1593,12 @@ local function Composer(): Node
 			-- is laid out as it was from the first frame.
 			keep = "chat",
 			toolbar_id = "composer-toolbar",
+			drop_ring = function(): boolean
+				return shared.dropping:get().composer == "session"
+			end,
+			ring = function(): number
+				return Branch.ring:get()
+			end,
 			open_model = shared.open_model,
 			step_effort = shared.step_effort,
 			model_open = model_open,

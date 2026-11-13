@@ -23,6 +23,11 @@ local appearance = require("@app/screens/shell/appearance")
 local art = require("@app/screens/shell/art")
 local boundary = require("@app/screens/shell/boundary")
 
+local ZOOM_EASE = motion.EASE
+local function zoom_ms(distance: number): number
+	return math.clamp(180 * math.sqrt(math.abs(distance) / 256), 180, 240)
+end
+
 export type Props = {
 	files: State<boolean>,
 	width: () -> number,
@@ -608,6 +613,7 @@ return function(props: Props): Node
 		local flipped = opened or now.sidebar ~= seen.sidebar or now.files ~= seen.files
 		local resized = now.vw ~= seen.vw
 		local moved = now.owner ~= seen.owner
+		local zoomed = now.expanded ~= seen.expanded and now.shown and seen.shown
 		seen = now
 		if to == base and not moved then
 			return
@@ -642,7 +648,7 @@ return function(props: Props): Node
 				revealing:set(true)
 			end
 			off:set(showing - to)
-			local params = motion.column(off:peek(), 0)
+			local params = if zoomed then { value = 0, duration = motion.ms(zoom_ms(showing - to)), ease = ZOOM_EASE } else motion.column(off:peek(), 0)
 			-- (By number: a callback holding its own clip would keep both for good.)
 			steps += 1
 			local this = steps

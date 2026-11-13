@@ -39,6 +39,7 @@ local boundary = require("@app/screens/shell/boundary")
 local Pills = require("@app/screens/chat/pills")
 local Asks = require("@app/screens/chat/asks")
 local DropOverlay = require("@ds/drop_overlay")
+local MessageRail = require("@ds/message_rail")
 
 -- What its tab says, and its icon, as the shipping app's.
 local M = {}
@@ -269,6 +270,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			return Shared.draft_peek(chat).cargo
 		end,
 		set_cargo = set_cargo,
+		refs = function(): string
+			return Shared.refs_key(chat)
+		end,
 	}
 	-- A tab closed mid-edit lets go of the edit, and made again finds its row
 	-- no longer held: the draft it set aside back. (A row gone is another
@@ -1290,6 +1294,11 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		measure = function(): number
 			return prefs.conversation_width:get()
 		end,
+		over = if tab.kind == "subagent"
+			then nil
+			else function(t: any): Node
+				return MessageRail.MessageRail { transcript = t, gate = split, name = `lane.{slot}` }
+			end,
 		messages = view.messages,
 		draft = view.draft,
 		offset = offset,

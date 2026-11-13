@@ -400,28 +400,9 @@ return function(): Node
 	local function window_w(): number
 		return root.width or 1240
 	end
-	-- Whether settings shows, over the whole window.
-	local function in_settings(): boolean
-		return route.current:get().name == "settings"
-	end
-	-- Leaving settings (Esc, Back to chats, a step back), its focus goes
-	-- with it: nothing of the chats lights up for having been next.
-	local was_settings = in_settings()
-	ui.effect(function()
-		local now = in_settings()
-		if was_settings and not now then
-			ui.after(0, function()
-				local el = root:peek()
-				if el then
-					el:blur()
-				end
-			end)
-		end
-		was_settings = now
-	end)
 	-- Whether the title bar stands over a wallpaper: a new chat's.
 	local function art(): boolean
-		return route.current:get().name == "home" and appearance.showing:get() ~= "none"
+		return route.chat:get().name == "home" and appearance.showing:get() ~= "none"
 	end
 	local frosted = ui.computed(function(): number
 		return if material.see_through() then 1 else 0
@@ -505,15 +486,12 @@ return function(): Node
 		-- The window's glass, or (opaque) its colour.
 		bg = ui.tween(frosted, { from = "$zeron.window", to = "$background", duration = 320, ease = "outQuad" }),
 		-- The chats: the sidebar, the page (its composer, a session's files),
-		-- the rail and the title bar. Kept while settings shows, out of
-		-- sight and out of the way, so they come back as they were (scroll,
-		-- draft, files and all).
+		-- the rail and the title bar, still there under settings' panel.
 		ui.column(arrival.frame_props({
 			id = "shell-chats",
 			w_full = true,
 			h_full = true,
 			relative = true,
-			hidden = in_settings,
 			ui.row {
 				grow = 1,
 				min_h = 0,
@@ -561,7 +539,6 @@ return function(): Node
 			h = 0,
 			overflow = "visible",
 			pointer_events = "none",
-			hidden = in_settings,
 			ui.presence(function(): string
 				local sidebar: any = boundary.load("@app/screens/shell/sidebar")
 				local c = sidebar and sidebar.card:get()
@@ -650,39 +627,9 @@ return function(): Node
 				exit = motion.transition({ opacity = 0, duration = 100 }),
 			}),
 		},
-		-- Settings: a page of its own over the whole window, its own list of
-		-- pages down its side and the way back to the chats at its head.
-		-- (Esc goes back: taken here, so a field or a menu elsewhere keeps
-		-- its own Esc.)
-		ui.show(
-			in_settings,
-			ui.column {
-				id = "shell-settings",
-				-- Zeron's Settings are no plugin's to change or add to: what you
-				-- allow plugins and templates is decided here (Settings →
-				-- Plugins and Templates). Sealed, with all it holds.
-				hook = false,
-				w_full = true,
-				h_full = true,
-				focusable = true,
-				focus = { outline = 0 },
-				-- (Focus comes here as it shows: none left on a row of the chats
-				-- now out of sight, where keys would go unseen.)
-				on_mount = function(el)
-					el:focus()
-				end,
-				on_key = function(e): boolean
-					if e.key == "Escape" then
-						route.leave_settings()
-						return true
-					end
-					return false
-				end,
-				boundary.screen(boundary.named("shell.boundary.screen.settings"), "@app/screens/shell/settings", function(settings): Node
-					return settings.View()
-				end),
-			}
-		),
+		boundary.screen(boundary.named("shell.boundary.screen.settings"), "@app/screens/shell/settings", function(settings): Node
+			return settings.Panel()
+		end, { pass = true }),
 		-- What's said for a moment (a plugin's toast, a notice): over
 		-- everything, once for the window.
 		ds.toast.Host {},

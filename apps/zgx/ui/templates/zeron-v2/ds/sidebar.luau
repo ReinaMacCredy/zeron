@@ -277,7 +277,7 @@ local SLIDE = { duration = 260, ease = "out(3)" }
 local FADE = { duration = 160 }
 -- Rows moving aside for a dragged one, and closing up after it (Zeron's
 -- TAB_SLIDE: 150 ms, easing out).
-local DRAG_SLIDE = { duration = 150, ease = "out(3)" }
+local DRAG_SLIDE = motion.DRAG_SLIDE
 -- How many of a group's sessions show before "Show N more" (the session
 -- open, and with `keep_active` those in a state, showing past them).
 local GROUP_FIRST = 5
@@ -2170,35 +2170,13 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local clock = ui.use_state(0)
 	-- (`css`: CSS `ease`, ds/motion's EASE, the column motion's curve, for
 	-- rows taking new places; else easing out.)
-	type Anim = { from: number, to: number, at: number, dur: number, delay: number, on_done: (() -> ())?, css: boolean? }
-	-- cubic-bezier(.25, .1, .25, 1) at progress `x`: its time found by
-	-- Newton's method (bisecting where the slope is flat), then its value.
-	local function css_ease(x: number): number
-		local function bez(t: number, a: number, b: number): number
-			local u = 1 - t
-			return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t
-		end
-		local t = x
-		for _ = 1, 8 do
-			local err = bez(t, 0.25, 0.25) - x
-			if math.abs(err) < 1e-4 then
-				break
-			end
-			local u = 1 - t
-			local slope = 3 * u * u * 0.25 + 6 * u * t * (0.25 - 0.25) + 3 * t * t * (1 - 0.25)
-			if math.abs(slope) < 1e-6 then
-				break
-			end
-			t = math.clamp(t - err / slope, 0, 1)
-		end
-		return bez(t, 0.1, 1)
-	end
+	type Anim = { from: number, to: number, at: number, dur: number, delay: number, on_done: (() -> ())?, css: boolean?, drag: boolean? }
 	local function value(a: Anim, t: number): number
 		if a.dur <= 0 then
 			return a.to
 		end
 		local p = math.clamp((t - a.at - a.delay) / a.dur, 0, 1)
-		p = if a.css then css_ease(p) else 1 - (1 - p) ^ 3
+		p = if a.css then motion.bezier(p, 0.25, 0.1, 0.25, 1) elseif a.drag then motion.bezier(p, 0, 0, 0.58, 1) else 1 - (1 - p) ^ 3
 		return a.from + (a.to - a.from) * p
 	end
 	local function still(v: number): Anim
@@ -2247,6 +2225,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				onUpdate = settle,
 			})
 		end
+		return n
+	end
+	local function slide(a: Anim?, to: number, on_done: (() -> ())?): Anim
+		local n = anim(a, to, DRAG_SLIDE.duration, 0, on_done)
+		n.drag = true
 		return n
 	end
 
@@ -2432,7 +2415,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			elseif not g.closing then
 				g.closing = true
 				local gone = g
-				g.a = anim(g.a, 0, DRAG_SLIDE.duration, 0, function()
+				g.a = slide(g.a, 0, function()
 					if gone.closing then
 						local kept: { Gap } = {}
 						for _, other in gaps do
@@ -2449,12 +2432,12 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		if o and o.list ~= "regular" then
 			if keep then
 				keep.closing = false
-				keep.a = anim(keep.a, 1, DRAG_SLIDE.duration)
+				keep.a = slide(keep.a, 1)
 			else
-				table.insert(gaps, { list = o.list, index = o.index, h = d.h, a = anim(still(0), 1, DRAG_SLIDE.duration), closing = false })
+				table.insert(gaps, { list = o.list, index = o.index, h = d.h, a = slide(still(0), 1), closing = false })
 			end
 		end
-		leaving = anim(leaving, if o then 1 else 0, DRAG_SLIDE.duration)
+		leaving = slide(leaving, if o then 1 else 0)
 		gaps_changed()
 	end
 	-- What a drag brings into the list (Pinned's drop zone while nothing is
