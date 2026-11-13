@@ -316,7 +316,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "set_thread",
-            "description": "Change threads on this device, in any project; set exactly one of `title` (renames `threadId`, this chat included), `archived` (archives or unarchives `threadId` or `threadIds`; not while one works, never cascades), `settled` (as the sidebar's Settle: on the Inbox's Settled shelf until its next message; not while one works or waits on a question) or `access` (one `threadId`: this chat or a thread it opened or delegated, capped at this chat's access; a raise reaches its running turn and the approvals it waits on at once, a lower one applies from its next run).",
+            "description": "Change threads on this device, in any project; set exactly one of `title` (renames `threadId`, this chat included), `archived` (archives or unarchives `threadId` or `threadIds`; not while one works, never cascades), `settled` (as the sidebar's Settle: on the Inbox's Settled shelf until its next message; not while one works or waits on a question) or `access` (one `threadId`: this chat or a thread it opened or delegated, capped at this chat's access; a raise reaches its running turn and the approvals it waits on at once, a lower one applies from its next run; `auto-review` applies edits and has a model approve other safe actions, asking about the rest).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -325,7 +325,7 @@ fn thread_tool_list() -> Value {
                     "title": { "type": "string" },
                     "archived": { "type": "boolean" },
                     "settled": { "type": "boolean" },
-                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"] }
+                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "auto-review", "full-access"] }
                 },
                 "additionalProperties": false
             }
@@ -509,7 +509,7 @@ fn thread_tool_list() -> Value {
                     "harness": { "type": "string" },
                     "model": { "type": "string", "description": "As that harness names it; empty keeps the chat's model." },
                     "reasoning": { "type": "string", "enum": REASONING_LEVELS },
-                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"] },
+                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "auto-review", "full-access"] },
                     "permissionMode": { "type": "string", "enum": ["ask", "auto", "full"], "description": "Old name for access." },
                     "notes": { "type": "string", "maxLength": 2000 },
                     "instructions": { "type": "string", "maxLength": 16000 },
@@ -627,7 +627,7 @@ fn thread_tool_list() -> Value {
                     "mode": { "type": "string", "enum": ["async", "wait"] },
                     "timeoutMs": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECS * 1000, "description": "For mode wait; default 10 minutes." },
                     "clientRequestId": { "type": "string", "maxLength": 256, "description": "Idempotency key: a retry returns the original task." },
-                    "access": { "type": "string", "enum": ["inherit", "supervised", "auto-accept-edits", "full-access"] },
+                    "access": { "type": "string", "enum": ["inherit", "supervised", "auto-accept-edits", "auto-review", "full-access"] },
                     "permissionMode": { "type": "string", "enum": ["ask", "auto", "full"], "description": "Old name for access." },
                     "quotaChoice": { "type": "string", "enum": ["native", "fallback", "wait"], "description": "Only after a quota_exhausted error, with the person's answer: your native sub-agent, the next fallback harness, or wait for the reset." }
                 },
@@ -2921,7 +2921,7 @@ impl ThreadTools {
     async fn set_thread_access(&self, args: &Value) -> Result<Value, String> {
         let thread_id = Self::thread_id(args)?;
         let access: AccessMode = serde_json::from_value(args["access"].clone())
-            .map_err(|_| "access is supervised, auto-accept-edits or full-access")?;
+            .map_err(|_| "access is supervised, auto-accept-edits, auto-review or full-access")?;
         let mut config = self
             .open_peer(thread_id)
             .await?
@@ -3353,7 +3353,7 @@ fn access_arg(args: &Value) -> Result<Option<AccessMode>, String> {
             .map(Some)
             .map_err(|_| {
                 format!(
-                    "unknown access mode {value}; use supervised, auto-accept-edits or full-access"
+                    "unknown access mode {value}; use supervised, auto-accept-edits, auto-review or full-access"
                 )
             }),
     }

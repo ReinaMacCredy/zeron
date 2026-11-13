@@ -2,7 +2,7 @@
 # must be listed in crates/docs/src/images.rs IMAGES. Order does not matter.
 
 [[entry]]
-version = "0.3.2"
+version = "0.3.4"
 date = "Nov 13"
 hero_visual = "text-annotation-hero"
 
@@ -85,6 +85,33 @@ description = "Subagents show in the composer's Running tray, chats in a plain f
 id = "upstream-0-3-2"
 title = "From upstream Zeron: the zgx interface as the stable app"
 description = "Upstream 0.3.0 to 0.3.2 make zgx the stable app: a Themes page under Customize, theme tools for agents, a command's output folded under its call with Show all lines, a + on a project's device rows, and many fixes to the sidebar, composer and transcript."
+
+[[entry.features]]
+id = "upstream-0-3-3"
+title = "From upstream Zeron: pictures from a tool's result"
+description = "A screenshot or image a tool returns shows as a small thumbnail when you open its row, and clicking it opens the lightbox. Finishing setup without an account now opens the main window on the next launch."
+details = "macOS sound chimes no longer risk hanging the Mac, and Windows lists microphones by name."
+
+[[entry.features]]
+id = "upstream-0-3-4"
+title = "From upstream Zeron: Windows terminal tabs and Codex's own commands"
+description = "Terminal tabs work on Windows: they open PowerShell, follow the tab's size, and Ctrl+C stops what the shell runs. In a Codex chat, / lists Codex's commands and skills."
+details = "With Reduce motion on, a switch that is on shows its knob on the right."
+
+[[entry.improvements]]
+text = "A lead agent can raise the access of a thread or subagent it started while it runs, up to its own, and what is waiting that the new mode covers is answered at once. A lead at Full access can also approve a request for the rest of that turn."
+
+[[entry.improvements]]
+text = "A new access mode, Auto: edits apply on their own, and a quick check by the chat's agent on its cheapest model lets safe commands and tools through and asks you about the rest. What it allows shows in the chat as answered by Auto."
+
+[[entry.improvements]]
+text = "On the zgx interface, your avatar sits on the rail above Settings, and the app's update shows there: an arrow falling while it downloads, a check that turns to restart when it's ready."
+
+[[entry.improvements]]
+text = "Show all and Show fewer on thoughts is one choice for every chat, kept across launches."
+
+[[entry.improvements]]
+text = "A work group's summary says consulted advisor instead of counting the advisor as a tool."
 
 [[entry.improvements]]
 text = "Settings moves to a sidebar tree: a group opens to its pages under a guide line, each page has a title and summary, and changing page crossfades. A search hit shows its path, and picking one glides to the row and flashes it."

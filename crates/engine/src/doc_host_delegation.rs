@@ -225,7 +225,7 @@ fn input_wake_text(
         text.push('\n');
     }
     text.push_str(
-        "Answer with respond_to_input (threadId, requestId, answers) when the answer follows from the task or an earlier decision; a tool approval needs this chat at Full access. Otherwise ask the person with ask_user, or leave it to them. They see the same question and may answer first, in which case respond_to_input reports nothing pending.",
+        "Answer with respond_to_input (threadId, requestId, answers) when the answer follows from the task or an earlier decision; a tool approval needs this chat at Full access, and scope run lets that run's same-kind actions through too; set_thread access raises a thread this chat opened. Otherwise ask the person with ask_user, or leave it to them. They see the same question and may answer first, in which case respond_to_input reports nothing pending.",
     );
     text
 }
