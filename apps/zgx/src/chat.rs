@@ -2313,8 +2313,7 @@ fn effort_label(level: &str) -> &str {
     }
 }
 
-/// ds.Mark's name for a harness. The mock agent (development only) borrows
-/// Pi's.
+/// ds.Mark's name for a harness; one with no mark of its own borrows Pi's.
 fn mark(id: &str) -> String {
     crate::agents::glyph(id).unwrap_or_else(|| "pi".into())
 }
@@ -5993,7 +5992,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 return system_row(entry, id);
             };
             let side = |name: &str, harness: &str| {
-                let mark = part[harness].as_str().and_then(switch_mark);
+                let mark = part[harness].as_str().and_then(crate::agents::glyph);
                 (
                     Value::from(single_line(part[name].as_str().unwrap_or_default()).as_str()),
                     mark.map_or(Value::Nil, |m| Value::from(m.as_str())),
@@ -6192,7 +6191,7 @@ fn decision_value(r: &Json) -> Value {
         ("tokens_in", num("inputTokens")),
         ("tokens_out", num("outputTokens")),
         ("reason", words("reason")),
-        ("mark", harness.and_then(switch_mark).map_or(Value::Nil, |m| Value::from(m.as_str()))),
+        ("mark", harness.and_then(crate::agents::glyph).map_or(Value::Nil, |m| Value::from(m.as_str()))),
         ("agent", agent.map_or(Value::Nil, Value::from)),
         ("model", words("model")),
     ])
@@ -6279,7 +6278,7 @@ fn compaction_wait(chats: &Chats, open: &Open) -> Value {
         CompactionWait::Classifying { harness, model, agent_note } => {
             fields.push(("phase", Value::from("checking")));
             fields.push(("agent_note", Value::Bool(agent_note)));
-            fields.push(("mark", switch_mark(harness.as_str()).map_or(Value::Nil, |m| Value::from(m.as_str()))));
+            fields.push(("mark", crate::agents::glyph(harness.as_str()).map_or(Value::Nil, |m| Value::from(m.as_str()))));
             fields.push(("agent", Value::from(harness.display_name())));
             fields.push(("model", model.as_deref().map_or(Value::Nil, Value::from)));
         }
@@ -6618,15 +6617,6 @@ fn handoff_switch(entry: &Json) -> Option<Json> {
         "fromHarness": from,
         "toHarness": to,
     }))
-}
-
-/// A switch side's mark: its agent's, the mock drawn as Claude, as the
-/// shipping app's `harness_brand_icon`.
-fn switch_mark(harness: &str) -> Option<String> {
-    if harness == "mock" {
-        return Some("claude".into());
-    }
-    crate::agents::glyph(harness)
 }
 
 /// A name on one line (the shipping app's `single_line`).

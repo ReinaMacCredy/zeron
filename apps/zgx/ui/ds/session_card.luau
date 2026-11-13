@@ -17,6 +17,7 @@
 
 local Glass = require("@self/glass")
 local Icon = require("@self/icon")
+local AgentMark = require("@self/agent_mark")
 local status = require("@self/status")
 local locale = require("@self/locale")
 
@@ -28,6 +29,7 @@ export type Props = {
 	project: string? | () -> string?,
 	branch: string? | () -> string?,
 	model: string? | () -> string?,
+	mark: string?,
 	opened_by: string? | () -> string?,
 	subagents: number? | () -> number?,
 	failed: boolean? | () -> boolean?,
@@ -66,6 +68,9 @@ local function line(icon: Icon.Name | () -> Icon.Name, text: () -> string, ink: 
 end
 
 return function(props: Props): Node
+	local function agent(): Node?
+		return if props.mark then AgentMark.Mark { label = props.mark, mark = props.mark, size = 12, bare = true } else nil
+	end
 	return Glass.Panel {
 		kind = "surface",
 		class = "session-card",
@@ -107,7 +112,7 @@ return function(props: Props): Node
 				return read(props.model) ~= nil
 			end, line("bot", function(): string
 				return read(props.model) or ""
-			end)),
+			end, nil, agent())),
 			ui.show(function(): boolean
 				return read(props.opened_by) ~= nil
 			end, line("lucide-corner-down-right", function(): string
@@ -117,7 +122,7 @@ return function(props: Props): Node
 				return (read(props.subagents) or 0) > 0
 			end, line("bot", function(): string
 				return locale.s("ds.session_card.subagents", { n = read(props.subagents) or 0 })
-			end)),
+			end, nil, agent())),
 			ui.show(function(): boolean
 				return read(props.failed) == true
 			end, line("lucide-circle-alert", function(): string

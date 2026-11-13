@@ -1734,7 +1734,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						gap = "$zeron.space.hair",
 						items = "center",
 						color = "$text.tertiary",
-						Icon { name = "bot", size = 12 },
+						ui.presence(function(): string
+							return cur().agent or ""
+						end, function(agent: string): Node
+							return if agent == "" then Icon { name = "bot", size = 12 } else Mark { name = agent :: Mark.Name, size = 12, bare = true }
+						end, { shrink = 0 }),
 						ui.text { function(): string
 							return tostring(cur().subagents or 0)
 						end, text_size = "$font.size.sm", color = "$text.tertiary", tabular = true },

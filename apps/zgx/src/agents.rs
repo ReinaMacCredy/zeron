@@ -497,6 +497,9 @@ pub(crate) fn mark(id: &str) -> Option<&'static str> {
         "hermes" => "hermes",
         "antigravity" => "antigravity",
         "muse" => "muse",
+        "fx" => "fx",
+        // The development-only mock wears Claude's, as gpui's `harness_brand_icon`.
+        "mock" => "claude",
         _ => return None,
     })
 }
