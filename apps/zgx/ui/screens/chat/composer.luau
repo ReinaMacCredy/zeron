@@ -869,6 +869,9 @@ local function Composer(): Node
 		set_cargo = function(list: { any })
 			shared.cargo:set(list)
 		end,
+		refs = function(): string
+			return shared.refs_key()
+		end,
 	}
 	local end_edit = edits.finish
 	-- Moving to another chat: an edit under way is left as it was (its

@@ -795,6 +795,8 @@ local QUEUED_FILES = {
 	{ path = "/host/uploads/9e97a72f-shot.png", name = "shot.png", kind = "image", src = "/host/uploads/9e97a72f-shot.png", on_host = true },
 	{ path = "/host/uploads/ea958e1e-note.txt", name = "note.txt", kind = "file", on_host = true },
 }
+-- (`q2`'s words as the host keeps them: a test may give it a mention.)
+local queued_words = ui.state("test_queued_words", "Queued with files")
 -- One queued message, editable here.
 stub.queue_edit = function(id: string, item: string): any
 	note(`queue_edit:{id}:{item}`)
@@ -807,7 +809,7 @@ stub.queue_edit = function(id: string, item: string): any
 	end
 	publish(id, { queue = q })
 	if item == "q2" then
-		return settled({ text = "Queued with files", attachments = QUEUED_FILES })
+		return settled({ text = queued_words:peek(), attachments = QUEUED_FILES })
 	end
 	return settled({ text = "Queued words" })
 end

@@ -429,6 +429,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			return Shared.draft_peek(chat).cargo
 		end,
 		set_cargo = set_cargo,
+		refs = function(): string
+			return Shared.refs_key(chat)
+		end,
 	}
 	-- A tab closed mid-edit lets go of the edit, and made again finds its row
 	-- no longer held: the draft it set aside back. (A row gone is another

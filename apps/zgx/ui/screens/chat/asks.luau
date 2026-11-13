@@ -19,6 +19,7 @@ local store = require("@app/screens/chat/store")
 local queued = require("@app/screens/chat/queued")
 local Dock = require("@ds/composer_dock")
 local Carried = require("@app/screens/chat/carried")
+local references = require("@ds/references")
 local T = require("@ds/transcript")
 
 local M = {}
@@ -36,6 +37,9 @@ export type Edits = {
 	say: (tone: string, key: string) -> (),
 	cargo: (() -> { any })?,
 	set_cargo: (({ any }) -> ())?,
+	-- The draft's chip map (ds/references): the message's mentions shown as
+	-- chips while it's edited, and links again as it's saved.
+	refs: (() -> string)?,
 }
 
 local chips = 0
@@ -64,7 +68,7 @@ function M.queue_edits(e: Edits): { [string]: any }
 		if not now or not id then
 			return
 		end
-		local words = e.text:peek()
+		local words = if e.refs then references.encode(e.refs(), e.text:peek()) else e.text:peek()
 		-- The files it carries now: its chips, as edited.
 		local files = if e.cargo then Carried.pack(e.cargo(), "", "").attachments else nil
 		ui.batch(function()
@@ -89,7 +93,8 @@ function M.queue_edits(e: Edits): { [string]: any }
 			store.queue_edit(id, item):after(function(got: any)
 				ui.batch(function()
 					e.editing:set { item = item, aside = e.text:peek(), aside_cargo = if e.cargo then e.cargo() else nil }
-					e.text:set(if got then got.text else "")
+					local text = if got then got.text else ""
+					e.text:set(if e.refs then references.decode(e.refs(), text) else text)
 					if e.set_cargo then
 						e.set_cargo(chips_of(if got then got.attachments else nil))
 					end
