@@ -3744,6 +3744,10 @@
     "edit": "Edit"
   },
   "shell": {
+    "split": {
+      "add_left": "Add left split",
+      "add_right": "Add right split"
+    },
     "sidebar": {
       "unknown_device": "Unknown device",
       "chats": "Chats",

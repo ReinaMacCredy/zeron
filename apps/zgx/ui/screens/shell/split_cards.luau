@@ -79,6 +79,12 @@ local function card(pane: string, side: string, layer: any, grow: any, lit: any,
 			end,
 		},
 		ds.Icon { name = "split-columns", size = 16 },
+		ui.text {
+			ui.t(if side == "left" then "shell.split.add_left" else "shell.split.add_right"),
+			text_size = ui.raw(11, "gpui's split card label"),
+			weight = "$font.weight.medium",
+			wrap = false,
+		},
 	}
 end
 

@@ -3744,6 +3744,10 @@
     "edit": "编辑"
   },
   "shell": {
+    "split": {
+      "add_left": "添加左侧分屏",
+      "add_right": "添加右侧分屏"
+    },
     "sidebar": {
       "unknown_device": "未知设备",
       "chats": "对话",
