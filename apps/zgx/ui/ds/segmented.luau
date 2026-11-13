@@ -6,10 +6,13 @@
 -- `Segmented { value = state, options = { { value = false, label = "Light" }, { value = true, label = "Dark" } } }`.
 
 -- (A label may be a message, `ui.t`, drawn as it is.)
-export type Option = { value: any, label: string | Message | () -> string }
+export type Option = { value: any, label: string | Message | () -> string, id: string?, trail: Node? }
 export type Props = {
 	value: State<any>,
 	options: { Option },
+	-- Called with the value pressed, in place of setting `value` (a choice
+	-- kept elsewhere, `value` a computed reading it).
+	on_pick: ((any) -> ())?,
 	-- Each segment's width, if they should all be one (equal, so the thumb's
 	-- travel is even); else each as wide as its label.
 	segment: number?,
@@ -53,6 +56,13 @@ local recipe = ui.variants {
 
 return function(props: Props): Node
 	local value = props.value
+	local function pick(v: any)
+		if props.on_pick then
+			props.on_pick(v)
+		else
+			value:set(v)
+		end
+	end
 	local fixed = props.segment
 	-- The thumb's inset in its track.
 	local PAD = ui.theme.get("zeron.space.hair") :: number
@@ -77,6 +87,7 @@ return function(props: Props): Node
 			segments,
 			ui.div {
 				ref = ref,
+				id = option.id,
 				role = "radio",
 				checked = chosen,
 				focusable = true,
@@ -91,12 +102,13 @@ return function(props: Props): Node
 				h_full = true,
 				items = "center",
 				justify = "center",
+				gap = if option.trail then "$space.1" else nil,
 				on_click = function()
-					value:set(option.value)
+					pick(option.value)
 				end,
 				on_key = function(e)
 					if e.key == " " or e.key == "Enter" then
-						value:set(option.value)
+						pick(option.value)
 						return true
 					end
 					return false
@@ -106,6 +118,7 @@ return function(props: Props): Node
 					text_size = "$font.size.sm",
 					weight = "$font.weight.medium",
 				},
+				option.trail,
 			}
 		)
 	end

@@ -177,7 +177,17 @@ test("beside the thread by kind: the asking thread's tab opens, old threads fold
 	end)).to_be(true)
 	expect(app:tree("#sidecar-panel-shell-t"):find("Launch Dev 86", 1, true) ~= nil).to_be(true)
 	expect(app:has("#sidecar-panel-child-old")).to_be(false)
+	app:frames(60)
+	local function left(id: string): number
+		local line = app:tree(`#{id}`):match("[^\n]+")
+		return tonumber(line:match(" (%-?[%d.]+),%-?[%d.]+ [%d.]+x")) :: number
+	end
+	expect(math.abs(left("sidecar-panel-tabs-thumb") - left("sidecar-panel-tab-shell")) < 1).to_be(true)
 	app:click("#sidecar-panel-tab-agent")
+	-- The thumb springs across from Shell, not jumping to Agent.
+	app:frames(3)
+	local mid = left("sidecar-panel-tabs-thumb")
+	expect(mid > left("sidecar-panel-tab-agent") + 1 and mid < left("sidecar-panel-tab-shell") - 1).to_be(true)
 	expect(eventually(app, function(): boolean
 		return app:has("#sidecar-panel-agent-lane")
 	end)).to_be(true)

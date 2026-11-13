@@ -3,6 +3,7 @@
 
 local Icon = require("@ds/icon")
 local Mark = require("@ds/mark")
+local Segmented = require("@ds/segmented")
 local Tooltip = require("@ds/tooltip")
 local Menu = require("@ds/menu")
 local ContextMenu = require("@ds/context_menu")
@@ -1186,45 +1187,10 @@ local function fold_row(data: any, surface: string): Node
 	})
 end
 
-local function kind_tab(data: any, surface: string, kind: string): Node
-	local function chosen(): boolean
-		return data.tab() == kind
-	end
-	return ui.show(function(): boolean
-		return table.find(data.kinds(), kind) ~= nil
-	end, ui.button {
-		id = `sidecar-{surface}-tab-{kind}`,
-		role = "tab",
-		selected = chosen,
-		label = function(): string
-			local n = data.count_of(kind)
-			local word = locale.s(`sidecar.tab.{kind}`)
-			return if n > 0 then `{word} {n}` else word
-		end,
-		grow = 1,
-		basis = 0,
-		min_w = 0,
-		h = 24,
-		gap = ui.raw(5, "the mockup's segment"),
+local function kind_trail(data: any, kind: string): Node
+	return ui.row {
+		gap = "$space.1",
 		items = "center",
-		justify = "center",
-		rounded = ui.raw(6, "the mockup's segment"),
-		cursor = "pointer",
-		bg = function(): string
-			return if chosen() then "$popover.bg" else "#00000000"
-		end,
-		shadow = function(): any
-			return if chosen() then "$shadow.sm" else false
-		end,
-		color = function(): string
-			return if chosen() then "$text.primary" else "$text.secondary"
-		end,
-		hover = { color = "$text.primary" },
-		focus = control.ring,
-		on_click = function()
-			data.run({ what = "tab", kind = kind })
-		end,
-		ui.text { locale.t(`sidecar.tab.{kind}`), shrink = 0, text_size = "$font.size.sm" },
 		ui.show(function(): boolean
 			return data.count_of(kind) > 0
 		end, ui.text {
@@ -1242,27 +1208,40 @@ local function kind_tab(data: any, surface: string, kind: string): Node
 				return data.asking() > 0
 			end, ui.div { class = "sidecar-tab-asking", w = 6, h = 6, shrink = 0, rounded = "$radius.full", bg = "$warning" })
 			else nil,
-	})
+	}
 end
 
 local function kind_tabs(data: any, surface: string): Node
 	return ui.show(function(): boolean
 		return #data.kinds() >= 2
-	end, ui.row {
-		id = `sidecar-{surface}-tabs`,
-		role = "tablist",
-		label = locale.t("sidecar.tabs"),
+	end, ui.column {
 		w_full = true,
 		shrink = 0,
-		p = ui.raw(2, "the mockup's well"),
-		gap = ui.raw(2, "the mockup's well"),
 		mt = "$space.1",
 		mb = ui.raw(6, "the mockup's well"),
-		rounded = ui.raw(8, "the mockup's well"),
-		bg = "$zeron.secondary.bg",
-		kind_tab(data, surface, "agent"),
-		kind_tab(data, surface, "thread"),
-		kind_tab(data, surface, "shell"),
+		ui.presence(function(): string
+			return table.concat(data.kinds(), ",")
+		end, function(key: string): Node
+			local options = {}
+			for _, kind in string.split(key, ",") do
+				table.insert(options, {
+					value = kind,
+					id = `sidecar-{surface}-tab-{kind}`,
+					label = locale.t(`sidecar.tab.{kind}`),
+					trail = kind_trail(data, kind),
+				})
+			end
+			return Segmented {
+				id = `sidecar-{surface}-tabs`,
+				label = locale.t("sidecar.tabs"),
+				fill = true,
+				value = ui.computed(data.tab),
+				on_pick = function(kind: string)
+					data.run({ what = "tab", kind = kind })
+				end,
+				options = options,
+			}
+		end, { w_full = true }),
 	})
 end
 
