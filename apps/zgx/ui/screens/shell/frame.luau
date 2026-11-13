@@ -711,9 +711,9 @@ end
 
 local function card_view(): Node
 	local radius = faded_in(inset_radius)
-	-- (Not framed, the strip over the bar is the card's top: its corners are the strip's.)
+	-- (Over a picture unframed, the strip over the bar is the card's top: its corners are the strip's. Plain, the strip is the window's own tint, so the card rounds its own.)
 	local top_radius = faded_in(function(): number
-		return if M.framed:get() then inset_radius() else 0
+		return if M.framed:get() or not shows_art() then inset_radius() else 0
 	end)
 	local whole = faded_in(function(): number
 		return if art.split:get() then 0 else 1
