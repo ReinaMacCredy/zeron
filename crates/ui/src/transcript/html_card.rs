@@ -1408,6 +1408,8 @@ mod tests {
             title: "Chart".into(),
             height: 420,
             url: None,
+            groups: Vec::new(),
+            closed: false,
         }
     }
 

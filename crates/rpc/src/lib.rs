@@ -473,6 +473,7 @@ pub mod methods {
     pub const DEVICE_TOOL_CLOSE: &str = "DeviceToolClose";
     /// `html_render`: store an agent's page in its chat (run-secret gated).
     pub const PUBLISH_HTML_RENDER: &str = "PublishHtmlRender";
+    pub const CLOSE_PICK_PAGE: &str = "ClosePickPage";
     /// `html_preview`: lay a page out in the desktop app and return a
     /// screenshot (run-secret gated, never relay-forwarded).
     pub const HTML_PREVIEW: &str = "HtmlPreview";

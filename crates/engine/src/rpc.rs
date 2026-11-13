@@ -4187,6 +4187,7 @@ fn forwardable(method: &str) -> bool {
             | methods::STOP_BACKGROUND_TASK
             | methods::READ_BACKGROUND_TASK_OUTPUT
             | methods::STOP_WAITING
+            | methods::CLOSE_PICK_PAGE
             // Checkout diffs are produced on the device holding the checkout.
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
@@ -6205,6 +6206,18 @@ impl RpcService for EngineRpc {
                 let p: StopWaitingParams = parse_params(params)?;
                 let stopped = self.sessions.stop_waiting(&p.chat_id);
                 RpcReply::value(&serde_json::json!({ "stopped": stopped }))
+            }
+            methods::CLOSE_PICK_PAGE => {
+                let p: zeron_proto::html_render::ClosePickPageParams = parse_params(params)?;
+                let handle = self
+                    .doc_host
+                    .open(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let closed = handle
+                    .writer()
+                    .close_html_pages(std::slice::from_ref(&p.title))
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "closed": closed }))
             }
             methods::READ_BACKGROUND_TASK_OUTPUT => {
                 let p: BackgroundTaskParams = parse_params(params)?;
@@ -8982,12 +8995,38 @@ impl RpcService for EngineRpc {
                         "html_render needs this chat's live Zeron run".into(),
                     ));
                 }
-                let input = zeron_proto::html_render::render_input(
+                let close: Vec<String> = p
+                    .close
+                    .iter()
+                    .map(|t| t.trim().to_owned())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                let input = zeron_proto::html_render::render_request(
                     p.html.as_deref(),
                     p.path.as_deref(),
                     p.url.as_deref(),
+                    &close,
                 )
                 .map_err(RpcError::BadParams)?;
+                let failed = |e: zeron_doc::DocError| RpcError::Failed(e.to_string());
+                let handle = self
+                    .doc_host
+                    .open(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if !close.is_empty() {
+                    let entries = handle.doc().read_entries().map_err(failed)?;
+                    crate::html_render::check_close(&entries, &close)
+                        .map_err(RpcError::BadParams)?;
+                }
+                let Some(input) = input else {
+                    handle.writer().close_html_pages(&close).map_err(failed)?;
+                    let entries = handle.doc().read_entries().map_err(failed)?;
+                    let open = crate::html_render::open_pages(&entries);
+                    return RpcReply::value(&serde_json::json!({
+                        "message": format!("Closed. {}", crate::html_render::open_pages_words(&open)),
+                        "openPages": open,
+                    }));
+                };
                 let mut message = zeron_proto::html_render::RENDERED_MESSAGE.to_owned();
                 let page = match input {
                     zeron_proto::html_render::RenderInput::Url(url) => {
@@ -9022,10 +9061,24 @@ impl RpcService for EngineRpc {
                         p.url.as_deref().unwrap_or_default()
                     }
                 };
+                if !close.is_empty() {
+                    handle.writer().close_html_pages(&close).map_err(failed)?;
+                }
+                let entries = handle.doc().read_entries().map_err(failed)?;
+                let shown = zeron_proto::html_render::title_key(&page.title);
+                let mut open = crate::html_render::open_pages(&entries);
+                open.retain(|p| zeron_proto::html_render::title_key(&p.title) != shown);
+                if !page.groups.is_empty() {
+                    open.push(crate::html_render::OpenPage {
+                        title: page.title.clone(),
+                        groups_left: page.groups.clone(),
+                    });
+                }
                 self.sessions.bind_html_render(&p.chat_id, key, page.clone());
                 RpcReply::value(&serde_json::json!({
                     "htmlRender": page,
                     "message": message,
+                    "openPages": open,
                 }))
             }
             methods::HTML_PREVIEW => {

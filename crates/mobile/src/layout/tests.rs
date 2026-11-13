@@ -2172,7 +2172,7 @@ fn page_rows_sit_outside_the_fold_and_take_the_height_their_page_reports() {
         subagent_ref: None,
         subagent_status: None,
         subagent_tail: None,
-        html_render: Some(zeron_proto::html_render::HtmlRenderRef { path: "html/a1/page.html".into(), title: "Mockup".into(), height: 600, url: None }),
+        html_render: Some(zeron_proto::html_render::HtmlRenderRef { path: "html/a1/page.html".into(), title: "Mockup".into(), height: 600, url: None, groups: Vec::new(), closed: false }),
         delegate_route: None,
         exit_code: None,
         output_lines: None,

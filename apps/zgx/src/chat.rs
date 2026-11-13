@@ -981,6 +981,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     // app's `stop_background_task`): whether it's stopping.
     host.async_action("chat.stop_task", move |args| async move { stop_task(args).await.map_err(String::from) });
     host.async_action("chat.stop_waiting", move |id| async move { stop_waiting(text(&id)).await.map_err(String::from) });
+    host.async_action("chat.close_page", move |args| async move { close_page(args).await.map_err(String::from) });
     let pick = which.clone();
     host.async_action("chat.respond", move |args| {
         let v = pick(&args);
@@ -4275,6 +4276,24 @@ async fn stop_waiting(id: String) -> Result<Value, Outcome> {
     Ok(Value::Bool(answer["stopped"].as_bool() == Some(true)))
 }
 
+async fn close_page(args: Value) -> Result<Value, Outcome> {
+    let id = args.field("id").map(text).unwrap_or_default();
+    let title = args.field("title").map(text).unwrap_or_default();
+    if id.is_empty() || title.is_empty() {
+        return Err("missing");
+    }
+    let chats = CHATS.with(Rc::clone);
+    let mut params = json!({ "chatId": id, "title": title });
+    if let Some(t) = chats.chat(&id).and_then(|c| chats.target(&c)) {
+        params["targetDeviceId"] = json!(t);
+    }
+    let answer = engine::get()
+        .call("ClosePickPage", params)
+        .await
+        .map_err(|e| engine::outcome(&e))?;
+    Ok(Value::Num(answer["closed"].as_f64().unwrap_or(0.)))
+}
+
 async fn command(chat: &str, command: Json) -> Result<(), Outcome> {
     command_with(chat, command, &[]).await
 }
@@ -7078,6 +7097,7 @@ fn html_block(part: &Json) -> Option<Value> {
         ("height", Value::Num(page["height"].as_f64().unwrap_or(f64::from(zeron_proto::html_render::MIN_HEIGHT)))),
         ("url", field("url")),
         ("device", part["device"].as_str().map_or(Value::Nil, Value::from)),
+        ("closed", Value::Bool(page["closed"].as_bool() == Some(true))),
     ]))
 }
 
@@ -10655,6 +10675,10 @@ mod tests {
         assert_eq!(kinds, ["tools", "html", "text"], "the page after its tool, above the reply");
         assert_eq!(text_of(&list[1], "path"), "/u/html/c1/ab.html");
         assert_eq!(list[1].field("height"), Some(&Value::Num(420.)));
+        assert_eq!(list[1].field("closed"), Some(&Value::Bool(false)));
+        let mut closed = entry.clone();
+        closed["parts"][0]["htmlRender"]["closed"] = json!(true);
+        assert_eq!(blocks(&closed).list()[1].field("closed"), Some(&Value::Bool(true)), "a closed page says so");
         let row = message(&entry, None).unwrap();
         let shown = row.field("blocks").unwrap().list();
         let files = shown.last().unwrap();
@@ -10670,9 +10694,14 @@ mod tests {
             "go",
             &[("Tray".into(), vec![zeron_proto::html_render::Pick { group: Some("A".into()), code: "A2".into(), label: "Floating".into() }], vec![])],
         );
+        let sent = zeron_proto::html_render::with_open_pages(
+            &sent,
+            &[("Round 1".into(), vec![zeron_proto::html_render::PickGroup { code: "B".into(), name: "Motion".into() }])],
+        );
         let prompt = json!({ "id": "u2", "role": "user", "createdAt": 1000., "parts": [{ "kind": "text", "text": sent }] });
         let row = message(&prompt, None).unwrap();
-        assert_eq!(text_of(&row, "text"), "go");
+        assert_eq!(text_of(&row, "text"), "go", "the open pages are the agent's, never the bubble's");
+        assert!(!text_of(&row, "copy").contains("Round 1"));
         let chip = &row.field("attachments").unwrap().list()[0];
         assert_eq!((text_of(chip, "kind"), text_of(chip, "card"), text_of(chip, "group"), text_of(chip, "code")), ("pick".into(), "Tray".into(), "A".into(), "A2".into()));
     }

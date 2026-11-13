@@ -44,6 +44,8 @@ pub(crate) fn part() -> MessagePart {
             title: TITLE.into(),
             height: HEIGHT,
             url: None,
+            groups: Vec::new(),
+            closed: false,
         });
     }
     part

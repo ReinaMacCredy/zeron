@@ -3097,6 +3097,18 @@ async fn a_published_page_lands_on_its_tool_part_and_leaves_with_the_chat() {
     let path = reply["htmlRender"]["path"].as_str().unwrap().to_owned();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "<p>chart</p>");
     assert_eq!(reply["message"], zeron_proto::html_render::RENDERED_MESSAGE);
+    assert_eq!(reply["openPages"], serde_json::json!([]));
+    let unknown = rpc
+        .handle(
+            zeron_rpc::methods::PUBLISH_HTML_RENDER,
+            serde_json::json!({ "chatId": "lead", "runSecret": secret, "close": ["Nope"] }),
+        )
+        .await;
+    assert!(
+        matches!(&unknown, Err(zeron_rpc::RpcError::BadParams(m)) if m.contains("\"Nope\"") && m.contains("No pages are open.")),
+        "an unknown title names what is open: {:?}",
+        unknown.err()
+    );
     release.notify_one();
     let stamped = || {
         entries(core, "lead").iter().find_map(|entry| {
@@ -3117,6 +3129,22 @@ async fn a_published_page_lands_on_its_tool_part_and_leaves_with_the_chat() {
     assert_eq!(page.path, path);
     assert_eq!(page.title, "Chart");
     assert_eq!(page.height, 420);
+    assert!(!page.closed);
+    let close = serde_json::json!({ "chatId": "lead", "title": "Chart" });
+    for want in [1, 0] {
+        match rpc
+            .handle(zeron_rpc::methods::CLOSE_PICK_PAGE, close.clone())
+            .await
+            .expect("close")
+        {
+            zeron_rpc::RpcReply::Value(value) => assert_eq!(value["closed"], want),
+            _ => panic!("close answers once"),
+        }
+    }
+    assert!(
+        stamped().unwrap().closed,
+        "the person's close is on the part"
+    );
     core.rpc_service()
         .handle(
             zeron_rpc::methods::MUTATE,

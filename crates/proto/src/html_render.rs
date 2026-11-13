@@ -32,8 +32,19 @@ pub struct PublishHtmlRenderParams {
     pub path: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default)]
     pub title: String,
+    #[serde(default)]
     pub height: f64,
+    #[serde(default)]
+    pub close: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosePickPageParams {
+    pub chat_id: String,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +214,10 @@ pub struct HtmlRenderRef {
     pub height: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,6 +265,19 @@ pub fn render_input<'a>(
     }
 }
 
+pub fn render_request<'a>(
+    html: Option<&'a str>,
+    path: Option<&'a str>,
+    url: Option<&'a str>,
+    close: &[String],
+) -> Result<Option<RenderInput<'a>>, String> {
+    let blank = |text: Option<&str>| text.is_none_or(|text| text.trim().is_empty());
+    if !close.is_empty() && blank(html) && blank(path) && blank(url) {
+        return Ok(None);
+    }
+    render_input(html, path, url).map(Some)
+}
+
 /// An engine older than the app refuses `path` and `url` with these words.
 pub fn stale_engine_reply(error: &str, sent: RenderInput<'_>) -> Option<String> {
     let what = match sent {
@@ -267,7 +295,7 @@ pub fn stale_engine_reply(error: &str, sent: RenderInput<'_>) -> Option<String> 
     })
 }
 
-pub const PICK_GUIDE: &str = "Options: when the person is to decide between options (A/B variants, including toggles that switch what the page shows), make each option a <button> with data-zeron-pick=\"A2\" (its code), data-zeron-group=\"A\" (one pick per group; leave it out for options picked freely) and data-zeron-label=\"Floating tab\", and data-zeron-desc for a one-line description; data-zeron-group-label names a group. Controls that only change the view, such as Reset or slow motion, stay plain buttons. A click puts the pick in the person's composer; the host marks chosen buttons data-zeron-chosen and sent ones data-zeron-locked, and fills an element with data-zeron-count. You receive the picks with their message.";
+pub const PICK_GUIDE: &str = "Options: when the person is to decide between options (A/B variants, including toggles that switch what the page shows), make each option a <button> with data-zeron-pick=\"A2\" (its code), data-zeron-group=\"A\" (one pick per group; leave it out for options picked freely) and data-zeron-label=\"Floating tab\", and data-zeron-desc for a one-line description; data-zeron-group-label names a group. Controls that only change the view, such as Reset or slow motion, stay plain buttons. A click puts the pick in the person's composer; the host marks chosen buttons data-zeron-chosen and sent ones data-zeron-locked, and fills an element with data-zeron-count. You receive the picks with their message. A page stays open until every group is picked and sent, or until it is closed: once the person answers a page or moves past it, in words or with a newer page, pass its title in `close` (with a new page or alone), and leave a page they haven't answered open.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pick {
@@ -288,6 +316,123 @@ pub const NOT_PICKED: &str = "Chưa chọn:";
 
 fn one_line(text: &str) -> String {
     text.split_ascii_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub fn title_key(title: &str) -> String {
+    one_line(
+        &title
+            .trim()
+            .chars()
+            .take(MAX_TITLE_CHARS)
+            .collect::<String>(),
+    )
+}
+
+pub const OPEN_PAGES: &str =
+    "Open pages: close with html_render `close` each one this message answered or moved past.";
+
+pub fn open_pages_block(pages: &[(String, Vec<PickGroup>)]) -> String {
+    let mut out = OPEN_PAGES.to_owned();
+    for (title, left) in pages {
+        let names: Vec<String> = left
+            .iter()
+            .map(|group| format!("{} ({})", group.code, one_line(&group.name)))
+            .collect();
+        out.push_str(&format!("\n\"{}\": {}", one_line(title), names.join(", ")));
+    }
+    out
+}
+
+pub fn with_open_pages(text: &str, pages: &[(String, Vec<PickGroup>)]) -> String {
+    let mut out = text.trim_end().to_owned();
+    if pages.is_empty() {
+        return out;
+    }
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str(&open_pages_block(pages));
+    out
+}
+
+fn is_open_pages_block(block: &str) -> bool {
+    let mut lines = block.split('\n');
+    lines.next() == Some(OPEN_PAGES)
+        && block.contains('\n')
+        && lines.all(|line| {
+            line.strip_prefix('"')
+                .and_then(|rest| rest.split_once("\": "))
+                .is_some_and(|(title, left)| !title.is_empty() && !left.is_empty())
+        })
+}
+
+pub fn sent_picks(text: &str) -> Vec<(String, Vec<Pick>)> {
+    text.split("\n\n").filter_map(picks_of_block).collect()
+}
+
+pub fn pick_groups(html: &str) -> Vec<String> {
+    let scan = blank_non_markup(html);
+    let mut groups: Vec<String> = Vec::new();
+    let mut at = 0;
+    while let Some(open) = scan[at..].iter().position(|&c| c == b'<').map(|p| at + p) {
+        let end = tag_end(&scan, open);
+        let tag = &html.as_bytes()[open..end];
+        at = end.max(open + 1);
+        if attribute(tag, b"data-zeron-pick").is_none() {
+            continue;
+        }
+        if let Some(code) = attribute(tag, b"data-zeron-group")
+            .map(|v| String::from_utf8_lossy(v).trim().to_owned())
+            .filter(|v| !v.is_empty() && !v.contains(char::is_whitespace))
+            && !groups.contains(&code)
+        {
+            groups.push(code);
+        }
+    }
+    groups
+}
+
+fn attribute<'a>(tag: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let mut from = 0;
+    while let Some(at) = find_ci(tag, name, from) {
+        from = at + 1;
+        if !at
+            .checked_sub(1)
+            .is_some_and(|i| tag[i].is_ascii_whitespace())
+        {
+            continue;
+        }
+        let mut i = at + name.len();
+        match tag.get(i) {
+            None => return Some(&[]),
+            Some(c) if *c == b'=' || c.is_ascii_whitespace() || *c == b'>' || *c == b'/' => {}
+            _ => continue,
+        }
+        while tag.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        if tag.get(i) != Some(&b'=') {
+            return Some(&[]);
+        }
+        i += 1;
+        while tag.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        let rest = &tag[i.min(tag.len())..];
+        return Some(match rest.first() {
+            Some(&q) if q == b'"' || q == b'\'' => {
+                let inner = &rest[1..];
+                &inner[..inner.iter().position(|&c| c == q).unwrap_or(inner.len())]
+            }
+            _ => {
+                &rest[..rest
+                    .iter()
+                    .position(|&c| c.is_ascii_whitespace() || c == b'>')
+                    .unwrap_or(rest.len())]
+            }
+        });
+    }
+    None
 }
 
 pub fn picks_block(card: &str, picks: &[Pick], missing: &[PickGroup]) -> String {
@@ -330,6 +475,10 @@ pub fn with_picks(words: &str, cards: &[(String, Vec<Pick>, Vec<PickGroup>)]) ->
 /// Only trailing blocks in exactly `with_picks`'s form read back, so typed text stays words.
 pub fn extract_picks(text: &str) -> (String, Vec<(String, Vec<Pick>)>) {
     let mut rest = text.trim_end();
+    let (before, last) = rest.rsplit_once("\n\n").unwrap_or(("", rest));
+    if is_open_pages_block(last) {
+        rest = before.trim_end();
+    }
     let mut cards = Vec::new();
     loop {
         let (before, block) = match rest.rfind("\n\n") {
@@ -346,7 +495,7 @@ pub fn extract_picks(text: &str) -> (String, Vec<(String, Vec<Pick>)>) {
         }
     }
     if cards.is_empty() {
-        return (text.trim_end().to_owned(), cards);
+        return (rest.to_owned(), cards);
     }
     cards.reverse();
     (rest.trim_end().to_owned(), cards)
@@ -1320,6 +1469,103 @@ mod tests {
         );
     }
 
+    #[test]
+    fn open_pages_ride_after_the_picks_and_never_read_back_as_words() {
+        let open = [(
+            "Gom trang\nvòng 1".to_owned(),
+            vec![
+                PickGroup {
+                    code: "A".into(),
+                    name: "Bố cục".into(),
+                },
+                PickGroup {
+                    code: "B".into(),
+                    name: "Chuyển động".into(),
+                },
+            ],
+        )];
+        let sent = with_open_pages(
+            &with_picks(
+                "discuss it again",
+                &[("Vòng 2".into(), vec![pick(Some("A"), "A1", "x")], vec![])],
+            ),
+            &open,
+        );
+        assert_eq!(
+            sent,
+            format!(
+                "discuss it again\n\nĐã chọn trong \"Vòng 2\":\nA = A1 (x)\n\n{OPEN_PAGES}\n\"Gom trang vòng 1\": A (Bố cục), B (Chuyển động)"
+            )
+        );
+        let (words, cards) = extract_picks(&sent);
+        assert_eq!(words, "discuss it again");
+        assert_eq!(
+            cards,
+            vec![("Vòng 2".into(), vec![pick(Some("A"), "A1", "x")])]
+        );
+        let only = with_open_pages("again", &open);
+        assert_eq!(extract_picks(&only), ("again".to_owned(), vec![]));
+        assert_eq!(extract_picks(&with_open_pages("", &open)).0, "");
+        assert_eq!(with_open_pages("again ", &[]), "again");
+        let typed = format!("{OPEN_PAGES}\nnot a page");
+        assert_eq!(extract_picks(&typed), (typed.clone(), vec![]));
+        assert_eq!(extract_picks(OPEN_PAGES), (OPEN_PAGES.to_owned(), vec![]));
+        let anywhere = format!("{sent}\n\n[quoted]");
+        assert_eq!(
+            sent_picks(&anywhere),
+            vec![("Vòng 2".into(), vec![pick(Some("A"), "A1", "x")])]
+        );
+    }
+
+    #[test]
+    fn a_pages_groups_are_read_from_its_pick_buttons_only() {
+        let page = r#"<div data-zeron-group-label="Layout"><button data-zeron-pick="A1" data-zeron-group="A">a</button>
+            <button class=x data-zeron-group = 'B' data-zeron-pick>b</button>
+            <button data-zeron-pick="A2" DATA-ZERON-GROUP="A">a2</button>
+            <button data-zeron-pick=C1 data-zeron-group=C>c</button>
+            <button data-zeron-pick="f">free</button>
+            <span data-zeron-group="D">not an option</span>
+            <!-- <button data-zeron-pick="E1" data-zeron-group="E"></button> -->
+            <script>const b = '<button data-zeron-pick="F1" data-zeron-group="F">';</script>
+            <button data-zeron-picked="G1" data-zeron-group="G">g</button></div>"#;
+        assert_eq!(pick_groups(page), ["A", "B", "C"]);
+        assert!(pick_groups("<p>chart</p>").is_empty());
+    }
+
+    #[test]
+    fn a_close_alone_shows_nothing_and_a_page_still_needs_one_source() {
+        let close = ["Round 1".to_owned()];
+        assert_eq!(render_request(None, Some(" "), None, &close), Ok(None));
+        assert_eq!(
+            render_request(Some("<p>x</p>"), None, None, &close),
+            Ok(Some(RenderInput::Html("<p>x</p>")))
+        );
+        assert!(render_request(None, None, None, &[]).is_err());
+        assert_eq!(title_key("  Gom trang\n vòng 1 "), "Gom trang vòng 1");
+        let p: PublishHtmlRenderParams = serde_json::from_value(serde_json::json!({
+            "chatId": "c", "runSecret": "s", "close": ["Round 1"]
+        }))
+        .unwrap();
+        assert_eq!(
+            (p.title.as_str(), p.close.as_slice()),
+            ("", close.as_slice())
+        );
+        let r = HtmlRenderRef {
+            path: "p.html".into(),
+            title: "T".into(),
+            height: 80,
+            url: None,
+            groups: vec!["A".into()],
+            closed: true,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            (json["groups"][0].as_str(), json["closed"].as_bool()),
+            (Some("A"), Some(true))
+        );
+        assert_eq!(serde_json::from_value::<HtmlRenderRef>(json).unwrap(), r);
+    }
+
     fn pick(group: Option<&str>, code: &str, label: &str) -> Pick {
         Pick {
             group: group.map(str::to_owned),
@@ -1455,6 +1701,8 @@ mod tests {
             title: "Chart".into(),
             height: 420,
             url: None,
+            groups: Vec::new(),
+            closed: false,
         };
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(
@@ -1565,6 +1813,8 @@ mod tests {
             title: "Tray".into(),
             height: 600,
             url: Some("http://localhost:5391/".into()),
+            groups: Vec::new(),
+            closed: false,
         };
         let json = serde_json::to_value(&live).unwrap();
         assert_eq!(json["url"], "http://localhost:5391/");

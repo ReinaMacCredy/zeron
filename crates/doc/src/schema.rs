@@ -1758,6 +1758,51 @@ impl SessionDoc {
         Ok(false)
     }
 
+    pub fn close_html_pages(&self, titles: &[String]) -> Result<usize, DocError> {
+        let keys: Vec<String> = titles
+            .iter()
+            .map(|t| zeron_proto::html_render::title_key(t))
+            .collect();
+        let messages = self.doc.get_list("messages");
+        let mut closed = 0;
+        for i in 0..messages.len() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
+                messages.get(i)
+            else {
+                continue;
+            };
+            let Some(loro::ValueOrContainer::Container(loro::Container::List(parts))) =
+                entry.get("parts")
+            else {
+                continue;
+            };
+            for j in 0..parts.len() {
+                let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) =
+                    parts.get(j)
+                else {
+                    continue;
+                };
+                let Some(loro::ValueOrContainer::Value(page)) = part.get("htmlRender") else {
+                    continue;
+                };
+                let mut page = page.to_json_value();
+                let open = page["closed"].as_bool() != Some(true);
+                let named = page["title"]
+                    .as_str()
+                    .is_some_and(|t| keys.contains(&zeron_proto::html_render::title_key(t)));
+                if open && named {
+                    page["closed"] = serde_json::Value::Bool(true);
+                    part.insert("htmlRender", loro_value_from_json(&page))?;
+                    closed += 1;
+                }
+            }
+        }
+        if closed > 0 {
+            self.commit();
+        }
+        Ok(closed)
+    }
+
     /// Update a subagent SPAWN CHIP (a tool part) in place, wherever it
     /// lives: `resolved`-style stamping for the eager-done world, where the
     /// chip's entry is usually already finished by the time the background
@@ -4017,6 +4062,56 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_closed_html_render_page_stays_closed_through_the_rest_of_its_turn() {
+        let doc = SessionDoc::init("chat-5").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
+        let mut folded = Vec::new();
+        for (id, title) in [("t1", "Round 1"), ("t2", "Round 2")] {
+            fold_event_into_parts(
+                &mut folded,
+                &AgentEvent::ToolCall {
+                    id: id.into(),
+                    call: ToolCall::Mcp {
+                        server: "zeron".into(),
+                        tool: "html_render".into(),
+                        input: Some(serde_json::json!({ "html": "<p>x</p>", "title": title })),
+                    },
+                },
+            );
+            if let Some(MessagePart::Tool { html_render, .. }) = folded.last_mut() {
+                *html_render = Some(zeron_proto::html_render::HtmlRenderRef {
+                    path: format!("html/{id}.html"),
+                    title: title.into(),
+                    height: 400,
+                    url: None,
+                    groups: vec!["A".into()],
+                    closed: false,
+                });
+            }
+        }
+        writer.sync(&folded).unwrap();
+        assert_eq!(doc.close_html_pages(&[" Round\n1 ".into()]).unwrap(), 1);
+        assert_eq!(doc.close_html_pages(&["Round 1".into()]).unwrap(), 0);
+        writer.sync(&folded).unwrap();
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        let closed: Vec<(String, bool)> = doc.read_entries().unwrap()[0]
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                MessagePart::Tool {
+                    html_render: Some(page),
+                    ..
+                } => Some((page.title.clone(), page.closed)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            closed,
+            [("Round 1".to_owned(), true), ("Round 2".to_owned(), false)]
+        );
     }
 
     /// A command's tail, exit code and trimmed flag land in the doc on its

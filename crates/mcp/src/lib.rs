@@ -556,7 +556,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "html_render",
-            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline above your final reply; call it before the reply, which adds only what the page doesn't say. Call it from the main conversation, not a subagent. Give exactly one of `html`, `path` or `url`. `html` is a finished page you wrote: the frame fits the page's height; a smaller `height` caps it and the rest scrolls. `path` is an .html file you already wrote in this thread's folder, shown as `html` is without reading it back. `url` is a local dev server you are running (http(s) on localhost, 127.0.0.1 or [::1], any port and path, such as a Vite preview): the person watches it live in a `height`-tall frame, with animations and hot reloads as they happen, and can click and scroll it; check it first with html_preview `url`. The rules below are for `html` and `path` pages. {} {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::PICK_GUIDE, html_render::THEME_GUIDE),
+            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline above your final reply; call it before the reply, which adds only what the page doesn't say. Call it from the main conversation, not a subagent. Give exactly one of `html`, `path` or `url`, or only `close`. `html` is a finished page you wrote: the frame fits the page's height; a smaller `height` caps it and the rest scrolls. `path` is an .html file you already wrote in this thread's folder, shown as `html` is without reading it back. `url` is a local dev server you are running (http(s) on localhost, 127.0.0.1 or [::1], any port and path, such as a Vite preview): the person watches it live in a `height`-tall frame, with animations and hot reloads as they happen, and can click and scroll it; check it first with html_preview `url`. The rules below are for `html` and `path` pages. {} {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::PICK_GUIDE, html_render::THEME_GUIDE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -564,9 +564,10 @@ fn thread_tool_list() -> Value {
                     "path": { "type": "string", "maxLength": 4096, "description": "An .html file in this thread's folder, instead of `html`." },
                     "url": { "type": "string", "maxLength": html_render::MAX_URL_BYTES, "description": "A running local dev server's page, instead of `html`." },
                     "title": { "type": "string", "maxLength": html_render::MAX_TITLE_CHARS },
-                    "height": { "type": "integer", "minimum": html_render::MIN_HEIGHT, "maximum": html_render::MAX_HEIGHT, "description": "CSS pixels." }
+                    "height": { "type": "integer", "minimum": html_render::MIN_HEIGHT, "maximum": html_render::MAX_HEIGHT, "description": "CSS pixels." },
+                    "close": { "type": "array", "items": { "type": "string", "maxLength": html_render::MAX_TITLE_CHARS }, "description": "Titles of pages shown earlier in this chat to close; alone it shows nothing. The result lists the pages still open." }
                 },
-                "required": ["title", "height"],
+                "required": [],
                 "additionalProperties": false
             },
             "annotations": { "title": "Render HTML", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": true }
@@ -1986,14 +1987,36 @@ impl ThreadTools {
             .run_secret
             .as_deref()
             .ok_or("html_render needs a live Zeron run")?;
-        let title = args["title"].as_str().ok_or("title must be a string")?;
-        let height = args["height"].as_f64().ok_or("height must be a number")?;
-        let mut params = json!({ "chatId": self.chat_id, "runSecret": secret, "title": title, "height": height });
-        let input = html_render::render_input(
+        let close: Vec<String> = match &args["close"] {
+            Value::Null => Vec::new(),
+            Value::Array(list) => list
+                .iter()
+                .map(|t| {
+                    t.as_str()
+                        .map(str::to_owned)
+                        .ok_or("close must be a list of titles")
+                })
+                .collect::<Result<_, _>>()?,
+            _ => return Err("close must be a list of titles".into()),
+        };
+        let mut params = json!({ "chatId": self.chat_id, "runSecret": secret, "close": close });
+        let Some(input) = html_render::render_request(
             args["html"].as_str(),
             args["path"].as_str(),
             args["url"].as_str(),
-        )?;
+            &close,
+        )?
+        else {
+            return self.call_engine(methods::PUBLISH_HTML_RENDER, params).await;
+        };
+        params["title"] = args["title"]
+            .as_str()
+            .ok_or("title must be a string")?
+            .into();
+        params["height"] = args["height"]
+            .as_f64()
+            .ok_or("height must be a number")?
+            .into();
         match input {
             html_render::RenderInput::Html(html) => params["html"] = html.into(),
             html_render::RenderInput::Path(_) => params["path"] = args["path"].clone(),
@@ -5947,6 +5970,24 @@ mod tests {
             stale.contains("older than the app") && !stale.contains("missing field"),
             "{stale}"
         );
+        rig.tools
+            .call("html_render", &json!({ "close": ["Round 1"] }))
+            .await
+            .unwrap();
+        let sent = logged(&rig.calls, methods::PUBLISH_HTML_RENDER);
+        let closing = sent.last().unwrap();
+        assert_eq!(closing["close"], json!(["Round 1"]));
+        assert!(closing.get("title").is_none() && closing.get("html").is_none());
+        for (args, refused) in [
+            (json!({ "close": "Round 1" }), "list of titles"),
+            (
+                json!({ "close": ["Round 1"], "html": "<p>x</p>" }),
+                "title must be",
+            ),
+        ] {
+            let error = rig.tools.call("html_render", &args).await.unwrap_err();
+            assert!(error.contains(refused), "{error}");
+        }
         let listed = tool_list();
         let tool = listed
             .as_array()
@@ -5954,7 +5995,8 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "html_render")
             .unwrap();
-        assert_eq!(tool["inputSchema"]["required"], json!(["title", "height"]));
+        assert_eq!(tool["inputSchema"]["required"], json!([]));
+        assert_eq!(tool["inputSchema"]["properties"]["close"]["type"], "array");
         assert_eq!(tool["inputSchema"]["properties"]["url"]["type"], "string");
         let description = tool["description"].as_str().unwrap();
         assert!(

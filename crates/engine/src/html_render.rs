@@ -366,6 +366,8 @@ pub fn publish(
         title,
         height: clamp_height(height),
         url: None,
+        groups: zeron_proto::html_render::pick_groups(&page),
+        closed: false,
     })
 }
 
@@ -377,6 +379,8 @@ pub fn live_page(url: &str, title: &str, height: f64) -> Result<HtmlRenderRef, P
         title: page_title(title)?,
         height: clamp_height(height),
         url: Some(live.url.to_owned()),
+        groups: Vec::new(),
+        closed: false,
     })
 }
 
@@ -422,6 +426,113 @@ pub fn remove_chat_pages(uploads: &Uploads, chat_id: &str) {
     {
         tracing::warn!(chat = %chat_id, %error, "html render pages not removed");
     }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenPage {
+    pub title: String,
+    pub groups_left: Vec<String>,
+}
+
+struct Shown {
+    key: String,
+    title: String,
+    groups: Vec<String>,
+    sent: Vec<String>,
+    closed: bool,
+}
+
+fn shown_pages(entries: &[zeron_doc::SessionMessageEntry]) -> Vec<Shown> {
+    use zeron_doc::{MessagePart, MessageRole};
+    use zeron_proto::html_render::{sent_picks, title_key};
+    let mut pages: Vec<Shown> = Vec::new();
+    for entry in entries {
+        for part in &entry.parts {
+            match (&entry.role, part) {
+                (
+                    MessageRole::Assistant,
+                    MessagePart::Tool {
+                        html_render: Some(page),
+                        is_error: false,
+                        ..
+                    },
+                ) => {
+                    let key = title_key(&page.title);
+                    pages.retain(|p| p.key != key);
+                    pages.push(Shown {
+                        key,
+                        title: page.title.clone(),
+                        groups: page.groups.clone(),
+                        sent: Vec::new(),
+                        closed: page.closed,
+                    });
+                }
+                (MessageRole::User, MessagePart::Text { text, .. }) => {
+                    for (card, picks) in sent_picks(text) {
+                        let key = title_key(&card);
+                        if let Some(page) = pages.iter_mut().find(|p| p.key == key) {
+                            page.sent.extend(picks.into_iter().filter_map(|p| p.group));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    pages
+}
+
+/// Pages with groups left that nobody closed; a page shown before groups were recorded never counts.
+pub fn open_pages(entries: &[zeron_doc::SessionMessageEntry]) -> Vec<OpenPage> {
+    shown_pages(entries)
+        .into_iter()
+        .filter(|page| !page.closed)
+        .map(|page| OpenPage {
+            groups_left: page
+                .groups
+                .iter()
+                .filter(|g| !page.sent.contains(g))
+                .cloned()
+                .collect(),
+            title: page.title,
+        })
+        .filter(|page| !page.groups_left.is_empty())
+        .collect()
+}
+
+pub fn open_pages_words(open: &[OpenPage]) -> String {
+    if open.is_empty() {
+        return "No pages are open.".into();
+    }
+    let pages: Vec<String> = open
+        .iter()
+        .map(|p| format!("\"{}\" ({} left)", p.title, p.groups_left.join(", ")))
+        .collect();
+    format!("Open pages: {}.", pages.join(", "))
+}
+
+pub fn check_close(
+    entries: &[zeron_doc::SessionMessageEntry],
+    close: &[String],
+) -> Result<(), String> {
+    let shown = shown_pages(entries);
+    let unknown: Vec<&str> = close
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| {
+            let key = zeron_proto::html_render::title_key(t);
+            !shown.iter().any(|p| p.key == key)
+        })
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "`close` names no page shown in this chat: \"{}\". {}",
+        unknown.join("\", \""),
+        open_pages_words(&open_pages(entries))
+    ))
 }
 
 const NO_PREVIEW_HOST: &str = "html_preview needs the Zeron desktop app open on this machine, so the page was not checked. html_render still works.";
@@ -932,6 +1043,78 @@ mod tests {
                 .unwrap_err()
                 .contains("rect")
         );
+    }
+
+    #[test]
+    fn open_pages_are_those_with_groups_left_that_nobody_closed() {
+        let page = |id: &str, title: &str, groups: &[&str], closed: bool| {
+            serde_json::json!({
+                "kind": "tool", "id": id, "resolved": true,
+                "call": { "kind": "mcp", "server": "zeron", "tool": "html_render", "input": { "title": title } },
+                "htmlRender": { "path": format!("html/{id}.html"), "title": title, "height": 400, "groups": groups, "closed": closed },
+            })
+        };
+        let entry = |id: &str, role: &str, parts: Vec<serde_json::Value>| {
+            serde_json::from_value::<zeron_doc::SessionMessageEntry>(serde_json::json!({
+                "id": id, "role": role, "parts": parts, "createdAt": 1, "deviceId": "d",
+            }))
+            .unwrap()
+        };
+        let said = |id: &str, text: &str| {
+            entry(
+                id,
+                "user",
+                vec![serde_json::json!({ "kind": "text", "id": "t", "text": text })],
+            )
+        };
+        let mut entries = vec![
+            entry(
+                "a1",
+                "assistant",
+                vec![
+                    page("p1", "Gom trang vòng 1", &["A", "B"], false),
+                    page("p0", "Notes", &[], false),
+                ],
+            ),
+            said("u1", "discuss it again"),
+            entry(
+                "a2",
+                "assistant",
+                vec![page("p2", "Vòng 2", &["A", "B"], false)],
+            ),
+            said(
+                "u2",
+                "ok\n\nĐã chọn trong \"Vòng 2\":\nA = A1 (x)\nB = B2 (y)\n\n[a quote]",
+            ),
+        ];
+        let open = open_pages(&entries);
+        assert_eq!(
+            open,
+            [OpenPage {
+                title: "Gom trang vòng 1".into(),
+                groups_left: vec!["A".into(), "B".into()],
+            }]
+        );
+        let refused = check_close(&entries, &["Vòng 3".into(), "Vòng 2".into()]).unwrap_err();
+        assert!(refused.contains("\"Vòng 3\""), "{refused}");
+        assert!(
+            refused.contains("Open pages: \"Gom trang vòng 1\" (A, B left)."),
+            "{refused}"
+        );
+        assert!(check_close(&entries, &["Notes".into(), " Vòng 2 ".into()]).is_ok());
+        entries[0] = entry(
+            "a1",
+            "assistant",
+            vec![page("p1", "Gom trang vòng 1", &["A", "B"], true)],
+        );
+        assert!(open_pages(&entries).is_empty());
+        entries.push(entry(
+            "a3",
+            "assistant",
+            vec![page("p3", "Gom trang vòng 1", &["A"], false)],
+        ));
+        assert_eq!(open_pages(&entries)[0].groups_left, ["A"]);
+        assert_eq!(open_pages_words(&[]), "No pages are open.");
     }
 
     #[test]
