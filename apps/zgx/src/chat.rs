@@ -185,8 +185,6 @@ struct Chats {
 struct Entry {
     id: Rc<str>,
     json: Option<Json>,
-    /// Copied from the chat a reply was forked from (`ForkChat`): kept
-    /// once its json is gone, for the fork's seam.
     fork_import: bool,
     /// `sum_of` its json, once that's gone.
     sum: u64,
@@ -789,8 +787,6 @@ struct Open {
     limit: Option<Json>,
     // (A delegate's limit card stands in its parent's transcript.)
     limits: Vec<Json>,
-    /// A prompt edited and sent again (`chat.rewind_send`): it and every
-    /// entry after it are left out while the rewind runs, until they're gone.
     cut: Option<String>,
 }
 
@@ -3407,12 +3403,6 @@ impl View {
         }
     }
 
-    /// A prompt edited and sent again (the shipping app's Edit message, as
-    /// `chat.send` takes it, with `entry`, the prompt it replaces): that
-    /// prompt and everything after it leave the transcript at once, the new
-    /// words sending in its place, while `RewindChat` cuts the chat there;
-    /// then the words go as any send. Refused, all of it comes back, and the
-    /// engine's words say why.
     async fn rewind_send(self: &Rc<Self>, req: Value) -> Result<Value, String> {
         let chats = CHATS.with(Rc::clone);
         let id = req.field("session").map(text).unwrap_or_default();
@@ -3430,7 +3420,7 @@ impl View {
             self.publish_messages();
             return Err(why);
         }
-        // (Not delivered after the rewind, it shows so on its row, with Retry.)
+        // A send that fails after the rewind shows on its row, with Retry.
         let _ = self.send(with_fields(req, [("message_id", Value::from(message_id.as_str()))])).await;
         Ok(Value::from(message_id.as_str()))
     }
@@ -5941,9 +5931,7 @@ fn kept_whole(entry: &Json) -> bool {
         || entry["parts"].as_array().into_iter().flatten().any(|p| matches!(p["kind"].as_str(), Some("classifier" | "compaction")))
 }
 
-/// Where a chat forked from a reply (`ForkChat`) starts its own: the line
-/// "Forked from <title>" after the copied history, as a `ForkSideChat`'s
-/// seam entry shows (the engine writes none for this fork).
+// The engine writes a seam entry for `ForkSideChat` but none for `ForkChat`.
 fn fork_seam(source: Option<&Json>) -> Value {
     let title = source.and_then(|s| s["title"].as_str()).map(str::trim).filter(|t| !t.is_empty()).unwrap_or("New session");
     Value::record([
@@ -11337,11 +11325,6 @@ mod tests {
         eprintln!("dropping the frame's JSON: {:?}", start.elapsed());
     }
 
-    /// A chat forked from a reply (`ForkChat`) says "Forked from <title>"
-    /// after the history it copied. A prompt edited and sent again
-    /// (`chat.rewind_send`) leaves with every row after it while the rewind
-    /// runs, the new words sending in its place, and nothing comes back once
-    /// the engine drops those entries.
     #[test]
     fn a_fork_shows_its_seam_and_an_edit_cuts_the_rows_it_replaces() {
         use super::{CHATS, Entry, Open, Pending, View, draft_value};
@@ -11393,11 +11376,9 @@ mod tests {
         view.pending.borrow_mut().entry("fork".into()).or_default().push(Pending::sending("new", "Edited", &Value::Nil));
         view.publish_messages();
         assert_eq!(ids(&view), ["u1", "a1", "fork-seam", "new"]);
-        // Refused: everything comes back.
         view.cut("fork", None);
         view.publish_messages();
         assert_eq!(ids(&view), ["u1", "a1", "fork-seam", "u2", "a2", "new"]);
-        // Rewound: the engine drops them, and the cut goes with them.
         view.cut("fork", Some("u2".into()));
         view.open.borrow_mut().as_mut().unwrap().entries.truncate(2);
         view.publish_messages();
