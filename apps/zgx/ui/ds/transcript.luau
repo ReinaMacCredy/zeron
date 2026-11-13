@@ -1293,7 +1293,7 @@ local function Transcript(props: Props): Node
 	-- build every row on it).
 	local held = ui.state(`transcript_held{kept}`, { id = "", h = 0 })
 	-- (The room at its foot as a glide began, held until its prompt is in: a composer shrinking meanwhile, a steered row leaving its queue, would bring the list back to its end, to follow the new rows there.)
-	local foot_held = ui.state(`transcript_foot_held{kept}`, 0)
+	local foot_held = ui.use_state(0)
 	-- A send's glide under way (from its step off the end to its landing).
 	local gliding = ui.state(`transcript_gliding{kept}`, false)
 	local glide: any = nil
