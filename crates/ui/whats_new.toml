@@ -114,6 +114,9 @@ text = "Show all and Show fewer on thoughts is one choice for every chat, kept a
 text = "A work group's summary says consulted advisor instead of counting the advisor as a tool."
 
 [[entry.improvements]]
+text = "When the composer shows a prediction, Tab or Right arrow takes it, even while the composer isn't focused, and the two keys show beside it."
+
+[[entry.improvements]]
 text = "Settings moves to a sidebar tree: a group opens to its pages under a guide line, each page has a title and summary, and changing page crossfades. A search hit shows its path, and picking one glides to the row and flashes it."
 visual = "settings-tree"
 

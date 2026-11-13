@@ -4,7 +4,7 @@
   "screens/chat/composer.luau": "e052ead10f6cf56c",
   "screens/chat/lane_tab.luau": "a097a62cbc3fa678",
   "screens/panel/init.luau": "6b1950105ac2f203",
-  "screens/shell/init.luau": "98ae1b562a621607",
+  "screens/shell/init.luau": "0a234b422be3dbdf",
   "screens/shell/page.luau": "1e9de8139d675c74",
   "screens/shell/view.luau": "7d8096992fbddbca"
 }

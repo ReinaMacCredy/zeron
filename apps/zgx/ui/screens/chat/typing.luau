@@ -52,6 +52,23 @@ function M.pill_key(e: any): boolean
 	return annotation_layer.key(e)
 end
 
+-- Tab or Right arrow no one took, with a prediction showing: the composer
+-- takes the keys with the whole prediction as its draft.
+function M.prediction_key(e: any): boolean
+	if through_control or e.editing or e["repeat"] then
+		return false
+	end
+	if (e.key ~= "Tab" and e.key ~= "ArrowRight") or e.shift or e.cmd or e.ctrl or e.alt or e.meta then
+		return false
+	end
+	local name = route.current:peek().name
+	if name ~= "session" and name ~= "home" then
+		return false
+	end
+	local fill = (composer_surface :: any).fill_prediction
+	return fill ~= nil and fill() == true
+end
+
 -- The window's on_key, a key no one took. Never takes the key itself: the
 -- window's text and paste follow it to the field just focused.
 function M.key(e: any)

@@ -489,6 +489,9 @@ return function(): Node
 			if panel and panel.home_key and (panel.home_key :: any)(e) == true then
 				return true
 			end
+			if typing and typing.prediction_key and typing.prediction_key(e) then
+				return true
+			end
 			if typing then
 				typing.key(e)
 			end
