@@ -1,10 +1,12 @@
 -- Settings → Playbooks on ui/playbooks_fixture.luau: each playbook with where it comes from, Start for one with a
 -- file (a new chat, its link in the draft), Edit, Delete asked once more, New playbook, Reveal folder.
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 
 local function open(): any
-	local app = mount("playbooks_fixture.luau")
+	local app = reachable(mount("playbooks_fixture.luau"))
 	app:resize(1200, 1400)
 	app:frames(30)
 	app:command("shell.settings")
