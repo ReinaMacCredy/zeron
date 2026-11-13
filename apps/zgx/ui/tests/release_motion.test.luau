@@ -154,6 +154,16 @@ local VISUALS = {
 		{ id = "answer-pill", title = "Answer from the composer", description = "", visual = "answer-pill" },
 		{ id = "keep-awake", title = "Stays awake", description = "", visual = "keep-awake" },
 		{ id = "plain", title = "No visual of ours", description = "", visual = "not-ported" },
+		{ id = "text-annotations", title = "Comment on text", description = "", visual = "text-annotation" },
+		{ id = "skills-page", title = "Skills", description = "", visual = "skills-page" },
+		{ id = "worktree-follow", title = "Worktrees", description = "", visual = "worktree-follow" },
+		{ id = "task-references", title = "Depends on", description = "", visual = "task-depends" },
+		{ id = "live-preview", title = "Live preview", description = "", visual = "live-preview" },
+		{ id = "window-frame", title = "Window frame", description = "", visual = "window-frame" },
+		{ id = "project-picker", title = "Project picker", description = "", visual = "project-picker" },
+		{ id = "zgx-app", title = "The new interface", description = "" },
+		{ id = "markdown-fence-render", title = "Rendered Markdown", description = "" },
+		{ id = "not-a-visual", title = "Nothing by its id", description = "" },
 	},
 	improvements = {
 		{ text = "Compaction morphs", visual = "compaction-morph" },
@@ -188,10 +198,27 @@ test("every visual the entry names draws in the dialog and the card's hero; a cl
 	expect(clock(app, "card") > unfolded_at).to_be(true)
 	app:click(CARD)
 	app:frames(30)
-	for _, id in { "answer-pill", "keep-awake", "compaction-morph", "swipe-dot", "tab-drag" } do
+	for _, id in {
+		"answer-pill",
+		"keep-awake",
+		"compaction-morph",
+		"swipe-dot",
+		"tab-drag",
+		"text-annotation",
+		"skills-page",
+		"worktree-follow",
+		"task-depends",
+		"live-preview",
+		"window-frame",
+		"project-picker",
+		"zgx-app",
+		"markdown-fence-render",
+	} do
 		expect(app:has(`#whats-new-highlights >> #whats-new-visual-{id}`)).to_be(true)
 	end
 	expect(app:has("#whats-new-visual-not-ported")).to_be(false)
+	expect(app:has("#whats-new-visual-plain")).to_be(false)
+	expect(app:has("#whats-new-visual-not-a-visual")).to_be(false)
 	local card_at = clock(app, "card")
 	local open_at = clock(app, "dialog")
 	app:frames(20)
@@ -215,4 +242,6 @@ test("with motion reduced no clock runs and each visual holds its still frame", 
 	expect(clock(app, "dialog")).to_be(0)
 	expect(app:has(`#whats-new-visual-keep-awake >> "Working 43s"`)).to_be(true)
 	expect(app:has(`#whats-new-visual-answer-pill >> "Which provider first?"`)).to_be(true)
+	expect(app:has(`#whats-new-visual-zgx-app >> "Moved 12 chats, 2 drafts and 9 settings"`)).to_be(true)
+	expect(app:has(`#whats-new-visual-task-depends >> "Blocked by"`)).to_be(true)
 end)

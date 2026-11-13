@@ -6,6 +6,17 @@ export type Clock = { t: () -> number, ms: () -> number, reduced: () -> boolean 
 
 local WHY = "gpui's What's New visual at its own size, fixed as its frame is, whatever the text size"
 
+ui.theme.tokens {
+	zeron = {
+		whats_new = {
+			selection = "alpha({accent}, 0.24)",
+			accent_16 = "alpha({accent}, 0.16)",
+			accent_rule = "alpha({accent}, 0.6)",
+			panel = "over({background}, {zeron.whats_new.block})",
+		},
+	},
+}
+
 function K.raw(n: number): any
 	return ui.raw(n, WHY)
 end
@@ -110,12 +121,36 @@ function K.glyph(name: Icon.Name, size: number, color: Ink): Node
 	return ui.div { shrink = 0, color = color, Icon { name = name, size = size } }
 end
 
-function K.card(props: { [any]: any }): Node
+function K.surface(props: { [any]: any }): { [any]: any }
 	props.rounded = K.raw(10)
 	props.border = 1
 	props.border_color = "$border"
-	props.bg = "$zeron.whats_new.block"
-	return ui.column(props)
+	props.bg = props.bg or "$zeron.whats_new.block"
+	return props
+end
+
+function K.card(props: { [any]: any }): Node
+	return ui.column(K.surface(props))
+end
+
+function K.bar(width: number): Node
+	return ui.div { shrink = 0, h = 6, w = width, rounded = "$radius.full", bg = "$zeron.whats_new.wash_10" }
+end
+
+function K.typed(copy: string, t: number, start: number, per_char: number): string
+	return string.sub(copy, 1, math.clamp(math.floor((t - start) / per_char), 0, #copy))
+end
+
+function K.caret(clock: Clock): Node
+	return ui.div {
+		shrink = 0,
+		w = 1.5,
+		h = 14,
+		bg = "$text.primary",
+		opacity = function(): number
+			return if (clock.t() * 2) % 1 < 0.5 then 1 else 0
+		end,
+	}
 end
 
 function K.key_chip(label: string): Node

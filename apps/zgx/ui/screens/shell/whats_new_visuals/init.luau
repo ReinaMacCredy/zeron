@@ -6,6 +6,7 @@ local M = {}
 export type Visual = { period: number, rest: number, build: (clock: K.Clock) -> Node }
 
 local answer_pill = require("@app/screens/shell/whats_new_visuals/answer_pill")
+local text_annotation = require("@app/screens/shell/whats_new_visuals/text_annotation")
 
 local VISUALS: { [string]: Visual } = {
 	["answer-pill"] = answer_pill.card,
@@ -14,20 +15,36 @@ local VISUALS: { [string]: Visual } = {
 	["compaction-morph"] = require("@app/screens/shell/whats_new_visuals/compaction_morph"),
 	["swipe-dot"] = require("@app/screens/shell/whats_new_visuals/swipe_dot"),
 	["tab-drag"] = require("@app/screens/shell/whats_new_visuals/tab_drag"),
+	["text-annotation"] = text_annotation.card,
+	["text-annotation-hero"] = text_annotation.hero,
+	["skills-page"] = require("@app/screens/shell/whats_new_visuals/skills_page"),
+	["worktree-follow"] = require("@app/screens/shell/whats_new_visuals/worktree_follow"),
+	["task-depends"] = require("@app/screens/shell/whats_new_visuals/task_depends"),
+	["live-preview"] = require("@app/screens/shell/whats_new_visuals/live_preview"),
+	["window-frame"] = require("@app/screens/shell/whats_new_visuals/window_frame"),
+	["project-picker"] = require("@app/screens/shell/whats_new_visuals/project_picker"),
+	["zgx-app"] = require("@app/screens/shell/whats_new_visuals/zgx_app"),
+	["markdown-fence-render"] = require("@app/screens/shell/whats_new_visuals/markdown_fence_render"),
 }
 
 function M.has(id: string?): boolean
 	return id ~= nil and VISUALS[id] ~= nil
 end
 
+-- A feature the shared toml gives no visual (gpui's test refuses ids it doesn't draw) takes ours by its id.
+function M.of(item: any): string?
+	local id = if item.visual == nil then item.id else item.visual
+	return if M.has(id) then id else nil
+end
+
 function M.any(entry: any): boolean
 	for _, f in entry.features do
-		if M.has(f.visual) then
+		if M.of(f) then
 			return true
 		end
 	end
 	for _, i in entry.improvements do
-		if M.has(i.visual) then
+		if M.of(i) then
 			return true
 		end
 	end

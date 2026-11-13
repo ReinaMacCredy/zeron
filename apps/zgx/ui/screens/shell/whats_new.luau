@@ -279,10 +279,11 @@ end
 local function highlights(e: any): Node
 	local items: { Node } = {}
 	for i, f in e.features do
+		local visual = visuals.of(f)
 		table.insert(items, Enter {
 			index = i - 1,
-			if visuals.has(f.visual)
-				then visuals.Frame { visual = f.visual, clock = dialog_clock, h = 172 }
+			if visual
+				then visuals.Frame { visual = visual, clock = dialog_clock, h = 172 }
 				elseif f.image then ui.image { src = f.image, w_full = true, h = 104, fit = "cover", rounded = "$radius.lg", border = 1, border_color = "$border" }
 				else hero { h = 104, rounded = "$radius.lg" },
 			ui.text { f.title, text_size = "$font.size.md", weight = "$font.weight.semibold", color = "$text.primary", wrap = true },
@@ -293,8 +294,9 @@ local function highlights(e: any): Node
 		local lines: { Node } = { ui.text { ui.t("shell.whats_new.improvements"), text_size = "$font.size.md", weight = "$font.weight.semibold", color = "$text.primary" } }
 		for _, item in e.improvements do
 			table.insert(lines, improvement(item.text, "$success"))
-			if visuals.has(item.visual) then
-				table.insert(lines, ui.div { w_full = true, pl = "$space.3", visuals.Frame { visual = item.visual, clock = dialog_clock, h = 104 } })
+			local visual = visuals.of(item)
+			if visual then
+				table.insert(lines, ui.div { w_full = true, pl = "$space.3", visuals.Frame { visual = visual, clock = dialog_clock, h = 104 } })
 			end
 		end
 		table.insert(items, Enter { index = #e.features, table.unpack(lines) })
