@@ -2925,6 +2925,9 @@ impl AppState {
                     device_id: "local".into(),
                     status: None,
                     continuation_of: None,
+                    from_chat_id: None,
+                    fork_import: false,
+                    answers_request_id: None,
                     duration_ms: None,
                 },
             );
@@ -7015,7 +7018,7 @@ mod tests {
             assert_eq!(state.transcript[0].id, "new-authoritative-row");
             // An authoritative empty reset must still be honored.
             state
-                .apply_transcript_frame(TranscriptFrame::reset(&[]))
+                .apply_transcript_frame(TranscriptFrame::reset::<zeron_doc::SessionMessageEntry>(&[]))
                 .unwrap();
             assert!(state.transcript.is_empty());
         });

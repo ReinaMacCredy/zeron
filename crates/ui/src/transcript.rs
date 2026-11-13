@@ -17200,7 +17200,7 @@ mod tests {
                 state
                     .receive_transcript_update(
                         zeron_doc::TranscriptUpdate {
-                            frame: zeron_doc::TranscriptFrame::reset(&[]),
+                            frame: zeron_doc::TranscriptFrame::reset::<zeron_doc::SessionMessageEntry>(&[]),
                             context_usage: None,
                             session_stats: None,
                             replay_baseline: Some(Default::default()),
