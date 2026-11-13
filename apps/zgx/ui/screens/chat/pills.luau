@@ -1192,7 +1192,7 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 		on_click = function()
 			toggle(roster_open)
 		end,
-		AgentFan { tiles = fan_tiles, size = 20 },
+		AgentFan { tiles = fan_tiles, size = 16, bare = true },
 		P.Dots { frame = clock.frame },
 		ui.show(function(): boolean
 			return (Roster.label(runs:get().listed)) ~= nil

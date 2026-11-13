@@ -1266,7 +1266,8 @@ local function beside_section(data: any, surface: string, after: (() -> ())?): N
 		end, Pills.Fan {
 			name = `sidecar-{surface}-fan`,
 			chat = session_id,
-			size = 16,
+			size = 14,
+			bare = true,
 			tiles = function(): { any }
 				return Pills.fan_of(session_id(), nil) or {}
 			end,
