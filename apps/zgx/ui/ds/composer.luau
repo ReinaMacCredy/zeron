@@ -1891,7 +1891,8 @@ return ui.component(function(props: Props): Node
 			tone = "ghost",
 			size = "sm",
 			icon = true,
-			w = 18,
+			w = 26,
+			rounded = 0,
 			id = "composer-send-menu",
 			label = locale.t("ds.composer.send_options"),
 			expanded = function()
@@ -1900,7 +1901,10 @@ return ui.component(function(props: Props): Node
 			on_click = function()
 				menu_open:toggle()
 			end,
-			Icon { name = "alt-arrow-down", size = 14 },
+			ui.div {
+				rotate = ui.spring(menu_open, { from = 0, to = 180, stiffness = 380, damping = 30 }),
+				Icon { name = "alt-arrow-up", size = 14 },
+			},
 		}
 		local lit = ui.use_state(0)
 		local els: { any } = {}
@@ -1923,35 +1927,41 @@ return ui.component(function(props: Props): Node
 				},
 			}, i, lit, els))
 		end
-		send_menu = ui.show(function(): boolean
+		local function offered(): boolean
 			return moves.shown() and (has_text() or has_cargo())
-		end, ui.row {
-			shrink = 0,
-			items = "center",
-			mr = ui.raw(-6, "2 from the send button, its group's gap is 8"),
-			ui.menu(Menu.panel {
-				open = menu_open,
-				anchor = chevron,
-				placement = { side = "top", align = "end", offset = 6 },
-				w = 268,
-				ui.column {
-					w_full = true,
-					p = "$space.1",
-					gap = "$zeron.list.gap",
-					item(1, "ds.composer.send", "arrow-up", function(): string
-						return if props.send_with and props.send_with() == "mod_enter" then "cmd+enter" else "enter"
-					end, function()
-						send()
-					end),
-					Menu.Rule {},
-					item(2, "ds.composer.move_draft", "arrow-up-right", function(): string
-						return moves.keys().move
-					end, moves.move),
-					item(3, "ds.composer.send_new", "chat-add", function(): string
-						return moves.keys().send_new
-					end, moves.send_new),
-				},
-			}),
+		end
+		send_menu = ui.menu(Menu.panel {
+			open = menu_open,
+			anchor = ui.row {
+				shrink = 0,
+				items = "center",
+				rounded = "$radius.full",
+				overflow = "hidden",
+				bg = function(): string
+					return if offered() then "$zeron.secondary.bg" else "#00000000"
+				end,
+				ui.show(offered, chevron),
+				send_button,
+			},
+			placement = { side = "top", align = "end", offset = 8 },
+			w = 268,
+			ui.column {
+				w_full = true,
+				p = "$space.1",
+				gap = "$zeron.list.gap",
+				item(1, "ds.composer.send", "arrow-up", function(): string
+					return if props.send_with and props.send_with() == "mod_enter" then "cmd+enter" else "enter"
+				end, function()
+					send()
+				end),
+				Menu.Rule {},
+				item(2, "ds.composer.move_draft", "arrow-up-right", function(): string
+					return moves.keys().move
+				end, moves.move),
+				item(3, "ds.composer.send_new", "chat-add", function(): string
+					return moves.keys().send_new
+				end, moves.send_new),
+			},
 		})
 	end
 	-- A question's way through: Back (from the second page), then Submit
@@ -2753,10 +2763,9 @@ return ui.component(function(props: Props): Node
 					return dictating() or (props.on_dictate ~= nil and voice_on:get() ~= false)
 				end, mic),
 				ui.show(stopping, stop_button),
-				send_menu,
 				ui.show(function()
 					return not stopping()
-				end, send_button),
+				end, send_menu or send_button),
 			}),
 		},
 		-- Files over it: the pill says what a drop does, over everything, as
