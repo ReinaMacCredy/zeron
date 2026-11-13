@@ -705,7 +705,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- preview was.
 	local grab_dy = 0
 	type Lift = { x: number, y: number, gx: number, gy: number, col: number, top: number, w: number, edge: number }
-	local lift = ui.use_state(nil :: Lift?)
+	type Home = { id: string, title: string, x0: number, y0: number, x1: number, y1: number, w: number, h: number }
+	local ghost = { lift = ui.use_state(nil :: Lift?), home = ui.use_state(nil :: Home?), t = ui.use_state(0), open = ui.use_state(false) }
 	-- A section being renamed (just made, or "Rename" chosen).
 	local section_dialog = ui.use_state(false)
 	local section_name = ui.use_state("")
@@ -2050,7 +2051,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			w_full = true,
 			shrink = 0,
 			opacity = function(): number
-				return if dragged() then 0 else 1
+				local back = ghost.home:get()
+				return if dragged() or (back and back.id == s.id) then 0 else 1
 			end,
 			on_press = function(e)
 				grab_dy = e.local_y
@@ -2063,7 +2065,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				local el = row_ref:peek()
 				local r = if el then ui.window_rect(el) else nil
 				if r then
-					lift:set({ x = 0, y = 0, gx = 0, gy = 0, col = r.x, top = r.y, w = r.width, edge = r.x + r.width + PAD })
+					ghost.lift:set({ x = 0, y = 0, gx = 0, gy = 0, col = r.x, top = r.y, w = r.width, edge = r.x + r.width + PAD })
 				end
 				local from = if list_now then list_now() else list :: string
 				start_drag({ id = s.id, list = from, index = if at then at() else 1, h = session_h(cur(), by_at(), slim_now()) + session_gap(slim_now()) })
@@ -2077,7 +2079,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				local w = if r and r.width then r.width else room_now() - PAD * 2
 				local h = session_h(cur(), by_at(), slim_now())
 				local function outside(): boolean
-					local l = lift:get()
+					local l = ghost.lift:get()
 					return l ~= nil and l.x > l.edge
 				end
 				return ui.div {
@@ -2088,7 +2090,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					end, ui.div(Glass.fill({
 						absolute = true,
 						x = function(): number
-							local l = lift:get()
+							local l = ghost.lift:get()
 							return if l and l.x > 0 then l.col - (l.x - l.gx) else 0
 						end,
 						w = w,
@@ -2130,24 +2132,35 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end,
 			drag_preview_in_window = true,
 			on_drag_move = function(_: any, e: any)
-				local l = lift:peek()
+				local l = ghost.lift:peek()
 				if l then
-					lift:set({ x = e.x, y = e.y, gx = e.grab_x, gy = e.grab_y, col = l.col, top = l.top, w = l.w, edge = l.edge })
+					ghost.lift:set({ x = e.x, y = e.y, gx = e.grab_x, gy = e.grab_y, col = l.col, top = l.top, w = l.w, edge = l.edge })
 				end
 			end,
 			on_drag_end = function(_: any, accepted: boolean)
 				split_dragging:set(false)
 				split_carried:set("")
 				end_drag()
-				local l = lift:peek()
-				lift:set(nil)
+				local l = ghost.lift:peek()
+				ghost.lift:set(nil)
 				local el = row_ref:peek()
 				local r = if el then ui.window_rect(el) else nil
 				if accepted or not l or not r or l.x <= 0 or motion.reduced_now() then
 					return
 				end
 				local x = if l.x > l.edge then l.x - l.gx else l.col
-				anime.animate(el, { x = { x - r.x, 0 }, y = { l.y - l.gy - r.y, 0 }, duration = DRAG_SLIDE.duration, ease = DRAG_SLIDE.ease })
+				ghost.home:set({ id = s.id, title = cur().title, x0 = x, y0 = l.y - l.gy, x1 = r.x, y1 = r.y, w = r.width, h = r.height })
+				ghost.t:set(0)
+				ghost.open:set(true)
+				anime.animate(ghost.t, {
+					value = 1,
+					duration = DRAG_SLIDE.duration,
+					ease = DRAG_SLIDE.ease,
+					onComplete = function()
+						ghost.open:set(false)
+						ghost.home:set(nil)
+					end,
+				})
 			end,
 			body,
 		}
@@ -6398,6 +6411,42 @@ fn layer(input:LayerInput)->vec4<f32> {
 				opacity = edge_lit,
 			},
 		if props.card then nil else edge_handle(0, 0, 0),
+		ui.layer {
+			open = ghost.open,
+			placement = { x = "start", y = "start", inset = 0 },
+			w_full = true,
+			h_full = true,
+			pointer_events = "none",
+			ui.show(function(): boolean
+				return ghost.home:get() ~= nil
+			end, ui.row {
+				id = "sidebar-returning",
+				absolute = true,
+				left = function(): number
+					local b = ghost.home:get()
+					return if b then b.x0 + (b.x1 - b.x0) * ghost.t:get() else 0
+				end,
+				top = function(): number
+					local b = ghost.home:get()
+					return if b then b.y0 + (b.y1 - b.y0) * ghost.t:get() else 0
+				end,
+				w = function(): number
+					local b = ghost.home:get()
+					return if b then b.w else 0
+				end,
+				h = function(): number
+					local b = ghost.home:get()
+					return if b then b.h else 0
+				end,
+				px = ui.raw(10, "Zeron's card's inset"),
+				items = if compact:peek() then "center" else "start",
+				pt = if compact:peek() then 0 else "$space.2",
+				line(label(function(): string
+					local b = ghost.home:get()
+					return if b then b.title else ""
+				end)),
+			}),
+		},
 	}
 	if not props.card then
 		return root
