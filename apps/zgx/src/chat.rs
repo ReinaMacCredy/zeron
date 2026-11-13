@@ -11500,7 +11500,7 @@ mod tests {
                 .collect()
         };
         let chats = Rc::new(Chats::default());
-        let context = Rc::new(RowContext { doc: "doc".into(), device: None, model: Some("Opus".into()) });
+        let context = Rc::new(RowContext { doc: "doc".into(), device: None, model: Some("Opus".into()), cwd: None });
         let base = footprint_mb();
         println!("KEPT base {base:.1} MB");
         // One built as a view builds it and let go of with nothing kept: what a
