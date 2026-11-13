@@ -1,5 +1,6 @@
 local ds = require("@ds")
 local AgentMark = require("@ds/agent_mark")
+local Avatar = require("@ds/avatar")
 local context_usage = require("@ds/context_usage")
 local HoverCard = require("@ds/hover_card")
 local locale = require("@ds/locale")
@@ -7,13 +8,16 @@ local Menu = require("@ds/menu")
 local motion = require("@ds/motion")
 local PrivateText = require("@ds/private_text")
 local Tooltip = require("@ds/tooltip")
+local UpdateGlyph = require("@ds/update_glyph")
 local agents = require("@account/agents")
+local auth = require("@account/auth")
 local boundary = require("@app/screens/shell/boundary")
 local keys = require("@app/screens/shell/keys")
 local route = require("@app/screens/shell/route")
 local art = require("@app/screens/shell/art")
 local tasks_store = require("@app/screens/tasks/store")
 local Builtins = require("@app/screens/plugins/builtins")
+local updates = require("@app/screens/shell/updates")
 
 local M = {}
 
@@ -21,6 +25,7 @@ M.W = art.RAIL_W
 
 local BUTTON, GLYPH, GAP, TOP, PAD = 34, 18, 6, 44, 8
 local RING_RADIUS, RING_STROKE, RING_GLYPH = 13, 2.5, 14
+local AVATAR = 24
 local CARD_W = 290
 local HOVER_FADE = "cubicBezier(.4, 0, .2, 1)"
 local REPO = "https://github.com/zeronsh/comet"
@@ -570,11 +575,78 @@ local function help(): Node
 	})
 end
 
+local about = ui.shared("about", { app_version = "", available = false })
+
+local function app_update(): any?
+	local here = updates.here()
+	if here then
+		return here
+	end
+	local a: any = about:get()
+	if a and a.blocker ~= nil and a.available == true then
+		return { phase = "available", action = "explain", latest = a.latest }
+	end
+	return nil
+end
+
+local function app_update_label(): string
+	local r = app_update()
+	if not r then
+		return ""
+	end
+	if r.phase == "downloading" then
+		return locale.s("shell.updates.downloading")
+	elseif r.phase == "ready" then
+		return locale.s("shell.updates.ready", { version = r.latest or "" })
+	elseif r.phase == "failed" then
+		return locale.s("shell.updates.failed")
+	end
+	return locale.s("shell.updates.version", { version = r.latest or "" })
+end
+
+local function explain()
+	local prompt: any = boundary.load("@app/screens/shell/update_prompt")
+	local watch: any = boundary.load("@app/screens/engine/update")
+	if prompt and watch then
+		prompt.open()
+		watch.show_prompt(prompt)
+	end
+end
+
+local function app_update_button(): Node
+	return RailButton {
+		key = "update-rail-button",
+		label = app_update_label,
+		tooltip = app_update_label,
+		on_click = function()
+			local r = app_update()
+			if not r or not r.action then
+				return
+			end
+			if r.action == "explain" then
+				explain()
+			else
+				updates.apply_here(r)
+			end
+		end,
+		UpdateGlyph {
+			phase = function(): any
+				local r = app_update()
+				return if r then r.phase else "available"
+			end,
+		},
+	}
+end
+
 local function update_entry(): Node
 	local function module(): any
 		return boundary.load("@app/screens/engine/update")
 	end
+	-- The app's own update wins (gpui shows only it): it restarts the engine too, and an idle stale engine restarts itself.
 	local function kind(): string
+		if app_update() then
+			return "app"
+		end
 		local update = module()
 		local now = if update then update.which() else ""
 		return if now == "ours" or now == "theirs" then now else ""
@@ -582,6 +654,9 @@ local function update_entry(): Node
 	return ui.show(function(): boolean
 		return kind() ~= ""
 	end, ui.presence(kind, function(now: string): Node
+		if now == "app" then
+			return app_update_button()
+		end
 		local mine = now == "ours"
 		return RailButton {
 			key = "update-rail-button",
@@ -614,6 +689,65 @@ local function update_entry(): Node
 		enter = motion.transition({ opacity = { 0, 1 }, duration = 140 }),
 		exit = motion.transition({ opacity = 0, duration = 100 }),
 	}))
+end
+
+-- You: your name, else your email; signed out, the workspace's ("Local",
+-- as Zeron's: kept on this device); nothing until the engine has said which.
+type User = { id: string?, name: string, avatar: string? }
+local function user(): User
+	local u = auth.user:get()
+	if u then
+		local name = if u.first_name then (u.first_name :: string):match("^%s*(.-)%s*$") else nil
+		-- (No first name: the email, unless addresses are hidden on screen.)
+		local fallback = if PrivateText.hidden:get() then locale.s("shell.sidebar.you") else u.email
+		-- (Your photo: Settings → Profile's, kept from the last time it was heard.)
+		local settings_store: any = boundary.load("@app/screens/settings/store")
+		local avatar = if settings_store then settings_store.photo_file(settings_store.photo()) else ""
+		return { id = u.id, name = if name and name ~= "" then name else fallback, avatar = if avatar ~= "" then avatar else nil }
+	end
+	if auth.state:get() == "restoring" then
+		return { name = "" }
+	end
+	return { name = locale.s("shell.sidebar.local") }
+end
+
+M.user = user
+M.account = {
+	on_user = function()
+		route.settings("profile")
+	end,
+	user_open = function(): boolean
+		local c = route.current:get()
+		return c.name == "settings" and c.page == "profile"
+	end,
+}
+
+local function account_entry(): Node
+	local function name(): string
+		return user().name
+	end
+	return ui.show(function(): boolean
+		return name() ~= ""
+	end, RailButton {
+		key = "rail-account",
+		label = name,
+		tooltip = name,
+		lit = M.account.user_open,
+		on_click = M.account.on_user,
+		ui.presence(function(): string
+			local u = user()
+			return u.id or u.name
+		end, function(seed: string): Node
+			return Avatar {
+				seed = seed,
+				size = AVATAR,
+				label = name(),
+				src = function(): string?
+					return user().avatar
+				end,
+			}
+		end),
+	})
 end
 
 local function settings_entry(): Node
@@ -656,6 +790,7 @@ M.Rail = ui.component(function(): Node
 		end, usage_ring),
 		help(),
 		update_entry(),
+		account_entry(),
 		settings_entry(),
 	}
 	local rail: { [any]: any } = {

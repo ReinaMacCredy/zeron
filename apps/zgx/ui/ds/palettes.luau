@@ -136,6 +136,52 @@ function M.alpha(c: string, a: number): string
 	return hex(r, g, b, math.clamp(a, 0, 1) * 255)
 end
 
+function M.hsl(hex: string): (number, number, number)
+	local r = (tonumber(string.sub(hex, 2, 3), 16) or 0) / 255
+	local g = (tonumber(string.sub(hex, 4, 5), 16) or 0) / 255
+	local b = (tonumber(string.sub(hex, 6, 7), 16) or 0) / 255
+	local hi, lo = math.max(r, g, b), math.min(r, g, b)
+	local l = (hi + lo) / 2
+	local d = hi - lo
+	if d < 1e-6 then
+		return 0, 0, l
+	end
+	local s = d / (1 - math.abs(2 * l - 1))
+	local h
+	if hi == r then
+		h = ((g - b) / d) % 6
+	elseif hi == g then
+		h = (b - r) / d + 2
+	else
+		h = (r - g) / d + 4
+	end
+	return h * 60, s, l
+end
+
+function M.from_hsl(h: number, s: number, l: number): string
+	local c = (1 - math.abs(2 * l - 1)) * s
+	local x = c * (1 - math.abs((h / 60) % 2 - 1))
+	local m = l - c / 2
+	local r, g, b = 0, 0, 0
+	if h < 60 then
+		r, g = c, x
+	elseif h < 120 then
+		r, g = x, c
+	elseif h < 180 then
+		g, b = c, x
+	elseif h < 240 then
+		g, b = x, c
+	elseif h < 300 then
+		r, b = x, c
+	else
+		r, b = c, x
+	end
+	local function byte(v: number): number
+		return math.clamp(math.floor((v + m) * 255 + 0.5), 0, 255)
+	end
+	return string.format("#%02x%02x%02x", byte(r), byte(g), byte(b))
+end
+
 local function luminance(c: string): number
 	local r, g, b = parse(c)
 	local function linear(ch: number): number

@@ -653,9 +653,10 @@ test("the composer is made once: the sessions arriving, changing and growing lea
 	expect(`field @{field()}`).to_be(`field @{first}`)
 end)
 
-test("signed out, the foot says Local", function()
+test("signed out, the rail's account says Local, and the sidebar's foot nothing of you", function()
 	local app = open()
-	expect(app:has(`{SIDE} >> "Local"`)).to_be(true)
+	expect(app:tree("#app-rail")).to_contain('#rail-account button "Local"')
+	expect(app:has(`{SIDE} >> "Local"`)).to_be(false)
 end)
 
 -- A node's rectangle (its first line in the tree under `scope`): x, y, w, h.
@@ -1043,8 +1044,8 @@ test("the palette's In Files lists lines found in the session's files, with thei
 	expect(list:find('"Files"', 1, true) < list:find('"In Files"', 1, true)).to_be(true)
 end)
 
--- At the sidebar's foot: you open your profile. Settings' own door is the rail's.
-test("the foot's you opens your profile, and only the rail has settings' button", function()
+-- On the rail: you open your profile. Settings' own door is the rail's too.
+test("the rail's you opens your profile, and only the rail has settings' button", function()
 	local app = open()
 	app:frames(20)
 	expect(app:tree("#shell-sidebar")).never.to_contain('checkbox "Settings"')
@@ -1056,7 +1057,7 @@ test("the foot's you opens your profile, and only the rail has settings' button"
 	app:frames(20)
 	expect(app:has("#settings-nav")).to_be(false)
 	-- You: your profile.
-	app:click('#shell-sidebar >> role:button "Local"')
+	app:click("#rail-account")
 	app:frames(20)
 	expect(app:has("#settings-nav")).to_be(true)
 	expect(app:tree("#settings")).to_contain('heading "Account"')

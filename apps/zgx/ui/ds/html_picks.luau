@@ -1,6 +1,7 @@
 -- Options picked on an agent's page: the agent's block (zeron_proto `with_picks`), the tray and a sent message's chips.
 
 local locale = require("@self/locale")
+local palettes = require("@self/palettes")
 
 local M = {}
 
@@ -103,55 +104,9 @@ function M.cards(items: { any }): { Card }
 	return out
 end
 
-local function hsl(hex: string): (number, number, number)
-	local r = (tonumber(string.sub(hex, 2, 3), 16) or 0) / 255
-	local g = (tonumber(string.sub(hex, 4, 5), 16) or 0) / 255
-	local b = (tonumber(string.sub(hex, 6, 7), 16) or 0) / 255
-	local hi, lo = math.max(r, g, b), math.min(r, g, b)
-	local l = (hi + lo) / 2
-	local d = hi - lo
-	if d < 1e-6 then
-		return 0, 0, l
-	end
-	local s = d / (1 - math.abs(2 * l - 1))
-	local h
-	if hi == r then
-		h = ((g - b) / d) % 6
-	elseif hi == g then
-		h = (b - r) / d + 2
-	else
-		h = (r - g) / d + 4
-	end
-	return h * 60, s, l
-end
-
-local function from_hsl(h: number, s: number, l: number): string
-	local c = (1 - math.abs(2 * l - 1)) * s
-	local x = c * (1 - math.abs((h / 60) % 2 - 1))
-	local m = l - c / 2
-	local r, g, b = 0, 0, 0
-	if h < 60 then
-		r, g = c, x
-	elseif h < 120 then
-		r, g = x, c
-	elseif h < 180 then
-		g, b = c, x
-	elseif h < 240 then
-		g, b = x, c
-	elseif h < 300 then
-		r, b = x, c
-	else
-		r, b = c, x
-	end
-	local function byte(v: number): number
-		return math.clamp(math.floor((v + m) * 255 + 0.5), 0, 255)
-	end
-	return string.format("#%02x%02x%02x", byte(r), byte(g), byte(b))
-end
-
 function M.capped(hex: string, s: number, l: number): string
-	local h, sat, light = hsl(hex)
-	return from_hsl(h, math.min(sat, s), math.min(light, l))
+	local h, sat, light = palettes.hsl(hex)
+	return palettes.from_hsl(h, math.min(sat, s), math.min(light, l))
 end
 
 -- In light themes capped at 48% lightness and 57% saturation, so the tick and send read on white.

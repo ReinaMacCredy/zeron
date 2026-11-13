@@ -22,7 +22,6 @@ local function project_editor(): any
 	return require("@app/screens/shell/project_editor")
 end
 local auth = require("@account/auth")
-local PrivateText = require("@ds/private_text")
 local status = require("@ds/status")
 local Pills = require("@app/screens/chat/pills")
 local route = require("@app/screens/shell/route")
@@ -868,27 +867,6 @@ local function filter_notice(): Node
 	)
 end
 
--- You, at the foot: your name, else your email; signed out, the
--- workspace's ("Local", as Zeron's: kept on this device); nothing until the
--- engine has said which.
-type User = { id: string?, name: string }
-local function user(): User
-	local u = auth.user:get()
-	if u then
-		local name = if u.first_name then (u.first_name :: string):match("^%s*(.-)%s*$") else nil
-		-- (No first name: the email, unless addresses are hidden on screen.)
-		local fallback = if PrivateText.hidden:get() then locale.s("shell.sidebar.you") else u.email
-		-- (Your photo: Settings → Profile's, kept from the last time it was heard.)
-		local settings_store: any = boundary.load("@app/screens/settings/store")
-		local avatar = if settings_store then settings_store.photo_file(settings_store.photo()) else ""
-		return { id = u.id, name = if name and name ~= "" then name else fallback, avatar = if avatar ~= "" then avatar else nil }
-	end
-	if auth.state:get() == "restoring" then
-		return { name = "" }
-	end
-	return { name = locale.s("shell.sidebar.local") }
-end
-
 -- What the connection line says (production's connection pill: no
 -- surface, a faint caption; the amber dot when offline or a change wasn't
 -- saved, the working ring while reconnecting). Healthy: nothing.
@@ -1031,20 +1009,6 @@ end
 
 -- What else asks for these (the shell's keys, the palette).
 local M = {}
-
--- You at a sidebar's foot (this one's, and the settings window's:
--- screens/shell/settings): you open your profile, chosen while it's open.
-M.user = user
-M.account = {
-	on_user = function()
-		route.settings("profile")
-	end,
-	user_open = function(): boolean
-		local c = route.current:get()
-		return c.name == "settings" and c.page == "profile"
-	end,
-}
-
 
 -- The view options, kept across launches (how it's grouped, sorted, …).
 M.options = shared
@@ -1862,7 +1826,6 @@ M.Sidebar = ui.component(function(props: Props): Node
 			local _, here = devices()
 			return here
 		end :: any,
-		user = user,
 		top = props.top,
 		card = not props.island,
 		card_x = rail.W + 5,
@@ -1901,8 +1864,6 @@ M.Sidebar = ui.component(function(props: Props): Node
 		on_search = function()
 			view.palette:set(true)
 		end,
-		on_user = M.account.on_user,
-		user_open = M.account.user_open,
 		menu = menu,
 		project_menu = project_menu,
 		narrowed = function(): boolean

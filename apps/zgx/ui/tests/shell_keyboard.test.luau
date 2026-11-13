@@ -82,7 +82,6 @@ test("Tab reads each part of the shell in its order: the sidebar's rows, the pag
 	local order = {
 		'"New chat"',
 		'"Fix the build"',
-		'"Local"',
 		'textbox "Message"',
 		'"Browser"',
 		'"Resize files"',

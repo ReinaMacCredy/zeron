@@ -465,24 +465,21 @@ function M.View(props: { inset: boolean? }?): Node
 				head = if head then head() else nil,
 				hide_rows = replaces,
 				foot = ui.slot("settings.nav", { w_full = true, gap = "$zeron.list.gap" }),
-				-- You, as the main sidebar's foot: you open your profile.
+				-- You, as on the rail: you open your profile.
 				account = (function(): Node?
-					local sidebar: any = require("@app/screens/shell/sidebar")
-					if not sidebar.account then
-						return nil
-					end
+					local rail: any = require("@app/screens/shell/rail")
 					return ds.AccountRow {
 						name = function(): string
-							return sidebar.user().name
+							return rail.user().name
 						end,
 						id = function(): string?
-							return sidebar.user().id
+							return rail.user().id
 						end,
 						avatar = function(): string?
-							return (sidebar.user() :: any).avatar
+							return rail.user().avatar
 						end,
-						on_user = sidebar.account.on_user,
-						user_open = sidebar.account.user_open,
+						on_user = rail.account.on_user,
+						user_open = rail.account.user_open,
 					}
 				end)(),
 			},

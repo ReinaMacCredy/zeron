@@ -159,8 +159,8 @@ local RUN, REST, FPS = 3.9, 900, 30
 -- point of its cycle whenever it shows, so one coming back into sight picks
 -- up in step with the rest, not from its start. (Set as the loop is made,
 -- before the renderer ever takes it over, which it still may.)
-function M.in_phase(anim: any, period: number)
-	anim.currentTime = ui.now() % period
+function M.in_phase(anim: any, period: number, shift: number?)
+	anim.currentTime = (ui.now() + (shift or 0)) % period
 end
 
 -- A node whose loop (`start(el)`'s animation, `period` ms a cycle) plays
@@ -171,7 +171,7 @@ end
 -- and the engine, seeing only unseen loops, looks just four times a second:
 -- an animation starting then would wait for that look, and leap. Still
 -- when motion is reduced.
-local function looping(props: ContainerProps, start: (el: Element) -> Animation, period: number): Node
+local function looping(props: ContainerProps, start: (el: Element) -> Animation, period: number, shift: number?, target: string?): Node
 	-- Whether it plays, and not the loop itself: a handle held here strongly
 	-- would hold its element, the element this node, and this node this
 	-- function, a cycle through Rust that no collector sees; held weakly, the
@@ -181,15 +181,16 @@ local function looping(props: ContainerProps, start: (el: Element) -> Animation,
 		if visible then
 			if not playing and not motion.reduced_now() then
 				playing = true
-				M.in_phase(start(el), period)
+				M.in_phase(start(el), period, shift)
 			end
 		elseif playing then
 			playing = false
-			anime.utils.remove(el)
+			anime.utils.remove(target or el)
 		end
 	end
 	return ui.div(props)
 end
+M.looping = looping
 
 -- The working ring, `size` points, in `ink` (a token).
 local function ring(ink: string, size: number): Node

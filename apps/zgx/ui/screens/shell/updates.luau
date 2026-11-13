@@ -18,6 +18,7 @@ local Menu = require("@ds/menu")
 local toast = require("@ds/toast")
 local status = require("@ds/status")
 local route = require("@app/screens/shell/route")
+local host = require("@app/screens/settings/host")
 local MarkStack = require("@ds/mark_stack")
 
 local M = {}
@@ -179,6 +180,15 @@ end)
 
 local function shown(): boolean
 	return #rows:get() > 0
+end
+
+function M.here(): any?
+	for _, r in rows:get() do
+		if r.id == "here:zeron" then
+			return r
+		end
+	end
+	return nil
 end
 
 -- What the stack shows: each thing once (Zeron on three devices is one Zeron),
@@ -345,6 +355,19 @@ local function failed(what: string, err: any)
 	}
 end
 
+function M.apply_here(r: any)
+	if r.action == "restart" then
+		local about_now: any = about:peek()
+		asked_this_run = true
+		restarted_from:set(about_now and about_now.app_version)
+	end
+	host.call("about.apply", {}):after(function() end, function(err: any)
+		asked_this_run = false
+		restarted_from:set(nil)
+		failed(name_of(r), err)
+	end)
+end
+
 -- What pressing its action does.
 local function act(r: any, close: () -> ())
 	local a = r.action
@@ -361,16 +384,7 @@ local function act(r: any, close: () -> ())
 	end
 	local name = name_of(r)
 	if r.kind == "zeron" and r.here then
-		if a == "restart" then
-			local about_now: any = about:peek()
-			asked_this_run = true
-			restarted_from:set(about_now and about_now.app_version)
-		end
-		ui.call("about.apply", {}):after(function() end, function(err: any)
-			asked_this_run = false
-			restarted_from:set(nil)
-			failed(name, err)
-		end)
+		M.apply_here(r)
 	elseif r.kind == "zeron" then
 		ui.call("updates.apply_zeron", { device = r.device }):after(function() end, function(err: any)
 			failed(name, err)

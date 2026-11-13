@@ -1105,7 +1105,7 @@ test("no signing keys yet: the card says how one is made", function()
 	expect(count(app, PAGE, 'button "Revoke"')).to_be(0)
 end)
 
-test("your photo shows at both sidebars' feet once chosen, and goes when removed", function()
+test("your photo shows on the rail and at Settings' foot once chosen, and goes when removed", function()
 	local app = open("Account")
 	local foot = `{NAV} >> role:button "Ada"`
 	expect(app:has(foot)).to_be(true)
@@ -1120,10 +1120,10 @@ test("your photo shows at both sidebars' feet once chosen, and goes when removed
 	expect(string.find(photo.avatar, "/auth/avatars/", 1, true)).never.to_be_nil()
 	expect((app:state("account_photo_files") :: any)[photo.avatar]).to_be("assets/favicons/zeron.png")
 	expect(app:tree(foot)).to_contain("img")
-	-- The chats' sidebar too.
+	-- The rail's too, back on the chats.
 	app:click(`{NAV} >> role:button "Back to chats"`)
 	app:frames(30)
-	expect(app:tree('#shell-sidebar >> role:button "Ada"')).to_contain("img")
+	expect(app:tree("#rail-account")).to_contain("img")
 	app:command("shell.settings")
 	app:frames(20)
 	app:click(`{NAV} >> role:tab "Account"`)
