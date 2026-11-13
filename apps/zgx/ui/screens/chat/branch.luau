@@ -168,7 +168,7 @@ function M.props(chat: () -> string?): any
 			rewinding:set { chat = id, id = m.id, excerpt = excerpt(m.copy or m.text or "") }
 			rewind_open:set(true)
 		end,
-		edit = function(m: any, text: string, back: () -> ())
+		edit = function(m: any, text: string, back: () -> (), sent: () -> ())
 			local id = chat()
 			if not id then
 				back()
@@ -181,7 +181,7 @@ function M.props(chat: () -> string?): any
 					table.insert(kept, { kind = a.kind, path = a.path or a.src, name = a.name, on_host = true })
 				end
 			end
-			store.rewind_send({ session = id, entry = m.id, text = text, message_id = mid, attachments = kept }):after(function() end, function(err: any)
+			store.rewind_send({ session = id, entry = m.id, text = text, message_id = mid, attachments = kept }):after(sent, function(err: any)
 				back()
 				ds.toast.show { title = words(err), tone = "danger" }
 			end)

@@ -23,7 +23,7 @@ end
 
 return ui.component(function(props: Props): Node
 	local field = ui.ref()
-	local opened = ui.use_state(0)
+	local opened = ui.use_state(if props.phase() == "open" then 0 else 1)
 	local sent = ui.use_state(0)
 	local full_w = ui.use_state(props.from.w)
 	local text_h = ui.use_state(props.from.h)

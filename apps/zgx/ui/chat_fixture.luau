@@ -3313,16 +3313,25 @@ do
 	end
 	stub.rewind_send = function(req: any): any
 		note(`rewind_send:{req.session}:{req.entry}:{req.text}:{req.message_id ~= nil}`)
-		local no = refused()
-		if no then
-			return no
-		end
-		local kept = upto(TRANSCRIPTS[req.session] or {}, req.entry, false)
+		local was = TRANSCRIPTS[req.session] or {}
+		local kept = upto(was, req.entry, false)
 		table.insert(kept, { id = req.message_id, role = "user", text = req.text, attachments = {}, waiting = "sending" })
-		TRANSCRIPTS[req.session] = kept
 		if opened == req.session then
 			store.messages:set(kept)
 		end
+		local why = BRANCH_FAILS:peek()
+		if why then
+			BRANCH_FAILS:set(nil)
+			return { after = function(_self: any, _ok: any, bad: (any) -> ())
+				ui.after(50, function()
+					if opened == req.session then
+						store.messages:set(was)
+					end
+					bad({ message = why })
+				end)
+			end }
+		end
+		TRANSCRIPTS[req.session] = kept
 		return settled(req.message_id)
 	end
 end

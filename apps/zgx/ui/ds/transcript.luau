@@ -245,7 +245,7 @@ export type Branch = {
 	blocked: (m: Message, kind: "edit" | "rewind" | "fork") -> string?,
 	fork: (m: Message) -> (),
 	rewind: (m: Message, fold: { start: (done: () -> ()) -> (), back: () -> () }) -> (),
-	edit: (m: Message, text: string, back: () -> ()) -> (),
+	edit: (m: Message, text: string, back: () -> (), sent: () -> ()) -> (),
 }
 export type Handle = {
 	messages: State<{ Message }>,
@@ -2085,7 +2085,7 @@ local function Transcript(props: Props): Node
 	}
 
 	local branch = props.branch
-	local editing = ui.use_state(nil :: { id: string, index: number, phase: MessageEdit.Phase, at_end: boolean }?)
+	local editing = ui.use_state(nil :: { id: string, index: number, phase: MessageEdit.Phase, at_end: boolean, sent: boolean? }?)
 	local edit_text = ui.use_state("")
 	local dim = ui.use_state(0)
 	local fold = ui.use_state(nil :: { first: string, from: number, heights: { [string]: number } }?)
@@ -2152,7 +2152,7 @@ local function Transcript(props: Props): Node
 		if f and messages:index_of("id", f.first) == nil then
 			fold:set(nil)
 		end
-		if e and messages:index_of("id", e.id) == nil then
+		if e and (e.phase ~= "send" or e.sent) and messages:index_of("id", e.id) == nil then
 			editing:set(nil)
 			dim:set(0)
 		end
@@ -2218,6 +2218,11 @@ local function Transcript(props: Props): Node
 			b.edit(m, text, function()
 				phase_to("open")
 				unfold()
+			end, function()
+				local now = editing:peek()
+				if now and now.id == e.id then
+					editing:set { id = now.id, index = now.index, phase = now.phase, at_end = now.at_end, sent = true }
+				end
 			end)
 		end)
 	end
