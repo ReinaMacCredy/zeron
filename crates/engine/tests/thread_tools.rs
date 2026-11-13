@@ -2503,6 +2503,8 @@ impl Harness for DelegatingHarness {
                             output: None,
                             diff: None,
                             exit_code: None,
+                            image_payloads: Vec::new(),
+                            preview_paths: Vec::new(),
                         }))
                         .await;
                 }
@@ -3027,6 +3029,8 @@ impl Harness for PublishingHarness {
                     output: None,
                     diff: None,
                     exit_code: None,
+                    image_payloads: Vec::new(),
+                    preview_paths: Vec::new(),
                 },
                 AgentEvent::TextDelta {
                     text: "Bars are tokens per turn.".into(),

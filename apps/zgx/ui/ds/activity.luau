@@ -26,8 +26,8 @@ local status = require("@self/status")
 local ToolDetail = require("@self/tool_detail")
 local Markdown = require("@self/markdown")
 local locale = require("@self/locale")
-local FoldButton = require("@self/fold_button")
 local ReplyPicture = require("@self/reply_picture")
+local FoldButton = require("@self/fold_button")
 local Threads = require("@self/transcript_threads")
 local FileIcon = require("@self/file_icons")
 
@@ -48,8 +48,6 @@ export type Tool = {
 	target: string?,
 	-- The file its name opens (a read's, an edit's, a skill's SKILL.md).
 	path: string?,
-	-- The pictures it read, wrote or printed (at most four), shown opened.
-	images: { string }?,
 	-- The whole call, when the line says less (a command of many lines, a
 	-- tool's input): the row opens to it.
 	call: string?,
@@ -72,6 +70,10 @@ export type Tool = {
 	diff_ref: string?,
 	stats: { ToolDetail.Stat }?,
 	diff: ToolDetail.Diff?,
+	-- The pictures its result carried (a Read of a screenshot), as the
+	-- engine keeps them: copies on the chat's host, which the row opens to
+	-- (Zeron's chip previews, crates/ui tool_images.rs).
+	pictures: { { path: string, name: string? } }?,
 }
 
 export type Writing = { words: (id: string) -> string?, seeded: () -> boolean }
@@ -96,7 +98,8 @@ export type Props = {
 	-- A tool's file (Tool `path`): what opens it, a click on its name, and whether it opens (only then is its name clickable).
 	open_file: ((path: string) -> ())?,
 	file_opens: ((path: string) -> boolean)?,
-	-- Where a tool's pictures (Tool `images`) are read from; without it, none show.
+	-- Where a tool's pictures are read from (ds/transcript's
+	-- `shown_pictures`: files on the chat's host). Without it, none show.
 	pictures: ReplyPicture.Pictures?,
 	threads: Threads.Threads?,
 	agent: (() -> any)?,
@@ -333,38 +336,27 @@ local CHANGES: { [string]: boolean } = { edit = true, write = true }
 local LIVE_CHANGE_H = 240
 local BADGED: { [string]: boolean } = { read = true, edit = true, write = true }
 
--- gpui's tool image previews: a reply's pictures, opening in the lightbox together.
-local function tool_pictures(now: () -> Tool, pictures: ReplyPicture.Pictures): Node
+-- A tool's pictures under its opened row: small thumbnails in a row (the
+-- theme's `zeron.prose.picture.thumb`), each opening in the lightbox among
+-- the others, a lightbox group of their own.
+local function tool_pictures(now: () -> Tool, shown: ReplyPicture.Pictures): Node
 	local function entries(): { ReplyPicture.Entry }
 		local out = {}
-		for _, path in now().images or {} do
-			table.insert(out, { src = path, alt = string.match(path, "([^/\\]+)$") or path })
+		for _, it in now().pictures or {} do
+			table.insert(out, { src = it.path, alt = it.name or "" })
 		end
 		return out
 	end
-	return ui.presence(function(): string?
-		local n = #(now().images or {})
-		return if n > 1 then "run" elseif n == 1 then "one" else nil
-	end, function(kind: string): Node
-		local group = `tool:{now().id}`
-		local body = if kind == "run"
-			then ReplyPicture.Run { pictures = pictures, items = entries, group = group, set = entries }
-			else ReplyPicture.Single { pictures = pictures, src = entries()[1].src, alt = entries()[1].alt, group = group, set = entries, tool = true }
-		return ui.div {
-			class = "tool-pictures",
-			ml = ui.raw(GUTTER, "under the line's words, past the tree's gutter"),
-			mb = "$space.2",
-			min_w = 0,
-			body,
-		}
-	end, { w_full = true, min_w = 0 })
+	return ReplyPicture.Thumbs { pictures = shown, items = entries, group = `tool:{now().id}`, set = entries }
 end
 
 -- A row's call and what it did, as it opens (`row`): `now`, its tool;
 -- `live_change`, an edit being written (its detail held to LIVE_CHANGE_H,
--- scrolling); `pictures`, where its pictures are read from.
+-- scrolling); `pictures`, where its result's pictures are read from
+-- (without it, they don't show).
 local Opened = ui.component(function(props: { now: () -> Tool, live_change: (() -> boolean)?, pictures: ReplyPicture.Pictures? }): Node
 	local now = props.now
+	local pictures = props.pictures
 	local live_change = props.live_change
 	local detail = ui.ref()
 	return ui.column {
@@ -372,6 +364,20 @@ local Opened = ui.component(function(props: { now: () -> Tool, live_change: (() 
 		ui.show(function(): boolean
 			return now().call ~= nil
 		end, call_block(now)),
+		if pictures
+			then ui.show(
+				function(): boolean
+					local list = now().pictures
+					return list ~= nil and #list > 0
+				end,
+				ui.div {
+					ml = ui.raw(GUTTER, "under the line's words, past the tree's gutter"),
+					mt = "$space.1",
+					mb = "$space.1",
+					tool_pictures(now, pictures),
+				}
+			)
+			else nil,
 		ui.show(
 			function(): boolean
 				return ToolDetail.has(now() :: any)
@@ -386,7 +392,6 @@ local Opened = ui.component(function(props: { now: () -> Tool, live_change: (() 
 				ui.column { ref = detail, w_full = true, ToolDetail.ToolDetail { tool = now :: any } },
 			}
 		),
-		if props.pictures then tool_pictures(now, props.pictures) else nil,
 	}
 end)
 
@@ -717,8 +722,10 @@ local function row(
 	local function has_detail(): boolean
 		return ToolDetail.has(now() :: any)
 	end
+	-- The pictures its result carried, where they can be read.
 	local function has_pictures(): boolean
-		return pictures ~= nil and #(now().images or {}) > 0
+		local list = now().pictures
+		return pictures ~= nil and list ~= nil and #list > 0
 	end
 	local function chosen(): boolean?
 		return CALLS_OPEN:get()[id]

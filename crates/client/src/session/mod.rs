@@ -1439,6 +1439,7 @@ fn refresh_setup_placeholder(st: &mut CoreState, machine: MachineWait) -> bool {
                     subagent_tail: None,
                     delegate_route: Default::default(),
                     html_render: Default::default(),
+                    preview_paths: Vec::new(),
                     exit_code: None,
                     output_truncated: false,
                     output_lines: None,

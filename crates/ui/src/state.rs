@@ -2714,6 +2714,7 @@ impl AppState {
                     subagent_tail: None,
                     delegate_route: None,
                     html_render: None,
+                    preview_paths: Vec::new(),
                     exit_code: None,
                     output_truncated: false,
                     output_lines: None,

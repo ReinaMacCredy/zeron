@@ -177,6 +177,8 @@ mod tests {
             output: None,
             diff: None,
             exit_code: None,
+            image_payloads: Vec::new(),
+            preview_paths: Vec::new(),
         }
     }
 

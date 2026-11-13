@@ -523,6 +523,7 @@ async fn a_fork_settles_the_running_subagent_chips_it_copies() {
         subagent_tail: None,
         delegate_route: None,
         html_render: None,
+        preview_paths: Vec::new(),
         exit_code: None,
         output_truncated: false,
         output_lines: None,

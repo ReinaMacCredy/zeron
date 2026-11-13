@@ -73,7 +73,6 @@ use crate::engine::{
 mod code_links;
 mod pills;
 mod review;
-mod tool_images;
 
 type Outcome = &'static str;
 
@@ -5782,6 +5781,56 @@ fn entry_text(entry: &Json) -> String {
     out
 }
 
+/// Whether a user entry is only Claude Code's note on a picture a tool read
+/// (`[Image: original WxH, displayed at WxH. …]`, `[Image: source: …]`), as
+/// zeron-harness's `is_synthetic_user_text` reads it: nothing else in it.
+fn image_note_only(entry: &Json) -> bool {
+    let mut notes = 0;
+    for p in entry["parts"].as_array().into_iter().flatten() {
+        match p["kind"].as_str() {
+            Some("text") => {
+                let text = p["text"].as_str().unwrap_or_default().trim();
+                if text.is_empty() {
+                    continue;
+                }
+                if !is_image_note(text) {
+                    return false;
+                }
+                notes += 1;
+            }
+            _ => return false,
+        }
+    }
+    notes > 0
+}
+
+/// The CLI's image note exactly (zeron-harness's `is_image_note`): one
+/// line, `[Image: source: <path>]` (the path may be followed by `, original
+/// WxH, displayed at WxH. …`), or `[Image: original WxH, displayed at WxH.
+/// …]`. Something a person typed that only starts and ends like one
+/// (`[Image: source: shot.png] why is button [x]`) is not it.
+fn is_image_note(text: &str) -> bool {
+    if text.contains('\n') {
+        return false;
+    }
+    let Some(rest) = text.strip_prefix("[Image: ").and_then(|rest| rest.strip_suffix(']')) else {
+        return false;
+    };
+    if let Some(path) = rest.strip_prefix("source: ") {
+        return !path.trim().is_empty() && !path.contains(['[', ']']);
+    }
+    fn dimensions(text: &str) -> Option<&str> {
+        let (width, rest) = text.split_once('x')?;
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        (!width.is_empty() && width.bytes().all(|b| b.is_ascii_digit()) && digits > 0).then(|| &rest[digits..])
+    }
+    rest.strip_prefix("original ")
+        .and_then(dimensions)
+        .and_then(|rest| rest.strip_prefix(", displayed at "))
+        .and_then(dimensions)
+        .is_some_and(|rest| !rest.contains(['[', ']']))
+}
+
 /// A transcript's subagents: each spawn that names its doc, once, in the order they
 /// were spawned, with when their turn began (a message's `tools` hold all of its).
 fn subagents_in(message: &Value) -> Option<Rc<[Value]>> {
@@ -5867,6 +5916,13 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .filter_map(|p| p["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
+            // Claude Code's note on a picture a tool read (its size as the
+            // model saw it), which a subagent's transcript kept as a message
+            // before the engine learned it isn't one: not something anyone
+            // said, so no bubble.
+            if image_note_only(entry) {
+                return None;
+            }
             if text.trim() == zeron_proto::RESUME_PROMPT {
                 return Some(resumed_row(id));
             }
@@ -7776,12 +7832,6 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
     if let Some(path) = tool_file(part, kind) {
         fields.push(("path", Value::from(path)));
     }
-    if part["kind"].as_str() == Some("tool") {
-        let images = tool_images::image_paths(part, code_links::cwd().as_deref());
-        if !images.is_empty() {
-            fields.push(("images", Value::List(images.iter().map(|p| Value::from(p.as_str())).collect::<Vec<_>>().into())));
-        }
-    }
     // What its row opens to (src/tool_details.rs).
     fields.extend(crate::tool_details::tool_fields(part));
     let stats = part["diffStats"].as_array();
@@ -8127,6 +8177,10 @@ fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool) -> Va
         // Its folder on that device (a reply's pictures resolve by it).
         ("cwd", s(&chat["cwd"])),
         ("harness", Value::from(harness)),
+        // The agent the chat records (nil until its config is known, where
+        // `harness` stands in as Claude Code): whose `/` commands and skills
+        // its composer lists when its model isn't in the catalog shown.
+        ("agent", s(&config["harness"])),
         ("model", model),
         ("model_label", model_label),
         ("effort", s(&config["reasoning"])),
@@ -9350,6 +9404,23 @@ mod tests {
         assert_eq!(model.as_deref(), Some("pi/kimi-k3"));
     }
 
+    /// The composer asks a chat's own agent for its `/` list: the harness its
+    /// config records, also without a model or before its device's catalog;
+    /// none until the config is known (not `harness`'s Claude Code stand-in).
+    #[test]
+    fn a_sessions_agent_is_its_recorded_harness() {
+        let chats = Chats::default();
+        let open = Open { id: "c".into(), ..Open::default() };
+        let agent = |chats: &Chats| session_value(chats, &open, false).field("agent").map(text).filter(|a| !a.is_empty());
+        assert_eq!(agent(&chats), None);
+        chats.chats.borrow_mut().insert(
+            "c".into(),
+            json!({ "id": "c", "deviceId": "laptop", "config": { "harness": "codex" } }),
+        );
+        assert_eq!(agent(&chats).as_deref(), Some("codex"));
+        assert!(matches!(session_value(&chats, &open, false).field("model"), None | Some(Value::Nil)));
+    }
+
     #[test]
     fn subagent_titles_follow_the_shipping_app() {
         let t = |call: serde_json::Value| super::subagent_title(&call);
@@ -10015,6 +10086,33 @@ mod tests {
         let summary = json!({ "id": "c", "role": "system", "parts": [{ "kind": "text", "id": "t0", "text": "Claude Code settings · Theme → dark, Verbose → on" }] });
         let parts = message(&summary, None).unwrap().field("parts").unwrap().list().to_vec();
         assert_eq!((f(&parts[1], "label"), f(&parts[1], "value")), ("Verbose".into(), "on".into()));
+    }
+
+    #[test]
+    fn claude_codes_image_note_is_no_message() {
+        let user = |text: &str| {
+            json!({ "id": "u", "role": "user", "createdAt": 1_788_900_000_000_i64,
+                "parts": [{ "id": "t", "kind": "text", "text": text }] })
+        };
+        for note in [
+            "[Image: original 1884x2066, displayed at 1824x2000. Multiply coordinates by 1.03 to map to original image.]",
+            "[Image: source: /home/me/scratch/test.png]",
+            "  [Image: source: /a.png, original 10x10, displayed at 10x10.]\n",
+        ] {
+            assert!(message(&user(note), None).is_none(), "{note} showed");
+        }
+        // Words of its own around it, or a note-like line that isn't one, show.
+        assert!(message(&user("Look: [Image: original 10x10, displayed at 10x10.]"), None).is_some());
+        assert!(message(&user("[Image: the logo]"), None).is_some());
+        for typed in [
+            "[Image: source: shot.png] why is button [x]",
+            "[Image: original mockup attached]\nmatch it exactly [urgent]",
+            "[Image: original mockup attached]",
+            "[Image: original 10x10, displayed at big]",
+            "[Image: source: ]",
+        ] {
+            assert!(message(&user(typed), None).is_some(), "{typed} hidden");
+        }
     }
 
     #[test]

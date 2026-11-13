@@ -1829,6 +1829,17 @@ ui.command {
 		end
 	end,
 }
+-- A Codex session on its agent's default model (none set, so none the
+-- catalog names): its agent only the one its config records.
+ui.command {
+	id = "codex_model_less",
+	title = "A Codex session with no model",
+	run = function()
+		META.s3 = { title = "Codex chat", project = "atlas", agent = "codex", harness = "codex", access = "full", plan = false }
+		TRANSCRIPTS.s3 = { { id = "z1", role = "user", text = "Hi" } }
+		seed()
+	end,
+}
 -- A session of long messages (each folds to five lines).
 do
 	local long_chat = {}
@@ -2696,7 +2707,7 @@ local function kinds_messages(): { any }
 					summary = "Read 1 file · called 4 tools",
 					tools = {
 						tool("k1", "read", "Read", "parse.rs", { path = "src/parse.rs", output = "fn parse_all() {}" }),
-						tool("k2", "mcp", "Used", "zeron.device_screenshot", { images = { "assets/composer/shell.png", "assets/composer/transcript.png" } }),
+						tool("k2", "mcp", "Used", "zeron.device_screenshot", { pictures = { { path = "assets/composer/shell.png", name = "shell.png" }, { path = "assets/composer/transcript.png", name = "transcript.png" } } }),
 						tool("k3", "wait", "Waited for agents"),
 						tool("k4", "skill", "Used", "zgx-port", { path = "/work/atlas/skills/zgx-port/SKILL.md" }),
 						tool("k5", "todo", "Updated the plan", "1/3 done", { call = "[x] a\n[ ] b\n[ ] c" }),

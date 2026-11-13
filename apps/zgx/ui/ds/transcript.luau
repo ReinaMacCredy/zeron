@@ -1021,6 +1021,7 @@ local function reply(
 				open_subagent = if view then view.open_subagent else nil,
 				threads = if view then view.threads else nil,
 				agent = if view and view.threads then view.threads.agent else nil,
+				pictures = if view then view.shown_pictures else nil,
 				thought = thought_of(m, now, draft),
 				tools = function()
 					return now().tools or {}

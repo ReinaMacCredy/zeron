@@ -18495,6 +18495,7 @@ mod tests {
             subagent_tail: None,
             html_render: None,
             delegate_route: None,
+            preview_paths: Vec::new(),
             exit_code: None,
             output_truncated: false,
             output_lines: None,
@@ -20651,6 +20652,7 @@ mod tests {
             exit_code: None,
             output_truncated: false,
             output_lines: None,
+            preview_paths: Vec::new(),
         }
     }
 
@@ -20686,6 +20688,7 @@ mod tests {
                 exit_code: None,
                 output_lines: None,
                 output_truncated: false,
+                preview_paths: Vec::new(),
             }
         };
         let entry = assistant(
@@ -20875,6 +20878,7 @@ mod tests {
             exit_code: None,
             output_truncated: false,
             output_lines: None,
+            preview_paths: Vec::new(),
         }
     }
 
@@ -20970,6 +20974,7 @@ mod tests {
             exit_code: None,
             output_lines: None,
             output_truncated: false,
+            preview_paths: Vec::new(),
         };
         let entry = assistant(
             "m-del",
@@ -24106,6 +24111,7 @@ mod tests {
             exit_code: None,
             output_lines: None,
             output_truncated: false,
+            preview_paths: Vec::new(),
         }
     }
 
@@ -25457,6 +25463,7 @@ mod computer_tests {
                 exit_code: None,
                 output_lines: None,
                 output_truncated: false,
+                preview_paths: Vec::new(),
             },
             other => other,
         };

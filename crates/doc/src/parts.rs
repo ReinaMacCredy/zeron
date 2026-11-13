@@ -481,6 +481,12 @@ pub enum MessagePart {
         html_render: Option<zeron_proto::html_render::HtmlRenderRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delegate_route: Option<zeron_proto::ChildRoute>,
+        /// Uploads copies of images embedded in this tool's result. When
+        /// this is non-empty the chip previews these paths instead of files
+        /// the call named, which may sit outside the attachment jail.
+        /// Empty on older parts and on results that carried no image bytes.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        preview_paths: Vec<String>,
         /// A command's exit status, as its harness reported it (command
         /// tools only — see [`command_output_tail`]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -581,6 +587,7 @@ impl MessagePart {
                 output,
                 diff,
                 diff_stats,
+                preview_paths,
                 ..
             } => {
                 serde_json::to_vec(call).map_or(0, |v| v.len())
@@ -591,6 +598,7 @@ impl MessagePart {
                     + diff_stats
                         .as_ref()
                         .map_or(0, |s| serde_json::to_vec(s).map_or(0, |v| v.len()))
+                    + preview_paths.iter().map(String::len).sum::<usize>()
             }
             MessagePart::Input {
                 questions, answers, ..
@@ -737,6 +745,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     subagent_tail: None,
                     html_render: None,
                     delegate_route: None,
+                    preview_paths: Vec::new(),
                     exit_code: None,
                     output_truncated: false,
                     output_lines: None,
@@ -748,7 +757,9 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             is_error,
             output,
             diff,
+            preview_paths,
             exit_code,
+            ..
         } => {
             for p in out.iter_mut() {
                 if let MessagePart::Tool {
@@ -760,6 +771,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     diff: diff_slot,
                     output_bytes,
                     diff_stats,
+                    preview_paths: stored,
                     exit_code: exit_slot,
                     output_truncated,
                     output_lines,
@@ -818,6 +830,11 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     }
                     *diff_slot = None;
                     *diff_stats = diff.as_ref().map(|d| vec![diff_stat(d)]);
+                    // A later result with no images must not wipe a preview
+                    // already stored for this chip.
+                    if !preview_paths.is_empty() {
+                        *stored = preview_paths.clone();
+                    }
                 }
             }
         }
@@ -1536,6 +1553,8 @@ mod tests {
                 is_error: true,
                 output: None,
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: None,
             },
         );
@@ -1545,6 +1564,55 @@ mod tests {
             } => {
                 assert!(*is_error);
                 assert!(*resolved);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_result_preview_paths_stick_and_an_empty_result_does_not_wipe_them() {
+        let mut parts = Vec::new();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "t".into(),
+                call: ToolCall::ReadFile {
+                    path: "/tmp/shots/1.png".into(),
+                },
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolResult {
+                exit_code: None,
+                id: "t".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+                preview_paths: vec!["/uploads/abc-image.png".into()],
+                image_payloads: Vec::new(),
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolResult {
+                exit_code: None,
+                id: "t".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
+            },
+        );
+        match &parts[0] {
+            MessagePart::Tool {
+                preview_paths,
+                resolved,
+                ..
+            } => {
+                assert!(*resolved);
+                assert_eq!(preview_paths, &vec!["/uploads/abc-image.png".to_string()]);
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -1762,6 +1830,7 @@ mod tests {
                 subagent_tail: None,
                 html_render: None,
                 delegate_route: None,
+                preview_paths: Vec::new(),
                 exit_code: None,
                 output_truncated: false,
                 output_lines: None,
@@ -1862,6 +1931,8 @@ mod tests {
                 },
             },
             AgentEvent::ToolResult {
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
                 id: "c".into(),
                 is_error: exit_code.is_some_and(|c| c != 0),
                 output: Some(output.into()),
@@ -1983,6 +2054,8 @@ mod tests {
                     },
                 },
                 AgentEvent::ToolResult {
+                    image_payloads: Vec::new(),
+                    preview_paths: Vec::new(),
                     id: "c".into(),
                     is_error: false,
                     output: Some("hunter2-but-unlabelled\n".into()),
@@ -2058,6 +2131,8 @@ mod tests {
                 },
             },
             AgentEvent::ToolResult {
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
                 id: "r".into(),
                 is_error: false,
                 output: Some("API_KEY=hunter2".into()),
@@ -2105,6 +2180,8 @@ mod tests {
                     new_text: "b\n".into(),
                     line_offset: None,
                 }),
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: None,
             },
         );
@@ -2164,6 +2241,8 @@ mod tests {
                     new_text: "x\n".into(),
                     line_offset: None,
                 }),
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: None,
             },
         );
@@ -2342,6 +2421,8 @@ mod tests {
                 is_error: false,
                 output: Some("   \n".into()),
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: None,
             }),
             None,
@@ -2352,6 +2433,8 @@ mod tests {
             is_error: true,
             output: Some("full output".into()),
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
             exit_code: None,
         })
         .unwrap();
@@ -2382,6 +2465,8 @@ mod tests {
                 output: Some("{\"appName\":\"TextEdit\",\"actions\":[{\"tool\":\"type_text\"}]}\nWindow: \"Notes\"".into()),
                 diff: None,
                 exit_code: None,
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
             },
         );
         let MessagePart::Tool { call, output, .. } = &parts[0] else {

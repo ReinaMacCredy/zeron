@@ -239,6 +239,8 @@ mod tests {
                 output: None,
                 diff: None,
                 exit_code: None,
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
             },
             true,
             at(t0, 70_000),
