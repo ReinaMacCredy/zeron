@@ -1250,15 +1250,17 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 			(panel.open_file :: any)(home, r.path, route.project:peek(), { line = r.line, column = r.column, end_line = r.end_line })
 		end
 	end
-	-- Text selected in it, annotated on its own chat's draft, its composer taking the keys after.
+	-- Text selected in it, annotated on its own chat's draft, its composer taking the keys after
+	-- (a subagent, with no composer, on its parent's).
 	local split = data.split == true
+	local subagent = tab.kind == "subagent"
 	local function keys_here()
 		if split or not props.panel_key or not PanelState.take_keys_now(props.panel_key, slot) then
 			Shared.focus:add(1)
 		end
 	end
 	local annotate = Shared.notes(function(): string?
-		return chat
+		return if subagent then data.parent or home_session() else chat
 	end, nil, {
 		side = function(text: string)
 			-- (A side chat already sent is no longer unsent: its parent is its row's.)
@@ -1268,7 +1270,7 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		focus = keys_here,
 		-- (Into its own draft, at its own composer's caret; a split's pane:
 		-- the window composer's, as the chat page's.)
-		mention = if split
+		mention = if split or subagent
 			then nil
 			else function(q: any)
 				Shared.mention_in(chat, { text = q.text, who = q.who or "" }, fields[chat], keys_here)

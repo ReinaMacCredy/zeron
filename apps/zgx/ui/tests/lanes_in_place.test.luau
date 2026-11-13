@@ -470,3 +470,53 @@ test("a side chat's tab names the chat it reads from above its transcript; a for
 	app:frames(30)
 	expect(app:has(".side-chat-tab >> .sidechat-context")).to_be(false)
 end)
+
+local function select_in_subagent(app: any)
+	local x, y, w
+	for line in app:tree(".subagent-tab"):gmatch("[^\n]+") do
+		if line:find('"This is chat-1--sub--1"', 1, true) then
+			x, y, w = line:match(" (%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x")
+		end
+	end
+	local at = { x = tonumber(x), y = tonumber(y), w = math.min(tonumber(w) :: number, 120), h = 20 }
+	app:set_state("fake_selection", { text = "This is chat-1--sub--1", top = at, bottom = at })
+	app:click('.subagent-tab >> "This is chat-1--sub--1"')
+	app:frames(30)
+end
+
+local function parent_draft(app: any): (string, { any })
+	local drafts = app:state("chat.composer.drafts") or {}
+	if app:state("chat.composer.here") == "chat-1" then
+		return app:state("chat.composer.text") or "", app:state("chat.composer.cargo") or {}
+	end
+	local d = drafts["chat-1"] or {}
+	return d.text or "", d.cargo or {}
+end
+
+test("a subagent tab's Add to chat, Mention and annotate land in its parent chat's composer", function()
+	local app = open()
+	app:click('#session-lanes >> role:button "Open subagent scan the repo"')
+	app:frames(30)
+	select_in_subagent(app)
+	app:click(".subagent-tab >> #annotation-add-to-chat")
+	app:frames(20)
+	app:type("#annotation-comment", "check this")
+	app:key("Enter")
+	app:frames(20)
+	local _, cargo = parent_draft(app)
+	local found = false
+	for _, item in cargo do
+		if item.kind == "quote" and item.text == "This is chat-1--sub--1" and item.comment == "check this" then
+			found = true
+		end
+	end
+	expect(found).to_be(true)
+	expect(app:has(".subagent-tab >> #annotation-badge-1")).to_be(true)
+	select_in_subagent(app)
+	app:click(".subagent-tab >> #annotation-mention")
+	app:frames(20)
+	local text = parent_draft(app)
+	expect(text).to_contain("This is chat-1--sub--1")
+	local sub = (app:state("chat.composer.drafts") or {})["chat-1--sub--1"]
+	expect(sub == nil or ((sub.text or "") == "" and #(sub.cargo or {}) == 0)).to_be(true)
+end)
