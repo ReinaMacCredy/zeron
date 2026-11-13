@@ -63,6 +63,8 @@ export type Props = {
 	wash: (() -> string?)?,
 	-- The chat whose device its files are on, for a pasted text's viewer.
 	session: (() -> string?)?,
+	editing: (() -> boolean)?,
+	editor: ((bubble: { w: number, h: number }) -> Node)?,
 }
 
 -- What a prompt carries, by the name its words give each (an `@`
@@ -476,22 +478,12 @@ return ui.component(function(props: Props): Node
 			table.insert(attachments, chip(a, props.session, props.open))
 		end
 	end
-	return ui.column {
-		w_full = true,
-		items = "end",
-		gap = "$space.2",
-		role = "article",
-		label = locale.t("ds.user_message.you"),
-		-- What came with it rides above the words, at the right, as Zeron's do
-		-- (not part of a selection of the words: it isn't what was said).
-		if #attachments > 0
-			then ui.row { selectable = false, max_w = "80%", flex_wrap = true, justify = "end", gap = "$space.2", attachments }
-			else nil,
-		if #badges > 0
-			then ui.row { selectable = false, max_w = "80%", flex_wrap = true, justify = "end", gap = ui.raw(6, "Zeron's message badges"), badges }
-			else nil,
-		if #chosen > 0 then HtmlPicks.Sent { chips = chosen } else nil,
-		if props.text == "" then nil else ui.column {
+	local bubble_size = { w = 0, h = 0 }
+	local function words(): Node
+		return ui.column {
+			on_resize = function(size: { w: number, h: number })
+				bubble_size = { w = size.w, h = size.h }
+			end,
 			min_w = 0,
 			max_w = "80%",
 			px = "$space.4",
@@ -565,6 +557,34 @@ return ui.component(function(props: Props): Node
 					},
 				}
 			),
-		},
+		}
+	end
+	return ui.column {
+		w_full = true,
+		items = "end",
+		gap = "$space.2",
+		role = "article",
+		label = locale.t("ds.user_message.you"),
+		-- What came with it rides above the words, at the right, as Zeron's do
+		-- (not part of a selection of the words: it isn't what was said).
+		if #attachments > 0
+			then ui.row { selectable = false, max_w = "80%", flex_wrap = true, justify = "end", gap = "$space.2", attachments }
+			else nil,
+		if #badges > 0
+			then ui.row { selectable = false, max_w = "80%", flex_wrap = true, justify = "end", gap = ui.raw(6, "Zeron's message badges"), badges }
+			else nil,
+		if #chosen > 0 then HtmlPicks.Sent { chips = chosen } else nil,
+		if props.text ~= "" and props.editing and props.editor
+			then ui.column {
+				w_full = true,
+				items = "end",
+				ui.presence(function(): string
+					return if (props.editing :: () -> boolean)() then "edit" else "words"
+				end, function(k: string): Node
+					return if k == "edit" then (props.editor :: any)(bubble_size) else words()
+				end),
+			}
+			elseif props.text == "" then nil
+			else words(),
 	}
 end)

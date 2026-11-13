@@ -66,6 +66,8 @@ local ContextCard = require("@self/compaction_context")
 local Threads = require("@self/transcript_threads")
 local HtmlCard = require("@self/html_card")
 local Rows = require("@self/transcript_rows")
+local MessageEdit = require("@self/message_edit")
+local toast = require("@self/toast")
 
 export type Tool = Activity.Tool
 export type Message = {
@@ -237,6 +239,13 @@ export type Props = {
 	-- A review's findings, where the host put its `review` row (screens/chat/review's Block); without it the row is empty.
 	review_block: ((m: Message) -> Node)?,
 	over: ((t: Handle) -> Node)?,
+	branch: Branch?,
+}
+export type Branch = {
+	blocked: (m: Message, kind: "edit" | "rewind" | "fork") -> string?,
+	fork: (m: Message) -> (),
+	rewind: (m: Message, fold: { start: (done: () -> ()) -> (), back: () -> () }) -> (),
+	edit: (m: Message, text: string, back: () -> ()) -> (),
 }
 export type Handle = {
 	messages: State<{ Message }>,
@@ -297,6 +306,8 @@ local TAIL = 32
 local TURN_GAP = 16
 local SEAM_GAP = 6
 local JUMP_H = 30
+local DIM, DIM_MS = 0.38, 160
+local FOLD_MS, FOLD_FADE_MS, FOLD_EASE = 240, 160, "cubicBezier(0.4, 0, 0.2, 1)"
 ui.theme.tokens {
 	zeron = { transcript = { latest = { bg = "over({zeron.window}, {zeron.inset.bg})" } } },
 }
@@ -342,7 +353,7 @@ local LANE_TOP = 8
 -- holding only those, not a state per message.
 local COPIED = ui.state("transcript_copied", {} :: { [string]: boolean })
 
-local function strip(m: Message, row: State<Message>, hovered: () -> boolean): Node
+local function strip(m: Message, row: State<Message>, hovered: () -> boolean, actions: (() -> Node?)?): Node
 	local mine = m.role == "user"
 	local function set_copied(on: boolean)
 		local all = table.clone(COPIED:peek())
@@ -432,6 +443,7 @@ local function strip(m: Message, row: State<Message>, hovered: () -> boolean): N
 							},
 						}
 					),
+					if actions then actions() else nil,
 					-- Where plugins add a message's actions: beside Copy.
 					ui.row { hook = "chat.message.actions", gap = "$space.2", items = "center" },
 				}
@@ -772,6 +784,7 @@ end
 
 type View = {
 	turn_state: ((m: Message, sending: boolean) -> TurnLine?)?,
+	actions: (() -> Node?)?,
 	view: Ref,
 	offset: State<number>,
 	at_end: State<boolean>?,
@@ -1122,7 +1135,7 @@ local function reply(
 					},
 				}
 			end, { exit = { opacity = 0, duration = 160 } }),
-			strip(m, row, hovered),
+			strip(m, row, hovered, if view then view.actions else nil),
 		},
 	}
 end
@@ -2071,6 +2084,234 @@ local function Transcript(props: Props): Node
 		go = go_to,
 	}
 
+	local branch = props.branch
+	local editing = ui.use_state(nil :: { id: string, index: number, phase: MessageEdit.Phase, at_end: boolean }?)
+	local edit_text = ui.use_state("")
+	local dim = ui.use_state(0)
+	local fold = ui.use_state(nil :: { first: string, from: number, heights: { [string]: number } }?)
+	local fold_h = ui.use_state(0)
+	local fold_o = ui.use_state(0)
+	local fold_runs: { any } = {}
+	local dimming: any = nil
+	local function dim_to(to: number)
+		if dimming then
+			dimming:pause()
+		end
+		dimming = anime.animate(dim, { value = { dim:peek(), to }, duration = motion.ms(DIM_MS), ease = "linear" })
+	end
+	local function run_fold(to: number, done: (() -> ())?)
+		for _, a in fold_runs do
+			a:pause()
+		end
+		fold_runs = {}
+		if motion.reduced_now() then
+			fold_h:set(to)
+			fold_o:set(to)
+			if done then
+				done()
+			end
+			return
+		end
+		local this: any
+		this = anime.animate(fold_h, {
+			value = { fold_h:peek(), to },
+			duration = FOLD_MS,
+			ease = FOLD_EASE,
+			onComplete = function()
+				if fold_runs[1] == this and done then
+					done()
+				end
+			end,
+		})
+		fold_runs = { this, anime.animate(fold_o, { value = { fold_o:peek(), to }, duration = FOLD_FADE_MS, ease = "linear" }) }
+	end
+	local function fold_from(from: number, done: () -> ())
+		local first = messages:at(from)
+		if not first then
+			done()
+			return
+		end
+		local heights = {}
+		for id, r in rows do
+			if r.index:peek() >= from then
+				heights[id] = sizes[id] or ESTIMATE
+			end
+		end
+		fold_h:set(0)
+		fold_o:set(0)
+		fold:set { first = first.id, from = from, heights = heights }
+		run_fold(1, done)
+	end
+	local function unfold()
+		run_fold(0, function()
+			fold:set(nil)
+		end)
+	end
+	ui.effect(function()
+		local f, e = fold:get(), editing:get()
+		if f and messages:index_of("id", f.first) == nil then
+			fold:set(nil)
+		end
+		if e and messages:index_of("id", e.id) == nil then
+			editing:set(nil)
+			dim:set(0)
+		end
+	end)
+	local function step_off_end(): boolean
+		if not at_end:peek() then
+			return false
+		end
+		if offset:peek() >= PAST_END / 2 then
+			offset:set(math.max(0, extent() - (list.height or 0)))
+		end
+		offset:set(math.max(0, offset:peek() - GLIDE_CLEAR))
+		end_held = false
+		return true
+	end
+	local function phase_to(phase: MessageEdit.Phase)
+		local e = editing:peek()
+		if e then
+			editing:set { id = e.id, index = e.index, phase = phase, at_end = e.at_end }
+		end
+	end
+	local function start_edit(m: Message)
+		if editing:peek() or fold:peek() then
+			return
+		end
+		local index = messages:index_of("id", m.id)
+		if not index then
+			return
+		end
+		local was_end = step_off_end()
+		edit_text:set(m.text)
+		local function open()
+			editing:set { id = m.id, index = index, phase = "open", at_end = was_end }
+			set_hover("")
+			dim_to(1)
+		end
+		if was_end then
+			ui.after(16, open)
+		else
+			open()
+		end
+	end
+	local function cancel_edit()
+		phase_to("cancel")
+		dim_to(0)
+	end
+	local function send_edit()
+		local e = editing:peek()
+		if not e or e.phase ~= "open" or not branch then
+			return
+		end
+		local text = edit_text:peek()
+		if string.match(text, "^%s*$") then
+			return
+		end
+		phase_to("send")
+		local b = branch :: Branch
+		fold_from(e.index + 1, function()
+			local m = messages:at(e.index)
+			if not m or m.id ~= e.id then
+				return
+			end
+			b.edit(m, text, function()
+				phase_to("open")
+				unfold()
+			end)
+		end)
+	end
+	local function edit_done(phase: MessageEdit.Phase)
+		local e = editing:peek()
+		if phase == "cancel" and e and e.phase == "cancel" then
+			editing:set(nil)
+			if e.at_end then
+				show_end()
+			end
+		end
+	end
+	local function editing_this(id: string): boolean
+		local e = editing:get()
+		return e ~= nil and e.id == id
+	end
+	local function dimmed(index: number): boolean
+		local e = editing:get()
+		return e ~= nil and e.phase ~= "cancel" and index > e.index
+	end
+	local function act(row: State<Message>, kind: "edit" | "rewind" | "fork", icon: Icon.Name, key: string, go: () -> ()): Node
+		local function why(): string
+			return (branch :: Branch).blocked(row:get(), kind) or ""
+		end
+		return ui.presence(why, function(reason: string): Node
+			local blocked = reason ~= ""
+			return ui.button {
+				label = locale.t(key),
+				tooltip = if blocked then reason else locale.s(key),
+				description = if blocked then reason else nil,
+				w = 24,
+				h = 24,
+				p = 0,
+				items = "center",
+				justify = "center",
+				rounded = "$radius.md",
+				bg = "#00000000",
+				color = "$text.secondary",
+				hover = { bg = "$zeron.secondary.bg" },
+				active = { bg = "$zeron.secondary.hover" },
+				focus = control.ring,
+				cursor = "pointer",
+				on_click = function()
+					if blocked then
+						toast.show { title = reason, tone = "warning" }
+					else
+						go()
+					end
+				end,
+				ui.div { opacity = if blocked then 0.4 else 1, Icon { name = icon, size = 14 } },
+			}
+		end)
+	end
+	local function branch_actions(m: Message, row: State<Message>): (() -> Node?)?
+		local b = branch
+		if not b then
+			return nil
+		end
+		if m.role == "assistant" then
+			return function(): Node?
+				return act(row, "fork", "branch-chat", "ds.transcript.fork_here", function()
+					b.fork(row:peek())
+				end)
+			end
+		end
+		if m.role ~= "user" then
+			return nil
+		end
+		return function(): Node?
+			local w = row:peek().waiting
+			if w == "sending" or w == "failed" then
+				return nil
+			end
+			return ui.row {
+				gap = "$space.2",
+				items = "center",
+				if m.text ~= "" then act(row, "edit", "pen", "ds.transcript.edit_message", function()
+					start_edit(row:peek())
+				end) else nil,
+				act(row, "rewind", "restart", "ds.transcript.rewind_here", function()
+					b.rewind(row:peek(), {
+						start = function(done: () -> ())
+							local index = messages:index_of("id", m.id)
+							if index then
+								fold_from(index, done)
+							end
+						end,
+						back = unfold,
+					})
+				end),
+			}
+		end
+	end
+
 	local function row(m: Message, index: State<number>, state: State<Message>): Node
 		local mine = m.role == "user"
 		-- The runway: the room under the newest prompt that lets it stand at
@@ -2128,7 +2369,15 @@ local function Transcript(props: Props): Node
 			return TURN_GAP
 		end
 		local function hovered(): boolean
-			return hover:get() == m.id
+			return hover:get() == m.id and not editing_this(m.id) and not dimmed(index:get())
+		end
+		local function folded(): number?
+			local f = fold:get()
+			return if f and index:get() >= f.from then fold_h:get() else nil
+		end
+		local function collapsed(): number
+			local p = folded()
+			return if p then 1 - p else 1
 		end
 		if mine then
 			tops[m.id] = outer
@@ -2167,7 +2416,7 @@ local function Transcript(props: Props): Node
 			items = "start",
 			px = if props.side then ui.raw(props.side, "a little wider than the composer") else "$space.5",
 			pt = function(): number
-				return ui.raw(pt(), "Zeron's gaps over a message (transcript.rs top_gap_for)")
+				return ui.raw(pt() * collapsed(), "Zeron's gaps over a message (transcript.rs top_gap_for)")
 			end,
 			-- The air at the conversation's end, on its last row: on the list
 			-- itself it would clip every row short of the list's foot.
@@ -2175,7 +2424,25 @@ local function Transcript(props: Props): Node
 				return if last() then ui.raw(TAIL + math.max(foot(), foot_held:get()), "the air at its end, and the room held for what floats over its foot") else 0
 			end,
 			relative = true,
-			min_h = need,
+			min_h = function(): number
+				return if folded() then 0 else need()
+			end,
+			max_h = function(): number
+				local p = folded()
+				local f = fold:peek()
+				if p and f then
+					return (f.heights[m.id] or sizes[m.id] or ESTIMATE) * (1 - p)
+				end
+				return 1e6
+			end,
+			overflow = function(): string
+				return if folded() then "hidden" else "visible"
+			end,
+			opacity = function(): number
+				local e = editing:get()
+				local o = if e and index:get() > e.index then 1 - (1 - DIM) * dim:get() else 1
+				return if folded() then o * (1 - fold_o:get()) else o
+			end,
 			ui.column {
 				ref = inner,
 				relative = true,
@@ -2308,11 +2575,27 @@ local function Transcript(props: Props): Node
 							session = props.sent_from,
 							find = if find_for then find_for(`{m.id}:u`) else nil,
 							wash = washed,
+							editing = if branch then function(): boolean
+								return editing_this(m.id)
+							end else nil,
+							editor = if branch then function(bubble: { w: number, h: number }): Node
+								return MessageEdit {
+									text = edit_text,
+									from = bubble,
+									phase = function(): MessageEdit.Phase
+										local e = editing:get()
+										return if e then e.phase else "cancel"
+									end,
+									on_cancel = cancel_edit,
+									on_send = send_edit,
+									on_done = edit_done,
+								}
+							end else nil,
 						},
-						strip(m, state, hovered),
+						strip(m, state, hovered, branch_actions(m, state)),
 						waiting_line(state, props.on_retry, props.working, props.compaction_wait, props.turn_state),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in }),
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state) }),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?
@@ -2329,6 +2612,9 @@ local function Transcript(props: Props): Node
 				end, { w_full = true, exit = { opacity = 0, duration = 120 } }),
 				layer.Here(m.id),
 			},
+			ui.show(function(): boolean
+				return dimmed(index:get())
+			end, ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, on_press = function() end }),
 		}
 	end
 

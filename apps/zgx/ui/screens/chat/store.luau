@@ -16,6 +16,8 @@
 --                         a turn runs (a promise). A new chat is made with
 --                         sessions.create first, then sent its first
 --                         message with `fresh`.
+--   store.rewind_send(req)  store.send's req with `entry`: the chat rewound
+--                         to before that prompt, then the words sent there
 --   store.interrupt(id)   stop its turn
 --   store.approve(id, request, scope)  allow what it asked, "once" or "always"
 --   store.deny(id, request)
@@ -188,6 +190,10 @@ end
 
 function M.send(req: Request): any
 	return ui.call("chat.send", req)
+end
+
+function M.rewind_send(req: { [string]: any }): any
+	return ui.call("chat.rewind_send", req)
 end
 
 -- A project's branch, as git where it lives has it: whether it's the

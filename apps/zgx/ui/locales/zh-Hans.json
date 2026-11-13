@@ -840,7 +840,12 @@
       "agent": "智能体",
       "several_messages": "多条消息",
       "two_names": "{first}和{final}",
-      "n_messages": "{n} 条消息"
+      "n_messages": "{n} 条消息",
+      "edit_message": "编辑消息",
+      "rewind_here": "回退到这里",
+      "fork_here": "从这里分叉",
+      "edit_field": "你的消息",
+      "edit_send": "发送"
     },
     "user_message": {
       "open_named": "打开 {name}",
@@ -4753,6 +4758,15 @@
       "agent_on_it": "Agent 处理中",
       "outdated": "已过时",
       "outdated_count": "{n} 个已过时"
+    },
+    "branch": {
+      "rewind_before": "“{excerpt}”之前",
+      "rewind_detail": "移除这条提示及其后的所有内容，并把这条提示放回输入框。磁盘上的文件保持不变。",
+      "rewind": "回退",
+      "stop_turn": "回退前请先停止正在运行的回合。",
+      "wait_reply": "请等待回复完成。",
+      "previous_provider": "这条回复来自之前的提供方：请从切换之后的回复分叉。",
+      "cannot": "{agent} 无法分叉或回退会话。"
     }
   },
   "sidecar": {

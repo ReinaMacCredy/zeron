@@ -3215,6 +3215,117 @@ for _, id in { "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9" } do
 		end,
 	}
 end
+do
+	local function turn(n: number, prompt: string, reply: string): { any }
+		local at = `Nov 14, 10:0{2 * n} AM`
+		return {
+			{ id = `bu{n}`, role = "user", text = prompt, at = at, copy = prompt },
+			{ id = `ba{n}`, role = "assistant", text = reply, model = "Opus", at = at, copy = reply, worked = 1 + 3 * n, blocks = { { id = `bt{n}`, kind = "text", text = reply } } },
+		}
+	end
+	local three = {}
+	for _, t in {
+		turn(1, "Write the checkout page copy. Keep it short.", "Here is a short version:\n\n**Review your order**, then pay. Free returns for 30 days."),
+		turn(2, "Make it friendlier and mention free shipping.", "Friendlier, with shipping:\n\n**Almost there!** Free shipping on every order, and 30 days to change your mind."),
+		turn(3, "Now a version for the mobile banner.", "Banner, under 40 characters:\n\n**Free shipping. Easy returns.**"),
+	} do
+		table.move(t, 1, #t, #three + 1, three)
+	end
+	META.b1 = { title = "Checkout page copy", project = "atlas", model = "opus", effort = "high", access = "full", plan = false, harness = "claude-code" }
+	TRANSCRIPTS.b1 = table.clone(three)
+	seed()
+	ui.command { id = "go_b1", title = "Open b1", run = function()
+		route.open_session("b1")
+	end }
+	ui.command { id = "reset_b1", title = "b1 as it began", run = function()
+		TRANSCRIPTS.b1 = table.clone(three)
+		if opened == "b1" then
+			store.messages:set(TRANSCRIPTS.b1)
+		end
+	end }
+	local NO_BRANCHING = ui.state("fixture_no_branching", false)
+	local BRANCH_FAILS = ui.state("fixture_branch_fails", nil :: string?)
+	ui.command { id = "no_branching", title = "The agent can't fork or rewind", run = function()
+		NO_BRANCHING:set(true)
+	end }
+	ui.command { id = "branch_fails", title = "The engine refuses the next fork, rewind or edit", run = function()
+		BRANCH_FAILS:set("No checkpoint for this reply: it was recorded before Claude Code checkpoints were tracked.")
+	end }
+	local function refused(): any?
+		local why = BRANCH_FAILS:peek()
+		if not why then
+			return nil
+		end
+		BRANCH_FAILS:set(nil)
+		return { after = function(_self: any, _ok: any, bad: (any) -> ())
+			bad({ message = why })
+		end }
+	end
+	local function upto(list: { any }, id: string, through: boolean): { any }
+		local out = {}
+		for _, m in list do
+			if m.id == id and not through then
+				break
+			end
+			table.insert(out, m)
+			if m.id == id then
+				break
+			end
+		end
+		return out
+	end
+	sessions_stub.branching = function(harness: string, _device: string?): any
+		note(`branching:{harness}`)
+		return settled(not NO_BRANCHING:peek())
+	end
+	sessions_stub.fork_from = function(source: string, entry: string, id: string?): any
+		note(`fork_from:{source}:{entry}`)
+		local no = refused()
+		if no then
+			return no
+		end
+		local new = id or "fork1"
+		local copy = upto(TRANSCRIPTS[source] or {}, entry, true)
+		table.insert(copy, { id = "fork-seam", role = "system", line = "fork", text = "", title = META[source].title })
+		META[new] = table.clone(META[source])
+		META[new].title = `Fork: {META[source].title}`
+		TRANSCRIPTS[new] = copy
+		seed()
+		return settled(new)
+	end
+	sessions_stub.rewind = function(chat_id: string, entry: string): any
+		note(`rewind:{chat_id}:{entry}`)
+		local no = refused()
+		if no then
+			return no
+		end
+		local prompt = ""
+		for _, m in TRANSCRIPTS[chat_id] or {} do
+			if m.id == entry then
+				prompt = m.text
+			end
+		end
+		TRANSCRIPTS[chat_id] = upto(TRANSCRIPTS[chat_id] or {}, entry, false)
+		if opened == chat_id then
+			store.messages:set(TRANSCRIPTS[chat_id])
+		end
+		return settled({ prompt = prompt, removed = 1 })
+	end
+	stub.rewind_send = function(req: any): any
+		note(`rewind_send:{req.session}:{req.entry}:{req.text}:{req.message_id ~= nil}`)
+		local no = refused()
+		if no then
+			return no
+		end
+		local kept = upto(TRANSCRIPTS[req.session] or {}, req.entry, false)
+		table.insert(kept, { id = req.message_id, role = "user", text = req.text, attachments = {}, waiting = "sending" })
+		TRANSCRIPTS[req.session] = kept
+		if opened == req.session then
+			store.messages:set(kept)
+		end
+		return settled(req.message_id)
+	end
+end
 -- A new chat with no project asked of it (⌘N, the sidebar's New chat).
 ui.command {
 	id = "go_new",

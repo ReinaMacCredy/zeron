@@ -290,6 +290,7 @@ export type Props = {
 	-- one over a wider area).
 	drop_overlay: boolean?,
 	drop_ring: (() -> boolean)?,
+	ring: (() -> number)?,
 	-- Bumped, the model picker opens (a shortcut to it).
 	open_model: State<number>?,
 	step_effort: State<{ n: number, by: number }>?,
@@ -2792,6 +2793,21 @@ return ui.component(function(props: Props): Node
 					pointer_events = "none",
 				}
 			)
+			else nil,
+		if props.ring
+			then ui.div {
+				id = "composer-ring",
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				rounded = "$zeron.composer.radius",
+				border = 1,
+				border_color = "$accent",
+				opacity = props.ring,
+				pointer_events = "none",
+			}
 			else nil,
 	}
 

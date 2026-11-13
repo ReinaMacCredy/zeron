@@ -187,6 +187,7 @@ export type Name =
 	| "lucide-clock"
 	| "lucide-eye"
 	| "lucide-eye-off"
+	| "branch-chat"
 
 -- `name` may be a function: the icon follows it (a checkout's folder or
 -- worktree).

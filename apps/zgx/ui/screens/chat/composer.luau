@@ -46,6 +46,7 @@ local Pills = require("@app/screens/chat/pills")
 local AppCommands = require("@app/screens/chat/app_commands")
 local Outgoing = require("@app/screens/chat/outgoing")
 local Pages = require("@app/screens/chat/pages")
+local Branch = require("@app/screens/chat/branch")
 
 -- gpui's hero headline: its line, and its gap over the 28 of chips above the pill.
 local HEADLINE_LINE, HEADLINE_GAP = 38, 18
@@ -1585,6 +1586,9 @@ local function Composer(): Node
 			toolbar_id = "composer-toolbar",
 			drop_ring = function(): boolean
 				return shared.dropping:get().composer == "session"
+			end,
+			ring = function(): number
+				return Branch.ring:get()
 			end,
 			open_model = shared.open_model,
 			step_effort = shared.step_effort,
