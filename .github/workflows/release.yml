@@ -236,15 +236,19 @@ jobs:
           path: dist
           merge-multiple: true
       - name: version guard (tag == artifact version)
+        env:
+          APP: ${{ needs.version.outputs.app }}
         run: |
           ver="${GITHUB_REF_NAME#v}"
           ls dist/
           for platform in linux-x86_64.tar.gz linux-aarch64.tar.gz \
-              macos-arm64.dmg macos-arm64-app.tar.gz \
-              windows-x86_64.zip windows-x86_64.exe windows-x86_64-setup.exe; do
+              macos-arm64.dmg windows-x86_64.zip windows-x86_64.exe windows-x86_64-setup.exe; do
             test -f "dist/zeron-$ver-$platform" \
               || { echo "missing artifact for tag v$ver: $platform — check builds and Cargo.toml version"; exit 1; }
           done
+          # crates/update `mac_app_artifact`: each interface's macOS installs ask for their own name.
+          if [ "$APP" = zgx ]; then mac_app="zeron-zgx-$ver-macos-arm64-app.tar.gz"; else mac_app="zeron-$ver-macos-arm64-app.tar.gz"; fi
+          test -f "dist/$mac_app" || { echo "missing artifact for tag v$ver: $mac_app"; exit 1; }
           echo "VERSION=$ver" >> "$GITHUB_ENV"
       - name: updater manifest
         env:

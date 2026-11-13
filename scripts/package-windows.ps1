@@ -104,7 +104,7 @@ try {
         $env:ZERON_BETA_VERSION = $ZgxVersion
         Push-Location (Join-Path $root 'apps/zgx')
         try {
-            cargo build --release --locked --features beta --manifest-path Cargo.toml --target-dir target
+            cargo build --release --locked --features cutover --manifest-path Cargo.toml --target-dir target
         } finally { Pop-Location }
         if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
         $built = (Resolve-Path -LiteralPath './apps/zgx/target/release/zeron-zgx.exe').Path

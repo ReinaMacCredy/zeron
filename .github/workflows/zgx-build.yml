@@ -113,6 +113,9 @@ jobs:
           test "$(plutil -extract CFBundleIdentifier raw "$plist")" = sh.zeron.app
           test "$(plutil -extract ZeronVersion raw "$plist")" = "$ZGX_VERSION"
           test "$(plutil -extract LSMinimumSystemVersion raw "$plist")" = 13.0
+          test "$(plutil -extract ZeronInterface raw "$plist")" = zgx
+          test -x "$app/Contents/Resources/cua-driver/cua-driver"
+          test -f "target/package-zgx/zeron-zgx-$ZGX_VERSION-macos-$(uname -m)-app.tar.gz"
           # Always up (scripts/package-zgx-macos.sh): <x.y.z>.<n> for beta n,
           # <x.y.z>.9999 for the release.
           case "$ZGX_VERSION" in

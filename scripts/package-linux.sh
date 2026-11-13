@@ -59,7 +59,7 @@ if [[ -n "$ZGX_VERSION" ]]; then
   # A workspace of its own (its own lock, patches). Built from its folder:
   # cargo reads .cargo/config.toml by where it runs, not by the manifest, and
   # the build's flags are there (Luau's NDEBUG), as scripts/package-zgx-macos.sh.
-  (cd "$ROOT/apps/zgx" && ZERON_BETA_VERSION="$ZGX_VERSION" cargo build --release --locked --features beta \
+  (cd "$ROOT/apps/zgx" && ZERON_BETA_VERSION="$ZGX_VERSION" cargo build --release --locked --features cutover \
     --manifest-path "$ROOT/apps/zgx/Cargo.toml" --target-dir "$ROOT/apps/zgx/target")
   BIN="$ROOT/apps/zgx/target/release/zeron-zgx"
   [[ "$("$BIN" --version)" == "zeron $ZGX_VERSION" ]] ||

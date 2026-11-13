@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Zeron.app, stable or beta: the zgx interface (apps/zgx, built with its
-# `beta` feature, which makes it the Zeron app) as the Zeron app itself —
+# `cutover` feature, which makes it the Zeron app) as the Zeron app itself —
 # the same bundle id, name, signing,
 # entitlements and `zeron://` scheme as scripts/package-macos.sh's — with
 # the engine it's given inside, built from the same commit, so a tester keeps
@@ -11,9 +11,9 @@
 #                                    line (crates/cli; the engine's commands
 #                                    run in the helper beside it)
 #     Contents/MacOS/Zeron Engine    the engine, signed here
-#     Contents/Resources/ui, plugins-builtin, zeron.icns, licenses
+#     Contents/Resources/ui, plugins-builtin, cua-driver, zeron.icns, licenses
 #   target/package-zgx/zeron-<version>-macos-<arch>.dmg
-#   target/package-zgx/zeron-<version>-macos-<arch>-app.tar.gz  (the updater's)
+#   target/package-zgx/zeron-zgx-<version>-macos-<arch>-app.tar.gz  (the updater's)
 #
 # Usage: ZGX_VERSION=0.2.139 ZGX_ENGINE=<engine> scripts/package-zgx-macos.sh
 #   ZGX_VERSION         the workspace version (a stable release, release.yml)
@@ -22,7 +22,7 @@
 #   ZGX_ENGINE          the engine: a built binary, a Zeron.app, its app tarball, or
 #                       its `Zeron Engine` binary; built with LUAU_CXXFLAGS=-DNDEBUG
 #                       (checked), which a stable release from before that isn't
-#   ZGX_BIN             the interface, built already (with --features beta and
+#   ZGX_BIN             the interface, built already (with --features cutover and
 #                       ZERON_BETA_VERSION=<ZGX_VERSION>); otherwise built here
 #   ZGX_TARGET_DIR      where to build it (apps/zgx/target)
 #   ZGX_DMG=0           no dmg
@@ -47,7 +47,7 @@ ARCH="$(uname -m)"
 OUT_DIR="$ROOT/target/package-zgx"
 APP="$OUT_DIR/Zeron.app"
 DMG="$OUT_DIR/zeron-$VERSION-macos-$ARCH.dmg"
-APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
+APP_TARBALL="$OUT_DIR/zeron-zgx-$VERSION-macos-$ARCH-app.tar.gz"
 ENTITLEMENTS="$ROOT/dist/macos/Zeron.entitlements"
 read -r -a CARGO_EXTRA <<<"${CARGO_FLAGS:-}"
 mkdir -p "$OUT_DIR"
@@ -86,7 +86,7 @@ if [[ -z "$ZGX_BIN" ]]; then
   # (From its folder: cargo reads .cargo/config.toml by where it runs, not by
   # the manifest, and the build's flags are there.)
   (cd "$ROOT/apps/zgx" && ZERON_BETA_VERSION="$VERSION" cargo build --release ${CARGO_EXTRA[@]+"${CARGO_EXTRA[@]}"} \
-    --features beta --target-dir "$target_dir")
+    --features cutover --target-dir "$target_dir")
   ZGX_BIN="$target_dir/release/zeron-zgx"
 fi
 # Only an app build of this version may go in: the updater stages it by
@@ -108,9 +108,13 @@ for bin in "$ZGX_BIN" "$ENGINE_BIN"; do
 done
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/cua-driver"
 install -m 755 "$ZGX_BIN" "$APP/Contents/MacOS/zeron"
 install -m 755 "$ENGINE_BIN" "$APP/Contents/MacOS/Zeron Engine"
+DRIVER="$APP/Contents/Resources/cua-driver/cua-driver"
+"$ROOT/scripts/build-cua-driver.sh" "$DRIVER" >/dev/null
+mkdir -p "$APP/Contents/Resources/licenses/cua-driver"
+cp "$ROOT/vendor/cua-driver/LICENSE.md" "$ROOT/vendor/cua-driver/NOTICE.md" "$APP/Contents/Resources/licenses/cua-driver/"
 # Zeron.app's Info.plist, as the old app's, with this one's versions: the
 # short version stays numeric (a beta's is the next release's), the engine
 # its own (crates/update `bundle_engine_version`), and zgx's floor macOS 13
@@ -132,6 +136,8 @@ plutil -replace CFBundleVersion -string "$CORE.${NUMBER:-$STABLE_BUILD}" "$PLIST
 plutil -replace ZeronEngineVersion -string "$ENGINE_VERSION" "$PLIST"
 plutil -replace ZeronVersion -string "$VERSION" "$PLIST"
 plutil -replace LSMinimumSystemVersion -string "13.0" "$PLIST"
+# The updater installs only a release whose bundle carries this same mark (crates/update `bundle_interface`).
+plutil -replace ZeronInterface -string zgx "$PLIST"
 plutil -convert xml1 "$PLIST"
 plutil -lint "$PLIST" >/dev/null
 
@@ -158,9 +164,11 @@ cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses/parakeet-v3.
 # Signed as scripts/package-macos.sh signs Zeron.app: the engine (its
 # identifier), then the bundle.
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+  codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.cua-driver "$DRIVER"
   codesign --entitlements "$ENTITLEMENTS" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
   codesign --entitlements "$ENTITLEMENTS" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
 else
+  codesign --force --sign - --identifier sh.zeron.cua-driver "$DRIVER"
   codesign --force --entitlements "$ENTITLEMENTS" --sign - --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
   codesign --force --entitlements "$ENTITLEMENTS" --sign - "$APP"
 fi
