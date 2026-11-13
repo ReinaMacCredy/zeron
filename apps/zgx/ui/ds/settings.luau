@@ -691,10 +691,7 @@ function M.Nav(props: NavProps): Node
 				bg = function()
 					return if on() then "$zeron.selected.flat.bg" else "#00000000"
 				end,
-				color = function()
-					return if on() then "$text.primary" else "$text.secondary"
-				end,
-				hover = { color = "$text.primary" },
+				color = "$text.primary",
 				focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = -2 },
 				on_click = function()
 					if props.on_choose then
