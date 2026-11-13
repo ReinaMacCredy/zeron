@@ -29,6 +29,16 @@ end
 
 local M = {}
 
+function M.fill(props: { [any]: any }): { [any]: any }
+	props.bg = function()
+		return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
+	end
+	props.backdrop_blur = function()
+		return if material.see_through() then 16 else 0
+	end
+	return props
+end
+
 -- Adds the glass to `props` (changed in place, and returned). (A modal
 -- opening closes every popup open outside it: zgx's own, since #1419.)
 function M.style(props: { [any]: any }, kind: Kind?): { [any]: any }
@@ -56,12 +66,7 @@ function M.style(props: { [any]: any }, kind: Kind?): { [any]: any }
 		return props
 	end
 	if kind == "surface" then
-		props.bg = function()
-			return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
-		end
-		props.backdrop_blur = function()
-			return if material.see_through() then 16 else 0
-		end
+		M.fill(props)
 		props.border = 1
 		props.border_color = "$border"
 		-- (A shadow under a see-through surface darkens the surface; gpui draws none on frost.)

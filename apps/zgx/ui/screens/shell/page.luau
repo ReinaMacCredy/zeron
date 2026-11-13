@@ -413,7 +413,7 @@ return function(props: Props): Node
 			end
 			return near() and (#splits.members:get() >= 2 or #splits.tabs:get() > 1)
 		end
-		local face: { [any]: any } = {
+		local face: { [any]: any } = Glass.fill {
 			class = "pane-grip",
 			w = 26,
 			h = 16,
@@ -421,12 +421,6 @@ return function(props: Props): Node
 			justify = "center",
 			color = "$text.secondary",
 			rounded = "$radius.md",
-			bg = function(): string
-				return if ds.material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
-			end,
-			backdrop_blur = function(): number
-				return if ds.material.see_through() then 16 else 0
-			end,
 			pointer_events = "auto",
 			cursor = function(): string
 				return if held:get() then "grabbing" else "grab"
@@ -1544,11 +1538,10 @@ return function(props: Props): Node
 				local dark = string.find(ui.theme.kind(), "dark", 1, true) ~= nil
 				return ui.raw(if dark then "#00000036" else "#0000001d", "gpui's size veil: its scrim at .35")
 			end,
-			ui.row {
+			ui.row(Glass.fill {
 				px = ui.raw(9, "gpui's size badge"),
 				py = ui.raw(5, "gpui's size badge"),
 				rounded = ui.raw(6, "gpui's size badge"),
-				bg = "$surface.overlay",
 				border = 1,
 				border_color = "$border.strong",
 				shadow = "$shadow.md",
@@ -1561,7 +1554,7 @@ return function(props: Props): Node
 				figure(function(): string
 					return measure("height")
 				end, "$text.primary"),
-			},
+			}),
 		}
 	end
 	local function pane_item(id: string): Node

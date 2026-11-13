@@ -46,6 +46,7 @@ local IconButton = require("@self/icon_button").IconButton
 local status = require("@self/status")
 local markdown = require("@self/markdown_edit")
 local material = require("@self/material")
+local glass = require("@self/glass")
 local DropOverlay = require("@self/drop_overlay")
 local cargo = require("@self/composer_cargo")
 local Lightbox = require("@self/lightbox")
@@ -1053,7 +1054,7 @@ local function notice_line(notice: State<Notice?>, on_action: (() -> ())?, on_di
 			cursor = "pointer",
 			on_click = on_dismiss,
 			-- (On the composer's own glass, as gpui's chip sits in its composer: the conversation never reads through.)
-			ui.div {
+			ui.div(glass.fill {
 				absolute = true,
 				left = 0,
 				right = 0,
@@ -1061,13 +1062,7 @@ local function notice_line(notice: State<Notice?>, on_action: (() -> ())?, on_di
 				bottom = 0,
 				rounded = ui.raw(12, "gpui's failure chip"),
 				pointer_events = "none",
-				bg = function(): string
-					return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
-				end,
-				backdrop_blur = function(): number
-					return if material.see_through() then 16 else 0
-				end,
-			},
+			}),
 			ui.div {
 				absolute = true,
 				left = 0,
@@ -3272,7 +3267,7 @@ return ui.component(function(props: Props): Node
 			h = 42,
 			mb = ui.raw(-42, "its own height"),
 			y = -24,
-			ui.button {
+			ui.button(glass.fill {
 				id = "composer-side-chat",
 				on_resize = measure(side_tab_w, "w"),
 				label = locale.t("ds.composer.side_chat"),
@@ -3290,9 +3285,6 @@ return ui.component(function(props: Props): Node
 				border_sides = { 1, 1, 0, 1 },
 				border_color = function(): string
 					return if tab.open() then "$accent" else "$zeron.composer.tray.edge"
-				end,
-				bg = function(): string
-					return if material.see_through() then "$zeron.composer.tray.tint" else "$zeron.composer.tray.solid"
 				end,
 				color = function(): string
 					return if tab.open() then "$text.primary" else "$text.tertiary"
@@ -3320,7 +3312,7 @@ return ui.component(function(props: Props): Node
 					text_size = "$font.size.xs",
 					color = "$text.disabled",
 				},
-			},
+			}),
 		})
 	end
 	local function pill_row(): Node?
@@ -3386,7 +3378,7 @@ return ui.component(function(props: Props): Node
 		ui.presence(function(): string?
 			return if footer_on_tray and footer_on_tray() then "tray" else nil
 		end, function(): Node
-			return ui.div {
+			return ui.div(glass.fill {
 				class = "composer-tray",
 				absolute = true,
 				left = 0,
@@ -3401,13 +3393,7 @@ return ui.component(function(props: Props): Node
 				rounded = "$zeron.composer.tray.radius",
 				rounded_tl = 0,
 				rounded_tr = 0,
-				bg = function(): string
-					return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
-				end,
-				backdrop_blur = function(): number
-					return if material.see_through() then 16 else 0
-				end,
-			}
+			})
 		end, {
 			absolute = true,
 			left = 0,
@@ -3428,7 +3414,7 @@ return ui.component(function(props: Props): Node
 			-- (The glass is a layer behind what's in it, not this column's own:
 			-- a backdrop blur on the column took in its children too, blurring
 			-- the draft and its controls.)
-			ui.div {
+			ui.div(glass.fill {
 				absolute = true,
 				left = 0,
 				right = 0,
@@ -3438,16 +3424,10 @@ return ui.component(function(props: Props): Node
 				rounded = "$zeron.composer.radius",
 				border = 1,
 				border_color = "$zeron.composer.edge",
-				bg = function()
-					return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
-				end,
-				backdrop_blur = function()
-					return if material.see_through() then 16 else 0
-				end,
 				shadow = function()
 					return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
 				end,
-			},
+			}),
 			trays,
 			ui.popover(m.popover(surface)),
 		},

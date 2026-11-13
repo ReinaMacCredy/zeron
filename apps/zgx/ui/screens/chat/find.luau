@@ -19,6 +19,7 @@
 
 local ds = require("@ds")
 local locale = require("@ds/locale")
+local glass = require("@ds/glass")
 local MarkdownFind = require("@ds/markdown_find")
 local Compaction = require("@ds/compaction")
 local Rows = require("@ds/transcript_rows")
@@ -208,7 +209,7 @@ local function bind(name: string, messages: any, can_open: () -> boolean, bar_id
 			function(): boolean
 				return M.shown:get()
 			end,
-			ui.row {
+			ui.row(glass.fill {
 				id = bar_id,
 				role = "toolbar",
 				label = ui.t("chat.find.toolbar"),
@@ -220,7 +221,6 @@ local function bind(name: string, messages: any, can_open: () -> boolean, bar_id
 				gap = "$space.1",
 				items = "center",
 				rounded = "$radius.lg",
-				bg = "$surface.overlay",
 				border = 1,
 				border_color = "$border.subtle",
 				shadow = "$shadow.lg",
@@ -278,7 +278,7 @@ local function bind(name: string, messages: any, can_open: () -> boolean, bar_id
 					M.step(1)
 				end, none),
 				glyph("common.close", "close", M.close),
-			}
+			})
 		)
 	end
 

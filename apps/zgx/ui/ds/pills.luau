@@ -2,7 +2,7 @@ local Icon = require("@self/icon")
 local AgentMark = require("@self/agent_mark")
 local locale = require("@self/locale")
 local motion = require("@self/motion")
-local material = require("@self/material")
+local glass = require("@self/glass")
 
 local M = {}
 
@@ -105,9 +105,7 @@ function M.Pill(props: { [any]: any }): Node
 	p.border_color = function(): string
 		return if active and active() then "$border.strong" else "$zeron.composer.edge"
 	end
-	p.bg = function(): string
-		return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
-	end
+	glass.fill(p)
 	p.color = function(): string
 		return if active and active() then "$text.primary" else "$text.secondary"
 	end

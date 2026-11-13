@@ -20,7 +20,7 @@
 --   }
 
 local Icon = require("@self/icon")
-local material = require("@self/material")
+local glass = require("@self/glass")
 local IconButton = require("@self/icon_button").IconButton
 local Mark = require("@self/mark")
 local control = require("@self/control")
@@ -287,7 +287,7 @@ return ui.component(function(props: Props): Node
 		})
 	end
 
-	return ui.column {
+	return ui.column(glass.fill {
 		id = "session-lanes",
 		w = props.w or 280,
 		p = INSET,
@@ -295,7 +295,6 @@ return ui.component(function(props: Props): Node
 		rounded = CARD_RADIUS,
 		border = 1,
 		border_color = "$zeron.settings.edge",
-		bg = material.pick("$zeron.menu.tint", "$zeron.settings.card"),
 		heading(
 			locale.t("ds.session_lanes.side_chats"),
 			ui.show(function(): boolean
@@ -366,5 +365,5 @@ return ui.component(function(props: Props): Node
 			}),
 			ui.column { w_full = true, gap = "$zeron.list.gap", ui.each(finished, sub_row, { key = by_ref, w_full = true }) },
 		}),
-	}
+	})
 end)
