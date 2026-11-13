@@ -37,7 +37,7 @@ ui.theme.tokens {
 	zeron = {
 		annotation = {
 			-- Opaque, as Zeron's `surface_fill` (ink 8% flattened on the page).
-			fill = "over(alpha({text.primary}, 0.08), {background})",
+			fill = "over(alpha({text.primary}, 0.08), over({background}, {zeron.window}))",
 			wash = { dark = "alpha({accent}, 0.5)", light = "alpha({accent}, 0.28)" },
 		},
 	},
