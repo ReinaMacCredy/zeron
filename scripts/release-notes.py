@@ -64,6 +64,7 @@ def main():
         found = sections(gh('release', 'view', upstream_tag, '-R', UPSTREAM, '--json', 'body', '-q', '.body'))
         changed += found["What's Changed"]
         contributors += found['New Contributors']
+    changed, contributors = list(dict.fromkeys(changed)), list(dict.fromkeys(contributors))
 
     entry = next((e for e in tomllib.loads(WHATS_NEW.read_text())['entry'] if version(e['version']) == new), None)
     # upstream-* items summarize the upstream lines already listed above.

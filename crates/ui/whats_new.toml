@@ -2,9 +2,20 @@
 # must be listed in crates/docs/src/images.rs IMAGES. Order does not matter.
 
 [[entry]]
-version = "0.2.137"
-date = "Nov 5"
+version = "0.3.2"
+date = "Nov 13"
 hero_visual = "text-annotation-hero"
+
+[[entry.features]]
+id = "zgx-app"
+title = "Zeron runs on its new interface"
+description = "Zeron.app is now built on zgx, the interface upstream Zeron ships from 0.3.0. Your chats, projects, drafts, settings and shortcuts carry over on first launch, and the engine is updated with the app."
+details = "The tab bar, rail and sidebar, Sidecar, Tasks, Inbox, the Git and PR pages, the terminal, split chats, side chats and the composer's pills are all on the new interface."
+
+[[entry.features]]
+id = "markdown-fence-render"
+title = "Read a Markdown block as rendered text"
+description = "A ```markdown code block in a reply has an eye button beside Copy. Turn it on to see the block rendered as Markdown, turn it off to see the source again."
 
 [[entry.features]]
 id = "text-annotations"
@@ -65,6 +76,16 @@ title = "From upstream Zeron: quieter pull request watches, and agent tools for 
 description = "Watching pull requests no longer runs git in every project. Agents also get tools for plugins, templates and themes, which you can turn off in Settings > Context & tools > Tools."
 details = "Upstream's new interface comes with this merge as Zeron Beta. See Settings > Lab."
 
+[[entry.features]]
+id = "upstream-0-2-138"
+title = "From upstream Zeron: an Activity sidebar and quieter git scans"
+description = "Subagents show in the composer's Running tray, chats in a plain folder no longer ask for a worktree, and background git scans run only for the chats you are viewing."
+
+[[entry.features]]
+id = "upstream-0-3-2"
+title = "From upstream Zeron: the zgx interface as the stable app"
+description = "Upstream 0.3.0 to 0.3.2 make zgx the stable app: a Themes page under Customize, theme tools for agents, a command's output folded under its call with Show all lines, a + on a project's device rows, and many fixes to the sidebar, composer and transcript."
+
 [[entry.improvements]]
 text = "Settings moves to a sidebar tree: a group opens to its pages under a guide line, each page has a title and summary, and changing page crossfades. A search hit shows its path, and picking one glides to the row and flashes it."
 visual = "settings-tree"
@@ -98,6 +119,18 @@ text = "Text past the title in the rail's quick capture goes to the task's notes
 
 [[entry.improvements]]
 text = "On iPhone, picking an @ suggestion on New thread inserts it instead of closing the list."
+
+[[entry.improvements]]
+text = "Every agent wears its provider's mark instead of a robot: a Pi or OpenCode chat shows the Pi or OpenCode mark even on a GPT model, and a subagent started on another model shows that model's maker."
+
+[[entry.improvements]]
+text = "The sidebar and rail take the tab bar's accent tint. Over a background picture, the tab bar matches the sidebar instead."
+
+[[entry.improvements]]
+text = "Deleting a chat also deletes its side chats and subagents."
+
+[[entry.improvements]]
+text = "Jump to latest and the queued pill hold their place while they fade, and the Compacting line no longer runs into the composer."
 
 [[entry]]
 version = "0.2.132"
