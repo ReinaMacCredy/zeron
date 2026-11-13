@@ -571,4 +571,178 @@ function M.new(props: Props)
 	return self
 end
 
+-- Chrome's tab opening and closing, measured from its frames: about 120 ms, easing out.
+local OPEN_MS = 120
+
+export type Motion = {
+	list: any,
+	leaving: (key: string) -> boolean,
+	apply: (props: { [any]: any }, key: string, natural: (() -> number)?) -> { [any]: any },
+}
+
+function M.motion(items: () -> { any }, key: (item: any) -> string): Motion
+	local clock = ui.use_state(0)
+	local version = ui.use_state(0)
+	local measured = ui.use_state({} :: { [string]: number })
+	local moves: { [string]: { from: number, to: number, at: number } } = {}
+	local gone: { [string]: { item: any, at: number } } = {}
+	local ticking: any = nil
+	local mounted = false
+	ui.after(0, function()
+		mounted = true
+	end)
+	local function factor_at(k: string, now: number): number
+		local m = moves[k]
+		if not m then
+			return 1
+		end
+		return m.from + (m.to - m.from) * motion.bezier(math.clamp((now - m.at) / OPEN_MS, 0, 1), 0, 0, 0.58, 1)
+	end
+	local function factor(k: string): number
+		return factor_at(k, clock:get())
+	end
+	local function settle()
+		local now = clock:peek()
+		local left = false
+		for k, m in moves do
+			if now - m.at >= OPEN_MS then
+				moves[k] = nil
+				if gone[k] then
+					gone[k] = nil
+					version:set(version:peek() + 1)
+				end
+			else
+				left = true
+			end
+		end
+		if not left and ticking then
+			ticking = nil
+		end
+	end
+	local function move(k: string, to: number, from: number?)
+		local now = clock:peek()
+		moves[k] = { from = from or factor_at(k, now), to = to, at = now }
+		if ticking then
+			ticking:cancel()
+		end
+		ticking = anime.animate(clock, {
+			value = now + OPEN_MS,
+			duration = OPEN_MS,
+			ease = "linear",
+			onUpdate = settle,
+			onComplete = function()
+				ticking = nil
+				settle()
+			end,
+		})
+	end
+	local before: { any } = {}
+	ui.effect(function()
+		local now = items()
+		local here: { [string]: boolean } = {}
+		for _, it in now do
+			here[key(it)] = true
+		end
+		-- (The last one closing takes its strip with it: nothing to slide.)
+		if #now == 0 then
+			for k in gone do
+				gone[k] = nil
+				moves[k] = nil
+			end
+		elseif mounted and not motion.reduced_now() then
+			local had: { [string]: boolean } = {}
+			for i, it in before do
+				local k = key(it)
+				had[k] = true
+				if not here[k] and not gone[k] then
+					local entry = { item = it, at = i }
+					gone[k] = entry
+					move(k, 0)
+					-- (On a timer too: a clock left without frames still lets it go.)
+					ui.after(OPEN_MS, function()
+						if gone[k] == entry then
+							gone[k] = nil
+							moves[k] = nil
+							version:set(version:peek() + 1)
+						end
+					end)
+				end
+			end
+			for k in here do
+				if gone[k] then
+					gone[k] = nil
+					move(k, 1)
+				elseif not had[k] then
+					-- (From about where Chrome's first frame has it: a quarter of the way, there to click.)
+					move(k, 1, 0.25)
+				end
+			end
+		end
+		before = now
+		version:set(version:peek() + 1)
+	end)
+	local list = ui.computed(function(): { any }
+		version:get()
+		local out = table.clone(items())
+		local closing: { { item: any, at: number } } = {}
+		for _, g in gone do
+			table.insert(closing, g)
+		end
+		table.sort(closing, function(a, b)
+			return a.at < b.at
+		end)
+		for _, g in closing do
+			table.insert(out, math.min(g.at, #out + 1), g.item)
+		end
+		return out
+	end)
+	local function apply(props: { [any]: any }, k: string, natural: (() -> number)?): { [any]: any }
+		local own = props.opacity
+		local resized = props.on_resize
+		props.opacity = function(): number
+			local base = if type(own) == "function" then own() elseif type(own) == "number" then own else 1
+			local f = factor(k)
+			-- (Opening, from the fade's floor: there to click from its first frame.)
+			return base * (if gone[k] then f else motion.FADE_FLOOR + (1 - motion.FADE_FLOOR) * f)
+		end
+		props.max_w = function(): number?
+			local f = factor(k)
+			if f >= 1 then
+				return nil
+			end
+			local w = if natural then natural() else measured:get()[k]
+			return if w then w * f else nil
+		end
+		local own_overflow = props.overflow
+		props.overflow = function(): string
+			if factor(k) < 1 then
+				return "hidden"
+			end
+			return if type(own_overflow) == "function" then own_overflow() else own_overflow or "visible"
+		end
+		props.pointer_events = function(): string
+			return if gone[k] then "none" else "auto"
+		end
+		if not natural then
+			props.on_resize = function(size: any, element: any)
+				if (factor(k) >= 1 or measured:peek()[k] == nil) and measured:peek()[k] ~= size.w then
+					measured:set_key({ k }, size.w)
+				end
+				if resized then
+					resized(size, element)
+				end
+			end
+		end
+		return props
+	end
+	return {
+		list = list,
+		leaving = function(k: string): boolean
+			version:get()
+			return gone[k] ~= nil
+		end,
+		apply = apply,
+	}
+end
+
 return M

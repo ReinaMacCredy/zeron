@@ -2972,34 +2972,12 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- (`css`: CSS `ease`, ds/motion's EASE, the column motion's curve, for
 	-- rows taking new places; else easing out.)
 	type Anim = { from: number, to: number, at: number, dur: number, delay: number, on_done: (() -> ())?, css: boolean?, drag: boolean? }
-	-- cubic-bezier(x1, y1, x2, y2) at progress `x`: its time found by
-	-- Newton's method (bisecting where the slope is flat), then its value.
-	local function bezier(x: number, x1: number, y1: number, x2: number, y2: number): number
-		local function bez(t: number, a: number, b: number): number
-			local u = 1 - t
-			return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t
-		end
-		local t = x
-		for _ = 1, 8 do
-			local err = bez(t, x1, x2) - x
-			if math.abs(err) < 1e-4 then
-				break
-			end
-			local u = 1 - t
-			local slope = 3 * u * u * x1 + 6 * u * t * (x2 - x1) + 3 * t * t * (1 - x2)
-			if math.abs(slope) < 1e-6 then
-				break
-			end
-			t = math.clamp(t - err / slope, 0, 1)
-		end
-		return bez(t, y1, y2)
-	end
 	local function value(a: Anim, t: number): number
 		if a.dur <= 0 then
 			return a.to
 		end
 		local p = math.clamp((t - a.at - a.delay) / a.dur, 0, 1)
-		p = if a.css then bezier(p, 0.25, 0.1, 0.25, 1) elseif a.drag then bezier(p, 0, 0, 0.58, 1) else 1 - (1 - p) ^ 3
+		p = if a.css then motion.bezier(p, 0.25, 0.1, 0.25, 1) elseif a.drag then motion.bezier(p, 0, 0, 0.58, 1) else 1 - (1 - p) ^ 3
 		return a.from + (a.to - a.from) * p
 	end
 	local function still(v: number): Anim

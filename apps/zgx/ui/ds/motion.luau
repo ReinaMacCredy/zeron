@@ -131,6 +131,27 @@ M.EASE = "cubicBezier(.25,.1,.25,1)"
 -- Zeron's EASE_OUT, and what a drag slides on (its TAB_SLIDE).
 M.EASE_OUT = "cubicBezier(0,0,.58,1)"
 M.DRAG_SLIDE = { duration = 150, ease = M.EASE_OUT } :: TweenOptions
+-- cubic-bezier(x1, y1, x2, y2) at progress `x`, for what eases on a clock of its own.
+function M.bezier(x: number, x1: number, y1: number, x2: number, y2: number): number
+	local function bez(t: number, a: number, b: number): number
+		local u = 1 - t
+		return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t
+	end
+	local t = x
+	for _ = 1, 8 do
+		local err = bez(t, x1, x2) - x
+		if math.abs(err) < 1e-4 then
+			break
+		end
+		local u = 1 - t
+		local slope = 3 * u * u * x1 + 6 * u * t * (x2 - x1) + 3 * t * t * (1 - x2)
+		if math.abs(slope) < 1e-6 then
+			break
+		end
+		t = math.clamp(t - err / slope, 0, 1)
+	end
+	return bez(t, y1, y2)
+end
 -- The base, and the longest, in milliseconds; the sidebar's default width,
 -- the distance the base covers.
 M.BASE, M.LONGEST, M.SIDEBAR = 180, 240, 256

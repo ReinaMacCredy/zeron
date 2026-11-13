@@ -1075,6 +1075,7 @@ M.Panel = ui.component(function(props: Props): Node
 	end
 
 	-- A tab in the strip.
+	local tab_motion: TabStrip.Motion
 	local function chip(tab: Tab, _i: number): Node
 		local id = tab.id
 		local hovered = ui.use_state(false)
@@ -1235,7 +1236,7 @@ M.Panel = ui.component(function(props: Props): Node
 				end
 				return entries
 			end,
-			ui.row {
+			ui.row(tab_motion.apply({
 				id = `panel-tab-{id}`,
 				ref = ref,
 				-- (A device tab's name and its device's line, as gpui's `device_tab_detail`.)
@@ -1404,7 +1405,7 @@ M.Panel = ui.component(function(props: Props): Node
 						return ui.div { id = `panel-tab-{id}-state`, SessionRow.state(which :: any) }
 					end, { shrink = 0 }),
 				},
-			},
+			}, id)),
 		}
 	end
 
@@ -1480,6 +1481,11 @@ M.Panel = ui.component(function(props: Props): Node
 			end
 		end
 		return out
+	end)
+	tab_motion = TabStrip.motion(function(): { Tab }
+		return shown_tabs:get()
+	end, function(t: Tab): string
+		return t.id
 	end)
 	ui.effect(function()
 		local a = active()
@@ -1607,7 +1613,7 @@ M.Panel = ui.component(function(props: Props): Node
 				gap = "$zeron.space.hair",
 				items = "center",
 				strip.Highlight(),
-				ui.each(shown_tabs, chip, {
+				ui.each(tab_motion.list, chip, {
 					key = function(t: Tab): string
 						return t.id
 					end,

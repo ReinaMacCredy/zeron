@@ -397,7 +397,10 @@ test("the app's ⌘W closes the panel's active tab only while the panel has the 
 	expect(eventually(app, function(): boolean
 		return app:state("test_panel_closed_focused") == "false"
 	end)).to_be(true)
-	expect(tab_titles(app)).to_be("Files")
+	-- (The closed tab shrinks away first.)
+	expect(eventually(app, function(): boolean
+		return tab_titles(app) == "Files"
+	end)).to_be(true)
 end)
 
 test("closing the active tab ignores outside focus but leaves hidden and empty panels alone", function()

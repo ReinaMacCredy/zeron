@@ -4,6 +4,7 @@ local ds = require("@ds")
 local ContextMenu = require("@ds/context_menu")
 local SessionRow = require("@ds/session_row")
 local motion = require("@ds/motion")
+local TabStrip = require("@ds/tab_strip")
 local status = require("@ds/status")
 local look = require("@app/screens/shell/project_look")
 local route = require("@app/screens/shell/route")
@@ -27,36 +28,6 @@ local DROP = BAR - TAB_H
 local LINE = BAR / 2
 local THUMB_W, THUMB_H = 150, 92
 local LIFT_MORPH_MS = 160
--- A tab opening or closing in its strip, as Chrome's: measured from its frames, about 120 ms easing out.
-local TAB_OPEN = { duration = 120, ease = motion.EASE_OUT } :: TweenOptions
-local function tab_grows(node: Node, opened: boolean): Node
-	if not opened or motion.reduced_now() then
-		return node
-	end
-	return ui.div {
-		shrink = 0,
-		layout = "width",
-		layout_enter = true,
-		layout_clip = true,
-		layout_ease = TAB_OPEN.ease,
-		layout_duration = TAB_OPEN.duration,
-		node,
-	}
-end
-local function tab_enter(): ElementParams?
-	return if motion.reduced_now() then nil else { opacity = { 0, 1 }, duration = TAB_OPEN.duration, ease = TAB_OPEN.ease }
-end
-local function tab_exit(): ElementParams?
-	return if motion.reduced_now() then nil else { opacity = 0, duration = TAB_OPEN.duration, ease = TAB_OPEN.ease }
-end
-local function tab_follows(props: { [any]: any }): { [any]: any }
-	if not motion.reduced_now() then
-		props.layout = "position"
-		props.layout_ease = TAB_OPEN.ease
-		props.layout_duration = TAB_OPEN.duration
-	end
-	return props
-end
 local SLIDE = { duration = 150, ease = "out(3)" }
 local FADE, FADE_RATE = 36, 12
 -- A tab's stacked tiles, as a fanned hand of cards: at most this many, and for each
@@ -862,7 +833,7 @@ local function slot_left(at: number): number
 	return PAD + (at - 1) * (tab_w:get() + TAB_GAP)
 end
 
-local Tab = ui.component(function(props: { chat: string }): Node
+local Tab = ui.component(function(props: { chat: string, motion: TabStrip.Motion }): Node
 	local id = props.chat
 	local hovered = ui.use_state(false)
 	-- A chat held over it, that dropping would bring in.
@@ -1009,7 +980,9 @@ local Tab = ui.component(function(props: { chat: string }): Node
 		items = function(): { any }
 			return menu_items(id)
 		end,
-		ui.row(row),
+		ui.row(props.motion.apply(row, id, function(): number
+			return tab_w:get()
+		end)),
 	}
 end)
 
@@ -1164,9 +1137,10 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		end
 		cut_params = seen
 	end)
-	local strip_open = false
-	ui.after(0, function()
-		strip_open = true
+	local tab_motion = TabStrip.motion(function(): { string }
+		return shown:get()
+	end, function(id: string): string
+		return id
 	end)
 	local function over_band(_: any, e: any)
 		local d = drag:peek()
@@ -1254,8 +1228,8 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 							return if #shown:get() == 0 then 0 else nil
 						end,
 						shrink = 0,
-						ui.each(shown, function(id: string): Node
-							return tab_grows(Tab { chat = id }, strip_open)
+						ui.each(tab_motion.list, function(id: string): Node
+							return Tab { chat = id, motion = tab_motion }
 						end, {
 							key = function(id: string): string
 								return id
@@ -1263,19 +1237,17 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 							direction = "row",
 							gap = ui.raw(TAB_GAP, "Zeron's gap between tabs"),
 							animate = motion.layout(motion.DRAG_SLIDE),
-							enter = tab_enter(),
-							exit = tab_exit(),
 						}),
 					},
 					ui.show(function(): boolean
 						return draft_shows:get()
-					end, ui.div(tab_follows({
+					end, ui.div {
 						ml = function(): any
 							return ui.raw(if #shown:get() > 0 then TAB_GAP else 0, "Zeron's gap between tabs")
 						end,
 						shrink = 0,
 						DraftTab {},
-					}))),
+					}),
 					ui.show(function(): boolean
 						local d = drag:get()
 						return d ~= nil and not d.out

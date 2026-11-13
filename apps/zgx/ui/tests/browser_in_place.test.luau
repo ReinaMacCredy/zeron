@@ -143,8 +143,13 @@ test("the address rides with the tab across a reload; a link opened twice is one
 	app:frames(2)
 	app:key("cmd+w")
 	app:frames(5)
-	expect(tab_titles(app)).to_be("Page at example.com")
-	expect(string.find(web_calls(app), "close:", 1, true) ~= nil).to_be(true)
+	-- (The closed tab shrinks away first.)
+	expect(eventually(app, function(): boolean
+		return tab_titles(app) == "Page at example.com"
+	end)).to_be(true)
+	expect(eventually(app, function(): boolean
+		return string.find(web_calls(app), "close:", 1, true) ~= nil
+	end)).to_be(true)
 end)
 
 test("annotation mode: the picker runs, a pick is a chip and a mark, the end hands the composer the keyboard, a chip gone unmarks", function()
