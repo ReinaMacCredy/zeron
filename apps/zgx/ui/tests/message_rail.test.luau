@@ -150,3 +150,45 @@ test("message rail: a long conversation's rail scrolls its ticks to keep the lit
 	expect((moved :: number) > (top :: number)).to_be(true)
 	expect(fy >= (sy :: number) and fy + 8 <= (sy :: number) + (sh :: number)).to_be(true)
 end)
+
+local function prompts(id: string): { any }
+	local m = {}
+	for i = 1, 6 do
+		table.insert(m, { id = `{id}-u{i}`, role = "user", text = `Prompt {i} of {id}` })
+		table.insert(m, { id = `{id}-a{i}`, role = "assistant", text = string.rep(`Reply {i} of {id}. `, 30) })
+	end
+	return m
+end
+
+test("message rail: each split pane has its own rail, gated on its own width", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(2400, 900)
+	app:frames(30)
+	app:set_state("fixture.chats", { a1 = { messages = prompts("a1") }, a2 = { messages = prompts("a2") } })
+	app:set_state("inset_split_trees", { { kind = "row", children = { { kind = "leaf", id = "a1" }, { kind = "leaf", id = "a2" } } } })
+	app:click('#shell-sidebar >> role:button "Fix the build"')
+	app:frames(60)
+	expect(app:has("#lane-split-a1 >> #message-rail")).to_be(true)
+	expect(app:has("#lane-split-a2 >> #message-rail")).to_be(true)
+	expect(app:state("message_rail.lit.lane.split-a1").last).to_be(6)
+	app:resize(1400, 900)
+	app:frames(30)
+	expect(app:has("#lane-split-a1 >> #message-rail")).to_be(false)
+	expect(app:has("#lane-split-a2 >> #message-rail")).to_be(false)
+end)
+
+test("message rail: a side chat has the rail however narrow its pane, as gpui's side chats do", function()
+	local app = mount("lanes_fixture.luau")
+	app:resize(1200, 900)
+	app:frames(30)
+	app:click('#session-lanes >> role:button "Open side chat Looking at the tests"')
+	app:frames(30)
+	app:command("side_long")
+	app:frames(30)
+	local _, _, w = box(app, ".side-chat-tab >> #transcript")
+	expect((w :: number) < 768).to_be(true)
+	expect(app:has(".side-chat-tab >> #message-rail")).to_be(true)
+	app:click(".side-chat-tab >> #message-rail-long-u3")
+	app:frames(50)
+	expect(app:state("message_rail.lit.lane.tab1").first).to_be(3)
+end)
