@@ -1958,8 +1958,10 @@ M.Sidebar = ui.component(function(props: Props): Node
 			M.peek_key()
 			return nil
 		end,
-		-- (The window's gap before its card, closing with it.)
-		pl = motion.tween(ui.computed(gap_now), motion.sidebar),
+		-- (Gone only with the column's last 5 points, so the card's left edge stands still as it folds.)
+		pl = function(): number
+			return ui.raw(math.min(5, view.sidebar_shown:get()), "the window's gap before its card")
+		end,
 		ui.show(function(): boolean
 			return M.peek_mounted:get()
 		end, ui.div {
