@@ -1735,8 +1735,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						items = "center",
 						color = "$text.tertiary",
 						ui.presence(function(): string
-							return cur().agent or ""
+							return if details.harness:get() then "\0" else cur().agent or ""
 						end, function(agent: string): Node
+							if agent == "\0" then
+								return ui.div { w = 0, h = 0 }
+							end
 							return if agent == "" then Icon { name = "bot", size = 12 } else Mark { name = agent :: Mark.Name, size = 12, bare = true }
 						end, { shrink = 0 }),
 						ui.text { function(): string

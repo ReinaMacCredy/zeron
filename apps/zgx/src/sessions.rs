@@ -255,10 +255,12 @@ struct FanTile {
     count: u32,
 }
 
+fn maker_mark(model: Option<&str>) -> Option<String> {
+    zeron_proto::HarnessId::brand_of(None, model).and_then(|maker| crate::agents::glyph(maker.as_str()))
+}
+
 fn brand_mark(harness: Option<&str>, model: Option<&str>) -> Option<String> {
-    zeron_proto::HarnessId::brand_of(None, model)
-        .and_then(|maker| crate::agents::glyph(maker.as_str()))
-        .or_else(|| harness.and_then(crate::agents::glyph))
+    harness.and_then(crate::agents::glyph).or_else(|| maker_mark(model))
 }
 
 /// A chat not open says only how many of its own subagents run, so they wear its own provider.
@@ -277,8 +279,8 @@ fn fan_tiles(harness: Option<&str>, model: Option<&str>, native: u32, spawned: &
     }
     let native = native as usize;
     let named = spawned.len().min(native);
-    for each in spawned[..named].iter().map(|m| Some(m.as_str())).chain(std::iter::repeat_n(model, native - named)) {
-        let mark = brand_mark(harness, each);
+    for (each, own_model) in spawned[..named].iter().map(|m| (Some(m.as_str()), true)).chain(std::iter::repeat_n((model, false), native - named)) {
+        let mark = if own_model { maker_mark(each).or_else(|| brand_mark(harness, None)) } else { brand_mark(harness, each) };
         let key = mark.clone().or_else(|| harness.map(str::to_owned)).unwrap_or_else(|| "agent".into());
         match tiles.iter_mut().find(|t| t.key == key) {
             Some(tile) => tile.count += 1,
@@ -3239,9 +3241,9 @@ mod tests {
     }
 
     #[test]
-    fn a_child_at_work_counts_on_the_fan_by_its_models_maker() {
-        let child = |status| super::FanRun::of_child(&serde_json::json!({ "config": { "harness": "mock", "model": "gpt-5.5" }, "createdAt": "2026-11-01T10:07:00Z" }), status);
-        assert_eq!(child(Some("working")).unwrap().mark.as_deref(), Some("openai"));
+    fn a_child_at_work_counts_on_the_fan_by_its_provider() {
+        let child = |status| super::FanRun::of_child(&serde_json::json!({ "config": { "harness": "pi", "model": "gpt-5.5" }, "createdAt": "2026-11-01T10:07:00Z" }), status);
+        assert_eq!(child(Some("working")).unwrap().mark.as_deref(), Some("pi"), "a Pi chat on GPT wears Pi, not OpenAI");
         assert!(child(Some("input")).unwrap().asking);
         assert!(child(Some("done")).is_none(), "a finished one leaves");
         assert!(child(None).is_none());
