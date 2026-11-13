@@ -1292,6 +1292,8 @@ local function Transcript(props: Props): Node
 	-- from the end, a send jumps there (a glide across a long way would
 	-- build every row on it).
 	local held = ui.state(`transcript_held{kept}`, { id = "", h = 0 })
+	-- (The room at its foot as a glide began, held until its prompt is in: a composer shrinking meanwhile, a steered row leaving its queue, would bring the list back to its end, to follow the new rows there.)
+	local foot_held = ui.state(`transcript_foot_held{kept}`, 0)
 	-- A send's glide under way (from its step off the end to its landing).
 	local gliding = ui.state(`transcript_gliding{kept}`, false)
 	local glide: any = nil
@@ -1350,6 +1352,7 @@ local function Transcript(props: Props): Node
 		ui.batch(function()
 			gliding:set(true)
 			held:set { id = last.id, h = r.need() }
+			foot_held:set(foot())
 			offset:set(start)
 		end)
 		-- Nothing to glide to: the old reply lets go of its room, and the
@@ -1357,6 +1360,7 @@ local function Transcript(props: Props): Node
 		local function let_go()
 			ui.batch(function()
 				held:set { id = "", h = 0 }
+				foot_held:set(0)
 				gliding:set(false)
 			end)
 			to_end(list, offset, count:peek())
@@ -1413,6 +1417,7 @@ local function Transcript(props: Props): Node
 					end
 					local at = messages:index_of("id", landing)
 					if at then
+						foot_held:set(0)
 						rise(messages:at(at))
 					elseif waited >= LANDING_MS then
 						let_go()
@@ -1424,6 +1429,7 @@ local function Transcript(props: Props): Node
 				look()
 				return
 			end
+			foot_held:set(0)
 			-- The prompt sent: the newest of the person's.
 			local prompt: Message? = nil
 			for i = count:peek(), 1, -1 do
@@ -1985,7 +1991,7 @@ local function Transcript(props: Props): Node
 			-- The air at the conversation's end, on its last row: on the list
 			-- itself it would clip every row short of the list's foot.
 			pb = function(): number
-				return if last() then ui.raw(TAIL + foot(), "the air at its end, and the room held for what floats over its foot") else 0
+				return if last() then ui.raw(TAIL + math.max(foot(), foot_held:get()), "the air at its end, and the room held for what floats over its foot") else 0
 			end,
 			relative = true,
 			min_h = need,
