@@ -9414,14 +9414,14 @@ mod tests {
     fn a_sessions_agent_is_its_recorded_harness() {
         let chats = Chats::default();
         let open = Open { id: "c".into(), ..Open::default() };
-        let agent = |chats: &Chats| session_value(chats, &open, false).field("agent").map(text).filter(|a| !a.is_empty());
+        let agent = |chats: &Chats| session_value(chats, &open, false, false).field("agent").map(text).filter(|a| !a.is_empty());
         assert_eq!(agent(&chats), None);
         chats.chats.borrow_mut().insert(
             "c".into(),
             json!({ "id": "c", "deviceId": "laptop", "config": { "harness": "codex" } }),
         );
         assert_eq!(agent(&chats).as_deref(), Some("codex"));
-        assert!(matches!(session_value(&chats, &open, false).field("model"), None | Some(Value::Nil)));
+        assert!(matches!(session_value(&chats, &open, false, false).field("model"), None | Some(Value::Nil)));
     }
 
     #[test]

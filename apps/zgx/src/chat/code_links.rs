@@ -35,10 +35,6 @@ pub(crate) fn with_root<T>(cwd: Option<&str>, here: bool, f: impl FnOnce() -> T)
     out
 }
 
-pub(crate) fn cwd() -> Option<String> {
-    CWD.with_borrow(Clone::clone)
-}
-
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     File,
