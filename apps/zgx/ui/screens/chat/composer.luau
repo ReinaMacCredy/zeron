@@ -50,7 +50,6 @@ local Branch = require("@app/screens/chat/branch")
 
 -- gpui's hero headline: its line, and its gap over the 28 of chips above the pill.
 local HEADLINE_LINE, HEADLINE_GAP = 38, 18
--- What Resume says (crates/proto/src/agent.rs `RESUME_PROMPT`).
 -- The side chat's chord: the open composer's, as the panel's commands are its tab's.
 local side_chat_opener: (() -> ())? = nil
 local function side_chat_key(): string
@@ -87,7 +86,6 @@ for _, c in { { id = "chat.move_draft", title = "ds.composer.move_draft", send =
 	}
 end
 
-local RESUME_PROMPT = "Resume without asking to continue."
 ds.toast.action("chat.add_credits", function()
 	route.settings("billing")
 end)
@@ -1109,15 +1107,17 @@ local function Composer(): Node
 			T.send(function()
 				for _, list in lists do
 					if list:index_of("id", mid) == nil then
-						list:push {
-							id = mid,
-							role = "user",
-							text = words,
-							attachments = parts.shown,
-							-- On its way from this moment: the line under it
-							-- says so at once.
-							waiting = "sending",
-						}
+						list:push(if resume
+							then Outgoing.resumed(mid)
+							else {
+								id = mid,
+								role = "user",
+								text = words,
+								attachments = parts.shown,
+								-- On its way from this moment: the line under it
+								-- says so at once.
+								waiting = "sending",
+							})
 					end
 				end
 				deliver(mid)
@@ -1450,6 +1450,20 @@ local function Composer(): Node
 		local said = tostring(stamp)
 		return if string.find(said, ":", 1, true) then ui.t("chat.composer.limit.at", { time = said }):get() else said
 	end
+	local WINDOW: { [string]: string } = { Session = "5h", ["5h"] = "5h", Week = "weekly", Weekly = "weekly", Day = "daily", Daily = "daily" }
+	local function exhausted_window(s: any): string?
+		for _, a in accounts.accounts(s.harness or "", s.model or "") or {} do
+			if a.active then
+				for _, w in a.windows or {} do
+					if w.used >= 1 then
+						return WINDOW[w.label]
+					end
+				end
+				return nil
+			end
+		end
+		return nil
+	end
 	local function limit(): any
 		local s = open()
 		local l = s and (s :: any).limit
@@ -1492,9 +1506,12 @@ local function Composer(): Node
 		if at then
 			table.insert(actions, { label = ui.t("chat.composer.limit.wait"):get(), on_click = if l.to then act("wait", "arm") else act("arm") })
 		end
+		local window = exhausted_window(s)
 		return {
 			waiting = false,
-			lead = ui.t("chat.composer.limit.reached", { name = name }):get(),
+			lead = if window
+				then ui.t("chat.composer.limit.reached_window", { name = name, window = ui.t(`chat.composer.limit.window.{window}`):get() }):get()
+				else ui.t("chat.composer.limit.reached", { name = name }):get(),
 			rest = if at then ui.t("chat.composer.limit.resets", { at = at }):get() else ui.t("chat.composer.limit.unknown"):get(),
 			actions = actions,
 		}
@@ -1636,6 +1653,13 @@ local function Composer(): Node
 					return nil
 				end
 				return (s :: any).prediction
+			end,
+			resume = function(): boolean
+				local s = open()
+				return s ~= nil and (s :: any).stopped == true and not editing:get()
+			end,
+			on_resume = function()
+				send(Outgoing.RESUME_PROMPT, { resume = true })
 			end,
 			limit = limit,
 			pills = Pills.Row {

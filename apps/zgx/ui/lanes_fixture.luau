@@ -247,6 +247,9 @@ end
 ui.command { id = "side_running", title = "The side chat runs", run = function()
 	side_says({ running = true })
 end }
+ui.command { id = "side_stopped", title = "Its turn stopped short", run = function()
+	side_says({ stopped = true })
+end }
 ui.command { id = "side_compacts", title = "It compacts", run = function()
 	side_says({ compaction_wait = { phase = "compacting" } })
 end }
