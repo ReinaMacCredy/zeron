@@ -166,11 +166,11 @@ test("dragged in from the panel, a file and a side chat are mentioned as what's 
 	app:command("context.snapshot")
 	local cargo = app:state("context.snapshot").main
 	expect(cargo[1].mention).to_be(1)
-	-- In @'s Attachments (Tab to it: All, Files, Chats, Attachments).
+	-- In @'s Attachments (Tab to it: All, Files, Folders, Chats, Attachments).
 	local function pick(query: string)
 		app:type(field, `@{query}`)
 		app:frames(20)
-		for _ = 1, 3 do
+		for _ = 1, 4 do
 			app:key("Tab")
 		end
 		app:frames(10)

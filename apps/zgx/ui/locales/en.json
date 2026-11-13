@@ -1263,12 +1263,14 @@
       "empty": {
         "all": "Nothing to mention yet",
         "files": "No files",
+        "folders": "No folders",
         "chats": "No other chats",
         "attachments": "Nothing attached to this message"
       },
       "none": {
         "all": "Nothing matches “{q}”",
         "files": "No files match “{q}”",
+        "folders": "No folders match “{q}”",
         "chats": "No chats match “{q}”",
         "attachments": "No attachments match “{q}”"
       },
@@ -4571,6 +4573,7 @@
       "drop_to_mention": "Drop to mention",
       "mention_sections": {
         "files": "Files",
+        "folders": "Folders",
         "chats": "Chats",
         "attachments": "Attachments"
       },

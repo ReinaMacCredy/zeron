@@ -315,3 +315,30 @@ test("the @ launcher opens beside its composer, never over it, when neither side
 	expect(overlaps).to_be(false)
 	expect(panel.y >= 0 and panel.y + panel.h <= 560).to_be(true)
 end)
+
+test("`@` lists folders under a tab of their own; one picked lands as its chip and goes as its path with a slash", function()
+	local links = require("../screens/chat/file_links")
+	local app = menu_app()
+	app:set_state("launcher", true)
+	app:set_state("found", {
+		{ path = "src/sample.rs", dir = false },
+		{ path = "docs/samples", dir = true },
+		{ path = SPACED, dir = true },
+	})
+	app:type("#field", "@sampl")
+	expect(app:wait('role:option "samples"', { timeout_ms = 1000 })).to_be(true)
+	expect(app:tree('role:tab "Folders"')).to_contain('text "2"')
+	expect(app:tree('role:tab "Files"')).to_contain('text "1"')
+	app:key("Tab")
+	app:key("Tab")
+	app:frames(2)
+	expect(app:has('role:option "sample.rs"')).to_be(false)
+	expect(app:has('role:option "samples"')).to_be(true)
+	app:key("Enter")
+	app:frames(2)
+	expect(app:text("#field")).to_be(`{string.rep(NB, 6)}samples{string.rep(NB, 2)} `)
+	app:command("encode")
+	app:frames(2)
+	expect(app:state("calls")).to_contain(`encoded:{links.link("docs/samples", true)} ;`)
+	expect(links.link("docs/samples", true)).to_be("[samples](zeron-file:docs/samples/)")
+end)

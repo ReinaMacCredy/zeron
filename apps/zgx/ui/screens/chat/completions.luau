@@ -41,10 +41,11 @@ export type Bind = {
 	chat: (() -> string?)?,
 }
 
--- `@`'s sections, in their order: the chat's files, other chats, what the
--- draft carries.
+-- `@`'s sections, in their order: the chat's files, its folders, other
+-- chats, what the draft carries.
 local SECTIONS = {
 	{ id = "files", key = "chat.composer.mention_sections.files" },
+	{ id = "folders", key = "chat.composer.mention_sections.folders" },
 	{ id = "chats", key = "chat.composer.mention_sections.chats" },
 	{ id = "attachments", key = "chat.composer.mention_sections.attachments" },
 }
@@ -129,11 +130,11 @@ function M.bind(b: Bind): { [string]: any }
 	end
 	local lists = ui.computed(function(): any
 		local given = table.clone(sources:get())
-		-- `@`: the files found, then the other chats, then what's carried.
+		-- `@`: the files found, the folders, then the other chats, then what's carried.
 		local at = {}
 		for _, f in given["@"] or {} do
 			local item = table.clone(f)
-			item.section = "files"
+			item.section = if f.dir then "folders" else "files"
 			table.insert(at, item)
 		end
 		for _, c in chats() do

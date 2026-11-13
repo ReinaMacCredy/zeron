@@ -1263,12 +1263,14 @@
       "empty": {
         "all": "暂无可提及的内容",
         "files": "没有文件",
+        "folders": "没有文件夹",
         "chats": "没有其他对话",
         "attachments": "这条消息没有附件"
       },
       "none": {
         "all": "没有与“{q}”匹配的内容",
         "files": "没有与“{q}”匹配的文件",
+        "folders": "没有与“{q}”匹配的文件夹",
         "chats": "没有与“{q}”匹配的对话",
         "attachments": "没有与“{q}”匹配的附件"
       },
@@ -4571,6 +4573,7 @@
       "drop_to_mention": "松开以提及",
       "mention_sections": {
         "files": "文件",
+        "folders": "文件夹",
         "chats": "对话",
         "attachments": "附件"
       },
