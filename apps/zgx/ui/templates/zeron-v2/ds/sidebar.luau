@@ -169,6 +169,8 @@ export type Props = {
 	island: boolean?,
 	-- Its width open (dragging its edge resizes it, 242 to 400).
 	width: State<number>?,
+	-- Told its width as it shows, each frame as it folds or comes back.
+	shown: State<number>?,
 	selected: State<string?>,
 	pinned: Live<{ Session }>?,
 	projects: Live<{ Project }>,
@@ -417,6 +419,15 @@ return ui.component(function(props: Props): Node
 			shown_w:set(w)
 		end
 	end)
+	if props.shown then
+		local told = props.shown
+		ui.effect(function()
+			local w = shown_w:get()
+			if told:peek() ~= w then
+				told:set(w)
+			end
+		end)
+	end
 	local selected = props.selected
 	-- (Reduce motion: there at once; ds/motion.)
 	local function eased(f: () -> number, how: any): any
