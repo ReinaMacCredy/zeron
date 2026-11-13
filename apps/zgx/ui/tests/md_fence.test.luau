@@ -32,22 +32,23 @@ end
 
 local RUN = 'role:button "Run in terminal"'
 
-test("Run shows on a shell's, a session's, plain text's and an unlabeled block, not on rust or json", function()
+test("Run shows on a shell's and a session's block with a prompt, not on text, unlabeled, rust or json", function()
 	local app = shells()
 	local runs = 0
 	for _ in string.gmatch(app:tree("#reply"), 'button "Run in terminal"') do
 		runs += 1
 	end
-	expect(runs).to_be(5)
-	for _, lang in { "bash", "text", "console", "sh" } do
+	expect(runs).to_be(3)
+	for _, lang in { "bash", "sh" } do
 		expect(app:has(`.lang-{lang} >> {RUN}`)).to_be(true)
 	end
-	expect(app:has(`.lang-rust >> {RUN}`)).to_be(false)
-	expect(app:has(`.lang-json >> {RUN}`)).to_be(false)
+	for _, lang in { "text", "rust", "json" } do
+		expect(app:has(`.lang-{lang} >> {RUN}`)).to_be(false)
+	end
 	expect(app:has(`.lang-rust >> role:button "Copy code"`)).to_be(true)
 end)
 
-test("Run hands over the block's exact text, a session's prompts taken off", function()
+test("Run hands over the block's exact text, and of a session only the commands after its prompts", function()
 	local app = shells()
 	app:click(`.lang-bash >> {RUN}`)
 	app:frames(5)
@@ -56,7 +57,7 @@ test("Run hands over the block's exact text, a session's prompts taken off", fun
 	local ran = app:state("test_ran")
 	expect(#ran).to_be(2)
 	expect(ran[1]).to_be("cargo test -p zeron-engine\tquiet")
-	expect(ran[2]).to_be("cd /tmp\nmake all\n./run\noutput stays")
+	expect(ran[2]).to_be("cd /tmp\nmake all\n./run")
 end)
 
 test("Copy of a long command wrapped to fit gives its line as written", function()

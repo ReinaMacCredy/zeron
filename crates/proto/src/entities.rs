@@ -3071,10 +3071,6 @@ pub const COMMAND_EXIT_OSC: &str = "7502";
 pub struct TerminalStatus {
     pub busy: bool,
     pub exited: bool,
-    /// Its shell is known to be at its prompt: nothing else in the
-    /// foreground. False where that can't be told (Windows, older engines).
-    #[serde(default)]
-    pub at_prompt: bool,
 }
 
 /// One `SubscribeTerminal` stream item. `seq` is a per-terminal monotonic counter
@@ -3255,6 +3251,10 @@ mod tests {
         assert_eq!(config(r#","access":"auto-review""#), AccessMode::AutoReview);
         assert_eq!(
             config(r#","access":"ask-the-moon""#),
+            AccessMode::Supervised
+        );
+        assert_eq!(
+            config(r#","access":"ask-the-moon","permissionMode":"full""#),
             AccessMode::Supervised
         );
         let written = serde_json::to_value(ChatConfig {

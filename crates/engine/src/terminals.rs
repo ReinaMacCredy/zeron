@@ -787,26 +787,21 @@ impl Terminals {
             return Ok(TerminalStatus {
                 busy: false,
                 exited: true,
-                at_prompt: false,
             });
         }
         #[cfg(unix)]
-        let (busy, at_prompt) = match (
+        let busy = match (
             live.master.as_ref().and_then(|m| m.process_group_leader()),
             live.shell_pid,
         ) {
-            (Some(leader), Some(shell)) => {
-                let busy = leader > 0 && leader as u32 != shell;
-                (busy, leader > 0 && !busy)
-            }
-            _ => (false, false),
+            (Some(leader), Some(shell)) => leader > 0 && leader as u32 != shell,
+            _ => false,
         };
         #[cfg(not(unix))]
-        let (busy, at_prompt) = (false, false);
+        let busy = false;
         Ok(TerminalStatus {
             busy,
             exited: false,
-            at_prompt,
         })
     }
 
@@ -1748,10 +1743,6 @@ mod initial_command_tests {
             }
         };
         assert!(wait_for(false).await, "an idle shell isn't busy");
-        assert!(
-            terminals.status(&session.id).unwrap().at_prompt,
-            "an idle shell is at its prompt"
-        );
         terminals.write(&session.id, "sleep 30\n").unwrap();
         assert!(wait_for(true).await, "a program in the foreground is");
         terminals.write(&session.id, "\u{3}").unwrap();

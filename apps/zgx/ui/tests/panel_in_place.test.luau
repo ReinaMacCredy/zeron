@@ -287,45 +287,21 @@ local function claimed(app: any, n: number): boolean
 	end)
 end
 
-test("a shell block runs in the chat's terminal waiting at its prompt: its text and one Enter, no new tab", function()
-	local app = open_panel()
-	app:click("#panel-open-terminal")
-	expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
-	expect(claimed(app, 1)).to_be(true)
-	run_block(app, "cargo build\ncargo test")
-	expect(eventually(app, function(): boolean
-		return string.find(term_calls(app), "write:term-1:", 1, true) ~= nil
-	end)).to_be(true)
-	expect(term_calls(app)).to_contain("write:term-1:cargo build\ncargo test⏎")
-	expect(term_calls(app)).never.to_contain("open:term-2")
-end)
-
-test("a busy terminal is left alone: the block runs in a new tab in the chat's folder", function()
-	local app = open_panel()
-	app:click("#panel-open-terminal")
-	expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
-	expect(claimed(app, 1)).to_be(true)
-	app:set_state("test_term_busy", true)
-	run_block(app, "ls -la")
-	expect(eventually(app, function(): boolean
-		return string.find(term_calls(app), "write:term-2:ls -la⏎", 1, true) ~= nil
-	end)).to_be(true)
-	expect(term_calls(app)).to_contain("open:term-2")
-	expect(term_calls(app)).never.to_contain("write:term-1")
-	expect(tab_titles(app)).to_contain("Terminal 2")
-end)
-
-test("a terminal that can't say it's at its prompt is left alone too: the block runs in a new tab", function()
-	local app = open_panel()
-	app:click("#panel-open-terminal")
-	expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
-	expect(claimed(app, 1)).to_be(true)
-	app:set_state("test_term_prompt_unknown", true)
-	run_block(app, "ls -la")
-	expect(eventually(app, function(): boolean
-		return string.find(term_calls(app), "write:term-2:ls -la⏎", 1, true) ~= nil
-	end)).to_be(true)
-	expect(term_calls(app)).never.to_contain("write:term-1")
+test("a shell block runs in a new terminal tab, its text and one Enter, never in the terminal already open", function()
+	for _, busy in { false, true } do
+		local app = open_panel()
+		app:click("#panel-open-terminal")
+		expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
+		expect(claimed(app, 1)).to_be(true)
+		app:set_state("test_term_busy", busy)
+		run_block(app, "cargo build\ncargo test")
+		expect(eventually(app, function(): boolean
+			return string.find(term_calls(app), "write:term-2:cargo build\ncargo test⏎", 1, true) ~= nil
+		end)).to_be(true)
+		expect(term_calls(app)).to_contain("open:term-2")
+		expect(term_calls(app)).never.to_contain("write:term-1")
+		expect(tab_titles(app)).to_contain("Terminal 2")
+	end
 end)
 
 test("with no terminal yet, a shell block opens one and runs there", function()

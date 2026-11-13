@@ -906,12 +906,14 @@ impl<'de> Deserialize<'de> for RunRequest {
     }
 }
 
-/// Builds before access modes wrote `permissionMode`, the source of truth on their rows.
+/// Builds before access modes wrote `permissionMode`: read only where `access` is absent.
 /// A mode this build doesn't know (a newer peer's) reads as the most cautious, never as
 /// the full access an absent one means.
 pub fn legacy_access(value: &mut serde_json::Value) {
     if let Some(map) = value.as_object_mut() {
-        if let Some(mode) = map.remove("permissionMode") {
+        if let Some(mode) = map.remove("permissionMode")
+            && !map.contains_key("access")
+        {
             map.insert("access".into(), mode);
         }
         if map.get("access").is_some_and(|mode| {

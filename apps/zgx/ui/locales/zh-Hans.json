@@ -649,8 +649,8 @@
         "edits_hint": "应用编辑，执行其他操作前先询问。",
         "full": "完全访问",
         "full_hint": "运行命令和编辑时不询问。",
-        "auto": "Auto",
-        "auto_hint": "A model approves safe actions; asks you about the rest."
+        "auto": "自动",
+        "auto_hint": "由模型批准安全的操作，其余的会先问你。"
       },
       "plan": {
         "mode": "计划模式",
@@ -760,8 +760,8 @@
       "copied": "已拷贝",
       "view_named": "查看 {name}",
       "done": "完成",
-      "run_code": "Run in terminal",
-      "run": "Run"
+      "run_code": "在终端中运行",
+      "run": "运行"
     },
     "mermaid": {
       "show_source": "显示源代码",

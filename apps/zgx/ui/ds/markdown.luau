@@ -1222,30 +1222,33 @@ local function code_shown(text: string): string
 	return shown
 end
 
--- The fences a terminal runs: a shell's, a session's, or none said.
+-- The fences a terminal runs: a shell's, or a session's.
 local RUNS: { [string]: boolean } = {
-	[""] = true, text = true, bash = true, sh = true, zsh = true, shell = true,
-	console = true, fish = true, powershell = true, pwsh = true, ps1 = true,
+	bash = true, sh = true, zsh = true, shell = true, console = true,
+	fish = true, powershell = true, pwsh = true, ps1 = true,
 }
 
-local function runs_in_terminal(lang: string?): boolean
-	return RUNS[string.lower(lang or "")] == true
-end
-
--- A shell block as a terminal is to get it: its source without the
--- trailing newline, a `console` block's prompts (`$ `, `% `, `❯ `) off each
--- line's start. (The one Enter after it is the runner's.)
-local function run_text(lang: string?, text: string): string
+-- A shell block as a terminal is to get it, nil for one it doesn't run: its
+-- source without the trailing newline; a `console` block's commands only,
+-- the lines after a prompt (`$ `, `% `, `❯ `), its output left out. (The
+-- one Enter after it is the runner's.)
+local function run_text(lang: string?, text: string): string?
+	local kind = string.lower(lang or "")
+	if not RUNS[kind] then
+		return nil
+	end
 	local out = string.gsub(text, "\n+$", "")
-	if string.lower(lang or "") ~= "console" then
+	if kind ~= "console" then
 		return out
 	end
 	local lines: { string } = {}
 	for line in string.gmatch(out .. "\n", "([^\n]*)\n") do
-		local bare = string.match(line, "^%$ (.*)$") or string.match(line, "^%% (.*)$") or string.match(line, "^❯ (.*)$")
-		table.insert(lines, bare or line)
+		local command = string.match(line, "^%$ (.*)$") or string.match(line, "^%% (.*)$") or string.match(line, "^❯ (.*)$")
+		if command then
+			table.insert(lines, command)
+		end
 	end
-	return table.concat(lines, "\n")
+	return if #lines > 0 then table.concat(lines, "\n") else nil
 end
 
 -- A code block: a strip with its language, Run (a shell's, in the chat's
@@ -1322,7 +1325,7 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 				tooltip = locale.s("ds.markdown.fit_content"),
 				rounded = ui.raw(control.nest("$radius.xl", 1, 5), "concentric with the code block, as Copy"),
 			}),
-			if props.run and runs_in_terminal(props.lang)
+			if props.run and run_text(props.lang, props.text) ~= nil
 				then ui.show(props.run.can, ui.button {
 					id = "md-code-run",
 					label = locale.t("ds.markdown.run_code"),
@@ -1340,7 +1343,7 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 					focus = { border = 0 },
 					on_click = function()
 						local run = props.run :: RunCode
-						run.run(run_text(props.lang, props.text))
+						run.run(run_text(props.lang, props.text) :: string)
 					end,
 					Icon { name = "terminal", size = 12 },
 					ui.text(function()
