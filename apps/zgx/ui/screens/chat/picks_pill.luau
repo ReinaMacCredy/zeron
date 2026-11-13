@@ -161,6 +161,7 @@ function M.Pill(props: { open: any, width: () -> number, chat: () -> string? }):
 			return props.open:get()
 		end,
 		pl = raw(8, "the mockup's pill"),
+		pr = raw(5, "the X at the pill's end"),
 		gap = raw(6, "the mockup's pill"),
 		shrink = 100,
 		min_w = 0,
@@ -178,6 +179,28 @@ function M.Pill(props: { open: any, width: () -> number, chat: () -> string? }):
 			local w = waiting:get()
 			return if w then "· " .. locale.s("ds.html_picks.left", { n = w.left }) else ""
 		end, id = "pills-picks-count", shrink = 0, wrap = false, color = "$text.tertiary" },
+		ui.button {
+			id = "pills-picks-close",
+			label = locale.t("ds.html_picks.close_page"),
+			w = 18,
+			h = 18,
+			p = 0,
+			shrink = 0,
+			items = "center",
+			justify = "center",
+			rounded = "$radius.full",
+			bg = "#00000000",
+			color = "$text.tertiary",
+			hover = { color = "$text.primary", bg = "$hover" },
+			on_click = function()
+				local w, chat = waiting:peek(), props.chat()
+				if w and chat then
+					props.open:set(false)
+					store.close_page(chat, w.title)
+				end
+			end,
+			Icon { name = "close", size = 10 },
+		},
 	}
 	return ui.presence(function(): string
 		return if waiting:get() then "picks" else ""

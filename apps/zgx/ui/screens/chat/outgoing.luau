@@ -83,7 +83,7 @@ end
 
 -- `typed`, `carried`: what `shared.take` handed out; `text`: the words when
 -- nothing was typed (a prompt sent without being typed).
-function M.parts(typed: string, text: string, carried: { any }): { [string]: any }
+function M.parts(typed: string, text: string, carried: { any }, open: { { title: string, left: { HtmlPicks.Group } } }?): { [string]: any }
 	local attachments = {}
 	-- Text selected and staged (annotations, plain selections): Zeron's
 	-- blocks after the words and the tokens (Quote.with_quotes).
@@ -124,7 +124,7 @@ function M.parts(typed: string, text: string, carried: { any }): { [string]: any
 	local cards = HtmlPicks.cards(chosen)
 	return {
 		words = words,
-		text = Carried.with_chats(Comments.with_comments(Quote.with_quotes(Annotation.with_annotations(HtmlPicks.with_picks(words, cards), picks), quotes), comments), chats),
+		text = Carried.with_chats(Comments.with_comments(Quote.with_quotes(Annotation.with_annotations(HtmlPicks.with_open(HtmlPicks.with_picks(words, cards), open or {}), picks), quotes), comments), chats),
 		attachments = attachments,
 		appshots = Appshots.of_cargo(carried),
 		shown = shown(attachments, quotes, picks, comments, cards, chats),

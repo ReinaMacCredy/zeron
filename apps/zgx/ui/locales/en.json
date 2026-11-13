@@ -1538,9 +1538,11 @@
       "close": "Close",
       "pill": "{title} · {n, plural, one {# group to pick} other {# groups to pick}}",
       "left": "{n, plural, one {# group to pick} other {# groups to pick}}",
-      "sent": "Picked options"
+      "sent": "Picked options",
+      "close_page": "Close page"
     },
     "html_card": {
+      "closed": "Closed",
       "count_sent": "Sent",
       "count_free": "{n} chosen",
       "count_partly_sent": "{n}/{total} sent",

@@ -11,12 +11,17 @@ local references = require("@ds/references")
 local M = {}
 
 -- (Up to a later card of the same title: what was sent there is that card's.)
-function M.sent_of(list: { any }, title: string, message: string): { list: { any }, locked: { [string]: boolean } }
+function M.sent_of(list: { any }, title: string, message: string): { list: { any }, locked: { [string]: boolean }, closed: boolean }
 	local out, locked = {}, {}
-	local after = false
+	local after, closed = false, false
 	for _, m in list do
 		if m.id == message then
 			after = true
+			for _, b in m.blocks or {} do
+				if b.kind == "html" and b.title == title and b.closed == true then
+					closed = true
+				end
+			end
 		elseif after and m.role == "assistant" then
 			local again = false
 			for _, b in m.blocks or {} do
@@ -38,7 +43,7 @@ function M.sent_of(list: { any }, title: string, message: string): { list: { any
 			end
 		end
 	end
-	return { list = out, locked = locked }
+	return { list = out, locked = locked, closed = closed }
 end
 
 local function swap_token(key: string, shown: string?, words: string?): boolean
@@ -61,9 +66,9 @@ local function token(key: string, p: any): string
 	return references.add(shared.refs_key(key), { kind = "pick", name = p.label, code = if (p.group or "") ~= "" then p.code else "·", link = p.code })
 end
 
-function M.place(key: string, card: string, title: string, p: any, sent: { list: { any }, locked: { [string]: boolean } })
+function M.place(key: string, card: string, title: string, p: any, sent: { list: { any }, locked: { [string]: boolean }, closed: boolean })
 	local group = p.group or ""
-	if group ~= "" and sent.locked[group] then
+	if sent.closed or (group ~= "" and sent.locked[group]) then
 		return
 	end
 	if group == "" then
@@ -150,37 +155,70 @@ function M.ready(chat: string, card: string, title: string, message: string, gro
 	M.shown:set(all)
 end
 
-function M.waiting(chat: string?, messages: { any }): (any?, number)
-	if not chat then
-		return nil, 0
-	end
+local function left_of(chat: string, messages: { any }, picked: { any }): { { page: any, left: { any } } }
 	local here: { [string]: boolean } = {}
 	for _, m in messages do
 		here[m.id] = true
 	end
-	local list = M.shown:get()[chat] or {}
-	for i = #list, 1, -1 do
-		local e = list[i]
+	local out = {}
+	for _, e in M.shown:get()[chat] or {} do
 		if here[e.message] then
 			local sent = M.sent_of(messages, e.title, e.message)
-			local picked: { [string]: boolean } = {}
-			for _, it in shared.cargo_of(chat) do
+			local chosen: { [string]: boolean } = {}
+			for _, it in picked do
 				if it.kind == "pick" and it.card == e.card then
-					picked[it.group or ""] = true
+					chosen[it.group or ""] = true
 				end
 			end
-			local left = 0
+			local left = {}
 			for _, g in e.groups do
-				if not picked[g.code] and not sent.locked[g.code] then
-					left += 1
+				if not chosen[g.code] and not sent.locked[g.code] then
+					table.insert(left, g)
 				end
 			end
-			if left > 0 then
-				return e, left
+			if not sent.closed and #left > 0 then
+				table.insert(out, { page = e, left = left })
 			end
 		end
 	end
-	return nil, 0
+	return out
+end
+
+function M.waiting(chat: string?, messages: { any }): (any?, number)
+	if not chat then
+		return nil, 0
+	end
+	local list = left_of(chat, messages, shared.cargo_of(chat))
+	local last = list[#list]
+	if not last then
+		return nil, 0
+	end
+	return last.page, #last.left
+end
+
+-- (A page this message picks on says what it left in its own block.)
+function M.open(chat: string?, messages: { any }, carried: { any }): { { title: string, left: { any } } }
+	if not chat then
+		return {}
+	end
+	local out = {}
+	for _, it in left_of(chat, messages, {}) do
+		local touched = false
+		for _, c in carried do
+			if c.kind == "pick" and c.card == it.page.card then
+				touched = true
+			end
+		end
+		for i = #out, 1, -1 do
+			if out[i].title == it.page.title then
+				table.remove(out, i)
+			end
+		end
+		if not touched then
+			table.insert(out, { title = it.page.title, left = it.left })
+		end
+	end
+	return out
 end
 
 function M.pages(key: () -> string?, messages: State<{ any }>, session: () -> any): any

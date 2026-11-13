@@ -13,7 +13,7 @@ local M = {}
 
 export type Pages = {
 	chosen: (card: string) -> { any },
-	sent: (title: string, message: string) -> { list: { any }, locked: { [string]: boolean } },
+	sent: (title: string, message: string) -> { list: { any }, locked: { [string]: boolean }, closed: boolean? },
 	pick: (card: string, title: string, message: string, p: any) -> (),
 	remote: () -> boolean,
 	device_name: (() -> string?)?,
@@ -277,7 +277,7 @@ local function picks_state(e: any, chosen: { any }, sent: any): any
 	if #groups == 0 and chosen[1] then
 		groups = chosen[1].groups or {}
 	end
-	return { chosen = list, sent = done, locked = locked, count = M.count(groups, chosen, sent) }
+	return { chosen = list, sent = done, locked = locked, count = M.count(groups, chosen, sent), closed = sent.closed == true }
 end
 
 local function header_button(id: string, icon: string, key: string, on_click: () -> ()): Node
@@ -309,6 +309,21 @@ local function header(children: { Node }): Node
 		items = "center",
 		gap = raw(6, "Zeron's card header"),
 		children,
+	}
+end
+
+local function closed_tag(key: string): Node
+	return ui.row {
+		id = `html-card-closed-{key}`,
+		h = raw(18, "the picks' code chip"),
+		px = raw(6, "the picks' code chip"),
+		items = "center",
+		shrink = 0,
+		rounded = raw(5, "the picks' code chip"),
+		bg = "$surface.raised",
+		border = 0.5,
+		border_color = "$border",
+		ui.text { locale.t("ds.html_card.closed"), wrap = false, text_size = "$font.size.xs", color = "$text.tertiary" },
 	}
 end
 
@@ -698,6 +713,9 @@ local function Page(props: any): Node
 		header {
 			Icon { name = "global", size = 12, color = "$text.tertiary" },
 			title_text(props.title),
+			ui.show(function(): boolean
+				return sent().closed == true
+			end, closed_tag(key)),
 			header_button(`html-card-expand-{key}`, "expand-arrows", "ds.html_card.expand", function()
 				if e.loaded then
 					sheet:set(true)

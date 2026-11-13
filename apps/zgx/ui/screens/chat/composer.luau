@@ -45,6 +45,7 @@ local Lanes = require("@app/screens/chat/lanes")
 local Pills = require("@app/screens/chat/pills")
 local AppCommands = require("@app/screens/chat/app_commands")
 local Outgoing = require("@app/screens/chat/outgoing")
+local Pages = require("@app/screens/chat/pages")
 
 -- gpui's hero headline: its line, and its gap over the 28 of chips above the pill.
 local HEADLINE_LINE, HEADLINE_GAP = 38, 18
@@ -1031,7 +1032,7 @@ local function Composer(): Node
 			return false
 		end
 		local typed, carried = shared.take()
-		local parts = Outgoing.parts(if resume then "" else typed, text, carried)
+		local parts = Outgoing.parts(if resume then "" else typed, text, carried, Pages.open(session_id:peek(), store.messages:peek(), carried))
 		local words, text_out, attachments = parts.words, parts.text, parts.attachments
 		local id = session_id:peek()
 		own_notice:set(nil)

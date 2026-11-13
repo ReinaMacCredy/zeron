@@ -3651,6 +3651,49 @@ do
 		end,
 	}
 	ui.command {
+		id = "pages_seed_rounds",
+		title = "s2 shows a page of options, then a newer one",
+		run = function()
+			seed {
+				{ id = "x5", role = "user", text = "Gom trang" },
+				page_reply("r1", {
+					{ id = "tc5-html", kind = "html", path = "/u/html/s2/round1.html", title = "Gom trang vòng 1", height = 300 },
+				}),
+				{ id = "x6", role = "user", text = "discuss it again" },
+				page_reply("r2", {
+					{ id = "tc6-html", kind = "html", path = "/u/html/s2/round2.html", title = "Vòng 2", height = 300 },
+				}),
+			}
+		end,
+	}
+	-- The engine's stamp (`close_html_pages`): every page of `page_close_title` in s2 closed.
+	local page_close_title = ui.state("page_close_title", "")
+	ui.command {
+		id = "page_close",
+		title = "The agent closes a page of s2",
+		run = function()
+			local list = {}
+			for _, m in TRANSCRIPTS.s2 or {} do
+				local blocks = {}
+				for _, b in m.blocks or {} do
+					if b.kind == "html" and b.title == page_close_title:peek() then
+						b = table.clone(b)
+						b.closed = true
+					end
+					table.insert(blocks, b)
+				end
+				local copy = table.clone(m)
+				copy.blocks = if m.blocks then blocks else nil
+				table.insert(list, copy)
+			end
+			TRANSCRIPTS.s2 = list
+			store.messages:set(list)
+		end,
+	}
+	stub.close_page = function(id: string, title: string)
+		note(`close_page:{id}:{title}`)
+	end
+	ui.command {
 		id = "pages_seed_spans",
 		title = "s2 names three .html files not on disk in code, then links one that is",
 		run = function()
@@ -3719,6 +3762,9 @@ do
 				return
 			end
 			local pars = string.split((string.gsub(text, "%s+$", "")), "\n\n")
+			if string.sub(pars[#pars] or "", 1, #"Open pages: ") == "Open pages: " then
+				table.remove(pars)
+			end
 			local blocks = {}
 			while #pars > 0 do
 				local card, found = block_of(pars[#pars])

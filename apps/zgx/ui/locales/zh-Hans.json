@@ -1538,9 +1538,11 @@
       "close": "关闭",
       "pill": "{title} · {n} 组待选",
       "left": "{n} 组待选",
-      "sent": "已选选项"
+      "sent": "已选选项",
+      "close_page": "关闭页面"
     },
     "html_card": {
+      "closed": "已关闭",
       "count_sent": "已发送",
       "count_free": "已选 {n} 项",
       "count_partly_sent": "已发送 {n}/{total}",

@@ -8,6 +8,7 @@ local M = {}
 -- The agent's words, locked in DECISIONS whatever the app's language.
 M.PICKED_IN = "Đã chọn trong"
 M.NOT_PICKED = "Chưa chọn:"
+M.OPEN_PAGES = "Open pages: close with html_render `close` each one this message answered or moved past."
 
 export type Pick = { group: string?, code: string, label: string }
 export type Group = { code: string, name: string }
@@ -47,6 +48,22 @@ function M.with_picks(words: string, cards: { Card }): string
 		end
 	end
 	return out
+end
+
+function M.with_open(text: string, open: { { title: string, left: { Group } } }): string
+	local out = string.match(text, "^(.-)%s*$") or text
+	if #open == 0 then
+		return out
+	end
+	local lines = { M.OPEN_PAGES }
+	for _, p in open do
+		local names = {}
+		for _, g in p.left do
+			table.insert(names, `{g.code} ({one_line(g.name)})`)
+		end
+		table.insert(lines, `"{one_line(p.title)}": {table.concat(names, ", ")}`)
+	end
+	return (if out ~= "" then out .. "\n\n" else "") .. table.concat(lines, "\n")
 end
 
 function M.cards(items: { any }): { Card }

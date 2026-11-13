@@ -27,6 +27,14 @@ end
 
 local FRAME = "p1-tc1-html"
 local PICTURES = "p2-tc2-html"
+local ROUND1 = "r1-tc5-html"
+local ROUND2 = "r2-tc6-html"
+local PATHS = {
+	[FRAME] = "/u/html/s2/frame.html",
+	[PICTURES] = "/u/html/s2/pictures.html",
+	[ROUND1] = "/u/html/s2/round1.html",
+	[ROUND2] = "/u/html/s2/round2.html",
+}
 
 local function seeded(app: any, which: string?)
 	app:resize(960, 900)
@@ -38,7 +46,7 @@ end
 
 -- Signed as the fixture's bootstrap signs: picks `p:<path>`, the rest `n:<path>`.
 local function post_to(app: any, view: string, card: string, value: any)
-	local path = if card == FRAME then "/u/html/s2/frame.html" else "/u/html/s2/pictures.html"
+	local path = PATHS[card]
 	local v = table.clone(value)
 	v.kind = v.kind or "zeron.page"
 	if v.nonce == nil then
@@ -502,4 +510,72 @@ test("pages: a chat on another device says where its dev server runs, and its We
 	-- (A code span's file can't be looked for there: only linked ones.)
 	expect((string.find(cards, "other.html", 1, true))).to_be(nil)
 	expect(app:tree("#html-card-open-p3-1")).to_contain("disabled")
+end)
+
+local OPEN_PAGES = "Open pages: close with html_render `close` each one this message answered or moved past."
+local ROUND_GROUPS = { { code = "A", name = "Bố cục" }, { code = "B", name = "Chuyển động" } }
+
+local function rounds_ready(app: any)
+	for _, card in { ROUND1, ROUND2 } do
+		local ready = {}
+		for _, g in ROUND_GROUPS do
+			table.insert(ready, { code = g.code, name = g.name, options = { { code = g.code .. "1", label = `{g.name} 1` }, { code = g.code .. "2", label = `{g.name} 2` } } })
+		end
+		post(app, card, { ready = ready })
+	end
+end
+
+local function round_pick(app: any, card: string, code: string)
+	local g = string.sub(code, 1, 1)
+	post(app, card, { pick = { group = g, code = code, label = `{if g == "A" then "Bố cục" else "Chuyển động"} {string.sub(code, 2)}`, groups = ROUND_GROUPS } })
+end
+
+local function agent_closes(app: any, title: string)
+	app:set_state("page_close_title", title)
+	app:command("page_close")
+	settle(app)
+end
+
+test("picks: a page skipped for a newer one rides the next message as open until the agent closes it; closed, no pill comes back and its buttons don't pick", function()
+	local app = mount("chat_fixture.luau")
+	seeded(app, "pages_seed_rounds")
+	rounds_ready(app)
+	expect(app:tree("#pills-picks")).to_contain("Vòng 2")
+	round_pick(app, ROUND2, "A1")
+	round_pick(app, ROUND2, "B2")
+	send(app, "ok")
+	expect(app:state("calls")).to_contain(`Đã chọn trong "Vòng 2":\nA = A1 (Bố cục 1)\nB = B2 (Chuyển động 2)\n\n{OPEN_PAGES}\n"Gom trang vòng 1": A (Bố cục), B (Chuyển động)`)
+	app:command("picks_echo")
+	settle(app)
+	-- Page 2 sent whole: the pill falls back to page 1, as it did when it stuck.
+	expect(app:tree("#pills-picks")).to_contain("Gom trang vòng 1")
+	agent_closes(app, "Gom trang vòng 1")
+	expect(app:has("#pills-picks")).to_be(false)
+	expect(app:has(`#html-card-closed-{ROUND1}`)).to_be(true)
+	expect(app:has(`#html-card-closed-{ROUND2}`)).to_be(false)
+	expect(last_run(app, ROUND1)).to_contain('"closed":true')
+	round_pick(app, ROUND1, "A2")
+	expect(picked_any(app)).to_be(false)
+	send(app, "next")
+	expect(string.find(app:state("calls"), `send:s2:next\n\n{OPEN_PAGES}`, 1, true)).to_be(nil)
+	expect(app:state("calls")).to_contain("send:s2:next")
+end)
+
+test("picks: the pill's X closes the page it shows, not just its card, for good", function()
+	local app = mount("chat_fixture.luau")
+	seeded(app, "pages_seed_rounds")
+	rounds_ready(app)
+	expect(app:tree("#pills-picks")).to_contain("Vòng 2")
+	app:click("#pills-picks-close")
+	settle(app)
+	expect(app:state("calls")).to_contain("close_page:s2:Vòng 2")
+	expect(app:has("#picks-card")).to_be(false)
+	-- The engine stamps the page closed; its transcript says so over a reload.
+	agent_closes(app, "Vòng 2")
+	expect(app:tree("#pills-picks")).to_contain("Gom trang vòng 1")
+	app:command("remake_session")
+	settle(app)
+	expect(app:has(`#html-card-closed-{ROUND2}`)).to_be(true)
+	round_pick(app, ROUND2, "A1")
+	expect(picked_any(app)).to_be(false)
 end)

@@ -222,6 +222,10 @@ function M.interrupt(id: string)
 	quietly(ui.call("chat.interrupt", id))
 end
 
+function M.close_page(id: string, title: string)
+	quietly(ui.call("chat.close_page", { id = id, title = title }))
+end
+
 -- The same, a promise: Stop says why it couldn't. (The turn alone: an agent's
 -- sub-agents and background shells go on.)
 function M.stop(id: string): any
