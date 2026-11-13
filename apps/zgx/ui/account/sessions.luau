@@ -14,6 +14,14 @@
 --   sessions.fork(source, parent?, id?)  a side chat starting as a copy of
 --                          `source` (Fork chat): a promise of its id, or the
 --                          engine's words for why not
+--   sessions.fork_from(source, entry, id?)  a new chat beside `source` holding
+--                          it through its reply `entry`: a promise of its id,
+--                          or the engine's words for why not
+--   sessions.rewind(chat, entry)  `chat` without its prompt `entry` and all
+--                          after it: a promise of { prompt, removed }, or the
+--                          engine's words
+--   sessions.branching(harness, device?)  whether that agent can fork or
+--                          rewind: a promise of true, false or nil (unknown)
 --   sessions.children(id)  a chat's side chats, newest first (tracked)
 --   sessions.archive(id), sessions.unarchive(id)
 --   sessions.rename(id, title)
@@ -183,6 +191,18 @@ end
 
 function M.fork(source: string, parent: string?, id: string?): any
 	return ui.call("sessions.fork", { source = source, parent = parent, id = id })
+end
+
+function M.fork_from(source: string, entry: string, id: string?): any
+	return ui.call("sessions.fork_from", { source = source, entry = entry, id = id })
+end
+
+function M.rewind(chat: string, entry: string): any
+	return ui.call("sessions.rewind", { chat = chat, entry = entry })
+end
+
+function M.branching(harness: string, device: string?): any
+	return ui.call("sessions.branching", { harness = harness, device = device })
 end
 
 function M.children(id: string?): { Child }

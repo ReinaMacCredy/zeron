@@ -29,6 +29,10 @@
 //!   chat.catalog (an action)      the models, looked up again
 //!   chat.send(req)                run a message, or queue it while a turn runs
 //!                                 (then its queued row's id)
+//!   chat.rewind_send(req)         `chat.send`'s req with `entry`, a prompt of
+//!                                 the person's: the chat rewound to before
+//!                                 it (`RewindChat`), then the words sent
+//!                                 (rejects with the engine's words)
 //!   chat.interrupt(id)
 //!   chat.respond({ id, request, decision = "once" | "always" | "deny" |
 //!                  "answer", values?, text? })
@@ -181,6 +185,9 @@ struct Chats {
 struct Entry {
     id: Rc<str>,
     json: Option<Json>,
+    /// Copied from the chat a reply was forked from (`ForkChat`): kept
+    /// once its json is gone, for the fork's seam.
+    fork_import: bool,
     /// `sum_of` its json, once that's gone.
     sum: u64,
     /// Since its row was last built, only these of its parts changed (each
@@ -191,7 +198,8 @@ struct Entry {
 
 impl Entry {
     fn new(json: Json) -> Self {
-        Self { id: json["id"].as_str().unwrap_or_default().into(), json: Some(json), sum: 0, patched: None }
+        let fork_import = json["forkImport"].as_bool() == Some(true);
+        Self { id: json["id"].as_str().unwrap_or_default().into(), json: Some(json), fork_import, sum: 0, patched: None }
     }
 
     /// What it is now, to tell it from another copy of it.
@@ -646,6 +654,22 @@ struct Pending {
 }
 
 impl Pending {
+    fn sending(id: &str, words: &str, req: &Value) -> Self {
+        Pending {
+            id: id.to_owned(),
+            words: words.to_owned(),
+            paths: local_paths(req),
+            waiting: "sending",
+            retry: None,
+            command: None,
+            at: stamp(now_seconds()),
+            alias: None,
+            held: false,
+            row: false,
+            transfers: Vec::new(),
+        }
+    }
+
     fn value(&self) -> Value {
         // (Failed, it stays a prompt: its line to send it again is a prompt's.)
         if self.waiting == "sending" && self.words.trim() == zeron_proto::RESUME_PROMPT {
@@ -765,6 +789,9 @@ struct Open {
     limit: Option<Json>,
     // (A delegate's limit card stands in its parent's transcript.)
     limits: Vec<Json>,
+    /// A prompt edited and sent again (`chat.rewind_send`): it and every
+    /// entry after it are left out while the rewind runs, until they're gone.
+    cut: Option<String>,
 }
 
 pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
@@ -971,6 +998,14 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 }
             }
             sent.map(|queued| queued.map_or(Value::Nil, |id| Value::from(id.as_str()))).map_err(String::from)
+        }
+    });
+    let pick = which.clone();
+    host.async_action("chat.rewind_send", move |req| {
+        let v = pick(&req);
+        async move {
+            crate::plugins::preview::refuse("chat.send")?;
+            v.rewind_send(req).await
         }
     });
     host.async_action("chat.interrupt", move |id| async move {
@@ -2908,10 +2943,18 @@ impl View {
             code_links::opening(false);
             let context = build_context(open, &chats);
             let whole_from = open.entries.len().saturating_sub(WHOLE_TAIL);
-            let Open { entries, older_todo, built, .. } = open;
+            let source = chats.chat(&open.id).and_then(|c| c["forkedFromChatId"].as_str().map(str::to_owned));
+            let Open { entries, older_todo, built, cut, .. } = open;
+            if cut.as_ref().is_some_and(|cut| !entries.iter().any(|e| &*e.id == cut.as_str())) {
+                *cut = None;
+            }
             let mut list: Vec<Value> = Vec::with_capacity(entries.len());
             let mut seen = Subagents::default();
+            let mut seam = None;
             for (at, e) in entries.iter_mut().enumerate() {
+                if cut.as_deref() == Some(&*e.id) {
+                    break;
+                }
                 if e.id.is_empty() {
                     if let Some(row) = e.json.as_ref().and_then(|json| message(json, context.model.as_deref())) {
                         seen.row(&row);
@@ -2937,9 +2980,17 @@ impl View {
                 }
                 list.extend(row.row);
                 seen.add(row.subagents.as_deref());
+                if e.fork_import {
+                    seam = Some(list.len());
+                }
                 if at < whole_from && e.json.is_some() {
                     settle(e, at, older_todo);
                 }
+            }
+            if let (Some(at), Some(source)) = (seam, source)
+                && !list.iter().any(|row| matches!(row.field("line"), Some(Value::Str(l)) if &**l == "fork"))
+            {
+                list.insert(at, fork_seam(chats.chat(&source).as_ref()));
             }
             merge_compaction_rows(&mut list);
             let open = &*open;
@@ -2948,6 +2999,7 @@ impl View {
             // (transcript.rs `sending_bridge`): sending while the send is
             // newer than the session's turn, working once the turn starts.
             if let Some(last) = open.entries.last()
+                && open.cut.is_none()
                 && last["role"].as_str() == Some("user")
                 && let Some(Value::Map(_)) = list.last()
             {
@@ -3071,19 +3123,7 @@ impl View {
         prompts.retain(|p| p.id != message_id);
         // (Bound for the queue, it shows there alone: never a prompt here first, while its files go up.)
         if fresh || !chats.running(&id) {
-            prompts.push(Pending {
-                id: message_id.clone(),
-                words: words.clone(),
-                paths: local_paths(&req),
-                waiting: "sending",
-                retry: None,
-                command: None,
-                at: stamp(now_seconds()),
-                alias: None,
-                held: false,
-                row: false,
-                transfers: Vec::new(),
-            });
+            prompts.push(Pending::sending(&message_id, &words, &req));
         }
         if let Some(device) = chat["deviceId"].as_str().filter(|d| zeron_proto::is_cloud_device(d, "")) {
             chats.follow_machine(id.clone(), device.to_owned());
@@ -3364,6 +3404,40 @@ impl View {
         }
         if changed {
             self.publish_messages();
+        }
+    }
+
+    /// A prompt edited and sent again (the shipping app's Edit message, as
+    /// `chat.send` takes it, with `entry`, the prompt it replaces): that
+    /// prompt and everything after it leave the transcript at once, the new
+    /// words sending in its place, while `RewindChat` cuts the chat there;
+    /// then the words go as any send. Refused, all of it comes back, and the
+    /// engine's words say why.
+    async fn rewind_send(self: &Rc<Self>, req: Value) -> Result<Value, String> {
+        let chats = CHATS.with(Rc::clone);
+        let id = req.field("session").map(text).unwrap_or_default();
+        let entry = req.field("entry").map(text).filter(|e| !e.is_empty()).ok_or("That prompt is no longer in the chat.")?;
+        let message_id = req.field("message_id").map(text).filter(|s| !s.is_empty()).unwrap_or_else(new_id);
+        let words = req.field("text").map(text).unwrap_or_default();
+        self.cut(&id, Some(entry.clone()));
+        self.pending.borrow_mut().entry(id.clone()).or_default().push(Pending::sending(&message_id, &words, &req));
+        self.publish_messages();
+        let target = chats.target(&chats.chat(&id).unwrap_or(Json::Null));
+        let rewound = engine::get().call("RewindChat", crate::sessions::rewind_params(&id, &entry, target.as_deref())).await;
+        if let Err(why) = rewound {
+            self.cut(&id, None);
+            self.forget_pending(&id, &message_id);
+            self.publish_messages();
+            return Err(why);
+        }
+        // (Not delivered after the rewind, it shows so on its row, with Retry.)
+        let _ = self.send(with_fields(req, [("message_id", Value::from(message_id.as_str()))])).await;
+        Ok(Value::from(message_id.as_str()))
+    }
+
+    fn cut(&self, id: &str, entry: Option<String>) {
+        if let Some(open) = self.open.borrow_mut().as_mut().filter(|o| o.id == id) {
+            open.cut = entry;
         }
     }
 
@@ -5865,6 +5939,20 @@ fn is_prompt(row: &Value) -> bool {
 fn kept_whole(entry: &Json) -> bool {
     entry["role"].as_str() == Some("user")
         || entry["parts"].as_array().into_iter().flatten().any(|p| matches!(p["kind"].as_str(), Some("classifier" | "compaction")))
+}
+
+/// Where a chat forked from a reply (`ForkChat`) starts its own: the line
+/// "Forked from <title>" after the copied history, as a `ForkSideChat`'s
+/// seam entry shows (the engine writes none for this fork).
+fn fork_seam(source: Option<&Json>) -> Value {
+    let title = source.and_then(|s| s["title"].as_str()).map(str::trim).filter(|t| !t.is_empty()).unwrap_or("New session");
+    Value::record([
+        ("id", Value::from("fork-seam")),
+        ("role", Value::from("system")),
+        ("line", Value::from("fork")),
+        ("text", Value::from("")),
+        ("title", Value::from(single_line(title).as_str())),
+    ])
 }
 
 fn resumed_row(id: &str) -> Value {
@@ -11247,6 +11335,75 @@ mod tests {
         let start = std::time::Instant::now();
         drop(whole);
         eprintln!("dropping the frame's JSON: {:?}", start.elapsed());
+    }
+
+    /// A chat forked from a reply (`ForkChat`) says "Forked from <title>"
+    /// after the history it copied. A prompt edited and sent again
+    /// (`chat.rewind_send`) leaves with every row after it while the rewind
+    /// runs, the new words sending in its place, and nothing comes back once
+    /// the engine drops those entries.
+    #[test]
+    fn a_fork_shows_its_seam_and_an_edit_cuts_the_rows_it_replaces() {
+        use super::{CHATS, Entry, Open, Pending, View, draft_value};
+        use serde_json::json;
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use zgx_script::{ScriptHost, Value, testing::TestApp};
+        let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.text { \"x\" }"));
+        CHATS.with(|c| {
+            let mut rows = c.chats.borrow_mut();
+            rows.insert("src".into(), json!({ "id": "src", "title": "Checkout\ncopy" }));
+            rows.insert("fork".into(), json!({ "id": "fork", "forkedFromChatId": "src" }));
+        });
+        let entry = |id: &str, role: &str, imported: bool| {
+            let mut e = json!({ "id": id, "role": role, "createdAt": 1.7e12, "parts": [{ "kind": "text", "id": "t", "text": id }] });
+            if imported {
+                e["forkImport"] = json!(true);
+            }
+            Entry::new(e)
+        };
+        let entries = vec![entry("u1", "user", true), entry("a1", "assistant", true), entry("u2", "user", false), entry("a2", "assistant", false)];
+        let view = View {
+            session: app.host.shared("t.session", Value::Nil),
+            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            draft: app.host.shared("t.draft", draft_value("", "")),
+            rpc: RefCell::default(),
+            open: RefCell::new(Some(Open { id: "fork".into(), entries, heard: true, ..Open::default() })),
+            pending: RefCell::default(),
+            generation: Cell::new(0),
+            snapshot: Cell::new(false),
+            stats: app.host.shared("t.stats", Value::Nil),
+            token_rate: app.host.shared("t.rate", Value::Nil),
+            turn_tokens: app.host.shared("t.turn_tokens", Value::Nil),
+            on_screen: Cell::new(true),
+            predicts: false,
+        };
+        let ids = |view: &View| -> Vec<String> {
+            let Value::List(rows) = view.messages.get() else { panic!("no list") };
+            rows.iter().map(|r| crate::auth::text(r.field("id").unwrap())).collect()
+        };
+        view.publish_messages();
+        assert_eq!(ids(&view), ["u1", "a1", "fork-seam", "u2", "a2"]);
+        let Value::List(rows) = view.messages.get() else { unreachable!() };
+        assert_eq!(rows[2].field("line"), Some(&Value::from("fork")));
+        assert_eq!(rows[2].field("title"), Some(&Value::from("Checkout copy")));
+
+        view.cut("fork", Some("u2".into()));
+        view.pending.borrow_mut().entry("fork".into()).or_default().push(Pending::sending("new", "Edited", &Value::Nil));
+        view.publish_messages();
+        assert_eq!(ids(&view), ["u1", "a1", "fork-seam", "new"]);
+        // Refused: everything comes back.
+        view.cut("fork", None);
+        view.publish_messages();
+        assert_eq!(ids(&view), ["u1", "a1", "fork-seam", "u2", "a2", "new"]);
+        // Rewound: the engine drops them, and the cut goes with them.
+        view.cut("fork", Some("u2".into()));
+        view.open.borrow_mut().as_mut().unwrap().entries.truncate(2);
+        view.publish_messages();
+        assert_eq!(ids(&view), ["u1", "a1", "fork-seam", "new"]);
+        assert!(view.open.borrow().as_ref().unwrap().cut.is_none());
+        CHATS.with(|c| c.chats.borrow_mut().clear());
     }
 
     /// The app's entry sums are the engine's (`zeron_doc::entry_sum`): a

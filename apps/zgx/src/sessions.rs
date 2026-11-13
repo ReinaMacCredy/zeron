@@ -44,6 +44,14 @@
 //!   sessions.fork({ source, parent?, id? })  a side chat starting as a copy of
 //!                                  `source` (`ForkSideChat`): its id, or the
 //!                                  engine's words for why not
+//!   sessions.fork_from({ source, entry, id? })  a new chat holding `source`
+//!                                  through its reply `entry` (`ForkChat`),
+//!                                  beside it: its id, or the engine's words
+//!   sessions.rewind({ chat, entry })  `chat` without its prompt `entry` and
+//!                                  all after it (`RewindChat`): { prompt,
+//!                                  removed }, or the engine's words
+//!   sessions.branching({ harness, device? })  whether that agent can fork
+//!                                  or rewind (`HarnessCompaction`); nil unknown
 //!   sessions.archive(id), sessions.unarchive(id)
 //!   sessions.rename({ id, title })
 //!   sessions.seen(id) (an action)  its finished state seen, on every device
@@ -1072,6 +1080,25 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         let a = a.clone();
         async move { a.fork(args).await }
     });
+    let a = s.clone();
+    host.async_action("sessions.fork_from", move |args| {
+        let a = a.clone();
+        async move { a.fork_from(args).await }
+    });
+    let a = s.clone();
+    host.async_action("sessions.rewind", move |args| {
+        let a = a.clone();
+        async move { a.rewind(args).await }
+    });
+    host.async_action("sessions.branching", move |args| {
+        let params = branching_params(args.field("harness").map(text).unwrap_or_default(), args.field("device").map(text));
+        async move {
+            match engine::get().call("HarnessCompaction", params).await {
+                Ok(reply) => Ok(reply["branching"].as_bool().map_or(Value::Nil, Value::Bool)),
+                Err(_) => Ok(Value::Nil),
+            }
+        }
+    });
     for (name, archived) in [("sessions.archive", true), ("sessions.unarchive", false)] {
         let a = s.clone();
         host.async_action(name, move |id| {
@@ -1895,6 +1922,35 @@ impl Sessions {
         Ok(Value::from(id.as_str()))
     }
 
+    /// The shipping app's Fork from a reply (`ForkChat`, on the source's
+    /// device): a new chat beside `source` holding it through the reply
+    /// `entry`, known to the chat page at once. Its id, or the engine's words.
+    async fn fork_from(&self, args: Value) -> Result<Value, String> {
+        let field = |key: &str| args.field(key).map(text).filter(|s| !s.is_empty());
+        let source = field("source").ok_or("That reply is no longer in the chat.")?;
+        let entry = field("entry").ok_or("That reply is no longer in the chat.")?;
+        let id = field("id").filter(|id| plain_id(id)).unwrap_or_else(new_id);
+        let params = fork_from_params(&self.chats.borrow(), &id, &source, &entry);
+        let chat = engine::get().call("ForkChat", params).await?;
+        crate::chat::made(&made_fork(&chat, &id));
+        Ok(Value::from(chat["id"].as_str().unwrap_or(&id)))
+    }
+
+    /// The shipping app's Rewind to here (`RewindChat`): `chat` loses its
+    /// prompt `entry` and everything after. `{ prompt, removed }`: the prompt's
+    /// words for the composer; or the engine's words for why not.
+    async fn rewind(&self, args: Value) -> Result<Value, String> {
+        let field = |key: &str| args.field(key).map(text).filter(|s| !s.is_empty());
+        let chat = field("chat").ok_or("That prompt is no longer in the chat.")?;
+        let entry = field("entry").ok_or("That prompt is no longer in the chat.")?;
+        let params = rewind_params(&chat, &entry, device_of(&self.chats.borrow(), &chat));
+        let outcome = engine::get().call("RewindChat", params).await?;
+        Ok(Value::record([
+            ("prompt", Value::from(outcome["prompt"].as_str().unwrap_or_default())),
+            ("removed", Value::Num(outcome["removed"].as_f64().unwrap_or(0.))),
+        ]))
+    }
+
     /// The places the scripts want: the changes from what's expected go to
     /// the engine in order.
     fn want(self: &Rc<Self>, mut wanted: Places) {
@@ -2091,9 +2147,52 @@ fn where_parent_is(chats: &Json, parent: &str) -> Option<Json> {
 /// `ForkSideChat`'s params: the copy `id` of `source`, under `parent` (the
 /// source by default), made on the source's device.
 fn fork_params(chats: &Json, id: &str, source: &str, parent: Option<&str>) -> Json {
-    let device = chats.as_array().into_iter().flatten().find(|c| c["id"].as_str() == Some(source)).and_then(|c| c["deviceId"].as_str());
     let mut params = json!({ "chatId": id, "sourceChatId": source, "parentChatId": parent.unwrap_or(source) });
+    if let Some(device) = device_of(chats, source) {
+        params["targetDeviceId"] = Json::from(device);
+    }
+    params
+}
+
+fn device_of<'a>(chats: &'a Json, id: &str) -> Option<&'a str> {
+    chats.as_array().into_iter().flatten().find(|c| c["id"].as_str() == Some(id)).and_then(|c| c["deviceId"].as_str())
+}
+
+/// `ForkChat`'s params: the copy `id` of `source` through its reply `entry`,
+/// made on the source's device.
+fn fork_from_params(chats: &Json, id: &str, source: &str, entry: &str) -> Json {
+    let mut params = json!({ "chatId": id, "sourceChatId": source, "entryId": entry });
+    if let Some(device) = device_of(chats, source) {
+        params["targetDeviceId"] = Json::from(device);
+    }
+    params
+}
+
+/// `RewindChat`'s params, on the chat's device.
+pub(crate) fn rewind_params(chat: &str, entry: &str, device: Option<&str>) -> Json {
+    let mut params = json!({ "chatId": chat, "entryId": entry });
     if let Some(device) = device {
+        params["targetDeviceId"] = Json::from(device);
+    }
+    params
+}
+
+/// The fork `ForkChat` made, as `chat::made` takes a new chat (its
+/// `createChat` params).
+fn made_fork(chat: &Json, id: &str) -> Json {
+    let mut row = json!({ "chatId": chat["id"].as_str().unwrap_or(id) });
+    for wire in ["deviceId", "spaceId", "config", "cwd", "branch"] {
+        if !chat[wire].is_null() {
+            row[wire] = chat[wire].clone();
+        }
+    }
+    row
+}
+
+/// `HarnessCompaction`'s params: what `harness` can do, on `device`.
+fn branching_params(harness: String, device: Option<String>) -> Json {
+    let mut params = json!({ "harness": harness });
+    if let Some(device) = device.filter(|d| !d.is_empty()) {
         params["targetDeviceId"] = Json::from(device);
     }
     params
@@ -3272,6 +3371,31 @@ mod tests {
         );
         // A side chat's own fork hangs beside it, under its parent.
         assert_eq!(super::fork_params(&chats, "new", "p", Some("top"))["parentChatId"], "top");
+    }
+
+    #[test]
+    fn a_fork_from_a_reply_and_a_rewind_go_to_the_chat_s_device() {
+        let chats = serde_json::json!([{ "id": "p", "deviceId": "mac" }]);
+        assert_eq!(
+            super::fork_from_params(&chats, "new", "p", "reply-1"),
+            serde_json::json!({ "chatId": "new", "sourceChatId": "p", "entryId": "reply-1", "targetDeviceId": "mac" })
+        );
+        assert_eq!(
+            super::rewind_params("p", "prompt-1", super::device_of(&chats, "p")),
+            serde_json::json!({ "chatId": "p", "entryId": "prompt-1", "targetDeviceId": "mac" })
+        );
+        // Not listed yet: the engine's own device answers.
+        assert_eq!(super::rewind_params("gone", "prompt-1", super::device_of(&chats, "gone")), serde_json::json!({ "chatId": "gone", "entryId": "prompt-1" }));
+        assert_eq!(
+            super::branching_params("codex".into(), Some("mac".into())),
+            serde_json::json!({ "harness": "codex", "targetDeviceId": "mac" })
+        );
+        assert_eq!(super::branching_params("codex".into(), None), serde_json::json!({ "harness": "codex" }));
+        let made = super::made_fork(
+            &serde_json::json!({ "id": "new", "deviceId": "mac", "spaceId": "proj", "cwd": "/w", "branch": null, "title": "T", "config": { "harness": "codex" } }),
+            "asked",
+        );
+        assert_eq!(made, serde_json::json!({ "chatId": "new", "deviceId": "mac", "spaceId": "proj", "cwd": "/w", "config": { "harness": "codex" } }));
     }
 
     #[test]
