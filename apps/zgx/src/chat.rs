@@ -7322,6 +7322,10 @@ enum CallKind {
     Search,
     Fetch,
     Todo,
+    /// Claude's advisor (`out`: its answer not back yet).
+    Advisor {
+        out: bool,
+    },
     Other,
     /// A Cloud machine's own setup step (`woke`: its wake).
     Cloud {
@@ -7352,6 +7356,12 @@ impl Tally {
                     "search" | "glob" | "webSearch" => (CallKind::Search, None),
                     "webFetch" => (CallKind::Fetch, None),
                     "todo" => (CallKind::Todo, None),
+                    "unknown" if call["name"].as_str() == Some(zeron_proto::ADVISOR_TOOL_NAME) => (
+                        CallKind::Advisor {
+                            out: p["resolved"].as_bool() != Some(true),
+                        },
+                        None,
+                    ),
                     _ => match cloud_setup_step(p) {
                         Some(step) => (CallKind::Cloud { woke: step == "wake" }, None),
                         None => (CallKind::Other, None),
@@ -7379,6 +7389,8 @@ struct GroupTally {
     searches: usize,
     fetches: usize,
     todos: usize,
+    advisors: usize,
+    advisors_out: usize,
     other: usize,
     /// A Cloud machine's setup steps (counted in `other` too), and its wakes.
     cloud: usize,
@@ -7439,6 +7451,12 @@ impl GroupTally {
                     CallKind::Search => step(&mut self.searches),
                     CallKind::Fetch => step(&mut self.fetches),
                     CallKind::Todo => step(&mut self.todos),
+                    CallKind::Advisor { out } => {
+                        step(&mut self.advisors);
+                        if *out {
+                            step(&mut self.advisors_out);
+                        }
+                    }
                     CallKind::Other => step(&mut self.other),
                     CallKind::Cloud { woke } => {
                         step(&mut self.other);
@@ -7515,6 +7533,11 @@ impl GroupTally {
             }
             if self.todos > 0 {
                 tools.push("updated todos".into());
+            }
+            if self.advisors > 0 {
+                tools.push(
+                    if self.advisors_out > 0 { "consulting advisor" } else { "consulted advisor" }.into(),
+                );
             }
             if self.other > 0 {
                 tools.push(format!("called {}", plural(self.other, "tool", "tools")));
@@ -10876,6 +10899,16 @@ mod tests {
         assert!(!consulting_advisor(&entry("streaming", true, &call)));
         assert!(!consulting_advisor(&entry("complete", false, &call)));
         assert!(!consulting_advisor(&entry("streaming", false, &json!({ "kind": "exec", "command": "ls" }))));
+    }
+
+    #[test]
+    fn a_group_names_its_advisor_consulted_or_out() {
+        let advisor = serde_json::to_value(zeron_proto::ToolCall::Unknown { name: zeron_proto::ADVISOR_TOOL_NAME.to_owned(), input: None }).unwrap();
+        let part = |resolved: bool| json!({ "kind": "tool", "id": "a", "resolved": resolved, "call": advisor });
+        let thought = json!({ "kind": "reasoning", "id": "t" });
+        let exec = json!({ "kind": "tool", "id": "e", "resolved": true, "call": { "kind": "exec", "command": "ls" } });
+        assert_eq!(group_summary(&[&thought, &exec, &part(true)]), "Thought process · ran 1 command · consulted advisor");
+        assert_eq!(group_summary(&[&exec, &part(false)]), "Ran 1 command · consulting advisor");
     }
 
     #[test]

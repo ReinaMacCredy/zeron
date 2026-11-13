@@ -434,6 +434,7 @@ end
 
 local CALLS_OPEN = ui.state("activity_calls_open", {} :: { [string]: boolean })
 local GROUPS_CHOSEN = ui.state("activity_groups_chosen", {} :: { [string]: boolean })
+local THOUGHTS_OPEN = ui.persist("activity_thoughts_open", false)
 
 -- A thought's row: no glyph, no branch, no header, its words themselves
 -- where a tool's line sits, rendered as the reply's markdown is
@@ -442,7 +443,8 @@ local GROUPS_CHOSEN = ui.state("activity_groups_chosen", {} :: { [string]: boole
 -- words fade out over the last line and a half, and under them, once they
 -- have faded away, a small quiet "Show all N lines"; opened, the whole
 -- thought, "Show fewer lines" under it to fold it back.
--- Open is kept by the thought's id, as a call's is. A thought that fits
+-- Open or folded is one choice for every thought in every chat, kept across
+-- launches: the last Show all or Show fewer pressed (Reina, Nov 13 2026). A thought that fits
 -- shows no button. Whether it folds is measured, as a long message's is
 -- (ds/user_message): the words are laid out whole behind the clip, so
 -- nothing rewraps as it opens.
@@ -531,12 +533,10 @@ local function thought_row(
 	local folded_h = THOUGHT_LINES * line
 	local body = ui.ref()
 	local function is_open(): boolean
-		return CALLS_OPEN:get()[id] == true
+		return THOUGHTS_OPEN:get()
 	end
 	local function set_open(on: boolean)
-		local all = table.clone(CALLS_OPEN:peek())
-		all[id] = on
-		CALLS_OPEN:set(all)
+		THOUGHTS_OPEN:set(on)
 	end
 	local function live(): boolean
 		return now().live == true
@@ -1083,7 +1083,7 @@ return ui.component(function(props: Props): Node
 	local first_folded = THOUGHT_LINES * line + (ROW - line)
 	local function height_of(t: Tool): number
 		local h = MEASURED[`{own_key}:{t.id}`]
-		local open = CALLS_OPEN:peek()[t.id] == true
+		local open = if t.kind == "thought" then THOUGHTS_OPEN:peek() else CALLS_OPEN:peek()[t.id] == true
 		if t.kind ~= "thought" then
 			return if open and h then h else ROW
 		end
