@@ -371,6 +371,9 @@ mod tests {
         app.frames(20);
         assert!(app.find("#pills-picks").is_some(), "the pill shows");
         app.frames(120);
+        // (The pill's arrival moves the transcript's end, which lights its rail; the rail rests after 1.4 s by `ui.now()`, the wall clock, which test frames don't move.)
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        app.frames(10);
         let before = app.calls();
         app.frames(180);
         assert_eq!(app.calls() - before, 0, "pages, cards and the pill at rest run no script");
