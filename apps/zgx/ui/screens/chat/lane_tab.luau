@@ -43,6 +43,7 @@ local Outgoing = require("@app/screens/chat/outgoing")
 local PanelState = require("@app/screens/panel/state")
 local look = require("@app/screens/shell/project_look")
 local DropOverlay = require("@ds/drop_overlay")
+local MessageRail = require("@ds/message_rail")
 
 -- Two places in a transcript (ds/transcript's `keep`), the same.
 local function same(a: any, b: any): boolean
@@ -1557,6 +1558,11 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		end,
 		side = if split then 20 else nil,
 		fade_lead = if split then 12 else nil,
+		over = if tab.kind == "subagent"
+			then nil
+			else function(t: any): Node
+				return MessageRail.MessageRail { transcript = t, gate = split, name = `lane.{slot}` }
+			end,
 		messages = messages,
 		draft = reply,
 		offset = offset,

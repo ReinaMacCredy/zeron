@@ -813,6 +813,12 @@
       "subagent": "Subagent",
       "worked_for": "Worked for {secs}s · {summary}"
     },
+    "message_rail": {
+      "attached_image": "Attached image",
+      "attached_file": "Attached file",
+      "attached_images": "{n} attached images",
+      "attached_files": "{n} attached files"
+    },
     "transcript": {
       "copy_message": "Copy message",
       "message_actions": "Message actions",

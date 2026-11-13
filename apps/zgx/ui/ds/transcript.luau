@@ -236,6 +236,18 @@ export type Props = {
 	file_link: ((target: string) -> boolean)?,
 	-- A review's findings, where the host put its `review` row (screens/chat/review's Block); without it the row is empty.
 	review_block: ((m: Message) -> Node)?,
+	over: ((t: Handle) -> Node)?,
+}
+export type Handle = {
+	messages: State<{ Message }>,
+	offset: State<number>,
+	list: Ref,
+	sized: State<number>,
+	draft: State<Draft>?,
+	chat_of: ((id: string) -> { title: string, mark: Mark.Name? }?)?,
+	foot: () -> number,
+	rows: (visit: (id: string, index: number, top: number, bottom: number) -> ()) -> (),
+	go: (id: string) -> (),
 }
 export type Anchor = { id: string, dy: number }
 export type TranscriptFind = {
@@ -1103,6 +1115,7 @@ local GLIDE_MS = 380
 local GLIDE_CLEAR = 1
 -- How long a steer's glide waits for the host's copy of its prompt.
 local LANDING_MS = 2000
+local GO_MS = 500
 local function to_end(list: Ref, offset: State<number>, rows: number)
 	local el = list:peek()
 	if el and rows > 0 then
@@ -1669,8 +1682,13 @@ local function Transcript(props: Props): Node
 	-- rows, heard before the list takes it): what tells their scroll from
 	-- the list moving itself as rows measure.
 	local wheeled_at = -math.huge
+	local going: any = nil
 	local function wheeled(): boolean?
 		wheeled_at = ui.now()
+		if going then
+			going:pause()
+			going = nil
+		end
 		-- (Taken somewhere of their own: a place still to come back to is
 		-- let go.)
 		waiting = nil
@@ -1891,6 +1909,128 @@ local function Transcript(props: Props): Node
 			end)
 		end
 	end)
+
+	local function row_top(id: string, above: { string }): number
+		local r = rows[id]
+		local row_el = r and r.outer:peek()
+		local list_el = list:peek()
+		if row_el and list_el and row_el.y ~= nil and list_el.y ~= nil then
+			return offset:peek() + (row_el.y :: number) - (list_el.y :: number)
+		end
+		local at = 0
+		for _, above_id in above do
+			at += sizes[above_id] or ESTIMATE
+		end
+		return at
+	end
+	local go_progress = ui.use_state(0)
+	local go_step: ((eased: number) -> ())? = nil
+	ui.effect(function()
+		local eased = go_progress:get()
+		if go_step then
+			go_step(eased)
+		end
+	end)
+	local function go_to(id: string)
+		local index = messages:index_of("id", id)
+		if not index or not list:peek() then
+			return
+		end
+		local above: { string } = {}
+		for i = 1, index - 1 do
+			local m = messages:at(i)
+			if m then
+				table.insert(above, m.id)
+			end
+		end
+		if going then
+			going:pause()
+			going = nil
+		end
+		go_step = nil
+		waiting = nil
+		returning = nil
+		placing:set(false)
+		if glide then
+			glide:pause()
+			glide = nil
+		end
+		if gliding:peek() then
+			ui.batch(function()
+				held:set { id = "", h = 0 }
+				foot_held:set(0)
+				gliding:set(false)
+			end)
+		end
+		end_held = false
+		if offset:peek() >= PAST_END / 2 then
+			offset:set(math.max(0, extent() - (list.height or 0)))
+		end
+		local function land()
+			local r = rows[id]
+			if r and r.outer:peek() then
+				offset:set(math.max(0, row_top(id, above)))
+				return
+			end
+			local now, el = messages:index_of("id", id), list:peek()
+			if now and el then
+				el:scroll_to_row(now, { align = "start" })
+			end
+		end
+		if motion.reduced_now() then
+			land()
+			return
+		end
+		local eased_prev = 0
+		go_progress:set(0)
+		go_step = function(eased: number)
+			if eased <= eased_prev then
+				return
+			end
+			local frac = if eased >= 1 then 1 else (eased - eased_prev) / (1 - eased_prev)
+			eased_prev = eased
+			local goal = row_top(id, above)
+			local now = offset:peek()
+			offset:set(math.max(0, now + frac * (goal - now)))
+		end
+		local this: any
+		this = anime.animate(go_progress, {
+			value = { 0, 1 },
+			duration = GO_MS,
+			ease = "cubicBezier(0.42, 0, 0.58, 1)",
+			onComplete = function()
+				if going == this then
+					going = nil
+					go_step = nil
+					land()
+				end
+			end,
+		})
+		going = this
+	end
+	local handle: Handle = {
+		messages = messages,
+		offset = offset,
+		list = list,
+		sized = sized,
+		draft = props.draft,
+		chat_of = props.chat_of,
+		foot = foot,
+		rows = function(visit: (id: string, index: number, top: number, bottom: number) -> ())
+			local list_el = list:peek()
+			if not list_el or list_el.y == nil then
+				return
+			end
+			for id, r in rows do
+				local el = r.outer:peek()
+				if el and el.y ~= nil and el.height ~= nil then
+					local top = (el.y :: number) - (list_el.y :: number)
+					visit(id, r.index:peek(), top, top + (el.height :: number))
+				end
+			end
+		end,
+		go = go_to,
+	}
 
 	local function row(m: Message, index: State<number>, state: State<Message>): Node
 		local mine = m.role == "user"
@@ -2333,6 +2473,7 @@ local function Transcript(props: Props): Node
 				return list.height or 0
 			end,
 		},
+		if props.over then props.over(handle) else nil,
 		-- A selection's pill, and the comment written on it.
 		layer.Overlay(),
 		-- Away from the end: the way back, over the list's foot.

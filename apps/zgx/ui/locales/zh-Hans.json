@@ -813,6 +813,12 @@
       "subagent": "子智能体",
       "worked_for": "运行了 {secs} 秒 · {summary}"
     },
+    "message_rail": {
+      "attached_image": "已附加图片",
+      "attached_file": "已附加文件",
+      "attached_images": "已附加 {n} 张图片",
+      "attached_files": "已附加 {n} 个文件"
+    },
     "transcript": {
       "copy_message": "拷贝消息",
       "message_actions": "消息操作",

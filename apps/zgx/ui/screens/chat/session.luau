@@ -27,6 +27,7 @@ local LinkMenu = require("@app/screens/chat/link_menu")
 local Find = require("@app/screens/chat/find")
 local boundary = require("@app/screens/shell/boundary")
 local Pages = require("@app/screens/chat/pages")
+local MessageRail = require("@ds/message_rail")
 
 -- The pictures replies show, read from the open chat's folder on its device.
 local pictures = ReplyImages.for_session(function(): any
@@ -406,6 +407,9 @@ local function Session(id: Id?): Node
 							end),
 							-- ⌘F's find (screens/chat/find): its matches marked.
 							find = Find.marks(),
+							over = function(t: any): Node
+								return MessageRail.MessageRail { transcript = t, gate = true }
+							end,
 							working = {
 								rate = function(): number?
 									return store.token_rate:get()

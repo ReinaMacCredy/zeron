@@ -771,6 +771,10 @@ function M.setup()
 					glyph = "{text.secondary}",
 				},
 				diff_bg = well,
+				message_rail = {
+					tick = if dark then "#ffffff29" else "#00000029",
+					lit = "alpha({text.primary}, 0.8)",
+				},
 			},
 		}
 	end)

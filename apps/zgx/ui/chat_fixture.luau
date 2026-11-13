@@ -1983,6 +1983,40 @@ do
 			end
 		end,
 	}
+	-- `rail_chat`: twelve prompts, their replies' Markdown of every kind, for the prompt rail's captures.
+	ui.command {
+		id = "rail_chat",
+		title = "A chat of twelve prompts",
+		run = function()
+			local asks = {
+				{ "Why does the **sidebar** jump when a chat opens?", "The sidebar measures its rows **before** the chat's title lands, so the first frame uses the old width.\n\n- Hold the width until `on_resize` fires\n- Then ease to the new one" },
+				{ "Can you check `cargo test -p zeron-ui` still passes?", "```sh\ncargo test -p zeron-ui --lib\n```\n\nAll 1,204 tests pass." },
+				{ "What does the rail's preview card show?", "The prompt, clamped to **three lines**, and the opening of its reply, clamped to *four*. Code like `preview_runs` keeps its wash." },
+				{ "Make the ticks a little brighter on hover", "Done: the hovered tick takes the text's ink at 80% and grows to 24 points, its neighbours to 16 and 10." },
+				{ "How long does the glide take?", "## Timing\n\nFive hundred milliseconds on CSS `ease-in-out`, over the **whole** distance, never a share of what remains." },
+				{ "Is there a test for the width gate?", "Yes. `rail_width_gate` pins it: 768 shows, 767.9 hides." },
+				{ "Summarize what changed today", "1. The rail moved into its own module\n2. Hover grows the tick under the pointer\n3. Clicking glides the transcript to that prompt" },
+				{ "Does a long conversation still fit?", "Past about sixty prompts the rail **scrolls its ticks** inside a window of 70% of the band, at most 640 points, and follows the lit ones." },
+				{ "What about prompts sent by another chat?", "Their card says *Message from* and the chat's name over the prompt, as the bubble does." },
+				{ "Can the rail hide on narrow windows?", "It hides below a 768-point conversation column, so the prose never runs under it." },
+				{ "Any remaining work?", "> Only the captures.\n\nThe rest is merged and its tests pass." },
+				{ "Thanks, ship it", "Shipped. The rail is on the main chat, side chats and each split pane wide enough for it." },
+			}
+			local list = {}
+			for i, pair in asks do
+				local prompt: any = { id = `rp{i}`, role = "user", text = pair[1] }
+				if i == 9 then
+					prompt.sender = { chat = "s2", title = "Short chat" }
+				end
+				table.insert(list, prompt)
+				table.insert(list, { id = `rr{i}`, role = "assistant", text = pair[2], model = "Opus", at = `Nov 13, 2:{10 + i} PM`, copy = pair[2] })
+			end
+			TRANSCRIPTS.s7 = list
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
 	-- (table_fixture's `status`.)
 	local STATUS_TABLE = [[
 Beta.5 is almost out. Here's where everything stands:
