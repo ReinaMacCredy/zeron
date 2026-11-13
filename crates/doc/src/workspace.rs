@@ -299,6 +299,11 @@ impl WorkspaceDoc {
         set_opt_str(&row, "createdByChatId", chat.created_by_chat_id.as_deref())?;
         set_opt_str(
             &row,
+            "childKind",
+            chat.child_kind.map(zeron_proto::ChildKind::as_str),
+        )?;
+        set_opt_str(
+            &row,
             "forkedFromChatId",
             chat.forked_from_chat_id.as_deref(),
         )?;
@@ -774,6 +779,8 @@ pub(crate) struct RawChat {
     sidechat_source_chat_id: Option<String>,
     #[serde(default)]
     created_by_chat_id: Option<String>,
+    #[serde(default, deserialize_with = "zeron_proto::lenient_child_kind")]
+    child_kind: Option<zeron_proto::ChildKind>,
     #[serde(default)]
     forked_from_chat_id: Option<String>,
     /// LENIENT like `config`: a harness id this build doesn't know is
@@ -861,6 +868,7 @@ impl From<RawChat> for Chat {
             room_gen: raw.room_gen,
             sidechat_source_chat_id: raw.sidechat_source_chat_id,
             created_by_chat_id: raw.created_by_chat_id,
+            child_kind: raw.child_kind,
             forked_from_chat_id: raw.forked_from_chat_id,
             previous_harnesses: raw.previous_harnesses,
             delegation: raw.delegation,
@@ -1052,6 +1060,7 @@ mod tests {
             room_gen: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            child_kind: None,
             forked_from_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,

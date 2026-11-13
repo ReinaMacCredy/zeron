@@ -697,6 +697,7 @@ impl Client {
             room_gen: Some(2),
             sidechat_source_chat_id: Default::default(),
             created_by_chat_id: Default::default(),
+            child_kind: None,
             forked_from_chat_id: Default::default(),
             previous_harnesses: Default::default(),
             delegation: Default::default(),

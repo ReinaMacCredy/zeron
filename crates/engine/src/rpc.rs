@@ -1101,6 +1101,8 @@ enum MutateParams {
         /// grouping only.
         #[serde(default, alias = "parentChatId")]
         created_by_chat_id: Option<String>,
+        #[serde(default, deserialize_with = "zeron_proto::lenient_child_kind")]
+        child_kind: Option<zeron_proto::ChildKind>,
         /// Run on Cloud (the checkout picker's Cloud): the chat gets its own
         /// Cloud machine, cloning the project's GitHub repository.
         #[serde(default)]
@@ -3381,6 +3383,7 @@ impl EngineRpc {
                 branch,
                 cwd,
                 created_by_chat_id,
+                child_kind,
                 cloud: _,
             } => {
                 // A voice orchestrator is hidden, so the chats it creates are
@@ -3388,13 +3391,14 @@ impl EngineRpc {
                 let created_by_chat_id = created_by_chat_id
                     .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent));
                 self.workspace
-                    .create_chat_from(
+                    .create_child_chat(
                         &chat_id,
                         space_id.as_deref(),
                         device_id.as_deref(),
                         config,
                         cwd,
                         created_by_chat_id.as_deref(),
+                        child_kind,
                     )
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
@@ -3831,7 +3835,7 @@ fn chat_descendants(
         chat.delegated_by() == Some(parent)
             || chat.sidechat_source_chat_id.as_deref() == Some(parent)
             || (chat.created_by_chat_id.as_deref() == Some(parent)
-                && chat.forked_from_chat_id.is_some())
+                && (chat.forked_from_chat_id.is_some() || chat.child_kind.is_some()))
     };
     let mut out: Vec<(String, bool)> = Vec::new();
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::from([root]);
@@ -6662,6 +6666,7 @@ impl RpcService for EngineRpc {
                     cwd,
                     created_by_chat_id,
                     cloud,
+                    ..
                 } = &p
                     && let Some(host) = Box::pin(self.cloud_chat_host(
                         chat_id,

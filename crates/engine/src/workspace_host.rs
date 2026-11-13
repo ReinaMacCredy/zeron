@@ -1145,7 +1145,9 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
     ) -> Result<(), EngineError> {
-        self.insert_chat(chat_id, space_id, device_id, None, config, cwd, None, None)
+        self.insert_chat(
+            chat_id, space_id, device_id, None, config, cwd, None, None, None,
+        )
     }
 
     /// [`Self::create_chat`] stamped with the chat whose agent is opening it
@@ -1159,6 +1161,28 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
         created_by_chat_id: Option<&str>,
+    ) -> Result<(), EngineError> {
+        self.create_child_chat(
+            chat_id,
+            space_id,
+            device_id,
+            config,
+            cwd,
+            created_by_chat_id,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_child_chat(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        device_id: Option<&str>,
+        config: Option<ChatConfig>,
+        cwd: Option<String>,
+        created_by_chat_id: Option<&str>,
+        child_kind: Option<zeron_proto::ChildKind>,
     ) -> Result<(), EngineError> {
         if zeron_proto::supervisor::is_supervisor_chat(chat_id) {
             return Err(EngineError::Other(format!(
@@ -1174,6 +1198,7 @@ impl WorkspaceHost {
             config,
             cwd,
             created_by_chat_id,
+            child_kind.filter(|_| created_by_chat_id.is_some()),
             None,
         )
     }
@@ -1205,6 +1230,7 @@ impl WorkspaceHost {
             config,
             cwd,
             None,
+            None,
             Some(delegation),
         )
     }
@@ -1234,6 +1260,7 @@ impl WorkspaceHost {
             cwd,
             created_by_chat_id,
             None,
+            None,
         )
     }
 
@@ -1247,6 +1274,7 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
         created_by_chat_id: Option<&str>,
+        child_kind: Option<zeron_proto::ChildKind>,
         delegation: Option<zeron_proto::Delegation>,
     ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
@@ -1313,6 +1341,7 @@ impl WorkspaceHost {
                 last_seen_at: None,
                 sidechat_source_chat_id: None,
                 created_by_chat_id: created_by_chat_id.map(str::to_string),
+                child_kind,
                 forked_from_chat_id: None,
                 previous_harnesses: Vec::new(),
                 delegation,
@@ -1372,6 +1401,7 @@ impl WorkspaceHost {
             last_seen_at: None,
             sidechat_source_chat_id: Some(source_chat_id.to_string()),
             created_by_chat_id: None,
+            child_kind: None,
             forked_from_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
@@ -1433,6 +1463,7 @@ impl WorkspaceHost {
             last_seen_at: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            child_kind: None,
             forked_from_chat_id: Some(source.id.clone()),
             previous_harnesses: Vec::new(),
             delegation: None,
@@ -1495,6 +1526,7 @@ impl WorkspaceHost {
             last_seen_at: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            child_kind: None,
             forked_from_chat_id: None,
             previous_harnesses,
             delegation: None,

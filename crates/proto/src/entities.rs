@@ -349,6 +349,13 @@ pub struct Chat {
     /// link never expires. `None` for a chat a person opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by_chat_id: Option<String>,
+    /// Set, `created_by_chat_id` is this chat's parent and goes with it; unset, a thread that stays.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_child_kind"
+    )]
+    pub child_kind: Option<ChildKind>,
     /// A label like `created_by_chat_id`: the source holds no authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from_chat_id: Option<String>,
@@ -375,6 +382,41 @@ pub struct Chat {
     /// peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep: Option<ChatSleep>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChildKind {
+    Side,
+    Subagent,
+}
+
+impl ChildKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChildKind::Side => "side",
+            ChildKind::Subagent => "subagent",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "side" => Some(ChildKind::Side),
+            "subagent" => Some(ChildKind::Subagent),
+            _ => None,
+        }
+    }
+}
+
+pub fn lenient_child_kind<'de, D>(deserializer: D) -> Result<Option<ChildKind>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .and_then(ChildKind::parse))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3666,6 +3708,44 @@ mod tests {
         assert!(chat.sidechat_expired(deadline + chrono::Duration::minutes(1)));
         chat.sidechat_source_chat_id = None;
         assert!(!chat.sidechat_expired(deadline + chrono::Duration::days(100)));
+    }
+
+    #[test]
+    fn a_child_kind_round_trips_and_an_unknown_one_costs_only_itself() {
+        let row = |extra: serde_json::Value| {
+            let mut row = serde_json::json!({
+                "id": "c", "deviceId": "d", "archived": false,
+                "createdAt": "2026-11-13T10:00:00Z", "createdByChatId": "p"
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                row[k] = v.clone();
+            }
+            row
+        };
+        let chat: Chat =
+            serde_json::from_value(row(serde_json::json!({ "childKind": "subagent" }))).unwrap();
+        assert_eq!(chat.child_kind, Some(ChildKind::Subagent));
+        assert_eq!(
+            serde_json::to_value(&chat).unwrap()["childKind"],
+            "subagent"
+        );
+        let side: Chat =
+            serde_json::from_value(row(serde_json::json!({ "childKind": "side" }))).unwrap();
+        assert_eq!(side.child_kind, Some(ChildKind::Side));
+        for extra in [
+            serde_json::json!({ "childKind": "orbit" }),
+            serde_json::json!({ "childKind": 3 }),
+            serde_json::json!({}),
+        ] {
+            let chat: Chat = serde_json::from_value(row(extra)).unwrap();
+            assert_eq!(chat.child_kind, None);
+            assert!(
+                serde_json::to_value(&chat)
+                    .unwrap()
+                    .get("childKind")
+                    .is_none()
+            );
+        }
     }
 
     #[test]
