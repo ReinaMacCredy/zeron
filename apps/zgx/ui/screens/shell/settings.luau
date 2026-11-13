@@ -735,6 +735,9 @@ M.Panel = ui.component(function(): Node
 						end,
 						M.View({ panel = true }),
 					}),
+					-- What its pages say (a refused change): over the scrim while it's
+					-- up, as the window's own stack is under it.
+					ds.toast.Host { front = open },
 				})
 			end,
 		},

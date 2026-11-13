@@ -95,8 +95,8 @@ test("the search finds a Chat row, and thread naming once, on General's Chat sec
 	expect(app:state("settings_search_lit")).to_be("key_switcher_cycles")
 end)
 
-test("settings/chat and settings/browser_history open General and Browser at their sections", function()
-	for _, case in { { "chat", "/settings/general", "#setting-chat_section" }, { "browser_history", "/settings/browser", "#setting-history_section" } } do
+test("settings/chat, settings/browser_history and settings/themes open General, Browser and Appearance at their sections", function()
+	for _, case in { { "chat", "/settings/general", "#setting-chat_section" }, { "browser_history", "/settings/browser", "#setting-history_section" }, { "themes", "/settings/appearance", "#setting-themes_section" } } do
 		local app = reachable(mount("shell_fixture.luau"))
 		app:resize(1200, 900)
 		app:frames(30)
