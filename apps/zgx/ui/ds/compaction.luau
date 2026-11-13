@@ -852,7 +852,9 @@ function M.Chip(props: { label: () -> string? }): Node
 			id = "composer-compacting",
 			role = "status",
 			mx = ui.raw(8, "gpui's compaction card"),
-			mt = ui.raw(6, "gpui's compaction card"),
+			-- (Padding, not margins: a sized presence holds its content at its border box, so a margin squeezed the line under the frame.)
+			pt = ui.raw(6, "gpui's compaction card"),
+			pb = ui.raw(8, "gpui's composer gap under it (composer.rs SPACE_SM)"),
 			gap = ui.raw(6, "gpui's compaction card"),
 			items = "center",
 			text_size = "$font.size.sm",
@@ -883,37 +885,40 @@ function M.Resume(props: { offer: () -> Offer?, on_compact: () -> (), on_keep: (
 			return last
 		end
 		return ui.column {
-			id = "composer-resume",
-			role = "group",
-			label = s("resume_title"),
-			mx = ui.raw(4, "gpui's compaction card"),
-			mt = ui.raw(6, "gpui's compaction card"),
-			mb = ui.raw(2, "gpui's compaction card"),
-			px = ui.raw(12, "gpui's compaction card"),
-			py = ui.raw(10, "gpui's compaction card"),
-			gap = ui.raw(8, "gpui's compaction card"),
-			rounded = ui.raw(12, "gpui's compaction card"),
-			border = 1,
-			border_color = "$border.subtle",
-			bg = "$surface.raised",
-			ui.row {
+			w_full = true,
+			px = ui.raw(4, "gpui's compaction card"),
+			pt = ui.raw(6, "gpui's compaction card"),
+			pb = ui.raw(2, "gpui's compaction card"),
+			ui.column {
+				id = "composer-resume",
+				role = "group",
+				label = s("resume_title"),
+				px = ui.raw(12, "gpui's compaction card"),
+				py = ui.raw(10, "gpui's compaction card"),
 				gap = ui.raw(8, "gpui's compaction card"),
-				items = "center",
-				ui.div { color = "$accent", Icon { name = "collapse-arrows", size = 14 } },
-				ui.text { s("resume_title"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.primary" },
-			},
-			ui.text {
-				function(): string
-					local o = now()
-					return s("resume_body", { tokens = o.tokens, idle = o.idle })
-				end,
-				text_size = "$font.size.sm",
-				color = "$text.secondary",
-			},
-			ui.row {
-				gap = ui.raw(6, "gpui's compaction card"),
-				Button { s("resume_compact"), id = "composer-resume-compact", tone = "primary", size = "sm", on_click = props.on_compact },
-				Button { s("resume_keep"), id = "composer-resume-keep", tone = "ghost", size = "sm", on_click = props.on_keep },
+				rounded = ui.raw(12, "gpui's compaction card"),
+				border = 1,
+				border_color = "$border.subtle",
+				bg = "$surface.raised",
+				ui.row {
+					gap = ui.raw(8, "gpui's compaction card"),
+					items = "center",
+					ui.div { color = "$accent", Icon { name = "collapse-arrows", size = 14 } },
+					ui.text { s("resume_title"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.primary" },
+				},
+				ui.text {
+					function(): string
+						local o = now()
+						return s("resume_body", { tokens = o.tokens, idle = o.idle })
+					end,
+					text_size = "$font.size.sm",
+					color = "$text.secondary",
+				},
+				ui.row {
+					gap = ui.raw(6, "gpui's compaction card"),
+					Button { s("resume_compact"), id = "composer-resume-compact", tone = "primary", size = "sm", on_click = props.on_compact },
+					Button { s("resume_keep"), id = "composer-resume-keep", tone = "ghost", size = "sm", on_click = props.on_keep },
+				},
 			},
 		}
 	end, { w_full = true, enter = { opacity = { 0, 1 }, y = { 4, 0 }, duration = 180, ease = "outCubic" }, exit = { opacity = 0, duration = 120 } })
