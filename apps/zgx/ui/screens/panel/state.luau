@@ -38,8 +38,8 @@ export type Tab = {
 	-- chat and action it runs ({ space, device, chat, action }), run once
 	-- as the tab first shows; its name is the tab's `title`.
 	run: { [string]: any }?,
-	-- What's typed into a new terminal once it's open (a chat's shell
-	-- block, its Enter with it), then forgotten.
+	-- What's pasted into a new terminal once its shell is up (a chat's
+	-- shell block), then Entered and forgotten.
 	input: string?,
 	-- A plugin's tab: which plugin, its own kind, its title and icon, and
 	-- what it carries (screens/plugins opens it; the plugin draws it).
