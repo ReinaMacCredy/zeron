@@ -96,6 +96,7 @@ fn question(
         multiline: false,
         kind: None,
         approval: false,
+        action: None,
     }
 }
 

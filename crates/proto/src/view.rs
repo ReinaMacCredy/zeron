@@ -1412,6 +1412,7 @@ mod input_outcome_tests {
             multiline: false,
             kind: None,
             approval: false,
+            action: None,
         }
     }
 

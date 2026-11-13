@@ -26,6 +26,7 @@ pub async fn apply(
     note: Option<SystemNote>,
 ) -> Result<(), EngineError> {
     let left_config = workspace.chat_config(&chat_id);
+    let left_access = left_config.as_ref().map(|c| c.access);
     let left_instance = left_config.as_ref().and_then(|c| c.instance_id.clone());
     let left_model = left_config.and_then(|c| c.model);
     let left = doc_host.harness_for(&chat_id);
@@ -49,6 +50,9 @@ pub async fn apply(
     } else {
         workspace.set_chat_config(&chat_id, &config)
     }?;
+    if left_access.is_some_and(|left| config.access > left) {
+        sessions.raise_run_access(chat_id, config.access);
+    }
     let (Some(handle), Some(mut note)) = (handle, note) else {
         return Ok(());
     };

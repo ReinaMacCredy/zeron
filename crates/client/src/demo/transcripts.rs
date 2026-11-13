@@ -614,6 +614,7 @@ pub(crate) fn picker_questions() -> Vec<UserInputQuestion> {
             multiline: false,
             multi_select: false,
             kind: None,
+            action: None,
         },
         UserInputQuestion {
             approval: false,
@@ -630,6 +631,7 @@ pub(crate) fn picker_questions() -> Vec<UserInputQuestion> {
             multiline: false,
             multi_select: true,
             kind: None,
+            action: None,
         },
     ]
 }
@@ -693,6 +695,7 @@ fn approval(
                         multiline: false,
                         multi_select: false,
                         kind: None,
+                        action: None,
                     }],
                     resolved: false,
                     answers: None,
@@ -1055,6 +1058,7 @@ fn input(
             kind: Some(kind),
             prefill: None,
             multiline: false,
+            action: None,
         }],
         resolved: answer.is_some(),
         answers: answer.map(|label| {
@@ -1856,6 +1860,7 @@ pub(crate) fn asking() -> Vec<Step> {
             multiline: false,
             multi_select: false,
             kind: None,
+            action: None,
         }]),
     ]
 }

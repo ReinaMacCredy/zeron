@@ -110,6 +110,7 @@ impl Harness for StallHarness {
                     prefill: None,
                     multiline: false,
                     approval: false,
+                    action: None,
                 }])
                 .await
                 .unwrap_or_default();

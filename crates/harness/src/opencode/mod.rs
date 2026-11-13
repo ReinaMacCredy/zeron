@@ -5038,6 +5038,7 @@ fn map_questions(props: &Value) -> Vec<(String, UserInputQuestion)> {
                                 .and_then(Value::as_bool)
                                 .unwrap_or(false),
                             kind: None,
+                            action: None,
                         },
                     ))
                 })

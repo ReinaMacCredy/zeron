@@ -316,7 +316,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "set_thread",
-            "description": "Change threads on this device, in any project; set exactly one of `title` (renames `threadId`, this chat included), `archived` (archives or unarchives `threadId` or `threadIds`; not while one works, never cascades) or `settled` (as the sidebar's Settle: on the Inbox's Settled shelf until its next message; not while one works or waits on a question).",
+            "description": "Change threads on this device, in any project; set exactly one of `title` (renames `threadId`, this chat included), `archived` (archives or unarchives `threadId` or `threadIds`; not while one works, never cascades), `settled` (as the sidebar's Settle: on the Inbox's Settled shelf until its next message; not while one works or waits on a question) or `access` (one `threadId`: this chat or a thread it opened or delegated, capped at this chat's access; a raise reaches its running turn and the approvals it waits on at once, a lower one applies from its next run).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -324,7 +324,8 @@ fn thread_tool_list() -> Value {
                     "threadIds": { "type": "array", "items": { "type": "string" } },
                     "title": { "type": "string" },
                     "archived": { "type": "boolean" },
-                    "settled": { "type": "boolean" }
+                    "settled": { "type": "boolean" },
+                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"] }
                 },
                 "additionalProperties": false
             }
@@ -341,12 +342,13 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "respond_to_input",
-            "description": "Answer the question or permission request another thread is blocked on (its `pendingInput`); `requestId` defaults to the current one. Each answer is a question id with the chosen option labels, or free text for an open question. A tool approval (`approval: true`) needs this chat at Full access; computer-use consent is the person's and is refused.",
+            "description": "Answer the question or permission request another thread is blocked on (its `pendingInput`); `requestId` defaults to the current one. Each answer is a question id with the chosen option labels, or free text for an open question. A tool approval (`approval: true`) needs this chat at Full access; computer-use consent is the person's and is refused. `scope: \"run\"` answers Yes and lets that thread's run do the same kind of action (command, file change or tool, never a plan) without asking until it ends; its chat config is unchanged.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "threadId": thread_id,
                     "requestId": { "type": "string" },
+                    "scope": { "type": "string", "enum": ["once", "run"] },
                     "answers": {
                         "type": "array",
                         "items": {
@@ -1808,6 +1810,11 @@ impl ThreadTools {
             .ok()
             .filter(|answers: &Vec<UserInputAnswer>| !answers.is_empty())
             .ok_or("answers must be a nonempty list of {questionId, labels}")?;
+        let for_run = match args["scope"].as_str() {
+            None | Some("once") => false,
+            Some("run") => true,
+            Some(other) => return Err(format!("scope is once or run, not {other}")),
+        };
         let (caller, _) = self.peers().await?;
         self.open_peer(thread_id).await?;
         let request_id = args["requestId"].as_str();
@@ -1846,16 +1853,15 @@ impl ThreadTools {
             ));
         }
         let request_id = pending["requestId"].clone();
-        let queued = self
-            .call_engine(
-                methods::QUEUE_COMMAND,
-                json!({
-                    "chatId": thread_id,
-                    "command": { "kind": "respondInput", "requestId": request_id, "answers": answers },
-                    "fromChatId": self.chat_id,
-                }),
-            )
-            .await?;
+        let mut params = json!({
+            "chatId": thread_id,
+            "command": { "kind": "respondInput", "requestId": request_id, "answers": answers },
+            "fromChatId": self.chat_id,
+        });
+        if for_run {
+            params["scope"] = json!("run");
+        }
+        let queued = self.call_engine(methods::QUEUE_COMMAND, params).await?;
         Ok(json!({
             "threadId": thread_id,
             "requestId": request_id,
@@ -2894,20 +2900,58 @@ impl ThreadTools {
     }
 
     pub async fn set_thread(&self, args: &Value) -> Result<Value, String> {
-        let fields = ["title", "archived", "settled"]
+        let fields = ["title", "archived", "settled", "access"]
             .into_iter()
             .filter(|field| !args[*field].is_null())
             .count();
         if fields != 1 {
-            return Err("set exactly one of title, archived or settled".into());
+            return Err("set exactly one of title, archived, settled or access".into());
         }
         if !args["title"].is_null() {
             self.set_thread_title(args).await
         } else if !args["archived"].is_null() {
             self.set_thread_archived(args).await
-        } else {
+        } else if !args["settled"].is_null() {
             self.set_thread_settled(args).await
+        } else {
+            self.set_thread_access(args).await
         }
+    }
+
+    async fn set_thread_access(&self, args: &Value) -> Result<Value, String> {
+        let thread_id = Self::thread_id(args)?;
+        let access: AccessMode = serde_json::from_value(args["access"].clone())
+            .map_err(|_| "access is supervised, auto-accept-edits or full-access")?;
+        let mut config = self
+            .open_peer(thread_id)
+            .await?
+            .config
+            .ok_or_else(|| format!("thread {thread_id} has no config to change"))?;
+        let before = config.access;
+        config.access = access;
+        self.call_engine(
+            methods::MUTATE,
+            json!({ "op": "setChatConfig", "chatId": thread_id, "config": config }),
+        )
+        .await?;
+        let now = self
+            .peer(thread_id)
+            .await?
+            .config
+            .map_or(access, |config| config.access);
+        let mut note = match now.cmp(&before) {
+            std::cmp::Ordering::Greater => {
+                "raised now: its running turn and the approvals it waits on follow".to_owned()
+            }
+            std::cmp::Ordering::Less => {
+                "lowered from its next run; a running turn keeps the access it has".to_owned()
+            }
+            std::cmp::Ordering::Equal => "unchanged".to_owned(),
+        };
+        if now < access {
+            note.push_str("; capped at this chat's own access");
+        }
+        Ok(json!({ "threadId": thread_id, "access": now, "note": note }))
     }
 
     async fn set_thread_title(&self, args: &Value) -> Result<Value, String> {

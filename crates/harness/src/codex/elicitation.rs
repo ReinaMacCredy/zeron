@@ -93,6 +93,7 @@ pub(super) fn form(params: &Value) -> Option<Form> {
             approval: false,
             kind: None,
             multi_select: false,
+            action: None,
         };
         return Some(Form {
             fields: Vec::new(),
@@ -139,6 +140,7 @@ pub(super) fn form(params: &Value) -> Option<Form> {
             approval: false,
             kind: None,
             multi_select,
+            action: None,
         };
         fields.push(Field {
             key: key.clone(),

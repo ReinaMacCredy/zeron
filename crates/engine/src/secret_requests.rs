@@ -120,6 +120,7 @@ impl SecretRequests {
             prefill: None,
             multiline: false,
             approval: false,
+            action: None,
         };
         let key = p
             .client_request_id

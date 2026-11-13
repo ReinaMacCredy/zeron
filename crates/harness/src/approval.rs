@@ -2,7 +2,7 @@
 //! before what its [`AccessMode`] does not cover; every driver asks the same
 //! way — a yes/no question through [`crate::RunControls::request_input`] —
 //! so an approval reads alike whichever agent raised it.
-use zeron_proto::{AccessMode, UserInputAnswer, UserInputQuestion};
+use zeron_proto::{AccessMode, ApprovalAction, UserInputAnswer, UserInputQuestion};
 
 pub const ALLOW: &str = zeron_proto::APPROVAL_ALLOW;
 pub const DENY: &str = zeron_proto::APPROVAL_DENY;
@@ -38,7 +38,39 @@ pub fn question(header: impl Into<String>, question: impl Into<String>) -> UserI
         prefill: None,
         multiline: false,
         approval: true,
+        action: None,
     }
+}
+
+pub fn covered(access: AccessMode, questions: &[UserInputQuestion]) -> bool {
+    !questions.is_empty()
+        && questions.iter().all(|q| {
+            q.action
+                .filter(|_| q.approval && q.kind.is_none())
+                .is_some_and(|action| {
+                    let action = match action {
+                        ApprovalAction::Edit => Action::Edit,
+                        ApprovalAction::Command | ApprovalAction::Tool => Action::Other,
+                    };
+                    allowed_without_asking(access, action)
+                })
+        })
+}
+
+pub fn least_covering(questions: &[UserInputQuestion]) -> Option<AccessMode> {
+    AccessMode::ALL
+        .into_iter()
+        .find(|access| covered(*access, questions))
+}
+
+pub fn allow_all(questions: &[UserInputQuestion]) -> Vec<UserInputAnswer> {
+    questions
+        .iter()
+        .map(|q| UserInputAnswer {
+            question_id: q.id.clone(),
+            labels: vec![ALLOW.into()],
+        })
+        .collect()
 }
 
 /// Whether `answers` approve `question`. Anything but an explicit yes —
@@ -53,25 +85,31 @@ pub fn approved(question: &UserInputQuestion, answers: &[UserInputAnswer]) -> bo
 /// "`agent` wants to run `command`. Allow it?"
 pub fn command(agent: &str, command: &str) -> UserInputQuestion {
     let command = command.trim();
-    question(
-        "Approve command",
-        if command.is_empty() {
-            format!("{agent} wants to run a command. Allow it?")
-        } else {
-            format!("{agent} wants to run `{command}`. Allow it?")
-        },
+    typed(
+        ApprovalAction::Command,
+        question(
+            "Approve command",
+            if command.is_empty() {
+                format!("{agent} wants to run a command. Allow it?")
+            } else {
+                format!("{agent} wants to run `{command}`. Allow it?")
+            },
+        ),
     )
 }
 
 /// "`agent` wants to modify a, b. Allow it?"
 pub fn edit(agent: &str, paths: &[&str]) -> UserInputQuestion {
-    question(
-        "Approve file change",
-        if paths.is_empty() {
-            format!("{agent} wants to modify files. Allow it?")
-        } else {
-            format!("{agent} wants to modify {}. Allow it?", paths.join(", "))
-        },
+    typed(
+        ApprovalAction::Edit,
+        question(
+            "Approve file change",
+            if paths.is_empty() {
+                format!("{agent} wants to modify files. Allow it?")
+            } else {
+                format!("{agent} wants to modify {}. Allow it?", paths.join(", "))
+            },
+        ),
     )
 }
 
@@ -82,10 +120,20 @@ pub fn tool(agent: &str, tool: &str, detail: Option<&str>) -> UserInputQuestion 
         .filter(|d| !d.is_empty())
         .map(|d| format!(" ({d})"))
         .unwrap_or_default();
-    question(
-        "Approve tool",
-        format!("{agent} wants to use {tool}{detail}. Allow it?"),
+    typed(
+        ApprovalAction::Tool,
+        question(
+            "Approve tool",
+            format!("{agent} wants to use {tool}{detail}. Allow it?"),
+        ),
     )
+}
+
+fn typed(action: ApprovalAction, question: UserInputQuestion) -> UserInputQuestion {
+    UserInputQuestion {
+        action: Some(action),
+        ..question
+    }
 }
 
 #[cfg(test)]
@@ -99,6 +147,31 @@ mod tests {
         assert!(allowed_without_asking(AutoAcceptEdits, Action::Edit));
         assert!(!allowed_without_asking(AutoAcceptEdits, Action::Other));
         assert!(!allowed_without_asking(Supervised, Action::Edit));
+    }
+
+    #[test]
+    fn a_mode_covers_only_typed_approvals_it_allows() {
+        use AccessMode::*;
+        let edit = edit("Muse", &["a.rs"]);
+        let command = command("Muse", "ls");
+        let tool = tool("Muse", "fetch", None);
+        let plan = question(zeron_proto::PLAN_APPROVAL_HEADER, "Start the plan?");
+        assert!(covered(AutoAcceptEdits, std::slice::from_ref(&edit)));
+        assert!(!covered(AutoAcceptEdits, &[edit.clone(), command.clone()]));
+        assert!(covered(FullAccess, &[edit.clone(), command.clone(), tool.clone()]));
+        assert!(!covered(Supervised, std::slice::from_ref(&edit)));
+        assert!(!covered(FullAccess, std::slice::from_ref(&plan)));
+        assert!(!covered(FullAccess, &[]));
+        let consent = UserInputQuestion {
+            kind: Some(zeron_proto::UserInputKind::Foreground { app: None }),
+            ..command.clone()
+        };
+        assert!(!covered(FullAccess, &[consent]));
+        assert_eq!(least_covering(&[edit.clone()]), Some(AutoAcceptEdits));
+        assert_eq!(least_covering(&[edit.clone(), tool]), Some(FullAccess));
+        assert_eq!(least_covering(&[command, plan]), None);
+        let yes = allow_all(std::slice::from_ref(&edit));
+        assert!(approved(&edit, &yes));
     }
 
     #[test]

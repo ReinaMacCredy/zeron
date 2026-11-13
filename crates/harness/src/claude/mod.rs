@@ -2479,6 +2479,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
                     })
                     .collect(),
                 kind: None,
+                action: None,
             }
         })
         .collect()

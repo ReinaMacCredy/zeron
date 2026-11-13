@@ -4636,6 +4636,7 @@ fn handle_server_request_live(
         multiline: false,
         multi_select: false,
         kind: None,
+        action: None,
     };
     let request_input = std::sync::Arc::clone(request_input);
     questions.spawn(client.clone(), id, async move {

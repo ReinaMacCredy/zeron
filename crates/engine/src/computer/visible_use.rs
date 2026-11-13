@@ -910,6 +910,7 @@ mod tests {
                 kind,
                 prefill: None,
                 multiline: false,
+                action: None,
             }],
             resolved: answer.is_some(),
             answers: answer.map(|label| {

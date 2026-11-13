@@ -102,6 +102,7 @@ struct PendingInput {
     tx: oneshot::Sender<Vec<UserInputAnswer>>,
     person: bool,
     secret: bool,
+    questions: Vec<UserInputQuestion>,
 }
 
 type PendingInputs = Arc<Mutex<HashMap<String, PendingInput>>>;
@@ -148,6 +149,36 @@ impl Drop for SecretAnswer {
 }
 
 pub(crate) const SECRET_QUESTION_ID: &str = "secret";
+
+fn raise_allowance(run: &RunHandle, access: AccessMode, keep: Option<&str>) -> bool {
+    let mut pending = lock(&run.pending_inputs);
+    {
+        let mut allowance = lock(&run.allowance);
+        if access <= *allowance {
+            return false;
+        }
+        *allowance = access;
+    }
+    let covered: Vec<String> = pending
+        .iter()
+        .filter(|(id, input)| {
+            Some(id.as_str()) != keep
+                && !input.secret
+                && zeron_harness::approval::covered(access, &input.questions)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for request_id in covered {
+        let input = pending.remove(&request_id).expect("listed above");
+        let answers = zeron_harness::approval::allow_all(&input.questions);
+        let _ = input.tx.send(answers.clone());
+        let _ = run.engine_tx.send(AgentEvent::InputResolved {
+            request_id,
+            answers: Some(answers),
+        });
+    }
+    true
+}
 
 pub(crate) fn asks_person(questions: &[UserInputQuestion]) -> bool {
     !questions.iter().any(UserInputQuestion::is_computer)
@@ -325,6 +356,7 @@ struct RunHandle {
     cancel: watch::Sender<bool>,
     engine_tx: mpsc::UnboundedSender<AgentEvent>,
     pending_inputs: PendingInputs,
+    allowance: Arc<Mutex<AccessMode>>,
     /// Steers accepted into the mailbox but not yet confirmed by a `Steered`
     /// event — the at-least-once ledger. A run can die with accepted steers
     /// still in its mailbox (idle reaper vs. a routed send; a mid-turn error
@@ -622,6 +654,8 @@ impl RunSetup {
         let (engine_tx, engine_rx) = mpsc::unbounded_channel();
         let pending_inputs: PendingInputs = Arc::new(Mutex::new(HashMap::new()));
         let pending = pending_inputs.clone();
+        let allowance = Arc::new(Mutex::new(request.access));
+        let live_allowance = allowance.clone();
         let events = engine_tx.clone();
         let interrupt_token = CancellationToken::new();
         let turn = TurnControl::default();
@@ -638,16 +672,23 @@ impl RunSetup {
             request_input: Box::new(move |questions: Vec<UserInputQuestion>| {
                 let (mut tx, rx) = oneshot::channel();
                 if accepts_input {
+                    let mut waiting = lock(&pending);
+                    if zeron_harness::approval::covered(*lock(&live_allowance), &questions) {
+                        let _ = tx.send(zeron_harness::approval::allow_all(&questions));
+                        return rx;
+                    }
                     let (answer_tx, answer_rx) = oneshot::channel();
                     let request_id = new_id();
-                    lock(&pending).insert(
+                    waiting.insert(
                         request_id.clone(),
                         PendingInput {
                             person: asks_person(&questions),
                             secret: questions.iter().any(UserInputQuestion::is_secret),
                             tx: answer_tx,
+                            questions: questions.clone(),
                         },
                     );
+                    drop(waiting);
                     let _ = events.send(AgentEvent::InputRequested {
                         request_id: request_id.clone(),
                         questions,
@@ -696,6 +737,7 @@ impl RunSetup {
                 cancel: cancel_tx,
                 engine_tx,
                 pending_inputs,
+                allowance,
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 fork_history_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 computer: RunComputer::new(),
@@ -2134,6 +2176,7 @@ impl SessionsEngine {
                     config: reconfigure.then(|| Box::new(request.clone())),
                 };
                 if let Ok(permit) = steer_tx.reserve().await {
+                    self.reset_allowance(chat_id, &run_id);
                     // Commit the reserved slot atomically with the update
                     // marker. An accepted update releases the slot instead, and
                     // the prompt takes the fresh-run path behind the update.
@@ -4632,6 +4675,71 @@ impl SessionsEngine {
         Ok(true)
     }
 
+    pub fn raise_run_access(&self, chat_id: &str, access: AccessMode) -> bool {
+        let raised = {
+            let mut runs = lock(&self.inner.runs);
+            let Some(run) = runs.get_mut(chat_id) else {
+                return false;
+            };
+            let launch = &mut run.runtime_config.request.access;
+            let relaunch = access > *launch;
+            if relaunch {
+                *launch = access;
+            }
+            raise_allowance(run, access, None) || relaunch
+        };
+        if let Some(last) = lock(&self.inner.last_requests).get_mut(chat_id)
+            && access > last.access
+        {
+            last.access = access;
+        }
+        raised
+    }
+
+    pub fn run_scope_access(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        answers: &[UserInputAnswer],
+    ) -> Result<AccessMode, String> {
+        let runs = lock(&self.inner.runs);
+        let run = runs.get(chat_id).ok_or(
+            "that thread's run isn't live on this device, so its request can only be answered once",
+        )?;
+        let pending = lock(&run.pending_inputs);
+        let input = pending
+            .get(request_id)
+            .ok_or("that request is no longer waiting")?;
+        let access = zeron_harness::approval::least_covering(&input.questions).ok_or(
+            "only a command, file change or tool approval can be approved for the run; answer this one once",
+        )?;
+        if !input
+            .questions
+            .iter()
+            .all(|q| zeron_harness::approval::approved(q, answers))
+        {
+            return Err(
+                "approving for the run answers Yes to every question of the request".into(),
+            );
+        }
+        Ok(access)
+    }
+
+    fn reset_allowance(&self, chat_id: &str, run_id: &str) {
+        if let Some(run) = lock(&self.inner.runs)
+            .get(chat_id)
+            .filter(|run| run.run_id == run_id)
+        {
+            *lock(&run.allowance) = run.runtime_config.request.access;
+        }
+    }
+
+    pub fn allow_for_run(&self, chat_id: &str, access: AccessMode, answered: &str) -> bool {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .is_some_and(|run| raise_allowance(run, access, Some(answered)))
+    }
+
     pub(crate) fn chats_awaiting_input(&self) -> Vec<String> {
         lock(&self.inner.runs)
             .iter()
@@ -4672,6 +4780,7 @@ impl SessionsEngine {
                 person: asks_person(&questions),
                 secret: questions.iter().any(UserInputQuestion::is_secret),
                 tx,
+                questions: questions.clone(),
             },
         );
         run.engine_tx

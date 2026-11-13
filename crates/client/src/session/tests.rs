@@ -50,6 +50,7 @@ fn question(id: &str, consent: bool) -> UserInputQuestion {
         }),
         prefill: None,
         multiline: false,
+        action: None,
     }
 }
 

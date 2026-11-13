@@ -3680,6 +3680,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                     .find_map(|k| q.get(*k).and_then(Value::as_bool))
                     .unwrap_or(false),
                 kind: None,
+                action: None,
             };
             (wire_id, question)
         })

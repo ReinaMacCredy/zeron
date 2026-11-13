@@ -123,6 +123,7 @@ impl Harness for HeldHarness {
                 multiline: false,
                 multi_select: false,
                 kind: None,
+                action: None,
             }])
         });
         let finish = self.finish.subscribe();

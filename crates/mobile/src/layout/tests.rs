@@ -221,6 +221,7 @@ fn question_chip_reads_what_was_answered() {
         multiline: false,
         approval: false,
         kind: None,
+        action: None,
     };
     let chip = |questions: Vec<zeron_proto::UserInputQuestion>, resolved: bool, answers: Option<Vec<zeron_proto::UserInputAnswer>>| {
         let mut w = worker(390.0);
@@ -905,6 +906,7 @@ fn consent_part(request_id: &str) -> MessagePart {
             options: vec!["Allow".into(), "Deny".into()],
             multi_select: false,
             kind: Some(zeron_proto::UserInputKind::Consent { scope: zeron_proto::computer::ComputerConsentScope::Task, app: None, tool: None, params: None }), prefill: None, multiline: false, 
+            action: None,
         }],
         resolved: false,
         answers: None,
@@ -1355,6 +1357,7 @@ fn a_foreground_request_is_a_card_until_answered_then_its_outcome() {
             }),
             prefill: None,
             multiline: false,
+            action: None,
         }],
         resolved,
         answers,

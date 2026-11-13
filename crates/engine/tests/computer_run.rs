@@ -206,6 +206,7 @@ fn plain_question(id: &str) -> UserInputQuestion {
         kind: None,
         prefill: None,
         multiline: false,
+        action: None,
     }
 }
 
@@ -1010,6 +1011,7 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
         }),
         prefill: None,
         multiline: false,
+        action: None,
     };
     let visible = UserInputQuestion {
         approval: false,
@@ -1021,6 +1023,7 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
         kind: None,
         prefill: None,
         multiline: false,
+        action: None,
     };
     let doc = rig.core.doc_host.open(CHAT).unwrap();
     for (id, question) in [("r-consent", consent), ("r-visible", visible)] {
@@ -1542,6 +1545,7 @@ fn push_open_question(rig: &Rig, request_id: &str) {
                     kind: None,
                     prefill: None,
                     multiline: false,
+                    action: None,
                 }],
                 resolved: false,
                 answers: None,

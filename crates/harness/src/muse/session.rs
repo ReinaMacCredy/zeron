@@ -813,6 +813,7 @@ impl Runner {
                 multiline: false,
                 approval: false,
                 kind: None,
+                action: None,
             })
             .collect();
         let answers = (input)(questions.clone());
@@ -1007,6 +1008,7 @@ mod tests {
             multiline: false,
             approval: false,
             kind: None,
+            action: None,
         }
     }
 

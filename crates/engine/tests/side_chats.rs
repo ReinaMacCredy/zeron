@@ -548,6 +548,7 @@ async fn a_fork_settles_the_running_subagent_chips_it_copies() {
                         multiline: false,
                         multi_select: false,
                         kind: None,
+                        action: None,
                     }],
                     resolved: false,
                     answers: None,

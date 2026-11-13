@@ -1822,6 +1822,7 @@ mod tests {
             prefill: None,
             multiline: false,
             approval: true,
+            action: None,
         };
         let text = question_lines(&[forged]).join("\n");
         let mut inside = false;

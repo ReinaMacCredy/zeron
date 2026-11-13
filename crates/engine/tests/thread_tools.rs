@@ -3356,6 +3356,7 @@ impl Harness for AskingHarness {
                     prefill: None,
                     multiline: false,
                     approval,
+                    action: None,
                 }])
                 .await
                 .unwrap_or_default();

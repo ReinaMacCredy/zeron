@@ -320,6 +320,7 @@ pub(crate) fn shelf_questions() -> Vec<UserInputQuestion> {
         prefill: None,
         multiline: false,
         approval: false,
+        action: None,
     }]
 }
 

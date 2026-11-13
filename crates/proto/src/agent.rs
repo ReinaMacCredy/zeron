@@ -1551,6 +1551,28 @@ pub struct UserInputQuestion {
     pub multiline: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub approval: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_approval_action"
+    )]
+    pub action: Option<ApprovalAction>,
+}
+
+fn lenient_approval_action<'de, D>(deserializer: D) -> Result<Option<ApprovalAction>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalAction {
+    Edit,
+    Command,
+    Tool,
 }
 
 pub const APPROVAL_ALLOW: &str = "Yes";
@@ -1901,6 +1923,7 @@ mod tests {
             kind: Some(kind),
             prefill: None,
             multiline: false,
+            action: None,
         };
         assert!(question.is_computer() && !question.is_consent());
         let plain = UserInputQuestion {
@@ -1908,6 +1931,26 @@ mod tests {
             ..question
         };
         assert!(!plain.is_computer());
+    }
+
+    #[test]
+    fn an_unknown_approval_action_reads_as_none_and_keeps_the_question() {
+        let question = |action: serde_json::Value| -> UserInputQuestion {
+            serde_json::from_value(serde_json::json!({
+                "id": "q", "header": "Approve", "question": "Allow?", "options": ["Yes", "No"],
+                "approval": true, "action": action,
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            question(serde_json::json!("command")).action,
+            Some(ApprovalAction::Command)
+        );
+        assert_eq!(question(serde_json::json!("teleport")).action, None);
+        assert_eq!(question(serde_json::json!(7)).action, None);
+        assert_eq!(question(serde_json::Value::Null).action, None);
+        let typed = question(serde_json::json!("edit"));
+        assert_eq!(serde_json::to_value(&typed).unwrap()["action"], "edit");
     }
 
     #[test]

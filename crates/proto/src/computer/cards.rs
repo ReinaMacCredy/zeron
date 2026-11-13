@@ -659,6 +659,7 @@ mod tests {
             }),
             prefill: None,
             multiline: false,
+            action: None,
         }
     }
 

@@ -4358,6 +4358,7 @@ mod computer_marker_tests {
             kind: None,
             prefill: None,
             multiline: false,
+            action: None,
         }
     }
 

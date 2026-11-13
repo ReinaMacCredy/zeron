@@ -19626,6 +19626,7 @@ mod tests {
             multiline: false,
             multi_select: multi,
             kind: None,
+            action: None,
         }
     }
 

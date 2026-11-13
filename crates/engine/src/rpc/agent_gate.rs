@@ -241,9 +241,31 @@ impl EngineRpc {
                 "renameChat" | "setChatArchived" | "setChatSettled" | "markChatSeen" | "createTask" | "assignTask"
                 | "deleteTask" | "escalateTask" | "planSteps" | "updateTask" | "updateTaskStep" => Ok(params),
                 "setChatConfig" => {
-                    let Some(calling) = calling.as_ref().filter(|c| Some(c.id.as_str()) == params["chatId"].as_str()) else {
+                    let Some(calling) = calling.as_ref() else {
                         return Err(refused("An agent changes only its own chat's config"));
                     };
+                    let target_id = params["chatId"].as_str().unwrap_or_default();
+                    if target_id != calling.id {
+                        let target = chats.iter().find(|c| c.id == target_id).filter(|c| {
+                            (c.child_kind.is_some() && c.created_by_chat_id.as_deref() == Some(calling.id.as_str()))
+                                || c.delegation.as_ref().is_some_and(|d| d.delegated_by_chat_id == calling.id)
+                        });
+                        let Some(target) = target else {
+                            return Err(refused(
+                                "An agent changes only its own chat's config, or the access of a thread it opened or delegated",
+                            ));
+                        };
+                        let Some(mut config) = target.config.clone() else {
+                            return Err(refused("That thread has no config to change the access of"));
+                        };
+                        let access: AccessMode = serde_json::from_value(params["config"]["access"].clone())
+                            .map_err(|_| refused("setChatConfig on another thread names only its access"))?;
+                        config.access = match calling.ceiling {
+                            Some((_, max_access)) => cap_access((config.sandbox, access), (config.sandbox, max_access)).1,
+                            None => access,
+                        };
+                        return Ok(json!({"op": "setChatConfig", "chatId": target_id, "config": config}));
+                    }
                     let Some(config) = params.get_mut("config").filter(|c| c.is_object()) else {
                         return Err(refused("setChatConfig needs a config"));
                     };
@@ -284,6 +306,7 @@ impl EngineRpc {
             _ => {
                 let target_id = params["chatId"].as_str().unwrap_or_default().to_owned();
                 let target = chats.iter().find(|c| c.id == target_id);
+                let for_run = params["scope"] == "run";
                 let command = &mut params["command"];
                 match command["kind"].as_str().unwrap_or_default() {
                     "run" => {
@@ -330,7 +353,7 @@ impl EngineRpc {
                                 .any(|l| l.as_str().is_some_and(|l| l.trim().eq_ignore_ascii_case("yes")))
                         });
                         let full = ceiling.is_none_or(|(_, access)| access == AccessMode::FullAccess);
-                        if approves && !full {
+                        if (approves || for_run) && !full {
                             return Err(refused(
                                 "This chat isn't in full access, so it can't approve what another chat asks: tell the person, who answers it in that chat",
                             ));
@@ -478,6 +501,55 @@ mod tests {
             let refused = with_caller(agent("careful"), rpc.handle(methods::MUTATE, op.clone())).await;
             assert!(refused.is_err(), "{op}");
         }
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_agent_changes_only_the_access_of_a_thread_it_owns_capped_at_its_own() {
+        let (_temp, core) = core().await;
+        chat(&core, "lead", "Lead", "workspace-write", "auto-accept-edits").await;
+        chat(&core, "stranger", "Stranger", "read-only", "supervised").await;
+        let rpc = core.rpc_service();
+        for (id, kind) in [("child", Some("subagent")), ("linked", None)] {
+            rpc.handle(
+                methods::MUTATE,
+                json!({"op":"createChat", "chatId":id, "deviceId":core.device_id, "createdByChatId":"lead", "childKind":kind,
+                    "config":{"harness":"codex","model":"m1","sandbox":"read-only","access":"supervised","disabledTools":["terminal"]}}),
+            )
+            .await
+            .unwrap();
+        }
+        let raise = |id: &str| {
+            json!({"op":"setChatConfig", "chatId":id, "note":{"text":"x"},
+                "config":{"harness":"claude-code","model":"m2","sandbox":"danger-full-access","access":"full-access","disabledTools":[]}})
+        };
+        for id in ["stranger", "linked"] {
+            let refused = with_caller(agent("lead"), rpc.handle(methods::MUTATE, raise(id))).await;
+            assert!(refused.is_err(), "{id}");
+        }
+        let gated = with_caller(agent("lead"), async { rpc.agent_gate(methods::MUTATE, raise("child")) })
+            .await
+            .unwrap();
+        assert!(gated.get("note").is_none());
+        with_caller(agent("lead"), rpc.handle(methods::MUTATE, raise("child"))).await.unwrap();
+        let config = core.workspace.chat("child").unwrap().unwrap().config.unwrap();
+        assert_eq!(config.access, zeron_proto::AccessMode::AutoAcceptEdits);
+        assert_eq!(config.sandbox, zeron_proto::SandboxLevel::ReadOnly);
+        assert_eq!(config.harness, HarnessId::Codex);
+        assert_eq!(config.model.as_deref(), Some("m1"));
+        assert_eq!(config.disabled_tools, ["terminal"]);
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn approving_for_the_run_needs_a_full_access_agent_even_with_a_no() {
+        let (_temp, core) = core().await;
+        chat(&core, "careful", "Careful", "workspace-write", "supervised").await;
+        let rpc = core.rpc_service();
+        let no_for_run = json!({"chatId":"child", "scope":"run", "command":{"kind":"respondInput", "requestId":"r",
+            "answers":[{"questionId":"q", "labels":["No"]}]}});
+        let refused = with_caller(agent("careful"), async { rpc.agent_gate(methods::QUEUE_COMMAND, no_for_run) }).await;
+        assert!(refused.is_err());
         core.sessions.shutdown().await;
     }
 

@@ -379,6 +379,16 @@ struct QueueCommandParams {
     transfers: Vec<crate::uploads::AttachmentTransfer>,
     #[serde(default)]
     from_chat_id: Option<String>,
+    #[serde(default)]
+    scope: RespondScope,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum RespondScope {
+    #[default]
+    Once,
+    Run,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5719,10 +5729,26 @@ impl RpcService for EngineRpc {
                     SessionCommandPayload::Steer { prompt, .. } => Some(prompt.clone()),
                     _ => None,
                 };
+                let for_run = match (&p.scope, &p.command) {
+                    (RespondScope::Once, _) => None,
+                    (RespondScope::Run, SessionCommandPayload::RespondInput { request_id, answers }) => {
+                        let access = self
+                            .sessions
+                            .run_scope_access(&p.chat_id, request_id, answers)
+                            .map_err(RpcError::Failed)?;
+                        Some((request_id.clone(), access))
+                    }
+                    (RespondScope::Run, _) => {
+                        return Err(RpcError::BadParams("scope run answers a respondInput only".into()));
+                    }
+                };
                 let command_id = self
                     .doc_host
                     .queue_command_with_transfers(&p.chat_id, p.command, p.transfers)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if let Some((request_id, access)) = for_run {
+                    self.sessions.allow_for_run(&p.chat_id, access, &request_id);
+                }
                 if let Some(prompt) = prompt {
                     self.watch_mentioned_trees(&p.chat_id, &prompt);
                 }

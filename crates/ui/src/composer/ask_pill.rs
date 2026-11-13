@@ -665,6 +665,7 @@ mod tests {
                     kind: None,
                     prefill: None,
                     multiline: false,
+                    action: None,
                 }],
                 resolved: false,
                 answers: None,
