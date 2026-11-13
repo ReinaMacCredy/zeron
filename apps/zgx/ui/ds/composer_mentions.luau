@@ -12,7 +12,9 @@
 -- over the page, the field losing the keys. A row chosen lands in the draft
 -- as its token and a space: a file by its name alone (as Zeron's chips name
 -- it), the shortest end of its path that tells it from another of that
--- name; the path it stands for is kept beside the draft (`refs`).
+-- name; the path it stands for is kept beside the draft (`refs`). In a
+-- draft with references (`opts.refs`), a file or folder lands as its chip
+-- instead, its name whole whatever it holds (spaces, CJK), sent as its link.
 --
 -- A token in the draft is styled in type alone (zgx's text has no inline
 -- chips, and a wash made a selection of every mention): its trigger greyed
@@ -326,11 +328,12 @@ function M.use(opts: Use)
 		local kind = if item.task then "task"
 			elseif string.sub(key, 1, 6) == "skill:" then "skill"
 			elseif string.sub(key, 1, 8) == "command:" then "command"
+			elseif item.file or item.dir then "file"
 			else nil
 		if opts.refs and kind and type((item :: any).link) == "string" and not (item :: any).consume then
 			local shown = references.add(opts.refs(), {
 				kind = kind,
-				name = if kind == "task" then item.label else item.value,
+				name = if kind == "task" or kind == "file" then item.label else item.value,
 				link = (item :: any).link,
 				task = item.task,
 			})

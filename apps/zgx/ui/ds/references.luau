@@ -194,6 +194,8 @@ function M.decode(key: string, raw: string): string
 				shown = M.add(key, { kind = "task", name = label, link = link, task = target })
 			elseif scheme == "attachment" and string.match(label, "^Pasted text %d+%.txt$") then
 				shown = M.add(key, { kind = "pasted", name = label, link = link })
+			elseif scheme == "file" then
+				shown = M.add(key, { kind = "file", name = label, link = link })
 			elseif scheme == "attachment" and string.match(target, "^%d+$") then
 				shown = M.add(key, { kind = "file", name = label, link = link })
 			elseif scheme == "image" and string.match(target, "^%d+$") then
@@ -299,13 +301,14 @@ function M.chips(key_of: () -> string, value: State<string>, line: number, colum
 				local dark = string.find(ui.theme.kind(), "dark", 1, true) ~= nil
 				local name = if at.ref.kind == "pasted" then "Pasted text.txt" elseif at.ref.kind == "image" then "image.png" else (string.match(at.ref.link, "^%[(.-)%]") or "")
 				local thumb = at.ref.kind == "image" and at.ref.thumb
+				local dir = string.match(at.ref.link, "^%[.-%]%(zeron%-file:.*/%)$") ~= nil
 				table.insert(out, {
 					from = at.from,
 					to = at.to,
 					bg = "$zeron.composer.chip.bg",
 					radius = 5,
 					inset = 1.5,
-					icon = if thumb then thumb else FileIcon.src(name, false, dark),
+					icon = if thumb then thumb else FileIcon.src(name, dir, dark),
 					icon_size = if thumb then 16 else size,
 					icon_x = if thumb then 3 else 4,
 				})

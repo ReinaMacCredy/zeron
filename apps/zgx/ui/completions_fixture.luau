@@ -85,6 +85,13 @@ ui.command {
 		note(`encoded:{Invocations.encode(references.encode("fixture", draft:peek()))}`)
 	end,
 }
+ui.command {
+	id = "decode",
+	title = "Bring the draft's links back as chips",
+	run = function()
+		draft:set(references.decode("fixture", draft:peek()))
+	end,
+}
 local place = ui.state("place", "s1")
 local field = ui.ref()
 local completions = Completions.bind {
