@@ -61,35 +61,42 @@ local function build(clock: K.Clock): Node
 		}),
 		ui.show(function(): boolean
 			return clock.t() >= DRAG_AT and pop() < 1
-		end, ui.row {
+		end, ui.overlay {
 			absolute = true,
-			top = function(): number
-				return HEIGHT / 2 - size() / 2
-			end,
-			left = function(): number
-				return center() - size() / 2
-			end,
-			w = size,
-			h = size,
-			items = "center",
-			justify = "center",
-			rounded = "$radius.full",
-			border = 1,
-			border_color = "$border",
-			shadow = "$shadow.md",
-			bg = "$zeron.whats_new.raised",
-			opacity = function(): number
-				return 1 - math.clamp((pop() - 0.55) / 0.45, 0, 1)
-			end,
-			ui.div {
-				shrink = 0,
-				scale = function(): number
-					return (16 + 2 * armed()) * (1 - 0.88 * pop()) / GLYPH
+			top = 0,
+			left = 0,
+			right = 0,
+			bottom = 0,
+			ui.row {
+				absolute = true,
+				top = function(): number
+					return HEIGHT / 2 - size() / 2
 				end,
+				left = function(): number
+					return center() - size() / 2
+				end,
+				w = size,
+				h = size,
+				items = "center",
+				justify = "center",
+				rounded = "$radius.full",
+				border = 1,
+				border_color = "$border",
+				shadow = "$shadow.md",
+				bg = "$zeron.whats_new.raised",
 				opacity = function(): number
-					return 0.45 + 0.55 * math.min(armed(), 1)
+					return 1 - math.clamp((pop() - 0.55) / 0.45, 0, 1)
 				end,
-				K.glyph("chevron-left", GLYPH, "$text.primary"),
+				ui.div {
+					shrink = 0,
+					scale = function(): number
+						return (16 + 2 * armed()) * (1 - 0.88 * pop()) / GLYPH
+					end,
+					opacity = function(): number
+						return 0.45 + 0.55 * math.min(armed(), 1)
+					end,
+					K.glyph("chevron-left", GLYPH, "$text.primary"),
+				},
 			},
 		}),
 	}

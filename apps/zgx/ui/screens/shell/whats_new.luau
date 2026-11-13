@@ -152,94 +152,97 @@ end
 function M.Card(): Node
 	return ui.show(function(): boolean
 		return card_entry() ~= nil and up:get() and not M.dismissed:get() and not M.open_now:get()
-	end, ui.column {
-		id = "whats-new-card",
-		role = "button",
-		label = function(): string
-			local e = card_entry()
-			return ui.t("shell.whats_new.open_card", { version = if e then e.version else "" }):get()
-		end,
+	end, ui.div {
 		shrink = 0,
-		mx = "$space.2",
-		mb = "$space.2",
-		relative = true,
-		rounded = "$radius.xl",
-		overflow = "hidden",
-		border = 1,
-		border_color = "$border",
-		bg = function(): string
-			return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
-		end,
-		shadow = "$zeron.menu.shadow",
-		cursor = "pointer",
 		opacity = function(): number
 			return shown:get()
 		end,
+		-- The rise moves this wrapper, not the clipping card: zgx's layout check reads a clip's own translation as its content overflowing.
 		y = function(): number
 			return 14 * (1 - rise:get())
 		end,
-		hover = { border_color = "$border.strong" },
-		on_click = function()
-			M.open(card_entry())
-		end,
-		ui.switch(function(): string
-			return if card_visual() then "visual" else "gradient"
-		end, {
-			visual = hero { h = 96, shine = true, visual = card_visual },
-			gradient = hero {
-				h = 76,
-				shine = true,
-				version = function(): string
-					local e = card_entry()
-					return if e then e.version else ""
-				end,
-			},
-		}),
 		ui.column {
-			px = "$space.3",
-			pt = "$space.2",
-			pb = "$space.3",
-			gap = ui.raw(2, "the title over its one line, as the mockup's card"),
-			ui.text {
-				function(): string
-					local e = card_entry()
-					local f = e and e.features[1]
-					return if f then f.title else ""
-				end,
-				text_size = "$font.size.sm",
-				weight = "$font.weight.semibold",
-				color = "$text.primary",
-				min_w = 0,
-				truncate = true,
+			id = "whats-new-card",
+			role = "button",
+			label = function(): string
+				local e = card_entry()
+				return ui.t("shell.whats_new.open_card", { version = if e then e.version else "" }):get()
+			end,
+			mx = "$space.2",
+			mb = "$space.2",
+			relative = true,
+			rounded = "$radius.xl",
+			overflow = "hidden",
+			border = 1,
+			border_color = "$border",
+			bg = function(): string
+				return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
+			end,
+			shadow = "$zeron.menu.shadow",
+			cursor = "pointer",
+			hover = { border_color = "$border.strong" },
+			on_click = function()
+				M.open(card_entry())
+			end,
+			ui.switch(function(): string
+				return if card_visual() then "visual" else "gradient"
+			end, {
+				visual = hero { h = 96, shine = true, visual = card_visual },
+				gradient = hero {
+					h = 76,
+					shine = true,
+					version = function(): string
+						local e = card_entry()
+						return if e then e.version else ""
+					end,
+				},
+			}),
+			ui.column {
+				px = "$space.3",
+				pt = "$space.2",
+				pb = "$space.3",
+				gap = ui.raw(2, "the title over its one line, as the mockup's card"),
+				ui.text {
+					function(): string
+						local e = card_entry()
+						local f = e and e.features[1]
+						return if f then f.title else ""
+					end,
+					text_size = "$font.size.sm",
+					weight = "$font.weight.semibold",
+					color = "$text.primary",
+					min_w = 0,
+					truncate = true,
+				},
+				ui.text {
+					function(): string
+						local e = card_entry()
+						local f = e and e.features[1]
+						return if f then f.description else ""
+					end,
+					text_size = "$font.size.xs",
+					color = "$text.secondary",
+					min_w = 0,
+					truncate = true,
+				},
 			},
-			ui.text {
-				function(): string
-					local e = card_entry()
-					local f = e and e.features[1]
-					return if f then f.description else ""
-				end,
-				text_size = "$font.size.xs",
-				color = "$text.secondary",
-				min_w = 0,
-				truncate = true,
+			ui.button {
+				id = "whats-new-card-close",
+				label = ui.t("shell.whats_new.dismiss"),
+				absolute = true,
+				right = 6,
+				top = 6,
+				w = 20,
+				h = 20,
+				rounded = "$radius.full",
+				items = "center",
+				justify = "center",
+				bg = ui.raw("#00000040", "a scrim on the hero's gradient"),
+				color = ui.raw("#ffffff", "white on the hero's gradient in either theme"),
+				hover = { bg = ui.raw("#0000008c", "a scrim on the hero's gradient") },
+				on_click = dismiss,
+				Icon { name = "close", size = 10 },
 			},
-		},
-		ui.button {
-			id = "whats-new-card-close",
-			label = ui.t("shell.whats_new.dismiss"),
-			absolute = true,
-			right = 6,
-			top = 6,
-			w = 20,
-			h = 20,
-			rounded = "$radius.full",
-			items = "center",
-			justify = "center",
-			bg = ui.raw("#00000040", "a scrim on the hero's gradient"),
-			color = ui.raw("#ffffff", "white on the hero's gradient in either theme"),
-			hover = { bg = ui.raw("#0000008c", "a scrim on the hero's gradient") },
-			on_click = dismiss,
-			Icon { name = "close", size = 10 },
 		},
 	})
 end

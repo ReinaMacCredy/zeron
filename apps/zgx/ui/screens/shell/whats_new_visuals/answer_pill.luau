@@ -179,18 +179,7 @@ local function visual(clock: K.Clock, hero: boolean): Node
 	if hero then
 		return ui.column { w_full = true, h = 84, shrink = 0, px = K.sp(10), gap = K.raw(5), pills, card }
 	end
-	local composer = ui.row {
-		w = 300,
-		h = 28,
-		px = K.sp(10),
-		items = "center",
-		rounded = K.raw(10),
-		border = 1,
-		border_color = "$border",
-		bg = "$zeron.whats_new.block",
-		K.text(11, "$text.tertiary", "Do anything\u{2026}"),
-	}
-	return ui.column { h = 196, shrink = 0, justify = "end", gap = K.raw(5), card, pills, composer }
+	return ui.column { shrink = 0, gap = K.raw(5), card, pills }
 end
 
 return {
