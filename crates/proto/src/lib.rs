@@ -61,6 +61,7 @@ pub mod program_status;
 pub mod projectless;
 pub mod provider_instance;
 pub mod redact;
+pub mod relay_gen;
 pub mod providers;
 pub mod pull_request;
 pub mod quotes;

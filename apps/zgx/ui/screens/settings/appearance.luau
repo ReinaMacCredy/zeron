@@ -701,6 +701,12 @@ function M.view(): Node
 					description = ui.t("settings.appearance.match_colors.description"),
 					control = ds.Switch { value = ds.look.wallpaper_colors, label = ui.t("settings.appearance.match_colors.label") },
 				}),
+				-- The accent in more places (ds.look `accented`).
+				row("accented", {
+					label = ui.t("settings.appearance.accented.label"),
+					description = ui.t("settings.appearance.accented.description"),
+					control = ds.Switch { value = ds.look.accented, label = ui.t("settings.appearance.accented.label") },
+				}),
 			},
 		},
 		ds.Settings.Section {

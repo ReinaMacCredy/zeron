@@ -147,6 +147,8 @@ struct TerminalsInner {
     sessions: Mutex<HashMap<String, Arc<Mutex<LiveTerminal>>>>,
     agent_opened: broadcast::Sender<AgentTerminalOpened>,
     activity_tx: watch::Sender<Vec<(String, TerminalActivity)>>,
+    /// Bumped as each terminal opens ([`Terminals::watch_opened`]).
+    opened_tx: watch::Sender<u64>,
     /// Each terminal's chat, kept past the terminal's close: a server it
     /// backgrounded outlives it and still belongs to that chat's previews.
     chats: Mutex<VecDeque<(String, String)>>,
@@ -286,6 +288,7 @@ impl Terminals {
                 sessions: Mutex::new(HashMap::new()),
                 agent_opened: broadcast::channel(64).0,
                 activity_tx,
+                opened_tx: watch::Sender::new(0),
                 chats: Mutex::new(VecDeque::new()),
             }),
         };
@@ -295,6 +298,11 @@ impl Terminals {
 
     pub(crate) fn watch_activity(&self) -> watch::Receiver<Vec<(String, TerminalActivity)>> {
         self.inner.activity_tx.subscribe()
+    }
+
+    /// Changes as each terminal opens (preview discovery wakes on it).
+    pub(crate) fn watch_opened(&self) -> watch::Receiver<u64> {
+        self.inner.opened_tx.subscribe()
     }
 
     /// Seen results no longer compete with new results in other program
@@ -545,6 +553,7 @@ impl Terminals {
             applied_inputs: HashMap::new(),
         }));
         lock(&self.inner.sessions).insert(id.clone(), session.clone());
+        self.inner.opened_tx.send_modify(|n| *n = n.wrapping_add(1));
 
         // Raw PTY bytes: blocking reader thread → batcher task.
         let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Vec<u8>>();

@@ -268,6 +268,7 @@ fn grok_spec() -> AcpAgentSpec {
             .into(),
         models: || {
             vec![Model {
+                default: false,
                 id: "grok-4.5".into(),
                 label: "Grok 4.5".into(),
                 description: Some("xAI's coding model — 500k context".into()),
@@ -348,6 +349,7 @@ fn devin_spec() -> AcpAgentSpec {
         models: || {
             vec![
                 Model {
+                    default: false,
                     id: "swe-1-7-medium".into(),
                     label: "SWE-1.7 Medium".into(),
                     description: Some("Devin's default coding model".into()),
@@ -355,6 +357,7 @@ fn devin_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                 },
                 Model {
+                    default: false,
                     id: "claude-fable-5-1-high".into(),
                     label: "Claude Fable 5.1 High".into(),
                     description: Some("Anthropic's frontier model through Devin".into()),
@@ -362,6 +365,7 @@ fn devin_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                 },
                 Model {
+                    default: false,
                     id: "adaptive".into(),
                     label: "Adaptive".into(),
                     description: Some("Devin picks the model per request".into()),
@@ -505,6 +509,7 @@ fn hermes_spec() -> AcpAgentSpec {
         models: || {
             vec![
                 Model {
+                    default: false,
                     id: "hermes-4-405b".into(),
                     label: "Hermes 4 405B".into(),
                     description: Some("Nous Research's hybrid-reasoning flagship".into()),
@@ -512,6 +517,7 @@ fn hermes_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                 },
                 Model {
+                    default: false,
                     id: "hermes-4-70b".into(),
                     label: "Hermes 4 70B".into(),
                     description: Some("Faster Hermes 4 — same post-training, 70B".into()),
@@ -1244,6 +1250,7 @@ fn antigravity_spec() -> AcpAgentSpec {
             use ReasoningLevel::{High, Low, Medium};
             vec![
                 Model {
+                    default: false,
                     id: "gemini-3.7-flash".into(),
                     label: "Gemini 3.7 Flash".into(),
                     description: None,
@@ -1251,6 +1258,7 @@ fn antigravity_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                 },
                 Model {
+                    default: false,
                     id: "gemini-3.1-pro".into(),
                     label: "Gemini 3.1 Pro".into(),
                     description: None,
@@ -3160,6 +3168,7 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
         // The wire name wins for real ids; an ALIAS row's terse wire name
         // ("Opus") loses to the curated family label/description.
         Model {
+            default: false,
             id: id.to_owned(),
             label: aliased
                 .map(|m| m.label.clone())
@@ -5009,6 +5018,7 @@ fn group_effort_variants(models: Vec<Model>) -> Vec<Model> {
             };
             let first = models.iter().find(|m| m.id == *first_id)?;
             Some(Model {
+                default: false,
                 id: group.id.clone(),
                 label: group.label.to_owned(),
                 // variant descriptions only restate their thinking level
@@ -8315,6 +8325,8 @@ mod tests {
                 .reasoning_levels
                 .contains(&ReasoningLevel::Ultracode)
         );
+        // Haiku 5.5, unlike Haiku 4.5, takes an effort.
+        assert!(models[3].reasoning_levels.contains(&ReasoningLevel::XHigh));
         // Versioned ids never fuzzy-match: a foreign id passes through.
         let foreign = json!({
             "sessionId": "s-1",

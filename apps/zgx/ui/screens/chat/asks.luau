@@ -19,6 +19,7 @@ local store = require("@app/screens/chat/store")
 local queued = require("@app/screens/chat/queued")
 local Dock = require("@ds/composer_dock")
 local Carried = require("@app/screens/chat/carried")
+local T = require("@ds/transcript")
 
 local M = {}
 
@@ -116,6 +117,10 @@ export type Bind = {
 	saving: (() -> string?)?,
 	-- A notice, when a queued message's send or steer doesn't go.
 	say: ((tone: string, key: string) -> ())?,
+	-- Its transcript's name (ds/transcript's: a side chat's); none, the
+	-- chat page's. (A function: the one it names as it steers, the window's
+	-- composer's following the pane at its foot.)
+	name: (string | () -> string?)?,
 }
 
 local DISMISSED = ui.shared("chat.todos.dismissed", {} :: { [string]: string })
@@ -231,34 +236,42 @@ function M.bind(b: Bind): { [string]: any }
 		end
 		local carries = row.cargo ~= nil and #row.cargo > 0
 		local next_turn = s ~= nil and s.running == true and not carries and s.steers == false
-		local p = store.queue(id, { op = "send", item = item }) :: any
-		if not p then
-			queued.unhide(id, { row.id, item })
-			return
-		end
-		if next_turn then
-			-- (Only moved up: a hide from before it was listed lifts.)
-			queued.unhide(id, { row.id, item })
-			queued.front(id, item)
-		else
-			queued.hide(id, { item })
-		end
-		p:after(function()
-			if next_turn then
-				ui.after(queued.LISTED_MS, function()
-					queued.unfront(id, item)
-				end)
-			end
-		end, function(err: any)
-			if next_turn then
-				queued.unfront(id, item)
-			else
+		local function deliver()
+			local p = store.queue(id, { op = "send", item = item }) :: any
+			if not p then
 				queued.unhide(id, { row.id, item })
+				return
 			end
-			if reason(err) ~= "gone" then
-				say("chat.composer.queue_send_failed", err)
+			if next_turn then
+				-- (Only moved up: a hide from before it was listed lifts.)
+				queued.unhide(id, { row.id, item })
+				queued.front(id, item)
+			else
+				queued.hide(id, { item })
 			end
-		end)
+			p:after(function()
+				if next_turn then
+					ui.after(queued.LISTED_MS, function()
+						queued.unfront(id, item)
+					end)
+				end
+			end, function(err: any)
+				if next_turn then
+					queued.unfront(id, item)
+				else
+					queued.unhide(id, { row.id, item })
+				end
+				if reason(err) ~= "gone" then
+					say("chat.composer.queue_send_failed", err)
+				end
+			end)
+		end
+		-- Sent now, its prompt glides to the top and holds the runway, as a sent one does (the host's copy has the queued row's id).
+		if next_turn then
+			deliver()
+		else
+			T.steer(deliver, item, if type(b.name) == "function" then b.name() else b.name)
+		end
 	end
 	local then_send: { [string]: any } = {}
 	-- Each act is on the chat and the question it was asked about, as they

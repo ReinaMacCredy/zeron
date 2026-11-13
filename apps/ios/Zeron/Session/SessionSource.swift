@@ -73,13 +73,36 @@ struct SessionChrome: Equatable {
     }
 
     var agents: Agents?
+    /// What to say in place of an empty transcript, if anything.
+    var emptyNotice: EmptyNotice?
+
+    /// A chat this device has nothing of. Anything it has stored always shows.
+    enum EmptyNotice: Equatable {
+        case syncing
+        case reconnecting
+        case offline
+        case hostAway
+
+        var text: String {
+            switch self {
+            case .syncing: "Syncing…"
+            case .reconnecting: "Reconnecting…"
+            case .offline: "Offline — this chat loads when you're back online"
+            case .hostAway: "This chat lives on another device — it loads when that device is back online"
+            }
+        }
+
+        /// Waiting on something this app is doing. Otherwise a spinner would promise
+        /// progress that isn't happening, and it gets the dot the composer uses.
+        var isWorking: Bool { self == .syncing || self == .reconnecting }
+    }
 
     static func == (a: SessionChrome, b: SessionChrome) -> Bool {
         a.title == b.title && a.subtitle == b.subtitle && a.hostName == b.hostName && a.running == b.running && a.canSteer == b.canSteer
             && a.placeholder == b.placeholder && a.chips == b.chips && a.banner == b.banner
             && a.questions?.requestId == b.questions?.requestId && a.questions?.items == b.questions?.items
             && a.queue == b.queue && a.error == b.error && a.limitPill == b.limitPill && a.prediction == b.prediction
-            && a.comments == b.comments && a.agents == b.agents
+            && a.comments == b.comments && a.agents == b.agents && a.emptyNotice == b.emptyNotice
     }
 }
 

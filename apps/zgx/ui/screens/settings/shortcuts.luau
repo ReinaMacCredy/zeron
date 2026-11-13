@@ -15,7 +15,6 @@ local ds = require("@ds")
 local Shortcut = require("@ds/shortcut_recorder")
 local search = require("@app/screens/settings/search")
 local Builtins = require("@app/screens/plugins/builtins")
-local Dictation = require("@ds/dictation")
 
 local M = {}
 
@@ -127,15 +126,6 @@ do
 			return Builtins.on("appshots")
 		end,
 	})
-	table.insert(rows, {
-		key = "key_dictation",
-		title = ui.t("settings.shortcuts.dictation.label"),
-		section = ui.t("settings.shortcuts.dictation.section"),
-		terms = ui.t("settings.shortcuts.dictation.terms"),
-		shown = function(): boolean
-			return Builtins.on("voice")
-		end,
-	})
 	search.index(M.ID, ui.t("settings.shortcuts.title"), ui.t("settings.shortcuts.terms"), rows)
 end
 
@@ -171,51 +161,6 @@ local function appshot(): Node?
 						size = "sm",
 						on_click = function()
 							require("@app/screens/shell/route").settings("appshots")
-						end,
-					},
-				},
-			}),
-		},
-	})
-end
-
--- Hold to dictate (ds/dictation): the composer's, held rather than pressed,
--- so not a menu command either (gpui lists it under Voice). Shown while the
--- Voice built-in is on; changed in Settings → Voice.
-local function dictation(): Node
-	return ui.show(function(): boolean
-		return Builtins.on("voice")
-	end, ds.Settings.Section {
-		title = ui.t("settings.shortcuts.dictation.section") :: any,
-		ds.Settings.Group {
-			search.anchor("key_dictation", ds.Settings.Row {
-				label = ui.t("settings.shortcuts.dictation.label") :: any,
-				description = function(): string
-					-- (A command given these keys while Voice was off takes them from no one: say so.)
-					local combo = Dictation.key:get()
-					local owner = if combo ~= "" and ui.shortcut_owner then ui.shortcut_owner(combo) else nil
-					local keys = shell_keys()
-					local k = if owner and keys then keys.get(owner) else nil
-					if owner then
-						return ui.t("settings.shortcuts.taken", { keys = Shortcut.shown(combo), name = if k then title_of(k) else owner }):get()
-					end
-					return ui.t("settings.shortcuts.dictation.description"):get()
-				end,
-				control = ui.row {
-					gap = "$space.2",
-					items = "center",
-					ui.presence(function(): string
-						return Dictation.key:get()
-					end, function(keys: string): Node
-						return if keys == "" then ui.text { Shortcut.shown(""), text_size = "$font.size.sm", color = "$text.secondary" } else ds.Kbd { keys = keys }
-					end),
-					ds.Button {
-						ui.t("settings.shortcuts.dictation.change"),
-						label = ui.t("settings.shortcuts.dictation.change_label"),
-						tone = "ghost",
-						size = "sm",
-						on_click = function()
-							require("@app/screens/shell/route").settings("voice")
 						end,
 					},
 				},
@@ -278,14 +223,6 @@ local function binding(k: Key): Node
 				end
 			end,
 			on_change = function(combo: string)
-				if Builtins.on("voice") and Dictation.is_key(combo) then
-					notice:set(ui.t("settings.shortcuts.taken_on_page", {
-						keys = Shortcut.shown(combo),
-						name = ui.t("settings.shortcuts.dictation.label"):get(),
-						page = ui.t("settings.voice.title"):get(),
-					}):get())
-					return
-				end
 				local owner = s.owner(combo, id)
 				if owner then
 					notice:set(ui.t("settings.shortcuts.taken", { keys = Shortcut.shown(combo), name = owner_name(owner) }):get())
@@ -388,10 +325,6 @@ function M.view(): Node
 	local appshot_section = appshot()
 	if appshot_section then
 		table.insert(sections, appshot_section)
-	end
-	-- (After what the shell has: none yet, the page says so.)
-	if #sections > 0 then
-		table.insert(sections, dictation())
 	end
 	if #sections == 0 then
 		table.insert(sections, ds.EmptyState {

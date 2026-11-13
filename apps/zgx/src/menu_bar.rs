@@ -72,6 +72,17 @@ pub enum Role {
 /// The host's own command ids: no script's command may have one.
 pub const HOST_COMMANDS: &str = "zeron.";
 
+/// "Use Zeron v3"'s shortcut, the host's whatever a script declares:
+/// ⌘⌥⇧Home on a Mac, Ctrl+Alt+Shift+Home on Linux and Windows, where
+/// there's no menu bar to reach the item from and a template draws the
+/// palette. (Home for the default; no letter, which AltGr+Shift types on
+/// some layouts, and no F key, which Ctrl+Alt switches consoles with on
+/// Linux.) Reserved too, so a focused web page or terminal never has it.
+pub const DEFAULT_INTERFACE_KEY: &str = "cmd+alt+shift+home";
+
+/// The host's own item that switches to the default interface.
+const USE_ZERON_TITLE: &str = "Use Zeron v3";
+
 /// A plugin's command (zgx names each `<plugin>/<id>`; Zeron's have no `/`).
 pub fn is_plugins(command: &Command) -> bool {
     command.id.contains('/')
@@ -145,11 +156,16 @@ impl Bar {
             let title = commands.get(at).map(|c| c.title.clone()).unwrap_or_default();
             menus.dropped.push((at, Dropped { plugin: d.plugin.clone(), key: d.key.clone(), title, why }));
         }
-        let reserved = reserved
+        let mut reserved: Vec<MenuAccelerator> = reserved
             .iter()
             .filter_map(|key| accelerator(key))
             .filter(|key| menus.keys.get(&key.label()).is_some_and(|holder| !holder.contains('/')))
             .collect();
+        if let Some(key) = accelerator(DEFAULT_INTERFACE_KEY)
+            && !reserved.contains(&key)
+        {
+            reserved.push(key);
+        }
         // In the order they're declared.
         let mut dropped = std::mem::take(&mut menus.dropped);
         dropped.sort_by_key(|(at, _)| *at);
@@ -192,12 +208,16 @@ const EDIT: [(StandardItem, &str); 6] = [
 ];
 
 impl Menus {
-    /// A bar with the Edit menu's shortcuts already held, so a command
-    /// asking for one is left without it rather than the bar refused.
+    /// A bar with the Edit menu's shortcuts and the host's shortcut
+    /// (`DEFAULT_INTERFACE_KEY`) already held, so a command asking for one is
+    /// left without it rather than the bar refused.
     fn new() -> Self {
         let mut menus = Menus::default();
         for (item, name) in EDIT {
             menus.keys.insert(name.to_string(), item.label().to_string());
+        }
+        if let Some(key) = accelerator(DEFAULT_INTERFACE_KEY) {
+            menus.keys.insert(key.label(), plugins::USE_ZERON_TEMPLATE.to_string());
         }
         menus
     }
@@ -268,6 +288,9 @@ impl Menus {
     }
 
     fn title_of(&self, id: &str) -> String {
+        if id == plugins::USE_ZERON_TEMPLATE {
+            return USE_ZERON_TITLE.to_string();
+        }
         for menu in &self.menus {
             for entry in &menu.entries {
                 if let AppMenuEntry::Item { label, action, .. } = entry
@@ -318,7 +341,11 @@ impl Menus {
         if let Some(preview) = preview {
             entries.push(AppMenuEntry::item(format!("Keep {}…", clean(&preview.name)), plugins::KEEP_TEMPLATE));
         }
-        entries.push(AppMenuEntry::item("Use Zeron v3", plugins::USE_ZERON_TEMPLATE));
+        let mut back = AppMenuEntry::item(USE_ZERON_TITLE, plugins::USE_ZERON_TEMPLATE);
+        if let Some(key) = accelerator(DEFAULT_INTERFACE_KEY) {
+            back = back.accelerator(key);
+        }
+        entries.push(back);
         self.menus.retain(|m| !m.entries.is_empty());
         self.menus
     }
@@ -362,6 +389,10 @@ pub fn accelerator(text: &str) -> Option<MenuAccelerator> {
         "backspace" => Key::Backspace,
         "delete" => Key::Delete,
         "space" => Key::Space,
+        "home" => Key::Home,
+        "end" => Key::End,
+        "pageup" => Key::PageUp,
+        "pagedown" => Key::PageDown,
         single if single.chars().count() == 1 => Key::Character(single.into()),
         other => {
             eprintln!("zeron-zgx: menus: unknown key `{other}` in `{text}`");

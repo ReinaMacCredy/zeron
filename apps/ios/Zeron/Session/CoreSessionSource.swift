@@ -76,7 +76,7 @@ final class CoreSessionSource: SessionSource {
         let hostName = row?.isCloud == true ? row?.deviceName : c.host.name
         next.hostName = hostName
         next.subtitle = hostName.map { "\(project) @ \($0)" } ?? project
-        next.running = c.live.turnRunning
+        next.running = c.live.turnRunning && c.live.canInterrupt
         next.resumable = c.live.resumable
         next.canSteer = c.host.capabilities.midTurnSteering ?? false
         next.placeholder = "Message \(row?.harnessLabel ?? "the agent")"
@@ -131,9 +131,14 @@ final class CoreSessionSource: SessionSource {
             next.banner = .working(since: nil, word: "Compacting context")
         } else if c.sendState == .failed {
             next.banner = .notDelivered
+        } else if app?.connectivity?.state == .offline, c.sendState != nil {
+            // This phone has no network: it can't know whether the host is there, and
+            // the send waits on the network first. Saying the host is offline blamed it.
+            next.banner = .offline
         } else if c.sendState == .queued {
-            // A Cloud chat's message waits for its machine to start or wake —
-            // the transcript's setup step says so, as on the desktop.
+            // A Cloud chat's message waits for its machine to start, wake or
+            // update first — the transcript's setup step says so (the core
+            // follows the machine's stage), as on the desktop.
             if row?.isCloud != true {
                 next.banner = .failed("\(c.host.name ?? "Host") is offline — will send when it's back")
             }
@@ -169,6 +174,13 @@ final class CoreSessionSource: SessionSource {
         next.error = c.queueError
         let roster = handle.backgroundRoster(nowMs: nowMs())
         next.agents = roster.summary.map { SessionChrome.Agents(summary: $0, state: roster.state) }
+        next.emptyNotice = switch c.transcriptLoad {
+        case .ready: nil
+        case .syncing: .syncing
+        case .reconnecting: .reconnecting
+        case .offline: .offline
+        case .hostAway: .hostAway
+        }
         if next != chrome {
             chrome = next
             onChange?()

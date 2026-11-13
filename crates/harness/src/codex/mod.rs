@@ -655,6 +655,7 @@ fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>)
         let options = model_service_tier(item).into_iter().collect();
         models.push((
             Model {
+                default: false,
                 id: id.to_owned(),
                 label,
                 description,
@@ -1425,6 +1426,9 @@ fn thread_params(
         // wait_threads blocks up to 30 min; Codex's own per-call ceiling
         // would cut it short (`tool_timeout_sec` in the 0.154.0 schema).
         overrides.insert("mcp_servers.zeron.tool_timeout_sec".into(), json!(1800));
+        // A cold start (a fresh machine paging the binary in) can outlast
+        // the 10 s default before the server answers `initialize`.
+        overrides.insert("mcp_servers.zeron.startup_timeout_sec".into(), json!(30));
         let drive_unprompted = run_access(request).is_full_access();
         for tool in PREAPPROVED_ZERON_TOOLS
             .into_iter()

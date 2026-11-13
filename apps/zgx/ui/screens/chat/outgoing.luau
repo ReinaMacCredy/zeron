@@ -12,6 +12,7 @@ local Invocations = require("@app/screens/chat/invocations")
 local Appshots = require("@app/screens/chat/appshots")
 local HtmlPicks = require("@ds/html_picks")
 local shared = require("@app/screens/chat/shared")
+local Carried = require("@app/screens/chat/carried")
 
 local M = {}
 
@@ -114,7 +115,8 @@ function M.parts(typed: string, text: string, carried: { any }): { [string]: any
 			typed = if typed ~= "" then `{typed} {link}` elseif text ~= "" then `{text} {link}` else link
 		end
 	end
-	local words = Invocations.encode(if typed ~= "" then typed else text)
+	-- (A mention of an attachment no longer attached leaves as its plain label.)
+	local words = Carried.settle(Invocations.encode(if typed ~= "" then typed else text), carried)
 	local cards = HtmlPicks.cards(chosen)
 	return {
 		words = words,

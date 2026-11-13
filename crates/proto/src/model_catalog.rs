@@ -8,6 +8,7 @@ fn model(
     options: Vec<ModelOption>,
 ) -> Model {
     Model {
+        default: false,
         id: id.into(),
         label: label.into(),
         description: (!description.is_empty()).then(|| description.into()),
@@ -111,7 +112,7 @@ pub mod claude {
     ];
 
     pub fn static_models() -> Vec<Model> {
-        vec![
+        let mut models = vec![
             model(
                 "claude-fable-5-2",
                 "Fable 5.2",
@@ -186,7 +187,12 @@ pub mod claude {
                 &[],
                 vec![toggle("thinking", "Thinking")],
             ),
-        ]
+        ];
+        // The CLI's own default, marked for pickers to preselect when discovery says nothing.
+        for model in &mut models {
+            model.default = model.id == "claude-opus-5-5";
+        }
+        models
     }
 }
 

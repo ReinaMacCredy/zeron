@@ -208,11 +208,12 @@ pub(crate) fn shown(path: &str, home: &str) -> String {
 
 fn entry_value(e: &Entry, home: &str) -> Value {
     let link = |command: Option<&Json>| {
-        let mut invocation = json!({ "kind": "skill", "name": e.name, "path": e.path });
-        if let Some(command) = command {
-            invocation["command"] = command.clone();
+        zeron_proto::invocation::Invocation::Skill {
+            name: e.name.clone(),
+            path: e.path.clone(),
+            command: command.and_then(|c| serde_json::from_value::<zeron_proto::invocation::SkillCommand>(c.clone()).ok()),
         }
-        crate::completion::link('$', &e.name, &invocation)
+        .link()
     };
     let links = e.commands.iter().map(|(h, c)| (h.as_str(), Value::from(link(Some(c)).as_str())));
     let strings = |list: &[String]| Value::List(list.iter().map(|s| Value::from(s.as_str())).collect::<Vec<_>>().into());

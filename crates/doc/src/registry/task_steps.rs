@@ -106,9 +106,8 @@ impl RegistryDoc {
 
     pub fn read_task_steps(&self) -> Result<Vec<TaskStep>, DocError> {
         let mut steps: Vec<TaskStep> = self
-            .read_kind::<RawTaskStep>(KIND_TASK_STEPS)
+            .read_cached::<RawTaskStep, TaskStep>(KIND_TASK_STEPS, TaskStep::from)
             .into_iter()
-            .map(TaskStep::from)
             .filter(|step| !step.deleted)
             .collect();
         steps.sort_by(|a, b| {

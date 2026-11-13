@@ -311,7 +311,7 @@ pub(crate) async fn run_one_shot(
         };
         // A Cloud device's credential broker supplies the CLI's login.
         registry
-            .prepare_run(run.harness, &mut request)
+            .prepare_run(run.harness, None, &mut request)
             .await
             .map_err(EngineError::Other)?;
         match tokio::time::timeout(
@@ -488,6 +488,7 @@ mod tests {
 
     fn model(id: &str, label: &str) -> Model {
         Model {
+            default: false,
             id: id.into(),
             label: label.into(),
             description: None,

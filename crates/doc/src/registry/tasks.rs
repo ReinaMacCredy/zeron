@@ -246,9 +246,8 @@ impl RegistryDoc {
 
     pub fn read_tasks(&self) -> Result<Vec<Task>, DocError> {
         let mut tasks: Vec<Task> = self
-            .read_kind::<RawTask>(KIND_TASKS)
+            .read_cached::<RawTask, Task>(KIND_TASKS, Task::from)
             .into_iter()
-            .map(Task::from)
             .filter(|task| !task.deleted)
             .collect();
         tasks.sort_by(|a, b| {

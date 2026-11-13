@@ -72,6 +72,8 @@ for _, k in
 		{ id = "shell.find", title = "Find", key = "cmd+f", group = "App", menu = "Edit" },
 		{ id = "shell.quick_capture", title = "Quick capture", key = "cmd+alt+n", group = "App", menu = "File", reserved = true },
 		{ id = "shell.random_wallpaper", title = "Random wallpaper", key = "cmd+u", group = "App", menu = "View" },
+		-- (Held: screens/chat/dictation makes its command.)
+		{ id = "shell.dictate", title = "Hold to dictate", key = "cmd+d", group = "App", menu = "Edit", elsewhere = true },
 		{ id = "shell.close", title = "Close", key = "cmd+w", group = "App", menu = "File", reserved = true },
 		-- (No key of their own: Settings → Shortcuts can give them one.)
 		{ id = "shell.reload", title = "Reload Zeron", key = "", group = "App", menu = "View" },

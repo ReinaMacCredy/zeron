@@ -4,8 +4,7 @@ M.H, M.TILE, M.MOST, M.GLYPH = 28, 20, 3, 16
 -- (The gap is cut out of the circle behind, not painted: what's under the button shows through.)
 local GAP_CUT = 2.5
 local STEP = 15
--- (Nudged right on those behind, to sit in the middle of what shows of them.)
-local MARK_SIDE, MARK_NUDGE = 11, 2
+local MARK_SIDE = 11
 local INSET_L, INSET_R = 4, 6
 M.GAP = 5
 
@@ -49,8 +48,10 @@ local function tile(props: StackProps, at: number): Node
 			then ui.svg { src = CRESCENT, tint = "$zeron.mark.bg", absolute = true, left = 0, top = 0, w = M.TILE, h = M.TILE }
 			else ui.div { absolute = true, left = 0, top = 0, w = M.TILE, h = M.TILE, rounded = "$radius.full", bg = "$zeron.mark.bg" },
 		ui.row {
+			id = `{props.id}-{at}-glyph`,
 			absolute = true,
-			left = if behind then MARK_NUDGE else 0,
+			-- (In its circle's middle, behind or not: the one in front may cover some of it.)
+			left = 0,
 			top = 0,
 			w = M.TILE,
 			h = M.TILE,

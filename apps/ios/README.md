@@ -108,6 +108,9 @@ A session's subagents, side chats and terminals (`Companions/`):
 | `-route chat:<id>` / `new` / `more` / `search` | Open a screen at launch |
 | `-route chat:<id>/terminal` / `/actions` / `/stop` | Open a chat with its Terminal sheet, Project actions sheet or Stop computer use confirm |
 | `-route page:<page>[@<host name>]` | Open a host settings page, on the first host or the named one |
+| `-send-on-open <text>` | With `-route chat:<id>`: send this once the session is open, for rigs driving a real stack (DEBUG) |
+| `-network-offline` | Report no network path whatever the OS says: a simulator shares its Mac's network (DEBUG) |
+| `-no-relay-layer` | Behave as a build without the relay layer does: an old phone in an account of new devices (DEBUG) |
 | `-companions` / `-terminal [-terminal-demo]` / `-subagent <tool id>` / `-side-chat <id>` | With `-route chat:<id>`: open its companions panel, a terminal (typing a scripted demo), a subagent, or a side chat (DEBUG) |
 | `-signedout` | Clear stored credentials |
 | `-dev <userId> <orgId> [-edge <url>]` | Dev bearer against an `AUTH_MODE=dev` edge (e.g. `wrangler dev`); not persisted |

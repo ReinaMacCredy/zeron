@@ -1,5 +1,6 @@
 -- Settings' pages: General, Appearance, Notifications and Profile (yours,
--- your account included); Providers (this Mac's agents); Members (your
+-- your account included); Providers (this Mac's agents), Devices and
+-- Projects (the folders your sessions work in); Members (your
 -- organization); Cloud and Billing (the account's Cloud, while it has one).
 -- Each is a module of its own with `ID`, `TITLE` and `view`, added to the
 -- shell's settings (screens/shell/settings: the list, the page beside it),
@@ -78,6 +79,7 @@ add("routing", "Routing", "routing", "map-arrow-right", "Devices")
 -- (Zeron's Agents > Playbooks, after Tools there too.)
 add("playbooks", "Playbooks", "playbooks", "document", "Devices")
 add("devices", "Devices", "devices", "laptop", "Devices")
+add("projects", "Projects", "projects", "folder-with-files", "Devices")
 -- (Zeron's Devices & updates > Device hub, beside Devices here.)
 add("device_hub", "Device hub", "device_hub", "smartphone", "Devices")
 add("members", "Members", "members", "users-group-rounded", "Organization")

@@ -321,6 +321,7 @@ pub(crate) mod tests {
             other => other,
         };
         Model {
+            default: false,
             id: id.into(),
             label: label.into(),
             description: None,

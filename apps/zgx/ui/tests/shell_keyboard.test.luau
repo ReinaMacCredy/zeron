@@ -9,7 +9,8 @@ local function open(): any
 	return app
 end
 
--- The focused node's line, as the tree says.
+-- The focused node's line, as the tree says. (The window's dump stops
+-- past a budget: the title bar, drawn last, is read on its own too.)
 local function focused(app: any): string
 	-- (The whole tree stops at 200 nodes, and the title bar comes last.)
 	for _, tree in { app:tree(), app:tree("#titlebar") } do

@@ -30,6 +30,8 @@ const UPLOAD_PARALLEL: usize = 3;
 /// registry has been live long enough to have heard its beats.
 const DARK_AFTER_MS: i64 = 5 * 60_000;
 const LIVENESS_WARMUP_MS: i64 = 60_000;
+/// A PR-status watch retries a host that presence says is up from this.
+const WATCH_RETRY_MIN: Duration = Duration::from_millis(500);
 
 pub(crate) fn deadline(method: &str) -> Duration {
     match method {
@@ -155,6 +157,8 @@ pub(crate) struct Relay {
     links: Arc<LinkCache>,
     watches: Mutex<HashMap<WatchKey, CancellationToken>>,
     limit_watches: Mutex<HashMap<String, CancellationToken>>,
+    /// Bumped whenever presence says a device came back: wakes parked watches.
+    alive: tokio::sync::watch::Sender<u64>,
     /// Devices whose engine lacks WatchCheckoutChangeRequest (cleared on
     /// registry reconnect).
     unsupported: Mutex<HashSet<String>>,
@@ -219,11 +223,18 @@ impl Relay {
             links,
             watches: Mutex::new(HashMap::new()),
             limit_watches: Mutex::new(HashMap::new()),
+            alive: tokio::sync::watch::Sender::new(0),
             unsupported: Mutex::new(HashSet::new()),
             supervisors: Mutex::new(HashMap::new()),
             no_supervisor: Mutex::new(HashSet::new()),
             host_sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Let go of every host's socket until something next calls one.
+    pub(crate) fn release(&self) {
+        self.stop_watches();
+        self.links.close_all();
     }
 
     pub(crate) fn shutdown(&self) {
@@ -234,6 +245,7 @@ impl Relay {
     /// Presence says `device_id` is alive again: dial immediately next time.
     pub(crate) fn peer_alive(&self, device_id: &str) {
         self.links.reset_cooldown(device_id);
+        self.alive.send_modify(|beats| *beats = beats.wrapping_add(1));
     }
 
     /// One unary call with a deadline; a stale cached link is retried once
@@ -463,6 +475,7 @@ impl Relay {
             let weak = Arc::downgrade(inner);
             let id = device.clone();
             self.follow(
+                inner,
                 device,
                 methods::WATCH_LIMIT_RESUMES,
                 json!({}),
@@ -573,7 +586,21 @@ async fn watch_host(
         let Some(inner) = weak.upgrade() else { return };
         let Some(live) = inner.live() else { return };
         let links = live.relay.links.clone();
+        // Subscribed before reading presence, so a beat in between still wakes us.
+        let mut alive = live.relay.alive.subscribe();
+        let fresh = inner.presence_fresh(device_id);
         drop(inner);
+        if !fresh {
+            // An offline host is not dialed: parked, with no traffic, until it beats.
+            if stream == HostStream::Sessions {
+                forget_host_sessions(&weak, device_id);
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = alive.changed() => backoff = Duration::from_millis(500),
+            }
+            continue;
+        }
         let result = async {
             let client = links.client(device_id).await?;
             if stream == HostStream::Supervisor
@@ -643,8 +670,20 @@ async fn watch_host(
     }
 }
 
-/// One `WatchCheckoutChangeRequest` stream (last snapshot kept through
-/// gaps); an engine without the method marks the device unsupported.
+/// The longest a change request watch waits between tries, for when presence is
+/// wrong: a host that beats but doesn't answer. One watch per open checkout.
+const WATCH_RETRY_MAX: Duration = Duration::from_secs(120);
+
+fn next_watch_retry(wait: Duration) -> Duration {
+    (wait * 2).min(WATCH_RETRY_MAX)
+}
+
+/// One `WatchCheckoutChangeRequest` stream for as long as the chat is listed. It only
+/// dials a host whose presence is fresh: an offline host parks it, with no traffic,
+/// until a beat says the host is back, and then it dials at once. A host that beats
+/// but doesn't answer is retried 0.5s→2min. The last status stays in the workspace
+/// through all of it, so a chat on an offline host keeps showing its PR. An engine
+/// without the method marks the device unsupported.
 fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken) {
     let Some(inner) = weak.upgrade() else { return };
     let Some(live) = inner.live() else { return };
@@ -652,8 +691,16 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
     let params = json!({ "cwd": key.cwd, "branch": key.branch });
     let unsupported = weak.clone();
     let device_id = key.device_id.clone();
+    let alive = live.relay.alive.subscribe();
+    let fresh = {
+        let weak = weak.clone();
+        let device_id = key.device_id.clone();
+        move || weak.upgrade().is_some_and(|inner| inner.presence_fresh(&device_id))
+    };
     follow(
         links,
+        alive,
+        fresh,
         key.device_id.clone(),
         methods::WATCH_CHECKOUT_CHANGE_REQUEST,
         params,
@@ -683,8 +730,10 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
 }
 
 impl Relay {
+    /// [`follow`] a stream of `device_id`'s, parked while its presence is stale.
     pub(crate) fn follow(
         &self,
+        inner: &Arc<ClientInner>,
         device_id: String,
         method: &'static str,
         params: Value,
@@ -692,8 +741,15 @@ impl Relay {
         on_item: impl FnMut(Value) -> bool + Send + 'static,
         on_unsupported: impl FnOnce() + Send + 'static,
     ) {
+        let fresh = {
+            let weak = Arc::downgrade(inner);
+            let device_id = device_id.clone();
+            move || weak.upgrade().is_some_and(|inner| inner.presence_fresh(&device_id))
+        };
         follow(
             self.links.clone(),
+            self.alive.subscribe(),
+            fresh,
             device_id,
             method,
             params,
@@ -704,8 +760,13 @@ impl Relay {
     }
 }
 
+/// A host stream for as long as `cancel` allows. While `fresh` says the host's
+/// presence is stale it parks, with no traffic, until a beat (`alive`) says
+/// it is back; a host that beats but doesn't answer is retried 0.5s to 2min.
 fn follow(
     links: Arc<LinkCache>,
+    mut alive: tokio::sync::watch::Receiver<u64>,
+    fresh: impl Fn() -> bool + Send + 'static,
     device_id: String,
     method: &'static str,
     params: Value,
@@ -714,8 +775,20 @@ fn follow(
     on_unsupported: impl FnOnce() + Send + 'static,
 ) {
     crate::runtime::shared().spawn(async move {
-        let mut backoff = Duration::from_millis(500);
+        let mut backoff = WATCH_RETRY_MIN;
         loop {
+            if cancel.is_cancelled() {
+                return;
+            }
+            // Marked seen before reading presence, so a beat in between still wakes us.
+            alive.borrow_and_update();
+            if !fresh() {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = alive.changed() => backoff = WATCH_RETRY_MIN,
+                }
+                continue;
+            }
             let subscription = tokio::select! {
                 _ = cancel.cancelled() => return,
                 result = async {
@@ -730,7 +803,7 @@ fn follow(
                         item = stream.recv() => item,
                     };
                     let Some(item) = item else { break };
-                    backoff = Duration::from_millis(500);
+                    backoff = WATCH_RETRY_MIN;
                     if !on_item(item) {
                         return;
                     }
@@ -745,8 +818,10 @@ fn follow(
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = tokio::time::sleep(backoff) => {}
+                // The host came back from being stale: try now, from the start of the curve.
+                _ = alive.changed() => backoff = WATCH_RETRY_MIN / 2,
             }
-            backoff = (backoff * 2).min(Duration::from_secs(5));
+            backoff = next_watch_retry(backoff);
         }
     });
 }
@@ -828,5 +903,23 @@ mod tests {
         })
         .await;
         assert_eq!(read.unwrap(), page);
+    }
+}
+
+#[cfg(test)]
+mod watch_retry_tests {
+    use super::*;
+
+    #[test]
+    fn a_host_thats_away_is_retried_ever_more_slowly() {
+        let mut wait = Duration::from_millis(500);
+        let mut waits = Vec::new();
+        for _ in 0..10 {
+            wait = next_watch_retry(wait);
+            waits.push(wait);
+        }
+        assert_eq!(waits[0], Duration::from_secs(1));
+        assert_eq!(*waits.last().unwrap(), WATCH_RETRY_MAX);
+        assert!(waits.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 }

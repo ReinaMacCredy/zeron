@@ -19,6 +19,7 @@
 
 local Icon = require("@self/icon")
 local HoverCard = require("@self/hover_card")
+local Mark = require("@self/mark")
 local Lightbox = require("@self/lightbox")
 local HtmlPicks = require("@self/html_picks")
 local PastedText = require("@self/pasted_text")
@@ -31,7 +32,9 @@ local locale = require("@self/locale")
 -- its name and what it is).
 -- (`appshot`: a picture that is an Appshot, the app it shows and its
 -- window's title: the card says so under it.)
-export type Attachment = { kind: "image" | "file" | "badge", name: string, src: string?, path: string?, meta: string?, icon: string?, appshot: { app: string, title: string?, bundle: string? }? }
+-- (`chat`: another chat attached, its id and its agent's mark: a card that
+-- opens it, as the composer showed it, not a mention in the words.)
+export type Attachment = { kind: "image" | "file" | "badge" | "chat", name: string, src: string?, path: string?, meta: string?, icon: string?, chat: string?, mark: string?, appshot: { app: string, title: string?, bundle: string? }? }
 -- (`open`: what opens a link in it that isn't the web's, as a file mention.)
 -- (`pictures`: where its pictures' paths show from: a chat on another
 -- device reads them from there, screens/chat/reply_images'
@@ -61,6 +64,29 @@ export type Props = {
 	-- The chat whose device its files are on, for a pasted text's viewer.
 	session: (() -> string?)?,
 }
+
+-- What a prompt carries, by the name its words give each (an `@`
+-- reference: "(attachment: <name>)", ds/markdown `attached`): each chip's
+-- name, and each review comment's place (its chip names how many, its
+-- places in `meta`).
+local function attached_by_name(list: { Attachment }?): { [string]: { kind: string, icon: string? } }?
+	if not list or #list == 0 then
+		return nil
+	end
+	local out: { [string]: { kind: string, icon: string? } } = {}
+	for _, a in list do
+		out[a.name] = { kind = a.kind, icon = a.icon }
+		if a.icon == "chat-round-line" and a.meta then
+			for place in string.gmatch(a.meta, "[^,]+") do
+				local p = string.match(place, "^%s*(.-)%s*$")
+				if p and p ~= "" then
+					out[p] = { kind = "comment", icon = a.icon }
+				end
+			end
+		end
+	end
+	return out
+end
 
 -- The messages opened, by id: every bubble's, outside any of them.
 local OPENED = ui.state("user_message_opened", {} :: { [string]: boolean })
@@ -150,8 +176,10 @@ end
 -- Bubbles without an id: lightbox groups of their own.
 local unnamed = 0
 
--- A file: its glyph on a small tile, its name over what it is.
-local function chip(a: Attachment, session: (() -> string?)?): Node
+-- A file: its glyph on a small tile, its name over what it is. A chat
+-- attached: its agent's mark on the tile (the side chat's glyph if it has
+-- none), its title, and a press opens it (`open`, as its link would).
+local function chip(a: Attachment, session: (() -> string?)?, open: ((target: string) -> ())?): Node
 	local pasted = PastedText.number_of(a.name)
 	local open_pasted = if pasted and a.path
 		then function()
@@ -159,9 +187,19 @@ local function chip(a: Attachment, session: (() -> string?)?): Node
 		end
 		else nil
 	local name = if pasted then locale.s("ds.pasted_text.title", { n = pasted }) else a.name
+	local chat = a.kind == "chat" and a.chat or nil
+	local glyph = if a.kind == "chat"
+		then (if a.mark then Mark { name = a.mark, size = 18, bare = true } else Icon { name = "side-chat", size = 18 })
+		else Icon { name = (a.icon or "document") :: any, size = 18 }
 	return ui.row {
+		role = if chat and open then "button" else nil,
+		cursor = if open_pasted or (chat and open) then "pointer" else nil,
 		on_click = open_pasted,
-		cursor = if open_pasted then "pointer" else nil,
+		on_press = if chat and open
+			then function()
+				(open :: (string) -> ())(`zeron-chat:{chat}`)
+			end
+			else nil,
 		h = 56,
 		max_w = 260,
 		pl = "$space.3",
@@ -180,7 +218,7 @@ local function chip(a: Attachment, session: (() -> string?)?): Node
 			rounded = "$radius.lg",
 			bg = "$hover",
 			color = "$text.secondary",
-			Icon { name = (a.icon or "document") :: any, size = 18 },
+			glyph,
 		},
 		ui.column {
 			min_w = 0,
@@ -321,7 +359,9 @@ return ui.component(function(props: Props): Node
 				local at, own = source(n, a)
 				local p = if pictures and not own then pictures.resolve(at) else nil
 				local src = if p and p.state == "ready" and p.src then p.src else at
-				table.insert(out, { src = src, name = a.name, path = if string.sub(src, 1, 1) == "/" then src else nil })
+				-- (A file here by its whole path: a Mac's `/…` or Windows' `C:\…`.)
+				local whole = string.sub(src, 1, 1) == "/" or string.match(src, "^%a:[\\/]") ~= nil
+				table.insert(out, { src = src, name = a.name, path = if whole then src else nil })
 			end
 		end
 		return out
@@ -419,7 +459,7 @@ return ui.component(function(props: Props): Node
 				table.insert(attachments, thumb(a, from, group, images, shown, pictures))
 			end
 		else
-			table.insert(attachments, chip(a, props.session))
+			table.insert(attachments, chip(a, props.session, props.open))
 		end
 	end
 	return ui.column {
@@ -470,7 +510,7 @@ return ui.component(function(props: Props): Node
 						end
 						return tostring(n)
 					end, function(): Node
-						return Markdown { text = props.text, breaks = true, open = open, link_menu = props.link_menu, chat_mark = props.chat_mark, attachment_icon = attachment_icon, invocations = true, find = props.find, wash = props.wash }
+						return Markdown { text = props.text, breaks = true, open = open, link_menu = props.link_menu, chat_mark = props.chat_mark, attachment_icon = attachment_icon, invocations = true, find = props.find, wash = props.wash, attached = attached_by_name(props.attachments) }
 					end, { w_full = true }),
 				},
 			},

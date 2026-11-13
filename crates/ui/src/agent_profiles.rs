@@ -289,6 +289,7 @@ mod tests {
             default_choice: choices[0].into(),
         };
         let model = |id: &str, options: Vec<zeron_proto::ModelOption>| Model {
+            default: false,
             id: id.into(),
             label: id.into(),
             description: None,

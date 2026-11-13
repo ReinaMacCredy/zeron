@@ -164,7 +164,9 @@ fun Composer(
     val steerDefault by model.steerByDefault.collectAsState()
     val canSteer = c.host.capabilities.midTurnSteering == true
     var delivery by remember(steerDefault) { mutableStateOf(if (steerDefault) Delivery.Steer else Delivery.Queue) }
-    val running = c.live.turnRunning
+    // A turn saved mid-stream with no path or no host reads as running, but a stop would
+    // only wait in the doc and could land on a later turn.
+    val running = c.live.turnRunning && c.live.canInterrupt
     val harness = row?.harness ?: "claude-code"
     val deviceId = c.host.deviceId
     var slashCatalog by remember(c.chatId) { mutableStateOf<uniffi.zeron_core.InvocationCatalog?>(null) }

@@ -56,6 +56,14 @@ export type Queued = {
 	saving: boolean?,
 	after_compaction: boolean?,
 	key: string?,
+	-- Kept back until something happens ("Waits for a size"): it can't be
+	-- sent or edited yet, only removed. Its words stand in its action's place.
+	waiting: string?,
+	-- How long it has waited, said beside it once that's worth knowing
+	-- ("3 days ago").
+	age: string?,
+	-- false: it can't be taken back from here (no Remove).
+	removable: boolean?,
 }
 export type TodoState = "done" | "doing" | "pending"
 export type Todo = { id: string, text: string, state: TodoState }
@@ -544,11 +552,15 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 		end
 		return if steers() == true then "steer" else "send_next"
 	end
+	-- Kept back until something happens (a send held in this device's outbox): it can't be sent or edited yet, only removed.
+	local function waits(): boolean
+		return now().waiting ~= nil
+	end
 	local function can_act(): boolean
-		return not (gated() or unknown() or now().sending == true)
+		return not (gated() or unknown() or now().sending == true or waits())
 	end
 	local function words(): string
-		return locale.s(`ds.composer_dock.{action()}`)
+		return now().waiting or locale.s(`ds.composer_dock.{action()}`)
 	end
 	local function hint(): string
 		if gated() or unknown() then
@@ -693,7 +705,9 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 					tooltip = locale.s("ds.composer_dock.edit"),
 					tooltip_delay = 350,
 					tone = "quiet",
-					disabled = inert,
+					disabled = function(): boolean
+						return inert() or waits()
+					end,
 					on_click = function()
 						if props.on_queue_edit then
 							props.on_queue_edit(now().id)
@@ -706,6 +720,10 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 			ui.row {
 				items = "center",
 				opacity = ui.tween(ui.computed(quiet_when), { duration = 120 }),
+				-- (One that can't be taken back from here has no Remove.)
+				hidden = function(): boolean
+					return now().removable == false
+				end,
 				ui.show(
 					removing,
 					glyph_button {
@@ -803,6 +821,16 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 		ui.show(function()
 			return has_cargo() and not editing()
 		end, thumbs(now, q.key or q.id, narrow, props)),
+		ui.show(function(): boolean
+			return now().age ~= nil
+		end, ui.text {
+			function(): string
+				return now().age or ""
+			end,
+			shrink = 0,
+			text_size = "$font.size.xs",
+			color = "$text.tertiary",
+		}),
 		ui.show(editing, editing_side, side()),
 	}
 end
@@ -900,7 +928,7 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 	local function ended(): boolean
 		return row:get().ended ~= nil
 	end
-	local glyph: Icon.Name = if t.kind == "terminal" then "terminal" elseif t.kind == "agent" then "bot" else "action-play"
+	local glyph: Icon.Name = if t.kind == "terminal" then "terminal" elseif t.kind == "agent" then "side-chat" else "action-play"
 	return ui.row {
 		h = height,
 		pl = "$space.2",

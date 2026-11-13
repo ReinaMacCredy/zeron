@@ -272,6 +272,8 @@ private fun MainNav(model: AppModel) {
             if (nav.currentDestination?.route != Routes.VOICE) nav.navigate(Routes.VOICE) { launchSingleTop = true }
         }
     }
+    // A rig's `send-on-open` is sent to the launch route's chat, once.
+    var sendPending by rememberSaveable { mutableStateOf(model.launch.sendOnOpen) }
     /** A session page with its companions wired to the nav stack (phone) or the inspector (large screens). */
     @Composable
     fun Session(id: String, onBack: () -> Unit, beside: Boolean = false) {
@@ -290,6 +292,7 @@ private fun MainNav(model: AppModel) {
                 if (beside) shell.push(id, InspectorPage.Subagent(parent, doc, title, running)) else nav.navigate(Routes.subagent(parent, doc, title, running))
             },
             openCompanion = companionPending?.takeIf { id == companionChat }?.also { companionPending = null },
+            sendOnOpen = sendPending?.takeIf { id == model.launch.route?.removePrefix("chat:") }?.also { sendPending = null },
             onOpenAccounts = { target, signIn -> nav.navigate(Routes.accounts(target.encode(), signIn)) },
             onOpenBilling = { if (wide) shell.settings = Routes.BILLING else nav.navigate(Routes.BILLING) },
             onShowCompanions = if (beside) ({ section -> shell.toggleCompanions(id, section) }) else null,
