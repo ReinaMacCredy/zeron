@@ -48,7 +48,6 @@ local function add(id: string, title: string, module: string, icon: string, grou
 end
 
 add("general", "General", "general", "settings-minimalistic", "Personal")
-add("chat", "Chat", "chat", "chat-round-line", "Personal")
 add("appearance", "Appearance", "appearance", "tuning", "Personal")
 add("notifications", "Notifications", "notifications", "bell", "Personal")
 add("files", "Files", "files", "folder", "Personal")
@@ -62,8 +61,7 @@ add("profile", "Account", "profile", "user-rounded", "Personal")
 add("usage", "Usage", "usage", "wallet", "Personal")
 -- The panel's browser, under a heading of its own (room for what it grows:
 -- site data, permissions, downloads).
-add("browser", "Browsing", "browser", "global", "Browser")
-add("browser_history", "History", "browser_history", "clock-circle", "Browser")
+add("browser", "Browser", "browser", "global", "Browser")
 add("providers", "Providers", "providers", "widget", "Devices")
 -- (Zeron's Agents heading has its Profiles beside Providers; zgx keeps the
 -- agents under Devices.)
@@ -148,12 +146,21 @@ settings.head(search.Field, {
 	end,
 })
 
--- Account is Profile's now: a way in to `settings/account` (a link, a
--- history entry, a saved route) lands there, on the account's rows.
+-- Pages folded into another: a way in to the old one (a link, a history
+-- entry, a saved route, a search) lands on the page that has it now, at
+-- its rows. (Account is Profile's; Chat a section of General, History of
+-- Browser, Themes of Appearance.)
+local MOVED: { [string]: { page: string, key: string } } = {
+	account = { page = "profile", key = "email" },
+	chat = { page = "general", key = "chat_section" },
+	browser_history = { page = "browser", key = "history_section" },
+	themes = { page = "appearance", key = "themes_section" },
+}
 ui.effect(function()
 	local r = route.current:get()
-	if r.name == "settings" and r.page == "account" then
-		search.open({ page = "profile", key = "email", title = "", where = "", score = 0 })
+	local to = if r.name == "settings" and r.page then MOVED[r.page] else nil
+	if to then
+		search.open({ page = to.page, key = to.key, title = "", where = "", score = 0 })
 	end
 end)
 

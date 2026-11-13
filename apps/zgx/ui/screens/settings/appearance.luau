@@ -1,7 +1,7 @@
 -- Settings → Appearance: how Zeron looks on this Mac, the shell's own
 -- look (screens/shell/appearance: the scheme, which setup chose too; a new
 -- chat's wallpaper and its effect, the frame and the art behind a chat), the
--- theme each scheme wears (a quick pick; every theme is on the Themes page,
+-- theme each scheme wears (a quick pick; every theme in the Themes section,
 -- screens/themes) and the window's glass (ds.material). Past Advanced look: all
 -- but the colours and the fonts, as the shipping app's page has it.
 
@@ -18,7 +18,7 @@ local plugin_settings = require("@app/screens/plugins/settings")
 local motion = require("@ds/motion")
 local prefers = require("@ds/prefers")
 local themes = require("@app/screens/themes/state")
-local route = require("@app/screens/shell/route")
+local themes_page = require("@app/screens/themes/page")
 local frame = require("@app/screens/shell/frame")
 local keys = require("@app/screens/shell/keys")
 
@@ -33,6 +33,7 @@ search.index(M.ID, ui.t("settings.appearance.title"), ui.t("settings.appearance.
 	{ key = "theme_dark", title = ui.t("settings.appearance.theme.dark"), terms = ui.t("settings.appearance.theme.terms") },
 	{ key = "themes", title = ui.t("settings.appearance.theme.more"), terms = ui.t("settings.appearance.theme.terms") },
 	{ key = "accent", title = ui.t("settings.appearance.accent.label"), terms = ui.t("settings.appearance.accent.terms") },
+	{ key = "themes_section", title = ui.t("themes.page.title"), terms = ui.t("settings.appearance.theme.terms") },
 	{ key = "reduce_motion", title = ui.t("settings.appearance.reduce_motion.label"), section = ui.t("settings.appearance.motion"), terms = ui.t("settings.appearance.reduce_motion.terms") },
 	{ key = "pause_motion", title = ui.t("settings.appearance.pause_motion.label"), section = ui.t("settings.appearance.motion"), terms = ui.t("settings.appearance.pause_motion.terms") },
 	{ key = "smooth_scrolling", title = ui.t("settings.appearance.smooth_scrolling.label"), section = ui.t("settings.appearance.motion"), terms = ui.t("settings.appearance.smooth_scrolling.terms") },
@@ -625,7 +626,7 @@ local function theme_rows(): Node
 			label = ui.t("settings.appearance.theme.more"),
 			description = ui.t("settings.appearance.theme.more_description"),
 			on_click = function()
-				route.settings("themes")
+				search.open({ page = M.ID, key = "themes_section", title = "", where = "", score = 0 })
 			end,
 		}),
 	}
@@ -709,6 +710,7 @@ function M.view(): Node
 				}),
 			},
 		},
+		search.anchor("themes_section", themes_page.Section()),
 		ds.Settings.Section {
 			title = ui.t("settings.appearance.fonts"),
 			ds.Settings.Group {

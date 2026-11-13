@@ -268,7 +268,7 @@ return ui.scroll {
 		ui.presence(function(): string
 			return if route.current:get().page == "themes" then "themes" else "appearance"
 		end, function(which: string): Node
-			return if which == "themes" then page.View() else settings_appearance.view()
+			return if which == "themes" then page.Section() else settings_appearance.view()
 		end, { w_full = true, items = "center" }),
 	},
 }

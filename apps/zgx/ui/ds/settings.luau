@@ -927,6 +927,8 @@ export type CatalogProps = {
 	none: (tab: string) -> Node,
 	hint: { id: string?, text: string | Message }?,
 	overlays: { Node }?,
+	-- A section of another page (its title a section's), not a page of its own.
+	section: boolean?,
 }
 
 -- The tabs' far end: New, and Import… before it when the page has one.
@@ -1113,7 +1115,7 @@ function M.Catalog(props: CatalogProps): Node
 	for _, overlay in props.overlays or {} do
 		table.insert(page, overlay)
 	end
-	return M.Page(page :: any)
+	return if props.section then M.Section(page :: any) else M.Page(page :: any)
 end
 
 return M

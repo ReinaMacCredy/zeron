@@ -54,10 +54,10 @@ test("Smooth scrolling: on at first, kept as set at the next launch, and steppin
 	local SWITCH = `{PAGE} >> role:switch "Smooth scrolling"`
 	expect(app:has(SWITCH)).to_be(true)
 	expect(app:state("smooth_scrolling")).to_be(true)
-	expect(app:tree(PAGE)).to_contain("Mouse wheels glide instead of jumping")
+	expect(app:tree("#setting-smooth_scrolling")).to_contain("Mouse wheels glide instead of jumping")
 	app:set_state("motion_reduce", true)
 	app:frames(10)
-	expect(app:tree(PAGE)).to_contain("Mouse wheels step instantly while motion is reduced.")
+	expect(app:tree("#setting-smooth_scrolling")).to_contain("Mouse wheels step instantly while motion is reduced.")
 	app:set_state("motion_reduce", false)
 	app:click(SWITCH)
 	app:frames(10)

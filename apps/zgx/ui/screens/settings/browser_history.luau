@@ -1,5 +1,7 @@
--- Settings → Browser → History: the pages you've visited in the panel's
--- browser, kept for your account on this Mac (screens/panel/browser_data).
+-- Settings → Browser, its History section (browser.luau puts it under the
+-- browsing's; `settings/browser_history` still opens there at it): the pages
+-- you've visited in the panel's browser, kept for your account on this Mac
+-- (screens/panel/browser_data).
 -- One card for what's kept (whether, and clearing a span of it); under it
 -- the pages themselves, searched from one field and laid out by day, as a
 -- browser's history is read: each row the site's icon (its initial until
@@ -17,14 +19,13 @@ local data = require("@app/screens/panel/browser_data")
 
 local M = {}
 
-M.ID = "browser_history"
-M.TITLE = "History"
-
-search.index(M.ID, ui.t("settings.browser_history.title"), ui.t("settings.browser.history_terms"), {
-	{ key = "keep_history", title = ui.t("settings.browser.keep_history.label"), terms = ui.t("settings.browser.keep_history.terms") },
-	{ key = "clear_history", title = ui.t("settings.browser.clear_history.label"), terms = ui.t("settings.browser.clear_history.terms") },
-	{ key = "history", title = ui.t("settings.browser.history_search"), terms = ui.t("settings.browser.history_terms") },
-})
+-- Its rows, as Browser's search index lists them.
+M.ROWS = {
+	{ key = "history_section", title = ui.t("settings.browser_history.title"), terms = ui.t("settings.browser.history_terms") },
+	{ key = "keep_history", title = ui.t("settings.browser.keep_history.label"), section = ui.t("settings.browser_history.title"), terms = ui.t("settings.browser.keep_history.terms") },
+	{ key = "clear_history", title = ui.t("settings.browser.clear_history.label"), section = ui.t("settings.browser_history.title"), terms = ui.t("settings.browser.clear_history.terms") },
+	{ key = "history", title = ui.t("settings.browser.history_search"), section = ui.t("settings.browser_history.title"), terms = ui.t("settings.browser.history_terms") },
+}
 
 local function row(key: string, props: any): Node
 	return search.anchor(key, ds.Settings.Row(props))
@@ -245,47 +246,46 @@ local function day_block(day: Day, _i: number, now: State<any>): Node
 	}
 end
 
-function M.view(): Node
-	return ds.Settings.Page {
+function M.section(): Node
+	return search.anchor("history_section", ds.Settings.Section {
 		title = ui.t("settings.browser_history.title"),
 		description = ui.t("settings.browser.history_description"),
-		ds.Settings.Section {
-			ds.Settings.Group {
-				row("keep_history", {
-					label = ui.t("settings.browser.keep_history.label"),
-					description = ui.t("settings.browser.keep_history.description"),
-					control = ds.Switch { value = data.keep_history, label = ui.t("settings.browser.keep_history.label") },
-				}),
-				row("clear_history", {
-					label = ui.t("settings.browser.clear_history.label"),
-					description = function(): string
-						return ui.t("settings.browser.clear_history.description", { n = total() }):get()
-					end,
-					control = ui.row {
-						gap = "$space.2",
-						items = "center",
-						ui.div {
-							id = "settings-browser-span",
-							ds.Select { value = span, name = ui.t("settings.browser.clear_history.span"), w = 144, options = span_options },
-						},
-						ds.Button {
-							id = "settings-browser-clear",
-							tone = "secondary",
-							disabled = function(): boolean
-								return total() == 0
-							end,
-							on_click = function()
-								M.clear(span:peek())
-							end,
-							ui.text { ui.t("settings.browser.clear_history.button") },
-						},
+		ds.Settings.Group {
+			row("keep_history", {
+				label = ui.t("settings.browser.keep_history.label"),
+				description = ui.t("settings.browser.keep_history.description"),
+				control = ds.Switch { value = data.keep_history, label = ui.t("settings.browser.keep_history.label") },
+			}),
+			row("clear_history", {
+				label = ui.t("settings.browser.clear_history.label"),
+				description = function(): string
+					return ui.t("settings.browser.clear_history.description", { n = total() }):get()
+				end,
+				control = ui.row {
+					gap = "$space.2",
+					items = "center",
+					ui.div {
+						id = "settings-browser-span",
+						ds.Select { value = span, name = ui.t("settings.browser.clear_history.span"), w = 144, options = span_options },
 					},
-				}),
-			},
+					ds.Button {
+						id = "settings-browser-clear",
+						tone = "secondary",
+						disabled = function(): boolean
+							return total() == 0
+						end,
+						on_click = function()
+							M.clear(span:peek())
+						end,
+						ui.text { ui.t("settings.browser.clear_history.button") },
+					},
+				},
+			}),
 		},
 		search.anchor("history", ui.column {
 			w_full = true,
 			gap = "$space.5",
+			pt = "$space.3",
 			-- Nothing kept: what will be here, or that it's off.
 			ui.show(function(): boolean
 				return total() == 0
@@ -346,7 +346,7 @@ function M.view(): Node
 				},
 			}),
 		}),
-	}
+	})
 end
 
 return M

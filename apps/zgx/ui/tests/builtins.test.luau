@@ -81,7 +81,7 @@ test("each feature's switch on its own page takes its doors away at once, and on
 	expect(switch_of(app, "Keep this Mac awake while agents work")).to_contain("unchecked")
 
 	-- Home widgets (no door yet; Appearance's New chat, under Advanced), Browser annotate and Device: their keys.
-	for _, it in { { "Appearance", "Home widgets", "builtin_home_widgets" }, { "Browsing", "Annotate", "builtin_browser_annotate" }, { "Device hub", "Device panel", "builtin_device" } } do
+	for _, it in { { "Appearance", "Home widgets", "builtin_home_widgets" }, { "Browser", "Annotate", "builtin_browser_annotate" }, { "Device hub", "Device panel", "builtin_device" } } do
 		settings(app, it[1])
 		if it[1] == "Appearance" then
 			app:set_state("settings_appearance_advanced", true)

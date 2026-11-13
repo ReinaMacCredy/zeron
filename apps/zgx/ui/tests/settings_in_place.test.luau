@@ -504,6 +504,8 @@ end)
 
 test("a new chat's picture: chosen, kept, named, removed; its effect said, and gone with it", function()
 	local app = open("Appearance")
+	-- (Its own section: the page's tree, past Themes, is longer than a tree's budget.)
+	local NEW_CHAT = "#appearance-new-chat"
 	-- (Tall enough that the New chat section shows whole.)
 	app:resize(1200, 2400)
 	app:set_state("settings_appearance_advanced", true)
@@ -511,16 +513,16 @@ test("a new chat's picture: chosen, kept, named, removed; its effect said, and g
 	app:set_state("shell_wallpaper_effect", "halftone")
 	app:frames(6)
 	-- Nothing to draw over: no effect to choose.
-	expect(shows(app, PAGE, "colored print dots")).to_be(false)
+	expect(shows(app, NEW_CHAT, "colored print dots")).to_be(false)
 	app:set_state("shell_wallpaper", "image")
 	app:frames(6)
-	expect(shows(app, PAGE, "No image chosen")).to_be(true)
+	expect(shows(app, NEW_CHAT, "No image chosen")).to_be(true)
 	app:click(`{PAGE} >> role:button "Choose Image"`)
 	app:frames(10)
 	-- Kept by the host (its copy), then shown by its name.
 	expect(asked(app, "wallpaper.keep:assets/favicons/zeron.png")).to_be(true)
-	expect(shows(app, PAGE, "zeron.png")).to_be(true)
-	expect(shows(app, PAGE, "colored print dots")).to_be(true)
+	expect(shows(app, NEW_CHAT, "zeron.png")).to_be(true)
+	expect(shows(app, NEW_CHAT, "colored print dots")).to_be(true)
 	expect(app:has(`{PAGE} >> role:button "Adjust"`)).to_be(true)
 	expect(app:has(`{PAGE} >> role:button "Replace"`)).to_be(true)
 	local image = app:state("shell_wallpaper_image") :: any
@@ -530,7 +532,7 @@ test("a new chat's picture: chosen, kept, named, removed; its effect said, and g
 	expect(app:state("shell_wallpaper")).to_be("none")
 	expect(app:state("shell_wallpaper_image")).to_be_nil()
 	expect(asked(app, "wallpaper.forget:assets/favicons/zeron.png")).to_be(true)
-	expect(shows(app, PAGE, "colored print dots")).to_be(false)
+	expect(shows(app, NEW_CHAT, "colored print dots")).to_be(false)
 end)
 
 -- About & updates: the host's `about` stood in for, each state of an update.

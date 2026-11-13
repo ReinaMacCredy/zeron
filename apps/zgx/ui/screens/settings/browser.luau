@@ -1,11 +1,11 @@
--- Settings → Browser → Browsing: the panel's browser tab
--- (screens/panel/browser), in three sections. Links and search: where a
+-- Settings → Browser: the panel's browser tab (screens/panel/browser), in
+-- four sections. Links and search: where a
 -- chat's links open, what the address bar searches with (a search address
 -- of your own too). Zoom: how big pages show, and each site you zoomed
 -- yourself, one by one, with its percentage and a way back. Developer:
 -- whether pages may be inspected. This Mac's, kept across launches
--- (screens/panel/browser_data), read by the tab as they change. History is
--- the Browser heading's other page (browser_history.luau).
+-- (screens/panel/browser_data), read by the tab as they change. History:
+-- the pages visited (browser_history.luau).
 --
 -- Every select is one width, so the controls end on one edge and start on
 -- another.
@@ -22,19 +22,24 @@ local prefs = require("@app/screens/settings/prefs")
 local search = require("@app/screens/settings/search")
 local Builtins = require("@app/screens/plugins/builtins")
 local data = require("@app/screens/panel/browser_data")
+local history = require("@app/screens/settings/browser_history")
 
 local M = {}
 
 M.ID = "browser"
-M.TITLE = "Browsing"
+M.TITLE = "Browser"
 
-search.index(M.ID, ui.t("settings.browser.page_title"), ui.t("settings.browser.terms"), {
+local rows: { search.Row } = {
 	{ key = "browser_annotate", title = ui.t("settings.features.browser_annotate.label"), terms = ui.t("settings.features.browser_annotate.terms") },
 	{ key = "open_links", title = ui.t("settings.general.open_links.label"), terms = ui.t("settings.general.open_links.terms") },
 	{ key = "search_engine", title = ui.t("settings.browser.search_engine.label"), terms = ui.t("settings.browser.search_engine.terms") },
 	{ key = "default_zoom", title = ui.t("settings.browser.default_zoom.label"), section = ui.t("settings.browser.zoom"), terms = ui.t("settings.browser.default_zoom.terms") },
 	{ key = "inspectable", title = ui.t("settings.browser.inspectable.label"), section = ui.t("settings.browser.developer"), terms = ui.t("settings.browser.inspectable.terms") },
-})
+}
+for _, r in history.ROWS do
+	table.insert(rows, r)
+end
+search.index(M.ID, ui.t("settings.shell.group.browser"), ui.t("settings.browser.terms"), rows)
 
 local function row(key: string, props: any): Node
 	return search.anchor(key, ds.Settings.Row(props))
@@ -93,7 +98,7 @@ end
 
 function M.view(): Node
 	return ds.Settings.Page {
-		title = ui.t("settings.browser.page_title"),
+		title = ui.t("settings.shell.group.browser"),
 		description = ui.t("settings.browser.description"),
 		search.anchor("browser_annotate", Builtins.Row("browser_annotate")),
 		ds.Settings.Section {
@@ -207,6 +212,7 @@ function M.view(): Node
 				}),
 			},
 		},
+		history.section(),
 	}
 end
 

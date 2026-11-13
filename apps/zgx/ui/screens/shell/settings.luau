@@ -263,14 +263,12 @@ local BACK = "::back"
 -- the name it was given); a heading by its English.
 local TITLE_KEYS: { [string]: { string } } = {
 	general = { "General", "settings.general.title" },
-	chat = { "Chat", "settings.chat.title" },
 	appearance = { "Appearance", "settings.appearance.title" },
 	activity = { "Activity", "settings.activity.title" },
 	notifications = { "Notifications", "settings.notifications.title" },
 	voice = { "Voice", "settings.voice.title" },
 	files = { "Files", "settings.files.title" },
-	browser = { "Browsing", "settings.browser.page_title" },
-	browser_history = { "History", "settings.browser_history.title" },
+	browser = { "Browser", "settings.shell.group.browser" },
 	shortcuts = { "Shortcuts", "settings.shortcuts.title" },
 	appshots = { "Appshots", "settings.appshots.title" },
 	computer = { "Computer use", "settings.computer.title" },
@@ -293,7 +291,6 @@ local TITLE_KEYS: { [string]: { string } } = {
 	experimental = { "Experimental", "settings.lab.title" },
 	tools = { "Tools", "settings.tools.title" },
 	plugins = { "Plugins", "plugins.page.title" },
-	themes = { "Themes", "themes.page.title" },
 	templates = { "Templates", "templates.page.title" },
 }
 local GROUP_KEYS: { [string]: string } = {

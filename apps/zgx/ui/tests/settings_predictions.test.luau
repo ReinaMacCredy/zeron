@@ -30,7 +30,7 @@ test("Predictions: one switch, off at first, saved to the engine and read back",
 	app:click(SWITCH)
 	app:frames(20)
 	expect(count(app, "SetPredictionSettings")).to_be(1)
-	app:click('#settings-nav >> role:tab "Chat"')
+	app:click('#settings-nav >> role:tab "Appearance"')
 	app:frames(20)
 	app:click('#settings-nav >> role:tab "General"')
 	app:frames(30)

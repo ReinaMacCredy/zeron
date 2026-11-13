@@ -10,6 +10,8 @@
 -- `zeron-user_ada`); the tab on the panel in ui/panel_fixture.luau, its page
 -- stood in for (signed out: `zeron-local`).
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 local NAV = "#settings-nav"
 local ADA = "zeron-user_ada"
@@ -28,15 +30,16 @@ local function node(app: any, scope: string, label: string): string?
 	return nil
 end
 
--- Settings, on one of the Browser heading's pages ("Browsing", "History").
-local function settings(page: string?): any
-	local app = mount("shell_fixture.luau")
+-- Settings, on Browser (its History a section of it, at its foot).
+local HISTORY = "#setting-history_section"
+local function settings(): any
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 900)
 	app:frames(30)
 	app:command("settings_stub.sign_in")
 	app:command("shell.settings")
 	app:frames(20)
-	app:click(`{NAV} >> role:tab "{page or "Browsing"}"`)
+	app:click(`{NAV} >> role:tab "Browser"`)
 	app:frames(30)
 	return app
 end
@@ -53,26 +56,23 @@ local function seed(app: any)
 	app:frames(20)
 end
 
-test("Browser settings: a heading of its own, Browsing and History, and General no longer has Open links in", function()
+test("Browser settings: a heading of its own, one Browser page with History as its section, and General no longer has Open links in", function()
 	local app = settings()
-	expect(app:has(`{NAV} >> "Browser"`)).to_be(true)
-	expect(app:has(`{NAV} >> role:tab "History"`)).to_be(true)
+	expect(app:has(`{NAV} >> role:tab "Browser"`)).to_be(true)
+	expect(app:has(`{NAV} >> role:tab "Browsing"`)).to_be(false)
+	expect(app:has(`{NAV} >> role:tab "History"`)).to_be(false)
 	expect(app:state("shell_route_path")).to_be("/settings/browser")
 	for _, label in { "Links and search", "Open links in", "Search engine", "Zoom", "Page zoom", "Developer", "Allow inspecting pages" } do
 		expect(shows(app, PAGE, label)).to_be(true)
 	end
-	expect(shows(app, PAGE, "Keep history")).to_be(false)
 	-- (No home page: a new tab is the start page.)
 	expect(shows(app, PAGE, "New tab opens")).to_be(false)
-	app:click(`{NAV} >> role:tab "History"`)
-	app:frames(30)
-	expect(app:state("shell_route_path")).to_be("/settings/browser_history")
-	for _, label in { "Keep history", "Clear history", "No history yet" } do
-		expect(shows(app, PAGE, label)).to_be(true)
+	for _, label in { "History", "Keep history", "Clear history", "No history yet" } do
+		expect(shows(app, HISTORY, label)).to_be(true)
 	end
 	-- Nothing kept yet: no filter, the count says so, the list says what goes there.
-	expect(shows(app, PAGE, "Nothing kept yet.")).to_be(true)
-	expect(shows(app, PAGE, "Pages you visit in the browser show here.")).to_be(true)
+	expect(shows(app, HISTORY, "Nothing kept yet.")).to_be(true)
+	expect(shows(app, HISTORY, "Pages you visit in the browser show here.")).to_be(true)
 	expect(app:has(`{PAGE} >> role:textbox "Search history"`)).to_be(false)
 	app:click(`{NAV} >> role:tab "General"`)
 	app:frames(20)
@@ -82,27 +82,27 @@ test("Browser settings: a heading of its own, Browsing and History, and General 
 end)
 
 test("Browser settings: history lists, filters, and lets one page go in place", function()
-	local app = settings("History")
+	local app = settings()
 	seed(app)
 	expect(app:wait(`{PAGE} >> "Quick Start – React"`, { timeout_ms = 5000 })).to_be(true)
-	expect(shows(app, PAGE, "Zeron")).to_be(true)
-	expect(shows(app, PAGE, "Example Domain")).to_be(true)
-	expect(shows(app, PAGE, "3 pages kept.")).to_be(true)
+	expect(shows(app, HISTORY, "Zeron")).to_be(true)
+	expect(shows(app, HISTORY, "Example Domain")).to_be(true)
+	expect(shows(app, HISTORY, "3 pages kept.")).to_be(true)
 	-- Laid out by day, the latest first, each with the time it was visited.
-	expect(shows(app, PAGE, "Today")).to_be(true)
-	expect(shows(app, PAGE, " AM\"") or shows(app, PAGE, " PM\"")).to_be(true)
+	expect(shows(app, HISTORY, "Today")).to_be(true)
+	expect(shows(app, HISTORY, " AM\"") or shows(app, HISTORY, " PM\"")).to_be(true)
 	-- The filter: by address or title.
 	app:type(`{PAGE} >> role:textbox "Search history"`, "react")
 	app:frames(20)
-	expect(shows(app, PAGE, "Quick Start – React")).to_be(true)
-	expect(shows(app, PAGE, "Example Domain")).to_be(false)
+	expect(shows(app, HISTORY, "Quick Start – React")).to_be(true)
+	expect(shows(app, HISTORY, "Example Domain")).to_be(false)
 	app:type(`{PAGE} >> role:textbox "Search history"`, "nothing-like-it")
 	app:frames(20)
-	expect(shows(app, PAGE, "No pages match.")).to_be(true)
+	expect(shows(app, HISTORY, "No pages match.")).to_be(true)
 	app:set_state("settings_browser_history_query", "")
 	app:frames(20)
 	-- One let go: the others stay the same rows.
-	local zeron = node(app, PAGE, "Zeron")
+	local zeron = node(app, HISTORY, "Zeron")
 	expect(zeron).never.to_be_nil()
 	-- (Its × shows as the row is pointed at, in its time's place.)
 	local remove = `{PAGE} >> role:button "Remove Example Domain from history"`
@@ -112,14 +112,14 @@ test("Browser settings: history lists, filters, and lets one page go in place", 
 	expect(app:tree(remove)).never.to_contain("hidden")
 	app:click(remove)
 	app:frames(20)
-	expect(shows(app, PAGE, "Example Domain")).to_be(false)
-	expect(node(app, PAGE, "Zeron")).to_be(zeron)
+	expect(shows(app, HISTORY, "Example Domain")).to_be(false)
+	expect(node(app, HISTORY, "Zeron")).to_be(zeron)
 	local kept = (app:state("browser_history") :: any)[ADA]
 	expect(#kept).to_be(2)
 end)
 
 test("Browser settings: Clear history clears the span chosen, then all of it", function()
-	local app = settings("History")
+	local app = settings()
 	seed(app)
 	-- The last hour: the two recent go, the one three days back stays.
 	app:set_state("settings_browser_span", "hour")
@@ -129,13 +129,13 @@ test("Browser settings: Clear history clears the span chosen, then all of it", f
 	local kept = (app:state("browser_history") :: any)[ADA]
 	expect(#kept).to_be(1)
 	expect(kept[1].url).to_be("https://example.com/")
-	expect(shows(app, PAGE, "1 page kept.")).to_be(true)
+	expect(shows(app, HISTORY, "1 page kept.")).to_be(true)
 	app:set_state("settings_browser_span", "all")
 	app:frames(10)
 	app:click("#settings-browser-clear")
 	app:frames(20)
 	expect((app:state("browser_history") :: any)[ADA]).to_be_nil()
-	expect(shows(app, PAGE, "Nothing kept yet.")).to_be(true)
+	expect(shows(app, HISTORY, "Nothing kept yet.")).to_be(true)
 end)
 
 test("Browser settings: a search of your own, checked for where its words go", function()

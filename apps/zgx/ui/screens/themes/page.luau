@@ -1,5 +1,6 @@
 --!strict
--- Settings → Themes: every theme Zeron can wear, laid out as Plugins and
+-- Settings → Appearance, its Themes section (`settings/themes` still opens
+-- there at it): every theme Zeron can wear, laid out as Plugins and
 -- Templates are (ds.Settings.Catalog): the same search, tabs, card of rows
 -- and empty states. A theme is only colours, so it's worn with whichever
 -- template runs, and it needs no allowing: it's data (src/themes.rs).
@@ -7,7 +8,7 @@
 -- Its tabs: all of them; Zeron's built in; those templates bring (a
 -- template's own colours, worn where you haven't chosen a theme); and
 -- yours, imported from VS Code (a theme's .json, or an extension's folder,
--- by Import theme or dropped on the page).
+-- by Import theme or dropped on the section).
 --
 -- Each row is its theme's as the list changes: its swatch (ds/theme_swatch,
 -- a half for each scheme it has), its name, which schemes it has, where it
@@ -768,7 +769,7 @@ local function dialogs(): { Node }
 	}
 end
 
-function M.View(): Node
+function M.Section(): Node
 	-- The swatches' themes, kept while the page is open.
 	state.swatches()
 	return ui.column {
@@ -782,6 +783,7 @@ function M.View(): Node
 		end,
 		on_file_drop = M.dropped,
 		ds.Settings.Catalog {
+			section = true,
 			title = ui.t("themes.page.title"),
 			description = ui.t("themes.page.description"),
 			search = { value = query, placeholder = ui.t("themes.page.search") },

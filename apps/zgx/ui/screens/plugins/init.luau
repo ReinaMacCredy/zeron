@@ -78,9 +78,8 @@ settings.add {
 	before = "archived",
 }
 
--- Themes and Templates have their own pages, beside this one (added after
--- it, so they list right after Plugins).
-require("@app/screens/themes")
+-- Templates has its own page, beside this one (added after it, so it lists
+-- right after Plugins). Themes are a section of Appearance.
 require("@app/screens/templates")
 
 -- Each plugin's own settings: a page of its own under "Plugins", while
