@@ -444,6 +444,11 @@ local function edge_gap(): number
 	return if appearance.inset_card:get() then WINDOW_EDGE else 0
 end
 
+-- The strip's own tint where no picture shows under it; the window round the cards (rail, sidebar, gaps) wears it too.
+local function plain_tint(): string
+	return if shows_art() then "#00000000" else M.strip_token("bg")
+end
+
 local function fill_token(): string
 	return if M.framed:get() then "$zeron.inset.framed_bg" else "$zeron.inset.bg"
 end
@@ -621,7 +626,7 @@ local function strip_view(): Node
 			elseif M.page_art:get() ~= nil then
 				return fill_token()
 			end
-			return if shows_art() then "#00000000" else M.strip_token("bg")
+			return plain_tint()
 		end,
 		mask_gradient = function(): any
 			return if framed() then STRIP_IN else nil
@@ -827,6 +832,16 @@ function M.View(): Node
 		top = 0,
 		bottom = 0,
 		pointer_events = "none",
+		ui.div {
+			id = "shell-window-tint",
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			pointer_events = "none",
+			bg = plain_tint,
+		},
 		ui.presence(function(): string
 			return if M.framed:get() then "frame" else ""
 		end, function(which: string): Node
