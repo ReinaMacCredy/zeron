@@ -560,24 +560,36 @@ fn place_of(chat: &Json) -> Place {
     }
 }
 
-/// What deleting `root` takes with it, as this engine's `deleteChat` does
-/// (crates/engine rpc.rs `delete_chat`): a Cloud chat's direct children on
-/// Cloud; a computer's chat takes none, its children staying.
-/// `(subagents, side chats)`.
+// Mirrors crates/engine rpc.rs `chat_descendants`, not `parentChatId`, which also links opened threads.
 fn deleted_with(chats: &[Json], root: &str) -> (u32, u32) {
     let on_cloud = |c: &Json| c["deviceId"].as_str().unwrap_or_default().starts_with("cloud-");
-    if !chats.iter().any(|c| c["id"].as_str() == Some(root) && on_cloud(c)) {
-        return (0, 0);
-    }
+    let owned_by = |c: &Json, parent: &str| {
+        c["delegation"]["delegatedByChatId"].as_str() == Some(parent)
+            || c["sidechatSourceChatId"].as_str() == Some(parent)
+            || (c["createdByChatId"].as_str() == Some(parent) && c["forkedFromChatId"].is_string())
+    };
+    let root_cloud = chats.iter().find(|c| c["id"].as_str() == Some(root)).is_some_and(on_cloud);
     let (mut subagents, mut sides) = (0, 0);
-    for c in chats {
-        if c["parentChatId"].as_str() != Some(root) || !on_cloud(c) {
-            continue;
-        }
-        if c["childKind"].as_str() == Some("subagent") {
-            subagents += 1;
-        } else {
-            sides += 1;
+    let mut seen: HashSet<&str> = HashSet::from([root]);
+    let mut frontier: Vec<(&str, bool)> = vec![(root, root_cloud)];
+    while let Some((parent, parent_cloud)) = frontier.pop() {
+        for c in chats {
+            let Some(id) = c["id"].as_str() else { continue };
+            let cloud = on_cloud(c);
+            let goes = if cloud {
+                parent_cloud && (owned_by(c, parent) || c["createdByChatId"].as_str() == Some(parent))
+            } else {
+                owned_by(c, parent)
+            };
+            if !goes || !seen.insert(id) {
+                continue;
+            }
+            if c["delegation"].is_object() {
+                subagents += 1;
+            } else {
+                sides += 1;
+            }
+            frontier.push((id, cloud));
         }
     }
     (subagents, sides)
@@ -2685,25 +2697,28 @@ pub(crate) fn unix_seconds(stamp: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    /// "Delete session?" counts only what this engine's `deleteChat` takes:
-    /// a Cloud chat's direct Cloud children; a computer's chat none.
+    /// "Delete session?" counts what the engine's `deleteChat` takes: its
+    /// children on computers and theirs, archived ones too (the lists show
+    /// none of those); a Cloud chat's Cloud children; never a computer's
+    /// Cloud delegate, nor anyone else's chats.
     #[test]
     fn a_delete_counts_what_goes_with_it() {
-        let chats = serde_json::json!([
+        let chats = super::with_parents(serde_json::json!([
             { "id": "p", "deviceId": "mac" },
-            { "id": "side", "deviceId": "mac", "parentChatId": "p" },
-            { "id": "own", "deviceId": "mac", "parentChatId": "p", "childKind": "side" },
-            { "id": "sub", "deviceId": "mac", "parentChatId": "p", "childKind": "subagent", "archived": true },
-            { "id": "subsub", "deviceId": "mac", "parentChatId": "sub", "childKind": "subagent" },
-            { "id": "delegate", "deviceId": "cloud-d", "parentChatId": "p", "childKind": "subagent" },
+            { "id": "side", "deviceId": "mac", "sidechatSourceChatId": "p" },
+            { "id": "own", "deviceId": "mac", "createdByChatId": "p", "forkedFromChatId": "p" },
+            { "id": "sub", "deviceId": "mac", "delegation": { "delegatedByChatId": "p" }, "archived": true },
+            { "id": "subsub", "deviceId": "mac", "delegation": { "delegatedByChatId": "sub" } },
+            { "id": "thread", "deviceId": "mac", "createdByChatId": "p" },
+            { "id": "delegate", "deviceId": "cloud-d", "delegation": { "delegatedByChatId": "p" } },
             { "id": "other", "deviceId": "mac" },
-            { "id": "others", "deviceId": "mac", "parentChatId": "other" },
+            { "id": "others", "deviceId": "mac", "sidechatSourceChatId": "other" },
             { "id": "c", "deviceId": "cloud-c" },
-            { "id": "c-delegate", "deviceId": "cloud-e", "parentChatId": "c", "childKind": "subagent" },
-            { "id": "c-side", "deviceId": "cloud-c", "parentChatId": "c", "childKind": "side" },
-        ]);
+            { "id": "c-delegate", "deviceId": "cloud-e", "delegation": { "delegatedByChatId": "c" } },
+            { "id": "c-side", "deviceId": "cloud-c", "sidechatSourceChatId": "c" },
+        ]));
         let all = chats.as_array().unwrap();
-        assert_eq!(super::deleted_with(all, "p"), (0, 0));
+        assert_eq!(super::deleted_with(all, "p"), (2, 2));
         assert_eq!(super::deleted_with(all, "c"), (1, 1));
         assert_eq!(super::deleted_with(all, "others"), (0, 0));
         assert_eq!(super::deleted_with(all, "gone"), (0, 0));
