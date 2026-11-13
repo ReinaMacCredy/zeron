@@ -243,11 +243,14 @@ function M.step(by: number): boolean
 	end
 	if M.cycles_tabs:peek() then
 		local strip_now = strip(false)
+		if tabs.draft_shows:peek() then
+			table.insert(strip_now, tabs.DRAFT)
+		end
 		if #strip_now == 0 then
 			return true
 		end
-		local s = route.session:peek()
-		local at = if s then table.find(strip_now, s.id) else nil
+		local here = if route.chat:peek().name == "home" then tabs.DRAFT else here_now()
+		local at = if here then table.find(strip_now, here) else nil
 		local i = if at then (at - 1 + by) % #strip_now + 1 elseif by > 0 then 1 else #strip_now
 		go(strip_now[i])
 		return true
