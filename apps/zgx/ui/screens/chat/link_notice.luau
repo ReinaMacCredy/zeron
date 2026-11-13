@@ -34,7 +34,7 @@ export type Link = {
 	cloud: { line: Notice? }?,
 }
 
-export type Notice = { text: string, tone: string?, spinner: boolean?, action: string? }
+export type Notice = { text: string, tone: string?, spinner: boolean?, action: string?, alert: boolean? }
 
 function M.host_of(now: any, s: any): (boolean, string?)
 	if s and s.device and s.device ~= now.here then
@@ -81,7 +81,13 @@ function M.of(link: Link): Notice?
 		}
 	end
 	if link.cloud then
-		return link.cloud.line
+		local line = link.cloud.line
+		if not line then
+			return nil
+		end
+		local said: any = table.clone(line)
+		said.alert = true
+		return said
 	end
 	if link.host_unreachable and intent then
 		local host = link.host or say("the_host", "the host")

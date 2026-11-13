@@ -23,9 +23,10 @@
 -- cargo (ds/composer_cargo: what the message carries, as chips), or what
 -- the agent asks (ds/composer_ask: a question's options, an approval), the
 -- draft then being the answer. Over it, the deck (ds/composer_deck: the
--- queue and the plan): folded, a pill floating over it; opened, its own
--- top. Above that, the pill row (what runs, what's asked), and a notice
--- (offline, a failed send, a draft restored) in its own line.
+-- queue, the plan, a Cloud machine's alerts with its notice first among
+-- them): folded, a pill floating over it; opened, its own top. Above that,
+-- the pill row (what runs, what's asked), and any other notice (offline, a
+-- failed send, a draft restored) in its own line.
 -- Mentions (ds/composer_mentions) open over the pill, its full width. Dictating, a track
 -- unrolls from the microphone over the controls: a dot, "Listening", the
 -- voice, a clock.
@@ -92,6 +93,9 @@ export type Notice = {
 	-- Worth knowing, not worth raising: read with the deck's alerts once
 	-- they're open, never putting up the pill on its own.
 	quiet: boolean?,
+	-- Said as the deck's first alert rather than on the notice line (a Cloud
+	-- machine's state, beside its alerts, as upstream's deck says it).
+	alert: boolean?,
 }
 export type Answer = { values: { string }, text: string }
 -- Where an existing chat works (`branch_fixed`).
@@ -224,11 +228,12 @@ export type Props = {
 	on_dismiss_todos: (() -> ())?,
 	-- Which of its tabs is open.
 	tray: State<dock.Tray?>?,
-	-- (Unused, 1B: the pill row carries what runs, the notice line what to know; the gallery still passes them.)
+	-- (Unused, 1B: the pill row carries what runs; the gallery still passes them.)
 	tasks: State<{ dock.Task }>?,
 	on_stop_task: ((id: string) -> ())?,
 	on_stop_all: (() -> ())?,
 	on_open_task: ((id: string) -> ())?,
+	-- A Cloud machine's alerts (screens/chat/cloud_tray), the deck's Alerts.
 	alerts: State<{ deck.Alert }>?,
 	on_alert_action: ((id: string) -> ())?,
 	on_dismiss_alert: ((id: string) -> ())?,
@@ -3102,7 +3107,37 @@ return ui.component(function(props: Props): Node
 		local reach = if props.pills_reach then props.pills_reach() else 0
 		return if reach >= 28 then reach else 0
 	end
-	if props.queue or props.todos then
+	-- A notice marked `alert` (a Cloud machine's state) is the deck's first
+	-- alert, in its tone, as upstream's deck says every notice; it goes only as
+	-- what it says is over, unless it says it may be let go.
+	local NOTICE = "\0notice"
+	local alerts: any = props.alerts
+	if props.notice then
+		local notice = props.notice
+		alerts = ui.computed(function(): { deck.Alert }
+			local out: { deck.Alert } = {}
+			local n = notice:get()
+			if n and n.alert then
+				local tone: deck.AlertTone = if n.tone == "danger" then "danger" elseif n.tone == "warning" then "warning" else "info"
+				table.insert(out, {
+					id = NOTICE,
+					tone = tone,
+					title = n.text,
+					action = n.action,
+					spinner = n.spinner,
+					dismissable = n.dismissable == true,
+					quiet = n.quiet == true,
+				})
+			end
+			if props.alerts then
+				for _, x in props.alerts:get() do
+					table.insert(out, x)
+				end
+			end
+			return out
+		end)
+	end
+	if props.queue or props.todos or alerts then
 		trays, tray_pill, deck_folded, deck_left, deck_crowded = deck.parts {
 			queue = props.queue,
 			can_steer = props.can_steer,
@@ -3126,6 +3161,25 @@ return ui.component(function(props: Props): Node
 			open = props.tray :: any,
 			narrow = narrow,
 			aside = props.aside,
+			alerts = alerts,
+			on_alert_action = function(id: string)
+				if id == NOTICE then
+					if props.on_notice_action then
+						props.on_notice_action()
+					end
+				elseif props.on_alert_action then
+					props.on_alert_action(id)
+				end
+			end,
+			on_dismiss_alert = function(id: string)
+				if id == NOTICE then
+					if props.on_dismiss_notice then
+						props.on_dismiss_notice()
+					end
+				elseif props.on_dismiss_alert then
+					props.on_dismiss_alert(id)
+				end
+			end,
 			on_pill_width = props.on_pill_width,
 			width = function(): number
 				return pill_w:get()
@@ -3380,7 +3434,10 @@ return ui.component(function(props: Props): Node
 		relative = true,
 		if props.pills then ui.div { w_full = true, h = 0, shrink = 0, opacity = dimmed, pill_row() } else nil,
 		if props.notice
-			then notice_line(props.notice, props.on_notice_action, props.on_dismiss_notice, function(): boolean
+			then notice_line(ui.computed(function(): Notice?
+				local n = (props.notice :: State<Notice?>):get()
+				return if n and n.alert then nil else n
+			end), props.on_notice_action, props.on_dismiss_notice, function(): boolean
 				return props.side_tab ~= nil and props.side_tab.shown()
 			end)
 			else nil,
