@@ -89,6 +89,9 @@ test("Tab and Shift+Tab go through the scopes, each listing its own kind; the ar
 	expect(files).never.to_contain("# Files")
 	app:key("Tab")
 	settle(app)
+	expect(rows(app)).never.to_contain("chat.rs")
+	app:key("Tab")
+	settle(app)
 	local chats = rows(app)
 	expect(chats).to_contain("Long chat")
 	expect(chats).never.to_contain("chat.rs")
@@ -131,7 +134,7 @@ test("each scope says when it has nothing, and when nothing matches", function()
 	local app = chat()
 	app:type(BOX, "@")
 	settle(app)
-	for _ = 1, 3 do
+	for _ = 1, 4 do
 		app:key("Tab")
 	end
 	settle(app)
