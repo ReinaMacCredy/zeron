@@ -1504,6 +1504,48 @@ return function(props: Props): Node
 		end
 		return out
 	end)
+	local resizing_split = ui.use_state(false)
+	local function size_veil(id: string, card: any): Node
+		local function measure(of: string): string
+			return tostring(math.floor((card[of] or 0) + 0.5))
+		end
+		local function figure(text: string | () -> string, color: string): Node
+			return ui.text { text, literal = true, font = "$font.mono", text_size = "$font.size.xs", color = color }
+		end
+		return ui.div {
+			id = `split-size-veil-{id}`,
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			pointer_events = "none",
+			items = "center",
+			justify = "center",
+			bg = function(): string
+				local dark = string.find(ui.theme.kind(), "dark", 1, true) ~= nil
+				return ui.raw(if dark then "#00000036" else "#0000001d", "gpui's size veil: its scrim at .35")
+			end,
+			ui.row {
+				px = ui.raw(9, "gpui's size badge"),
+				py = ui.raw(5, "gpui's size badge"),
+				rounded = ui.raw(6, "gpui's size badge"),
+				bg = "$surface.overlay",
+				border = 1,
+				border_color = "$border.strong",
+				shadow = "$shadow.md",
+				items = "center",
+				gap = ui.raw(4, "gpui's size badge"),
+				figure(function(): string
+					return measure("width")
+				end, "$text.primary"),
+				figure("×", "$text.secondary"),
+				figure(function(): string
+					return measure("height")
+				end, "$text.primary"),
+			},
+		}
+	end
 	local function pane_item(id: string): Node
 		local lane_slot = `split-{id}`
 		local function focused(): boolean
@@ -1720,6 +1762,9 @@ return function(props: Props): Node
 				end,
 				label = ui.t("chat.composer.drop_to_mention") :: any,
 			},
+			ui.show(function(): boolean
+				return resizing_split:get()
+			end, size_veil(id, card_ref)),
 		}
 		local item: { [any]: any } = {
 			-- (`#split-pane-<session>`, `.split-pane`: a chat's pane, the
@@ -1793,6 +1838,7 @@ return function(props: Props): Node
 	-- shares again, easing there. It takes the pointer `seam.REACH` each side
 	-- of the gap's middle, its gap lit under it.
 	local PANE_LEAST_WIDE, PANE_LEAST_TALL = 288, 160
+	local SPLIT_SNAP = 14
 	local DIVIDER_REACH = seam.REACH - splits.GAP / 2
 	local function divider(id: string): Node
 		local function find(list: { any }): any
@@ -1850,11 +1896,16 @@ return function(props: Props): Node
 				local span = if row then area.w else area.h
 				start = { at = if row then e.x else e.y, shares = splits.shares_at(d.path), path = d.path, part = d.at, length = d.length.p * span + d.length.q }
 				held:set(true)
+				resizing_split:set(true)
 			end,
 			on_pointer_move = function(e: any)
 				local s = start
 				if s and s.length > 0 then
 					local moved = ((if row then e.x else e.y) - s.at) / s.length
+					local even = (s.shares[s.part] + s.shares[s.part + 1]) / 2
+					if math.abs((s.shares[s.part] + moved - even) * s.length) < SPLIT_SNAP then
+						moved = even - s.shares[s.part]
+					end
 					local least = math.min(0.45, (if row then PANE_LEAST_WIDE else PANE_LEAST_TALL) / s.length)
 					local lo, hi = splits.bounds(s.shares, s.part, least)
 					drag.at((s.shares[s.part] + moved) * s.length, lo * s.length, hi * s.length)
@@ -1865,6 +1916,7 @@ return function(props: Props): Node
 			on_release = function()
 				start = nil
 				held:set(false)
+				resizing_split:set(false)
 				drag.release()
 			end,
 			-- What lights: the gap itself.
