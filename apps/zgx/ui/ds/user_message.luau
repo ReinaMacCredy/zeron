@@ -393,20 +393,34 @@ return ui.component(function(props: Props): Node
 				local n = tonumber(string.match(base, "^Image[ _](%d+)%.%w+$"))
 				if n and string.find(props.text, `(zeron-image:{n})`, 1, true) then
 					pictured[n] = k
-					local ok, asked = pcall(ui.call, "chat.thumb", a.src)
-					if ok and asked then
-						asked:after(function(svg: any)
-							if type(svg) == "string" then
-								local next = table.clone(thumbs:peek())
-								next[n] = "code:" .. svg
-								thumbs:set(next)
-							end
-						end, function() end)
-					end
 				end
 			end
 		end
 	end
+	-- (From where its tile shows it now: a dragged screenshot's first file can be gone before the chat's copy comes.)
+	local thumbed: { [number]: string } = {}
+	ui.effect(function()
+		if next(pictured) == nil then
+			return
+		end
+		local list = images()
+		for n, k in pictured do
+			local path = list[k] and list[k].path
+			if path and thumbed[n] ~= path and thumbs:peek()[n] == nil then
+				thumbed[n] = path
+				local ok, asked = pcall(ui.call, "chat.thumb", path)
+				if ok and asked then
+					asked:after(function(svg: any)
+						if type(svg) == "string" then
+							local next = table.clone(thumbs:peek())
+							next[n] = "code:" .. svg
+							thumbs:set(next)
+						end
+					end, function() end)
+				end
+			end
+		end
+	end)
 	local function open(target: string)
 		local n = tonumber(string.match(target, "^zeron%-attachment:(%d+)$"))
 		local picture = tonumber(string.match(target, "^zeron%-image:(%d+)$"))
