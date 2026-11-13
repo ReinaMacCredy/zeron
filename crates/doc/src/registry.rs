@@ -1597,6 +1597,10 @@ impl RegistryDoc {
                 opt_str(chat.created_by_chat_id.as_deref()),
             ),
             (
+                "childKind",
+                opt_str(chat.child_kind.map(zeron_proto::ChildKind::as_str)),
+            ),
+            (
                 "forkedFromChatId",
                 opt_str(chat.forked_from_chat_id.as_deref()),
             ),
@@ -2272,6 +2276,10 @@ impl RegistryDoc {
                     (
                         "createdByChatId",
                         opt_str(chat.created_by_chat_id.as_deref()),
+                    ),
+                    (
+                        "childKind",
+                        opt_str(chat.child_kind.map(zeron_proto::ChildKind::as_str)),
                     ),
                     (
                         "forkedFromChatId",

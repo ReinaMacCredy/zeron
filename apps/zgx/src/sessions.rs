@@ -563,10 +563,11 @@ fn place_of(chat: &Json) -> Place {
 // Mirrors crates/engine rpc.rs `chat_descendants`, not `parentChatId`, which also links opened threads.
 fn deleted_with(chats: &[Json], root: &str) -> (u32, u32) {
     let on_cloud = |c: &Json| c["deviceId"].as_str().unwrap_or_default().starts_with("cloud-");
+    let marked = |c: &Json| matches!(c["childKind"].as_str(), Some("side" | "subagent"));
     let owned_by = |c: &Json, parent: &str| {
         c["delegation"]["delegatedByChatId"].as_str() == Some(parent)
             || c["sidechatSourceChatId"].as_str() == Some(parent)
-            || (c["createdByChatId"].as_str() == Some(parent) && c["forkedFromChatId"].is_string())
+            || (c["createdByChatId"].as_str() == Some(parent) && (c["forkedFromChatId"].is_string() || marked(c)))
     };
     let root_cloud = chats.iter().find(|c| c["id"].as_str() == Some(root)).is_some_and(on_cloud);
     let (mut subagents, mut sides) = (0, 0);
@@ -584,7 +585,7 @@ fn deleted_with(chats: &[Json], root: &str) -> (u32, u32) {
             if !goes || !seen.insert(id) {
                 continue;
             }
-            if c["delegation"].is_object() {
+            if c["delegation"].is_object() || c["childKind"].as_str() == Some("subagent") {
                 subagents += 1;
             } else {
                 sides += 1;
@@ -2074,7 +2075,7 @@ pub(crate) fn with_parent(chat: &mut Json) {
 /// config, branch and folder. None when there's no such chat.
 fn where_parent_is(chats: &Json, parent: &str) -> Option<Json> {
     let found = chats.as_array()?.iter().find(|c| c["id"].as_str() == Some(parent))?;
-    let mut out = json!({ "parentChatId": parent });
+    let mut out = json!({ "parentChatId": parent, "childKind": "side" });
     for wire in ["deviceId", "spaceId", "config", "branch", "cwd"] {
         if !found[wire].is_null() {
             out[wire] = found[wire].clone();
@@ -2710,6 +2711,9 @@ mod tests {
             { "id": "sub", "deviceId": "mac", "delegation": { "delegatedByChatId": "p" }, "archived": true },
             { "id": "subsub", "deviceId": "mac", "delegation": { "delegatedByChatId": "sub" } },
             { "id": "thread", "deviceId": "mac", "createdByChatId": "p" },
+            { "id": "nested", "deviceId": "mac", "createdByChatId": "side", "childKind": "side" },
+            { "id": "moved", "deviceId": "mac", "createdByChatId": "p", "childKind": "subagent" },
+            { "id": "unknown", "deviceId": "mac", "createdByChatId": "p", "childKind": "orbit" },
             { "id": "delegate", "deviceId": "cloud-d", "delegation": { "delegatedByChatId": "p" } },
             { "id": "other", "deviceId": "mac" },
             { "id": "others", "deviceId": "mac", "sidechatSourceChatId": "other" },
@@ -2718,7 +2722,7 @@ mod tests {
             { "id": "c-side", "deviceId": "cloud-c", "sidechatSourceChatId": "c" },
         ]));
         let all = chats.as_array().unwrap();
-        assert_eq!(super::deleted_with(all, "p"), (2, 2));
+        assert_eq!(super::deleted_with(all, "p"), (3, 3));
         assert_eq!(super::deleted_with(all, "c"), (1, 1));
         assert_eq!(super::deleted_with(all, "others"), (0, 0));
         assert_eq!(super::deleted_with(all, "gone"), (0, 0));
@@ -3251,7 +3255,7 @@ mod tests {
         ]);
         assert_eq!(
             super::where_parent_is(&chats, "p").unwrap(),
-            serde_json::json!({ "parentChatId": "p", "deviceId": "mac", "spaceId": "proj", "branch": "main", "cwd": "/w", "config": { "harness": "codex" } })
+            serde_json::json!({ "parentChatId": "p", "childKind": "side", "deviceId": "mac", "spaceId": "proj", "branch": "main", "cwd": "/w", "config": { "harness": "codex" } })
         );
         assert!(super::where_parent_is(&chats, "nope").is_none());
         assert_eq!(

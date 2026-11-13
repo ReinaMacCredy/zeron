@@ -284,6 +284,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         room_gen: None,
         sidechat_source_chat_id: None,
         created_by_chat_id: None,
+        child_kind: None,
         forked_from_chat_id: None,
         previous_harnesses: Vec::new(),
         delegation: None,
@@ -555,6 +556,35 @@ fn an_agent_created_row_round_trips_its_creator_across_devices() {
     assert_eq!(on_b[1].created_by_chat_id.as_deref(), Some("chat-1"));
     assert_eq!(on_b[1].forked_from_chat_id.as_deref(), Some("chat-0"));
     assert_eq!(on_b[0].created_by_chat_id, None);
+}
+
+#[test]
+fn a_child_kind_syncs_and_survives_updates_and_restart() {
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let mut side = chat("side", "dev-a");
+    side.created_by_chat_id = Some("main".into());
+    side.child_kind = Some(zeron_proto::ChildKind::Side);
+    a.upsert_chat(&side).unwrap();
+    let mut thread = chat("thread", "dev-a");
+    thread.created_by_chat_id = Some("main".into());
+    a.upsert_chat(&thread).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(b.chat("side").unwrap(), Some(side.clone()));
+    assert_eq!(b.chat("thread").unwrap().unwrap().child_kind, None);
+    b.rename_chat("side", "Ask about the parser").unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(
+        a.chat("side").unwrap().unwrap().child_kind,
+        Some(zeron_proto::ChildKind::Side)
+    );
+    let restored = RegistryDoc::from_bytes(&a.to_bytes().unwrap(), "dev-a").unwrap();
+    assert_eq!(
+        restored.chat("side").unwrap().unwrap().child_kind,
+        Some(zeron_proto::ChildKind::Side)
+    );
 }
 
 #[test]

@@ -1978,6 +1978,7 @@ impl Client {
             room_gen: Some(2),
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            child_kind: None,
             forked_from_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
@@ -2008,6 +2009,7 @@ impl Client {
         let mut chat = parent;
         chat.id = crate::new_id();
         chat.created_by_chat_id = Some(root);
+        chat.child_kind = Some(zeron_proto::ChildKind::Side);
         chat.title = None;
         chat.archived = false;
         chat.created_at = Utc::now();

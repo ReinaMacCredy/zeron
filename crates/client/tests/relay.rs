@@ -84,6 +84,7 @@ fn chat_row(id: &str, generation: u32, has_messages: bool) -> Chat {
         room_gen: Some(generation),
         sidechat_source_chat_id: None,
         created_by_chat_id: None,
+        child_kind: None,
         forked_from_chat_id: None,
         previous_harnesses: Vec::new(),
         delegation: None,

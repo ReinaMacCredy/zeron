@@ -44,6 +44,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         room_gen: None,
         sidechat_source_chat_id: None,
         created_by_chat_id: None,
+        child_kind: None,
         forked_from_chat_id: None,
         previous_harnesses: Vec::new(),
         delegation: None,

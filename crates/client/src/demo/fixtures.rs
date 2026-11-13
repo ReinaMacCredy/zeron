@@ -1004,6 +1004,7 @@ pub(crate) fn seed(
             room_gen: Some(2),
             sidechat_source_chat_id: demo.side_of.map(str::to_owned),
             created_by_chat_id: demo.parent.map(str::to_owned),
+            child_kind: None,
             forked_from_chat_id: None,
             previous_harnesses: demo.previous.to_vec(),
             delegation: demo

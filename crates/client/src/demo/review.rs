@@ -137,6 +137,7 @@ fn child(spec: Child<'_>) -> Chat {
         harness_session_cwd: None,
         sidechat_source_chat_id: None,
         created_by_chat_id: Some(spec.owner.id.clone()),
+        child_kind: None,
         forked_from_chat_id: None,
         previous_harnesses: Vec::new(),
         settle: None,

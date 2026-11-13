@@ -204,6 +204,10 @@ fn side_chats_start_fresh_or_fork_the_conversation() {
     let row = ws.session(&fresh).unwrap();
     assert_eq!(row.parent_chat_id.as_deref(), Some("chat-veil"));
     assert_eq!(row.device_id, "dev-mac", "same host as its parent");
+    assert_eq!(
+        client.chat(&fresh).unwrap().child_kind,
+        Some(zeron_proto::ChildKind::Side)
+    );
     assert!(
         !ws.front.recent.iter().any(|r| r.id == fresh),
         "side chats stay off the front page"

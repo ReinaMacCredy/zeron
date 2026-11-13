@@ -426,13 +426,24 @@ async fn deleting_a_parent_deletes_its_local_children_and_ends_their_runs() {
     cloud.delegation.as_mut().unwrap().delegated_by_chat_id = CHAT.into();
     rig.core.workspace.import_chat_row(&cloud).unwrap();
     create_chat(&rig.core, "stranger");
+    let _: serde_json::Value = memory_client(rig.core.rpc_service())
+        .call_as(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat", "chatId": "nested", "deviceId": here, "cwd": "/tmp",
+                "parentChatId": "side", "childKind": "side",
+            }),
+        )
+        .await
+        .unwrap();
     let parent = start(&rig, "parent work", SessionStatus::Idle).await;
     let subagent = start_in(&rig, "subagent", "subagent work", SessionStatus::Idle).await;
     let side = start_in(&rig, "side", "side work", SessionStatus::Idle).await;
+    let nested = start_in(&rig, "nested", "nested work", SessionStatus::Idle).await;
     let thread = start_in(&rig, "thread", "thread work", SessionStatus::Idle).await;
     let stranger = start_in(&rig, "stranger", "stranger work", SessionStatus::Idle).await;
     delete_chat(&rig).await;
-    for gone in [CHAT, "subagent", "side", "grandchild", "fork"] {
+    for gone in [CHAT, "subagent", "side", "grandchild", "fork", "nested"] {
         assert!(
             rig.core.workspace.chat(gone).unwrap().is_none(),
             "{gone} survived"
@@ -441,6 +452,7 @@ async fn deleting_a_parent_deletes_its_local_children_and_ends_their_runs() {
     assert_ended_in(&rig, CHAT, parent).await;
     assert_ended_in(&rig, "subagent", subagent).await;
     assert_ended_in(&rig, "side", side).await;
+    assert_ended_in(&rig, "nested", nested).await;
     for kept in ["thread", "cloud-delegate", "stranger"] {
         assert!(
             rig.core.workspace.chat(kept).unwrap().is_some(),
