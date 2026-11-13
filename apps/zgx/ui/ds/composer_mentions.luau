@@ -98,6 +98,7 @@ export type Use = {
 
 -- How many of a section All shows.
 local ALL_EACH = 6
+local ROOM_SLACK = 64
 
 -- Wires the mentions to a draft: returns what the composer needs.
 -- (Called as a component is built: its states are the component's own.)
@@ -248,10 +249,25 @@ function M.use(opts: Use)
 	local offset = ui.use_state(0)
 	-- The lit row brought into view, as the keys move it: past the rows
 	-- that show, the list scrolls with it.
+	-- (zgx keeps a panel too tall for either side on its first side, over its anchor.)
+	local function room(): number?
+		local el = opts.field:get()
+		if not el then
+			return nil
+		end
+		local ok, size = pcall(function(): any
+			return ui.window.size:get()
+		end)
+		local found, at = pcall(ui.window_rect, el)
+		if not found or not ok or type(size) ~= "table" or type(size.height) ~= "number" or size.height <= 1 or not at then
+			return nil
+		end
+		return math.max(at.y, size.height - at.y - at.height) - ROOM_SLACK
+	end
 	local function reveal(i: number)
 		local t = token:peek()
 		if sections_of(t) then
-			Launcher.reveal(offset, shown:peek(), scope:peek() == "all", i)
+			Launcher.reveal(offset, shown:peek(), scope:peek() == "all", i, room())
 			return
 		end
 		local lines = {}
@@ -567,6 +583,7 @@ function M.use(opts: Use)
 					)
 				end,
 				choose = choose,
+				room = room,
 			}, ui.column {
 				id = "mention-panel",
 				-- (A press in it leaves the draft the keys: the list hangs

@@ -284,3 +284,34 @@ test("a folder whose name holds spaces and CJK lands as one chip and goes as its
 	app:frames(2)
 	expect(app:text("#field")).to_be(`again {SPACED_CHIP} now`)
 end)
+
+local function box(tree: string, target: string): { x: number, y: number, w: number, h: number }?
+	local x, y, w, h = string.match(tree, target .. "[^\n]- (%-?%d+),(%-?%d+) (%d+)x(%d+)")
+	if not x then
+		return nil
+	end
+	return { x = tonumber(x) :: number, y = tonumber(y) :: number, w = tonumber(w) :: number, h = tonumber(h) :: number }
+end
+
+test("the @ launcher opens beside its composer, never over it, when neither side has room for all its rows", function()
+	local app = menu_app()
+	app:resize(900, 560)
+	app:set_state("launcher", true)
+	app:set_state("below", 234)
+	local many = {}
+	for i = 1, 12 do
+		table.insert(many, { path = `src/sample_{i}.rs`, dir = false })
+	end
+	app:set_state("found", many)
+	app:frames(2)
+	app:type("#field", "@sampl")
+	expect(app:wait('role:option "sample_1.rs"', { timeout_ms = 1000 })).to_be(true)
+	app:frames(1)
+	local tree = app:tree()
+	local pill = box(tree, "#pill") :: any
+	local panel = box(tree, "#mention%-popover") :: any
+	expect(pill ~= nil and panel ~= nil).to_be(true)
+	local overlaps = panel.y < pill.y + pill.h and pill.y < panel.y + panel.h
+	expect(overlaps).to_be(false)
+	expect(panel.y >= 0 and panel.y + panel.h <= 560).to_be(true)
+end)

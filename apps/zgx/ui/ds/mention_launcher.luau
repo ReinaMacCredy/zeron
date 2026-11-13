@@ -71,13 +71,30 @@ local function shape(entries: { any }): { string }
 	return lines
 end
 
+local function chrome(): number
+	local band = 2 * ((ui.theme.get("space.1") :: number?) or 4)
+	local tab = (ui.theme.get("zeron.menu.launcher.tab") :: number?) or 24
+	return 2 * (row_h() + band) + tab + band + 4
+end
+
+local function rows_in(lines: { string }, room: number?): number
+	local rows = ROWS
+	if room then
+		while rows > 1 and Menu.list_height(lines, rows, row_h()) > room - chrome() do
+			rows -= 1
+		end
+	end
+	return rows
+end
+
 -- Brings row `i` of `items` into the list's view (its `offset`), as the
 -- keys light it (ds/menu `reveal`).
-function M.reveal(offset: State<number>, items: { any }, all: boolean, i: number)
+function M.reveal(offset: State<number>, items: { any }, all: boolean, i: number, room: number?)
 	local entries = arrange(items, all)
 	for n, entry in entries do
 		if entry.i == i then
-			Menu.reveal(offset, shape(entries), n, ROWS, row_h())
+			local lines = shape(entries)
+			Menu.reveal(offset, lines, n, rows_in(lines, room), row_h())
 			return
 		end
 	end
@@ -100,6 +117,7 @@ export type Props = {
 	-- What an empty scope says.
 	empty: (scope: string, query: string) -> string,
 	choose: (item: any) -> (),
+	room: (() -> number?)?,
 }
 
 -- `label`'s text from `from` to `to` as spans, the part in `s`..`e` (what
@@ -479,7 +497,8 @@ function M.Panel(props: Props): Node
 		gap = "$zeron.list.gap",
 	})
 	local function list_cap(): number
-		return Menu.list_height(shape(placed:get()), ROWS, row_h())
+		local lines = shape(placed:get())
+		return Menu.list_height(lines, rows_in(lines, if props.room then props.room() else nil), row_h())
 	end
 	local function legend(keys: Node, what: string): Node
 		return ui.row {

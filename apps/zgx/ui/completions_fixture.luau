@@ -114,7 +114,9 @@ local completions = Completions.bind {
 	end,
 }
 
-local Field = ui.component(function(): Node
+local launcher = ui.state("launcher", false)
+local below = ui.state("below", 0)
+local Field = ui.component(function(props: { launcher: boolean }): Node
 	local m = Mentions.use {
 		field = field,
 		value = draft,
@@ -122,6 +124,8 @@ local Field = ui.component(function(): Node
 		enabled = completions.enabled,
 		empty = completions.empty,
 		on_choose = completions.on_mention,
+		sections = if props.launcher then completions.sections else nil,
+		docked = props.launcher,
 		refs = function(): string
 			return "fixture"
 		end,
@@ -173,5 +177,17 @@ return ui.column {
 		"Other",
 	},
 	ui.div { id = "blank", grow = 1, w_full = true },
-	Field {},
+	ui.presence(function(): string
+		return if launcher:get() then "launcher" else "list"
+	end, function(which: string): Node
+		return Field { launcher = which == "launcher" }
+	end),
+	ui.div {
+		id = "below",
+		w_full = true,
+		shrink = 0,
+		h = function(): number
+			return below:get()
+		end,
+	},
 }
