@@ -93,8 +93,8 @@ ui.theme.tokens {
 		strip = {
 			bg_light = "mix({zeron.window}, {accent}, 0.18)",
 			bg_dark = "mix({zeron.window}, {accent}, 0.16)",
-			art_light = "alpha({accent}, 0.22)",
-			art_dark = "alpha(mix({zeron.window}, {accent}, 0.25), 0.47)",
+			art_light = "alpha({zeron.window}, 0.22)",
+			art_dark = "alpha({zeron.window}, 0.47)",
 			ink_light = "alpha({text.primary}, 0.72)",
 			ink_dark = "alpha({text.primary}, 0.7)",
 			hover_light = "#ffffff59",
@@ -381,17 +381,6 @@ local function framed_view(): Node
 				return extra_shade()
 			end),
 		}),
-		ui.div {
-			id = "shell-frame-wash",
-			absolute = true,
-			left = 0,
-			right = 0,
-			top = 0,
-			bottom = 0,
-			bg = function(): string
-				return M.strip_token("art")
-			end,
-		},
 	}
 end
 
@@ -455,9 +444,9 @@ local function edge_gap(): number
 	return if appearance.inset_card:get() then WINDOW_EDGE else 0
 end
 
--- The strip's own tint, which the window round the cards (rail, sidebar, gaps) wears too: framed, the frame wears the strip's wash over art instead; under a plugin's wallpaper, nothing.
+-- The strip's accent tint where no picture shows; the window round the cards (rail, sidebar, gaps) wears it too. Over a picture both are the sidebar's plain look.
 local function plain_tint(): string
-	return if M.framed:get() or plugin_wallpaper() then "#00000000" else M.strip_token("bg")
+	return if shows_art() then "#00000000" else M.strip_token("bg")
 end
 
 local function fill_token(): string
@@ -655,7 +644,9 @@ local function strip_view(): Node
 			ui.show(framed, quad(function(): number
 				return if fades() then appearance.frame_shade:get() else 1 - (1 - appearance.frame_shade:get()) * (1 - extra_shade())
 			end)),
-			ui.show(shows_art, ui.div {
+			ui.show(function(): boolean
+				return shows_art() and not framed()
+			end, ui.div {
 				absolute = true,
 				left = 0,
 				right = 0,
