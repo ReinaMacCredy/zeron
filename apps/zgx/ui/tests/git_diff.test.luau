@@ -17,6 +17,8 @@ test("a diff's lines are coloured as their language is, once per file", function
 	expect(string.find(said, "same=true", 1, true) ~= nil).to_be(true)
 	-- A language Zeron doesn't colour: none at all.
 	expect(string.find(said, "unknown=true", 1, true) ~= nil).to_be(true)
+	expect(string.find(said, "added_let=$zeron.syntax.keyword", 1, true) ~= nil).to_be(true)
+	expect(string.find(said, "context_fn=$zeron.syntax.keyword", 1, true) ~= nil).to_be(true)
 end)
 
 test("side by side pairs what was taken out with what was put in", function()

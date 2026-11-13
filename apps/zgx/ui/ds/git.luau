@@ -500,14 +500,21 @@ function M.highlight(lines: { Line }, path: string?): { [number]: { Run } }?
 		return nil
 	end
 	local out: { [number]: { Run } } = {}
-	local state: any = 0
+	local old_state: any, new_state: any = 0, 0
 	for i, l in lines do
 		if l.kind == "hunk" then
-			state = 0
+			old_state, new_state = 0, 0
 		else
 			local text = expand(l.text)
 			local spans
-			spans, state = h(text, state)
+			if l.kind == "-" then
+				spans, old_state = h(text, old_state)
+			elseif l.kind == "+" then
+				spans, new_state = h(text, new_state)
+			else
+				_, old_state = h(text, old_state)
+				spans, new_state = h(text, new_state)
+			end
 			out[i] = runs(text, spans)
 		end
 	end

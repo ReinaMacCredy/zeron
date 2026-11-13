@@ -31,6 +31,11 @@ if hl then
 	table.insert(said, `same={tostring(git.highlight(lines, "src/lanes.rs") == hl)}`)
 end
 table.insert(said, `unknown={tostring(git.highlight(git.parse(DIFF), "notes.unknownext") == nil)}`)
+local opened = git.highlight(git.parse({ "@@ -1,2 +1,2 @@", "-/* gone", "+let kept = 1;", " fn after() {}" }), "src/lanes.rs")
+if opened then
+	table.insert(said, `added_let={(opened :: any)[3][1].color}`)
+	table.insert(said, `context_fn={(opened :: any)[4][1].color}`)
+end
 
 local paired: { string } = {}
 for _, p in git.pairs(lines) do

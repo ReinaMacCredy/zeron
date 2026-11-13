@@ -42,6 +42,7 @@
 
 local locale = require("@self/locale")
 local FoldButton = require("@self/fold_button")
+local Git = require("@self/git")
 
 local M = {}
 
@@ -65,6 +66,7 @@ export type Tool = {
 	diff_ref: string?,
 	stats: { Stat }?,
 	diff: Diff?,
+	path: string?,
 }
 -- An output as it shows: its lines, whether earlier ones were let go, and
 -- the exit code its text led with (Claude Code's "Exit code 1").
@@ -531,8 +533,27 @@ local function more_line(n: number?): Node?
 	}
 end
 
+local function code_of(l: Line, runs: { Git.Run }?): Node
+	local base: { [any]: any } = {
+		literal = true,
+		shrink = 0,
+		pr = "$space.3",
+		font = "$font.mono",
+		text_size = "$font.size.xs",
+		color = "$text.primary",
+	}
+	if not runs or #runs == 0 then
+		base[1] = Git.expand(l.text)
+		return ui.text(base)
+	end
+	for k, r in runs do
+		base[k] = ui.span { r.text, color = r.color, literal = true }
+	end
+	return ui.rich(base)
+end
+
 -- A diff's line, the gallery's look.
-local function diff_line(l: Line): Node
+local function diff_line(l: Line, runs: { Git.Run }?): Node
 	if l.kind == "hunk" then
 		return ui.text {
 			l.text,
@@ -566,22 +587,15 @@ local function diff_line(l: Line): Node
 		num(l.old),
 		num(l.new),
 		ui.text { l.kind, w = SIGN, shrink = 0, align = "center", font = "$font.mono", text_size = "$font.size.sm", color = ink },
-		ui.text {
-			(string.gsub(l.text, "\t", "    ")),
-			literal = true,
-			shrink = 0,
-			pr = "$space.3",
-			font = "$font.mono",
-			text_size = "$font.size.xs",
-			color = "$text.primary",
-		},
+		code_of(l, runs),
 	}
 end
 
-local function diff_view(d: Diff): Node
+local function diff_view(d: Diff, path: string?): Node
 	local rows: { Node } = {}
-	for _, l in d.lines do
-		table.insert(rows, diff_line(l))
+	local hl = Git.highlight(d.lines, if d.path and d.path ~= "" then d.path else path)
+	for i, l in d.lines do
+		table.insert(rows, diff_line(l, if hl then hl[i] else nil))
 	end
 	return ui.column {
 		w_full = true,
@@ -721,7 +735,7 @@ M.ToolDetail = ui.component(function(props: { tool: () -> Tool }): Node
 			end
 			local v = s.value
 			if v.kind == "diff" then
-				return diff_view(v)
+				return diff_view(v, now().path)
 			end
 			-- A fetched output: its lines as the host cut them.
 			local fetched: Source = { text = table.concat(v.lines or {}, "\n"), more = v.more or 0 }
