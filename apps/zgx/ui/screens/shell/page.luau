@@ -42,9 +42,6 @@ local Glass = require("@ds/glass")
 export type Props = {
 	files: State<boolean>,
 	width: () -> number,
-	-- Settings stand where the page and its panel do: only the top bar's left.
-	away: (() -> boolean)?,
-	settings: (() -> Node)?,
 }
 
 -- The title bar's height (Zeron's): the pages start under it, the
@@ -87,9 +84,6 @@ fit.page_holds(function(): number
 end)
 
 return function(props: Props): Node
-	local function away(): boolean
-		return props.away ~= nil and props.away()
-	end
 	local box = ui.ref()
 	local px, py = art.px, art.py
 	-- (The chat route: held while settings shows over the window, so what
@@ -898,12 +892,6 @@ return function(props: Props): Node
 			-- card gone, there's no gap before the panel's.)
 			local before = if fit.current:get().sidebar then INSET else WINDOW_EDGE
 			local room: number = (row_ref.width or 0) - before - WINDOW_EDGE
-			-- (Settings' list stands where the sidebar does, in this row: as beside the
-			-- sidebar, the panel has what's past it.)
-			if away() then
-				local settings: any = require("@app/screens/shell/settings")
-				room -= settings.list_w() + 6
-			end
 			if room > 0 then
 				return room
 			end
@@ -1188,7 +1176,7 @@ return function(props: Props): Node
 		end
 	end)
 	ui.effect(function()
-		local on = grouped() and not away()
+		local on = grouped()
 		if art.split:peek() ~= on then
 			art.split:set(on)
 		end
@@ -2023,7 +2011,7 @@ return function(props: Props): Node
 		end
 	end)
 	local function sidecar_shown(): boolean
-		return in_session() and not on_plugin() and not grouped() and not away() and not expanded()
+		return in_session() and not on_plugin() and not grouped() and not expanded()
 	end
 	local sidecar = ui.div {
 		id = "sidecar-slot",
@@ -2067,9 +2055,6 @@ return function(props: Props): Node
 		min_w = 0,
 		h_full = true,
 		relative = true,
-		hidden = function(): boolean
-			return away()
-		end,
 		on_mount = function(el: any)
 			splits.set_area(el)
 		end,
@@ -2164,7 +2149,7 @@ return function(props: Props): Node
 	}
 
 	ui.effect(function()
-		local gap = if not appearance.inset_card:get() then 0 elseif away() and not fit.current:get().sidebar then WINDOW_EDGE else INSET
+		local gap = if appearance.inset_card:get() then INSET else 0
 		local left = props.width() - (row_ref.width or props.width()) + gap
 		if art.card_left:peek() ~= left then
 			art.card_left:set(left)
@@ -2190,12 +2175,8 @@ return function(props: Props): Node
 		pb = motion.tween(ui.computed(function(): number
 			return if appearance.inset_card:get() then WINDOW_EDGE else 0
 		end), motion.sidebar),
-		-- (Settings' list holds still as the sidebar's column folds behind it, a point narrower than its gap.)
 		pl = motion.tween(ui.computed(function(): number
-			if not appearance.inset_card:get() then
-				return 0
-			end
-			return if away() and not fit.current:get().sidebar then WINDOW_EDGE else INSET
+			return if appearance.inset_card:get() then INSET else 0
 		end), motion.sidebar),
 		pr = motion.tween(ui.computed(function(): number
 			return if appearance.inset_card:get() then WINDOW_EDGE else 0
@@ -2205,7 +2186,7 @@ return function(props: Props): Node
 		ui.div {
 			id = "title-seam",
 			absolute = true,
-			left = top_bar.list_past,
+			left = 0,
 			top = function(): number
 				return ui.raw(ds.TitleBar.middle() - SEAM_H / 2, "on the top bar's line")
 			end,
@@ -2219,21 +2200,6 @@ return function(props: Props): Node
 		},
 		split_area,
 		sidecar,
-		-- (Settings, in the page's place.)
-		if props.settings
-			then ui.column {
-				grow = 1,
-				min_w = 0,
-				h_full = true,
-				overflow = "hidden",
-				-- (This row lets the pointer through but for what takes it.)
-				pointer_events = "auto",
-				hidden = function(): boolean
-					return not away()
-				end,
-				props.settings(),
-			}
-			else nil,
 		beside,
 		panel_edge,
 		ui.div {

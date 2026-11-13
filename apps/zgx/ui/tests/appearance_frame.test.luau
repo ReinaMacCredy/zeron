@@ -1,4 +1,6 @@
 
+local reachable = require("./settings_panel").reachable
+
 local shuffle_order = require("@ds/shuffle_order")
 local glass_tint = require("@ds/glass_tint")
 
@@ -7,7 +9,7 @@ local NAV = "#settings-nav"
 local IMAGE = { path = "/w0.png", name = "w0.png", w = 512, h = 512, x = 0.5, y = 0.5, zoom = 1 }
 
 local function shell(): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 800)
 	app:frames(30)
 	app:command("settings_stub.sign_in")

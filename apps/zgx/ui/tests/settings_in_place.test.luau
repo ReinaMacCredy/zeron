@@ -6,6 +6,8 @@
 -- On the shell in ui/shell_fixture.luau, Settings' host calls answered by
 -- ui/settings_stub.luau.
 
+local reachable = require("./settings_panel").reachable
+
 -- A node's identity under `scope`, by its kind and label: `@id`.
 local function node(app: any, scope: string, kind: string, label: string): string?
 	for line in app:tree(scope):gmatch("[^\n]+") do
@@ -48,7 +50,7 @@ local function press_tab(app: any, page: string)
 end
 
 local function open(page: string?): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 1100)
 	app:frames(30)
 	app:command("settings_stub.sign_in")
@@ -168,7 +170,7 @@ test("inviting sends, keeps those that didn't go, and lists the rest as invited"
 end)
 
 test("a member who isn't an admin sees roles, not the ways to change them", function()
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 900)
 	app:frames(30)
 	app:command("settings_stub.sign_in")
@@ -761,7 +763,7 @@ test("Reduce motion in Appearance is the one setting every move asks", function(
 end)
 
 test("signed out, Account shows no forms: what an account gives, and the way to sign in", function()
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 900)
 	app:frames(30)
 	app:command("shell.settings")
@@ -1089,7 +1091,7 @@ test("a signing key added on another device is New for one visit", function()
 end)
 
 test("no signing keys yet: the card says how one is made", function()
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 900)
 	app:frames(30)
 	app:set_state("settings_stub_keys", "none")
@@ -1121,8 +1123,8 @@ test("your photo shows on the rail and at Settings' foot once chosen, and goes w
 	expect((app:state("account_photo_files") :: any)[photo.avatar]).to_be("assets/favicons/zeron.png")
 	expect(app:tree(foot)).to_contain("img")
 	-- The rail's too, back on the chats.
-	app:click(`{NAV} >> role:button "Back to chats"`)
-	app:frames(30)
+	app:click("#settings-close")
+	app:wait("#shell-settings", { gone = true, timeout_ms = 1000 })
 	expect(app:tree("#rail-account")).to_contain("img")
 	app:command("shell.settings")
 	app:frames(20)
@@ -1149,8 +1151,8 @@ end)
 test("the pages are one tab list: the open one selected, the arrows between them; the search's hint reads as one", function()
 	local app = open("Members")
 	expect(app:has(`{NAV} >> role:tablist "Settings pages"`)).to_be(true)
-	-- "Back to chats" is a way out, not a page.
-	expect(app:has(`{NAV} >> role:button "Back to chats"`)).to_be(true)
+	-- No "Back to chats": the panel's × is the way out, the chats round it.
+	expect(app:has(`{NAV} >> role:button "Back to chats"`)).to_be(false)
 	-- From the search, Tab lands on the open page (the selected tab), not
 	-- the first; one more Tab leaves the list for the page.
 	app:click(`{NAV} >> role:textbox "Search settings"`)
@@ -1269,48 +1271,42 @@ end
 
 local TOGGLE = '#titlebar >> role:button "Toggle sidebar"'
 
-test("the sidebar's toggle and the window's fit never reach Settings' list", function()
+test("the sidebar's toggle never reaches through Settings' panel, and a narrow window shrinks the panel", function()
 	local app = open()
-	local shown = box(app, NAV)
-	local function holds(when: string, collapsed: boolean)
-		expect(`{when}: {box(app, NAV)}`).to_be(`{when}: {shown}`)
+	local function folded(when: string, collapsed: boolean)
 		expect(`{when}: folded {app:state("shell_collapsed")}`).to_be(`{when}: folded {collapsed}`)
 	end
-	-- Neither of the toggle's ways folds it, or the chats' sidebar behind it.
+	-- The command folds nothing; the bar's toggle is under the scrim.
 	app:command("shell.toggle_sidebar")
 	app:frames(40)
-	holds("the command, open", false)
-	app:click(TOGGLE)
-	app:frames(40)
-	holds("the button, open", false)
-	-- (That press left the keyboard nowhere: Esc still goes back.)
+	folded("the command, open", false)
+	local ok, why = pcall(app.click, app, TOGGLE)
+	expect(ok).to_be(false)
+	expect(tostring(why)).to_contain("#settings-scrim")
 	app:key("Escape")
-	app:frames(20)
+	expect(app:wait("#shell-settings", { gone = true, timeout_ms = 1000 })).to_be(true)
 	expect(app:state("shell_route_path")).never.to_contain("settings")
 	expect(box(app, "#shell-sidebar")).never.to_contain(" 0x")
-	-- Folded before Settings opens: the list as it was, and folded still after.
+	-- Folded before Settings opens: folded still after.
 	app:command("shell.toggle_sidebar")
 	app:frames(40)
 	app:command("shell.settings")
 	app:frames(20)
-	holds("folded first", true)
 	app:command("shell.toggle_sidebar")
-	app:click(TOGGLE)
 	app:frames(40)
-	holds("the toggle, folded", true)
+	folded("the command, folded", true)
 	app:key("Escape")
-	app:frames(40)
+	expect(app:wait("#shell-settings", { gone = true, timeout_ms = 1000 })).to_be(true)
 	expect(app:state("shell_collapsed")).to_be(true)
 	expect(box(app, "#shell-sidebar")).to_contain(" 0x")
-	-- The window too narrow for it all: the list stays as it is, the page narrows.
-	app:command("shell.toggle_sidebar")
-	app:frames(40)
+	-- The window too narrow for Claude's size: the panel keeps 48 from its
+	-- edges, the list its width.
 	app:command("shell.settings")
 	app:frames(20)
 	app:resize(500, 900)
 	app:frames(30)
-	local x, y, w = shown:match("(%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
-	expect(box(app, NAV)).to_contain(`{x},{y} {w}x`)
+	expect(box(app, "#shell-settings")).to_be("48,75 404x750")
+	expect(box(app, NAV)).to_contain(" 212x")
 end)
 
 test("the bar stands still going into Settings and out of it, frame by frame", function()
@@ -1342,7 +1338,7 @@ test("the bar stands still going into Settings and out of it, frame by frame", f
 end)
 
 test("Settings opened beside the panel in a narrow window keeps its page's room: the panel gives way", function()
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(806, 900)
 	app:frames(30)
 	app:command("shell.toggle_files")

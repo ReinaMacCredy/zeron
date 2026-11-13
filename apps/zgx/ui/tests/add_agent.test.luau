@@ -168,7 +168,7 @@ test("Add an agent: an added agent offers the registry's newer version, and is r
 	app:click(`{PAGE} >> role:button "Remove"`)
 	app:frames(30)
 	expect(app:has(`"Remove Gemini CLI from this computer?"`)).to_be(true)
-	app:click(`role:dialog >> role:button "Remove"`)
+	app:click(`role:dialog "Remove Gemini CLI from this computer?" >> role:button "Remove"`)
 	app:frames(40)
 	expect(calls(app):find("registry.remove:gemini", 1, true) ~= nil).to_be(true)
 	expect(shows(app, "Add to this computer")).to_be(true)

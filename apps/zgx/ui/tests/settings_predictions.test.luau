@@ -1,10 +1,12 @@
 -- General → Predictions (screens/settings/predictions) on ui/shell_fixture.luau with ui/settings_stub.luau's engine.
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 local SWITCH = `{PAGE} >> role:switch "Show predictions"`
 
 local function open(): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 1800)
 	app:frames(30)
 	app:command("shell.settings")

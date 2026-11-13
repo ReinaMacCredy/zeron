@@ -4,6 +4,8 @@
 -- setting switches every address at once. On ui/private_fixture.luau, and
 -- the settings pages on ui/shell_fixture.luau.
 
+local reachable = require("./settings_panel").reachable
+
 local EMAILS = { "mara@halcyon.dev", "theo.lindqvist@halcyon.dev", "ines_duarte+zeron@north-wind.io" }
 
 local function shows(app: any, text: string): boolean
@@ -11,7 +13,7 @@ local function shows(app: any, text: string): boolean
 end
 
 local function open(): any
-	local app = mount("private_fixture.luau")
+	local app = reachable(mount("private_fixture.luau"))
 	app:resize(700, 500)
 	app:frames(10)
 	return app
@@ -96,7 +98,7 @@ local function on_page(app: any, text: string): boolean
 end
 
 test("Settings' switch hides every address in the app at once", function()
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 900)
 	app:frames(30)
 	app:command("settings_stub.sign_in")

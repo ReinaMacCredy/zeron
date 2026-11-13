@@ -288,9 +288,9 @@ test("archived sessions list in settings, and come back", function()
 	app:frames(30)
 	expect(app:state("calls")).to_contain("unarchive:z1")
 	expect(app:has('#settings-page >> "Old experiment"')).to_be(false)
-	-- Back to the chats: it's in the sidebar again.
-	app:click('#settings-nav >> "Back to chats"')
-	app:frames(20)
+	-- Settings closed: it's in the sidebar again.
+	app:click("#settings-close")
+	app:wait("#shell-settings", { gone = true, timeout_ms = 1000 })
 	expect(node(app, SIDE, "button", "Old experiment")).never.to_be_nil()
 end)
 
@@ -310,8 +310,8 @@ test("settings pages list under their groups' headings, a search over them", fun
 	local personal, profile = top_of(app, "#settings-nav", "Personal"), top_of(app, "#settings-nav", "Profile")
 	local devices, mac = top_of(app, "#settings-nav", "Devices"), top_of(app, "#settings-nav", "This computer")
 	expect(personal < profile and profile < devices and devices < mac).to_be(true)
-	-- The field under Back, over the pages.
-	expect(top_of(app, "#settings-nav", "Back to chats") < top_of(app, "#settings-nav", "Search settings")).to_be(true)
+	-- The field heads the list, over the pages; no Back, the chats show round the panel.
+	expect(app:has('#settings-nav >> "Back to chats"')).to_be(false)
 	expect(top_of(app, "#settings-nav", "Search settings") < personal).to_be(true)
 	-- (The list scrolls past a short window, as gpui's: its foot scrolled to first.)
 	app:scroll("#settings-nav", 2000)
@@ -319,11 +319,10 @@ test("settings pages list under their groups' headings, a search over them", fun
 	app:click('#settings-nav >> "This computer"')
 	app:frames(20)
 	expect(app:state("shell_route_path")).to_be("/settings/devices")
-	-- Something typed: the pages are put away, Back and the field stay.
+	-- Something typed: the pages are put away, the field stays.
 	app:command("settings_typed")
 	app:frames(20)
 	expect(app:has('#settings-nav >> "This computer"')).to_be(false)
-	expect(app:has('#settings-nav >> "Back to chats"')).to_be(true)
 	expect(app:has("#settings-nav >> #settings-search")).to_be(true)
 end)
 
@@ -402,7 +401,7 @@ test("a palette section's title keeps to its row as a search moves it first", fu
 	expect(`room {(row_y :: number) - (title_y :: number) - (title_h :: number)}`).to_be(`room {room}`)
 end)
 
-test("settings is a page of its own, and the chats come back as they were", function()
+test("settings floats over the chats, which stay as they were", function()
 	local app = open()
 	app:command("many")
 	app:frames(30)
@@ -427,17 +426,15 @@ test("settings is a page of its own, and the chats come back as they were", func
 	local row_y = top(app, SIDE, label)
 	expect(row_y).never.to_be_nil()
 
-	-- Settings over the whole window: no sidebar, composer or files; its
-	-- own list, the way back at its head.
+	-- Settings over the chats: the sidebar, the page and its files still there
+	-- under it, kept as they are.
 	app:command("shell.settings")
 	app:frames(20)
 	expect(app:state("shell_route_path")).to_be("/settings/general")
 	expect(app:has("#shell-settings")).to_be(true)
-	-- (The chats stay, out of sight and out of the way, kept as they are; the top bar
-	-- is still there.)
-	expect((app:tree("#shell-sidebar"):match("[^\n]+")) :: string).to_contain(" hidden")
-	expect((app:tree("#shell-page"):match("[^\n]+")) :: string).to_contain(" hidden")
-	expect(app:has('#settings-nav >> "Back to chats"')).to_be(true)
+	expect((app:tree("#shell-sidebar"):match("[^\n]+")) :: string).never.to_contain(" hidden")
+	expect((app:tree("#shell-page"):match("[^\n]+")) :: string).never.to_contain(" hidden")
+	expect(`{label} at {top(app, SIDE, label)}`).to_be(`{label} at {row_y}`)
 	-- Its pages take one step of the history between them.
 	app:scroll("#settings-nav", 2000)
 	app:frames(5)
@@ -445,19 +442,16 @@ test("settings is a page of its own, and the chats come back as they were", func
 	app:frames(10)
 	expect(app:state("shell_route_path")).to_be("/settings/archived")
 
-	-- Back to the chats: the session, its files, the sidebar where it was
-	-- scrolled, the same nodes.
-	app:click('#settings-nav >> "Back to chats"')
-	app:frames(30)
+	-- Closed: the session, its files, the sidebar where it was scrolled, the
+	-- same nodes.
+	app:click("#settings-close")
+	expect(app:wait("#shell-settings", { gone = true, timeout_ms = 1000 })).to_be(true)
 	expect(app:state("shell_route_path")).to_be("/session/a1")
-	expect(app:has("#shell-settings")).to_be(false)
 	expect((app:tree("#shell-page"):match("[^\n]+")) :: string).never.to_contain(" hidden")
 	expect(app:state("shell_selected")).to_be("a1")
 	expect(open_panel(app, "a1")).to_be(true)
 	expect(app:has('#titlebar >> role:button "Panel"')).to_be(true)
 	expect(app:state("shell_sidebar_offset")).to_be(offset)
-	-- (Out of sight, the list held no room, so its rows in view are made
-	-- again: the same rows, where they were.)
 	expect(`{label} at {top(app, SIDE, label)}`).to_be(`{label} at {row_y}`)
 
 	-- Esc goes back too, and so does a step back (⌘[).
@@ -1054,8 +1048,7 @@ test("the rail's you opens your profile, and only the rail has settings' button"
 	expect(app:tree("#settings-nav")).never.to_contain('checkbox "Settings"')
 	app:command("shell.settings")
 	app:key("Escape")
-	app:frames(20)
-	expect(app:has("#settings-nav")).to_be(false)
+	expect(app:wait("#settings-nav", { gone = true, timeout_ms = 1000 })).to_be(true)
 	-- You: your profile.
 	app:click("#rail-account")
 	app:frames(20)

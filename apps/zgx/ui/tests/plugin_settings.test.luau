@@ -7,12 +7,14 @@
 -- plays the host. (The plugin hearing a change: src/plugins/examples_tests
 -- `greeter_reads_its_settings_and_hears_each_change`.)
 
+local reachable = require("./settings_panel").reachable
+
 local NAV = "#settings-nav"
 local PAGE = "#settings-page"
 local TAB = `{NAV} >> role:tab "Greeter"`
 
 local function open(): any
-	local app = mount("plugin_settings_fixture.luau")
+	local app = reachable(mount("plugin_settings_fixture.luau"))
 	-- (Tall enough for every page's tab, Agent profiles and Playbooks among them.)
 	app:resize(1200, 1400)
 	app:frames(30)

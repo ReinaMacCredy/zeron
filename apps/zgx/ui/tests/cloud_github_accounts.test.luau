@@ -4,6 +4,8 @@
 -- more than one. An engine from before several logins still shows its one. On
 -- the shell in ui/shell_fixture.luau, answered by ui/cloud_stub.luau.
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 local NAV = "#settings-nav"
 
@@ -36,7 +38,7 @@ local function asked_count(app: any, entry: string): number
 end
 
 local function open(): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 1400)
 	app:frames(30)
 	app:command("settings_stub.sign_in")
@@ -79,7 +81,7 @@ test("disconnecting one asks first, says what happens, and leaves the other", fu
 	app:frames(20)
 	expect(app:has(`"Disconnect home-example?"`)).to_be(true)
 	expect(asked(app, "github.forget:a2")).to_be(false)
-	app:click(`role:dialog >> role:button "Disconnect"`)
+	app:click(`role:dialog ~"Disconnect" >> role:button "Disconnect"`)
 	app:frames(30)
 	expect(asked(app, "github.forget:a2")).to_be(true)
 	expect(under(app, "github", "octo-example")).to_be(true)
@@ -140,7 +142,7 @@ test("an engine from before several logins shows its one, and disconnects all of
 	expect(shows(app, "acme/atlas")).to_be(true)
 	app:click(`{PAGE} >> #setting-github >> role:button "Disconnect"`)
 	app:frames(20)
-	app:click(`role:dialog >> role:button "Disconnect"`)
+	app:click(`role:dialog ~"Disconnect" >> role:button "Disconnect"`)
 	app:frames(30)
 	expect(asked(app, "github.forget:all")).to_be(true)
 	expect(asked(app, "github.disconnect")).to_be(true)

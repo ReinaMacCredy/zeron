@@ -2,6 +2,8 @@
 -- broken down by model or period. On the shell in ui/shell_fixture.luau, the
 -- host's calls answered by ui/usage_stub.luau.
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 
 local function shows(app: any, text: string): boolean
@@ -9,7 +11,7 @@ local function shows(app: any, text: string): boolean
 end
 
 local function open(): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 1200)
 	app:frames(30)
 	app:command("settings_stub.sign_in")

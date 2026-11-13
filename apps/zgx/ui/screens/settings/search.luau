@@ -245,33 +245,40 @@ function M.open(hit: Hit)
 end
 
 -- Where the settings page scrolls (the shell's, once it says), and the
--- top of the page's view in the window: the shell's title strip (fixed
--- geometry, shell/settings TITLE_H).
-local VIEW_TOP = 38
+-- top of the page in the window (its scrolled content's).
 local function scroll_state(): State<number>?
 	local shell = require("@app/screens/shell/settings") :: any
 	return shell.scroll
 end
+local function page_top(): number
+	local shell = require("@app/screens/shell/settings") :: any
+	return shell.page_top()
+end
 
 -- A row a hit can land on: `key` is its index key. While it's the one lit,
--- it washes, and the page scrolls to it (a row's room above it).
+-- it washes, and the page scrolls to it (a row's room above it), again as
+-- the page settles while it's lit (a page just opened lays out more than
+-- once).
 -- `fit`: as wide as what it holds (a card standing on its own), not the
 -- row's whole width.
 function M.anchor(key: string, row: Node, fit: boolean?): Node
 	local here = ui.ref()
-	ui.effect(function()
-		local el = here:get()
-		if not el or M.lit:get() ~= key then
-			return
-		end
+	local function reveal()
+		local el = here:peek()
 		local scroll = scroll_state()
-		if scroll and el.y then
-			scroll:set(math.max(0, scroll:peek() + el.y - VIEW_TOP - 48))
+		if el and scroll and el.y and (el.height or 0) > 0 and M.lit:peek() == key then
+			scroll:set(math.max(0, el.y - page_top() - 48))
+		end
+	end
+	ui.effect(function()
+		if here:get() and M.lit:get() == key then
+			reveal()
 		end
 	end)
 	return ui.div {
 		ref = here,
 		id = `setting-{key}`,
+		on_resize = reveal,
 		w_full = not fit,
 		relative = true,
 		row,

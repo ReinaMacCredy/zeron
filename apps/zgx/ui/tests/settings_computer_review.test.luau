@@ -5,10 +5,12 @@
 -- when the page is opened again, a refused one put back with its words, and
 -- Computer use left as the engine has it off a Mac, as gpui's is.
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 
 local function open(page: string, mac: boolean?): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 900)
 	if mac then
 		app:set_state("platform", "macos")

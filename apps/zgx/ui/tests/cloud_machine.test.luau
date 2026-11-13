@@ -5,6 +5,8 @@
 -- sizes it opens to, and what a pick asks of the host. Settings → Cloud's
 -- default size is on ui/shell_fixture.luau.
 
+local reachable = require("./settings_panel").reachable
+
 local logic = require("../screens/chat/cloud_machine")
 local TurnState = require("../screens/chat/turn_state")
 
@@ -633,7 +635,7 @@ end
 -- The chat fixture's s2, on a Cloud machine, as the edge says `case`; the deck
 -- opened as the person would, if `open`.
 local function on_cloud(case: string, open: boolean?): any
-	local app = mount("chat_fixture.luau")
+	local app = reachable(mount("chat_fixture.luau"))
 	app:resize(960, 760)
 	app:command("go_s2")
 	app:frames(30)
@@ -1037,7 +1039,7 @@ test("an old edge shows state, and nothing of sizes", function()
 end)
 
 test("nothing about a machine shows on a chat that isn't on Cloud", function()
-	local app = mount("chat_fixture.luau")
+	local app = reachable(mount("chat_fixture.luau"))
 	app:resize(960, 760)
 	app:command("go_s2")
 	app:frames(30)
@@ -1149,7 +1151,7 @@ test("a reply that's running on a machine that's up keeps its working word", fun
 end)
 
 test("on another computer gone quiet, the same: it's named", function()
-	local app = mount("chat_fixture.luau")
+	local app = reachable(mount("chat_fixture.luau"))
 	app:resize(960, 760)
 	app:command("go_s2")
 	app:frames(30)
@@ -1162,7 +1164,7 @@ test("on another computer gone quiet, the same: it's named", function()
 end)
 
 test("on this computer, a turn that stopped reporting reads as interrupted", function()
-	local app = mount("chat_fixture.luau")
+	local app = reachable(mount("chat_fixture.luau"))
 	app:resize(960, 760)
 	app:command("go_s2")
 	app:frames(30)
@@ -1448,7 +1450,7 @@ local function chosen_size(app: any, name: string): boolean
 end
 
 local function settings(old_edge: boolean?): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	-- (Taller: our Settings list has more pages than upstream's, Cloud under the fold at 900.)
 	app:resize(1200, 1400)
 	app:frames(30)

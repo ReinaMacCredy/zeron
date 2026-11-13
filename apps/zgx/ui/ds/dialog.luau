@@ -142,6 +142,7 @@ local function panel(props: ContainerProps): ContainerProps
 	props.shadow = "$zeron.dialog.shadow"
 	return props
 end
+M.panel = panel
 
 -- What a dialog says, built fresh each time it opens (a typed confirmation
 -- starts empty).

@@ -1,9 +1,11 @@
 -- Zeron's own features (screens/plugins/builtins): Review is the one built-in left on Settings → Plugins; the rest are switches on the Settings page that owns each, and off still takes the feature's doors away at once, with no reload; a launch after keeps a switch off. On ui/shell_fixture.luau (Settings, the rail, a new chat's composer) and ui/panel_fixture.luau (the browser).
 
+local reachable = require("./settings_panel").reachable
+
 local MOVED = { "Usage", "Home widgets", "Keep awake", "Appshots", "Predictions", "Browser annotate", "Device", "Voice" }
 
 local function open(): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 1800)
 	app:set_state("shell_fixture.plugins", true)
 	app:frames(30)
@@ -110,7 +112,7 @@ test("a switch turned off stays off at the next launch, its door with it", funct
 end)
 
 test("Browser annotate off takes the browser bar's Annotate, its View menu item and its key away, and on brings them back", function()
-	local app = mount("panel_fixture.luau")
+	local app = reachable(mount("panel_fixture.luau"))
 	app:resize(900, 640)
 	app:frames(10)
 	expect(app:wait("#panel-empty", { timeout_ms = 15000 })).to_be(true)

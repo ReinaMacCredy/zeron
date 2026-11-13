@@ -4,10 +4,12 @@
 -- (its fields, its tools, Remove asked once more, a name needed), New
 -- profile, the host's System prompt, and the picker's More… landing here.
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 
 local function open(): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 900)
 	app:frames(30)
 	app:command("shell.settings")
@@ -16,6 +18,8 @@ local function open(): any
 	app:frames(30)
 	return app
 end
+-- The editor (Settings is a dialog of its own round it).
+local EDITOR = 'role:dialog "Edit agent profile"'
 local function calls(app: any): string
 	return tostring(app:state("calls") or "")
 end
@@ -55,7 +59,7 @@ test("the arrows move a profile, and the first can't go up", function()
 end)
 
 test("on a host without profiles the page says so, never Loading for good", function()
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 900)
 	app:frames(30)
 	app:command("profiles_old_host")
@@ -110,23 +114,23 @@ test("the tools open over the rest; a group turned off holds its rules; Escape f
 	app:click("#profile-tools-folded")
 	app:frames(30)
 	expect(calls(app)).to_contain("profile_tools:claude-code")
-	expect(shows(app, '"Zeron tools"', 'role:dialog')).to_be(true)
-	expect(shows(app, '"Claude built-in"', 'role:dialog')).to_be(true)
-	expect(shows(app, '"No MCP servers in your Claude config."', 'role:dialog')).to_be(true)
-	expect(shows(app, "#profile-folded", 'role:dialog')).to_be(true)
+	expect(shows(app, '"Zeron tools"', EDITOR)).to_be(true)
+	expect(shows(app, '"Claude built-in"', EDITOR)).to_be(true)
+	expect(shows(app, '"No MCP servers in your Claude config."', EDITOR)).to_be(true)
+	expect(shows(app, "#profile-folded", EDITOR)).to_be(true)
 	-- (The keys are in the tools as they open: Escape there folds them back.)
 	app:key("Escape")
 	app:frames(20)
-	expect(shows(app, "#profile-folded", 'role:dialog')).to_be(false)
+	expect(shows(app, "#profile-folded", EDITOR)).to_be(false)
 	app:click("#profile-tools-folded")
 	app:frames(30)
 	app:click('role:switch "Threads"')
 	app:frames(10)
 	app:key("Escape")
 	app:frames(20)
-	expect(shows(app, "#profile-folded", 'role:dialog')).to_be(false)
+	expect(shows(app, "#profile-folded", EDITOR)).to_be(false)
 	expect(app:has('role:dialog "Edit agent profile"')).to_be(true)
-	expect(shows(app, '"Tools"', 'role:dialog')).to_be(true)
+	expect(shows(app, '"Tools"', EDITOR)).to_be(true)
 	expect(app:has('#profile-tools-folded >> ~"3 off"')).to_be(true)
 end)
 

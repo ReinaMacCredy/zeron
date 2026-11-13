@@ -76,7 +76,6 @@ end
 local seen_told: string? = nil
 
 local top_bar = require("@app/screens/shell/top_bar")
-local refocus = require("@app/screens/shell/refocus")
 
 return function(): Node
 	-- The window's router (screens/shell/route): made with the shell, so
@@ -447,55 +446,6 @@ local function sidebar_limit(): number
 	local function window_w(): number
 		return root.width or 1240
 	end
-	-- Whether settings shows, over the whole window.
-	local function in_settings(): boolean
-		return route.current:get().name == "settings"
-	end
-	local was_settings = in_settings()
-	ui.effect(function()
-		local now = in_settings()
-		if was_settings and not now then
-			refocus()
-		end
-		was_settings = now
-	end)
-	-- Settings: in the page's place, under the top bar and beside the panel, its tabs
-	-- still there, its own list of pages down its side and the way back to the chats at
-	-- its head.
-	local function settings_view(): Node
-		return
-		ui.show(
-				in_settings,
-				ui.column {
-					id = "shell-settings",
-					-- (They draw on the page's card and the window: nothing of their own under the bar's line.)
-					theme = { ["zeron.inset.bg"] = "#00000000", ["zeron.inset.framed_bg"] = "#00000000", ["zeron.inset.edge"] = "#00000000" },
-					-- Zeron's Settings are no plugin's to change or add to: what you
-					-- allow plugins and templates is decided here (Settings →
-					-- Plugins and Templates). Sealed, with all it holds.
-					hook = false,
-					w_full = true,
-					h_full = true,
-					focusable = true,
-					focus = { outline = 0 },
-					-- (Focus comes here as it shows: none left on a row of the chats
-					-- now out of sight, where keys would go unseen.)
-					on_mount = function(el)
-						el:focus()
-					end,
-					on_key = function(e): boolean
-						if e.key == "Escape" then
-							route.leave_settings()
-							return true
-						end
-						return false
-					end,
-					boundary.screen(boundary.named("shell.boundary.screen.settings"), "@app/screens/shell/settings", function(settings): Node
-						return settings.View({ inset = true })
-					end),
-				}
-			)
-	end
 	local frosted = ui.computed(function(): number
 		return if material.see_through() then 1 else 0
 	end)
@@ -612,9 +562,7 @@ local function sidebar_limit(): number
 		-- The window's glass, or (opaque) its colour.
 		bg = ui.tween(frosted, { from = "$zeron.window", to = "$background", duration = 320, ease = "outQuad" }),
 		-- The chats: the sidebar, the page (its composer, a session's files),
-		-- the rail and the title bar. Kept while settings shows, out of
-		-- sight and out of the way, so they come back as they were (scroll,
-		-- draft, files and all).
+		-- the rail and the title bar, still there under settings' panel.
 		ui.column(arrival.frame_props({
 			id = "shell-chats",
 			w_full = true,
@@ -630,11 +578,9 @@ local function sidebar_limit(): number
 				boundary.screen(boundary.named("shell.boundary.screen.app_rail"), "@app/screens/shell/rail", function(r): Node
 					return r.Rail()
 				end, { pass = true }),
-				-- (Settings stand in its place and the page's, under the top bar.)
 				ui.div {
 					h_full = true,
 					shrink = 0,
-					hidden = in_settings,
 					z = function(): number
 						local sidebar: any = boundary.load("@app/screens/shell/sidebar")
 						return if sidebar and sidebar.peek_mounted:get() then 1 else 0
@@ -646,7 +592,7 @@ local function sidebar_limit(): number
 					end),
 				},
 				boundary.screen(boundary.named("shell.boundary.screen.page"), "@app/screens/shell/page", function(Page): Node
-					return Page { files = files, width = window_w, away = in_settings, settings = settings_view }
+					return Page { files = files, width = window_w }
 				end, { pass = true }),
 			},
 			boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(sidebar): Node
@@ -658,7 +604,6 @@ local function sidebar_limit(): number
 				then ui.div {
 					id = "shell-rail",
 					absolute = true,
-					hidden = in_settings,
 					left = ds.island.metrics().inset,
 					bottom = ds.island.metrics().inset,
 					boundary.screen(boundary.named("shell.boundary.screen.rail"), "@app/screens/shell/sidebar", function(Sidebar): Node
@@ -711,7 +656,6 @@ local function sidebar_limit(): number
 			h = 0,
 			overflow = "visible",
 			pointer_events = "none",
-			hidden = in_settings,
 			ui.presence(function(): string
 				local sidebar: any = boundary.load("@app/screens/shell/sidebar")
 				local c = sidebar and sidebar.card:get()
@@ -832,6 +776,10 @@ local function sidebar_limit(): number
 				exit = motion.transition({ opacity = 0, duration = 100 }),
 			}),
 		},
+		-- Settings, floating over the chats.
+		boundary.screen(boundary.named("shell.boundary.screen.settings"), "@app/screens/shell/settings", function(settings): Node
+			return settings.Panel()
+		end, { pass = true }),
 		-- What's said for a moment (a plugin's toast, a notice): over
 		-- everything, once for the window.
 		ds.toast.Host {},

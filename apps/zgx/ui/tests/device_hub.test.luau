@@ -6,6 +6,8 @@
 -- device hosts: Add host's checks, Test connection's lines, Save and Remove.
 -- The page leaves the list while the Device built-in is off.
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 
 local function eventually(app: any, ok: () -> boolean, ms: number?): boolean
@@ -20,7 +22,7 @@ local function eventually(app: any, ok: () -> boolean, ms: number?): boolean
 end
 
 local function open(): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 1400)
 	app:frames(30)
 	app:command("shell.settings")
@@ -149,7 +151,7 @@ test("device hosts: Add host's form checks what's typed, tests it, saves it; a h
 end)
 
 test("Device hub's Device panel switch is the Device built-in's; off, the page stays listed to turn it back on", function()
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 1000)
 	app:frames(30)
 	app:command("shell.settings")

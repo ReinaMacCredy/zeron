@@ -113,11 +113,10 @@ function M.strip_token(name: string): string
 end
 
 M.page_art = ui.computed(function(): string?
-	local page = route.current:get().name
-	if page == "plugin" or page == "settings" or appearance.showing:get() ~= "image" then
+	local name = route.chat:get().name
+	if name == "plugin" or appearance.showing:get() ~= "image" then
 		return nil
 	end
-	local name = route.chat:get().name
 	if name == "home" then
 		return "hero"
 	end
@@ -394,8 +393,8 @@ function M.art_under_rail(): boolean
 end
 
 local function plugin_wallpaper(): boolean
-	local showing, page = appearance.showing:get(), route.current:get().name
-	return showing ~= "none" and showing ~= "image" and page ~= "plugin" and page ~= "settings" and route.chat:get().name == "home"
+	local showing = appearance.showing:get()
+	return showing ~= "none" and showing ~= "image" and route.chat:get().name == "home"
 end
 
 local function shows_art(): boolean
@@ -412,16 +411,7 @@ function M.island(): boolean
 end
 
 local function page_x(): number
-	if route.current:get().name == "settings" then
-		local settings: any = require("@app/screens/shell/settings")
-		return art.RAIL_W + WINDOW_EDGE + settings.list_w()
-	end
 	return art.page_left:get()
-end
-
--- (Over Settings the card stops at the list at once, whatever its tween is still doing: the list has no fill of its own.)
-local function clip_left(): number
-	return if route.current:get().name == "settings" then page_x() else 0
 end
 
 local function moved(f: () -> number): any
@@ -525,9 +515,6 @@ local function card_picture(): Node
 			right = 0,
 			top = 0,
 			bottom = 0,
-			hidden = function(): boolean
-				return route.current:get().name == "settings"
-			end,
 			ds.Wallpaper {
 				effect = appearance.effect_now,
 				fill = true,
@@ -725,7 +712,7 @@ local function card_view(): Node
 		absolute = true,
 		pointer_events = "none",
 		left = function(): number
-			return page_x() - clip_left()
+			return page_x()
 		end,
 		ml = moved(left_gap),
 		right = art.panel_w,
@@ -851,7 +838,7 @@ function M.View(): Node
 		end, { absolute = true, left = 0, right = 0, top = 0, bottom = 0, pointer_events = "none" }),
 		ui.div {
 			absolute = true,
-			left = clip_left,
+			left = 0,
 			right = art.panel_gap,
 			top = 0,
 			bottom = 0,

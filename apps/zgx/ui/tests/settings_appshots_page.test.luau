@@ -4,6 +4,8 @@
 -- refusal, Destination, resets and Restore defaults, the permission guide
 -- (Grant asks, unfolds the steps, folds once granted) and Recheck.
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 local function ready(over: { [string]: any }?): any
 	local s = {
@@ -27,7 +29,7 @@ local function ready(over: { [string]: any }?): any
 end
 
 local function open(state: any): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 1500)
 	app:frames(30)
 	app:command("shell.settings")

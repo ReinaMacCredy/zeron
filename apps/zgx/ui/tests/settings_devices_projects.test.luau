@@ -7,11 +7,13 @@
 -- (the sessions as the engine sends them), Settings' calls answered by
 -- ui/settings_stub.luau.
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 local NAV = "#settings-nav"
 
 local function open(page: string, before: { string }?): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 900)
 	app:frames(30)
 	app:command("settings_stub.sign_in")

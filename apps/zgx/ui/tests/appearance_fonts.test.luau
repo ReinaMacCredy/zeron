@@ -4,11 +4,13 @@
 -- once, kept across launches, and Default gives the theme's own back.
 -- Settings on the shell in ui/shell_fixture.luau.
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 local NAV = "#settings-nav"
 
 local function appearance(): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 900)
 	app:frames(30)
 	app:command("settings_stub.sign_in")

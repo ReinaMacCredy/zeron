@@ -21,22 +21,22 @@
 -- by `settings.extra(name, fn)`: `fn` returns them as they are now (read
 -- where it reads states, so the list follows), after the app's own.
 --
--- `settings.View()`: settings, a page of its own over the whole window (the
--- shell shows it while the route is `settings/:page`).
+-- `settings.Panel()`: settings floating over the chats while the route is
+-- `settings/:page` (the shell's). `settings.View()`: settings, a page of its
+-- own over the whole window (a template's shell); `{ panel = true }`, what
+-- the panel holds.
 --
 -- `settings.title_of(id, fallback)`: a page's title in the locale shown, a
 -- string read now (`title` stays the English it's kept and compared by).
 
 local ds = require("@ds")
+local motion = require("@ds/motion")
+local dialog = require("@ds/dialog")
 local route = require("@app/screens/shell/route")
-local frame = require("@app/screens/shell/frame")
 local boundary = require("@app/screens/shell/boundary")
+local refocus = require("@app/screens/shell/refocus")
 
 local M = {}
-
-local function card_fill(): string
-	return if frame.framed:get() then "$zeron.inset.framed_bg" else "$zeron.inset.bg"
-end
 
 export type Page = {
 	id: string,
@@ -187,9 +187,23 @@ M.add {
 	module = "@app/screens/settings/archived",
 }
 
+-- The route's page, held after settings closes so the panel leaves showing
+-- the page it had, not the first one.
+local held = ui.state("shell_settings_held_page", "")
+ui.effect(function()
+	local r = route.current:get()
+	if r.name == "settings" and r.page and held:peek() ~= r.page then
+		held:set(r.page)
+	end
+end)
+local function route_page(): string?
+	local r = route.current:get()
+	return if r.name == "settings" then r.page else held:get()
+end
+
 -- The page open now: the route's, else (gone, or not added yet) the first.
 local function open_id(): string
-	local id = route.current:get().page
+	local id = route_page()
 	if id and M.page(id) then
 		return id
 	end
@@ -310,9 +324,20 @@ function M.title_of(id: string, fallback: string?): string
 	return title_of(id, if page then page.title else (fallback or id))
 end
 
--- The list's width, tracked: the sidebar's, dragged in either.
-function M.list_w(): number
-	return require("@app/screens/shell/fit").list_w()
+-- The panel's measures (Claude's settings): its most and the room it keeps
+-- from the window's edges, its head's height, the list's width and the
+-- page's measure.
+local PANEL_W, PANEL_H, PANEL_INSET = 1020, 750, 48
+local HEAD_H = 48
+local PANEL_NAV_W = 212
+local PANEL_MEASURE = 720
+
+-- The page's column, the last one built: a search's hit scrolls by where
+-- its row is in it.
+local page_column: any = nil
+function M.page_top(): number
+	local el = if page_column then page_column:peek() else nil
+	return if el and el.y then el.y else 0
 end
 
 -- Settings, a page of its own over the whole window: its pages listed
@@ -321,10 +346,11 @@ end
 -- the page scrolling beside it under a strip of its own. The gallery's
 -- settings window (demos/example_kit `settings`). Esc, ⌘[ and Back to
 -- chats go back where the chats were, as they were.
--- `inset`: under the top bar, its tabs still there, the list and the page each a card
--- as the chats' sidebar and page are (v3). Pinned, as Zeron's (shell.rs `sidebar_pinned_open`).
-function M.View(props: { inset: boolean? }?): Node
-	local inset = props ~= nil and props.inset == true
+-- `panel`: what the floating panel holds (`M.Panel`): its head (the title
+-- and its ×), the list at a fixed width under it, no Back (the chats show
+-- round it), the page centred at a measure beside it.
+function M.View(props: { panel: boolean? }?): Node
+	local panel = props ~= nil and props.panel == true
 	-- Where the page is scrolled, as the view has it: `M.scroll` as it was,
 	-- put back until a layout keeps it. (A view made again, the scripts
 	-- reloaded, lays the page out before its rows have come; its scroll,
@@ -337,6 +363,8 @@ function M.View(props: { inset: boolean? }?): Node
 	local shown = ui.use_state(target)
 	local settled = target <= 0
 	local view = ui.ref()
+	local column = ui.ref()
+	page_column = column
 	local function laid_out(h: number)
 		if settled then
 			return
@@ -366,20 +394,12 @@ function M.View(props: { inset: boolean? }?): Node
 			shown:set(want)
 		end
 	end)
-	return ui.row {
+	local body = ui.row {
 		id = "settings",
 		w_full = true,
-		h_full = true,
+		h_full = not panel,
+		grow = if panel then 1 else nil,
 		min_h = 0,
-		-- (In the page's place: its row has the edges, but for the 1 more the sidebar
-		-- stands from the window than the page does from it.)
-		pl = if inset
-			then function(): number
-				local fit: any = require("@app/screens/shell/fit")
-				local appearance: any = require("@app/screens/shell/appearance")
-				return ui.raw(if appearance.inset_card:get() and fit.current:get().sidebar then 1 else 0, "as far in as the sidebar")
-			end
-			else nil,
 		-- The pages (the design system's list of them; a page added later
 		-- joins it in place), and what plugins add under them.
 		ui.div {
@@ -388,20 +408,8 @@ function M.View(props: { inset: boolean? }?): Node
 			h_full = true,
 			shrink = 0,
 			relative = true,
-			rounded = if inset then "$zeron.inset.radius" else nil,
-			bg = if inset then card_fill else nil,
-			overflow = if inset then "hidden" else nil,
-			w = if inset
-				then function(): number
-					return ui.raw(M.list_w(), "the list's width")
-				end
-				else nil,
-			mr = if inset then ui.raw(4, "the window's gap between cards") else nil,
 			ds.Settings.Nav {
-				card = inset,
-				value = ui.computed(function(): string?
-					return route.current:get().page
-				end) :: any,
+				value = ui.computed(route_page) :: any,
 				on_choose = function(id: string)
 					if id == BACK then
 						route.leave_settings()
@@ -410,13 +418,14 @@ function M.View(props: { inset: boolean? }?): Node
 						route.settings(id)
 					end
 				end,
+				w = if panel then PANEL_NAV_W else nil,
 				-- (The main sidebar's width, shared and dragged in either; its
 				-- bounds. Asked for here: both are loaded by now.)
-				width = require("@app/screens/shell/sidebar").width,
-				min_w = require("@app/screens/shell/fit").SIDEBAR_MIN,
-				max_w = require("@app/screens/shell/fit").SIDEBAR_MAX,
-				top = if inset then nil else TITLE_H,
-				lead = { { value = BACK, label = ui.t("settings.shell.back") :: any, icon = "arrow-left" } },
+				width = if panel then nil else require("@app/screens/shell/sidebar").width,
+				min_w = if panel then nil else require("@app/screens/shell/fit").SIDEBAR_MIN,
+				max_w = if panel then nil else require("@app/screens/shell/fit").SIDEBAR_MAX,
+				top = if panel then nil else TITLE_H,
+				lead = if panel then nil else { { value = BACK, label = ui.t("settings.shell.back") :: any, icon = "arrow-left" } },
 				items = function(): { any }
 					local out: { any } = {}
 					-- (Under one heading, "Settings", while no page has a group
@@ -484,7 +493,7 @@ function M.View(props: { inset: boolean? }?): Node
 				end)(),
 			},
 			-- Its strip, with the window's buttons in it, moves the window.
-			if inset then nil else ui.div { id = "settings-nav-drag", absolute = true, left = 0, right = 0, top = 0, h = TITLE_H, window_drag = true },
+			if panel then nil else ui.div { id = "settings-nav-drag", absolute = true, left = 0, right = 0, top = 0, h = TITLE_H, window_drag = true },
 		},
 		-- The page open, under its own strip (another page is another page:
 		-- it swaps).
@@ -492,21 +501,10 @@ function M.View(props: { inset: boolean? }?): Node
 			grow = 1,
 			min_w = 0,
 			h_full = true,
-			-- (The panel expanded over it: none of it shows, the list beside the panel.)
-			hidden = if inset
-				then function(): boolean
-					return (require("@app/screens/shell/view") :: any).expanded:get() == true
-				end
-				else nil,
-			rounded = if inset then "$zeron.inset.radius" else nil,
-			bg = if inset then card_fill else nil,
-			border = if inset then 1 else nil,
-			border_color = if inset then "$zeron.inset.edge" else nil,
-			overflow = if inset then "hidden" else nil,
-			-- (Its strip moves the window, a double click zooming it; inset, the top
-			-- bar does that.)
-			if inset then nil else ui.div { id = "settings-drag", h = TITLE_H, w_full = true, shrink = 0, window_drag = true },
+			-- (Its strip moves the window, a double click zooming it.)
+			if panel then nil else ui.div { id = "settings-drag", h = TITLE_H, w_full = true, shrink = 0, window_drag = true },
 			ui.scroll {
+				id = "settings-scroll",
 				w_full = true,
 				grow = 1,
 				min_h = 0,
@@ -517,6 +515,7 @@ function M.View(props: { inset: boolean? }?): Node
 				on_wheel = scrolled,
 				ui.column {
 					id = "settings-page",
+					ref = column,
 					hook = "settings.page",
 					-- (Laid out, as tall as it is: where it was scrolled again, the
 					-- scroll's room known now.)
@@ -524,9 +523,9 @@ function M.View(props: { inset: boolean? }?): Node
 						laid_out(size.h)
 					end,
 					w_full = true,
-					px = "$space.6",
-					pt = "$space.4",
-					pb = "$space.8",
+					px = if panel then ui.raw(28, "the panel's page inset, Claude's") else "$space.6",
+					pt = if panel then ui.raw(22, "the panel's page inset, Claude's") else "$space.4",
+					pb = if panel then ui.raw(40, "the panel's page inset, Claude's") else "$space.8",
 					items = "center",
 					ui.presence(function(): string
 						local id = open_id()
@@ -542,14 +541,207 @@ function M.View(props: { inset: boolean? }?): Node
 						return ui.column {
 							hook = if page.private then false else nil,
 							w_full = true,
+							max_w = if panel then ui.raw(PANEL_MEASURE, "the panel's page measure, Claude's") else nil,
 							items = "center",
 							(page.view :: () -> Node)(),
 						}
-					end, { w_full = true, items = "center" }),
+					end, {
+						w_full = true,
+						items = "center",
+						-- (A page chosen rises into place.)
+						enter = if panel then motion.transition({ opacity = { 0, 1 }, y = { 4, 0 }, duration = 160, ease = "cubicBezier(0.2, 0.8, 0.2, 1)" }) else nil,
+					}),
 				},
 			},
 		},
 	}
+	if not panel then
+		return body
+	end
+	return ui.column {
+		w_full = true,
+		h_full = true,
+		min_h = 0,
+		ui.row {
+			id = "settings-head",
+			w_full = true,
+			h = ui.raw(HEAD_H, "the panel's head, Claude's"),
+			shrink = 0,
+			pl = ui.raw(18, "the title in from the panel's edge, Claude's"),
+			pr = "$space.2",
+			items = "center",
+			justify = "between",
+			border_sides = { 0, 0, 1, 0 },
+			border_color = "$border",
+			ui.text { ui.t("settings.shell.heading"), heading = 1, text_size = "$font.size.md", weight = "$font.weight.semibold", color = "$text.primary" },
+			ds.IconButton {
+				id = "settings-close",
+				icon = "close",
+				size = "lg",
+				label = ui.t("common.close") :: any,
+				tooltip = false,
+				on_click = function()
+					route.leave_settings()
+				end,
+			},
+		},
+		body,
+	}
 end
+
+-- The window's size, followed.
+local function window_size(): (number, number)
+	local size = (ui.window.size :: any):get()
+	return math.max(1, size.width or 0), math.max(1, size.height or 0)
+end
+
+-- How the panel comes (Claude's: 210 ms, easing out) and goes (140, easing
+-- in), and the scrim's fade.
+local OPEN = { duration = 210, ease = "cubicBezier(0.2, 0.8, 0.2, 1)" }
+local CLOSE = { duration = 140, ease = "cubicBezier(0.4, 0, 1, 1)" }
+local SCRIM = { duration = 180, ease = "cubicBezier(0.2, 0.8, 0.2, 1)" }
+
+-- Settings floating over the chats while the route is `settings/:page`, as
+-- Claude's: the window dimmed under a scrim, the panel centred over it at
+-- `PANEL_W` by `PANEL_H`, shrinking with the window to keep `PANEL_INSET`
+-- from its edges, frosted as a dialog is. zgx's modal under it all (focus
+-- held in it, given back as it goes), its own dim made clear: the scrim is
+-- this one's and fades with the panel. Escape, a click on the scrim, the ×
+-- and ⌘, again close it (the route leaves); it stays up until it has gone.
+M.Panel = ui.component(function(): Node
+	local function open(): boolean
+		return route.current:get().name == "settings"
+	end
+	local now = route.current:peek().name == "settings"
+	local phase = ui.use_state(if now then 1 else 0)
+	local dim = ui.use_state(if now then 1 else 0)
+	local up = ui.use_state(now)
+	local moving: { any } = {}
+	ui.effect(function()
+		local want = open()
+		for _, m in moving do
+			m:cancel()
+		end
+		moving = {}
+		if want then
+			up:set(true)
+			table.insert(moving, anime.animate(phase, motion.params({ value = 1, duration = OPEN.duration, ease = OPEN.ease })))
+			table.insert(moving, anime.animate(dim, motion.params({ value = 1, duration = SCRIM.duration, ease = SCRIM.ease })))
+		elseif up:peek() then
+			table.insert(moving, anime.animate(phase, motion.params({ value = 0, duration = CLOSE.duration, ease = CLOSE.ease })))
+			table.insert(
+				moving,
+				anime.animate(
+					dim,
+					motion.params({
+						value = 0,
+						duration = SCRIM.duration,
+						ease = SCRIM.ease,
+						-- (Gone, the keys go back to the chats: the modal gives focus back
+						-- where it was as it closes, often nowhere.)
+						onComplete = function()
+							up:set(false)
+							refocus()
+						end,
+					})
+				)
+			)
+		end
+	end)
+	local function leave()
+		if open() then
+			route.leave_settings()
+		end
+	end
+	return ui.div {
+		theme = { backdrop = "#00000000" },
+		ui.modal {
+			open = function(): boolean
+				return up:get()
+			end,
+			on_close = leave,
+			label = ui.t("settings.shell.heading"),
+			-- (The panel takes the keys as it shows: Escape, ⌘F, the list's arrows.)
+			autofocus = false,
+			placement = { x = "start", y = "start", inset = 0 },
+			-- (The modal is the whole window, the scrim's: a modal panel's size
+			-- takes no percentage, and keeps 32 from the window's edges unless told.)
+			w = function(): number
+				return (window_size())
+			end,
+			h = function(): number
+				local _, h = window_size()
+				return h
+			end,
+			max_w = function(): number
+				return (window_size())
+			end,
+			max_h = function(): number
+				local _, h = window_size()
+				return h
+			end,
+			p = 0,
+			gap = 0,
+			rounded = 0,
+			bg = "#00000000",
+			border = 0,
+			shadow = "$zeron.dialog.stage",
+			-- (Gone once it has left, not kept hidden as a modal's content is: no page's
+			-- effects run on behind a closed panel.)
+			build = function(): Node
+				return ui.show(function(): boolean
+					return up:get()
+				end, ui.div {
+					w_full = true,
+					h_full = true,
+					relative = true,
+					items = "center",
+					justify = "center",
+					ui.div {
+						id = "settings-scrim",
+						absolute = true,
+						left = 0,
+						top = 0,
+						right = 0,
+						bottom = 0,
+						bg = ui.raw("#00000073", "Claude's settings scrim"),
+						aria_hidden = true,
+						opacity = function(): number
+							return math.clamp(dim:get(), 0, 1)
+						end,
+						on_click = leave,
+					},
+					ui.column(dialog.panel {
+						id = "shell-settings",
+						-- Zeron's Settings are no plugin's to change or add to: what you
+						-- allow plugins and templates is decided here (Settings →
+						-- Plugins and Templates). Sealed, with all it holds.
+						hook = false,
+						focusable = true,
+						focus = { outline = 0 },
+						on_mount = function(el)
+							el:focus()
+						end,
+						w = function(): number
+							return ui.raw(math.min(PANEL_W, window_size() - 2 * PANEL_INSET), "Claude's settings panel")
+						end,
+						h = function(): number
+							local _, h = window_size()
+							return ui.raw(math.min(PANEL_H, h - 2 * PANEL_INSET), "Claude's settings panel")
+						end,
+						overflow = "hidden",
+						opacity = function(): number
+							return math.clamp(phase:get(), 0, 1)
+						end,
+						scale = function(): number
+							return 0.97 + 0.03 * phase:get()
+						end,
+						M.View({ panel = true }),
+					}),
+				})
+			end,
+		},
+	}
+end)
 
 return M

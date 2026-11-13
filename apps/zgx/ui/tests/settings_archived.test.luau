@@ -7,12 +7,14 @@
 -- is narrow. On the shell in ui/shell_fixture.luau (`archived_days`: 37
 -- sessions over the days, two on Cloud machines of their own).
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 local DELETE_ALL = `role:dialog "Delete all archived sessions?"`
 local DELETE_ONE = `role:dialog "Delete session?"`
 
 local function open(command: string?): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 1100)
 	app:frames(30)
 	app:command(command or "archived_days")
@@ -213,6 +215,9 @@ test("past fifty, Show more shows the rest", function()
 	app:frames(30)
 	app:click("#archived-more")
 	app:frames(30)
+	-- (Where the rows past fifty begin: the panel shows less of the page than the window did.)
+	app:set_state("shell_settings_scroll", 2500)
+	app:frames(30)
 	expect(app:has(row("Old 30"))).to_be(true)
 	expect(app:has("#archived-more")).to_be(false)
 end)
@@ -357,7 +362,7 @@ test("narrow, Delete all goes under the title", function()
 end)
 
 test("Settings opened at Archived from the palette brings its row into the list's sight", function()
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 900)
 	app:frames(30)
 	app:command("shell.settings")

@@ -4,6 +4,8 @@
 -- pages asked for, and a purchase landing while one is open. On the shell
 -- in ui/shell_fixture.luau, the host's calls answered by ui/cloud_stub.luau.
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 local NAV = "#settings-nav"
 
@@ -30,7 +32,7 @@ local function asked_like(app: any, prefix: string): boolean
 end
 
 local function open(page: string?, offer: boolean?): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 1100)
 	app:frames(30)
 	app:command("settings_stub.sign_in")

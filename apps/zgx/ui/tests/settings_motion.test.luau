@@ -1,9 +1,11 @@
 -- Settings → Appearance → Pause animations in background, on ui/shell_fixture.luau.
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 
 local function open(): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 2600)
 	app:frames(30)
 	app:command("shell.settings")
@@ -29,7 +31,7 @@ test("Pause animations in background: under Reduce motion, off at first, kept as
 end)
 
 test("Settings' pages load as they're first shown, not with the shell, and what one follows stays followed once it's put away", function()
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:frames(30)
 	-- (Appearance's own state: there once its module has loaded.)
 	expect((pcall(function()

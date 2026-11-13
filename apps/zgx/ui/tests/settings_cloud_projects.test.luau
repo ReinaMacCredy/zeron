@@ -8,12 +8,14 @@
 -- (`fixture.cloud_projects`) and ui/chat_fixture.luau
 -- (`fixture.cloud_copies`).
 
+local reachable = require("./settings_panel").reachable
+
 local PAGE = "#settings-page"
 local NAV = "#settings-nav"
 local CLOUD = 'role:group "Cloud"'
 
 local function open(): any
-	local app = mount("shell_fixture.luau")
+	local app = reachable(mount("shell_fixture.luau"))
 	app:resize(1200, 900)
 	app:frames(30)
 	app:command("settings_stub.sign_in")
@@ -165,7 +167,7 @@ end)
 -- A new chat's project, on Cloud ────────────────────────────────────────────
 
 test("a new chat on Cloud lists Cloud's copies of a repository once", function()
-	local app = mount("chat_fixture.luau")
+	local app = reachable(mount("chat_fixture.luau"))
 	app:resize(960, 760)
 	app:command("go_home")
 	app:frames(30)

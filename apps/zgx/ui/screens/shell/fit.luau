@@ -132,10 +132,6 @@ end)
 -- then narrow: a toggle always shows it. It gives way again only under this
 -- width; room for it all forgets it.
 local sidebar_kept = ui.state("shell_fit_sidebar_kept", nil :: number?)
-function M.list_w(): number
-	registered:get()
-	return math.clamp(if preferred then preferred() else M.SIDEBAR_DEFAULT, M.SIDEBAR_MIN, M.SIDEBAR_MAX)
-end
 -- The fit now. (Nothing hides before the window's width is known.)
 M.current = ui.computed(function(): Fit
 	local vw = M.viewport:get()
@@ -156,13 +152,6 @@ M.current = ui.computed(function(): Fit
 		return { sidebar = open_sidebar, right = open_panel, files = false, sidebar_limit = width }
 	end
 	local floor = M.page_floor:get()
-	-- Settings' list always stands: without room for it, a page and the panel, the panel gives way.
-	if open_panel and route.current:get().name == "settings" then
-		if vw - M.list_w() - M.RIGHT_PANE_MIN < M.CHAT_PANEL_MIN then
-			open_panel = false
-			open_tree = false
-		end
-	end
 	local panel_at = if id then M.panel_at:get()[id] or 0 else 0
 	-- Too little room for a split's panes as wide as the panel beside both
 	-- sides: the side asked for longest ago gives way, hidden, not closed, and
