@@ -1544,6 +1544,7 @@ impl EngineRpc {
             self.voice.retire_chat(child);
             if let Err(err) = self.workspace.delete_chat(child) {
                 tracing::warn!(chat = %child, error = %err, "deleting a deleted chat's child failed");
+                continue;
             }
             self.sessions.forget_prediction(child);
             self.doc_host.purge_chat(child);
@@ -3843,11 +3844,7 @@ fn chat_descendants(
     while let Some((parent, parent_on_cloud)) = frontier.pop() {
         for chat in chats {
             let on_cloud = zeron_proto::is_cloud_device(&chat.device_id, "");
-            let goes = if on_cloud {
-                parent_on_cloud && chat.is_child_of(parent)
-            } else {
-                owned_by(chat, parent)
-            };
+            let goes = owned_by(chat, parent) && (parent_on_cloud || !on_cloud);
             if goes && seen.insert(chat.id.as_str()) {
                 out.push((chat.id.clone(), on_cloud));
                 frontier.push((chat.id.as_str(), on_cloud));

@@ -1223,6 +1223,10 @@ end
 local CodeBlock = ui.component(function(props: { lang: string, text: string, class: string?, provide: { [string]: any }?, find: CodeFind?, veil: CodeVeil?, render: (() -> Node)? }): Node
 	local copied = ui.use_state(false)
 	local rendered = ui.use_state(props.render ~= nil)
+	-- (A find shows the source, where its matches are highlighted.)
+	local function as_rendered(): boolean
+		return rendered:get() and props.find == nil
+	end
 	local stop: (() -> ())? = nil
 	local text = code_shown(props.text)
 	local function copy()
@@ -1277,7 +1281,7 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 				}
 				else nil,
 			ui.show(function(): boolean
-				return not rendered:get()
+				return not as_rendered()
 			end, ToggleButton {
 				on = fit,
 				label = locale.t("ds.markdown.fit_content") :: any,
@@ -1312,7 +1316,7 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 			},
 		},
 		ui.presence(function(): string
-			return if rendered:get() then "rendered" elseif fit:get() then "fit" else "code"
+			return if as_rendered() then "rendered" elseif fit:get() then "fit" else "code"
 		end, function(shown: string): Node
 			if shown == "rendered" and props.render then
 				return ui.column { w_full = true, min_w = 0, px = "$space.4", pt = "$space.1", pb = "$space.4", props.render() }

@@ -121,6 +121,7 @@ pub const BLOCKED: &[&str] = &[
     "cloud.sleep",
     "cloud.retry",
     "cloud.set_machine",
+    "sessions.create_cloud",
 ];
 
 pub fn blocked(action: &str) -> bool {

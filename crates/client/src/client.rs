@@ -2005,6 +2005,7 @@ impl Client {
         let root = parent
             .created_by_chat_id
             .clone()
+            .filter(|_| parent.child_kind == Some(zeron_proto::ChildKind::Side))
             .unwrap_or_else(|| parent.id.clone());
         let mut chat = parent;
         chat.id = crate::new_id();

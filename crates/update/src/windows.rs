@@ -259,22 +259,20 @@ fn remove_whole(dir: &Path) -> bool {
     true
 }
 
-/// An installation the old app's updater moved to the zgx app still names
-/// that app's feed, the GitHub release marked latest, which has no beta
-/// channel beside it: from its first launch as the zgx app it follows the
-/// edge's (stable at its root, beta in `beta/`), as a zgx package names. A
-/// feed someone set themselves stays.
+/// An installation naming one of upstream's feeds follows the fork's from its
+/// next launch, so it never updates onto an upstream build. A feed someone set
+/// themselves stays.
 fn leave_github_feed(directory: &Path) {
     let config = directory.join(CONFIG);
     let on_github = std::fs::read(&config)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Config>(&bytes).ok())
-        .is_some_and(|c| c.releases_url.trim().trim_end_matches('/') == GITHUB_LATEST);
+        .is_some_and(|c| UPSTREAM_FEEDS.contains(&c.releases_url.trim().trim_end_matches('/')));
     if !on_github {
         return;
     }
     let new = directory.join(format!(".{CONFIG}.new"));
-    let json = serde_json::json!({ "releases_url": EDGE_FEED }).to_string();
+    let json = serde_json::json!({ "releases_url": super::RELEASES_FEED }).to_string();
     if std::fs::write(&new, json).and_then(|()| std::fs::rename(&new, &config)).is_err() {
         let _ = std::fs::remove_file(&new);
     }
@@ -444,8 +442,8 @@ pub async fn complete_install(directory: &Path, version: &str) -> anyhow::Result
 
 /// The GitHub release marked latest, the feed the old app's Windows installs name.
 const GITHUB_LATEST: &str = "https://github.com/zeronsh/zeron/releases/latest/download";
-/// The edge's feed, the zgx app's: stable at its root, the beta channel in `beta/`.
-const EDGE_FEED: &str = "https://zeron.sh/releases";
+/// Upstream's feeds: a fork install naming one would update onto upstream builds, so it moves to the fork's.
+const UPSTREAM_FEEDS: [&str; 2] = [GITHUB_LATEST, "https://zeron.sh/releases"];
 
 /// Where the feed keeps `version`'s own files, and its manifest: a GitHub
 /// release of its own (`releases/download/v<version>`, whose `manifest.json`
@@ -1069,12 +1067,14 @@ mod tests {
     }
 
     #[test]
-    fn only_the_old_app_s_github_feed_moves_to_the_edge() {
+    fn only_upstream_s_feeds_move_to_the_fork_s() {
         let install = tempfile::tempdir().unwrap();
         let config = install.path().join(CONFIG);
-        std::fs::write(&config, format!(r#"{{"releases_url":"{GITHUB_LATEST}/"}}"#)).unwrap();
-        leave_github_feed(install.path());
-        assert!(std::fs::read_to_string(&config).unwrap().contains(EDGE_FEED));
+        for upstream in UPSTREAM_FEEDS {
+            std::fs::write(&config, format!(r#"{{"releases_url":"{upstream}/"}}"#)).unwrap();
+            leave_github_feed(install.path());
+            assert!(std::fs::read_to_string(&config).unwrap().contains(crate::RELEASES_FEED));
+        }
         std::fs::write(&config, r#"{"releases_url":"https://example.com/feed"}"#).unwrap();
         leave_github_feed(install.path());
         assert!(std::fs::read_to_string(&config).unwrap().contains("example.com"));

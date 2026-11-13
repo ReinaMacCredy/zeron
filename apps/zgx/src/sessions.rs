@@ -1060,6 +1060,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         let a = a.clone();
         async move {
             if args.field("cloud").is_some_and(Value::truthy) {
+                crate::plugins::preview::refuse("sessions.create_cloud")?;
                 a.create_on_cloud(args).await
             } else {
                 a.create(args).await.map_err(String::from)
