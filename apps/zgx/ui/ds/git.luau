@@ -507,12 +507,10 @@ function M.highlight(lines: { Line }, path: string?): { [number]: { Run } }?
 		else
 			local text = expand(l.text)
 			local spans
-			if l.kind == "-" then
+			if l.kind ~= "+" then
 				spans, old_state = h(text, old_state)
-			elseif l.kind == "+" then
-				spans, new_state = h(text, new_state)
-			else
-				_, old_state = h(text, old_state)
+			end
+			if l.kind ~= "-" then
 				spans, new_state = h(text, new_state)
 			end
 			out[i] = runs(text, spans)
