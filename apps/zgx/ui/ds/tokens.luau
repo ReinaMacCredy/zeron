@@ -770,6 +770,7 @@ function M.setup()
 					well = well .. (if glass then "52" else "29"),
 					glyph = "{text.secondary}",
 				},
+				diff_bg = well,
 			},
 		}
 	end)

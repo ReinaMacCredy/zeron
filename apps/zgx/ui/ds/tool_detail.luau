@@ -586,7 +586,7 @@ local function diff_view(d: Diff): Node
 	return ui.column {
 		w_full = true,
 		rounded = "$radius.md",
-		bg = "$zeron.code.wash",
+		bg = "$zeron.diff_bg",
 		overflow = "hidden",
 		py = "$space.1",
 		class = "tool-diff",
