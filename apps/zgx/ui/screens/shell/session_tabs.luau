@@ -227,6 +227,11 @@ local function close_draft()
 	end
 end
 
+function M.carried_in_strip(): boolean
+	local d = drag:get()
+	return d ~= nil and not d.out
+end
+
 function M.close_showing(): boolean
 	local name = route.current:peek().name
 	if name == "home" then
@@ -846,6 +851,7 @@ local Tab = ui.component(function(props: { chat: string }): Node
 			drag:set({ key = id, w = w, order = list, grab = nil, out = false })
 			-- (Zeron's: a tab carried into the page splits it, as a sidebar row does.)
 			splits.dragging:set(true)
+			splits.carried:set(face(id))
 			return { session_tab = id, session = face(id) }
 		end,
 		drag_preview = function(): Node
@@ -864,6 +870,7 @@ local Tab = ui.component(function(props: { chat: string }): Node
 			local d = drag:peek()
 			drag:set(nil)
 			splits.dragging:set(false)
+			splits.carried:set("")
 			if d and not landed then
 				splits.set_order(d.order)
 			end

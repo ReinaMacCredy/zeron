@@ -36,16 +36,19 @@ type Item = any
 local sidebar_view = ui.shared("sidebar.view", {} :: { [string]: any })
 -- (A session carried: the page's split shows where it can land, as for the sidebar's rows.)
 local split_dragging = ui.shared("split.dragging", false)
+local split_carried = ui.shared("split.carried", "")
 
 -- A session's row lifted out, as the sidebar's (its payload): onto a composer as a mention, into a split.
 local function session_drag(id: string): any
 	return {
 		payload = function(): any
 			split_dragging:set(true)
+			split_carried:set(id)
 			return { session = id }
 		end,
 		ended = function()
 			split_dragging:set(false)
+			split_carried:set("")
 		end,
 	}
 end

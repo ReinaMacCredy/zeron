@@ -25,6 +25,7 @@ local art = require("@app/screens/shell/art")
 local frame = require("@app/screens/shell/frame")
 local boundary = require("@app/screens/shell/boundary")
 local splits = require("@app/screens/shell/split")
+local SplitCards = require("@app/screens/shell/split_cards")
 local session_tabs = require("@app/screens/shell/session_tabs")
 local swipe = require("@app/screens/shell/swipe")
 local top_bar = require("@app/screens/shell/top_bar")
@@ -440,6 +441,7 @@ return function(props: Props): Node
 				end
 				held:set(true)
 				splits.dragging:set(true)
+				splits.carried:set(id)
 				return { split_pane = id, session = id }
 			end,
 			drag_preview = function(): Node
@@ -450,6 +452,7 @@ return function(props: Props): Node
 			on_drag_end = function()
 				held:set(false)
 				splits.dragging:set(false)
+				splits.carried:set("")
 			end,
 			ds.Icon { name = "grip-horizontal", size = (ui.theme.get("zeron.menu.glyph.size") :: number?) or 16 },
 		}
@@ -1390,12 +1393,23 @@ return function(props: Props): Node
 	-- A preview of where shows as it's held there; the pane's middle stays
 	-- the chat page's own (a chat dropped there is mentioned).
 	local over = ui.use_state(nil :: { id: string, side: string }?)
+	local drag_pane = ui.use_state(nil :: string?)
 	-- (A drag that ended anywhere leaves no preview.)
 	ui.effect(function()
-		if not splits.dragging:get() and over:peek() ~= nil then
-			over:set(nil)
+		if not splits.dragging:get() then
+			if over:peek() ~= nil then
+				over:set(nil)
+			end
+			if drag_pane:peek() ~= nil then
+				drag_pane:set(nil)
+			end
 		end
 	end)
+	local function carried_over(id: string)
+		if splits.dragging:peek() and drag_pane:peek() ~= id then
+			drag_pane:set(id)
+		end
+	end
 	-- Every chat of the split is watched by the host in a lane of its own,
 	-- focused or not, for as long as it's in the split: each pane shows its
 	-- own chat from its own lane, and the focus moving changes no pane's
@@ -1440,17 +1454,20 @@ return function(props: Props): Node
 	}
 	-- The room a pane's composer takes at its foot: the window's own, measured, over
 	-- the focused one; a pane's own over another.
+	local function composer_room(id: string, extra: number?): () -> number
+		-- (A pane's own, as its lane measures it: a draft with a chip stands taller.)
+		local own = LaneTab.dock_height(`split-{id}`)
+		return function(): number
+			local h = if splits.focused:get() == id then chat_shared.dock_h:get() else own:get()
+			return ui.raw(Dock.GAP + h + (extra or 0), "the pane's composer, which attaches")
+		end
+	end
 	local function zone(id: string, side: string): Node
 		local props: { [any]: any } = table.clone(ZONES[side])
 		props.id = `split-zone-{id}-{side}`
 		props.absolute = true
 		if side ~= "top" then
-			-- (A pane's own, as its lane measures it: a draft with a chip stands taller.)
-			local own = LaneTab.dock_height(`split-{id}`)
-			props.bottom = function(): number
-				local h = if splits.focused:get() == id then chat_shared.dock_h:get() else own:get()
-				return ui.raw(Dock.GAP + h, "the pane's composer, which attaches")
-			end
+			props.bottom = composer_room(id)
 		end
 		props.pointer_events = "auto"
 		props.drop_when = function(payload: any): boolean
@@ -1458,6 +1475,7 @@ return function(props: Props): Node
 			return d ~= nil and d ~= id and splits.can_take(d)
 		end
 		props.on_drag_over = function(_payload: any)
+			carried_over(id)
 			local o = over:peek()
 			if not o or o.id ~= id or o.side ~= side then
 				over:set({ id = id, side = side })
@@ -1636,6 +1654,7 @@ return function(props: Props): Node
 			end,
 			drop_when = files_zone.drop_when,
 			on_drag_over = function(payload: any, e: any)
+				carried_over(id)
 				if focused() then
 					files_zone.on_drag_over(payload, e)
 				else
@@ -1818,11 +1837,27 @@ return function(props: Props): Node
 			border_color = "$zeron.inset.drop_edge",
 			rounded = "$zeron.inset.radius",
 		})
+		local cards = SplitCards.Cards {
+			pane = id,
+			shown = function(): boolean
+				return #members:get() == 1 or (drag_pane:get() or splits.focused:get()) == id
+			end,
+			tall = function(): boolean
+				return not session_tabs.carried_in_strip()
+			end,
+			hot = held,
+			inert = function(): boolean
+				local d = splits.carried:get()
+				return d ~= "" and not (d ~= id and splits.can_take(d))
+			end,
+			bottom = composer_room(id, 8),
+		}
 		-- (The sides last: over the top's and bottom's ends, they own the
 		-- corners.)
 		local item: { [any]: any } = {
 			pointer_events = "none",
 			preview,
+			cards,
 			zone(id, "top"),
 			zone(id, "bottom"),
 			zone(id, "left"),

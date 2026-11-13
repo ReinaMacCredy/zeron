@@ -65,6 +65,7 @@ local TextField = require("@self/text_field")
 -- chat is being dragged, so the split shows where it can land.
 local split_grouped = ui.shared("split.grouped", {} :: { string })
 local split_dragging = ui.shared("split.dragging", false)
+local split_carried = ui.shared("split.carried", "")
 local function in_split(id: string): boolean
 	return table.find(split_grouped:get(), id) ~= nil
 end
@@ -2058,6 +2059,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				start_drag({ id = s.id, list = from, index = if at then at() else 1, h = session_h(cur(), by_at(), slim_now()) + session_gap(slim_now()) })
 				-- (The page's split shows where it can land.)
 				split_dragging:set(true)
+				split_carried:set(s.id)
 				return { session = s.id }
 			end,
 			-- The row as it stands, on the window's colour. (Nothing here eases: a drag's
@@ -2078,6 +2080,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end,
 			on_drag_end = function()
 				split_dragging:set(false)
+				split_carried:set("")
 				end_drag()
 			end,
 			body,

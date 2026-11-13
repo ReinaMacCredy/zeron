@@ -76,6 +76,7 @@ local old_order = ui.persist("shell_session_tabs", {} :: { string })
 
 -- A chat being dragged (shared with the sidebar's rows, which set it).
 M.dragging = ui.shared("split.dragging", false)
+M.carried = ui.shared("split.carried", "")
 
 -- The ids of the chats in the split showing, for the sidebar (its rows
 -- strong for each) and the panel (one for them all): set below as the
