@@ -239,9 +239,41 @@ fn a_row_leaving_the_outbox_is_the_queues_to_show() {
     view.heard_frame(json!({ "reset": [] }));
     let mut row = held_send("r1", None);
     row["queueRow"] = json!(true);
+    view.follow_held(&[row.clone()]);
+    assert_eq!(messages(&view), json!([]), "on its way, it shows in the queue, never as a prompt first");
+    row["failure"] = json!("the file is too large");
     view.follow_held(&[row]);
-    assert_eq!(messages(&view)[0]["id"], "r1");
+    assert_eq!(messages(&view)[0]["waiting"], "failed");
     view.follow_held(&[]);
+    assert_eq!(messages(&view), json!([]));
+}
+
+#[test]
+fn a_send_bound_for_the_queue_never_shows_as_a_prompt_while_its_files_go_up() {
+    let (_app, view, _sending) = pending_chat();
+    view.open_chat(Some("other-chat".into()));
+    view.heard_frame(json!({ "reset": [] }));
+    CHATS.with(|chats| {
+        chats.sessions.borrow_mut().insert(
+            "other-chat".to_owned(),
+            json!({ "status": "working", "updatedAt": now_seconds() * 1000 }),
+        );
+    });
+    let sender = view.clone();
+    let mut queued: Sending = Box::pin(async move {
+        sender
+            .send(Value::record([
+                ("session", Value::from("other-chat")),
+                ("message_id", Value::from("q1")),
+                ("text", Value::from("and this")),
+                (
+                    "attachments",
+                    Value::List(vec![Value::record([("path", Value::from("/tmp/shot.png")), ("kind", Value::from("image"))])].into()),
+                ),
+            ]))
+            .await
+    });
+    assert!(queued.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
     assert_eq!(messages(&view), json!([]));
 }
 

@@ -2975,7 +2975,8 @@ impl View {
                 }
             }
             if let Some(pending) = self.pending.borrow().get(&open.id) {
-                for row in pending.iter().map(Pending::value) {
+                // (A queue row on its way already shows in the queue; failed, it shows here with its retry.)
+                for row in pending.iter().filter(|p| !(p.row && p.waiting == "sending")).map(Pending::value) {
                     seen.row(&row);
                     list.push(row);
                 }
@@ -3067,19 +3068,22 @@ impl View {
         let prompts = pending.entry(id.clone()).or_default();
         // (Shown already while its chat was being made: `chat.creating`.)
         prompts.retain(|p| p.id != message_id);
-        prompts.push(Pending {
-            id: message_id.clone(),
-            words: words.clone(),
-            paths: local_paths(&req),
-            waiting: "sending",
-            retry: None,
-            command: None,
-            at: stamp(now_seconds()),
-            alias: None,
-            held: false,
-            row: false,
-            transfers: Vec::new(),
-        });
+        // (Bound for the queue, it shows there alone: never a prompt here first, while its files go up.)
+        if fresh || !chats.running(&id) {
+            prompts.push(Pending {
+                id: message_id.clone(),
+                words: words.clone(),
+                paths: local_paths(&req),
+                waiting: "sending",
+                retry: None,
+                command: None,
+                at: stamp(now_seconds()),
+                alias: None,
+                held: false,
+                row: false,
+                transfers: Vec::new(),
+            });
+        }
         if let Some(device) = chat["deviceId"].as_str().filter(|d| zeron_proto::is_cloud_device(d, "")) {
             chats.follow_machine(id.clone(), device.to_owned());
         }
