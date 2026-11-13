@@ -1896,7 +1896,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						if kind == "jump" then
 							return jump_label()
 						elseif kind == "archive" then
-							return ui.div { absolute = true, right = -4, top = -4, archive_button() }
+							return ui.div {
+								x = ui.raw(4, "overhangs the corner, as the row's inset"),
+								my = ui.raw(-4, "taller than the line it stands on"),
+								archive_button(),
+							}
 						elseif kind == "none" then
 							return ui.div {}
 						elseif kind == "subagents" then
