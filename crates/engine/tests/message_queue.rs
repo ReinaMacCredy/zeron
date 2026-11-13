@@ -270,10 +270,6 @@ fn assemble_at(path: &std::path::Path, harness: Arc<HeldHarness>) -> EngineCore 
     registry.register(harness);
     let core = EngineCore::assemble(path, Arc::new(registry), HarnessId::Mock, None)
         .expect("engine core assembles");
-    // As the engine's own boot says (deferred.rs): this one serves no IPC
-    // port. Left unsaid, a turn revived on boot waits out
-    // `ipc_port_ready`'s whole limit for a port never coming.
-    core.sessions.set_no_ipc_port();
     core
 }
 

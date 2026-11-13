@@ -88,9 +88,6 @@ fn engine(dir: &std::path::Path, name: &str) -> EngineCore {
     let registry = HarnessRegistry::new();
     registry.register(harness);
     let core = EngineCore::assemble(&dir.join("engine"), Arc::new(registry), id, None).unwrap();
-    // No port here: a turn revived on boot (restart_durability's reboot)
-    // goes on at once rather than waiting out `ipc_port_ready`'s limit.
-    core.sessions.set_no_ipc_port();
     core
 }
 

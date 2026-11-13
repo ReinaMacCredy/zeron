@@ -125,10 +125,6 @@ impl Rig {
         }));
         let core = EngineCore::assemble(&self.dir, Arc::new(registry), HarnessId::Mock, None)
             .expect("engine core assembles");
-        // No port here: a turn revived on boot goes on at once rather than
-        // waiting out `ipc_port_ready`'s limit for one. (A real machine's
-        // boot records its port; no test here reads the tools a port adds.)
-        core.sessions.set_no_ipc_port();
         core
     }
 

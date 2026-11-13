@@ -275,7 +275,7 @@ fn assemble(dir: &std::path::Path, harness: impl Harness + 'static) -> EngineCor
         .expect("engine core assembles");
     // Served, as the engine's port is right after assembly: a turn revived on
     // boot waits for it.
-    core.sessions.set_ipc_port(27699);
+    core.sessions.set_tool_server_port(27699);
     core
 }
 
@@ -834,7 +834,7 @@ fn assemble_signed_out(dir: &std::path::Path, scope: WorkspaceScope) -> EngineCo
     let core =
         EngineCore::assemble_with_profile(profile, Arc::new(registry), HarnessId::Mock, None)
             .expect("engine core assembles");
-    core.sessions.set_ipc_port(27699);
+    core.sessions.set_tool_server_port(27699);
     let mut config = AuthConfig::new("http://127.0.0.1:9", dir.join("auth"));
     config.workos_client_id = Some("client_test".into());
     let auth = Auth::new(config);

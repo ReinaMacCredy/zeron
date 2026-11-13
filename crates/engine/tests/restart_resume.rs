@@ -149,7 +149,7 @@ fn assemble(dir: &std::path::Path, harness: RecordingHarness) -> EngineCore {
         .expect("engine core assembles");
     // Served, as the engine's port is right after assembly: a turn revived on
     // boot waits for it (see `a_revived_turn_waits_for_the_port_its_zeron_tools_dial`).
-    core.sessions.set_ipc_port(27699);
+    core.sessions.set_tool_server_port(27699);
     core
 }
 
@@ -1028,7 +1028,7 @@ async fn a_revived_turn_waits_for_the_port_its_zeron_tools_dial() {
         "the revived turn must not go out before the port"
     );
 
-    core.sessions.set_ipc_port(27699);
+    core.sessions.set_tool_server_port(27699);
     wait_for(
         || {
             requests

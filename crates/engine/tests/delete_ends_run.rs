@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls, TurnControl};
 use zeron_proto::{
-    AgentEvent, ChildKind, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SessionStatus, SteeringMode,
 };
 use zeron_rpc::{memory_client, methods};
@@ -153,7 +153,7 @@ fn rig() -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
         .expect("engine core assembles");
-    create_chat(&core, CHAT, None);
+    create_chat(&core, CHAT);
     Rig {
         core,
         ledger,
@@ -161,7 +161,7 @@ fn rig() -> Rig {
     }
 }
 
-fn create_chat(core: &EngineCore, chat: &str, parent: Option<(&str, ChildKind)>) {
+fn create_chat(core: &EngineCore, chat: &str) {
     let here = core.workspace.device_id().to_string();
     core.workspace
         .create_chat_hosted(
@@ -171,8 +171,7 @@ fn create_chat(core: &EngineCore, chat: &str, parent: Option<(&str, ChildKind)>)
             Some(&here),
             None,
             Some("/tmp".into()),
-            parent.map(|(p, _)| p.to_owned()),
-            parent.map(|(_, kind)| kind),
+            None,
         )
         .unwrap();
 }
@@ -350,30 +349,4 @@ async fn archiving_a_chat_keeps_its_run() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(alive(pid), "an archived chat's agent stays warm");
     assert!(rig.core.sessions.has_run(CHAT));
-}
-
-/// A deleted chat's children on this computer go with it, and theirs in
-/// turn: the apps show a child under its parent, so one left behind could
-/// not be reached, yet would keep its doc and its warm agent.
-#[tokio::test]
-async fn deleting_a_parent_deletes_its_local_children_and_ends_their_runs() {
-    let rig = rig();
-    create_chat(&rig.core, "subagent", Some((CHAT, ChildKind::Subagent)));
-    create_chat(&rig.core, "side", Some((CHAT, ChildKind::Side)));
-    create_chat(&rig.core, "grandchild", Some(("subagent", ChildKind::Subagent)));
-    create_chat(&rig.core, "stranger", None);
-    let parent = start(&rig, "parent work", SessionStatus::Idle).await;
-    let subagent = start_in(&rig, "subagent", "subagent work", SessionStatus::Idle).await;
-    let side = start_in(&rig, "side", "side work", SessionStatus::Idle).await;
-    let stranger = start_in(&rig, "stranger", "stranger work", SessionStatus::Idle).await;
-    delete_chat(&rig).await;
-    for gone in [CHAT, "subagent", "side", "grandchild"] {
-        assert!(rig.core.workspace.chat(gone).unwrap().is_none(), "{gone} survived");
-    }
-    assert_ended_in(&rig, CHAT, parent).await;
-    assert_ended_in(&rig, "subagent", subagent).await;
-    assert_ended_in(&rig, "side", side).await;
-    assert!(rig.core.workspace.chat("stranger").unwrap().is_some(), "an unrelated chat stays");
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(alive(stranger) && rig.core.sessions.has_run("stranger"), "and keeps its run");
 }
