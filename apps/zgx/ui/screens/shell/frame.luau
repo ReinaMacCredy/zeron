@@ -381,6 +381,17 @@ local function framed_view(): Node
 				return extra_shade()
 			end),
 		}),
+		ui.div {
+			id = "shell-frame-wash",
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			bg = function(): string
+				return M.strip_token("art")
+			end,
+		},
 	}
 end
 
@@ -444,9 +455,9 @@ local function edge_gap(): number
 	return if appearance.inset_card:get() then WINDOW_EDGE else 0
 end
 
--- The strip's own tint where no picture shows under it; the window round the cards (rail, sidebar, gaps) wears it too.
+-- The strip's own tint, which the window round the cards (rail, sidebar, gaps) wears too: framed, the frame wears the strip's wash over art instead; under a plugin's wallpaper, nothing.
 local function plain_tint(): string
-	return if shows_art() then "#00000000" else M.strip_token("bg")
+	return if M.framed:get() or plugin_wallpaper() then "#00000000" else M.strip_token("bg")
 end
 
 local function fill_token(): string
