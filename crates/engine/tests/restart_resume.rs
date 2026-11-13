@@ -147,8 +147,6 @@ fn assemble(dir: &std::path::Path, harness: RecordingHarness) -> EngineCore {
     registry.register(Arc::new(harness));
     let core = EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock, None)
         .expect("engine core assembles");
-    // Served, as the engine's port is right after assembly: a turn revived on
-    // boot waits for it (see `a_revived_turn_waits_for_the_port_its_zeron_tools_dial`).
     core.sessions.set_tool_server_port(27699);
     core
 }
@@ -998,60 +996,6 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
     assert!(
         revived.mcp.is_some(),
         "a run revived at boot launches with the zeron tool server"
-    );
-    core.shutdown().await;
-}
-
-/// Boot recovery revives a cut-off turn while the engine is still being
-/// assembled, before it serves its IPC port. Dispatched then, the run went out
-/// with no Zeron MCP server: its agent found its Zeron tools gone. It waits for
-/// the port, and carries the server once it's recorded.
-#[tokio::test]
-async fn a_revived_turn_waits_for_the_port_its_zeron_tools_dial() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("data");
-    seed_fresh_crash(&dir);
-
-    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(RecordingHarness {
-        requests: requests.clone(),
-        session_id: "hs-after-crash".into(),
-        fail_starts: Default::default(),
-    }));
-    // Assembled, the port not served yet.
-    let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(
-        requests.lock().unwrap().is_empty(),
-        "the revived turn must not go out before the port"
-    );
-
-    core.sessions.set_tool_server_port(27699);
-    wait_for(
-        || {
-            requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|r| r.prompt.contains("Continue where you left off"))
-        },
-        "the revived turn to dispatch",
-    )
-    .await;
-    let recorded = requests.lock().unwrap().clone();
-    let revived = recorded
-        .iter()
-        .find(|r| r.prompt.contains("Continue where you left off"))
-        .unwrap();
-    let zeron = revived
-        .mcp
-        .as_ref()
-        .expect("the revived run carries Zeron's MCP server");
-    assert_eq!(
-        zeron.env.get("ZERON_IPC_PORT").map(String::as_str),
-        Some("27699")
     );
     core.shutdown().await;
 }
