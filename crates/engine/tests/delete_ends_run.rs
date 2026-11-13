@@ -228,15 +228,21 @@ async fn start_in(rig: &Rig, chat: &str, prompt: &str, ready: SessionStatus) -> 
         .dispatch(chat, HarnessId::Mock, request(prompt), None)
         .await
         .unwrap();
+    let pid_of = || {
+        rig.ledger
+            .pids
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(sent, _)| sent.contains(prompt))
+            .map(|(_, pid)| *pid)
+    };
     wait_for(
-        || {
-            status(&rig.core, chat) == Some(ready)
-                && rig.ledger.pids.lock().unwrap().contains_key(prompt)
-        },
+        || status(&rig.core, chat) == Some(ready) && pid_of().is_some(),
         "the run to start",
     )
     .await;
-    let pid = rig.ledger.pids.lock().unwrap()[prompt];
+    let pid = pid_of().unwrap();
     assert!(alive(pid), "the agent process runs");
     pid
 }
@@ -353,4 +359,101 @@ async fn archiving_a_chat_keeps_its_run() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(alive(pid), "an archived chat's agent stays warm");
     assert!(rig.core.sessions.has_run(CHAT));
+}
+
+fn delegate(core: &EngineCore, chat: &str, owner: &str, depth: u32) {
+    let here = core.workspace.device_id().to_string();
+    let delegation = zeron_proto::Delegation {
+        delegated_by_chat_id: owner.into(),
+        depth,
+        anchor: "task".into(),
+        client_request_id: None,
+        owner_turn_started_at: None,
+        wake: zeron_proto::DelegationWake::Always,
+        status: zeron_proto::DelegationStatus::Running,
+        cancel_requested: false,
+        delivery: None,
+        summary: None,
+        started_at: chrono::Utc::now(),
+        completed_at: None,
+        finding_outcomes: Default::default(),
+        findings_handed: Default::default(),
+        findings_announced: Default::default(),
+        route: None,
+    };
+    core.workspace
+        .create_delegated_chat(
+            chat,
+            None,
+            Some(&here),
+            None,
+            Some("/tmp".into()),
+            delegation,
+        )
+        .unwrap();
+}
+
+/// A deleted chat's subagents and side chats on this computer go with it,
+/// and theirs in turn: the apps show a child under its parent, so one left
+/// behind could not be reached, yet would keep its doc and its warm agent.
+#[tokio::test]
+async fn deleting_a_parent_deletes_its_local_children_and_ends_their_runs() {
+    let rig = rig();
+    let here = rig.core.workspace.device_id().to_string();
+    delegate(&rig.core, "subagent", CHAT, 1);
+    rig.core.workspace.create_sidechat(CHAT, "side").unwrap();
+    delegate(&rig.core, "grandchild", "subagent", 2);
+    create_chat(&rig.core, "fork");
+    let mut fork = rig.core.workspace.chat("fork").unwrap().unwrap();
+    fork.created_by_chat_id = Some(CHAT.into());
+    fork.forked_from_chat_id = Some(CHAT.into());
+    rig.core.workspace.import_chat_row(&fork).unwrap();
+    rig.core
+        .workspace
+        .create_chat_hosted(
+            "thread",
+            None,
+            Some(&here),
+            Some(&here),
+            None,
+            Some("/tmp".into()),
+            Some(CHAT),
+        )
+        .unwrap();
+    let mut cloud = rig.core.workspace.chat("grandchild").unwrap().unwrap();
+    cloud.id = "cloud-delegate".into();
+    cloud.device_id = "cloud-machine".into();
+    cloud.delegation.as_mut().unwrap().delegated_by_chat_id = CHAT.into();
+    rig.core.workspace.import_chat_row(&cloud).unwrap();
+    create_chat(&rig.core, "stranger");
+    let parent = start(&rig, "parent work", SessionStatus::Idle).await;
+    let subagent = start_in(&rig, "subagent", "subagent work", SessionStatus::Idle).await;
+    let side = start_in(&rig, "side", "side work", SessionStatus::Idle).await;
+    let thread = start_in(&rig, "thread", "thread work", SessionStatus::Idle).await;
+    let stranger = start_in(&rig, "stranger", "stranger work", SessionStatus::Idle).await;
+    delete_chat(&rig).await;
+    for gone in [CHAT, "subagent", "side", "grandchild", "fork"] {
+        assert!(
+            rig.core.workspace.chat(gone).unwrap().is_none(),
+            "{gone} survived"
+        );
+    }
+    assert_ended_in(&rig, CHAT, parent).await;
+    assert_ended_in(&rig, "subagent", subagent).await;
+    assert_ended_in(&rig, "side", side).await;
+    for kept in ["thread", "cloud-delegate", "stranger"] {
+        assert!(
+            rig.core.workspace.chat(kept).unwrap().is_some(),
+            "{kept} went with it"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        alive(thread) && rig.core.sessions.has_run("thread"),
+        "an opened thread keeps its run"
+    );
+    assert!(
+        alive(stranger) && rig.core.sessions.has_run("stranger"),
+        "and so does an unrelated chat"
+    );
 }
