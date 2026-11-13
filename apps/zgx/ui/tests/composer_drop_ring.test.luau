@@ -1,0 +1,35 @@
+local function open(): any
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 800)
+	app:frames(30)
+	app:click('#shell-sidebar >> role:button "Fix the build"')
+	app:frames(30)
+	return app
+end
+
+test("a chat held over the composer rings the pill; held over the page, it doesn't", function()
+	local app = open()
+	expect(app:has("#composer-drop-ring")).to_be(false)
+	app:set_state("chat.dropping", { composer = "session" })
+	app:frames(2)
+	expect(app:has("#composer-drop-ring")).to_be(true)
+	app:set_state("chat.dropping", { page = "session" })
+	app:frames(2)
+	expect(app:has("#composer-drop-ring")).to_be(false)
+	app:set_state("chat.dropping", { composer = true })
+	app:frames(2)
+	expect(app:has("#composer-drop-ring")).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
+
+test("a sidebar chat dropped on the composer is a chip on the draft, the ring gone", function()
+	local app = open()
+	app:drag('#shell-sidebar >> role:button "Write the docs"', "#chat-composer >> role:textbox")
+	app:frames(20)
+	local cargo = app:state("chat.composer.cargo") or {}
+	expect(#cargo).to_be(1)
+	expect(cargo[1].kind).to_be("chat")
+	expect(cargo[1].chat).to_be("a2")
+	expect(app:has("#composer-drop-ring")).to_be(false)
+	expect(app:error()).to_be_nil()
+end)

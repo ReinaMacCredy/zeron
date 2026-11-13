@@ -1582,6 +1582,9 @@ local function Composer(): Node
 			-- is laid out as it was from the first frame.
 			keep = "chat",
 			toolbar_id = "composer-toolbar",
+			drop_ring = function(): boolean
+				return shared.dropping:get().composer == "session"
+			end,
 			open_model = shared.open_model,
 			step_effort = shared.step_effort,
 			model_open = model_open,

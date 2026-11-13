@@ -288,6 +288,7 @@ export type Props = {
 	-- False: files over it show no overlay on the pill (the caller draws
 	-- one over a wider area).
 	drop_overlay: boolean?,
+	drop_ring: (() -> boolean)?,
 	-- Bumped, the model picker opens (a shortcut to it).
 	open_model: State<number>?,
 	step_effort: State<{ n: number, by: number }>?,
@@ -2778,6 +2779,24 @@ return ui.component(function(props: Props): Node
 					return dropping:get()
 				end,
 			}
+			else nil,
+		if props.drop_ring
+			then ui.show(
+				props.drop_ring,
+				ui.div {
+					id = "composer-drop-ring",
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = 0,
+					bottom = 0,
+					rounded = "$zeron.composer.radius",
+					border = 1,
+					border_dash = { 2, 1 },
+					border_color = "$accent",
+					pointer_events = "none",
+				}
+			)
 			else nil,
 	}
 
