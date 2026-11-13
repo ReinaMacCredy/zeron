@@ -106,6 +106,28 @@ test("⌘= and ⌘− step the composer's effort along its model's levels, held 
 	expect(configured(app, "s1")).to_be(true)
 end)
 
+-- How many words the model chip is drawn as: more while a label rolls.
+local function chip_words(app: any): number
+	local _, n = string.gsub(app:tree('role:button "Model"'), "\n", "")
+	return n
+end
+
+test("the chip's effort rolls on ⌘−, its panel shut, and another chat's is there at once", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s1")
+	app:frames(60)
+	local at_rest = chip_words(app)
+	app:command("effort_down")
+	app:frames(3)
+	expect(chip_words(app) > at_rest).to_be(true)
+	app:frames(60)
+	local settled = chip_words(app)
+	open(app, "s2")
+	app:frames(3)
+	expect(chip_words(app) <= settled).to_be(true)
+end)
+
 test("what a chat shows on arriving is not written back to it", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)

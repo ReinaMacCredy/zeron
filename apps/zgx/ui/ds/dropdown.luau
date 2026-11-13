@@ -114,6 +114,9 @@ export type Props = {
 	-- The label and detail roll only for a change made in the open panel; one
 	-- from elsewhere (another chat's own choice shown) is there at once.
 	roll_in_panel: boolean?,
+	-- With `roll_in_panel`, true for a change made with the panel shut that
+	-- rolls all the same (the effort stepped with ⌘− ⌘=).
+	roll_also: (() -> boolean)?,
 	-- The search field's placeholder (a function follows what it names);
 	-- `false`, no search.
 	search: (string | Message | boolean | () -> string)?,
@@ -741,9 +744,10 @@ return ui.component(function(props: Props): Node
 				else glyph())
 		end
 	end
+	local roll_also = props.roll_also
 	local rolls = if props.roll_in_panel
 		then function(): boolean
-			return open:peek()
+			return open:peek() or (roll_also ~= nil and roll_also())
 		end
 		else nil
 	-- The detail, shown only while it says something (an empty one would

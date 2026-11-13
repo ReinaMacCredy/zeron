@@ -461,6 +461,7 @@ return ui.component(function(props: Props): Node
 		props.effort:set(m.effort or m.efforts[1].value)
 	end
 	ui.effect(fit_effort)
+	local stepping = false
 	if props.step_with then
 		local asked = props.step_with
 		local seen = asked:peek().n
@@ -481,7 +482,11 @@ return ui.component(function(props: Props): Node
 				end
 				local to = ls[math.clamp(at + s.by, 1, #ls)]
 				if at > 0 and to and to.value ~= slider_value:peek() then
+					stepping = true
 					set_level(to.value)
+					ui.after(0, function()
+						stepping = false
+					end)
 				end
 			end)
 		end)
@@ -2311,6 +2316,9 @@ return ui.component(function(props: Props): Node
 		end, ui.row { shrink = 0, gap = "$zeron.space.tight", items = "center", chip_fast }),
 		-- (Another chat's model and effort, shown as it's moved to: at once.)
 		roll_in_panel = true,
+		roll_also = function(): boolean
+			return stepping
+		end,
 		-- (Dropdown hands its label on, as the trigger's name.)
 		label = props.label or locale.t("ds.model_picker.model") :: any,
 		ghost = loading_chip,
