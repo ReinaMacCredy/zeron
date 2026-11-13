@@ -65,6 +65,8 @@ mod math;
 mod menu_bar;
 mod migration;
 mod mermaid;
+#[cfg(target_os = "macos")]
+mod pdf;
 mod plugins;
 mod previews;
 mod projects;
@@ -806,6 +808,14 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     math::install(&host);
     // Mermaid diagrams drawn for `ds/mermaid` (src/mermaid.rs).
     mermaid::install(&host);
+    #[cfg(target_os = "macos")]
+    {
+        let (displays, current) = (cx.window_info.displays.clone(), cx.window_info.current_display.clone());
+        pdf::install(&host, move || {
+            let at = current.with_untracked(|c| *c);
+            displays.with_untracked(|d| at.and_then(|i| d.get(i)).or_else(|| d.first()).map_or(2., |d| d.scale_factor))
+        });
+    }
     // A slider's detents tapped under the trackpad (src/haptics.rs).
     haptics::install(&host);
     // The engine's account (src/auth.rs), this Mac's agents (src/agents.rs)

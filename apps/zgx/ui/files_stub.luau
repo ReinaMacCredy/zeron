@@ -31,6 +31,7 @@ ui.command {
 	end,
 }
 local Workspace = require("@app/screens/files/workspace")
+local PdfView = require("@ds/pdf_view")
 
 -- The disk: each file's text (folders are what paths pass through, and
 -- `dirs`, those made empty).
@@ -202,6 +203,9 @@ stub.read = function(target: api.Target, path: string): any
 	if string.find(path, "%.png$") then
 		return settle({ checkout = "c1", path = path, hash = hash(text), size = #text, encoding = "binary", truncated = false, here = false })
 	end
+	if string.find(path, "%.pdf$") then
+		return settle({ checkout = "c1", path = path, hash = hash(text), size = #text, encoding = "binary", truncated = false, here = true })
+	end
 	return settle({ checkout = "c1", path = path, text = text, hash = hash(text), size = #text, encoding = "utf8", line_ending = "lf", truncated = false, here = true })
 end
 stub.image = function(_target: api.Target, path: string, checkout: string): any
@@ -344,6 +348,20 @@ ui.command {
 		disk["docs/guide.md"] = "# Guide\n\n- [ ] Write it\n- [x] Plan it\n\n```\n- [ ] not a task\n```\n\n![shot](../shot.png)\n\nSee [the notes](../notes.md).\n"
 		disk["shot.png"] = "png"
 		tell({ { kind = "created", path = "docs/guide.md" }, { kind = "created", path = "shot.png" } })
+	end,
+}
+PdfView.open = function(_path: string): any
+	return settle({ pages = { { w = 612, h = 792 }, { w = 612, h = 792 } } })
+end
+PdfView.page = function(_path: string, _page: number, _zoom: number): any
+	return settle({ src = "assets/favicons/zgx.png" })
+end
+ui.command {
+	id = "disk_pdf",
+	title = "A PDF",
+	run = function()
+		disk["manual.pdf"] = "%PDF-1.4"
+		tell({ { kind = "created", path = "manual.pdf" } })
 	end,
 }
 -- Pictures made on another device: one that comes, one that can't.

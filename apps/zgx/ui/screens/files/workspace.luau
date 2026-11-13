@@ -743,6 +743,8 @@ local function doc_from(w: Workspace, path: string, f: api.File): Doc
 		else
 			d.state = "loading"
 		end
+	elseif ext(path) == "pdf" and f.here and d.absolute and ui.shared("platform", ""):peek() == "macos" then
+		d.pdf = true
 	elseif f.encoding == "binary" then
 		d.state = "binary"
 	elseif f.readonly == "tooLarge" or f.truncated then

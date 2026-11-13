@@ -234,6 +234,7 @@ return {
 	["ds.file_viewer.lines"] = "{n, plural, one {# line} other {# lines}}",
 	["ds.file_viewer.toggle_fit"] = "Double-click to toggle fit",
 	["ds.file_viewer.outside"] = "Read-only: outside this chat's folder.",
+	["ds.file_viewer.pdf_page"] = "Page {n} of {total}",
 	["ds.dropdown.placeholder"] = "Choose…",
 	["ds.dropdown.search_placeholder"] = "Search…",
 	["ds.dropdown.no_matches"] = "No matches",

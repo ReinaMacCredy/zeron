@@ -288,7 +288,8 @@
       },
       "lines": "{n, plural, other {# 行}}",
       "toggle_fit": "连按两下以切换适合窗口",
-      "outside": "只读：在此对话的文件夹之外。"
+      "outside": "只读：在此对话的文件夹之外。",
+      "pdf_page": "第 {n} 页，共 {total} 页"
     },
     "dropdown": {
       "placeholder": "选择…",

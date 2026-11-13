@@ -60,6 +60,7 @@ local CodeEditor = require("@self/code_editor")
 local Syntax = require("@self/syntax")
 local SelectionMenu = require("@self/selection_menu")
 local AnnotationLayer = require("@self/annotation_layer")
+local PdfView = require("@self/pdf_view")
 -- (Zoom eases as the lightbox's does: one system.)
 local Motion = require("@self/motion")
 local locale = require("@self/locale")
@@ -74,6 +75,7 @@ export type Doc = {
 	text: string?,
 	-- An image's source (a path), and its size in pixels if known.
 	image: string?,
+	pdf: boolean?,
 	width: number?,
 	height: number?,
 	size: number?,
@@ -671,6 +673,7 @@ local function component(props: Props): Node
 	end
 	local rendered: State<boolean> = ui.use_state(true)
 	local zoom_label = ui.use_state("100%")
+	local page_label = ui.use_state("")
 	local copied = ui.use_state(false)
 	local copied_v = 0
 	local image_commands: { [string]: () -> () } = {}
@@ -717,6 +720,9 @@ local function component(props: Props): Node
 		end
 		if d.state ~= "ready" then
 			return d.state
+		end
+		if d.pdf then
+			return "pdf"
 		end
 		if d.image then
 			return "image"
@@ -1320,16 +1326,39 @@ local function component(props: Props): Node
 			end
 		end,
 	}
-	row { label = "ds.file_viewer.zoom_in", icon = "plus", keys = "cmd+=", when = narrower(ROOM_SWITCH, shows({ "image" })), on_click = zoom("zoom_in") }
-	row { label = "ds.file_viewer.zoom_out", icon = "minus", keys = "cmd+-", when = narrower(ROOM_SWITCH, shows({ "image" })), on_click = zoom("zoom_out") }
-	row { label = "ds.file_viewer.fit", keys = "cmd+0", when = shows({ "image" }), on_click = zoom("fit") }
-	row { label = "ds.file_viewer.actual_size", keys = "cmd+1", when = shows({ "image" }), on_click = zoom("actual") }
+	local is_pdf = shows({ "pdf" })
+	local function zoomable(): boolean
+		return shows({ "image" })() or (is_pdf() and page_label:get() ~= "")
+	end
+	row { label = "ds.file_viewer.zoom_in", icon = "plus", keys = "cmd+=", when = narrower(ROOM_SWITCH, zoomable), on_click = zoom("zoom_in") }
+	row { label = "ds.file_viewer.zoom_out", icon = "minus", keys = "cmd+-", when = narrower(ROOM_SWITCH, zoomable), on_click = zoom("zoom_out") }
+	row { label = "ds.file_viewer.fit", keys = "cmd+0", when = zoomable, on_click = zoom("fit") }
+	row { label = "ds.file_viewer.actual_size", keys = "cmd+1", when = zoomable, on_click = zoom("actual") }
 	row { label = "ds.file_viewer.copy_path", icon = "copy", keys = "alt+cmd+c", when = narrower(ROOM_ALL, has_file), on_click = copy_path }
+	local open_default = on_path(props.on_open_default)
+	if open_default then
+		row { label = "ds.file_viewer.binary.open_default", icon = "arrow-up-right", when = and_openable(is_pdf), on_click = open_default }
+	end
 	if reveal_file then
-		row { label = "ds.file_viewer.reveal", icon = "folder", keys = "alt+cmd+r", when = and_openable(narrower(ROOM_ALL, has_file)), on_click = reveal_file }
+		row {
+			label = "ds.file_viewer.reveal",
+			icon = "folder",
+			keys = "alt+cmd+r",
+			when = and_openable(function(): boolean
+				return is_pdf() or narrower(ROOM_ALL, has_file)()
+			end),
+			on_click = reveal_file,
+		}
 	end
 	if open_file then
-		row { label = "ds.file_viewer.open_in_editor", icon = "arrow-up-right", when = and_openable(narrower(ROOM_ALL, has_file)), on_click = open_file }
+		row {
+			label = "ds.file_viewer.open_in_editor",
+			icon = "arrow-up-right",
+			when = and_openable(narrower(ROOM_ALL, function(): boolean
+				return has_file() and not is_pdf()
+			end)),
+			on_click = open_file,
+		}
 	end
 	-- What others add (plugins'), asked for each time the menu opens: kept
 	-- as words in a state (its rows keyed by them), their handlers here.
@@ -1457,7 +1486,7 @@ local function component(props: Props): Node
 				end, toggle("ds.file_viewer.wrap_lines", "wrap-text", wrap, "alt+z")),
 			}),
 			ui.show(shows({ "markdown" }), source_switch()),
-			ui.show(shows({ "image" }), zoom_controls()),
+			ui.show(zoomable, zoom_controls()),
 			ui.show(function(): boolean
 				return has_file() and room() >= ROOM_ALL
 			end, ui.row {
@@ -1609,12 +1638,31 @@ local function component(props: Props): Node
 			h_full = true,
 		}
 	end
+	local function failed(name: string, why: string?, again: (() -> ())?, open_from: Doc?): Node
+		return notice(
+			"danger-triangle",
+			function(): string
+				return locale.s("ds.file_viewer.error.title", { name = name })
+			end,
+			function(): string
+				return why or locale.s("ds.file_viewer.error.body")
+			end,
+			{
+				if open_from and props.on_open_default and openable()
+					then { label = locale.t("ds.file_viewer.binary.open_default"), primary = true, on_click = function()
+						(props.on_open_default :: (string) -> ())(open_from.absolute or open_from.path)
+					end }
+					else nil :: any,
+				if again then { label = locale.t("common.try_again"), on_click = again } else nil :: any,
+			}
+		)
+	end
 	local body = ui.presence(function(): string
 		local d = doc()
 		-- (Built again for each file, as its kind changes, and at another
 		-- code size.)
 		local size = if props.code_size then props.code_size() else nil
-		return if d then `{kind()}\0{d.path}\0{size or ""}` else "none"
+		return if d then `{kind()}\0{d.path}\0{size or ""}{if d.pdf then `\0{d.size or ""}` else ""}` else "none"
 	end, function(key: string): Node
 		local d = doc_peek()
 		local k = kind()
@@ -1684,24 +1732,24 @@ local function component(props: Props): Node
 				end
 			)
 		elseif k == "error" then
-			return notice(
-				"danger-triangle",
-				function(): string
-					return locale.s("ds.file_viewer.error.title", { name = name })
-				end,
-				function(): string
-					return doc_.error or locale.s("ds.file_viewer.error.body")
-				end,
-				{
-					if props.on_retry
-						then { label = locale.t("common.try_again"), on_click = function()
-							(props.on_retry :: (string) -> ())(doc_.path)
-						end }
-						else nil :: any,
-				}
-			)
+			return failed(name, doc_.error, if props.on_retry
+				then function()
+					(props.on_retry :: (string) -> ())(doc_.path)
+				end
+				else nil)
 		elseif k == "image" then
 			return image_view(doc_, zoom_label, image_commands)
+		elseif k == "pdf" then
+			return PdfView.View {
+				path = doc_.absolute or doc_.path,
+				label = name,
+				zoom_label = zoom_label,
+				page_label = page_label,
+				commands = image_commands,
+				failed = function(why: string, again: () -> ()): Node
+					return failed(name, if why ~= "" then why else nil, again, doc_)
+				end,
+			}
 		end
 		local language = Syntax.language(doc_.path)
 		if readonly and (doc_.text or "") == "" then
@@ -1833,6 +1881,12 @@ local function component(props: Props): Node
 						table.insert(parts, `{d.width} × {d.height}`)
 					end
 					table.insert(parts, string.upper(ext(d.path)))
+				elseif k == "pdf" then
+					local at = page_label:get()
+					if at ~= "" then
+						table.insert(parts, at)
+					end
+					table.insert(parts, "PDF")
 				elseif k == "code" or k == "markdown" then
 					local lang = Syntax.name(Syntax.language(d.path))
 					if lang ~= "" then
@@ -1871,7 +1925,7 @@ local function component(props: Props): Node
 	box[#box + 1] = body
 	box[#box + 1] = ui.show(function(): boolean
 		local k = kind()
-		return k == "image" or (k == "markdown" and rendered:get())
+		return k == "image" or (k == "pdf" and page_label:get() ~= "") or (k == "markdown" and rendered:get())
 	end, foot)
 	return ui.column(box)
 end

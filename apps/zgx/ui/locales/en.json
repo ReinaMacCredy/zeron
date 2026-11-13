@@ -288,7 +288,8 @@
       },
       "lines": "{n, plural, one {# line} other {# lines}}",
       "toggle_fit": "Double-click to toggle fit",
-      "outside": "Read-only: outside this chat's folder."
+      "outside": "Read-only: outside this chat's folder.",
+      "pdf_page": "Page {n} of {total}"
     },
     "dropdown": {
       "placeholder": "Choose…",
