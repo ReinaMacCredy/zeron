@@ -310,8 +310,8 @@ fn resizing_split_panes_costs_each_about_what_one_chat_does() {
     assert!(steps.iter().all(|s| (*s as f64) <= pane * 1.25), "each pane more costs about one pane: {calls:?}");
 }
 
-/// A chat carried from the sidebar: over a pane's edge it's a split (the
-/// half it would take showing), over the pane's middle or its composer
+/// A chat carried from the sidebar: over a pane's edge it's a split (Zeron's
+/// cards showing), over the pane's middle or its composer
 /// it's mentioned ("Drop to mention" showing); each drop does what showed.
 #[test]
 fn a_sidebar_row_splits_at_an_edge_and_attaches_in_the_middle_or_the_composer() {
@@ -329,10 +329,13 @@ fn a_sidebar_row_splits_at_an_edge_and_attaches_in_the_middle_or_the_composer() 
     carry(&mut app, from, composer, |app| assert_eq!(showing(app), (false, true), "the composer shows Drop to mention"));
     assert_eq!(panes(&mut app), 0, "the composer doesn't split");
     assert!(mentioned(&mut app, "Ship the release"), "the composer attaches");
-    // The left edge, and the top: a split, its landing showing.
+    // The left edge: a split, shown as Zeron shows it, its left card lit and no half.
     let from = row_at(&mut app, "Tidy the tests");
     carry(&mut app, from, (page.x + 20., page.y + page.height / 2.), |app| {
-        assert_eq!(showing(app), (true, false), "the edge shows where it lands")
+        assert_eq!(showing(app), (false, false), "the edge shows Zeron's cards alone");
+        app.frames(20);
+        let (left, right) = (app.bounds("#split-card-a1-left"), app.bounds("#split-card-a1-right"));
+        assert!(left.width > right.width, "the left card is the one lit: {left:?} {right:?}");
     });
     assert_eq!(panes(&mut app), 2, "the edge splits");
     let right = app.bounds("shell-page");

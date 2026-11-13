@@ -26,6 +26,12 @@ local frame = require("@app/screens/shell/frame")
 local boundary = require("@app/screens/shell/boundary")
 local splits = require("@app/screens/shell/split")
 local SplitCards = require("@app/screens/shell/split_cards")
+
+-- A pane zoomed in or out: Zeron's WidthTween::panel, apart from the panel's other steps.
+local ZOOM_EASE = motion.EASE
+local function zoom_ms(distance: number): number
+	return math.clamp(180 * math.sqrt(math.abs(distance) / 256), 180, 240)
+end
 local session_tabs = require("@app/screens/shell/session_tabs")
 local swipe = require("@app/screens/shell/swipe")
 local top_bar = require("@app/screens/shell/top_bar")
@@ -1059,6 +1065,8 @@ return function(props: Props): Node
 			-- narrowed a little first as the sidebar folded, then widened.)
 			local params = if now.sidebar ~= was.sidebar and not opened
 				then motion.column(math.max(now.side, was.side) + SIDEBAR_GAP, 0)
+				elseif now.expanded ~= was.expanded and now.shown and was.shown
+				then { value = 0, duration = motion.ms(zoom_ms(showing - to)), ease = ZOOM_EASE }
 				else motion.panel(0)
 			-- (By number: a callback holding its own clip would keep both for good.)
 			steps += 1
@@ -1795,8 +1803,16 @@ return function(props: Props): Node
 			local o = over:get()
 			return if o and o.id == id then o.side else ""
 		end
+		local function carded(): boolean
+			return #members:get() == 1 or (drag_pane:get() or splits.focused:get()) == id
+		end
+		-- (Zeron's cards alone say where a left or right drop lands, with two panes or fewer.)
 		local preview = ui.show(function(): boolean
-			return held() ~= ""
+			local side = held()
+			if side == "" then
+				return false
+			end
+			return not ((side == "left" or side == "right") and #members:get() <= 2 and carded())
 		end, ui.div {
 			id = "split-landing",
 			absolute = true,
@@ -1820,9 +1836,7 @@ return function(props: Props): Node
 		})
 		local cards = SplitCards.Cards {
 			pane = id,
-			shown = function(): boolean
-				return #members:get() == 1 or (drag_pane:get() or splits.focused:get()) == id
-			end,
+			shown = carded,
 			tall = function(): boolean
 				return not session_tabs.carried_in_strip()
 			end,
