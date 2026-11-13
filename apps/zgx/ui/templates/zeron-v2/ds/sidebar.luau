@@ -1802,7 +1802,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 							-- (A group that isn't a folder, the chats in none, wears
 							-- its glyph on the chrome's quiet wash, not a letter.)
 							if p.icon then
-								return group_tile(QUIET, Icon { name = p.icon, size = 12 }, live or own, hidden)
+								return group_tile(QUIET, Icon { name = p.icon, size = 12 }, live or own, hidden, nil, nil, p.id)
 							end
 							local hue, src, emoji = look(p)
 							return group_tile(

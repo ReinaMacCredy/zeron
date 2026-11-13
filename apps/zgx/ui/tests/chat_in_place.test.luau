@@ -415,7 +415,8 @@ end
 -- the steered prompt's y (`q1`) from the frame it joins in, and the lowest
 -- `watch` (an earlier prompt, by its id) stood meanwhile.
 local function steer(app: any, watch: string?): ({ number }, number?)
-	app:click('role:button "Open Queued"')
+	-- (Our deck's pill, 1B: its Queue capsule.)
+	app:click('role:button "Open Queue"')
 	settle(app)
 	app:hover('role:listitem "1. Queued words"')
 	settle(app)

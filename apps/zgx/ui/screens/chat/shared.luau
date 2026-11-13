@@ -51,15 +51,17 @@ function M.same_pick(a: any, b: any): boolean
 end
 
 -- What a chat runs, as its chip shows it: its model, or with none of its own
--- the first its agent lists (gpui's `default_model`); its level, kept to what
--- the model offers, else the one it starts on.
+-- the row its agent marks default, else its first (gpui's `default_model`);
+-- its level, kept to what the model offers, else the one it starts on.
 function M.resolve_model(s: any, catalog: any): { model: string?, effort: string? }
 	local value: string? = s.model
 	local found: any = nil
 	for _, m in catalog.models do
-		if (value and m.value == value) or (not value and m.harness == s.harness) then
+		if value and m.value == value then
 			found = m
 			break
+		elseif not value and m.harness == s.harness and (found == nil or (m.default and not found.default)) then
+			found = m
 		end
 	end
 	local effort: string? = s.effort

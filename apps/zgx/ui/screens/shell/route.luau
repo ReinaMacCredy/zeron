@@ -202,10 +202,23 @@ ui.effect(function()
 	if router.last_move == "replace" then
 		entries[at] = path
 	elseif router.last_move == "back" then
-		at -= 1
+		-- (Back past the oldest kept: the router keeps more, so it's put first.)
+		if at > 1 then
+			at -= 1
+		else
+			table.insert(entries, 1, path)
+			if #entries > HISTORY_MAX then
+				table.remove(entries)
+			end
+		end
 		sign = 1
 	elseif router.last_move == "forward" then
-		at += 1
+		if at < #entries then
+			at += 1
+		else
+			table.insert(entries, path)
+			at = #entries
+		end
 		sign = -1
 	else
 		-- A new place: past where it stands, what was ahead dropped.
@@ -220,7 +233,7 @@ ui.effect(function()
 		end
 	end
 	history:set({ entries = entries, at = at })
-	if sign ~= 0 and not is_settings(path) and not is_settings(from) then
+	if sign ~= 0 and from and not is_settings(path) and not is_settings(from) then
 		M.stepped:set({ seq = M.stepped:peek().seq + 1, sign = sign })
 	end
 end)

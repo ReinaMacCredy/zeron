@@ -1043,9 +1043,10 @@ local function Composer(): Node
 				req.steer_now = true
 			end
 			-- A chat with no model of its own runs the one its chip shows, of
-			-- its own agent (another's goes through the switch dialog).
+			-- its own agent (another's goes through the switch dialog); its
+			-- agent's own default is never sent as a pick.
 			local opened = open()
-			if opened and (opened :: any).model == nil and not running:peek() then
+			if opened and (opened :: any).model == nil and not running:peek() and model:peek() ~= shared.resolve_model(opened, store.catalog:peek()).model then
 				for _, m in store.catalog:peek().models do
 					if m.value == model:peek() and m.harness == (opened :: any).harness then
 						req.model = m.value
@@ -1851,6 +1852,9 @@ local function Composer(): Node
 				end
 			end,
 			on_queue_steer_all = asks.on_queue_steer_all,
+			queue_held = function(): boolean
+				return #asks.engine_queue:get() > 0
+			end,
 			queue_pictures = queue_pictures,
 			on_dismiss_todos = asks.on_dismiss_todos,
 			-- (A refused held row's Edit: its words back in the composer,

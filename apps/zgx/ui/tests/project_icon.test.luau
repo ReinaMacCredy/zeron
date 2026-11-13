@@ -3,6 +3,8 @@
 -- own: the sidebar's project groups, the palette's projects, the panel's
 -- project. (What a plugin draws there, and what it reads of the project,
 -- is src/plugins/loading_tests.rs's `a_plugin_draws_each_project_s_icon`.)
+-- (The panel's project row isn't tested here: our Sidecar holds a session's
+-- place while it shows it, with no project tile.)
 -- On the shell in ui/shell_fixture.luau: two projects, Atlas and Borealis.
 
 local function settle(app: any)
@@ -28,13 +30,4 @@ test("the palette's projects wear .project-icon", function()
 	app:type('role:textbox ~"Search"', "Atl")
 	settle(app)
 	expect(app:count("#palette-list >> .project-icon") > 0).to_be(true)
-end)
-
-test("a chat's panel shows its project's icon as .project-icon", function()
-	local app = open()
-	app:click('#shell-sidebar >> role:button "Fix the build"')
-	settle(app)
-	app:click('#titlebar >> role:button "Panel"')
-	settle(app)
-	expect(app:count("#panel-home-project >> .project-icon")).to_be(1)
 end)

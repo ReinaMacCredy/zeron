@@ -5085,21 +5085,20 @@ pub(crate) fn built_entry(
 ) -> Option<Value> {
     // (One still being written is built again with its next change.)
     let settled = entry["status"].as_str() != Some("streaming");
+    // (What its parts read from the chat's host, for the patched row as for the whole.)
+    let hosted = with_host(entry, doc, device);
     if settled {
         ROW_BUILD.set(Some(RowBuild::default()));
     } else {
         LIVE_PASS.set(Some(Default::default()));
         // Changed in its last group's calls alone, as it was last built:
         // only those built again (`LiveRow`).
-        if let Some(row) = live_row_patched(entry, model) {
+        if let Some(row) = live_row_patched(hosted.as_ref().unwrap_or(entry), model) {
             LIVE_PASS.set(None);
             return Some(row);
         }
     }
-    let mut row = match with_host(entry, doc, device) {
-        Some(entry) => message(&entry, model),
-        None => message(entry, model),
-    };
+    let mut row = message(hosted.as_ref().unwrap_or(entry), model);
     if !settled && let Some(row) = &row {
         live_row_keep(entry, row, model);
     }

@@ -913,7 +913,7 @@ M.Panel = ui.component(function(props: Props): Node
 		end
 	end)
 	-- A closed tab's view let go: its terminal, its page, its chat, its file.
-	local function let_go(tab: Tab)
+	local function let_go(tab: Tab, k: string)
 		if tab.kind == "terminal" and Terminal and Terminal.close then
 			Terminal.close(tab)
 		elseif tab.kind == "browser" and Browser then
@@ -968,7 +968,7 @@ M.Panel = ui.component(function(props: Props): Node
 				return
 			end
 		end
-		let_go(tab)
+		let_go(tab, k)
 	end
 	local function close(id: string)
 		local k = key:peek()
@@ -1828,7 +1828,7 @@ M.Panel = ui.component(function(props: Props): Node
 		end
 		if key:get() ~= l.key or #state.of(l.key).tabs > 0 or (files and files:get() == true) or closed() then
 			leaving:set(nil)
-			let_go(l.tab)
+			let_go(l.tab, l.key)
 		end
 	end)
 

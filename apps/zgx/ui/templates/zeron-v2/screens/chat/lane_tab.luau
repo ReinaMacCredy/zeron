@@ -723,7 +723,6 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		local current = session:get()
 		return asks.question:get() ~= nil or asks.approval:get() ~= nil
 			or (current ~= nil and (current.state == "missing" or current.state == "offline"))
-			or (focused ~= nil and not focused())
 	end, name)
 	local queue_pictures = ReplyImages.for_attachments(function(): any
 		local s = session:get()
@@ -1008,6 +1007,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		can_steer = asks.can_steer,
 		on_queue_send = asks.on_queue_send,
 		on_queue_steer_all = asks.on_queue_steer_all,
+		queue_held = function(): boolean
+			return #asks.engine_queue:get() > 0
+		end,
 		queue_pictures = queue_pictures,
 		on_dismiss_todos = asks.on_dismiss_todos,
 		on_queue_edit = edits.on_queue_edit,

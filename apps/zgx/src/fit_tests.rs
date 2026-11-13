@@ -310,6 +310,7 @@ fn content_split(available: f32) -> f32 {
 /// gap before the sidebar's card and the gap between cards after it, or the
 /// window's edge alone; the gap before the panel and the window's edge
 /// after it. Zeron's columns had none.)
+/// (Ours: `vw` less the rail, which stands at the window's left edge.)
 fn share_of(vw: f32, side: f32) -> f32 {
     let gaps = if side > 0.5 { SIDEBAR_EDGE + 4. } else { 5. } + 4. + 5.;
     content_split(vw - side - gaps)
@@ -574,7 +575,7 @@ fn a_dragged_panel_width_holds_until_the_panel_is_toggled() {
     app.frames(60);
     let side = app.bounds("#shell-sidebar").width - SIDEBAR_EDGE;
     let split = app.bounds("#shell-files").width;
-    assert!((split - share_of(1500., side)).abs() < 0.5, "it opens at its share: {split}");
+    assert!((split - share_of(1500. - RAIL, side)).abs() < 0.5, "it opens at its share: {split}");
     drag(&mut app, "\"Resize files\"", 140.);
     app.frames(60);
     let dragged = app.bounds("#shell-files").width;
@@ -593,7 +594,7 @@ fn a_dragged_panel_width_holds_until_the_panel_is_toggled() {
         drag(&mut app, "\"Resize files\"", 120.);
         app.frames(60);
         let reopened = app.bounds("#shell-files").width;
-        let share = share_of(1400., side);
+        let share = share_of(1400. - RAIL, side);
         assert!((reopened - share).abs() < 0.5, "reopened at {reopened}, its share is {share} (dragged to {dragged})");
     }
 }
@@ -645,7 +646,7 @@ fn double_clicking_a_seam_puts_it_back() {
     }
     let sidebar = |app: &mut TestApp| app.bounds("#shell-sidebar").width - SIDEBAR_EDGE;
     let panel = |app: &mut TestApp| app.bounds("#shell-files").width;
-    let share = share_of(1500., SIDEBAR_DEFAULT);
+    let share = share_of(1500. - RAIL, SIDEBAR_DEFAULT);
     // (The panel's width chosen first: the sidebar's reset forgets it too.)
     drag(&mut app, "\"Resize files\"", 100.);
     app.frames(30);
@@ -676,7 +677,7 @@ fn double_clicking_a_seam_puts_it_back() {
     // (Forgotten: the window resized, it keeps to its share.)
     app.ui.scene.borrow_mut().resize(1400., 800.);
     app.frames(30);
-    assert!((panel(&mut app) - share_of(1400., SIDEBAR_DEFAULT)).abs() < 0.5, "it keeps to its share: {}", panel(&mut app));
+    assert!((panel(&mut app) - share_of(1400. - RAIL, SIDEBAR_DEFAULT)).abs() < 0.5, "it keeps to its share: {}", panel(&mut app));
 }
 
 /// The light in a seam's gap, `label`'s: its opacity. (Inside the seam, or,

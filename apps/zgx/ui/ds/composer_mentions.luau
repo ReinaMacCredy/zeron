@@ -26,10 +26,10 @@
 --   on_caret = m.on_caret, on_focus = m.on_focus,
 --   highlight = mentions.highlight
 --
--- A press anywhere but the popover puts it away as Escape does, and acts
--- where it landed (the popover lets presses through): elsewhere, as the
--- draft loses focus; on the draft, as it's pressed. A row picked with the
--- pointer leaves the keys in the draft, the caret where the pick put it.
+-- A press elsewhere acts where it landed (the popover lets presses
+-- through) and hides the list with the draft's keys, showing it again as the
+-- draft takes them back; a press on the draft leaves it. A row picked with
+-- the pointer leaves the keys in the draft, the caret where the pick put it.
 
 local Icon = require("@self/icon")
 local FileIcon = require("@self/file_icons")

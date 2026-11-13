@@ -70,6 +70,8 @@ export type Props = {
 	can_steer: (boolean | () -> boolean?)?,
 	on_queue_send: ((id: string) -> ())?,
 	on_queue_steer_all: (() -> ())?,
+	-- Whether the queue still has rows the engine holds while none shows (each hidden as it's sent).
+	queue_held: (() -> boolean)?,
 	-- The pill holds nothing, so the primary modifier and Enter would act on the last row.
 	composer_empty: (() -> boolean)?,
 	-- Where a row's pictures read from (a chat on another device).
@@ -1101,7 +1103,8 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 	-- One gone while open, closes.
 	ui.effect(function()
 		local now = open:get()
-		if now == "queue" and not has_queue() then
+		-- (Not while its rows are only hidden, a send under way: a steer that fails puts them back.)
+		if now == "queue" and not has_queue() and not (props.queue_held ~= nil and props.queue_held()) then
 			open:set(nil)
 		elseif now == "todos" and not has_todos() then
 			open:set(nil)

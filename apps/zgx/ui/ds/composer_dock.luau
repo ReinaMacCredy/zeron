@@ -717,13 +717,12 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 				},
 			},
 			primary,
-			ui.row {
+			-- (One that can't be taken back from here has no Remove.)
+			ui.show(function(): boolean
+				return now().removable ~= false
+			end, ui.row {
 				items = "center",
 				opacity = ui.tween(ui.computed(quiet_when), { duration = 120 }),
-				-- (One that can't be taken back from here has no Remove.)
-				hidden = function(): boolean
-					return now().removable == false
-				end,
 				ui.show(
 					removing,
 					glyph_button {
@@ -749,7 +748,7 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 						Icon { name = "close", size = 13 },
 					}
 				),
-			},
+			}),
 		}
 	end
 	return ui.row {

@@ -234,7 +234,8 @@ test("the lit row follows the list as it narrows, and the arrows move it", funct
 	local function takes(): string
 		app:key("Enter")
 		settle(app)
-		local got = app:text(BOX)
+		-- (A command picked is our chip, its name padded with no-break spaces.)
+		local got = string.gsub(app:text(BOX), "\u{a0}", "")
 		fresh(app, "")
 		return got
 	end

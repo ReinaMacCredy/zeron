@@ -2273,6 +2273,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- (`project`: a project's id, its tile then `.project-icon`.)
 	local function group_tile(hue: string | { bg: string, ink: string } | () -> string?, inside: Node, sessions: Sessions, hidden: () -> boolean, src: (string | () -> string?)?, emoji: (() -> string?)?, own: Node?, project: string?): Node
 		local tile_size = if railed() then 18 else 16
+		-- (A project's own tile, a monogram or its glyph, is `.project-icon` too, as ds/tile's.)
+		if own and project then
+			own = ui.div { w = tile_size, h = tile_size, shrink = 0, provide = { project = project }, ui.div { class = "project-icon", w = tile_size, h = tile_size, shrink = 0, own } }
+		end
 		local function badge(kind: status.Kind): Node
 			return ui.div {
 				absolute = true,
@@ -2488,10 +2492,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 										end,
 										seed = p.seed or p.id,
 										size = 16,
-									})
+									}, p.id)
 								end
 								if p.icon then
-									return group_tile(QUIET, Icon { name = p.icon, size = 12 }, live or own, hidden)
+									return group_tile(QUIET, Icon { name = p.icon, size = 12 }, live or own, hidden, nil, nil, nil, p.id)
 								end
 								local hue, src, emoji = look(p)
 								return group_tile(
@@ -6195,9 +6199,6 @@ fn layer(input:LayerInput)->vec4<f32> {
 				resizing = false
 				dragging:set(false)
 				edge_drag.release()
-			end,
-			on_double_click = function()
-				wide:set(WIDE)
 			end,
 		}
 	end

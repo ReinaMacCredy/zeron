@@ -39,7 +39,7 @@ export type Pack = {
 M.CHATS_HEADER = "Chats attached:"
 
 -- `words` with `chats`' block after them.
-local function with_chats(words: string, chats: { { name: string, chat: string, mark: string? } }): string
+function M.with_chats(words: string, chats: { { name: string, chat: string, mark: string? } }): string
 	local lines: { string } = {}
 	for _, c in chats do
 		local link = ChatLinks.link(c.name, c.chat)
@@ -103,7 +103,7 @@ function M.text(words: string, p: Pack): string
 		end
 	end
 	-- (The chats' block last: the host takes it off first, src/chat.rs.)
-	return with_chats(Comments.with_comments(Annotation.with_annotations(Quote.with_quotes(words, p.quotes), picks), p.comments), p.chats)
+	return M.with_chats(Comments.with_comments(Annotation.with_annotations(Quote.with_quotes(words, p.quotes), picks), p.comments), p.chats)
 end
 
 -- An attached item's name, as what the message carries says it (its
@@ -152,11 +152,16 @@ function M.mention(item: any): string?
 		return ChatLinks.link(item.name, item.chat)
 	elseif item.kind == "annotation" and item.annotation then
 		return Annotation.token(item.annotation)
-	elseif item.path and type(item.mention) == "number" then
+	elseif item.path and M.number(item) then
 		local picture = item.kind == "image" or item.kind == "appshot"
-		return AttachmentMentions.link(item.mention, if picture then nil else item.name)
+		return AttachmentMentions.link(M.number(item) :: number, if picture then nil else item.name)
 	end
 	return nil
+end
+
+-- An attached file's number in the draft: upstream's `mention`, or our chip's own (shared's `take`).
+function M.number(item: any): number?
+	return if type(item.mention) == "number" then item.mention elseif type(item.number) == "number" then item.number else nil
 end
 
 -- The words as they go: a mention of an attachment no longer attached
@@ -166,6 +171,10 @@ function M.settle(words: string, chips: { any }): string
 	for _, item in chips do
 		if item.path and type(item.mention) == "number" then
 			table.insert(numbers, item.mention)
+		end
+		-- (A chip in the words, ours, by its own number: shared's `take`.)
+		if type(item.number) == "number" then
+			table.insert(numbers, item.number)
 		end
 	end
 	return AttachmentMentions.demote_unattached(words, numbers)

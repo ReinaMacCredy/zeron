@@ -110,7 +110,9 @@ local made = ui.component(function(props: Props): Node
 	-- No room for a file beside the tree: the two never share the row.
 	local function narrow(): boolean
 		local w = room:get()
-		return w > 0 and w < tree_w() + FILE_LEAST
+		-- (A width dragged gives way down to the least first: `beside_w`.)
+		local least = if kept_w and kept_w:get() > 0 then math.min(tree_w(), TREE_MIN) else tree_w()
+		return w > 0 and w < least + FILE_LEAST
 	end
 	-- Narrow with a file open: the tree over it (else the file alone).
 	local over = props.over or ui.use_state(false)

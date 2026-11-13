@@ -2293,7 +2293,6 @@ return ui.component(function(props: Props): Node
 			return NAME_AT[if props.fold then props.fold() else 0] or NAME_AT[0]
 		end,
 		mark_when = props.mark_when,
-		say = named,
 		value = shown_model,
 		items = items :: any,
 		tone = props.tone or "model_chip",
@@ -2321,7 +2320,12 @@ return ui.component(function(props: Props): Node
 		content_opacity = function(): number
 			return reveal:get()
 		end,
+		-- (The name the catalog can't give, as the host says it; else, with no model, what stands in.)
 		say = function(): string?
+			local said = named()
+			if said then
+				return said
+			end
 			if current() ~= nil or props.model:get() ~= nil then
 				return nil
 			end

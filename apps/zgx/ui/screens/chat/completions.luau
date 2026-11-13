@@ -117,7 +117,7 @@ function M.bind(b: Bind): { [string]: any }
 				table.insert(out, {
 					section = "attachments",
 					-- (Its token in the draft: a picture's its number's.)
-					value = if picture and type(item.mention) == "number" then `Image-{item.mention}` else word(name),
+					value = if picture and Carried.number(item) then `Image-{Carried.number(item)}` else word(name),
 					label = name,
 					-- (What it is: a picture, a file…)
 					detail = ui.t(`chat.composer.attachment_kind.{what}`):get(),

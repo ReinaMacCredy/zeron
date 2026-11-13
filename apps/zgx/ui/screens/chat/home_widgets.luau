@@ -29,7 +29,14 @@ M.stats = source("stats")
 M.services = source("services")
 M.git = source("git")
 M.prs = source("prs")
-local fetched: { [string]: number } = {}
+-- When each was last fetched, and what it was fetched for: kept across a reload of the scripts, which asks the engine nothing again.
+local kept = ui.state("home_widgets_fetched", { at = {}, projects = "" } :: any)
+local function fetched(name: string): number?
+	return kept:peek().at[name]
+end
+local function mark(name: string, at: number?)
+	kept:set_key({ "at", name }, at)
+end
 local busy: { [string]: boolean } = {}
 local git_filter = ui.state("home_widgets_git_filter", nil :: string?)
 local pr_pick = ui.state("home_widgets_pr_pick", nil :: string?)
@@ -55,7 +62,7 @@ end
 
 local function settle(slot: State<Source>, name: string, value: any?, err: any?)
 	busy[name] = false
-	fetched[name] = ui.now()
+	mark(name, ui.now())
 	slot:set(if err ~= nil then { err = why(err) } else { value = value })
 end
 
@@ -217,11 +224,10 @@ local function fetch_prs(projects: { any })
 	end
 end
 
-local projects_seen = ""
-local ports_seen: boolean? = nil
 
 local function due(name: string, every: number): boolean
-	return not busy[name] and (fetched[name] == nil or ui.now() - fetched[name] >= every)
+	local at = fetched(name)
+	return not busy[name] and (at == nil or ui.now() - at >= every)
 end
 
 local function refresh()
@@ -231,15 +237,15 @@ local function refresh()
 		table.insert(ids, p.id)
 	end
 	local sig = table.concat(ids, ",")
-	if sig ~= projects_seen then
-		projects_seen = sig
-		fetched.git = nil
-		fetched.prs = nil
+	if sig ~= kept:peek().projects then
+		kept:set_key({ "projects" }, sig)
+		mark("git", nil)
+		mark("prs", nil)
 	end
 	local all_ports = prefs.home_widget("services_all_ports")
-	if all_ports ~= ports_seen then
-		ports_seen = all_ports
-		fetched.services = nil
+	if all_ports ~= kept:peek().ports then
+		kept:set_key({ "ports" }, all_ports)
+		mark("services", nil)
 		M.services:set({})
 	end
 	if prefs.home_widget("this_mac") and due("stats", STATS_MS) then
@@ -760,7 +766,7 @@ local function GitActivity(): Node
 		if git_filter:peek() ~= id then
 			git_filter:set(id)
 			busy.git = false
-			fetched.git = nil
+			mark("git", nil)
 			refresh()
 		end
 	end)

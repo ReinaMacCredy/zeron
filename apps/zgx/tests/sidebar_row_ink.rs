@@ -79,9 +79,10 @@ fn sidebar_rows_wear_each_schemes_ink_in_every_state() {
     // Selected: "Tidy the tests" picked. Under the pointer: "Answer the
     // review". At rest: "Write the docs". Working: "Fix the build" (done,
     // unseen, from the fourth switch on). Asking: "Ship the release".
-    app.click("\"Tidy the tests\"");
+    // (The sidebar's: a new chat's Home panel lists recent chats too.)
+    app.click("#shell-sidebar >> \"Tidy the tests\"");
     app.frames(30);
-    app.hover("\"Answer the review\"");
+    app.hover("#shell-sidebar >> \"Answer the review\"");
     app.frames(30);
     let mut fix_the_build = "working";
     // Every miss, each switch's and state's, said at the end.

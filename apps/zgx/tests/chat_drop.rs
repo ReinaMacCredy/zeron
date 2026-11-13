@@ -71,7 +71,8 @@ fn files_over_the_transcript_dim_the_chat_and_a_drop_attaches_them() {
     app.frames(10);
     assert!(!dimmed(&mut app), "a drop takes the overlay away");
     assert!(
-        has(&mut app, r#"#chat-composer >> ~"notes.md""#),
+        // (Exact: our chip's name is in the field's words too, and a match must be one.)
+        has(&mut app, r#"#chat-composer >> "notes.md""#),
         "the file is a chip on the composer, as a drop on it makes"
     );
 }
@@ -150,5 +151,5 @@ fn files_dropped_on_a_new_chats_page_attach_to_its_composer() {
     app.ui.dispatch(InputEvent::FilesDrop { x, y, paths: vec![path].into() });
     app.frames(10);
     assert!(!dimmed(&mut app));
-    assert!(has(&mut app, r#"#chat-composer >> ~"plan.pdf""#));
+    assert!(has(&mut app, r#"#chat-composer >> "plan.pdf""#));
 }

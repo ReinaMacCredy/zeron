@@ -162,9 +162,10 @@ test("the mention menu: Escape holds while the caret moves in the token, an edit
 	app:key("ArrowLeft")
 	app:frames(2)
 	expect(shown(app, 'role:option "/review"')).to_be(false)
+	-- (Upstream's launcher: typed further at, it stays away; the caret out of the token ends that.)
 	app:key("Backspace")
 	app:frames(2)
-	expect(shown(app, "role:option")).to_be(true)
+	expect(shown(app, "role:option")).to_be(false)
 end)
 
 test("the mention menu: a row pressed is picked and closes it", function()
@@ -184,7 +185,7 @@ end)
 
 -- Upstream's popover stands at the caret and lets presses through: a press
 -- outside it still acts where it landed, and puts it away as Escape does.
-test("the mention menu: a press outside closes it and still acts, a press on the draft closes it", function()
+test("the mention menu: a press outside closes it and still acts; back in the draft it shows again", function()
 	local app = menu_app()
 	app:type("#field", "/rev")
 	app:frames(2)
@@ -193,17 +194,17 @@ test("the mention menu: a press outside closes it and still acts, a press on the
 	app:frames(2)
 	expect(shown(app, 'role:option "/review"')).to_be(false)
 	expect(app:state("calls")).to_contain("other")
-	-- Back in the draft at the token's end: put away until an edit.
+	-- Back in the draft at the token's end: upstream's launcher was hidden as the draft lost the keys, not put away, so it shows again.
 	app:click("#field")
 	app:frames(2)
-	expect(shown(app, 'role:option "/review"')).to_be(false)
+	expect(shown(app, 'role:option "/review"')).to_be(true)
 	app:fill("#field", "/revi")
 	app:frames(2)
 	expect(shown(app, 'role:option "/review"')).to_be(true)
-	-- A press on the draft itself puts it away too.
+	-- (A press on the draft itself leaves it, upstream's launcher: the caret stays in the token.)
 	app:click("#field")
 	app:frames(2)
-	expect(shown(app, 'role:option "/review"')).to_be(false)
+	expect(shown(app, 'role:option "/review"')).to_be(true)
 end)
 
 test("the mention menu: a row pressed leaves the keys in the draft, the caret where the pick put it", function()

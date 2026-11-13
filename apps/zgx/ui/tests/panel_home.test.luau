@@ -592,6 +592,9 @@ end
 
 test("the home stands a little over the panel's middle as its parts open, close and grow", function()
 	local app = home()
+	-- (Taller than home()'s: our home's parts stand taller, so at 900 the lift is cut to the room left.)
+	app:resize(1000, 1400)
+	app:frames(30)
 	-- (The lift: the composer's, here with no strip over the page.)
 	local py, ph = span_of(app, "#panel-empty")
 	local by, bh = span_of(app, "#panel-home-block")

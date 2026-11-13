@@ -699,12 +699,12 @@ fn no_picture_of_a_chat_has_what_lay_over_it() {
     assert_eq!(taken.get(), was, "with the card over the page");
 }
 
-/// A tab carried near an end of its strip scrolls the strip under it, as
-/// long as it's held there; let go, it lands among the others. (Five chats
-/// composed in tabs in a window 800 wide: the top bar's strip overflows,
-/// scrolled to its end, the last tab showing.)
+/// A tab carried off its strip, down over the page, and held there: the
+/// window keeps all its room. (Five chats composed in tabs in a window 800
+/// wide. Upstream's scroll of the strip near its end while a tab is carried
+/// is its TabStrip's, which our tab strip, the A2 chrome's, doesn't take.)
 #[test]
-fn a_tab_carried_near_an_end_of_its_strip_scrolls_it() {
+fn a_tab_carried_off_its_strip_takes_no_room() {
     let mut app = mount();
     app.ui.scene.borrow_mut().resize(800., H);
     app.frames(30);
@@ -720,29 +720,7 @@ fn a_tab_carried_near_an_end_of_its_strip_scrolls_it() {
     let tabs = zgx_script::Value::from_json(&format!("[{}]", rows.join(","))).unwrap();
     app.host.set_state("screens/shell/split.luau::inset_split_trees", tabs).unwrap();
     app.frames(60);
-    let room = app.bounds("#session-tabs-scroll");
-    let first = app.bounds("#session-tab-a1").x;
-    assert!(first < room.x - 1., "the strip overflows, scrolled past its start: a1 at {first}, the strip at {}", room.x);
-    // b2 carried to the strip's start and held there.
-    let from = app.bounds("#session-tab-b2");
-    let (x, y) = (from.x + from.width / 2., from.y + from.height / 2.);
     let button = PointerButton::Primary;
-    app.ui.dispatch(InputEvent::PointerMove { x, y });
-    app.ui.dispatch(InputEvent::PointerDown { x, y, button });
-    app.frames(2);
-    let to = room.x + 8.;
-    for i in 1..=20 {
-        let px = x + (to - x) * i as f32 / 20.;
-        app.ui.dispatch(InputEvent::PointerMove { x: px, y });
-        app.frames(1);
-    }
-    let held = app.bounds("#session-tab-a1").x;
-    app.frames(60);
-    let after = app.bounds("#session-tab-a1").x;
-    assert!(after > held + 20., "held near the start, the strip scrolls toward it: a1 {held} then {after}");
-    app.ui.dispatch(InputEvent::PointerUp { x: to, y, button });
-    app.ui.input.forget_clicks();
-    app.frames(60);
     // Carried off the strip, down over the page, and held there: the window
     // keeps all its room (the tab stays its strip's, taking none of it).
     let shell = app.bounds("#shell");

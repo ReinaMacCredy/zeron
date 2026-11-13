@@ -1200,7 +1200,10 @@ const TWO_SESSIONS: &str = r#"{"state":"ready","here":"mac",
 /// The title bar's arrow `name` ("Back", "Forward"): its tree line (its
 /// node's id left out, new after a reload, and whether it has focus).
 fn arrow(app: &mut TestApp, name: &str) -> String {
-    let tree = app.tree();
+    // (The title bar's own tree: the window's runs past the 200 lines a tree shows.)
+    let nav = app.find("#titlebar-nav").unwrap_or_else(|| panic!("no title bar arrows:\n{}", app.tree()));
+    let (lines, hidden) = zgx_script::driver::tree_lines(&app.ui, &app.handle, Some(nav), &Default::default());
+    let tree = zgx_script::driver::tree_lines_text(&lines, hidden);
     let line = tree
         .lines()
         .find(|l| l.contains(&format!("button \"{name}\"")))

@@ -311,6 +311,8 @@ export type Props = {
 	footer_git: (() -> boolean)?,
 	on_open_pasted: ((id: string, insert: (text: string) -> boolean) -> ())?,
 	on_queue_steer_all: (() -> ())?,
+	-- (ds/composer_deck's `queue_held`.)
+	queue_held: (() -> boolean)?,
 	queue_pictures: any?,
 	model_committed: (() -> boolean)?,
 	model_take: ((value: string) -> boolean)?,
@@ -3106,6 +3108,7 @@ return ui.component(function(props: Props): Node
 			can_steer = props.can_steer,
 			on_queue_send = props.on_queue_send,
 			on_queue_steer_all = props.on_queue_steer_all,
+			queue_held = props.queue_held,
 			composer_empty = function(): boolean
 				return not has_text() and not has_cargo()
 			end,

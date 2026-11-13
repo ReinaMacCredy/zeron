@@ -264,15 +264,13 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
--- A lane's two floating pills, by its slot: "Jump to latest"'s width and the
--- deck's folded pill's while each shows (each moves aside for the other, as
--- on the chat page), and how far its pill row's pills reach.
-local function pair(slot: string): (State<number?>, State<number?>, State<number>)
-	return ui.state(`chat_lane_jump_w_{slot}`, nil :: number?), ui.state(`chat_lane_pill_w_{slot}`, nil :: number?), ui.state(`chat_lane_pills_reach_{slot}`, 0)
+-- How far a lane's pill row's pills reach, by its slot.
+local function pills_reach(slot: string): State<number>
+	return ui.state(`chat_lane_pills_reach_{slot}`, 0)
 end
 
 local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, panel_key: string?, tab_id: string?): Node
-	local jump_w, deck_w, reach = pair(tab_id or name)
+	local reach = pills_reach(tab_id or name)
 	local lifted = Dock.lift(tab_id or name)
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
@@ -1200,6 +1198,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		can_steer = asks.can_steer,
 		on_queue_send = asks.on_queue_send,
 		on_queue_steer_all = asks.on_queue_steer_all,
+		queue_held = function(): boolean
+			return #asks.engine_queue:get() > 0
+		end,
 		queue_pictures = queue_pictures,
 		on_dismiss_todos = asks.on_dismiss_todos,
 		on_queue_edit = if split then nil else edits.on_queue_edit,
@@ -1235,14 +1236,6 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		on_lift = function(n: number)
 			if lifted:peek() ~= n then
 				lifted:set(n)
-			end
-		end,
-		aside = function(): number?
-			return jump_w:get()
-		end,
-		on_pill_width = function(w: number?)
-			if deck_w:peek() ~= w then
-				deck_w:set(w)
 			end
 		end,
 		tray = tray,
@@ -1479,7 +1472,6 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 	end)
 	local dock_h = M.dock_height(slot)
 	-- (A split's pane, focused: the window's composer stands at its foot.)
-	local jump_w, deck_w = pair(slot)
 	local own_lift, page_lift = Dock.lift(slot), Dock.lift("page")
 	local room = Dock.room(function(): number
 		return if split and focused_now() then Shared.dock_h:get() else dock_h:get()
@@ -1567,14 +1559,15 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		offset = offset,
 		keep = anchor,
 		foot = if tab.kind == "subagent" then nil else room.foot,
-		beside = function(): number?
-			return deck_w:get()
-		end,
-		on_jump_width = function(w: number?)
-			if jump_w:peek() ~= w then
-				jump_w:set(w)
-			end
-		end,
+		-- Its "Jump to latest" and the pill of the composer at its foot, a
+		-- centred pair: its own composer's, or, a split's focused pane, the
+		-- window's (screens/chat/shared's `pill_width_of`).
+		beside = if tab.kind == "subagent"
+			then nil
+			else function(): number?
+				return Shared.pill_width_of("waiting", if split and focused_now() then "window" else `lane.{slot}`):get()
+			end,
+		on_jump_width = Shared.pill_teller("jump", `lane.{slot}`),
 		compact = function(): boolean
 			return prefs.compact_transcript:get()
 		end,

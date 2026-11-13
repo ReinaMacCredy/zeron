@@ -763,9 +763,7 @@ mod update_tests {
         assert_eq!(offer_of(&manifest("garbage-version"), "0.2.132", None, Some("15.1")), Offer::Current);
         assert!(matches!(offer_of(&manifest("needs-newer-macos"), "0.2.132", None, Some("14.6")), Offer::Held(why) if why.contains("macOS 15.0")));
         assert_eq!(offer_of(&manifest("needs-newer-macos"), "0.2.132", None, Some("15.0")), Offer::Newer);
-        // A beta build on the fork's one feed (Stable's): its release replaces the beta though older,
-        // unless the beta's engine is newer than that release's.
-        assert_eq!(offer_of(&manifest("stable-older"), "0.2.133-beta.1", Some("0.2.131"), Some("15.1")), Offer::Switch);
-        assert!(matches!(offer_of(&manifest("stable-older"), "0.2.133-beta.1", Some("0.2.132"), Some("15.1")), Offer::Held(_)));
+        // (A beta build leaving for an older Stable now needs Stable chosen on record in the data
+        // dir, v0.3.2's crates/update `offer`: a machine's own record, so it's that crate's tests'.)
     }
 }

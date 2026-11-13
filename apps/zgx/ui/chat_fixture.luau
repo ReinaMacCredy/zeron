@@ -442,6 +442,15 @@ ui.command {
 stub.send = function(req: any)
 	if req.session and META[req.session] and META[req.session].running and not req.fresh then
 		note(`send:{req.session}:{req.text}{if req.steer_now then "|steer_now" else ""}`)
+		-- (Refused while a turn runs too: upstream's send_fails.)
+		if SEND_FAILS:peek() then
+			SEND_FAILS:set(false)
+			return {
+				after = function(_self: any, _ok: any, err: (any) -> ())
+					err({ message = "failed" })
+				end,
+			}
+		end
 		return queue_answer(function()
 			queued_n += 1
 			local id = `eq{queued_n}`
@@ -1403,6 +1412,18 @@ ui.command {
 	title = "A terminal selection staged",
 	run = function()
 		chat.shared.set_terminal_quote("cargo build\nerror[E0425]: cannot find value")
+	end,
+}
+-- A passage of a reply attached as a chip (upstream's mention tests).
+ui.command {
+	id = "attach_passage",
+	title = "A reply's passage attached",
+	run = function()
+		chat.shared.attach_quote {
+			text = "Layout dominates on both machines, so that is where the work should go first.",
+			who = "GPT-5.5",
+			from = "Sep 8, 1:43 PM",
+		}
 	end,
 }
 ui.command {

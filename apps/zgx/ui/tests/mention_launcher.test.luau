@@ -67,7 +67,8 @@ test("`@` opens the launcher: what's typed and how many match, the scopes, the s
 	local files, chats, attached = table.find(shown, "# Files"), table.find(shown, "# Chats"), table.find(shown, "# Attachments")
 	expect(files ~= nil and chats ~= nil and attached ~= nil).to_be(true)
 	expect((files :: number) < (chats :: number) and (chats :: number) < (attached :: number)).to_be(true)
-	expect(shown).to_contain("zgx.png")
+	-- (A picture dropped is named by its number in the draft, gpui's chips.)
+	expect(shown).to_contain("Image 3.png")
 	expect(count(app)).never.to_be("")
 	for _, key in { "Navigate", "Insert", "Switch tab" } do
 		expect(tree).to_contain(`text "{key}"`)
@@ -94,7 +95,7 @@ test("Tab and Shift+Tab go through the scopes, each listing its own kind; the ar
 	app:key("Tab")
 	settle(app)
 	local attached = rows(app)
-	expect(attached).to_contain("zgx.png")
+	expect(attached).to_contain("Image 3.png")
 	expect(attached).never.to_contain("Long chat")
 	-- Round to All, then back with Shift+Tab to Attachments.
 	app:key("Tab")
@@ -103,7 +104,7 @@ test("Tab and Shift+Tab go through the scopes, each listing its own kind; the ar
 	app:key("shift+Tab")
 	settle(app)
 	expect(rows(app)).never.to_contain("Long chat")
-	expect(rows(app)).to_contain("zgx.png")
+	expect(rows(app)).to_contain("Image 3.png")
 	-- The second row lit, then taken: the second attachment.
 	app:key("ArrowDown")
 	app:key("Enter")
@@ -167,7 +168,7 @@ test("what's attached, picked, goes as its mention (a picture by its number); on
 	app:command("drop_pictures")
 	app:command("attach_passage")
 	settle(app)
-	app:type(BOX, "look at @zgx")
+	app:type(BOX, "look at @Image")
 	settle(app)
 	app:key("Enter")
 	settle(app)
@@ -185,7 +186,7 @@ test("what's attached, picked, goes as its mention (a picture by its number); on
 	app:key("Enter")
 	settle(app)
 	-- (Its × shows under the pointer.)
-	app:hover('role:button "photo.heic"')
+	app:hover('#chat-composer >> "photo.heic"')
 	app:frames(10)
 	app:click('role:button "Remove photo.heic"')
 	settle(app)
@@ -198,7 +199,8 @@ test("what's attached, picked, goes as its mention (a picture by its number); on
 	local calls = app:state("calls")
 	-- (Taken off: its name alone, no link to nothing.)
 	expect(calls).to_contain("then photo.heic")
-	expect(calls).never.to_contain("](zeron-attachment:2)")
+	-- (The second send's: the first carried our chips in its words.)
+	expect(string.match(calls, ".*send:s2:(.*)$")).never.to_contain("](zeron-attachment:2)")
 end)
 
 -- The bubble's words (its paragraph's text).
@@ -222,7 +224,7 @@ test("round trip: an attachment picked in the draft goes as its mention, and the
 	local app = chat()
 	app:command("drop_pictures")
 	settle(app)
-	app:type(BOX, "Look at @zgx")
+	app:type(BOX, "Look at @Image")
 	settle(app)
 	app:key("Enter")
 	settle(app)
@@ -260,14 +262,15 @@ test("a tab clicked switches to it and the launcher stays, the draft keeping the
 	settle(app)
 	app:type(BOX, "look @")
 	settle(app)
-	local wants = { Files = "chat.rs", Chats = "Long chat", Attachments = "zgx.png", All = "# Chats" }
+	local wants = { Files = "chat.rs", Chats = "Long chat", Attachments = "Image 3.png", All = "# Chats" }
 	for _, tab in { "Files", "Chats", "Attachments", "All" } do
 		app:click(`role:tab "{tab}"`)
 		settle(app)
 		expect(`{tab}: {open_now(app)}`).to_be(`{tab}: true`)
 		expect(rows(app)).to_contain(wants[tab])
 		expect(field_has_keys(app)).to_be(true)
-		expect(app:text(BOX)).to_be("look @")
+		-- (After the chips our drop puts in the words.)
+		expect(string.match(app:text(BOX), "look @$") ~= nil).to_be(true)
 	end
 	-- Still typed at: the query narrows the tab shown.
 	app:key("Tab")

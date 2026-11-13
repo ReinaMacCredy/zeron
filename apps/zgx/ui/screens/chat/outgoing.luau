@@ -11,7 +11,6 @@ local Comments = require("@app/screens/chat/comments")
 local Invocations = require("@app/screens/chat/invocations")
 local Appshots = require("@app/screens/chat/appshots")
 local HtmlPicks = require("@ds/html_picks")
-local shared = require("@app/screens/chat/shared")
 local Carried = require("@app/screens/chat/carried")
 
 local M = {}
@@ -39,7 +38,7 @@ function M.badges(quotes: { Quote.Staged }): { any }
 	return out
 end
 
-local function shown(list: { any }, quotes: { Quote.Staged }, picks: { { [string]: any } }, said: { Comments.Comment }, cards: { HtmlPicks.Card }): { any }
+local function shown(list: { any }, quotes: { Quote.Staged }, picks: { { [string]: any } }, said: { Comments.Comment }, cards: { HtmlPicks.Card }, chats: { any }): { any }
 	local out = {}
 	-- (As chat.rs `page_picks` reads them back.)
 	for _, c in cards do
@@ -61,6 +60,10 @@ local function shown(list: { any }, quotes: { Quote.Staged }, picks: { { [string
 	-- And each element picked on a page (chat.rs `split_annotations`).
 	for _, chip in Annotation.shown(picks) do
 		table.insert(out, chip)
+	end
+	-- And each chat attached, a card with its agent's mark (chat.rs `chat_chip`).
+	for _, c in chats do
+		table.insert(out, { kind = "chat", name = c.name, chat = c.chat, mark = c.mark })
 	end
 	-- And its review comments, one chip (chat.rs `comments_chip`).
 	if #said > 0 then
@@ -93,6 +96,7 @@ function M.parts(typed: string, text: string, carried: { any }): { [string]: any
 	-- (screens/chat/comments), each its file and line.
 	local comments: { Comments.Comment } = {}
 	local chosen: { any } = {}
+	local chats: { { name: string, chat: string, mark: string? } } = {}
 	for _, item in carried do
 		if item.kind == "pick" then
 			table.insert(chosen, item)
@@ -109,10 +113,10 @@ function M.parts(typed: string, text: string, carried: { any }): { [string]: any
 		elseif item.kind == "annotation" and item.annotation then
 			table.insert(picks, item)
 		elseif item.kind == "chat" and item.chat then
-			-- Another chat mentioned (a session dropped from the sidebar):
-			-- its link in the words, the engine's to read out to the agent.
-			local link = shared.chat_link(item.name, item.chat)
-			typed = if typed ~= "" then `{typed} {link}` elseif text ~= "" then `{text} {link}` else link
+			-- Another chat attached (a session dropped from the sidebar): in
+			-- a block after the words (Carried.with_chats), the sent message
+			-- a card for it (src/chat.rs `split_chats`).
+			table.insert(chats, { name = item.name, chat = item.chat, mark = item.mark })
 		end
 	end
 	-- (A mention of an attachment no longer attached leaves as its plain label.)
@@ -120,10 +124,10 @@ function M.parts(typed: string, text: string, carried: { any }): { [string]: any
 	local cards = HtmlPicks.cards(chosen)
 	return {
 		words = words,
-		text = Comments.with_comments(Quote.with_quotes(Annotation.with_annotations(HtmlPicks.with_picks(words, cards), picks), quotes), comments),
+		text = Carried.with_chats(Comments.with_comments(Quote.with_quotes(Annotation.with_annotations(HtmlPicks.with_picks(words, cards), picks), quotes), comments), chats),
 		attachments = attachments,
 		appshots = Appshots.of_cargo(carried),
-		shown = shown(attachments, quotes, picks, comments, cards),
+		shown = shown(attachments, quotes, picks, comments, cards, chats),
 	}
 end
 
