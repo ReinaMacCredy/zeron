@@ -53,7 +53,7 @@ local Activity = require("@self/activity")
 local status = require("@self/status")
 local Working = require("@self/working")
 local Mark = require("@self/mark")
-local glass = require("@self/glass")
+local Tooltip = require("@self/tooltip")
 local control = require("@self/control")
 local Quote = require("@self/quote")
 local SelectionMenu = require("@self/selection_menu")
@@ -146,7 +146,7 @@ export type Props = {
 	-- arrives: this says where they go instead of the next control's, which
 	-- may be another chat's.)
 	on_jump: (() -> ())?,
-	-- The way back's pill: its width while it shows, nil once it goes (the
+	-- The way back's button: its width while it shows, nil once it goes (the
 	-- composer's own pill moves aside for it).
 	on_jump_width: ((w: number?) -> ())?,
 	-- The composer's own pill beside it: its width while it shows. The two
@@ -297,6 +297,29 @@ local TAIL = 32
 local TURN_GAP = 16
 local SEAM_GAP = 6
 local JUMP_H = 30
+ui.theme.tokens {
+	zeron = { transcript = { latest = { bg = "over({zeron.window}, {zeron.inset.bg})" } } },
+}
+local LATEST_DOT = 4
+local RIPPLE_MS, RIPPLE_STEP_MS, RIPPLE_RISE, RIPPLE_SHIFT_MS = 1000, 220, 1.5, 150
+local function latest_dot(i: number): Node
+	return status.looping({
+		w = LATEST_DOT,
+		h = LATEST_DOT,
+		shrink = 0,
+		rounded = "$radius.full",
+		bg = "$text.tertiary",
+	}, function(el)
+		return anime.animate(el, {
+			y = {
+				{ to = -RIPPLE_RISE, duration = RIPPLE_STEP_MS, ease = "inOut(2)" },
+				{ to = 0, duration = RIPPLE_STEP_MS, ease = "inOut(2)" },
+			},
+			loop = true,
+			loopDelay = RIPPLE_MS - 2 * RIPPLE_STEP_MS,
+		})
+	end, RIPPLE_MS, -i * RIPPLE_SHIFT_MS)
+end
 
 -- `ZERON_ZGX_TRACE_TRANSCRIPT=1`: the transcript's hover and layout, a line
 -- each to the app's output (off, nothing is made or printed).
@@ -1457,13 +1480,11 @@ local function Transcript(props: Props): Node
 		end)
 	end
 	local away = ui.state(`transcript_away{kept}`, false)
-	-- The way back's width, as last laid out; said while it shows.
-	local jump_w = ui.use_state(0)
+	-- The way back's width, said while it shows.
 	ui.effect(function()
 		local shown = away:get()
 		if props.on_jump_width then
-			local w = jump_w:peek()
-			props.on_jump_width(if shown and w > 0 then w else nil)
+			props.on_jump_width(if shown then JUMP_H else nil)
 		end
 	end)
 	-- (Gone with it: a pill beside it no longer moves aside for it.)
@@ -1931,18 +1952,7 @@ local function Transcript(props: Props): Node
 			go_step(eased)
 		end
 	end)
-	local function go_to(id: string)
-		local index = messages:index_of("id", id)
-		if not index or not list:peek() then
-			return
-		end
-		local above: { string } = {}
-		for i = 1, index - 1 do
-			local m = messages:at(i)
-			if m then
-				table.insert(above, m.id)
-			end
-		end
+	local function glide_to(goal: () -> number, land: () -> ())
 		if going then
 			going:pause()
 			going = nil
@@ -1966,17 +1976,6 @@ local function Transcript(props: Props): Node
 		if offset:peek() >= PAST_END / 2 then
 			offset:set(math.max(0, extent() - (list.height or 0)))
 		end
-		local function land()
-			local r = rows[id]
-			if r and r.outer:peek() then
-				offset:set(math.max(0, row_top(id, above)))
-				return
-			end
-			local now, el = messages:index_of("id", id), list:peek()
-			if now and el then
-				el:scroll_to_row(now, { align = "start" })
-			end
-		end
 		if motion.reduced_now() then
 			land()
 			return
@@ -1989,9 +1988,8 @@ local function Transcript(props: Props): Node
 			end
 			local frac = if eased >= 1 then 1 else (eased - eased_prev) / (1 - eased_prev)
 			eased_prev = eased
-			local goal = row_top(id, above)
 			local now = offset:peek()
-			offset:set(math.max(0, now + frac * (goal - now)))
+			offset:set(math.max(0, now + frac * (goal() - now)))
 		end
 		local this: any
 		this = anime.animate(go_progress, {
@@ -2007,6 +2005,47 @@ local function Transcript(props: Props): Node
 			end,
 		})
 		going = this
+	end
+	local function go_to(id: string)
+		local index = messages:index_of("id", id)
+		if not index or not list:peek() then
+			return
+		end
+		local above: { string } = {}
+		for i = 1, index - 1 do
+			local m = messages:at(i)
+			if m then
+				table.insert(above, m.id)
+			end
+		end
+		glide_to(function(): number
+			return row_top(id, above)
+		end, function()
+			local r = rows[id]
+			if r and r.outer:peek() then
+				offset:set(math.max(0, row_top(id, above)))
+				return
+			end
+			local now, el = messages:index_of("id", id), list:peek()
+			if now and el then
+				el:scroll_to_row(now, { align = "start" })
+			end
+		end)
+	end
+	local function go_end()
+		if not list:peek() then
+			show_end()
+			return
+		end
+		local view = list.height or 0
+		local function goal(): number
+			return math.max(0, extent() - view)
+		end
+		-- (From far up, the last view's worth alone: a glide across a long way would build every row on it.)
+		if offset:peek() < PAST_END / 2 and goal() - offset:peek() > 2 * view then
+			offset:set(goal() - view)
+		end
+		glide_to(goal, show_end)
 	end
 	local handle: Handle = {
 		messages = messages,
@@ -2491,70 +2530,65 @@ local function Transcript(props: Props): Node
 				local other = if props.beside then props.beside() else nil
 				return if other and other > 0 then -(other + 8) / 2 else 0
 			end), { stiffness = 380, damping = 30 }),
-			-- (Held at the pill's size: a leaving presence is pinned at its holder's corner, which collapsed to the row's middle.)
+			-- (Held at the button's size: a leaving presence is pinned at its holder's corner, which collapsed to the row's middle.)
 			ui.div {
 				relative = true,
 				shrink = 0,
 				items = "start",
+				w = JUMP_H,
 				h = JUMP_H,
-				w = function(): number | string
-					local w = jump_w:get()
-					return if w > 0 then w else "auto"
-				end,
 				pointer_events = "none",
 				ui.presence(function()
 					return if away:get() then "away" else nil
 				end, function()
-					-- The menus' glass (solid when opaque), a closer shadow: a pill
-					-- over the reply, firming to the solid fill as it is touched.
-					local pill = glass.style({
-						label = locale.t("ds.transcript.jump_to_latest"),
+					local function name(): string
+						return if writing:get() then locale.s("ds.transcript.new_reply") else locale.s("ds.transcript.jump_to_latest")
+					end
+					local button_ref = ui.ref()
+					return ui.button {
+						ref = button_ref,
+						label = name,
+						tooltip = Tooltip { name },
+						w = JUMP_H,
 						h = JUMP_H,
 						shrink = 0,
-						px = "$space.3",
-						gap = "$space.2",
+						p = 0,
 						items = "center",
-						rounded = "$zeron.prose.bubble.radius",
+						justify = "center",
+						rounded = "$radius.full",
+						bg = "$zeron.transcript.latest.bg",
+						border = 1,
+						border_color = "$border",
+						shadow = "$shadow.sm",
 						cursor = "pointer",
 						color = "$text.primary",
-						text_size = "$font.size.sm",
-						weight = "$font.weight.medium",
-						hover = { bg = "$zeron.menu.solid" },
-						active = { bg = "$zeron.menu.solid" },
-					}, "menu")
-					pill.shadow = "$shadow.md"
-					local pill_ref = ui.ref()
-					pill.ref = pill_ref
-					pill.on_resize = function(size: { w: number, h: number })
-						if math.abs(jump_w:peek() - size.w) >= 0.5 then
-							jump_w:set(size.w)
-						end
-						if props.on_jump_width and away:peek() then
-							props.on_jump_width(size.w)
-						end
-					end
-					pill.on_click = function()
-						-- (It leaves as the view arrives: the keys go where it's
-						-- told, not on to the next control.)
-						if props.on_jump then
-							local el = pill_ref:peek()
-							if el then
-								el:blur()
+						hover = { bg = "$zeron.transcript.latest.bg", border_color = "$border.strong" },
+						active = { bg = "$zeron.transcript.latest.bg", border_color = "$border.strong" },
+						on_click = function()
+							-- (It leaves as the view arrives: the keys go where it's
+							-- told, not on to the next control.)
+							if props.on_jump then
+								local el = button_ref:peek()
+								if el then
+									el:blur()
+								end
+								props.on_jump()
 							end
-							props.on_jump()
-						end
-						show_end()
-					end
-					pill[1] = ui.show(writing, status.StatusDot { kind = "working" })
-					pill[2] = ui.text(function()
-						return if writing:get() then locale.s("ds.transcript.new_reply") else locale.s("ds.transcript.jump_to_latest")
-					end)
-					pill[3] = Icon { name = "arrow-down", size = 14 }
-					return ui.button(pill)
-				end, {
-					enter = { opacity = { 0, 1 }, y = { 8, 0 }, duration = 180, ease = "outQuad" },
-					exit = { opacity = 0, y = 8, duration = 120 },
-				}),
+							go_end()
+						end,
+						ui.switch(function(): string
+							return if writing:get() then "dots" else "arrow"
+						end, {
+							dots = ui.row { gap = "$space.1", items = "center", latest_dot(0), latest_dot(1), latest_dot(2) },
+							arrow = Icon { name = "arrow-down", size = 20 },
+						}),
+					}
+				end, if motion.reduced_now()
+					then nil
+					else {
+						enter = { opacity = { 0, 1 }, duration = 140 },
+						exit = { opacity = 0, duration = 140 },
+					}),
 			},
 		},
 	}

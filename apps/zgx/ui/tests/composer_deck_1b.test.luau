@@ -282,7 +282,7 @@ test("beside the side chat's tab the folded pill stops short of it, and Scroll t
 		expect(apart(app, PILL, "#composer-side-chat")).to_be(true)
 		app:scroll("#transcript", -900)
 		app:frames(60)
-		local jump = 'role:button "Jump to latest"'
+		local jump = 'role:button "New reply"'
 		expect(app:has(jump)).to_be(true)
 		expect(apart(app, PILL, "#composer-side-chat")).to_be(true)
 		expect(apart(app, PILL, jump)).to_be(true)
@@ -313,7 +313,7 @@ local function over(app: any, a: string, b: string): boolean
 end
 
 test("at a narrow composer the pills, the side chat's tab, the folded pill and Jump to latest never meet, and the conversation's end clears the pill row", function()
-	local AGENTS, SHELLS, TAB, JUMP = "#pills-agents", "#pills-shells-pill", "#composer-side-chat", 'role:button "Jump to latest"'
+	local AGENTS, SHELLS, TAB, JUMP = "#pills-agents", "#pills-shells-pill", "#composer-side-chat", 'role:button "New reply"'
 	for _, w in { 400, 460, 480, 600 } do
 		local app = busy(w)
 		expect(apart(app, AGENTS, SHELLS)).to_be(true)
@@ -352,7 +352,7 @@ test("Jump to latest beside a folded pill held short of the side chat's tab stay
 		patch(app, { queue = { { id = "q1", text = "Words" } }, todos = plan(0, 2) })
 		app:scroll("#transcript", -900)
 		app:frames(60)
-		local jump = 'role:button "Jump to latest"'
+		local jump = 'role:button "New reply"'
 		expect(app:has(jump)).to_be(true)
 		local left = box(app, "#composer-pills")
 		expect(box(app, jump) >= left).to_be(true)
@@ -373,7 +373,7 @@ test("Jump to latest and the folded pill fade out where they stood, not from the
 	patch(app, { queue = { { id = "q1", text = "Words" } } })
 	app:scroll("#transcript", -900)
 	app:frames(60)
-	local jump = 'role:button "Jump to latest"'
+	local jump = 'role:button "New reply"'
 	local jx, jy = box(app, jump)
 	app:scroll("#transcript", 100000)
 	app:frames(3)
