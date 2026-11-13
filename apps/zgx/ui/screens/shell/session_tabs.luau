@@ -26,6 +26,7 @@ local BAR, LIFT = 42, 30
 local DROP = BAR - TAB_H
 local LINE = BAR / 2
 local THUMB_W, THUMB_H = 150, 92
+local LIFT_MORPH_MS = 160
 local SLIDE = { duration = 150, ease = "out(3)" }
 local FADE, FADE_RATE = 36, 12
 -- A tab's stacked tiles, as a fanned hand of cards: at most this many, and for each
@@ -770,29 +771,60 @@ local function menu_items(id: string): { any }
 	return items
 end
 
-local function lifted_card(id: string): Node
+type Lift = { x: number, y: number, gx: number, gy: number, top: number, w: number }
+local function lifted_card(id: string, at: State<Lift?>, t: State<number>): Node
+	local function lerp(a: number, b: number): number
+		return a + (b - a) * t:get()
+	end
 	local function line(part: number): Node
 		return ui.div { h = 4, w = `{part * 100}%`, rounded = ui.raw(2, "Zeron's skeleton line"), bg = "$hover" }
 	end
 	return ui.column {
-		w = THUMB_W,
-		h = THUMB_H,
+		absolute = true,
+		left = function(): number
+			local a = at:get()
+			return ui.raw(if a then lerp(0, a.gx - THUMB_W / 2) else 0, "Zeron's lifted tab")
+		end,
+		top = function(): number
+			local a = at:get()
+			return ui.raw(if a then lerp(a.top - (a.y - a.gy), a.gy - 12) else 0, "Zeron's lifted tab")
+		end,
+		w = function(): number
+			local a = at:get()
+			return ui.raw(lerp(if a then a.w else THUMB_W, THUMB_W), "Zeron's lifted tab")
+		end,
+		h = function(): number
+			return ui.raw(lerp(TAB_H, THUMB_H), "Zeron's lifted tab")
+		end,
+		opacity = t,
 		overflow = "hidden",
-		rounded = "$radius.lg",
-		bg = "$zeron.menu.solid",
+		rounded = function(): number
+			return ui.raw(lerp(8, 10), "Zeron's lifted tab")
+		end,
+		bg = "$surface.raised",
 		border = 1,
-		border_color = "$border",
+		border_color = "$border.strong",
 		shadow = "$shadow.lg",
 		px = ui.raw(10, "Zeron's card's sides"),
 		ui.row {
-			h = 24,
+			h = function(): number
+				return ui.raw(lerp(TAB_H - 2, 24), "Zeron's lifted tab")
+			end,
 			shrink = 0,
-			gap = "$zeron.space.tight",
+			gap = "$space.2",
 			items = "center",
 			color = "$text.primary",
-			ds.FadeText { title(id), grow = 1, min_w = 0, text_size = TITLE_SIZE },
+			own_mark(id, 14),
+			ds.FadeText {
+				title(id),
+				grow = 1,
+				min_w = 0,
+				text_size = function(): number
+					return ui.raw(lerp(12, 10), "Zeron's lifted tab title")
+				end,
+			},
 		},
-		ui.column { gap = ui.raw(6, "Zeron's lines' gap"), line(0.9), line(0.7), line(0.82), line(0.5) },
+		ui.column { gap = ui.raw(6, "Zeron's lines' gap"), opacity = t, line(0.9), line(0.7), line(0.82), line(0.5) },
 	}
 end
 
@@ -813,6 +845,21 @@ local Tab = ui.component(function(props: { chat: string }): Node
 		local d = drag:get()
 		return d ~= nil and d.key == id
 	end
+	local lift_at = ui.use_state(nil :: Lift?)
+	local lift_t = ui.use_state(0)
+	local lifting: any, lifted = nil, false
+	ui.effect(function()
+		local d = drag:get()
+		local out = d ~= nil and d.key == id and d.out
+		if out == lifted then
+			return
+		end
+		lifted = out
+		if lifting then
+			lifting:cancel()
+		end
+		lifting = anime.animate(lift_t, motion.params({ value = if out then 1 else 0, duration = LIFT_MORPH_MS, ease = motion.EASE_OUT }))
+	end)
 	local row: { [any]: any } = tab_box({
 		id = `session-tab-{id}`,
 		ref = own,
@@ -845,6 +892,9 @@ local Tab = ui.component(function(props: { chat: string }): Node
 		on_drag = function(): any
 			local w = tab_w:peek()
 			local list = shown:peek()
+			local el = own:peek()
+			local r = if el then ui.window_rect(el) else nil
+			lift_at:set({ x = 0, y = 0, gx = 0, gy = 0, top = if r then r.y else 0, w = w })
 			rider_x:set(slot_left(table.find(list, id) or 1))
 			slot_w:set(w)
 			landed = false
@@ -855,17 +905,20 @@ local Tab = ui.component(function(props: { chat: string }): Node
 			return { session_tab = id, session = face(id) }
 		end,
 		drag_preview = function(): Node
+			local a = lift_at:peek()
 			return ui.div {
-				w = THUMB_W,
-				h = THUMB_H,
-				ui.show(function(): boolean
-					local d = drag:get()
-					return d ~= nil and d.out
-				end, lifted_card(id)),
+				w = if a then a.w else THUMB_W,
+				h = TAB_H,
+				lifted_card(id, lift_at, lift_t),
 			}
 		end,
-		drag_preview_anchor = { 0.5, 0 },
-		drag_preview_offset = { 0, -12 },
+		drag_preview_in_window = true,
+		on_drag_move = function(_: any, e: any)
+			local a = lift_at:peek()
+			if a then
+				lift_at:set({ x = e.x, y = e.y, gx = e.grab_x, gy = e.grab_y, top = a.top, w = a.w })
+			end
+		end,
 		on_drag_end = function()
 			local d = drag:peek()
 			drag:set(nil)
@@ -1096,7 +1149,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			again.out = false
 			drag:set(again)
 			d = again
-			anime.animate(slot_w, { value = d.w, duration = SLIDE.duration, ease = SLIDE.ease })
+			anime.animate(slot_w, { value = d.w, duration = motion.DRAG_SLIDE.duration, ease = motion.DRAG_SLIDE.ease })
 		end
 		rider_x:set(PAD + math.clamp(x - (d.grab :: number), -6, (#list - 1) * slot + 6))
 		local to = math.clamp(math.floor(x / slot) + 1, 1, #list)
@@ -1112,7 +1165,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		local again = table.clone(d)
 		again.out = true
 		drag:set(again)
-		anime.animate(slot_w, { value = 0, duration = SLIDE.duration, ease = SLIDE.ease })
+		anime.animate(slot_w, { value = 0, duration = motion.DRAG_SLIDE.duration, ease = motion.DRAG_SLIDE.ease })
 	end
 	-- From the window's left whatever the sidebar is doing, so they stay put as
 	-- it moves. (Only the tabs' own part takes the pointer.)
@@ -1175,7 +1228,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 							end,
 							direction = "row",
 							gap = ui.raw(TAB_GAP, "Zeron's gap between tabs"),
-							animate = motion.layout(SLIDE),
+							animate = motion.layout(motion.DRAG_SLIDE),
 							enter = if motion.reduced_now() then nil else { opacity = { 0, 1 }, duration = SLIDE.duration, ease = "out(3)" },
 							exit = if motion.reduced_now() then nil else { opacity = 0, duration = 120, ease = "out(3)" },
 						}),

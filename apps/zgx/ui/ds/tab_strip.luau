@@ -134,8 +134,8 @@ export type HighlightProps = {
 	hidden: (() -> boolean)?,
 }
 
--- The chosen tab's wash, under the tabs: one pill springing to the tab chosen
--- and to its width (ds/tabs' spring). It's made once the tabs up to it are
+-- The chosen tab's wash, under the tabs: one pill gliding to the tab chosen
+-- and to its width, as its tabs slide. It's made once the tabs up to it are
 -- measured, so it starts where it belongs; the tabs keep their own wash for
 -- the pointer's hover.
 function M.Highlight(props: HighlightProps): Node
@@ -169,12 +169,12 @@ function M.Highlight(props: HighlightProps): Node
 			rounded = props.rounded,
 			bg = "$zeron.selected.flat.bg",
 			pointer_events = "none",
-			x = motion.spring(ui.computed(function(): number
+			x = motion.tween(ui.computed(function(): number
 				return left_in(props.order(), props.width, chosen())
-			end), motion.TAB_SLIDE_SPRING),
-			w = motion.spring(ui.computed(function(): number
+			end), motion.DRAG_SLIDE),
+			w = motion.tween(ui.computed(function(): number
 				return props.width(chosen())
-			end), motion.TAB_SLIDE_SPRING),
+			end), motion.DRAG_SLIDE),
 			opacity = function(): number
 				return if props.hidden and props.hidden() then 0 else 1
 			end,

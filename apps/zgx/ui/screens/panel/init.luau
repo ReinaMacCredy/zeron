@@ -1613,7 +1613,7 @@ M.Panel = ui.component(function(props: Props): Node
 					end,
 					direction = "row",
 					gap = "$zeron.space.hair",
-					animate = motion.tab_slide(),
+					animate = motion.layout(motion.DRAG_SLIDE),
 				}),
 				-- (Only with a tab open, as Zeron's: the empty page is what it
 				-- opens. Here, after the last tab, while they all fit; pinned at

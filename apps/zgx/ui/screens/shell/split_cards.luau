@@ -3,7 +3,7 @@ local motion = require("@ds/motion")
 
 local M = {}
 
-local EASE_OUT = "cubicBezier(0,0,.58,1)"
+local EASE_OUT = motion.EASE_OUT
 local ENTER_MS, GROW_MS = 120, 160
 
 local function lerp(a: number, b: number, t: number): number

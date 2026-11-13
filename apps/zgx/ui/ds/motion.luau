@@ -128,6 +128,9 @@ end
 
 -- CSS `ease`: cubic-bezier(0.25, 0.1, 0.25, 1).
 M.EASE = "cubicBezier(.25,.1,.25,1)"
+-- Zeron's EASE_OUT, and what a drag slides on (its TAB_SLIDE).
+M.EASE_OUT = "cubicBezier(0,0,.58,1)"
+M.DRAG_SLIDE = { duration = 150, ease = M.EASE_OUT } :: TweenOptions
 -- The base, and the longest, in milliseconds; the sidebar's default width,
 -- the distance the base covers.
 M.BASE, M.LONGEST, M.SIDEBAR = 180, 240, 256
@@ -263,15 +266,6 @@ end
 -- and as it's let go.
 M.TAB_LIFT = 1.03
 M.TAB_LIFT_TWEEN = { duration = 120, ease = "out(3)" } :: TweenOptions
--- The tabs beside one moving, opening or closing slide over on a stiffer
--- spring, critically damped: quick, and still, with nothing to wobble. (The
--- tab itself comes and goes at once: a chat alone's tab is replaced on each
--- navigation, too often for an entrance.) A strip's chosen wash follows its
--- tab on this one too, so the two never drift apart.
-M.TAB_SLIDE_SPRING = { stiffness = 600, damping = 49 } :: SpringOptions
-function M.tab_slide(): { [string]: any }?
-	return M.layout { spring = anime.createSpring(M.TAB_SLIDE_SPRING) }
-end
 -- A tab carried near an end of its strip scrolls the strip under it, this
 -- far from the edge, at this many points a second, till the end.
 M.TAB_EDGE, M.TAB_EDGE_SPEED = 32, 700

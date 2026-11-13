@@ -314,6 +314,9 @@ export type Props = {
 -- Widths: Zeron's default, the inset either side, and the leading slot (a
 -- compact row's height); collapsed, the slot and its insets.
 local WIDE, PAD, SLOT = 256, 8, 30
+local function dark(): boolean
+	return string.find(ui.theme.kind(), "dark", 1, true) ~= nil
+end
 -- How far it resizes (Zeron's: 242 to 400, 256 by default).
 local MIN_W, MAX_W = 242, 400
 -- A section's title (Pinned, yours, the groups'): a short row over its
@@ -337,7 +340,7 @@ local SLIDE = { duration = 260, ease = "out(3)" }
 local FADE = { duration = 160 }
 -- Rows moving aside for a dragged one, and closing up after it (Zeron's
 -- TAB_SLIDE: 150 ms, easing out).
-local DRAG_SLIDE = { duration = 150, ease = "out(3)" }
+local DRAG_SLIDE = motion.DRAG_SLIDE
 -- How many of a group's sessions show before "Show N more" (the session
 -- open, and with `keep_active` those in a state, showing past them).
 local GROUP_FIRST = 5
@@ -701,6 +704,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- that point under the pointer, and a drop lands the row where the
 	-- preview was.
 	local grab_dy = 0
+	type Lift = { x: number, y: number, gx: number, gy: number, col: number, top: number, w: number, edge: number }
+	local lift = ui.use_state(nil :: Lift?)
 	-- A section being renamed (just made, or "Rename" chosen).
 	local section_dialog = ui.use_state(false)
 	local section_name = ui.use_state("")
@@ -2055,6 +2060,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				if shelved then
 					return nil
 				end
+				local el = row_ref:peek()
+				local r = if el then ui.window_rect(el) else nil
+				if r then
+					lift:set({ x = 0, y = 0, gx = 0, gy = 0, col = r.x, top = r.y, w = r.width, edge = r.x + r.width + PAD })
+				end
 				local from = if list_now then list_now() else list :: string
 				start_drag({ id = s.id, list = from, index = if at then at() else 1, h = session_h(cur(), by_at(), slim_now()) + session_gap(slim_now()) })
 				-- (The page's split shows where it can land.)
@@ -2062,26 +2072,82 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				split_carried:set(s.id)
 				return { session = s.id }
 			end,
-			-- The row as it stands, on the window's colour. (Nothing here eases: a drag's
-			-- preview has no clock for it.)
 			drag_preview = function()
 				local r = row_ref:peek()
-				return ui.row {
-					w = if r and r.width then r.width else room_now() - PAD * 2,
-					h = session_h(cur(), by_at(), slim_now()),
-					px = ui.raw(10, "Zeron's card's inset"),
-					items = if compact:peek() then "center" else "start",
-					pt = if compact:peek() then 0 else "$space.2",
-					rounded = "$radius.md",
-					bg = "$background",
-					shadow = "$shadow.sm",
-					line(label(cur().title)),
+				local w = if r and r.width then r.width else room_now() - PAD * 2
+				local h = session_h(cur(), by_at(), slim_now())
+				local function outside(): boolean
+					local l = lift:get()
+					return l ~= nil and l.x > l.edge
+				end
+				return ui.div {
+					w = w,
+					h = h,
+					ui.show(function(): boolean
+						return not outside()
+					end, ui.div(Glass.fill({
+						absolute = true,
+						x = function(): number
+							local l = lift:get()
+							return if l and l.x > 0 then l.col - (l.x - l.gx) else 0
+						end,
+						w = w,
+						h = h,
+						rounded = ui.raw(8, "Zeron's lifted row"),
+						shadow = "$shadow.md",
+						ui.row {
+							w_full = true,
+							h_full = true,
+							rounded = ui.raw(8, "Zeron's lifted row"),
+							bg = function(): string
+								return ui.raw(if dark() then "#ffffff0f" else "#0000000f", "Zeron's lifted row's wash .06")
+							end,
+							px = ui.raw(10, "Zeron's card's inset"),
+							items = if compact:peek() then "center" else "start",
+							pt = if compact:peek() then 0 else "$space.2",
+							line(label(cur().title)),
+						},
+					}))),
+					ui.show(outside, ui.row {
+						absolute = true,
+						w = ui.raw(216, "Zeron's tab ghost"),
+						h = ui.raw(32, "Zeron's tab ghost"),
+						px = ui.raw(10, "Zeron's tab ghost"),
+						gap = "$space.2",
+						items = "center",
+						rounded = ui.raw(6, "Zeron's CONTROL_RADIUS"),
+						bg = "$surface.raised",
+						border = 1,
+						border_color = "$border.strong",
+						opacity = 0.85,
+						color = "$text.primary",
+						agent(s, function(): boolean
+							return true
+						end, cur),
+						ui.text { cur().title, text_size = ui.raw(12, "Zeron's tab ghost"), wrap = false, grow = 1, min_w = 0 },
+					}),
 				}
 			end,
-			on_drag_end = function()
+			drag_preview_in_window = true,
+			on_drag_move = function(_: any, e: any)
+				local l = lift:peek()
+				if l then
+					lift:set({ x = e.x, y = e.y, gx = e.grab_x, gy = e.grab_y, col = l.col, top = l.top, w = l.w, edge = l.edge })
+				end
+			end,
+			on_drag_end = function(_: any, accepted: boolean)
 				split_dragging:set(false)
 				split_carried:set("")
 				end_drag()
+				local l = lift:peek()
+				lift:set(nil)
+				local el = row_ref:peek()
+				local r = if el then ui.window_rect(el) else nil
+				if accepted or not l or not r or l.x <= 0 or motion.reduced_now() then
+					return
+				end
+				local x = if l.x > l.edge then l.x - l.gx else l.col
+				anime.animate(el, { x = { x - r.x, 0 }, y = { l.y - l.gy - r.y, 0 }, duration = DRAG_SLIDE.duration, ease = DRAG_SLIDE.ease })
 			end,
 			body,
 		}
@@ -2892,35 +2958,35 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local clock = ui.use_state(0)
 	-- (`css`: CSS `ease`, ds/motion's EASE, the column motion's curve, for
 	-- rows taking new places; else easing out.)
-	type Anim = { from: number, to: number, at: number, dur: number, delay: number, on_done: (() -> ())?, css: boolean? }
-	-- cubic-bezier(.25, .1, .25, 1) at progress `x`: its time found by
+	type Anim = { from: number, to: number, at: number, dur: number, delay: number, on_done: (() -> ())?, css: boolean?, drag: boolean? }
+	-- cubic-bezier(x1, y1, x2, y2) at progress `x`: its time found by
 	-- Newton's method (bisecting where the slope is flat), then its value.
-	local function css_ease(x: number): number
+	local function bezier(x: number, x1: number, y1: number, x2: number, y2: number): number
 		local function bez(t: number, a: number, b: number): number
 			local u = 1 - t
 			return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t
 		end
 		local t = x
 		for _ = 1, 8 do
-			local err = bez(t, 0.25, 0.25) - x
+			local err = bez(t, x1, x2) - x
 			if math.abs(err) < 1e-4 then
 				break
 			end
 			local u = 1 - t
-			local slope = 3 * u * u * 0.25 + 6 * u * t * (0.25 - 0.25) + 3 * t * t * (1 - 0.25)
+			local slope = 3 * u * u * x1 + 6 * u * t * (x2 - x1) + 3 * t * t * (1 - x2)
 			if math.abs(slope) < 1e-6 then
 				break
 			end
 			t = math.clamp(t - err / slope, 0, 1)
 		end
-		return bez(t, 0.1, 1)
+		return bez(t, y1, y2)
 	end
 	local function value(a: Anim, t: number): number
 		if a.dur <= 0 then
 			return a.to
 		end
 		local p = math.clamp((t - a.at - a.delay) / a.dur, 0, 1)
-		p = if a.css then css_ease(p) else 1 - (1 - p) ^ 3
+		p = if a.css then bezier(p, 0.25, 0.1, 0.25, 1) elseif a.drag then bezier(p, 0, 0, 0.58, 1) else 1 - (1 - p) ^ 3
 		return a.from + (a.to - a.from) * p
 	end
 	local function still(v: number): Anim
@@ -2969,6 +3035,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				onUpdate = settle,
 			})
 		end
+		return n
+	end
+	local function slide(a: Anim?, to: number, on_done: (() -> ())?): Anim
+		local n = anim(a, to, DRAG_SLIDE.duration, 0, on_done)
+		n.drag = true
 		return n
 	end
 
@@ -3154,7 +3225,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			elseif not g.closing then
 				g.closing = true
 				local gone = g
-				g.a = anim(g.a, 0, DRAG_SLIDE.duration, 0, function()
+				g.a = slide(g.a, 0, function()
 					if gone.closing then
 						local kept: { Gap } = {}
 						for _, other in gaps do
@@ -3171,12 +3242,12 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		if o and o.list ~= "regular" then
 			if keep then
 				keep.closing = false
-				keep.a = anim(keep.a, 1, DRAG_SLIDE.duration)
+				keep.a = slide(keep.a, 1)
 			else
-				table.insert(gaps, { list = o.list, index = o.index, h = d.h, a = anim(still(0), 1, DRAG_SLIDE.duration), closing = false })
+				table.insert(gaps, { list = o.list, index = o.index, h = d.h, a = slide(still(0), 1), closing = false })
 			end
 		end
-		leaving = anim(leaving, if o then 1 else 0, DRAG_SLIDE.duration)
+		leaving = slide(leaving, if o then 1 else 0)
 		gaps_changed()
 	end
 	-- What a drag brings into the list (Pinned's drop zone while nothing is
