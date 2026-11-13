@@ -51,6 +51,10 @@ async fn play(prompt: &str, request_input: &Ask, answers: &Answers) {
     } else if prompt.contains("two commands") {
         ask("first", approval::command("Mock", "ls")).await;
         ask("second", approval::command("Mock", "pwd")).await;
+    } else if let Some(command) = prompt.strip_prefix("auto: ") {
+        ask("auto", approval::command("Mock", command)).await;
+    } else if prompt.contains("auto edit") {
+        ask("edit", approval::edit("Mock", &["a.rs"])).await;
     } else if prompt.contains("one command") {
         ask("next turn", approval::command("Mock", "whoami")).await;
     } else if prompt.contains("plan") {
@@ -94,6 +98,16 @@ impl Harness for ApprovalHarness {
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
+    }
+    async fn run_one_shot(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        instructions: &'static str,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        zeron_harness::mock::MockHarness { script: Vec::new() }
+            .run_one_shot(request, controls, instructions)
+            .await
     }
     async fn run(
         &self,
@@ -192,6 +206,10 @@ async fn rig_with(lead_access: &str, steerable: bool) -> Rig {
 }
 
 fn start_child(core: &EngineCore, prompt: &str) {
+    start_child_with(core, prompt, AccessMode::Supervised);
+}
+
+fn start_child_with(core: &EngineCore, prompt: &str, access: AccessMode) {
     let handle = core.doc_host.open("child").expect("open chat");
     handle
         .doc()
@@ -206,7 +224,7 @@ fn start_child(core: &EngineCore, prompt: &str) {
                     model_options: Default::default(),
                     cwd: "/tmp".into(),
                     sandbox: SandboxLevel::WorkspaceWrite,
-                    access: AccessMode::Supervised,
+                    access,
                     plan: false,
                     auto_approve: false,
                     attachments: Vec::new(),
@@ -528,5 +546,107 @@ async fn a_run_grant_ends_with_its_turn_on_a_runtime_that_takes_the_next() {
             .unwrap()
     );
     wait_for(|| answered(&rig).len() == 3, "the next turn's answer").await;
+    rig.core.shutdown().await;
+}
+
+/// The Auto check's wait in these tests: the mock answers at once, and one
+/// that never answers is given up on quickly.
+fn short_auto_check() {
+    // SAFETY: every test here that reads it sets the same value.
+    unsafe { std::env::set_var("ZERON_AUTO_REVIEW_TIMEOUT_MS", "1500") };
+}
+
+fn answers_of(core: &EngineCore, request_id: &str) -> Vec<Vec<String>> {
+    core.doc_host
+        .open("child")
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|entry| entry.parts.clone())
+        .filter_map(|part| match part {
+            MessagePart::Input {
+                request_id: id,
+                answers,
+                ..
+            } if id == request_id => answers,
+            _ => None,
+        })
+        .flatten()
+        .map(|answer| answer.labels)
+        .collect()
+}
+
+#[tokio::test]
+async fn auto_lets_through_what_its_check_allows_and_records_it_as_answered_by_auto() {
+    short_auto_check();
+    let rig = rig("full-access").await;
+    start_child_with(
+        &rig.core,
+        "auto: cargo test auto-allow",
+        AccessMode::AutoReview,
+    );
+    wait_for(|| idle(&rig.core), "the child's run to finish").await;
+    assert_eq!(answered(&rig), [("auto".into(), true)]);
+    wait_for(|| inputs(&rig.core).len() == 1, "the recorded request").await;
+    let (request_id, questions, _) = inputs(&rig.core).remove(0);
+    assert_eq!(questions[0].header, "Approve command");
+    wait_for(
+        || !answers_of(&rig.core, &request_id).is_empty(),
+        "its answer",
+    )
+    .await;
+    assert_eq!(
+        answers_of(&rig.core, &request_id),
+        [vec![
+            "Yes".to_owned(),
+            zeron_proto::APPROVAL_BY_AUTO.to_owned()
+        ]]
+    );
+    assert!(open_inputs(&rig.core).is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn auto_asks_the_person_when_its_check_says_ask_answers_garbage_or_never_answers() {
+    short_auto_check();
+    for command in ["rm -rf build", "make auto-garbage", "deploy auto-hang"] {
+        let rig = rig("full-access").await;
+        start_child_with(
+            &rig.core,
+            &format!("auto: {command}"),
+            AccessMode::AutoReview,
+        );
+        wait_for(|| open_inputs(&rig.core).len() == 1, "the command card").await;
+        assert!(
+            answered(&rig).is_empty(),
+            "{command}: nothing answered for the person"
+        );
+        let (request_id, questions) = open_inputs(&rig.core).remove(0);
+        assert!(questions[0].question.contains(command), "{command}");
+        assert!(
+            rig.core
+                .sessions
+                .respond_input("child", &request_id, Vec::new())
+                .unwrap()
+        );
+        wait_for(|| idle(&rig.core), "the child's run to finish").await;
+        assert_eq!(answered(&rig), [("auto".into(), false)], "{command}");
+        rig.core.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn auto_applies_an_edit_without_asking_anyone() {
+    short_auto_check();
+    let rig = rig("full-access").await;
+    start_child_with(&rig.core, "auto edit", AccessMode::AutoReview);
+    wait_for(|| idle(&rig.core), "the child's run to finish").await;
+    assert_eq!(answered(&rig), [("edit".into(), true)]);
+    assert!(
+        inputs(&rig.core).is_empty(),
+        "an edit is covered, not checked"
+    );
     rig.core.shutdown().await;
 }

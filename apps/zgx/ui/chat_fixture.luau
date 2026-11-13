@@ -1805,6 +1805,17 @@ ui.command {
 		seed()
 	end,
 }
+-- The agent's catalog row naming the access modes it takes: Auto among them, or not.
+local test_access_modes = ui.state("test_access_modes", {} :: { string })
+ui.command {
+	id = "agent_access_modes",
+	title = "The agent's access modes",
+	run = function()
+		local cat = table.clone(store.catalog:peek())
+		cat.harnesses = { { id = "claude-code", label = "Claude", mark = "claude", access_modes = test_access_modes:peek() } }
+		store.catalog:set(cat)
+	end,
+}
 -- Sessions holding only a handoff: from another chat (s5), and from another
 -- agent, its seam (s6); and the open session's transcript not come yet.
 ui.command {

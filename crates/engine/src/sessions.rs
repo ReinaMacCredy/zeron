@@ -17,7 +17,7 @@
 //! Every dying path must instead carry its own visible error (child crash with stderr,
 //! spawn failure, stream error, engine-restart recovery).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
@@ -178,6 +178,50 @@ fn raise_allowance(run: &RunHandle, access: AccessMode, keep: Option<&str>) -> b
         });
     }
     true
+}
+
+/// Puts a request to the person (or the lead), unless the run's allowance
+/// covers it by now: then it's answered yes at once, never shown.
+fn ask_person(
+    pending: &PendingInputs,
+    allowance: &Mutex<AccessMode>,
+    events: &mpsc::UnboundedSender<AgentEvent>,
+    questions: Vec<UserInputQuestion>,
+    mut tx: oneshot::Sender<Vec<UserInputAnswer>>,
+) {
+    let mut waiting = lock(pending);
+    if zeron_harness::approval::covered(*lock(allowance), &questions) {
+        let _ = tx.send(zeron_harness::approval::allow_all(&questions));
+        return;
+    }
+    let (answer_tx, answer_rx) = oneshot::channel();
+    let request_id = new_id();
+    waiting.insert(
+        request_id.clone(),
+        PendingInput {
+            person: asks_person(&questions),
+            secret: questions.iter().any(UserInputQuestion::is_secret),
+            tx: answer_tx,
+            questions: questions.clone(),
+        },
+    );
+    drop(waiting);
+    let _ = events.send(AgentEvent::InputRequested {
+        request_id: request_id.clone(),
+        questions,
+    });
+    let pending = pending.clone();
+    let events = events.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            // A dropped resolver stays an error for the harness, as before.
+            answer = answer_rx => if let Ok(answer) = answer { let _ = tx.send(answer); },
+            _ = tx.closed() => {
+                lock(&pending).remove(&request_id);
+                let _ = events.send(AgentEvent::InputResolved { request_id, answers: Some(Vec::new()) });
+            }
+        }
+    });
 }
 
 pub(crate) fn asks_person(questions: &[UserInputQuestion]) -> bool {
@@ -357,6 +401,8 @@ struct RunHandle {
     engine_tx: mpsc::UnboundedSender<AgentEvent>,
     pending_inputs: PendingInputs,
     allowance: Arc<Mutex<AccessMode>>,
+    /// Requests the Auto check allowed, recorded as asked and answered.
+    auto_answered: Arc<Mutex<HashSet<String>>>,
     /// Steers accepted into the mailbox but not yet confirmed by a `Steered`
     /// event — the at-least-once ledger. A run can die with accepted steers
     /// still in its mailbox (idle reaper vs. a routed send; a mid-turn error
@@ -639,6 +685,7 @@ impl RunSetup {
         harness: Arc<dyn Harness>,
         request: &RunRequest,
         mode: RunMode,
+        review: Option<crate::auto_review::Review>,
     ) -> Self {
         let (steerable, accepts_input, capacity, credential, binary, side_chats_only) = match mode {
             RunMode::Turn {
@@ -656,6 +703,8 @@ impl RunSetup {
         let pending = pending_inputs.clone();
         let allowance = Arc::new(Mutex::new(request.access));
         let live_allowance = allowance.clone();
+        let auto_answered: Arc<Mutex<HashSet<String>>> = Arc::default();
+        let answered_by_auto = auto_answered.clone();
         let events = engine_tx.clone();
         let interrupt_token = CancellationToken::new();
         let turn = TurnControl::default();
@@ -670,44 +719,44 @@ impl RunSetup {
             realtime,
             execution_lease: None,
             request_input: Box::new(move |questions: Vec<UserInputQuestion>| {
-                let (mut tx, rx) = oneshot::channel();
-                if accepts_input {
-                    let mut waiting = lock(&pending);
-                    if zeron_harness::approval::covered(*lock(&live_allowance), &questions) {
-                        let _ = tx.send(zeron_harness::approval::allow_all(&questions));
-                        return rx;
-                    }
-                    let (answer_tx, answer_rx) = oneshot::channel();
-                    let request_id = new_id();
-                    waiting.insert(
-                        request_id.clone(),
-                        PendingInput {
-                            person: asks_person(&questions),
-                            secret: questions.iter().any(UserInputQuestion::is_secret),
-                            tx: answer_tx,
-                            questions: questions.clone(),
-                        },
-                    );
-                    drop(waiting);
-                    let _ = events.send(AgentEvent::InputRequested {
-                        request_id: request_id.clone(),
-                        questions,
-                    });
-                    let pending = pending.clone();
-                    let events = events.clone();
-                    tokio::spawn(async move {
-                        tokio::select! {
-                            // A dropped resolver stays an error for the harness, as before.
-                            answer = answer_rx => if let Ok(answer) = answer { let _ = tx.send(answer); },
-                            _ = tx.closed() => {
-                                lock(&pending).remove(&request_id);
-                                let _ = events.send(AgentEvent::InputResolved { request_id, answers: Some(Vec::new()) });
-                            }
-                        }
-                    });
-                } else {
+                let (tx, rx) = oneshot::channel();
+                if !accepts_input {
                     let _ = tx.send(Vec::new());
+                    return rx;
                 }
+                // An Auto run's approval goes to its check first; what the
+                // check doesn't allow, in time, comes to the person.
+                let reviewed = review.clone().filter(|_| {
+                    let allowance = *lock(&live_allowance);
+                    allowance == AccessMode::AutoReview
+                        && !zeron_harness::approval::covered(allowance, &questions)
+                        && zeron_harness::approval::covered(AccessMode::FullAccess, &questions)
+                });
+                let Some(review) = reviewed else {
+                    ask_person(&pending, &live_allowance, &events, questions, tx);
+                    return rx;
+                };
+                let (pending, allowance, events) =
+                    (pending.clone(), live_allowance.clone(), events.clone());
+                let answered_by_auto = answered_by_auto.clone();
+                tokio::spawn(async move {
+                    if review(questions.clone()).await {
+                        let request_id = new_id();
+                        lock(&answered_by_auto).insert(request_id.clone());
+                        let _ = tx.send(zeron_harness::approval::allow_all(&questions));
+                        let answers = zeron_harness::approval::allow_all_by_auto(&questions);
+                        let _ = events.send(AgentEvent::InputRequested {
+                            request_id: request_id.clone(),
+                            questions,
+                        });
+                        let _ = events.send(AgentEvent::InputResolved {
+                            request_id,
+                            answers: Some(answers),
+                        });
+                    } else {
+                        ask_person(&pending, &allowance, &events, questions, tx);
+                    }
+                });
                 rx
             }),
             steering: steer_rx,
@@ -738,6 +787,7 @@ impl RunSetup {
                 engine_tx,
                 pending_inputs,
                 allowance,
+                auto_answered,
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 fork_history_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 computer: RunComputer::new(),
@@ -2321,6 +2371,18 @@ impl SessionsEngine {
             resume_injected = request.resume.is_some();
         }
         self.inner.inject_branch(chat_id, &mut request);
+        // A client from before Auto reads an Auto chat's config as none and
+        // sends its default, full access: the chat's own Auto holds.
+        if request.access > AccessMode::AutoReview
+            && self
+                .inner
+                .workspace()
+                .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+                .and_then(|chat| chat.config)
+                .is_some_and(|config| config.access == AccessMode::AutoReview)
+        {
+            request.access = AccessMode::AutoReview;
+        }
         // A continuation only means something to the session that holds the
         // turn: a run starting fresh gets the original prompt.
         let revival = revival.map(|mut revival| {
@@ -2332,6 +2394,36 @@ impl SessionsEngine {
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
         let title_instance = instance_id.as_ref().map(|_| harness.clone());
         let default_instance = instance_id.is_none();
+        let review: crate::auto_review::Review = {
+            let registry = self.inner.registry.clone();
+            let instance = title_instance.clone();
+            let folder = request.cwd.clone();
+            let opening = request.prompt.clone();
+            let doc = handle.clone();
+            Arc::new(move |questions| {
+                let latest = doc
+                    .doc()
+                    .read_entries()
+                    .ok()
+                    .and_then(|entries| {
+                        entries
+                            .iter()
+                            .rev()
+                            .find(|entry| entry.role == MessageRole::User)
+                            .map(entry_text)
+                    })
+                    .filter(|text| !text.trim().is_empty())
+                    .unwrap_or_else(|| opening.clone());
+                Box::pin(crate::auto_review::review(
+                    registry.clone(),
+                    harness_id,
+                    instance.clone(),
+                    questions,
+                    folder.clone(),
+                    latest,
+                ))
+            })
+        };
 
         let RunSetup {
             handle: mut run,
@@ -2349,6 +2441,7 @@ impl SessionsEngine {
                 binary,
                 side_chats_only,
             },
+            Some(review),
         );
         controls.tool_server = self.inner.tool_server_for(
             chat_id,
@@ -3841,6 +3934,7 @@ impl SessionsEngine {
             harness.clone(),
             &request,
             RunMode::Compaction,
+            None,
         );
         let cancel = setup.handle.interrupt_token.clone();
         let since = now_ms();
@@ -4197,6 +4291,7 @@ impl SessionsEngine {
             harness.clone(),
             &request,
             RunMode::Compaction,
+            None,
         );
         let interrupt_token = run.interrupt_token.clone();
         let _cancel_on_drop = interrupt_token.clone().drop_guard();
@@ -9907,8 +10002,10 @@ async fn drive_run(
         if let AgentEvent::InputRequested { request_id, .. } = &event {
             let pending = lock(&inner.runs)
                 .get(&chat_id)
-                .map(|h| h.pending_inputs.clone());
-            let known = pending.is_some_and(|p| lock(&p).contains_key(request_id));
+                .map(|h| (h.pending_inputs.clone(), h.auto_answered.clone()));
+            let known = pending.is_some_and(|(p, auto)| {
+                lock(&p).contains_key(request_id) || lock(&auto).contains(request_id)
+            });
             if !known {
                 tracing::warn!(
                     chat = %chat_id,
@@ -10393,8 +10490,11 @@ async fn drive_run(
                 questions,
             } => {
                 // Known-id guaranteed: the unknown-id twin was dropped above,
-                // before the parked gate.
-                if asks_person(questions) {
+                // before the parked gate. One the Auto check allowed asks no one.
+                let by_auto = lock(&inner.runs)
+                    .get(&chat_id)
+                    .is_some_and(|h| lock(&h.auto_answered).contains(request_id));
+                if asks_person(questions) && !by_auto {
                     inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
                     if let Some(host) = inner.doc_host() {
                         host.offer_input_wakes(&chat_id, request_id, questions);
@@ -10402,6 +10502,9 @@ async fn drive_run(
                 }
             }
             AgentEvent::InputResolved { request_id, .. } => {
+                if let Some(h) = lock(&inner.runs).get(&chat_id) {
+                    lock(&h.auto_answered).remove(request_id);
+                }
                 let question_open = inner.awaits_person(&chat_id, &run_id, Some(request_id));
                 let status = if question_open {
                     SessionStatus::AwaitingInput

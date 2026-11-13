@@ -3248,6 +3248,11 @@ mod tests {
             AccessMode::AutoAcceptEdits
         );
         assert_eq!(config(r#","access":"supervised""#), AccessMode::Supervised);
+        assert_eq!(config(r#","access":"auto-review""#), AccessMode::AutoReview);
+        assert_eq!(
+            config(r#","access":"ask-the-moon""#),
+            AccessMode::Supervised
+        );
         let written = serde_json::to_value(ChatConfig {
             access: AccessMode::Supervised,
             ..serde_json::from_str(r#"{"harness":"codex","model":null,"reasoning":null,"sandbox":"workspace-write","permissionMode":"full"}"#).unwrap()

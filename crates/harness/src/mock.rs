@@ -134,6 +134,32 @@ fn compact_knob_run(
     .boxed()
 }
 
+/// The Auto access mode's check, scripted by the action's words:
+/// `auto-allow` ALLOW, `auto-garbage` neither word, `auto-hang` no answer
+/// at all; anything else ASK.
+fn auto_review_reply(prompt: &str) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    if prompt.contains("auto-hang") {
+        return futures::stream::pending().boxed();
+    }
+    let reply = if prompt.contains("auto-allow") {
+        "ALLOW"
+    } else if prompt.contains("auto-garbage") {
+        "Looks fine to me, go ahead."
+    } else {
+        "ASK"
+    };
+    futures::stream::iter([
+        Ok(AgentEvent::TextDelta { text: reply.into() }),
+        Ok(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: None,
+        }),
+    ])
+    .boxed()
+}
+
 fn uuid_like() -> String {
     format!(
         "{:x}",
@@ -309,6 +335,9 @@ impl Harness for MockHarness {
         controls: RunControls,
         instructions: &'static str,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        if instructions == crate::AUTO_REVIEW_INSTRUCTIONS {
+            return Ok(auto_review_reply(&request.prompt));
+        }
         // The demo run calls tools, which a commit message's one-shot refuses.
         if instructions == crate::COMMIT_MESSAGE_INSTRUCTIONS {
             return Ok(futures::stream::iter([

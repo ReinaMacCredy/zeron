@@ -927,7 +927,10 @@ impl From<zeron_proto::AccessMode> for AccessMode {
     fn from(mode: zeron_proto::AccessMode) -> Self {
         match mode {
             zeron_proto::AccessMode::Supervised => Self::Supervised,
-            zeron_proto::AccessMode::AutoAcceptEdits => Self::AutoAcceptEdits,
+            // The phone's picker has no Auto yet: an Auto chat reads as the edits it applies unasked.
+            zeron_proto::AccessMode::AutoAcceptEdits | zeron_proto::AccessMode::AutoReview => {
+                Self::AutoAcceptEdits
+            }
             zeron_proto::AccessMode::FullAccess => Self::FullAccess,
         }
     }

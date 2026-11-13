@@ -122,7 +122,7 @@ export type Props = {
 	-- A turn is running: Send becomes Stop while the draft is empty, and
 	-- queues what is typed.
 	running: State<boolean>?,
-	-- What the agent may do unasked: "supervised", "edits" or "full"; and
+	-- What the agent may do unasked: "supervised", "edits", "auto" or "full"; and
 	-- plan mode (explore and propose before changing anything).
 	access: State<string?>?,
 	plan: State<boolean>?,
@@ -304,6 +304,9 @@ export type Props = {
 	refs: (() -> string)?,
 	field: any?,
 	prediction: (() -> string?)?,
+	-- The access modes the chat's agent takes ("supervised", "edits", "auto",
+	-- "full"); nil while it isn't known: every one.
+	access_modes: (() -> { string }?)?,
 	limit: (() -> any)?,
 	side_tab: any?,
 	pills: Node?,
@@ -426,7 +429,8 @@ end
 -- The access modes, as Zeron offers them; their icons (Central Icons,
 -- centralicons.com, round outlined, radius 2, stroke 1.5) say what each
 -- does: it waits for you (a raised hand), edits go through (a pencil with
--- sparkles), nothing is held back (an open padlock). (Made as they're
+-- sparkles), a model checks the rest first (a shield's check), nothing is
+-- held back (an open padlock). (Made as they're
 -- read, in the locale's words.)
 local function ACCESS(): { Dropdown.Item }
 	return {
@@ -437,6 +441,10 @@ local function ACCESS(): { Dropdown.Item }
 	worded({ value = "edits", icon = "access-edits" }, {
 		label = "ds.composer.access.edits",
 		description = "ds.composer.access.edits_hint",
+	}),
+	worded({ value = "auto", icon = "shield-check" }, {
+		label = "ds.composer.access.auto",
+		description = "ds.composer.access.auto_hint",
 	}),
 	worded({ value = "full", icon = "access-full" }, {
 		label = "ds.composer.access.full",
@@ -1827,7 +1835,20 @@ return ui.component(function(props: Props): Node
 				end
 				else nil,
 			value = props.access,
-			items = ACCESS,
+			items = function(): { Dropdown.Item }
+				local all = ACCESS()
+				local offered = if props.access_modes then props.access_modes() else nil
+				if offered == nil then
+					return all
+				end
+				local out: { Dropdown.Item } = {}
+				for _, item in all do
+					if table.find(offered, (item :: any).value) then
+						table.insert(out, item)
+					end
+				end
+				return out
+			end,
 			tone = "chip",
 			label = locale.t("ds.composer.access.label") :: any,
 			search = false,

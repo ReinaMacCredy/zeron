@@ -2154,6 +2154,7 @@ fn access_modes_value(modes: &Json) -> Value {
     let named = modes.as_array().into_iter().flatten().filter_map(|m| match m.as_str()? {
         "supervised" => Some("supervised"),
         "auto-accept-edits" => Some("edits"),
+        "auto-review" => Some("auto"),
         "full-access" => Some("full"),
         _ => None,
     });
@@ -4534,6 +4535,7 @@ fn merged_config(config: &Json, args: &Value) -> Json {
         match access.as_str() {
             "supervised" => c["access"] = json!("supervised"),
             "edits" => c["access"] = json!("auto-accept-edits"),
+            "auto" => c["access"] = json!("auto-review"),
             _ => {
                 if let Some(map) = c.as_object_mut() {
                     map.remove("access");
@@ -8120,6 +8122,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool) -> Va
     let access = match config["access"].as_str() {
         Some("supervised") => "supervised",
         Some("auto-accept-edits") => "edits",
+        Some("auto-review") => "auto",
         _ => "full",
     };
     let fast = fast_in(&config["modelOptions"]);

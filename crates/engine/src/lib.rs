@@ -39,6 +39,7 @@ pub fn build_id() -> &'static str {
 }
 pub mod auth;
 mod auto_compact;
+mod auto_review;
 mod background_output;
 mod change_request_store;
 pub mod change_requests;

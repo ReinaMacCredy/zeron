@@ -517,6 +517,8 @@ return {
 	["ds.composer.access.edits_hint"] = "Apply edits, ask before other actions.",
 	["ds.composer.access.full"] = "Full access",
 	["ds.composer.access.full_hint"] = "Run commands and edits without asking.",
+	["ds.composer.access.auto"] = "Auto",
+	["ds.composer.access.auto_hint"] = "A model approves safe actions; asks you about the rest.",
 	["ds.composer.plan.mode"] = "Plan mode",
 	["ds.composer.plan.hint"] = "Explore and propose a plan before changing anything.",
 	["ds.composer.plan.short"] = "Plan",

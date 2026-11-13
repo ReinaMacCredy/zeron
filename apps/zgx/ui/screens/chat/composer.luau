@@ -1612,6 +1612,14 @@ local function Composer(): Node
 			menus_below = shown_new,
 			running = running,
 			access = access,
+			access_modes = function(): { string }?
+				local row = harness_row()
+				local modes = if row then row.access_modes else nil
+				if modes == nil then
+					return nil
+				end
+				return if #modes > 0 then modes else { "full" }
+			end,
 			plan = plan,
 			prediction = function(): string?
 				local s = open()

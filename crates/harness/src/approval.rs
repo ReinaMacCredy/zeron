@@ -20,7 +20,7 @@ pub enum Action {
 pub fn allowed_without_asking(access: AccessMode, action: Action) -> bool {
     match access {
         AccessMode::FullAccess => true,
-        AccessMode::AutoAcceptEdits => action == Action::Edit,
+        AccessMode::AutoAcceptEdits | AccessMode::AutoReview => action == Action::Edit,
         AccessMode::Supervised => false,
     }
 }
@@ -69,6 +69,17 @@ pub fn allow_all(questions: &[UserInputQuestion]) -> Vec<UserInputAnswer> {
         .map(|q| UserInputAnswer {
             question_id: q.id.clone(),
             labels: vec![ALLOW.into()],
+        })
+        .collect()
+}
+
+/// The yes [`allow_all`] gives, recorded as the Auto access mode's.
+pub fn allow_all_by_auto(questions: &[UserInputQuestion]) -> Vec<UserInputAnswer> {
+    questions
+        .iter()
+        .map(|q| UserInputAnswer {
+            question_id: q.id.clone(),
+            labels: vec![ALLOW.into(), zeron_proto::APPROVAL_BY_AUTO.into()],
         })
         .collect()
 }
@@ -147,6 +158,8 @@ mod tests {
         assert!(allowed_without_asking(AutoAcceptEdits, Action::Edit));
         assert!(!allowed_without_asking(AutoAcceptEdits, Action::Other));
         assert!(!allowed_without_asking(Supervised, Action::Edit));
+        assert!(allowed_without_asking(AutoReview, Action::Edit));
+        assert!(!allowed_without_asking(AutoReview, Action::Other));
     }
 
     #[test]

@@ -230,6 +230,7 @@ fn access_id(mode: AccessMode) -> &'static str {
     match mode {
         AccessMode::Supervised => "supervised",
         AccessMode::AutoAcceptEdits => "edits",
+        AccessMode::AutoReview => "auto",
         AccessMode::FullAccess => "full",
     }
 }
@@ -238,6 +239,7 @@ fn access_of(id: &str) -> Option<AccessMode> {
     match id {
         "supervised" => Some(AccessMode::Supervised),
         "edits" => Some(AccessMode::AutoAcceptEdits),
+        "auto" => Some(AccessMode::AutoReview),
         "full" => Some(AccessMode::FullAccess),
         _ => None,
     }

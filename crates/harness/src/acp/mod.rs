@@ -4353,7 +4353,7 @@ fn prompt_turn_with_context(
 fn mode_preferences(mode: zeron_proto::AccessMode) -> &'static [&'static str] {
     match mode {
         zeron_proto::AccessMode::Supervised => &["default", "ask", "askPermissions", "read-only"],
-        zeron_proto::AccessMode::AutoAcceptEdits => {
+        zeron_proto::AccessMode::AutoAcceptEdits | zeron_proto::AccessMode::AutoReview => {
             &["acceptEdits", "accept_edits", "auto_edit", "auto", "agent"]
         }
         zeron_proto::AccessMode::FullAccess => &[

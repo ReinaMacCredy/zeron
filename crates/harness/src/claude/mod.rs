@@ -297,6 +297,7 @@ fn option_is_on(options: &serde_json::Map<String, Value>, key: &str) -> bool {
 fn access_permission_mode(request: &RunRequest) -> &'static str {
     match request.access {
         AccessMode::AutoAcceptEdits => "acceptEdits",
+        AccessMode::AutoReview => "auto",
         AccessMode::Supervised | AccessMode::FullAccess => "default",
     }
 }
@@ -315,9 +316,10 @@ fn permission_mode(request: &RunRequest) -> &'static str {
 fn strictness(mode: &str) -> u8 {
     match mode {
         "bypassPermissions" => 0,
-        "acceptEdits" => 1,
-        "default" => 2,
-        _ => 3, // plan
+        "auto" => 1,
+        "acceptEdits" => 2,
+        "default" => 3,
+        _ => 4, // plan
     }
 }
 
@@ -2835,6 +2837,8 @@ mod tests {
         let auto = args(AccessMode::AutoAcceptEdits);
         assert_eq!(mode_of(&auto).as_deref(), Some("acceptEdits"));
         assert!(!auto.iter().any(|a| a == "--dangerously-skip-permissions"));
+        let review = args(AccessMode::AutoReview);
+        assert_eq!(mode_of(&review).as_deref(), Some("auto"));
         let full = args(AccessMode::FullAccess);
         assert_eq!(mode_of(&full).as_deref(), Some("default"));
         assert!(!full.iter().any(|a| a == "--dangerously-skip-permissions"));
