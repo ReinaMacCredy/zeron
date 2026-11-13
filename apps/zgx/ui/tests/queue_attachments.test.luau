@@ -44,16 +44,20 @@ test("a queued message's files show as chips while it's edited, and saving keeps
 	expect(app:has('role:button "Remove shot.png"')).to_be(false)
 end)
 
-test("a queued message's picture mention is a chip while it's edited, and saved as its link", function()
+test("a queued message's picture mention is a chip while it's edited, saved as its link, and one added meanwhile numbered past it", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
 	open(app, "s1")
 	app:set_state("test_queued_words", "see [Image 1](zeron-image:1) here")
 	editing(app)
 	expect(app:text('role:textbox "Message"')).never.to_contain("zeron-image")
+	-- A picture added meanwhile is numbered past it, never a second Image 1.
+	app:command("drop_pictures")
+	settle(app)
+	expect(app:has('role:button "Remove Image 4.png"')).to_be(true)
 	app:click('role:button "Save to queue"')
 	settle(app)
-	expect(app:state("calls")).to_contain("queue_finish:s1:q2:commit:see [Image 1](zeron-image:1) here:")
+	expect(app:state("calls")).to_contain("queue_finish:s1:q2:commit:see [Image 1](zeron-image:1) here [spin.gif]")
 end)
 
 test("a file taken off while editing goes, and the draft's own chips come back", function()

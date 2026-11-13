@@ -11,6 +11,7 @@
 
 local Quote = require("@ds/quote")
 local references = require("@ds/references")
+local AttachmentMentions = require("@ds/attachment_mentions")
 local Annotation = require("@ds/annotation")
 local sessions = require("@account/sessions")
 local agents = require("@account/agents")
@@ -805,6 +806,10 @@ local function next_number(key: string): number
 	local top = numbered:peek()[key] or 0
 	for _, item in cargo_in(key) do
 		top = math.max(top, item.number or 0)
+	end
+	-- (A queued message being edited mentions its own, which no chip here numbers.)
+	for _, m in AttachmentMentions.mentions(references.encode(M.refs_key(key), M.draft_peek(key).text)) do
+		top = math.max(top, m.index)
 	end
 	return top + 1
 end
