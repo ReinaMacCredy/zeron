@@ -2354,6 +2354,7 @@ local function Transcript(props: Props): Node
 			ui.div {
 				relative = true,
 				shrink = 0,
+				items = "start",
 				h = JUMP_H,
 				w = function(): number | string
 					local w = jump_w:get()
