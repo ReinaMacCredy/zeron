@@ -109,7 +109,8 @@ fn tool_switch(method: &str, params: &Value) -> Option<&'static str> {
             "renameChat" => "set_thread_title",
             "setChatArchived" => "set_thread_archived",
             "setChatSettled" => "set_thread_settled",
-            "createTask" | "assignTask" | "deleteTask" | "planSteps" | "updateTask" | "updateTaskStep" => "tasks",
+            "createTask" | "assignTask" | "deleteTask" | "updateTask" => "tasks",
+            "planSteps" | "updateTaskStep" => "plan",
             _ => return None,
         },
         methods::QUEUE_COMMAND => match params["command"]["kind"].as_str()? {
@@ -245,7 +246,13 @@ impl EngineRpc {
                     Ok(params)
                 }
                 "renameChat" | "setChatArchived" | "setChatSettled" | "markChatSeen" | "createTask" | "assignTask"
-                | "deleteTask" | "planSteps" | "updateTask" | "updateTaskStep" => Ok(params),
+                | "deleteTask" | "updateTask" => Ok(params),
+                "planSteps" | "updateTaskStep" => {
+                    if let Some(calling) = &calling {
+                        params["fromChatId"] = json!(calling.id);
+                    }
+                    Ok(params)
+                }
                 "setChatConfig" => {
                     let Some(calling) = calling.as_ref() else {
                         return Err(refused("An agent changes only its own chat's config"));

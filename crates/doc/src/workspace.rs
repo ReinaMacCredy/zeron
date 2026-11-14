@@ -804,6 +804,10 @@ pub(crate) struct RawChat {
     slept_at: Option<i64>,
     #[serde(default)]
     sleep_woke_at: Option<i64>,
+    #[serde(default, deserialize_with = "lenient")]
+    plan: Option<zeron_proto::ChatPlan>,
+    #[serde(default, deserialize_with = "lenient")]
+    plan_pending: Option<bool>,
 }
 
 fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -880,6 +884,8 @@ impl From<RawChat> for Chat {
                 at: dt(raw.slept_at.unwrap_or(until)),
                 woke_at: raw.sleep_woke_at.map(dt),
             }),
+            plan: raw.plan,
+            plan_pending: raw.plan_pending.unwrap_or_default(),
         }
     }
 }
@@ -1068,6 +1074,8 @@ mod tests {
             unsettled_at: None,
             work_tree: None,
             sleep: None,
+            plan: None,
+            plan_pending: false,
         }
     }
 

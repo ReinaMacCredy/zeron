@@ -1460,6 +1460,8 @@ impl Client {
             work_tree: None,
             unsettled_at: None,
             sleep: None,
+            plan: None,
+            plan_pending: false,
         };
         let id = chat.id.clone();
         self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;

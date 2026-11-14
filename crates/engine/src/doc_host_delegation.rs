@@ -41,11 +41,11 @@ pub struct DelegateTaskParams {
     pub route: Option<zeron_proto::ChildRoute>,
     #[serde(default)]
     pub quota_choice: Option<crate::routing::quota::QuotaChoice>,
-    #[serde(skip)]
+    #[serde(default)]
     pub step_id: Option<String>,
-    #[serde(skip)]
+    #[serde(default)]
     pub space_id: Option<String>,
-    #[serde(skip)]
+    #[serde(default)]
     pub cwd: Option<String>,
 }
 
@@ -207,14 +207,14 @@ fn step_next(steps: &[&TaskHandback]) -> Option<String> {
     Some(match steps {
         [] => return None,
         [one] if reruns_step(one) => format!(
-            "Read it with read_thread, then send the thread a fix with send_message_to_thread, run the step again with create_thread and taskStepId {}, or mark it skipped with the tasks tool.",
+            "Read it with read_thread, then send the thread a fix with send_message_to_thread, run the step again with delegate_task and stepId {}, or mark it skipped with the plan tool.",
             one.step.as_ref().map_or("", |(id, _)| id.as_str())
         ),
-        [_] => "Read it with read_thread, then mark the step done or skipped with the tasks tool, action \"step\", or tell the thread what is still missing with send_message_to_thread.".to_string(),
+        [_] => "Read it with read_thread, then mark the step done or skipped with the plan tool, action \"step\", or tell the thread what is still missing with send_message_to_thread.".to_string(),
         many => {
-            let mut next = "Read them with read_thread, then mark each step done or skipped with the tasks tool, action \"step\", or tell its thread what is still missing with send_message_to_thread.".to_string();
+            let mut next = "Read them with read_thread, then mark each step done or skipped with the plan tool, action \"step\", or tell its thread what is still missing with send_message_to_thread.".to_string();
             if many.iter().any(|step| reruns_step(step)) {
-                next.push_str(" A failed step can also run again with create_thread and its taskStepId.");
+                next.push_str(" A failed step can also run again with delegate_task and its stepId.");
             }
             next
         }
@@ -249,7 +249,7 @@ fn wake_text(tasks: &[TaskHandback]) -> String {
             };
             (
                 format!(
-                    "Step \"{}\" (taskStepId {step_id}) {what} on its thread {}.",
+                    "Step \"{}\" (stepId {step_id}) {what} on its thread {}.",
                     zeron_proto::view::single_line(step_title),
                     task.id
                 ),
@@ -619,10 +619,11 @@ impl DocHost {
 
     pub(crate) fn child_owner(&self, chat_id: &str) -> Option<Chat> {
         let workspace = self.workspace()?;
-        let owner = match workspace.chat(chat_id).ok()??.delegation {
-            Some(delegation) => delegation.delegated_by_chat_id,
-            None => self.step_lead_of(chat_id)?,
-        };
+        let owner = workspace
+            .chat(chat_id)
+            .ok()??
+            .delegation?
+            .delegated_by_chat_id;
         workspace.chat(&owner).ok()?
     }
 
@@ -638,10 +639,10 @@ impl DocHost {
         let chat = workspace
             .chat(chat_id)?
             .ok_or_else(|| failure("thread_not_found", chat_id))?;
-        let open = match &chat.delegation {
-            Some(delegation) => delegation.is_running() && !delegation.cancel_requested,
-            None => self.step_lead_of(chat_id).is_some(),
-        };
+        let open = chat
+            .delegation
+            .as_ref()
+            .is_some_and(|delegation| delegation.is_running() && !delegation.cancel_requested);
         if chat.archived || !open {
             return Ok(());
         }
@@ -679,24 +680,10 @@ impl DocHost {
             )),
             ..route.unwrap_or_default()
         };
-        if chat.delegation.is_some() {
-            workspace.update_chat_delegation(chat_id, |delegation| {
-                delegation.route = Some(fell_back(delegation.route.take()));
-                true
-            })?;
-        } else if let Some(step) = workspace
-            .read_task_steps()?
-            .into_iter()
-            .find(|step| step.chat_id.as_deref() == Some(chat_id))
-        {
-            workspace.update_task_step(
-                &step.id,
-                &zeron_proto::TaskStepPatch {
-                    route: Some(Some(fell_back(step.route.clone()))),
-                    ..Default::default()
-                },
-            )?;
-        }
+        workspace.update_chat_delegation(chat_id, |delegation| {
+            delegation.route = Some(fell_back(delegation.route.take()));
+            true
+        })?;
         self.queue_message(chat_id, zeron_proto::RESUME_PROMPT, Vec::new())?;
         let handle = self.open(chat_id)?;
         self.drain_queue(&handle).await;
@@ -841,7 +828,7 @@ impl DocHost {
                 bound?;
                 return Err(failure(
                     "invalid_request",
-                    "That task step no longer exists",
+                    "That plan step no longer exists",
                 ));
             }
         }
@@ -1610,8 +1597,6 @@ impl DocHost {
             .thread_watches()
             .map(|watches| watches.watchers_of(chat_id))
             .unwrap_or_default()
-            .into_iter()
-            .chain(self.step_lead_of(chat_id))
         {
             if !targets.contains(&watcher) {
                 targets.push(watcher);
@@ -1669,11 +1654,6 @@ impl DocHost {
             .filter(|d| d.is_running() && d.wake != DelegationWake::Never)
             .map(|d| d.delegated_by_chat_id.clone());
         let mut targets: Vec<String> = owner.iter().cloned().collect();
-        if let Some(lead) = self.step_lead_of(chat_id)
-            && !targets.contains(&lead)
-        {
-            targets.push(lead);
-        }
         targets.retain(|target| target != chat_id);
         if targets.is_empty() {
             return;
@@ -2366,7 +2346,7 @@ mod tests {
         stopped.step = Some(("st".into(), "Build it".into()));
         assert_eq!(
             wake_text(&[stopped, task("e", Some(DelegationStatus::Completed), "")]),
-            "Step \"Build it\" (taskStepId st) was interrupted on its thread s.\n\nDelegated task e (\"Title e\") completed.\n\nRead it with read_thread, then send the thread a fix with send_message_to_thread, run the step again with create_thread and taskStepId st, or mark it skipped with the tasks tool. Use task_status with taskId e to read the result.",
+            "Step \"Build it\" (stepId st) was interrupted on its thread s.\n\nDelegated task e (\"Title e\") completed.\n\nRead it with read_thread, then send the thread a fix with send_message_to_thread, run the step again with delegate_task and stepId st, or mark it skipped with the plan tool. Use task_status with taskId e to read the result.",
             "a step and a task in one wake each keep their own next line"
         );
     }

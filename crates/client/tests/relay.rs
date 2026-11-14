@@ -92,6 +92,8 @@ fn chat_row(id: &str, generation: u32, has_messages: bool) -> Chat {
         work_tree: None,
         unsettled_at: None,
         sleep: None,
+        plan: None,
+        plan_pending: false,
     }
 }
 

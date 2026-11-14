@@ -1019,6 +1019,8 @@ mod drag_regressions {
             unsettled_at: None,
             harness_session_harness: Default::default(),
             sleep: None,
+            plan: None,
+            plan_pending: false,
         }
     }
 

@@ -30,8 +30,8 @@ use tokio::sync::watch;
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
 use zeron_proto::projectless;
 use zeron_proto::{
-    Chat, ChatConfig, Device, HarnessId, Session, SidebarPreferencesState, Space, Task, TaskPatch,
-    TaskStep, TaskStepPatch,
+    Chat, ChatConfig, ChatPlan, Device, HarnessId, Session, SidebarPreferencesState, Space, Task,
+    TaskPatch, TaskStep, TaskStepPatch,
 };
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
@@ -391,6 +391,10 @@ impl WorkspaceHost {
         // write. Otherwise this re-seeds once if local-only writes exist that
         // no server has seen. The boot save below persists the result.
         doc.set_local_only(config.local_only);
+        let moved = doc.move_plans_to_chats();
+        if moved > 0 {
+            tracing::info!(moved, "moved plans from their tasks onto their lead chats");
+        }
         // Destructive-break hygiene: the pre-spaces row stays unreachable.
         store.delete_snapshot(LEGACY_WORKSPACE_DOC_ID).ok();
 
@@ -1349,6 +1353,8 @@ impl WorkspaceHost {
                 work_tree: None,
                 unsettled_at: None,
                 sleep: None,
+                plan: None,
+                plan_pending: false,
             })
         })?;
         Ok(())
@@ -1410,6 +1416,8 @@ impl WorkspaceHost {
             unsettled_at: None,
             harness_session_harness: Default::default(),
             sleep: None,
+            plan: None,
+            plan_pending: false,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1472,6 +1480,8 @@ impl WorkspaceHost {
             unsettled_at: None,
             harness_session_harness: Default::default(),
             sleep: None,
+            plan: None,
+            plan_pending: false,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1535,6 +1545,8 @@ impl WorkspaceHost {
             unsettled_at: None,
             harness_session_harness: Default::default(),
             sleep: None,
+            plan: None,
+            plan_pending: false,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1697,8 +1709,8 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.read_task_steps())?)
     }
 
-    pub fn task_steps_of(&self, task_id: &str) -> Vec<TaskStep> {
-        self.read(|doc| doc.task_steps_of(task_id))
+    pub fn steps_of(&self, chat_id: &str) -> Vec<TaskStep> {
+        self.read(|doc| doc.steps_of(chat_id))
     }
 
     pub fn step_started(&self, step: &TaskStep) -> bool {
@@ -1706,40 +1718,54 @@ impl WorkspaceHost {
     }
 
     pub(crate) fn mission_thread(&self, chat_id: &str) -> bool {
-        self.inner.tasks_tx.borrow().iter().any(|task| {
-            task.has_plan() && !task.deleted && task.chat_id.as_deref() == Some(chat_id)
-        }) || self
-            .inner
-            .task_steps_tx
+        self.inner
+            .chats_tx
             .borrow()
             .iter()
-            .any(|step| !step.deleted && step.chat_id.as_deref() == Some(chat_id))
+            .any(|chat| chat.id == chat_id && chat.has_plan())
+            || self
+                .inner
+                .task_steps_tx
+                .borrow()
+                .iter()
+                .any(|step| !step.deleted && step.chat_id.as_deref() == Some(chat_id))
     }
 
     pub fn create_task_step(&self, step: &TaskStep) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.create_task_step(step))?)
     }
 
-    pub fn plan_task_steps(
+    pub fn write_plan(
         &self,
-        task_id: &str,
+        chat_id: &str,
+        plan: &ChatPlan,
         steps: &[TaskStep],
-        patch: &TaskPatch,
     ) -> Result<(), EngineError> {
-        Ok(self.mutate(|doc| doc.plan_task_steps(task_id, steps, patch, Utc::now()))?)
+        Ok(self.mutate(|doc| doc.write_plan(chat_id, plan, steps, Utc::now()))?)
     }
 
-    pub fn edit_task_plan(
+    pub fn edit_plan(
         &self,
-        task_id: &str,
-        patch: &TaskPatch,
+        chat_id: &str,
+        plan: Option<&ChatPlan>,
         updates: &[(String, TaskStepPatch)],
         creates: &[TaskStep],
         deletes: &[String],
     ) -> Result<(), EngineError> {
-        Ok(self.mutate(|doc| {
-            doc.edit_task_plan(task_id, patch, updates, creates, deletes, Utc::now())
-        })?)
+        Ok(self.mutate(|doc| doc.edit_plan(chat_id, plan, updates, creates, deletes, Utc::now()))?)
+    }
+
+    pub fn set_chat_plan(
+        &self,
+        chat_id: &str,
+        plan: Option<&ChatPlan>,
+        pending: bool,
+    ) -> Result<(), EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_plan(chat_id, plan, pending))?)
+    }
+
+    pub fn set_plan_pending(&self, chat_id: &str, pending: bool) -> Result<(), EngineError> {
+        Ok(self.mutate(|doc| doc.set_plan_pending(chat_id, pending))?)
     }
 
     pub fn update_task_step(

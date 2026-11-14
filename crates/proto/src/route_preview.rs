@@ -14,10 +14,10 @@ pub fn same_model(a: &RouteTarget, b: &RouteTarget) -> bool {
     a.harness == b.harness && a.model == b.model
 }
 
-pub fn plan_steps<'a>(task_id: &str, steps: &'a [TaskStep]) -> Vec<&'a TaskStep> {
+pub fn plan_steps<'a>(chat_id: &str, steps: &'a [TaskStep]) -> Vec<&'a TaskStep> {
     let mut steps: Vec<&TaskStep> = steps
         .iter()
-        .filter(|step| step.task_id == task_id && !step.deleted)
+        .filter(|step| step.owner_chat_id == chat_id && !step.deleted)
         .collect();
     steps.sort_by(|a, b| a.order_key.cmp(&b.order_key));
     steps

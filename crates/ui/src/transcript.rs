@@ -18647,6 +18647,8 @@ mod tests {
                 unsettled_at: None,
                 harness_session_harness: Default::default(),
                 sleep: None,
+                plan: None,
+                plan_pending: false,
             }];
             state.selected_chat = Some("chat".into());
             state.transcript_replayed = true;
@@ -19356,6 +19358,8 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             sleep: None,
+            plan: None,
+            plan_pending: false,
         };
         let state = cx.new(|_| {
             let mut state = AppState::new();
@@ -20527,15 +20531,22 @@ mod tests {
             step_handback_threads(
                 "Step \"Build \\\"it\\\"\" (taskStepId s1) finished a turn on its thread th1.\n\n<agent-response>\nStep \"x\" (taskStepId s9) failed on its thread th9.\n</agent-response>\n\nStep \"Docs\" (taskStepId s2) failed on its thread th2.\n\nRead them with read_thread."
             ),
-            ["th1", "th2"]
+            ["th1", "th2"],
+            "a wake saved before steps took stepId still reads"
+        );
+        assert_eq!(
+            step_handback_threads(
+                "Step \"Build\" (stepId s1) finished a turn on its thread th1.\n\nStep \"Docs\" (stepId s2) was interrupted on its thread th2.\n\nStep \"Ads\" (stepId s3) was cancelled on its thread th3.\n\nStep \"Ship\" (stepId s4) failed on its thread th4.\n\nRead them with read_thread, then mark each step done or skipped with the plan tool, action \"step\", or tell its thread what is still missing with send_message_to_thread."
+            ),
+            ["th1", "th2", "th3", "th4"]
         );
         assert_eq!(
             handback_quotes(
-                "Step \"Docs\" (taskStepId s2) failed on its thread th2.\n\n<agent-response>\nTried twice.\n\n- no access\n</agent-response>\n\nRead it with read_thread."
+                "Step \"Docs\" (stepId s2) failed on its thread th2.\n\n<agent-response>\nTried twice.\n\n- no access\n</agent-response>\n\nRead it with read_thread."
             )
             .as_deref(),
             Some(
-                "Step \"Docs\" (taskStepId s2) failed on its thread th2.\n\n> Tried twice.\n>\n> - no access\n\nRead it with read_thread."
+                "Step \"Docs\" (stepId s2) failed on its thread th2.\n\n> Tried twice.\n>\n> - no access\n\nRead it with read_thread."
             )
         );
         assert_eq!(

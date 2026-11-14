@@ -20961,6 +20961,8 @@ mod tests {
             work_tree: None,
             unsettled_at: None,
             sleep: None,
+            plan: None,
+            plan_pending: false,
         }
     }
 
@@ -24062,6 +24064,8 @@ mod exit_regressions {
                         last_seen_at: None,
                         room_gen: None,
                         sleep: None,
+                        plan: None,
+                        plan_pending: false,
                     }]);
                     state.select_space(Some("mine".into()), cx);
                 });
@@ -25363,6 +25367,8 @@ mod right_tab_mouse_regressions {
                     work_tree: None,
                     unsettled_at: None,
                     sleep: None,
+                    plan: None,
+                    plan_pending: false,
                 };
                 let mut side = source.clone();
                 side.id = "side".into();

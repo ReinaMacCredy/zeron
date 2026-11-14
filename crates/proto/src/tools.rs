@@ -117,7 +117,7 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
             ),
             tool(
                 "tasks",
-                "Write, update and assign tasks on the person's Tasks list, and plan an orchestrated task's steps.",
+                "Write, update and assign tasks on the person's Tasks list.",
             ),
             tool(
                 "context_settings",
@@ -159,6 +159,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
             tool(
                 "delegate_task",
                 "Delegate one task to a Zeron-owned child agent of this chat.",
+            ),
+            tool(
+                "plan",
+                "Write this chat's plan of steps, mark each step and read the plan.",
             ),
             tool(
                 "review_changes",

@@ -62,6 +62,7 @@
 
 mod agent_gate;
 mod caller;
+mod plan;
 mod tasks;
 mod device_stats;
 mod remote_plugins;
@@ -200,12 +201,6 @@ struct CreateThreadParams {
     space_id: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
-    #[serde(default)]
-    task_step_id: Option<String>,
-    #[serde(default)]
-    chosen: Vec<crate::routing::Chosen>,
-    #[serde(default)]
-    quota_choice: Option<crate::routing::quota::QuotaChoice>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1312,7 +1307,7 @@ enum MutateParams {
     },
     #[serde(rename_all = "camelCase")]
     PlanSteps {
-        task_id: String,
+        chat_id: String,
         steps: Vec<PlannedStep>,
         #[serde(default)]
         overview: Option<String>,
@@ -1329,18 +1324,18 @@ enum MutateParams {
         from_chat_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
-    ApprovePlan { task_id: String },
+    ApprovePlan { chat_id: String },
     #[serde(rename_all = "camelCase")]
-    RetryTaskStep { step_id: String },
+    RetryStep { step_id: String },
     #[serde(rename_all = "camelCase")]
-    EditTaskPlan {
-        task_id: String,
+    EditPlan {
+        chat_id: String,
         #[serde(default)]
         overview: Option<String>,
         #[serde(default)]
         overview_images: Option<Vec<String>>,
         #[serde(default)]
-        steps: Vec<tasks::PlanEdit>,
+        steps: Vec<plan::PlanEdit>,
         #[serde(default)]
         remove_step_ids: Vec<String>,
         #[serde(default)]
@@ -2299,42 +2294,28 @@ impl EngineRpc {
         Ok(Ok(p))
     }
 
-    async fn start_step(&self, p: CreateThreadParams, step_id: String) -> Result<String, RpcError> {
-        let role = self
-            .workspace
-            .task_step(&step_id)
-            .filter(|step| {
-                !self
-                    .workspace
-                    .task(&step.task_id)
-                    .is_some_and(|task| task.same_agents)
-            })
-            .and_then(|step| step.role);
-        let params = crate::doc_host::DelegateTaskParams {
-            owner_chat_id: p.from_chat_id,
-            task: p.prompt,
-            title: p.title,
-            role,
-            harness: p.harness,
-            model: p.model,
-            reasoning: p.reasoning,
-            profile: p.profile,
-            chosen: p.chosen,
-            quota_choice: p.quota_choice,
-            step_id: Some(step_id),
-            space_id: p.space_id,
-            cwd: p.cwd,
-            ..Default::default()
+    fn step_delegation(
+        &self,
+        mut p: crate::doc_host::DelegateTaskParams,
+    ) -> Result<crate::doc_host::DelegateTaskParams, RpcError> {
+        let step = p
+            .step_id
+            .as_deref()
+            .and_then(|step_id| self.workspace.task_step(step_id));
+        let same_agents = step
+            .as_ref()
+            .and_then(|step| self.workspace.chat(&step.owner_chat_id).ok().flatten())
+            .and_then(|lead| lead.plan)
+            .is_some_and(|plan| plan.same_agents);
+        p.role = match same_agents {
+            true => None,
+            false => p.role.or_else(|| step.and_then(|step| step.role)),
         };
-        let mut params = self.route_delegation(params)?.map_err(|_| {
+        let mut p = self.route_delegation(p)?.map_err(|_| {
             RpcError::Failed("a step runs on a thread, not a native sub-agent".into())
         })?;
-        params.role = None;
-        self.doc_host
-            .delegate_task(params, self.registry.delegation_settings())
-            .await
-            .map(|view| view.task_id)
-            .map_err(|e| RpcError::Failed(e.to_string()))
+        p.role = None;
+        Ok(p)
     }
 
     async fn start_review(&self, p: StartReviewParams) -> Result<serde_json::Value, RpcError> {
@@ -3691,7 +3672,7 @@ impl EngineRpc {
                 self.add_tasks_to_thread(&task_ids, &chat_id)
             }
             MutateParams::PlanSteps {
-                task_id,
+                chat_id,
                 steps,
                 overview,
                 resources,
@@ -3702,7 +3683,7 @@ impl EngineRpc {
                     .map(|step| (step.title, step.notes, step.thread_id, step.role))
                     .collect();
                 self.plan_steps(
-                    &task_id,
+                    &chat_id,
                     steps,
                     overview,
                     resources,
@@ -3715,18 +3696,18 @@ impl EngineRpc {
                 patch,
                 from_chat_id,
             } => self.update_task_step(&step_id, &patch, from_chat_id.as_deref()),
-            MutateParams::ApprovePlan { task_id } => self.approve_plan(&task_id).await.map(drop),
-            MutateParams::RetryTaskStep { step_id } => self.retry_task_step(&step_id).await,
-            MutateParams::EditTaskPlan {
-                task_id,
+            MutateParams::ApprovePlan { chat_id } => self.approve_plan(&chat_id).await.map(drop),
+            MutateParams::RetryStep { step_id } => self.retry_step(&step_id).await,
+            MutateParams::EditPlan {
+                chat_id,
                 overview,
                 overview_images,
                 steps,
                 remove_step_ids,
                 order,
             } => self
-                .edit_task_plan(
-                    &task_id,
+                .edit_plan(
+                    &chat_id,
                     overview,
                     overview_images,
                     steps,
@@ -5343,25 +5324,22 @@ impl RpcService for EngineRpc {
             }
             methods::CREATE_THREAD => {
                 let p: CreateThreadParams = parse_params(params)?;
-                let chat_id = match p.task_step_id.clone() {
-                    Some(step_id) => self.start_step(p, step_id).await?,
-                    None => self
-                        .doc_host
-                        .create_thread(
-                            &p.from_chat_id,
-                            &p.prompt,
-                            p.title.as_deref(),
-                            p.harness,
-                            p.model.as_deref(),
-                            p.reasoning,
-                            &p.profile,
-                            p.space_id.as_deref(),
-                            p.cwd.as_deref(),
-                            self.registry.delegation_settings(),
-                        )
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?,
-                };
+                let chat_id = self
+                    .doc_host
+                    .create_thread(
+                        &p.from_chat_id,
+                        &p.prompt,
+                        p.title.as_deref(),
+                        p.harness,
+                        p.model.as_deref(),
+                        p.reasoning,
+                        &p.profile,
+                        p.space_id.as_deref(),
+                        p.cwd.as_deref(),
+                        self.registry.delegation_settings(),
+                    )
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "chatId": chat_id }))
             }
             methods::SEND_THREAD_MESSAGE => {
@@ -5395,6 +5373,8 @@ impl RpcService for EngineRpc {
                 }
                 let p = if self.doc_host.delegated_before(&p) {
                     p
+                } else if p.step_id.is_some() {
+                    self.step_delegation(p)?
                 } else {
                     match self.route_delegation(p)? {
                         Ok(p) => p,
@@ -6475,7 +6455,7 @@ impl RpcService for EngineRpc {
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
                 if let MutateParams::PlanSteps {
-                    task_id,
+                    chat_id,
                     steps,
                     overview,
                     resources,
@@ -6488,7 +6468,7 @@ impl RpcService for EngineRpc {
                         .collect();
                     let images_moved = self
                         .plan_steps(
-                            &task_id,
+                            &chat_id,
                             steps,
                             overview,
                             resources,
@@ -6496,8 +6476,8 @@ impl RpcService for EngineRpc {
                         )?;
                     return RpcReply::value(&serde_json::json!({
                         "ok": true,
-                        "task": self.workspace.task(&task_id),
-                        "steps": self.workspace.task_steps_of(&task_id),
+                        "chat": self.workspace.chat(&chat_id).map_err(|e| RpcError::Failed(e.to_string()))?,
+                        "steps": self.workspace.steps_of(&chat_id),
                         "imagesMoved": images_moved,
                     }));
                 }

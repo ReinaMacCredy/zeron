@@ -382,6 +382,29 @@ pub struct Chat {
     /// peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep: Option<ChatSleep>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_option"
+    )]
+    pub plan: Option<ChatPlan>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan_pending: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPlan {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub overview: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan_doc: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub same_agents: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -697,6 +720,10 @@ impl Chat {
         crate::voice::is_orchestrator_chat(&self.id) || is_supervisor_chat(&self.id)
     }
 
+    pub fn has_plan(&self) -> bool {
+        self.plan.is_some()
+    }
+
     /// True when this chat syncs over the chat2 dumb relay.
     pub fn on_chat2(&self) -> bool {
         self.room_gen.unwrap_or(1) >= 2
@@ -936,58 +963,14 @@ pub struct Task {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub deleted: bool,
-    #[serde(default, skip_serializing_if = "TaskMode::is_single")]
-    pub mode: TaskMode,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub plan_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_error: Option<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub plan: String,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub plan_doc: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub same_agents: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub resources: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum TaskMode {
-    #[default]
-    Single,
-    Orchestrated,
-}
-
-impl TaskMode {
-    pub fn is_single(&self) -> bool {
-        *self == Self::Single
-    }
-}
-
-impl Task {
-    pub fn has_plan(&self) -> bool {
-        self.mode == TaskMode::Orchestrated && self.chat_id.is_some()
-    }
-
-    pub fn is_open_plan_of(&self, chat_id: &str) -> bool {
-        !self.deleted
-            && self.completed_at.is_none()
-            && self.has_plan()
-            && self.chat_id.as_deref() == Some(chat_id)
-    }
-}
-
-/// Rows from before the one-open-plan rule resolve to the first match.
-pub fn plan_of_chat<'a>(tasks: &'a [Task], chat_id: &str) -> Option<&'a Task> {
-    tasks.iter().find(|task| task.is_open_plan_of(chat_id))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1009,7 +992,7 @@ pub struct ThreadLink {
 }
 
 /// Only `Delegated` is step-like; the other kinds are labels.
-pub fn thread_link(chat: &Chat, tasks: &[Task], steps: &[TaskStep]) -> Option<ThreadLink> {
+pub fn thread_link(chat: &Chat, steps: &[TaskStep]) -> Option<ThreadLink> {
     if chat.is_system() {
         return None;
     }
@@ -1024,13 +1007,7 @@ pub fn thread_link(chat: &Chat, tasks: &[Task], steps: &[TaskStep]) -> Option<Th
         steps
             .iter()
             .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(chat.id.as_str()))
-            .filter(|step| {
-                tasks.iter().any(|task| {
-                    task.id == step.task_id
-                        && !task.deleted
-                        && task.chat_id.as_deref() == Some(parent)
-                })
-            })
+            .filter(|step| step.owner_chat_id == parent)
             .max_by_key(|step| step.outcome.is_none())
             .map(|step| step.id.clone())
     };
@@ -1053,16 +1030,11 @@ pub fn thread_link(chat: &Chat, tasks: &[Task], steps: &[TaskStep]) -> Option<Th
 }
 
 /// A sidechat or a fork roots its own tree: neither link makes it a child.
-pub fn tree_path<'a>(
-    chat: &'a Chat,
-    chats: &'a [Chat],
-    tasks: &[Task],
-    steps: &[TaskStep],
-) -> Vec<&'a Chat> {
+pub fn tree_path<'a>(chat: &'a Chat, chats: &'a [Chat], steps: &[TaskStep]) -> Vec<&'a Chat> {
     let mut path = vec![chat];
     while let Some(parent) = path
         .last()
-        .and_then(|node| thread_link(node, tasks, steps))
+        .and_then(|node| thread_link(node, steps))
         .filter(|link| matches!(link.kind, LinkKind::Delegated | LinkKind::OpenedFrom))
         .and_then(|link| chats.iter().find(|chat| chat.id == link.parent))
     {
@@ -1078,7 +1050,8 @@ pub fn tree_path<'a>(
 #[serde(rename_all = "camelCase")]
 pub struct TaskStep {
     pub id: String,
-    pub task_id: String,
+    #[serde(default)]
+    pub owner_chat_id: String,
     #[serde(default)]
     pub title: String,
     #[serde(default)]
@@ -1130,32 +1103,6 @@ pub enum StepTurnEnd {
     Completed,
     Failed,
     Stopped,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanEdit {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub overview: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub overview_images: Option<Vec<String>>,
-    pub steps: Vec<PlanStepEdit>,
-    #[serde(default)]
-    pub remove_step_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub order: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanStepEdit {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub step_id: Option<String>,
-    pub title: String,
-    #[serde(default)]
-    pub notes: String,
-    #[serde(default)]
-    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1285,24 +1232,12 @@ pub struct TaskPatch {
     pub completed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<TaskMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_pending: Option<bool>,
     #[serde(
         default,
         deserialize_with = "present_nullable",
         skip_serializing_if = "Option::is_none"
     )]
     pub send_error: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_doc: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub same_agents: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resources: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1356,6 +1291,7 @@ impl NeedsYou {
 /// A stopped linked thread waits on the person until they tick the task.
 pub fn needs_you(
     task: &Task,
+    lead: Option<&Chat>,
     linked: Option<ChatIndicator>,
     steps: &[StepStatus],
 ) -> Option<NeedsYou> {
@@ -1379,23 +1315,26 @@ pub fn needs_you(
         if let Some(step) = step(StepStatus::Failed) {
             return Some(NeedsYou::StepFailed(step));
         }
-        if task.plan_pending && !steps.is_empty() {
+        if lead.is_some_and(|lead| lead.plan_pending) && !steps.is_empty() {
             return Some(NeedsYou::PlanReady);
         }
     }
-    let planning = (task.mode == TaskMode::Orchestrated || task.plan_pending)
-        && steps.is_empty()
-        && linked.is_some();
+    let planning = lead.is_some_and(Chat::has_plan) && steps.is_empty() && linked.is_some();
     if lead_working || planning || steps.contains(&StepStatus::Working) {
         return None;
     }
     linked.map(|_| NeedsYou::Review)
 }
 
-pub fn task_status(task: &Task, linked: Option<ChatIndicator>, steps: &[StepStatus]) -> TaskStatus {
+pub fn task_status(
+    task: &Task,
+    lead: Option<&Chat>,
+    linked: Option<ChatIndicator>,
+    steps: &[StepStatus],
+) -> TaskStatus {
     if task.completed_at.is_some() {
         TaskStatus::Done
-    } else if needs_you(task, linked, steps).is_some() {
+    } else if needs_you(task, lead, linked, steps).is_some() {
         TaskStatus::NeedsYou
     } else if linked.is_some() || steps.contains(&StepStatus::Working) {
         TaskStatus::Working
@@ -3324,9 +3263,9 @@ mod tests {
     #[test]
     fn task_status_derives_from_completion_then_the_linked_thread() {
         let mut task: Task = serde_json::from_value(serde_json::json!({ "id": "t" })).unwrap();
-        assert_eq!(task_status(&task, None, &[]), TaskStatus::ToDo);
+        assert_eq!(task_status(&task, None, None, &[]), TaskStatus::ToDo);
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[]),
+            task_status(&task, None, Some(ChatIndicator::Working), &[]),
             TaskStatus::Working
         );
         for stopped in [
@@ -3335,18 +3274,21 @@ mod tests {
             ChatIndicator::Completed,
             ChatIndicator::Idle,
         ] {
-            assert_eq!(task_status(&task, Some(stopped), &[]), TaskStatus::NeedsYou);
+            assert_eq!(
+                task_status(&task, None, Some(stopped), &[]),
+                TaskStatus::NeedsYou
+            );
         }
         task.send_error = Some("offline".into());
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[]),
+            task_status(&task, None, Some(ChatIndicator::Working), &[]),
             TaskStatus::NeedsYou,
             "a failed send waits on the person even while the thread runs"
         );
         task.send_error = None;
         task.completed_at = Some(Utc::now());
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[]),
+            task_status(&task, None, Some(ChatIndicator::Working), &[]),
             TaskStatus::Done
         );
     }
@@ -3354,88 +3296,108 @@ mod tests {
     #[test]
     fn an_orchestrated_task_rolls_its_steps_up_under_the_lead() {
         use StepStatus::*;
-        let mut task: Task = serde_json::from_value(serde_json::json!({ "id": "t" })).unwrap();
+        let task: Task = serde_json::from_value(serde_json::json!({ "id": "t" })).unwrap();
         let lead = Some(ChatIndicator::Idle);
         assert_eq!(
-            task_status(&task, lead, &[Done, Working]),
+            task_status(&task, None, lead, &[Done, Working]),
             TaskStatus::Working
         );
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[Planned]),
+            task_status(&task, None, Some(ChatIndicator::Working), &[Planned]),
             TaskStatus::Working
         );
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[Working, NeedsYou]),
+            task_status(
+                &task,
+                None,
+                Some(ChatIndicator::Working),
+                &[Working, NeedsYou]
+            ),
             TaskStatus::NeedsYou,
             "a step that needs the person outranks a working lead"
         );
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Errored), &[Working]),
+            task_status(&task, None, Some(ChatIndicator::Errored), &[Working]),
             TaskStatus::NeedsYou
         );
         assert_eq!(
-            task_status(&task, lead, &[Done, Skipped]),
+            task_status(&task, None, lead, &[Done, Skipped]),
             TaskStatus::NeedsYou
         );
-        assert_eq!(task_status(&task, None, &[Working]), TaskStatus::Working);
         assert_eq!(
-            task_status(&task, lead, &[Failed, Working]),
+            task_status(&task, None, None, &[Working]),
+            TaskStatus::Working
+        );
+        assert_eq!(
+            task_status(&task, None, lead, &[Failed, Working]),
             TaskStatus::NeedsYou,
             "a failed step waits on the person while the lead is idle"
         );
         assert_eq!(
-            task_status(&task, None, &[Done, Failed]),
+            task_status(&task, None, None, &[Done, Failed]),
             TaskStatus::NeedsYou
         );
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[Failed]),
+            task_status(&task, None, Some(ChatIndicator::Working), &[Failed]),
             TaskStatus::Working,
             "the lead is handling the failed step"
         );
         assert_eq!(
-            needs_you(&task, lead, &[Done, Skipped]),
+            needs_you(&task, None, lead, &[Done, Skipped]),
             Some(super::NeedsYou::Review),
             "a finished plan under an idle lead waits for review"
         );
         assert_eq!(
-            needs_you(&task, lead, &[Done, Failed]),
+            needs_you(&task, None, lead, &[Done, Failed]),
             Some(super::NeedsYou::StepFailed(2))
         );
         assert_eq!(
-            needs_you(&task, Some(ChatIndicator::Working), &[Working, NeedsYou]),
+            needs_you(
+                &task,
+                None,
+                Some(ChatIndicator::Working),
+                &[Working, NeedsYou]
+            ),
             Some(super::NeedsYou::StepAsks(2))
         );
-        assert_eq!(needs_you(&task, lead, &[Done, Working]), None);
-        task.plan_pending = true;
+        assert_eq!(needs_you(&task, None, lead, &[Done, Working]), None);
+        let mut planner = child(None);
+        planner.plan = Some(ChatPlan::default());
+        planner.plan_pending = true;
+        let planner = Some(&planner);
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[Planned]),
+            task_status(&task, planner, Some(ChatIndicator::Working), &[Planned]),
             TaskStatus::Working,
             "the lead is still writing the plan"
         );
-        assert_eq!(task_status(&task, lead, &[Planned]), TaskStatus::NeedsYou);
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[]),
+            task_status(&task, planner, lead, &[Planned]),
+            TaskStatus::NeedsYou
+        );
+        assert_eq!(
+            task_status(&task, planner, Some(ChatIndicator::Working), &[]),
             TaskStatus::Working
         );
         assert_eq!(
-            task_status(&task, None, &[]),
+            task_status(&task, planner, None, &[]),
             TaskStatus::ToDo,
             "no plan yet means nothing to approve"
         );
         assert_eq!(
-            task_status(&task, lead, &[]),
+            task_status(&task, planner, lead, &[]),
             TaskStatus::Working,
             "a mission without steps is planning even between the lead's turns"
         );
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::AwaitingInput), &[]),
+            task_status(&task, planner, Some(ChatIndicator::AwaitingInput), &[]),
             TaskStatus::NeedsYou
         );
     }
 
     fn step(chat_id: Option<&str>, outcome: Option<StepOutcome>) -> TaskStep {
         let mut step: TaskStep =
-            serde_json::from_value(serde_json::json!({ "id": "s", "taskId": "t" })).unwrap();
+            serde_json::from_value(serde_json::json!({ "id": "s", "ownerChatId": "lead" }))
+                .unwrap();
         step.chat_id = chat_id.map(str::to_string);
         step.outcome = outcome;
         step
@@ -3573,20 +3535,11 @@ mod tests {
 
     #[test]
     fn thread_link_owns_only_delegated_and_step_bound_children() {
-        let task = |id: &str, lead: Option<&str>, mode: TaskMode| {
-            let mut task: Task = serde_json::from_value(serde_json::json!({ "id": id })).unwrap();
-            task.chat_id = lead.map(str::to_string);
-            task.mode = mode;
-            task
-        };
-        let plan = task("t", Some("lead"), TaskMode::Orchestrated);
-        let other = task("o", Some("elsewhere"), TaskMode::Orchestrated);
         let mut bound = step(Some("c"), None);
         bound.id = "s1".into();
         let mut foreign = step(Some("c"), None);
-        foreign.task_id = "o".into();
-        let tasks = [plan.clone(), other];
-        let link = |chat: &Chat, steps: &[TaskStep]| thread_link(chat, &tasks, steps);
+        foreign.owner_chat_id = "elsewhere".into();
+        let link = |chat: &Chat, steps: &[TaskStep]| thread_link(chat, steps);
         let delegated = child(Some(DelegationStatus::Running));
         assert_eq!(
             link(&delegated, &[]),
@@ -3644,14 +3597,6 @@ mod tests {
         let mut supervisor = opened.clone();
         supervisor.id = format!("{SUPERVISOR_CHAT_PREFIX}dev");
         assert_eq!(link(&supervisor, &[]), None);
-
-        let single = task("h", Some("lead"), TaskMode::Single);
-        assert!(plan.has_plan() && !single.has_plan());
-        assert!(!task("u", None, TaskMode::Orchestrated).has_plan());
-        let mut done = plan.clone();
-        done.completed_at = Some(Utc::now());
-        assert_eq!(plan_of_chat(&[single.clone(), done], "lead"), None);
-        assert_eq!(plan_of_chat(&[single, plan.clone()], "lead"), Some(&plan));
     }
 
     #[test]
@@ -3675,12 +3620,9 @@ mod tests {
             serde_json::to_value(&patch).unwrap(),
             serde_json::json!({ "dueOn": null, "chatId": "c" })
         );
-        let patch: TaskPatch = serde_json::from_value(
-            serde_json::json!({ "sendError": null, "mode": "orchestrated" }),
-        )
-        .unwrap();
+        let patch: TaskPatch =
+            serde_json::from_value(serde_json::json!({ "sendError": null })).unwrap();
         assert_eq!(patch.send_error, Some(None));
-        assert_eq!(patch.mode, Some(TaskMode::Orchestrated));
         let patch: TaskStepPatch =
             serde_json::from_value(serde_json::json!({ "outcome": null, "chatId": "c" })).unwrap();
         assert_eq!(patch.outcome, Some(None));

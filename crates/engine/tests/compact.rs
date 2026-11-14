@@ -19,8 +19,8 @@ use zeron_engine::registry::{CompactionMode, CompactionSettings};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
-    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode, Task, TaskPatch, TaskStep,
+    AgentEvent, ChatPlan, Compaction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
+    SandboxLevel, SteeringMode, TaskStep,
 };
 
 const CHAT: &str = "chat-compact";
@@ -985,24 +985,22 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
     );
     harness.can_compact.store(true, Ordering::SeqCst);
 
-    let lead: Task = serde_json::from_value(serde_json::json!({
-        "id": "task-1", "title": "Mission", "chatId": CHAT, "mode": "orchestrated",
-    }))
-    .unwrap();
-    core.workspace.create_task(&lead).unwrap();
-    let watched = |task: bool| {
-        let tasks = core.workspace.watch_tasks();
+    core.workspace
+        .set_chat_plan(CHAT, Some(&ChatPlan::default()), false)
+        .unwrap();
+    let watched = |plan: bool| {
+        let chats = core.workspace.watch_chats();
         let steps = core.workspace.watch_task_steps();
         move || {
-            let lead = tasks
+            let lead = chats
                 .borrow()
                 .iter()
-                .any(|t| t.chat_id.as_deref() == Some(CHAT));
+                .any(|c| c.id == CHAT && c.plan.is_some());
             let step = steps
                 .borrow()
                 .iter()
                 .any(|s| s.chat_id.as_deref() == Some(CHAT));
-            (lead, step) == (task, !task)
+            (lead, step) == (plan, !plan)
         }
     };
     wait_for(watched(true), "the chat leads a mission").await;
@@ -1019,17 +1017,12 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
     );
 
     missions(false);
+    core.workspace.set_chat_plan(CHAT, None, false).unwrap();
     core.workspace
-        .update_task(
-            "task-1",
-            &TaskPatch {
-                chat_id: Some(None),
-                ..Default::default()
-            },
-        )
+        .create_chat_from("lead-x", None, Some(&core.device_id), None, None, None)
         .unwrap();
     let step: TaskStep = serde_json::from_value(serde_json::json!({
-        "id": "step-1", "taskId": "task-1", "title": "Step", "chatId": CHAT,
+        "id": "step-1", "ownerChatId": "lead-x", "title": "Step", "chatId": CHAT,
     }))
     .unwrap();
     core.workspace.create_task_step(&step).unwrap();

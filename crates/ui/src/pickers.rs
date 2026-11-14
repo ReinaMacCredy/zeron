@@ -13437,6 +13437,8 @@ mod tests {
             unsettled_at: None,
             harness_session_harness: Default::default(),
             sleep: None,
+            plan: None,
+            plan_pending: false,
         };
         assert_eq!(
             chat.harness_marks(),
@@ -14363,6 +14365,8 @@ mod tests {
                     unsettled_at: None,
                     harness_session_harness: Default::default(),
                     sleep: None,
+                    plan: None,
+                    plan_pending: false,
                 }];
                 state.selected_chat = Some("c1".into());
                 state.transcript_replayed = false;
@@ -14528,6 +14532,8 @@ mod tests {
                     unsettled_at: None,
                     harness_session_harness: Default::default(),
                     sleep: None,
+                    plan: None,
+                    plan_pending: false,
                 }];
                 state.selected_chat = Some("c1".into());
             });

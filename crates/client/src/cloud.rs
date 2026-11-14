@@ -705,6 +705,8 @@ impl Client {
             work_tree: None,
             unsettled_at: Default::default(),
             sleep: None,
+            plan: None,
+            plan_pending: false,
         };
         self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
         Ok(chat_id)

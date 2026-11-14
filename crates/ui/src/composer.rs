@@ -18532,6 +18532,8 @@ mod tests {
                         unsettled_at: None,
                         harness_session_harness: Default::default(),
                         sleep: None,
+                        plan: None,
+                        plan_pending: false,
                     }];
                     state.selected_chat = Some("c1".into());
                 });
@@ -18757,6 +18759,8 @@ mod tests {
             unsettled_at: None,
             harness_session_harness: Default::default(),
             sleep: None,
+            plan: None,
+            plan_pending: false,
         }
     }
 
@@ -19310,6 +19314,8 @@ mod tests {
             unsettled_at: None,
             harness_session_harness: Default::default(),
             sleep: None,
+            plan: None,
+            plan_pending: false,
         };
         let mut chats = vec![
             chat("a1", Some("Fix PR fetching")),

@@ -303,30 +303,40 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     .await;
     let header = |id: &str| {
         format!(
-            "Shop backend\n\nYou lead this task (task id {id}). Break it into steps and run each step on its own thread.\n\n1. Write the plan with the tasks tool: action \"plan\", taskId \"{id}\", steps [{{title, notes, role}}]. Keep each step small enough for one agent.\n"
+            "Shop backend\n\nYou lead this task (task id {id}). Break it into steps and run each step on its own thread.\n\n1. Write the plan with the plan tool: action \"write\", steps [{{title, notes, role}}]. Keep each step small enough for one agent.\n"
         )
     };
-    let run = "Run each step on its own thread with create_thread: prompt set to what the step must do, taskStepId set to the step's id, title optional. Steps that do not depend on each other can run at the same time.";
-    let tail = "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the tasks tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with create_thread and the same taskStepId.\n{n}. When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true.";
+    let run = "Run each step on its own thread with delegate_task: task set to what the step must do, stepId set to the step's id. Steps that do not depend on each other can run at the same time.";
+    let tail = "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the plan tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with delegate_task and the same stepId.\n{n}. When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true.";
     assert_eq!(
         prompts.lock().unwrap().as_slice(),
         [
             format!(
-                "{}2. Then stop. The person reviews the plan in Tasks and approves it; you get a message when it is approved.\n3. {run}\n4. Give each step a role (worker, validator, research, design or general); Zeron runs it on the route set in Settings > Routing. Pass harness or model only when a step needs a specific one.\n5. {}",
+                "{}2. Then stop. The person reviews the plan and approves it; you get a message when it is approved.\n3. {run}\n4. Give each step a role (worker, validator, research, design or general); Zeron runs it on the route set in Settings > Routing. Pass target only when a step needs a specific harness or model.\n5. {}",
                 header("t1"),
                 tail.replace("{n}", "6")
             ),
             format!(
-                "{}2. {run}\n3. Run every step on your own harness and model: do not pass harness or model to create_thread.\n4. {}",
+                "{}2. {run}\n3. Run every step on your own harness and model: do not pass target or profile to delegate_task.\n4. {}",
                 header("t2"),
                 tail.replace("{n}", "5")
             ),
         ]
     );
-    let led = core.workspace.task("t1").unwrap();
-    assert_eq!(led.mode, zeron_proto::TaskMode::Orchestrated);
-    assert!(led.plan_pending);
-    assert!(!led.plan_doc, "a start without planDoc is steps only");
+    let lead = |id: &str| core.workspace.chat(id).unwrap().unwrap();
+    let led = lead("lead-1");
+    assert!(
+        led.plan_pending,
+        "Plan first opens the lead chat waiting for approval"
+    );
+    assert!(
+        !led.plan.expect("the lead chat holds the plan").plan_doc,
+        "a start without planDoc is steps only"
+    );
+    assert_eq!(
+        core.workspace.task("t1").unwrap().chat_id.as_deref(),
+        Some("lead-1")
+    );
 
     mutate(json!({
         "op": "startTask", "taskId": "t4", "chatId": "lead-4", "orchestrate": true, "planDoc": true,
@@ -340,10 +350,10 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     .await;
     let doc_brief = prompts.lock().unwrap()[2].clone();
     assert!(
-        doc_brief.contains("taskId \"t4\", overview, steps [{title, notes, role}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done."),
+        doc_brief.contains("action \"write\", overview, steps [{title, notes, role}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done."),
         "{doc_brief}"
     );
-    assert!(core.workspace.task("t4").unwrap().plan_doc);
+    assert!(lead("lead-4").plan.unwrap().plan_doc);
     assert!(
         prompts.lock().unwrap()[..2]
             .iter()
@@ -379,13 +389,15 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     assert!(
         brief.starts_with(
             "Shop frontend\n\nNext.js and Tailwind\n\nYou lead this task (task id t5)."
-        ) && brief.contains("taskId \"t5\", overview"),
+        ) && brief.contains("action \"write\", overview"),
         "{brief}"
     );
-    let led = core.workspace.task("t5").unwrap();
-    assert_eq!(led.chat_id.as_deref(), Some("talk"));
-    assert_eq!(led.mode, zeron_proto::TaskMode::Orchestrated);
-    assert!(led.plan_pending && led.plan_doc);
+    assert_eq!(
+        core.workspace.task("t5").unwrap().chat_id.as_deref(),
+        Some("talk")
+    );
+    let talk = lead("talk");
+    assert!(talk.plan_pending && talk.plan.unwrap().plan_doc);
     assert_eq!(
         core.workspace.read_chats().unwrap().len(),
         chats,
@@ -404,76 +416,43 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     mutate(json!({ "op": "createTask", "taskId": "t6", "title": "Shop backend" }))
         .await
         .unwrap();
-    assert!(
+    let refusal = |reply: Result<RpcReply, zeron_rpc::RpcError>| match reply {
+        Err(err) => err.to_string(),
+        Ok(_) => panic!("expected a refusal"),
+    };
+    let err = refusal(
         mutate(json!({
             "op": "assignTask", "taskId": "t6", "chatId": "talk", "orchestrate": true,
         }))
-        .await
-        .is_err(),
-        "a chat that leads an unfinished mission cannot lead a second one"
+        .await,
     );
+    assert!(err.contains("already has a plan"), "{err}");
     assert_eq!(core.workspace.task("t6").unwrap().chat_id, None);
     assert_eq!(prompts.lock().unwrap().len(), 4);
-    let refusal = |reply: Result<RpcReply, zeron_rpc::RpcError>| match reply {
-        Err(err) => err.to_string(),
-        Ok(_) => panic!("a second open plan on one chat is refused"),
-    };
-    mutate(json!({ "op": "assignTask", "taskId": "t6", "chatId": "talk" }))
-        .await
-        .unwrap();
     let err = refusal(
         mutate(json!({
-            "op": "planSteps", "taskId": "t6", "fromChatId": "talk",
+            "op": "planSteps", "chatId": "talk", "fromChatId": "lead-1",
             "steps": [{ "title": "Build the API" }],
         }))
         .await,
     );
-    assert!(err.contains("already leads a mission"), "{err}");
+    assert!(err.contains("writes only its own plan"), "{err}");
     assert!(
-        core.workspace.task_steps_of("t6").is_empty(),
+        core.workspace.steps_of("talk").is_empty(),
         "a refused plan writes no steps"
     );
-    assert_eq!(
-        core.workspace.task("t6").unwrap().mode,
-        zeron_proto::TaskMode::Single
-    );
-    mutate(json!({ "op": "createTask", "taskId": "t7", "title": "Shop admin" }))
-        .await
-        .unwrap();
-    mutate(json!({ "op": "updateTask", "taskId": "t7", "patch": { "mode": "orchestrated" } }))
-        .await
-        .unwrap();
-    let err = refusal(
-        mutate(json!({ "op": "updateTask", "taskId": "t7", "patch": { "chatId": "talk" } })).await,
-    );
-    assert!(err.contains("already leads a mission"), "{err}");
-    assert_eq!(core.workspace.task("t7").unwrap().chat_id, None);
-    mutate(json!({ "op": "updateTask", "taskId": "t5", "patch": { "completed": true } }))
-        .await
-        .unwrap();
-    mutate(json!({ "op": "updateTask", "taskId": "t7", "patch": { "chatId": "talk" } }))
-        .await
-        .unwrap();
-    let err = refusal(
-        mutate(json!({ "op": "updateTask", "taskId": "t5", "patch": { "completed": false } }))
-            .await,
-    );
-    assert!(
-        err.contains("already leads a mission"),
-        "reopening a done plan on a chat that leads another: {err}"
-    );
-    let reopen = |completed| zeron_proto::TaskPatch {
-        completed: Some(completed),
-        ..Default::default()
-    };
-    core.workspace.update_task("t5", &reopen(false)).unwrap();
     mutate(json!({
-        "op": "planSteps", "taskId": "t7", "fromChatId": "talk",
+        "op": "planSteps", "chatId": "talk", "fromChatId": "talk",
         "steps": [{ "title": "Build the admin" }],
     }))
     .await
-    .expect("a lead re-plans its mission beside a duplicate open plan from before the rule");
-    core.workspace.update_task("t5", &reopen(true)).unwrap();
+    .expect("a chat writes its own plan");
+    let talk = lead("talk");
+    assert!(
+        talk.plan_pending && talk.plan.unwrap().plan_doc,
+        "a plan write keeps the approval flag and the start's flags"
+    );
+    assert_eq!(core.workspace.steps_of("talk").len(), 1);
     core.workspace.create_sidechat("talk", "talk-side").unwrap();
     mutate(json!({ "op": "createTask", "taskId": "t8", "title": "Shop side" }))
         .await
@@ -487,11 +466,11 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     assert!(err.contains("side chat cannot lead"), "{err}");
     assert_eq!(core.workspace.task("t8").unwrap().chat_id, None);
 
-    let unapproved = core.workspace.task("t2").unwrap();
-    assert_eq!(unapproved.mode, zeron_proto::TaskMode::Orchestrated);
+    let unapproved = lead("lead-2");
+    assert!(unapproved.plan.unwrap().same_agents);
     assert!(!unapproved.plan_pending);
     assert!(
-        mutate(json!({ "op": "approvePlan", "taskId": "t1" }))
+        mutate(json!({ "op": "approvePlan", "chatId": "lead-1" }))
             .await
             .is_err(),
         "a plan with no steps has nothing to approve"
@@ -553,8 +532,8 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
         unled.chat_id, None,
         "a lead that never got its brief is unlinked"
     );
-    assert_eq!(unled.mode, zeron_proto::TaskMode::Single);
-    assert!(!unled.plan_pending);
+    let quiet = lead("quiet");
+    assert!(quiet.plan.is_none() && !quiet.plan_pending);
 }
 
 #[tokio::test]
@@ -622,7 +601,7 @@ async fn a_mission_lead_reads_its_context_chats_first_and_the_list_locks_at_star
     );
     assert!(
         first.ends_with(
-            "\n7. When a step needs one of the chats you read, name it with its threadId in that step's prompt."
+            "\n7. When a step needs one of the chats you read, name it with its threadId in that step's task."
         ),
         "{first}"
     );
@@ -653,4 +632,78 @@ async fn a_mission_lead_reads_its_context_chats_first_and_the_list_locks_at_star
             .await
             .expect("a deleted chat already on the list does not block edits to it");
     }
+}
+
+#[tokio::test]
+async fn a_planning_to_do_lists_the_progress_of_its_lead_chats_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Recording(prompts.clone())));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    let rpc = core.rpc_service();
+    let mutate = |params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { rpc.handle(methods::MUTATE, params).await }
+    };
+    for (id, title) in [("t1", "Ship the shop"), ("t2", "Plain to-do")] {
+        mutate(json!({ "op": "createTask", "taskId": id, "title": title }))
+            .await
+            .unwrap();
+    }
+    mutate(json!({ "op": "startTask", "taskId": "t1", "chatId": "lead-1", "orchestrate": true }))
+        .await
+        .unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the lead's turn").await;
+    mutate(json!({
+        "op": "planSteps", "chatId": "lead-1", "fromChatId": "lead-1",
+        "steps": [{ "title": "API" }, { "title": "Docs" }, { "title": "Ads" }],
+    }))
+    .await
+    .unwrap();
+    let steps = core.workspace.steps_of("lead-1");
+    for (step, outcome) in [(&steps[0], "done"), (&steps[2], "skipped")] {
+        mutate(json!({
+            "op": "updateTaskStep", "stepId": step.id, "patch": { "outcome": outcome },
+            "fromChatId": "lead-1",
+        }))
+        .await
+        .unwrap();
+    }
+    assert!(
+        mutate(json!({
+            "op": "updateTaskStep", "stepId": steps[1].id, "patch": { "outcome": "done" },
+            "fromChatId": "t2-chat",
+        }))
+        .await
+        .is_err(),
+        "only the chat whose plan holds a step marks it"
+    );
+
+    let tools = zeron_mcp::ThreadTools::new(zeron_rpc::memory_client(rpc.clone()), "lead-1");
+    let listed = tools
+        .call("tasks", &json!({ "action": "list" }))
+        .await
+        .unwrap();
+    let rows = listed["tasks"].as_array().unwrap();
+    let row = |id: &str| rows.iter().find(|row| row["id"] == id).unwrap().clone();
+    assert_eq!(row("t1")["progress"], json!({ "done": 1, "total": 2 }));
+    assert!(
+        row("t2").get("progress").is_none(),
+        "a plain to-do has no progress"
+    );
+    let plan = tools
+        .call("plan", &json!({ "action": "read" }))
+        .await
+        .unwrap();
+    assert_eq!(plan["planPending"], json!(true));
+    let statuses: Vec<&str> = plan["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(statuses, ["done", "planned", "skipped"]);
 }

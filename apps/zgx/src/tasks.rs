@@ -34,7 +34,7 @@ fn shaped(task: &Json, steps: &[zeron_proto::TaskStep]) -> Option<Json> {
     let t: zeron_proto::Task = serde_json::from_value(task.clone()).ok()?;
     let steps: Vec<Json> = steps
         .iter()
-        .filter(|s| s.task_id == t.id && !s.deleted)
+        .filter(|s| t.chat_id.as_deref() == Some(s.owner_chat_id.as_str()) && !s.deleted)
         .map(|s| json!({ "chat": s.chat_id, "outcome": s.outcome, "ended": s.turn.as_ref().map(|turn| turn.ended) }))
         .collect();
     if t.deleted {
@@ -52,8 +52,7 @@ fn shaped(task: &Json, steps: &[zeron_proto::TaskStep]) -> Option<Json> {
         "created": t.created_at.timestamp_millis(),
         "images": t.images,
         "send_error": t.send_error,
-        "plan": t.mode == zeron_proto::TaskMode::Orchestrated || t.plan_pending,
-        "plan_pending": t.plan_pending,
+        "plan": !steps.is_empty(),
         "steps": steps,
         "depends": t.depends_on,
     }))
@@ -322,13 +321,13 @@ mod tests {
         let tasks = json!([
             { "id": "a", "title": "Fix it", "orderKey": "a0", "createdAt": "2026-11-08T10:00:00Z", "completedAt": "2026-11-08T10:00:01.5Z", "spaceId": "p1", "dueOn": "2026-11-08", "chatId": "c1", "images": ["/u/a.png"], "dependsOn": ["b"] },
             { "id": "b", "title": "Gone", "deleted": true },
-            { "id": "c", "title": "Plan", "mode": "orchestrated", "sendError": "offline" },
+            { "id": "c", "title": "Plan", "chatId": "lead", "sendError": "offline" },
         ]);
         let steps = json!([
-            { "id": "s1", "taskId": "c", "chatId": "k1", "turn": { "ended": "failed" } },
-            { "id": "s2", "taskId": "c", "outcome": "done" },
-            { "id": "s3", "taskId": "c", "deleted": true },
-            { "id": "s4", "taskId": "a" , "deleted": true },
+            { "id": "s1", "ownerChatId": "lead", "chatId": "k1", "turn": { "ended": "failed" } },
+            { "id": "s2", "ownerChatId": "lead", "outcome": "done" },
+            { "id": "s3", "ownerChatId": "lead", "deleted": true },
+            { "id": "s4", "ownerChatId": "c1" , "deleted": true },
         ]);
         let out = shaped_all(&tasks, &steps);
         let list = out.as_array().unwrap();

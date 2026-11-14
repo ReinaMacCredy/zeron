@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Local, Utc};
-use zeron_proto::mission::{PlanPhase, Rollup, is_mission, plan_led_by};
+use zeron_proto::mission::{PlanPhase, Rollup, is_mission};
 use zeron_proto::today::plural;
 use zeron_proto::usage::format_tokens;
 use zeron_proto::view::single_line;
@@ -148,14 +148,12 @@ pub fn linked_label(indicator: ChatIndicator) -> &'static str {
     }
 }
 
-/// A plan first, else the task handed to this chat, open before done.
+/// The task handed to this chat, open before done.
 pub fn task_led_by<'a>(tasks: &'a [Task], chat_id: &str) -> Option<&'a Task> {
-    plan_led_by(tasks, chat_id).or_else(|| {
-        tasks
-            .iter()
-            .filter(|task| !task.deleted && task.chat_id.as_deref() == Some(chat_id))
-            .max_by_key(|task| (task.completed_at.is_none(), task.completed_at))
-    })
+    tasks
+        .iter()
+        .filter(|task| !task.deleted && task.chat_id.as_deref() == Some(chat_id))
+        .max_by_key(|task| (task.completed_at.is_none(), task.completed_at))
 }
 
 pub fn lead_waits<B>(task: &Task, plan: &Rollup<B>) -> Option<String> {
@@ -179,7 +177,7 @@ pub fn lead_line<B>(task: &Task, plan: &Rollup<B>) -> String {
         "Done".into()
     } else if plan.lead.is_none() {
         "Not started".into()
-    } else if let Some(lead) = plan.lead.filter(|_| !is_mission(task, plan)) {
+    } else if let Some(lead) = plan.lead.filter(|_| !is_mission(plan)) {
         linked_label(lead).into()
     } else if plan.phase(task) == PlanPhase::Planning {
         "Planning".into()
@@ -198,7 +196,7 @@ pub fn lead_status<B>(task: &Task, plan: &Rollup<B>) -> (TreeStatus, &'static st
     if task.completed_at.is_some() {
         return (TreeStatus::Done, "Done");
     }
-    if let Some(indicator) = plan.lead.filter(|_| !is_mission(task, plan)) {
+    if let Some(indicator) = plan.lead.filter(|_| !is_mission(plan)) {
         let status = match indicator {
             ChatIndicator::Working | ChatIndicator::Waiting => TreeStatus::Running,
             ChatIndicator::Errored => TreeStatus::Failed,
@@ -245,14 +243,11 @@ pub fn chat_status<S: TreeSource>(source: &S, chat: &Chat) -> (TreeStatus, &'sta
     }
 }
 
-pub fn children_by_parent<'a>(
-    chats: &'a [Chat],
-    tasks: &[Task],
-) -> HashMap<&'a str, Vec<&'a Chat>> {
+pub fn children_by_parent(chats: &[Chat]) -> HashMap<&str, Vec<&Chat>> {
     let ids: HashSet<&str> = chats.iter().map(|chat| chat.id.as_str()).collect();
     let mut children: HashMap<&str, Vec<&Chat>> = HashMap::new();
     for chat in chats.iter().filter(|chat| !chat.archived) {
-        let Some(link) = zeron_proto::thread_link(chat, tasks, &[]) else {
+        let Some(link) = zeron_proto::thread_link(chat, &[]) else {
             continue;
         };
         if !matches!(link.kind, LinkKind::Delegated | LinkKind::OpenedFrom) {
@@ -304,7 +299,7 @@ pub fn tree_rows<S: TreeSource>(
     };
     let mut walk = Walk {
         source,
-        children: children_by_parent(source.chats(), source.tasks()),
+        children: children_by_parent(source.chats()),
         native,
         seen: HashSet::from([root.id.clone()]),
         out: Vec::new(),
@@ -465,7 +460,7 @@ fn roots_a_tree<S: TreeSource>(
 
 pub fn tree_index<S: TreeSource>(source: &S) -> IndexRows {
     let now = source.now();
-    let children = children_by_parent(source.chats(), source.tasks());
+    let children = children_by_parent(source.chats());
     let nested: HashSet<&str> = children
         .iter()
         .flat_map(|(parent, kids)| {

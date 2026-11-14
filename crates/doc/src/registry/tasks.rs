@@ -1,5 +1,5 @@
 use super::*;
-use zeron_proto::{Task, TaskMode, TaskPatch, pin_order_key_between, valid_pin_order_key};
+use zeron_proto::{Task, TaskPatch, pin_order_key_between, valid_pin_order_key};
 
 pub const TASK_TITLE_MAX_CHARS: usize = 500;
 pub const TASK_NOTES_MAX_CHARS: usize = 10_000;
@@ -31,19 +31,7 @@ struct RawTask {
     #[serde(default)]
     deleted: bool,
     #[serde(default)]
-    mode: TaskMode,
-    #[serde(default)]
-    plan_pending: bool,
-    #[serde(default)]
     send_error: Option<String>,
-    #[serde(default)]
-    plan: String,
-    #[serde(default)]
-    plan_doc: bool,
-    #[serde(default)]
-    same_agents: bool,
-    #[serde(default)]
-    resources: Vec<String>,
     #[serde(default)]
     images: Vec<String>,
     #[serde(default)]
@@ -70,13 +58,7 @@ impl From<RawTask> for Task {
             created_at: at(raw.created_at),
             updated_at: at(raw.updated_at),
             deleted: raw.deleted,
-            mode: raw.mode,
-            plan_pending: raw.plan_pending,
             send_error: raw.send_error,
-            plan: raw.plan,
-            plan_doc: raw.plan_doc,
-            same_agents: raw.same_agents,
-            resources: raw.resources,
             images: raw.images,
             context: raw.context,
             depends_on: raw.depends_on,
@@ -192,13 +174,7 @@ fn task_fields(task: &Task, title: String, order_key: String) -> BTreeMap<String
         ("createdAt", json!(task.created_at.timestamp_millis())),
         ("updatedAt", json!(task.updated_at.timestamp_millis())),
         ("deleted", json!(false)),
-        ("mode", json!(task.mode)),
-        ("planPending", json!(task.plan_pending)),
         ("sendError", opt_str(task.send_error.as_deref())),
-        ("plan", json!(task.plan)),
-        ("planDoc", json!(task.plan_doc)),
-        ("sameAgents", json!(task.same_agents)),
-        ("resources", json!(task.resources)),
         ("images", json!(task.images)),
         ("context", json!(task.context)),
         ("dependsOn", json!(task.depends_on)),
@@ -213,7 +189,7 @@ pub(super) fn check_row_fits(row: &RegistryRow) -> Result<(), DocError> {
     Err(invalid(if row.kind == KIND_TASK_STEPS {
         "This step is too large to sync; shorten its spec"
     } else {
-        "This task is too large to sync: its notes and plan overview share one limit, so shorten one of them"
+        "This task is too large to sync; shorten its notes"
     }))
 }
 
@@ -368,27 +344,8 @@ impl RegistryDoc {
             check_order_key(order_key)?;
             set.insert("orderKey".into(), json!(order_key));
         }
-        if let Some(mode) = patch.mode {
-            set.insert("mode".into(), json!(mode));
-        }
-        if let Some(plan_pending) = patch.plan_pending {
-            set.insert("planPending".into(), json!(plan_pending));
-        }
         if let Some(send_error) = &patch.send_error {
             set.insert("sendError".into(), opt_str(send_error.as_deref()));
-        }
-        if let Some(plan) = &patch.plan {
-            check_notes(plan)?;
-            set.insert("plan".into(), json!(plan));
-        }
-        if let Some(plan_doc) = patch.plan_doc {
-            set.insert("planDoc".into(), json!(plan_doc));
-        }
-        if let Some(same_agents) = patch.same_agents {
-            set.insert("sameAgents".into(), json!(same_agents));
-        }
-        if let Some(resources) = &patch.resources {
-            set.insert("resources".into(), json!(resources));
         }
         if let Some(images) = &patch.images {
             check_images(images)?;
@@ -413,24 +370,17 @@ impl RegistryDoc {
             return Ok(false);
         }
         let hlc = self.next_hlc();
-        let flag = |kind: &str, id: &str| RowOp {
-            kind: kind.into(),
-            id: id.into(),
+        self.enqueue_ops(vec![RowOp {
+            kind: KIND_TASKS.into(),
+            id: task_id.into(),
             op: OpKind::Update,
             set: Some(fields([
                 ("deleted", json!(true)),
                 ("updatedAt", json!(now.timestamp_millis())),
             ])),
-            hlc: hlc.clone(),
+            hlc,
             clocks: None,
-        };
-        let mut ops = vec![flag(KIND_TASKS, task_id)];
-        ops.extend(
-            self.task_steps_of(task_id)
-                .iter()
-                .map(|step| flag(KIND_TASK_STEPS, &step.id)),
-        );
-        self.enqueue_ops(ops);
+        }]);
         Ok(true)
     }
 }

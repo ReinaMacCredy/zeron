@@ -1036,6 +1036,8 @@ pub(crate) fn seed(
                 .filter(|(settled, _)| !settled)
                 .map(|(_, ago)| ms(now - ago)),
             sleep: None,
+            plan: None,
+            plan_pending: false,
         };
         doc.upsert_chat(&chat)?;
         if chat.id == super::review::OWNER {

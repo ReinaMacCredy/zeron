@@ -1722,17 +1722,17 @@ async fn a_step_thread_is_not_settled_while_its_limit_offer_waits() {
     }))
     .await;
     mutate(serde_json::json!({
-        "op": "planSteps", "taskId": "t1", "fromChatId": "lead-1",
+        "op": "planSteps", "chatId": "lead-1", "fromChatId": "lead-1",
         "steps": [{ "title": "Build it", "role": "worker" }],
     }))
     .await;
-    mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" })).await;
-    let step = rig.core.workspace.task_steps_of("t1").remove(0);
+    mutate(serde_json::json!({ "op": "approvePlan", "chatId": "lead-1" })).await;
+    let step = rig.core.workspace.steps_of("lead-1").remove(0);
     let thread = call(
-        zeron_rpc::methods::CREATE_THREAD,
-        serde_json::json!({ "fromChatId": "lead-1", "prompt": "LIMIT ME: build it", "taskStepId": step.id }),
+        zeron_rpc::methods::DELEGATE_TASK,
+        serde_json::json!({ "ownerChatId": "lead-1", "task": "LIMIT ME: build it", "stepId": step.id }),
     )
-    .await["chatId"]
+    .await["taskId"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1799,10 +1799,10 @@ async fn a_planned_step_role_routes_its_thread_and_survives_a_replan() {
         }
     };
     let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
-    let step_titled = |task: &str, title: &str| {
+    let step_titled = |lead: &str, title: &str| {
         rig.core
             .workspace
-            .task_steps_of(task)
+            .steps_of(lead)
             .into_iter()
             .find(|step| step.title == title)
             .unwrap_or_else(|| panic!("step {title}"))
@@ -1815,7 +1815,7 @@ async fn a_planned_step_role_routes_its_thread_and_survives_a_replan() {
         }))
         .await;
         mutate(serde_json::json!({
-            "op": "planSteps", "taskId": task, "fromChatId": lead,
+            "op": "planSteps", "chatId": lead, "fromChatId": lead,
             "steps": [
                 { "title": "Check the API", "role": "test" },
                 { "title": "Write the docs", "role": "worker" },
@@ -1827,17 +1827,17 @@ async fn a_planned_step_role_routes_its_thread_and_survives_a_replan() {
         &*rpc,
         zeron_rpc::methods::MUTATE,
         serde_json::json!({
-            "op": "planSteps", "taskId": "t1", "fromChatId": "lead-1",
+            "op": "planSteps", "chatId": "lead-1", "fromChatId": "lead-1",
             "steps": [{ "title": "Plan", "role": "planner" }],
         }),
     )
     .await;
     assert!(bad.is_err(), "an unknown step role is refused");
-    let check = step_titled("t1", "Check the API");
+    let check = step_titled("lead-1", "Check the API");
     assert_eq!(check.role.as_deref(), Some("validator"));
-    let docs = step_titled("t1", "Write the docs");
+    let docs = step_titled("lead-1", "Write the docs");
     mutate(serde_json::json!({
-        "op": "editTaskPlan", "taskId": "t1",
+        "op": "editPlan", "chatId": "lead-1",
         "steps": [
             { "stepId": check.id, "title": "Check the whole API" },
             { "title": "Write the docs", "notes": "README" },
@@ -1845,29 +1845,29 @@ async fn a_planned_step_role_routes_its_thread_and_survives_a_replan() {
         "removeStepIds": [docs.id],
     }))
     .await;
-    let check = step_titled("t1", "Check the whole API");
+    let check = step_titled("lead-1", "Check the whole API");
     assert_eq!(
         check.role.as_deref(),
         Some("validator"),
         "an edit keeps the role"
     );
-    let docs = step_titled("t1", "Write the docs");
+    let docs = step_titled("lead-1", "Write the docs");
     assert_eq!(
         docs.role.as_deref(),
         Some("worker"),
         "a re-added namesake keeps the role"
     );
 
-    for task in ["t1", "t2"] {
-        mutate(serde_json::json!({ "op": "approvePlan", "taskId": task })).await;
+    for lead in ["lead-1", "lead-2"] {
+        mutate(serde_json::json!({ "op": "approvePlan", "chatId": lead })).await;
     }
     let run = |lead: &str, step: &zeron_proto::TaskStep| {
         call(
-            zeron_rpc::methods::CREATE_THREAD,
-            serde_json::json!({ "fromChatId": lead, "prompt": format!("do: {}", step.title), "taskStepId": step.id }),
+            zeron_rpc::methods::DELEGATE_TASK,
+            serde_json::json!({ "ownerChatId": lead, "task": format!("do: {}", step.title), "stepId": step.id }),
         )
     };
-    let thread = run("lead-1", &check).await["chatId"]
+    let thread = run("lead-1", &check).await["taskId"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1885,8 +1885,8 @@ async fn a_planned_step_role_routes_its_thread_and_survives_a_replan() {
     assert_eq!(route.source, "routed");
     assert_eq!(route.role.as_deref(), Some("validator"));
 
-    let same = step_titled("t2", "Check the API");
-    let thread = run("lead-2", &same).await["chatId"]
+    let same = step_titled("lead-2", "Check the API");
+    let thread = run("lead-2", &same).await["taskId"]
         .as_str()
         .unwrap()
         .to_string();
@@ -2798,20 +2798,15 @@ async fn delegation_limits_and_retries_follow_the_settings() {
         .to_string();
     assert!(err.starts_with("depth_limit"), "{err}");
     rig.core.registry.set_delegation_settings(limits).unwrap();
-    let task: zeron_proto::Task = serde_json::from_value(serde_json::json!({
-        "id": "nested-task", "title": "Nested", "chatId": child, "mode": "orchestrated",
-    }))
-    .unwrap();
-    rig.core.workspace.create_task(&task).unwrap();
     let step: zeron_proto::TaskStep = serde_json::from_value(serde_json::json!({
-        "id": "nested-step", "taskId": "nested-task", "title": "Go deeper",
+        "id": "nested-step", "ownerChatId": child, "title": "Go deeper",
     }))
     .unwrap();
     rig.core.workspace.create_task_step(&step).unwrap();
     let err = zeron_rpc::RpcService::handle(
         &*rig.core.rpc_service(),
-        zeron_rpc::methods::CREATE_THREAD,
-        serde_json::json!({ "fromChatId": child, "prompt": "go", "taskStepId": "nested-step" }),
+        zeron_rpc::methods::DELEGATE_TASK,
+        serde_json::json!({ "ownerChatId": child, "task": "go", "stepId": "nested-step" }),
     )
     .await
     .map(|_| ())
@@ -4204,24 +4199,24 @@ async fn a_plan_edit_moves_unstarted_steps_and_names_the_new_order() {
     .await
     .unwrap();
     mutate(serde_json::json!({
-        "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead",
+        "op": "planSteps", "chatId": "task-lead", "fromChatId": "task-lead",
         "steps": [{ "title": "Scaffold" }, { "title": "Layout" }, { "title": "Grid" }, { "title": "Cart" }],
     }))
     .await
     .unwrap();
-    mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" }))
+    mutate(serde_json::json!({ "op": "approvePlan", "chatId": "task-lead" }))
         .await
         .unwrap();
-    let steps = rig.core.workspace.task_steps_of("t1");
+    let steps = rig.core.workspace.steps_of("task-lead");
     call(
-        zeron_rpc::methods::CREATE_THREAD,
-        serde_json::json!({ "fromChatId": "task-lead", "prompt": "do it", "taskStepId": steps[0].id }),
+        zeron_rpc::methods::DELEGATE_TASK,
+        serde_json::json!({ "ownerChatId": "task-lead", "task": "do it", "stepId": steps[0].id }),
     )
     .await
     .unwrap();
     let ids = |order: [usize; 4]| order.map(|ix| steps[ix].id.clone());
     let Err(err) = mutate(serde_json::json!({
-        "op": "editTaskPlan", "taskId": "t1", "order": ids([1, 0, 2, 3]),
+        "op": "editPlan", "chatId": "task-lead", "order": ids([1, 0, 2, 3]),
     }))
     .await
     else {
@@ -4230,11 +4225,11 @@ async fn a_plan_edit_moves_unstarted_steps_and_names_the_new_order() {
     assert!(err.to_string().contains("have not started"), "{err}");
 
     mutate(serde_json::json!({
-        "op": "editTaskPlan", "taskId": "t1", "order": ids([0, 3, 1, 2]),
+        "op": "editPlan", "chatId": "task-lead", "order": ids([0, 3, 1, 2]),
     }))
     .await
     .unwrap();
-    let after = rig.core.workspace.task_steps_of("t1");
+    let after = rig.core.workspace.steps_of("task-lead");
     assert_eq!(
         after.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(),
         ["Scaffold", "Cart", "Layout", "Grid"]
@@ -4249,7 +4244,7 @@ async fn a_plan_edit_moves_unstarted_steps_and_names_the_new_order() {
             "only the moved step is written"
         );
     }
-    let edited = "The person edited the plan on the task page (task id t1)";
+    let edited = "The person edited your plan:";
     wait_for(
         || !prompts_with(&rig, edited).is_empty(),
         "the lead's edit message",
@@ -4257,7 +4252,7 @@ async fn a_plan_edit_moves_unstarted_steps_and_names_the_new_order() {
     .await;
     let message = prompts_with(&rig, edited).remove(0);
     let line = format!(
-        "- The steps are in a new order: 1. \"Scaffold\", 2. \"Cart\" (moved, taskStepId {}), 3. \"Layout\", 4. \"Grid\".",
+        "- The steps are in a new order: 1. \"Scaffold\", 2. \"Cart\" (moved, stepId {}), 3. \"Layout\", 4. \"Grid\".",
         steps[3].id
     );
     assert!(message.contains(&line), "{line} in {message}");
@@ -4320,15 +4315,15 @@ async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_the
     );
 
     mutate(serde_json::json!({
-        "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead",
+        "op": "planSteps", "chatId": "task-lead", "fromChatId": "task-lead",
         "steps": [{ "title": "Grid" }, { "title": "Cart" }],
     }))
     .await
     .unwrap();
-    let steps = rig.core.workspace.task_steps_of("t1");
+    let steps = rig.core.workspace.steps_of("task-lead");
     let shots = [img("bb-grid.png"), img("cc-grid-2.png")];
     mutate(serde_json::json!({
-        "op": "editTaskPlan", "taskId": "t1",
+        "op": "editPlan", "chatId": "task-lead",
         "overviewImages": [img("aa-overview.png"), img("dd-flow.png")],
         "steps": [
             { "stepId": steps[0].id, "title": "Grid", "notes": "", "images": shots },
@@ -4337,7 +4332,7 @@ async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_the
     }))
     .await
     .unwrap();
-    let edited = "The person edited the plan on the task page (task id t1)";
+    let edited = "The person edited your plan:";
     wait_for(
         || !prompts_with(&rig, edited).is_empty(),
         "the lead's edit message",
@@ -4346,16 +4341,31 @@ async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_the
     let message = prompts_with(&rig, edited).remove(0);
     assert!(
         message.contains(&format!(
-            "- Step \"Grid\" (taskStepId {}) has 2 new images.",
+            "- Step \"Grid\" (stepId {}) has 2 new images.",
             steps[0].id
         )),
         "{message}"
     );
     assert_eq!(attached_to(&rig, edited), [img("dd-flow.png")]);
-    assert_eq!(rig.core.workspace.task("t1").unwrap().images.len(), 2);
+    let overview_images = |rig: &Rig| {
+        rig.core
+            .workspace
+            .chat("task-lead")
+            .unwrap()
+            .unwrap()
+            .plan
+            .unwrap()
+            .images
+    };
+    assert_eq!(overview_images(&rig).len(), 2);
+    assert_eq!(
+        rig.core.workspace.task("t1").unwrap().images.len(),
+        2,
+        "the to-do keeps its own images"
+    );
 
     let Ok(zeron_rpc::RpcReply::Value(replanned)) = mutate(serde_json::json!({
-        "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead",
+        "op": "planSteps", "chatId": "task-lead", "fromChatId": "task-lead",
         "steps": [{ "title": " Grid " }, { "title": "Checkout" }],
     }))
     .await
@@ -4363,12 +4373,12 @@ async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_the
         panic!("the lead re-plans");
     };
     let old = steps;
-    let steps = rig.core.workspace.task_steps_of("t1");
+    let steps = rig.core.workspace.steps_of("task-lead");
     assert_eq!(steps.len(), 2);
     assert_eq!(steps[0].images, shots, "a step keeps its images by title");
     assert!(steps[1].images.is_empty());
     assert_eq!(
-        rig.core.workspace.task("t1").unwrap().images,
+        overview_images(&rig),
         [
             img("aa-overview.png"),
             img("dd-flow.png"),
@@ -4380,28 +4390,28 @@ async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_the
         replanned["imagesMoved"],
         serde_json::json!([
             format!(
-                "Step \"Grid\" (taskStepId {}) had 2 images, now on the new step with its title (taskStepId {}).",
+                "Step \"Grid\" (stepId {}) had 2 images, now on the new step with its title (stepId {}).",
                 old[0].id, steps[0].id
             ),
             format!(
-                "Step \"Cart\" (taskStepId {}) had 1 image, now on the overview: no single new step has its title.",
+                "Step \"Cart\" (stepId {}) had 1 image, now on the overview: no single new step has its title.",
                 old[1].id
             ),
         ])
     );
 
-    mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" }))
+    mutate(serde_json::json!({ "op": "approvePlan", "chatId": "task-lead" }))
         .await
         .unwrap();
     let Ok(zeron_rpc::RpcReply::Value(reply)) = call(
-        zeron_rpc::methods::CREATE_THREAD,
-        serde_json::json!({ "fromChatId": "task-lead", "prompt": "build the grid", "taskStepId": steps[0].id }),
+        zeron_rpc::methods::DELEGATE_TASK,
+        serde_json::json!({ "ownerChatId": "task-lead", "task": "build the grid", "stepId": steps[0].id }),
     )
     .await
     else {
         panic!("the step thread starts");
     };
-    let thread = reply["chatId"].as_str().unwrap().to_string();
+    let thread = reply["taskId"].as_str().unwrap().to_string();
     wait_for(
         || !prompts_with(&rig, "build the grid").is_empty(),
         "the step's first turn",
@@ -4450,7 +4460,7 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = format!("port:{}", listener.local_addr().unwrap().port());
     let plan = serde_json::json!({
-        "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead",
+        "op": "planSteps", "chatId": "task-lead", "fromChatId": "task-lead",
         "steps": [{ "title": "Build the API" }, { "title": "Write the docs", "notes": "README" }],
         "overview": "Ship the API", "resources": [port, port],
     });
@@ -4475,25 +4485,31 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     };
     assert!(err.to_string().contains("is not a resource"), "{err}");
     mutate(plan).await.unwrap();
-    assert_eq!(
-        rig.core.workspace.task("t1").unwrap().resources,
-        [port.clone()]
-    );
-    let steps = rig.core.workspace.task_steps_of("t1");
+    let plan_of = |rig: &Rig| {
+        rig.core
+            .workspace
+            .chat("task-lead")
+            .unwrap()
+            .unwrap()
+            .plan
+            .unwrap()
+    };
+    assert_eq!(plan_of(&rig).resources, [port.clone()]);
+    let steps = rig.core.workspace.steps_of("task-lead");
     assert_eq!(
         steps.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(),
         ["Build the API", "Write the docs"]
     );
     let run = |step: &zeron_proto::TaskStep, owner: &str| {
         call(
-            zeron_rpc::methods::CREATE_THREAD,
+            zeron_rpc::methods::DELEGATE_TASK,
             serde_json::json!({
-                "fromChatId": owner, "prompt": format!("do: {}", step.title), "taskStepId": step.id,
+                "ownerChatId": owner, "task": format!("do: {}", step.title), "stepId": step.id,
             }),
         )
     };
     let started = |reply: Result<zeron_rpc::RpcReply, zeron_rpc::RpcError>| match reply {
-        Ok(zeron_rpc::RpcReply::Value(value)) => value["chatId"].as_str().unwrap().to_string(),
+        Ok(zeron_rpc::RpcReply::Value(value)) => value["taskId"].as_str().unwrap().to_string(),
         Ok(_) => panic!("a chat id"),
         Err(err) => panic!("{err}"),
     };
@@ -4504,12 +4520,22 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     let err = refused(run(&steps[0], "task-lead").await);
     assert!(err.contains("plan_pending"), "{err}");
     let err = refused(run(&steps[0], "lead").await);
-    assert!(err.contains("Only the task's lead runs its steps"), "{err}");
+    assert!(
+        err.contains("Only the chat whose plan holds this step runs it"),
+        "{err}"
+    );
 
-    mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" }))
+    mutate(serde_json::json!({ "op": "approvePlan", "chatId": "task-lead" }))
         .await
         .unwrap();
-    assert!(!rig.core.workspace.task("t1").unwrap().plan_pending);
+    assert!(
+        !rig.core
+            .workspace
+            .chat("task-lead")
+            .unwrap()
+            .unwrap()
+            .plan_pending
+    );
     wait_for(
         || !prompts_with(&rig, "The plan is approved. Run it.").is_empty(),
         "the lead's approval message",
@@ -4523,7 +4549,7 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     )
     .await;
     let handback = format!(
-        "Step \"Build the API\" (taskStepId {}) finished a turn on its thread {first}.\n\n<agent-response>\nnoted\n</agent-response>\n\nRead it with read_thread, then mark the step done or skipped with the tasks tool, action \"step\", or tell the thread what is still missing with send_message_to_thread.",
+        "Step \"Build the API\" (stepId {}) finished a turn on its thread {first}.\n\n<agent-response>\nnoted\n</agent-response>\n\nRead it with read_thread, then mark the step done or skipped with the plan tool, action \"step\", or tell the thread what is still missing with send_message_to_thread.",
         steps[0].id
     );
     wait_for(
@@ -4575,10 +4601,10 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         "a step runs on a thread its lead owns"
     );
 
-    assert_eq!(rig.core.workspace.task("t1").unwrap().plan, "Ship the API");
+    assert_eq!(plan_of(&rig).overview, "Ship the API");
     let edit = |remove: Vec<&str>| {
         serde_json::json!({
-            "op": "editTaskPlan", "taskId": "t1", "overview": "Ship the API, then its docs",
+            "op": "editPlan", "chatId": "task-lead", "overview": "Ship the API, then its docs",
             "steps": [
                 { "stepId": steps[1].id, "title": "Write the docs", "notes": "README and a guide" },
                 { "title": "Tag the release", "notes": "After both steps" },
@@ -4588,12 +4614,15 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     };
     let err = refused(mutate(edit(vec![steps[0].id.as_str()])).await);
     assert!(err.contains("has started"), "{err}");
-    let task = rig.core.workspace.task("t1").unwrap();
-    assert_eq!(task.plan, "Ship the API", "a refused edit applies nothing");
+    assert_eq!(
+        plan_of(&rig).overview,
+        "Ship the API",
+        "a refused edit applies nothing"
+    );
     let titles = |rig: &Rig| {
         rig.core
             .workspace
-            .task_steps_of("t1")
+            .steps_of("task-lead")
             .iter()
             .map(|s| (s.title.clone(), s.notes.clone()))
             .collect::<Vec<_>>()
@@ -4602,15 +4631,17 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     assert_eq!(titles(&rig)[1].1, "README");
 
     mutate(edit(Vec::new())).await.unwrap();
-    let edited = "The person edited the plan on the task page (task id t1)";
+    let edited = "The person edited your plan:";
     wait_for(
         || !prompts_with(&rig, edited).is_empty(),
         "the lead's edit message",
     )
     .await;
+    assert_eq!(plan_of(&rig).overview, "Ship the API, then its docs");
     assert_eq!(
-        rig.core.workspace.task("t1").unwrap().plan,
-        "Ship the API, then its docs"
+        plan_of(&rig).resources,
+        [port.clone()],
+        "an edit keeps what it does not change"
     );
     let after = titles(&rig);
     assert_eq!(after[1].1, "README and a guide");
@@ -4618,7 +4649,7 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     let added = rig
         .core
         .workspace
-        .task_steps_of("t1")
+        .steps_of("task-lead")
         .into_iter()
         .find(|s| s.title == "Tag the release")
         .unwrap();
@@ -4626,16 +4657,16 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     for change in [
         "- The overview changed.".to_string(),
         format!(
-            "- Step \"Write the docs\" (taskStepId {}) has a new spec.",
+            "- Step \"Write the docs\" (stepId {}) has a new spec.",
             steps[1].id
         ),
-        format!("- New step \"Tag the release\" (taskStepId {}).", added.id),
+        format!("- New step \"Tag the release\" (stepId {}).", added.id),
     ] {
         assert!(message.contains(&change), "{change} in {message}");
     }
 
     mutate(serde_json::json!({
-        "op": "editTaskPlan", "taskId": "t1", "removeStepIds": [added.id],
+        "op": "editPlan", "chatId": "task-lead", "removeStepIds": [added.id],
     }))
     .await
     .unwrap();
@@ -4659,21 +4690,37 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         .create_sidechat("lead", "lead-side")
         .unwrap()
         .id;
+    let peer = match call(
+        zeron_rpc::methods::CREATE_THREAD,
+        serde_json::json!({ "fromChatId": "lead", "prompt": "read the logs" }),
+    )
+    .await
+    {
+        Ok(zeron_rpc::RpcReply::Value(value)) => value["chatId"].as_str().unwrap().to_string(),
+        _ => panic!("a peer thread"),
+    };
     let child = started(
         call(
-            zeron_rpc::methods::CREATE_THREAD,
-            serde_json::json!({ "fromChatId": "lead", "prompt": "read the logs" }),
+            zeron_rpc::methods::DELEGATE_TASK,
+            serde_json::json!({ "ownerChatId": "lead", "task": "read the logs" }),
         )
         .await,
     );
+    for thread in [&peer, &child] {
+        wait_for(
+            || {
+                rig.core
+                    .sessions
+                    .session_status(thread)
+                    .is_some_and(|s| s.last_completed_turn.is_some())
+            },
+            "the thread's own turn",
+        )
+        .await;
+    }
     wait_for(
-        || {
-            rig.core
-                .sessions
-                .session_status(&child)
-                .is_some_and(|s| s.last_completed_turn.is_some())
-        },
-        "the child's own turn",
+        || delegation(&rig.core, &child).status == zeron_proto::DelegationStatus::Completed,
+        "the owned child to settle",
     )
     .await;
     mutate(serde_json::json!({ "op": "createTask", "taskId": "t3", "title": "Ship the shop" }))
@@ -4700,29 +4747,30 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     }
     let attach = |thread: &str| {
         serde_json::json!({
-            "op": "planSteps", "taskId": "t3", "fromChatId": "lead",
+            "op": "planSteps", "chatId": "lead", "fromChatId": "lead",
             "steps": [{ "title": "Read the logs", "threadId": thread }, { "title": "Fix the bug" }],
         })
     };
     let err = refused(mutate(attach(&side)).await);
-    assert!(err.contains("is a sidechat"), "{err}");
+    assert!(err.contains("is not a thread this chat owns"), "{err}");
     let err = refused(mutate(attach("task-lead")).await);
-    assert!(err.contains("is not a thread this chat started"), "{err}");
+    assert!(err.contains("is not a thread this chat owns"), "{err}");
+    let err = refused(mutate(attach(&peer)).await);
     assert!(
-        rig.core.workspace.task_steps_of("t3").is_empty(),
+        err.contains("is a peer thread") && err.contains("delegate_task and its stepId"),
+        "{err}"
+    );
+    assert!(
+        rig.core.workspace.steps_of("lead").is_empty(),
         "a refused plan writes no steps"
     );
     mutate(attach(&child)).await.unwrap();
-    let planned = rig.core.workspace.task_steps_of("t3");
+    let planned = rig.core.workspace.steps_of("lead");
     assert_eq!(planned[0].chat_id.as_deref(), Some(child.as_str()));
     assert_eq!(planned[1].chat_id, None);
     let row = rig.core.workspace.chat(&child).unwrap().unwrap();
-    let link = zeron_proto::thread_link(
-        &row,
-        &rig.core.workspace.read_tasks().unwrap(),
-        &rig.core.workspace.read_task_steps().unwrap(),
-    )
-    .unwrap();
+    let link =
+        zeron_proto::thread_link(&row, &rig.core.workspace.read_task_steps().unwrap()).unwrap();
     assert_eq!(
         (link.parent.as_str(), link.kind, link.step_id),
         (
@@ -4772,22 +4820,22 @@ async fn approved_plan(core: &EngineCore, titles: &[&str]) -> Vec<zeron_proto::T
         .map(|title| serde_json::json!({ "title": title }))
         .collect();
     mutate(serde_json::json!({
-        "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead", "steps": steps,
+        "op": "planSteps", "chatId": "task-lead", "fromChatId": "task-lead", "steps": steps,
     }))
     .await;
-    mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" })).await;
-    core.workspace.task_steps_of("t1")
+    mutate(serde_json::json!({ "op": "approvePlan", "chatId": "task-lead" })).await;
+    core.workspace.steps_of("task-lead")
 }
 
 async fn run_step(core: &EngineCore, step: &zeron_proto::TaskStep) -> String {
     rpc_value(
         core,
-        zeron_rpc::methods::CREATE_THREAD,
+        zeron_rpc::methods::DELEGATE_TASK,
         serde_json::json!({
-            "fromChatId": "task-lead", "prompt": format!("do: {}", step.title), "taskStepId": step.id,
+            "ownerChatId": "task-lead", "task": format!("do: {}", step.title), "stepId": step.id,
         }),
     )
-    .await["chatId"]
+    .await["taskId"]
         .as_str()
         .unwrap()
         .to_string()
@@ -4861,7 +4909,7 @@ fn a_step_thread_stopped_across_a_restart_reads_interrupted_and_its_lead_is_told
         )
         .await;
         let told = format!(
-            "Step \"Build it\" (taskStepId {}) was interrupted on its thread {thread}.",
+            "Step \"Build it\" (stepId {}) was interrupted on its thread {thread}.",
             step.id
         );
         wait_for(
@@ -4984,7 +5032,7 @@ async fn a_step_thread_runs_again_for_its_step_only_while_the_step_is_open() {
     )
     .await;
     let again = format!(
-        "Step \"Write docs\" (taskStepId {}) finished a turn on its thread {open}.\n\n<agent-response>\n{FOLLOW_UP_REPLY}\n</agent-response>",
+        "Step \"Write docs\" (stepId {}) finished a turn on its thread {open}.\n\n<agent-response>\n{FOLLOW_UP_REPLY}\n</agent-response>",
         steps[1].id
     );
     wait_for(
@@ -5135,7 +5183,7 @@ async fn step_handbacks_fold_into_one_lead_message() {
     .await
     .unwrap();
     mutate(serde_json::json!({
-        "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead",
+        "op": "planSteps", "chatId": "task-lead", "fromChatId": "task-lead",
         "steps": [
             { "title": "first" }, { "title": "second" },
             { "title": "alpha" }, { "title": "beta" }, { "title": "late" },
@@ -5143,7 +5191,7 @@ async fn step_handbacks_fold_into_one_lead_message() {
     }))
     .await
     .unwrap();
-    mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" }))
+    mutate(serde_json::json!({ "op": "approvePlan", "chatId": "task-lead" }))
         .await
         .unwrap();
     wait_for(
@@ -5153,12 +5201,12 @@ async fn step_handbacks_fold_into_one_lead_message() {
     .await;
     wait_for(|| idle(core, "task-lead"), "the lead's approval turn").await;
 
-    let steps = core.workspace.task_steps_of("t1");
+    let steps = core.workspace.steps_of("task-lead");
     let run = |step: &zeron_proto::TaskStep| {
         let reply = call(
-            zeron_rpc::methods::CREATE_THREAD,
+            zeron_rpc::methods::DELEGATE_TASK,
             serde_json::json!({
-                "fromChatId": "task-lead", "prompt": format!("do: {}", step.title), "taskStepId": step.id,
+                "ownerChatId": "task-lead", "task": format!("do: {}", step.title), "stepId": step.id,
             }),
         );
         let title = step.title.clone();
@@ -5166,7 +5214,7 @@ async fn step_handbacks_fold_into_one_lead_message() {
             let Ok(zeron_rpc::RpcReply::Value(value)) = reply.await else {
                 panic!("a step thread for {title}");
             };
-            value["chatId"].as_str().unwrap().to_string()
+            value["taskId"].as_str().unwrap().to_string()
         }
     };
     let step_rows = || {
@@ -5180,7 +5228,7 @@ async fn step_handbacks_fold_into_one_lead_message() {
             .filter(|row| !row.delegated_tasks.is_empty())
             .collect::<Vec<_>>()
     };
-    let handbacks = |rig: &Rig| prompts_with(rig, "(taskStepId ");
+    let handbacks = |rig: &Rig| prompts_with(rig, "(stepId ");
 
     let first = run(&steps[0]).await;
     let second_thread = run(&steps[1]).await;
@@ -5201,7 +5249,7 @@ async fn step_handbacks_fold_into_one_lead_message() {
     for (step, thread) in steps.iter().zip([&first, &second_thread]) {
         assert!(
             early[0].contains(&format!(
-                "Step \"{}\" (taskStepId {}) finished a turn on its thread {thread}.\n\n<agent-response>\n{} is done\n</agent-response>",
+                "Step \"{}\" (stepId {}) finished a turn on its thread {thread}.\n\n<agent-response>\n{} is done\n</agent-response>",
                 step.title, step.id, step.title
             )),
             "{}",
@@ -5248,7 +5296,7 @@ async fn step_handbacks_fold_into_one_lead_message() {
 
     lead.send(true).unwrap();
     wait_for(
-        || !prompts_with(&rig, &format!("(taskStepId {})", steps[4].id)).is_empty(),
+        || !prompts_with(&rig, &format!("(stepId {})", steps[4].id)).is_empty(),
         "the folded handback's turn",
     )
     .await;
@@ -5259,7 +5307,7 @@ async fn step_handbacks_fold_into_one_lead_message() {
     for (step, thread) in steps[2..].iter().zip(&threads).take(2) {
         assert!(
             message.contains(&format!(
-                "Step \"{}\" (taskStepId {}) finished a turn on its thread {thread}.\n\n<agent-response>\n{} is done\n</agent-response>",
+                "Step \"{}\" (stepId {}) finished a turn on its thread {thread}.\n\n<agent-response>\n{} is done\n</agent-response>",
                 step.title, step.id, step.title
             )),
             "{message}"
@@ -5267,7 +5315,7 @@ async fn step_handbacks_fold_into_one_lead_message() {
     }
     assert!(
         message.contains(&format!(
-            "Step \"late\" (taskStepId {}) finished a turn on its thread {}.\n\n<agent-response>\n{}\n[truncated 10 chars; use read_thread for the full response]\n</agent-response>",
+            "Step \"late\" (stepId {}) finished a turn on its thread {}.\n\n<agent-response>\n{}\n[truncated 10 chars; use read_thread for the full response]\n</agent-response>",
             steps[4].id,
             threads[2],
             "z".repeat(4_000)
@@ -5275,7 +5323,7 @@ async fn step_handbacks_fold_into_one_lead_message() {
         "{message}"
     );
     assert!(message.ends_with(
-        "Read them with read_thread, then mark each step done or skipped with the tasks tool, action \"step\", or tell its thread what is still missing with send_message_to_thread."
+        "Read them with read_thread, then mark each step done or skipped with the plan tool, action \"step\", or tell its thread what is still missing with send_message_to_thread."
     ));
     let woken: Vec<_> = entries(core, "task-lead")
         .into_iter()

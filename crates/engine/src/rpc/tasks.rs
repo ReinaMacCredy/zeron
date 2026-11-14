@@ -1,76 +1,13 @@
+use super::plan::written;
 use super::*;
-use zeron_proto::{LinkKind, Task, TaskMode, TaskPatch, TaskStep, TaskStepPatch};
+use zeron_proto::{ChatPlan, Task, TaskPatch};
 
-fn refused(message: &str) -> RpcError {
+pub(super) fn refused(message: &str) -> RpcError {
     RpcError::Failed(message.into())
 }
 
-fn failed(error: crate::EngineError) -> RpcError {
+pub(super) fn failed(error: crate::EngineError) -> RpcError {
     RpcError::Failed(error.to_string())
-}
-
-const MAX_RESOURCE_KEYS: usize = 16;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ResourceKey {
-    Port(u16),
-    Slot(String),
-    Path(String),
-}
-
-impl ResourceKey {
-    fn parse(key: &str) -> Option<Self> {
-        let (kind, value) = key.trim().split_once(':')?;
-        let value = value.trim();
-        match kind.trim() {
-            "port" => value.parse().ok().filter(|port| *port > 0).map(Self::Port),
-            "slot" => (!value.is_empty()
-                && value.len() <= 64
-                && value
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
-            .then(|| Self::Slot(value.to_string())),
-            "path" => {
-                if value.starts_with('/') || value.starts_with('~') {
-                    return None;
-                }
-                let parts: Vec<&str> = value
-                    .split('/')
-                    .filter(|part| !part.is_empty() && *part != ".")
-                    .collect();
-                (!parts.is_empty() && !parts.contains(&"..")).then(|| Self::Path(parts.join("/")))
-            }
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for ResourceKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Port(port) => write!(f, "port:{port}"),
-            Self::Slot(name) => write!(f, "slot:{name}"),
-            Self::Path(path) => write!(f, "path:{path}"),
-        }
-    }
-}
-
-fn checked_keys(keys: &[String]) -> Result<Vec<String>, String> {
-    let mut parsed: Vec<ResourceKey> = Vec::new();
-    for key in keys {
-        let key = ResourceKey::parse(key).ok_or_else(|| {
-            format!("\"{key}\" is not a resource: use port:<1-65535>, slot:<name> or path:<path inside the project>")
-        })?;
-        if !parsed.contains(&key) {
-            parsed.push(key);
-        }
-    }
-    if parsed.len() > MAX_RESOURCE_KEYS {
-        return Err(format!(
-            "A mission declares at most {MAX_RESOURCE_KEYS} resources"
-        ));
-    }
-    Ok(parsed.iter().map(ResourceKey::to_string).collect())
 }
 
 fn task_prompt(task: &Task) -> String {
@@ -125,19 +62,10 @@ fn reads_block(chats: &[ContextChat]) -> Option<String> {
     ))
 }
 
-fn lead_patch(
-    chat_id: &str,
-    space_id: Option<String>,
-    task: &Task,
-    lead: Option<Lead>,
-) -> TaskPatch {
+fn lead_patch(chat_id: &str, space_id: Option<String>, task: &Task) -> TaskPatch {
     TaskPatch {
         chat_id: Some(Some(chat_id.to_string())),
         space_id: space_id.filter(|_| task.space_id.is_none()).map(Some),
-        mode: lead.map(|_| TaskMode::Orchestrated),
-        plan_pending: lead.map(|lead| lead.approve_plan),
-        plan_doc: lead.map(|lead| lead.plan_doc),
-        same_agents: lead.map(|lead| lead.same_agents),
         ..Default::default()
     }
 }
@@ -150,210 +78,52 @@ pub(super) struct Lead {
     pub attach: bool,
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PlanEdit {
-    #[serde(default)]
-    pub step_id: Option<String>,
-    pub title: String,
-    #[serde(default)]
-    pub notes: String,
-    #[serde(default)]
-    pub images: Option<Vec<String>>,
-    #[serde(default)]
-    pub role: Option<String>,
-}
-
-const REORDER_REFUSED: &str =
-    "Only steps that have not started can move, and only below the last started step";
-
-fn new_images(before: &[String], after: &[String]) -> Vec<String> {
-    after
-        .iter()
-        .filter(|path| !before.contains(path))
-        .cloned()
-        .collect()
-}
-
-fn image_change(before: &[String], after: &[String]) -> Option<String> {
-    let added = new_images(before, after).len();
-    let removed = before.iter().filter(|path| !after.contains(path)).count();
-    match (added, removed) {
-        (0, 0) => None,
-        (1, 0) => Some("1 new image".into()),
-        (n, 0) => Some(format!("{n} new images")),
-        (0, 1) => Some("1 image removed".into()),
-        (0, n) => Some(format!("{n} images removed")),
-        (added, removed) => Some(format!("{added} new and {removed} removed images")),
-    }
-}
-
-fn count_images(n: usize) -> String {
-    match n {
-        1 => "1 image".into(),
-        n => format!("{n} images"),
-    }
-}
-
-fn canonical_role(name: &str) -> Option<String> {
-    crate::routing::Role::parse(name).map(|role| role.name().to_string())
-}
-
-fn carry_roles(before: &[TaskStep], steps: &mut [TaskStep]) {
-    for step in steps.iter_mut().filter(|step| step.role.is_none()) {
-        let title = step.title.trim();
-        let mut namesakes = before
-            .iter()
-            .filter(|old| old.title.trim() == title && old.role.is_some());
-        if let (Some(old), None) = (namesakes.next(), namesakes.next()) {
-            step.role = old.role.clone();
+impl Lead {
+    fn plan(self, task: &Task) -> ChatPlan {
+        ChatPlan {
+            plan_doc: self.plan_doc,
+            same_agents: self.same_agents,
+            images: task.images.clone(),
+            ..Default::default()
         }
     }
-}
-
-fn carry_images(
-    before: &[TaskStep],
-    started: impl Fn(&TaskStep) -> bool,
-    steps: &mut [TaskStep],
-) -> (Vec<String>, Vec<String>) {
-    let replaced: Vec<&TaskStep> = before.iter().filter(|step| !started(step)).collect();
-    let mut moved = Vec::new();
-    let mut orphans = Vec::new();
-    for old in replaced.iter().filter(|step| !step.images.is_empty()) {
-        let title = old.title.trim();
-        let namesakes = replaced
-            .iter()
-            .filter(|step| step.title.trim() == title)
-            .count();
-        let mut matches = steps.iter_mut().filter(|step| step.title.trim() == title);
-        let what = count_images(old.images.len());
-        match (namesakes, matches.next(), matches.next()) {
-            (1, Some(new), None) => {
-                new.images = old.images.clone();
-                moved.push(format!(
-                    "Step \"{}\" (taskStepId {}) had {what}, now on the new step with its title (taskStepId {}).",
-                    old.title, old.id, new.id
-                ));
-            }
-            _ => {
-                orphans.extend(old.images.iter().cloned());
-                moved.push(format!(
-                    "Step \"{}\" (taskStepId {}) had {what}, now on the overview: no single new step has its title.",
-                    old.title, old.id
-                ));
-            }
-        }
-    }
-    (moved, orphans)
-}
-
-fn reorder_keys(
-    steps: &[(&TaskStep, bool)],
-    order: &[String],
-    mut nonce: impl FnMut() -> String,
-) -> Result<Vec<(String, String)>, &'static str> {
-    let listed: Vec<(&TaskStep, bool)> = order
-        .iter()
-        .filter_map(|id| steps.iter().find(|(step, _)| &step.id == id).copied())
-        .collect();
-    let unique: std::collections::HashSet<&str> = order.iter().map(String::as_str).collect();
-    if order.len() != steps.len() || listed.len() != steps.len() || unique.len() != steps.len() {
-        return Err("The new order must list every remaining step once");
-    }
-    let key = |step: &TaskStep| (step.order_key.is_empty(), step.order_key.clone());
-    let fixed = listed
-        .iter()
-        .rposition(|(_, started)| *started)
-        .map_or(0, |last| last + 1);
-    if listed[..fixed]
-        .windows(2)
-        .any(|pair| key(pair[0].0) >= key(pair[1].0))
-    {
-        return Err(REORDER_REFUSED);
-    }
-    let floor = fixed.checked_sub(1).map(|ix| key(listed[ix].0));
-    let tail = &listed[fixed..];
-    let eligible = |ix: usize| floor.as_ref().is_none_or(|floor| key(tail[ix].0) > *floor);
-    let mut best: Vec<(usize, Option<usize>)> = Vec::with_capacity(tail.len());
-    for ix in 0..tail.len() {
-        let run = (0..ix)
-            .filter(|&before| eligible(before) && key(tail[before].0) < key(tail[ix].0))
-            .max_by_key(|&before| best[before].0)
-            .map_or((0, None), |before| (best[before].0, Some(before)));
-        best.push(if eligible(ix) {
-            (run.0 + 1, run.1)
-        } else {
-            (0, None)
-        });
-    }
-    let mut kept = vec![false; tail.len()];
-    let mut at = (0..tail.len())
-        .filter(|&ix| best[ix].0 > 0)
-        .max_by_key(|&ix| best[ix].0);
-    while let Some(ix) = at {
-        kept[ix] = true;
-        at = best[ix].1;
-    }
-    let mut lower = fixed
-        .checked_sub(1)
-        .map(|ix| listed[ix].0.order_key.clone());
-    let mut moves = Vec::new();
-    for (ix, (step, _)) in tail.iter().enumerate() {
-        if kept[ix] {
-            lower = Some(step.order_key.clone());
-            continue;
-        }
-        let upper = (ix + 1..tail.len())
-            .find(|&next| kept[next])
-            .map(|next| tail[next].0.order_key.as_str());
-        let key = zeron_proto::pin_order_key_between(lower.as_deref(), upper, &nonce())
-            .map_err(|_| "This plan's steps cannot be reordered")?;
-        moves.push((step.id.clone(), key.clone()));
-        lower = Some(key);
-    }
-    Ok(moves)
 }
 
 fn lead_brief(task_id: &str, lead: Lead, reads: bool) -> String {
-    let plan = if lead.plan_doc {
-        format!(
-            "Write the plan with the tasks tool: action \"plan\", taskId \"{task_id}\", overview, steps [{{title, notes, role}}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done. Keep each step small enough for one agent."
-        )
+    let mut lines = vec![if lead.plan_doc {
+        "Write the plan with the plan tool: action \"write\", overview, steps [{title, notes, role}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done. Keep each step small enough for one agent."
     } else {
-        format!(
-            "Write the plan with the tasks tool: action \"plan\", taskId \"{task_id}\", steps [{{title, notes, role}}]. Keep each step small enough for one agent."
-        )
-    };
-    let mut lines = vec![plan.as_str()];
+        "Write the plan with the plan tool: action \"write\", steps [{title, notes, role}]. Keep each step small enough for one agent."
+    }];
     if lead.attach {
         lines.push(
-            "When a thread you already started with create_thread or delegate_task does a step's work, set that step's threadId to the thread's id so the thread runs the step.",
+            "When a thread you already started with delegate_task does a step's work, set that step's threadId to the thread's id so the thread runs the step.",
         );
     }
     if lead.approve_plan {
         lines.push(
-            "Then stop. The person reviews the plan in Tasks and approves it; you get a message when it is approved.",
+            "Then stop. The person reviews the plan and approves it; you get a message when it is approved.",
         );
     }
     lines.push(if lead.attach {
-        "Do a step yourself, or with your own sub-agents, then mark it done with the tasks tool, action \"step\". Run a step on its own thread with create_thread only when it needs one: prompt set to what the step must do, taskStepId set to the step's id, title optional."
+        "Do a step yourself, or with your own sub-agents, then mark it done with the plan tool, action \"step\". Run a step on its own thread with delegate_task only when it needs one: task set to what the step must do, stepId set to the step's id."
     } else {
-        "Run each step on its own thread with create_thread: prompt set to what the step must do, taskStepId set to the step's id, title optional. Steps that do not depend on each other can run at the same time."
+        "Run each step on its own thread with delegate_task: task set to what the step must do, stepId set to the step's id. Steps that do not depend on each other can run at the same time."
     });
     lines.push(if lead.same_agents {
-        "Run every step on your own harness and model: do not pass harness or model to create_thread."
+        "Run every step on your own harness and model: do not pass target or profile to delegate_task."
     } else {
-        "Give each step a role (worker, validator, research, design or general); Zeron runs it on the route set in Settings > Routing. Pass harness or model only when a step needs a specific one."
+        "Give each step a role (worker, validator, research, design or general); Zeron runs it on the route set in Settings > Routing. Pass target only when a step needs a specific harness or model."
     });
     lines.push(
-        "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the tasks tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with create_thread and the same taskStepId.",
+        "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the plan tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with delegate_task and the same stepId.",
     );
     lines.push(
         "When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true.",
     );
     if reads {
         lines.push(
-            "When a step needs one of the chats you read, name it with its threadId in that step's prompt.",
+            "When a step needs one of the chats you read, name it with its threadId in that step's task.",
         );
     }
     let steps: Vec<String> = lines
@@ -415,13 +185,7 @@ impl EngineRpc {
                 created_at: now,
                 updated_at: now,
                 deleted: false,
-                mode: Default::default(),
-                plan_pending: false,
                 send_error: None,
-                plan: String::new(),
-                plan_doc: false,
-                same_agents: false,
-                resources: Vec::new(),
                 images,
                 context,
                 depends_on,
@@ -440,16 +204,15 @@ impl EngineRpc {
         patch: &TaskPatch,
         when: Option<&dyn Fn(&Task) -> Result<(), RpcError>>,
     ) -> Result<(), RpcError> {
-        let leads = patch.chat_id.is_some() || patch.mode.is_some() || patch.completed.is_some();
-        let _plans = (leads || patch.depends_on.is_some()).then(|| self.plan_writes());
+        let _plans = patch.depends_on.is_some().then(|| self.plan_writes());
         if let Some(depends_on) = &patch.depends_on {
             let kept = self.task_or_refuse(task_id)?.depends_on;
             self.check_dependencies(task_id, depends_on, &kept)?;
         }
-        if patch.context.is_some() || leads {
+        if patch.context.is_some() || when.is_some() {
             let task = self.task_or_refuse(task_id)?;
             if let Some(context) = &patch.context {
-                if task.has_plan() {
+                if self.leads_plan(&task) {
                     return Err(refused(
                         "The chats a mission reads are fixed once it starts; write to its lead instead",
                     ));
@@ -461,9 +224,6 @@ impl EngineRpc {
                     .collect();
                 self.check_context_chats(&added)?;
             }
-            if leads {
-                self.check_one_plan(&task, patch)?;
-            }
             if let Some(when) = when {
                 when(&task)?;
             }
@@ -472,6 +232,13 @@ impl EngineRpc {
             true => Ok(()),
             false => Err(refused("Task no longer exists")),
         }
+    }
+
+    pub(super) fn leads_plan(&self, task: &Task) -> bool {
+        task.chat_id
+            .as_deref()
+            .and_then(|id| self.workspace.chat(id).ok().flatten())
+            .is_some_and(|chat| chat.has_plan())
     }
 
     fn check_dependencies(
@@ -489,103 +256,10 @@ impl EngineRpc {
     }
 
     /// Held from a plan check to its write, so two calls cannot both pass the check.
-    fn plan_writes(&self) -> std::sync::MutexGuard<'_, ()> {
+    pub(super) fn plan_writes(&self) -> std::sync::MutexGuard<'_, ()> {
         self.plan_writes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn check_one_plan(&self, task: &Task, patch: &TaskPatch) -> Result<(), RpcError> {
-        let mut after = task.clone();
-        if let Some(chat_id) = &patch.chat_id {
-            after.chat_id = chat_id.clone();
-        }
-        if let Some(mode) = patch.mode {
-            after.mode = mode;
-        }
-        if let Some(completed) = patch.completed {
-            after.completed_at = completed.then(chrono::Utc::now);
-        }
-        let Some(chat_id) = after
-            .chat_id
-            .as_deref()
-            .filter(|id| after.is_open_plan_of(id))
-        else {
-            return Ok(());
-        };
-        if task.is_open_plan_of(chat_id) {
-            return Ok(());
-        }
-        if self
-            .workspace
-            .chat(chat_id)
-            .map_err(failed)?
-            .is_some_and(|chat| chat.sidechat_source_chat_id.is_some())
-        {
-            return Err(refused("A side chat cannot lead a mission"));
-        }
-        let tasks = self.workspace.read_tasks().map_err(failed)?;
-        if tasks
-            .iter()
-            .any(|other| other.id != task.id && other.is_open_plan_of(chat_id))
-        {
-            return Err(refused("This chat already leads a mission"));
-        }
-        Ok(())
-    }
-
-    fn check_step_threads(&self, task: &Task, threads: &[Option<String>]) -> Result<(), RpcError> {
-        if threads.iter().all(Option::is_none) {
-            return Ok(());
-        }
-        let lead = task
-            .chat_id
-            .as_deref()
-            .ok_or_else(|| refused("This task has no lead thread"))?;
-        let tasks = self.workspace.read_tasks().map_err(failed)?;
-        let steps = self.workspace.read_task_steps().map_err(failed)?;
-        for (n, thread) in threads.iter().enumerate() {
-            let Some(thread) = thread.as_deref() else {
-                continue;
-            };
-            if threads[..n].iter().flatten().any(|seen| seen == thread) {
-                return Err(refused(&format!("threadId {thread} is on two steps")));
-            }
-            let chat = self
-                .workspace
-                .chat(thread)
-                .map_err(failed)?
-                .ok_or_else(|| refused(&format!("threadId {thread} no longer exists")))?;
-            match zeron_proto::thread_link(&chat, &tasks, &steps) {
-                Some(link)
-                    if link.parent == lead
-                        && matches!(link.kind, LinkKind::Delegated | LinkKind::OpenedFrom) => {}
-                Some(link) if link.kind == LinkKind::SidechatOf => {
-                    return Err(refused(&format!(
-                        "threadId {thread} is a sidechat; a step runs on a thread this chat started"
-                    )));
-                }
-                Some(link) if link.kind == LinkKind::ForkedFrom => {
-                    return Err(refused(&format!(
-                        "threadId {thread} is a fork; a step runs on a thread this chat started"
-                    )));
-                }
-                _ => {
-                    return Err(refused(&format!(
-                        "threadId {thread} is not a thread this chat started"
-                    )));
-                }
-            }
-            if let Some(holder) = steps.iter().find(|step| {
-                !step.deleted && step.outcome.is_none() && step.chat_id.as_deref() == Some(thread)
-            }) {
-                return Err(refused(&format!(
-                    "threadId {thread} already runs step \"{}\"",
-                    holder.title
-                )));
-            }
-        }
-        Ok(())
     }
 
     fn check_context_chats(&self, context: &[String]) -> Result<(), RpcError> {
@@ -723,9 +397,6 @@ impl EngineRpc {
                     chat_id: Some(None),
                     space_id: task.space_id.is_none().then_some(None),
                     send_error: task.send_error.clone().map(Some),
-                    mode: lead.map(|_| task.mode),
-                    plan_pending: lead.map(|_| task.plan_pending),
-                    plan_doc: lead.map(|_| task.plan_doc),
                     ..Default::default()
                 };
                 self.workspace.update_task(task_id, &cleared).ok();
@@ -761,6 +432,14 @@ impl EngineRpc {
         if send && from_chat_id == Some(chat_id) {
             return Err(refused("A thread cannot send a task to itself"));
         }
+        if lead.is_some() && chat.sidechat_source_chat_id.is_some() {
+            return Err(refused("A side chat cannot lead a mission"));
+        }
+        if lead.is_some() && chat.has_plan() {
+            return Err(refused(
+                "This chat already has a plan; a chat holds one plan for its life",
+            ));
+        }
         let reads = lead.and_then(|_| {
             self.context_reads(&task, chat.space_id.as_deref(), chat.config.as_ref())
         });
@@ -779,10 +458,24 @@ impl EngineRpc {
             task_id,
             &TaskPatch {
                 completed: task.completed_at.is_some().then_some(false),
-                ..lead_patch(chat_id, chat.space_id, &task, lead)
+                ..lead_patch(chat_id, chat.space_id, &task)
             },
             claim.then_some(&unclaimed as &dyn Fn(&Task) -> Result<(), RpcError>),
         )?;
+        let restore = TaskPatch {
+            chat_id: Some(task.chat_id.clone()),
+            space_id: task.space_id.is_none().then_some(None),
+            completed: task.completed_at.is_some().then_some(true),
+            ..Default::default()
+        };
+        if let Some(lead) = lead
+            && let Err(error) =
+                self.workspace
+                    .set_chat_plan(chat_id, Some(&lead.plan(&task)), lead.approve_plan)
+        {
+            self.workspace.update_task(task_id, &restore).ok();
+            return Err(written(error));
+        }
         if send {
             let sent = self
                 .send_to_task_thread(
@@ -794,17 +487,8 @@ impl EngineRpc {
                 )
                 .await;
             if sent.is_err() && lead.is_some() {
-                let restore = TaskPatch {
-                    chat_id: Some(task.chat_id.clone()),
-                    space_id: task.space_id.is_none().then_some(None),
-                    completed: task.completed_at.is_some().then_some(true),
-                    mode: Some(task.mode),
-                    plan_pending: Some(task.plan_pending),
-                    plan_doc: Some(task.plan_doc),
-                    same_agents: Some(task.same_agents),
-                    ..Default::default()
-                };
                 self.workspace.update_task(task_id, &restore).ok();
+                self.workspace.set_chat_plan(chat_id, None, false).ok();
             }
             sent?;
         }
@@ -818,7 +502,7 @@ impl EngineRpc {
         let mut tasks: Vec<Task> = Vec::with_capacity(task_ids.len());
         for id in task_ids {
             let task = self.task_or_refuse(id)?;
-            if task.has_plan() {
+            if self.leads_plan(&task) {
                 return Err(refused(&format!(
                     "\"{}\" is a mission; start it on its own",
                     task.title
@@ -842,7 +526,7 @@ impl EngineRpc {
                 &task.id,
                 &TaskPatch {
                     send_error: task.send_error.is_some().then_some(None),
-                    ..lead_patch(chat_id, space_id.clone(), task, None)
+                    ..lead_patch(chat_id, space_id.clone(), task)
                 },
             )?;
         }
@@ -997,460 +681,10 @@ impl EngineRpc {
         sent.map_err(failed)
     }
 
-    pub(super) fn lead_of(&self, task: &Task) -> Result<String, RpcError> {
-        let lead = task
-            .chat_id
-            .clone()
-            .ok_or_else(|| refused("This task has no lead thread"))?;
-        match self.workspace.chat(&lead).map_err(failed)? {
-            Some(_) => Ok(lead),
-            None => Err(refused("This task has no lead thread")),
-        }
-    }
-
     pub(super) fn task_or_refuse(&self, task_id: &str) -> Result<Task, RpcError> {
         self.workspace
             .task(task_id)
             .ok_or_else(|| refused("Task no longer exists"))
-    }
-
-    pub(super) fn step_or_refuse(&self, step_id: &str) -> Result<TaskStep, RpcError> {
-        self.workspace
-            .task_step(step_id)
-            .ok_or_else(|| refused("Step no longer exists"))
-    }
-
-    fn check_lead(task: &Task, from_chat_id: Option<&str>, does: &str) -> Result<(), RpcError> {
-        match from_chat_id {
-            Some(from) if task.chat_id.as_deref() != Some(from) => {
-                Err(refused(&format!("Only the task's lead thread {does}")))
-            }
-            _ => Ok(()),
-        }
-    }
-
-    pub(super) fn plan_steps(
-        &self,
-        task_id: &str,
-        steps: Vec<(String, String, Option<String>, Option<String>)>,
-        overview: Option<String>,
-        resources: Option<Vec<String>>,
-        from_chat_id: Option<&str>,
-    ) -> Result<Vec<String>, RpcError> {
-        let task = self.task_or_refuse(task_id)?;
-        Self::check_lead(&task, from_chat_id, "writes its plan")?;
-        let mode = (task.mode != TaskMode::Orchestrated).then_some(TaskMode::Orchestrated);
-        self.check_one_plan(
-            &task,
-            &TaskPatch {
-                mode,
-                ..Default::default()
-            },
-        )?;
-        if steps.iter().any(|(_, _, _, role)| {
-            role.as_deref()
-                .is_some_and(|role| canonical_role(role).is_none())
-        }) {
-            return Err(refused(&format!(
-                "A step's role must be one of {}",
-                crate::routing::Role::names()
-            )));
-        }
-        let threads: Vec<Option<String>> = steps.iter().map(|(_, _, id, _)| id.clone()).collect();
-        self.check_step_threads(&task, &threads)?;
-        let resources = resources
-            .map(|keys| checked_keys(&keys))
-            .transpose()
-            .map_err(|message| refused(&message))?
-            .filter(|keys| *keys != task.resources);
-        let before = self.workspace.task_steps_of(task_id);
-        let now = chrono::Utc::now();
-        let mut steps: Vec<TaskStep> = steps
-            .into_iter()
-            .map(|(title, notes, thread, role)| TaskStep {
-                id: crate::new_id(),
-                task_id: task_id.to_string(),
-                title,
-                notes,
-                order_key: String::new(),
-                turn: None,
-                chat_id: thread,
-                outcome: None,
-                created_at: now,
-                updated_at: now,
-                deleted: false,
-                images: Vec::new(),
-                role: role.as_deref().and_then(canonical_role),
-                route: None,
-            })
-            .collect();
-        carry_roles(&before, &mut steps);
-        let (moved, orphans) = carry_images(
-            &before,
-            |step| self.workspace.step_started(step),
-            &mut steps,
-        );
-        let mut images = task.images.clone();
-        let mut left_out = Vec::new();
-        for image in orphans {
-            if images.contains(&image) {
-                continue;
-            }
-            if images.len() < zeron_doc::TASK_IMAGES_MAX {
-                images.push(image);
-            } else {
-                left_out.push(image);
-            }
-        }
-        if !left_out.is_empty() {
-            return Err(refused(&format!(
-                "This plan replaces steps whose images do not fit on the overview, which holds {}: {} would be lost. Keep those steps' titles so their images stay with them, or ask the person which images to drop.",
-                zeron_doc::TASK_IMAGES_MAX,
-                left_out.len()
-            )));
-        }
-        let patch = TaskPatch {
-            mode,
-            plan: overview,
-            resources,
-            images: (images != task.images).then_some(images),
-            ..Default::default()
-        };
-        let plans = self.plan_writes();
-        self.check_one_plan(&task, &patch)?;
-        self.workspace
-            .plan_task_steps(task_id, &steps, &patch)
-            .map_err(failed)?;
-        drop(plans);
-        Ok(moved)
-    }
-
-    pub(super) fn update_task_step(
-        &self,
-        step_id: &str,
-        patch: &TaskStepPatch,
-        from_chat_id: Option<&str>,
-    ) -> Result<(), RpcError> {
-        let step = self.step_or_refuse(step_id)?;
-        if from_chat_id.is_some() {
-            Self::check_lead(
-                &self.task_or_refuse(&step.task_id)?,
-                from_chat_id,
-                "writes its plan",
-            )?;
-        }
-        match self
-            .workspace
-            .update_task_step(step_id, patch)
-            .map_err(failed)?
-        {
-            true => Ok(()),
-            false => Err(refused("Step no longer exists")),
-        }
-    }
-
-    pub(super) fn plan_awaiting_approval(&self, task_id: &str) -> Result<(Task, String), RpcError> {
-        let task = self.task_or_refuse(task_id)?;
-        if !task.plan_pending {
-            return Err(refused("This plan is not waiting for approval"));
-        }
-        let lead = self.lead_of(&task)?;
-        if self.workspace.task_steps_of(task_id).is_empty() {
-            return Err(refused("The plan has no steps yet"));
-        }
-        Ok((task, lead))
-    }
-
-    pub(super) fn set_plan_pending(&self, task_id: &str, pending: bool) -> Result<(), RpcError> {
-        let patch = TaskPatch {
-            plan_pending: Some(pending),
-            ..Default::default()
-        };
-        self.update_task(task_id, &patch)
-    }
-
-    pub(super) async fn approve_plan(&self, task_id: &str) -> Result<String, RpcError> {
-        let (task, lead) = self.plan_awaiting_approval(task_id)?;
-        self.set_plan_pending(task_id, false)?;
-        let sent = self
-            .send_to_task_thread(
-                &task,
-                &lead,
-                None,
-                "The plan is approved. Run it.",
-                Vec::new(),
-            )
-            .await;
-        if sent.is_err() {
-            self.set_plan_pending(task_id, true).ok();
-        }
-        sent
-    }
-
-    pub(super) async fn retry_task_step(&self, step_id: &str) -> Result<(), RpcError> {
-        let step = self.step_or_refuse(step_id)?;
-        let task = self.task_or_refuse(&step.task_id)?;
-        let lead = self.lead_of(&task)?;
-        let (title, id) = (&step.title, &step.id);
-        let text = match step.chat_id {
-            Some(thread) => format!(
-                "Step \"{title}\" needs another run (taskStepId {id}). Check its thread {thread} with read_thread, then send it what to fix with send_message_to_thread, or start the step again with create_thread and taskStepId {id}."
-            ),
-            None => format!(
-                "Step \"{title}\" has not started (taskStepId {id}). Run it with create_thread and taskStepId {id}."
-            ),
-        };
-        self.send_to_task_thread(&task, &lead, None, &text, Vec::new())
-            .await
-            .map(drop)
-    }
-
-    fn unstarted(&self, step: &TaskStep) -> bool {
-        !self.workspace.step_started(step)
-    }
-
-    /// Every edit is checked before the first write, so a refusal applies nothing.
-    pub(super) async fn edit_task_plan(
-        &self,
-        task_id: &str,
-        overview: Option<String>,
-        overview_images: Option<Vec<String>>,
-        steps: Vec<PlanEdit>,
-        remove_step_ids: &[String],
-        order: &[String],
-    ) -> Result<Option<String>, RpcError> {
-        let task = self.task_or_refuse(task_id)?;
-        let lead = self.lead_of(&task)?;
-        let current = self.workspace.task_steps_of(task_id);
-        let find = |id: &str| {
-            current
-                .iter()
-                .find(|step| step.id == id)
-                .ok_or_else(|| refused("Step no longer exists"))
-        };
-        let mut removed = Vec::new();
-        for id in remove_step_ids {
-            let step = find(id)?;
-            if !self.unstarted(step) {
-                return Err(refused(&format!(
-                    "Step \"{}\" has started, so it cannot be removed; skip it instead",
-                    step.title
-                )));
-            }
-            removed.push(step);
-        }
-        let too_long = |text: &str, max: usize| text.chars().count() > max;
-        if overview
-            .as_deref()
-            .is_some_and(|text| too_long(text, zeron_doc::TASK_NOTES_MAX_CHARS))
-        {
-            return Err(refused("The overview is limited to 10,000 characters"));
-        }
-        let images_ok = |images: &Option<Vec<String>>| {
-            images
-                .as_deref()
-                .map_or(Ok(()), zeron_doc::check_images)
-                .map_err(|error| match error {
-                    zeron_doc::DocError::Schema(message) => refused(&message),
-                    other => failed(other.into()),
-                })
-        };
-        images_ok(&overview_images)?;
-        for edit in &steps {
-            images_ok(&edit.images)?;
-            let title = edit.title.trim();
-            if title.is_empty() || too_long(title, zeron_doc::TASK_TITLE_MAX_CHARS) {
-                return Err(refused("A step needs a title of up to 500 characters"));
-            }
-            if too_long(&edit.notes, zeron_doc::TASK_NOTES_MAX_CHARS) {
-                return Err(refused("A step's spec is limited to 10,000 characters"));
-            }
-            if let Some(id) = &edit.step_id {
-                find(id)?;
-                if remove_step_ids.contains(id) {
-                    return Err(refused("A step cannot be both edited and removed"));
-                }
-            }
-        }
-        let mut moves = Vec::new();
-        if !order.is_empty() {
-            let mut remaining = Vec::new();
-            for step in current
-                .iter()
-                .filter(|step| !remove_step_ids.contains(&step.id))
-            {
-                remaining.push((step, !self.unstarted(step)));
-            }
-            moves = reorder_keys(&remaining, order, crate::new_id).map_err(refused)?;
-        }
-        let mut changes = Vec::new();
-        let overview = overview.filter(|overview| *overview != task.plan);
-        let overview_images = overview_images.filter(|images| *images != task.images);
-        let attached = overview_images
-            .as_deref()
-            .map(|images| new_images(&task.images, images))
-            .unwrap_or_default();
-        if overview.is_some() {
-            changes.push("The overview changed.".to_string());
-        }
-        if let Some(what) = overview_images
-            .as_deref()
-            .and_then(|images| image_change(&task.images, images))
-        {
-            let note = if attached.is_empty() {
-                ""
-            } else {
-                "; the new ones are attached to this message"
-            };
-            changes.push(format!("The overview has {what}{note}."));
-        }
-        let task_patch = TaskPatch {
-            plan: overview,
-            images: overview_images,
-            ..Default::default()
-        };
-        let mut updates: Vec<(String, TaskStepPatch)> = moves
-            .iter()
-            .map(|(id, key)| {
-                let patch = TaskStepPatch {
-                    order_key: Some(key.clone()),
-                    ..Default::default()
-                };
-                (id.clone(), patch)
-            })
-            .collect();
-        let mut creates = Vec::new();
-        if !moves.is_empty() {
-            let title = |id: &str| {
-                steps
-                    .iter()
-                    .find(|edit| edit.step_id.as_deref() == Some(id))
-                    .map(|edit| edit.title.trim().to_string())
-                    .or_else(|| find(id).ok().map(|step| step.title.clone()))
-                    .unwrap_or_default()
-            };
-            let listed: Vec<String> = order
-                .iter()
-                .enumerate()
-                .map(
-                    |(ix, id)| match moves.iter().any(|(moved, _)| moved == id) {
-                        true => format!("{}. \"{}\" (moved, taskStepId {id})", ix + 1, title(id)),
-                        false => format!("{}. \"{}\"", ix + 1, title(id)),
-                    },
-                )
-                .collect();
-            changes.push(format!(
-                "The steps are in a new order: {}.",
-                listed.join(", ")
-            ));
-        }
-        for edit in steps {
-            let title = edit.title.trim().to_string();
-            let Some(id) = edit.step_id else {
-                let id = crate::new_id();
-                let images = edit.images.unwrap_or_default();
-                let with = match images.len() {
-                    0 => String::new(),
-                    n => format!(" with {}", count_images(n)),
-                };
-                let role = edit.role.as_deref().and_then(canonical_role).or_else(|| {
-                    let mut namesakes = removed
-                        .iter()
-                        .filter(|old| old.title.trim() == title && old.role.is_some());
-                    match (namesakes.next(), namesakes.next()) {
-                        (Some(old), None) => old.role.clone(),
-                        _ => None,
-                    }
-                });
-                let now = chrono::Utc::now();
-                creates.push(TaskStep {
-                    id: id.clone(),
-                    task_id: task_id.to_string(),
-                    title: title.clone(),
-                    notes: edit.notes,
-                    order_key: String::new(),
-                    chat_id: None,
-                    outcome: None,
-                    created_at: now,
-                    updated_at: now,
-                    deleted: false,
-                    turn: None,
-                    images,
-                    role,
-                    route: None,
-                });
-                changes.push(format!("New step \"{title}\" (taskStepId {id}){with}."));
-                continue;
-            };
-            let step = find(&id)?;
-            let images = edit.images.filter(|images| *images != step.images);
-            let started = !self.unstarted(step);
-            let image_note = images.as_deref().and_then(|images| {
-                let what = image_change(&step.images, images)?;
-                Some(
-                    match started && !new_images(&step.images, images).is_empty() {
-                        true => {
-                            format!("{what} (its thread already started and does not get them)")
-                        }
-                        false => what,
-                    },
-                )
-            });
-            let patch = TaskStepPatch {
-                title: (title != step.title).then(|| title.clone()),
-                notes: (edit.notes != step.notes).then_some(edit.notes),
-                images,
-                role: edit
-                    .role
-                    .as_deref()
-                    .and_then(canonical_role)
-                    .filter(|role| step.role.as_deref() != Some(role.as_str()))
-                    .map(Some),
-                ..Default::default()
-            };
-            let text = match (patch.title.is_some(), patch.notes.is_some()) {
-                (true, true) => Some(format!("is now \"{title}\", and its spec changed")),
-                (true, false) => Some(format!("is now \"{title}\"")),
-                (false, true) => Some("has a new spec".to_string()),
-                (false, false) => None,
-            };
-            let what = match (text, image_note) {
-                (Some(text), Some(note)) => Some(format!("{text}, and has {note}")),
-                (Some(text), None) => Some(text),
-                (None, Some(note)) => Some(format!("has {note}")),
-                (None, None) if patch.role.is_some() => None,
-                (None, None) => continue,
-            };
-            updates.push((id.clone(), patch));
-            if let Some(what) = what {
-                changes.push(format!("Step \"{}\" (taskStepId {id}) {what}.", step.title));
-            }
-        }
-        let deletes: Vec<String> = removed.iter().map(|step| step.id.clone()).collect();
-        self.workspace
-            .edit_task_plan(task_id, &task_patch, &updates, &creates, &deletes)
-            .map_err(failed)?;
-        for step in removed {
-            changes.push(format!(
-                "Step \"{}\" (taskStepId {}) is removed.",
-                step.title, step.id
-            ));
-        }
-        if changes.is_empty() {
-            return Ok(None);
-        }
-        let next = if task.plan_pending {
-            "The plan still waits for the person's approval: do not run any step until the approval message comes."
-        } else {
-            "Run the new and changed steps from this plan, and send a step whose thread is already running what changed with send_message_to_thread."
-        };
-        let text = format!(
-            "The person edited the plan on the task page (task id {task_id}):\n- {}\n\nRead the whole plan with the tasks tool: action \"list\", taskId \"{task_id}\". {next}",
-            changes.join("\n- ")
-        );
-        self.send_to_task_thread(&task, &lead, None, &text, attached)
-            .await
-            .map(Some)
     }
 
     fn link_and_send(
@@ -1468,9 +702,14 @@ impl EngineRpc {
             &task.id,
             &TaskPatch {
                 send_error: task.send_error.is_some().then_some(None),
-                ..lead_patch(chat_id, space_id, task, lead)
+                ..lead_patch(chat_id, space_id, task)
             },
         )?;
+        if let Some(lead) = lead {
+            self.workspace
+                .set_chat_plan(chat_id, Some(&lead.plan(task)), lead.approve_plan)
+                .map_err(written)?;
+        }
         let (text, images) =
             crate::doc_host::images_here(&first_turn(task, lead, reads), task.images.clone());
         self.doc_host
@@ -1512,61 +751,6 @@ fn dependency_problem(
 mod tests {
     use super::*;
 
-    fn step(id: &str, key: &str) -> TaskStep {
-        TaskStep {
-            id: id.into(),
-            task_id: "t".into(),
-            title: id.into(),
-            notes: String::new(),
-            order_key: key.into(),
-            chat_id: None,
-            outcome: None,
-            created_at: Default::default(),
-            updated_at: Default::default(),
-            deleted: false,
-            turn: None,
-            images: Vec::new(),
-            role: None,
-            route: None,
-        }
-    }
-
-    fn reorder(plan: &[(&str, bool)], order: &[&str]) -> Result<Vec<String>, &'static str> {
-        let rows: Vec<TaskStep> = plan
-            .iter()
-            .enumerate()
-            .map(|(ix, (id, _))| step(id, &format!("{}8", ix + 1)))
-            .collect();
-        let steps: Vec<(&TaskStep, bool)> = rows
-            .iter()
-            .zip(plan)
-            .map(|(row, (_, started))| (row, *started))
-            .collect();
-        let order: Vec<String> = order.iter().map(|id| id.to_string()).collect();
-        let mut n = 0;
-        let moves = reorder_keys(&steps, &order, || {
-            n += 1;
-            format!("n{n}")
-        })?;
-        let mut keyed: Vec<(String, String)> = rows
-            .iter()
-            .map(|row| {
-                let key = moves
-                    .iter()
-                    .find(|(id, _)| *id == row.id)
-                    .map_or(row.order_key.clone(), |(_, key)| key.clone());
-                (key, row.id.clone())
-            })
-            .collect();
-        keyed.sort();
-        assert_eq!(
-            keyed.iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>(),
-            order,
-            "the new keys sort into the new order"
-        );
-        Ok(moves.into_iter().map(|(id, _)| id).collect())
-    }
-
     #[test]
     fn the_reads_block_marks_other_projects_and_working_chats() {
         let chat = |id: &str, project: Option<&str>, working: bool| ContextChat {
@@ -1580,51 +764,6 @@ mod tests {
             reads_block(&[chat("a", None, true), chat("b", Some("astra"), false)]).unwrap(),
             "Before you plan, read these chats with read_thread. They are context only: do not message them or answer their questions.\n- \"Chat a\" (threadId a, still working: read it again before you send the plan)\n- \"Chat b\" (threadId b, project astra)"
         );
-    }
-
-    #[test]
-    fn only_the_moved_step_gets_a_new_key() {
-        let plan = [
-            ("a", true),
-            ("b", true),
-            ("c", false),
-            ("d", false),
-            ("e", false),
-        ];
-        assert_eq!(
-            reorder(&plan, &["a", "b", "e", "c", "d"]),
-            Ok(vec!["e".into()])
-        );
-        assert_eq!(
-            reorder(&plan, &["a", "b", "d", "e", "c"]),
-            Ok(vec!["c".into()])
-        );
-        assert_eq!(reorder(&plan, &["a", "b", "c", "d", "e"]), Ok(vec![]));
-    }
-
-    #[test]
-    fn an_unstarted_step_above_a_running_one_may_drop_below_it() {
-        let plan = [("a", false), ("b", true), ("c", false)];
-        assert_eq!(reorder(&plan, &["b", "a", "c"]), Ok(vec!["a".into()]));
-        assert_eq!(reorder(&plan, &["b", "c", "a"]), Ok(vec!["a".into()]));
-    }
-
-    #[test]
-    fn started_steps_keep_their_place() {
-        let plan = [("a", true), ("b", true), ("c", false)];
-        assert_eq!(reorder(&plan, &["b", "a", "c"]), Err(REORDER_REFUSED));
-        assert_eq!(reorder(&plan, &["a", "c", "b"]), Err(REORDER_REFUSED));
-        assert_eq!(reorder(&plan, &["c", "a", "b"]), Err(REORDER_REFUSED));
-    }
-
-    #[test]
-    fn the_order_lists_every_step_once() {
-        let plan = [("a", false), ("b", false)];
-        assert!(reorder(&plan, &["a"]).is_err());
-        assert!(reorder(&plan, &["a", "a"]).is_err());
-        assert!(reorder(&plan, &["a", "x"]).is_err());
-        let started = [("s0", false), ("s1", true), ("s2", false)];
-        assert!(reorder(&started, &["s2", "s0", "s0", "x"]).is_err());
     }
 
     #[test]
