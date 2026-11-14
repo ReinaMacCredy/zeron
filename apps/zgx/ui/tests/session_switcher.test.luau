@@ -138,7 +138,7 @@ test("the cards' order: most recent first, then the rest as they stand, a cap ke
 	expect(app:error()).to_be_nil()
 end)
 
-test("set to cycle the tabs, it steps along the strip with no cards", function()
+test("set to cycle the tabs, held it shows the strip's tabs as cards, one on from the one showing", function()
 	local app = shell()
 	app:set_state("shell_switcher_cycles_tabs", true)
 	open(app, "Fix the build")
@@ -148,9 +148,75 @@ test("set to cycle the tabs, it steps along the strip with no cards", function()
 	app:frames(3)
 	app:command("shell.next_session")
 	app:frames(10)
+	expect(app:state("shell_switcher_cards")).to_equal({ "a1", "a2", "a3" })
+	expect(app:state("shell_switcher_hi")).to_be(1)
+	local seen: { number } = {}
+	for _ = 1, 7 do
+		app:command("shell.next_session")
+		app:frames(2)
+		table.insert(seen, app:state("shell_switcher_hi") :: number)
+	end
+	for _ = 1, 4 do
+		app:command("shell.previous_session")
+		app:frames(2)
+		table.insert(seen, app:state("shell_switcher_hi") :: number)
+	end
+	expect(table.concat(seen, " ")).to_be("2 3 1 2 3 1 2 1 3 2 1")
+	expect(route_has(app, "a3")).to_be(true)
+	app:release()
+	app:frames(30)
 	expect(up(app)).to_be(false)
 	expect(route_has(app, "a1")).to_be(true)
+	app:hold("ctrl")
+	app:frames(3)
+	app:command("shell.previous_session")
+	app:frames(10)
+	expect(app:state("shell_switcher_hi")).to_be(3)
+	app:key("Escape")
+	app:frames(20)
+	expect(up(app)).to_be(false)
 	app:release()
+	app:frames(20)
+	expect(route_has(app, "a1")).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("set to cycle the tabs, a press let go each time steps the strip round after round, Shift back the same", function()
+	local app = shell()
+	app:set_state("shell_switcher_cycles_tabs", true)
+	open(app, "Fix the build")
+	open(app, "Write the docs")
+	open(app, "Tidy the tests")
+	local seen: { string } = {}
+	local function at(): string
+		for _, id in { "a1", "a2", "a3" } do
+			if route_has(app, id) then
+				return id
+			end
+		end
+		return "?"
+	end
+	for _ = 1, 7 do
+		app:command("shell.next_session")
+		app:frames(5)
+		expect(up(app)).to_be(false)
+		table.insert(seen, at())
+	end
+	for _ = 1, 4 do
+		app:command("shell.previous_session")
+		app:frames(5)
+		table.insert(seen, at())
+	end
+	for _ = 1, 4 do
+		app:hold("ctrl")
+		app:frames(3)
+		app:command("shell.next_session")
+		app:frames(5)
+		app:release()
+		app:frames(10)
+		table.insert(seen, at())
+	end
+	expect(table.concat(seen, " ")).to_be("a1 a2 a3 a1 a2 a3 a1 a3 a2 a1 a3 a1 a2 a3 a1")
 	expect(app:error()).to_be_nil()
 end)
 

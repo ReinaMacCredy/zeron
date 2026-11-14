@@ -102,7 +102,7 @@ fn key(path: &Path, stamp: Stamp, page: usize, scale: f64) -> String {
     hash.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
-fn cache_dir() -> PathBuf {
+pub(crate) fn app_cache() -> PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let id = objc2_foundation::NSBundle::mainBundle()
@@ -110,9 +110,13 @@ fn cache_dir() -> PathBuf {
             .map(|id| id.to_string())
             .unwrap_or_else(|| "zeron-zgx".into());
         let caches = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches")).unwrap_or_else(std::env::temp_dir);
-        caches.join(id).join("pdf")
+        caches.join(id)
     })
     .clone()
+}
+
+fn cache_dir() -> PathBuf {
+    app_cache().join("pdf")
 }
 
 /// The cache drops the least recently served first; only the access time moves, since a shown picture's file edited reloads the scripts.

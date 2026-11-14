@@ -16,21 +16,43 @@ local SETTLE = 160
 local WAIT = 60
 
 export type Size = { w: number, h: number }
+export type Box = { x: number, y: number, w: number, h: number }
+export type Pick = { page: number, x: number, y: number, x2: number, y2: number, box: Box }
 export type Props = {
-	path: string,
+	path: string | () -> string,
 	label: string,
 	zoom_label: State<string>,
 	page_label: State<string>,
 	commands: { [string]: () -> () },
 	failed: (reason: string, again: () -> ()) -> Node,
+	offset: State<number>?,
+	on_pick: ((pick: Pick) -> ())?,
+	page_layer: ((page: number, holder: Ref) -> Node?)?,
 }
+
+local function path_of(props: Props): string
+	local p = props.path
+	return if type(p) == "function" then p() else p
+end
+
+local function same(a: { Size }, b: { Size }): boolean
+	if #a ~= #b then
+		return false
+	end
+	for i, p in a do
+		if p.w ~= b[i].w or p.h ~= b[i].h then
+			return false
+		end
+	end
+	return true
+end
 
 local function reason(err: any): string
 	local why = if type(err) == "table" then err.message or err.error elseif err ~= nil then tostring(err) else nil
 	return if type(why) == "string" and why ~= "" then why else ""
 end
 
-local function pages_view(props: Props, list: { Size }): Node
+local function pages_view(props: Props, list: { Size }, version: State<number>): Node
 	local n = #list
 	local widest = 1
 	for _, p in list do
@@ -39,7 +61,7 @@ local function pages_view(props: Props, list: { Size }): Node
 	local view = ui.ref()
 	local zoom = ui.use_state(1)
 	local drawn = ui.use_state(0)
-	local offset = ui.use_state(0)
+	local offset = props.offset or ui.use_state(0)
 	local pan = ui.use_state(0)
 	local width = ui.use_state(0)
 	local fitted = true
@@ -205,6 +227,7 @@ local function pages_view(props: Props, list: { Size }): Node
 		ui.effect(function()
 			local z = drawn:get()
 			local wz = ui.window.zoom:get()
+			version:get()
 			if z <= 0 then
 				return
 			end
@@ -215,13 +238,16 @@ local function pages_view(props: Props, list: { Size }): Node
 			end
 			-- (A page a fast scroll only passes over is never drawn.)
 			ui.after(if src:peek() then 0 else WAIT, function()
-				M.page(props.path, i, z * wz):after(function(r: any)
+				M.page(path_of(props), i, z * wz):after(function(r: any)
 					if alive and drawn:peek() == z then
 						src:set(r.src)
 					end
 				end, function() end)
 			end)
 		end)
+		local page = ui.ref()
+		local pressed: any = nil
+		local on_pick = props.on_pick
 		return ui.div {
 			w_full = true,
 			h = function(): number
@@ -232,6 +258,31 @@ local function pages_view(props: Props, list: { Size }): Node
 				return wheel(i, e)
 			end,
 			ui.div {
+				ref = page,
+				on_press = if on_pick
+					then function(e: any)
+						pressed = { x = e.local_x, y = e.local_y, wx = e.x or 0, wy = e.y or 0 }
+					end
+					else nil,
+				on_release = if on_pick
+					then function(e: any)
+						local from = pressed
+						pressed = nil
+						if not from or e.local_x == nil then
+							return
+						end
+						local z = zoom:peek()
+						local wx, wy = e.x or from.wx, e.y or from.wy
+						on_pick({
+							page = i,
+							x = from.x / z,
+							y = from.y / z,
+							x2 = e.local_x / z,
+							y2 = e.local_y / z,
+							box = { x = math.min(from.wx, wx), y = math.min(from.wy, wy), w = math.abs(wx - from.wx), h = math.abs(wy - from.wy) },
+						})
+					end
+					else nil,
 				absolute = true,
 				top = GAP,
 				left = function(): number
@@ -263,6 +314,7 @@ local function pages_view(props: Props, list: { Size }): Node
 						pointer_events = "none",
 					}
 				),
+				if props.page_layer then props.page_layer(i, page) else nil,
 			},
 		}
 	end
@@ -337,7 +389,7 @@ end
 local function component(props: Props): Node
 	local phase = ui.use_state(nil :: string?)
 	ui.effect(function()
-		if phase:get() ~= "pages" then
+		if string.sub(phase:get() or "", 1, 5) ~= "pages" then
 			props.page_label:set("")
 		end
 	end)
@@ -347,12 +399,28 @@ local function component(props: Props): Node
 	local pages: { Size } = {}
 	local why = ""
 	local tries = ui.use_state(0)
+	local version = ui.use_state(0)
+	local shapes = 0
+	local asked = 0
 	ui.effect(function()
 		tries:get()
-		M.open(props.path):after(function(r: any)
+		asked += 1
+		local mine = asked
+		M.open(path_of(props)):after(function(r: any)
+			if mine ~= asked then
+				return
+			end
+			if phase:peek() == `pages{shapes}` and same(pages, r.pages) then
+				version:set(version:peek() + 1)
+				return
+			end
 			pages = r.pages
-			phase:set("pages")
+			shapes += 1
+			phase:set(`pages{shapes}`)
 		end, function(err: any)
+			if mine ~= asked then
+				return
+			end
 			why = reason(err)
 			phase:set("failed")
 		end)
@@ -367,7 +435,7 @@ local function component(props: Props): Node
 		if which == "failed" then
 			return props.failed(why, again)
 		end
-		return pages_view(props, pages)
+		return pages_view(props, pages, version)
 	end, { w_full = true, h_full = true })
 end
 

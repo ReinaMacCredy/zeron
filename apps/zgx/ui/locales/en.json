@@ -289,7 +289,9 @@
       "lines": "{n, plural, one {# line} other {# lines}}",
       "toggle_fit": "Double-click to toggle fit",
       "outside": "Read-only: outside this chat's folder.",
-      "pdf_page": "Page {n} of {total}"
+      "pdf_page": "Page {n} of {total}",
+      "table_named": "{name}, as a table",
+      "not_a_table": "Line {line} isn't well-formed CSV, so this shows its source."
     },
     "dropdown": {
       "placeholder": "Choose…",
@@ -1640,6 +1642,34 @@
         "unsupported": "This window can't answer it.",
         "use_for_request": "Use for this request"
       }
+    },
+    "tex_view": {
+      "compiling": "Compiling…",
+      "errors": "{n, plural, one {# error} other {# errors}} in the last compile",
+      "more": "{n} more",
+      "line": "Line {line}",
+      "go_to_line": "Show line {line} in Source",
+      "timeout": "Compiling took too long, so it was stopped.",
+      "waiting": {
+        "title": "Compiling {name}…",
+        "body": "The first compile can take a minute or two."
+      },
+      "no_pdf": {
+        "title": "{name} didn't compile",
+        "body": "Fix what's listed above and save to try again."
+      },
+      "missing": {
+        "title": "No TeX to compile {name}",
+        "body": "Install MacTeX or BasicTeX, then try again. Source still shows the file."
+      },
+      "not_document": {
+        "title": "{name} isn't a whole document",
+        "body": "It has no \\documentclass. A line % !TEX root = main.tex names the file it belongs to."
+      },
+      "no_root": {
+        "title": "Its root file isn't there",
+        "body": "Its % !TEX root line names {root}, which doesn't exist."
+      }
     }
   },
   "settings": {
@@ -2157,7 +2187,7 @@
         },
         "cycles": {
           "label": "Ctrl+Tab cycles tabs",
-          "description": "Move straight to the next tab instead of opening the switcher."
+          "description": "Go through the tabs in the strip's order instead of the most recently used sessions. Hold Control to pick one from the cards."
         }
       },
       "focused_pane": "Navigate within the focused pane.",
@@ -3958,6 +3988,7 @@
         "panel_new_browser_tab": "New Browser Tab",
         "panel_focus_address": "Open Location",
         "panel_reload_page": "Reload Page",
+        "panel_copy_link": "Copy Link",
         "shell_next_session": "Next session",
         "shell_previous_session": "Previous session",
         "session_n": "Session {i}",
@@ -4978,6 +5009,7 @@
         "new_tab": "New Browser Tab",
         "open_location": "Open Location",
         "reload": "Reload Page",
+        "copy_link": "Copy Link",
         "zoom_in": "Zoom In",
         "zoom_out": "Zoom Out",
         "zoom_reset": "Actual Size"

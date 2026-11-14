@@ -44,7 +44,7 @@ end
 -- link goes to `on_link` (the browser) and nothing navigates the page, a
 -- script's `location.href` included, before it loads. (An old zgx has no
 -- `decide_navigation`: the card's `on_navigate` puts the page back.)
-function M.keep_page(web: any, on_link: (string) -> ())
+function M.keep_page(web: any, on_link: (string) -> (), home: ((url: string) -> boolean)?)
 	local ok, decide = pcall(function()
 		return web.decide_navigation
 	end)
@@ -56,6 +56,9 @@ function M.keep_page(web: any, on_link: (string) -> ())
 			return string.sub(r.url, 1, 5) ~= "file:"
 		end
 		if r.url == "about:blank" or string.sub(r.url, 1, 12) == "about:blank#" then
+			return true
+		end
+		if home and home(r.url) then
 			return true
 		end
 		if r.kind == "link" then
@@ -144,6 +147,21 @@ end
 
 function M.open_url(url: string)
 	pcall(ui.invoke, "open_url", url)
+end
+
+-- A link leaving a stored page opens in the browser: an http(s) URL with a host and no user info, once a second at most.
+function M.leave(e: any, url: string)
+	local host = string.match(url, "^https?://([^/?#]*)")
+	local t = ui.now()
+	if host and host ~= "" and not string.find(host, "@", 1, true) and t - (e.opened or -1e9) >= 1000 then
+		e.opened = t
+		M.open_url(url)
+	end
+end
+
+function M.file_web(id: string): any
+	M.close((ui :: any).web(id))
+	return (ui :: any).web(id, { profile = "ephemeral", messages = false })
 end
 
 return M

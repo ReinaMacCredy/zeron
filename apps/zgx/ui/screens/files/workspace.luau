@@ -754,6 +754,7 @@ local function doc_from(w: Workspace, path: string, f: api.File): Doc
 		d.error = ui.t("files.workspace.unreadable_text"):get()
 	else
 		d.text = f.text
+		d.tex = ext(path) == "tex" and f.here and d.absolute ~= nil and ui.shared("platform", ""):peek() == "macos" or nil
 	end
 	return d
 end

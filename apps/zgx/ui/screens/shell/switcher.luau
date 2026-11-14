@@ -225,6 +225,17 @@ ui.effect(function()
 	end
 end)
 
+local function raise(list: { string }, start: number, where: string)
+	local s = route.session:peek()
+	if s and where == "session" then
+		picture_of(s.id)
+	end
+	ui.batch(function()
+		hi:set(start)
+		cards:set(list)
+	end)
+end
+
 function M.step(by: number): boolean
 	local list = cards:peek()
 	if list then
@@ -251,8 +262,11 @@ function M.step(by: number): boolean
 		end
 		local here = if route.chat:peek().name == "home" then tabs.DRAFT else here_now()
 		local at = if here then table.find(strip_now, here) else nil
+		if at and #strip_now == 1 then
+			return true
+		end
 		local i = if at then (at - 1 + by) % #strip_now + 1 elseif by > 0 then 1 else #strip_now
-		go(strip_now[i])
+		raise(strip_now, i, where)
 		return true
 	end
 	local sidebar: any = boundary.load("@app/screens/shell/sidebar")
@@ -265,15 +279,7 @@ function M.step(by: number): boolean
 		end
 		return true
 	end
-	local s = route.session:peek()
-	if s and where == "session" then
-		picture_of(s.id)
-	end
-	local start = (1 - 1 + by) % #order + 1
-	ui.batch(function()
-		hi:set(start)
-		cards:set(order)
-	end)
+	raise(order, (1 - 1 + by) % #order + 1, where)
 	return true
 end
 

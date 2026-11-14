@@ -139,15 +139,7 @@ local function touch(key: string)
 	end
 end
 
--- A link leaving a stored page opens in the browser: an http(s) URL with a host and no user info, once a second at most.
-local function leave(e: any, url: string)
-	local host = string.match(url, "^https?://([^/?#]*)")
-	local t = ui.now()
-	if host and host ~= "" and not string.find(host, "@", 1, true) and t - (e.opened or -1e9) >= 1000 then
-		e.opened = t
-		api.open_url(url)
-	end
-end
+local leave = api.leave
 
 -- (Made once the page is read: its bootstrap goes in with it.)
 local function web_of(e: any, id: string): any

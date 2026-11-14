@@ -312,22 +312,47 @@ test("browser tab: the ⋯ menu opens the inspector and zooms", function()
 	app:frames(10)
 	expect((app:state("browser_site_zoom") :: any)["example.com"]).to_be(1.1)
 	expect(app:has('role:menuitem "Zoom In"')).to_be(true)
-	-- Open in the default browser is the menu's (not a button on the bar).
-	app:click('role:menuitem "Open in Browser"')
-	expect(eventually(app, function(): boolean
-		return string.find(calls(app), "external:https://example.com/", 1, true) ~= nil
-	end, 3000)).to_be(true)
+	expect(app:has('role:menuitem "Copy Link"')).to_be(true)
+	expect(app:has('role:menuitem "Open in Browser"')).to_be(false)
 end)
 
-test("browser tab: the bar is back, forward, reload, the address, then the page's controls", function()
+test("browser tab: the bar is back, forward, reload, the address, then annotate, open in the default browser and ⋯", function()
 	local app = panel()
 	go(app, "example.com", "https://example.com/")
 	local function x(target: string): number
 		return tonumber(app:tree(target):match(" (%d+),%d+ %d+x%d+")) or -1
 	end
+	local OPEN = '#panel-browser-bar-tab1 >> role:button "Open in Browser"'
 	local fwd, reload, field = x('role:button "Forward"'), x('role:button "Reload"'), x(FIELD_ROLE)
+	local annotate, open, more = x('role:checkbox "Annotate"'), x(OPEN), x('role:button "More"')
 	expect(fwd < reload and reload < field).to_be(true)
-	expect(app:has('#panel-browser-bar-tab1 >> role:button "Open in Browser"')).to_be(false)
+	expect(field < annotate and annotate < open and open < more).to_be(true)
+	app:click(OPEN)
+	expect(eventually(app, function(): boolean
+		return string.find(calls(app), "external:https://example.com/", 1, true) ~= nil
+	end, 3000)).to_be(true)
+	app:set_state("builtin_browser_annotate", false)
+	app:frames(10)
+	expect(app:has('role:checkbox "Annotate"')).to_be(false)
+	expect(app:has(OPEN)).to_be(true)
+end)
+
+test("browser tab: Copy Link is the Edit menu's ⌘⇧C and copies the page's address", function()
+	local app = panel()
+	local key: string? = nil
+	for _, c in app:commands() do
+		if c.id == "panel.copy_link" then
+			key = `{c.menu} {c.key}`
+		end
+	end
+	expect(key).to_be("Edit cmd+shift+c")
+	app:command("panel.copy_link")
+	app:frames(5)
+	expect(app:clipboard() or "").to_be("")
+	go(app, "example.com", "https://example.com/")
+	app:command("panel.copy_link")
+	app:frames(5)
+	expect(app:clipboard()).to_be("https://example.com/")
 end)
 
 test("browser tab: a file the page can't show says so, and opens in the default browser", function()
@@ -337,7 +362,7 @@ test("browser tab: a file the page can't show says so, and opens in the default 
 	app:set_state(`test_web_error_{id}`, "Frame load interrupted")
 	app:frames(20)
 	expect(app:wait("\"This file can’t be shown here\"", { timeout_ms = 3000 })).to_be(true)
-	app:click('role:button "Open in Browser"')
+	app:click('role:button "Open in Browser"[2]')
 	app:frames(10)
 	expect(calls(app)).to_contain("external:https://example.com/archive.zip")
 end)

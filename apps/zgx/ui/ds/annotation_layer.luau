@@ -400,6 +400,14 @@ function M.new(opts: {
 		end
 		pending:set(p)
 	end
+	function L.offer(s: any)
+		pinned:set(nil)
+		local p = if notes then pending_of(s) else nil
+		if p then
+			p.offered = true
+		end
+		pending:set(if p and p.at then p else nil)
+	end
 	function L.clear()
 		away()
 	end
@@ -554,6 +562,9 @@ function M.new(opts: {
 		end
 		-- However the selection went (a press elsewhere, its row rebuilt), the pill goes with it.
 		ui.every(WATCH, function()
+			if pending:peek() and pending:peek().offered then
+				return false
+			end
 			if SelectionMenu.read() == nil then
 				if pending:peek() and pending:peek().gen == props.gen then
 					away()
