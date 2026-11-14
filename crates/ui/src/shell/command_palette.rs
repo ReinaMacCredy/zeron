@@ -261,7 +261,6 @@ enum Command {
     NewProject,
     Settings,
     Inbox,
-    Supervisor,
     Usage,
     Tasks,
     ArchiveThread,
@@ -275,7 +274,6 @@ impl Command {
             Self::NewProject => "New project",
             Self::Settings => "Open settings",
             Self::Inbox => "Open inbox",
-            Self::Supervisor => "Open Supervisor",
             Self::Usage => "Open usage",
             Self::Tasks => "Tasks",
             Self::ArchiveThread => "Archive thread",
@@ -289,7 +287,6 @@ impl Command {
             Self::NewProject => icons::FOLDER,
             Self::Settings => icons::SETTINGS,
             Self::Inbox => icons::BELL,
-            Self::Supervisor => icons::LUCIDE_SHIELD,
             Self::Usage => icons::USAGE_CHART,
             Self::Tasks => icons::TASKS,
             Self::ArchiveThread => icons::ARCHIVE_MINIMALISTIC,
@@ -406,7 +403,6 @@ fn commands_for(query: &str, can_archive: bool) -> Vec<Command> {
             Command::NewProject,
             Command::Settings,
             Command::Inbox,
-            Command::Supervisor,
             Command::Usage,
             Command::Tasks,
         ])
@@ -1060,7 +1056,6 @@ impl Shell {
             RowKind::Command(Command::NewProject) => self.open_add_space(cx),
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
             RowKind::Command(Command::Inbox) => self.open_inbox(cx),
-            RowKind::Command(Command::Supervisor) => self.open_supervisor(cx),
             RowKind::Command(Command::Usage) => self.open_usage(cx),
             RowKind::Command(Command::Tasks) => self.open_tasks(cx),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
@@ -1118,11 +1113,7 @@ impl Shell {
             Command::NewProject => ShortcutId::NewProject,
             Command::Settings => return Some(crate::settings::badge_combo("mod-,")),
             Command::ArchiveThread => ShortcutId::ArchiveSession,
-            Command::NewTerminal(_)
-            | Command::Inbox
-            | Command::Supervisor
-            | Command::Usage
-            | Command::Tasks => {
+            Command::NewTerminal(_) | Command::Inbox | Command::Usage | Command::Tasks => {
                 return None;
             }
         };
@@ -1354,8 +1345,6 @@ impl Shell {
                     false,
                     false,
                     false,
-                    false,
-                    None,
                     Some(query),
                     theme,
                     cx,
@@ -3123,7 +3112,6 @@ mod tests {
                 Command::NewProject,
                 Command::Settings,
                 Command::Inbox,
-                Command::Supervisor,
                 Command::Usage,
                 Command::Tasks
             ]

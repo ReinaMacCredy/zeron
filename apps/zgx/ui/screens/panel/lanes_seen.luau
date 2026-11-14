@@ -95,6 +95,8 @@ ui.effect(function()
 			for _, t in s.tabs do
 				if t.id == active and (t.kind == "side_chat" or t.kind == "subagent") and t.chat then
 					now[t.chat] = true
+				elseif t.id == active and t.kind == "threads" and t.thread then
+					now[t.thread] = true
 				end
 			end
 		end

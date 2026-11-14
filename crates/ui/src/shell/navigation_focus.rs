@@ -96,8 +96,6 @@ impl Shell {
                 | Route::Usage
                 | Route::Inbox
                 | Route::Tasks
-                | Route::TaskCenter
-                | Route::Supervisor
                 | Route::Docs
                 | Route::Skills
         ) {

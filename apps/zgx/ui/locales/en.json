@@ -1363,7 +1363,9 @@
       "approve": "Approve",
       "fan": "{n, plural, one {# agent} other {# agents}}",
       "fan_asking": "{n, plural, one {# agent} other {# agents}}, {k} asking",
-      "answer_failed": "Answer failed: {err}"
+      "answer_failed": "Answer failed: {err}",
+      "working_count": "{n} Working",
+      "approve_plan": "Approve the plan"
     },
     "profiles": {
       "title": "Profiles",
@@ -1534,7 +1536,13 @@
       "open_subagent": "Open subagent",
       "from": "From",
       "from_label": "Open {title}",
-      "auto_continue": "Auto-continue"
+      "auto_continue": "Auto-continue",
+      "plan": {
+        "head": "{n, plural, one {Plan · # step} other {Plan · # steps}}",
+        "edit": "Edit plan",
+        "approve": "Approve and run",
+        "approved": "Approved"
+      }
     },
     "annotation": {
       "add_to_chat": "Add to chat",
@@ -3926,7 +3934,8 @@
       "hide_details": "Hide session details",
       "show_details": "Show session details",
       "panel": "Panel",
-      "panel_tooltip": "Panel  {key}"
+      "panel_tooltip": "Panel  {key}",
+      "threads": "Threads"
     },
     "page": {
       "plugin": "Plugin",
@@ -4784,6 +4793,70 @@
       "wait_reply": "Wait for the reply to finish.",
       "previous_provider": "That reply came from a previous provider: fork from a reply after the switch.",
       "cannot": "{agent} cannot fork or rewind a session."
+    },
+    "threads": {
+      "count": "{n, plural, one {# thread} other {# threads}}",
+      "empty": "No threads yet. Hand work out in this chat and each piece becomes a thread.",
+      "back": "Back to threads",
+      "waiting": "Waiting on you: {line}",
+      "read_only": "read-only",
+      "subagent": "Sub-agent",
+      "peer": "Peer",
+      "skipped": "Skipped",
+      "cancelled": "Cancelled",
+      "more": "More for {title}",
+      "failed": "Couldn't update the thread: {err}",
+      "group": {
+        "review": "Ready for review",
+        "waiting": "Waiting on you",
+        "working": "Working",
+        "planned": "Planned",
+        "done": "Done"
+      },
+      "menu": {
+        "open": "Open thread",
+        "stop": "Stop",
+        "done": "Mark done",
+        "skip": "Skip",
+        "reopen": "Reopen",
+        "retry": "Run again"
+      },
+      "placeholder": "Message this thread…",
+      "plan": {
+        "title": "Plan",
+        "overview": "Overview",
+        "hide": "Hide",
+        "edit": "Edit",
+        "waiting": "Waiting for your approval. Nothing has started."
+      },
+      "edit": {
+        "head": "Edit plan",
+        "close": "Close the editor",
+        "overview": "Overview",
+        "steps": "Steps",
+        "add": "Add step",
+        "none": "No changes yet",
+        "count": "{n, plural, one {# change} other {# changes}}",
+        "bad": "A step needs a title",
+        "discard_ask": "{n, plural, one {Discard # change?} other {Discard # changes?}}",
+        "keep": "Keep editing",
+        "discard": "Discard",
+        "cancel": "Cancel",
+        "save": "Save",
+        "locked": "Already started. Save sends a changed spec to its thread. It keeps its place and cannot be removed.",
+        "started": "Already started",
+        "failed": "Couldn't save the plan: {err}",
+        "drag": "Drag to reorder",
+        "remove": "Remove step {n}",
+        "spec_toggle": "Spec of step {n}",
+        "role": "Role of {title}",
+        "no_role": "No role",
+        "same_as_lead": "same as the lead",
+        "title_name": "Title of step {n}",
+        "title_placeholder": "Step title",
+        "spec_name": "Spec of step {n}",
+        "spec_placeholder": "What this step should do"
+      }
     }
   },
   "sidecar": {
@@ -4848,7 +4921,8 @@
       "close_others": "Close Other Tabs",
       "close_left": "Close Tabs to the Left",
       "close_right": "Close Tabs to the Right",
-      "unsaved": "Unsaved changes"
+      "unsaved": "Unsaved changes",
+      "threads": "Threads"
     },
     "strip": {
       "label": "Panel tabs",
@@ -5833,7 +5907,7 @@
       "run_in_name": "Run in",
       "folder": "Folder…",
       "plan_first": "Plan first",
-      "plan_first_help": "The lead writes steps before it starts. You can also Add plan later."
+      "plan_first_help": "The chat writes a plan before it starts, and nothing runs until you approve it."
     },
     "capture": {
       "added": "Added to To do: {title}",
@@ -5847,7 +5921,12 @@
       "tasks": "Tasks",
       "what_tasks": "tasks",
       "not_image": "{name} is not an image."
-    }
+    },
+    "needs": {
+      "step_asks": "Step {n} asks you",
+      "step_failed": "Step {n} failed"
+    },
+    "progress": "{done}/{total}"
   },
   "inbox": {
     "title": "Inbox",

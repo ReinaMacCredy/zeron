@@ -52,6 +52,8 @@ fn chat(id: &str, device_id: &str) -> Chat {
         work_tree: None,
         unsettled_at: None,
         sleep: None,
+        plan: None,
+        plan_pending: false,
     }
 }
 

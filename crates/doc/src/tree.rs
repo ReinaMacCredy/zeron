@@ -1,14 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Local, Utc};
-use zeron_proto::mission::{PlanPhase, Rollup, StepRow, is_mission, plan_led_by, step_chat};
+use zeron_proto::mission::{PlanPhase, Rollup, is_mission};
 use zeron_proto::today::plural;
 use zeron_proto::usage::format_tokens;
 use zeron_proto::view::single_line;
-use zeron_proto::{
-    Chat, ChatIndicator, DelegationStatus, HarnessId, LinkKind, SessionStats, StepStatus, Task,
-    TaskStep,
-};
+use zeron_proto::{Chat, ChatIndicator, DelegationStatus, HarnessId, LinkKind, SessionStats, Task};
 
 use crate::{MessagePart, SessionMessageEntry, SubagentStatus};
 
@@ -26,40 +23,6 @@ pub enum TreeStatus {
 }
 
 impl TreeStatus {
-    pub fn of_step<B>(
-        row: &StepRow<B>,
-        delegation: Option<DelegationStatus>,
-    ) -> (Self, &'static str) {
-        match row.status {
-            StepStatus::Done => (Self::Done, "Done"),
-            StepStatus::Skipped => (Self::Stopped, "Skipped"),
-            StepStatus::Planned
-                if row.step.turn.is_some() || delegation == Some(DelegationStatus::Completed) =>
-            {
-                (Self::Queued, "Waiting on lead")
-            }
-            StepStatus::Planned => (Self::Queued, "Planned"),
-            StepStatus::Working => (Self::Running, "Working"),
-            StepStatus::Failed => (Self::Failed, "Failed"),
-            StepStatus::NeedsYou => {
-                let stopped = delegation.is_none()
-                    && row.step.turn.as_ref().map(|turn| turn.ended)
-                        == Some(zeron_proto::StepTurnEnd::Stopped);
-                match delegation {
-                    _ if row.indicator == Some(ChatIndicator::AwaitingInput) => {
-                        (Self::Waiting, "Needs you")
-                    }
-                    Some(DelegationStatus::Cancelled) => (Self::Failed, "Stopped"),
-                    Some(DelegationStatus::Interrupted) => (Self::Failed, "Interrupted"),
-                    Some(DelegationStatus::Failed) => (Self::Failed, "Failed"),
-                    _ if stopped => (Self::Failed, "Stopped"),
-                    _ if row.indicator == Some(ChatIndicator::Errored) => (Self::Failed, "Failed"),
-                    _ => (Self::Waiting, "Needs you"),
-                }
-            }
-        }
-    }
-
     pub fn muted(self) -> bool {
         matches!(self, Self::Queued | Self::Stopped)
     }
@@ -72,24 +35,8 @@ impl TreeStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
     Root,
-    Step(usize),
     Agent,
     Native,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Group {
-    Steps(usize),
-    Agents(usize),
-}
-
-impl Group {
-    pub fn label(self) -> String {
-        match self {
-            Self::Steps(n) => format!("Steps \u{a0}{n}"),
-            Self::Agents(n) => format!("Outside the plan \u{a0}{n}"),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -98,13 +45,11 @@ pub struct TreeNode<B> {
     pub parent: Option<usize>,
     pub depth: usize,
     pub kind: NodeKind,
-    pub group: Option<Group>,
     pub title: String,
     pub status: TreeStatus,
     pub word: &'static str,
     pub brand: Option<B>,
     pub chat_id: Option<String>,
-    pub step_id: Option<String>,
     pub since: Option<DateTime<Utc>>,
 }
 
@@ -141,7 +86,6 @@ pub trait TreeSource {
     type Brand: Clone;
     fn chats(&self) -> &[Chat];
     fn tasks(&self) -> &[Task];
-    fn steps(&self) -> &[TaskStep];
     fn now(&self) -> DateTime<Utc>;
     fn indicator(&self, chat: &Chat) -> ChatIndicator;
     fn running_subagents(&self, chat_id: &str) -> usize;
@@ -204,14 +148,12 @@ pub fn linked_label(indicator: ChatIndicator) -> &'static str {
     }
 }
 
-/// A plan first, else the task handed to this chat, open before done.
+/// The task handed to this chat, open before done.
 pub fn task_led_by<'a>(tasks: &'a [Task], chat_id: &str) -> Option<&'a Task> {
-    plan_led_by(tasks, chat_id).or_else(|| {
-        tasks
-            .iter()
-            .filter(|task| !task.deleted && task.chat_id.as_deref() == Some(chat_id))
-            .max_by_key(|task| (task.completed_at.is_none(), task.completed_at))
-    })
+    tasks
+        .iter()
+        .filter(|task| !task.deleted && task.chat_id.as_deref() == Some(chat_id))
+        .max_by_key(|task| (task.completed_at.is_none(), task.completed_at))
 }
 
 pub fn lead_waits<B>(task: &Task, plan: &Rollup<B>) -> Option<String> {
@@ -219,9 +161,7 @@ pub fn lead_waits<B>(task: &Task, plan: &Rollup<B>) -> Option<String> {
     if plan.phase(task) == PlanPhase::PlanReady {
         waits.push("Plan review".to_owned());
     }
-    let questions = plan
-        .questions
-        .max(usize::from(plan.lead == Some(ChatIndicator::AwaitingInput)));
+    let questions = usize::from(plan.lead == Some(ChatIndicator::AwaitingInput));
     if questions > 0 {
         waits.push(format!(
             "{questions} {}",
@@ -232,13 +172,12 @@ pub fn lead_waits<B>(task: &Task, plan: &Rollup<B>) -> Option<String> {
 }
 
 pub fn lead_line<B>(task: &Task, plan: &Rollup<B>) -> String {
-    let running = plan.count(StepStatus::Working);
     let working = plan.lead == Some(ChatIndicator::Working);
     if task.completed_at.is_some() {
         "Done".into()
     } else if plan.lead.is_none() {
         "Not started".into()
-    } else if let Some(lead) = plan.lead.filter(|_| !is_mission(task, plan)) {
+    } else if let Some(lead) = plan.lead.filter(|_| !is_mission(plan)) {
         linked_label(lead).into()
     } else if plan.phase(task) == PlanPhase::Planning {
         "Planning".into()
@@ -246,8 +185,6 @@ pub fn lead_line<B>(task: &Task, plan: &Rollup<B>) -> String {
         "Failed".into()
     } else if let Some(waits) = lead_waits(task, plan).filter(|_| !working) {
         waits
-    } else if running > 0 {
-        format!("Watching {running} {}", plural(running, "step", "steps"))
     } else if working {
         "Working".into()
     } else {
@@ -259,7 +196,7 @@ pub fn lead_status<B>(task: &Task, plan: &Rollup<B>) -> (TreeStatus, &'static st
     if task.completed_at.is_some() {
         return (TreeStatus::Done, "Done");
     }
-    if let Some(indicator) = plan.lead.filter(|_| !is_mission(task, plan)) {
+    if let Some(indicator) = plan.lead.filter(|_| !is_mission(plan)) {
         let status = match indicator {
             ChatIndicator::Working | ChatIndicator::Waiting => TreeStatus::Running,
             ChatIndicator::Errored => TreeStatus::Failed,
@@ -275,7 +212,6 @@ pub fn lead_status<B>(task: &Task, plan: &Rollup<B>) -> (TreeStatus, &'static st
         Some(ChatIndicator::Working) => (TreeStatus::Running, "Working"),
         Some(ChatIndicator::Errored) => (TreeStatus::Failed, "Failed"),
         _ if lead_waits(task, plan).is_some() => (TreeStatus::Waiting, "Needs you"),
-        _ if plan.count(StepStatus::Working) > 0 => (TreeStatus::Running, "Working"),
         _ if plan.needs == Some(zeron_proto::NeedsYou::Review) => {
             (TreeStatus::Waiting, "Ready to review")
         }
@@ -307,15 +243,11 @@ pub fn chat_status<S: TreeSource>(source: &S, chat: &Chat) -> (TreeStatus, &'sta
     }
 }
 
-pub fn children_by_parent<'a>(
-    chats: &'a [Chat],
-    tasks: &[Task],
-    steps: &[TaskStep],
-) -> HashMap<&'a str, Vec<&'a Chat>> {
+pub fn children_by_parent(chats: &[Chat]) -> HashMap<&str, Vec<&Chat>> {
     let ids: HashSet<&str> = chats.iter().map(|chat| chat.id.as_str()).collect();
     let mut children: HashMap<&str, Vec<&Chat>> = HashMap::new();
     for chat in chats.iter().filter(|chat| !chat.archived) {
-        let Some(link) = zeron_proto::thread_link(chat, tasks, steps) else {
+        let Some(link) = zeron_proto::thread_link(chat, &[]) else {
             continue;
         };
         if !matches!(link.kind, LinkKind::Delegated | LinkKind::OpenedFrom) {
@@ -367,7 +299,7 @@ pub fn tree_rows<S: TreeSource>(
     };
     let mut walk = Walk {
         source,
-        children: children_by_parent(source.chats(), source.tasks(), source.steps()),
+        children: children_by_parent(source.chats()),
         native,
         seen: HashSet::from([root.id.clone()]),
         out: Vec::new(),
@@ -387,70 +319,14 @@ pub fn tree_rows<S: TreeSource>(
         parent: None,
         depth: 0,
         kind: NodeKind::Root,
-        group: None,
         title,
         status,
         word,
         brand: Some(source.chat_brand(root)),
         chat_id: Some(root.id.clone()),
-        step_id: None,
         since: since(source, root),
     });
-    let mut bound: HashSet<&str> = HashSet::new();
-    if let Some((_, plan)) = &rollup {
-        let total = plan.steps.len();
-        for (n, row) in plan.steps.iter().enumerate() {
-            let chat = step_chat(source.chats(), &row.step);
-            if let Some(chat) = chat {
-                bound.insert(chat.id.as_str());
-                walk.seen.insert(chat.id.clone());
-            }
-            let delegation = chat.and_then(|chat| chat.delegation.as_ref().map(|d| d.status));
-            let (status, word) = TreeStatus::of_step(row, delegation);
-            let ix = walk.out.len();
-            walk.out.push(TreeNode {
-                id: row.step.id.clone(),
-                parent: Some(0),
-                depth: 1,
-                kind: NodeKind::Step(n + 1),
-                group: (n == 0).then_some(Group::Steps(total)),
-                title: single_line(&row.step.title),
-                status,
-                word,
-                brand: row.brand.clone(),
-                chat_id: chat.map(|chat| chat.id.clone()),
-                step_id: Some(row.step.id.clone()),
-                since: chat.and_then(|chat| since(source, chat)),
-            });
-            if let Some(chat) = chat {
-                walk.descend(chat, ix, 1);
-            }
-        }
-    }
-    let agents: Vec<&Chat> = walk
-        .children
-        .get(root.id.as_str())
-        .into_iter()
-        .flatten()
-        .copied()
-        .filter(|chat| !bound.contains(chat.id.as_str()))
-        .collect();
-    let first = walk.out.len();
-    for chat in agents {
-        walk.agent(chat, 0, 1);
-    }
-    walk.natives(root, 0, 1);
-    let count = walk.out[first..]
-        .iter()
-        .filter(|node| node.parent == Some(0))
-        .count();
-    if count > 0
-        && rollup
-            .as_ref()
-            .is_some_and(|(task, plan)| is_mission(task, plan))
-    {
-        walk.out[first].group = Some(Group::Agents(count));
-    }
+    walk.descend(root, 0, 0);
     if rollup.is_none() {
         walk.out[0].title = root_line(&walk.out);
     }
@@ -469,13 +345,11 @@ impl<'a, S: TreeSource> Walk<'a, S> {
             parent: Some(parent),
             depth,
             kind: NodeKind::Agent,
-            group: None,
             title: single_line(&chat.display_title()),
             status,
             word,
             brand: Some(self.source.chat_brand(chat)),
             chat_id: Some(chat.id.clone()),
-            step_id: None,
             since: since(self.source, chat),
         });
         self.descend(chat, ix, depth);
@@ -534,13 +408,11 @@ impl<'a, S: TreeSource> Walk<'a, S> {
                 parent: Some(parent),
                 depth,
                 kind: NodeKind::Native,
-                group: None,
                 title: call.subagent_title(),
                 status,
                 word,
                 brand: Some(self.source.brand(harness, call.subagent_model())),
                 chat_id: None,
-                step_id: None,
                 since: started,
             });
         }
@@ -588,7 +460,7 @@ fn roots_a_tree<S: TreeSource>(
 
 pub fn tree_index<S: TreeSource>(source: &S) -> IndexRows {
     let now = source.now();
-    let children = children_by_parent(source.chats(), source.tasks(), source.steps());
+    let children = children_by_parent(source.chats());
     let nested: HashSet<&str> = children
         .iter()
         .flat_map(|(parent, kids)| {

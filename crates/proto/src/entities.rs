@@ -382,6 +382,29 @@ pub struct Chat {
     /// peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep: Option<ChatSleep>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_option"
+    )]
+    pub plan: Option<ChatPlan>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan_pending: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPlan {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub overview: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan_doc: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub same_agents: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -656,6 +679,12 @@ impl DelegationDelivery {
     }
 }
 
+pub const SUPERVISOR_CHAT_PREFIX: &str = "supervisor-";
+
+pub fn is_supervisor_chat(chat_id: &str) -> bool {
+    chat_id.starts_with(SUPERVISOR_CHAT_PREFIX)
+}
+
 impl Chat {
     pub fn live_work_tree(&self) -> Option<&ChatWorkTree> {
         self.work_tree
@@ -688,8 +717,11 @@ impl Chat {
     }
 
     pub fn is_system(&self) -> bool {
-        crate::voice::is_orchestrator_chat(&self.id)
-            || crate::supervisor::is_supervisor_chat(&self.id)
+        crate::voice::is_orchestrator_chat(&self.id) || is_supervisor_chat(&self.id)
+    }
+
+    pub fn has_plan(&self) -> bool {
+        self.plan.is_some()
     }
 
     /// True when this chat syncs over the chat2 dumb relay.
@@ -751,14 +783,18 @@ impl Chat {
     /// Ignores the live status; Working and AwaitingInput chats never settle.
     /// A chat with no messages never settles on its own, as in T3.
     pub fn settled_at(&self, after_days: u32, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let activity = self.last_message_at;
-        match self
-            .settle
-            .filter(|settle| activity.is_none_or(|at| at <= settle.at))
-        {
+        match self.live_settle() {
             Some(settle) => settle.settled.then_some(settle.at),
-            None => activity.filter(|at| *at < now - chrono::Duration::days(i64::from(after_days))),
+            None => self
+                .last_message_at
+                .filter(|at| *at < now - chrono::Duration::days(i64::from(after_days))),
         }
+    }
+
+    pub fn live_settle(&self) -> Option<SidebarSettle> {
+        let activity = self.last_message_at;
+        self.settle
+            .filter(|settle| activity.is_none_or(|at| at <= settle.at))
     }
 
     /// [`Chat::settled_at`] for a row showing `status`: a live turn keeps it in the Inbox.
@@ -931,58 +967,14 @@ pub struct Task {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub deleted: bool,
-    #[serde(default, skip_serializing_if = "TaskMode::is_single")]
-    pub mode: TaskMode,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub plan_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_error: Option<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub plan: String,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub plan_doc: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub same_agents: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub resources: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum TaskMode {
-    #[default]
-    Single,
-    Orchestrated,
-}
-
-impl TaskMode {
-    pub fn is_single(&self) -> bool {
-        *self == Self::Single
-    }
-}
-
-impl Task {
-    pub fn has_plan(&self) -> bool {
-        self.mode == TaskMode::Orchestrated && self.chat_id.is_some()
-    }
-
-    pub fn is_open_plan_of(&self, chat_id: &str) -> bool {
-        !self.deleted
-            && self.completed_at.is_none()
-            && self.has_plan()
-            && self.chat_id.as_deref() == Some(chat_id)
-    }
-}
-
-/// Rows from before the one-open-plan rule resolve to the first match.
-pub fn plan_of_chat<'a>(tasks: &'a [Task], chat_id: &str) -> Option<&'a Task> {
-    tasks.iter().find(|task| task.is_open_plan_of(chat_id))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1004,7 +996,7 @@ pub struct ThreadLink {
 }
 
 /// Only `Delegated` is step-like; the other kinds are labels.
-pub fn thread_link(chat: &Chat, tasks: &[Task], steps: &[TaskStep]) -> Option<ThreadLink> {
+pub fn thread_link(chat: &Chat, steps: &[TaskStep]) -> Option<ThreadLink> {
     if chat.is_system() {
         return None;
     }
@@ -1019,13 +1011,7 @@ pub fn thread_link(chat: &Chat, tasks: &[Task], steps: &[TaskStep]) -> Option<Th
         steps
             .iter()
             .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(chat.id.as_str()))
-            .filter(|step| {
-                tasks.iter().any(|task| {
-                    task.id == step.task_id
-                        && !task.deleted
-                        && task.chat_id.as_deref() == Some(parent)
-                })
-            })
+            .filter(|step| step.owner_chat_id == parent)
             .max_by_key(|step| step.outcome.is_none())
             .map(|step| step.id.clone())
     };
@@ -1048,16 +1034,11 @@ pub fn thread_link(chat: &Chat, tasks: &[Task], steps: &[TaskStep]) -> Option<Th
 }
 
 /// A sidechat or a fork roots its own tree: neither link makes it a child.
-pub fn tree_path<'a>(
-    chat: &'a Chat,
-    chats: &'a [Chat],
-    tasks: &[Task],
-    steps: &[TaskStep],
-) -> Vec<&'a Chat> {
+pub fn tree_path<'a>(chat: &'a Chat, chats: &'a [Chat], steps: &[TaskStep]) -> Vec<&'a Chat> {
     let mut path = vec![chat];
     while let Some(parent) = path
         .last()
-        .and_then(|node| thread_link(node, tasks, steps))
+        .and_then(|node| thread_link(node, steps))
         .filter(|link| matches!(link.kind, LinkKind::Delegated | LinkKind::OpenedFrom))
         .and_then(|link| chats.iter().find(|chat| chat.id == link.parent))
     {
@@ -1073,7 +1054,8 @@ pub fn tree_path<'a>(
 #[serde(rename_all = "camelCase")]
 pub struct TaskStep {
     pub id: String,
-    pub task_id: String,
+    #[serde(default)]
+    pub owner_chat_id: String,
     #[serde(default)]
     pub title: String,
     #[serde(default)]
@@ -1129,32 +1111,6 @@ pub enum StepTurnEnd {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlanEdit {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub overview: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub overview_images: Option<Vec<String>>,
-    pub steps: Vec<PlanStepEdit>,
-    #[serde(default)]
-    pub remove_step_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub order: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanStepEdit {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub step_id: Option<String>,
-    pub title: String,
-    #[serde(default)]
-    pub notes: String,
-    #[serde(default)]
-    pub images: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct TaskStepPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -1198,47 +1154,68 @@ pub struct TaskStepPatch {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum StepStatus {
+pub enum ThreadState {
     Planned,
     Working,
-    NeedsYou,
+    WaitingOnYou,
+    ReadyForReview,
     Done,
     Skipped,
     Failed,
+    Cancelled,
 }
 
-pub fn step_status(
+pub fn thread_state(
+    mark: Option<StepOutcome>,
+    delegation: Option<&Delegation>,
+    indicator: Option<ChatIndicator>,
+) -> ThreadState {
+    match mark {
+        Some(StepOutcome::Done) => return ThreadState::Done,
+        Some(StepOutcome::Skipped) => return ThreadState::Skipped,
+        None => {}
+    }
+    let Some(indicator) = indicator else {
+        return ThreadState::Planned;
+    };
+    match indicator {
+        ChatIndicator::Working => return ThreadState::Working,
+        ChatIndicator::AwaitingInput => return ThreadState::WaitingOnYou,
+        _ => {}
+    }
+    match delegation.map(|delegation| delegation.status) {
+        Some(DelegationStatus::Running) => ThreadState::Working,
+        Some(DelegationStatus::Completed) => ThreadState::ReadyForReview,
+        Some(DelegationStatus::Failed) => ThreadState::Failed,
+        Some(DelegationStatus::Cancelled) => ThreadState::Cancelled,
+        Some(DelegationStatus::Interrupted) => ThreadState::WaitingOnYou,
+        None => match indicator {
+            ChatIndicator::Waiting => ThreadState::Working,
+            ChatIndicator::Errored => ThreadState::Failed,
+            _ => ThreadState::ReadyForReview,
+        },
+    }
+}
+
+pub fn step_state(
     step: &TaskStep,
     thread: Option<&Chat>,
     indicator: Option<ChatIndicator>,
-) -> StepStatus {
-    match step.outcome {
-        Some(StepOutcome::Done) => return StepStatus::Done,
-        Some(StepOutcome::Skipped) => return StepStatus::Skipped,
-        None => {}
-    }
-    let Some(thread) = thread.filter(|_| step.chat_id.is_some()) else {
-        return StepStatus::Planned;
-    };
-    match indicator {
-        Some(ChatIndicator::Working) => return StepStatus::Working,
-        Some(ChatIndicator::AwaitingInput) => return StepStatus::NeedsYou,
-        _ => {}
-    }
-    // Steps bound to a delegate_task child before steps ran on threads.
-    if let Some(delegation) = &thread.delegation {
-        return match delegation.status {
-            DelegationStatus::Running => StepStatus::Working,
-            DelegationStatus::Completed => StepStatus::Planned,
-            _ => StepStatus::NeedsYou,
-        };
-    }
-    match step.turn.as_ref().map(|turn| turn.ended) {
-        Some(StepTurnEnd::Completed) => StepStatus::Planned,
-        Some(StepTurnEnd::Failed) => StepStatus::Failed,
-        Some(StepTurnEnd::Stopped) => StepStatus::NeedsYou,
-        None => StepStatus::Working,
-    }
+) -> ThreadState {
+    let thread = thread.filter(|_| step.chat_id.is_some());
+    thread_state(
+        step.outcome,
+        thread.and_then(|thread| thread.delegation.as_ref()),
+        thread.map(|_| indicator.unwrap_or(ChatIndicator::Idle)),
+    )
+}
+
+pub fn chat_state(chat: &Chat, indicator: ChatIndicator) -> ThreadState {
+    let mark = chat
+        .live_settle()
+        .filter(|settle| settle.settled)
+        .map(|_| StepOutcome::Done);
+    thread_state(mark, chat.delegation.as_ref(), Some(indicator))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1247,10 +1224,10 @@ pub struct PlanProgress {
     pub total: usize,
 }
 
-pub fn plan_progress(steps: &[StepStatus]) -> PlanProgress {
+pub fn plan_progress(steps: &[ThreadState]) -> PlanProgress {
     PlanProgress {
-        done: steps.iter().filter(|s| **s == StepStatus::Done).count(),
-        total: steps.iter().filter(|s| **s != StepStatus::Skipped).count(),
+        done: steps.iter().filter(|s| **s == ThreadState::Done).count(),
+        total: steps.iter().filter(|s| **s != ThreadState::Skipped).count(),
     }
 }
 
@@ -1283,24 +1260,12 @@ pub struct TaskPatch {
     pub completed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<TaskMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_pending: Option<bool>,
     #[serde(
         default,
         deserialize_with = "present_nullable",
         skip_serializing_if = "Option::is_none"
     )]
     pub send_error: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_doc: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub same_agents: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resources: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1354,14 +1319,15 @@ impl NeedsYou {
 /// A stopped linked thread waits on the person until they tick the task.
 pub fn needs_you(
     task: &Task,
+    lead: Option<&Chat>,
     linked: Option<ChatIndicator>,
-    steps: &[StepStatus],
+    steps: &[ThreadState],
 ) -> Option<NeedsYou> {
     if task.completed_at.is_some() {
         return None;
     }
     let lead_working = linked == Some(ChatIndicator::Working);
-    let step = |status: StepStatus| steps.iter().position(|s| *s == status).map(|ix| ix + 1);
+    let step = |status: ThreadState| steps.iter().position(|s| *s == status).map(|ix| ix + 1);
     if task.send_error.is_some() {
         return Some(NeedsYou::NotSent);
     }
@@ -1370,32 +1336,35 @@ pub fn needs_you(
         Some(ChatIndicator::Errored) => return Some(NeedsYou::LeadErrored),
         _ => {}
     }
-    if let Some(step) = step(StepStatus::NeedsYou) {
+    if let Some(step) = step(ThreadState::WaitingOnYou) {
         return Some(NeedsYou::StepAsks(step));
     }
     if !lead_working {
-        if let Some(step) = step(StepStatus::Failed) {
+        if let Some(step) = step(ThreadState::Failed) {
             return Some(NeedsYou::StepFailed(step));
         }
-        if task.plan_pending && !steps.is_empty() {
+        if lead.is_some_and(|lead| lead.plan_pending) && !steps.is_empty() {
             return Some(NeedsYou::PlanReady);
         }
     }
-    let planning = (task.mode == TaskMode::Orchestrated || task.plan_pending)
-        && steps.is_empty()
-        && linked.is_some();
-    if lead_working || planning || steps.contains(&StepStatus::Working) {
+    let planning = lead.is_some_and(Chat::has_plan) && steps.is_empty() && linked.is_some();
+    if lead_working || planning || steps.contains(&ThreadState::Working) {
         return None;
     }
     linked.map(|_| NeedsYou::Review)
 }
 
-pub fn task_status(task: &Task, linked: Option<ChatIndicator>, steps: &[StepStatus]) -> TaskStatus {
+pub fn task_status(
+    task: &Task,
+    lead: Option<&Chat>,
+    linked: Option<ChatIndicator>,
+    steps: &[ThreadState],
+) -> TaskStatus {
     if task.completed_at.is_some() {
         TaskStatus::Done
-    } else if needs_you(task, linked, steps).is_some() {
+    } else if needs_you(task, lead, linked, steps).is_some() {
         TaskStatus::NeedsYou
-    } else if linked.is_some() || steps.contains(&StepStatus::Working) {
+    } else if linked.is_some() || steps.contains(&ThreadState::Working) {
         TaskStatus::Working
     } else {
         TaskStatus::ToDo
@@ -3322,9 +3291,9 @@ mod tests {
     #[test]
     fn task_status_derives_from_completion_then_the_linked_thread() {
         let mut task: Task = serde_json::from_value(serde_json::json!({ "id": "t" })).unwrap();
-        assert_eq!(task_status(&task, None, &[]), TaskStatus::ToDo);
+        assert_eq!(task_status(&task, None, None, &[]), TaskStatus::ToDo);
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[]),
+            task_status(&task, None, Some(ChatIndicator::Working), &[]),
             TaskStatus::Working
         );
         for stopped in [
@@ -3333,107 +3302,130 @@ mod tests {
             ChatIndicator::Completed,
             ChatIndicator::Idle,
         ] {
-            assert_eq!(task_status(&task, Some(stopped), &[]), TaskStatus::NeedsYou);
+            assert_eq!(
+                task_status(&task, None, Some(stopped), &[]),
+                TaskStatus::NeedsYou
+            );
         }
         task.send_error = Some("offline".into());
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[]),
+            task_status(&task, None, Some(ChatIndicator::Working), &[]),
             TaskStatus::NeedsYou,
             "a failed send waits on the person even while the thread runs"
         );
         task.send_error = None;
         task.completed_at = Some(Utc::now());
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[]),
+            task_status(&task, None, Some(ChatIndicator::Working), &[]),
             TaskStatus::Done
         );
     }
 
     #[test]
     fn an_orchestrated_task_rolls_its_steps_up_under_the_lead() {
-        use StepStatus::*;
-        let mut task: Task = serde_json::from_value(serde_json::json!({ "id": "t" })).unwrap();
+        use ThreadState::*;
+        let task: Task = serde_json::from_value(serde_json::json!({ "id": "t" })).unwrap();
         let lead = Some(ChatIndicator::Idle);
         assert_eq!(
-            task_status(&task, lead, &[Done, Working]),
+            task_status(&task, None, lead, &[Done, Working]),
             TaskStatus::Working
         );
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[Planned]),
+            task_status(&task, None, Some(ChatIndicator::Working), &[Planned]),
             TaskStatus::Working
         );
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[Working, NeedsYou]),
+            task_status(
+                &task,
+                None,
+                Some(ChatIndicator::Working),
+                &[Working, WaitingOnYou]
+            ),
             TaskStatus::NeedsYou,
             "a step that needs the person outranks a working lead"
         );
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Errored), &[Working]),
+            task_status(&task, None, Some(ChatIndicator::Errored), &[Working]),
             TaskStatus::NeedsYou
         );
         assert_eq!(
-            task_status(&task, lead, &[Done, Skipped]),
+            task_status(&task, None, lead, &[Done, Skipped]),
             TaskStatus::NeedsYou
         );
-        assert_eq!(task_status(&task, None, &[Working]), TaskStatus::Working);
         assert_eq!(
-            task_status(&task, lead, &[Failed, Working]),
+            task_status(&task, None, None, &[Working]),
+            TaskStatus::Working
+        );
+        assert_eq!(
+            task_status(&task, None, lead, &[Failed, Working]),
             TaskStatus::NeedsYou,
             "a failed step waits on the person while the lead is idle"
         );
         assert_eq!(
-            task_status(&task, None, &[Done, Failed]),
+            task_status(&task, None, None, &[Done, Failed]),
             TaskStatus::NeedsYou
         );
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[Failed]),
+            task_status(&task, None, Some(ChatIndicator::Working), &[Failed]),
             TaskStatus::Working,
             "the lead is handling the failed step"
         );
         assert_eq!(
-            needs_you(&task, lead, &[Done, Skipped]),
+            needs_you(&task, None, lead, &[Done, Skipped]),
             Some(super::NeedsYou::Review),
             "a finished plan under an idle lead waits for review"
         );
         assert_eq!(
-            needs_you(&task, lead, &[Done, Failed]),
+            needs_you(&task, None, lead, &[Done, Failed]),
             Some(super::NeedsYou::StepFailed(2))
         );
         assert_eq!(
-            needs_you(&task, Some(ChatIndicator::Working), &[Working, NeedsYou]),
+            needs_you(
+                &task,
+                None,
+                Some(ChatIndicator::Working),
+                &[Working, WaitingOnYou]
+            ),
             Some(super::NeedsYou::StepAsks(2))
         );
-        assert_eq!(needs_you(&task, lead, &[Done, Working]), None);
-        task.plan_pending = true;
+        assert_eq!(needs_you(&task, None, lead, &[Done, Working]), None);
+        let mut planner = child(None);
+        planner.plan = Some(ChatPlan::default());
+        planner.plan_pending = true;
+        let planner = Some(&planner);
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[Planned]),
+            task_status(&task, planner, Some(ChatIndicator::Working), &[Planned]),
             TaskStatus::Working,
             "the lead is still writing the plan"
         );
-        assert_eq!(task_status(&task, lead, &[Planned]), TaskStatus::NeedsYou);
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::Working), &[]),
+            task_status(&task, planner, lead, &[Planned]),
+            TaskStatus::NeedsYou
+        );
+        assert_eq!(
+            task_status(&task, planner, Some(ChatIndicator::Working), &[]),
             TaskStatus::Working
         );
         assert_eq!(
-            task_status(&task, None, &[]),
+            task_status(&task, planner, None, &[]),
             TaskStatus::ToDo,
             "no plan yet means nothing to approve"
         );
         assert_eq!(
-            task_status(&task, lead, &[]),
+            task_status(&task, planner, lead, &[]),
             TaskStatus::Working,
             "a mission without steps is planning even between the lead's turns"
         );
         assert_eq!(
-            task_status(&task, Some(ChatIndicator::AwaitingInput), &[]),
+            task_status(&task, planner, Some(ChatIndicator::AwaitingInput), &[]),
             TaskStatus::NeedsYou
         );
     }
 
     fn step(chat_id: Option<&str>, outcome: Option<StepOutcome>) -> TaskStep {
         let mut step: TaskStep =
-            serde_json::from_value(serde_json::json!({ "id": "s", "taskId": "t" })).unwrap();
+            serde_json::from_value(serde_json::json!({ "id": "s", "ownerChatId": "lead" }))
+                .unwrap();
         step.chat_id = chat_id.map(str::to_string);
         step.outcome = outcome;
         step
@@ -3481,107 +3473,115 @@ mod tests {
     }
 
     #[test]
-    fn a_step_reads_its_outcome_then_its_thread() {
-        let running = child(Some(DelegationStatus::Running));
-        let working = Some(ChatIndicator::Working);
-        for (outcome, status) in [
-            (StepOutcome::Done, StepStatus::Done),
-            (StepOutcome::Skipped, StepStatus::Skipped),
-        ] {
+    fn one_state_per_row_from_the_mark_the_block_and_the_session() {
+        use ChatIndicator::{AwaitingInput, Completed, Errored, Idle, Waiting, Working};
+        use DelegationStatus as D;
+        use ThreadState as S;
+        let done = Some(StepOutcome::Done);
+        let skipped = Some(StepOutcome::Skipped);
+        let step_thread = [
+            (done, Some(D::Running), Some(Working), S::Done),
+            (skipped, Some(D::Running), Some(Working), S::Skipped),
+            (None, None, None, S::Planned),
+            (None, Some(D::Running), Some(Idle), S::Working),
+            (None, Some(D::Completed), Some(Working), S::Working),
+            (None, Some(D::Running), Some(AwaitingInput), S::WaitingOnYou),
+            (None, Some(D::Interrupted), Some(Idle), S::WaitingOnYou),
+            (None, Some(D::Completed), Some(Idle), S::ReadyForReview),
+            (None, Some(D::Completed), Some(Completed), S::ReadyForReview),
+            (None, Some(D::Failed), Some(Idle), S::Failed),
+            (None, Some(D::Cancelled), Some(Idle), S::Cancelled),
+        ];
+        for (mark, block, indicator, want) in step_thread {
+            let bound = step(indicator.map(|_| "c"), mark);
+            let thread = indicator.map(|_| child(block));
             assert_eq!(
-                step_status(&step(Some("c"), Some(outcome)), Some(&running), working),
-                status,
-                "an outcome wins over a running thread"
+                step_state(&bound, thread.as_ref(), indicator),
+                want,
+                "step thread: {mark:?} {block:?} {indicator:?}"
             );
         }
+        let gone = step(Some("c"), None);
         assert_eq!(
-            step_status(&step(None, None), None, None),
-            StepStatus::Planned
-        );
-        assert_eq!(
-            step_status(&step(Some("c"), None), None, None),
-            StepStatus::Planned,
+            step_state(&gone, None, None),
+            S::Planned,
             "a deleted thread reads unstarted"
         );
-        let done = child(Some(DelegationStatus::Completed));
-        assert_eq!(
-            step_status(&step(Some("c"), None), Some(&done), working),
-            StepStatus::Working,
-            "a finished child taking another turn works"
-        );
-        assert_eq!(
-            step_status(
-                &step(Some("c"), None),
-                Some(&running),
-                Some(ChatIndicator::AwaitingInput)
-            ),
-            StepStatus::NeedsYou
-        );
-        let cases = [
-            (DelegationStatus::Running, StepStatus::Working),
-            (DelegationStatus::Completed, StepStatus::Planned),
-            (DelegationStatus::Failed, StepStatus::NeedsYou),
-            (DelegationStatus::Cancelled, StepStatus::NeedsYou),
-            (DelegationStatus::Interrupted, StepStatus::NeedsYou),
+        let old_step_thread = [
+            (done, Some(Errored), S::Done),
+            (skipped, Some(Working), S::Skipped),
+            (None, None, S::Planned),
+            (None, Some(Working), S::Working),
+            (None, Some(Waiting), S::Working),
+            (None, Some(AwaitingInput), S::WaitingOnYou),
+            (None, Some(Idle), S::ReadyForReview),
+            (None, Some(Completed), S::ReadyForReview),
+            (None, Some(Errored), S::Failed),
         ];
-        for (delegation, status) in cases {
-            let mut bound = step(Some("c"), None);
+        for (mark, indicator, want) in old_step_thread {
+            let mut bound = step(indicator.map(|_| "c"), mark);
             bound.turn = Some(StepTurn {
                 ended: StepTurnEnd::Failed,
-                turn: None,
-            });
-            assert_eq!(
-                step_status(
-                    &bound,
-                    Some(&child(Some(delegation))),
-                    Some(ChatIndicator::Idle)
-                ),
-                status,
-                "a delegated child reads its delegation: {delegation:?}"
-            );
-        }
-        let thread = child(None);
-        let ended = [
-            (None, StepStatus::Working),
-            (Some(StepTurnEnd::Completed), StepStatus::Planned),
-            (Some(StepTurnEnd::Failed), StepStatus::Failed),
-            (Some(StepTurnEnd::Stopped), StepStatus::NeedsYou),
-        ];
-        for (end, status) in ended {
-            let mut bound = step(Some("c"), None);
-            bound.turn = end.map(|ended| StepTurn {
-                ended,
                 turn: Some("turn-1".into()),
             });
             assert_eq!(
-                step_status(&bound, Some(&thread), Some(ChatIndicator::Idle)),
-                status,
-                "{end:?}"
+                step_state(&bound, indicator.map(|_| child(None)).as_ref(), indicator),
+                want,
+                "a step thread with no block reads its session, never its recorded turn: {mark:?} {indicator:?}"
             );
+        }
+        let at = |minutes: i64| child(None).created_at + chrono::Duration::minutes(minutes);
+        let owned = |block: D, settled: Option<bool>, said_after: bool| {
+            let mut chat = child(Some(block));
+            chat.last_message_at = Some(at(if said_after { 20 } else { 5 }));
+            chat.settle = settled.map(|settled| SidebarSettle {
+                settled,
+                at: at(10),
+            });
+            chat
+        };
+        let plain_thread = [
+            (owned(D::Completed, Some(true), false), Idle, S::Done),
+            (
+                owned(D::Completed, Some(true), true),
+                Idle,
+                S::ReadyForReview,
+            ),
+            (
+                owned(D::Completed, Some(false), false),
+                Idle,
+                S::ReadyForReview,
+            ),
+            (owned(D::Completed, None, false), Idle, S::ReadyForReview),
+            (owned(D::Running, None, false), Idle, S::Working),
+            (owned(D::Completed, None, true), Working, S::Working),
+            (
+                owned(D::Running, None, false),
+                AwaitingInput,
+                S::WaitingOnYou,
+            ),
+            (owned(D::Interrupted, None, false), Idle, S::WaitingOnYou),
+            (owned(D::Failed, None, false), Idle, S::Failed),
+            (owned(D::Cancelled, None, false), Idle, S::Cancelled),
+        ];
+        for (chat, indicator, want) in plain_thread {
             assert_eq!(
-                step_status(&bound, Some(&thread), Some(ChatIndicator::Working)),
-                StepStatus::Working,
-                "a thread taking another turn works: {end:?}"
+                chat_state(&chat, indicator),
+                want,
+                "plain owned thread: {:?} {:?} {indicator:?}",
+                chat.delegation.as_ref().map(|d| d.status),
+                chat.settle,
             );
         }
     }
 
     #[test]
     fn thread_link_owns_only_delegated_and_step_bound_children() {
-        let task = |id: &str, lead: Option<&str>, mode: TaskMode| {
-            let mut task: Task = serde_json::from_value(serde_json::json!({ "id": id })).unwrap();
-            task.chat_id = lead.map(str::to_string);
-            task.mode = mode;
-            task
-        };
-        let plan = task("t", Some("lead"), TaskMode::Orchestrated);
-        let other = task("o", Some("elsewhere"), TaskMode::Orchestrated);
         let mut bound = step(Some("c"), None);
         bound.id = "s1".into();
         let mut foreign = step(Some("c"), None);
-        foreign.task_id = "o".into();
-        let tasks = [plan.clone(), other];
-        let link = |chat: &Chat, steps: &[TaskStep]| thread_link(chat, &tasks, steps);
+        foreign.owner_chat_id = "elsewhere".into();
+        let link = |chat: &Chat, steps: &[TaskStep]| thread_link(chat, steps);
         let delegated = child(Some(DelegationStatus::Running));
         assert_eq!(
             link(&delegated, &[]),
@@ -3637,24 +3637,26 @@ mod tests {
         assert_eq!(link(&side, &[]).map(|l| l.kind), Some(LinkKind::SidechatOf));
         assert_eq!(link(&child(None), &[]), None);
         let mut supervisor = opened.clone();
-        supervisor.id = format!("{}dev", crate::supervisor::CHAT_PREFIX);
+        supervisor.id = format!("{SUPERVISOR_CHAT_PREFIX}dev");
         assert_eq!(link(&supervisor, &[]), None);
-
-        let single = task("h", Some("lead"), TaskMode::Single);
-        assert!(plan.has_plan() && !single.has_plan());
-        assert!(!task("u", None, TaskMode::Orchestrated).has_plan());
-        let mut done = plan.clone();
-        done.completed_at = Some(Utc::now());
-        assert_eq!(plan_of_chat(&[single.clone(), done], "lead"), None);
-        assert_eq!(plan_of_chat(&[single, plan.clone()], "lead"), Some(&plan));
     }
 
     #[test]
     fn plan_progress_leaves_skipped_steps_out_of_the_total() {
-        use StepStatus::*;
+        use ThreadState::*;
         assert_eq!(
-            plan_progress(&[Done, Skipped, Working, Planned, NeedsYou, Done, Failed]),
-            PlanProgress { done: 2, total: 6 }
+            plan_progress(&[
+                Done,
+                Skipped,
+                Working,
+                Planned,
+                WaitingOnYou,
+                Done,
+                Failed,
+                ReadyForReview,
+                Cancelled
+            ]),
+            PlanProgress { done: 2, total: 8 }
         );
         assert_eq!(plan_progress(&[]), PlanProgress::default());
     }
@@ -3670,12 +3672,9 @@ mod tests {
             serde_json::to_value(&patch).unwrap(),
             serde_json::json!({ "dueOn": null, "chatId": "c" })
         );
-        let patch: TaskPatch = serde_json::from_value(
-            serde_json::json!({ "sendError": null, "mode": "orchestrated" }),
-        )
-        .unwrap();
+        let patch: TaskPatch =
+            serde_json::from_value(serde_json::json!({ "sendError": null })).unwrap();
         assert_eq!(patch.send_error, Some(None));
-        assert_eq!(patch.mode, Some(TaskMode::Orchestrated));
         let patch: TaskStepPatch =
             serde_json::from_value(serde_json::json!({ "outcome": null, "chatId": "c" })).unwrap();
         assert_eq!(patch.outcome, Some(None));

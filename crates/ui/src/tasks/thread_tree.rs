@@ -1,14 +1,10 @@
 use chrono::{DateTime, Utc};
 use zeron_doc::SessionMessageEntry;
 use zeron_doc::tree::TreeSource;
-use zeron_proto::{Chat, ChatIndicator, HarnessId, Task, TaskStep};
+use zeron_proto::{Chat, ChatIndicator, HarnessId, Task};
 
 use super::{Brand, Rollup};
 use crate::state::AppState;
-
-pub(crate) use zeron_doc::tree::NodeKind;
-
-pub(crate) type TreeNode = zeron_doc::tree::TreeNode<Brand>;
 
 pub(crate) struct Source<'a> {
     pub state: &'a AppState,
@@ -24,10 +20,6 @@ impl TreeSource for Source<'_> {
 
     fn tasks(&self) -> &[Task] {
         &self.state.tasks
-    }
-
-    fn steps(&self) -> &[TaskStep] {
-        &self.state.task_steps
     }
 
     fn now(&self) -> DateTime<Utc> {
@@ -67,23 +59,4 @@ impl TreeSource for Source<'_> {
             self.state.sub_transcript(chat_id).iter()
         })
     }
-}
-
-pub(crate) fn tree_rows(
-    state: &AppState,
-    root_chat_id: &str,
-    native: bool,
-    now: DateTime<Utc>,
-) -> Vec<TreeNode> {
-    zeron_doc::tree::tree_rows(&Source { state, now }, root_chat_id, native)
-}
-
-pub(crate) fn watched_docs(
-    state: &AppState,
-    root_chat_id: &str,
-    held: &[String],
-    now: DateTime<Utc>,
-) -> Vec<String> {
-    let selected = state.selected_chat.as_deref() == Some(root_chat_id);
-    zeron_doc::tree::watched_docs(&Source { state, now }, root_chat_id, held, selected)
 }

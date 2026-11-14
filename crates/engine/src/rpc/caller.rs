@@ -106,7 +106,7 @@ impl EngineRpc {
             return Ok(());
         };
         match task.chat_id.as_deref() {
-            Some(lead) if task.mode == zeron_proto::TaskMode::Orchestrated && lead != from => {
+            Some(lead) if self.leads_plan(&task) && lead != from => {
                 Err(RpcError::Failed(
                     "Only this mission's lead thread or the person changes it, reassigns it or deletes it".into(),
                 ))
@@ -116,12 +116,13 @@ impl EngineRpc {
     }
 
     pub(super) fn refuse_step_as_lead(&self, task_id: &str, chat_id: &str) -> Result<(), RpcError> {
-        if self
-            .workspace
-            .task_steps_of(task_id)
-            .iter()
-            .any(|step| step.chat_id.as_deref() == Some(chat_id))
-        {
+        let lead = self.workspace.task(task_id).and_then(|task| task.chat_id);
+        if lead.is_some_and(|lead| {
+            self.workspace
+                .steps_of(&lead)
+                .iter()
+                .any(|step| step.chat_id.as_deref() == Some(chat_id))
+        }) {
             return Err(RpcError::Failed(
                 "A step thread of this mission cannot take the mission over".into(),
             ));

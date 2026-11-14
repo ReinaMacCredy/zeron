@@ -253,7 +253,7 @@ local function line_of(r: any): (string, string)
 		local a = r.item and r.item.ask
 		local words = if a and a.question then a.question.text elseif a and a.approval then a.approval.title else nil
 		return if words and words ~= "" then words else locale.s("shell.live.asking"), tone_of("ask")
-	elseif r.kind == "plan" then
+	elseif r.kind == "plan" or r.kind == "plan_approval" then
 		return locale.s("shell.live.plan", { n = #(r.item.steps or {}) }), tone_of("plan")
 	elseif r.kind == "failed" then
 		local u = usage:get()[c.id]
@@ -398,7 +398,7 @@ local function right_of(r: any, clock: State<number>, expanded: any, close: () -
 				expanded:set(if expanded:peek() == r.id then nil else r.id)
 			end))
 		end
-	elseif r.kind == "plan" then
+	elseif r.kind == "plan" or r.kind == "plan_approval" then
 		table.insert(row, action(`live-view-{r.id}`, locale.s("shell.live.view"), "quiet", function()
 			open_thread(r.id, close)
 		end))

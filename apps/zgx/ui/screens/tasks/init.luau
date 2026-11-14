@@ -85,7 +85,11 @@ function M.meta(t: store.Task, given: store.State?, ghost: boolean?): { Node }
 			if s.reason == "not_sent" then
 				add(ui.text { locale.s("tasks.not_sent"), color = "$warning", shrink = 0 })
 			else
-				add(ui.text { store.linked_word(s.chat), color = store.TONES[s.column], shrink = 0 })
+				add(ui.text { store.state_word(s), color = store.TONES[s.column], shrink = 0 })
+			end
+			local progress = store.progress_word(s)
+			if progress then
+				add(ui.text { progress, id = if ghost then nil else `task-row-progress-{t.id}`, literal = true, tabular = true, shrink = 0 })
 			end
 		elseif s.reason == "not_sent" then
 			add(ui.text { locale.s("tasks.not_sent"), color = "$warning", shrink = 0 })
@@ -295,7 +299,7 @@ function M.line_of(t: store.Task, project: string?): Line
 	end
 	local open = s.column ~= "done"
 	local meta = project ~= nil or t.due ~= nil or (open and (c ~= nil or s.reason == "not_sent" or s.gone or blockers ~= ""))
-	local slim = { column = s.column, reason = s.reason, gone = s.gone, chat = if c then { id = c.id, title = c.title, status = c.status } else nil }
+	local slim = { column = s.column, reason = s.reason, step = s.step, progress = s.progress, gone = s.gone, chat = if c then { id = c.id, title = c.title, status = c.status } else nil }
 	return { kind = "task", task = t, key = t.id, state = slim, said = `{project or ""}|{blockers}`, meta = meta }
 end
 
@@ -589,7 +593,12 @@ local function BoardCard(l: Line, ghost: boolean?): Node
 			text_size = ui.raw(11.5, "gpui"),
 			color = "$text.secondary",
 			ui.text { store.project_name(t.project) or locale.s("tasks.no_project"), literal = true, truncate = true, min_w = 0, shrink = 1 },
-			if s.chat then ui.text { store.linked_word(s.chat), color = store.TONES[s.column], shrink = 0 } else nil,
+			if s.chat then ui.row {
+				gap = ui.raw(6, "gpui"),
+				shrink = 0,
+				ui.text { store.state_word(s), color = store.TONES[s.column], shrink = 0 },
+				if store.progress_word(s) then ui.text { store.progress_word(s) :: string, id = if ghost then nil else `task-kanban-progress-{t.id}`, literal = true, tabular = true, shrink = 0 } else nil,
+			} else nil,
 		},
 	}
 end

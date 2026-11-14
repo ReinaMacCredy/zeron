@@ -367,7 +367,7 @@ impl Composer {
     ) -> Option<AnyElement> {
         // The whole queue surface is the SELECTED chat's: a composer bound to
         // another chat would show — and act on — that chat's queued rows.
-        if !self.reads_selection(cx) {
+        if !self.reads_selection() {
             return None;
         }
         // A drop outside the panel ends GPUI's active drag without invoking our
@@ -1499,7 +1499,7 @@ impl Composer {
     /// An edit/review gate or an old chat host makes it a no-op.
     pub(crate) fn activate_latest_queued(&mut self, cx: &mut Context<Self>) {
         // Same reason the panel is hidden: the rows belong to the selection.
-        if self.editing_queued.is_some() || !self.reads_selection(cx) {
+        if self.editing_queued.is_some() || !self.reads_selection() {
             return;
         }
         let (id, delivery_blocked, host_supports_actions, has_attachments) = {

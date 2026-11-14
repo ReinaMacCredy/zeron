@@ -7,7 +7,6 @@ use gpui::{
     Focusable, IntoElement, KeyDownEvent, PathPromptOptions, Render, SharedString, Subscription,
     Task, Window, div, prelude::*, px,
 };
-use zeron_proto::tools::{ToolSettings, ToolSettingsState};
 use zeron_proto::{ChatConfig, ChatIndicator, TaskPatch, TaskStatus};
 
 use super::images::{self, ImageGallery};
@@ -25,7 +24,6 @@ use crate::theme::Theme;
 use crate::typography::ui_rems;
 
 const PILL_HEIGHT: f32 = 28.0;
-const MISSION_LABEL_WIDTH: f32 = 62.0;
 const CARD_RADIUS: f32 = 24.0;
 const PANEL_IN: MotionSpec = MotionSpec::new(300, motion::EASE_DRAWER);
 const PANEL_OUT: MotionSpec = MotionSpec::new(220, motion::EASE_IN_SHARP);
@@ -50,7 +48,6 @@ pub enum TaskCardEvent {
         patch: Option<TaskPatch>,
         space_id: Option<Option<String>>,
         config: Option<ChatConfig>,
-        orchestrate: Option<Orchestrate>,
     },
     CreateSpace {
         space_id: String,
@@ -65,23 +62,6 @@ pub enum TaskCardEvent {
     },
     OpenChat(String),
     Refused(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Orchestrate {
-    pub approve_plan: bool,
-    pub same_agents: bool,
-    pub plan_doc: bool,
-}
-
-impl Default for Orchestrate {
-    fn default() -> Self {
-        Self {
-            approve_plan: true,
-            same_agents: false,
-            plan_doc: true,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,15 +94,10 @@ struct Open {
     run_in: Option<Option<String>>,
     folder: Option<String>,
     tab: HandOff,
-    plan_first: bool,
     assign: Entity<ComposerInput>,
     assign_pick: Option<(String, String)>,
     assign_hidden: bool,
-    mission: Orchestrate,
-    reads: Entity<ComposerInput>,
-    reads_hidden: bool,
-    context: Vec<String>,
-    _subscriptions: [Subscription; 6],
+    _subscriptions: [Subscription; 5],
 }
 
 struct Fields {
@@ -168,8 +143,6 @@ pub struct TaskCard {
     picking: Option<Task<()>>,
     gallery: Entity<ImageGallery>,
     menu: popover::Popup<()>,
-    tool_settings: Option<ToolSettings>,
-    tools_fetch: Option<Task<()>>,
     _state_changes: Subscription,
 }
 
@@ -203,8 +176,6 @@ impl TaskCard {
             start_focus: cx.focus_handle(),
             folder_prompt: None,
             menu: popover::Popup::default(),
-            tool_settings: None,
-            tools_fetch: None,
             _state_changes: state_changes,
         }
     }
@@ -299,15 +270,7 @@ impl TaskCard {
             .as_ref()
             .map(|task| task.images.clone())
             .unwrap_or_default();
-        let context: Vec<String> = row
-            .as_ref()
-            .map(|task| task.context.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|id| self.state.read(cx).chats.iter().any(|chat| &chat.id == id))
-            .collect();
         self.menu = popover::Popup::default();
-        self.fetch_tool_settings(cx);
         let state = self.state.clone();
         let title_input = cx.new(|cx| {
             let mut input = ComposerInput::new("Task title", cx)
@@ -346,7 +309,6 @@ impl TaskCard {
             })
         };
         let assign_input = thread_input("@ a chat to give this task to", cx);
-        let reads_input = thread_input("@ chats the lead reads first", cx);
         let subscriptions = [
             cx.observe(&title_menus, |_, _, cx| cx.notify()),
             cx.observe(&notes_menus, |_, _, cx| cx.notify()),
@@ -362,22 +324,6 @@ impl TaskCard {
                     ComposerInputEvent::Submitted => {
                         if let Some(first) = card.assign_matches(cx).into_iter().next() {
                             card.pick_thread(first.chat_id, first.title, cx);
-                        }
-                    }
-                    _ => {}
-                }
-                cx.notify();
-            }),
-            cx.subscribe(&reads_input, |card: &mut Self, _, event, cx| {
-                match event {
-                    ComposerInputEvent::Edited => {
-                        if let Some(open) = card.open.as_mut() {
-                            open.reads_hidden = false;
-                        }
-                    }
-                    ComposerInputEvent::Submitted => {
-                        if let Some(first) = card.reads_matches(cx).into_iter().next() {
-                            card.add_context(first.chat_id, cx);
                         }
                     }
                     _ => {}
@@ -402,16 +348,11 @@ impl TaskCard {
             run_in: None,
             folder: None,
             tab: HandOff::NewChat,
-            plan_first: !context.is_empty(),
             title_menus,
             notes_menus,
             assign: assign_input,
             assign_pick: None,
             assign_hidden: false,
-            mission: Orchestrate::default(),
-            reads: reads_input,
-            reads_hidden: false,
-            context,
             _subscriptions: subscriptions,
         });
         self.focus_field(focus, window, cx);
@@ -487,8 +428,6 @@ impl TaskCard {
             .tasks
             .iter()
             .find(|task| task.id == open.task_id && !task.deleted);
-        open.context
-            .retain(|id| state.chats.iter().any(|chat| &chat.id == id));
         let arrived = match row {
             Some(row) if !open.seen => {
                 open.seen = true;
@@ -499,9 +438,6 @@ impl TaskCard {
                 open.images = row.images.clone();
                 open.images.extend(added);
                 open.images.truncate(zeron_doc::TASK_IMAGES_MAX);
-                if open.context.is_empty() {
-                    open.context = row.context.clone();
-                }
                 open.images != row.images
             }
             Some(_) => false,
@@ -613,9 +549,6 @@ impl TaskCard {
         if patch.notes.as_ref() == Some(&open.saved_notes) {
             open.saved_notes = row.as_ref().map(|t| t.notes.clone()).unwrap_or_default();
         }
-        if patch.context.as_ref() == Some(&open.context) {
-            open.context = row.as_ref().map(|t| t.context.clone()).unwrap_or_default();
-        }
         if patch.images.as_ref() == Some(&open.images) {
             open.images = row.map(|t| t.images).unwrap_or_default();
         }
@@ -701,24 +634,18 @@ impl TaskCard {
     }
 
     fn start(&mut self, cx: &mut Context<Self>) {
-        let Some((task_id, orchestrate, context)) = self.open.as_ref().map(|open| {
-            let mission = open.plan_first.then_some(open.mission);
-            (open.task_id.clone(), mission, open.context.clone())
-        }) else {
+        let Some(task_id) = self.open.as_ref().map(|open| open.task_id.clone()) else {
             return;
         };
-        if orchestrate.is_some() && !context.is_empty() && self.reads_off(cx) {
-            return;
-        }
         let state = self.state.read(cx);
-        let row = state.tasks.iter().find(|task| {
+        let startable = state.tasks.iter().any(|task| {
             task.id == task_id
                 && linked_chat(&state.chats, task).is_none()
                 && task.completed_at.is_none()
         });
-        let Some(saved_context) = row.map(|task| task.context.clone()) else {
+        if !startable {
             return;
-        };
+        }
         if self.is_starting(&task_id) || self.runs_elsewhere(cx).is_some() {
             return;
         }
@@ -738,10 +665,7 @@ impl TaskCard {
             card.update(cx, |_, cx| cx.notify()).ok();
         })
         .detach();
-        let mut patch = taken.map(|(_, patch)| patch);
-        if orchestrate.is_some() && context != saved_context {
-            patch.get_or_insert_default().context = Some(context);
-        }
+        let patch = taken.map(|(_, patch)| patch);
         let space_id = self.open.as_ref().and_then(|open| open.run_in.clone());
         let config = self.agent.read(cx).resolved(cx).chat_config();
         cx.emit(TaskCardEvent::Start {
@@ -749,7 +673,6 @@ impl TaskCard {
             patch,
             space_id,
             config,
-            orchestrate,
         });
         cx.notify();
     }
@@ -799,15 +722,6 @@ impl TaskCard {
         match self.open.as_ref() {
             Some(open) if open.assign_pick.is_none() => {
                 self.thread_offer(&open.assign, &open.task_id, &[], cx)
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    fn reads_matches(&self, cx: &Context<Self>) -> Vec<crate::composer::ThreadMatch> {
-        match self.open.as_ref() {
-            Some(open) if open.context.len() < zeron_doc::TASK_CONTEXT_MAX => {
-                self.thread_offer(&open.reads, &open.task_id, &open.context, cx)
             }
             _ => Vec::new(),
         }
@@ -871,78 +785,6 @@ impl TaskCard {
         open.assign_pick = None;
         window.focus(&open.assign.focus_handle(cx), cx);
         cx.notify();
-    }
-
-    fn add_context(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        let Some(open) = self.open.as_mut() else {
-            return;
-        };
-        if open.context.len() >= zeron_doc::TASK_CONTEXT_MAX || open.context.contains(&chat_id) {
-            return;
-        }
-        open.context.push(chat_id);
-        open.reads.update(cx, |input, cx| input.set_text("", cx));
-        self.save_context(cx);
-    }
-
-    fn remove_context(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        if let Some(open) = self.open.as_mut() {
-            open.context.retain(|id| id != chat_id);
-            self.save_context(cx);
-        }
-    }
-
-    fn save_context(&mut self, cx: &mut Context<Self>) {
-        let Some(open) = self.open.as_ref() else {
-            return;
-        };
-        let (task_id, context) = (open.task_id.clone(), open.context.clone());
-        self.update(
-            &task_id,
-            TaskPatch {
-                context: Some(context),
-                ..Default::default()
-            },
-            cx,
-        );
-        cx.notify();
-    }
-
-    fn fetch_tool_settings(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        self.tools_fetch = Some(cx.spawn(async move |card, cx| {
-            let reply = engine
-                .client()
-                .call_as::<ToolSettingsState>(
-                    zeron_rpc::methods::GET_TOOL_SETTINGS,
-                    serde_json::json!({}),
-                )
-                .await;
-            card.update(cx, |card, cx| {
-                if let Ok(state) = reply {
-                    card.tool_settings = Some(state.settings);
-                    cx.notify();
-                }
-            })
-            .ok();
-        }));
-    }
-
-    /// The engine's `reads_threads` test, so the lead gets no Reads block exactly when this is true.
-    fn reads_off(&self, cx: &App) -> bool {
-        let Some(settings) = &self.tool_settings else {
-            return false;
-        };
-        let disabled = self
-            .agent
-            .read(cx)
-            .resolved(cx)
-            .chat_config()
-            .map(|config| config.disabled_tools)
-            .unwrap_or_default();
-        settings.chat_tool_off(&disabled, "read_thread")
     }
 
     fn assign(&mut self, send: bool, cx: &mut Context<Self>) {
@@ -1048,20 +890,6 @@ impl TaskCard {
         cx.notify();
     }
 
-    fn set_plan_first(&mut self, plan_first: bool, cx: &mut Context<Self>) {
-        if let Some(open) = self.open.as_mut() {
-            open.plan_first = plan_first;
-        }
-        cx.notify();
-    }
-
-    fn set_mission(&mut self, mission: Orchestrate, cx: &mut Context<Self>) {
-        if let Some(open) = self.open.as_mut() {
-            open.mission = mission;
-        }
-        cx.notify();
-    }
-
     fn set_tab(&mut self, tab: HandOff, cx: &mut Context<Self>) {
         if let Some(open) = self.open.as_mut() {
             open.tab = tab;
@@ -1090,12 +918,10 @@ impl TaskCard {
             !hidden && !input.read(cx).text().trim().is_empty()
         };
         let assign = open.assign_pick.is_none() && shown(open.assign_hidden, &open.assign);
-        let reads = shown(open.reads_hidden, &open.reads);
-        match open.tab {
-            HandOff::Thread if assign => open.assign_hidden = true,
-            HandOff::NewChat if open.plan_first && reads => open.reads_hidden = true,
-            _ => return false,
+        if open.tab != HandOff::Thread || !assign {
+            return false;
         }
+        open.assign_hidden = true;
         cx.notify();
         true
     }
@@ -1464,7 +1290,6 @@ impl TaskCard {
         let ready = row.is_some() && !starting && elsewhere.is_none();
         let (pane, footer) = match tab {
             HandOff::NewChat => {
-                let blocked = open.plan_first && !open.context.is_empty() && self.reads_off(cx);
                 let start = self
                     .solid_button(
                         "task-card-start",
@@ -1473,26 +1298,18 @@ impl TaskCard {
                             None if starting => "Starting…".into(),
                             None => "Start".into(),
                         },
-                        ready && !blocked,
+                        ready,
                         theme,
                     )
                     .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.start(cx)));
-                let pane = div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(self.render_agent())
-                            .child(self.render_run_line(row, theme, cx)),
-                    )
-                    .child(self.render_plan_first(open.plan_first, theme, cx))
-                    .when(open.plan_first, |el| {
-                        el.child(self.render_plan_options(open.mission, row, theme, cx))
-                    });
+                let pane = div().flex().flex_col().gap(px(8.0)).child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(self.render_agent())
+                        .child(self.render_run_line(row, theme, cx)),
+                );
                 (pane.into_any_element(), vec![start.into_any_element()])
             }
             HandOff::Thread => self.render_thread_tab(theme, cx),
@@ -1682,328 +1499,6 @@ impl TaskCard {
                 .into_any_element(),
             vec![link.into_any_element(), send.into_any_element()],
         )
-    }
-
-    fn render_plan_first(&self, on: bool, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
-        div()
-            .flex()
-            .items_start()
-            .gap(px(10.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_size(ui_rems(12.5))
-                            .text_color(theme.text)
-                            .child(zeron_proto::mission::PLAN_FIRST),
-                    )
-                    .child(
-                        div()
-                            .text_size(ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .child(
-                                "The lead writes steps before it starts. You can also Add plan later.",
-                            ),
-                    ),
-            )
-            .child(
-                widgets::toggle_switch(theme, on, "task-card-plan-first")
-                    .id("task-card-plan-first")
-                    .debug_selector(|| "task-card-plan-first".into())
-                    .flex_none()
-                    .cursor_pointer()
-                    .tab_index(0)
-                    .role(gpui::Role::Switch)
-                    .aria_label(zeron_proto::mission::PLAN_FIRST)
-                    .aria_toggled(if on {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
-                    .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
-                        card.set_plan_first(!on, cx)
-                    })),
-            )
-    }
-
-    fn render_plan_options(
-        &self,
-        choice: Orchestrate,
-        row: Option<&Row>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let weak = cx.entity().downgrade();
-        let step_agents = widgets::segmented(
-            theme,
-            "task-card-step-agents",
-            &[(false, "Lead picks"), (true, "Same as lead")],
-            choice.same_agents,
-            move |same_agents, _, cx| {
-                weak.update(cx, |card, cx| {
-                    card.set_mission(
-                        Orchestrate {
-                            same_agents,
-                            ..choice
-                        },
-                        cx,
-                    )
-                })
-                .ok();
-            },
-        )
-        .debug_selector(|| "task-card-step-agents".into());
-        let weak = cx.entity().downgrade();
-        let plan_mode = widgets::segmented(
-            theme,
-            "task-card-plan-mode",
-            &[
-                (true, zeron_proto::mission::PLAN_DOC),
-                (false, zeron_proto::mission::STEPS_ONLY),
-            ],
-            choice.plan_doc,
-            move |plan_doc, _, cx| {
-                weak.update(cx, |card, cx| {
-                    card.set_mission(Orchestrate { plan_doc, ..choice }, cx)
-                })
-                .ok();
-            },
-        )
-        .debug_selector(|| "task-card-plan-mode".into());
-        let review = if choice.plan_doc {
-            zeron_proto::mission::REVIEW_PLAN
-        } else {
-            "Show me the plan before it runs"
-        };
-        let on = choice.approve_plan;
-        let approve = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(8.0))
-            .text_size(ui_rems(12.5))
-            .text_color(theme.text)
-            .child(review)
-            .child(
-                widgets::toggle_switch(theme, on, "task-card-approve-plan")
-                    .id("task-card-approve-plan")
-                    .debug_selector(|| "task-card-approve-plan".into())
-                    .cursor_pointer()
-                    .tab_index(0)
-                    .role(gpui::Role::Switch)
-                    .aria_label(review)
-                    .aria_toggled(if on {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
-                    .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
-                        card.set_mission(
-                            Orchestrate {
-                                approve_plan: !on,
-                                ..choice
-                            },
-                            cx,
-                        )
-                    })),
-            );
-        let field = |label: &'static str, top: bool, control: AnyElement| {
-            div()
-                .flex()
-                .when(top, |el| el.items_start())
-                .when(!top, |el| el.items_center())
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(MISSION_LABEL_WIDTH))
-                        .when(top, |el| el.pt(px(7.0)))
-                        .text_size(ui_rems(12.5))
-                        .text_color(theme.text_muted)
-                        .child(label),
-                )
-                .child(div().flex_1().min_w_0().child(control))
-        };
-        div()
-            .debug_selector(|| "task-card-plan-options".into())
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(field(
-                "Plan",
-                false,
-                div().flex().child(plan_mode).into_any_element(),
-            ))
-            .child(field("Reads", true, self.render_reads(row, theme, cx)))
-            .child(field(
-                "Steps",
-                false,
-                div().flex().child(step_agents).into_any_element(),
-            ))
-            .child(approve)
-            .into_any_element()
-    }
-
-    fn render_reads(&self, row: Option<&Row>, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let Some(open) = self.open.as_ref() else {
-            return div().into_any_element();
-        };
-        let off = self.reads_off(cx);
-        let home = Self::run_in(Some(open), row);
-        let now = Utc::now();
-        let chips: Vec<AnyElement> = {
-            let state = self.state.read(cx);
-            open.context
-                .iter()
-                .filter_map(|chat_id| {
-                    let chip = context_chip(state, chat_id, home.as_deref(), theme, now)?;
-                    let remove = chat_id.clone();
-                    Some(
-                        chip.pr(px(4.0))
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "task-card-reads-remove-{chat_id}"
-                                    )))
-                                    .debug_selector({
-                                        let id = format!("task-card-reads-remove-{chat_id}");
-                                        move || id.clone()
-                                    })
-                                    .role(gpui::Role::Button)
-                                    .aria_label("Remove")
-                                    .flex_none()
-                                    .size(px(18.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(theme.glass_hover()))
-                                    .child(
-                                        icon(icons::LUCIDE_X)
-                                            .size(px(11.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
-                                        card.remove_context(&remove, cx)
-                                    })),
-                            )
-                            .into_any_element(),
-                    )
-                })
-                .collect()
-        };
-        let room = open.context.len() < zeron_doc::TASK_CONTEXT_MAX;
-        let popover = (!off && room && !open.reads_hidden)
-            .then(|| self.reads_matches(cx))
-            .filter(|_| !open.reads.read(cx).text().trim().is_empty())
-            .map(|matches| {
-                let rows = self.thread_rows(
-                    matches,
-                    "task-card-reads-match",
-                    |card: &mut Self, chat_id, _, cx| card.add_context(chat_id, cx),
-                    theme,
-                    cx,
-                );
-                self.match_popover(
-                    "task-card-reads-matches",
-                    rows,
-                    "Enter adds the first match. Pick up to 5.",
-                    260.0,
-                    |card: &mut Self| {
-                        if let Some(open) = card.open.as_mut() {
-                            open.reads_hidden = true;
-                        }
-                    },
-                    theme,
-                    cx,
-                )
-            });
-        let count = open.context.len();
-        let field = div()
-            .id("task-card-reads")
-            .debug_selector(|| "task-card-reads".into())
-            .relative()
-            .min_h(px(32.0))
-            .px(px(6.0))
-            .py(px(4.0))
-            .rounded(px(10.0))
-            .bg(theme.wash(0.06))
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(5.0))
-            .children(chips)
-            .when(!off && room, |el| {
-                el.child(
-                    div()
-                        .flex_1()
-                        .min_w(px(90.0))
-                        .px(px(2.0))
-                        .text_size(ui_rems(12.5))
-                        .child(open.reads.clone()),
-                )
-            })
-            .on_key_down(cx.listener(|card, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key != "backspace" {
-                    return;
-                }
-                let last = card.open.as_ref().and_then(|open| {
-                    open.reads
-                        .read(cx)
-                        .text()
-                        .is_empty()
-                        .then(|| open.context.last().cloned())
-                        .flatten()
-                });
-                if let Some(last) = last {
-                    cx.stop_propagation();
-                    card.remove_context(&last, cx);
-                }
-            }))
-            .children(popover);
-        let note = if off {
-            let fix = if count > 0 {
-                " Remove them to start, turn read_thread on for this lead, or pick another lead."
-            } else {
-                " Turn it on in the lead's profile or Settings > Tools, or pick another lead."
-            };
-            widgets::warning_strip(
-                theme,
-                format!(
-                    "This lead's tools leave out read_thread, so it cannot read context chats.{fix}"
-                ),
-            )
-            .debug_selector(|| "task-card-reads-off".into())
-            .mt_0()
-            .into_any_element()
-        } else {
-            div()
-                .text_size(ui_rems(11.5))
-                .text_color(theme.text_muted.opacity(0.75))
-                .child(if count == 0 {
-                    "Optional. The lead reads them before it plans. They are not assigned."
-                        .to_string()
-                } else {
-                    format!(
-                        "{count} of {} · read before it plans; nothing is sent to them",
-                        zeron_doc::TASK_CONTEXT_MAX
-                    )
-                })
-                .into_any_element()
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(5.0))
-            .child(field)
-            .child(note)
-            .into_any_element()
     }
 
     fn thread_rows(
@@ -2529,90 +2024,6 @@ impl TaskCard {
     }
 }
 
-pub(super) fn context_chip(
-    state: &AppState,
-    chat_id: &str,
-    home: Option<&str>,
-    theme: &Theme,
-    now: chrono::DateTime<Utc>,
-) -> Option<gpui::Stateful<gpui::Div>> {
-    let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
-    let (mark, tint) = crate::pickers::agent_brand_icon(
-        chat.config.as_ref().map(|config| config.harness),
-        chat.config
-            .as_ref()
-            .and_then(|config| config.model.as_deref()),
-    );
-    let indicator = state.display_status_for(chat, now);
-    let (_, _, tone) = crate::shell::chat_status_tone(indicator, theme);
-    let project = chat
-        .space_id
-        .as_deref()
-        .filter(|space| Some(*space) != home)
-        .and_then(|_| state.space_for_chat(chat))
-        .map(|space| space.display_name().to_string());
-    let mut tip = match indicator {
-        ChatIndicator::Working => "Still working. The lead reads what is there when it starts, \
-                                   then reads it again before it sends the plan."
-            .to_string(),
-        ChatIndicator::AwaitingInput => {
-            "Waiting on you. The lead sees the question but leaves it to you.".to_string()
-        }
-        ChatIndicator::Errored => "Its last turn failed. The lead reads it like any other; \
-                                   the failure is part of the context."
-            .to_string(),
-        _ => "Context only. The lead reads it with read_thread before it plans. Nothing is \
-              sent to it, and the task does not follow it."
-            .to_string(),
-    };
-    if let Some(project) = &project {
-        tip.push_str(&format!(
-            " It is in {project}, another project on this device."
-        ));
-    }
-    let title = crate::transcript::single_line(chat.title.as_deref().unwrap_or("New session"));
-    let selector = format!("task-context-{chat_id}");
-    Some(
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector.clone())
-            .flex_none()
-            .max_w_full()
-            .h(px(24.0))
-            .pl(px(7.0))
-            .pr(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(5.0))
-            .rounded_full()
-            .bg(theme.wash(0.08))
-            .text_size(ui_rems(12.0))
-            .text_color(theme.text)
-            .tooltip(widgets::text_tooltip(tip))
-            .child(
-                icon(mark)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(tint.unwrap_or(theme.text_muted)),
-            )
-            .child(div().flex_none().size(px(7.0)).rounded_full().bg(tone))
-            .child(div().min_w_0().max_w(px(150.0)).truncate().child(title))
-            .children(project.map(|project| {
-                div()
-                    .flex_none()
-                    .max_w(px(80.0))
-                    .truncate()
-                    .px(px(4.0))
-                    .rounded(px(5.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_size(ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child(project)
-            })),
-    )
-}
-
 impl Render for TaskCard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(open) = &self.open {
@@ -2720,69 +2131,14 @@ mod tests {
         .unwrap()
     }
 
-    fn failed_turn() -> Option<zeron_proto::StepTurn> {
-        Some(zeron_proto::StepTurn {
-            ended: zeron_proto::StepTurnEnd::Failed,
-            turn: None,
-        })
-    }
-
-    fn step(
-        id: &str,
-        key: &str,
-        chat: Option<&str>,
-        outcome: Option<&str>,
-    ) -> zeron_proto::TaskStep {
-        serde_json::from_value(serde_json::json!({
-            "id": id, "taskId": "orch", "title": id, "orderKey": key,
-            "chatId": chat, "outcome": outcome,
-        }))
-        .unwrap()
-    }
-
-    fn orchestrated(plan_pending: bool) -> zeron_proto::Task {
-        serde_json::from_value(serde_json::json!({
-            "id": "orch", "title": "Build it", "orderKey": "a", "chatId": "lead",
-            "mode": "orchestrated", "planPending": plan_pending,
-        }))
-        .unwrap()
-    }
-
     fn init(cx: &mut gpui::TestAppContext) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            let mut spine = crate::settings::UiSettings::default();
-            spine.tree_view = crate::settings::TreeView::Spine;
-            crate::settings::init(spine, dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
         dir
-    }
-
-    #[test]
-    fn an_orchestrated_task_rolls_its_steps_into_its_status() {
-        let mut state = AppState::new();
-        state.tasks = vec![orchestrated(false)];
-        state.chats = vec![chat("lead"), chat("child")];
-        state.task_steps = vec![
-            step("s1", "1", None, Some("done")),
-            step("s2", "2", Some("child"), None),
-            step("s3", "3", None, None),
-            step("s4", "4", None, Some("skipped")),
-        ];
-        let now = Utc::now();
-        let plan = super::super::rollup(&state, &state.tasks[0], now);
-        let statuses: Vec<_> = plan.steps.iter().map(|row| row.status).collect();
-        use zeron_proto::StepStatus::*;
-        assert_eq!(statuses, [Done, Working, Planned, Skipped]);
-        assert_eq!(plan.status, TaskStatus::Working);
-        assert_eq!((plan.progress.done, plan.progress.total), (1, 3));
-
-        state.task_steps[1].turn = failed_turn();
-        let plan = super::super::rollup(&state, &state.tasks[0], now);
-        assert_eq!(plan.steps[1].status, Failed);
-        assert_eq!(plan.status, TaskStatus::NeedsYou);
     }
 
     #[gpui::test]
@@ -2849,11 +2205,15 @@ mod tests {
     }
 
     #[gpui::test]
-    fn an_orchestrated_row_opens_the_center_instead_of_the_card(cx: &mut gpui::TestAppContext) {
+    fn a_row_with_a_thread_opens_it_instead_of_the_card(cx: &mut gpui::TestAppContext) {
         let _dir = init(cx);
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| {
-            state.tasks = vec![orchestrated(false), task("plain", false)];
+            let linked = serde_json::from_value(serde_json::json!({
+                "id": "orch", "title": "Build it", "orderKey": "a", "chatId": "lead",
+            }))
+            .unwrap();
+            state.tasks = vec![linked, task("plain", false)];
             state.chats = vec![chat("lead")];
         });
         let (page, cx) = cx.add_window_view(|_, cx| super::super::TasksPage::new(state, cx));
@@ -2861,23 +2221,22 @@ mod tests {
         let sink = opened.clone();
         cx.update(|_, cx| {
             cx.subscribe(&page, move |_, event: &super::super::TasksEvent, _| {
-                if let super::super::TasksEvent::OpenCenter(id) = event {
+                if let super::super::TasksEvent::OpenChat(id) = event {
                     sink.borrow_mut().push(id.clone());
                 }
             })
             .detach();
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("task-ring-orch").is_some());
         let at = cx.debug_bounds("task-row-orch").unwrap().center();
         cx.simulate_click(at, gpui::Modifiers::none());
         cx.run_until_parked();
-        assert_eq!(*opened.borrow(), ["orch"]);
+        assert_eq!(*opened.borrow(), ["lead"]);
         assert!(!page.read_with(cx, |page, cx| page.card().read(cx).is_open()));
         let at = cx.debug_bounds("task-row-plain").unwrap().center();
         cx.simulate_click(at, gpui::Modifiers::none());
         cx.run_until_parked();
-        assert_eq!(*opened.borrow(), ["orch"]);
+        assert_eq!(*opened.borrow(), ["lead"]);
         let open = page.read_with(cx, |page, cx| {
             page.card().read(cx).task_id().map(str::to_owned)
         });
@@ -2890,7 +2249,7 @@ mod tests {
         let edit = cx.debug_bounds("task-row-menu-edit").unwrap().center();
         cx.simulate_click(edit, gpui::Modifiers::none());
         cx.run_until_parked();
-        assert_eq!(*opened.borrow(), ["orch"]);
+        assert_eq!(*opened.borrow(), ["lead"]);
         let open = page.read_with(cx, |page, cx| {
             page.card().read(cx).task_id().map(str::to_owned)
         });
@@ -2921,278 +2280,6 @@ mod tests {
             Some(title),
             "Edit on the task the card already shows puts the caret back in its title"
         );
-    }
-
-    #[gpui::test]
-    fn the_center_shows_the_selected_steps_thread_or_else_the_lead(cx: &mut gpui::TestAppContext) {
-        let _dir = init(cx);
-        let state = cx.new(|_| AppState::new());
-        state.update(cx, |state, _| {
-            state.tasks = vec![orchestrated(true)];
-            state.chats = vec![chat("lead"), chat("child")];
-            state.task_steps = vec![
-                step("s1", "1", Some("child"), None),
-                step("s2", "2", None, None),
-            ];
-            state.task_steps[0].turn = failed_turn();
-        });
-        let (center, cx) =
-            cx.add_window_view(|_, cx| super::super::TaskCenter::new(state, "orch".into(), cx));
-        cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
-        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let sink = events.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(
-                &center,
-                move |_, event: &super::super::TaskCenterEvent, _| {
-                    use super::super::TaskCenterEvent::*;
-                    match event {
-                        ApprovePlan(id) => sink.borrow_mut().push(format!("approve {id}")),
-                        RetryStep(id) => sink.borrow_mut().push(format!("retry {id}")),
-                        EditPlan { edit, approve, .. } => sink.borrow_mut().push(format!(
-                            "edit {:?} remove {:?} approve {approve}",
-                            edit.steps
-                                .iter()
-                                .map(|step| (step.step_id.as_deref(), step.title.as_str()))
-                                .collect::<Vec<_>>(),
-                            edit.remove_step_ids,
-                        )),
-                        Update { .. } | UpdateStep { .. } => sink.borrow_mut().push("write".into()),
-                        _ => {}
-                    }
-                },
-            )
-            .detach();
-        });
-        cx.run_until_parked();
-        let target = |cx: &mut gpui::VisualTestContext| {
-            center.read_with(cx, |center, cx| center.live_target(cx))
-        };
-        assert_eq!(target(cx).as_deref(), Some("lead"));
-        for (selector, expected) in [
-            ("task-center-step-s1", "child"),
-            ("task-center-step-s2", "lead"),
-            ("task-center-lead", "lead"),
-        ] {
-            let at = cx.debug_bounds(selector).unwrap().center();
-            cx.simulate_click(at, gpui::Modifiers::none());
-            cx.run_until_parked();
-            assert_eq!(target(cx).as_deref(), Some(expected), "{selector}");
-        }
-        assert!(cx.debug_bounds("task-center-add-step").is_some());
-        assert!(cx.debug_bounds("task-center-retry-s2").is_none());
-        let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
-            let at = cx.debug_bounds(selector).unwrap().center();
-            cx.simulate_click(at, gpui::Modifiers::none());
-            cx.run_until_parked();
-        };
-        let rename_s2 = |cx: &mut gpui::VisualTestContext| {
-            click(cx, "task-center-edit-s2");
-            cx.simulate_input(" now");
-            click(cx, "task-center-edit-save");
-        };
-        assert!(cx.debug_bounds("task-center-edit-s2").is_none());
-        click(cx, "task-center-spec-s2");
-        rename_s2(cx);
-        assert!(cx.debug_bounds("task-center-edit-bar").is_some());
-        assert!(
-            events.borrow().is_empty(),
-            "an unsent edit never leaves the center"
-        );
-        click(cx, "task-center-undo");
-        assert!(cx.debug_bounds("task-center-edit-bar").is_none());
-        for selector in ["task-center-retry-s1", "task-center-approve"] {
-            click(cx, selector);
-        }
-        assert_eq!(*events.borrow(), ["retry s1", "approve orch"]);
-
-        rename_s2(cx);
-        click(cx, "task-center-send");
-        assert!(cx.debug_bounds("task-center-edit-bar").is_none());
-        click(cx, "task-center-remove-s2");
-        assert!(cx.debug_bounds("task-center-restore-s2").is_some());
-        click(cx, "task-center-approve");
-        assert_eq!(
-            events.borrow()[2..],
-            [
-                r#"edit [(Some("s2"), "s2 now")] remove [] approve false"#,
-                r#"edit [] remove ["s2"] approve true"#,
-            ]
-        );
-    }
-
-    #[gpui::test]
-    fn a_step_moved_from_its_menu_sends_the_new_order(cx: &mut gpui::TestAppContext) {
-        let _dir = init(cx);
-        let state = cx.new(|_| AppState::new());
-        state.update(cx, |state, _| {
-            state.tasks = vec![orchestrated(false)];
-            state.chats = vec![chat("lead"), chat("child")];
-            state.task_steps = vec![
-                step("s1", "1", Some("child"), None),
-                step("s2", "2", None, None),
-                step("s3", "3", None, None),
-            ];
-        });
-        let (center, cx) =
-            cx.add_window_view(|_, cx| super::super::TaskCenter::new(state, "orch".into(), cx));
-        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let sink = sent.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(
-                &center,
-                move |_, event: &super::super::TaskCenterEvent, _| {
-                    if let super::super::TaskCenterEvent::EditPlan { edit, .. } = event {
-                        sink.borrow_mut().push(edit.order.clone());
-                    }
-                },
-            )
-            .detach();
-        });
-        cx.run_until_parked();
-        let menu = |cx: &mut gpui::VisualTestContext, step: &str, item: &'static str| {
-            let at = cx
-                .debug_bounds(Box::leak(
-                    format!("task-center-step-{step}").into_boxed_str(),
-                ))
-                .unwrap()
-                .center();
-            cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
-            cx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::none());
-            cx.run_until_parked();
-            let at = cx.debug_bounds(item).unwrap().center();
-            cx.simulate_click(at, gpui::Modifiers::none());
-            cx.run_until_parked();
-            let away = cx.debug_bounds("task-center-header").unwrap().center();
-            cx.simulate_click(away, gpui::Modifiers::none());
-            std::thread::sleep(crate::motion::MENU_OUT.total());
-            cx.executor()
-                .advance_clock(std::time::Duration::from_secs(1));
-            cx.run_until_parked();
-        };
-        menu(cx, "s3", "task-center-menu-up");
-        menu(cx, "s3", "task-center-menu-up");
-        assert!(cx.debug_bounds("task-center-edit-bar").is_some());
-        let at = cx.debug_bounds("task-center-send").unwrap().center();
-        cx.simulate_click(at, gpui::Modifiers::none());
-        cx.run_until_parked();
-        assert_eq!(
-            *sent.borrow(),
-            [vec!["s1".to_string(), "s3".into(), "s2".into()]],
-            "a started step keeps its place above the moved one"
-        );
-    }
-
-    struct Uploads;
-
-    #[async_trait::async_trait]
-    impl zeron_rpc::RpcService for Uploads {
-        async fn handle(
-            &self,
-            method: &str,
-            params: serde_json::Value,
-        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
-            let reply = match method {
-                zeron_rpc::methods::UPLOAD_COMMIT => serde_json::json!({
-                    "path": format!("/uploads/{}", params["fileName"].as_str().unwrap_or_default()),
-                }),
-                _ => serde_json::json!({}),
-            };
-            zeron_rpc::RpcReply::value(&reply)
-        }
-    }
-
-    #[gpui::test]
-    fn a_pasted_step_image_goes_with_the_plan_edit_only_once_saved(cx: &mut gpui::TestAppContext) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let _guard = runtime.enter();
-        let _dir = init(cx);
-        cx.executor().allow_parking();
-        let state = cx.new(|_| AppState::new());
-        state.update(cx, |state, _| {
-            state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                zeron_rpc::memory_client(std::sync::Arc::new(Uploads)),
-            ));
-            state.tasks = vec![orchestrated(false)];
-            state.chats = vec![chat("lead")];
-            state.task_steps = vec![step("s1", "1", None, None)];
-        });
-        let (center, cx) =
-            cx.add_window_view(|_, cx| super::super::TaskCenter::new(state, "orch".into(), cx));
-        cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
-        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let sink = sent.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(
-                &center,
-                move |_, event: &super::super::TaskCenterEvent, _| {
-                    if let super::super::TaskCenterEvent::EditPlan { edit, .. } = event {
-                        sink.borrow_mut().push(edit.steps.clone());
-                    }
-                },
-            )
-            .detach();
-        });
-        let mut png = std::io::Cursor::new(Vec::new());
-        image::RgbaImage::new(2, 2)
-            .write_to(&mut png, image::ImageFormat::Png)
-            .unwrap();
-        let shot = gpui::Image::from_bytes(gpui::ImageFormat::Png, png.into_inner());
-        let settle = |cx: &mut gpui::VisualTestContext,
-                      done: &dyn Fn(&mut gpui::VisualTestContext) -> bool| {
-            for _ in 0..200 {
-                cx.run_until_parked();
-                if done(cx) {
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            panic!("condition never settled");
-        };
-        let edit_and_paste = |cx: &mut gpui::VisualTestContext| {
-            let at = cx.debug_bounds("task-center-step-s1").unwrap().center();
-            cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
-            cx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::none());
-            cx.run_until_parked();
-            let at = cx.debug_bounds("task-center-menu-edit").unwrap().center();
-            cx.simulate_click(at, gpui::Modifiers::none());
-            std::thread::sleep(crate::motion::MENU_OUT.total());
-            cx.executor()
-                .advance_clock(std::time::Duration::from_secs(1));
-            cx.run_until_parked();
-            cx.write_to_clipboard(gpui::ClipboardItem::new_image(&shot));
-            cx.dispatch_action(crate::composer::Paste);
-            settle(cx, &|cx| {
-                cx.debug_bounds("task-center-edit-image-0").is_some()
-            });
-        };
-
-        edit_and_paste(cx);
-        let at = cx.debug_bounds("task-center-edit-cancel").unwrap().center();
-        cx.simulate_click(at, gpui::Modifiers::none());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("task-center-editor").is_none());
-        assert!(
-            cx.debug_bounds("task-center-edit-bar").is_none(),
-            "Cancel drops the new image"
-        );
-
-        edit_and_paste(cx);
-        let at = cx.debug_bounds("task-center-edit-save").unwrap().center();
-        cx.simulate_click(at, gpui::Modifiers::none());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("task-center-editor").is_none());
-        assert!(
-            cx.debug_bounds("task-center-spec-s1-image-0").is_some(),
-            "the saved image shows under the spec"
-        );
-        let at = cx.debug_bounds("task-center-send").unwrap().center();
-        cx.simulate_click(at, gpui::Modifiers::none());
-        cx.run_until_parked();
-        let sent = sent.borrow();
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0][0].step_id.as_deref(), Some("s1"));
-        assert_eq!(sent[0][0].images, ["/uploads/image.png"]);
     }
 
     #[gpui::test]
@@ -3340,62 +2427,6 @@ mod tests {
             let notes = page.card.read(cx).open.as_ref().unwrap().notes.clone();
             assert!(notes.focus_handle(cx).is_focused(window));
         });
-    }
-
-    #[gpui::test]
-    fn orchestrate_starts_the_task_with_the_chosen_options(cx: &mut gpui::TestAppContext) {
-        let _dir = init(cx);
-        let state = cx.new(|_| AppState::new());
-        state.update(cx, |state, _| state.tasks = vec![task("plain", false)]);
-        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state, cx));
-        let starts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let sink = starts.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(&card, move |_, event: &TaskCardEvent, _| {
-                if let TaskCardEvent::Start { orchestrate, .. } = event {
-                    sink.borrow_mut().push(*orchestrate);
-                }
-            })
-            .detach();
-        });
-        card.update(cx, |card, cx| {
-            card.open("plain".into(), None, CardFocus::Title, None, cx)
-        });
-        cx.run_until_parked();
-        let right_half = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
-            let bounds = cx.debug_bounds(selector).unwrap();
-            gpui::point(
-                bounds.origin.x + bounds.size.width * 0.75,
-                bounds.center().y,
-            )
-        };
-        assert!(cx.debug_bounds("task-card-start").is_some());
-        assert!(cx.debug_bounds("task-card-assign").is_none());
-        assert!(cx.debug_bounds("task-card-reads").is_none());
-        let at = cx.debug_bounds("task-card-plan-first").unwrap().center();
-        cx.simulate_click(at, gpui::Modifiers::none());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("task-card-reads").is_some());
-        let at = cx.debug_bounds("task-card-approve-plan").unwrap().center();
-        cx.simulate_click(at, gpui::Modifiers::none());
-        cx.run_until_parked();
-        let at = right_half(cx, "task-card-step-agents");
-        cx.simulate_click(at, gpui::Modifiers::none());
-        cx.run_until_parked();
-        let at = right_half(cx, "task-card-plan-mode");
-        cx.simulate_click(at, gpui::Modifiers::none());
-        cx.run_until_parked();
-        let at = cx.debug_bounds("task-card-start").unwrap().center();
-        cx.simulate_click(at, gpui::Modifiers::none());
-        cx.run_until_parked();
-        assert_eq!(
-            *starts.borrow(),
-            [Some(Orchestrate {
-                approve_plan: false,
-                same_agents: true,
-                plan_doc: false,
-            })]
-        );
     }
 
     #[gpui::test]
@@ -3564,86 +2595,5 @@ mod tests {
             click(cx, button);
             assert_eq!(events.borrow().last(), Some(&("fix".to_string(), send)));
         }
-    }
-
-    #[gpui::test]
-    fn the_reads_field_saves_its_chats_and_holds_the_start_without_read_thread(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let _dir = init(cx);
-        let state = cx.new(|_| AppState::new());
-        state.update(cx, |state, _| {
-            state.local_device_id = Some("mac".into());
-            state.tasks = vec![task("plain", false)];
-            state.chats = vec![chat("review"), chat("redirect")];
-        });
-        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state, cx));
-        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let sink = events.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(&card, move |_, event: &TaskCardEvent, _| match event {
-                TaskCardEvent::Update { patch, .. } => {
-                    if let Some(context) = &patch.context {
-                        sink.borrow_mut().push(format!("save {context:?}"));
-                    }
-                }
-                TaskCardEvent::Start { .. } => sink.borrow_mut().push("start".into()),
-                _ => {}
-            })
-            .detach();
-        });
-        card.update(cx, |card, cx| {
-            card.open("plain".into(), None, CardFocus::Title, None, cx)
-        });
-        cx.run_until_parked();
-        let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
-            let at = cx.debug_bounds(selector).unwrap().center();
-            cx.simulate_click(at, gpui::Modifiers::none());
-            cx.run_until_parked();
-        };
-        click(cx, "task-card-plan-first");
-        for query in ["@rev", "@red"] {
-            card.update(cx, |card, cx| {
-                let input = card.open.as_ref().unwrap().reads.clone();
-                input.update(cx, |input, cx| input.set_text(query, cx));
-            });
-            cx.run_until_parked();
-            click(cx, "task-card-reads-match-0");
-        }
-        assert!(cx.debug_bounds("task-context-review").is_some());
-        assert!(cx.debug_bounds("task-context-redirect").is_some());
-        card.update_in(cx, |card, window, cx| {
-            let reads = card.open.as_ref().unwrap().reads.focus_handle(cx);
-            window.focus(&reads, cx);
-        });
-        cx.simulate_keystrokes("backspace");
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("task-context-redirect").is_none());
-        assert_eq!(
-            *events.borrow(),
-            [
-                r#"save ["review"]"#,
-                r#"save ["review", "redirect"]"#,
-                r#"save ["review"]"#
-            ]
-        );
-
-        card.update(cx, |card, cx| {
-            let mut settings = ToolSettings::default();
-            settings.set_tool("read_thread", false);
-            card.tool_settings = Some(settings);
-            cx.notify();
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("task-card-reads-off").is_some());
-        click(cx, "task-card-start");
-        assert_eq!(
-            events.borrow().len(),
-            3,
-            "a lead that cannot read them does not start"
-        );
-        click(cx, "task-card-reads-remove-review");
-        click(cx, "task-card-start");
-        assert_eq!(events.borrow()[3..], ["save []", "start"]);
     }
 }

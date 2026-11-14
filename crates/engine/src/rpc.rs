@@ -62,7 +62,7 @@
 
 mod agent_gate;
 mod caller;
-mod supervisor;
+mod plan;
 mod tasks;
 mod device_stats;
 mod remote_plugins;
@@ -201,12 +201,6 @@ struct CreateThreadParams {
     space_id: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
-    #[serde(default)]
-    task_step_id: Option<String>,
-    #[serde(default)]
-    chosen: Vec<crate::routing::Chosen>,
-    #[serde(default)]
-    quota_choice: Option<crate::routing::quota::QuotaChoice>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1313,7 +1307,7 @@ enum MutateParams {
     },
     #[serde(rename_all = "camelCase")]
     PlanSteps {
-        task_id: String,
+        chat_id: String,
         steps: Vec<PlannedStep>,
         #[serde(default)]
         overview: Option<String>,
@@ -1330,52 +1324,23 @@ enum MutateParams {
         from_chat_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
-    ApprovePlan { task_id: String },
+    ApprovePlan { chat_id: String },
     #[serde(rename_all = "camelCase")]
-    TakeBackPlanApproval { task_id: String },
+    RetryStep { step_id: String },
     #[serde(rename_all = "camelCase")]
-    ResumeSupervisorStep {
-        step_id: String,
-        #[serde(default)]
-        from_chat_id: Option<String>,
-    },
-    #[serde(rename_all = "camelCase")]
-    RetryTaskStep { step_id: String },
-    #[serde(rename_all = "camelCase")]
-    EditTaskPlan {
-        task_id: String,
+    EditPlan {
+        chat_id: String,
         #[serde(default)]
         overview: Option<String>,
         #[serde(default)]
         overview_images: Option<Vec<String>>,
         #[serde(default)]
-        steps: Vec<tasks::PlanEdit>,
+        steps: Vec<plan::PlanEdit>,
         #[serde(default)]
         remove_step_ids: Vec<String>,
         #[serde(default)]
         order: Vec<String>,
     },
-    #[serde(rename_all = "camelCase")]
-    SetMissionSupervised { task_id: String, supervised: bool },
-    #[serde(rename_all = "camelCase")]
-    SetTreeWatched { root_chat_id: String, watched: bool },
-    #[serde(rename_all = "camelCase")]
-    SetWatchEverything { on: bool },
-    #[serde(rename_all = "camelCase")]
-    EscalateTask {
-        task_id: String,
-        #[serde(default)]
-        from_chat_id: Option<String>,
-        title: String,
-        why: zeron_proto::supervisor::ItemWhy,
-        #[serde(default)]
-        detail: String,
-        options: Vec<String>,
-    },
-    #[serde(rename_all = "camelCase")]
-    ResolveSupervisorItem { item_id: String, choice: String },
-    #[serde(rename_all = "camelCase")]
-    ResolveSupervisorItems { answers: Vec<ItemChoice> },
     /// The person puts a chat to sleep until `until` (epoch ms), or wakes it
     /// (`until` absent). Synced; its host wakes it early when it asks.
     #[serde(rename_all = "camelCase")]
@@ -1384,13 +1349,6 @@ enum MutateParams {
         #[serde(default)]
         until: Option<i64>,
     },
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct ItemChoice {
-    item_id: String,
-    choice: String,
 }
 
 fn approve_plan_default() -> bool {
@@ -2293,55 +2251,6 @@ impl EngineRpc {
         ))
     }
 
-    fn route_step(
-        &self,
-        p: &mut CreateThreadParams,
-    ) -> Result<Option<zeron_proto::ChildRoute>, RpcError> {
-        let Some(step) = p
-            .task_step_id
-            .as_deref()
-            .and_then(|id| self.workspace.task_step(id))
-        else {
-            return Ok(None);
-        };
-        let role = step.role.as_deref().and_then(crate::routing::Role::parse);
-        let same_agents = self
-            .workspace
-            .task(&step.task_id)
-            .is_some_and(|task| task.same_agents);
-        if role.is_none() || same_agents {
-            return Ok(None);
-        }
-        let gated = self.resolve_route(
-            &p.from_chat_id,
-            &crate::routing::Request {
-                role,
-                chosen: &p.chosen,
-                harness: p.harness,
-                model: p.model.as_deref(),
-                reasoning: p.reasoning,
-                profile: p.profile.profile_id.is_some(),
-            },
-            true,
-            p.quota_choice,
-        )?;
-        let resolved = match gated {
-            crate::routing::quota::Gated::Run(resolved) => resolved,
-            crate::routing::quota::Gated::UseNative { .. } => {
-                return Err(RpcError::Failed(
-                    "a step runs on a thread, not a native sub-agent".into(),
-                ));
-            }
-            crate::routing::quota::Gated::Exhausted(message) => {
-                return Err(RpcError::Failed(message));
-            }
-        };
-        p.harness = resolved.harness;
-        p.model = resolved.model;
-        p.reasoning = resolved.reasoning;
-        Ok(resolved.route)
-    }
-
     /// `Err(reply)` is the delegate_task answer when no child starts: the agent runs it natively.
     fn route_delegation(
         &self,
@@ -2360,7 +2269,7 @@ impl EngineRpc {
                 reasoning: p.reasoning,
                 profile: p.profile.profile_id.is_some(),
             },
-            false,
+            p.step_id.is_some(),
             p.quota_choice,
         )?;
         let resolved = match gated {
@@ -2383,6 +2292,30 @@ impl EngineRpc {
         p.reasoning = resolved.reasoning;
         p.route = resolved.route;
         Ok(Ok(p))
+    }
+
+    fn step_delegation(
+        &self,
+        mut p: crate::doc_host::DelegateTaskParams,
+    ) -> Result<crate::doc_host::DelegateTaskParams, RpcError> {
+        let step = p
+            .step_id
+            .as_deref()
+            .and_then(|step_id| self.workspace.task_step(step_id));
+        let same_agents = step
+            .as_ref()
+            .and_then(|step| self.workspace.chat(&step.owner_chat_id).ok().flatten())
+            .and_then(|lead| lead.plan)
+            .is_some_and(|plan| plan.same_agents);
+        p.role = match same_agents {
+            true => None,
+            false => p.role.or_else(|| step.and_then(|step| step.role)),
+        };
+        let mut p = self.route_delegation(p)?.map_err(|_| {
+            RpcError::Failed("a step runs on a thread, not a native sub-agent".into())
+        })?;
+        p.role = None;
+        Ok(p)
     }
 
     async fn start_review(&self, p: StartReviewParams) -> Result<serde_json::Value, RpcError> {
@@ -2506,6 +2439,7 @@ impl EngineRpc {
                     chosen: Vec::new(),
                     route: None,
                     quota_choice: None,
+                    ..Default::default()
                 },
                 self.registry.delegation_settings(),
             )
@@ -3673,12 +3607,6 @@ impl EngineRpc {
                 patch,
                 from_chat_id,
             } => {
-                let refusal = if self.registry.supervisor_settings().goal_and_spend {
-                    supervisor::GOAL_ACTION
-                } else {
-                    supervisor::GOAL_OR_SPEND
-                };
-                supervisor::refuse_supervisor(from_chat_id.as_deref(), refusal)?;
                 self.refuse_stranger(&task_id, from_chat_id.as_deref())?;
                 self.update_task(&task_id, &patch)
             }
@@ -3686,7 +3614,6 @@ impl EngineRpc {
                 task_id,
                 from_chat_id,
             } => {
-                supervisor::refuse_supervisor(from_chat_id.as_deref(), supervisor::GOAL_OR_SPEND)?;
                 self.refuse_stranger(&task_id, from_chat_id.as_deref())?;
                 self.workspace
                     .delete_task(&task_id)
@@ -3725,7 +3652,6 @@ impl EngineRpc {
                 attach_plan,
                 claim,
             } => {
-                supervisor::refuse_supervisor(from_chat_id.as_deref(), supervisor::GOAL_OR_SPEND)?;
                 self.refuse_stranger(&task_id, from_chat_id.as_deref())?;
                 self.refuse_step_as_lead(&task_id, &chat_id)?;
                 let lead = orchestrate.then_some(tasks::Lead {
@@ -3746,7 +3672,7 @@ impl EngineRpc {
                 self.add_tasks_to_thread(&task_ids, &chat_id)
             }
             MutateParams::PlanSteps {
-                task_id,
+                chat_id,
                 steps,
                 overview,
                 resources,
@@ -3757,13 +3683,12 @@ impl EngineRpc {
                     .map(|step| (step.title, step.notes, step.thread_id, step.role))
                     .collect();
                 self.plan_steps(
-                    &task_id,
+                    &chat_id,
                     steps,
                     overview,
                     resources,
                     from_chat_id.as_deref(),
                 )
-                .await
                 .map(drop)
             }
             MutateParams::UpdateTaskStep {
@@ -3771,70 +3696,26 @@ impl EngineRpc {
                 patch,
                 from_chat_id,
             } => self.update_task_step(&step_id, &patch, from_chat_id.as_deref()),
-            MutateParams::ApprovePlan { task_id } => self.approve_plan(&task_id).await.map(drop),
-            MutateParams::TakeBackPlanApproval { task_id } => {
-                self.take_back_plan_approval(&task_id).await
-            }
-            MutateParams::ResumeSupervisorStep {
-                step_id,
-                from_chat_id,
-            } => {
-                self.resume_step_for_person(&step_id, from_chat_id.as_deref())
-                    .await
-            }
-            MutateParams::RetryTaskStep { step_id } => self.retry_task_step(&step_id).await,
-            MutateParams::EditTaskPlan {
-                task_id,
+            MutateParams::ApprovePlan { chat_id } => self.approve_plan(&chat_id).await.map(drop),
+            MutateParams::RetryStep { step_id } => self.retry_step(&step_id).await,
+            MutateParams::EditPlan {
+                chat_id,
                 overview,
                 overview_images,
                 steps,
                 remove_step_ids,
                 order,
             } => self
-                .edit_task_plan(
-                    &task_id,
+                .edit_plan(
+                    &chat_id,
                     overview,
                     overview_images,
                     steps,
                     &remove_step_ids,
                     &order,
-                    None,
                 )
                 .await
                 .map(drop),
-            MutateParams::SetMissionSupervised {
-                task_id,
-                supervised,
-            } => self.set_mission_supervised(&task_id, supervised).await,
-            MutateParams::SetTreeWatched {
-                root_chat_id,
-                watched,
-            } => self.set_tree_watched(&root_chat_id, watched),
-            MutateParams::SetWatchEverything { on } => self.set_watch_everything(on),
-            MutateParams::EscalateTask {
-                task_id,
-                from_chat_id,
-                title,
-                why,
-                detail,
-                options,
-            } => self
-                .escalate_task(
-                    &task_id,
-                    from_chat_id.as_deref(),
-                    title,
-                    why,
-                    detail,
-                    options,
-                )
-                .map(drop),
-            MutateParams::ResolveSupervisorItem { item_id, choice } => {
-                self.resolve_supervisor_items(vec![ItemChoice { item_id, choice }])
-                    .await
-            }
-            MutateParams::ResolveSupervisorItems { answers } => {
-                self.resolve_supervisor_items(answers).await
-            }
         }
     }
 }
@@ -5132,7 +5013,6 @@ impl RpcService for EngineRpc {
             }
             methods::START_REVIEW => {
                 let p: StartReviewParams = parse_params(params)?;
-                self.supervisor_gate(Some(&p.owner_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
                 RpcReply::value(&Box::pin(self.start_review(p)).await?)
             }
             methods::SET_DELEGATION_SETTINGS => {
@@ -5189,7 +5069,6 @@ impl RpcService for EngineRpc {
                 let include = include_registry(&params);
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 update_harness_enabled(&self.registry, p.harness, p.enabled).await?;
-                self.doc_host.supervisor_stale();
                 if let Some(coordinator) = &self.harness_updates {
                     coordinator.refresh_enabled();
                 }
@@ -5444,12 +5323,10 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&chat)
             }
             methods::CREATE_THREAD => {
-                let mut p: CreateThreadParams = parse_params(params)?;
-                self.supervisor_gate(Some(&p.from_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
-                let route = self.route_step(&mut p)?;
+                let p: CreateThreadParams = parse_params(params)?;
                 let chat_id = self
                     .doc_host
-                    .create_step_thread(
+                    .create_thread(
                         &p.from_chat_id,
                         &p.prompt,
                         p.title.as_deref(),
@@ -5459,9 +5336,7 @@ impl RpcService for EngineRpc {
                         &p.profile,
                         p.space_id.as_deref(),
                         p.cwd.as_deref(),
-                        p.task_step_id
-                            .as_deref()
-                            .map(|id| (id, self.registry.delegation_settings(), route)),
+                        self.registry.delegation_settings(),
                     )
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
@@ -5469,26 +5344,11 @@ impl RpcService for EngineRpc {
             }
             methods::SEND_THREAD_MESSAGE => {
                 let p: SendThreadMessageParams = parse_params(params)?;
-                self.refuse_held_thread(&p.chat_id)?;
-                let basis = self
-                    .supervisor_gate(Some(&p.from_chat_id), |s| s.message_threads, supervisor::MESSAGE_OFF)?
-                    .then(|| {
-                        self.doc_host.intervention_basis(
-                            zeron_proto::supervisor::InterventionKind::Send,
-                            &p.from_chat_id,
-                            Some(&p.chat_id),
-                            None,
-                        )
-                    });
                 let id = self
                     .doc_host
                     .queue_thread_message(&p.chat_id, Some(&p.from_chat_id), &p.text)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                if let Some(basis) = basis {
-                    self.doc_host
-                        .record_intervention(basis, Some(id.clone()), None, &p.text);
-                }
                 RpcReply::value(&serde_json::json!({ "id": id }))
             }
             methods::SET_THREAD_WATCHES => {
@@ -5511,9 +5371,10 @@ impl RpcService for EngineRpc {
                         crate::review::REQUEST_PREFIX
                     )));
                 }
-                self.supervisor_gate(Some(&p.owner_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
                 let p = if self.doc_host.delegated_before(&p) {
                     p
+                } else if p.step_id.is_some() {
+                    self.step_delegation(p)?
                 } else {
                     match self.route_delegation(p)? {
                         Ok(p) => p,
@@ -5687,9 +5548,6 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
-                if p.from_chat_id.is_some() && zeron_proto::supervisor::is_supervisor_chat(&p.chat_id) {
-                    return Err(RpcError::Failed(supervisor::PERSON_ONLY.into()));
-                }
                 // Before the write: a command stays in the chat's doc, which syncs.
                 if let SessionCommandPayload::RespondInput { request_id, .. } = &p.command
                     && self.doc_host.input_is_secret(&p.chat_id, request_id)
@@ -5698,41 +5556,6 @@ impl RpcService for EngineRpc {
                         "a secret is entered in its own card on the Mac".into(),
                     ));
                 }
-                let respond = match &p.command {
-                    SessionCommandPayload::Interrupt { .. } => {
-                        supervisor::refuse_supervisor(p.from_chat_id.as_deref(), supervisor::NO_INTERRUPT)?;
-                        None
-                    }
-                    SessionCommandPayload::RespondInput {
-                        request_id,
-                        answers,
-                    } => match p.from_chat_id.as_deref() {
-                        Some(from)
-                            if self.supervisor_gate(Some(from), |s| s.message_threads, supervisor::MESSAGE_OFF)? =>
-                        {
-                            self.supervisor_may_answer(from, &p.chat_id)?;
-                            let text: Vec<String> = answers
-                                .iter()
-                                .map(|answer| format!("{}: {}", answer.question_id, answer.labels.join(", ")))
-                                .collect();
-                            let basis = self.doc_host.intervention_basis(
-                                zeron_proto::supervisor::InterventionKind::Respond,
-                                from,
-                                Some(&p.chat_id),
-                                None,
-                            );
-                            Some((basis, request_id.clone(), text.join("; ")))
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                let prompt = match &p.command {
-                    _ if !zeron_proto::supervisor::is_supervisor_chat(&p.chat_id) => None,
-                    SessionCommandPayload::Run { request, .. } => Some(request.prompt.clone()),
-                    SessionCommandPayload::Steer { prompt, .. } => Some(prompt.clone()),
-                    _ => None,
-                };
                 let for_run = match (&p.scope, &p.command) {
                     (RespondScope::Once, _) => None,
                     (RespondScope::Run, SessionCommandPayload::RespondInput { request_id, answers }) => {
@@ -5752,17 +5575,6 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 if let Some((request_id, actions)) = for_run {
                     self.sessions.allow_for_run(&p.chat_id, actions, &request_id);
-                }
-                if let Some(prompt) = prompt {
-                    self.watch_mentioned_trees(&p.chat_id, &prompt);
-                }
-                if let Some((basis, request_id, text)) = respond {
-                    self.doc_host.record_intervention(
-                        basis,
-                        Some(command_id.clone()),
-                        Some(request_id),
-                        &text,
-                    );
                 }
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
@@ -6085,7 +5897,6 @@ impl RpcService for EngineRpc {
                         p.transfers,
                     )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                self.watch_mentioned_trees(&p.chat_id, &p.text);
                 if p.steer_now {
                     self.doc_host.steer_queued_on_submit(&p.chat_id, &id).await;
                 }
@@ -6460,12 +6271,6 @@ impl RpcService for EngineRpc {
             methods::WATCH_SPACES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_spaces(),
             ))),
-            methods::ENSURE_SUPERVISOR
-            | methods::WATCH_SUPERVISOR
-            | methods::GET_SUPERVISOR_SETTINGS
-            | methods::SET_SUPERVISOR_SETTINGS
-            | methods::SUPERVISOR_ACT
-            | methods::REQUEST_SUPERVISOR_CHECK => self.supervisor_rpc(method, params).await,
             methods::WATCH_TASKS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_tasks())))
             }
@@ -6649,27 +6454,8 @@ impl RpcService for EngineRpc {
             }
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
-                if let MutateParams::EscalateTask {
-                    task_id,
-                    from_chat_id,
-                    title,
-                    why,
-                    detail,
-                    options,
-                } = p
-                {
-                    let item_id = self.escalate_task(
-                        &task_id,
-                        from_chat_id.as_deref(),
-                        title,
-                        why,
-                        detail,
-                        options,
-                    )?;
-                    return RpcReply::value(&serde_json::json!({ "ok": true, "itemId": item_id }));
-                }
                 if let MutateParams::PlanSteps {
-                    task_id,
+                    chat_id,
                     steps,
                     overview,
                     resources,
@@ -6682,17 +6468,16 @@ impl RpcService for EngineRpc {
                         .collect();
                     let images_moved = self
                         .plan_steps(
-                            &task_id,
+                            &chat_id,
                             steps,
                             overview,
                             resources,
                             from_chat_id.as_deref(),
-                        )
-                        .await?;
+                        )?;
                     return RpcReply::value(&serde_json::json!({
                         "ok": true,
-                        "task": self.workspace.task(&task_id),
-                        "steps": self.workspace.task_steps_of(&task_id),
+                        "chat": self.workspace.chat(&chat_id).map_err(|e| RpcError::Failed(e.to_string()))?,
+                        "steps": self.workspace.steps_of(&chat_id),
                         "imagesMoved": images_moved,
                     }));
                 }

@@ -75,13 +75,10 @@ pub use session::{
 pub use subagents::{SubagentInfo, SubagentSink, SubagentState, SubagentWatch};
 pub use terminal::{TerminalInfo, TerminalLink, TerminalReplies, TerminalSink, TerminalUpdate};
 pub use workspace::{
-    ApprovalView, Brief, BriefMessage, ContextChat, DeviceView, EstimateLine, FrontGroup,
-    FrontPage, HostRef, ItemSend, MissionFromChat, MissionOptions, MissionStrip, NeedsYouEntry,
-    NeedsYouKind, OutlineRow, PlanEstimate, ProjectRef, ProjectView, PullRequestGroups,
-    SearchField, SearchHit, SectionView, SessionRow, SidebarView, StepView, SupervisorHost,
-    SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, TodayPage, TodayPart,
-    TodayPullRequests, TodaySlot, TodayTask, TodayUsage, WakeEntry, WatchState, WorkspaceSnapshot,
-    project_color_index, relative_time_label,
+    ContextChat, DeviceView, FrontGroup, FrontPage, HostRef, OutlineRow, ProjectRef, ProjectView,
+    PullRequestGroups, SearchField, SearchHit, SectionView, SessionRow, SidebarView, TaskDetail,
+    TaskDraft, TaskRow, TasksPage, TodayPage, TodayPart, TodayPullRequests, TodaySlot, TodayTask,
+    TodayUsage, WorkspaceSnapshot, project_color_index, relative_time_label,
 };
 pub use zeron_term_link::remote::TerminalPath;
 

@@ -38,9 +38,7 @@ Right-click a row for the full menu: **Rename**, **Add plan** (on a chat of this
 
 ## Step threads
 
-The lead of a Task with a plan (see [Agent trees and plans](zeron://docs/mission-control)) is one row with a progress ring and the step it is on, such as **Task · step 4 of 7**, or **Task · done** once every step is done; click it to open the Task's page. Only the step threads that are running or asking you show indented under it, and a step that asks reads **Asking**. One faint row, such as **5 more steps**, counts the rest; click it to open the Task's page.
-
-![A Task in the sidebar: the lead with its ring, the step it is on, and 3 more steps](sidebar-mission.jpg)
+The threads a chat hands work to, the steps of its plan included, have no sidebar row of their own while that chat has one. They are listed in that chat's **Threads** tab; see [Mission](zeron://docs/mission).
 
 Hover the lead and click the chevron at its left edge, Tab to the chevron and press Space, or use the right-click menu, to fold the steps away. A collapsed lead keeps the chevron showing and sums up its steps, for example **4 · 1 running**: the number of steps, then the most pressing of asking you, failed, or running. When a step needs you, an attention dot appears on the lead. Opening a step, from the Task's page or a link, unfolds its lead again. If you fold a lead while one of its steps is open, the lead row stays shaded to show it holds the open chat. Zeron remembers which leads you collapsed.
 

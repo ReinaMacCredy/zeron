@@ -66,6 +66,19 @@ test("the tray answers in place, approves a plan, and dismisses or retries a fai
 	expect(app:state("calls")).to_contain("send:broke:Resume without asking to continue.")
 end)
 
+test("a chat's plan waiting for approval is approved from the tray", function()
+	local waiting = { key = "lead:plan", chat = "lead", request = "plan", title = "lead", kind = "plan_approval", secret = false, steps = { "One", "Two", "Three" } }
+	local app = open({ chat("lead", nil), chat("w1", "working") }, { waiting })
+	expect(app:has('role:button "1 needs you · 1 working"')).to_be(true)
+	app:click("#live-pill")
+	app:frames(10)
+	expect(app:has("#live-retry-lead")).to_be(false)
+	app:click("#live-approve-lead")
+	app:frames(5)
+	expect(app:state("calls")).to_contain("answer:lead:plan:once:")
+	expect(app:error()).to_be(nil)
+end)
+
 test("a thread that finishes comes to the front with a check for a moment", function()
 	local app = open({ chat("a", "working"), chat("b", "working") })
 	app:set_state("sessions", { state = "ready", devices = {}, projects = {}, chats = { chat("a", "working"), chat("b", "done") }, archived = {}, places = { pinned = {}, sections = {} }, places_ready = true })

@@ -827,6 +827,8 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 work_tree: None,
                 unsettled_at: None,
                 sleep: None,
+                plan: None,
+                plan_pending: false,
             })
             .unwrap();
         legacy

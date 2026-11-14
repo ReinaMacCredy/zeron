@@ -65,7 +65,7 @@ end
 function M.visible(here: string?): { any }
 	local out: { any } = {}
 	for _, item in list:get() do
-		if item.chat ~= here then
+		if item.chat ~= here or item.kind == "plan_approval" then
 			table.insert(out, item)
 		end
 	end
@@ -87,7 +87,7 @@ local function question_glyph(): Node
 end
 
 local function kind_glyph(kind: string): Node
-	if kind == "plan" then
+	if kind == "plan" or kind == "plan_approval" then
 		return ui.div { color = "$text.secondary", Icon { name = "checklist", size = 13 } }
 	end
 	return question_glyph()
@@ -236,9 +236,21 @@ local function ask_body(item: any): Node
 end
 
 local function plan_body(item: any): Node
-	local rows: { Node } = {}
+	local body: { any } = {
+		id = "pills-waiting-plan",
+		px = "$space.4",
+		pt = ui.raw(6, "waiting.rs plan"),
+		pb = "$space.2",
+		gap = ui.raw(6, "waiting.rs plan"),
+		ui.text {
+			string.upper(locale.s("ds.pills.plan_head", { n = #item.steps })),
+			text_size = ui.raw(10.5, "waiting.rs plan"),
+			weight = "$font.weight.medium",
+			color = "$text.secondary",
+		},
+	}
 	for i, step in item.steps do
-		table.insert(rows, ui.row {
+		table.insert(body, ui.row {
 			gap = "$space.2",
 			items = "center",
 			ui.div {
@@ -255,27 +267,14 @@ local function plan_body(item: any): Node
 			FadeText { step, literal = true, min_w = 0, color = "$text.primary" },
 		})
 	end
-	return ui.column {
-		id = "pills-waiting-plan",
-		px = "$space.4",
-		pt = ui.raw(6, "waiting.rs plan"),
-		pb = "$space.2",
-		gap = ui.raw(6, "waiting.rs plan"),
-		ui.text {
-			string.upper(locale.s("ds.pills.plan_head", { n = #item.steps })),
-			text_size = ui.raw(10.5, "waiting.rs plan"),
-			weight = "$font.weight.medium",
-			color = "$text.secondary",
-		},
-		table.unpack(rows),
-		ui.text { locale.t("ds.pills.nothing_runs"), text_size = ui.raw(12, "waiting.rs plan"), color = "$zeron.composer.faint" },
-		ui.row {
-			pt = "$space.1",
-			ds.Button { locale.t("ds.pills.approve"), id = "pills-waiting-approve", size = "sm", on_click = function()
-				M.answer(item, { decision = "once" })
-			end },
-		},
-	}
+	table.insert(body, ui.text { locale.t("ds.pills.nothing_runs"), text_size = ui.raw(12, "waiting.rs plan"), color = "$zeron.composer.faint" })
+	table.insert(body, ui.row {
+		pt = "$space.1",
+		ds.Button { locale.t("ds.pills.approve"), id = "pills-waiting-approve", size = "sm", on_click = function()
+			M.answer(item, { decision = "once" })
+		end },
+	})
+	return ui.column(body)
 end
 
 M.want = ui.state("chat_waiting_want", nil :: string?)
@@ -307,7 +306,7 @@ local Card = ui.component(function(props: { items: any, on_close: () -> () }): N
 	end
 	local shown = ui.computed(now)
 	local function kind_word(kind: string): string
-		return locale.s(if kind == "plan" then "ds.pills.plan" else "ds.pills.question")
+		return locale.s(if kind == "plan" or kind == "plan_approval" then "ds.pills.plan" else "ds.pills.question")
 	end
 	return ui.column {
 		id = "pills-waiting-card",
@@ -410,7 +409,7 @@ local Card = ui.component(function(props: { items: any, on_close: () -> () }): N
 					ui.text { kind_word(item.kind), weight = "$font.weight.medium", color = "$accent", wrap = false },
 					if from ~= "" then ui.text { `· {from}`, wrap = false } else nil,
 				},
-				if item.kind == "plan" then plan_body(item) else ask_body(item),
+				if item.kind == "plan" or item.kind == "plan_approval" then plan_body(item) else ask_body(item),
 			}
 		end, { w_full = true, enter = { opacity = { 0, 1 }, x = { 8, 0 }, duration = 150 }, exit = { opacity = 0, duration = 80 } }),
 		ui.row {
@@ -474,11 +473,20 @@ function M.Pill(props: { open: any, width: () -> number, elsewhere_of: () -> str
 		on_click = function()
 			props.open:set(not props.open:peek())
 		end,
-		ui.div { mr = ui.raw(4, "background.rs pill_leading"), question_glyph() },
+		ui.div { mr = ui.raw(4, "background.rs pill_leading"), color = "$warning", Icon { name = "clock-circle", size = 14 } },
 		ui.text { function(): string
 			return tostring(#items:get())
-		end, id = "pills-waiting-count", weight = "$font.weight.semibold", color = "$accent", tabular = true, wrap = false },
-		ui.text { locale.t("ds.pills.waiting"), wrap = false },
+		end, id = "pills-waiting-count", weight = "$font.weight.semibold", color = "$warning", tabular = true, wrap = false },
+		ui.text { locale.t("ds.pills.waiting"), color = "$warning", wrap = false },
+		ui.show(function(): boolean
+			local here = props.elsewhere_of()
+			for _, it in items:get() do
+				if it.kind == "plan_approval" and it.chat == here then
+					return true
+				end
+			end
+			return false
+		end, ui.text { locale.t("ds.pills.approve_plan"), id = "pills-waiting-plan-here", ml = ui.raw(4, "the mockup's waiting pill"), wrap = false }),
 	}
 	return ui.presence(function(): string
 		return if #items:get() > 0 then "waiting" else ""

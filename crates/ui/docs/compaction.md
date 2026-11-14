@@ -90,9 +90,8 @@ Only a message you type yourself, before a new turn starts. These are never clas
 - slash commands such as `/compact`
 - messages sent while a turn is already running
 - messages from another thread
-- handbacks from delegated tasks and from a Task's steps
+- handbacks from delegated tasks and from a plan's steps
 - your answers to an agent's question, and wakes when another thread asks something
-- the Supervisor's wakes
 - the agent's own next-message note, which is checked as described above
 - the first message after the agent compacted itself
 - the first message after the chat moved to another agent: the conversation handed over replaces the compaction
@@ -116,7 +115,7 @@ What leaves your Mac for each check: your last four messages, each with the agen
 
 ## In tasks
 
-**In tasks** decides whether the lead and step threads of a Task with a plan are compacted automatically. On (the default), they follow the same rules as any chat. Off leaves them alone: no idle compaction, no reminders, and no classifier check. A lead stays a Task's thread after its Task is complete. The agent's own compact tool still follows **Let agents compact themselves**, and you can still compact by hand. See [Agent trees and plans](zeron://docs/mission-control) for Tasks with a plan.
+**In tasks** decides whether a chat with a plan and its step threads are compacted automatically. On (the default), they follow the same rules as any chat. Off leaves them alone: no idle compaction, no reminders, and no classifier check. A chat stays a lead after every step of its plan is done. The agent's own compact tool still follows **Let agents compact themselves**, and you can still compact by hand. See [Mission](zeron://docs/mission) for plans.
 
 ## What you see in the transcript
 

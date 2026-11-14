@@ -99,8 +99,6 @@ pub mod wake_update;
 pub mod sessions;
 pub mod source_control;
 pub mod spaces;
-mod supervisor;
-mod supervisor_resources;
 pub mod terminals;
 pub mod thread_watches;
 pub mod titles;
@@ -494,8 +492,6 @@ impl EngineCore {
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
         doc_host.set_thread_watches(thread_watches::ThreadWatches::open(profile.store_root())?);
-        doc_host.set_supervisor(supervisor::SupervisorStore::open(profile.store_root())?);
-        doc_host.spawn_supervisor_router(registry.clone());
         let agent_profiles = AgentProfilesStore::open(profile.store_root())?;
         let provider_instances = ProviderInstancesStore::open(data_dir)?;
         sessions.set_provider_instances(provider_instances.clone());

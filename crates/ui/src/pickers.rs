@@ -2440,10 +2440,6 @@ impl Pickers {
             .is_some_and(|list| self.offered(list).is_empty())
     }
 
-    pub(crate) fn harnesses_error(&self) -> Option<&str> {
-        self.harnesses.error()
-    }
-
     /// The resolved harness's steering mode, from the loaded descriptor list.
     /// `None` while the catalog is loading.
     pub fn resolved_steering_mode(&self, cx: &App) -> Option<zeron_proto::SteeringMode> {
@@ -13441,6 +13437,8 @@ mod tests {
             unsettled_at: None,
             harness_session_harness: Default::default(),
             sleep: None,
+            plan: None,
+            plan_pending: false,
         };
         assert_eq!(
             chat.harness_marks(),
@@ -14367,6 +14365,8 @@ mod tests {
                     unsettled_at: None,
                     harness_session_harness: Default::default(),
                     sleep: None,
+                    plan: None,
+                    plan_pending: false,
                 }];
                 state.selected_chat = Some("c1".into());
                 state.transcript_replayed = false;
@@ -14532,6 +14532,8 @@ mod tests {
                     unsettled_at: None,
                     harness_session_harness: Default::default(),
                     sleep: None,
+                    plan: None,
+                    plan_pending: false,
                 }];
                 state.selected_chat = Some("c1".into());
             });

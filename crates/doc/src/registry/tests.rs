@@ -292,6 +292,8 @@ fn chat(id: &str, device_id: &str) -> Chat {
         work_tree: None,
         unsettled_at: None,
         sleep: None,
+        plan: None,
+        plan_pending: false,
     }
 }
 
@@ -2833,41 +2835,40 @@ fn a_task_row_always_reseeds_within_the_op_budget() {
     );
 }
 
-fn step(id: &str, task_id: &str, title: &str) -> zeron_proto::TaskStep {
+fn step(id: &str, chat_id: &str, title: &str) -> zeron_proto::TaskStep {
     serde_json::from_value(
-        json!({ "id": id, "taskId": task_id, "title": title, "createdAt": ts(2_000) }),
+        json!({ "id": id, "ownerChatId": chat_id, "title": title, "createdAt": ts(2_000) }),
     )
     .unwrap()
 }
 
-fn step_ids(doc: &RegistryDoc, task_id: &str) -> Vec<String> {
-    doc.task_steps_of(task_id)
-        .into_iter()
-        .map(|s| s.id)
-        .collect()
+fn step_ids(doc: &RegistryDoc, chat_id: &str) -> Vec<String> {
+    doc.steps_of(chat_id).into_iter().map(|s| s.id).collect()
 }
 
 #[test]
-fn task_steps_sync_in_order_and_follow_their_task_out() {
+fn plan_steps_sync_in_order_under_their_chat() {
     let mut a = RegistryDoc::new("a");
     let mut b = RegistryDoc::new("b");
     let mut server = HashMap::new();
     let mut seq = 0;
+    a.upsert_chat(&chat("lead", "a")).unwrap();
+    a.upsert_chat(&chat("other", "a")).unwrap();
     a.create_task(&task("t1", "Shop backend")).unwrap();
-    a.create_task(&task("t2", "Other")).unwrap();
     assert!(
         a.create_task_step(&step("s1", "missing", "Orphan"))
             .is_err(),
-        "a step needs its task"
+        "a step needs its chat"
     );
     for (id, title) in [("s1", "Schema"), ("s2", "API"), ("s3", "Tests")] {
-        assert!(a.create_task_step(&step(id, "t1", title)).unwrap());
+        assert!(a.create_task_step(&step(id, "lead", title)).unwrap());
     }
-    a.create_task_step(&step("o1", "t2", "Elsewhere")).unwrap();
-    assert!(!a.create_task_step(&step("s1", "t1", "Retried")).unwrap());
-    assert!(a.create_task_step(&step("s4", "t1", "   ")).is_err());
+    a.create_task_step(&step("o1", "other", "Elsewhere"))
+        .unwrap();
+    assert!(!a.create_task_step(&step("s1", "lead", "Retried")).unwrap());
+    assert!(a.create_task_step(&step("s4", "lead", "   ")).is_err());
     server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
-    assert_eq!(step_ids(&b, "t1"), ["s1", "s2", "s3"]);
+    assert_eq!(step_ids(&b, "lead"), ["s1", "s2", "s3"]);
     assert_eq!(b.task_step("s1").unwrap().title, "Schema");
 
     let first = b.task_step("s1").unwrap().order_key;
@@ -2879,30 +2880,22 @@ fn task_steps_sync_in_order_and_follow_their_task_out() {
     };
     assert!(a.update_task_step("s3", &to_front, ts(3_000)).unwrap());
     server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
-    assert_eq!(step_ids(&b, "t1"), ["s3", "s1", "s2"]);
+    assert_eq!(step_ids(&b, "lead"), ["s3", "s1", "s2"]);
     let moved = b.task_step("s3").unwrap();
     assert_eq!(moved.chat_id.as_deref(), Some("child-3"));
     assert_eq!(moved.outcome, Some(zeron_proto::StepOutcome::Done));
     let reopen = zeron_proto::TaskStepPatch {
         outcome: Some(None),
-        turn: Some(Some(zeron_proto::StepTurn {
-            ended: zeron_proto::StepTurnEnd::Failed,
-            turn: Some("m1".into()),
-        })),
         ..Default::default()
     };
     a.update_task_step("s3", &reopen, ts(3_001)).unwrap();
     assert_eq!(a.task_step("s3").unwrap().outcome, None);
-    assert_eq!(
-        a.task_step("s3").unwrap().turn.map(|turn| turn.ended),
-        Some(zeron_proto::StepTurnEnd::Failed)
-    );
 
     assert!(a.delete_task_step("s2", ts(4_000)).unwrap());
     assert!(a.task_step("s2").is_none());
-    assert!(!a.create_task_step(&step("s2", "t1", "Revived")).unwrap());
-    a.create_task_step(&step("s5", "t1", "Docs")).unwrap();
-    assert_eq!(step_ids(&a, "t1"), ["s3", "s1", "s5"]);
+    assert!(!a.create_task_step(&step("s2", "lead", "Revived")).unwrap());
+    a.create_task_step(&step("s5", "lead", "Docs")).unwrap();
+    assert_eq!(step_ids(&a, "lead"), ["s3", "s1", "s5"]);
 
     let restarted = RegistryDoc::from_bytes(&a.to_bytes().unwrap(), "a").unwrap();
     assert_eq!(
@@ -2910,22 +2903,22 @@ fn task_steps_sync_in_order_and_follow_their_task_out() {
         a.read_task_steps().unwrap()
     );
 
-    let batches = a.pending_len();
     assert!(a.delete_task("t1", ts(5_000)).unwrap());
-    assert_eq!(a.pending_len(), batches + 1, "the cascade is one batch");
-    assert!(step_ids(&a, "t1").is_empty());
-    assert_eq!(step_ids(&a, "t2"), ["o1"]);
     server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
-    assert!(step_ids(&b, "t1").is_empty());
-    assert!(b.task_step("s3").is_none());
+    assert_eq!(
+        step_ids(&b, "lead"),
+        ["s3", "s1", "s5"],
+        "a deleted to-do leaves the chat's plan"
+    );
+    assert_eq!(step_ids(&b, "other"), ["o1"]);
 }
 
 #[test]
 fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
     let mut doc = RegistryDoc::new("a");
-    doc.create_task(&task("t1", "Shop backend")).unwrap();
+    doc.upsert_chat(&chat("lead", "a")).unwrap();
     for id in ["run", "open", "done", "gone"] {
-        doc.create_task_step(&step(id, "t1", id)).unwrap();
+        doc.create_task_step(&step(id, "lead", id)).unwrap();
     }
     doc.upsert_chat(&chat("child", "a")).unwrap();
     let bind = |chat: &str| zeron_proto::TaskStepPatch {
@@ -2941,41 +2934,44 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
         ..Default::default()
     };
     doc.update_task_step("done", &finish, ts(3_000)).unwrap();
-    let plan = [step("n1", "t1", "First"), step("n2", "t1", "Second")];
-    doc.plan_task_steps("t1", &plan, &Default::default(), ts(4_000))
+    let plan = [step("n1", "lead", "First"), step("n2", "lead", "Second")];
+    let overview = |text: &str| zeron_proto::ChatPlan {
+        overview: text.into(),
+        ..Default::default()
+    };
+    doc.write_plan("lead", &overview("Ship it"), &plan, ts(4_000))
         .unwrap();
-    assert_eq!(step_ids(&doc, "t1"), ["run", "done", "n1", "n2"]);
+    assert_eq!(step_ids(&doc, "lead"), ["run", "done", "n1", "n2"]);
     assert!(doc.task_step("open").is_none());
     assert!(
         doc.task_step("gone").is_none(),
         "a step whose thread was deleted is unstarted"
     );
+    assert_eq!(
+        doc.chat("lead").unwrap().unwrap().plan,
+        Some(overview("Ship it"))
+    );
 
     let before = doc.read_task_steps().unwrap();
-    let refused = [step("n3", "t1", "Fine"), step("n4", "t1", "  ")];
+    let refused = [step("n3", "lead", "Fine"), step("n4", "lead", "  ")];
     assert!(
-        doc.plan_task_steps("t1", &refused, &Default::default(), ts(5_000))
+        doc.write_plan("lead", &overview("Ship it"), &refused, ts(5_000))
             .is_err()
+    );
+    assert!(
+        doc.write_plan(
+            "lead",
+            &overview("Ship it"),
+            &[step("x", "child", "Other")],
+            ts(5_000)
+        )
+        .is_err(),
+        "a plan writes only its own chat's steps"
     );
     assert_eq!(
         doc.read_task_steps().unwrap(),
         before,
         "a refused plan writes nothing"
-    );
-    let notes = zeron_proto::TaskPatch {
-        notes: Some("n".repeat(10_000)),
-        ..Default::default()
-    };
-    doc.update_task("t1", &notes, ts(5_000)).unwrap();
-    let overview = zeron_proto::TaskPatch {
-        plan: Some("o".repeat(10_000)),
-        ..Default::default()
-    };
-    let fits = [step("n5", "t1", "Fits")];
-    assert!(
-        doc.plan_task_steps("t1", &fits, &overview, ts(5_000))
-            .is_err(),
-        "notes and overview share the row's op budget"
     );
     let renamed = zeron_proto::TaskStepPatch {
         title: Some("Renamed".into()),
@@ -2985,57 +2981,254 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
         ("n1".to_string(), renamed.clone()),
         ("open".to_string(), renamed),
     ];
+    let fits = [step("n5", "lead", "Fits")];
     assert!(
-        doc.edit_task_plan("t1", &Default::default(), &edits, &fits, &[], ts(5_000))
-            .is_err()
-    );
-    assert!(
-        doc.edit_task_plan("t1", &overview, &[], &fits, &["n2".into()], ts(5_000))
+        doc.edit_plan("lead", None, &edits, &fits, &[], ts(5_000))
             .is_err()
     );
     assert_eq!(
         doc.read_task_steps().unwrap(),
         before,
-        "a refused plan or plan edit writes nothing"
+        "a refused plan edit writes nothing"
     );
-    assert_eq!(doc.task("t1").unwrap().plan, "");
-    doc.edit_task_plan(
-        "t1",
-        &Default::default(),
+    doc.edit_plan(
+        "lead",
+        Some(&overview("Ship it twice")),
         &edits[..1],
         &fits,
         &["n2".into()],
         ts(6_000),
     )
     .unwrap();
-    assert_eq!(step_ids(&doc, "t1"), ["run", "done", "n1", "n5"]);
+    assert_eq!(step_ids(&doc, "lead"), ["run", "done", "n1", "n5"]);
     assert_eq!(doc.task_step("n1").unwrap().title, "Renamed");
+    assert_eq!(
+        doc.chat("lead").unwrap().unwrap().plan,
+        Some(overview("Ship it twice"))
+    );
     assert!(
-        doc.plan_task_steps("gone", &plan, &Default::default(), ts(5_000))
+        doc.write_plan("gone", &overview(""), &[step("g", "gone", "G")], ts(5_000))
             .is_err()
     );
+    let many: Vec<_> = (0..49)
+        .map(|n| step(&format!("m{n}"), "lead", "M"))
+        .collect();
+    assert!(
+        doc.write_plan("lead", &overview(""), &many, ts(7_000))
+            .is_err(),
+        "the 50-step cap counts the started steps a plan keeps"
+    );
 
-    let lead = zeron_proto::TaskPatch {
-        mode: Some(zeron_proto::TaskMode::Orchestrated),
-        plan_pending: Some(true),
-        send_error: Some(Some("offline".into())),
-        ..Default::default()
-    };
-    doc.update_task("t1", &lead, ts(6_000)).unwrap();
+    doc.set_chat_plan("lead", Some(&overview("Ship it twice")), true)
+        .unwrap();
     let restarted = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "a").unwrap();
-    let task = restarted.task("t1").unwrap();
-    assert_eq!(task.mode, zeron_proto::TaskMode::Orchestrated);
-    assert!(task.plan_pending);
-    assert_eq!(task.send_error.as_deref(), Some("offline"));
-    let cleared = zeron_proto::TaskPatch {
-        plan_pending: Some(false),
-        send_error: Some(None),
+    assert!(restarted.chat("lead").unwrap().unwrap().plan_pending);
+    doc.set_plan_pending("lead", false).unwrap();
+    let lead = doc.chat("lead").unwrap().unwrap();
+    assert!(!lead.plan_pending);
+    assert_eq!(lead.plan, Some(overview("Ship it twice")));
+}
+
+#[test]
+fn an_oversize_plan_is_refused_on_its_chat_and_writes_nothing() {
+    let mut doc = RegistryDoc::new("a");
+    doc.upsert_chat(&chat("lead", "a")).unwrap();
+    let wide = zeron_proto::ChatPlan {
+        overview: "語".repeat(9_000),
         ..Default::default()
     };
-    doc.update_task("t1", &cleared, ts(6_001)).unwrap();
-    let task = doc.task("t1").unwrap();
-    assert!(!task.plan_pending);
-    assert_eq!(task.send_error, None);
+    let pending = doc.pending_ops_len();
+    let err = doc
+        .write_plan("lead", &wide, &[step("s1", "lead", "One")], ts(3_000))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("too large to sync"), "{err}");
+    assert_eq!(
+        doc.pending_ops_len(),
+        pending,
+        "the refused plan queues nothing"
+    );
+    assert_eq!(doc.chat("lead").unwrap().unwrap().plan, None);
+    assert!(doc.steps_of("lead").is_empty());
+    assert!(doc.set_chat_plan("lead", Some(&wide), true).is_err());
+    assert!(!doc.chat("lead").unwrap().unwrap().plan_pending);
+}
+
+fn old_row(kind: &str, id: &str, fields: Value, ms: i64) -> RegistryRow {
+    let fields: BTreeMap<String, Value> = serde_json::from_value(fields).unwrap();
+    RegistryRow {
+        kind: kind.into(),
+        id: id.into(),
+        seq: 1,
+        deleted: false,
+        del_hlc: None,
+        clocks: fields
+            .keys()
+            .map(|key| (key.clone(), hlc_by(ms, "old-device")))
+            .collect(),
+        fields,
+    }
+}
+
+fn old_mission(task_id: &str, lead: &str, overview: &str, steps: &[&str]) -> Vec<RegistryRow> {
+    let mut rows = vec![old_row(
+        KIND_TASKS,
+        task_id,
+        json!({
+            "id": task_id, "title": "Update IOS app", "chatId": lead, "mode": "orchestrated",
+            "planPending": true, "plan": overview, "planDoc": true, "sameAgents": true,
+            "images": ["/tmp/a.png"], "resources": ["port:5173"], "context": ["c1"],
+            "orderKey": "80", "createdAt": 1_000, "updatedAt": 2_000, "deleted": false,
+        }),
+        2_000,
+    )];
+    for (n, id) in steps.iter().enumerate() {
+        rows.push(old_row(
+            KIND_TASK_STEPS,
+            id,
+            json!({
+                "id": id, "taskId": task_id, "title": format!("Step {n}"),
+                "orderKey": format!("{}8", n + 1), "chatId": format!("thread-{id}"),
+                "outcome": "done", "createdAt": 1_000, "updatedAt": 2_000, "deleted": false,
+            }),
+            2_000,
+        ));
+    }
+    rows
+}
+
+#[test]
+fn the_mover_puts_an_old_plan_on_its_lead_chat_once_and_keeps_the_task_row() {
+    let mut doc = RegistryDoc::new("a");
+    doc.upsert_chat(&chat("lead", "a")).unwrap();
+    doc.upsert_chat(&chat("live", "a")).unwrap();
+    let mut rows = old_mission("t1", "lead", "Sync the app", &["s1", "s2", "s3"]);
+    rows.extend(old_mission("t2", "live", "Old overview", &["l1"]));
+    rows.extend(old_mission("t3", "no-such-chat", "Lost lead", &["x1"]));
+    let mut deleted = old_mission("t4", "lead", "Deleted", &["d1"]);
+    deleted[0].fields.insert("deleted".into(), json!(true));
+    rows.extend(deleted);
+    let mut single = old_mission("t5", "lead", "Single", &[]);
+    single[0].fields.insert("mode".into(), json!("single"));
+    rows.extend(single);
+    assert!(doc.apply_rows(1, rows));
+    let live = zeron_proto::ChatPlan {
+        overview: "Written live".into(),
+        ..Default::default()
+    };
+    doc.set_chat_plan("live", Some(&live), false).unwrap();
+
+    let written = doc.move_plans_to_chats();
+    assert_eq!(
+        written, 5,
+        "lead's plan and three steps, and the live chat's one step"
+    );
+    let lead = doc.chat("lead").unwrap().unwrap();
+    assert_eq!(
+        lead.plan,
+        Some(zeron_proto::ChatPlan {
+            overview: "Sync the app".into(),
+            plan_doc: true,
+            same_agents: true,
+            images: vec!["/tmp/a.png".into()],
+            resources: vec!["port:5173".into()],
+        })
+    );
+    assert!(lead.plan_pending, "the approval flag moves with the plan");
+    assert_eq!(step_ids(&doc, "lead"), ["s1", "s2", "s3"]);
+    assert_eq!(
+        doc.chat("live").unwrap().unwrap().plan,
+        Some(live),
+        "a live write beats the moved plan"
+    );
+    assert!(!doc.chat("live").unwrap().unwrap().plan_pending);
+    assert_eq!(step_ids(&doc, "live"), ["l1"]);
+    assert_eq!(
+        doc.task_step("x1").unwrap().owner_chat_id,
+        "",
+        "a plan whose lead chat is gone stays where it was"
+    );
+    assert_eq!(doc.task_step("d1").unwrap().owner_chat_id, "");
+
+    let pending = doc.pending_ops_len();
+    assert_eq!(doc.move_plans_to_chats(), 0, "a second run writes nothing");
+    assert_eq!(doc.pending_ops_len(), pending);
+    let mut restarted = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "a").unwrap();
+    assert_eq!(restarted.move_plans_to_chats(), 0);
+
+    let written_live = zeron_proto::ChatPlan {
+        overview: "Rewritten by the lead".into(),
+        ..Default::default()
+    };
+    doc.set_chat_plan("lead", Some(&written_live), true)
+        .unwrap();
+    doc.set_plan_pending("lead", false).unwrap();
+    let done = zeron_proto::TaskPatch {
+        completed: Some(true),
+        ..Default::default()
+    };
+    doc.update_task("t1", &done, Utc::now()).unwrap();
+    assert_eq!(
+        doc.move_plans_to_chats(),
+        0,
+        "a to-do edited after the move does not move its old plan again"
+    );
+    let lead = doc.chat("lead").unwrap().unwrap();
+    assert_eq!(lead.plan, Some(written_live));
+    assert!(!lead.plan_pending, "the person's approval stays");
+
+    let task = doc.overlay_row(KIND_TASKS, "t1").unwrap();
+    for (key, value) in [
+        ("mode", json!("orchestrated")),
+        ("plan", json!("Sync the app")),
+        ("planPending", json!(true)),
+        ("planDoc", json!(true)),
+        ("resources", json!(["port:5173"])),
+    ] {
+        assert_eq!(
+            task.fields.get(key),
+            Some(&value),
+            "the task row keeps {key}"
+        );
+    }
+    let step = doc.overlay_row(KIND_TASK_STEPS, "s1").unwrap();
+    assert_eq!(step.fields.get("taskId"), Some(&json!("t1")));
+    assert_eq!(doc.task("t1").unwrap().context, ["c1"]);
+}
+
+#[test]
+fn the_mover_skips_a_plan_its_chat_row_cannot_hold() {
+    let mut doc = RegistryDoc::new("a");
+    let mut fat = chat("fat", "a");
+    if let Some(config) = fat.config.as_mut() {
+        config.instructions = "i".repeat(9_000);
+    }
+    doc.upsert_chat(&fat).unwrap();
+    doc.upsert_chat(&chat("lead", "a")).unwrap();
+    let mut rows = old_mission("big", "fat", &"o".repeat(8_000), &["b1"]);
+    rows.extend(old_mission("ok", "lead", "Fits", &["k1"]));
+    assert!(doc.apply_rows(1, rows));
+    assert_eq!(
+        doc.move_plans_to_chats(),
+        2,
+        "the plan that fits still moves"
+    );
+    assert_eq!(doc.chat("fat").unwrap().unwrap().plan, None);
+    assert!(!doc.chat("fat").unwrap().unwrap().plan_pending);
+    assert_eq!(doc.task_step("b1").unwrap().owner_chat_id, "");
+    assert_eq!(
+        doc.overlay_row(KIND_TASKS, "big")
+            .unwrap()
+            .fields
+            .get("mode"),
+        Some(&json!("orchestrated"))
+    );
+    assert_eq!(step_ids(&doc, "lead"), ["k1"]);
+    assert!(
+        doc.take_pushable()
+            .iter()
+            .all(|b| b.ops.iter().all(fits_op_budget))
+    );
 }
 
 #[test]

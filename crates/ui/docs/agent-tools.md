@@ -7,8 +7,8 @@ The tools come in seven groups, the same ones you see in Settings > Context & to
 | Group | What the agent can do |
 | --- | --- |
 | **Threads** | List, read, and rename your chats, start a new chat, message another chat, wait for or watch chats, stop a chat's turn, archive or settle chats, and answer another chat's pending question. |
-| **Questions, terminal, actions and tasks** | Ask you questions and wait for the answers, use this chat's terminals in the terminal panel, manage the project's Actions menu, write and assign tasks on your Tasks list, plan a Task's steps, change this chat's auto-compact window, compact its own context, and read these Docs and the release notes to answer how Zeron works. |
-| **Delegation** | Run child agents on any installed provider and model, check on or cancel them, start a code review, report what it did about review findings, and manage agent profiles when you ask. |
+| **Questions, terminal, actions and tasks** | Ask you questions and wait for the answers, use this chat's terminals in the terminal panel, manage the project's Actions menu, write and assign tasks on your Tasks list, change this chat's auto-compact window, compact its own context, and read these Docs and the release notes to answer how Zeron works. |
+| **Delegation** | Run child agents on any installed provider and model, check on or cancel them, write a plan and run its steps, start a code review, report what it did about review findings, and manage agent profiles when you ask. |
 | **Pages and visuals** | Show live HTML pages and native charts, tables, and mockups inline in the thread. |
 | **Device hub** | Open iOS Simulators and Android Emulators in the Device panel, take screenshots of them, and close them. |
 | **Computer** | Control the desktop and a browser on this Mac. |
@@ -28,11 +28,12 @@ Each tool has its own switch in Settings > Context & tools > Tools, under its gr
 | | `request_secret` | Ask you for a secret in a private card. The agent gets a private file to read in its commands, never the value. See [When an agent asks](zeron://docs/agent-questions). |
 | | `terminal` | Use this chat's terminals. See [Terminal](zeron://docs/terminal). |
 | | `project_actions` | Manage the project's saved Actions. See [Projects and worktrees](zeron://docs/projects). |
-| | `tasks` | Write, update, and assign tasks, and plan a Task's steps. See [Tasks](zeron://docs/tasks). |
+| | `tasks` | Write, update, and assign tasks. See [Tasks](zeron://docs/tasks). |
 | | `context_settings`, `compact` | Read the chat's context settings and set its auto-compact window, and compact its own context. See [Compaction and context](zeron://docs/compaction). |
 | | `docs` | Read these Docs and the release notes to answer how Zeron works and the full reference for `show_visual`. |
 | **Delegation** | `list_projects`, `orchestrator_capabilities` | Look up your projects, the agents installed on this device, and their models: a short list per agent (the models in use plus the first eight), with a count of the rest and a search for any of them. |
 | | `delegate_task`, `task_status`, `task_cancel` | Start a child agent, read how it is doing, and stop it. See [Delegation and subagents](zeron://docs/delegation). |
+| | `plan` | Write this chat's plan of steps, mark each step done or skipped, and read the plan. See [Mission](zeron://docs/mission). |
 | | `review_changes`, `resolve_findings` | Start a code review, and report what it did about each finding. See [Code review](zeron://docs/review). |
 | | `agent_profiles` | Create, change, or remove your agent profiles when you ask. See [Agent profiles](zeron://docs/agent-profiles). |
 | **Pages and visuals** | `html_render`, `html_preview` | Show a finished HTML page in the chat, and check a page before showing it: a screenshot, its elements as text, a crop, and clicks or typing step by step. See [Browser](zeron://docs/browser). |
@@ -42,8 +43,6 @@ Each tool has its own switch in Settings > Context & tools > Tools, under its gr
 | **Computer** | `computer`, `computer_zeron_browser`, and the `computer_*` tools | See and drive the apps on your Mac (click, type, scroll, screenshots, windows, menus, clipboard) and the Zeron browser tabs (navigate, click, type, uploads, downloads, dialogs). See [Computer use](zeron://docs/computer-use). |
 
 The threads tools are described from your side in [Agents and other threads](zeron://docs/threads).
-
-The Supervisor's own chat also gets `supervisor`, which acts on Tasks within the Authority you set. It has no switch in Settings > Context & tools > Tools; see [Supervisor](zeron://docs/supervisor).
 
 ## Built-in limits
 
@@ -55,8 +54,8 @@ The Supervisor's own chat also gets `supervisor`, which acts on Tasks within the
 - An agent can answer another chat's permission request only when its own chat runs at **Full access**.
 - A child agent, or a profile an agent applies, never gets a higher access mode than the chat that started it.
 - A question from an agent waits up to 25 minutes for your answer.
-- An agent can keep up to 8 chats it started open at once. The chats a task's lead starts for its steps do not count; **Delegated tasks per chat** in Settings > Agents > Routing caps how many steps run at once instead.
-- Only the lead of a [Task with a plan](zeron://docs/mission-control) writes its plan and runs its steps, and while the plan waits for your approval, the lead cannot start a step.
+- **Delegated tasks per chat** in Settings > Agents > Routing caps what one chat has running at once: its delegated tasks, the steps of its plan, and the chats it started that are still working.
+- A [plan](zeron://docs/mission) belongs to the chat that wrote it: only that chat changes it and runs its steps, and while the plan waits for your approval, it cannot start a step.
 
 ## Turn tools off
 

@@ -1,14 +1,13 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{AnyElement, App, EntityId, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, SharedString, Window, div, prelude::*, px};
 use zeron_doc::MessagePart;
 use zeron_proto::{
     APPROVAL_ALLOW, APPROVAL_DENY, PLAN_APPROVAL_HEADER, ToolCall, UserInputAnswer,
     UserInputQuestion,
 };
 
-use crate::icons::{self, icon};
 use crate::popover;
 use crate::theme::Theme;
 
@@ -103,12 +102,6 @@ pub struct PlanAnswer {
     pub question_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PlanTarget {
-    Task(String),
-    Question(PlanAnswer),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlanOutcome {
     Waiting,
@@ -136,23 +129,9 @@ pub(crate) fn plan_outcome(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StepMark {
-    Number,
-    Current,
-    Done,
-}
-
 pub(crate) enum CardView {
-    Waiting {
-        busy: bool,
-        task_blocked: Option<&'static str>,
-    },
+    Waiting { busy: bool },
     Here,
-    Task {
-        title: SharedString,
-        steps: Vec<(SharedString, StepMark)>,
-    },
     NotApproved,
 }
 
@@ -160,9 +139,8 @@ pub(crate) struct ProposalCard {
     pub id: SharedString,
     pub steps: Arc<Vec<SharedString>>,
     pub view: CardView,
-    pub on_approve: Rc<dyn Fn(bool, &mut Window, &mut App)>,
+    pub on_approve: Rc<dyn Fn(&mut Window, &mut App)>,
     pub on_edit: Rc<dyn Fn(&mut Window, &mut App)>,
-    pub on_open_task: Rc<dyn Fn(&mut Window, &mut App)>,
 }
 
 fn pill(text: impl Into<SharedString>, accent: bool, theme: &Theme) -> gpui::Div {
@@ -185,15 +163,7 @@ fn pill(text: impl Into<SharedString>, accent: bool, theme: &Theme) -> gpui::Div
         .child(text.into())
 }
 
-fn step_row(
-    key: SharedString,
-    ix: usize,
-    title: SharedString,
-    mark: StepMark,
-    theme: &Theme,
-    view: EntityId,
-    cx: &mut App,
-) -> AnyElement {
+fn step_row(ix: usize, title: SharedString, theme: &Theme) -> AnyElement {
     let badge = div()
         .size(px(18.0))
         .flex_none()
@@ -202,28 +172,10 @@ fn step_row(
         .justify_center()
         .rounded_full()
         .border_1()
-        .text_size(crate::typography::ui_rems(10.5));
-    let badge = match mark {
-        StepMark::Number => badge
-            .border_color(theme.border_strong)
-            .text_color(theme.text_muted)
-            .child(SharedString::from((ix + 1).to_string())),
-        StepMark::Done => badge
-            .border_color(theme.success)
-            .text_color(theme.success)
-            .child(icon(icons::CHECK).size(px(11.0)).text_color(theme.success)),
-        StepMark::Current => {
-            badge
-                .border_color(theme.accent)
-                .child(crate::loaders::mini_mono_spinner(
-                    key,
-                    2.0,
-                    theme.accent,
-                    view,
-                    cx,
-                ))
-        }
-    };
+        .text_size(crate::typography::ui_rems(10.5))
+        .border_color(theme.border_strong)
+        .text_color(theme.text_muted)
+        .child(SharedString::from((ix + 1).to_string()));
     div()
         .min_h(px(28.0))
         .flex()
@@ -241,75 +193,28 @@ fn step_row(
         .into_any_element()
 }
 
-pub(crate) fn proposal_card(
-    card: ProposalCard,
-    theme: &Theme,
-    view: EntityId,
-    cx: &mut App,
-) -> AnyElement {
+pub(crate) fn proposal_card(card: ProposalCard, theme: &Theme) -> AnyElement {
     let ProposalCard {
         id,
         steps,
         view: card_view,
         on_approve,
         on_edit,
-        on_open_task,
     } = card;
-    let count = steps.len();
-    let plain: Vec<(SharedString, StepMark)> = steps
-        .iter()
-        .map(|step| (step.clone(), StepMark::Number))
-        .collect();
-    let (header, rows, why, actions) = match card_view {
-        CardView::Waiting { busy, task_blocked } => {
-            let approve = {
-                let on_approve = on_approve.clone();
-                popover::btn_primary(theme, "Approve")
-                    .id(SharedString::from(format!("{id}-approve")))
-                    .debug_selector(|| "plan-approve".into())
-                    .role(gpui::Role::Button)
-                    .aria_label("Approve")
-                    .aria_disabled(busy)
-                    .when(busy, |el| el.opacity(0.45))
-                    .when(!busy, |el| {
-                        el.on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            on_approve(false, window, cx);
-                        })
-                    })
-            };
-            let task_off = busy || task_blocked.is_some();
-            let as_task = div()
-                .id(SharedString::from(format!("{id}-approve-task")))
-                .debug_selector(|| "plan-approve-task".into())
+    let (header, why, actions) = match card_view {
+        CardView::Waiting { busy } => {
+            let approve = popover::btn_primary(theme, "Approve")
+                .id(SharedString::from(format!("{id}-approve")))
+                .debug_selector(|| "plan-approve".into())
                 .role(gpui::Role::Button)
-                .aria_label("Approve as Task")
-                .aria_disabled(task_off)
-                .px(px(12.0))
-                .py(px(6.0))
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(theme.border_strong)
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(crate::typography::ui_rems(13.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text)
-                .child(icon(icons::CHECKLIST).size(px(13.0)).text_color(theme.text))
-                .child("Approve as Task")
-                .when(task_off, |el| el.opacity(0.45))
-                .when_some(task_blocked, |el, reason| {
-                    el.tooltip(crate::settings::widgets::text_tooltip(reason))
-                })
-                .when(!task_off, |el| {
-                    el.cursor_pointer()
-                        .hover(|s| s.bg(crate::theme::ink(0.05)))
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            on_approve(true, window, cx);
-                        })
+                .aria_label("Approve")
+                .aria_disabled(busy)
+                .when(busy, |el| el.opacity(0.45))
+                .when(!busy, |el| {
+                    el.on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        on_approve(window, cx);
+                    })
                 });
             let edit = popover::btn_ghost(theme, "Edit plan", format!("{id}-edit"))
                 .id(SharedString::from(format!("{id}-edit")))
@@ -336,11 +241,7 @@ pub(crate) fn proposal_card(
                         true,
                         theme,
                     )),
-                plain,
-                format!(
-                    "Approve runs it in this chat. Approve as Task tracks the {count} step{} in Tasks.",
-                    if count == 1 { "" } else { "s" }
-                ),
+                "Approve runs it in this chat.".to_owned(),
                 Some(
                     div()
                         .pt(px(4.0))
@@ -349,7 +250,6 @@ pub(crate) fn proposal_card(
                         .items_center()
                         .gap(px(8.0))
                         .child(approve)
-                        .child(as_task)
                         .child(edit),
                 ),
             )
@@ -358,82 +258,21 @@ pub(crate) fn proposal_card(
             div()
                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Plan"))
                 .child(pill("Running here", false, theme)),
-            plain,
-            "Runs in this chat. No Task was created.".to_owned(),
+            "Runs in this chat.".to_owned(),
             None,
         ),
         CardView::NotApproved => (
             div()
                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Plan"))
                 .child(pill("Not approved", false, theme)),
-            plain,
             "The agent was told not to run this plan.".to_owned(),
             None,
         ),
-        CardView::Task { title, steps } => {
-            let total = steps.len();
-            let at = steps
-                .iter()
-                .position(|(_, mark)| *mark != StepMark::Done)
-                .unwrap_or(total.saturating_sub(1));
-            let open = div()
-                .id(SharedString::from(format!("{id}-open-task")))
-                .debug_selector(|| "plan-open-task".into())
-                .role(gpui::Role::Link)
-                .aria_label("Open in Tasks")
-                .flex_none()
-                .cursor_pointer()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.accent)
-                .hover(|s| s.opacity(0.8))
-                .child("Open in Tasks \u{203a}")
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    on_open_task(window, cx);
-                });
-            (
-                div()
-                    .child(
-                        icon(icons::CHECKLIST)
-                            .size(px(14.0))
-                            .flex_none()
-                            .text_color(theme.text),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(SharedString::from(format!("Task \u{b7} {title}"))),
-                    )
-                    .when(total > 0, |el| {
-                        el.child(pill(format!("Step {} of {total}", at + 1), true, theme))
-                    })
-                    .child(div().flex_1())
-                    .child(open),
-                steps,
-                format!(
-                    "Tracked in Tasks with its {total} step{}. Each step reports back here.",
-                    if total == 1 { "" } else { "s" }
-                ),
-                None,
-            )
-        }
     };
-    let rows: Vec<AnyElement> = rows
-        .into_iter()
+    let rows: Vec<AnyElement> = steps
+        .iter()
         .enumerate()
-        .map(|(ix, (title, mark))| {
-            step_row(
-                SharedString::from(format!("{id}-step-{ix}")),
-                ix,
-                title,
-                mark,
-                theme,
-                view,
-                cx,
-            )
-        })
+        .map(|(ix, title)| step_row(ix, title.clone(), theme))
         .collect();
     div()
         .py(px(4.0))

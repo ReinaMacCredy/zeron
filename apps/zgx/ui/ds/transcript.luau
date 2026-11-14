@@ -800,6 +800,7 @@ type View = {
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
 	open_subagent: ((sub: any) -> ())?,
 	threads: Threads.Threads?,
+	plan_call: (() -> string?)?,
 	-- A message text's find (its key: `<id>:u`, `<id>:<block>`, `<id>:r`).
 	find: ((key: string) -> any)?,
 	-- The text an open annotation input washes in it.
@@ -835,9 +836,34 @@ local function thought_of(m: Message, now: () -> Message, draft: State<Draft>?):
 	}
 end
 
-local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, draft: State<Draft>?, view: View?): Node
+local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, draft: State<Draft>?, view: View?, top: boolean?): Node
 	local shown = ui.computed(list)
 	return ui.each(shown, function(b: Block, _i: number, brow: State<Block>): Node
+		if (b.kind == "tools" or b.kind == "work") and top and view and view.plan_call and view.threads then
+			local plan_call, threads = view.plan_call, view.threads
+			local function card(): Node
+				return Threads.Plan { id = "plan-card", threads = threads }
+			end
+			return ui.presence(function(): string
+				local id = plan_call()
+				local now_b = brow:get()
+				if not id or not Threads.holds(now_b, id) then
+					return ""
+				end
+				return if now_b.kind == "tools" and #(now_b.tools or {}) == 1 then "only" else "after"
+			end, function(which: string): Node
+				if which == "only" then
+					return card()
+				end
+				local group = blocks_of(function(): { Block }
+					return { brow:get() }
+				end, m, now, draft, view)
+				if which == "" then
+					return group
+				end
+				return ui.column { w_full = true, min_w = 0, gap = "$space.3", group, card() }
+			end, { w_full = true, min_w = 0 })
+		end
 		if b.kind == "tools" or b.kind == "work" then
 			return Activity {
 				key = `{m.id}:{b.id}`,
@@ -1062,7 +1088,7 @@ local function reply(
 					return n.compact
 				end
 				return n.blocks or {}
-			end, m, now, draft, view)
+			end, m, now, draft, view, true)
 			else ui.show(
 			function()
 				local tools = now().tools
@@ -1192,6 +1218,17 @@ local named_sending: { [string]: (push: () -> (), landing: string?) -> () } = {}
 local function Transcript(props: Props): Node
 	opened_at = ui.now()
 	local messages = props.messages
+	local threads = props.threads
+	local newest_plan = if threads and threads.plan
+		then ui.computed(function(): string?
+			return if (threads.plan :: any)() then Threads.newest_plan(messages:get()) else nil
+		end)
+		else nil
+	local plan_call = if newest_plan
+		then function(): string?
+			return newest_plan:get()
+		end
+		else nil
 	-- (Its own kept states, by its name: a side chat's beside the chat
 	-- page's never shares the chat page's glide, runway or hover.)
 	local kept = if props.name then `.{props.name}` else ""
@@ -2627,7 +2664,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered, branch_actions(m, state)),
 						waiting_line(state, props.on_retry, props.working, props.compaction_wait, props.turn_state),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code }),
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code }),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?

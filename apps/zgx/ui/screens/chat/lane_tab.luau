@@ -270,7 +270,7 @@ local function pills_reach(slot: string): State<number>
 	return ui.state(`chat_lane_pills_reach_{slot}`, 0)
 end
 
-local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, panel_key: string?, tab_id: string?): Node
+local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, panel_key: string?, tab_id: string?, placeholder: string?): Node
 	local reach = pills_reach(tab_id or name)
 	local lifted = Dock.lift(tab_id or name)
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
@@ -1063,7 +1063,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		focus = if split then nil else focus,
 		-- (ds.Composer's placeholder is a string: read as the tab is made.)
 		-- (A split's pane is a chat of its own: the chat page's words.)
-		placeholder = locale.s(if split then "chat.composer.placeholder" else "chat.lane_tab.placeholder"),
+		placeholder = locale.s(placeholder or if split then "chat.composer.placeholder" else "chat.lane_tab.placeholder"),
 		running = running,
 		access = access,
 		plan = plan,
@@ -1754,7 +1754,7 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 					hidden = function(): boolean
 						return split and focused_now()
 					end,
-					Dock.Dock { height = dock_h, composer = ui.column { w_full = true, owners(chat, split), composer(chat, view, `lane.{slot}`, focus, open_model, data.split == true, if split then focused_now else nil, props.panel_key, slot) }, id = `lane-composer-{slot}` },
+					Dock.Dock { height = dock_h, composer = ui.column { w_full = true, owners(chat, split), composer(chat, view, `lane.{slot}`, focus, open_model, data.split == true, if split then focused_now else nil, props.panel_key, slot, tab.placeholder) }, id = `lane-composer-{slot}` },
 				},
 			}
 			if zone then

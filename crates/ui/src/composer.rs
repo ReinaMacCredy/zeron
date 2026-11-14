@@ -45,7 +45,7 @@ mod annotation_chip;
 mod ask_pill;
 mod claude_cards;
 pub(crate) mod claude_config;
-pub(crate) use ask_pill::{AskInfo, pending_questions};
+pub(crate) use ask_pill::AskInfo;
 mod waiting;
 pub use waiting::WaitingAction;
 pub(crate) use waiting::{WaitItem, WaitKind};
@@ -7393,7 +7393,6 @@ pub struct Composer {
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
     pr_chat: bool,
-    full_chat: bool,
     pr_context: Option<String>,
     pr_chips: Vec<(crate::pull_request_detail::ContextChip, SharedString)>,
     pr_chip_remove: Option<PrChipRemove>,
@@ -7751,7 +7750,6 @@ impl Composer {
             context_ring,
             side_chat: false,
             pr_chat: false,
-            full_chat: false,
             pr_context: None,
             pr_chips: Vec::new(),
             pr_chip_remove: None,
@@ -7954,7 +7952,7 @@ impl Composer {
     fn active_prediction(&self, cx: &App) -> Option<SharedString> {
         if self.side_chat
             || self.plan(cx)
-            || (self.chat_override.is_some() && !self.full_chat)
+            || self.chat_override.is_some()
             || self.wizard.is_some()
             || self.editing_queued.is_some()
             || self.mentions.read(cx).is_open()
@@ -8227,11 +8225,6 @@ impl Composer {
         cx.notify();
     }
 
-    pub(crate) fn set_full_chat(&mut self, cx: &mut Context<Self>) {
-        self.full_chat = true;
-        cx.notify();
-    }
-
     pub(crate) fn bound_transcript<'a>(&self, state: &'a AppState) -> &'a [SessionMessageEntry] {
         match self.chat_override.as_deref() {
             Some(chat_id) => state.sub_transcript(chat_id),
@@ -8240,26 +8233,8 @@ impl Composer {
     }
 
     // AppState keeps the queue for the selected chat only.
-    pub(crate) fn reads_selection(&self, cx: &App) -> bool {
-        match self.chat_override.as_deref() {
-            None => true,
-            Some(chat_id) => {
-                self.full_chat && self.state.read(cx).selected_chat.as_deref() == Some(chat_id)
-            }
-        }
-    }
-
-    pub(crate) fn set_idle_placeholder(
-        &mut self,
-        placeholder: &'static str,
-        cx: &mut Context<Self>,
-    ) {
-        self.idle_placeholder = placeholder.into();
-        if self.wizard.is_none() {
-            self.input
-                .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
-        }
-        cx.notify();
+    pub(crate) fn reads_selection(&self) -> bool {
+        self.chat_override.is_none()
     }
 
     pub(crate) fn set_pr_chat(&mut self, placeholder: &'static str, cx: &mut Context<Self>) {
@@ -8299,7 +8274,7 @@ impl Composer {
         let runs_on_cloud = self.pickers.read(cx).runs_on_cloud(cx);
         let draft = self.has_draft(cx);
         let bound_chat = self.bound_chat_id(cx);
-        let reads_selection = self.reads_selection(cx);
+        let reads_selection = self.reads_selection();
         let state = self.state.read(cx);
         let now = crate::state::clock_now();
         let (link, host) = match bound_chat.as_deref() {
@@ -10168,7 +10143,7 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if (self.chat_override.is_some() && !self.full_chat) || self.side_chat || self.pr_chat {
+        if self.chat_override.is_some() || self.side_chat || self.pr_chat {
             return None;
         }
         let chat = self.bound_chat_row(cx)?;
@@ -10303,7 +10278,8 @@ impl Composer {
         let (pending, edited_row_exists) = {
             let s = self.state.read(cx);
             (
-                (self.chat_override.is_none() || self.full_chat)
+                self.chat_override
+                    .is_none()
                     .then(|| pending_input_request(self.bound_transcript(s)))
                     .flatten()
                     .filter(|(_, questions)| {
@@ -10655,7 +10631,7 @@ impl Composer {
     fn navigate_history(&mut self, delta: isize, cx: &mut Context<Self>) {
         let target = if self.wizard.is_some()
             || self.editing_queued.is_some()
-            || (self.chat_override.is_some() && !self.full_chat)
+            || self.chat_override.is_some()
             || self.input.read(cx).read_only
         {
             None
@@ -13818,7 +13794,7 @@ impl Render for Composer {
         let card_in_flow = card.is_some() && self.bound_chat_id(cx).is_none();
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
-        let has_queue = self.reads_selection(cx) && !self.state.read(cx).queue.is_empty();
+        let has_queue = self.reads_selection() && !self.state.read(cx).queue.is_empty();
         let todo = self.render_todo_panel(has_queue, window, cx);
         let queue = self.render_queue_panel(show_queue_latest_shortcut, window, cx);
         let trays = usize::from(todo.is_some()) + usize::from(queue.is_some());
@@ -18556,6 +18532,8 @@ mod tests {
                         unsettled_at: None,
                         harness_session_harness: Default::default(),
                         sleep: None,
+                        plan: None,
+                        plan_pending: false,
                     }];
                     state.selected_chat = Some("c1".into());
                 });
@@ -18781,6 +18759,8 @@ mod tests {
             unsettled_at: None,
             harness_session_harness: Default::default(),
             sleep: None,
+            plan: None,
+            plan_pending: false,
         }
     }
 
@@ -19101,83 +19081,6 @@ mod tests {
             .unwrap();
     }
 
-    #[gpui::test]
-    fn a_full_chat_composer_recalls_and_answers_its_own_chat(cx: &mut gpui::TestAppContext) {
-        let (_dir, handle) = composer_focus_window(cx);
-        let state = handle
-            .read_with(cx, |composer, _| composer.state.clone())
-            .unwrap();
-        let window = cx.add_window(|_, cx| {
-            let mut composer = Composer::for_chat(state.clone(), "step".into(), cx);
-            composer.set_full_chat(cx);
-            composer
-        });
-        let entry = |id: &str, role: MessageRole, part: MessagePart| SessionMessageEntry {
-            id: id.into(),
-            role,
-            parts: vec![part],
-            created_at: 0,
-            device_id: "dev".into(),
-            status: Some(zeron_doc::MessageStatus::Streaming),
-            continuation_of: None,
-            from_chat_id: None,
-            fork_import: false,
-            answers_request_id: None,
-            duration_ms: None,
-        };
-        let prompt = |chat: &str| {
-            entry(
-                &format!("{chat}-prompt"),
-                MessageRole::User,
-                MessagePart::Text {
-                    id: format!("{chat}-text"),
-                    text: format!("{chat} prompt"),
-                },
-            )
-        };
-        let asking = |chat: &str| {
-            entry(
-                &format!("{chat}-ask"),
-                MessageRole::Assistant,
-                MessagePart::Input {
-                    id: format!("in-{chat}"),
-                    request_id: format!("{chat}-request"),
-                    questions: vec![question("q", &["a"], false)],
-                    resolved: false,
-                    answers: None,
-                    asked_at_ms: None,
-                    answered_at_ms: None,
-                },
-            )
-        };
-        window
-            .update(cx, |composer, _, cx| {
-                composer.state.update(cx, |state, _| {
-                    state.chats = vec![chat_row("lead", None), chat_row("step", None)];
-                    state.selected_chat = Some("lead".into());
-                    state.transcript = vec![prompt("lead")];
-                    state.set_subagent_snapshot("step".into(), vec![prompt("step")]);
-                });
-                composer.on_state_changed(cx);
-                composer.navigate_history(-1, cx);
-                assert_eq!(composer.input.read(cx).text(), "step prompt");
-                composer.navigate_history(1, cx);
-
-                composer.state.update(cx, |state, _| {
-                    state.transcript = vec![prompt("lead"), asking("lead")];
-                    state
-                        .set_subagent_snapshot("step".into(), vec![prompt("step"), asking("step")]);
-                });
-                composer.on_state_changed(cx);
-                assert_eq!(
-                    composer.wizard.as_ref().map(|w| w.request_id.as_str()),
-                    Some("step-request"),
-                    "the question card is the bound chat's, never the selection's"
-                );
-            })
-            .unwrap();
-    }
-
     #[test]
     fn dismissed_mentions_reject_stale_responses() {
         let mut state = FileMentionState {
@@ -19411,6 +19314,8 @@ mod tests {
             unsettled_at: None,
             harness_session_harness: Default::default(),
             sleep: None,
+            plan: None,
+            plan_pending: false,
         };
         let mut chats = vec![
             chat("a1", Some("Fix PR fetching")),

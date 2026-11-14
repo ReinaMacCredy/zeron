@@ -95,7 +95,6 @@ mod harness_updates;
 #[cfg(test)]
 mod home_grid_tests;
 mod intros;
-mod mission_strip;
 mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
@@ -118,7 +117,6 @@ mod sidebar_sections;
 pub(crate) mod spaces;
 mod split;
 mod summary;
-mod supervisor_actions;
 mod swipe_nav;
 mod switcher;
 mod task_actions;
@@ -160,31 +158,6 @@ fn connection_pill_caption(conn: &zeron_proto::Connectivity) -> Option<(&'static
         S::Offline => Some(("Offline — sends are saved", true)),
         S::Reconnecting => Some(("Reconnecting…", false)),
     }
-}
-
-fn lead_rollup_label(fold: &spaces::LeadFold, theme: &Theme) -> Option<AnyElement> {
-    (!fold.open).then(|| {
-        div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(5.0))
-            .whitespace_nowrap()
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted)
-            .child(fold.rollup.clone())
-            .when(fold.asking, |el| {
-                el.child(
-                    div()
-                        .size(px(7.0))
-                        .flex_none()
-                        .rounded_full()
-                        .bg(theme.warning),
-                )
-            })
-            .into_any_element()
-    })
 }
 
 pub(crate) fn chat_status_tone(
@@ -324,8 +297,6 @@ const CHAT_MENU_ROW_COPY: u8 = 3;
 const CHAT_MENU_ROW_DELETE: u8 = 4;
 const CHAT_MENU_ROW_TAB: u8 = 5;
 const CHAT_MENU_ROW_SETTLE: u8 = 9;
-const CHAT_MENU_ROW_STEPS: u8 = 10;
-const CHAT_MENU_ROW_PLAN: u8 = 11;
 
 #[derive(Clone, Copy)]
 enum TabCloseAction {
@@ -1977,8 +1948,6 @@ pub enum Route {
     Settings(SettingsSection),
     Terminal,
     Tasks,
-    TaskCenter,
-    Supervisor,
     Docs,
     Skills,
 }
@@ -2147,8 +2116,6 @@ pub enum NavEntry {
     Usage,
     Inbox,
     Tasks,
-    TaskCenter(String),
-    Supervisor,
     Docs(Option<&'static str>),
     Skills,
 }
@@ -2293,7 +2260,6 @@ pub(super) fn chat_row_height(show_label: bool) -> f32 {
             SIDEBAR_CARD_TWO_LINE_HEIGHT
         }
 }
-const SIDEBAR_NESTED_INDENT: f32 = 16.0;
 
 fn sidebar_row_height(compact: bool, slim: bool, show_label: bool) -> f32 {
     if compact {
@@ -3624,8 +3590,6 @@ pub struct Shell {
     right_more: popover::Popup<()>,
     /// Session tab currently hovered (close button appears on hover).
     tab_hover: Option<String>,
-    tab_group_hover: Option<String>,
-    tab_group_menu_hover: Option<String>,
     /// Session-tab context menu: (chat id, window position).
     tab_menu: popover::Popup<(String, Point<Pixels>)>,
     /// Session-tab drag-reorder in flight (see `tabs::TabDragState`).
@@ -3677,14 +3641,6 @@ pub struct Shell {
     inbox_page: Option<(Entity<crate::inbox::InboxPage>, Subscription)>,
     tasks_page: Option<Entity<crate::tasks::TasksPage>>,
     _tasks_events: Option<gpui::Subscription>,
-    task_center_task: Option<String>,
-    task_center: Option<(Entity<crate::tasks::TaskCenter>, Subscription)>,
-    task_center_pane: Option<task_actions::DocPane>,
-    task_center_docs: Vec<String>,
-    task_slide: task_actions::TaskSlide,
-    mission_trees:
-        std::collections::HashMap<String, (Entity<crate::tasks::StripTree>, Subscription)>,
-    supervisor: supervisor_actions::SupervisorShell,
     triage: triage::TriageTray,
     _triage_observation: Subscription,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
@@ -3906,8 +3862,8 @@ pub struct Shell {
     active_chat: String,
     /// Last selected session survives opening the blank Appshot destination.
     last_appshot_chat: Option<String>,
-    /// The session last interacted with and its moment (Appshot affinity and
-    /// Supervisor presence), and the session the previous snap went to.
+    /// The session last interacted with and its moment (Appshot affinity),
+    /// and the session the previous snap went to.
     last_interaction: Option<(String, std::time::Instant)>,
     appshot_last_target: Option<(String, std::time::Instant)>,
     /// Last rendered sidebar order (key + estimated height) — the FLIP baseline
@@ -4249,19 +4205,12 @@ impl Shell {
         // `settings` reopens the remembered section; a named one is
         // remembered like any other link to a section.
         let open_route = std::env::var("ZERON_OPEN_ROUTE").ok();
-        let open_task = open_route
-            .as_deref()
-            .and_then(|route| route.strip_prefix("tasks/"))
-            .filter(|id| !id.is_empty())
-            .map(str::to_owned);
         let route = match open_route.as_deref() {
             Some("pull-requests") => Route::PullRequests,
             Some("usage") => Route::Usage,
             Some("inbox") => Route::Inbox,
             Some("tasks") => Route::Tasks,
-            Some("supervisor") => Route::Supervisor,
             Some("skills") => Route::Skills,
-            Some(_) if open_task.is_some() => Route::TaskCenter,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
                     Some(section) => {
@@ -4316,8 +4265,6 @@ impl Shell {
             Route::Inbox => NavEntry::Inbox,
             Route::Settings(section) => NavEntry::Settings(section),
             Route::Tasks => NavEntry::Tasks,
-            Route::TaskCenter => NavEntry::TaskCenter(open_task.clone().unwrap_or_default()),
-            Route::Supervisor => NavEntry::Supervisor,
             Route::Docs => NavEntry::Docs(None),
             Route::Skills => NavEntry::Skills,
         });
@@ -4433,8 +4380,6 @@ impl Shell {
             right_tab_room: Default::default(),
             right_more: popover::Popup::default(),
             tab_hover: None,
-            tab_group_hover: None,
-            tab_group_menu_hover: None,
             tab_menu: popover::Popup::default(),
             tab_drag: None,
             split_drop_hot: None,
@@ -4470,13 +4415,6 @@ impl Shell {
             inbox_page: None,
             tasks_page: None,
             _tasks_events: None,
-            task_center_task: open_task.clone(),
-            task_center: None,
-            task_center_pane: None,
-            task_center_docs: Vec::new(),
-            task_slide: task_actions::TaskSlide::resting(route),
-            mission_trees: std::collections::HashMap::new(),
-            supervisor: Default::default(),
             triage: Default::default(),
             _triage_observation: triage_observation,
             pull_request_detail: None,
@@ -4749,8 +4687,7 @@ impl Shell {
     }
 
     /// Any keystroke or click refreshes the Automatic destination's affinity,
-    /// as Synara's coordinator does from `pointerdown`/`keydown`, and marks
-    /// the person present for Supervisor routing.
+    /// as Synara's coordinator does from `pointerdown`/`keydown`.
     fn note_interaction(&mut self, cx: &mut Context<Self>) {
         let selected = self
             .state
@@ -5061,7 +4998,6 @@ impl Shell {
                 }
             }
         }
-        self.route_supervisor_needs(cx);
         // Agent release discoveries finish independently (bounded provider
         // concurrency), so debounce the transition and deliver one aggregate
         // banner. Versioned releases deduplicate by version. Versionless
@@ -5235,7 +5171,6 @@ impl Shell {
         }
         if selected != self.active_chat {
             self.last_interaction = Some((selected.clone(), std::time::Instant::now()));
-            self.reveal_sidebar_child(&selected, cx);
         }
         if selected != self.active_chat {
             self.suspend_file_images(cx);
@@ -6595,11 +6530,9 @@ impl Shell {
                 }
                 crate::route_badge::RouteLink::Usage => self.open_usage(cx),
             },
-            TranscriptEvent::ApprovePlan {
-                chat_id,
-                as_task,
-                target,
-            } => self.approve_plan(chat_id, target.clone(), *as_task, cx),
+            TranscriptEvent::ApprovePlan { chat_id, answer } => {
+                self.approve_plan(chat_id, answer.clone(), cx)
+            }
             TranscriptEvent::EditPlan { chat_id, answer } => {
                 self.composer.update(cx, |composer, cx| {
                     composer.answer_plan(chat_id, answer.clone(), false, cx)
@@ -6698,12 +6631,6 @@ impl Shell {
                     .as_ref()
                     .and_then(|split| split.composer_for(transcript))
             })
-            .or_else(|| {
-                self.task_center_pane
-                    .as_ref()
-                    .and_then(|pane| pane.composer_for(transcript))
-            })
-            .or_else(|| self.supervisor.composer_for(transcript))
             .unwrap_or_else(|| self.composer.clone())
     }
 
@@ -7193,8 +7120,6 @@ impl Shell {
             .any(|tab| tab.chat_id == chat_id)
             || self.subagent_tabs.values().any(|tab| tab.doc_id == chat_id)
             || self.split_chat_id() == Some(chat_id)
-            || self.task_center_holds(chat_id)
-            || self.supervisor.holds(chat_id)
     }
 
     pub(super) fn release_doc(&mut self, chat_id: &str, cx: &mut Context<Self>) {
@@ -8164,10 +8089,6 @@ impl Shell {
 
     fn set_route(&mut self, route: Route, cx: &mut Context<Self>) {
         self.dismiss_command_palette(cx);
-        self.route_task_slide(route);
-        if self.route == Route::Supervisor && route != Route::Supervisor {
-            self.leave_supervisor(cx);
-        }
         // A settings-search landing belongs to the page it was asked on, and
         // a query to the visit: however Settings is left, the next visit
         // starts from the sections.
@@ -8842,9 +8763,6 @@ impl Shell {
                 self.defer_in_active_window(cx, |shell, window, cx| shell.open_triage(window, cx))
             }
             crate::inbox::InboxEvent::OpenTasks => self.open_tasks(cx),
-            crate::inbox::InboxEvent::OpenTaskCenter(task_id) => {
-                self.open_task_center(task_id.clone(), cx)
-            }
             crate::inbox::InboxEvent::CreateTask {
                 task_id,
                 title,
@@ -9170,8 +9088,6 @@ impl Shell {
             NavEntry::Usage => self.enter_usage_route(cx),
             NavEntry::Inbox => self.enter_inbox_route(cx),
             NavEntry::Tasks => self.enter_tasks_route(cx),
-            NavEntry::TaskCenter(task_id) => self.enter_task_center_route(task_id, cx),
-            NavEntry::Supervisor => self.enter_supervisor_route(cx),
             NavEntry::Docs(article) => self.enter_docs_route(article, cx),
             NavEntry::Skills => self.enter_skills_route(cx),
             NavEntry::Settings(section) => {
@@ -13071,8 +12987,6 @@ impl Shell {
         project_icon: bool,
         in_project_group: bool,
         slim: bool,
-        nested: bool,
-        lead: Option<spaces::LeadFold>,
         search_query: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -13107,8 +13021,6 @@ impl Shell {
                 project_icon,
                 in_project_group,
                 slim,
-                nested,
-                lead,
                 theme,
                 cx,
             );
@@ -13167,29 +13079,6 @@ impl Shell {
         let project_icon = (project_icon && search_query.is_none())
             .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
-        let lead_chevron = lead
-            .as_ref()
-            .filter(|_| !preview && search_query.is_none())
-            .map(|fold| {
-                self.lead_chevron(
-                    &row_id,
-                    &id,
-                    fold,
-                    corner_hovered,
-                    Theme::SPACE_SM,
-                    theme,
-                    cx,
-                )
-            });
-        let mission = search_query
-            .is_none()
-            .then(|| spaces::SidebarMission::of(self.state.read(cx), &id))
-            .flatten()
-            .filter(|_| !nested);
-        let lead_rollup = lead
-            .as_ref()
-            .filter(|_| mission.is_none())
-            .and_then(|fold| lead_rollup_label(fold, theme));
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
         let project_icon = project_icon.map(|icon| {
             div()
@@ -13276,9 +13165,7 @@ impl Shell {
             })
         };
         let compact_status = compact.then(|| {
-            let glyph = if let Some(mission) = &mission {
-                mission.ring(12.0, theme)
-            } else if ring.is_some() {
+            let glyph = if ring.is_some() {
                 crate::composer::background::sidebar_ring_mark(0, theme).into_any_element()
             } else if working {
                 loaders::mini_glyph_spinner(
@@ -13521,11 +13408,7 @@ impl Shell {
                 .child(corner_body)
                 .into_any_element()
         };
-        let secondary = !selected
-            && (split_side.is_some() && self.split.is_some()
-                || lead
-                    .as_ref()
-                    .is_some_and(|fold| !fold.open && fold.holds_selected));
+        let secondary = !selected && split_side.is_some() && self.split.is_some();
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
         let subline = if search_query.is_some() {
@@ -13622,7 +13505,6 @@ impl Shell {
             rename_input.is_some(),
             corner_hovered,
             &fade_key,
-            mission.as_ref().map(|mission| mission.task_id.clone()),
             cx,
         )
         .h(px(legacy_height))
@@ -13635,13 +13517,9 @@ impl Shell {
             8.0
         }))
         .px(px(Theme::SPACE_SM))
-        .when(nested || lead.is_some(), |el| {
-            el.pl(px(Theme::SPACE_SM + SIDEBAR_NESTED_INDENT))
-        })
         .py(px(6.0))
         .text_color(motion::hover_blend(&fade_key, rest_text, text))
         .bg(motion::hover_blend(&fade_key, rest_bg, hover_bg))
-        .children(lead_chevron)
         // Line 1: "project @ device", status word / time-ago right.
         .when(!compact && show_label, |el| {
             el.child(
@@ -13724,7 +13602,6 @@ impl Shell {
                     )
                     .into_any_element(),
                 })
-                .children(lead_rollup)
                 .when(!compact && !show_label && remote, |el| {
                     el.child(
                         icon(remote_glyph)
@@ -13849,11 +13726,7 @@ impl Shell {
                                         .text_right()
                                         .text_size(crate::typography::ui_rems(11.0))
                                         .text_color(subline)
-                                        .child(
-                                            compact_jump_label
-                                                .or(mission.as_ref().map(|m| m.count()))
-                                                .unwrap_or(time_ago),
-                                        )
+                                        .child(compact_jump_label.unwrap_or(time_ago))
                                         .into_any_element()
                                 }),
                         )
@@ -13931,54 +13804,6 @@ impl Shell {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn lead_chevron(
-        &self,
-        row_id: &str,
-        lead_id: &str,
-        fold: &spaces::LeadFold,
-        hovered: bool,
-        inset: f32,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let lead_id = lead_id.to_owned();
-        let label = if fold.open {
-            "Collapse step threads"
-        } else {
-            "Expand step threads"
-        };
-        div()
-            .id(SharedString::from(format!("{row_id}-steps-toggle")))
-            .debug_selector({
-                let selector = format!("{row_id}-steps-toggle");
-                move || selector.clone()
-            })
-            .absolute()
-            .left(px(inset - 2.0))
-            .top_0()
-            .bottom_0()
-            .w(px(SIDEBAR_NESTED_INDENT))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .role(gpui::Role::Button)
-            .aria_label(label)
-            .aria_expanded(fold.open)
-            .tab_index(0)
-            .opacity(if hovered || !fold.open { 1.0 } else { 0.0 })
-            .focus_visible(|style| style.opacity(1.0).border_1().border_color(theme.accent))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                this.toggle_sidebar_lead(&lead_id, cx);
-            }))
-            .tooltip(crate::settings::widgets::text_tooltip_above(label))
-            .child(self.turned_disclosure_chevron(&fold.motion_key, fold.open, -0.25, theme))
-            .into_any_element()
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn render_sidebar_card(
         &self,
         id: String,
@@ -13999,8 +13824,6 @@ impl Shell {
         project_icon: bool,
         in_project_group: bool,
         slim: bool,
-        nested: bool,
-        lead: Option<spaces::LeadFold>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -14023,7 +13846,7 @@ impl Shell {
         let now = Utc::now();
         let worktree;
         let diff;
-        let (device, remote, queued, undelivered, expired, started_at, subagents, asks, mission) = {
+        let (device, remote, queued, undelivered, expired, started_at, subagents) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|chat| chat.id == id);
             worktree = chat
@@ -14050,10 +13873,6 @@ impl Shell {
                     .session_for(&id)
                     .and_then(|session| session.started_at),
                 state.running_subagents_for(&id, now),
-                nested && chat.is_some_and(|chat| spaces::step_needs_you(state, chat, status)),
-                (!nested)
-                    .then(|| spaces::SidebarMission::of(state, &id))
-                    .flatten(),
             )
         };
         let queued = queued && !undelivered;
@@ -14085,12 +13904,6 @@ impl Shell {
                     icons::LUCIDE_CIRCLE_DOT_DASHED,
                     theme.warning,
                 )
-            } else if asks {
-                (
-                    self.triage_word(&id).or(Some("Asking".into())),
-                    icons::LUCIDE_MESSAGE_CIRCLE_QUESTION,
-                    theme.warning,
-                )
             } else {
                 let (label, icon, color) = chat_status_tone(status, theme);
                 let label = self
@@ -14099,27 +13912,12 @@ impl Shell {
                     .or(label);
                 (label, icon, color)
             };
-        let unread = (!settled_state
-            && matches!(status, Status::Completed | Status::AwaitingInput))
-            || lead.as_ref().is_some_and(|fold| !fold.open && fold.asking);
+        let unread = !settled_state && matches!(status, Status::Completed | Status::AwaitingInput);
         let failed = undelivered || (!settled_state && status == Status::Errored);
         let recede = !selected && !unread && !failed;
         let hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
-        let lead_chevron = lead
-            .as_ref()
-            .filter(|_| !preview)
-            .map(|fold| self.lead_chevron(&row_id, &id, fold, hovered, 10.0, theme, cx));
-        let lead_rollup = || {
-            lead.as_ref()
-                .filter(|_| mission.is_none())
-                .and_then(|fold| lead_rollup_label(fold, theme))
-        };
         let unsent = crate::draft_store::has_content(&id, cx) && !selected;
-        let secondary = !selected
-            && (split_side.is_some() && self.split.is_some()
-                || lead
-                    .as_ref()
-                    .is_some_and(|fold| !fold.open && fold.holds_selected));
+        let secondary = !selected && split_side.is_some() && self.split.is_some();
         let light_active = selected && !theme.appearance.is_dark();
         let bg = if light_active {
             gpui::white()
@@ -14324,7 +14122,6 @@ impl Shell {
                 rename_input.is_some(),
                 hovered,
                 &fade_key,
-                mission.as_ref().map(|mission| mission.task_id.clone()),
                 cx,
             )
             .when_some(hover_card, |el, card| el.child(card));
@@ -14343,11 +14140,6 @@ impl Shell {
                     .children(pin_action)
                     .child(settle_action.unwrap_or(archive_action))
                     .into_any_element()
-            } else if let Some(mission) = &mission {
-                div()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .child(mission.mark(theme))
-                    .into_any_element()
             } else {
                 div()
                     .whitespace_nowrap()
@@ -14363,15 +14155,11 @@ impl Shell {
                 .items_center()
                 .gap(px(10.0))
                 .px(px(10.0))
-                .when(nested || lead.is_some(), |el| {
-                    el.pl(px(10.0 + SIDEBAR_NESTED_INDENT))
-                })
                 .rounded(px(6.0))
                 .bg(bg)
                 .when(light_active, |el| {
                     el.shadow(crate::theme::card_selected_shadows())
                 })
-                .children(lead_chevron)
                 .children(project_icon.map(|icon| {
                     div()
                         .flex_none()
@@ -14389,7 +14177,6 @@ impl Shell {
                     },
                     if lifted { theme.text } else { rest },
                 ))
-                .children(lead_rollup())
                 .child(
                     div()
                         .id(SharedString::from(format!("{row_id}-corner")))
@@ -14453,8 +14240,6 @@ impl Shell {
                 .child(archive_action)
                 .children(settle_action)
                 .into_any_element()
-        } else if let Some(mission) = &mission {
-            mission.mark(theme)
         } else {
             status_el()
         };
@@ -14527,7 +14312,6 @@ impl Shell {
                     ))
                 } else {
                     el.child(title_el(14.0, title_weight, title_color))
-                        .children(lead_rollup())
                 }
             })
             .children(split_glyph)
@@ -14677,9 +14461,6 @@ impl Shell {
                     .size_full()
                     .rounded(px(6.0))
                     .px(px(10.0))
-                    .when(nested || lead.is_some(), |el| {
-                        el.pl(px(10.0 + SIDEBAR_NESTED_INDENT))
-                    })
                     .py(px(8.0))
                     .flex()
                     .flex_col()
@@ -14688,7 +14469,6 @@ impl Shell {
                         el.shadow(crate::theme::card_selected_shadows())
                     })
                     .when(recede && working && !hovered, |el| el.opacity(0.7))
-                    .children(lead_chevron)
                     .child(line_one)
                     .when(show_label, |el| {
                         el.child(
@@ -14699,8 +14479,7 @@ impl Shell {
                                 .flex_row()
                                 .items_center()
                                 .gap(px(6.0))
-                                .child(title_el(14.0, title_weight, title_color))
-                                .children(lead_rollup()),
+                                .child(title_el(14.0, title_weight, title_color)),
                         )
                     })
                     .child(line_three),
@@ -14928,7 +14707,6 @@ impl Shell {
         has_rename: bool,
         corner_hovered: bool,
         fade_key: &str,
-        mission: Option<String>,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let select_id = id.to_string();
@@ -14982,8 +14760,6 @@ impl Shell {
                     // double-click edits the title in place.
                     if event.click_count() >= 2 && search_query_none {
                         this.open_rename_chat(select_id.clone(), cx);
-                    } else if let Some(task_id) = &mission {
-                        this.open_task_center(task_id.clone(), cx);
                     } else {
                         this.open_chat(select_id.clone(), cx);
                     }
@@ -15957,7 +15733,7 @@ impl Shell {
                 matches!(self.route, Route::Chat) && self.state.read(cx).selected_chat.is_none()
             }
             RailItem::Inbox => matches!(self.route, Route::Inbox),
-            RailItem::Tasks => matches!(self.route, Route::Tasks | Route::TaskCenter),
+            RailItem::Tasks => matches!(self.route, Route::Tasks),
             RailItem::Skills => matches!(self.route, Route::Skills),
             RailItem::PullRequests => matches!(self.route, Route::PullRequests),
             RailItem::Settings => matches!(self.route, Route::Settings(_)),
@@ -16810,20 +16586,7 @@ impl Shell {
                     .then(|| spaces::sidebar_settled_at(state, status, chat, now).is_some())
                 })
                 .flatten();
-            let step_threads = (menu_state.tab.is_none()
-                && !chat_id.is_empty()
-                && self.sidebar_has_step_threads(&chat_id, cx))
-            .then(|| self.sidebar_lead_collapsed(&chat_id));
-            let can_plan = !chat_id.is_empty() && {
-                let state = self.state.read(cx);
-                state
-                    .chats
-                    .iter()
-                    .any(|chat| chat.id == chat_id && crate::tasks::can_add_plan(state, chat))
-            };
             let rename_id = chat_id.clone();
-            let plan_id = chat_id.clone();
-            let steps_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let settle_id = chat_id.clone();
             let archive_id = chat_id.clone();
@@ -16862,30 +16625,6 @@ impl Shell {
                         .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                         .child(SharedString::from("Rename"));
                 let menu = menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_RENAME, rename, cx));
-                let menu = if can_plan {
-                    let plan =
-                        popover::menu_row(&theme, false, format!("chat-menu-plan-{chat_id}"))
-                            .id("chat-menu-plan")
-                            .debug_selector(|| "chat-menu-plan".into())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.close_chat_menu(cx);
-                                this.add_plan(
-                                    &plan_id,
-                                    crate::tasks::Orchestrate::default(),
-                                    None,
-                                    cx,
-                                );
-                            }))
-                            .child(
-                                icon(icons::MISSION_CONTROL)
-                                    .size(px(16.0))
-                                    .text_color(theme.text_muted),
-                            )
-                            .child(SharedString::from("Add plan"));
-                    menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PLAN, plan, cx))
-                } else {
-                    menu
-                };
                 let menu = if is_side_chat {
                     menu
                 } else {
@@ -16932,36 +16671,9 @@ impl Shell {
                                 }));
                         self.chat_menu_hover_row(CHAT_MENU_ROW_SETTLE, row, cx)
                     });
-                    let steps = step_threads.map(|collapsed| {
-                        let row =
-                            popover::menu_row(&theme, false, format!("chat-menu-steps-{chat_id}"))
-                                .id("chat-menu-steps")
-                                .debug_selector(|| "chat-menu-steps".into())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.close_chat_menu(cx);
-                                    this.toggle_sidebar_lead(&steps_id, cx)
-                                }))
-                                .child(
-                                    icon(icons::LUCIDE_CHEVRON_DOWN)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted)
-                                        .when(collapsed, |el| {
-                                            el.with_transformation(gpui::Transformation::rotate(
-                                                gpui::radians(-std::f32::consts::FRAC_PI_2),
-                                            ))
-                                        }),
-                                )
-                                .child(SharedString::from(if collapsed {
-                                    "Expand step threads"
-                                } else {
-                                    "Collapse step threads"
-                                }));
-                        self.chat_menu_hover_row(CHAT_MENU_ROW_STEPS, row, cx)
-                    });
                     let copy = self.render_chat_copy_trigger(&chat_id, copy_open, &theme, cx);
                     menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PIN, pin, cx))
                         .children(settle)
-                        .children(steps)
                         .child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx))
                         .child(self.chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx))
                 };
@@ -17388,10 +17100,6 @@ impl Shell {
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
-        if let Some(page) = self.render_task_slide(window, cx) {
-            return page;
-        }
-
         if matches!(self.route, Route::Inbox) {
             return self.render_inbox_page(cx);
         }
@@ -17415,14 +17123,6 @@ impl Shell {
 
         if matches!(self.route, Route::Tasks) {
             return self.render_tasks_page(window, cx);
-        }
-
-        if matches!(self.route, Route::TaskCenter) && self.task_chat_slide_t().is_none() {
-            return self.render_task_center_page(window, cx);
-        }
-
-        if matches!(self.route, Route::Supervisor) {
-            return self.render_supervisor_page(window, cx);
         }
 
         if matches!(self.route, Route::Docs) {
@@ -17797,13 +17497,6 @@ impl Shell {
         } else {
             0.0
         };
-        let (mission_strip, strip_band) = match has_selection
-            .then(|| self.render_mission_strip(composer_width, cx))
-            .flatten()
-        {
-            Some((strip, band)) => (Some(strip), band),
-            None => (None, 0.0),
-        };
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
@@ -17852,8 +17545,7 @@ impl Shell {
                     // starting the underlay below it moves the transcript's
                     // own titlebar inset and fade down with it, while the
                     // backgrounds above stay put.
-                    let header_inset = split_header + strip_band;
-                    div().absolute().inset_0().top(px(header_inset)).child(
+                    div().absolute().inset_0().top(px(split_header)).child(
                         crate::terminal::dock::above_terminal(
                             crate::edge_fade::edge_faded(
                                 Theme::TRANSCRIPT_FADE_BAND,
@@ -17872,20 +17564,6 @@ impl Shell {
                     )
                 },
             )
-            .when_some(mission_strip, |column, strip| {
-                column.child(
-                    div()
-                        .absolute()
-                        .top(px(Theme::TITLEBAR_HEIGHT
-                            + split_header
-                            + mission_strip::STRIP_GAP))
-                        .left_0()
-                        .right_0()
-                        .flex()
-                        .justify_center()
-                        .child(strip),
-                )
-            })
             .when_some(
                 has_selection
                     .then(|| self.render_device_float(cx))
@@ -17900,7 +17578,7 @@ impl Shell {
                         div()
                             .absolute()
                             .inset_0()
-                            .top(px(Theme::TITLEBAR_HEIGHT + header + strip_band))
+                            .top(px(Theme::TITLEBAR_HEIGHT + header))
                             .overflow_hidden()
                             .child(crate::terminal::dock::above_terminal(
                                 float,
@@ -20790,7 +20468,6 @@ impl Render for Shell {
                     };
                 }
                 let pr_route = matches!(self.route, Route::PullRequests);
-                let chat_under = self.task_chat_slide_t().is_some();
                 let page_route = pr_route
                     || matches!(
                         self.route,
@@ -20798,14 +20475,12 @@ impl Render for Shell {
                             | Route::Usage
                             | Route::Inbox
                             | Route::Tasks
-                            | Route::Supervisor
                             | Route::Docs
                             | Route::Skills
-                    )
-                    || (self.route == Route::TaskCenter && !chat_under);
+                    );
                 // The Pull requests route shares this layout without the
                 // chat's side pane.
-                let on_chat = matches!(self.route, Route::Chat) || chat_under;
+                let on_chat = matches!(self.route, Route::Chat);
                 let right_target_width = if on_chat {
                     self.right_visible_width(cx)
                 } else {
@@ -21077,27 +20752,23 @@ impl Render for Shell {
                     .child(sidebar)
                     .child(sidebar_seam)
                     .child(
-                        self.render_task_chat_slide(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .flex()
-                                .flex_row()
-                                .child(card)
-                                // The resize seam straddles the right pane's left edge.
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .flex_none()
-                                        .relative()
-                                        .opacity(under_stage)
-                                        .child(right)
-                                        .child(right_seam),
-                                ),
-                            window,
-                            cx,
-                        ),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_row()
+                            .child(card)
+                            // The resize seam straddles the right pane's left edge.
+                            .child(
+                                div()
+                                    .h_full()
+                                    .flex_none()
+                                    .relative()
+                                    .opacity(under_stage)
+                                    .child(right)
+                                    .child(right_seam),
+                            ),
                     );
                 let page = div()
                     .size_full()
@@ -21290,6 +20961,8 @@ mod tests {
             work_tree: None,
             unsettled_at: None,
             sleep: None,
+            plan: None,
+            plan_pending: false,
         }
     }
 
@@ -21961,7 +21634,6 @@ mod tests {
         assert_eq!(titlebar_new_session_alpha(&Route::PullRequests, false), 1.0);
         assert_eq!(titlebar_new_session_alpha(&Route::PullRequests, true), 1.0);
         assert_eq!(titlebar_new_session_alpha(&Route::Tasks, false), 1.0);
-        assert_eq!(titlebar_new_session_alpha(&Route::TaskCenter, false), 1.0);
         assert_eq!(
             titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), true),
             0.0
@@ -24392,6 +24064,8 @@ mod exit_regressions {
                         last_seen_at: None,
                         room_gen: None,
                         sleep: None,
+                        plan: None,
+                        plan_pending: false,
                     }]);
                     state.select_space(Some("mine".into()), cx);
                 });
@@ -25693,6 +25367,8 @@ mod right_tab_mouse_regressions {
                     work_tree: None,
                     unsettled_at: None,
                     sleep: None,
+                    plan: None,
+                    plan_pending: false,
                 };
                 let mut side = source.clone();
                 side.id = "side".into();

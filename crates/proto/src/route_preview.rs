@@ -1,6 +1,5 @@
-use crate::{Chat, ChatConfig, ChildRoute, RouteTarget, TaskStep};
-
-pub use crate::routing::{Fallback, Preview, QuotaState, Role, Row, multiplier_text};
+use crate::routing::{Preview, Role};
+use crate::{ChatConfig, RouteTarget, TaskStep};
 
 pub fn target_of(config: &ChatConfig) -> RouteTarget {
     RouteTarget {
@@ -14,10 +13,10 @@ pub fn same_model(a: &RouteTarget, b: &RouteTarget) -> bool {
     a.harness == b.harness && a.model == b.model
 }
 
-pub fn plan_steps<'a>(task_id: &str, steps: &'a [TaskStep]) -> Vec<&'a TaskStep> {
+pub fn plan_steps<'a>(chat_id: &str, steps: &'a [TaskStep]) -> Vec<&'a TaskStep> {
     let mut steps: Vec<&TaskStep> = steps
         .iter()
-        .filter(|step| step.task_id == task_id && !step.deleted)
+        .filter(|step| step.owner_chat_id == chat_id && !step.deleted)
         .collect();
     steps.sort_by(|a, b| a.order_key.cmp(&b.order_key));
     steps
@@ -46,36 +45,11 @@ pub fn preview_roles(steps: &[&TaskStep]) -> Vec<&'static str> {
     roles
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct PlanLine {
-    pub title: String,
-    pub role: Option<&'static str>,
-    pub target: Option<RouteTarget>,
-    pub agent_picks: bool,
-    pub native: bool,
-    pub multiplier: Option<f64>,
-    pub planned: Option<f64>,
-    pub fallback: Option<String>,
-}
-
-pub struct Labels<'a> {
-    pub runs_as: &'a dyn Fn(&RouteTarget, bool) -> String,
-    pub clock: &'a dyn Fn(i64) -> Option<String>,
-}
-
-pub fn plan_lines(
+pub fn step_targets(
     steps: &[&TaskStep],
-    chats: &[Chat],
     lead: Option<&RouteTarget>,
     preview: Option<&Preview>,
-    labels: &Labels,
-) -> Vec<PlanLine> {
-    let until = |resets_at: Option<i64>| {
-        resets_at
-            .and_then(labels.clock)
-            .map(|at| format!(" until {at}"))
-            .unwrap_or_default()
-    };
+) -> Vec<Option<RouteTarget>> {
     steps
         .iter()
         .map(|step| {
@@ -86,159 +60,59 @@ pub fn plan_lines(
                     .iter()
                     .find(|row| row.role == role && row.source != "off")
             });
-            let mut line = PlanLine {
-                title: step.title.clone(),
-                role,
-                target: None,
-                agent_picks: false,
-                native: false,
-                multiplier: None,
-                planned: None,
-                fallback: None,
-            };
-            let ran = step.chat_id.as_deref().and_then(|id| {
-                let chat = chats.iter().find(|chat| chat.id == id)?;
-                chat.config.as_ref().map(target_of)
-            });
-            if let Some(ran) = ran {
-                line.multiplier = row
-                    .and_then(|row| {
-                        if row.target.as_ref().is_some_and(|t| same_model(t, &ran)) {
-                            return row.multiplier;
-                        }
-                        let fallback = row.fallback.as_ref()?;
-                        fallback
-                            .target
-                            .as_ref()
-                            .is_some_and(|t| same_model(t, &ran))
-                            .then_some(fallback.multiplier)
-                            .flatten()
-                    })
-                    .or_else(|| {
-                        lead.is_some_and(|lead| same_model(lead, &ran))
-                            .then_some(1.0)
-                    });
-                line.planned = line.multiplier;
-                line.target = Some(ran);
-                return line;
+            match row {
+                Some(row) => row
+                    .fallback
+                    .as_ref()
+                    .and_then(|fallback| fallback.target.clone())
+                    .or_else(|| row.target.clone()),
+                None if role.is_none() || preview.is_some() => lead.cloned(),
+                None => None,
             }
-            let Some(row) = row else {
-                if role.is_none() || preview.is_some() {
-                    line.agent_picks = true;
-                    line.target = lead.cloned();
-                    line.multiplier = Some(1.0);
-                    line.planned = Some(1.0);
-                }
-                return line;
-            };
-            let role = role.unwrap_or("general");
-            line.target = row.target.clone();
-            line.multiplier = row.multiplier;
-            line.planned = row.multiplier;
-            if let Some(fallback) = &row.fallback {
-                match &fallback.target {
-                    Some(target) => {
-                        line.fallback = Some(format!(
-                            "{role}: {}{}, runs as {}",
-                            fallback.reason,
-                            until(fallback.resets_at),
-                            (labels.runs_as)(target, fallback.native)
-                        ));
-                        line.target = Some(target.clone());
-                        line.native = fallback.native;
-                        line.multiplier = fallback.multiplier;
-                    }
-                    None => {
-                        let harness = row
-                            .target
-                            .as_ref()
-                            .map_or("The route", |target| target.harness.display_name());
-                        line.fallback = Some(format!(
-                            "{role}: {harness} out of quota{}, {}",
-                            until(fallback.resets_at),
-                            fallback.reason
-                        ));
-                    }
-                }
-            } else if row.source == ChildRoute::FELL_BACK {
-                line.fallback = Some(format!(
-                    "{role}: {}, runs as {}",
-                    row.reason.as_deref().unwrap_or("route unavailable"),
-                    row.target.as_ref().map_or_else(
-                        || "this chat's model".to_string(),
-                        |t| (labels.runs_as)(t, false)
-                    )
-                ));
-            }
-            line
         })
         .collect()
-}
-
-pub struct Totals {
-    pub total: f64,
-    pub planned: f64,
-    pub raised: usize,
-}
-
-pub fn totals(lines: &[PlanLine]) -> Totals {
-    let cost = |m: Option<f64>| m.unwrap_or(1.0);
-    Totals {
-        total: lines.iter().map(|line| cost(line.multiplier)).sum(),
-        planned: lines
-            .iter()
-            .map(|line| cost(line.planned.or(line.multiplier)))
-            .sum(),
-        raised: lines
-            .iter()
-            .filter(|line| {
-                line.fallback.is_some() && cost(line.multiplier) > cost(line.planned) + 1e-9
-            })
-            .count(),
-    }
-}
-
-pub fn mix(lines: &[PlanLine]) -> Vec<(RouteTarget, bool, usize)> {
-    let mut groups: Vec<(RouteTarget, bool, usize)> = Vec::new();
-    for line in lines {
-        let Some(target) = &line.target else { continue };
-        match groups
-            .iter_mut()
-            .find(|(t, native, _)| same_model(t, target) && *native == line.native)
-        {
-            Some(group) => group.2 += 1,
-            None => groups.push((target.clone(), line.native, 1)),
-        }
-    }
-    groups
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn line(multiplier: f64, planned: f64, fallback: bool) -> PlanLine {
-        PlanLine {
-            title: String::new(),
-            role: Some("worker"),
-            target: None,
-            agent_picks: false,
-            native: false,
-            multiplier: Some(multiplier),
-            planned: Some(planned),
-            fallback: fallback.then(String::new),
-        }
-    }
-
     #[test]
-    fn totals_count_only_fallbacks_that_raise_the_cost() {
-        let t = totals(&[
-            line(1.0, 0.04, true),
-            line(0.2, 0.2, false),
-            line(1.0, 1.0, true),
-        ]);
-        assert!((t.total - 2.2).abs() < 1e-9);
-        assert!((t.planned - 1.24).abs() < 1e-9);
-        assert_eq!(t.raised, 1);
+    fn an_unstarted_step_runs_where_its_role_routes_else_on_its_lead() {
+        let target = |harness: &str| -> RouteTarget {
+            serde_json::from_value(serde_json::json!({ "harness": harness })).unwrap()
+        };
+        let step = |role: Option<&str>| -> TaskStep {
+            serde_json::from_value(serde_json::json!({ "id": "s", "role": role })).unwrap()
+        };
+        let preview: Preview = serde_json::from_value(serde_json::json!({ "rows": [
+            { "role": "worker", "source": "routed", "target": { "harness": "codex" } },
+            { "role": "design", "source": "fell_back", "target": { "harness": "codex" },
+              "fallback": { "target": { "harness": "claude-code" }, "reason": "out of quota" } },
+            { "role": "research", "source": "off", "target": { "harness": "codex" } },
+        ] }))
+        .unwrap();
+        let steps = [
+            step(None),
+            step(Some("worker")),
+            step(Some("design")),
+            step(Some("research")),
+        ];
+        let steps: Vec<&TaskStep> = steps.iter().collect();
+        let lead = target("mock");
+        assert_eq!(
+            step_targets(&steps, Some(&lead), Some(&preview)),
+            [
+                Some(lead.clone()),
+                Some(target("codex")),
+                Some(target("claude-code")),
+                Some(lead.clone())
+            ]
+        );
+        assert_eq!(
+            step_targets(&steps, Some(&lead), None),
+            [Some(lead.clone()), None, None, None],
+            "a role waits for its route"
+        );
     }
 }

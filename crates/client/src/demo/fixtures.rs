@@ -901,7 +901,6 @@ pub(crate) const ONLINE: &[&str] = &[MAC, VPS, MINI];
 pub(crate) struct Seeded {
     pub change_requests: Vec<CheckoutChangeRequestStatus>,
     pub limits: Vec<(&'static str, LimitResumes)>,
-    pub missions: bool,
 }
 
 /// Write the whole dataset into the replica (as local writes, which the
@@ -925,7 +924,6 @@ pub(crate) fn seed(
             return Ok(Seeded {
                 change_requests,
                 limits: Vec::new(),
-                missions: false,
             });
         }
         DemoFixture::NoProjects => {
@@ -936,7 +934,6 @@ pub(crate) fn seed(
             return Ok(Seeded {
                 change_requests,
                 limits: Vec::new(),
-                missions: false,
             });
         }
         DemoFixture::Standard => {}
@@ -1039,6 +1036,8 @@ pub(crate) fn seed(
                 .filter(|(settled, _)| !settled)
                 .map(|(_, ago)| ms(now - ago)),
             sleep: None,
+            plan: None,
+            plan_pending: false,
         };
         doc.upsert_chat(&chat)?;
         if chat.id == super::review::OWNER {
@@ -1149,11 +1148,10 @@ pub(crate) fn seed(
             }],
         },
     )];
-    super::missions::seed(doc, Utc::now())?;
+    super::tasks::seed(doc, Utc::now())?;
     Ok(Seeded {
         change_requests,
         limits,
-        missions: true,
     })
 }
 

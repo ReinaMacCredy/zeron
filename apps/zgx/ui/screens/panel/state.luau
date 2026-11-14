@@ -17,7 +17,7 @@
 
 local M = {}
 
-export type Kind = "files" | "terminal" | "plugin" | "browser" | "side_chat" | "subagent" | "device"
+export type Kind = "files" | "terminal" | "plugin" | "browser" | "side_chat" | "subagent" | "device" | "threads"
 export type Tab = {
 	id: string,
 	kind: Kind,
@@ -51,6 +51,8 @@ export type Tab = {
 	-- A lane's (a side chat, a subagent: screens/chat/lane_tab): the chat
 	-- it shows (a side chat's id, a subagent's doc).
 	chat: string?,
+	thread: string?,
+	editing: boolean?,
 	-- A device tab's (screens/device/panel): the device it shows, once
 	-- bound, { host, id }; a name given it by Rename.
 	device_target: { host: string, id: string }?,
@@ -200,6 +202,9 @@ function M.open(key: string, kind: Kind, extra: { [string]: any }?): string
 	end
 	if (kind == "side_chat" or kind == "subagent") and extra then
 		tab.chat, tab.title, tab.data = extra.chat, extra.title, extra.data
+	end
+	if kind == "threads" and extra then
+		tab.chat, tab.thread = extra.chat, extra.thread
 	end
 	if kind == "terminal" and extra then
 		-- (A run action's: its name, and what runs it.)

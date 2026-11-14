@@ -1,4 +1,4 @@
-The **Tasks** tab on the iPhone holds your [tasks](zeron://docs/tasks) and [missions](zeron://docs/mission-control) from every computer. Its badge counts the questions and approvals waiting on you there.
+The **Tasks** tab on the iPhone holds your [tasks](zeron://docs/tasks) and [missions](zeron://docs/mission) from every computer. Its badge counts the questions and approvals waiting on you there.
 
 ![The Tasks tab, and a mission's plan review](ios-tasks.jpg)
 
@@ -6,7 +6,6 @@ The **Tasks** tab on the iPhone holds your [tasks](zeron://docs/tasks) and [miss
 
 From the top:
 
-- The **Supervisor** card: what the Supervisor watches, on which computers, and when it last woke. Tap it for the Supervisor page (see [The Supervisor on iPhone](zeron://docs/mobile-inbox)).
 - **Missions**: each mission with its computer, its state (such as **Needs you · plan review**) and its step count. The agents working on it show as brand marks.
 - **Needs you**, **Working**, **To do** and **Done**: your tasks, each with its project and due date.
 
@@ -46,9 +45,7 @@ Tap a mission to open its **Mission page**. On top, the mission's state and how 
 
 **Open lead thread** opens the lead's chat.
 
-The **…** menu has **Watched by the Supervisor**, **Authority on** that computer (see [The Supervisor on iPhone](zeron://docs/mobile-inbox)), and **Lead brief**: the lead's brief, with the messages to and from the lead.
-
-When the Supervisor approved the plan for you, the mission shows "Approved by the Supervisor · starts in" a countdown, with **Take back**, before the lead hears of it. See [The Supervisor](zeron://docs/supervisor).
+The **…** menu has **Lead brief**: the lead's brief, with the messages to and from the lead.
 
 ## Threads in a mission
 

@@ -267,7 +267,7 @@ fn maker_mark(model: Option<&str>) -> Option<String> {
     zeron_proto::HarnessId::brand_of(None, model).and_then(|maker| crate::agents::glyph(maker.as_str()))
 }
 
-fn brand_mark(harness: Option<&str>, model: Option<&str>) -> Option<String> {
+pub(crate) fn brand_mark(harness: Option<&str>, model: Option<&str>) -> Option<String> {
     harness.and_then(crate::agents::glyph).or_else(|| maker_mark(model))
 }
 
@@ -972,6 +972,18 @@ thread_local! {
     static SESSIONS: Rc<Sessions> = Rc::new(Sessions::default());
 }
 
+pub(crate) fn here() -> Option<String> {
+    SESSIONS.with(|s| s.here.borrow().clone())
+}
+
+pub(crate) fn with_chats<R>(f: impl FnOnce(&Json, &dyn Fn(&str) -> Option<Session>, chrono::DateTime<chrono::Utc>) -> R) -> R {
+    SESSIONS.with(|s| {
+        let at = chrono::DateTime::from_timestamp(now_seconds(), 0).unwrap_or_default();
+        let live = s.live_rows.borrow();
+        f(&s.chats.borrow(), &|id| live.winner(id, at).cloned(), at)
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn delete_action_for_tests(host: &ScriptHost) {
     delete_action(host, SESSIONS.with(Rc::clone));
@@ -1408,6 +1420,7 @@ impl Sessions {
             shared.set(value.clone());
         }
         self.look_again();
+        crate::threads::changed();
     }
 
     /// Publishes again as the soonest live state showing goes stale, or a

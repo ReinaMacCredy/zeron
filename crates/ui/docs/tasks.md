@@ -10,7 +10,7 @@ Chips above the list filter it, each with its count:
 
 - **All**: every task, and in **List** also every tree.
 - **Plans**: tasks with a plan. See **Tasks with a plan** below.
-- **Trees**, in **List** only: chats that started other threads without a plan. Each row shows the tree's state, its title, a **Tree** badge, what it is doing (**Watching 2 agents**, **Idle**, or **Needs you** and who asks) and how many of its agents are done. Click a row to open the tree's page, described in [Agent trees and plans](zeron://docs/mission-control).
+- **Trees**, in **List** only: chats that started other threads without a plan. Each row shows the tree's state, its title, a **Tree** badge, what it is doing (**Watching 2 agents**, **Idle**, or **Needs you** and who asks) and how many of its agents are done. Click a row to open the tree's page.
 
 What waits on you is not a chip here: the pill at the right of the titlebar counts it, and its Cmd+I tray lists it, with a row for a task that was **Not sent** or is **Ready to review**. Click such a row to open the task.
 
@@ -71,7 +71,7 @@ On the **New chat** tab, pick the agent and model. The line under it reads **in*
 
 Zeron creates a chat named after the task, sends the title and notes as the first message, and opens the chat. The card then shows the chat's status and an **Open thread** button.
 
-Turn on **Plan first** under the agent to have that chat lead the task with a plan: it writes the steps before it starts, and the card shows the plan's options and a **Reads** row. See **Tasks with a plan** below. Plan first is off by default; you can still add a plan later from the task's page.
+Turn on **Plan first** under the agent to have that chat write a plan before it starts. See **Tasks with a plan** below. Plan first is off by default.
 
 ## Assign a task to a thread
 
@@ -96,13 +96,13 @@ Each task's row then shows the chat it shares and that chat's status. Every task
 
 ## A task's page
 
-Once a task has a chat, clicking it opens the task's page. The header shows the title, the chat's state (**Working**, **Asked you a question**, **Failed** or **Ready for you**) and its agent, with **Add plan**, **Mark as done** and **⋯** on the right. When the chat asks you something, **Answer** shows too. The page shows the lead's row; click it to watch the chat live on the right, with **Open thread** and a composer.
+Once a task has a chat, clicking it opens the task's page. The header shows the title, the chat's state (**Working**, **Asked you a question**, **Failed** or **Ready for you**) and its agent, with **Mark as done** and **⋯** on the right. When the chat asks you something, **Answer** shows too. The page shows the lead's row; click it to watch the chat live on the right, with **Open thread** and a composer.
 
 ## Tasks with a plan
 
-A task can have a plan: a lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back, and the [Supervisor](zeron://docs/supervisor) can watch it from above. Start one with **Plan first** on the card, or click **Add plan** on a task's page to make its chat the lead in place: the same task gets the plan, and threads the chat already started show under **Outside the plan**. In a chat, **Approve as Task** on the agent's plan card does the same with the plan the agent wrote (see [When an agent asks](zeron://docs/agent-questions)). Until the lead writes its steps, the task reads **Planning**.
+A task's chat can work from a plan: its agent writes the steps, you approve them, and each step runs on its own thread that reports back to the chat. Start one with **Plan first** on the card.
 
-In the list a task with a plan has a progress ring in place of its circle and a **Plan** badge, and its tabs gather into one group in the titlebar. How a plan runs, from the goal to the Supervisor, and its page, views and tab group are described in [Agent trees and plans](zeron://docs/mission-control).
+The plan belongs to the chat, not to the task. The task shows the chat's progress, such as **2/5**, and lands in **Needs you** while the plan waits for your approval or a step asks you something or fails. Plans, threads and the **Threads** tab are described in [Mission](zeron://docs/mission).
 
 ## Images
 
@@ -113,11 +113,11 @@ A task can carry up to 12 images:
 
 Thumbnails show in the task's row and on its board card. Click one to see it large; the left and right arrows, or the ‹ › buttons, move between the task's images, and Escape or a click outside closes it.
 
-The images go to the agent that does the work, the same way an image you attach in a chat does: with the task's first message when you start or send it. Images are stored on this device with your chat attachments, and deleting a task leaves them there. Images on a plan's overview and steps are in [Agent trees and plans](zeron://docs/mission-control).
+The images go to the agent that does the work, the same way an image you attach in a chat does: with the task's first message when you start or send it. Images are stored on this device with your chat attachments, and deleting a task leaves them there. Images on a plan's overview and steps are in [Mission](zeron://docs/mission).
 
 ## Tasks from agents
 
-Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit them, mark them done, and assign them to a chat on this device. An agent's new task lands in that agent's project. The lead of a task with a plan uses the same tool to write its plan and mark its steps done (see [Agent trees and plans](zeron://docs/mission-control)). See [Agent tools](zeron://docs/agent-tools).
+Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit them, mark them done, and assign them to a chat on this device. An agent's new task lands in that agent's project. A chat writes its plan with the separate `plan` tool (see [Mission](zeron://docs/mission)). See [Agent tools](zeron://docs/agent-tools).
 
 ## Kanban columns
 

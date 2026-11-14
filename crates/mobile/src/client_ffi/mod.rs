@@ -34,7 +34,6 @@ use zeron_client as zc;
 
 pub use cloud::*;
 pub use session::*;
-use tasks::NeedsYouEntry;
 pub use types::*;
 
 /// Receives coalesced change events (at most one burst per display frame).
@@ -430,10 +429,6 @@ impl CoreClient {
     /// Warm the most relevant sessions (capped).
     pub fn preload_sessions(&self) {
         self.client.preload_sessions();
-    }
-
-    pub fn needs_you(&self) -> Vec<NeedsYouEntry> {
-        self.client.needs_you().iter().map(Into::into).collect()
     }
 
     // ── host RPC ───────────────────────────────────────────────────────────

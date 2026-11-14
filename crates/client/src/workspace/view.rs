@@ -288,8 +288,6 @@ pub struct WorkspaceSnapshot {
     /// still needs its version and capabilities.
     cloud_machines: Vec<DeviceView>,
     pub tasks: super::TasksPage,
-    pub supervisor: super::SupervisorPage,
-    pub needs_you: Vec<super::NeedsYouEntry>,
     pub today: super::TodayPage,
     /// Every chat row (archived and children included), by id.
     pub sessions: HashMap<String, Arc<SessionRow>>,
@@ -410,12 +408,8 @@ pub(crate) struct DeriveContext<'a> {
     /// Newest presence heartbeat per device (epoch ms).
     pub presence: &'a HashMap<String, i64>,
     pub change_requests: &'a [CheckoutChangeRequestStatus],
-    pub steps: &'a [zeron_proto::TaskStep],
-    pub supervisors:
-        &'a std::collections::BTreeMap<String, zeron_proto::supervisor::SupervisorSnapshot>,
     /// Each host's own sessions, carrying the background work the registry lacks.
     pub host_sessions: &'a std::collections::BTreeMap<String, Vec<Session>>,
-    pub item_sends: &'a HashMap<String, super::ItemSend>,
     pub asks: &'a HashMap<String, super::Ask>,
     /// Oldest-unadopted-send state per chat (open sessions only).
     pub send_states: &'a HashMap<String, SendState>,
@@ -487,32 +481,14 @@ fn inbox_key(chat: &Chat) -> DateTime<Utc> {
         .map_or(sort_key(chat), |at| at.max(sort_key(chat)))
 }
 
-/// One level, as the desktop sidebar: a mission step's thread under its
-/// lead, else an agent-opened chat under its creator, both listed; a parent
-/// that is itself nested keeps its own children as rows.
+/// One level, as the desktop sidebar: an agent-opened chat under its
+/// creator, both listed; a parent that is itself nested keeps its own
+/// children as rows.
 fn nest_parents<'a>(
     listed: &HashSet<&'a str>,
     state: &'a WorkspaceState,
-    steps: &'a [zeron_proto::TaskStep],
 ) -> HashMap<&'a str, &'a str> {
     let mut parent: HashMap<&str, &str> = HashMap::new();
-    for step in steps.iter().filter(|step| !step.deleted) {
-        let Some(child) = step.chat_id.as_deref() else {
-            continue;
-        };
-        let lead = state
-            .tasks
-            .iter()
-            .find(|task| task.id == step.task_id && !task.deleted)
-            .and_then(|task| task.chat_id.as_deref());
-        if let Some(lead) = lead
-            && lead != child
-            && listed.contains(child)
-            && listed.contains(lead)
-        {
-            parent.entry(child).or_insert(lead);
-        }
-    }
     for chat in &state.chats {
         if let Some(creator) = chat.created_by_chat_id.as_deref()
             && creator != chat.id
@@ -832,7 +808,7 @@ pub(crate) fn derive(
 
     // Front page.
     let active_ids: HashSet<&str> = active.iter().map(|c| c.id.as_str()).collect();
-    let parent_of = nest_parents(&active_ids, state, cx.steps);
+    let parent_of = nest_parents(&active_ids, state);
     let listed: HashSet<&str> = active_ids
         .iter()
         .copied()
@@ -1059,8 +1035,8 @@ pub(crate) fn derive(
             .then_with(|| a.id.cmp(&b.id))
     });
 
-    let (tasks, supervisor, needs_you) = super::tasks::derive(state, &rows, &devices, cx);
-    let today = super::today::derive(state, &rows, &devices, &needs_you, cx);
+    let tasks = super::tasks::derive(state, &rows, &devices, cx);
+    let today = super::today::derive(state, &rows, &devices, cx);
     let mut snapshot = WorkspaceSnapshot {
         revision: 0,
         computed_at_ms: now_ms,
@@ -1081,8 +1057,6 @@ pub(crate) fn derive(
         devices,
         cloud_machines,
         tasks,
-        supervisor,
-        needs_you,
         today,
         sessions: rows,
         children,
@@ -1141,7 +1115,7 @@ fn snapshot_hash(s: &WorkspaceSnapshot) -> u64 {
     for device in s.devices.iter().chain(&s.cloud_machines) {
         device.hash(&mut h);
     }
-    format!("{:?}{:?}{:?}{:?}", s.tasks, s.supervisor, s.needs_you, s.today).hash(&mut h);
+    format!("{:?}{:?}", s.tasks, s.today).hash(&mut h);
     let mut all: Vec<(&String, u64)> = s.sessions.iter().map(|(k, v)| (k, v.revision)).collect();
     all.sort();
     all.hash(&mut h);
@@ -1204,10 +1178,7 @@ mod tests {
                 now: Utc::now(),
                 presence: &presence,
                 change_requests: &[],
-                steps: &[],
-                supervisors: &Default::default(),
                 host_sessions: &Default::default(),
-                item_sends: &HashMap::new(),
                 asks: &HashMap::new(),
                 send_states: &HashMap::new(),
                 synced: true,

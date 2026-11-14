@@ -11,11 +11,16 @@ local function calls(app: any): string
 	return app:state("calls") or ""
 end
 
-test("children: a delegated task's chat opens as a tab, saying whose it is, with Open parent", function()
+test("children: a delegated task's chat opens in its owner's Threads tab, saying whose it is, with Open parent", function()
 	local app = open()
 	app:command("open_delegate")
 	app:frames(30)
 	expect(calls(app)).to_contain("watch:dg-1")
+	expect(app:has("#threads-thread")).to_be(true)
+	local tabs = ((app:state("panel_sessions") :: any)["chat:chat-1"] :: any).tabs
+	expect(#tabs).to_be(1)
+	expect(tabs[1].kind).to_be("threads")
+	expect(tabs[1].thread).to_be("dg-1")
 	expect(app:has("#delegate-owner-dg-1")).to_be(true)
 	expect(app:tree("#delegate-owner-dg-1")).to_contain("Subagent of Parent")
 	app:command("route_away")

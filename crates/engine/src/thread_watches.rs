@@ -97,8 +97,10 @@ impl ThreadWatches {
         if now.is_empty() {
             next.watches.remove(watcher);
         }
-        persist_json(&self.inner.path, &next)?;
-        *state = next;
+        if next.watches != state.watches {
+            persist_json(&self.inner.path, &next)?;
+            *state = next;
+        }
         Ok(now)
     }
 }

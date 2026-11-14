@@ -21,8 +21,6 @@ The agent does this through the tools in the **Threads** group of [Settings > Co
 
 In the chat that started it, a line reads **Started thread** with the new chat's name and **Open**, which opens the new chat as a tab in the right pane with an **Agent** badge. While the chat that started it has a sidebar row, the new chat has none of its own: it is listed in that chat's **Live state** column under **Beside this thread**. The agent can also wait for the new chat's first turn and read its replies.
 
-The lead of a Task with a plan runs each step on a new chat this way, bound to that step (see [Agent trees and plans](zeron://docs/mission-control)). Zeron then messages the lead when the step's chat finishes a turn or fails, so the lead does not wait on it.
-
 ## Message another chat
 
 `send_message_to_thread` sends a message to another chat. An idle chat starts a turn with it. A working chat gets it inside its current turn, at its next step, when its agent takes messages mid-turn; otherwise when the turn ends. An agent never messages its own chat.
@@ -41,11 +39,11 @@ The receiving agent never mistakes another chat's message for yours. Zeron puts 
 
 The first message of a chat that `create_thread` opened carries the same line. The transcript keeps the message as it was written; only the agent sees the line.
 
-In the transcript, the message is not one of your bubbles. It starts with a row reading **From**, the sending chat's name with its agent's mark, and the time, followed by a thin rule, and then the text. Click the name to open the chat that sent it. When a Task's lead gets one report for several step threads, the row names each of them.
+In the transcript, the message is not one of your bubbles. It starts with a row reading **From**, the sending chat's name with its agent's mark, and the time, followed by a thin rule, and then the text. Click the name to open the chat that sent it. When a chat gets one report for several of its threads, the row names each of them.
 
 ## Watch chats and answer their questions
 
-`watch_threads` has Zeron wake the agent whenever one of the chats it lists stops on a question or a tool approval, even after the agent's turn has ended. The wake names the chat and quotes the questions. A chat can watch up to 50 others. A chat's delegated tasks wake it this way without being listed, and so do a Task lead's step threads.
+`watch_threads` has Zeron wake the agent whenever one of the chats it lists stops on a question or a tool approval, even after the agent's turn has ended. The wake names the chat and quotes the questions. A chat can watch up to 50 others. A chat's delegated tasks, the steps of its plan included, wake it this way without being listed.
 
 `respond_to_input` answers the question or permission request another chat is stopped on. It grants a tool approval only when the answering chat runs at **Full access**; otherwise the agent asks you or leaves it to you. Computer use consent is always yours to give, and an agent never answers its own chat's question. You see the same question in the asking chat, and if you answer first, the agent finds nothing left to answer. See [When an agent asks](zeron://docs/agent-questions).
 
@@ -60,30 +58,21 @@ In the transcript, the message is not one of your bubbles. It starts with a row 
 
 ## Point an agent at a chat
 
-Three places hand an agent a chat to read rather than a copy of it, and the agent reads it with `read_thread`:
+Two places hand an agent a chat to read rather than a copy of it, and the agent reads it with `read_thread`:
 
 - **@ mentions** of threads in the composer insert a link the agent opens. See [Commands and mentions](zeron://docs/commands-and-mentions).
 - **Hand off to project** starts a thread in a project with a link to the source chat. When the new chat's agent has `read_thread` off, it gets a text copy of the conversation instead. See [Hand off a thread](zeron://docs/handoff).
-- **Reads** on a task's card, with **Plan first** on, lists the chats its lead reads before it plans. The field turns off when the lead's tools leave out `read_thread`. See [Agent trees and plans](zeron://docs/mission-control).
-
-## When the Supervisor uses these tools
-
-The [Supervisor](zeron://docs/supervisor) reaches leads and their step threads through the same tools, within the switches under **Authority** on its page:
-
-- Messaging a chat and answering its questions follow **Message a Lead or Peer directly**. In a tree without a plan, answering a question also needs the tree watched and **Decide for me** on.
-- Starting a chat with `create_thread`, like delegating a task or starting a review with `review_changes`, follows **Start a new plan**, which is off by default.
-- It never stops a chat's turn with `interrupt_thread`. A step that blocks a shared resource is paused instead, which needs a contention Zeron verified.
 
 ## Limits
 
 - An agent reaches only chats on the same device as its own.
-- An agent can keep up to 8 chats it started open at once; archive one to start another. A Task lead's step threads do not count.
+- The chats an agent started that are still working count, with its delegated tasks, against **Delegated tasks per chat**; see [Delegation and subagents](zeron://docs/delegation).
 - A chat can watch up to 50 other chats.
 
 See [Zeron tools for agents](zeron://docs/agent-tools) for the limits that apply to every tool.
 
 ## Turn these tools off
 
-The **Threads** group in [Settings > Context & tools > Tools](zeron://settings/tools) has a switch for the whole group and one for each tool. With `read_thread` off, **Hand off to project** sends a text copy, and the **Reads** field of a task with **Plan first** turns off.
+The **Threads** group in [Settings > Context & tools > Tools](zeron://settings/tools) has a switch for the whole group and one for each tool. With `read_thread` off, **Hand off to project** sends a text copy.
 
 > To turn thread tools off for only some chats, set the **Tools** field of an [agent profile](zeron://docs/agent-profiles).

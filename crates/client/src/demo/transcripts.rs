@@ -599,7 +599,7 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     ]
 }
 
-pub(crate) fn picker_questions() -> Vec<UserInputQuestion> {
+fn picker_questions() -> Vec<UserInputQuestion> {
     vec![
         UserInputQuestion {
             approval: false,
@@ -637,6 +637,26 @@ pub(crate) fn picker_questions() -> Vec<UserInputQuestion> {
     ]
 }
 
+const SHELF_QUESTION: &str = "req-shelf";
+
+fn shelf_questions() -> Vec<UserInputQuestion> {
+    vec![UserInputQuestion {
+        id: "q1".into(),
+        header: "Settle after".into(),
+        question: "Where should the phone read settle_after_days from?".into(),
+        options: vec![
+            "The host's settings (Recommended)".into(),
+            "A phone-only setting".into(),
+        ],
+        multi_select: false,
+        kind: None,
+        prefill: None,
+        multiline: false,
+        approval: false,
+        action: None,
+    }]
+}
+
 fn shelf(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     vec![
         user(
@@ -654,9 +674,9 @@ fn shelf(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     "The phone has no settings row for it yet. One question before I read the setting:",
                 ),
                 MessagePart::Input {
-                    id: super::missions::SHELF_QUESTION.into(),
-                    request_id: super::missions::SHELF_QUESTION.into(),
-                    questions: super::missions::shelf_questions(),
+                    id: SHELF_QUESTION.into(),
+                    request_id: SHELF_QUESTION.into(),
+                    questions: shelf_questions(),
                     resolved: false,
                     answers: None,
                     asked_at_ms: None,

@@ -1,6 +1,6 @@
 # In-app Docs. Sections show in this order; articles keep their order within a
 # section. Each article's body is <id>.md, listed in crates/docs/src/lib.rs BODIES.
-# actions: tasks, supervisor, inbox, usage, pull-requests, changelog, settings/<slug>, docs/<id>.
+# actions: tasks, inbox, usage, pull-requests, changelog, settings/<slug>, docs/<id>.
 
 [[section]]
 id = "basics"
@@ -268,20 +268,12 @@ blurb = "Plan work as a list or a Kanban board, start a task with one click, or 
 actions = ["tasks"]
 
 [[article]]
-id = "mission-control"
+id = "mission"
 section = "work"
-title = "Agent trees and plans"
+title = "Mission"
 icon = "hugeicons-target-02"
-blurb = "Every chat that started other agents, as a tree, and Tasks with a plan whose lead runs each step on its own thread."
-actions = ["tasks", "supervisor", "settings/general"]
-
-[[article]]
-id = "supervisor"
-section = "work"
-title = "Supervisor"
-icon = "lucide-shield"
-blurb = "One agent above your planned Tasks and the trees you pick: it wakes on their events, and you set what it may do."
-actions = ["supervisor", "tasks", "docs/mission-control"]
+blurb = "A chat that hands work out: its plan, the threads that run each piece, and the Threads tab that shows where each one stands."
+actions = ["tasks", "settings/routing", "docs/delegation"]
 
 [[article]]
 id = "inbox"
@@ -400,15 +392,15 @@ section = "iphone"
 title = "Tasks and missions on iPhone"
 icon = "checklist"
 blurb = "The Tasks tab, a task's sheet, and a mission's plan review and steps on the phone."
-actions = ["tasks", "docs/mission-control"]
+actions = ["tasks", "docs/mission"]
 
 [[article]]
 id = "mobile-inbox"
 section = "iphone"
-title = "Sessions and the Supervisor on iPhone"
+title = "The sessions list on iPhone"
 icon = "hugeicons-target-02"
-blurb = "Organize, sort and nest the sessions list, and run each Mac's Supervisor from the phone."
-actions = ["supervisor", "docs/sessions-sidebar"]
+blurb = "Organize, sort and nest the sessions list."
+actions = ["docs/sessions-sidebar"]
 
 [[article]]
 id = "mobile-git"

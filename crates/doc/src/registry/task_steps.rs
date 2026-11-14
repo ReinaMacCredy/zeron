@@ -1,11 +1,9 @@
 use super::tasks::{
-    at, check_images, check_notes, check_order_key, check_row_fits, check_step_count, checked_title,
-    invalid,
+    at, check_images, check_notes, check_order_key, check_row_fits, checked_title, invalid,
 };
 use super::*;
 use zeron_proto::{
-    StepOutcome, StepTurn, TaskPatch, TaskStep, TaskStepPatch, pin_order_key_between,
-    valid_pin_order_key,
+    StepOutcome, StepTurn, TaskStep, TaskStepPatch, pin_order_key_between, valid_pin_order_key,
 };
 
 #[derive(Debug, Deserialize)]
@@ -13,7 +11,7 @@ use zeron_proto::{
 struct RawTaskStep {
     id: String,
     #[serde(default)]
-    task_id: String,
+    owner_chat_id: String,
     #[serde(default)]
     title: String,
     #[serde(default)]
@@ -44,7 +42,7 @@ impl From<RawTaskStep> for TaskStep {
     fn from(raw: RawTaskStep) -> Self {
         TaskStep {
             id: raw.id,
-            task_id: raw.task_id,
+            owner_chat_id: raw.owner_chat_id,
             title: raw.title,
             notes: raw.notes,
             order_key: raw.order_key,
@@ -66,7 +64,7 @@ impl From<RawTaskStep> for TaskStep {
 fn step_fields(step: &TaskStep, title: String, order_key: String) -> BTreeMap<String, Value> {
     fields([
         ("id", json!(step.id)),
-        ("taskId", json!(step.task_id)),
+        ("ownerChatId", json!(step.owner_chat_id)),
         ("title", json!(title)),
         ("notes", json!(step.notes)),
         ("orderKey", json!(order_key)),
@@ -82,7 +80,7 @@ fn step_fields(step: &TaskStep, title: String, order_key: String) -> BTreeMap<St
     ])
 }
 
-fn flagged_deleted(id: &str, now: DateTime<Utc>, hlc: String) -> RowOp {
+pub(super) fn flagged_deleted(id: &str, now: DateTime<Utc>, hlc: String) -> RowOp {
     RowOp {
         kind: KIND_TASK_STEPS.into(),
         id: id.into(),
@@ -112,14 +110,14 @@ impl RegistryDoc {
             .collect();
         steps.sort_by(|a, b| {
             (
-                &a.task_id,
+                &a.owner_chat_id,
                 a.order_key.is_empty(),
                 &a.order_key,
                 a.created_at,
                 &a.id,
             )
                 .cmp(&(
-                    &b.task_id,
+                    &b.owner_chat_id,
                     b.order_key.is_empty(),
                     &b.order_key,
                     b.created_at,
@@ -129,18 +127,18 @@ impl RegistryDoc {
         Ok(steps)
     }
 
-    pub fn task_steps_of(&self, task_id: &str) -> Vec<TaskStep> {
+    pub fn steps_of(&self, chat_id: &str) -> Vec<TaskStep> {
         self.read_task_steps()
             .unwrap_or_default()
             .into_iter()
-            .filter(|step| step.task_id == task_id)
+            .filter(|step| step.owner_chat_id == chat_id)
             .collect()
     }
 
-    fn last_step_key(&self, task_id: &str) -> Option<String> {
+    pub(super) fn last_step_key(&self, chat_id: &str) -> Option<String> {
         self.overlay_rows(KIND_TASK_STEPS)
             .into_iter()
-            .filter(|row| row.fields.get("taskId").and_then(Value::as_str) == Some(task_id))
+            .filter(|row| row.fields.get("ownerChatId").and_then(Value::as_str) == Some(chat_id))
             .filter_map(|row| {
                 row.fields
                     .get("orderKey")
@@ -180,42 +178,28 @@ impl RegistryDoc {
 
     /// A taken id, deleted rows included, is never overwritten: retries must not revive.
     pub fn create_task_step(&mut self, step: &TaskStep) -> Result<bool, DocError> {
-        if self.task(&step.task_id).is_none() {
-            return Err(invalid("Task no longer exists"));
+        if !self.row_exists(KIND_CHATS, &step.owner_chat_id) {
+            return Err(invalid("Chat no longer exists"));
         }
         if self.overlay_row(KIND_TASK_STEPS, &step.id).is_some() {
             return Ok(false);
         }
-        let after = self.last_step_key(&step.task_id);
+        let after = self.last_step_key(&step.owner_chat_id);
         let op = self.step_upsert(step, after.as_deref())?;
         self.enqueue_ops(vec![op]);
         Ok(true)
     }
 
-    fn task_patch_op(
+    pub(super) fn new_step_ops(
         &mut self,
-        task_id: &str,
-        patch: &TaskPatch,
-        now: DateTime<Utc>,
-    ) -> Result<Option<RowOp>, DocError> {
-        if *patch == TaskPatch::default() {
-            return Ok(None);
-        }
-        self.task_update_op(task_id, patch, now)?
-            .map(Some)
-            .ok_or_else(|| invalid("Task no longer exists"))
-    }
-
-    fn new_step_ops(
-        &mut self,
-        task_id: &str,
+        chat_id: &str,
         steps: &[TaskStep],
         mut after: Option<String>,
     ) -> Result<Vec<RowOp>, DocError> {
         let mut ops = Vec::new();
         for step in steps {
-            if step.task_id != task_id {
-                return Err(invalid("A step belongs to another task"));
+            if step.owner_chat_id != chat_id {
+                return Err(invalid("A step belongs to another chat's plan"));
             }
             let op = self.step_upsert(step, after.as_deref())?;
             after = op
@@ -238,76 +222,6 @@ impl RegistryDoc {
                 .is_some_and(|id| self.row_exists(KIND_CHATS, id))
     }
 
-    /// One batch with the task patch, so a refused row leaves the old plan whole.
-    pub fn plan_task_steps(
-        &mut self,
-        task_id: &str,
-        steps: &[TaskStep],
-        patch: &TaskPatch,
-        now: DateTime<Utc>,
-    ) -> Result<(), DocError> {
-        if self.task(task_id).is_none() {
-            return Err(invalid("Task no longer exists"));
-        }
-        let (kept, dropped): (Vec<TaskStep>, Vec<TaskStep>) = self
-            .task_steps_of(task_id)
-            .into_iter()
-            .partition(|step| self.step_started(step));
-        check_step_count(kept.len() + steps.len())?;
-        let task_op = self.task_patch_op(task_id, patch, now)?;
-        let ops = self.new_step_ops(task_id, steps, self.last_step_key(task_id))?;
-        let hlc = self.next_hlc();
-        let dropped = dropped
-            .into_iter()
-            .map(|step| flagged_deleted(&step.id, now, hlc.clone()));
-        let mut batch: Vec<RowOp> = task_op.into_iter().chain(dropped).collect();
-        batch.extend(ops);
-        self.enqueue_ops(batch);
-        Ok(())
-    }
-
-    /// Every row is checked before any is queued, so a refused edit applies nothing.
-    pub fn edit_task_plan(
-        &mut self,
-        task_id: &str,
-        patch: &TaskPatch,
-        updates: &[(String, TaskStepPatch)],
-        creates: &[TaskStep],
-        deletes: &[String],
-        now: DateTime<Utc>,
-    ) -> Result<(), DocError> {
-        if self.task(task_id).is_none() {
-            return Err(invalid("Task no longer exists"));
-        }
-        check_step_count(
-            (self.task_steps_of(task_id).len() + creates.len()).saturating_sub(deletes.len()),
-        )?;
-        let mut batch: Vec<RowOp> = self
-            .task_patch_op(task_id, patch, now)?
-            .into_iter()
-            .collect();
-        for (step_id, patch) in updates {
-            let op = self
-                .step_update_op(step_id, patch, now)?
-                .ok_or_else(|| invalid("Step no longer exists"))?;
-            batch.push(op);
-        }
-        let after = updates
-            .iter()
-            .filter_map(|(_, patch)| patch.order_key.clone())
-            .chain(self.last_step_key(task_id))
-            .max();
-        batch.extend(self.new_step_ops(task_id, creates, after)?);
-        for step_id in deletes {
-            if self.task_step(step_id).is_none() {
-                return Err(invalid("Step no longer exists"));
-            }
-            batch.push(flagged_deleted(step_id, now, self.next_hlc()));
-        }
-        self.enqueue_ops(batch);
-        Ok(())
-    }
-
     pub fn update_task_step(
         &mut self,
         step_id: &str,
@@ -321,7 +235,7 @@ impl RegistryDoc {
         Ok(true)
     }
 
-    fn step_update_op(
+    pub(super) fn step_update_op(
         &mut self,
         step_id: &str,
         patch: &TaskStepPatch,

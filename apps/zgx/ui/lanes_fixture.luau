@@ -125,6 +125,10 @@ stub_sessions.archive = function(id: string): any
 	note(`archive:{id}`)
 	return settled(true, nil)
 end
+stub_sessions.settle = function(id: string, on: boolean): any
+	note(`settle:{id}:{on}`)
+	return settled(true, nil)
+end
 stub_sessions.link = function(id: string): any
 	note(`link:{id}`)
 	return settled(true, `https://zeron.sh/c/{id}`)
@@ -459,6 +463,66 @@ ui.command { id = "open_delegate", title = "Open a delegated child", run = funct
 	publish()
 	lanes.open_child("chat-1", "dg-1")
 end }
+do
+	local Threads = require("@app/screens/chat/threads")
+	local edits = ui.state("threads_edit_args", nil :: any)
+	local refuse = false
+	Threads.host = {
+		follow = function(chats: { string })
+			note(`follow:{table.concat(chats, "+")}`)
+		end,
+		call = function(name: string, args: any): any
+			note(`{name}:{args.step or ""}:{args.state or ""}`)
+			if name == "threads.edit" then
+				edits:set(args)
+				if refuse then
+					return settled(false, { message = "Step no longer exists" })
+				end
+			end
+			return settled(true, nil)
+		end,
+	}
+	local published = ui.shared("chat.threads", {} :: any)
+	ui.command { id = "threads_refuse", title = "The engine refuses a plan edit", run = function()
+		refuse = true
+	end }
+	ui.command { id = "threads_pending", title = "chat-1's plan waits for approval", run = function()
+		local all = table.clone(published:peek())
+		local entry = table.clone(all["chat-1"])
+		entry.plan = table.clone(entry.plan)
+		entry.plan.pending = true
+		all["chat-1"] = entry
+		published:set(all)
+	end }
+	ui.command { id = "threads_ask", title = "dg-ask's question is pending", run = function()
+		ui.shared("chat.waiting", {} :: any):set({
+			{ key = "w-ask", chat = "dg-ask", request = "r-ask", kind = "ask", title = "Add rate limiting to checkout", ask = { kind = "question", question = { text = "Redis or in memory for the counts?" } } },
+		})
+	end }
+	local function owned(id: string, status: string, delegation: string): any
+		return { id = id, parent = "chat-1", title = id, kind = "agent", status = status, delegation = delegation, delegated_by = "chat-1", harness = "codex", mark = "openai", agent = "openai", device = "d", updated = NOW, created = NOW }
+	end
+	ui.command { id = "threads_seed", title = "chat-1 owns threads in every group", run = function()
+		for _, c in { owned("dg-review", "idle", "completed"), owned("dg-ask", "input", "running"), owned("dg-fail", "failed", "failed"), owned("dg-run", "working", "running"), owned("dg-done", "idle", "completed") } do
+			table.insert(children, c)
+		end
+		publish()
+		published:set({ ["chat-1"] = { plan = { overview = "Four changes", pending = false, order = { "s1", "s2", "s5", "s6" }, progress = { done = 0, total = 3 } }, rows = {
+			{ key = "step:s1", kind = "owned", read_only = false, chat = "dg-review", step = "s1", number = 1, title = "Add CSV export to orders", spec = "Export orders as CSV", role = "worker", locked = true, state = "readyForReview", line = "PR is ready for review", mark = "claude", model = "sonnet", updated = NOW - 2400 },
+			{ key = "owned:dg-ask", kind = "owned", read_only = false, chat = "dg-ask", step = "s2", number = 2, title = "Add rate limiting to checkout", spec = "Limit checkout requests", role = "worker", locked = true, state = "waitingOnYou", line = "Where should the rate limiter keep its counts?", mark = "claude", updated = NOW - 780 },
+			{ key = "owned:dg-fail", kind = "owned", read_only = false, chat = "dg-fail", title = "Fix flaky cart total test", state = "failed", line = "The suite would not start", mark = "openai", updated = NOW - 660 },
+			{ key = "owned:dg-run", kind = "owned", read_only = false, chat = "dg-run", title = "Upgrade the date library", state = "working", line = "Update 23 call sites", mark = "openai", model = "gpt-6.1", updated = NOW - 900 },
+			{ key = "step:s5", kind = "step", read_only = false, step = "s5", number = 5, title = "Write the release notes", spec = "Notes for the release", role = "general", state = "planned", line = "After the four changes land" },
+			{ key = "owned:dg-done", kind = "owned", read_only = false, chat = "dg-done", title = "Docs refresh", state = "done", updated = NOW - 5000 },
+			{ key = "step:s6", kind = "step", read_only = false, step = "s6", number = 6, title = "An old idea", spec = "", role = "research", state = "skipped" },
+			{ key = "subagent:chat-1--sub--1", kind = "subagent", read_only = true, title = "scan the repo", state = "working", updated = NOW - 60 },
+			{ key = "peer:peer-1", kind = "peer", read_only = true, chat = "peer-1", title = "A peer thread", state = "readyForReview", updated = NOW - 120 },
+		} } })
+	end }
+	ui.command { id = "threads_open", title = "Open chat-1's Threads tab", run = function()
+		Threads.open("chat-1")
+	end }
+end
 ui.command { id = "open_late", title = "Open a child not yet listed", run = function()
 	lanes.open_child("chat-1", "late-1")
 end }
@@ -478,6 +542,23 @@ end }
 ui.command { id = "panel_show", title = "Show the panel", run = function()
 	require("@app/screens/shell/view").set_files(true)
 end }
+local plan_shown = ui.state("test_plan_card", false)
+ui.command { id = "show_plan", title = "A lead's plan in its transcript", run = function()
+	plan_shown:set(true)
+end }
+local function plan_tool(id: string): any
+	return { id = id, kind = "mcp", verb = "Called", target = "zeron.plan", call = 'zeron · plan\n{\n  "action": "write"\n}' }
+end
+local plan_messages = ui.state("test_plan_messages", {
+	{ id = "lead-0", role = "assistant", text = "", blocks = {
+		{ id = "b0", kind = "tools", tools = { { id = "t-read", kind = "read", verb = "Read", target = "README.md" }, plan_tool("t-old") } },
+	} },
+	{ id = "lead-1", role = "assistant", text = "", blocks = {
+		{ id = "b1", kind = "text", text = "Here's the plan. Nothing starts until you approve it." },
+		{ id = "b2", kind = "tools", tools = { plan_tool("t-new") } },
+	} },
+} :: any)
+
 -- The spawns as a transcript shows them (cards, with their open state).
 local cards_shown = ui.state("test_lanes_cards", false)
 ui.command { id = "show_cards", title = "Spawn cards", run = function()
@@ -626,6 +707,30 @@ return ui.row {
 			}
 		),
 	},
+	ui.presence(function(): string
+		return if plan_shown:get() then "plan" else ""
+	end, function(shown: string): Node
+		if shown == "" then
+			return ui.div {}
+		end
+		return ui.column {
+			id = "fixture-plan",
+			w = 420,
+			h = 600,
+			ui.component(function(): Node
+				return require("@ds/transcript").Transcript {
+					messages = plan_messages,
+					threads = require("@app/screens/chat/shared").threads_for(function(): string?
+						return "chat-1"
+					end, function(): string?
+						return "chat-1"
+					end, function(): any
+						return store.session:get()
+					end),
+				}
+			end)({}),
+		}
+	end),
 	ui.button { id = "outside-panel", "Outside the panel" },
 	ui.text {
 		id = "fixture-route",
