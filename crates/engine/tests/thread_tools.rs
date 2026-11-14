@@ -15,7 +15,7 @@ use zeron_doc::{
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SessionStatus, SteeringMode,
 };
 
@@ -51,6 +51,9 @@ impl Harness for RecordingHarness {
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
+    }
+    fn compaction(&self) -> Compaction {
+        Compaction::SlashText("/compact".into())
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
@@ -98,6 +101,7 @@ impl Harness for RecordingHarness {
         });
         let delay = self.step_delay;
         let limited = self.id == HarnessId::Codex && request.prompt.contains("LIMIT ME");
+        let compacting = request.prompt.starts_with("/compact");
         let reply = if request.prompt.contains("FOLLOW-UP") {
             "Because the handle outlives the request."
         } else {
@@ -121,7 +125,16 @@ impl Harness for RecordingHarness {
                     session_id: Some("hs-rec".into()),
                 },
             ];
-            let script = if limited {
+            let script = if compacting {
+                vec![
+                    script[0].clone(),
+                    AgentEvent::Compacted {
+                        pre_tokens: Some(20_000),
+                        post_tokens: Some(2_000),
+                    },
+                    script[2].clone(),
+                ]
+            } else if limited {
                 let resets_at = chrono::Utc::now().timestamp_millis() + 3_600_000;
                 vec![
                     script[0].clone(),
@@ -1971,6 +1984,196 @@ async fn a_never_wake_child_finishes_without_waking_its_idle_owner() {
     rig.core.shutdown().await;
 }
 
+const FOLLOW_UP_REPLY: &str = "Because the handle outlives the request.";
+
+fn completed_wake(child: &str, title: &str, reply: &str) -> String {
+    format!(
+        "Delegated task {child} (\"{title}\") completed.\n\n<agent-response>\n{reply}\n</agent-response>\n\nUse task_status with taskId {child} to read the result."
+    )
+}
+
+fn prompts_equal(rig: &Rig, text: &str) -> usize {
+    rig.prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| *p == text)
+        .count()
+}
+
+fn settled(core: &EngineCore, chat_id: &str) -> bool {
+    core.workspace
+        .chat(chat_id)
+        .unwrap()
+        .unwrap()
+        .settled_at(zeron_proto::SETTLE_AFTER_DAYS_DEFAULT, chrono::Utc::now())
+        .is_some()
+}
+
+#[tokio::test]
+async fn a_finished_child_sent_more_work_runs_again_and_wakes_its_owner_with_only_the_new_reply() {
+    let rig = rig(Duration::from_millis(100));
+    let child = rig
+        .core
+        .doc_host
+        .delegate_task(delegate("count the tests"), Default::default())
+        .await
+        .unwrap()
+        .task_id;
+    let first_wake = completed_wake(&child, "count the tests", "noted");
+    let second_wake = completed_wake(&child, "count the tests", FOLLOW_UP_REPLY);
+    wait_for(|| prompts_equal(&rig, &first_wake) == 1, "the first wake").await;
+    wait_for(|| idle(&rig.core, "lead"), "the owner's first wake turn").await;
+    let first = delegation(&rig.core, &child);
+    assert_eq!(first.status, zeron_proto::DelegationStatus::Completed);
+    assert_eq!(
+        first.delivery,
+        Some(zeron_proto::DelegationDelivery::Delivered)
+    );
+    rig.core.workspace.set_chat_settled(&child, true).unwrap();
+    assert!(settled(&rig.core, &child));
+
+    let sent = rig
+        .core
+        .doc_host
+        .queue_thread_message(&child, Some("lead"), "FOLLOW-UP: which ones are slow?")
+        .await
+        .unwrap();
+    wait_for(
+        || working(&rig.core, &child) && delegation(&rig.core, &child).is_running(),
+        "the second run to re-open the task",
+    )
+    .await;
+    let reopened = delegation(&rig.core, &child);
+    assert_eq!(
+        reopened.anchor, sent,
+        "the new run is anchored on its message"
+    );
+    assert_eq!(reopened.completed_at, None);
+    assert_eq!(reopened.delivery, None);
+    let read = rig
+        .core
+        .doc_host
+        .task_status("lead", &child, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        (read.status, read.work_state, read.summary),
+        ("running", "working", None)
+    );
+    assert!(
+        !settled(&rig.core, &child),
+        "the new message unsettles it as any message does"
+    );
+
+    wait_for(|| prompts_equal(&rig, &second_wake) == 1, "the second wake").await;
+    wait_for(|| idle(&rig.core, "lead"), "the owner's second wake turn").await;
+    assert_eq!(
+        prompts_equal(&rig, &first_wake),
+        1,
+        "the first reply is told once"
+    );
+    let done = delegation(&rig.core, &child);
+    assert_eq!(done.status, zeron_proto::DelegationStatus::Completed);
+    assert_eq!(done.anchor, sent);
+    assert_eq!(
+        done.delivery,
+        Some(zeron_proto::DelegationDelivery::Delivered)
+    );
+
+    let compacted = rig.core.sessions.compact(&child, None).await.unwrap();
+    assert!(compacted.compacted, "{compacted:?}");
+    wait_for(|| idle(&rig.core, &child), "the compaction to end").await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        delegation(&rig.core, &child),
+        done,
+        "a compaction is not a new run"
+    );
+    assert_eq!(prompts_equal(&rig, &second_wake), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_never_wake_child_runs_again_unannounced_and_a_cancelled_one_stays_cancelled() {
+    let rig = rig(Duration::from_millis(100));
+    let mut params = delegate("review the diff");
+    params.wake = Some(zeron_proto::DelegationWake::Never);
+    let quiet = rig
+        .core
+        .doc_host
+        .delegate_task(params, Default::default())
+        .await
+        .unwrap()
+        .task_id;
+    let stopped = rig
+        .core
+        .doc_host
+        .delegate_task(delegate("long job"), Default::default())
+        .await
+        .unwrap()
+        .task_id;
+    wait_for(|| working(&rig.core, &stopped), "the second child's turn").await;
+    rig.core
+        .doc_host
+        .task_cancel("lead", &stopped)
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            !delegation(&rig.core, &quiet).is_running()
+                && delegation(&rig.core, &stopped).status
+                    == zeron_proto::DelegationStatus::Cancelled
+        },
+        "both children to settle",
+    )
+    .await;
+    let cancelled = delegation(&rig.core, &stopped);
+
+    let sent = rig
+        .core
+        .doc_host
+        .queue_thread_message(&quiet, Some("lead"), "FOLLOW-UP: and the tests?")
+        .await
+        .unwrap();
+    queue_human_run(&rig.core, &stopped, "cmd-again", "msg-again");
+    wait_for(
+        || delegation(&rig.core, &quiet).anchor == sent && working(&rig.core, &stopped),
+        "the never-wake child to re-open and the cancelled one to run",
+    )
+    .await;
+    assert_eq!(delegation(&rig.core, &stopped), cancelled);
+    wait_for(
+        || {
+            !delegation(&rig.core, &quiet).is_running()
+                && idle(&rig.core, &quiet)
+                && idle(&rig.core, &stopped)
+        },
+        "both runs to end",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let quiet_done = delegation(&rig.core, &quiet);
+    assert_eq!(quiet_done.status, zeron_proto::DelegationStatus::Completed);
+    assert_eq!(
+        quiet_done.delivery,
+        Some(zeron_proto::DelegationDelivery::Disposed)
+    );
+    assert_eq!(
+        delegation(&rig.core, &stopped),
+        cancelled,
+        "a cancelled task never re-opens"
+    );
+    assert!(
+        !entries(&rig.core, "lead")
+            .iter()
+            .any(|e| e.from_chat_id.as_deref() == Some(quiet.as_str())),
+        "a never-wake child re-opens without a wake"
+    );
+    assert_eq!(queue_len(&rig.core, "lead"), 0);
+    rig.core.shutdown().await;
+}
+
 fn queue_steer(core: &EngineCore, chat_id: &str, command_id: &str, prompt: &str) {
     core.doc_host
         .open(chat_id)
@@ -2190,6 +2393,7 @@ async fn resolving_findings_checks_the_owner_the_review_the_ids_and_the_notes() 
     );
     assert_eq!(outcomes["F1"].commit.as_deref(), Some("abc1234"));
 
+    let reviewed = delegation(&rig.core, &review);
     rig.core
         .doc_host
         .queue_thread_message(&review, Some("lead"), "FOLLOW-UP: why F2?")
@@ -2201,6 +2405,12 @@ async fn resolving_findings_checks_the_owner_the_review_the_ids_and_the_notes() 
     )
     .await;
     wait_for(|| idle(&rig.core, &review), "the follow-up to end").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        delegation(&rig.core, &review),
+        reviewed,
+        "a review never re-opens"
+    );
     let view = serde_json::to_value(
         rig.core
             .doc_host

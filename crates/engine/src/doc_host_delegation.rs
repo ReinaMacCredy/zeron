@@ -67,7 +67,6 @@ pub struct TaskView {
     pub model: Option<String>,
     pub status: &'static str,
     pub work_state: &'static str,
-    pub has_pending_child_runs: bool,
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub findings: Option<Vec<FindingView>>,
@@ -378,6 +377,29 @@ fn reply_status(entries: &[SessionMessageEntry], anchor: &str) -> Option<Message
         .rev()
         .find(|entry| entry.role == MessageRole::Assistant)
         .map(|entry| entry.status.unwrap_or(MessageStatus::Complete))
+}
+
+fn reruns(delegation: &Delegation) -> bool {
+    matches!(
+        delegation.status,
+        DelegationStatus::Completed | DelegationStatus::Failed | DelegationStatus::Interrupted
+    ) && !crate::review::is_review(delegation)
+}
+
+fn rerun_anchor(entries: &[SessionMessageEntry], delegation: &Delegation) -> Option<String> {
+    let settled = delegation.completed_at?.timestamp_millis();
+    let from = entries
+        .iter()
+        .position(|entry| entry.id == delegation.anchor)
+        .map_or(0, |at| at + 1);
+    let from = entries[from..]
+        .iter()
+        .rposition(|entry| entry.role == MessageRole::Assistant && entry.created_at <= settled)
+        .map_or(from, |at| from + at + 1);
+    entries[from..]
+        .iter()
+        .find(|entry| entry.role == MessageRole::User && entry.answers_request_id.is_none())
+        .map(|entry| entry.id.clone())
 }
 
 fn result_parts(entries: &[SessionMessageEntry], anchor: &str) -> (Option<String>, Option<String>) {
@@ -841,7 +863,6 @@ impl DocHost {
             model: child.config.as_ref().and_then(|c| c.model.clone()),
             status,
             work_state,
-            has_pending_child_runs: !delegation.is_running() && active,
             summary,
             findings,
             next,
@@ -1618,6 +1639,7 @@ impl DocHost {
         let (Some(workspace), Some(sessions)) = (self.workspace(), self.sessions()) else {
             return;
         };
+        self.reopen_reruns(workspace, &sessions).await;
         for _ in 0..4 {
             let Ok(chats) = workspace.read_chats() else {
                 return;
@@ -1633,6 +1655,7 @@ impl DocHost {
                 if !delegation.cancel_requested && sessions.limit_holds(&chat.id) {
                     continue;
                 }
+                let observed = Utc::now();
                 let session = sessions.session_status(&chat.id);
                 let after_restart = booted_at.is_some_and(|at| delegation.started_at < at);
                 let task_queued = self.task_queued(&chat.id, &delegation.anchor);
@@ -1662,14 +1685,20 @@ impl DocHost {
                     reply_status(&entries, &delegation.anchor),
                     after_restart,
                 ) {
-                    finished.push((chat.clone(), status, result_text(status, text, error)));
+                    finished.push((
+                        chat.clone(),
+                        status,
+                        result_text(status, text, error),
+                        observed,
+                    ));
                 }
             }
             if finished.is_empty() {
                 break;
             }
-            for (child, status, result) in finished {
-                self.finish_child(&sessions, &child, status, result).await;
+            for (child, status, result, observed) in finished {
+                self.finish_child(&sessions, &child, status, result, observed)
+                    .await;
             }
         }
         if booted_at.is_some() {
@@ -1683,6 +1712,7 @@ impl DocHost {
         child: &Chat,
         status: DelegationStatus,
         result: String,
+        observed: chrono::DateTime<Utc>,
     ) {
         let Some(workspace) = self.workspace() else {
             return;
@@ -1702,7 +1732,7 @@ impl DocHost {
             }
             d.status = status;
             d.summary = Some(clip(&result, SUMMARY_CHARS));
-            d.completed_at = Some(Utc::now());
+            d.completed_at = Some(observed);
             if !d.delivery.is_some_and(DelegationDelivery::is_final) {
                 if owner.as_ref().is_none_or(|owner| {
                     owner.archived
@@ -1734,6 +1764,56 @@ impl DocHost {
         }
         if offer && let Err(err) = self.offer_wake(&owner_id, &child.id).await {
             tracing::warn!(task = %child.id, error = %err, "waking the owner failed");
+        }
+    }
+
+    async fn reopen_reruns(&self, workspace: &WorkspaceHost, sessions: &SessionsEngine) {
+        let Ok(chats) = workspace.read_chats() else {
+            return;
+        };
+        for chat in &chats {
+            let Some(delegation) = chat.delegation.as_ref().filter(|d| reruns(d)) else {
+                continue;
+            };
+            if chat.device_id != self.inner.config.device_id
+                || !sessions
+                    .session_status(&chat.id)
+                    .is_some_and(|session| turn_live(&session) && !session.compacting)
+            {
+                continue;
+            }
+            let Some(anchor) = self
+                .open(&chat.id)
+                .ok()
+                .and_then(|handle| handle.doc.read_entries().ok())
+                .and_then(|entries| rerun_anchor(&entries, delegation))
+            else {
+                continue;
+            };
+            let mut claimed = false;
+            let reopened = workspace.update_chat_delegation(&chat.id, |d| {
+                if !reruns(d) {
+                    return false;
+                }
+                claimed = d.delivery == Some(DelegationDelivery::Claimed);
+                d.status = DelegationStatus::Running;
+                d.anchor = anchor;
+                d.owner_turn_started_at = None;
+                d.completed_at = None;
+                d.delivery = None;
+                true
+            });
+            if let Err(err) = reopened {
+                tracing::warn!(task = %chat.id, error = %err, "re-opening a delegated task failed");
+                continue;
+            }
+            if claimed
+                && let Err(err) = self
+                    .drop_from_wakes(&delegation.delegated_by_chat_id, &[chat.id.clone()])
+                    .await
+            {
+                tracing::warn!(task = %chat.id, error = %err, "dropping a superseded wake failed");
+            }
         }
     }
 
@@ -2004,6 +2084,39 @@ mod tests {
         entries.push(entry("wake", MessageRole::User, None));
         assert_eq!(reply_status(&entries, "task"), None);
         assert_eq!(reply_status(&entries, "missing"), None);
+    }
+
+    #[test]
+    fn a_run_after_the_settle_starts_at_its_first_message_and_a_compaction_at_none() {
+        let entry = |id: &str, role, created_at| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: Vec::new(),
+            created_at,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+            duration_ms: None,
+        };
+        let mut d = delegation();
+        d.status = DelegationStatus::Completed;
+        d.completed_at = chrono::DateTime::from_timestamp_millis(100);
+        let mut entries = vec![
+            entry("task", MessageRole::User, 10),
+            entry("a1", MessageRole::Assistant, 20),
+            entry("compacted", MessageRole::System, 150),
+        ];
+        assert_eq!(rerun_anchor(&entries, &d), None);
+        entries.push(entry("queued-early", MessageRole::User, 90));
+        entries.push(entry("a2", MessageRole::Assistant, 160));
+        assert_eq!(
+            rerun_anchor(&entries, &d).as_deref(),
+            Some("queued-early"),
+            "a message queued before the settle that ran after it"
+        );
     }
 
     #[test]
