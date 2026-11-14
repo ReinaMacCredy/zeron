@@ -126,7 +126,11 @@ test("each chat keeps its own draft; the composer stays one node with the keys",
 	settle(app)
 	open(app, "s2")
 	expect(app:text('role:textbox "Message"')).to_be("Draft for two")
+	-- A new chat again: a fresh draft beside the one written in, which keeps its words (gpui's).
 	app:command("go_home")
+	settle(app)
+	expect(app:text('role:textbox "Message"')).to_be("")
+	app:command("open_first_draft")
 	settle(app)
 	expect(app:text('role:textbox "Message"')).to_be("A new idea")
 	-- Sending clears only that chat's: s1's stays.

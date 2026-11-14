@@ -1154,6 +1154,7 @@ local function is_settled(c: any): boolean
 	local days = if now.settle_after_days and now.settle_after_days > 0 then now.settle_after_days else 3
 	return settled_at(c, c.status, days, os.time()) ~= nil
 end
+M.is_settled = is_settled
 local warmed: string? = nil
 ui.effect(function()
 	local c = route.chat:get() :: any
@@ -1773,10 +1774,8 @@ M.Sidebar = ui.component(function(props: Props): Node
 				end
 			end
 		end,
-		draft = M.draft,
-		on_draft = function()
-			route.new_chat()
-		end,
+		drafts = M.drafts,
+		on_draft = route.open_draft,
 		on_discard_draft = M.discard_draft,
 		search_label = function(): string
 			local only = only_project()
@@ -1994,6 +1993,13 @@ local function draft_key(): any
 	return require("@app/screens/chat/shared")
 end
 local draft_frozen = ui.state("shell_sidebar_draft_frozen", nil :: string?)
+-- (A draft not shown keeps where it was left for: the route says only the shown one's.)
+local draft_left = ui.state("shell_sidebar_draft_left", {} :: { [string]: { target: string, project: string? } })
+local function draft_project(): string?
+	local c = route.chat:get()
+	local p: any = if c.name ~= "home" or c.project ~= "none" then route.project:get() else nil
+	return if p then p.id else nil
+end
 local function draft_target(): string
 	local c = route.chat:get()
 	local p = if c.name ~= "home" or c.project ~= "none" then route.project:get() else nil
@@ -2001,45 +2007,65 @@ local function draft_target(): string
 	local _, here = devices()
 	return if here then `{folder} @ {here}` else folder
 end
-local function draft_held(): string?
-	local d = draft_key().draft_of("")
-	return if d.text ~= "" or #d.cargo > 0 then d.text else nil
-end
-M.draft = function(): any
+M.drafts = function(): { any }
 	local at_home = route.chat:get().name == "home"
-	local prompt = if at_home then draft_frozen:get() else draft_held()
-	if prompt == nil then
-		return nil
-	end
+	local active = route.draft:get()
 	local just = only_project()
-	if just then
-		local c = route.chat:get()
-		local on: any = if c.name ~= "home" or c.project ~= "none" then route.project:get() else nil
-		if not on or not in_filter(on.id, just) then
-			return nil
+	local left = draft_left:get()
+	local keys = draft_key().new_drafts()
+	if at_home and not table.find(keys, active) then
+		table.insert(keys, active)
+		table.sort(keys, draft_key().new_before)
+	end
+	local out: { any } = {}
+	for _, key in keys do
+		local open = at_home and key == active
+		local prompt = if open then draft_frozen:get() else draft_key().draft_of(key).text
+		local was = if open then nil else left[key]
+		local project = if was then was.project else draft_project()
+		local filtered = just ~= nil and not (project and in_filter(project, just))
+		if prompt ~= nil and not filtered then
+			table.insert(out, {
+				id = key,
+				target = if was then was.target else draft_target(),
+				prompt = (string.gsub(prompt, "%s+", " ")),
+				open = open,
+			})
 		end
 	end
-	return { id = "home", target = draft_target(), prompt = (string.gsub(prompt, "%s+", " ")), open = at_home }
+	return out
 end
 do
 	local was_home = route.chat:peek().name == "home"
+	local was_key = route.draft:peek()
+	local was: { target: string, project: string? }? = nil
 	ui.effect(function()
 		local at_home = route.chat:get().name == "home"
-		if at_home == was_home then
+		local key = route.draft:get()
+		local now = if at_home then { target = draft_target(), project = draft_project() } else nil
+		if at_home == was_home and key == was_key then
+			was = now
 			return
 		end
-		was_home = at_home
+		if was_home and was then
+			local all = table.clone(draft_left:peek())
+			all[was_key] = was
+			draft_left:set(all)
+		end
+		was_home, was_key, was = at_home, key, now
 		if at_home then
-			local d = draft_key().draft_peek("")
+			local d = draft_key().draft_peek(key)
 			draft_frozen:set(if d.text ~= "" or #d.cargo > 0 then d.text else nil)
 		else
 			draft_frozen:set(nil)
 		end
 	end)
 end
-function M.discard_draft()
-	draft_key().discard_draft_of("")
-	draft_frozen:set(nil)
+function M.discard_draft(key: string)
+	draft_key().discard_draft_of(key)
+	if route.draft:peek() == key then
+		draft_frozen:set(nil)
+	end
 end
 
 -- What a walk with the keys holds on (screens/shell/init `step`): the order, less a split pair's moves.

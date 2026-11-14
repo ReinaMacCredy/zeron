@@ -96,6 +96,9 @@ test("Send in new thread sends once, with what the draft carries, on the chat's 
 	expect(app:text('role:textbox "Message"')).to_be("")
 	app:command("go_home")
 	settle(app)
+	expect(app:text('role:textbox "Message"')).to_be("")
+	app:command("open_first_draft")
+	settle(app)
 	expect(app:text('role:textbox "Message"')).to_be("Held idea")
 end)
 

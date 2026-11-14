@@ -3265,6 +3265,13 @@ impl View {
         // engine answers a switch by ending the live turn, which would be
         // this run's.
         let switching = !fresh && chat["config"]["harness"] != config["harness"];
+        if fresh {
+            if let Some(c) = chats.chats.borrow_mut().get_mut(&id) {
+                c["config"] = config.clone();
+            }
+            chats.publish_views();
+            crate::sessions::configured(&id, &config);
+        }
         if fresh || switching {
             let mut params = json!({ "op": "setChatConfig", "chatId": id, "config": config });
             // (Its divider, with the conversation handed over.)

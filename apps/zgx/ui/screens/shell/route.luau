@@ -645,6 +645,9 @@ function M.narrowed_project(get: () -> string?)
 	narrowed_to = get
 end
 
+-- The draft key the new-chat page shows: "" or a `new:<n>` one `new_chat` made.
+M.draft = ui.state("shell_new_draft", "")
+
 -- The chat last open, until a new chat is started (the one open on a
 -- chat's route, held under settings too). A new chat asked for in no
 -- project starts where it was, when the list isn't narrowed to one.
@@ -694,6 +697,20 @@ function M.new_chat(project: string?, device: string?)
 			-- heard.)
 			M.device_pick:set({ device = on })
 		end
+		-- (gpui's `new_draft`: one written in stays a draft, and a fresh one opens beside it.)
+		local drafts = require("@app/screens/chat/shared")
+		if drafts.has_words(M.draft:peek()) then
+			M.draft:set(drafts.mint_new())
+		end
+		if at().name ~= "home" then
+			go("home")
+		end
+	end)
+end
+
+function M.open_draft(key: string)
+	ui.batch(function()
+		M.draft:set(key)
 		if at().name ~= "home" then
 			go("home")
 		end

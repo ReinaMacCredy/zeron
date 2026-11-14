@@ -357,6 +357,7 @@ local function grown(key: string, text: string, from: number, to: number): (numb
 end
 
 local carets: { [string]: number } = {}
+local fields: { [string]: { key_of: () -> string, field: any } } = {}
 
 function M.caret(key: string, set: number?): number?
 	if set then
@@ -365,13 +366,20 @@ function M.caret(key: string, set: number?): number?
 	return carets[key]
 end
 
+function M.field(key: string): any?
+	local at = fields[key]
+	return if at and at.key_of() == key then at.field:peek() else nil
+end
+
 function M.unit(key_of: () -> string, value: State<string>, field: any, on_chip: ((ref: Ref, shown: string) -> boolean)?)
 	local snapping = false
+	local shown = { key_of = key_of, field = field }
 	local function on_caret(_line: number, _column: number, anchor: number, focus: number)
 		if snapping then
 			return
 		end
 		carets[key_of()] = math.max(anchor, focus)
+		fields[key_of()] = shown
 		if on_chip and anchor == focus then
 			for _, at in M.spans(key_of(), value:peek()) do
 				if anchor > at.from - 1 and anchor < at.to and on_chip(at.ref, at.shown) then

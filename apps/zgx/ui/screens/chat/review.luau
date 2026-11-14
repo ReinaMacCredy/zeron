@@ -6,6 +6,7 @@ local Tooltip = require("@ds/tooltip")
 local ContextMenu = require("@ds/context_menu")
 local Button = require("@ds/button")
 local IconButton = require("@ds/icon_button")
+local Reveal = require("@ds/reveal")
 local locale = require("@ds/locale")
 
 local M = {}
@@ -118,52 +119,55 @@ M.Button = ui.component(function(props: { chat: () -> string?, size: number }): 
 	local function label(): string
 		return locale.s(if busy() then "chat.review.running" else "chat.review.button")
 	end
-	return ui.show(function(): boolean
-		local now = r()
-		return M.on() and now ~= nil and now.reviewable == true
-	end, ContextMenu {
-		label = locale.t("chat.review.menu"),
-		open = menu_open,
-		items = function(): { ContextMenu.Entry }?
-			return entries()
+	return Reveal {
+		shown = function(): boolean
+			local now = r()
+			return M.on() and now ~= nil and now.reviewable == true
 		end,
-		ui.button {
-			id = "chat-review",
-			label = label,
-			-- (Its tip says what a press does: the host's while it runs, else the review it starts.)
-			tooltip = Tooltip {
-				function(): string
-					local now = r()
-					if not now then
-						return ""
-					end
-					return if now.busy then now.tip or "" else now.start_label or ""
-				end,
-			},
-			tooltip_placement = IconButton.placement("bottom"),
-			disabled = busy,
-			h = props.size,
-			px = "$zeron.space.tight",
-			gap = ui.raw(5, "gpui's review chip"),
-			items = "center",
-			shrink = 0,
-			rounded = "$radius.lg",
-			color = "$text.secondary",
-			hover = { bg = "$hover", color = "$text.primary" },
-			on_click = function()
-				local id = chat()
-				if id and not busy() then
-					call("review.start", { chat = id })
-				end
+		ContextMenu {
+			label = locale.t("chat.review.menu"),
+			open = menu_open,
+			items = function(): { ContextMenu.Entry }?
+				return entries()
 			end,
-			ui.presence(function(): string
-				return if busy() then "busy" else "idle"
-			end, function(k: string): Node
-				return Icon { name = if k == "busy" then "refresh" else "checklist", size = 14 } :: any
-			end),
-			ui.text { label, text_size = "$font.size.sm", weight = "$font.weight.medium", wrap = false },
+			ui.button {
+				id = "chat-review",
+				label = label,
+				-- (Its tip says what a press does: the host's while it runs, else the review it starts.)
+				tooltip = Tooltip {
+					function(): string
+						local now = r()
+						if not now then
+							return ""
+						end
+						return if now.busy then now.tip or "" else now.start_label or ""
+					end,
+				},
+				tooltip_placement = IconButton.placement("bottom"),
+				disabled = busy,
+				h = props.size,
+				px = "$zeron.space.tight",
+				gap = ui.raw(5, "gpui's review chip"),
+				items = "center",
+				shrink = 0,
+				rounded = "$radius.lg",
+				color = "$text.secondary",
+				hover = { bg = "$hover", color = "$text.primary" },
+				on_click = function()
+					local id = chat()
+					if id and not busy() then
+						call("review.start", { chat = id })
+					end
+				end,
+				ui.presence(function(): string
+					return if busy() then "busy" else "idle"
+				end, function(k: string): Node
+					return Icon { name = if k == "busy" then "refresh" else "checklist", size = 14 } :: any
+				end),
+				ui.text { label, text_size = "$font.size.sm", weight = "$font.weight.medium", wrap = false },
+			},
 		},
-	})
+	}
 end)
 
 local OUTCOME_TONE: { [string]: string } = { fixed = "$success", skipped = "$warning", agent_on_it = "$accent" }

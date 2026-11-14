@@ -302,6 +302,59 @@ ui.effect(function()
 	end
 end)
 
+-- The other new chats' drafts (`new:<n>`, made by route's `new_chat` beside one written in), kept across launches as "" is.
+local function is_new(key: string): boolean
+	return key == "" or string.sub(key, 1, 4) == "new:"
+end
+local function words_in(d: any): boolean
+	return type(d) == "table" and ((type(d.text) == "string" and d.text ~= "") or (type(d.cargo) == "table" and #d.cargo > 0))
+end
+local saved_more = ui.persist("chat_new_drafts", nil :: any)
+local minted = ui.persist("chat_new_minted", 0)
+do
+	local more = saved_more:peek()
+	if type(more) == "table" then
+		local all = table.clone(kept:peek())
+		local top = made:peek()
+		for key, d in more do
+			if all[key] == nil and here:peek() ~= key and words_in(d) then
+				all[key] = d
+				for _, c in (if type(d.cargo) == "table" then d.cargo else {}) :: { any } do
+					local n = tonumber(string.match(tostring(c.id or ""), "(%d+)$"))
+					if n and n > top then
+						top = n
+					end
+				end
+			end
+		end
+		ui.batch(function()
+			kept:set(all)
+			if top ~= made:peek() then
+				made:set(top)
+			end
+		end)
+	end
+end
+ui.effect(function()
+	local out: any = nil
+	local h = here:get()
+	if h ~= "" and is_new(h) then
+		local d = { text = M.text:get(), cargo = M.cargo:get(), quotes = M.quotes:get() }
+		if words_in(d) then
+			out = { [h] = d }
+		end
+	end
+	for key, d in kept:get() do
+		if key ~= "" and key ~= h and is_new(key) and words_in(d) then
+			out = out or {}
+			out[key] = { text = d.text, cargo = d.cargo, quotes = d.quotes }
+		end
+	end
+	if out ~= nil or saved_more:peek() ~= nil then
+		saved_more:set(out)
+	end
+end)
+
 -- Whether a file's name is a picture the window can draw. (zgx decodes
 -- no GIF or HEIC yet: those are file chips, so a thumbnail never fails.)
 -- A project's file or folder as Zeron mentions it in a prompt, and back
@@ -909,7 +962,7 @@ local function stage_files(key: string, base: number, files: { any }, stats: { [
 			end
 		end
 		if #words > 0 then
-			M.put_words(key, table.concat(words, " "))
+			M.put_words(key, table.concat(words, " "), true)
 		end
 		push_cargo(key, items)
 		if #refused > 0 then
@@ -921,9 +974,6 @@ end
 function M.attach_files(files: { any }, of: string?)
 	local key = of or here:peek()
 	refuse_in(key, nil)
-	if not of then
-		M.focus:add(1)
-	end
 	-- (Taken now: a second attach can come before the host answers the first.)
 	local base = next_number(key)
 	note_number(key, base + #files - 1)
@@ -1070,8 +1120,10 @@ function M.paste_text(text: string, of: string?, insert: ((shown: string) -> boo
 	end
 	refuse_in(key, nil)
 	note_number(key, number)
+	local inserted = false
 	local function put(words: string)
-		if not (insert and insert(words)) then
+		inserted = insert ~= nil and insert(words)
+		if not inserted then
 			M.set_draft_of(key, "text", M.draft_peek(key).text .. words)
 		end
 	end
@@ -1116,7 +1168,7 @@ function M.paste_text(text: string, of: string?, insert: ((shown: string) -> boo
 			landed(written)
 		end
 	end
-	if not of then
+	if not of and not inserted then
 		M.focus:add(1)
 	end
 	return true
@@ -1837,10 +1889,19 @@ local function without_chip(text: string, item: any): string
 	return if at and to then string.sub(text, 1, at - 1) .. string.sub(text, to + 1) else text
 end
 
-function M.put_words(key: string, words: string)
+function M.put_words(key: string, words: string, focus: boolean?)
 	local refs = M.refs_key(key)
 	local text = M.draft_peek(key).text
-	local at = math.clamp(references.caret(refs) or #text, 0, #text)
+	local el = references.field(refs)
+	local caret = references.caret(refs)
+	local from: number? = nil
+	if el then
+		local a, b = el:selection_bytes()
+		if a and b then
+			from, caret = math.min(a, b), math.max(a, b)
+		end
+	end
+	local at = math.clamp(caret or #text, 0, #text)
 	for _, span in references.spans(refs, text) do
 		if at > span.from - 1 and at < span.to then
 			at = span.to
@@ -1849,10 +1910,21 @@ function M.put_words(key: string, words: string)
 	while at < #text and (string.byte(text, at + 1) or 0) >= 0x80 and (string.byte(text, at + 1) or 0) < 0xC0 do
 		at += 1
 	end
+	local start = if from and from ~= caret then math.clamp(from, 0, at) else at
 	local tail = if at == #text then " " else ""
-	local lead = if at > 0 and not string.find(string.sub(text, at, at), "%s") then " " else ""
-	M.set_draft_of(key, "text", string.sub(text, 1, at) .. lead .. words .. tail .. string.sub(text, at + 1))
-	references.caret(refs, at + #lead + #words + #tail)
+	local lead = if start > 0 and not string.find(string.sub(text, start, start), "%s") then " " else ""
+	local put = lead .. words .. tail
+	if el and el:set_selection_bytes(start, at) and el:replace_selection(put) then
+		if focus then
+			el:focus()
+		end
+		return
+	end
+	M.set_draft_of(key, "text", string.sub(text, 1, start) .. put .. string.sub(text, at + 1))
+	references.caret(refs, start + #put)
+	if focus and key == here:peek() then
+		M.focus:add(1)
+	end
 end
 
 function M.remove_cargo(id: string)
@@ -1912,6 +1984,35 @@ function M.discard_draft_of(key: string)
 	local all = table.clone(kept:peek())
 	all[key] = nil
 	kept:set(all)
+end
+
+M.is_new = is_new
+function M.has_words(key: string): boolean
+	local d = M.draft_peek(key)
+	return d.text ~= "" or #d.cargo > 0
+end
+function M.new_before(a: string, b: string): boolean
+	return (tonumber(string.sub(a, 5)) or 0) < (tonumber(string.sub(b, 5)) or 0)
+end
+-- The new chats' drafts written in, "" first, then in the order they were made.
+function M.new_drafts(): { string }
+	local out: { string } = {}
+	local h = here:get()
+	if is_new(h) and (M.text:get() ~= "" or #M.cargo:get() > 0) then
+		table.insert(out, h)
+	end
+	for key, d in kept:get() do
+		if key ~= h and is_new(key) and words_in(d) then
+			table.insert(out, key)
+		end
+	end
+	table.sort(out, M.new_before)
+	return out
+end
+function M.mint_new(): string
+	local n = minted:peek() + 1
+	minted:set(n)
+	return `new:{n}`
 end
 
 export type Whole = { text: string, cargo: { any }, quotes: { [string]: string }, number: number? }
@@ -1975,10 +2076,6 @@ function M.move_draft(from: string, to: string): { from: Whole, to: Whole }
 		M.put_whole(from, { text = "", cargo = {}, quotes = {} })
 	end)
 	return { from = a, to = b }
-end
-
-function M.join_draft_before(key: string, w: Whole)
-	M.put_whole(key, joined(w, M.whole_of(key)))
 end
 
 -- Chat `key`'s draft changed where it's shown by its id (`field`: "text"
