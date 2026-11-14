@@ -167,24 +167,34 @@ local function order_now(sidebar: { string }, going_home: boolean): { string }
 		local c = chat_row(id)
 		return if c then c.updated else nil
 	end, cutoff(os.time()), M.limit:peek())
-	if going_home or route.chat:peek().name == "home" then
-		table.insert(list, 1, tabs.DRAFT)
+	local home = going_home or route.chat:peek().name == "home"
+	local first = if home then tabs.tab_of(route.draft:peek()) else nil
+	if first then
+		table.insert(list, 1, first)
 	else
 		-- (The first press goes one on from where it is: where it is comes first.)
 		local at = table.find(list, here_now() or "")
 		if at and at > 1 then
 			table.insert(list, 1, table.remove(list, at) :: string)
 		end
-		if tabs.draft_shows:peek() then
-			table.insert(list, tabs.DRAFT)
+	end
+	for _, key in tabs.drafts:peek() do
+		local tab = tabs.tab_of(key)
+		if tab ~= first then
+			table.insert(list, tab)
 		end
 	end
 	return list
 end
 
+local function here_tab(): string?
+	return if route.chat:peek().name == "home" then tabs.tab_of(route.draft:peek()) else here_now()
+end
+
 local function go(id: string?)
-	if id == tabs.DRAFT then
-		route.new_chat()
+	local draft = tabs.draft_in(id)
+	if draft then
+		route.open_draft(draft)
 	elseif id then
 		route.open_session(id)
 	end
@@ -198,9 +208,9 @@ function M.commit()
 	end
 	local id = list[hi:peek()]
 	cards:set(nil)
-	local here = if route.chat:peek().name == "home" then tabs.DRAFT else here_now()
+	local here = here_tab()
 	-- (A chat deleted since the cards came up is no place to land.)
-	if id ~= here and (id == tabs.DRAFT or chat_row(id)) then
+	if id ~= here and (tabs.draft_in(id) or chat_row(id)) then
 		go(id)
 	end
 end
@@ -243,13 +253,13 @@ function M.step(by: number): boolean
 	end
 	if M.cycles_tabs:peek() then
 		local strip_now = strip(false)
-		if tabs.draft_shows:peek() then
-			table.insert(strip_now, tabs.DRAFT)
+		for _, key in tabs.drafts:peek() do
+			table.insert(strip_now, tabs.tab_of(key))
 		end
 		if #strip_now == 0 then
 			return true
 		end
-		local here = if route.chat:peek().name == "home" then tabs.DRAFT else here_now()
+		local here = here_tab()
 		local at = if here then table.find(strip_now, here) else nil
 		local i = if at then (at - 1 + by) % #strip_now + 1 elseif by > 0 then 1 else #strip_now
 		go(strip_now[i])
@@ -260,7 +270,7 @@ function M.step(by: number): boolean
 	if #order == 0 then
 		return true
 	elseif #order == 1 then
-		if route.chat:peek().name == "home" and order[1] ~= tabs.DRAFT then
+		if route.chat:peek().name == "home" and not tabs.draft_in(order[1]) then
 			go(order[1])
 		end
 		return true
@@ -304,13 +314,13 @@ local function target_of(c: any): string
 end
 
 local function Card(id: string, at: number): Node
-	local is_draft = id == tabs.DRAFT
-	local c = if is_draft then nil else chat_row(id)
+	local draft = tabs.draft_in(id)
+	local c = if draft then nil else chat_row(id)
 	local function lit(): boolean
 		return hi:get() == at
 	end
 	local picture = pictures.src(id)
-	local text = if is_draft then chat_shared.draft_of("").text elseif c then c.preview else nil
+	local text = if draft then chat_shared.draft_of(draft).text elseif c then c.preview else nil
 	local visual: Node = if picture
 		then ui.image {
 			src = picture,

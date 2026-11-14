@@ -134,6 +134,8 @@ struct Sessions {
     live_heard: Cell<bool>,
     here: RefCell<Option<String>>,
     chats: RefCell<Json>,
+    /// Chats made here that the engine's list doesn't carry yet (it lags the create by a few frames).
+    made: RefCell<Vec<Json>>,
     spaces: RefCell<Json>,
     devices: RefCell<Json>,
     live: RefCell<Json>,
@@ -1639,6 +1641,34 @@ impl Sessions {
         self.value_at(now_seconds())
     }
 
+    fn listed(&self, id: &str) -> bool {
+        self.chats.borrow().as_array().into_iter().flatten().any(|c| c["id"].as_str() == Some(id))
+    }
+
+    fn made(&self, row: Json) {
+        let Some(id) = row["id"].as_str() else { return };
+        if !row["parentChatId"].is_null() || self.listed(id) || self.made.borrow().iter().any(|c| c["id"].as_str() == Some(id)) {
+            return;
+        }
+        self.made.borrow_mut().push(row);
+        self.publish();
+    }
+
+    fn with_made(&self, chats: Value, known: &HashSet<&str>, now: i64) -> Value {
+        self.made.borrow_mut().retain(|c| !self.listed(c["id"].as_str().unwrap_or_default()));
+        let made = self.made.borrow();
+        let Value::List(list) = &chats else { return chats };
+        if made.is_empty() {
+            return chats;
+        }
+        let at = chrono::DateTime::from_timestamp(now, 0).unwrap_or_default();
+        let mut out: Vec<Value> = list.iter().cloned().collect();
+        for c in made.iter() {
+            out.push(top_row(&mut HashMap::new(), c, c["id"].as_str().unwrap_or_default(), known, None, at, 0, 0, None, &[]));
+        }
+        Value::List(out.into())
+    }
+
     /// What scripts see, judged at `now` (Unix seconds).
     fn value_at(&self, now: i64) -> Value {
         let state = if self.heard.get() { "ready" } else { "loading" };
@@ -1675,6 +1705,7 @@ impl Sessions {
             })
             .collect();
         let (chats, children, archived) = self.chat_lists(now, &known_spaces);
+        let chats = self.with_made(chats, &known_spaces, now);
         let places = self.expected.borrow();
         let ids = |list: &[String]| Value::List(list.iter().map(|id| Value::from(id.as_str())).collect());
         let sections: Vec<Value> = places
@@ -1882,6 +1913,7 @@ impl Sessions {
         // Known to the chat's sender at once (a side chat's first message
         // follows straight away, before the engine's list has it).
         crate::chat::made(&params);
+        self.made(made_row(&params));
         if let Some(title) = field("title") {
             let _ = self.mutate(json!({ "op": "renameChat", "chatId": id, "title": title })).await;
         }
@@ -1942,7 +1974,9 @@ impl Sessions {
         let id = field("id").filter(|id| plain_id(id)).unwrap_or_else(new_id);
         let params = fork_from_params(&self.chats.borrow(), &id, &source, &entry);
         let chat = engine::get().call("ForkChat", params).await?;
-        crate::chat::made(&made_fork(&chat, &id));
+        let made = made_fork(&chat, &id);
+        crate::chat::made(&made);
+        self.made(made_row(&made));
         Ok(Value::from(chat["id"].as_str().unwrap_or(&id)))
     }
 
@@ -2179,6 +2213,27 @@ pub(crate) fn rewind_params(chat: &str, entry: &str, device: Option<&str>) -> Js
         params["targetDeviceId"] = Json::from(device);
     }
     params
+}
+
+fn made_row(params: &Json) -> Json {
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let mut row = json!({ "id": params["chatId"], "createdAt": now });
+    for wire in ["deviceId", "spaceId", "config", "cwd", "branch", "parentChatId"] {
+        if !params[wire].is_null() {
+            row[wire] = params[wire].clone();
+        }
+    }
+    row
+}
+
+pub(crate) fn configured(id: &str, config: &Json) {
+    SESSIONS.with(|s| {
+        let mut made = s.made.borrow_mut();
+        let Some(row) = made.iter_mut().find(|c| c["id"].as_str() == Some(id)) else { return };
+        row["config"] = config.clone();
+        drop(made);
+        s.publish();
+    });
 }
 
 fn made_fork(chat: &Json, id: &str) -> Json {

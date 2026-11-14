@@ -3385,6 +3385,13 @@ ui.command {
 		route.new_chat("atlas")
 	end,
 }
+ui.command {
+	id = "open_first_draft",
+	title = "The first new chat's draft",
+	run = function()
+		route.open_draft("")
+	end,
+}
 
 -- The catalog changing: an agent arriving with its models, and none at all
 -- (signed out of every agent, or still looking).

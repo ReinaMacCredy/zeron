@@ -11,22 +11,32 @@
 local PanelHome = require("@ds/panel_home")
 local Tooltip = require("@ds/tooltip")
 local control = require("@ds/control")
+local Reveal = require("@ds/reveal")
 
 return function(zeron: any, Repo: any)
-	-- Each session's totals as last heard, by session and folder (kept
-	-- while the window is: the home shows them at once when it's back).
+	-- Each session's totals as last heard (kept while the window is: the
+	-- home shows them at once when it's back).
 	local heard = ui.state("git.branch_totals", {} :: { [string]: any })
 
-	local function counts(branch: () -> any, panel_of: () -> any, id: string, text_size: any, corner: any, gap: any): Node
+	local function counts(branch: () -> any, panel_of: () -> any, id: string, text_size: any, corner: any, gap: any): (() -> boolean, Node)
 		local function slot_of(b: any): string?
-			return if b and b.cwd then `{b.session}|{b.cwd}` else nil
+			return if b and type(b.session) == "string" then b.session else nil
 		end
+		local function where(b: any): string
+			return `{b.device or ""}|{b.cwd or ""}`
+		end
+		-- (Totals heard in another folder or device stand only while this one's answer is on its way.)
+		local asking = ui.use_state(false)
 		-- What to ask again on: the folder, the branch, the device and the
 		-- session's status (a turn ending moves the work).
 		local asked: string? = nil
 		ui.effect(function()
 			local b = branch()
 			if type(b) ~= "table" or not b.cwd or (b.branch or "") == "" then
+				asked = nil
+				if asking:peek() then
+					asking:set(false)
+				end
 				return
 			end
 			local record = zeron.context_of("session", b.session)
@@ -35,40 +45,64 @@ return function(zeron: any, Repo: any)
 				return
 			end
 			asked = key
+			asking:set(true)
 			local slot = slot_of(b) :: string
+			local at = where(b)
 			zeron.service(b.device):call("branch_totals", { cwd = b.cwd }, { timeout = 60 }):after(function(t: any)
 				if asked ~= key then
 					return
 				end
 				local now = table.clone(heard:peek())
-				now[slot] = if type(t) == "table" and t.adds then { adds = t.adds, dels = t.dels or 0 } else false
+				now[slot] = if type(t) == "table" and t.adds then { adds = t.adds, dels = t.dels or 0, at = at } else false
 				heard:set(now)
+				asking:set(false)
 			end, function(err: any)
 				-- (Not known: the row keeps its branch alone.)
 				print(`git: branch totals: {err}`)
+				if asked == key then
+					local was = heard:peek()[slot]
+					if type(was) == "table" and was.at ~= at then
+						local now = table.clone(heard:peek())
+						now[slot] = nil
+						heard:set(now)
+					end
+					asking:set(false)
+				end
 			end)
 		end)
 		local function totals(): { adds: number, dels: number }?
-			local slot = slot_of(branch())
+			local b = branch()
+			local slot = slot_of(b)
 			local t = if slot then heard:get()[slot] else nil
 			if type(t) ~= "table" or t.adds + t.dels == 0 then
 				return nil
 			end
+			if t.at ~= where(b) and not asking:get() then
+				return nil
+			end
 			return t
 		end
+		local held = ui.use_state(totals())
+		ui.effect(function()
+			local t = totals()
+			if t then
+				held:set(t)
+			end
+		end)
 		local function open()
 			local b, panel = branch(), panel_of()
 			if panel and b then
 				Repo.open_tab(panel, b.session, "changes", "branch")
 			end
 		end
-		return ui.show(function(): boolean
+		return function(): boolean
 			return totals() ~= nil
-		end, ui.row {
+		end,
+		ui.row {
 			id = id,
 			role = "button",
 			label = function(): string
-				local t = totals() or { adds = 0, dels = 0 }
+				local t = held:get() or { adds = 0, dels = 0 }
 				return zeron.s("home.diff_label", { adds = t.adds, dels = t.dels })
 			end,
 			tooltip = Tooltip { zeron.t("home.branch_changes") },
@@ -92,7 +126,7 @@ return function(zeron: any, Repo: any)
 			end,
 			ui.text {
 				function(): string
-					local t = totals()
+					local t = held:get()
 					return if t then `+{t.adds}` else ""
 				end,
 				literal = true,
@@ -103,7 +137,7 @@ return function(zeron: any, Repo: any)
 			},
 			ui.text {
 				function(): string
-					local t = totals()
+					local t = held:get()
 					return if t then `−{t.dels}` else ""
 				end,
 				literal = true,
@@ -112,7 +146,7 @@ return function(zeron: any, Repo: any)
 				text_size = text_size,
 				color = "$zeron.diff.removed",
 			},
-		})
+		}
 	end
 
 	return {
@@ -123,9 +157,9 @@ return function(zeron: any, Repo: any)
 				return ui.div {}
 			end
 			local panel = zeron.context("panel")
-			return counts(branch, function(): any
+			return ui.show(counts(branch, function(): any
 				return panel
-			end, "git-branch-totals", "$font.size.xs", PanelHome.inner(6), "$space.1")
+			end, "git-branch-totals", "$font.size.xs", PanelHome.inner(6), "$space.1"))
 		end,
 		toggle = function(): Node
 			-- (The title bar provides no session: the window's page's, read as it changes.)
@@ -138,9 +172,10 @@ return function(zeron: any, Repo: any)
 				local record = zeron.context_of("session", session)
 				return { session = session, device = record.device, cwd = record.cwd, branch = record.branch }
 			end
-			return counts(branch, function(): any
+			local shown, node = counts(branch, function(): any
 				return zeron.context("panel")
 			end, "git-toggle-totals", "$font.size.xs", "$radius.md", ui.raw(6, "Zeron's gap in the toggle"))
+			return Reveal { shown = shown, node }
 		end,
 	}
 end

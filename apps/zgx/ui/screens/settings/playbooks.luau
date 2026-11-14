@@ -107,7 +107,8 @@ end
 
 local function seed(project: string?, prompt: string)
 	route.new_chat(project)
-	shared.set_draft_of("", "text", prompt .. shared.draft_peek("").text)
+	local key = route.draft:peek()
+	shared.set_draft_of(key, "text", prompt .. shared.draft_peek(key).text)
 	ui.after(0, function()
 		shared.focus:set(shared.focus:peek() + 1)
 	end)

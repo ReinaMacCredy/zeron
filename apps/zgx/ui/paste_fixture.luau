@@ -6,6 +6,7 @@
 local page = require("./chat_fixture")
 local shared = require("@app/screens/chat/shared")
 local PastedText = require("@ds/pasted_text")
+local References = require("@ds/references")
 
 local host = ui.state("test_host", "new")
 local stats = ui.state("test_stats", {} :: { any })
@@ -93,6 +94,17 @@ ui.command {
 	run = function()
 		local text = if length:peek() > 0 then string.rep(unit:peek(), length:peek()) else words:peek()
 		answer:set(tostring(shared.paste_text(text)))
+	end,
+}
+ui.command {
+	id = "paste_at_caret",
+	title = "Paste test_paste_length of test_paste_unit through the composer's field",
+	run = function()
+		local text = string.rep(unit:peek(), length:peek())
+		answer:set(tostring(shared.paste_text(text, nil, function(shown: string): boolean
+			local el = References.field(shared.refs_key(shared.showing()))
+			return el ~= nil and el:replace_selection(shown)
+		end)))
 	end,
 }
 ui.command {
@@ -194,6 +206,13 @@ ui.command {
 	title = "Attach test_files",
 	run = function()
 		shared.attach_files(files:peek())
+	end,
+}
+ui.command {
+	id = "paste_image_now",
+	title = "Paste the clipboard's picture into the composer",
+	run = function()
+		shared.cargo_props().on_paste_image()
 	end,
 }
 ui.command {

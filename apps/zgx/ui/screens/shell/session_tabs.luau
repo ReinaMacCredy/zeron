@@ -52,6 +52,8 @@ local rows = splits.tree.steady(function(): { [string]: any }
 			tree = (c :: any).tree,
 			pr = (c :: any).pr,
 			fan = (c :: any).fan,
+			settle = (c :: any).settle,
+			last_message = (c :: any).last_message,
 		}
 	end
 	return out
@@ -93,19 +95,52 @@ M.shown = shown
 M.recent = recent
 M.DRAFT = DRAFT
 
-local function draft_held(): boolean
-	local d = chat_shared.draft_of("")
-	return d.text ~= "" or #d.cargo > 0
+local function tab_of(key: string): string
+	return if key == "" then DRAFT else `{DRAFT}:{key}`
 end
-local draft_put_away = ui.state("shell_session_tabs_draft_away", false)
-local draft_shows = ui.computed(function(): boolean
-	local name = route.chat:get().name
-	return name == "home" or (draft_held() and not draft_put_away:get())
+local function draft_in(tab: string?): string?
+	if tab == DRAFT then
+		return ""
+	end
+	return if tab and string.sub(tab, 1, #DRAFT + 1) == `{DRAFT}:` then string.sub(tab, #DRAFT + 2) else nil
+end
+M.tab_of = tab_of
+M.draft_in = draft_in
+local draft_put_away = ui.state("shell_session_tabs_drafts_away", {} :: { [string]: boolean })
+local drafts = ui.computed(function(): { string }
+	local home = route.chat:get().name == "home"
+	local active = route.draft:get()
+	local away = draft_put_away:get()
+	local out: { string } = {}
+	for _, key in chat_shared.new_drafts() do
+		if not away[key] or (home and key == active) then
+			table.insert(out, key)
+		end
+	end
+	if home and not table.find(out, active) then
+		table.insert(out, active)
+		table.sort(out, chat_shared.new_before)
+	end
+	return out
 end)
-M.draft_shows = draft_shows
+M.drafts = drafts
+local strip = ui.computed(function(): { string }
+	local out = table.clone(shown:get())
+	for _, key in drafts:get() do
+		table.insert(out, tab_of(key))
+	end
+	return out
+end)
 ui.effect(function()
-	if route.chat:get().name == "home" and draft_put_away:peek() then
-		draft_put_away:set(false)
+	if route.chat:get().name ~= "home" then
+		return
+	end
+	local key = route.draft:get()
+	local away = draft_put_away:peek()
+	if away[key] then
+		local left = table.clone(away)
+		left[key] = nil
+		draft_put_away:set(left)
 	end
 end)
 
@@ -114,7 +149,7 @@ local function selected_key(): string?
 	if name == "session" then
 		return splits.current_key()
 	end
-	return if name == "home" then DRAFT else nil
+	return if name == "home" then tab_of(route.draft:get()) else nil
 end
 
 type Drag = { key: string, w: number, order: { string }, grab: number?, out: boolean }
@@ -193,16 +228,19 @@ ui.effect(function()
 end)
 
 local function neighbour(key: string): string?
-	local list = shown:peek()
+	local list = strip:peek()
 	local at = table.find(list, key)
 	if not at then
 		return nil
 	end
-	return list[at + 1] or (if draft_shows:peek() then DRAFT else nil) or list[at - 1]
+	return list[at + 1] or list[at - 1]
 end
 
 local function go_to(key: string?)
-	if key == DRAFT or not key then
+	local draft = draft_in(key)
+	if draft then
+		route.open_draft(draft)
+	elseif not key then
 		route.new_chat()
 	else
 		route.open_session(face(key))
@@ -218,14 +256,29 @@ local function close(key: string)
 	end
 end
 
-local function close_draft()
-	local list = shown:peek()
-	local last = list[#list]
-	if draft_held() and last then
-		draft_put_away:set(true)
+-- A draft written in is put away (its sidebar row stays); an empty one just goes.
+local function close_draft(key: string)
+	local showing = route.current:peek().name == "home" and route.draft:peek() == key
+	local next_tab = if showing then neighbour(tab_of(key)) else nil
+	if showing and not next_tab then
+		return
 	end
-	if last and route.current:peek().name == "home" then
-		route.open_session(face(last))
+	if chat_shared.has_words(key) then
+		local away = table.clone(draft_put_away:peek())
+		away[key] = true
+		draft_put_away:set(away)
+	end
+	if next_tab then
+		go_to(next_tab)
+	end
+end
+
+local function discard_draft(key: string)
+	chat_shared.discard_draft_of(key)
+	if draft_put_away:peek()[key] then
+		local away = table.clone(draft_put_away:peek())
+		away[key] = nil
+		draft_put_away:set(away)
 	end
 end
 
@@ -237,7 +290,7 @@ end
 function M.close_showing(): boolean
 	local name = route.current:peek().name
 	if name == "home" then
-		close_draft()
+		close_draft(route.draft:peek())
 		return true
 	end
 	local key = splits.current_key()
@@ -572,6 +625,38 @@ local function close_button(on_click: () -> ()): Node
 	}
 end
 
+local function settle_button(id: string, hovered: any): Node
+	local function chat(): any
+		local panes = splits.panes(id)
+		return if #panes == 1 then chat_of(panes[1]) else nil
+	end
+	return ui.show(function(): boolean
+		return hovered:get() and chat() ~= nil
+	end, ui.presence(function(): string
+		local c = chat()
+		return if c and require("@app/screens/shell/sidebar").is_settled(c) then "unsettle" else "settle"
+	end, function(which: string): Node
+		local settled = which == "unsettle"
+		return ds.IconButton {
+			id = `session-tab-{id}-settle`,
+			label = ui.t(if settled then "ds.sidebar.unsettle_thread" else "ds.sidebar.settle_thread"),
+			tooltip = false,
+			size = "sm",
+			tone = "quiet",
+			w = SLOT,
+			h = SLOT,
+			rounded = "$radius.sm",
+			on_click = function()
+				local c = chat()
+				if c then
+					require("@app/screens/shell/sidebar").settle(c.id, not settled)
+				end
+			end,
+			ds.Icon { name = if settled then "lucide-undo-2" else "lucide-check", size = 14 },
+		}
+	end, { shrink = 0 }))
+end
+
 local function corner(id: string, hovered: any, active: () -> boolean): Node
 	return ui.row {
 		w = SLOT,
@@ -670,6 +755,7 @@ local function face_row(id: string, hovered: any, active: () -> boolean): { any 
 			},
 			tree_badge(id),
 		},
+		settle_button(id, hovered),
 		corner(id, hovered, active),
 	}
 end
@@ -684,8 +770,8 @@ local function hover(key: string, inside: boolean)
 end
 
 local function before(key: string): string?
-	local list = shown:get()
-	local at = if key == DRAFT then #list + 1 else table.find(list, key)
+	local list = strip:get()
+	local at = table.find(list, key)
 	return if at and at > 1 then list[at - 1] else nil
 end
 
@@ -1001,47 +1087,123 @@ local Tab = ui.component(function(props: { chat: string, motion: TabStrip.Motion
 	}
 end)
 
-local DraftTab = ui.component(function(_: {}): Node
+-- Those tabs closed at once, chats' and drafts' (one written in put away), `keep` gone to if the one showing was among them.
+local function close_tabs(tabs: { string }, keep: string)
+	local showing = selected_key()
+	local chats: { string } = {}
+	local away = table.clone(draft_put_away:peek())
+	for _, tab in tabs do
+		local d = draft_in(tab)
+		if not d then
+			table.insert(chats, tab)
+		elseif chat_shared.has_words(d) then
+			away[d] = true
+		end
+	end
+	draft_put_away:set(away)
+	if #chats > 0 then
+		splits.close_tabs(chats)
+	end
+	if showing and table.find(tabs, showing) then
+		go_to(keep)
+	end
+end
+
+local function draft_menu(key: string): { any }
+	local tab = tab_of(key)
+	local list = strip:peek()
+	local at = table.find(list, tab) or 0
+	local function others_of(side: string?): { string }
+		local out: { string } = {}
+		for i, other in list do
+			if other ~= tab and (side == nil or (side == "left" and i < at) or (side == "right" and i > at)) then
+				table.insert(out, other)
+			end
+		end
+		return out
+	end
+	local items: { any } = {
+		{ label = ui.t("shell.tabs.close"):get(), icon = "close-thin", on_select = function()
+			close_draft(key)
+		end },
+	}
+	if #list > 1 then
+		table.insert(items, { label = ui.t("shell.tabs.close_others"):get(), on_select = function()
+			close_tabs(others_of(nil), tab)
+		end })
+	end
+	if at < #list then
+		table.insert(items, { label = ui.t("shell.tabs.close_right"):get(), on_select = function()
+			close_tabs(others_of("right"), tab)
+		end })
+	end
+	if at > 1 then
+		table.insert(items, { label = ui.t("shell.tabs.close_left"):get(), on_select = function()
+			close_tabs(others_of("left"), tab)
+		end })
+	end
+	if chat_shared.has_words(key) then
+		table.insert(items, { label = ui.t("ds.sidebar.discard_draft"):get(), icon = "trash-bin-minimalistic", on_select = function()
+			discard_draft(key)
+		end })
+	end
+	return items
+end
+
+local DraftTab = ui.component(function(props: { key: string }): Node
+	local key = props.key
+	local tab = tab_of(key)
 	local hovered = ui.use_state(false)
 	local function active(): boolean
-		return selected_key() == DRAFT
+		return selected_key() == tab
 	end
-	return ui.row(tab_box({
-		id = "session-tab-draft",
-		role = "tab",
-		label = ui.t("shell.tabs.new_session"),
-		selected = active,
-		w = function(): number
-			return tab_w:get()
+	local function close()
+		close_draft(key)
+	end
+	return ContextMenu {
+		label = ui.t("panel.tab.actions"),
+		ring = "$radius.lg",
+		shrink = 0,
+		items = function(): { any }
+			return draft_menu(key)
 		end,
-		on_hover = function(inside: boolean)
-			hovered:set(inside)
-			hover(DRAFT, inside)
-		end,
-		on_click = function()
-			route.new_chat()
-		end,
-		on_aux_click = function(e: any)
-			if e.button == "middle" then
-				close_draft()
-			end
-		end,
-		rule(DRAFT),
-		ui.div { shrink = 0, color = "$warning", ds.Icon { name = "pen", size = 13 } },
-		ds.FadeText { ui.t("shell.tabs.new_session"), grow = 1, min_w = 0, text_size = TITLE_SIZE },
-		ui.row {
-			w = SLOT,
-			h = SLOT,
-			shrink = 0,
-			items = "center",
-			justify = "center",
-			ui.show(function(): boolean
-				return hovered:get() or active()
-			end, close_button(close_draft)),
-		},
-	}, active, function(): boolean
-		return hovered:get()
-	end))
+		ui.row(tab_box({
+			id = if key == "" then "session-tab-draft" else `session-tab-draft-{key}`,
+			role = "tab",
+			label = ui.t("shell.tabs.new_session"),
+			selected = active,
+			w = function(): number
+				return tab_w:get()
+			end,
+			on_hover = function(inside: boolean)
+				hovered:set(inside)
+				hover(tab, inside)
+			end,
+			on_click = function()
+				route.open_draft(key)
+			end,
+			on_aux_click = function(e: any)
+				if e.button == "middle" then
+					close()
+				end
+			end,
+			rule(tab),
+			ui.div { shrink = 0, color = "$warning", ds.Icon { name = "pen", size = 13 } },
+			ds.FadeText { ui.t("shell.tabs.new_session"), grow = 1, min_w = 0, text_size = TITLE_SIZE },
+			ui.row {
+				w = SLOT,
+				h = SLOT,
+				shrink = 0,
+				items = "center",
+				justify = "center",
+				ui.show(function(): boolean
+					return hovered:get() or active()
+				end, close_button(close)),
+			},
+		}, active, function(): boolean
+			return hovered:get()
+		end)),
+	}
 end)
 
 function M.Strip(props: { window_x: () -> number, start: () -> number, right: () -> number, hidden: (() -> boolean)? }): Node
@@ -1056,7 +1218,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		return { math.clamp(at * FADE_RATE, 0, FADE), math.clamp(past * FADE_RATE, 0, FADE) }
 	end
 	local function slots(): number
-		return #shown:get() + (if draft_shows:get() then 1 else 0)
+		return #strip:get()
 	end
 	ui.effect(function()
 		local room = view.width or 0
@@ -1071,10 +1233,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 	end)
 	local function showing_at(): number?
 		local key = selected_key()
-		if key == DRAFT then
-			return #shown:get() + 1
-		end
-		return if key then table.find(shown:get(), key) else nil
+		return if key then table.find(strip:get(), key) else nil
 	end
 	-- The tab showing, always clear of the overflow and its fade: as it's opened,
 	-- as tabs come and go, and as the strip's room changes (the panel opening).
@@ -1244,15 +1403,24 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 							animate = motion.layout(motion.DRAG_SLIDE),
 						}),
 					},
-					ui.show(function(): boolean
-						return draft_shows:get()
-					end, ui.div {
+					ui.row {
+						w = function(): any
+							return if #drafts:get() == 0 then 0 else nil
+						end,
 						ml = function(): any
-							return ui.raw(if #shown:get() > 0 then TAB_GAP else 0, "Zeron's gap between tabs")
+							return ui.raw(if #shown:get() > 0 and #drafts:get() > 0 then TAB_GAP else 0, "Zeron's gap between tabs")
 						end,
 						shrink = 0,
-						DraftTab {},
-					}),
+						ui.each(drafts, function(key: string): Node
+							return DraftTab { key = key }
+						end, {
+							key = function(key: string): string
+								return key
+							end,
+							direction = "row",
+							gap = ui.raw(TAB_GAP, "Zeron's gap between tabs"),
+						}),
+					},
 					ui.show(function(): boolean
 						local d = drag:get()
 						return d ~= nil and not d.out

@@ -188,9 +188,9 @@ export type Props = {
 	on_settle: ((id: string, settled: boolean) -> ())?,
 	unseen: (() -> boolean)?,
 	on_mark_read: (() -> ())?,
-	draft: (() -> { id: string, target: string, prompt: string, open: boolean }?)?,
-	on_draft: (() -> ())?,
-	on_discard_draft: (() -> ())?,
+	drafts: (() -> { { id: string, target: string, prompt: string, open: boolean } })?,
+	on_draft: ((id: string) -> ())?,
+	on_discard_draft: ((id: string) -> ())?,
 	search_label: (() -> string)?,
 	head: Node?,
 	peek: (() -> boolean)?,
@@ -3541,17 +3541,19 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				room(zoned({ f }, for_drag), "pinned", "pinned")
 			end
 		end
-		local held_draft = if props.draft then props.draft() else nil
-		if held_draft then
+		local held_drafts = if props.drafts then props.drafts() else {}
+		if #held_drafts > 0 then
 			local f = group_fold("::drafts")
-			add({ kind = "title", key = "title:drafts", place = "regular", chain = {}, title = "ds.sidebar.drafts", n = 1, fold = function(): Fold
+			add({ kind = "title", key = "title:drafts", place = "regular", chain = {}, title = "ds.sidebar.drafts", n = #held_drafts, fold = function(): Fold
 				return group_fold("::drafts")
 			end, open = opened["::drafts"], base = title_h })
 			inset({ f }, "regular", "drafts")
 			if f.present then
-				add({ kind = "draft", key = "draft", place = "regular", chain = { f }, draft = held_draft, base = function(): number
-					return SessionRow.CARD + SessionRow.CARD_GAP
-				end })
+				for _, held_draft in held_drafts do
+					add({ kind = "draft", key = `draft:{held_draft.id}`, place = "regular", chain = { f }, draft = held_draft, base = function(): number
+						return SessionRow.CARD + SessionRow.CARD_GAP
+					end })
+				end
 			end
 		end
 		-- The Activity view: one list (every session not pinned, the one back
@@ -4927,11 +4929,15 @@ fn layer(input:LayerInput)->vec4<f32> {
 				end
 				node = Surface {
 					depth = "flat",
-					id = "sidebar-draft",
+					id = if d().id == "" then "sidebar-draft" else `sidebar-draft-{d().id}`,
 					selected = function(): boolean
 						return d().open
 					end,
-					on_click = props.on_draft,
+					on_click = function()
+						if props.on_draft then
+							props.on_draft(d().id)
+						end
+					end,
 					on_hover = function(inside: boolean)
 						hovered:set(inside)
 					end,
@@ -4984,7 +4990,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 								end,
 								head_action("lucide-x", locale.s("ds.sidebar.discard_draft"), function()
 									if props.on_discard_draft then
-										props.on_discard_draft()
+										props.on_discard_draft(d().id)
 									end
 								end),
 							},

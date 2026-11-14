@@ -111,9 +111,10 @@ function M.try(e: store.Entry)
 	if agent then
 		shared.want_agent:set(agent)
 	end
-	local draft = shared.draft_peek("").text
-	local shown = references.add(shared.refs_key(""), { kind = "skill", name = e.name, link = link })
-	shared.set_draft_of("", "text", `{shown} {draft}`)
+	local key = route.draft:peek()
+	local draft = shared.draft_peek(key).text
+	local shown = references.add(shared.refs_key(key), { kind = "skill", name = e.name, link = link })
+	shared.set_draft_of(key, "text", `{shown} {draft}`)
 	ui.after(0, function()
 		shared.focus:set(shared.focus:peek() + 1)
 	end)

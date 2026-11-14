@@ -1039,27 +1039,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		-- Its + and a picture pasted: chips on its own draft, as the chat page's.
 		-- (A split's pane: a press focuses it, the window's composer taking
 		-- over.)
-		on_attach = if split
-			then nil
-			else function()
-				ui.open_files({ title = ui.t("chat.composer.attach_files"):get(), multiple = true }):after(function(files: any)
-					if files and #files > 0 then
-						Shared.attach_files(files, chat)
-						focus:add(1)
-					end
-				end, function() end)
-			end,
-		on_paste_image = if split
-			then nil
-			else function(): boolean
-				store.paste_image():after(function(path: string?)
-					if type(path) == "string" and path ~= "" then
-						Shared.attach_files({ { name = "image.png", path = path, clipboard = true } }, chat)
-						focus:add(1)
-					end
-				end, function() end)
-				return true
-			end,
+		on_attach = if split then nil else cargo_props.on_attach,
+		on_paste_image = if split then nil else cargo_props.on_paste_image,
 		focus = if split then nil else focus,
 		-- (ds.Composer's placeholder is a string: read as the tab is made.)
 		-- (A split's pane is a chat of its own: the chat page's words.)
