@@ -595,7 +595,11 @@ local function mark_of(row: any, size: number): Node?
 	if not row.mark then
 		return nil
 	end
-	return ui.div { shrink = 0, tooltip = row.model, Mark { name = row.mark :: any, size = size, bare = true } }
+	return ui.div {
+		shrink = 0,
+		tooltip = row.model,
+		Mark { name = row.mark :: any, size = size, bare = true },
+	}
 end
 
 local function more_menu(ctx: Ctx, row: any, list: { any }, open: any): Node
