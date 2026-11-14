@@ -3103,7 +3103,6 @@
         "description": "在浏览器的 ⋯ 菜单中加入“检查页面”，对此后打开的页面生效。",
         "terms": "开发者工具 网页检查器 检查元素 控制台 devtools"
       },
-      "page_title": "浏览",
       "links_and_search": "链接与搜索",
       "zoom": "缩放"
     },
@@ -4896,6 +4895,7 @@
       "offline": "Zeron 暂时无法连接到此会话的设备。",
       "update": "更新 Zeron 以在此使用终端。",
       "failed": "终端未能打开",
+      "run_lines": "这段命令有多行，这个 shell 会逐行立即执行，所以没有运行。请自行复制进去。",
       "label": "终端"
     },
     "browser": {

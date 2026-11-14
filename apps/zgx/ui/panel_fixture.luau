@@ -27,6 +27,8 @@ local busy = ui.state("test_term_busy", false)
 local term_pwd = ui.state("test_term_pwd", "/proj" :: string?)
 -- What's selected in its shell (zgx's `term.selection`).
 local term_selection = ui.state("test_term_selection", nil :: string?)
+-- Whether its shell turned bracketed paste on (zgx's `term:bracketed_paste()`).
+local term_bracketed = ui.state("test_term_bracketed", true)
 local opened = 0
 local sessions: { [string]: any } = {}
 -- A new one: its bridge opens it (term-N), its id claimed after.
@@ -80,6 +82,9 @@ tapi.term = function(key: string, options: any?): any
 		end
 		s.input = function(_: any, text: string)
 			term_note(`input:{key}:{string.gsub(text, "\r", "⏎")}`)
+		end
+		s.bracketed_paste = function(_: any): boolean
+			return term_bracketed:peek()
 		end
 		setmetatable(s, { __index = function(_: any, field: string): any
 			if field == "selection" then

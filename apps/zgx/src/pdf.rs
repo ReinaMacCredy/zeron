@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     ffi::c_void,
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, OnceLock},
@@ -67,7 +66,7 @@ pub fn install(host: &ScriptHost, display_scale: impl Fn() -> f64 + 'static) {
                 submit(Job::Page { path, page, scale, out: out.clone(), reply });
                 answer.recv().await.ok_or(DAMAGED)??;
             }
-            served().lock().unwrap_or_else(|e| e.into_inner()).insert(out.clone());
+            used(&out);
             Ok(Value::record([("src", Value::from(out.to_string_lossy().as_ref()))]))
         }
     });
@@ -116,10 +115,11 @@ fn cache_dir() -> PathBuf {
     .clone()
 }
 
-/// A shown picture's file changing or going reloads the scripts: those shown this run stay.
-fn served() -> &'static Mutex<HashSet<PathBuf>> {
-    static SERVED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    SERVED.get_or_init(Default::default)
+/// The cache drops the least recently served first; only the access time moves, since a shown picture's file edited reloads the scripts.
+fn used(out: &Path) {
+    if let Ok(file) = std::fs::File::open(out) {
+        let _ = file.set_times(std::fs::FileTimes::new().set_accessed(std::time::SystemTime::now()));
+    }
 }
 
 enum Job {
@@ -169,7 +169,6 @@ fn work(queue: &Queue) {
                         let dir = out.parent().unwrap_or(Path::new("."));
                         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
                         doc.render(page, scale, &out)?;
-                        served().lock().unwrap_or_else(|e| e.into_inner()).insert(out.clone());
                         prune(dir, CACHE_BYTES);
                         Ok(())
                     })
@@ -311,7 +310,7 @@ fn prune(dir: &Path, cap: u64) {
         .filter(|e| e.path().extension().is_some_and(|x| x == "png"))
         .filter_map(|e| {
             let meta = e.metadata().ok()?;
-            Some((meta.modified().unwrap_or(UNIX_EPOCH), meta.len(), e.path()))
+            Some((meta.accessed().or_else(|_| meta.modified()).unwrap_or(UNIX_EPOCH), meta.len(), e.path()))
         })
         .collect();
     let mut total: u64 = files.iter().map(|(_, len, _)| len).sum();
@@ -319,13 +318,9 @@ fn prune(dir: &Path, cap: u64) {
         return;
     }
     files.sort();
-    let served = served().lock().unwrap_or_else(|e| e.into_inner());
     for (_, len, path) in files {
         if total <= cap {
             break;
-        }
-        if served.contains(&path) {
-            continue;
         }
         if std::fs::remove_file(&path).is_ok() {
             total -= len;
@@ -465,17 +460,20 @@ mod tests {
     }
 
     #[test]
-    fn pdf_cache_past_its_cap_drops_the_oldest_but_never_one_shown() {
+    fn pdf_cache_past_its_cap_drops_the_least_recently_served() {
         let dir = scratch("prune");
         let (old, shown, newest) = (dir.join("old.png"), dir.join("shown.png"), dir.join("newest.png"));
         for (path, age) in [(&shown, 300), (&old, 200), (&newest, 0)] {
             std::fs::write(path, [0u8; 100]).unwrap();
             let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age);
-            std::fs::File::options().write(true).open(path).unwrap().set_modified(when).unwrap();
+            let times = std::fs::FileTimes::new().set_accessed(when).set_modified(when);
+            std::fs::File::options().write(true).open(path).unwrap().set_times(times).unwrap();
         }
-        served().lock().unwrap().insert(shown.clone());
+        let modified = std::fs::metadata(&shown).unwrap().modified().unwrap();
+        used(&shown);
+        assert_eq!(std::fs::metadata(&shown).unwrap().modified().unwrap(), modified, "serving leaves the file unedited");
         prune(&dir, 200);
-        assert!(!old.exists(), "the oldest not shown goes");
+        assert!(!old.exists(), "the least recently served goes");
         assert!(shown.exists() && newest.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -308,6 +308,20 @@ test("a shell block is pasted into a new terminal tab, then Entered, never into 
 	end
 end)
 
+test("a block of several lines waits for the shell to bracket pastes, and isn't sent if it never does", function()
+	local app = open_panel()
+	app:set_state("test_term_bracketed", false)
+	run_block(app, "cargo build\ncargo test")
+	expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
+	eventually(app, function(): boolean
+		return false
+	end, 7000)
+	app:set_state("test_term_bracketed", true)
+	app:frames(10)
+	expect(term_calls(app)).never.to_contain("paste:")
+	expect(term_calls(app)).never.to_contain("input:")
+end)
+
 test("a shell still starting gets the block once it's up, or after two seconds", function()
 	local app = open_panel()
 	app:set_state("test_term_pwd", nil)

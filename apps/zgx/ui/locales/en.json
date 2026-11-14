@@ -3103,7 +3103,6 @@
         "description": "Adds Inspect Page to the browser’s ⋯ menu, for pages opened from now on.",
         "terms": "devtools developer tools web inspector inspect element console"
       },
-      "page_title": "Browsing",
       "links_and_search": "Links and search",
       "zoom": "Zoom"
     },
@@ -4896,6 +4895,7 @@
       "offline": "Zeron can't reach this session's device right now.",
       "update": "Update Zeron to use terminals here.",
       "failed": "The terminal didn't open",
+      "run_lines": "This block has several lines and this shell would run each one as it arrives, so it wasn't run. Copy it in yourself.",
       "label": "Terminal"
     },
     "browser": {

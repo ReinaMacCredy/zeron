@@ -13,11 +13,20 @@
 --   Terminal.close(tab)            the tab's terminal ended
 
 local ds = require("@ds")
+local locale = require("@ds/locale")
 local state = require("@app/screens/panel/state")
 local api = require("@app/screens/panel/terminal_api")
 local files_paths = require("@app/screens/files/paths")
 
 type Tab = state.Tab
+
+local function run_text(text: string): string
+	text = string.gsub(text, "\r\n?", "\n")
+	text = string.gsub(text, "%c", function(c: string): string
+		return if c == "\n" or c == "\t" then c else ""
+	end)
+	return (string.gsub(text, "\n+$", ""))
+end
 
 -- The chat page's composer, if it's there (a fixture mounts the panel alone): a terminal's selection rides its next message.
 local chat_shared: any = (function(): any
@@ -245,33 +254,60 @@ M.Terminal = ui.component(function(props: Props): Node
 				command = t.command,
 				cwd = "~",
 			})
-			-- A reply's shell block (Run): pasted as a paste, so the shell's
-			-- bracketed paste keeps its tabs and lines whole where it turned
-			-- that on, once the shell is up (it says where it is or what it's
-			-- called, else after 2 s); then Enter. Once only.
+			-- A reply's shell block (Run): pasted as a paste, then Enter. Once
+			-- only. One line goes once the shell is up (it says where it is or
+			-- what it's called, else after 2 s). Several wait for the shell to
+			-- bracket pastes, as it does at its prompt: unbracketed, each line
+			-- runs as it arrives. Not within 6 s, it isn't sent.
 			if t.input then
-				local text = t.input :: string
+				local text = run_text(t.input :: string)
 				local done = false
-				local function run()
+				local function run(send: boolean)
 					if done then
 						return
 					end
 					done = true
 					state.patch(key, id, { input = false })
+					if not send then
+						ds.toast.show { title = locale.s("panel.terminal.run_lines"), tone = "warning" }
+						return
+					end
 					pcall(function()
 						term:paste(text)
 						term:input("\r")
 					end)
 				end
-				ui.effect(function()
-					local ok, up = pcall(function(): boolean
-						return term.pwd ~= nil or term.title ~= nil
-					end)
-					if ok and up then
-						ui.after(0, run)
+				if string.find(text, "\n", 1, true) then
+					local waited = 0
+					local function check()
+						local ok, on = pcall(function(): any
+							return term:bracketed_paste()
+						end)
+						if ok and on == true then
+							run(true)
+						elseif waited >= 6000 then
+							run(false)
+						elseif not done then
+							waited += 200
+							ui.after(200, check)
+						end
 					end
-				end)
-				ui.after(2000, run)
+					check()
+				else
+					ui.effect(function()
+						local ok, up = pcall(function(): boolean
+							return term.pwd ~= nil or term.title ~= nil
+						end)
+						if ok and up then
+							ui.after(0, function()
+								run(true)
+							end)
+						end
+					end)
+					ui.after(2000, function()
+						run(true)
+					end)
+				end
 			end
 			-- (Staged on the chat shown, as gpui's `share_selection` stages it on the chat focused.)
 			local shared = chat_shared
