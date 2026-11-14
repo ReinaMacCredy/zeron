@@ -904,15 +904,24 @@ test("a split stays as it was under Settings, its panes' cards and no page card"
 	expect(app:tree("#shell-page-fill")).to_contain("hidden")
 end)
 
-test("the tabs take their room as the panel starts to glide, not on each frame of it", function()
+test("the tabs give the panel its room as it glides open, and take it back as it closes", function()
 	local app = shell_with({ "Write the docs" })
+	local full = box(app, "#session-tabs-scroll").w
 	app:command("shell.toggle_files")
-	app:frames(2)
-	local room = box(app, "#session-tabs-scroll").w
-	for i = 1, 20 do
-		app:frames(1)
-		expect(`{i}: {box(app, "#session-tabs-scroll").w}`).to_be(`{i}: {room}`)
-	end
+	app:frames(3)
+	local early = box(app, "#session-tabs-scroll").w
+	expect(early < full).to_be(true)
+	app:frames(60)
+	local open_w = box(app, "#session-tabs-scroll").w
+	expect(open_w < early).to_be(true)
+	expect(box(app, "#session-tabs-scroll").x + open_w <= box(app, "#shell-files").x).to_be(true)
+	app:command("shell.toggle_files")
+	app:frames(3)
+	local closing = box(app, "#session-tabs-scroll").w
+	expect(closing > open_w and closing < full).to_be(true)
+	app:frames(60)
+	expect(box(app, "#session-tabs-scroll").w).to_be(full)
+	expect(app:error()).to_be_nil()
 end)
 
 test("a plain navigation to where Forward would go plays no slide", function()

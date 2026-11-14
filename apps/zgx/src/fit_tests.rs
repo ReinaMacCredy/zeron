@@ -561,13 +561,12 @@ fn the_panel_opening_never_closes_the_sidebar_for_its_tree() {
     assert!(1150. - side_after - panel >= CHAT_PANEL_MIN - 0.5, "the chat has {}", 1150. - side_after - panel);
 }
 
-/// A panel width you chose (its edge dragged) holds only until the panel's
-/// next toggle, as Zeron's `right_pane_width` does: the window resized, it
-/// stays where it was dragged; closed and opened again, it comes back at its
-/// share. And while it's opening, its edge is out of reach: a drag there does
-/// nothing (Zeron's handle is gone while the panel moves).
+/// A panel width you chose (its edge dragged) holds: the window resized, it
+/// stays where it was dragged; closed and opened again, it comes back at
+/// that width. And while it's opening, its edge is out of reach: a drag
+/// there does nothing (Zeron's handle is gone while the panel moves).
 #[test]
-fn a_dragged_panel_width_holds_until_the_panel_is_toggled() {
+fn a_dragged_panel_width_holds_as_the_panel_is_toggled() {
     let mut app = mount();
     app.ui.scene.borrow_mut().resize(1500., 800.);
     app.frames(30);
@@ -596,9 +595,37 @@ fn a_dragged_panel_width_holds_until_the_panel_is_toggled() {
         drag(&mut app, "\"Resize files\"", 120.);
         app.frames(60);
         let reopened = app.bounds("#shell-files").width;
-        let share = share_of(1400. - RAIL, side);
-        assert!((reopened - share).abs() < 0.5, "reopened at {reopened}, its share is {share} (dragged to {dragged})");
+        assert!((reopened - dragged).abs() < 0.5, "reopened at {reopened}, dragged to {dragged}");
     }
+}
+
+#[test]
+fn the_tabs_follow_the_panels_edge_while_it_is_dragged() {
+    use zgx::input::{InputEvent, Modifiers, PointerButton};
+    let mut app = mount();
+    app.ui.scene.borrow_mut().resize(1500., 800.);
+    app.frames(30);
+    app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    app.frames(20);
+    app.click("#titlebar >> role:button \"Panel\"");
+    app.frames(60);
+    let before = app.bounds("#session-tabs-scroll").width;
+    let b = app.bounds("\"Resize files\"");
+    let (x, y) = (b.x + b.width / 2., b.y + b.height / 2.);
+    let (button, m) = (PointerButton::Primary, Modifiers::default());
+    app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x, y }, m);
+    app.ui.dispatch_with_modifiers(InputEvent::PointerDown { x, y, button }, m);
+    for step in 1..=4 {
+        app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x: x - 30. * step as f32, y }, m);
+        app.frames(1);
+    }
+    app.frames(2);
+    let tabs = app.bounds("#session-tabs-scroll");
+    let panel = app.bounds("#shell-files");
+    assert!((before - tabs.width - 120.).abs() < 1., "held, the tabs gave {} of the 120 dragged", before - tabs.width);
+    assert!(tabs.x + tabs.width <= panel.x + 0.5, "held, the tabs end at {} and the panel starts at {}", tabs.x + tabs.width, panel.x);
+    app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x: x - 120., y, button }, m);
+    app.ui.input.forget_clicks();
 }
 
 /// Where a seam takes the pointer: its handle `label`, `by` points from its
