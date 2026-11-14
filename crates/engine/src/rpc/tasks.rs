@@ -588,19 +588,6 @@ impl EngineRpc {
         Ok(())
     }
 
-    /// Recorded at bind, so settle_task_steps never wakes the lead for a turn that ended before.
-    fn ended_turn(&self, thread: &str) -> Option<zeron_proto::StepTurn> {
-        use zeron_proto::{SessionStatus, StepTurn, StepTurnEnd};
-        let session = self.sessions.session_status(thread)?;
-        let ended = match session.status {
-            SessionStatus::Working | SessionStatus::AwaitingInput => return None,
-            SessionStatus::Errored => StepTurnEnd::Failed,
-            SessionStatus::Idle => StepTurnEnd::Completed,
-        };
-        let turn = session.last_completed_turn;
-        (ended == StepTurnEnd::Failed || turn.is_some()).then_some(StepTurn { ended, turn })
-    }
-
     fn check_context_chats(&self, context: &[String]) -> Result<(), RpcError> {
         for id in context {
             let chat = self.workspace.chat(id).map_err(failed)?;
@@ -1086,7 +1073,7 @@ impl EngineRpc {
                 title,
                 notes,
                 order_key: String::new(),
-                turn: thread.as_deref().and_then(|id| self.ended_turn(id)),
+                turn: None,
                 chat_id: thread,
                 outcome: None,
                 created_at: now,

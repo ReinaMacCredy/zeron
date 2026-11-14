@@ -278,7 +278,6 @@ struct DocHostInner {
     store: Arc<DocsStore>,
     config: DocHostConfig,
     delegation_lock: tokio::sync::Mutex<()>,
-    active_step_threads: Mutex<HashSet<String>>,
     /// Set-once (first wins), cleared by `shutdown_workers`: sessions and
     /// doc-host reference each other through Arcs, so a retired runtime's
     /// graph only drops once this back-edge is severed.
@@ -1516,7 +1515,6 @@ impl DocHost {
                 store,
                 config,
                 delegation_lock: tokio::sync::Mutex::new(()),
-                active_step_threads: Mutex::new(HashSet::new()),
                 sessions: Mutex::new(None),
                 quiesced: AtomicBool::new(false),
                 boot_recovery_finished: AtomicBool::new(false),
@@ -4706,8 +4704,7 @@ impl DocHost {
         if from_chat_id == Some(chat_id) {
             return Err(EngineError::Other("a thread cannot message itself".into()));
         }
-        let (handle, id) =
-            self.push_thread_row(chat_id, from_chat_id, text, Vec::new(), attachments)?;
+        let (handle, id) = self.push_thread_row(chat_id, from_chat_id, text, attachments)?;
         self.send_thread_row(&handle, &id).await;
         Ok(id)
     }
@@ -4719,7 +4716,7 @@ impl DocHost {
         text: &str,
         attachments: Vec<String>,
     ) -> Result<String, EngineError> {
-        let (handle, id) = self.push_thread_row(chat_id, None, text, Vec::new(), attachments)?;
+        let (handle, id) = self.push_thread_row(chat_id, None, text, attachments)?;
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let (host, row) = (self.clone(), id.clone());
             self.spawn_worker_on(&runtime, async move {
@@ -4736,7 +4733,7 @@ impl DocHost {
         text: &str,
         attachments: Vec<String>,
     ) -> Result<String, EngineError> {
-        let (handle, id) = self.push_thread_row(chat_id, None, text, Vec::new(), attachments)?;
+        let (handle, id) = self.push_thread_row(chat_id, None, text, attachments)?;
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let host = self.clone();
             self.spawn_worker_on(&runtime, async move { host.drain_queue(&handle).await });
@@ -4744,13 +4741,11 @@ impl DocHost {
         Ok(id)
     }
 
-    /// A row carrying `task_steps` is a step handback, held for its settle window.
     fn push_thread_row(
         &self,
         chat_id: &str,
         from_chat_id: Option<&str>,
         text: &str,
-        task_steps: Vec<String>,
         attachments: Vec<String>,
     ) -> Result<(Arc<ChatDocHandle>, String), EngineError> {
         let workspace = self
@@ -4771,9 +4766,6 @@ impl DocHost {
         }
         let handle = self.open(chat_id)?;
         let id = new_id();
-        if !task_steps.is_empty() {
-            handle.hold_handback(&id);
-        }
         handle.doc.push_queued(&QueuedMessage {
             id: id.clone(),
             text: text.to_string(),
@@ -4786,7 +4778,7 @@ impl DocHost {
             from_chat_id: from_chat_id.map(str::to_owned),
             computer_generation: Some(handle.doc.computer_generation()),
             delegated_tasks: Vec::new(),
-            task_steps,
+            task_steps: Vec::new(),
             input_request: None,
             engine_sent: from_chat_id.is_none(),
         })?;
@@ -4985,39 +4977,6 @@ impl DocHost {
         space_id: Option<&str>,
         cwd: Option<&str>,
     ) -> Result<String, EngineError> {
-        self.create_step_thread(
-            from_chat_id,
-            prompt,
-            title,
-            harness,
-            model,
-            reasoning,
-            profile,
-            space_id,
-            cwd,
-            None,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_step_thread(
-        &self,
-        from_chat_id: &str,
-        prompt: &str,
-        title: Option<&str>,
-        harness: Option<zeron_proto::HarnessId>,
-        model: Option<&str>,
-        reasoning: Option<zeron_proto::ReasoningLevel>,
-        profile: &ProfileParams,
-        space_id: Option<&str>,
-        cwd: Option<&str>,
-        step: Option<(
-            &str,
-            crate::registry::DelegationSettings,
-            Option<zeron_proto::ChildRoute>,
-        )>,
-    ) -> Result<String, EngineError> {
         let workspace = self
             .workspace()
             .ok_or_else(|| EngineError::Other("workspace not wired".into()))?;
@@ -5033,34 +4992,21 @@ impl DocHost {
         {
             return Err(EngineError::Other(format!("cwd {cwd} is not a directory")));
         }
-        let admitting = match step {
-            Some(_) => Some(self.inner.delegation_lock.lock().await),
-            None => None,
-        };
-        let (step, route) = match step {
-            Some((step_id, limits, route)) => (
-                Some(self.runnable_step(workspace, from_chat_id, step_id, limits)?),
-                route,
-            ),
-            None => {
-                let bound = self.bound_step_threads(workspace);
-                let live = workspace
-                    .read_chats()?
-                    .iter()
-                    .filter(|chat| {
-                        !chat.archived
-                            && chat.created_by_chat_id.as_deref() == Some(from_chat_id)
-                            && !bound.contains(&chat.id)
-                    })
-                    .count();
-                if live >= MAX_CREATED_THREADS {
-                    return Err(EngineError::Other(format!(
-                        "this thread already has {live} open threads it created; archive one first"
-                    )));
-                }
-                (None, None)
-            }
-        };
+        let bound = self.bound_step_threads(workspace);
+        let live = workspace
+            .read_chats()?
+            .iter()
+            .filter(|chat| {
+                !chat.archived
+                    && chat.created_by_chat_id.as_deref() == Some(from_chat_id)
+                    && !bound.contains(&chat.id)
+            })
+            .count();
+        if live >= MAX_CREATED_THREADS {
+            return Err(EngineError::Other(format!(
+                "this thread already has {live} open threads it created; archive one first"
+            )));
+        }
         let config = self.derived_config(&from, harness, model, reasoning, profile)?;
         let chat_id = new_id();
         let (space_id, cwd) = match (space_id, cwd) {
@@ -5076,57 +5022,18 @@ impl DocHost {
             cwd,
             Some(from_chat_id).filter(|id| !zeron_proto::voice::is_orchestrator_chat(id)),
         )?;
-        let title = title
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .or(step.as_ref().map(|step| step.title.as_str()));
-        if let Some(title) = title {
+        if let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) {
             workspace.rename_chat(&chat_id, title)?;
         }
-        let discard = |chat_id: &str| {
-            workspace.delete_chat(chat_id).ok();
-            self.purge_chat(chat_id);
-        };
-        if let Some(step) = &step {
-            let bound = workspace.update_task_step(
-                &step.id,
-                &zeron_proto::TaskStepPatch {
-                    chat_id: Some(Some(chat_id.clone())),
-                    turn: Some(None),
-                    route: Some(route.clone()),
-                    ..Default::default()
-                },
-            );
-            if !matches!(bound, Ok(true)) {
-                discard(&chat_id);
-                bound?;
-                return Err(EngineError::Other("the step no longer exists".into()));
-            }
-        }
-        drop(admitting);
         if let Some(sessions) = self.sessions() {
             sessions.bind_delegate(from_chat_id, prompt, &chat_id);
         }
-        let step_id = step.as_ref().map(|step| step.id.clone());
-        let (prompt, images) =
-            images_here(prompt, step.map(|step| step.images).unwrap_or_default());
-        let sent = if self.defers(&chat_id, route.as_ref()) {
-            self.push_thread_row(&chat_id, Some(from_chat_id), &prompt, Vec::new(), images)
-                .map(drop)
-        } else {
-            self.queue_thread_message_with(&chat_id, Some(from_chat_id), &prompt, images)
-                .await
-                .map(drop)
-        };
-        if let Err(err) = sent {
-            if let Some(step_id) = step_id {
-                let unbind = zeron_proto::TaskStepPatch {
-                    chat_id: Some(None),
-                    ..Default::default()
-                };
-                workspace.update_task_step(&step_id, &unbind).ok();
-            }
-            discard(&chat_id);
+        if let Err(err) = self
+            .queue_thread_message(&chat_id, Some(from_chat_id), prompt)
+            .await
+        {
+            workspace.delete_chat(&chat_id).ok();
+            self.purge_chat(&chat_id);
             return Err(err);
         }
         Ok(chat_id)

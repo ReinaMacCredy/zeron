@@ -5534,7 +5534,17 @@ mod tests {
 
     #[tokio::test]
     async fn an_orchestrated_task_lists_its_steps_and_its_lead_plans_and_marks_them() {
-        let rig = rig(fixture());
+        let mut fake = fixture();
+        for (step, thread, status) in [(4, "deploy", "interrupted"), (5, "launch", "failed")] {
+            let mut child = chat(thread, Some("s1"), false, None);
+            child["delegation"] = json!({
+                "delegatedByChatId": "a", "depth": 1, "anchor": "m1", "wake": "always",
+                "status": status, "startedAt": "2026-09-18T10:00:00Z"
+            });
+            fake.chats.push(child);
+            fake.task_steps[step]["chatId"] = json!(thread);
+        }
+        let rig = rig(fake);
         let listed = rig
             .tools
             .call("tasks", &json!({ "action": "list" }))

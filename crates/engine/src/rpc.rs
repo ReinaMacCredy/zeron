@@ -2256,55 +2256,6 @@ impl EngineRpc {
         ))
     }
 
-    fn route_step(
-        &self,
-        p: &mut CreateThreadParams,
-    ) -> Result<Option<zeron_proto::ChildRoute>, RpcError> {
-        let Some(step) = p
-            .task_step_id
-            .as_deref()
-            .and_then(|id| self.workspace.task_step(id))
-        else {
-            return Ok(None);
-        };
-        let role = step.role.as_deref().and_then(crate::routing::Role::parse);
-        let same_agents = self
-            .workspace
-            .task(&step.task_id)
-            .is_some_and(|task| task.same_agents);
-        if role.is_none() || same_agents {
-            return Ok(None);
-        }
-        let gated = self.resolve_route(
-            &p.from_chat_id,
-            &crate::routing::Request {
-                role,
-                chosen: &p.chosen,
-                harness: p.harness,
-                model: p.model.as_deref(),
-                reasoning: p.reasoning,
-                profile: p.profile.profile_id.is_some(),
-            },
-            true,
-            p.quota_choice,
-        )?;
-        let resolved = match gated {
-            crate::routing::quota::Gated::Run(resolved) => resolved,
-            crate::routing::quota::Gated::UseNative { .. } => {
-                return Err(RpcError::Failed(
-                    "a step runs on a thread, not a native sub-agent".into(),
-                ));
-            }
-            crate::routing::quota::Gated::Exhausted(message) => {
-                return Err(RpcError::Failed(message));
-            }
-        };
-        p.harness = resolved.harness;
-        p.model = resolved.model;
-        p.reasoning = resolved.reasoning;
-        Ok(resolved.route)
-    }
-
     /// `Err(reply)` is the delegate_task answer when no child starts: the agent runs it natively.
     fn route_delegation(
         &self,
@@ -2323,7 +2274,7 @@ impl EngineRpc {
                 reasoning: p.reasoning,
                 profile: p.profile.profile_id.is_some(),
             },
-            false,
+            p.step_id.is_some(),
             p.quota_choice,
         )?;
         let resolved = match gated {
@@ -2346,6 +2297,44 @@ impl EngineRpc {
         p.reasoning = resolved.reasoning;
         p.route = resolved.route;
         Ok(Ok(p))
+    }
+
+    async fn start_step(&self, p: CreateThreadParams, step_id: String) -> Result<String, RpcError> {
+        let role = self
+            .workspace
+            .task_step(&step_id)
+            .filter(|step| {
+                !self
+                    .workspace
+                    .task(&step.task_id)
+                    .is_some_and(|task| task.same_agents)
+            })
+            .and_then(|step| step.role);
+        let params = crate::doc_host::DelegateTaskParams {
+            owner_chat_id: p.from_chat_id,
+            task: p.prompt,
+            title: p.title,
+            role,
+            harness: p.harness,
+            model: p.model,
+            reasoning: p.reasoning,
+            profile: p.profile,
+            chosen: p.chosen,
+            quota_choice: p.quota_choice,
+            step_id: Some(step_id),
+            space_id: p.space_id,
+            cwd: p.cwd,
+            ..Default::default()
+        };
+        let mut params = self.route_delegation(params)?.map_err(|_| {
+            RpcError::Failed("a step runs on a thread, not a native sub-agent".into())
+        })?;
+        params.role = None;
+        self.doc_host
+            .delegate_task(params, self.registry.delegation_settings())
+            .await
+            .map(|view| view.task_id)
+            .map_err(|e| RpcError::Failed(e.to_string()))
     }
 
     async fn start_review(&self, p: StartReviewParams) -> Result<serde_json::Value, RpcError> {
@@ -2469,6 +2458,7 @@ impl EngineRpc {
                     chosen: Vec::new(),
                     route: None,
                     quota_choice: None,
+                    ..Default::default()
                 },
                 self.registry.delegation_settings(),
             )
@@ -5352,26 +5342,25 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&chat)
             }
             methods::CREATE_THREAD => {
-                let mut p: CreateThreadParams = parse_params(params)?;
-                let route = self.route_step(&mut p)?;
-                let chat_id = self
-                    .doc_host
-                    .create_step_thread(
-                        &p.from_chat_id,
-                        &p.prompt,
-                        p.title.as_deref(),
-                        p.harness,
-                        p.model.as_deref(),
-                        p.reasoning,
-                        &p.profile,
-                        p.space_id.as_deref(),
-                        p.cwd.as_deref(),
-                        p.task_step_id
-                            .as_deref()
-                            .map(|id| (id, self.registry.delegation_settings(), route)),
-                    )
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let p: CreateThreadParams = parse_params(params)?;
+                let chat_id = match p.task_step_id.clone() {
+                    Some(step_id) => self.start_step(p, step_id).await?,
+                    None => self
+                        .doc_host
+                        .create_thread(
+                            &p.from_chat_id,
+                            &p.prompt,
+                            p.title.as_deref(),
+                            p.harness,
+                            p.model.as_deref(),
+                            p.reasoning,
+                            &p.profile,
+                            p.space_id.as_deref(),
+                            p.cwd.as_deref(),
+                        )
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?,
+                };
                 RpcReply::value(&serde_json::json!({ "chatId": chat_id }))
             }
             methods::SEND_THREAD_MESSAGE => {

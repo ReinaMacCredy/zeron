@@ -1545,9 +1545,8 @@ async fn a_step_thread_is_not_settled_while_its_limit_offer_waits() {
     )
     .await;
     tokio::time::sleep(Duration::from_millis(600)).await;
-    assert_eq!(
-        rig.core.workspace.task_step(&step.id).unwrap().turn,
-        None,
+    assert!(
+        delegation(&rig.core, &thread).is_running(),
         "the lead is not told the step failed while its offer waits"
     );
     rig.core.shutdown().await;
@@ -1685,13 +1684,7 @@ async fn a_planned_step_role_routes_its_thread_and_survives_a_replan() {
         .unwrap();
     assert_eq!(config.harness, HarnessId::ClaudeCode);
     assert_eq!(config.model.as_deref(), Some("claude-haiku-5-5"));
-    let route = rig
-        .core
-        .workspace
-        .task_step(&check.id)
-        .unwrap()
-        .route
-        .expect("step route");
+    let route = delegation(&rig.core, &thread).route.expect("step route");
     assert_eq!(route.source, "routed");
     assert_eq!(route.role.as_deref(), Some("validator"));
 
@@ -1707,7 +1700,7 @@ async fn a_planned_step_role_routes_its_thread_and_survives_a_replan() {
         lead.config.map(|c| (c.harness, c.model)),
         "a same-agents mission skips routing"
     );
-    assert_eq!(rig.core.workspace.task_step(&same.id).unwrap().route, None);
+    assert_eq!(delegation(&rig.core, &thread).route, None);
     rig.core.shutdown().await;
 }
 
@@ -4301,16 +4294,8 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     .await;
 
     let first = started(run(&steps[0], "task-lead").await);
-    let turn_of = |step_id: &str| {
-        rig.core
-            .workspace
-            .task_step(step_id)
-            .unwrap()
-            .turn
-            .map(|turn| turn.ended)
-    };
     wait_for(
-        || turn_of(&steps[0].id) == Some(zeron_proto::StepTurnEnd::Completed),
+        || delegation(&rig.core, &first).status == zeron_proto::DelegationStatus::Completed,
         "the first step's thread to finish its turn",
     )
     .await;
@@ -4361,10 +4346,10 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         Some("Write the docs"),
         "an untitled step thread takes the step's title"
     );
-    assert_eq!(thread.created_by_chat_id.as_deref(), Some("task-lead"));
-    assert!(
-        thread.delegation.is_none(),
-        "a step runs on an ordinary thread"
+    assert_eq!(
+        thread.delegated_by(),
+        Some("task-lead"),
+        "a step runs on a thread its lead owns"
     );
 
     assert_eq!(rig.core.workspace.task("t1").unwrap().plan, "Ship the API");
@@ -4539,6 +4524,279 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     rig.core.shutdown().await;
 }
 
+async fn rpc_value(
+    core: &EngineCore,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    match zeron_rpc::RpcService::handle(&*core.rpc_service(), method, params).await {
+        Ok(zeron_rpc::RpcReply::Value(value)) => value,
+        Ok(_) => panic!("a value"),
+        Err(err) => panic!("{method}: {err}"),
+    }
+}
+
+async fn approved_plan(core: &EngineCore, titles: &[&str]) -> Vec<zeron_proto::TaskStep> {
+    let mutate = |params| rpc_value(core, zeron_rpc::methods::MUTATE, params);
+    mutate(serde_json::json!({ "op": "createTask", "taskId": "t1", "title": "Ship it" })).await;
+    mutate(serde_json::json!({
+        "op": "startTask", "taskId": "t1", "chatId": "task-lead", "spaceId": "space-tt",
+        "orchestrate": true,
+    }))
+    .await;
+    let steps: Vec<_> = titles
+        .iter()
+        .map(|title| serde_json::json!({ "title": title }))
+        .collect();
+    mutate(serde_json::json!({
+        "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead", "steps": steps,
+    }))
+    .await;
+    mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" })).await;
+    core.workspace.task_steps_of("t1")
+}
+
+async fn run_step(core: &EngineCore, step: &zeron_proto::TaskStep) -> String {
+    rpc_value(
+        core,
+        zeron_rpc::methods::CREATE_THREAD,
+        serde_json::json!({
+            "fromChatId": "task-lead", "prompt": format!("do: {}", step.title), "taskStepId": step.id,
+        }),
+    )
+    .await["chatId"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn a_step_thread_stopped_across_a_restart_reads_interrupted_and_its_lead_is_told() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+
+    let crashed = tokio::runtime::Runtime::new().unwrap();
+    let (_gate, gate_rx) = tokio::sync::watch::channel(false);
+    let (core, step, thread) = crashed.block_on(async {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(GatedHarness {
+            prompts: prompts.clone(),
+            gates: [("Build it", gate_rx)].into_iter().collect(),
+        }));
+        let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+            .expect("engine core assembles");
+        core.workspace
+            .create_space("space-tt", "dev-a", "/tmp", None, false)
+            .expect("space");
+        let step = approved_plan(&core, &["Build it"]).await.remove(0);
+        wait_for(
+            || {
+                prompts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.contains("The plan is approved. Run it."))
+                    && idle(&core, "task-lead")
+                    && queue_len(&core, "task-lead") == 0
+            },
+            "the lead's approval turn",
+        )
+        .await;
+        let thread = run_step(&core, &step).await;
+        wait_for(|| working(&core, &thread), "the step thread mid-run").await;
+        core.doc_host.shutdown_workers().await;
+        core.sessions.interrupt(&thread).await.unwrap();
+        core.workspace.flush();
+        assert!(
+            delegation(&core, &thread).is_running(),
+            "the engine dies before it settles the stopped run"
+        );
+        (core, step, thread)
+    });
+    crashed.shutdown_background();
+    drop(core);
+
+    let rebooted = tokio::runtime::Runtime::new().unwrap();
+    rebooted.block_on(async {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(RecordingHarness {
+            id: HarnessId::Mock,
+            prompts: prompts.clone(),
+            attachments: Arc::default(),
+            steers: Arc::default(),
+            steerable: false,
+            step_delay: Duration::from_millis(20),
+            reply: "noted",
+        }));
+        let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+            .expect("engine core reassembles");
+        wait_for(
+            || delegation(&core, &thread).status == zeron_proto::DelegationStatus::Interrupted,
+            "the stopped step thread to settle",
+        )
+        .await;
+        let told = format!(
+            "Step \"Build it\" (taskStepId {}) was interrupted on its thread {thread}.",
+            step.id
+        );
+        wait_for(
+            || prompts.lock().unwrap().iter().any(|p| p.starts_with(&told)),
+            "the lead's wake for the stopped step",
+        )
+        .await;
+        assert!(
+            !prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("do: Build it")),
+            "nothing revived the stopped step"
+        );
+        let step = core.workspace.task_step(&step.id).unwrap();
+        let chat = core.workspace.chat(&thread).unwrap();
+        assert_eq!(
+            zeron_proto::step_status(&step, chat.as_ref(), Some(zeron_proto::ChatIndicator::Idle)),
+            zeron_proto::StepStatus::NeedsYou
+        );
+        core.shutdown().await;
+    });
+}
+
+#[tokio::test]
+async fn a_step_thread_stopped_before_its_first_reply_settles_and_the_step_runs_again() {
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let (_gate, gate_rx) = tokio::sync::watch::channel(false);
+    let rig = rig_on(Arc::new(GatedHarness {
+        prompts: prompts.clone(),
+        gates: [("Build it", gate_rx)].into_iter().collect(),
+    }));
+    let rig = Rig { prompts, ..rig };
+    let core = &rig.core;
+    let step = approved_plan(core, &["Build it"]).await.remove(0);
+    wait_for(
+        || {
+            !prompts_with(&rig, "The plan is approved. Run it.").is_empty()
+                && idle(core, "task-lead")
+        },
+        "the lead's approval turn",
+    )
+    .await;
+    let thread = run_step(core, &step).await;
+    wait_for(|| working(core, &thread), "the step thread mid-run").await;
+    core.sessions.interrupt(&thread).await.unwrap();
+    wait_for(
+        || delegation(core, &thread).status == zeron_proto::DelegationStatus::Interrupted,
+        "the stopped step thread to settle",
+    )
+    .await;
+    let again = run_step(core, &step).await;
+    assert_ne!(again, thread, "the lead starts the step again");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_step_thread_runs_again_for_its_step_only_while_the_step_is_open() {
+    let rig = rig(Duration::from_millis(50));
+    let core = &rig.core;
+    let steps = approved_plan(core, &["Build it", "Write docs", "Tag it"]).await;
+    wait_for(
+        || !prompts_with(&rig, "The plan is approved. Run it.").is_empty(),
+        "the lead's approval message",
+    )
+    .await;
+    wait_for(|| idle(core, "task-lead"), "the lead's approval turn").await;
+    let mark_done = |step: &zeron_proto::TaskStep| {
+        rpc_value(
+            core,
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "updateTaskStep", "stepId": step.id, "patch": { "outcome": "done" },
+                "fromChatId": "task-lead",
+            }),
+        )
+    };
+    let early = run_step(core, &steps[2]).await;
+    mark_done(&steps[2]).await;
+    assert!(
+        delegation(core, &early).is_running(),
+        "marked while its thread runs"
+    );
+    wait_for(
+        || !delegation(core, &early).is_running(),
+        "the early-marked thread to finish",
+    )
+    .await;
+    assert_eq!(
+        delegation(core, &early).delivery,
+        Some(zeron_proto::DelegationDelivery::Disposed),
+        "a step marked while its thread runs wakes nobody when it finishes"
+    );
+    let marked = run_step(core, &steps[0]).await;
+    let open = run_step(core, &steps[1]).await;
+    for thread in [&marked, &open] {
+        wait_for(
+            || !prompts_with(&rig, &format!("on its thread {thread}.")).is_empty(),
+            "each step's first handback",
+        )
+        .await;
+    }
+    wait_for(|| idle(core, "task-lead"), "the lead's handback turn").await;
+    mark_done(&steps[0]).await;
+    let before = delegation(core, &marked);
+
+    core.doc_host
+        .queue_thread_message(&marked, Some("task-lead"), "FOLLOW-UP: one more check")
+        .await
+        .unwrap();
+    let sent = core
+        .doc_host
+        .queue_thread_message(&open, Some("task-lead"), "FOLLOW-UP: the guide too")
+        .await
+        .unwrap();
+    wait_for(
+        || delegation(core, &open).anchor == sent,
+        "the open step's thread to re-open",
+    )
+    .await;
+    let again = format!(
+        "Step \"Write docs\" (taskStepId {}) finished a turn on its thread {open}.\n\n<agent-response>\n{FOLLOW_UP_REPLY}\n</agent-response>",
+        steps[1].id
+    );
+    wait_for(
+        || !prompts_with(&rig, &again).is_empty(),
+        "the open step's second handback",
+    )
+    .await;
+    wait_for(
+        || {
+            idle(core, &marked)
+                && entries(core, &marked).iter().any(|e| {
+                    e.parts.iter().any(|part| {
+                        matches!(part, zeron_doc::MessagePart::Text { text, .. } if text == FOLLOW_UP_REPLY)
+                    })
+                })
+        },
+        "the marked step's thread to answer",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        delegation(core, &marked),
+        before,
+        "a thread whose step is marked done is not re-opened"
+    );
+    assert!(
+        prompts_with(&rig, FOLLOW_UP_REPLY)
+            .iter()
+            .all(|prompt| !prompt.contains(&format!("on its thread {marked}."))),
+        "nor is its lead told"
+    );
+    assert!(prompts_with(&rig, &format!("on its thread {early}.")).is_empty());
+    rig.core.shutdown().await;
+}
+
 struct GatedHarness {
     prompts: Arc<Mutex<Vec<String>>>,
     gates: std::collections::HashMap<&'static str, tokio::sync::watch::Receiver<bool>>,
@@ -4696,7 +4954,7 @@ async fn step_handbacks_fold_into_one_lead_message() {
             .read_queue()
             .unwrap()
             .into_iter()
-            .filter(|row| !row.task_steps.is_empty())
+            .filter(|row| !row.delegated_tasks.is_empty())
             .collect::<Vec<_>>()
     };
     let handbacks = |rig: &Rig| prompts_with(rig, "(taskStepId ");
@@ -4739,15 +4997,15 @@ async fn step_handbacks_fold_into_one_lead_message() {
         || {
             step_rows()
                 .first()
-                .is_some_and(|row| row.task_steps.len() == 2)
+                .is_some_and(|row| row.delegated_tasks.len() == 2)
         },
         "alpha and beta in one queued handback",
     )
     .await;
     let row = step_rows().remove(0);
-    let mut both = row.task_steps.clone();
+    let mut both = row.delegated_tasks.clone();
     both.sort();
-    let mut expected = vec![steps[2].id.clone(), steps[3].id.clone()];
+    let mut expected = vec![threads[0].clone(), threads[1].clone()];
     expected.sort();
     assert_eq!(both, expected);
 
@@ -4756,7 +5014,7 @@ async fn step_handbacks_fold_into_one_lead_message() {
         || {
             step_rows()
                 .first()
-                .is_some_and(|row| row.task_steps.len() == 3)
+                .is_some_and(|row| row.delegated_tasks.len() == 3)
         },
         "the late step joining the queued handback",
     )

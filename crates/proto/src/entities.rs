@@ -1230,19 +1230,16 @@ pub fn step_status(
         Some(ChatIndicator::AwaitingInput) => return StepStatus::NeedsYou,
         _ => {}
     }
-    // Steps bound to a delegate_task child before steps ran on threads.
-    if let Some(delegation) = &thread.delegation {
-        return match delegation.status {
+    match (&thread.delegation, indicator) {
+        (Some(delegation), _) => match delegation.status {
             DelegationStatus::Running => StepStatus::Working,
             DelegationStatus::Completed => StepStatus::Planned,
-            _ => StepStatus::NeedsYou,
-        };
-    }
-    match step.turn.as_ref().map(|turn| turn.ended) {
-        Some(StepTurnEnd::Completed) => StepStatus::Planned,
-        Some(StepTurnEnd::Failed) => StepStatus::Failed,
-        Some(StepTurnEnd::Stopped) => StepStatus::NeedsYou,
-        None => StepStatus::Working,
+            DelegationStatus::Failed => StepStatus::Failed,
+            DelegationStatus::Cancelled | DelegationStatus::Interrupted => StepStatus::NeedsYou,
+        },
+        (None, Some(ChatIndicator::Waiting)) => StepStatus::Working,
+        (None, Some(ChatIndicator::Errored)) => StepStatus::Failed,
+        (None, _) => StepStatus::Planned,
     }
 }
 
@@ -3525,7 +3522,7 @@ mod tests {
         let cases = [
             (DelegationStatus::Running, StepStatus::Working),
             (DelegationStatus::Completed, StepStatus::Planned),
-            (DelegationStatus::Failed, StepStatus::NeedsYou),
+            (DelegationStatus::Failed, StepStatus::Failed),
             (DelegationStatus::Cancelled, StepStatus::NeedsYou),
             (DelegationStatus::Interrupted, StepStatus::NeedsYou),
         ];
@@ -3547,27 +3544,30 @@ mod tests {
         }
         let thread = child(None);
         let ended = [
-            (None, StepStatus::Working),
-            (Some(StepTurnEnd::Completed), StepStatus::Planned),
-            (Some(StepTurnEnd::Failed), StepStatus::Failed),
-            (Some(StepTurnEnd::Stopped), StepStatus::NeedsYou),
+            None,
+            Some(StepTurnEnd::Completed),
+            Some(StepTurnEnd::Failed),
+            Some(StepTurnEnd::Stopped),
         ];
-        for (end, status) in ended {
+        for end in ended {
             let mut bound = step(Some("c"), None);
             bound.turn = end.map(|ended| StepTurn {
                 ended,
                 turn: Some("turn-1".into()),
             });
-            assert_eq!(
-                step_status(&bound, Some(&thread), Some(ChatIndicator::Idle)),
-                status,
-                "{end:?}"
-            );
-            assert_eq!(
-                step_status(&bound, Some(&thread), Some(ChatIndicator::Working)),
-                StepStatus::Working,
-                "a thread taking another turn works: {end:?}"
-            );
+            for (indicator, status) in [
+                (ChatIndicator::Idle, StepStatus::Planned),
+                (ChatIndicator::Completed, StepStatus::Planned),
+                (ChatIndicator::Working, StepStatus::Working),
+                (ChatIndicator::Waiting, StepStatus::Working),
+                (ChatIndicator::Errored, StepStatus::Failed),
+            ] {
+                assert_eq!(
+                    step_status(&bound, Some(&thread), Some(indicator)),
+                    status,
+                    "a thread with no block reads its session, never its recorded turn: {end:?} {indicator:?}"
+                );
+            }
         }
     }
 
