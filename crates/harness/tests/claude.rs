@@ -1474,6 +1474,7 @@ async fn shared_skill_colliding_with_builtin_keeps_file_delivery() {
     let config = tempfile::tempdir().unwrap();
     let harness = harness().with_launch(LaunchOverrides {
         home: Some(config.path().to_path_buf()),
+        executable: Some(fixture_path()),
         ..LaunchOverrides::default()
     });
     let commands = harness.commands_for(cwd.path()).await.unwrap();

@@ -616,7 +616,7 @@ mod tests {
         assert!(
             !help
                 .lines()
-                .any(|line| line.trim_start().starts_with("app")),
+                .any(|line| line.split_whitespace().next() == Some("app")),
             "{help}"
         );
     }
