@@ -40,9 +40,8 @@ fn pieces(app: &mut TestApp, words: &str) -> Vec<(String, Color)> {
 }
 
 /// Whether every piece of the text holding `words` comes to paint `ink`, frames
-/// paced as a window's are. (The veil times its fade by `ui.now()`, the wall
-/// clock, and repaints by an animation on the frames' clock: frames run flat
-/// out would end that animation with the fade barely begun.)
+/// paced as a window's are. (The veil's fade runs by `ui.now()`, the wall
+/// clock: frames run flat out would end with the fade barely begun.)
 fn settles(app: &mut TestApp, words: &str, ink: Color) -> bool {
     for _ in 0..60 {
         app.frames(1);
@@ -82,8 +81,13 @@ fn a_thought_being_written_fades_its_words_in() {
     assert!(old.starts_with("Weighing the parser first."), "{now:?}");
     assert_eq!(*old_color, ink, "what had already shown doesn't fade again");
 
-    // And settles in the thought's own ink.
-    assert!(settles(&mut app, "Then the host.", ink), "the new words never settled: {:?}", pieces(&mut app, "Then the host."));
+    // And settles in the thought's own ink, however its frames were paced: run
+    // flat out, then one more once the fade's time has passed.
+    app.frames(60);
+    std::thread::sleep(std::time::Duration::from_millis(450));
+    app.frames(1);
+    let settled = pieces(&mut app, "Then the host.");
+    assert!(settled.iter().all(|(_, color)| *color == ink), "the new words never settled: {settled:?}");
 
     // Written: its group folds shut, and opened, its row holds the words the
     // draft has let go.

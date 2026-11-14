@@ -629,11 +629,10 @@ return function(props: Props): Node
 	-- The width it would take, its tree docked: as last split (opening, a
 	-- neighbour opening or closing) or dragged. Kept across launches.
 	local files_w = ui.persist("shell_files_width", FILES_W)
-	-- Whether a width was chosen (its edge dragged, or keyed) since it was
-	-- last opened or closed: until its toggle, it holds that width (another
-	-- chat's panel, a relaunch), the fit narrowing it only as it must. Its
-	-- toggle forgets it, as Zeron's does: it opens at its share again, and
-	-- keeps to its share as the window is resized.
+	-- Whether a width was chosen (its edge dragged, or keyed): from then on
+	-- it opens at that width (closed and opened again, another chat's panel,
+	-- a relaunch), the fit narrowing it only as it must. Until then each
+	-- opening splits, and it keeps to its share as the window is resized.
 	local chosen = ui.persist("shell_panel_width_chosen", false)
 	local from_x, from_w, resizing = 0, 0, false
 	-- Its edge being dragged: whether its tree was docked at the press (kept
@@ -817,32 +816,17 @@ return function(props: Props): Node
 			right_w:set(r)
 		end
 	end
-	-- (Whose panel shows: the session's, a plugin page's; none on a new
-	-- chat. Another one is the route moving, not the person opening or
-	-- closing this one, and the panel lands at once, as it is there.)
-	local function owner(peek: boolean): string
-		local c: any = if peek then route.chat:peek() else route.chat:get()
-		if c.name == "plugin" then
-			return `page:{c.plugin or ""}/{c.page or ""}`
-		end
-		return if c.name == "session" then `chat:{c.session or ""}` else c.name or ""
-	end
-	-- It opens at its share, unless a width was chosen since its toggle
-	-- (its edge dragged, then another chat's panel shown, or the fit hiding
-	-- it for room and bringing it back). Its toggle, opening or closing it,
-	-- forgets that width. (The sidebar folding or coming back splits them
-	-- again too, above, as Zeron's does: Gaël's call over Wing's earlier
-	-- rule, where the chat took all the sidebar gave and the panel held.)
-	local split = { on = shown:peek(), open = props.files:peek(), owner = owner(true) }
+	-- It opens at its share, unless a width was chosen (its edge dragged):
+	-- then at that width, however it comes back (its toggle, another chat's
+	-- panel shown, the fit hiding it for room and bringing it back). (The
+	-- sidebar folding or coming back splits them again, above, as Zeron's
+	-- does: Gaël's call over Wing's earlier rule, where the chat took all
+	-- the sidebar gave and the panel held.)
+	local was_on = shown:peek()
 	ui.effect(function()
 		local on = shown:get()
-		local open, who = props.files:get(), owner(false)
-		local changed = on ~= split.on
-		local toggled = open ~= split.open and who == split.owner
-		split = { on = on, open = open, owner = who }
-		if toggled and chosen:peek() then
-			chosen:set(false)
-		end
+		local changed = on ~= was_on
+		was_on = on
 		local vw = fit.viewport:peek()
 		if changed and on and not shell_view.expanded:peek() and vw > 0 then
 			local side = sidebar_settled()
@@ -1170,13 +1154,32 @@ return function(props: Props): Node
 			art.panel_gap:set(gap)
 		end
 	end)
-	-- (What the tabs leave the panel: where it rests, not where it is on its way, and only as a drag of its edge ends.)
-	local tabs_room = ui.state("shell_files_tabs_room", rest_w:peek())
+	-- (What the tabs leave the panel: under the hand as its edge is dragged or the window resized, gliding with it on a step.)
+	local tabs_room = ui.state("shell_files_tabs_room", if shown:peek() then rest_w:peek() else 0)
+	local tabs_to = tabs_room:peek()
+	local tabs_glide: any = nil
 	ui.effect(function()
-		local rest = rest_w:get()
-		if drag_held:get() == nil and tabs_room:peek() ~= rest then
-			tabs_room:set(rest)
+		local to = if shown:get() then rest_w:get() else 0
+		local step = stepping:get()
+		if to == tabs_to then
+			return
 		end
+		tabs_to = to
+		if tabs_glide then
+			tabs_glide:cancel()
+			tabs_glide = nil
+		end
+		if not step then
+			tabs_room:set(to)
+			return
+		end
+		local params = motion.panel(to)
+		params.onComplete = function()
+			if tabs_to == to then
+				tabs_glide = nil
+			end
+		end
+		tabs_glide = anime.animate(tabs_room, params)
 	end)
 	ui.effect(function()
 		local on = expanded()
@@ -2269,7 +2272,8 @@ return function(props: Props): Node
 			right = function(): number
 				local toggle = 34 + 8 - 10 + ds.TitleBar.actions_right() + math.max(art.actions_w:get() - 24, 0)
 				-- (The tabs are the page card's: none over the panel beside it.)
-				return if shown:get() then math.max(toggle + EXPAND + 8, tabs_room:get() + INSET + WINDOW_EDGE) else toggle
+				local room = tabs_room:get()
+				return math.max(toggle + (if shown:get() then EXPAND + 8 else 0), if room > 0 then room + INSET + WINDOW_EDGE else 0)
 			end,
 		},
 		-- Expand: the panel over the session's chat, and back, on the top bar beside
