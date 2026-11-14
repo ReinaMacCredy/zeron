@@ -17,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let preview = zeron_doc::TranscriptUpdate {
             frame: zeron_doc::TranscriptFrame::reset(&tail),
             context_usage: doc.context_usage(),
+            context_baseline: None,
             session_stats: None,
             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&tail)),
         };
@@ -54,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let update = zeron_doc::TranscriptUpdate {
             frame: zeron_doc::TranscriptFrame::reset(&entries),
             context_usage: doc.context_usage(),
+            context_baseline: None,
             session_stats: None,
             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
         };

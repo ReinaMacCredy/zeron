@@ -37,7 +37,7 @@ local function sources(m: any): { { key: string, text: string, breaks: boolean?,
 		return { { key = `{m.id}:u`, text = m.text or "", breaks = true } }
 	end
 	-- A compaction's divider: its label's words, as drawn settled.
-	if m.role == "system" and (m.line == "classifier" or m.line == "compaction") then
+	if m.role == "system" and m.line == "compaction" then
 		return { { key = `{m.id}:c`, text = Compaction.words(m) } }
 	end
 	-- A row's own words (a line, a Claude Code card), drawn as they are.

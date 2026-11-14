@@ -832,10 +832,6 @@ impl Harness for ClaudeHarness {
     fn steer_stops_tool(&self) -> bool {
         true
     }
-    /// `/compact` preserves the last assistant message after its summary (`compactMetadata.preservedMessages`).
-    fn compaction_keeps_last_reply(&self) -> bool {
-        true
-    }
     fn compaction_summary(&self, session_id: &str, pre_tokens: u64) -> Option<String> {
         normalize::compact_summary(
             &config_root(&launch_env(&self.launch, &Default::default())),

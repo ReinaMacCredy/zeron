@@ -7,12 +7,16 @@
 --   context_usage.fraction(u)  0 to 1, or nil while it can't be said
 --   context_usage.lines(u)     the card's two lines, as Zeron writes them
 --   context_usage.ink(f)       the ring's ink at `f`
---   Card { usage, stats?, working?, plan? }  the ring's card; given the
---                              chat's stats (`chat.stats`), its last turn's
---                              rate and output and the prompt cache's time
---                              left; given the account's plan, its windows
---   Chip { usage, stats?, working?, plan?, side }  the footer's one chip:
---                              ring, percent, " · ", the cache's clock
+--   Card { usage, stats?, working?, plan?, compaction? }  the ring's card;
+--                              given the chat's stats (`chat.stats`), its
+--                              last turn's rate and output and the prompt
+--                              cache's time left; given the account's plan,
+--                              its windows; given the chat's compaction
+--                              readout, the bar's marks and the next
+--                              compaction, with Compact now while idle
+--   Chip { usage, stats?, working?, plan?, compaction?, side }  the footer's
+--                              one chip: the next compaction's word, ring,
+--                              percent, " · ", the cache's clock
 --   PlanChip { plan, side }    the plan's window nearest its limit, only
 --                              from 80% (PLAN_NEAR)
 
@@ -24,8 +28,20 @@ local SessionStats = require("@self/session_stats")
 local Icon = require("@self/icon")
 local ProviderCard = require("@self/provider_card")
 local AgentMark = require("@self/agent_mark")
+local Button = require("@self/button")
+local status = require("@self/status")
+local motion = require("@self/motion")
+local Tooltip = require("@self/tooltip")
 
 export type Usage = { tokens: number?, window: number? }
+export type Marks = { floor: number?, warn: number?, auto: number? }
+export type Next = { icon: "spin" | "agent" | "clock" | "warn" | "off", title: string, detail: string?, chip: string? }
+export type Compaction = {
+	marks: () -> Marks?,
+	next: () -> Next?,
+	on_compact: (() -> ())?,
+	busy: (() -> boolean)?,
+}
 -- The account in use's plan: its agent (the model picker's harness: name
 -- and mark), its plan's name, and its windows (each 0 to 1, when it starts
 -- over in seconds).
@@ -266,7 +282,173 @@ local function PlanPart(plan: () -> Plan?): Node
 	})
 end
 
-function M.Card(props: { usage: () -> Usage?, stats: (() -> SessionStats.Stats?)?, working: (() -> boolean)?, plan: (() -> Plan?)? }): Node
+local MARKS: { { key: string, words: string, ink: string } } = {
+	{ key = "floor", words = "ds.composer.context.mark_floor", ink = "$text.tertiary" },
+	{ key = "warn", words = "ds.composer.context.mark_warn", ink = "$text.tertiary" },
+	{ key = "auto", words = "ds.composer.context.mark_auto", ink = "$warning" },
+}
+-- A mark's box: wider than its tick, so the pointer finds its words.
+local MARK_W = 9
+
+local Meter = ui.component(function(props: { usage: () -> Usage?, fraction: () -> number, marks: () -> Marks? }): Node
+	local track_w = ui.use_state(0)
+	local layer: { [any]: any } = {
+		relative = true,
+		w_full = true,
+		h = 10,
+		justify = "center",
+		on_resize = function(size: { w: number, h: number })
+			if math.abs(track_w:peek() - size.w) >= 0.5 then
+				track_w:set(size.w)
+			end
+		end,
+		progress.ProgressBar {
+			value = props.fraction,
+			w_full = true,
+			label = locale.t("ds.composer.context.heading"),
+			tone = function(): progress.Tone
+				return tone(props.fraction())
+			end,
+		},
+	}
+	for _, mark in MARKS do
+		local function at(): number?
+			local m = props.marks()
+			local u = props.usage()
+			local v = if m then (m :: any)[mark.key] else nil
+			if type(v) ~= "number" or not u or not u.window or u.window <= 0 then
+				return nil
+			end
+			return v
+		end
+		local function words(): string
+			return locale.s(mark.words, { n = math.floor((at() or 0) / 1000 + 0.5) })
+		end
+		table.insert(layer, ui.show(function(): boolean
+			return at() ~= nil
+		end, ui.div {
+			class = `context-mark context-mark-{mark.key}`,
+			absolute = true,
+			top = 0,
+			w = MARK_W,
+			h = 10,
+			items = "center",
+			left = function(): number
+				local u = props.usage()
+				local f = math.clamp((at() or 0) / (if u and u.window then u.window else 1), 0, 1)
+				return f * track_w:get() - MARK_W / 2
+			end,
+			label = words,
+			tooltip = Tooltip { words },
+			ui.div { w = 1.5, h = 10, rounded = ui.raw(1, "the mark's round ends"), bg = mark.ink },
+		}))
+	end
+	return ui.column(layer)
+end)
+
+local function NextPart(c: Compaction, working: () -> boolean): Node
+	local function upcoming(): Next?
+		local n = c.next()
+		return if n then n else nil
+	end
+	local function icon(): string
+		local n = upcoming()
+		return if n then n.icon else "off"
+	end
+	local GLYPHS = { agent = "lucide-box", clock = "lucide-clock", warn = "danger-triangle", off = "lucide-circle-dashed" }
+	return ui.show(function(): boolean
+		return upcoming() ~= nil
+	end, ui.column {
+		id = "composer-context-next",
+		w_full = true,
+		pb = "$space.1",
+		ui.div { mx = ui.raw(-4, "the card's inset: the rule runs edge to edge"), mb = "$space.1", Menu.Rule {} },
+		ui.row {
+			h = "$zeron.menu.heading",
+			px = "$space.2",
+			items = "center",
+			ui.text { locale.t("ds.composer.context.next"), text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$text.tertiary" },
+		},
+		ui.row {
+			px = "$space.2",
+			gap = "$space.2",
+			items = "start",
+			ui.row {
+				w = 14,
+				h = "$font.line.sm",
+				shrink = 0,
+				items = "center",
+				justify = "center",
+				ui.show(function(): boolean
+					return icon() == "spin"
+				end, status.Spinner { size = 12, ink = "$text.secondary" }),
+				ui.show(function(): boolean
+					return icon() ~= "spin"
+				end, ui.div {
+					color = function(): string
+						return if icon() == "warn" then "$warning" else "$text.secondary"
+					end,
+					Icon {
+						name = function(): any
+							return GLYPHS[icon()] or GLYPHS.off
+						end,
+						size = 14,
+					},
+				}),
+			},
+			ui.column {
+				grow = 1,
+				min_w = 0,
+				gap = "$zeron.space.hair",
+				ui.text {
+					function(): string
+						local n = upcoming()
+						return if n then n.title else ""
+					end,
+					id = "composer-context-next-title",
+					wrap = true,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					weight = "$font.weight.medium",
+					color = function(): string
+						return if icon() == "off" then "$text.secondary" else "$text.primary"
+					end,
+				},
+				ui.show(function(): boolean
+					local n = upcoming()
+					return n ~= nil and (n.detail or "") ~= ""
+				end, ui.text {
+					function(): string
+						local n = upcoming()
+						return if n then n.detail or "" else ""
+					end,
+					id = "composer-context-next-detail",
+					wrap = true,
+					text_size = "$font.size.xs",
+					color = "$text.secondary",
+				}),
+			},
+		},
+		if c.on_compact
+			then ui.show(function(): boolean
+				return not working() and not (c.busy and c.busy())
+			end, ui.row {
+				px = "$space.2",
+				pt = "$space.2",
+				Button {
+					locale.t("ds.composer.context.compact_now"),
+					id = "composer-context-compact",
+					tone = "secondary",
+					size = "xs",
+					w_full = true,
+					on_click = c.on_compact,
+				},
+			})
+			else nil,
+	})
+end
+
+function M.Card(props: { usage: () -> Usage?, stats: (() -> SessionStats.Stats?)?, working: (() -> boolean)?, plan: (() -> Plan?)?, compaction: Compaction? }): Node
 	local usage = props.usage
 	local function fraction(): number?
 		return M.fraction(usage())
@@ -274,6 +456,10 @@ function M.Card(props: { usage: () -> Usage?, stats: (() -> SessionStats.Stats?)
 	local function known(): boolean
 		return fraction() ~= nil
 	end
+	local working = props.working or function(): boolean
+		return false
+	end
+	local compaction = props.compaction
 	return HoverCard.Card {
 		id = "composer-context-card",
 		w = 248,
@@ -308,13 +494,13 @@ function M.Card(props: { usage: () -> Usage?, stats: (() -> SessionStats.Stats?)
 			pt = "$space.1",
 			pb = "$space.2",
 			gap = "$space.2",
-			ui.show(known, progress.ProgressBar {
-				value = fraction,
-				size = "thin",
-				w_full = true,
-				label = locale.t("ds.composer.context.heading"),
-				tone = function(): progress.Tone
-					return tone(fraction() or 0)
+			ui.show(known, Meter {
+				usage = usage,
+				fraction = function(): number
+					return fraction() or 0
+				end,
+				marks = if compaction then compaction.marks else function(): Marks?
+					return nil
 				end,
 			}),
 			ui.column {
@@ -346,15 +532,59 @@ function M.Card(props: { usage: () -> Usage?, stats: (() -> SessionStats.Stats?)
 				}),
 			},
 		},
-		if props.stats
-			then TurnPart {
-				stats = props.stats,
-				working = props.working or function(): boolean
-					return false
-				end,
-			}
-			else nil,
+		if compaction then NextPart(compaction, working) else nil,
+		if props.stats then TurnPart { stats = props.stats, working = working } else nil,
 		if props.plan then PlanPart(props.plan) else nil,
+	}
+end
+
+-- Kept across remounts, so a footer built again shows the words at once rather than opening them again.
+local next_widths = ui.state("context_next_w", {} :: { [string]: number })
+
+local function NextWord(upcoming: () -> Next?): Node
+	local last = ""
+	local function chip(): string?
+		local n = upcoming()
+		return if n and (n.chip or "") ~= "" then n.chip else nil
+	end
+	local function words(): string
+		local c = chip()
+		if c then
+			last = locale.s("ds.composer.context.next_chip", { chip = c })
+		end
+		return last
+	end
+	local EASE = { duration = 240, ease = motion.sidebar.ease }
+	return ui.row {
+		id = "composer-context-next-chip",
+		shrink = 0,
+		relative = true,
+		h = "$font.line.xs",
+		overflow = "hidden",
+		w = motion.tween(ui.computed(function(): number
+			return if chip() then next_widths:get()[words()] or 0 else 0
+		end), EASE),
+		opacity = ui.tween(ui.computed(function(): number
+			return if chip() then 1 else 0
+		end), if motion.reduced_now() then { duration = motion.FADE } else EASE),
+		-- Out of flow: in-flow text wider than a closing clip is a layout warning.
+		ui.text {
+			words,
+			absolute = true,
+			left = 0,
+			top = 0,
+			line_height = "$font.line.xs",
+			shrink = 0,
+			pr = "$space.1",
+			text_size = "$font.size.xs",
+			color = "$text.secondary",
+			on_resize = function(size: { w: number, h: number })
+				local key = words()
+				if key ~= "" and math.abs((next_widths:peek()[key] or 0) - size.w) >= 0.5 then
+					next_widths:set_key(key, size.w)
+				end
+			end,
+		},
 	}
 end
 
@@ -367,6 +597,7 @@ M.Chip = ui.component(function(props: {
 	stats: (() -> SessionStats.Stats?)?,
 	working: (() -> boolean)?,
 	plan: (() -> Plan?)?,
+	compaction: Compaction?,
 	side: () -> string,
 }): Node
 	local working = props.working or function(): boolean
@@ -383,12 +614,12 @@ M.Chip = ui.component(function(props: {
 		return M.fraction(props.usage())
 	end
 	local function card(): Node
-		return M.Card { usage = props.usage, stats = props.stats, working = props.working, plan = props.plan }
+		return M.Card { usage = props.usage, stats = props.stats, working = props.working, plan = props.plan, compaction = props.compaction }
 	end
 	return ui.show(function(): boolean
 		return windowed() or word:get() ~= nil
 	end, ui.presence(props.side, function(at: string): Node
-		return ui.row {
+		local chip = ui.row {
 			id = "composer-context",
 			h = 24,
 			px = "$zeron.space.tight",
@@ -404,6 +635,7 @@ M.Chip = ui.component(function(props: {
 			tooltip = card(),
 			tooltip_placement = { side = at, align = "end", offset = 8 },
 			tooltip_delay = 150,
+			tooltip_interactive = props.compaction ~= nil,
 			ui.show(windowed, M.Ring {
 				footer = true,
 				fraction = function(): number
@@ -449,6 +681,11 @@ M.Chip = ui.component(function(props: {
 				},
 			}),
 		}
+		local compaction = props.compaction
+		if not compaction then
+			return chip
+		end
+		return ui.row { items = "center", shrink = 0, NextWord(compaction.next), chip }
 	end))
 end)
 
@@ -481,6 +718,7 @@ function M.PlanChip(props: { plan: () -> Plan?, card: Node, side: () -> string }
 			tooltip = props.card,
 			tooltip_placement = { side = at, align = "end", offset = 8 },
 			tooltip_delay = 150,
+			tooltip_interactive = true,
 			ui.presence(function(): string?
 				local p = props.plan()
 				return if p then p.agent.id else nil

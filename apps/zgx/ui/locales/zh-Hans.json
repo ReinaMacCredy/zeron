@@ -741,7 +741,13 @@
         "window_week": "每周",
         "window_day": "每日",
         "plan": "{name} · 套餐",
-        "plan_window": "{percent} · {when}重置"
+        "plan_window": "{percent} · {when}重置",
+        "next": "下一次压缩",
+        "next_chip": "{chip} ·",
+        "compact_now": "立即压缩",
+        "mark_floor": "从 {n}K 起提醒新任务",
+        "mark_warn": "在 {n}K 时提醒智能体",
+        "mark_auto": "在 {n}K 时自行压缩"
       },
       "terminal": "终端",
       "resume": "继续",
@@ -1413,40 +1419,10 @@
       "more": "更多…"
     },
     "compaction": {
-      "verdict": {
-        "new": "新任务",
-        "carry": "带上最近几轮",
-        "continue": "同一任务",
-        "failed": "没有回答"
-      },
-      "swapped_in": "已换入",
-      "usually": "{elapsed}，通常约 {usual}",
       "compacted": "已压缩",
       "compacting": "正在压缩",
-      "background": "已在后台压缩",
-      "nothing_carried": "未带上任何内容",
-      "turns_as_text": "{n, plural, other {# 轮以文本带上}}",
-      "not_compacted": "未压缩",
-      "context_kept": "上下文保留",
-      "no_answer": "分类器没有回答",
-      "classifier": "分类器",
       "queued": "压缩已排队",
       "queued_meta": "· 本轮结束后开始",
-      "checking": "正在判断是否压缩",
-      "checking_note": "正在检查代理的备注",
-      "said": "{verdict}（分类器说 {said}）",
-      "by": {
-        "stage1": "初判",
-        "stage2": "复核",
-        "streak": "连续三次判定为同一任务",
-        "ceiling": "上下文接近窗口上限，未询问",
-        "agent_note": "代理备注，未询问即压缩",
-        "turn_end": "本轮结束时已过检查线，未询问",
-        "background_copy": "在后台压缩的副本，未询问"
-      },
-      "decision": "判定",
-      "reason": "原因",
-      "decided_by": "判定者",
       "context": {
         "title": "上下文",
         "subtitle": "Claude Code · {model}",
@@ -1456,29 +1432,14 @@
         "compact_now": "立即压缩",
         "settings": "上下文设置"
       },
-      "context_tokens": "{n} 个 token",
-      "tokens": "Token",
-      "usage": "输入 {input} · 输出 {output}",
-      "saw": "分类器看到的内容",
-      "would_see": "它会看到的内容（未发送）",
-      "first_look": "初判",
-      "second_look": "复核",
-      "reply": "回答",
-      "summary_label": "代理写的摘要",
-      "carried_label": "原样带上的内容",
-      "nothing_carried_long": "没有原样带上任何内容：下一轮从摘要开始",
-      "kept_heading": "代理保留的内容",
-      "classifier_heading": "分类器",
+      "summary_label": "摘要",
       "resume_title": "以更少的上下文继续",
       "resume_body": "{tokens} 个 token，来自 {idle} 前 · 缓存已过期",
       "resume_compact": "压缩",
       "resume_keep": "保留完整历史",
       "minutes_seconds": "{m}分{s}秒",
       "days_hours": "{d}天{h}小时",
-      "context_label": "上下文",
-      "copy_running": "正在压缩副本 · {clock}",
-      "copy_ready_turn": "副本已就绪 · 本轮结束后换入",
-      "copy_ready_background": "副本已就绪 · 等待后台工作结束"
+      "focus_label": "要求保留"
     },
     "threads": {
       "agent": "智能体",
@@ -3242,40 +3203,44 @@
     },
     "compaction": {
       "title": "压缩",
-      "terms": "压缩 上下文 摘要 空闲 缓存 分类器 代理 token compaction compact",
+      "terms": "压缩 上下文 摘要 空闲 缓存 智能体 令牌 窗口 compaction compact context",
       "unread": "无法读取压缩设置",
       "loading": "正在加载…",
       "off": "关闭",
-      "idle_section": "空闲时",
-      "chat_section": "对话中",
       "idle": {
-        "label": "在缓存过期前压缩空闲对话",
-        "description": "在 1 小时的提示缓存过期前，为长时间空闲的对话写摘要，回来时只需重新处理摘要，而不是整个对话。",
-        "terms": "空闲 缓存 过期 摘要"
+        "label": "缓存即将过期",
+        "description": "空闲的对话会在 1 小时提示缓存过期前压缩。",
+        "terms": "空闲 缓存 过期 摘要",
+        "who": "Zeron"
       },
       "threshold": {
-        "label": "空闲阈值",
-        "description": "更小的对话不受影响。",
+        "label": "仅限大于以下大小的对话",
         "terms": "空闲 阈值 token 大小"
       },
       "agents": {
-        "label": "让代理自行压缩",
-        "description": "代理获得压缩工具，并在上下文填满时收到提醒。",
-        "terms": "代理 压缩 工具 提醒"
+        "label": "工作内容变了",
+        "description": "智能体为新任务调用 compact；在本轮结束时执行。",
+        "terms": "代理 压缩 工具 提醒",
+        "who": "智能体"
       },
       "tasks": {
-        "label": "在任务中",
-        "description": "主线程和步骤线程按同样的规则压缩。关闭则不影响任务。",
-        "terms": "任务 主线程 步骤"
-      },
-      "check": {
-        "label": "检查起点",
-        "description": "压缩可释放的上下文，按上次压缩后剩下的部分之上计算；窗口较小的对话从其可用空间的 70% 开始检查。",
-        "terms": "检查 提醒 分类器 新任务 阈值"
+        "label": "任务线程",
+        "description": "主导线程和步骤线程与任何对话一样压缩。",
+        "terms": "任务 主导 步骤 线程 mission"
       },
       "remind": {
         "label": "提醒起点",
-        "description": "压缩可释放的上下文，按上次压缩后剩下的部分之上计算；窗口较小的对话在其可用空间的 70% 时收到提醒。超过此值后，每条消息都会附带提醒，直到对话被压缩。"
+        "description": "高于新对话的令牌数。",
+        "terms": "提醒 新任务 令牌 remind"
+      },
+      "reasons_section": "对话因以下三种原因之一而压缩",
+      "scope_section": "范围",
+      "window": {
+        "label": "窗口已满",
+        "description": "Claude Code 会在接近窗口时自行压缩并继续工作。智能体会在 85% 时收到提醒。",
+        "detail": "每个对话的窗口：模型选择器",
+        "who": "Claude Code",
+        "terms": "窗口 已满 自动压缩 模型 window"
       }
     },
     "computer": {
@@ -3403,47 +3368,10 @@
     "lab": {
       "title": "实验功能",
       "description": "实验和测试版功能。它们可能在以后的版本中改变或移除。",
-      "terms": "实验室 测试版 实验 压缩 jev 分类器 令牌 lab beta experimental",
+      "terms": "实验室 测试版 实验 令牌 访问 lab beta experimental",
       "beta": "测试版",
       "unread": "无法读取实验室设置",
-      "compaction_section": "压缩",
       "access_section": "智能体权限",
-      "ahead": {
-        "label": "提前压缩",
-        "description": "Claude 在一轮结束后立即就地压缩。Codex 在后台为副本生成摘要，并在下次停顿时换入；副本之后的轮次以文本形式返回。",
-        "terms": "提前 后台 摘要 副本 ahead"
-      },
-      "mode": {
-        "label": "压缩新任务",
-        "classifier_description": "由模型阅读每条消息，在开始新任务时先压缩。",
-        "reminder_description": "每条消息都附带提醒，由智能体决定是否压缩。",
-        "reminder": "提醒",
-        "classifier": "分类器",
-        "terms": "新任务 提醒 分类器 模式"
-      },
-      "source": {
-        "label": "分类器",
-        "description": "智能体的模型，或使用你的 API 密钥的 TypeSafe Jev 分类器。Jev 会收到最近的对话以及检查点之后的每条新消息。",
-        "agent": "智能体模型",
-        "typesafe": "Jev · TypeSafe",
-        "openrouter": "Jev · OpenRouter",
-        "terms": "jev typesafe openrouter 来源"
-      },
-      "model": {
-        "label": "分类器模型",
-        "description": "由 Claude 分类时用 Sonnet，由 Codex 分类时用 Codex 的默认模型；测试中小模型会压缩后续消息。",
-        "auto": "会话智能体",
-        "terms": "分类器 模型 sonnet"
-      },
-      "key": {
-        "label": "API 密钥",
-        "saved": "密钥已保存在钥匙串中。",
-        "none_typesafe": "没有密钥。可在 console.typesafe.ai/keys 获取",
-        "none_openrouter": "没有密钥。可在 openrouter.ai/settings/keys 获取",
-        "paste": "粘贴密钥",
-        "remove": "移除密钥",
-        "copy_first": "请先复制 API 密钥，再点按“粘贴密钥”。"
-      },
       "full_token": {
         "label": "智能体使用完整令牌",
         "description": "新的运行可以触及应用能做的一切，包括允许插件和登录，且不会询问你。只有在你需要的工具被拒绝时才打开它。",

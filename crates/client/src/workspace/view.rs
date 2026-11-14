@@ -123,7 +123,6 @@ pub struct SessionRow {
     pub sidechats: Vec<String>,
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
-    pub classifying: Option<zeron_proto::Classifying>,
     /// Asleep until then (ms; the Activity view's Asleep), as
     /// [`Chat::sleep_state`] reads it at derive time. `None` when awake or
     /// woken.
@@ -571,10 +570,6 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.sidechat_expired.hash(&mut h);
     row.sidechats.hash(&mut h);
     row.room_gen.hash(&mut h);
-    row.classifying
-        .as_ref()
-        .map(|c| (c.harness, &c.model))
-        .hash(&mut h);
     row.sleep_until_ms.hash(&mut h);
     row.woke_at_ms.hash(&mut h);
     row.waits_on_process.hash(&mut h);
@@ -716,7 +711,6 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
             .map(|list| list.iter().map(|c| c.id.clone()).collect())
             .unwrap_or_default(),
         room_gen: chat.room_gen.unwrap_or(1),
-        classifying: session.and_then(|s| s.classifying.clone()),
         sleep_until_ms,
         woke_at_ms,
         waits_on_process,

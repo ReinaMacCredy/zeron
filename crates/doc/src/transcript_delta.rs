@@ -26,6 +26,8 @@ pub struct TranscriptUpdate {
     #[serde(default)]
     pub context_usage: Option<zeron_proto::ContextUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_baseline: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_stats: Option<zeron_proto::SessionStats>,
     /// Historical content included in this update, independent of reset/delta
     /// encoding. Omitted on ordinary live updates and by older engines.
@@ -1044,6 +1046,7 @@ mod context_update_tests {
                 tokens: Some(0),
                 window: Some(200000),
             }),
+            context_baseline: None,
             session_stats: Some(zeron_proto::SessionStats {
                 turns: 2,
                 ..Default::default()

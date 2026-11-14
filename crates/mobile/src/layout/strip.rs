@@ -1,6 +1,6 @@
 use zeron_text::WhiteSpace;
 
-use super::display::{ColorRole, Decoration, DisplayBuilder, LinkHit, WidgetKind};
+use super::display::{ColorRole, DisplayBuilder, LinkHit, WidgetKind};
 use super::markdown::{Ctx, PText, Px, place_text, prepare_plain};
 use super::rows::place_text_lines;
 use super::style::{Family, Weight};
@@ -41,7 +41,6 @@ pub(crate) enum Item {
     Text(PText),
     Pill { label: PText, url: String },
     Hint { title: String, text: String },
-    Chevron(bool),
 }
 
 pub(crate) enum Block {
@@ -98,13 +97,6 @@ pub(crate) fn linked(mut t: PText, url: String) -> PText {
     t
 }
 
-pub(crate) fn struck(mut t: PText) -> PText {
-    for paint in &mut t.paints {
-        paint.decoration = Decoration::Strikethrough;
-    }
-    t
-}
-
 /// `TranscriptListView` routes `zeron-chat` links to `AppRouter.openSession`.
 pub(crate) fn chat_link(chat_id: &str) -> String {
     format!("zeron-chat://open?id={}", query_escape(chat_id))
@@ -155,7 +147,7 @@ struct Line {
 fn item_size(item: &Item, px: Px, width: f32) -> (f32, f32) {
     let icon = d(px, ICON);
     match item {
-        Item::Icon { .. } | Item::Hint { .. } | Item::Chevron(_) => (icon, icon),
+        Item::Icon { .. } | Item::Hint { .. } => (icon, icon),
         Item::Text(t) => {
             let natural = t.p.max_content_width().ceil();
             if natural <= width {
@@ -224,9 +216,6 @@ fn paint_item(item: &Item, slot: &Slot, x: f32, y: f32, px: Px, o: &mut DisplayB
     match item {
         Item::Icon { name, color } => {
             o.widget(WidgetKind::Icon { name: name.clone(), color: *color }, (sx, sy, slot.w, slot.h), None);
-        }
-        Item::Chevron(open) => {
-            o.widget(WidgetKind::Chevron { expanded: *open }, (sx, sy, slot.w, slot.h), None);
         }
         Item::Hint { title, text } => {
             o.widget(
@@ -381,7 +370,7 @@ pub(crate) fn heap_bytes(s: &Strip) -> usize {
             Item::Text(t) => t.p.heap_bytes(),
             Item::Pill { label, url } => label.p.heap_bytes() + url.len(),
             Item::Hint { text, .. } => text.len(),
-            Item::Icon { .. } | Item::Chevron(_) => 0,
+            Item::Icon { .. } => 0,
         })
         .sum::<usize>()
         + s.card.iter().map(block).sum::<usize>()

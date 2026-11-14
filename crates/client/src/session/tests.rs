@@ -293,7 +293,7 @@ fn park_on_background_agent(session: &SessionHandle, held_by_subagents: bool) {
                 running_subagents: 1,
                 running_subagent_models: Vec::new(),
                 compact_plan: None,
-                classifying: None,
+                compact_hold: None,
                 chat_id,
                 device_id: host,
                 status: zeron_proto::SessionStatus::Working,

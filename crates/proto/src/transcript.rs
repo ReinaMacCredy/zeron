@@ -372,44 +372,26 @@ pub fn limit_pill_label(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompactionWait {
-    Queued,
-    Classifying {
-        harness: crate::HarnessId,
-        model: Option<String>,
-        agent_note: bool,
-    },
-    Compacting(Option<Boundary>),
+pub fn compaction_label(text: &str) -> &str {
+    match text.rsplit_once(" · ") {
+        Some((label, sizes)) if sizes.ends_with(" tokens") && sizes.contains(" → ") => label,
+        _ => text,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Boundary {
-    pub tokens: u64,
-    pub carry: bool,
-    pub cause: Option<&'static str>,
+pub enum CompactionWait {
+    Queued,
+    Compacting,
 }
 
 impl CompactionWait {
-    pub fn of(
-        compacting: Option<Option<Boundary>>,
-        classifying: Option<&crate::Classifying>,
-        plan: Option<crate::CompactPlan>,
-        idle: bool,
-    ) -> Option<Self> {
-        if let Some(boundary) = compacting {
-            return Some(Self::Compacting(boundary));
-        }
-        let agent = plan == Some(crate::CompactPlan::Agent);
-        if let Some(run) = classifying {
-            return Some(Self::Classifying {
-                harness: run.harness,
-                model: run.model.clone(),
-                agent_note: agent,
-            });
+    pub fn of(compacting: bool, plan: Option<crate::CompactPlan>, idle: bool) -> Option<Self> {
+        if compacting {
+            return Some(Self::Compacting);
         }
         // The agent's compaction runs after its turn settles, with the chat idle.
-        (agent && idle).then_some(Self::Queued)
+        (plan == Some(crate::CompactPlan::Agent) && idle).then_some(Self::Queued)
     }
 
     pub fn words(&self) -> (String, Option<&'static str>) {
@@ -418,32 +400,7 @@ impl CompactionWait {
                 "Compaction queued · starts when the turn settles".to_string(),
                 None,
             ),
-            Self::Classifying { agent_note, .. } => (
-                "Classifier".to_string(),
-                Some(if *agent_note {
-                    "· checking the agent's note"
-                } else {
-                    "· checking if this is a new task"
-                }),
-            ),
-            Self::Compacting(Some(Boundary {
-                tokens,
-                carry,
-                cause,
-            })) => (
-                format!(
-                    "Compacting {}{}{}",
-                    compact_count(*tokens),
-                    cause.map(|cause| format!(" {cause}")).unwrap_or_default(),
-                    if *carry {
-                        ", carrying the last turns over"
-                    } else {
-                        " before the new task"
-                    }
-                ),
-                None,
-            ),
-            Self::Compacting(None) => ("Compacting context".to_string(), None),
+            Self::Compacting => ("Compacting context".to_string(), None),
         }
     }
 

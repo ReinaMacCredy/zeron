@@ -355,6 +355,8 @@ pub struct CompactionRecord {
     pub carried: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1324,6 +1326,25 @@ mod tests {
 
     fn text_delta(s: &str) -> AgentEvent {
         AgentEvent::TextDelta { text: s.into() }
+    }
+
+    #[test]
+    fn a_compaction_record_keeps_its_focus_and_reads_without_one() {
+        let asked = CompactionRecord {
+            pre_tokens: Some(180_000),
+            focus: Some("the refund flow".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&asked).unwrap();
+        assert_eq!(json["focus"], "the refund flow");
+        assert_eq!(
+            serde_json::from_value::<CompactionRecord>(json).unwrap(),
+            asked
+        );
+        let old: CompactionRecord =
+            serde_json::from_value(serde_json::json!({ "preTokens": 1, "carried": "x" })).unwrap();
+        assert_eq!(old.focus, None);
+        assert!(serde_json::to_value(&old).unwrap().get("focus").is_none());
     }
 
     #[test]

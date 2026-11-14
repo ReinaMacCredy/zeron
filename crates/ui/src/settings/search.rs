@@ -33,12 +33,8 @@ pub enum SettingId {
     IdleCompaction,
     IdleThreshold,
     AgentCompaction,
-    CompactionMode,
     TaskCompaction,
     CompactionNudge,
-    CompactionClassifier,
-    CompactionClassifierModel,
-    CompactAhead,
     WorktreeLocation,
     CommitCredit,
     ColorScheme,
@@ -137,21 +133,6 @@ impl SettingId {
         )
     }
 
-    pub fn beta(self) -> bool {
-        self.on_experimental_page()
-    }
-
-    /// Drawn only once the engine answers, the classifier rows only in classifier mode.
-    fn on_experimental_page(self) -> bool {
-        matches!(
-            self,
-            SettingId::CompactAhead
-                | SettingId::CompactionMode
-                | SettingId::CompactionClassifier
-                | SettingId::CompactionClassifierModel
-        )
-    }
-
     /// Drawn only once the engine answers.
     fn on_compaction_page(self) -> bool {
         matches!(
@@ -193,9 +174,6 @@ impl Target {
             Target::Setting(id) if id.on_compaction_page() => {
                 Some(Target::Page(SettingsSection::Compaction))
             }
-            Target::Setting(id) if id.on_experimental_page() => {
-                Some(Target::Page(SettingsSection::Experimental))
-            }
             Target::Setting(id) => id.parent().map(Target::Setting),
             Target::Shortcut(_) | Target::Page(_) => None,
         }
@@ -205,10 +183,6 @@ impl Target {
 impl Target {
     pub fn in_advanced_look(self) -> bool {
         matches!(self, Target::Setting(id) if id.in_advanced_look())
-    }
-
-    pub fn beta(self) -> bool {
-        matches!(self, Target::Setting(id) if id.beta())
     }
 }
 

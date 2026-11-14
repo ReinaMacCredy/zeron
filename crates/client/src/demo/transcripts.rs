@@ -1482,6 +1482,7 @@ fn seams(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                         duration_ms: Some(31_000),
                         carried: Some("person: Bench the layout pass\nagent: Layout pass is 1.4ms at p95.".into()),
                         summary: Some("- The layout pass was benchmarked at 1.4ms p95.\n- Next: profile the scroll path.".into()),
+                        focus: None,
                     },
                 },
             ],

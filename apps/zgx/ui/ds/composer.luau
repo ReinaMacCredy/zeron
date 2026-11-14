@@ -3140,6 +3140,7 @@ return ui.component(function(props: Props): Node
 		local function working(): boolean
 			return props.running ~= nil and props.running:get()
 		end
+		local readout: context_usage.Compaction? = if props.compaction and props.compaction.next then props.compaction else nil
 		local function context_card(): Node
 			return context_usage.Card {
 				usage = props.usage or function(): Usage?
@@ -3148,6 +3149,7 @@ return ui.component(function(props: Props): Node
 				stats = props.stats,
 				working = working,
 				plan = plan,
+				compaction = readout,
 			}
 		end
 		footer = ui.row {
@@ -3213,6 +3215,7 @@ return ui.component(function(props: Props): Node
 						stats = props.stats,
 						working = working,
 						plan = plan,
+						compaction = readout,
 						side = side,
 					}
 					elseif props.context then ring(props.context)

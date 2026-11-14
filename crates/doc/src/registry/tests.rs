@@ -324,7 +324,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         running_subagents: 0,
         running_subagent_models: Vec::new(),
         compact_plan: None,
-        classifying: None,
+        compact_hold: None,
         chat_id: chat_id.into(),
         device_id: device_id.into(),
         status,

@@ -4323,8 +4323,14 @@ fn doc_messages_stream_from(
     };
     let usage = prev
         .as_ref()
-        .map(|_| (doc.context_usage(), doc.session_stats()))
-        .unwrap_or((None, None));
+        .map(|_| {
+            (
+                doc.context_usage(),
+                doc.session_stats(),
+                doc.context_baseline(),
+            )
+        })
+        .unwrap_or((None, None, 0));
     futures::stream::unfold(
         (rx, prev, doc, usage, Vec::new(), baseline),
         move |(
@@ -4377,7 +4383,11 @@ fn doc_messages_stream_from(
                 prev = Some(current);
                 // No-op commits (a second watcher attaching, command-only
                 // changes) produce empty deltas — skip the frame entirely.
-                let usage = (doc.context_usage(), doc.session_stats());
+                let usage = (
+                    doc.context_usage(),
+                    doc.session_stats(),
+                    doc.context_baseline(),
+                );
                 let rejections = doc.command_rejections();
                 let rejected_anew = rejections != previous_rejections;
                 if frame.is_empty_delta()
@@ -4392,6 +4402,7 @@ fn doc_messages_stream_from(
                 let mut value = serde_json::to_value(zeron_doc::TranscriptUpdate {
                     frame,
                     context_usage: usage.0,
+                    context_baseline: Some(usage.2),
                     session_stats: usage.1,
                     replay_baseline,
                 })
@@ -4448,7 +4459,11 @@ async fn windowed_doc_messages_stream(
                     None => TranscriptFrame::reset(slice),
                     Some(prev) => diff_transcript(prev, slice),
                 };
-                let usage = (doc.context_usage(), doc.session_stats());
+                let usage = (
+                    doc.context_usage(),
+                    doc.session_stats(),
+                    doc.context_baseline(),
+                );
                 let unchanged = frame.is_empty_delta()
                     && prev_info.as_ref() == Some(&info)
                     && prev_usage.as_ref() == Some(&usage);
@@ -4459,6 +4474,7 @@ async fn windowed_doc_messages_stream(
                 let mut value = serde_json::to_value(zeron_doc::TranscriptUpdate {
                     frame,
                     context_usage: usage.0,
+                    context_baseline: Some(usage.2),
                     session_stats: usage.1.clone(),
                     replay_baseline: None,
                 })
@@ -4504,6 +4520,7 @@ async fn since_doc_messages_stream(
         let mut first = serde_json::to_value(zeron_doc::TranscriptUpdate {
             frame,
             context_usage: handle.doc().context_usage(),
+            context_baseline: Some(handle.doc().context_baseline()),
             session_stats: handle.doc().session_stats(),
             replay_baseline: Some(sent),
         })
@@ -4536,6 +4553,7 @@ async fn opening_doc_messages_stream(
         let mut preview = serde_json::to_value(zeron_doc::TranscriptUpdate {
             frame: zeron_doc::TranscriptFrame::reset(&entries),
             context_usage: handle.doc().context_usage(),
+            context_baseline: Some(handle.doc().context_baseline()),
             session_stats: handle.doc().session_stats(),
             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
         })
@@ -5023,14 +5041,14 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&self.registry.delegation_settings())
             }
             methods::GET_COMPACTION_SETTINGS => {
-                RpcReply::value(&crate::jev::settings_state(&self.registry).await)
+                RpcReply::value(&self.registry.compaction_settings())
             }
             methods::SET_COMPACTION_SETTINGS => {
-                let p: crate::jev::CompactionSettingsUpdate = parse_params(params)?;
-                let state = crate::jev::update_settings(&self.registry, p)
-                    .await
+                let p: crate::registry::CompactionSettings = parse_params(params)?;
+                self.registry
+                    .set_compaction_settings(p)
                     .map_err(RpcError::Failed)?;
-                RpcReply::value(&state)
+                RpcReply::value(&self.registry.compaction_settings())
             }
             methods::GET_TOOL_SETTINGS => {
                 let p: GetToolSettingsParams = if params.is_null() {

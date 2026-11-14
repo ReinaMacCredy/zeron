@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use zeron_proto::HarnessId;
 use zeron_proto::compaction::{ResumeCompaction, compact_outcome_notice, resume_compaction_due};
-use zeron_proto::stats_view::CompactSection;
+use zeron_proto::stats_view::{ContextMarks, NextCompaction};
 
 use super::{SessionHandle, lock};
 use crate::error::Result;
@@ -66,16 +66,30 @@ impl SessionHandle {
         })
     }
 
-    pub fn compact_section(&self, now_ms: i64) -> Option<CompactSection> {
-        let plan = lock(&self.core.state)
-            .session
+    pub fn next_compaction(&self) -> NextCompaction {
+        let config = self
+            .core
+            .client()
+            .ok()
+            .and_then(|client| client.workspace.chat(&self.core.chat_id))
+            .and_then(|chat| chat.config);
+        let (session, usage) = {
+            let st = lock(&self.core.state);
+            (st.session.clone(), st.context_usage)
+        };
+        let reported = usage.and_then(|usage| usage.window);
+        let window = config
             .as_ref()
-            .and_then(|session| session.compact_plan);
-        CompactSection::of(
-            plan,
+            .and_then(zeron_proto::model_options::chat_budget)
+            .or(reported);
+        let threshold =
+            zeron_proto::model_options::chat_compact_threshold(config.as_ref(), reported);
+        NextCompaction::of(
+            session.as_ref(),
             self.composer().compacting,
-            self.session_stats().as_ref(),
-            now_ms,
+            usage.and_then(|usage| usage.tokens),
+            ContextMarks::of(window, threshold, None).auto,
+            config.map_or("", |config| config.harness.display_name()),
         )
     }
 

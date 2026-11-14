@@ -2293,32 +2293,6 @@ pub fn turn_stopped(last: &SessionMessageEntry) -> bool {
             && matches!(last.parts.last(), Some(MessagePart::Error { .. })))
 }
 
-pub fn boundary_compaction<'a, I>(transcript: I) -> Option<zeron_proto::transcript::Boundary>
-where
-    I: IntoIterator<Item = &'a SessionMessageEntry>,
-    I::IntoIter: DoubleEndedIterator,
-{
-    let entry = transcript
-        .into_iter()
-        .rev()
-        .find(|entry| entry.role != MessageRole::User)?;
-    entry.parts.iter().find_map(|part| match part {
-        MessagePart::Classifier { record, .. } => {
-            let carry = match record.verdict {
-                crate::parts::ClassifierVerdict::New => false,
-                crate::parts::ClassifierVerdict::Carry => true,
-                _ => return None,
-            };
-            Some(zeron_proto::transcript::Boundary {
-                tokens: record.context_tokens,
-                carry,
-                cause: record.decided_by.compaction_cause(),
-            })
-        }
-        _ => None,
-    })
-}
-
 /// The streaming reply's advisor call is still out: the one tool that takes
 /// minutes with nothing streaming, so the working trailer names that wait.
 pub fn consulting_advisor(last: &SessionMessageEntry) -> bool {
@@ -3232,6 +3206,7 @@ mod tests {
                     duration_ms: Some(41_000),
                     carried: Some("<carried_over>".into()),
                     summary: None,
+                    focus: None,
                 },
             },
         ];

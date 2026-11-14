@@ -1356,10 +1356,6 @@ pub enum RowKind {
         text: SharedString,
         route: zeron_doc::HandoffRoute,
     },
-    Classifier {
-        record: Arc<zeron_doc::ClassifierRecord>,
-        compaction: Option<Arc<zeron_doc::CompactionRecord>>,
-    },
     Compaction {
         text: SharedString,
         record: Arc<zeron_doc::CompactionRecord>,
@@ -1848,25 +1844,12 @@ pub fn rows_for_entry(
             .iter()
             .any(|p| matches!(p, MessagePart::Switch { .. }))
     {
-        if let Some(record) = entry.parts.iter().find_map(|p| match p {
-            MessagePart::Classifier { record, .. } => Some(record),
-            _ => None,
-        }) {
-            return vec![Row {
-                id: entry.id.clone().into(),
-                version: fnv1a(record.input.as_bytes())
-                    ^ record.duration_ms
-                    ^ fnv1a(record.reason.as_deref().unwrap_or_default().as_bytes()).rotate_left(1),
-                turn_start: true,
-                kind: RowKind::Classifier {
-                    record: Arc::new(record.clone()),
-                    compaction: None,
-                },
-                entry_id,
-                timestamp: None,
-                copy_text: None,
-                compact_fold: None,
-            }];
+        if entry
+            .parts
+            .iter()
+            .any(|p| matches!(p, MessagePart::Classifier { .. }))
+        {
+            return Vec::new();
         }
         if let Some(record) = entry.parts.iter().find_map(|p| match p {
             MessagePart::Compaction { record, .. } => Some(record),
@@ -7103,7 +7086,6 @@ impl Transcript {
                     .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
             )
         };
-        compaction_card::merge_compaction_rows(&mut new_rows);
         new_rows.retain(|row| !self.fence_hidden(row));
         let workless: Vec<SharedString> = self
             .settle_close
@@ -10776,10 +10758,7 @@ impl Transcript {
         let state = self.state.read(cx);
         let session = state.session_for(chat_id);
         CompactionWait::of(
-            state
-                .chat_compacting(chat_id)
-                .then(|| zeron_doc::schema::boundary_compaction(&state.transcript)),
-            session.and_then(|session| session.classifying.as_ref()),
+            state.chat_compacting(chat_id),
             session.and_then(|session| session.compact_plan),
             state.indicator_for(chat_id, now) == crate::state::Indicator::None,
         )
@@ -11412,14 +11391,6 @@ impl Transcript {
                 text,
                 route,
             } => self.render_handoff(&row.id, *harness, text.clone(), route, &theme, cx),
-            RowKind::Classifier { record, compaction } => self.render_compaction_card(
-                ix,
-                &row.id,
-                record.clone(),
-                compaction.clone(),
-                &theme,
-                cx,
-            ),
             RowKind::Compaction { text, record } => self.render_compaction_divider(
                 ix,
                 &row.id,
@@ -16377,6 +16348,7 @@ mod tests {
                                 frame,
                                 replay_baseline,
                                 context_usage: None,
+                                context_baseline: None,
                                 session_stats: None,
                             },
                             cx,
@@ -16490,6 +16462,7 @@ mod tests {
             .prepare(&zeron_doc::TranscriptUpdate {
                 frame: zeron_doc::TranscriptFrame::reset(&original),
                 context_usage: None,
+                context_baseline: None,
                 session_stats: None,
                 replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&original)),
             })
@@ -16503,6 +16476,7 @@ mod tests {
             .prepare(&zeron_doc::TranscriptUpdate {
                 frame: zeron_doc::diff_transcript(&original, &changed),
                 context_usage: None,
+                context_baseline: None,
                 session_stats: None,
                 replay_baseline: None,
             })
@@ -16528,6 +16502,7 @@ mod tests {
                 replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
                 frame: zeron_doc::TranscriptFrame::Reset { reset: entries },
                 context_usage: None,
+                context_baseline: None,
                 session_stats: None,
             };
             let start = Instant::now();
@@ -16615,6 +16590,7 @@ mod tests {
                                     entries,
                                 )),
                                 context_usage: None,
+                                context_baseline: None,
                                 session_stats: None,
                             },
                             pending,
@@ -16670,6 +16646,7 @@ mod tests {
                             frame: zeron_doc::diff_transcript(&full, &live),
                             replay_baseline: None,
                             context_usage: None,
+                            context_baseline: None,
                             session_stats: None,
                         },
                         cx,
@@ -16710,6 +16687,7 @@ mod tests {
                         zeron_doc::TranscriptUpdate {
                             frame,
                             context_usage: None,
+                            context_baseline: None,
                             session_stats: None,
                             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&history)),
                         },
@@ -16722,6 +16700,7 @@ mod tests {
                         zeron_doc::TranscriptUpdate {
                             frame: zeron_doc::diff_transcript(&history, &live),
                             context_usage: None,
+                            context_baseline: None,
                             session_stats: None,
                             replay_baseline: None,
                         },
@@ -16759,6 +16738,7 @@ mod tests {
                                 frame,
                                 replay_baseline: baseline,
                                 context_usage: None,
+                                context_baseline: None,
                                 session_stats: None,
                             },
                             cx,
@@ -16816,6 +16796,7 @@ mod tests {
                         zeron_doc::TranscriptUpdate {
                             frame: zeron_doc::TranscriptFrame::reset::<zeron_doc::SessionMessageEntry>(&[]),
                             context_usage: None,
+                            context_baseline: None,
                             session_stats: None,
                             replay_baseline: Some(Default::default()),
                         },
@@ -16835,6 +16816,7 @@ mod tests {
                         zeron_doc::TranscriptUpdate {
                             frame: zeron_doc::diff_transcript(&[], &live),
                             context_usage: None,
+                            context_baseline: None,
                             session_stats: None,
                             replay_baseline: None,
                         },
@@ -16870,6 +16852,7 @@ mod tests {
                         zeron_doc::TranscriptUpdate {
                             frame,
                             context_usage: None,
+                            context_baseline: None,
                             session_stats: None,
                             replay_baseline: None,
                         },
@@ -21089,6 +21072,7 @@ mod tests {
                                 zeron_doc::TranscriptUpdate {
                                     frame: zeron_doc::TranscriptFrame::reset(&history),
                                     context_usage: None,
+                                    context_baseline: None,
                                     session_stats: None,
                                     replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
                                         &history,
@@ -21118,6 +21102,7 @@ mod tests {
                                 zeron_doc::TranscriptUpdate {
                                     frame: zeron_doc::diff_transcript(&history, &next),
                                     context_usage: None,
+                                    context_baseline: None,
                                     session_stats: None,
                                     // The RPC must retain its opening cutoff when
                                     // publishing subsequent changed-part history.
@@ -21174,6 +21159,7 @@ mod tests {
                                 zeron_doc::TranscriptUpdate {
                                     frame: zeron_doc::TranscriptFrame::reset(&history),
                                     context_usage: None,
+                                    context_baseline: None,
                                     session_stats: None,
                                     replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
                                         &history,
@@ -21187,6 +21173,7 @@ mod tests {
                                 zeron_doc::TranscriptUpdate {
                                     frame: zeron_doc::diff_transcript(&history, &live),
                                     context_usage: None,
+                                    context_baseline: None,
                                     session_stats: None,
                                     replay_baseline: None,
                                 },
@@ -21238,6 +21225,7 @@ mod tests {
                                 zeron_doc::TranscriptUpdate {
                                     frame: zeron_doc::diff_transcript(&live, &next),
                                     context_usage: None,
+                                    context_baseline: None,
                                     session_stats: None,
                                     replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
                                         &next_history,
@@ -21346,6 +21334,7 @@ mod tests {
                                     zeron_doc::TranscriptUpdate {
                                         frame,
                                         context_usage: None,
+                                        context_baseline: None,
                                         session_stats: None,
                                         replay_baseline: Some(
                                             zeron_doc::TranscriptBaseline::capture(&updated),
@@ -21594,7 +21583,7 @@ mod tests {
                             running_subagents: 0,
                             running_subagent_models: Vec::new(),
                             compact_plan: None,
-                            classifying: None,
+                            compact_hold: None,
                             waiting: None,
                             chat_id: "chat".into(),
                             device_id: "test".into(),

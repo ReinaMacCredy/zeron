@@ -435,10 +435,6 @@ pub trait Harness: Send + Sync {
     fn compacts_in_place(&self) -> bool {
         false
     }
-    /// Whether the CLI's own compaction keeps the agent's last reply word for word after its summary.
-    fn compaction_keeps_last_reply(&self) -> bool {
-        false
-    }
     /// The summary the CLI's own compaction of `session_id` at `pre_tokens` wrote, when it keeps one on disk. Blocking.
     fn compaction_summary(&self, _session_id: &str, _pre_tokens: u64) -> Option<String> {
         None
@@ -579,11 +575,6 @@ pub trait Harness: Send + Sync {
         Err(HarnessError::Protocol(
             "compaction is not supported by this harness".into(),
         ))
-    }
-
-    /// [`Harness::compact`] with a `branch.keep` compacts a fork cut there; its `Done` names the fork.
-    fn compacts_a_copy(&self) -> bool {
-        false
     }
 
     /// Whether the driver can start a run on a copy of a resumed session cut

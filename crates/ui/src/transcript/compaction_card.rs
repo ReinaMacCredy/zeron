@@ -1,6 +1,6 @@
 use super::*;
 use gpui::Div;
-use zeron_doc::{ClassifierRecord, ClassifierVerdict, CompactionRecord, DecidedBy};
+use zeron_doc::CompactionRecord;
 
 // Long enough for the rules to fill and fade before the label goes static.
 const SETTLE: Duration = Duration::from_millis(900);
@@ -17,7 +17,6 @@ const FILL_FADE: motion::MotionSpec = motion::MotionSpec::new(400, motion::EASE)
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Queued,
-    Checking,
     Compacting,
     Settled,
 }
@@ -123,53 +122,13 @@ impl CardClock {
     }
 }
 
-pub(super) fn merge_compaction_rows(rows: &mut Vec<Row>) {
-    let mut ix = 0;
-    while ix + 1 < rows.len() {
-        // A message sent while the chat compacts lands between the decision and its result.
-        let next = (ix + 1..rows.len()).find(|&at| !matches!(rows[at].kind, RowKind::User { .. }));
-        if let (
-            RowKind::Classifier {
-                compaction: None, ..
-            },
-            Some(next),
-        ) = (&rows[ix].kind, next)
-            && let RowKind::Compaction { record, .. } = &rows[next].kind
-        {
-            let record = record.clone();
-            let version = rows.remove(next).version;
-            let row = &mut rows[ix];
-            row.version = row.version.rotate_left(7) ^ version;
-            if let RowKind::Classifier { compaction, .. } = &mut row.kind {
-                *compaction = Some(record);
-            }
-        }
-        ix += 1;
-    }
-}
-
-/// What the composer's chip says while `chat_id` is checking or compacting:
-/// the same words as the divider in the chat.
+/// What the composer's chip says while `chat_id` is compacting: the same
+/// word as the divider in the chat.
 pub(crate) fn composer_label(
     state: &crate::state::AppState,
     chat_id: &str,
 ) -> Option<&'static str> {
-    if state.chat_compacting(chat_id) {
-        return Some("Compacting");
-    }
-    let session = state.session_for(chat_id)?;
-    session.classifying.as_ref()?;
-    Some(checking_title(
-        session.compact_plan == Some(zeron_proto::CompactPlan::Agent),
-    ))
-}
-
-fn checking_title(agent_note: bool) -> &'static str {
-    if agent_note {
-        "Checking the agent's note"
-    } else {
-        "Checking whether to compact"
-    }
+    state.chat_compacting(chat_id).then_some("Compacting")
 }
 
 fn eased(spec: motion::MotionSpec, elapsed: Duration, reduce: bool) -> f32 {
@@ -183,23 +142,13 @@ fn progress(spec: motion::MotionSpec, since: Instant, now: Instant, reduce: bool
     eased(spec, now.saturating_duration_since(since), reduce)
 }
 
-fn boundary_row(rows: &[Row]) -> Option<usize> {
-    rows.iter()
-        .rposition(|row| !matches!(row.kind, RowKind::User { .. }))
-        .filter(|ix| matches!(rows[*ix].kind, RowKind::Classifier { .. }))
-}
-
 fn usual_secs(rows: &[Row], skip: usize) -> Option<u64> {
     let mut durations: Vec<u64> = rows
         .iter()
         .enumerate()
         .filter(|(ix, _)| *ix != skip)
         .filter_map(|(_, row)| match &row.kind {
-            RowKind::Classifier {
-                compaction: Some(record),
-                ..
-            }
-            | RowKind::Compaction { record, .. } => record.duration_ms,
+            RowKind::Compaction { record, .. } => record.duration_ms,
             _ => None,
         })
         .collect();
@@ -222,31 +171,10 @@ fn wait_meta(elapsed: Duration, usual: Option<u64>) -> String {
     }
 }
 
-fn carried_turns(carried: Option<&str>) -> usize {
-    carried.map_or(0, |carried| {
-        carried_body(carried)
-            .split("\n\n")
-            .filter(|block| !block.starts_with("Still running when the chat compacted:"))
-            .count()
-    })
-}
-
-fn carried_body(carried: &str) -> &str {
-    let inner = carried
-        .trim()
-        .trim_start_matches("<carried_over>")
-        .trim_end_matches("</carried_over>")
-        .trim();
-    inner.split_once("\n\n").map_or(inner, |(_, rest)| rest)
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Icon {
     Spinner,
     Done,
-    Kept,
-    Alert,
-    Decision,
     Queued,
 }
 
@@ -352,31 +280,6 @@ fn rule(left: bool, rules: &Rules, theme: &Theme) -> Div {
         }))
 }
 
-fn verdict_tag(record: &ClassifierRecord, theme: &Theme) -> (SharedString, gpui::Hsla) {
-    if record.decided_by == DecidedBy::BackgroundCopy {
-        return ("Swapped in".into(), theme.warning);
-    }
-    let routine = record.decided_by.asked() || record.decided_by == DecidedBy::TurnEnd;
-    let color = if !routine || record.verdict == ClassifierVerdict::Failed {
-        theme.warning
-    } else {
-        match record.verdict {
-            ClassifierVerdict::New => theme.success,
-            ClassifierVerdict::Carry => theme.accent,
-            _ => theme.text_muted,
-        }
-    };
-    (record.verdict.label().into(), color)
-}
-
-fn reason(record: &ClassifierRecord) -> Option<SharedString> {
-    record
-        .reason
-        .clone()
-        .or_else(|| (!record.decided_by.asked()).then(|| record.decided_by.label().to_string()))
-        .map(SharedString::from)
-}
-
 impl Transcript {
     fn glyph(&self, icon: Icon, scale: f32, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let glyph = |path: &'static str, color: gpui::Hsla| {
@@ -395,13 +298,7 @@ impl Transcript {
             )
             .into_any_element(),
             Icon::Done => glyph(crate::icons::LUCIDE_CHECK, theme.success),
-            Icon::Alert => glyph(crate::icons::LUCIDE_CIRCLE_ALERT, theme.warning),
-            Icon::Decision => glyph(crate::icons::LUCIDE_LIST_FILTER, theme.text_muted),
             Icon::Queued => glyph(crate::icons::LUCIDE_CIRCLE_DASHED, theme.text_faint),
-            Icon::Kept => div()
-                .text_color(theme.text_muted)
-                .child("–")
-                .into_any_element(),
         }
     }
 
@@ -586,19 +483,6 @@ impl Transcript {
         if self.fresh_compaction(&chat_id, now).is_some() {
             return None;
         }
-        if matches!(wait, CompactionWait::Compacting(Some(_)))
-            && boundary_row(&self.rows).is_some_and(|ix| {
-                matches!(
-                    self.rows[ix].kind,
-                    RowKind::Classifier {
-                        compaction: None,
-                        ..
-                    }
-                )
-            })
-        {
-            return None;
-        }
         let reduce = cx.reduce_motion();
         motion::pulse_lease(cx.entity_id(), cx);
         let theme = Theme::of(cx).clone();
@@ -616,50 +500,14 @@ impl Transcript {
                     chevron: None,
                 },
             ),
-            CompactionWait::Classifying {
-                harness,
-                model,
-                agent_note,
-            } => (
-                Phase::Checking,
-                Head {
-                    icon: Icon::Spinner,
-                    title: checking_title(*agent_note).into(),
-                    chip: Some(HandoffSide::new(*harness, model.as_deref(), cx).chip(&theme)),
-                    tag: None,
-                    meta: Some(format!("· {}", format_elapsed(elapsed.as_secs() as i64)).into()),
-                    chevron: None,
-                },
-            ),
-            CompactionWait::Compacting(boundary) => (
+            CompactionWait::Compacting => (
                 Phase::Compacting,
                 Head {
                     icon: Icon::Spinner,
                     title: "Compacting".into(),
                     chip: None,
-                    tag: boundary.map(|boundary| {
-                        (
-                            SharedString::from(if boundary.carry {
-                                "Carry over"
-                            } else {
-                                "New task"
-                            }),
-                            theme.accent,
-                        )
-                    }),
-                    meta: Some(
-                        match boundary {
-                            Some(boundary) => {
-                                format!(
-                                    "· {} · {}",
-                                    tokens(boundary.tokens),
-                                    wait_meta(elapsed, usual)
-                                )
-                            }
-                            None => format!("· {}", wait_meta(elapsed, usual)),
-                        }
-                        .into(),
-                    ),
+                    tag: None,
+                    meta: Some(format!("· {}", wait_meta(elapsed, usual)).into()),
                     chevron: None,
                 },
             ),
@@ -692,209 +540,6 @@ impl Transcript {
                 )
                 .into_any_element(),
         )
-    }
-
-    pub(super) fn render_compaction_card(
-        &mut self,
-        ix: usize,
-        row_id: &SharedString,
-        record: Arc<ClassifierRecord>,
-        kept: Option<Arc<CompactionRecord>>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let now = motion::now();
-        let reduce = cx.reduce_motion();
-        let live_chat = self.chat_id.clone().filter(|_| self.doc_override.is_none());
-        let boundary = boundary_row(&self.rows) == Some(ix);
-        let compacts = matches!(
-            record.verdict,
-            ClassifierVerdict::New | ClassifierVerdict::Carry
-        );
-        let mut compacting_since = None;
-        let mut settled_at = self.compaction_clock.settled.get(row_id).copied();
-        if let Some(chat_id) = live_chat.as_deref().filter(|_| boundary) {
-            let wait = self.compaction_wait(chat_id, chrono::Utc::now(), cx);
-            if kept.is_none() && compacts {
-                if let Some(wait @ CompactionWait::Compacting(Some(_))) = &wait {
-                    compacting_since = Some(self.compaction_clock.wait_since(chat_id, wait, now));
-                } else if let Some((phase, at)) = self.compaction_clock.live_phase(chat_id)
-                    && self.compaction_clock.wait_ended_recently(chat_id, now)
-                {
-                    compacting_since = Some(if phase == Phase::Compacting { at } else { now });
-                }
-            } else if self.compaction_clock.live_phase(chat_id).is_some() {
-                self.compaction_clock.settled.insert(row_id.clone(), now);
-                settled_at = Some(now);
-            }
-            if compacting_since.is_some() {
-                self.compaction_clock
-                    .phase_since(chat_id, Phase::Compacting, now);
-            } else if settled_at.is_some() {
-                self.compaction_clock
-                    .phase_since(chat_id, Phase::Settled, now);
-            }
-        }
-        if let Some(at) = settled_at
-            && (reduce || now.saturating_duration_since(at) > SETTLE)
-        {
-            self.compaction_clock.settled.remove(row_id);
-            settled_at = None;
-        }
-        let fold = self.folds.get(row_id).copied().unwrap_or_default();
-        let open = fold.open.unwrap_or(false);
-        let animating = compacting_since.is_some()
-            || settled_at.is_some()
-            || fold
-                .toggled_at
-                .is_some_and(|at| now.saturating_duration_since(at) < motion::RESIZE.total());
-        if animating {
-            motion::pulse_lease(cx.entity_id(), cx);
-        }
-
-        let context = kept
-            .as_ref()
-            .and_then(|kept| kept.pre_tokens)
-            .unwrap_or(record.context_tokens);
-        let tag = Some(verdict_tag(&record, theme));
-        let settled = compacting_since.is_none();
-        let head = match (&kept, compacting_since) {
-            (_, Some(since)) => {
-                let elapsed = now.saturating_duration_since(since);
-                Head {
-                    icon: Icon::Spinner,
-                    title: "Compacting".into(),
-                    chip: None,
-                    tag,
-                    meta: Some(
-                        format!(
-                            "· {} · {}",
-                            tokens(context),
-                            wait_meta(elapsed, usual_secs(&self.rows, ix))
-                        )
-                        .into(),
-                    ),
-                    chevron: None,
-                }
-            }
-            (Some(kept), None) => {
-                let mut meta = format!("· {}", tokens(context));
-                if let Some(post) = kept.post_tokens {
-                    meta.push_str(&format!(" → {}", tokens(post)));
-                }
-                let copy = record.decided_by == DecidedBy::BackgroundCopy;
-                if copy {
-                    meta.push_str(&match carried_turns(kept.carried.as_deref()) {
-                        0 => " · nothing carried".to_string(),
-                        1 => " · 1 turn as text".to_string(),
-                        turns => format!(" · {turns} turns as text"),
-                    });
-                } else if let Some(ms) = kept.duration_ms {
-                    meta.push_str(&format!(" · {}", format_elapsed((ms / 1000) as i64)));
-                }
-                Head {
-                    icon: Icon::Done,
-                    title: if copy {
-                        "Compacted in the background"
-                    } else {
-                        "Compacted"
-                    }
-                    .into(),
-                    chip: None,
-                    tag,
-                    meta: Some(meta.into()),
-                    chevron: Some(open),
-                }
-            }
-            (None, None) => {
-                let (icon, title, meta) = match record.verdict {
-                    ClassifierVerdict::Continue => (
-                        Icon::Kept,
-                        "Not compacted",
-                        format!("· {} · context kept", tokens(context)),
-                    ),
-                    ClassifierVerdict::Failed => (
-                        Icon::Alert,
-                        "Not compacted",
-                        format!("· {} · the classifier gave no answer", tokens(context)),
-                    ),
-                    _ => (
-                        Icon::Decision,
-                        "Classifier",
-                        format!(
-                            "· {} · {:.1}s",
-                            tokens(context),
-                            record.duration_ms as f64 / 1000.0
-                        ),
-                    ),
-                };
-                Head {
-                    icon,
-                    title: title.into(),
-                    chip: None,
-                    tag,
-                    meta: Some(meta.into()),
-                    chevron: Some(open),
-                }
-            }
-        };
-        let live_key = live_chat
-            .as_deref()
-            .filter(|_| boundary)
-            .map(|chat_id| self.compaction_clock.label_key(chat_id));
-        let morph = live_key.as_ref().map(|key| {
-            let (from, at) = self.compaction_clock.look_since(key, &head.look(), now);
-            (from, progress(motion::RESIZE, at, now, reduce))
-        });
-        let live_since = live_chat
-            .as_deref()
-            .and_then(|chat_id| self.compaction_clock.entered_at(chat_id))
-            .or(compacting_since)
-            .filter(|_| compacting_since.is_some() || settled_at.is_some());
-        let rules = rules(live_since, settled_at, kept.is_some(), now, reduce);
-        let key = live_key.unwrap_or_else(|| row_id.clone());
-        let toggle_id = row_id.clone();
-        let hover = theme.wash(0.08);
-        let label = self
-            .divider_label(&key, head, morph, theme, cx)
-            .id(SharedString::from(format!("{row_id}-head")))
-            .when(settled, |label| {
-                label
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(hover))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let fold = this.folds.entry(toggle_id.clone()).or_default();
-                        fold.open = Some(!fold.open.unwrap_or(false));
-                        fold.toggled_at = Some(motion::now());
-                        this.diagram_layout_changed(std::slice::from_ref(&toggle_id), cx);
-                    }))
-            });
-        let body = (settled && open).then(|| {
-            let shown = fold
-                .toggled_at
-                .map_or(1.0, |at| progress(motion::FADE_QUICK, at, now, reduce));
-            Self::panel(
-                div()
-                    .flex()
-                    .flex_col()
-                    .children(
-                        kept.as_ref()
-                            .and_then(|kept| self.kept_section(row_id, kept, theme)),
-                    )
-                    .child(self.classifier_section(row_id, &record, theme, cx)),
-                theme,
-            )
-            .relative()
-            .top(px(-4.0 * (1.0 - shown)))
-            .opacity(shown)
-        });
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .child(Self::divider_line(label, rules, theme))
-            .children(body)
-            .into_any_element()
     }
 
     fn section(title: &'static str, theme: &Theme) -> Div {
@@ -943,211 +588,26 @@ impl Transcript {
         kept: &CompactionRecord,
         theme: &Theme,
     ) -> Option<Div> {
-        if kept.summary.is_none() && kept.carried.is_none() {
-            return None;
-        }
-        let sub = |text: &'static str| div().pt(px(4.0)).text_color(theme.text_muted).child(text);
+        let summary = kept.summary.as_deref()?;
         Some(
-            Self::section("WHAT THE AGENT KEPT", theme)
-                .children(kept.summary.as_deref().map(|summary| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .child(sub("Summary the agent wrote"))
-                        .child(Self::text_box(
-                            format!("{row_id}-summary").into(),
-                            summary,
-                            theme,
-                        ))
-                }))
-                .child(match kept.carried.as_deref() {
-                    Some(carried) => div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .child(sub("Carried over word for word"))
-                        .child(Self::text_box(
-                            format!("{row_id}-carried").into(),
-                            carried_body(carried),
-                            theme,
-                        )),
-                    None => {
-                        sub("Nothing carried word for word: the next turn starts from the summary")
-                    }
-                }),
-        )
-    }
-
-    fn classifier_section(
-        &self,
-        row_id: &SharedString,
-        record: &ClassifierRecord,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let field = |key: &'static str, value: String| {
-            div()
-                .flex()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .w(px(96.0))
-                        .flex_none()
-                        .text_color(theme.text_muted)
-                        .child(key),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_color(theme.text)
-                        .child(SharedString::from(value)),
-                )
-        };
-        let label = ClassifierVerdict::label;
-        let decision = match record.classifier_verdict {
-            Some(said) => format!("{} (said {})", label(record.verdict), label(said)),
-            None => label(record.verdict).to_string(),
-        };
-        let asked = record.decided_by.asked();
-        let model = record
-            .harness
-            .map(|harness| HandoffSide::new(harness, record.model.as_deref(), cx).detail())
-            .or_else(|| record.model.clone());
-        let decided = match (asked, model) {
-            (true, Some(model)) => format!(
-                "{model} · {} · {:.1}s",
-                record.decided_by.label(),
-                record.duration_ms as f64 / 1000.0
-            ),
-            _ => record.decided_by.label().to_string(),
-        };
-        let usage = match (record.input_tokens, record.output_tokens) {
-            (Some(input), Some(output)) => {
-                Some(format!("{} in · {} out", tokens(input), tokens(output)))
-            }
-            _ => None,
-        };
-        let input_id: SharedString = format!("{row_id}-input").into();
-        let input_open = self
-            .folds
-            .get(&input_id)
-            .and_then(|fold| fold.open)
-            .unwrap_or(false);
-        let toggle_id = row_id.clone();
-        let link = div()
-            .id(SharedString::from(format!("{row_id}-input-link")))
-            .pt(px(4.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .cursor_pointer()
-            .text_color(theme.text_muted)
-            .hover(|s| s.text_color(theme.text))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.folds.entry(input_id.clone()).or_default().open = Some(!input_open);
-                this.diagram_layout_changed(std::slice::from_ref(&toggle_id), cx);
-            }))
-            .child(
-                crate::icons::icon(if input_open {
-                    crate::icons::LUCIDE_CHEVRON_DOWN
-                } else {
-                    crate::icons::LUCIDE_CHEVRON_RIGHT
-                })
-                .size(px(11.0))
-                .text_color(theme.text_muted),
-            )
-            .child(if asked {
-                "What the classifier saw"
-            } else {
-                "What it would have seen (not sent)"
-            });
-        Self::section("CLASSIFIER", theme)
-            .child(field("Decision", decision))
-            .children(reason(record).map(|reason| field("Reason", reason.to_string())))
-            .child(field("Decided by", decided))
-            .child(field(
-                "Context",
-                format!("{} tokens", tokens(record.context_tokens)),
-            ))
-            .children(usage.map(|usage| field("Tokens", usage)))
-            .when(!record.input.is_empty(), |section| section.child(link))
-            .when(input_open, |section| {
-                section.child(self.classifier_io(row_id, record, theme))
-            })
-    }
-
-    fn classifier_io(
-        &self,
-        row_id: &SharedString,
-        record: &ClassifierRecord,
-        theme: &Theme,
-    ) -> Div {
-        let mono_box = |id: &'static str, text: &str, border: gpui::Hsla| {
-            div()
-                .id(SharedString::from(format!("{row_id}-{id}")))
-                .max_h(px(224.0))
-                .overflow_y_scroll()
-                .p(px(10.0))
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(border)
-                .font_family(theme.font_mono.clone())
-                .text_size(px(12.0))
-                .line_height(px(18.0))
-                .text_color(theme.text_faint)
-                .children(text.lines().map(|line| {
-                    div()
-                        .w_full()
-                        .min_h(px(18.0))
-                        .child(SharedString::from(line.to_string()))
-                }))
-        };
-        let titled = |title: SharedString, id: &'static str, text: &str, border: gpui::Hsla| {
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(div().text_color(theme.text_muted).child(title))
-                .child(mono_box(id, text, border))
-        };
-        let asked = record.decided_by.asked();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .child(mono_box("input", &record.input, theme.border))
-            .when(asked, |io| {
-                io.child(match record.stage2_reply.as_deref() {
-                    None => titled("Reply".into(), "reply", &record.reply, theme.border),
-                    Some(stage2) => {
-                        let decides = |stage: DecidedBy| {
-                            if record.decided_by == stage {
-                                theme.accent
-                            } else {
-                                theme.border
-                            }
-                        };
+            Self::section("WHAT THE AGENT KEPT", theme).child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
                         div()
-                            .flex()
-                            .gap(px(10.0))
-                            .child(titled(
-                                "First look".into(),
-                                "reply",
-                                &record.reply,
-                                decides(DecidedBy::Stage1),
-                            ))
-                            .child(titled(
-                                "Second look".into(),
-                                "stage2",
-                                stage2,
-                                decides(DecidedBy::Stage2),
-                            ))
-                    }
-                })
-            })
+                            .pt(px(4.0))
+                            .text_color(theme.text_muted)
+                            .child("Summary the agent wrote"),
+                    )
+                    .child(Self::text_box(
+                        format!("{row_id}-summary").into(),
+                        summary,
+                        theme,
+                    )),
+            ),
+        )
     }
 
     fn fresh_compaction(&self, chat_id: &str, now: Instant) -> Option<usize> {
@@ -1215,10 +675,14 @@ impl Transcript {
         });
         let head = Head {
             icon: Icon::Done,
-            title: if meta.is_none() && !text.is_empty() {
-                text
-            } else {
+            title: if text.is_empty() {
                 "Compacted".into()
+            } else if meta.is_some() {
+                zeron_proto::transcript::compaction_label(&text)
+                    .to_owned()
+                    .into()
+            } else {
+                text
             },
             chip: None,
             tag: None,
@@ -1260,133 +724,5 @@ impl Transcript {
             .child(Self::divider_line(label, rules, theme))
             .children(kept.filter(|_| open).map(|kept| Self::panel(kept, theme)))
             .into_any_element()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn row(id: &str, kind: RowKind) -> Row {
-        Row {
-            id: id.to_string().into(),
-            version: fnv1a(id.as_bytes()),
-            turn_start: true,
-            kind,
-            entry_id: id.to_string().into(),
-            timestamp: None,
-            copy_text: None,
-            compact_fold: None,
-        }
-    }
-
-    fn classifier(id: &str) -> Row {
-        row(
-            id,
-            RowKind::Classifier {
-                record: Arc::new(ClassifierRecord::default()),
-                compaction: None,
-            },
-        )
-    }
-
-    fn compaction(id: &str, post: u64) -> Row {
-        row(
-            id,
-            RowKind::Compaction {
-                text: "Context compacted".into(),
-                record: Arc::new(CompactionRecord {
-                    post_tokens: Some(post),
-                    ..Default::default()
-                }),
-            },
-        )
-    }
-
-    fn user(id: &str) -> Row {
-        row(
-            id,
-            RowKind::User {
-                text: "how is it going".into(),
-                mentions: Arc::default(),
-                markdown: None,
-                attachments: Arc::default(),
-                badges: Arc::default(),
-                sender: None,
-                pending: false,
-                from_chat_id: None,
-            },
-        )
-    }
-
-    fn divider(id: &str) -> Row {
-        row(
-            id,
-            RowKind::Divider {
-                text: "Host restarted".into(),
-                hint: None,
-            },
-        )
-    }
-
-    #[test]
-    fn a_swapped_copy_counts_the_turns_it_carried_as_text() {
-        let head = "<carried_over>\nThe last turns of this conversation.\n\n";
-        assert_eq!(carried_turns(None), 0);
-        assert_eq!(
-            carried_turns(Some(&format!(
-                "{head}person: refund\nagent: done\n</carried_over>"
-            ))),
-            1
-        );
-        assert_eq!(
-            carried_turns(Some(&format!(
-                "{head}person: a\nagent: b\n\nperson: c\nagent: d\n\nStill running when the chat compacted:\n- background shell x: y\n</carried_over>"
-            ))),
-            2
-        );
-    }
-
-    #[test]
-    fn a_compaction_folds_into_the_decision_right_before_it() {
-        let mut rows = vec![
-            classifier("k1"),
-            compaction("c1", 10),
-            classifier("k2"),
-            divider("d"),
-            compaction("c2", 20),
-        ];
-        let decided = rows[0].version;
-        merge_compaction_rows(&mut rows);
-        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_ref()).collect();
-        assert_eq!(ids, ["k1", "k2", "d", "c2"]);
-        assert!(matches!(
-            &rows[0].kind,
-            RowKind::Classifier { compaction: Some(record), .. } if record.post_tokens == Some(10)
-        ));
-        assert!(matches!(
-            &rows[1].kind,
-            RowKind::Classifier {
-                compaction: None,
-                ..
-            }
-        ));
-        assert_ne!(rows[0].version, decided);
-
-        let mut sent_meanwhile = vec![classifier("k1"), user("u1"), compaction("c1", 10)];
-        merge_compaction_rows(&mut sent_meanwhile);
-        let ids: Vec<&str> = sent_meanwhile.iter().map(|row| row.id.as_ref()).collect();
-        assert_eq!(ids, ["k1", "u1"]);
-        assert!(matches!(
-            &sent_meanwhile[0].kind,
-            RowKind::Classifier { compaction: Some(record), .. } if record.post_tokens == Some(10)
-        ));
-
-        let mut later = vec![classifier("k1"), compaction("c1", 10)];
-        later[1].version ^= 1;
-        merge_compaction_rows(&mut later);
-        let mut first = vec![classifier("k1"), compaction("c1", 10)];
-        merge_compaction_rows(&mut first);
-        assert_ne!(later[0].version, first[0].version);
     }
 }

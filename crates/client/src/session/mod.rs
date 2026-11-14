@@ -564,14 +564,13 @@ impl SessionCore {
         let now = now_ms();
         let degraded = client.chat_delivery_degraded(&self.chat_id);
         let workspace = client.workspace.snapshot();
-        let (indicator_working, working_since_ms, compacting, classifying) = workspace
+        let (indicator_working, working_since_ms, compacting) = workspace
             .session(&self.chat_id)
-            .map_or((false, None, false, None), |row| {
+            .map_or((false, None, false), |row| {
                 (
                     row.host_indicator == ChatIndicator::Working && !row.held_by_subagents,
                     row.working_since_ms,
                     row.compacting,
-                    row.classifying.clone(),
                 )
             });
         // A Cloud chat whose machine isn't up yet: it is being started (or
@@ -642,12 +641,7 @@ impl SessionCore {
             // read as stuck, for as long as the host stays away.
             let working = (indicator_working || streaming) && !degraded;
             let wait = CompactionWait::of(
-                compacting.then(|| {
-                    zeron_doc::schema::boundary_compaction(
-                        st.tracker.entries().iter().map(|e| &*e.message),
-                    )
-                }),
-                classifying.as_ref(),
+                compacting,
                 st.session.as_ref().and_then(|session| session.compact_plan),
                 !working,
             );

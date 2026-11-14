@@ -2,7 +2,7 @@ use crate::theme::Theme;
 use gpui::{Context, IntoElement, SharedString, Task, Window, div, prelude::*, px};
 use zeron_proto::SessionStats;
 use zeron_proto::stats_view::{
-    Cache, CompactSection, chip_label, cost_headline, cost_note, stats_rows, token_split,
+    Cache, NextCompaction, chip_label, cost_headline, cost_note, stats_rows, token_split,
 };
 
 fn now_ms() -> i64 {
@@ -293,56 +293,13 @@ impl Render for StatsCard {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CompactView {
-    pub plan: Option<zeron_proto::CompactPlan>,
-    pub compacting: bool,
-    pub stats: Option<SessionStats>,
-}
-
-impl CompactView {
-    pub fn shown(&self) -> bool {
-        self.compacting || self.plan.is_some()
-    }
-}
-
-pub fn compact_section(view: &CompactView, theme: &Theme) -> gpui::Div {
-    let Some(CompactSection {
-        heading,
-        note,
-        rows,
-    }) = CompactSection::of(view.plan, view.compacting, view.stats.as_ref(), now_ms())
-    else {
-        return div();
-    };
+pub fn next_compaction(next: &NextCompaction, theme: &Theme) -> gpui::Div {
     div()
         .w(px(280.0))
         .flex()
         .flex_col()
-        .child(crate::popover::menu_heading(theme, heading))
-        .children(
-            rows
-                .into_iter()
-                .map(|(label, value)| {
-                    div()
-                        .px(px(8.0))
-                        .h(px(24.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(12.0))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .child(label)
-                        .child(
-                            div()
-                                .text_color(theme.text)
-                                .child(SharedString::from(value)),
-                        )
-                }),
-        )
-        .when_some(note, |el, note| {
+        .child(crate::popover::menu_heading(theme, &next.title))
+        .when_some(next.detail.clone(), |el, detail| {
             el.child(
                 div()
                     .px(px(8.0))
@@ -350,7 +307,7 @@ pub fn compact_section(view: &CompactView, theme: &Theme) -> gpui::Div {
                     .pb(px(8.0))
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_faint)
-                    .child(note),
+                    .child(detail),
             )
         })
 }

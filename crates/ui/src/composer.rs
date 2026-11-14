@@ -16124,7 +16124,7 @@ mod tests {
                 running_subagents: 0,
                 running_subagent_models: Vec::new(),
                 compact_plan: None,
-                classifying: None,
+                compact_hold: None,
                 waiting: None,
             }];
             state.selected_chat = Some("c".into());

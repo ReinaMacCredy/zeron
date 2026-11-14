@@ -1225,45 +1225,6 @@ impl ChatDocHandle {
         self.write_system_note_with(message_id, text, hint, None, created_at)
     }
 
-    pub fn write_classifier_record(
-        &self,
-        message_id: &str,
-        record: zeron_doc::ClassifierRecord,
-        created_at: i64,
-    ) -> Result<(), DocError> {
-        let label = match record.verdict {
-            zeron_doc::ClassifierVerdict::New => "Classifier: new task",
-            zeron_doc::ClassifierVerdict::Carry => "Classifier: carry over",
-            zeron_doc::ClassifierVerdict::Continue => "Classifier: same task",
-            zeron_doc::ClassifierVerdict::Failed => "Classifier: no answer",
-        };
-        self.doc.push_message(&SessionMessageEntry {
-            id: message_id.to_string(),
-            role: MessageRole::System,
-            parts: vec![
-                MessagePart::Text {
-                    id: "t0".into(),
-                    text: label.into(),
-                },
-                MessagePart::Classifier {
-                    id: zeron_doc::classifier_part_id(message_id),
-                    record,
-                },
-            ],
-            created_at,
-            device_id: self.device_id.clone(),
-            status: Some(MessageStatus::Complete),
-            continuation_of: None,
-            from_chat_id: None,
-            fork_import: false,
-            answers_request_id: None,
-            duration_ms: None,
-        })?;
-        // The send awaiting this record holds the doc worker past the compaction, so its publish would wait too.
-        self.publish_messages_if_watched();
-        Ok(())
-    }
-
     /// Published at once: no run drains these commits.
     pub fn update_record_part(
         &self,
@@ -8386,17 +8347,6 @@ mod transfer_progress_tests {
         let start = std::time::Instant::now();
         assert_eq!(handle.watch_messages().borrow().entries.len(), 2000);
         eprintln!("offline whale rebuilt mirror: {:?}", start.elapsed());
-    }
-
-    #[tokio::test]
-    async fn a_classifier_record_reaches_watchers_while_the_doc_worker_is_busy() {
-        let (_dir, host) = host();
-        let handle = host.open("busy").unwrap();
-        let rx = handle.watch_messages();
-        handle
-            .write_classifier_record("record", zeron_doc::ClassifierRecord::default(), 0)
-            .unwrap();
-        assert!(rx.borrow().entries.iter().any(|e| e.id == "record"));
     }
 
     #[tokio::test]

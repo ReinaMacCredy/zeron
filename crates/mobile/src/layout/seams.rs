@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use zeron_doc::parts::{ClassifierRecord, ClassifierVerdict, DecidedBy, HandoffKind, HandoffRoute, MessagePart};
+use zeron_doc::parts::{HandoffKind, HandoffRoute, MessagePart};
 use zeron_doc::schema::SessionMessageEntry;
 use zeron_proto::transcript as words;
 use zeron_proto::{ChildRoute, DelegationStatus, HarnessId};
@@ -9,7 +9,7 @@ use zeron_proto::{ChildRoute, DelegationStatus, HarnessId};
 use super::display::ColorRole;
 use super::markdown::Ctx;
 use super::rows::{Content, RowCore, RowKind, next_version, row_key};
-use super::strip::{Align, Block, Faces, Item, Rule, Strip, chat_link, linked, struck};
+use super::strip::{Align, Block, Faces, Item, Rule, Strip, chat_link, linked};
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ChatRef {
@@ -323,97 +323,6 @@ pub(crate) fn handoff(ctx: &mut Ctx, key: String, entry_id: &str, harness: Harne
         after,
     };
     core(key, entry_id, strip, label)
-}
-
-pub(crate) fn classifier(ctx: &mut Ctx, key: String, entry_id: &str, record: &ClassifierRecord, open: bool) -> RowCore {
-    let faces = Faces::new(ctx);
-    let label = ClassifierVerdict::label;
-    let verdict_color = match record.verdict {
-        ClassifierVerdict::New => ColorRole::Accent,
-        ClassifierVerdict::Carry => ColorRole::Success,
-        ClassifierVerdict::Continue => ColorRole::TextFaint,
-        ClassifierVerdict::Failed => ColorRole::Warning,
-    };
-    let verdict = match record.classifier_verdict {
-        Some(said) => format!("{} (said {})", label(record.verdict), label(said)),
-        None => label(record.verdict).to_owned(),
-    };
-    let overturned = record.decided_by == DecidedBy::Stage2 && record.stage2_reply.is_some() && record.verdict != ClassifierVerdict::Continue;
-    let secs = format!("{:.1}s", record.duration_ms as f64 / 1000.0);
-    let asked = record.decided_by.asked();
-    let middle = if asked { secs.as_str() } else { record.decided_by.label() };
-    let mut items = vec![
-        Item::Icon {
-            name: "line.3.horizontal.decrease".into(),
-            color: ColorRole::TextFaint,
-        },
-        Item::Text(faces.text(ctx, "Classifier", ColorRole::TextFaint)),
-    ];
-    match (record.harness, record.model.as_deref()) {
-        (Some(harness), model) => items.extend(side_items(&faces, ctx, harness, model, ColorRole::TextFaint)),
-        (None, Some(model)) => items.push(Item::Text(faces.text(ctx, model, ColorRole::TextFaint))),
-        (None, None) => {}
-    }
-    items.push(Item::Text(faces.text(ctx, &format!("· {middle} ·"), ColorRole::TextFaint)));
-    if overturned {
-        items.push(Item::Text(struck(faces.text(ctx, label(ClassifierVerdict::Continue), ColorRole::TextFaint))));
-        items.push(Item::Text(faces.text(ctx, "→", ColorRole::TextFaint)));
-    }
-    items.push(Item::Text(faces.text(ctx, &verdict, verdict_color)));
-    if overturned {
-        items.push(Item::Text(faces.text(ctx, "second look", ColorRole::Accent)));
-    }
-    items.push(Item::Chevron(open));
-    let (mut card, mut after) = (Vec::new(), Vec::new());
-    if open {
-        match (record.harness, record.model.as_deref()) {
-            (Some(harness), model) => card.push(field(&faces, ctx, "Model", &side_detail(harness, model))),
-            (None, Some(model)) => card.push(field(&faces, ctx, "Model", model)),
-            (None, None) => {}
-        }
-        card.push(field(&faces, ctx, "Verdict", &verdict));
-        card.push(field(&faces, ctx, "Decided", record.decided_by.label()));
-        if asked {
-            card.push(field(&faces, ctx, "Time", &secs));
-        }
-        card.push(field(&faces, ctx, "Context", &format!("{} tokens", words::compact_count(record.context_tokens))));
-        if let (Some(input), Some(output)) = (record.input_tokens, record.output_tokens) {
-            card.push(field(&faces, ctx, "Tokens", &format!("{} in · {} out", words::compact_count(input), words::compact_count(output))));
-        }
-        let sent = if asked {
-            "Sent to the classifier"
-        } else {
-            "Not sent: decided without asking"
-        };
-        after.push(Block::Caption(faces.text(ctx, sent, ColorRole::TextSecondary)));
-        after.push(mono_block(&faces, ctx, &record.input, sent, false));
-        match record.stage2_reply.as_deref() {
-            _ if !asked => {}
-            None => {
-                after.push(Block::Caption(faces.text(ctx, "Reply", ColorRole::TextSecondary)));
-                after.push(mono_block(&faces, ctx, &record.reply, "Reply", false));
-            }
-            Some(stage2) => {
-                for (title, text, decides) in [
-                    ("First look", record.reply.as_str(), record.decided_by == DecidedBy::Stage1),
-                    ("Second look", stage2, record.decided_by == DecidedBy::Stage2),
-                ] {
-                    let caption = if decides { format!("{title} · decides") } else { title.to_owned() };
-                    after.push(Block::Caption(faces.text(ctx, &caption, ColorRole::TextSecondary)));
-                    after.push(mono_block(&faces, ctx, text, title, decides));
-                }
-            }
-        }
-    }
-    let strip = Strip {
-        items,
-        align: Align::Center,
-        rule: Rule::Around,
-        open: Some(open),
-        card,
-        after,
-    };
-    core(key, entry_id, strip, format!("Classifier · {middle} · {verdict}"))
 }
 
 pub(crate) fn route_badge(route: &ChildRoute) -> Option<(String, ColorRole)> {

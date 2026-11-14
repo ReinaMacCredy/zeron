@@ -176,6 +176,7 @@ struct Chats {
     compacting: RefCell<HashSet<String>>,
     compaction_probed: RefCell<HashSet<String>>,
     compaction_unsupported: RefCell<HashMap<String, String>>,
+    reminder: Cell<Option<u64>>,
 }
 
 /// A transcript's entry. A settled one, built into its row and older than
@@ -473,6 +474,7 @@ struct LetGo {
     built: HashMap<Rc<str>, Built>,
     built_model: Option<Option<String>>,
     context_usage: (Option<f64>, Option<f64>),
+    context_baseline: Option<u64>,
     stats: Option<zeron_proto::SessionStats>,
 }
 
@@ -736,6 +738,7 @@ struct Open {
     /// What the context holds as the agent last reported it: tokens in it
     /// and the window's size (either may be missing), for the ring's card.
     context_usage: (Option<f64>, Option<f64>),
+    context_baseline: Option<u64>,
     stats: Option<zeron_proto::SessionStats>,
     /// The last stats a frame carried, through frames that carry none.
     stats_seen: Option<zeron_proto::SessionStats>,
@@ -834,6 +837,11 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             *view.rpc.borrow_mut() = Some(rpc.clone());
             view.hold_rows();
             view.subscribe();
+            engine::get().spawn(async {
+                if let Ok(answer) = engine::get().call("GetCompactionSettings", json!({})).await {
+                    compaction_settings(&answer);
+                }
+            });
         }
     });
 
@@ -1494,14 +1502,14 @@ impl Chats {
         if !old.heard || old.stepping {
             return;
         }
-        let Open { id, entries, older_todo, built, built_model, context_usage, stats, .. } = old;
+        let Open { id, entries, older_todo, built, built_model, context_usage, context_baseline, stats, .. } = old;
         let bytes = let_go_weight(&entries, &built);
         kept.retain(|held| held.id != id);
         // (Too big on its own to keep: not kept, and what is kept stays.)
         if keeping_chats() && bytes > LET_GO_BYTES {
             return;
         }
-        kept.push(LetGo { at: std::time::Instant::now(), bytes, id, entries, older_todo, built, built_model, context_usage, stats });
+        kept.push(LetGo { at: std::time::Instant::now(), bytes, id, entries, older_todo, built, built_model, context_usage, context_baseline, stats });
         prune_let_go(&mut kept);
         eprintln!(
             "zeron-zgx: chat: kept chats let go of: {}, {:.1} MB",
@@ -1538,6 +1546,7 @@ impl Chats {
             older_todo: held.older_todo,
             heard: true,
             context_usage: held.context_usage,
+            context_baseline: held.context_baseline,
             stats: held.stats,
             stats_seen: held.stats,
             built: held.built,
@@ -2636,6 +2645,9 @@ impl View {
             if let Some(usage) = frame.get("contextUsage").filter(|u| !u.is_null()) {
                 open.context_usage = (usage["tokens"].as_f64(), usage["window"].as_f64());
             }
+            if let Some(baseline) = frame.get("contextBaseline").and_then(Json::as_u64) {
+                open.context_baseline = Some(baseline);
+            }
             let stats = stats_of(&frame);
             let moved = open.stats != stats;
             if let Some(now) = &stats {
@@ -2990,7 +3002,6 @@ impl View {
             {
                 list.insert(at, fork_seam(chats.chat(&source).as_ref()));
             }
-            merge_compaction_rows(&mut list);
             let open = &*open;
             // The newest prompt, while its reply hasn't begun: sending,
             // then working, as the shipping app's working trailer says
@@ -6009,11 +6020,11 @@ fn is_prompt(row: &Value) -> bool {
         && matches!(row.field("answers"), None | Some(Value::Nil))
 }
 
-/// An entry whose row each publish reads (the prompts, `merge_compaction_rows`'
-/// lines): never folded, so reading it never opens one.
+/// An entry each publish reads (the prompts, the compactions `compaction_wait`
+/// times): never folded, so reading it never opens one.
 fn kept_whole(entry: &Json) -> bool {
     entry["role"].as_str() == Some("user")
-        || entry["parts"].as_array().into_iter().flatten().any(|p| matches!(p["kind"].as_str(), Some("classifier" | "compaction")))
+        || entry["parts"].as_array().into_iter().flatten().any(|p| p["kind"].as_str() == Some("compaction"))
 }
 
 // The engine writes a seam entry for `ForkSideChat` but none for `ForkChat`.
@@ -6236,11 +6247,14 @@ fn system_row(entry: &Json, id: &str) -> Option<Value> {
             ("title", title.map_or(Value::Nil, Value::from)),
         ]))
     };
-    if let Some(decided) = part("classifier") {
-        return row("classifier", text, None, None).map(|r| with_fields(r, [("decision", decision_value(&decided["record"]))]));
+    if part("classifier").is_some() {
+        return None;
     }
     if let Some(compacted) = part("compaction") {
-        return row("compaction", text, None, None).map(|r| with_fields(r, [("kept", kept_value(&compacted["record"]))]));
+        let record = &compacted["record"];
+        let sized = record["preTokens"].is_number() && record["postTokens"].is_number();
+        let words = if sized { zeron_proto::transcript::compaction_label(text) } else { text };
+        return row("compaction", words, None, None).map(|r| with_fields(r, [("kept", kept_value(record))]));
     }
     if let Some(fork) = part("fork") {
         return row("fork", "", None, Some(&single_line(fork["sourceTitle"].as_str().unwrap_or_default())));
@@ -6350,150 +6364,43 @@ fn context_report(card: &zeron_proto::claude_config::CommandCard) -> Option<Valu
     ]))
 }
 
-/// A classifier's verdict as the engine writes it (`ClassifierVerdict`: anything else reads as no answer).
-fn verdict_code(v: &Json) -> &'static str {
-    match v.as_str() {
-        Some("new") => "new",
-        Some("carry") => "carry",
-        Some("continue") => "continue",
-        _ => "failed",
-    }
-}
-
-/// Who decided (`DecidedBy`: anything else reads as the first look).
-fn decided_code(v: &Json) -> &'static str {
-    match v.as_str() {
-        Some("stage2") => "stage2",
-        Some("streak") => "streak",
-        Some("ceiling") => "ceiling",
-        Some("agentNote") => "agent_note",
-        Some("turnEnd") => "turn_end",
-        Some("backgroundCopy") => "background_copy",
-        _ => "stage1",
-    }
-}
-
-/// A classifier's record, for the compaction card and its open panel (gpui's `render_compaction_card`).
-fn decision_value(r: &Json) -> Value {
-    let num = |k: &str| r[k].as_f64().map_or(Value::Nil, Value::Num);
-    let words = |k: &str| r[k].as_str().filter(|s| !s.trim().is_empty()).map_or(Value::Nil, Value::from);
-    let harness = r["harness"].as_str();
-    let agent = harness
-        .and_then(|h| serde_json::from_value::<zeron_proto::HarnessId>(Json::from(h)).ok())
-        .map(|h| h.display_name());
-    Value::record([
-        ("verdict", Value::from(verdict_code(&r["verdict"]))),
-        ("said", if r["classifierVerdict"].is_string() { Value::from(verdict_code(&r["classifierVerdict"])) } else { Value::Nil }),
-        ("by", Value::from(decided_code(&r["decidedBy"]))),
-        ("ms", Value::Num(r["durationMs"].as_f64().unwrap_or(0.))),
-        ("context", Value::Num(r["contextTokens"].as_f64().unwrap_or(0.))),
-        ("input", Value::from(r["input"].as_str().unwrap_or_default())),
-        ("reply", Value::from(r["reply"].as_str().unwrap_or_default())),
-        ("stage2", words("stage2Reply")),
-        ("tokens_in", num("inputTokens")),
-        ("tokens_out", num("outputTokens")),
-        ("reason", words("reason")),
-        ("mark", harness.and_then(crate::agents::glyph).map_or(Value::Nil, |m| Value::from(m.as_str()))),
-        ("agent", agent.map_or(Value::Nil, Value::from)),
-        ("model", words("model")),
-    ])
-}
-
-/// The turns a carried-over block holds, in its words (gpui's `carried_body`).
-fn carried_body(carried: &str) -> &str {
-    let inner = carried.trim().trim_start_matches("<carried_over>").trim_end_matches("</carried_over>").trim();
-    inner.split_once("\n\n").map_or(inner, |(_, rest)| rest)
-}
-
-fn carried_turns(carried: Option<&str>) -> usize {
-    carried.map_or(0, |c| carried_body(c).split("\n\n").filter(|b| !b.starts_with("Still running when the chat compacted:")).count())
-}
-
-/// What a compaction kept (`CompactionRecord`): its sizes, how long, the agent's summary, the turns carried word for word.
+/// What a compaction kept (`CompactionRecord`): its sizes, how long, the agent's summary, what the agent asked to keep.
 fn kept_value(r: &Json) -> Value {
     let num = |k: &str| r[k].as_f64().map_or(Value::Nil, Value::Num);
-    let carried = r["carried"].as_str();
+    let words = |k: &str| r[k].as_str().filter(|s| !s.trim().is_empty()).map_or(Value::Nil, Value::from);
     Value::record([
         ("pre", num("preTokens")),
         ("post", num("postTokens")),
         ("ms", num("durationMs")),
-        ("summary", r["summary"].as_str().filter(|s| !s.trim().is_empty()).map_or(Value::Nil, Value::from)),
-        ("carried", carried.map_or(Value::Nil, |c| Value::from(carried_body(c)))),
-        ("turns", Value::Num(carried_turns(carried) as f64)),
+        ("summary", words("summary")),
+        ("focus", words("focus")),
     ])
 }
 
-/// A compaction folds into the decision right before it, past the messages sent meanwhile (gpui's `merge_compaction_rows`).
-fn merge_compaction_rows(list: &mut Vec<Value>) {
-    // (A folded row is neither a prompt nor one of these lines, `kept_whole`: it isn't opened.)
-    let field = |v: &Value, k: &str| if matches!(v, Value::Folded(_)) { String::new() } else { v.field(k).map(crate::auth::text).unwrap_or_default() };
-    let mut ix = 0;
-    while ix + 1 < list.len() {
-        let next = (ix + 1..list.len()).find(|&at| field(&list[at], "role") != "user");
-        if field(&list[ix], "line") == "classifier"
-            && list[ix].field("kept").is_none_or(|k| matches!(k, Value::Nil))
-            && let Some(next) = next
-            && field(&list[next], "line") == "compaction"
-        {
-            let kept = list.remove(next).field("kept").cloned().unwrap_or(Value::Nil);
-            list[ix] = with_fields(list[ix].clone(), [("kept", kept)]);
-        }
-        ix += 1;
-    }
-}
-
 /// The compaction a chat waits on (gpui's `CompactionWait::of`): queued after
-/// the agent's turn, its classifier checking, or compacting; with the row
-/// that shows it when the decision itself is the boundary, and how long
-/// compactions here usually take.
+/// the agent's turn, or compacting; with how long compactions here usually take.
 fn compaction_wait(chats: &Chats, open: &Open) -> Value {
-    use zeron_proto::transcript::{Boundary, CompactionWait};
+    use zeron_proto::transcript::CompactionWait;
     let session = chats.sessions.borrow().get(&open.id).cloned().unwrap_or(Json::Null);
-    let classifying: Option<zeron_proto::Classifying> = serde_json::from_value(session["classifying"].clone()).ok();
     let plan: Option<zeron_proto::CompactPlan> = serde_json::from_value(session["compactPlan"].clone()).ok();
-    let entries = || open.entries.iter().filter_map(|e| e.json.as_ref());
-    let tail = entries().rev().find(|e| e["role"].as_str() != Some("user"));
-    let decision = tail.and_then(|e| e["parts"].as_array()?.iter().find(|p| p["kind"].as_str() == Some("classifier")));
-    let boundary = decision.and_then(|p| {
-        let record = &p["record"];
-        let carry = match verdict_code(&record["verdict"]) {
-            "new" => false,
-            "carry" => true,
-            _ => return None,
-        };
-        Some(Boundary { tokens: record["contextTokens"].as_u64().unwrap_or(0), carry, cause: None })
-    });
-    let compacting = chats.chat_compacting(&open.id).then_some(boundary);
-    let Some(wait) = CompactionWait::of(compacting, classifying.as_ref(), plan, !chats.running(&open.id)) else {
+    let Some(wait) = CompactionWait::of(chats.chat_compacting(&open.id), plan, !chats.running(&open.id)) else {
         return Value::Nil;
     };
-    let mut durations: Vec<u64> = entries()
+    let mut durations: Vec<u64> = open
+        .entries
+        .iter()
+        .filter_map(|e| e.json.as_ref())
         .flat_map(|e| e["parts"].as_array().into_iter().flatten())
         .filter(|p| p["kind"].as_str() == Some("compaction"))
         .filter_map(|p| p["record"]["durationMs"].as_u64())
         .collect();
     durations.sort_unstable();
     let usual = durations.get(durations.len() / 2).map_or(Value::Nil, |ms| Value::Num(((ms + 500) / 1000) as f64));
-    let mut fields = vec![("usual", usual)];
-    match wait {
-        CompactionWait::Queued => fields.push(("phase", Value::from("queued"))),
-        CompactionWait::Classifying { harness, model, agent_note } => {
-            fields.push(("phase", Value::from("checking")));
-            fields.push(("agent_note", Value::Bool(agent_note)));
-            fields.push(("mark", crate::agents::glyph(harness.as_str()).map_or(Value::Nil, |m| Value::from(m.as_str()))));
-            fields.push(("agent", Value::from(harness.display_name())));
-            fields.push(("model", model.as_deref().map_or(Value::Nil, Value::from)));
-        }
-        CompactionWait::Compacting(boundary) => {
-            fields.push(("phase", Value::from("compacting")));
-            if let Some(b) = boundary {
-                fields.push(("tag", Value::from(if b.carry { "carry" } else { "new" })));
-                fields.push(("tokens", Value::Num(b.tokens as f64)));
-                fields.push(("row", tail.and_then(|e| e["id"].as_str()).map_or(Value::Nil, Value::from)));
-            }
-        }
-    }
-    Value::record(fields)
+    let phase = match wait {
+        CompactionWait::Queued => "queued",
+        CompactionWait::Compacting => "compacting",
+    };
+    Value::record([("usual", usual), ("phase", Value::from(phase))])
 }
 
 /// Why compacting this chat is refused now, as gpui's `compact_disabled_reason` (a key; the agent's own words when it can't).
@@ -6527,32 +6434,47 @@ fn resume_offer(open: &Open, chat: &Json, harness: &str, blocked: &Value) -> Val
     ])
 }
 
-/// A planned or running compaction, for the footer ring's dot and its card's section (`stats_view::CompactSection`).
-fn compact_plan(chats: &Chats, open: &Open) -> Value {
-    use zeron_proto::stats_view::CompactSection;
-    let session = chats.sessions.borrow().get(&open.id).cloned().unwrap_or(Json::Null);
-    let plan: Option<zeron_proto::CompactPlan> = serde_json::from_value(session["compactPlan"].clone()).ok();
-    let compacting = chats.chat_compacting(&open.id);
-    // (The prompt cache's row ticks in the card itself, from the stats.)
-    let Some(section) = CompactSection::of(plan, compacting, None, now_seconds() * 1000) else { return Value::Nil };
-    let rows: Vec<Value> = section
-        .rows
-        .iter()
-        .map(|(label, value)| Value::record([("label", Value::from(*label)), ("value", Value::from(value.as_str()))]))
-        .collect();
-    let copy = match plan {
-        Some(zeron_proto::CompactPlan::Copy { since, ready }) => {
-            Value::record([("since", Value::Num(since as f64 / 1000.)), ("ready", Value::Bool(ready))])
-        }
-        _ => Value::Nil,
+/// The chat's next compaction and the context meter's marks (`stats_view::NextCompaction`, `ContextMarks`).
+fn compaction_readout(chats: &Chats, open: &Open, config: &Json) -> (Value, Value) {
+    use zeron_proto::stats_view::{ContextMarks, NextCompaction, NextIcon, reminder_floor};
+    let session = chats.sessions.borrow().get(&open.id).cloned().and_then(|s| serde_json::from_value::<zeron_proto::Session>(s).ok());
+    let config = serde_json::from_value::<zeron_proto::ChatConfig>(config.clone()).ok();
+    let tokens = open.context_usage.0.map(|t| t as u64);
+    let reported = open.context_usage.1.map(|w| w as u64);
+    let window = config.as_ref().and_then(zeron_proto::model_options::chat_budget).or(reported);
+    let threshold = zeron_proto::model_options::chat_compact_threshold(config.as_ref(), reported);
+    let floor = chats
+        .reminder
+        .get()
+        .zip(open.context_baseline)
+        .and_then(|(nudge, baseline)| reminder_floor(nudge, tokens.map_or(baseline, |t| baseline.min(t)), window));
+    let marks = ContextMarks::of(window, threshold, floor);
+    let harness = config.map_or("", |c| c.harness.display_name());
+    let next = NextCompaction::of(session.as_ref(), chats.chat_compacting(&open.id), tokens, marks.auto, harness);
+    let next = {
+        let icon = match next.icon {
+            NextIcon::Spin => "spin",
+            NextIcon::Agent => "agent",
+            NextIcon::Clock => "clock",
+            NextIcon::Warn => "warn",
+            NextIcon::Off => "off",
+        };
+        let words = |w: Option<String>| w.map_or(Value::Nil, |w| Value::from(w.as_str()));
+        Value::record([
+            ("icon", Value::from(icon)),
+            ("title", Value::from(next.title.as_str())),
+            ("detail", words(next.detail)),
+            ("chip", words(next.chip)),
+        ])
     };
-    Value::record([
-        ("heading", Value::from(section.heading)),
-        ("note", section.note.map_or(Value::Nil, Value::from)),
-        ("rows", Value::List(rows.into())),
-        ("busy", Value::Bool(compacting)),
-        ("copy", copy),
-    ])
+    let mark = |m: Option<u64>| m.map_or(Value::Nil, |m| Value::Num(m as f64));
+    (next, Value::record([("floor", mark(marks.floor)), ("warn", mark(marks.warn)), ("auto", mark(marks.auto))]))
+}
+
+pub(crate) fn compaction_settings(answer: &Json) {
+    let chats = CHATS.with(Rc::clone);
+    chats.reminder.set(answer["nudgeTokens"].as_u64());
+    chats.publish_views();
 }
 
 /// `secs` since the epoch as an RFC 3339 stamp in UTC.
@@ -8315,6 +8237,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool) -> Va
         .collect();
     let (context_tokens, reported_window) = open.context_usage;
     let context_window = chat_budget(config).or(reported_window);
+    let (next_compaction, context_marks) = compaction_readout(chats, open, config);
     let blocked = compact_blocked(chats, open, harness);
     let mut fields = vec![
         ("id", Value::from(open.id.as_str())),
@@ -8345,7 +8268,8 @@ fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool) -> Va
         ("stopped", Value::Bool(stopped)),
         ("compacting", Value::Bool(chats.chat_compacting(&open.id))),
         ("compaction_wait", compaction_wait(chats, open)),
-        ("compact_plan", compact_plan(chats, open)),
+        ("next_compaction", next_compaction),
+        ("context_marks", context_marks),
         ("compact_blocked", blocked.clone()),
         ("resume", resume_offer(open, &chat, harness, &blocked)),
         ("prediction", open.prediction.as_deref().map_or(Value::Nil, Value::from)),
@@ -9934,8 +9858,8 @@ mod tests {
         let entry = |parts: Json| json!({ "id": "s", "role": "system", "parts": parts });
         let text = |id: &str, words: &str| json!({ "kind": "text", "id": id, "text": words });
         let field = |m: &Value, k: &str| m.field(k).map(crate::auth::text).unwrap_or_default();
-        let classified = message(&entry(json!([text("t0", "Classifier: same task"), { "kind": "classifier", "id": "c", "record": { "verdict": "continue" } }])), None).unwrap();
-        assert_eq!((field(&classified, "role").as_str(), field(&classified, "line").as_str()), ("system", "classifier"));
+        let classified = entry(json!([text("t0", "Classifier: same task"), { "kind": "classifier", "id": "c", "record": { "verdict": "continue" } }]));
+        assert!(message(&classified, None).is_none(), "a classifier's entry from an older chat has no row");
         let compacted = message(&entry(json!([text("t0", "Compacted · 212.0k → 40.0k tokens"), { "kind": "compaction", "id": "c", "record": { "preTokens": 212000 } }])), None).unwrap();
         assert_eq!((field(&compacted, "line").as_str(), field(&compacted, "text").as_str()), ("compaction", "Compacted · 212.0k → 40.0k tokens"));
         let fork = message(&entry(json!([{ "kind": "fork", "id": "f", "sourceChatId": "c1", "sourceTitle": "Old\nchat" }])), None).unwrap();
@@ -9963,38 +9887,20 @@ mod tests {
     }
 
     #[test]
-    fn a_compaction_s_rows_carry_their_records_and_fold_into_the_decision_before_them() {
-        let entry = |id: &str, role: &str, parts: Json| json!({ "id": id, "role": role, "parts": parts });
-        let text = |words: &str| json!({ "kind": "text", "id": "t0", "text": words });
-        let field = |m: &Value, k: &str| m.field(k).map(crate::auth::text).unwrap_or_default();
+    fn a_compaction_s_row_carries_what_it_kept_and_what_the_agent_asked_to_keep() {
+        let entry = |parts: Json| json!({ "id": "x", "role": "system", "parts": parts });
         let num = |m: &Value, k: &str| m.field(k).and_then(Value::as_f64);
-        let decided = entry("k", "system", json!([text("Classifier"), { "kind": "classifier", "id": "c", "record": {
-            "harness": "claude-code", "model": "claude-sonnet-5-5", "verdict": "carry", "classifierVerdict": "continue", "decidedBy": "stage2",
-            "durationMs": 1670, "contextTokens": 212000, "input": "the turns", "reply": "CONTINUE", "stage2Reply": "CARRY",
-            "inputTokens": 2300, "outputTokens": 4, "reason": "Same task, the last turns matter" } }]));
-        let carried = "<carried_over>\nThe last turns.\n\nperson: a\nagent: b\n\nperson: c\nagent: d\n\nStill running when the chat compacted:\n- shell\n</carried_over>";
-        let compacted = entry("x", "system", json!([text("Context compacted"), { "kind": "compaction", "id": "p", "record": {
-            "preTokens": 212000, "postTokens": 69000, "durationMs": 53000, "summary": "What was done", "carried": carried } }]));
-        let row = message(&decided, None).unwrap();
-        let d = row.field("decision").unwrap();
-        assert_eq!((field(d, "verdict").as_str(), field(d, "said").as_str(), field(d, "by").as_str()), ("carry", "continue", "stage2"));
-        assert_eq!((num(d, "ms"), num(d, "context"), num(d, "tokens_in")), (Some(1670.), Some(212000.), Some(2300.)));
-        assert_eq!((field(d, "stage2").as_str(), field(d, "agent").as_str(), field(d, "mark").as_str()), ("CARRY", "Claude Code", "claude"));
-        let unknown = message(&entry("k2", "system", json!([{ "kind": "classifier", "id": "c", "record": { "verdict": "maybe", "decidedBy": "later" } }])), None).unwrap();
-        let u = unknown.field("decision").unwrap();
-        assert_eq!((field(u, "verdict").as_str(), field(u, "by").as_str()), ("failed", "stage1"), "an unknown verdict reads as no answer, as serde(other)");
-        let kept = message(&compacted, None).unwrap();
-        let k = kept.field("kept").unwrap();
-        assert_eq!((num(k, "pre"), num(k, "post"), num(k, "ms"), num(k, "turns")), (Some(212000.), Some(69000.), Some(53000.), Some(2.)));
-        assert!(field(k, "carried").starts_with("person: a"), "the block's own heading and tags go: {}", field(k, "carried"));
-
-        let user = message(&entry("u", "user", json!([text("next")])), None).unwrap();
-        let mut list = vec![row.clone(), user.clone(), kept.clone(), row.clone(), message(&entry("d", "system", json!([text("Host restarted")])), None).unwrap(), kept.clone()];
-        merge_compaction_rows(&mut list);
-        let lines: Vec<String> = list.iter().map(|m| format!("{}:{}", field(m, "role"), field(m, "line"))).collect();
-        assert_eq!(lines, ["system:classifier", "user:", "system:classifier", "system:divider", "system:compaction"], "a message sent meanwhile stays; a divider between keeps them apart");
-        assert_eq!(list[0].field("kept").and_then(|k| num(k, "post")), Some(69000.));
-        assert!(matches!(list[2].field("kept"), None | Some(Value::Nil)));
+        let field = |m: &Value, k: &str| m.field(k).map(crate::auth::text).unwrap_or_default();
+        let compacted = entry(json!([{ "kind": "text", "id": "t0", "text": "Agent compacted · 212.0k → 69.0k tokens" }, { "kind": "compaction", "id": "p", "record": {
+            "preTokens": 212000, "postTokens": 69000, "durationMs": 53000, "summary": "What was done", "focus": "the refund flow", "carried": "old" } }]));
+        let row = message(&compacted, None).unwrap();
+        assert_eq!(field(&row, "text"), "Agent compacted");
+        let k = row.field("kept").unwrap();
+        assert_eq!((num(k, "pre"), num(k, "post"), num(k, "ms")), (Some(212000.), Some(69000.), Some(53000.)));
+        assert_eq!((field(k, "summary").as_str(), field(k, "focus").as_str()), ("What was done", "the refund flow"));
+        assert!(k.field("carried").is_none() && k.field("turns").is_none());
+        let bare = message(&entry(json!([{ "kind": "compaction", "id": "p", "record": {} }])), None).unwrap();
+        assert!(matches!(bare.field("kept").unwrap().field("focus"), Some(Value::Nil)));
     }
 
     #[test]
@@ -10002,14 +9908,13 @@ mod tests {
         let chats = Chats::default();
         chats.chats.borrow_mut().insert("c".to_owned(), json!({ "id": "c", "config": { "harness": "claude-code" }, "lastMessageAt": utc_stamp(now_seconds() - 145 * 60) }));
         let session = |extra: Json| {
-            let mut s = json!({ "chatId": "c", "status": "idle", "updatedAt": utc_stamp(now_seconds()) });
+            let mut s = json!({ "chatId": "c", "deviceId": "d", "status": "idle", "updatedAt": utc_stamp(now_seconds()) });
             s.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
             chats.sessions.borrow_mut().insert("c".to_owned(), s);
         };
-        let decided = |verdict: &str| Entry::new(json!({ "id": "k", "role": "system", "parts": [{ "kind": "classifier", "id": "c", "record": { "verdict": verdict, "contextTokens": 212000 } }] }));
         let done = Entry::new(json!({ "id": "x", "role": "system", "parts": [{ "kind": "compaction", "id": "p", "record": { "durationMs": 52600 } }] }));
         let user = Entry::new(json!({ "id": "u", "role": "user", "parts": [] }));
-        let open = Open { id: "c".to_owned(), entries: vec![done, decided("carry"), user], context_usage: (Some(184_312.), Some(1_000_000.)), ..Open::default() };
+        let open = Open { id: "c".to_owned(), entries: vec![done, user], context_usage: (Some(184_312.), Some(1_000_000.)), ..Open::default() };
         let wait = |open: &Open| compaction_wait(&chats, open);
         let field = |m: &Value, k: &str| m.field(k).map(crate::auth::text).unwrap_or_default();
 
@@ -10019,30 +9924,12 @@ mod tests {
         assert_eq!(field(&wait(&open), "phase"), "queued", "the agent asked: queued until its turn settles");
         session(json!({ "compactPlan": { "kind": "agent" }, "status": "working" }));
         assert!(matches!(wait(&open), Value::Nil), "still its turn: the trailer stays");
-        session(json!({ "compactPlan": { "kind": "agent" }, "classifying": { "harness": "claude-code", "model": "claude-sonnet-5-5" } }));
-        let checking = wait(&open);
-        assert_eq!((field(&checking, "phase").as_str(), field(&checking, "agent").as_str(), field(&checking, "model").as_str()), ("checking", "Claude Code", "claude-sonnet-5-5"));
-        assert!(matches!(checking.field("agent_note"), Some(Value::Bool(true))));
         session(json!({ "compacting": true }));
         let compacting = wait(&open);
-        assert_eq!((field(&compacting, "phase").as_str(), field(&compacting, "tag").as_str(), field(&compacting, "row").as_str()), ("compacting", "carry", "k"));
-        assert_eq!(compacting.field("tokens").and_then(Value::as_f64), Some(212000.));
+        assert_eq!(field(&compacting, "phase"), "compacting");
         assert_eq!(compacting.field("usual").and_then(Value::as_f64), Some(53.), "the median of what compactions here took");
-        let kept = Open { entries: vec![decided("continue")], ..Open { id: "c".to_owned(), ..Open::default() } };
-        let plain = wait(&kept);
-        assert_eq!(field(&plain, "phase"), "compacting");
-        assert!(plain.field("tag").is_none() && plain.field("row").is_none(), "a same-task decision is no boundary");
-
         session(json!({ "compactPlan": { "kind": "copy", "since": 1_700_000_000_000i64, "ready": true } }));
-        let copy = compact_plan(&chats, &open);
-        assert_eq!(field(&copy, "heading"), "Background compaction");
-        assert_eq!(copy.field("copy").and_then(|c| c.field("since")).and_then(Value::as_f64), Some(1_700_000_000.));
-        session(json!({ "compacting": true, "compactPlan": { "kind": "agent" } }));
-        let busy = compact_plan(&chats, &open);
-        assert_eq!(field(&busy, "heading"), "Compacting");
-        assert!(matches!(busy.field("busy"), Some(Value::Bool(true))));
-        session(json!({}));
-        assert!(matches!(compact_plan(&chats, &open), Value::Nil), "nothing planned: no dot, no section");
+        assert!(matches!(wait(&open), Value::Nil), "an older peer's background copy is nothing to wait on");
         let blocked = compact_blocked(&chats, &open, "claude-code");
         let chat = chats.chat("c").unwrap();
         let offer = resume_offer(&open, &chat, "claude-code", &blocked);
@@ -10058,6 +9945,31 @@ mod tests {
         assert!(matches!(resume_offer(&open, &chats.chat("c").unwrap(), "claude-code", &Value::Nil), Value::Nil), "the cache lasts 70 minutes");
         assert_eq!(utc_stamp(0), "1970-01-01T00:00:00Z");
         assert_eq!(utc_stamp(1_709_251_199), "2024-02-29T23:59:59Z");
+    }
+
+    #[test]
+    fn the_readout_names_the_next_compaction_and_marks_the_meter() {
+        let chats = Chats::default();
+        let config = json!({ "harness": "claude-code", "model": null, "reasoning": null, "sandbox": "workspace-write" });
+        chats.sessions.borrow_mut().insert("c".to_owned(), json!({ "chatId": "c", "deviceId": "d", "status": "idle", "updatedAt": utc_stamp(now_seconds()), "compactHold": { "kind": "ran" } }));
+        let mut open = Open { id: "c".to_owned(), context_usage: (Some(100_000.), Some(1_000_000.)), context_baseline: Some(20_000), ..Open::default() };
+        let field = |m: &Value, k: &str| m.field(k).map(crate::auth::text).unwrap_or_default();
+        let num = |m: &Value, k: &str| m.field(k).and_then(Value::as_f64);
+
+        let (next, marks) = compaction_readout(&chats, &open, &config);
+        assert_eq!((field(&next, "icon").as_str(), field(&next, "title").as_str()), ("off", "Not scheduled"));
+        assert_eq!(field(&next, "detail"), "Already compacted since your last message");
+        assert_eq!((num(&marks, "auto"), num(&marks, "warn"), num(&marks, "floor")), (Some(967_000.), Some(821_950.), None), "no floor until the settings are read");
+        chats.reminder.set(Some(150_000));
+        let (_, marks) = compaction_readout(&chats, &open, &config);
+        assert_eq!(num(&marks, "floor"), Some(170_000.));
+        open.context_usage.0 = Some(900_000.);
+        let (next, _) = compaction_readout(&chats, &open, &config);
+        assert_eq!((field(&next, "icon").as_str(), field(&next, "title").as_str()), ("warn", "Claude Code · at 967K"));
+        assert_eq!(field(&next, "chip"), "auto-compacts at 967K");
+        let codex = json!({ "harness": "codex", "model": null, "reasoning": null, "sandbox": "workspace-write" });
+        let (_, marks) = compaction_readout(&chats, &open, &codex);
+        assert!(matches!((marks.field("auto"), marks.field("warn")), (Some(Value::Nil), Some(Value::Nil))), "Codex compacts at its window: no mark");
     }
 
     #[test]

@@ -4107,7 +4107,7 @@ async fn a_compaction_after_a_stray_done_reopens_working_and_writes_its_note() {
         vec![
             (
                 MessageRole::System,
-                "Context compacted · 226.9k → 12.5k tokens".to_string()
+                "Compacted, window full · 226.9k → 12.5k tokens".to_string()
             ),
             (MessageRole::Assistant, "reply".to_string()),
         ]
@@ -4188,7 +4188,7 @@ async fn a_mid_turn_compaction_splits_the_reply_around_its_note_and_clears_on_do
         rows,
         vec![
             (MessageRole::Assistant, "before".to_string()),
-            (MessageRole::System, "Context compacted".to_string()),
+            (MessageRole::System, "Compacted, window full".to_string()),
             (MessageRole::Assistant, "after".to_string()),
         ]
     );

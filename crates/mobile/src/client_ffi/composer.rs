@@ -361,18 +361,12 @@ pub struct CompactSectionView {
 #[uniffi::export]
 impl SessionHandle {
     pub fn compact_section(&self, now_ms: i64) -> Option<CompactSectionView> {
-        let section = self.inner.compact_section(now_ms)?;
+        let _ = now_ms;
+        let next = self.inner.next_compaction();
         Some(CompactSectionView {
-            heading: section.heading.into(),
-            note: section.note.map(Into::into),
-            rows: section
-                .rows
-                .into_iter()
-                .map(|(label, value)| StatsRow {
-                    label: label.into(),
-                    value,
-                })
-                .collect(),
+            heading: next.title,
+            note: next.detail,
+            rows: Vec::new(),
         })
     }
 }

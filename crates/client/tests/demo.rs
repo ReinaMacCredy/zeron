@@ -1056,9 +1056,9 @@ fn the_roster_lists_subagents_and_shells_and_stops_them() {
     );
     assert_eq!(roster.agents[2].parent.as_deref(), Some("spawn-pickers"));
     assert_eq!(roster.harness, Some(zeron_proto::HarnessId::ClaudeCode));
-    let compact = session.compact_section(0).unwrap();
-    assert_eq!(compact.heading, "Idle compaction");
-    assert_eq!(compact.rows.last().unwrap().0, "Compacts at");
+    let compact = session.next_compaction();
+    assert_eq!(compact.icon, zeron_proto::stats_view::NextIcon::Clock);
+    assert!(compact.title.starts_with("Idle · "));
     let shell = roster.shells[0].id.clone();
     assert_eq!(roster.shells[0].command, "cargo test -p zeron-mobile");
     session.watch_shell_output(Some(shell.clone()));

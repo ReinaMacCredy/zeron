@@ -26,6 +26,18 @@ text = "Delegated tasks per chat is now one limit for delegated tasks, plan step
 [[entry.improvements]]
 text = "Agents write a plan with the new plan tool, which has its own switch in Settings > Context & tools > Tools."
 
+[[entry.improvements]]
+text = "Compaction has one decider per reason: Zeron compacts an idle chat before its prompt cache expires, the agent calls compact when the work changes, and Claude Code compacts by itself when its window fills. The classifier that read each message, Jev, Compact ahead of time and the carried-over turns are gone, so a message is sent at once."
+
+[[entry.improvements]]
+text = "The Context window card marks where the agent is reminded and where the chat compacts by itself, and its Next compaction section says when the next one runs or why none is scheduled. A planned compaction also shows beside the ring in the footer."
+
+[[entry.improvements]]
+text = "Idle compaction no longer misses a Claude Code chat with background work, a chat left idle across an engine restart, or a Mac that woke late."
+
+[[entry.improvements]]
+text = "Settings > Agents > Compaction lists the three reasons with who decides each. A compaction's divider opens to what the agent asked to keep and its summary."
+
 [[entry]]
 version = "0.3.4"
 date = "Nov 13"

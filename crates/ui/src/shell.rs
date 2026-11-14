@@ -1101,7 +1101,7 @@ impl SettingsSection {
             SettingsSection::Playbooks => &["playbook", "recipe", "triage", "debug", "bug"],
             SettingsSection::Account => &["sign in", "sign out", "sync", "email", "login"],
             SettingsSection::Compaction => &["compact", "context", "summarize"],
-            SettingsSection::Experimental => &["lab", "beta", "experimental", "compact"],
+            SettingsSection::Experimental => &["lab", "beta", "experimental"],
             _ => &[],
         }
     }
@@ -1297,34 +1297,6 @@ impl SettingsSection {
                     "Remind at",
                     &["compaction", "check from", "context", "threshold"],
                     Some(Target::Setting(SettingId::CompactionNudge)),
-                ),
-            ],
-            SettingsSection::Experimental => &[
-                (
-                    "Compact ahead of time",
-                    &[
-                        "compaction",
-                        "background",
-                        "summary",
-                        "beta",
-                        "experimental",
-                    ],
-                    Some(Target::Setting(SettingId::CompactAhead)),
-                ),
-                (
-                    "Compact new tasks",
-                    &["compaction", "reminder", "classifier"],
-                    Some(Target::Setting(SettingId::CompactionMode)),
-                ),
-                (
-                    "Classifier",
-                    &["compaction", "jev", "typesafe", "openrouter", "api key"],
-                    Some(Target::Setting(SettingId::CompactionClassifier)),
-                ),
-                (
-                    "Classifier model",
-                    &["compaction", "jev"],
-                    Some(Target::Setting(SettingId::CompactionClassifierModel)),
                 ),
             ],
             SettingsSection::Updates => &[
@@ -1850,7 +1822,7 @@ fn settings_hits(query: &str, cloud_offered: bool) -> Vec<SettingsHit> {
                 path.clone()
             },
             target,
-            beta: target.is_some_and(Target::beta),
+            beta: page == SettingsSection::Experimental,
         }));
     }
     hits
@@ -7501,6 +7473,7 @@ impl Shell {
                         replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
                         frame: zeron_doc::TranscriptFrame::Reset { reset: entries },
                         context_usage: None,
+                        context_baseline: None,
                         session_stats: None,
                     };
                     let prepared = crate::transcript::TranscriptPreparation::default()
@@ -21101,16 +21074,6 @@ mod tests {
             )
         );
         assert_eq!(
-            hit("compact ahead"),
-            (
-                SettingsSection::Experimental,
-                "Compact ahead of time",
-                "Lab".to_string(),
-                Some(Target::Setting(SettingId::CompactAhead)),
-                true,
-            )
-        );
-        assert_eq!(
             hit("credit zeron").0,
             SettingsSection::General,
             "General keeps its own rows"
@@ -21119,7 +21082,7 @@ mod tests {
             .into_iter()
             .map(|hit| hit.page)
             .collect();
-        assert_eq!(compaction.len(), 9);
+        assert_eq!(compaction.len(), 5);
         assert!(compaction.iter().all(|page| {
             matches!(
                 page,
@@ -21423,7 +21386,7 @@ mod tests {
             running_subagents: 0,
             running_subagent_models: Vec::new(),
             compact_plan: None,
-            classifying: None,
+            compact_hold: None,
             waiting: None,
         }
     }
