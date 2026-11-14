@@ -2205,8 +2205,7 @@ local function Composer(): Node
 		end
 	end)
 	-- Over the whole pane, the pointer passing through it to the page
-	-- (its wheel too) but for the composer itself. (Under settings the shell
-	-- hides the chat frame, its state kept: nothing here is made again.)
+	-- (its wheel too) but for the composer itself.
 	return ui.overlay {
 		ref = page,
 		-- Not seen over a plugin's page (the chat's is kept unseen under it),
@@ -2215,8 +2214,7 @@ local function Composer(): Node
 			return if route.current:get().name == "plugin" then 0 else 1
 		end,
 		on_resize = function(size: { w: number, h: number })
-			-- (Hidden, Settings standing in its place, it has no height: not somewhere to
-			-- move to, nor to glide back from.)
+			-- (Hidden, it has no height: not somewhere to move to, nor to glide back from.)
 			if size.h >= 1 and math.abs(page_h:peek() - size.h) >= 1 then
 				page_h:set(size.h)
 			end

@@ -581,7 +581,7 @@ function M.setup()
 			-- room a row's control keeps at its end, and a group's card (a
 			-- quiet fill with a hairline, the rows' dividers fainter).
 			settings = {
-				measure = 640,
+				measure = 720,
 				row = 52,
 				control = 240,
 				card = "{surface.base}",

@@ -511,6 +511,14 @@ local function Composer(): Node
 		branch = branch,
 		active = new_chat,
 	}
+	ui.effect(function()
+		if new_chat() then
+			local id = project:get()
+			if route.new_chat_project:peek() ~= id then
+				route.new_chat_project:set(id)
+			end
+		end
+	end)
 
 	local running = ui.computed(function(): boolean
 		local s = open()
@@ -2170,8 +2178,7 @@ local function Composer(): Node
 		glide_to(y)
 	end)
 	-- Over the whole pane, the pointer passing through it to the page
-	-- (its wheel too) but for the composer itself. (Under settings the shell
-	-- hides the chat frame, its state kept: nothing here is made again.)
+	-- (its wheel too) but for the composer itself.
 	return ui.overlay {
 		ref = page,
 		-- Not seen over a plugin's page (the chat's is kept unseen under it),
