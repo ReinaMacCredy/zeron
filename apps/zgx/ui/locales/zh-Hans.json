@@ -289,7 +289,9 @@
       "lines": "{n, plural, other {# 行}}",
       "toggle_fit": "连按两下以切换适合窗口",
       "outside": "只读：在此对话的文件夹之外。",
-      "pdf_page": "第 {n} 页，共 {total} 页"
+      "pdf_page": "第 {n} 页，共 {total} 页",
+      "table_named": "{name}（表格）",
+      "not_a_table": "第 {line} 行不是有效的 CSV，因此显示源代码。"
     },
     "dropdown": {
       "placeholder": "选择…",
@@ -1640,6 +1642,34 @@
         "unsupported": "此窗口无法回答。",
         "use_for_request": "仅用于这次请求"
       }
+    },
+    "tex_view": {
+      "compiling": "正在编译…",
+      "errors": "上次编译有 {n} 个错误",
+      "more": "还有 {n} 个",
+      "line": "第 {line} 行",
+      "go_to_line": "在源代码中显示第 {line} 行",
+      "timeout": "编译时间过长，已停止。",
+      "waiting": {
+        "title": "正在编译 {name}…",
+        "body": "第一次编译可能需要一两分钟。"
+      },
+      "no_pdf": {
+        "title": "{name} 未能编译",
+        "body": "修正上面列出的问题后保存即可重试。"
+      },
+      "missing": {
+        "title": "没有可编译 {name} 的 TeX",
+        "body": "请安装 MacTeX 或 BasicTeX，然后重试。源代码仍可查看。"
+      },
+      "not_document": {
+        "title": "{name} 不是完整的文档",
+        "body": "它没有 \\documentclass。用一行 % !TEX root = main.tex 指明它所属的文件。"
+      },
+      "no_root": {
+        "title": "找不到它的根文件",
+        "body": "它的 % !TEX root 行指向 {root}，但该文件不存在。"
+      }
     }
   },
   "settings": {
@@ -2157,7 +2187,7 @@
         },
         "cycles": {
           "label": "Ctrl+Tab 循环切换标签页",
-          "description": "直接转到下一个标签页,而不打开切换器。"
+          "description": "按标签栏的顺序切换标签页,而不是按最近使用的会话。按住 Control 可从卡片中选择。"
         }
       },
       "focused_pane": "在当前聚焦的窗格内切换。",
@@ -3958,6 +3988,7 @@
         "panel_new_browser_tab": "新建浏览器标签页",
         "panel_focus_address": "打开位置",
         "panel_reload_page": "重新载入页面",
+        "panel_copy_link": "复制链接",
         "shell_next_session": "下一个会话",
         "shell_previous_session": "上一个会话",
         "session_n": "会话 {i}",
@@ -4978,6 +5009,7 @@
         "new_tab": "新建浏览器标签页",
         "open_location": "打开位置",
         "reload": "重新载入页面",
+        "copy_link": "复制链接",
         "zoom_in": "放大",
         "zoom_out": "缩小",
         "zoom_reset": "实际大小"

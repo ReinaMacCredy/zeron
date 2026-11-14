@@ -67,6 +67,8 @@ mod migration;
 mod mermaid;
 #[cfg(target_os = "macos")]
 mod pdf;
+#[cfg(target_os = "macos")]
+mod tex;
 mod plugins;
 mod previews;
 mod projects;
@@ -842,6 +844,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
             let at = current.with_untracked(|c| *c);
             displays.with_untracked(|d| at.and_then(|i| d.get(i)).or_else(|| d.first()).map_or(2., |d| d.scale_factor))
         });
+        tex::install(&host);
     }
     // A slider's detents tapped under the trackpad (src/haptics.rs).
     haptics::install(&host);

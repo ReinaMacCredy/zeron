@@ -8,7 +8,7 @@
 #   target/package-zgx/Zeron.app
 #     Contents/MacOS/zeron           the zgx interface and `zeron`'s command line
 #     Contents/MacOS/Zeron Engine    the engine (the root workspace's)
-#     Contents/Resources/ui, plugins-builtin, cua-driver, zeron.icns, licenses
+#     Contents/Resources/ui, plugins-builtin, cua-driver, tectonic, zeron.icns, licenses
 #   target/package-zgx/zeron-zgx-<version>-macos-<arch>-app.tar.gz   (the updater's)
 #
 # Usage: scripts/package-zgx-cutover.sh   (from apps/zgx or anywhere; macOS only)
@@ -74,6 +74,8 @@ DRIVER="$APP/Contents/Resources/cua-driver/cua-driver"
 "$ROOT/scripts/build-cua-driver.sh" "$DRIVER" >/dev/null
 mkdir -p "$APP/Contents/Resources/licenses/cua-driver" "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/vendor/cua-driver/LICENSE.md" "$ROOT/vendor/cua-driver/NOTICE.md" "$APP/Contents/Resources/licenses/cua-driver/"
+TECTONIC="$APP/Contents/Resources/tectonic/tectonic"
+"$ROOT/scripts/fetch-tectonic.sh" "$TECTONIC" "$APP/Contents/Resources/licenses/tectonic/LICENSE" >/dev/null
 
 # Zeron.app's own Info.plist (its id, name, `zeron://`), with zgx's floor, macOS 13.
 PLIST="$APP/Contents/Info.plist"
@@ -111,6 +113,7 @@ else
   echo "warning: ad-hoc signed: macOS privacy grants don't survive a rebuild" >&2
 fi
 codesign --force "${SIGN[@]}" --identifier sh.zeron.cua-driver "$DRIVER"
+codesign --force "${SIGN[@]}" --identifier sh.zeron.tectonic "$TECTONIC"
 codesign --force "${SIGN[@]}" --entitlements "$ENTITLEMENTS" --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
 codesign --force "${SIGN[@]}" --entitlements "$ENTITLEMENTS" "$APP"
 codesign --verify --strict --verbose=2 "$APP"

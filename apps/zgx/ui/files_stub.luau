@@ -353,6 +353,21 @@ ui.command {
 PdfView.open = function(_path: string): any
 	return settle({ pages = { { w = 612, h = 792 }, { w = 612, h = 792 } } })
 end
+local TexView = require("@ds/tex_view")
+TexView.compile = function(path: string): any
+	return settle({ state = "done", pdf = "/cache/view-1.pdf", root = path, problems = {} })
+end
+TexView.sync = function(_at: any): any
+	return settle({ file = "/proj/docs/cv.tex", line = 3, end_line = 3, text = "Write it" })
+end
+ui.command {
+	id = "disk_tex",
+	title = "A LaTeX document",
+	run = function()
+		disk["docs/cv.tex"] = "\\documentclass{article}\n\\begin{document}\nWrite it\n\\end{document}\n"
+		tell({ { kind = "created", path = "docs" }, { kind = "created", path = "docs/cv.tex" } })
+	end,
+}
 PdfView.page = function(_path: string, _page: number, _zoom: number): any
 	return settle({ src = "assets/favicons/zgx.png" })
 end

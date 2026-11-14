@@ -11,7 +11,7 @@
 #                                    line (crates/cli; the engine's commands
 #                                    run in the helper beside it)
 #     Contents/MacOS/Zeron Engine    the engine, signed here
-#     Contents/Resources/ui, plugins-builtin, cua-driver, zeron.icns, licenses
+#     Contents/Resources/ui, plugins-builtin, cua-driver, tectonic, zeron.icns, licenses
 #   target/package-zgx/zeron-<version>-macos-<arch>.dmg
 #   target/package-zgx/zeron-zgx-<version>-macos-<arch>-app.tar.gz  (the updater's)
 #
@@ -115,6 +115,8 @@ DRIVER="$APP/Contents/Resources/cua-driver/cua-driver"
 "$ROOT/scripts/build-cua-driver.sh" "$DRIVER" >/dev/null
 mkdir -p "$APP/Contents/Resources/licenses/cua-driver"
 cp "$ROOT/vendor/cua-driver/LICENSE.md" "$ROOT/vendor/cua-driver/NOTICE.md" "$APP/Contents/Resources/licenses/cua-driver/"
+TECTONIC="$APP/Contents/Resources/tectonic/tectonic"
+"$ROOT/scripts/fetch-tectonic.sh" "$TECTONIC" "$APP/Contents/Resources/licenses/tectonic/LICENSE" >/dev/null
 # Zeron.app's Info.plist, as the old app's, with this one's versions: the
 # short version stays numeric (a beta's is the next release's), the engine
 # its own (crates/update `bundle_engine_version`), and zgx's floor macOS 13
@@ -165,10 +167,12 @@ cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses/parakeet-v3.
 # identifier), then the bundle.
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.cua-driver "$DRIVER"
+  codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.tectonic "$TECTONIC"
   codesign --entitlements "$ENTITLEMENTS" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
   codesign --entitlements "$ENTITLEMENTS" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
 else
   codesign --force --sign - --identifier sh.zeron.cua-driver "$DRIVER"
+  codesign --force --sign - --identifier sh.zeron.tectonic "$TECTONIC"
   codesign --force --entitlements "$ENTITLEMENTS" --sign - --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
   codesign --force --entitlements "$ENTITLEMENTS" --sign - "$APP"
 fi

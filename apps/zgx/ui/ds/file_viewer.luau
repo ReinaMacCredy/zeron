@@ -61,6 +61,9 @@ local Syntax = require("@self/syntax")
 local SelectionMenu = require("@self/selection_menu")
 local AnnotationLayer = require("@self/annotation_layer")
 local PdfView = require("@self/pdf_view")
+local HtmlFile = require("@self/html_file")
+local CsvTable = require("@self/csv_table")
+local TexView = require("@self/tex_view")
 -- (Zoom eases as the lightbox's does: one system.)
 local Motion = require("@self/motion")
 local locale = require("@self/locale")
@@ -76,6 +79,7 @@ export type Doc = {
 	-- An image's source (a path), and its size in pixels if known.
 	image: string?,
 	pdf: boolean?,
+	tex: boolean?,
 	width: number?,
 	height: number?,
 	size: number?,
@@ -248,9 +252,19 @@ local function tick_task(text: string, k: number, done: boolean): string
 	return if changed then table.concat(out) else text
 end
 
-local function is_markdown(path: string): boolean
-	local e = ext(path)
-	return e == "md" or e == "markdown" or e == "mdx"
+local PREVIEWED: { [string]: string } = {
+	md = "markdown",
+	markdown = "markdown",
+	mdx = "markdown",
+	html = "html",
+	htm = "html",
+	csv = "csv",
+	tsv = "csv",
+	tex = "tex",
+}
+local PREVIEWS: { [string]: boolean } = {}
+for _, k in PREVIEWED do
+	PREVIEWS[k] = true
 end
 local function lines_in(text: string): number
 	local _, n = string.gsub(text, "\n", "")
@@ -671,7 +685,6 @@ local function component(props: Props): Node
 			end
 		end)
 	end
-	local rendered: State<boolean> = ui.use_state(true)
 	local zoom_label = ui.use_state("100%")
 	local page_label = ui.use_state("")
 	local copied = ui.use_state(false)
@@ -712,6 +725,9 @@ local function component(props: Props): Node
 		return bar.width or ROOM_ALL
 	end
 
+	local function openable(): boolean
+		return props.openable == nil or props.openable()
+	end
 	-- What it is now: its kind, from its state and its name.
 	local function kind(): string
 		local d = doc()
@@ -727,10 +743,34 @@ local function component(props: Props): Node
 		if d.image then
 			return "image"
 		end
-		if is_markdown(d.path) then
-			return "markdown"
+		local previewed = PREVIEWED[ext(d.path)]
+		if previewed == "html" and not (d.absolute and openable()) then
+			return "code"
 		end
-		return "code"
+		if previewed == "tex" and not d.tex then
+			return "code"
+		end
+		return previewed or "code"
+	end
+	local function previewable(): boolean
+		return PREVIEWS[kind()] == true
+	end
+	local chosen = ui.use_state({} :: { [string]: boolean })
+	local fell_back = ui.use_state({} :: { [string]: number })
+	local rendered = ui.computed(function(): boolean
+		local k = kind()
+		local d = doc()
+		return PREVIEWS[k] == true and chosen:get()[k] ~= false and not (d and fell_back:get()[d.path])
+	end)
+	local function show_rendered(on: boolean)
+		local k = kind()
+		if PREVIEWS[k] then
+			chosen:set_key(k, on)
+		end
+		local d = doc_peek()
+		if on and d and fell_back:peek()[d.path] then
+			fell_back:set_key(d.path, nil)
+		end
 	end
 	-- The editor's text follows the doc. Another file: what was typed here
 	-- is kept, and that file's own comes back. The same file read again: it
@@ -1125,7 +1165,7 @@ local function component(props: Props): Node
 	end
 	local function editing(): boolean
 		local k = kind()
-		return k == "code" or (k == "markdown" and not rendered:get())
+		return k == "code" or (PREVIEWS[k] == true and not rendered:get())
 	end
 	local function zoom(name: string): () -> ()
 		return function()
@@ -1147,9 +1187,6 @@ local function component(props: Props): Node
 	end
 	local reveal_file = on_path(props.on_reveal)
 	local open_file = on_path(props.on_open_editor)
-	local function openable(): boolean
-		return props.openable == nil or props.openable()
-	end
 	local function and_openable(f: () -> boolean): () -> boolean
 		return function(): boolean
 			return openable() and f()
@@ -1228,13 +1265,14 @@ local function component(props: Props): Node
 			size = "lg",
 			tone = "quiet",
 			on_click = function()
-				rendered:toggle()
+				show_rendered(not rendered:peek())
 			end,
 		}
 		return ui.show(function(): boolean
 			return room() >= ROOM_SWITCH
 		end, Segmented {
-			value = rendered,
+			value = rendered :: any,
+			on_pick = show_rendered,
 			label = locale.t("ds.file_viewer.show") :: any,
 			options = {
 				{ value = true, label = locale.t("ds.file_viewer.preview") :: any },
@@ -1328,7 +1366,7 @@ local function component(props: Props): Node
 	}
 	local is_pdf = shows({ "pdf" })
 	local function zoomable(): boolean
-		return shows({ "image" })() or (is_pdf() and page_label:get() ~= "")
+		return shows({ "image" })() or ((is_pdf() or shows({ "tex" })()) and page_label:get() ~= "")
 	end
 	row { label = "ds.file_viewer.zoom_in", icon = "plus", keys = "cmd+=", when = narrower(ROOM_SWITCH, zoomable), on_click = zoom("zoom_in") }
 	row { label = "ds.file_viewer.zoom_out", icon = "minus", keys = "cmd+-", when = narrower(ROOM_SWITCH, zoomable), on_click = zoom("zoom_out") }
@@ -1478,14 +1516,14 @@ local function component(props: Props): Node
 			ui.show(editing, ui.row {
 				gap = "$zeron.space.hair",
 				mr = function(): any
-					return if shows({ "markdown" })() then "$space.1" else 0
+					return if previewable() then "$space.1" else 0
 				end,
 				toggle("ds.file_viewer.find", "search", find_open, "cmd+f"),
 				ui.show(function(): boolean
 					return room() >= ROOM_TOOLS
 				end, toggle("ds.file_viewer.wrap_lines", "wrap-text", wrap, "alt+z")),
 			}),
-			ui.show(shows({ "markdown" }), source_switch()),
+			ui.show(previewable, source_switch()),
 			ui.show(zoomable, zoom_controls()),
 			ui.show(function(): boolean
 				return has_file() and room() >= ROOM_ALL
@@ -1567,6 +1605,19 @@ local function component(props: Props): Node
 		tone = "neutral",
 		title = function(): string
 			return locale.s("ds.file_viewer.outside")
+		end,
+	})
+	local function bad_line(): number?
+		local d = doc()
+		return if d and kind() == "csv" then fell_back:get()[d.path] else nil
+	end
+	local not_a_table = ui.show(function(): boolean
+		return bad_line() ~= nil
+	end, banner.Banner {
+		edge = true,
+		tone = "neutral",
+		title = function(): string
+			return locale.s("ds.file_viewer.not_a_table", { line = bad_line() or 0 })
 		end,
 	})
 	local conflict = ui.show(stale, banner.Banner {
@@ -1759,9 +1810,59 @@ local function component(props: Props): Node
 				return locale.s("ds.file_viewer.empty.body")
 			end)
 		end
-		if k == "markdown" then
-			return ui.presence(rendered, function(on: boolean): Node
-				if on then
+		if PREVIEWS[k] then
+			return ui.presence(function(): boolean
+				return rendered:get()
+			end, function(on: boolean): Node
+				if on and k == "html" then
+					return HtmlFile.View {
+						path = doc_.absolute or doc_.path,
+						label = name,
+						saved = function(): string
+							return base:get()
+						end,
+					}
+				elseif on and k == "tex" then
+					local here = doc_.absolute or doc_.path
+					return TexView.View {
+						path = here,
+						label = name,
+						saved = function(): string
+							return base:get()
+						end,
+						zoom_label = zoom_label,
+						page_label = page_label,
+						commands = image_commands,
+						failed = function(why: string, again: () -> ()): Node
+							return failed(name, if why ~= "" then why else nil, again)
+						end,
+						notice = notice,
+						annotate = props.annotate,
+						on_line = function(file: string, line: number)
+							local dir = string.match(here, "^(.*)/[^/]*$") or ""
+							if file == here then
+								show_rendered(false)
+								if props.reveal_line then
+									props.reveal_line:set(line)
+								end
+							elseif props.on_link and string.sub(file, 1, #dir + 1) == dir .. "/" then
+								props.on_link(doc_.path, string.sub(file, #dir + 2))
+							end
+						end,
+					}
+				elseif on and k == "csv" then
+					return CsvTable {
+						text = function(): string
+							return text:get()
+						end,
+						tsv = ext(doc_.path) == "tsv",
+						label = locale.t("ds.file_viewer.table_named", { name = name }),
+						waiting = loading,
+						on_bad = function(line: number)
+							fell_back:set_key(doc_.path, line)
+						end,
+					}
+				elseif on then
 					-- Annotations on what it shows (ds/annotation_layer): the column of text its one holder.
 					local notes = if props.annotate then props.annotate(doc_.path) else nil
 					local view, holder = ui.ref(), ui.ref()
@@ -1838,7 +1939,7 @@ local function component(props: Props): Node
 						},
 					} }, layer.Overlay() }
 				end
-				return code("markdown", doc_.path)
+				return code(if k == "markdown" then "markdown" else language, doc_.path)
 			end, {
 				w_full = true,
 				h_full = true,
@@ -1887,7 +1988,11 @@ local function component(props: Props): Node
 						table.insert(parts, at)
 					end
 					table.insert(parts, "PDF")
-				elseif k == "code" or k == "markdown" then
+				elseif k == "code" or PREVIEWS[k] then
+					local at = if k == "tex" then page_label:get() else ""
+					if at ~= "" then
+						table.insert(parts, at)
+					end
 					local lang = Syntax.name(Syntax.language(d.path))
 					if lang ~= "" then
 						table.insert(parts, lang)
@@ -1922,10 +2027,11 @@ local function component(props: Props): Node
 	box[#box + 1] = deleted
 	box[#box + 1] = conflict
 	box[#box + 1] = outside
+	box[#box + 1] = not_a_table
 	box[#box + 1] = body
 	box[#box + 1] = ui.show(function(): boolean
 		local k = kind()
-		return k == "image" or (k == "pdf" and page_label:get() ~= "") or (k == "markdown" and rendered:get())
+		return k == "image" or (k == "pdf" and page_label:get() ~= "") or rendered:get()
 	end, foot)
 	return ui.column(box)
 end

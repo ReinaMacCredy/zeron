@@ -111,14 +111,16 @@ local heard = ui.state("panel_browser_heard", nil :: any)
 -- The browser tab showing now, for the app's ⌘⇧I.
 -- The browser tab showing now, for the app's keys (the shipping app's
 -- Browser context: ⌘L the address, ⌘T a new tab, ⌘⇧R reload, ⌘⇧I
--- annotate; nothing when no browser tab shows). ⌘[ and ⌘] are the
--- router's here; back and forward are the bar's and WebKit's swipe.
+-- annotate, ⌘⇧C the address copied; nothing when no browser tab shows).
+-- ⌘[ and ⌘] are the router's here; back and forward are the bar's and
+-- WebKit's swipe.
 type Showing = {
 	id: string,
 	toggle: () -> (),
 	focus_address: () -> (),
 	reload: () -> (),
 	new_tab: () -> (),
+	copy_link: () -> (),
 	-- Zoom in (1), out (-1) or back to the site's default (0).
 	zoom: (by: number) -> (),
 	-- The page (or its bar) has the keyboard: the zoom keys are the page's
@@ -128,7 +130,7 @@ type Showing = {
 local showing: Showing? = nil
 
 -- Each on its key now, as Settings → Shortcuts binds it (screens/shell/keys
--- lists these four), else its own.
+-- lists these five), else its own.
 local shell_keys: any = (function()
 	local ok, k = pcall(require, "@app/screens/shell/keys")
 	return if ok and type(k) == "table" and k.key then k else nil
@@ -184,6 +186,9 @@ ui.command {
 }
 command("panel.reload_page", ui.t("panel.browser.command.reload"):get(), "View", "cmd+shift+r", function(s)
 	s.reload()
+end)
+command("panel.copy_link", ui.t("panel.browser.command.copy_link"):get(), "Edit", "cmd+shift+c", function(s)
+	s.copy_link()
 end)
 -- ⌘+ ⌘− ⌘0, the page's while it has the keyboard (each site keeps its
 -- own: browser_data); else ⌘+ ⌘− step a shown composer's effort (Zeron's);
@@ -590,6 +595,12 @@ Page = ui.component(function(props: Props): Node
 			start_annotating()
 		end
 	end
+	local function copy_link()
+		local u = web.url
+		if has_page(web) and type(u) == "string" and u ~= "" then
+			ui.clipboard.write(u)
+		end
+	end
 	local address_ref = ui.ref()
 	showing = {
 		id = id,
@@ -609,6 +620,7 @@ Page = ui.component(function(props: Props): Node
 		new_tab = function()
 			state.open(key, "browser")
 		end,
+		copy_link = copy_link,
 		zoom = zoom,
 		keyboard = function(): boolean
 			local ok, focused = pcall(function(): any
@@ -823,6 +835,7 @@ Page = ui.component(function(props: Props): Node
 			local page = can_leave()
 			-- Greyed with no page, without a reason under each: the empty tab says it.
 			local no_page = not page
+			local link_key = if shell_keys then shell_keys.combo("panel.copy_link") else "cmd+shift+c"
 			local entries: { any } = {
 				{ heading = ui.t("panel.browser.menu.zoom", { level = data.percent(zoom_now()) }):get() },
 				{ label = ui.t("panel.browser.command.zoom_in"):get(), icon = "plus", shortcut = "cmd+=", disabled = no_page, keep_open = true, on_select = function()
@@ -841,18 +854,7 @@ Page = ui.component(function(props: Props): Node
 						M.open_find(t)
 					end
 				end },
-				{ label = ui.t("panel.browser.menu.copy_link"):get(), icon = "copy", disabled = no_page, on_select = function()
-					local u = web.url
-					if type(u) == "string" and u ~= "" then
-						ui.clipboard.write(u)
-					end
-				end },
-				{ label = ui.t("panel.browser.open_in_browser"):get(), icon = "arrow-up-right", disabled = no_page, on_select = function()
-					local u = web.url
-					if type(u) == "string" then
-						api.open_externally(u)
-					end
-				end },
+				{ label = ui.t("panel.browser.menu.copy_link"):get(), icon = "copy", shortcut = if link_key ~= "" then link_key else nil, disabled = no_page, on_select = copy_link },
 			}
 			if data.inspectable:peek() then
 				table.insert(entries, { label = ui.t("panel.browser.menu.inspect"):get(), icon = "file-code", disabled = no_page, on_select = function()
@@ -997,7 +999,7 @@ Page = ui.component(function(props: Props): Node
 	}
 
 	-- The bar: back, forward and reload (stop while loading), the address,
-	-- annotate, and the rest under ⋯ (open in the default browser among it).
+	-- annotate, open in the default browser, and the rest under ⋯.
 	-- (Three Tab stops: the history pair, the address, the page's controls;
 	-- each pair or trio a toolbar of its own, so the arrows move within it
 	-- and the field keeps its own arrows for the caret.)
@@ -1092,6 +1094,21 @@ Page = ui.component(function(props: Props): Node
 				end
 			end,
 		}),
+		IconButton {
+			icon = "arrow-up-right",
+			label = ui.t("panel.browser.open_in_browser"),
+			tooltip_side = "bottom",
+			tone = "quiet",
+			disabled = function(): boolean
+				return not can_leave()
+			end,
+			on_click = function()
+				local u = web.url
+				if type(u) == "string" then
+					api.open_externally(u)
+				end
+			end,
+		},
 		more_menu,
 		},
 	}
