@@ -81,6 +81,10 @@ pub const BLOCKED: &[&str] = &[
     "tasks.assign",
     "tasks.start",
     "tasks.upload_image",
+    "threads.approve",
+    "threads.edit",
+    "threads.mark",
+    "threads.retry",
     "chat.respond",
     // (Lets an agent use this computer.)
     "chat.answer_computer",

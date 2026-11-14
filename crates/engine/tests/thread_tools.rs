@@ -4577,17 +4577,20 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         });
         (
             step.chat_id.clone(),
-            zeron_proto::step_status(&step, chat.as_ref(), indicator),
+            zeron_proto::step_state(&step, chat.as_ref(), indicator),
         )
     };
     assert_eq!(
         status(&steps[0].id),
-        (Some(first.clone()), zeron_proto::StepStatus::Planned),
+        (
+            Some(first.clone()),
+            zeron_proto::ThreadState::ReadyForReview
+        ),
         "a finished turn waits for the lead to mark the step"
     );
     assert_eq!(
         status(&steps[1].id),
-        (Some(second.clone()), zeron_proto::StepStatus::Working)
+        (Some(second.clone()), zeron_proto::ThreadState::Working)
     );
     let thread = rig.core.workspace.chat(&second).unwrap().unwrap();
     assert_eq!(
@@ -4782,7 +4785,10 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     );
     assert_eq!(
         status(&planned[0].id),
-        (Some(child.clone()), zeron_proto::StepStatus::Planned),
+        (
+            Some(child.clone()),
+            zeron_proto::ThreadState::ReadyForReview
+        ),
         "a child bound after its turn ended reads that turn"
     );
     let err = refused(mutate(attach(&child)).await);
@@ -4928,8 +4934,8 @@ fn a_step_thread_stopped_across_a_restart_reads_interrupted_and_its_lead_is_told
         let step = core.workspace.task_step(&step.id).unwrap();
         let chat = core.workspace.chat(&thread).unwrap();
         assert_eq!(
-            zeron_proto::step_status(&step, chat.as_ref(), Some(zeron_proto::ChatIndicator::Idle)),
-            zeron_proto::StepStatus::NeedsYou
+            zeron_proto::step_state(&step, chat.as_ref(), Some(zeron_proto::ChatIndicator::Idle)),
+            zeron_proto::ThreadState::WaitingOnYou
         );
         core.shutdown().await;
     });

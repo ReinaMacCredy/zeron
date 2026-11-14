@@ -3038,7 +3038,9 @@ impl View {
         };
         // The list first: a reply that ended takes its words into its row
         // before the draft lets them go.
-        self.subagents.set(Value::List(subagents.into()));
+        if self.subagents.set(Value::List(subagents.into())) {
+            crate::threads::changed();
+        }
         self.messages.set(Value::List(list.into()));
         self.publish_draft();
         self.after_model_moved();
@@ -4565,6 +4567,20 @@ pub(crate) fn chat_config(id: &str) -> Option<Json> {
 /// `fast`, as `chat.send` reads them).
 pub(crate) fn draft_config(args: &Value) -> Json {
     merged_config(&json!({}), args)
+}
+
+pub(crate) fn open_subagents() -> HashMap<String, Vec<Value>> {
+    let mut by_chat: HashMap<String, Vec<Value>> = HashMap::new();
+    for view in CHATS.with(|chats| chats.views()) {
+        let Some(id) = view.open.borrow().as_ref().map(|open| open.id.clone()) else { continue };
+        let rows = view.subagents.with_untracked(|rows| rows.list().to_vec());
+        by_chat.entry(id).or_insert(rows);
+    }
+    by_chat
+}
+
+pub(crate) fn publish_waiting() {
+    CHATS.with(|chats| chats.publish_waiting());
 }
 
 /// The profiles changed: each chat's comparison with its own again.

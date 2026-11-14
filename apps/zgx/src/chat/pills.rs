@@ -293,6 +293,10 @@ pub(super) fn subagent_row(sub: &Value, tool: &Value, at: Value, recent: bool) -
     ])
 }
 
+fn approves_plan(chat: &str, request: &str) -> bool {
+    request == crate::threads::PLAN_REQUEST && crate::threads::waiting_plans().iter().any(|(id, _)| id == chat)
+}
+
 fn is_plan(questions: &[Json]) -> bool {
     questions.iter().any(|q| q["approval"].as_bool() == Some(true) && q["header"].as_str() == Some(zeron_proto::PLAN_APPROVAL_HEADER))
 }
@@ -342,34 +346,54 @@ impl Chats {
     pub(super) fn waiting_value(&self) -> Value {
         let chats = self.chats.borrow();
         let waiting = self.waiting.borrow();
-        let mut rows: Vec<(&String, &Waiting)> = waiting.iter().filter(|(_, w)| !w.answered).collect();
-        let updated = |id: &String| chats.get(id).and_then(|chat| chat["lastMessageAt"].as_str().or(chat["createdAt"].as_str()).map(str::to_owned));
-        rows.sort_by(|a, b| updated(b.0).cmp(&updated(a.0)).then_with(|| a.0.cmp(b.0)));
-        let list: Vec<Value> = rows
-            .into_iter()
+        let updated = |id: &str| chats.get(id).and_then(|chat| chat["lastMessageAt"].as_str().or(chat["createdAt"].as_str()).map(str::to_owned));
+        let title = |chat: Option<&Json>| chat.and_then(|c| c["title"].as_str()).map(str::trim).filter(|t| !t.is_empty()).map_or(Value::Nil, Value::from);
+        let project = |chat: Option<&Json>| chat.and_then(|c| c["spaceId"].as_str()).map_or(Value::Nil, Value::from);
+        let mut rows: Vec<(Option<String>, String, Value)> = waiting
+            .iter()
+            .filter(|(_, w)| !w.answered)
             .filter_map(|(id, w)| {
                 let chat = chats.get(id);
                 if chat.is_none() && self.chats_heard.get() {
                     return None;
                 }
                 let ask = ask_value(&w.part, self.pages_answered(id, &w.request))?;
-                let title = chat.and_then(|c| c["title"].as_str()).map(str::trim).filter(|t| !t.is_empty()).map_or(Value::Nil, Value::from);
                 let plan = is_plan(&w.questions) && !w.steps.is_empty();
                 let steps: Vec<Value> = w.steps.iter().map(|s| Value::from(s.as_str())).collect();
-                Some(Value::record([
-                    ("key", Value::from(format!("{id}:{}", w.request).as_str())),
+                let key = format!("{id}:{}", w.request);
+                Some((updated(id), key.clone(), Value::record([
+                    ("key", Value::from(key.as_str())),
                     ("chat", Value::from(id.as_str())),
                     ("request", Value::from(w.request.as_str())),
-                    ("title", title),
-                    ("project", chat.and_then(|c| c["spaceId"].as_str()).map_or(Value::Nil, Value::from)),
+                    ("title", title(chat)),
+                    ("project", project(chat)),
                     ("kind", Value::from(if plan { "plan" } else { "ask" })),
                     ("secret", Value::Bool(w.questions.iter().any(is_secret))),
                     ("ask", ask),
                     ("steps", Value::List(steps.into())),
-                ]))
+                ])))
             })
             .collect();
-        Value::List(list.into())
+        for (id, titles) in crate::threads::waiting_plans() {
+            let chat = chats.get(&id);
+            if chat.is_none() && self.chats_heard.get() {
+                continue;
+            }
+            let key = format!("{id}:{}", crate::threads::PLAN_REQUEST);
+            let steps: Vec<Value> = titles.iter().map(|s| Value::from(s.as_str())).collect();
+            rows.push((updated(&id), key.clone(), Value::record([
+                ("key", Value::from(key.as_str())),
+                ("chat", Value::from(id.as_str())),
+                ("request", Value::from(crate::threads::PLAN_REQUEST)),
+                ("title", title(chat)),
+                ("project", project(chat)),
+                ("kind", Value::from("plan_approval")),
+                ("secret", Value::Bool(false)),
+                ("steps", Value::List(steps.into())),
+            ])));
+        }
+        rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        Value::List(rows.into_iter().map(|(_, _, row)| row).collect())
     }
 
     pub(super) fn publish_waiting(&self) {
@@ -421,6 +445,9 @@ impl Chats {
     pub(super) async fn waiting_answer(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
         let id = args.field("id").map(text).unwrap_or_default();
         let request = args.field("request").map(text).unwrap_or_default();
+        if approves_plan(&id, &request) {
+            return crate::threads::approve(id).await.map(drop).map_err(|e| engine::outcome(&e));
+        }
         let questions = self.waiting.borrow().get(&id).filter(|w| w.request == request && !w.answered).ok_or("missing")?.questions.clone();
         self.answer(&id, &request, &questions, &args).await
     }
@@ -653,6 +680,33 @@ pub(super) mod tests {
         assert_eq!(rows[0].field("kind").map(text).as_deref(), Some("plan"));
         let Some(Value::List(steps)) = rows[0].field("steps") else { panic!("steps") };
         assert_eq!(steps.iter().map(text).collect::<Vec<_>>(), ["Do it", "Then that"]);
+    }
+
+    #[test]
+    fn a_plan_waiting_for_approval_is_one_row_that_approving_answers() {
+        use crate::threads::tests::{TITLES, chat, plan};
+        let lead = |pending: bool| json!([chat("lead", json!({ "title": "Storefront", "plan": { "overview": "Five" }, "planPending": pending }))]);
+        crate::threads::join_for_tests(lead(true), plan("lead", &[]));
+        let chats = with_waiting("c", "r", two_pages());
+        chats.chats.borrow_mut().insert("lead".into(), json!({ "id": "lead", "title": "Storefront", "spaceId": "p" }));
+        let plans = |chats: &Chats| -> Vec<Value> {
+            let Value::List(rows) = chats.waiting_value() else { panic!("a list") };
+            rows.iter().filter(|r| r.field("kind").map(text).as_deref() == Some("plan_approval")).cloned().collect()
+        };
+        let rows = plans(&chats);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].field("key").map(text).as_deref(), Some("lead:plan"));
+        assert_eq!(rows[0].field("request").map(text).as_deref(), Some(crate::threads::PLAN_REQUEST));
+        assert_eq!(rows[0].field("title").map(text).as_deref(), Some("Storefront"));
+        assert_eq!(rows[0].field("steps").unwrap().list().iter().map(text).collect::<Vec<_>>(), TITLES);
+        assert_eq!(page(&chats), Some(1.), "the question of another chat stays");
+        assert!(approves_plan("lead", crate::threads::PLAN_REQUEST));
+        assert!(!approves_plan("lead", "r") && !approves_plan("c", "r"), "a question is answered as before");
+        crate::threads::join_for_tests(lead(false), plan("lead", &[]));
+        assert!(plans(&chats).is_empty());
+        assert!(!approves_plan("lead", crate::threads::PLAN_REQUEST));
+        crate::threads::join_for_tests(json!([chat("lead", json!({ "plan": {}, "planPending": true }))]), Vec::new());
+        assert!(plans(&chats).is_empty(), "a plan with no steps has nothing to approve");
     }
 
     #[test]

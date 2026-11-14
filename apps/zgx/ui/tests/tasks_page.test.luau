@@ -323,15 +323,23 @@ test("a mission's state follows its plan: planning is Working, a working step is
 	app:click('#tasks-view >> "Kanban"')
 	app:frames(30)
 	expect(app:has("#tasks-column-needs >> #task-kanban-t6")).to_be(true)
+	local function read(): string
+		app:command("fixture.t6_read")
+		app:frames(1)
+		return app:state("tasks_t6") :: string
+	end
 	app:command("fixture.mission")
 	app:frames(10)
 	expect(app:has("#tasks-column-working >> #task-kanban-t6")).to_be(true)
+	expect(read()).to_be("working||")
 	app:command("fixture.mission_steps")
 	app:frames(10)
 	expect(app:has("#tasks-column-working >> #task-kanban-t6")).to_be(true)
+	expect(read()).to_be("working||1/2")
 	app:command("fixture.mission_plan_ready")
 	app:frames(10)
 	expect(app:has("#tasks-column-needs >> #task-kanban-t6")).to_be(true)
+	expect(read()).to_be("needs|plan_ready|0/1")
 end)
 
 test("a title that holds mentions shows their words, not their links", function()

@@ -36,9 +36,61 @@ local tasks: { any } = {
 	task("t9", "Answer the design review", "a9", { completed = (NOW - 60) * 1000 }),
 	task("t10", "Upgrade the build image", "b0", { completed = (NOW - 2 * DAY) * 1000 }),
 }
-local function publish()
-	store.list:set({ state = "ready", tasks = table.clone(tasks) })
+local function as_host(t: any, chats: { [string]: any }): any
+	local out = table.clone(t)
+	out.plan = nil
+	if t.completed then
+		out.column = "done"
+		return out
+	end
+	local c = if t.chat then chats[t.chat] else nil
+	local lead = if c then c.status or "idle" else nil
+	local p = t.plan or {}
+	local has: { [string]: boolean } = {}
+	local done, total = 0, 0
+	for _, s in p.states or {} do
+		has[s] = true
+		done += if s == "done" then 1 else 0
+		total += if s == "skipped" then 0 else 1
+	end
+	local steps = #(p.states or {})
+	local reason: string? = nil
+	if t.send_error then
+		reason = "not_sent"
+	elseif lead == "input" then
+		reason = "asks"
+	elseif lead == "failed" then
+		reason = "failed"
+	elseif has.waitingOnYou then
+		reason = "step_asks"
+	elseif lead ~= "working" and has.failed then
+		reason = "step_failed"
+	elseif lead ~= "working" and p.pending and steps > 0 then
+		reason = "plan_ready"
+	elseif c and not (lead == "working" or (p.has_plan and steps == 0) or has.working) then
+		reason = "review"
+	end
+	out.needs = reason
+	out.column = if reason then "needs" elseif c or has.working then "working" else "todo"
+	out.progress = if steps > 0 then { done = done, total = total } else nil
+	return out
 end
+local old_host = false
+local function publish()
+	if old_host then
+		return
+	end
+	local chats = store.chats:peek()
+	local out = {}
+	for _, t in tasks do
+		table.insert(out, as_host(t, chats))
+	end
+	store.list:set({ state = "ready", tasks = out })
+end
+ui.effect(function()
+	sessions.now:get()
+	publish()
+end)
 local function at(id: string): number?
 	for i, t in tasks do
 		if t.id == id then
@@ -212,6 +264,7 @@ ui.command { id = "fixture.tasks_old_host", title = "Fixture: a host without tas
 		end
 		return call(name, ...)
 	end
+	old_host = true
 	store.list:set({ state = "idle", tasks = {} })
 end }
 ui.command { id = "fixture.t4_linked", title = "Fixture: the onboarding copy's title holds a command's link", menu = "Fixture", run = function()
@@ -256,37 +309,31 @@ end }
 ui.command { id = "fixture.b1_question", title = "Fixture: Ship the release asks a question to answer here", menu = "Fixture", run = function()
 	ui.shared("chat.waiting", {} :: { any }):set({ { key = "b1:r1", chat = "b1", request = "r1", kind = "ask", ask = {}, steps = {} } })
 end }
-ui.command { id = "fixture.mission", title = "Fixture: Write the release notes is a mission", menu = "Fixture", run = function()
+local function plan_t6(plan: any)
 	for i, t in tasks do
 		if t.id == "t6" then
 			local m = table.clone(t)
-			m.plan = true
+			m.plan = plan
 			tasks[i] = m
 		end
 	end
 	publish()
+end
+ui.command { id = "fixture.mission", title = "Fixture: Write the release notes is a mission", menu = "Fixture", run = function()
+	plan_t6({ has_plan = true, pending = true, states = {} })
 end }
 ui.command { id = "fixture.mission_steps", title = "Fixture: the mission's plan has steps, one working", menu = "Fixture", run = function()
-	for i, t in tasks do
-		if t.id == "t6" then
-			local m = table.clone(t)
-			m.plan, m.plan_pending = true, false
-			m.steps = { { chat = "a1" }, { outcome = "done" } }
-			tasks[i] = m
-		end
-	end
-	publish()
+	plan_t6({ has_plan = true, pending = false, states = { "working", "done" } })
 end }
 ui.command { id = "fixture.mission_plan_ready", title = "Fixture: the mission's plan waits on you", menu = "Fixture", run = function()
-	for i, t in tasks do
-		if t.id == "t6" then
-			local m = table.clone(t)
-			m.plan, m.plan_pending = true, true
-			m.steps = { { chat = "a3", ended = "completed" } }
-			tasks[i] = m
-		end
-	end
-	publish()
+	plan_t6({ has_plan = true, pending = true, states = { "readyForReview" } })
+end }
+local t6_read = ui.state("tasks_t6", "")
+ui.command { id = "fixture.t6_read", title = "Fixture: read Write the release notes' state", menu = "Fixture", run = function()
+	local t = store.find("t6") :: any
+	local s = store.state(t)
+	local p = t.progress
+	t6_read:set(`{s.column}|{s.reason or ""}|{if p then `{p.done}/{p.total}` else ""}`)
 end }
 ui.command { id = "fixture.t4_eleven_images", title = "Fixture: Draft the onboarding copy holds eleven images", menu = "Fixture", run = function()
 	for i, t in tasks do

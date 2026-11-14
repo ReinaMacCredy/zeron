@@ -48,9 +48,10 @@ export type Task = {
 	created: number,
 	images: { string },
 	send_error: string?,
-	plan: boolean?,
-	plan_pending: boolean?,
-	steps: { { chat: string?, outcome: string?, ended: string? } }?,
+	column: string?,
+	needs: string?,
+	needs_step: number?,
+	progress: { done: number, total: number }?,
 	depends: { string },
 }
 
@@ -232,65 +233,18 @@ function M.project_name(id: string?): string?
 	return if id then projects:get()[id] else nil
 end
 
--- A step's state (proto `step_status`): "done", "skipped", "planned", "working", "needs" or "failed".
-local function step_status(s: any, chats: { [string]: any }): string
-	if s.outcome == "done" or s.outcome == "skipped" then
-		return s.outcome
-	end
-	local c = if s.chat then chats[s.chat] else nil
-	if not c then
-		return "planned"
-	elseif c.status == "working" then
-		return "working"
-	elseif c.status == "input" then
-		return "needs"
-	elseif c.delegation then
-		return if c.delegation == "running" then "working" elseif c.delegation == "completed" then "planned" else "needs"
-	elseif s.ended == "completed" then
-		return "planned"
-	elseif s.ended == "failed" then
-		return "failed"
-	elseif s.ended == "stopped" then
-		return "needs"
-	end
-	return "working"
-end
-
--- A task's one state, as proto `task_status` and `needs_you`: "todo", "working", "needs" or "done", the linked chat (nil if none or gone) and why it needs you.
+-- A task's one state, as the host reads it through proto `rollup`: "todo", "working", "needs" or "done", the linked chat (nil if none or gone) and why it needs you.
 export type State = { column: string, chat: any, reason: string?, gone: boolean }
 function M.state(t: Task): State
-	local chats = M.chats:get()
-	local c = if t.chat then chats[t.chat] else nil
-	if t.completed then
+	local c = if t.chat then M.chats:get()[t.chat] else nil
+	local column = t.column or "todo"
+	if column == "done" then
 		return { column = "done", chat = c, gone = false }
 	end
 	local gone = t.chat ~= nil and c == nil
-	local lead = if c then c.status or "idle" else nil
-	local has: { [string]: boolean } = {}
-	local steps = 0
-	for _, s in t.steps or {} do
-		has[step_status(s, chats)] = true
-		steps += 1
-	end
-	local reason: string? = nil
-	if t.send_error then
-		reason = "not_sent"
-	elseif lead == "input" then
-		reason = "asks"
-	elseif lead == "failed" then
-		reason = "failed"
-	elseif has.needs then
-		reason = "step_asks"
-	elseif lead ~= "working" and has.failed then
-		reason = "step_failed"
-	elseif lead ~= "working" and t.plan_pending and steps > 0 then
-		reason = "plan_ready"
-	elseif c and not (lead == "working" or (t.plan and steps == 0) or has.working) then
-		reason = "review"
-	end
-	if reason then
-		return { column = "needs", chat = c, reason = reason, gone = gone }
-	elseif c or has.working then
+	if column == "needs" then
+		return { column = "needs", chat = c, reason = t.needs, gone = gone }
+	elseif column == "working" then
 		return { column = "working", chat = c, gone = false }
 	end
 	return { column = "todo", chat = nil, gone = gone }

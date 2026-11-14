@@ -29,7 +29,7 @@ use zeron_proto::tools::ToolSettingsState;
 use zeron_proto::view::{Indicator, effective_indicator};
 use zeron_proto::{
     AccessMode, AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, Chat, HarnessId,
-    ReasoningLevel, Session, Space, StepStatus, Task, TaskStep, UserInputAnswer,
+    ReasoningLevel, Session, Space, Task, TaskStep, ThreadState, UserInputAnswer,
 };
 use zeron_rpc::{RpcClient, methods};
 
@@ -443,7 +443,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "plan",
-            "description": "This chat's plan: steps, each run on a thread this chat owns. `write` replaces the steps that have not started with `steps` [{title, notes, role, threadId}] and keeps the rest; `overview` and `resources` (port:<n>, slot:<name>, path:<path in the project>; [] clears) replace theirs when given. A step's `threadId` hands it to a thread this chat delegated that runs no open step. Replaced steps' images move to the same-titled step or the overview (`imagesMoved`). Run a step with delegate_task and its `stepId`. `step` marks `stepId` `state` done, skipped or open; a step is done only once marked. `read` returns the plan: `overview`, `planPending` (run no step until the person approves) and each step's `status` (planned, working, needsYou, failed, done or skipped) and `threadId`.",
+            "description": "This chat's plan: steps, each run on a thread this chat owns. `write` replaces the steps that have not started with `steps` [{title, notes, role, threadId}] and keeps the rest; `overview` and `resources` (port:<n>, slot:<name>, path:<path in the project>; [] clears) replace theirs when given. A step's `threadId` hands it to a thread this chat delegated that runs no open step. Replaced steps' images move to the same-titled step or the overview (`imagesMoved`). Run a step with delegate_task and its `stepId`. `step` marks `stepId` `state` done, skipped or open; a step is done only once marked. `read` returns the plan: `overview`, `planPending` (run no step until the person approves) and each step's `status` (planned, working, waitingOnYou, readyForReview, failed, cancelled, done or skipped) and `threadId`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2490,7 +2490,7 @@ impl ThreadTools {
         }
     }
 
-    async fn step_statuses(&self) -> Result<Vec<(TaskStep, StepStatus)>, String> {
+    async fn step_statuses(&self) -> Result<Vec<(TaskStep, ThreadState)>, String> {
         let steps: Vec<TaskStep> = self.snapshot(methods::WATCH_TASK_STEPS, json!({})).await?;
         self.statuses_of(steps).await
     }
@@ -2498,7 +2498,7 @@ impl ThreadTools {
     async fn statuses_of(
         &self,
         steps: Vec<TaskStep>,
-    ) -> Result<Vec<(TaskStep, StepStatus)>, String> {
+    ) -> Result<Vec<(TaskStep, ThreadState)>, String> {
         if steps.is_empty() {
             return Ok(Vec::new());
         }
@@ -2520,7 +2520,7 @@ impl ThreadTools {
                         now,
                     )
                 });
-                let status = zeron_proto::step_status(&step, thread, indicator);
+                let status = zeron_proto::step_state(&step, thread, indicator);
                 (step, status)
             })
             .collect())
@@ -3777,11 +3777,11 @@ fn error(id: Value, code: i64, message: String) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-fn add_progress(row: &mut Value, task: &Task, steps: &[(TaskStep, StepStatus)]) {
+fn add_progress(row: &mut Value, task: &Task, steps: &[(TaskStep, ThreadState)]) {
     let Some(lead) = task.chat_id.as_deref() else {
         return;
     };
-    let statuses: Vec<StepStatus> = steps
+    let statuses: Vec<ThreadState> = steps
         .iter()
         .filter(|(step, _)| step.owner_chat_id == lead)
         .map(|(_, status)| *status)
@@ -3791,12 +3791,12 @@ fn add_progress(row: &mut Value, task: &Task, steps: &[(TaskStep, StepStatus)]) 
     }
 }
 
-fn plan_json(chat: &Chat, steps: &[(TaskStep, StepStatus)]) -> Value {
+fn plan_json(chat: &Chat, steps: &[(TaskStep, ThreadState)]) -> Value {
     if chat.plan.is_none() && steps.is_empty() {
         return json!({ "plan": null });
     }
     let plan = chat.plan.clone().unwrap_or_default();
-    let statuses: Vec<StepStatus> = steps.iter().map(|(_, status)| *status).collect();
+    let statuses: Vec<ThreadState> = steps.iter().map(|(_, status)| *status).collect();
     let mut view = json!({
         "overview": plan.overview,
         "planDoc": plan.plan_doc,
@@ -5632,7 +5632,7 @@ mod tests {
                 ("s2", "done"),
                 ("s3", "planned"),
                 ("s4", "skipped"),
-                ("s5", "needsYou"),
+                ("s5", "waitingOnYou"),
                 ("s6", "failed"),
             ]
         );

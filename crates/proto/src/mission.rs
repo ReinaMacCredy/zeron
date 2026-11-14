@@ -1,11 +1,11 @@
 use crate::{
-    Chat, ChatIndicator, NeedsYou, PlanProgress, StepStatus, Task, TaskStatus, TaskStep,
-    plan_progress, step_status, task_status,
+    Chat, ChatIndicator, NeedsYou, PlanProgress, Task, TaskStatus, TaskStep, ThreadState,
+    plan_progress, step_state, task_status,
 };
 
 pub struct StepRow<B> {
     pub step: TaskStep,
-    pub status: StepStatus,
+    pub status: ThreadState,
     pub indicator: Option<ChatIndicator>,
     pub brand: Option<B>,
 }
@@ -94,13 +94,13 @@ pub fn rollup<B>(
             let shown = chat.map(&indicator);
             StepRow {
                 step: step.clone(),
-                status: step_status(step, chat, shown),
+                status: step_state(step, chat, shown),
                 indicator: shown,
                 brand: chat.map(&brand),
             }
         })
         .collect();
-    let statuses: Vec<StepStatus> = steps.iter().map(|row| row.status).collect();
+    let statuses: Vec<ThreadState> = steps.iter().map(|row| row.status).collect();
     Rollup {
         lead,
         status: task_status(task, lead_chat, lead, &statuses),
