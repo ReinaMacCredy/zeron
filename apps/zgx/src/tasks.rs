@@ -179,8 +179,10 @@ impl Tasks {
         }
         let empty = self.list.borrow().as_array().is_none_or(Vec::is_empty);
         let tasks = mock_tasks().filter(|_| empty);
-        let plan = mock_plan() && !self.list.borrow().as_array().into_iter().flatten().any(|t| t["id"] == MOCK_PLAN_TASK);
-        if tasks.is_none() && !plan {
+        let has = |id: &str| self.list.borrow().as_array().into_iter().flatten().any(|t| t["id"] == id);
+        let plan = mock_plan() && !has(MOCK_PLAN_TASK);
+        let now = mock_plan() && !has(MOCK_NOW_TASK);
+        if tasks.is_none() && !plan && !now {
             return;
         }
         engine::get().spawn(async move {
@@ -192,6 +194,19 @@ impl Tasks {
             if plan {
                 for params in plan_seed_params() {
                     if engine::get().call("Mutate", params).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            if now {
+                let (made, runs) = now_seed_params();
+                for params in made {
+                    if engine::get().call("Mutate", params).await.is_err() {
+                        return;
+                    }
+                }
+                for params in runs {
+                    if engine::get().call("DelegateTask", params).await.is_err() {
                         return;
                     }
                 }
@@ -237,6 +252,25 @@ fn plan_seed_params() -> Vec<Json> {
             "steps": MOCK_PLAN_STEPS.iter().map(|(title, notes)| json!({ "title": title, "notes": notes })).collect::<Vec<_>>(),
         }),
     ]
+}
+
+const MOCK_NOW_TASK: &str = "mock-now-task";
+const MOCK_NOW_LEAD: &str = "mock-now-lead";
+const MOCK_NOW_THREADS: [&str; 4] = [
+    "Mock step: fix the flaky cart total test",
+    "Mock ask: add rate limiting to checkout",
+    "Mock done: add CSV export to orders",
+    "Mock done: upgrade the date library",
+];
+
+fn now_seed_params() -> (Vec<Json>, Vec<Json>) {
+    (
+        vec![
+            json!({ "op": "createTask", "taskId": MOCK_NOW_TASK, "title": "Checkout" }),
+            json!({ "op": "startTask", "taskId": MOCK_NOW_TASK, "chatId": MOCK_NOW_LEAD }),
+        ],
+        MOCK_NOW_THREADS.iter().map(|task| json!({ "ownerChatId": MOCK_NOW_LEAD, "task": task, "harness": "mock" })).collect(),
+    )
 }
 
 fn mock_runs(chat: &str, steps: &[&TaskStep]) -> Vec<Json> {
@@ -509,6 +543,11 @@ mod tests {
         assert_eq!(runs.iter().map(|r| r["stepId"].as_str().unwrap()).collect::<Vec<_>>(), ["s2", "s3", "s4", "s5"], "the four not started yet, in plan order");
         assert_eq!((runs[0]["ownerChatId"].as_str(), runs[0]["harness"].as_str()), (Some(MOCK_PLAN_LEAD), Some("mock")));
         assert!(mock_runs("another", &refs).is_empty());
+        let (made, runs) = now_seed_params();
+        assert_eq!(made.iter().map(|p| p["op"].as_str().unwrap()).collect::<Vec<_>>(), ["createTask", "startTask"]);
+        assert!(made[1].get("orchestrate").is_none(), "the lead that hands work out at once has no plan");
+        assert_eq!(runs.len(), 4);
+        assert!(runs.iter().all(|r| r["ownerChatId"] == MOCK_NOW_LEAD && r.get("stepId").is_none()));
     }
 
     #[test]

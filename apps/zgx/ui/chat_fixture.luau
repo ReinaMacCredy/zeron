@@ -225,6 +225,7 @@ do
 		end,
 	}
 	local published = ui.shared("chat.subagents", {} :: { any })
+	local threads_published = ui.shared("chat.threads", {} :: any)
 	ui.command {
 		id = "subagents_running",
 		title = "Subagents run: two working, one done",
@@ -234,6 +235,14 @@ do
 				{ ref = "d2", title = "read the docs", status = "running" },
 				{ ref = "d3", title = "find the flaky test", status = "done" },
 			})
+			local s = store.session:peek()
+			if s and s.id then
+				threads_published:set({ [s.id] = { rows = {
+					{ key = "subagent:d1", kind = "subagent", read_only = true, title = "scan the repo", state = "working" },
+					{ key = "subagent:d2", kind = "subagent", read_only = true, title = "read the docs", state = "working" },
+					{ key = "subagent:d3", kind = "subagent", read_only = true, title = "find the flaky test", state = "done" },
+				} } })
+			end
 		end,
 	}
 end
@@ -669,6 +678,7 @@ do
 	mirror("test_waiting", "chat.waiting", {})
 	mirror("test_shell_output", "chat.shell_output", {})
 	mirror("test_usage", "chat.roster_usage", {})
+	mirror("test_threads", "chat.threads", {})
 	;(require("@app/screens/chat/lanes") :: any).watch = function(slot: string, id: string?)
 		note(`lane_watch:{slot}:{id or ""}`)
 	end
@@ -2451,6 +2461,9 @@ ui.command {
 -- a line, one outside the chat's folder, one on the web), in a chat whose
 -- folder is /work/atlas; what opens a file there noted (`open_file:`).
 local panel_stub: any = (require :: any)("@app/screens/panel")
+;(require("@app/screens/chat/threads") :: any).opener = function(session: string, thread: string?)
+	note(`threads_open:{session}:{thread or ""}`)
+end
 panel_stub.open_file = function(session: any, path: string, _project: any?, at: any?)
 	local line = if type(at) == "table" then at.line elseif type(at) == "number" then at else nil
 	note(`open_file:{if type(session) == "table" then session.id else session}:{path}{if line then `@{line}` else ""}`)
@@ -3619,6 +3632,8 @@ ui.command {
 -- The shell, as small as can hold the page: the route's page, and the
 -- composer over it.
 local test_fan = ui.state("test_fan", false)
+local test_thread_row = ui.state("test_thread_row", false)
+local thread_row_tasks = ui.state("test_thread_row_tasks", {} :: { any })
 -- Agent pages (ds/html_card) without a host: a view is a box that hears what a test posts (`page_post`).
 do
 	local html_api = require("@ds/html_api") :: any
@@ -3975,6 +3990,19 @@ return ui.overlay {
 			tiles = function(): { any }
 				return require("@app/screens/chat/pills").fan_of("s2", { { key = "row", asking = false, count = 2 } }) or {}
 			end,
+		},
+	}),
+	ui.show(function(): boolean
+		return test_thread_row:get()
+	end, ui.div {
+		absolute = true,
+		left = 20,
+		top = 420,
+		w = 640,
+		require("@app/screens/chat/pills").Row {
+			id = "composer-pills-thread",
+			bind = require("@app/screens/chat/pills").window_bind(),
+			tasks = thread_row_tasks,
 		},
 	}),
 	-- In the title bar's strip, what a drag may come from: the files pane's

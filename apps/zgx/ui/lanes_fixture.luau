@@ -125,6 +125,10 @@ stub_sessions.archive = function(id: string): any
 	note(`archive:{id}`)
 	return settled(true, nil)
 end
+stub_sessions.settle = function(id: string, on: boolean): any
+	note(`settle:{id}:{on}`)
+	return settled(true, nil)
+end
 stub_sessions.link = function(id: string): any
 	note(`link:{id}`)
 	return settled(true, `https://zeron.sh/c/{id}`)
@@ -459,6 +463,42 @@ ui.command { id = "open_delegate", title = "Open a delegated child", run = funct
 	publish()
 	lanes.open_child("chat-1", "dg-1")
 end }
+do
+	local Threads = require("@app/screens/chat/threads")
+	Threads.host = {
+		follow = function(chats: { string })
+			note(`follow:{table.concat(chats, "+")}`)
+		end,
+		call = function(name: string, args: any): any
+			note(`{name}:{args.step or ""}:{args.state or ""}`)
+			return settled(true, nil)
+		end,
+	}
+	local published = ui.shared("chat.threads", {} :: any)
+	local function owned(id: string, status: string, delegation: string): any
+		return { id = id, parent = "chat-1", title = id, kind = "agent", status = status, delegation = delegation, delegated_by = "chat-1", harness = "codex", mark = "openai", agent = "openai", device = "d", updated = NOW, created = NOW }
+	end
+	ui.command { id = "threads_seed", title = "chat-1 owns threads in every group", run = function()
+		for _, c in { owned("dg-review", "idle", "completed"), owned("dg-ask", "input", "running"), owned("dg-fail", "failed", "failed"), owned("dg-run", "working", "running"), owned("dg-done", "idle", "completed") } do
+			table.insert(children, c)
+		end
+		publish()
+		published:set({ ["chat-1"] = { plan = { overview = "Four changes", pending = false, order = { "s1", "s2", "s5", "s6" }, progress = { done = 0, total = 3 } }, rows = {
+			{ key = "step:s1", kind = "owned", read_only = false, chat = "dg-review", step = "s1", number = 1, title = "Add CSV export to orders", state = "readyForReview", line = "PR is ready for review", mark = "claude", model = "sonnet", updated = NOW - 2400 },
+			{ key = "owned:dg-ask", kind = "owned", read_only = false, chat = "dg-ask", step = "s2", number = 2, title = "Add rate limiting to checkout", state = "waitingOnYou", line = "Where should the rate limiter keep its counts?", mark = "claude", updated = NOW - 780 },
+			{ key = "owned:dg-fail", kind = "owned", read_only = false, chat = "dg-fail", title = "Fix flaky cart total test", state = "failed", line = "The suite would not start", mark = "openai", updated = NOW - 660 },
+			{ key = "owned:dg-run", kind = "owned", read_only = false, chat = "dg-run", title = "Upgrade the date library", state = "working", line = "Update 23 call sites", mark = "openai", model = "gpt-6.1", updated = NOW - 900 },
+			{ key = "step:s5", kind = "step", read_only = false, step = "s5", number = 5, title = "Write the release notes", state = "planned", line = "After the four changes land" },
+			{ key = "owned:dg-done", kind = "owned", read_only = false, chat = "dg-done", title = "Docs refresh", state = "done", updated = NOW - 5000 },
+			{ key = "step:s6", kind = "step", read_only = false, step = "s6", number = 6, title = "An old idea", state = "skipped" },
+			{ key = "subagent:chat-1--sub--1", kind = "subagent", read_only = true, title = "scan the repo", state = "working", updated = NOW - 60 },
+			{ key = "peer:peer-1", kind = "peer", read_only = true, chat = "peer-1", title = "A peer thread", state = "readyForReview", updated = NOW - 120 },
+		} } })
+	end }
+	ui.command { id = "threads_open", title = "Open chat-1's Threads tab", run = function()
+		Threads.open("chat-1")
+	end }
+end
 ui.command { id = "open_late", title = "Open a child not yet listed", run = function()
 	lanes.open_child("chat-1", "late-1")
 end }

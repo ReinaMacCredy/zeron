@@ -1363,7 +1363,9 @@
       "approve": "批准",
       "fan": "{n, plural, other {# 个代理}}",
       "fan_asking": "{n, plural, other {# 个代理}}，{k} 个提问中",
-      "answer_failed": "回答失败：{err}"
+      "answer_failed": "回答失败：{err}",
+      "working_count": "{n} 个进行中",
+      "approve_plan": "批准计划"
     },
     "profiles": {
       "title": "配置",
@@ -3926,7 +3928,8 @@
       "hide_details": "隐藏会话详情",
       "show_details": "显示会话详情",
       "panel": "面板",
-      "panel_tooltip": "面板  {key}"
+      "panel_tooltip": "面板  {key}",
+      "threads": "线程"
     },
     "page": {
       "plugin": "插件",
@@ -4784,6 +4787,34 @@
       "wait_reply": "请等待回复完成。",
       "previous_provider": "这条回复来自之前的提供方：请从切换之后的回复分叉。",
       "cannot": "{agent} 无法分叉或回退会话。"
+    },
+    "threads": {
+      "count": "{n} 个线程",
+      "empty": "还没有线程。在这个聊天里分派工作，每一项都会成为一个线程。",
+      "back": "返回线程列表",
+      "waiting": "等你处理：{line}",
+      "read_only": "只读",
+      "subagent": "子代理",
+      "peer": "同级线程",
+      "skipped": "已跳过",
+      "cancelled": "已取消",
+      "more": "{title} 的更多操作",
+      "failed": "无法更新线程：{err}",
+      "group": {
+        "review": "待审阅",
+        "waiting": "等你处理",
+        "working": "进行中",
+        "planned": "已计划",
+        "done": "已完成"
+      },
+      "menu": {
+        "open": "打开线程",
+        "stop": "停止",
+        "done": "标记为完成",
+        "skip": "跳过",
+        "reopen": "重新打开",
+        "retry": "重新运行"
+      }
     }
   },
   "sidecar": {
@@ -4848,7 +4879,8 @@
       "close_others": "关闭其他标签页",
       "close_left": "关闭左侧标签页",
       "close_right": "关闭右侧标签页",
-      "unsaved": "未保存的更改"
+      "unsaved": "未保存的更改",
+      "threads": "线程"
     },
     "strip": {
       "label": "面板标签页",
@@ -5847,7 +5879,12 @@
       "tasks": "任务",
       "what_tasks": "任务",
       "not_image": "{name} 不是图片。"
-    }
+    },
+    "needs": {
+      "step_asks": "第 {n} 步在等你",
+      "step_failed": "第 {n} 步失败"
+    },
+    "progress": "{done}/{total}"
   },
   "inbox": {
     "title": "收件箱",

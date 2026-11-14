@@ -65,7 +65,7 @@ end
 function M.visible(here: string?): { any }
 	local out: { any } = {}
 	for _, item in list:get() do
-		if item.chat ~= here then
+		if item.chat ~= here or item.kind == "plan_approval" then
 			table.insert(out, item)
 		end
 	end
@@ -473,11 +473,20 @@ function M.Pill(props: { open: any, width: () -> number, elsewhere_of: () -> str
 		on_click = function()
 			props.open:set(not props.open:peek())
 		end,
-		ui.div { mr = ui.raw(4, "background.rs pill_leading"), question_glyph() },
+		ui.div { mr = ui.raw(4, "background.rs pill_leading"), color = "$warning", Icon { name = "clock-circle", size = 14 } },
 		ui.text { function(): string
 			return tostring(#items:get())
-		end, id = "pills-waiting-count", weight = "$font.weight.semibold", color = "$accent", tabular = true, wrap = false },
-		ui.text { locale.t("ds.pills.waiting"), wrap = false },
+		end, id = "pills-waiting-count", weight = "$font.weight.semibold", color = "$warning", tabular = true, wrap = false },
+		ui.text { locale.t("ds.pills.waiting"), color = "$warning", wrap = false },
+		ui.show(function(): boolean
+			local here = props.elsewhere_of()
+			for _, it in items:get() do
+				if it.kind == "plan_approval" and it.chat == here then
+					return true
+				end
+			end
+			return false
+		end, ui.text { locale.t("ds.pills.approve_plan"), id = "pills-waiting-plan-here", ml = ui.raw(4, "the mockup's waiting pill"), wrap = false }),
 	}
 	return ui.presence(function(): string
 		return if #items:get() > 0 then "waiting" else ""

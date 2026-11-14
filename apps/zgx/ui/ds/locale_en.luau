@@ -1123,6 +1123,8 @@ return {
 	["ds.pills.fan"] = "{n, plural, one {# agent} other {# agents}}",
 	["ds.pills.fan_asking"] = "{n, plural, one {# agent} other {# agents}}, {k} asking",
 	["ds.pills.answer_failed"] = "Answer failed: {err}",
+	["ds.pills.working_count"] = "{n} Working",
+	["ds.pills.approve_plan"] = "Approve the plan",
 	["ds.profiles.title"] = "Profiles",
 	["ds.profiles.search"] = "Search profiles…",
 	["ds.profiles.change"] = "{name} · Change profile",

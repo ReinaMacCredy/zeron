@@ -1363,7 +1363,9 @@
       "approve": "Approve",
       "fan": "{n, plural, one {# agent} other {# agents}}",
       "fan_asking": "{n, plural, one {# agent} other {# agents}}, {k} asking",
-      "answer_failed": "Answer failed: {err}"
+      "answer_failed": "Answer failed: {err}",
+      "working_count": "{n} Working",
+      "approve_plan": "Approve the plan"
     },
     "profiles": {
       "title": "Profiles",
@@ -3926,7 +3928,8 @@
       "hide_details": "Hide session details",
       "show_details": "Show session details",
       "panel": "Panel",
-      "panel_tooltip": "Panel  {key}"
+      "panel_tooltip": "Panel  {key}",
+      "threads": "Threads"
     },
     "page": {
       "plugin": "Plugin",
@@ -4784,6 +4787,34 @@
       "wait_reply": "Wait for the reply to finish.",
       "previous_provider": "That reply came from a previous provider: fork from a reply after the switch.",
       "cannot": "{agent} cannot fork or rewind a session."
+    },
+    "threads": {
+      "count": "{n, plural, one {# thread} other {# threads}}",
+      "empty": "No threads yet. Hand work out in this chat and each piece becomes a thread.",
+      "back": "Back to threads",
+      "waiting": "Waiting on you: {line}",
+      "read_only": "read-only",
+      "subagent": "Sub-agent",
+      "peer": "Peer",
+      "skipped": "Skipped",
+      "cancelled": "Cancelled",
+      "more": "More for {title}",
+      "failed": "Couldn't update the thread: {err}",
+      "group": {
+        "review": "Ready for review",
+        "waiting": "Waiting on you",
+        "working": "Working",
+        "planned": "Planned",
+        "done": "Done"
+      },
+      "menu": {
+        "open": "Open thread",
+        "stop": "Stop",
+        "done": "Mark done",
+        "skip": "Skip",
+        "reopen": "Reopen",
+        "retry": "Run again"
+      }
     }
   },
   "sidecar": {
@@ -4848,7 +4879,8 @@
       "close_others": "Close Other Tabs",
       "close_left": "Close Tabs to the Left",
       "close_right": "Close Tabs to the Right",
-      "unsaved": "Unsaved changes"
+      "unsaved": "Unsaved changes",
+      "threads": "Threads"
     },
     "strip": {
       "label": "Panel tabs",
@@ -5847,7 +5879,12 @@
       "tasks": "Tasks",
       "what_tasks": "tasks",
       "not_image": "{name} is not an image."
-    }
+    },
+    "needs": {
+      "step_asks": "Step {n} asks you",
+      "step_failed": "Step {n} failed"
+    },
+    "progress": "{done}/{total}"
   },
   "inbox": {
     "title": "Inbox",

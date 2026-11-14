@@ -159,6 +159,29 @@ return function(props: Props): Node
 				),
 			}
 		),
+		ui.show(function(): boolean
+			return route.chat:get().name == "session" and boundary.load("@app/screens/chat/threads") ~= nil
+		end, ds.IconButton {
+			id = "titlebar-threads",
+			label = ui.t("shell.title_bar.threads"),
+			tooltip_side = "bottom",
+			w = size,
+			h = size,
+			tone = "bar",
+			lit = function(): boolean
+				local threads: any = boundary.load("@app/screens/chat/threads")
+				local s = route.session:get()
+				return threads ~= nil and s ~= nil and threads.shown(s.id)
+			end,
+			on_click = function()
+				local threads: any = boundary.load("@app/screens/chat/threads")
+				local s = route.session:peek()
+				if threads and s then
+					threads.toggle(s.id)
+				end
+			end,
+			ds.Icon { name = "chat-round-line", size = 16 },
+		}),
 		ui.show(live_pill.shown, live_pill.Button {}),
 		ui.show(updates.shown, updates.Button {}),
 		ui.show(

@@ -738,7 +738,9 @@ local function Linked(t: store.Task): Node
 			return if l then l.title else locale.s("tasks.chat_deleted")
 		end, literal = true, weight = "$font.weight.semibold", truncate = true },
 		if c then ui.text { id = "task-card-status", function(): string
-			return store.linked_word(now().chat)
+			local st = now()
+			local progress = store.progress_word(st)
+			return if progress then `{store.state_word(st)} · {progress}` else store.state_word(st)
 		end, color = function(): string
 			return store.TONES[now().column]
 		end, text_size = ui.raw(12, "gpui") } else nil,

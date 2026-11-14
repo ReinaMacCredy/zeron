@@ -336,10 +336,13 @@ test("a mission's state follows its plan: planning is Working, a working step is
 	app:frames(10)
 	expect(app:has("#tasks-column-working >> #task-kanban-t6")).to_be(true)
 	expect(read()).to_be("working||1/2")
+	expect(app:text("#task-kanban-progress-t6")).to_be("1/2")
 	app:command("fixture.mission_plan_ready")
 	app:frames(10)
 	expect(app:has("#tasks-column-needs >> #task-kanban-t6")).to_be(true)
 	expect(read()).to_be("needs|plan_ready|0/1")
+	expect(app:tree("#task-kanban-t6")).to_contain("Plan ready")
+	expect(app:text("#task-kanban-progress-t6")).to_be("0/1")
 end)
 
 test("a title that holds mentions shows their words, not their links", function()

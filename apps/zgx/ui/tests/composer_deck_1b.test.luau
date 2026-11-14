@@ -83,7 +83,7 @@ test("its tabs are Queue and Plan alone; agents and shells stay on the pill row"
 	expect(app:has('role:button "Stop npm run dev"')).to_be(false)
 	-- What runs is the pill row's.
 	expect(app:has("#pills-shells-pill")).to_be(true)
-	expect(app:has("#pills-agents")).to_be(true)
+	expect(app:has("#pills-threads")).to_be(true)
 	app:click('role:tab "Open Plan"')
 	app:frames(30)
 	expect(app:has('~"Step 4"')).to_be(true)
@@ -313,7 +313,7 @@ local function over(app: any, a: string, b: string): boolean
 end
 
 test("at a narrow composer the pills, the side chat's tab, the folded pill and Jump to latest never meet, and the conversation's end clears the pill row", function()
-	local AGENTS, SHELLS, TAB, JUMP = "#pills-agents", "#pills-shells-pill", "#composer-side-chat", 'role:button "New reply"'
+	local AGENTS, SHELLS, TAB, JUMP = "#pills-threads", "#pills-shells-pill", "#composer-side-chat", 'role:button "New reply"'
 	for _, w in { 400, 460, 480, 600 } do
 		local app = busy(w)
 		expect(apart(app, AGENTS, SHELLS)).to_be(true)

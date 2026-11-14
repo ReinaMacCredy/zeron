@@ -234,7 +234,7 @@ function M.project_name(id: string?): string?
 end
 
 -- A task's one state, as the host reads it through proto `rollup`: "todo", "working", "needs" or "done", the linked chat (nil if none or gone) and why it needs you.
-export type State = { column: string, chat: any, reason: string?, gone: boolean }
+export type State = { column: string, chat: any, reason: string?, step: number?, progress: { done: number, total: number }?, gone: boolean }
 function M.state(t: Task): State
 	local c = if t.chat then M.chats:get()[t.chat] else nil
 	local column = t.column or "todo"
@@ -243,9 +243,9 @@ function M.state(t: Task): State
 	end
 	local gone = t.chat ~= nil and c == nil
 	if column == "needs" then
-		return { column = "needs", chat = c, reason = t.needs, gone = gone }
+		return { column = "needs", chat = c, reason = t.needs, step = t.needs_step, progress = t.progress, gone = gone }
 	elseif column == "working" then
-		return { column = "working", chat = c, gone = false }
+		return { column = "working", chat = c, progress = t.progress, gone = false }
 	end
 	return { column = "todo", chat = nil, gone = gone }
 end
@@ -264,6 +264,30 @@ function M.linked_word(c: any): string
 		return locale.s("tasks.linked.failed")
 	end
 	return locale.s("tasks.linked.ready")
+end
+
+local REASONS: { [string]: string } = {
+	asks = "tasks.linked.asks",
+	failed = "tasks.linked.failed",
+	plan_ready = "ds.status.plan",
+	step_asks = "tasks.needs.step_asks",
+	step_failed = "tasks.needs.step_failed",
+}
+
+function M.state_word(s: State): string
+	local key = if s.column == "needs" and s.reason then REASONS[s.reason] else nil
+	if key then
+		return locale.s(key, { n = s.step or 0 })
+	end
+	return M.linked_word(s.chat)
+end
+
+function M.progress_word(s: State): string?
+	local p = s.progress
+	if not p or (p.total or 0) <= 0 then
+		return nil
+	end
+	return locale.s("tasks.progress", { done = p.done or 0, total = p.total })
 end
 
 -- (Local time, which a test swaps for a zone east or west of UTC.)

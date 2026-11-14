@@ -8,6 +8,7 @@ local function opened(): any
 	local app = mount("chat_fixture.luau")
 	app:resize(1100, 800)
 	app:command("go_s2")
+	app:set_state("test_thread_row", true)
 	app:frames(30)
 	return app
 end
@@ -451,6 +452,39 @@ test("a fan's roster closes as the chat moves, and doesn't come back with it", f
 	pop(app, 30)
 	gone(app)
 	expect(app:has("#pills-roster")).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("the main composer counts its chat's Working threads in one pill that opens the Threads tab, and keeps no roster", function()
+	local app = opened()
+	app:set_state("test_subs", { sub("a", "running") })
+	app:set_state("test_threads", { s2 = { rows = {
+		{ key = "owned:k1", kind = "owned", chat = "k1", title = "One", state = "working" },
+		{ key = "owned:k2", kind = "owned", chat = "k2", title = "Two", state = "working" },
+		{ key = "owned:k3", kind = "owned", chat = "k3", title = "Three", state = "readyForReview" },
+	} } })
+	pop(app)
+	expect(app:text("#composer-pills >> #pills-threads-words")).to_be("2 Working")
+	expect(app:has("#composer-pills >> #pills-agents")).to_be(false)
+	expect(app:has("#composer-pills-thread >> #pills-agents")).to_be(true)
+	app:click("#composer-pills >> #pills-threads")
+	pop(app)
+	expect(app:state("calls")).to_contain("threads_open:s2:")
+	expect(app:has("#pills-roster")).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("a plan waiting on the chat shown is in its own Waiting pill, and Approve answers it", function()
+	local app = opened()
+	app:set_state("test_waiting", { { key = "s2:plan", chat = "s2", request = "plan", title = "Short chat", kind = "plan_approval", secret = false, steps = { "One", "Two" } } })
+	pop(app)
+	expect(app:text("#pills-waiting-count")).to_be("1")
+	expect(app:text("#pills-waiting-plan-here")).to_be("Approve the plan")
+	app:click("#pills-waiting")
+	pop(app)
+	app:click("#pills-waiting-approve")
+	pop(app)
+	expect(app:state("calls")).to_contain("waiting_answer:s2:plan:once")
 	expect(app:error()).to_be(nil)
 end)
 

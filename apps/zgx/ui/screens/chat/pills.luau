@@ -13,6 +13,7 @@ local store = require("@app/screens/chat/store")
 local lanes = require("@app/screens/chat/lanes")
 local Roster = require("@app/screens/chat/roster")
 local Waiting = require("@app/screens/chat/waiting")
+local Threads = require("@app/screens/chat/threads")
 local PicksPill = require("@app/screens/chat/picks_pill")
 local typing = require("@app/screens/chat/typing")
 local glass = require("@ds/glass")
@@ -220,7 +221,7 @@ local function open_row(r: any)
 	if not id then
 		return
 	end
-	if r.child then
+	if r.child or r.delegated then
 		lanes.open(id, { kind = "side_chat", id = r.doc, title = r.title })
 	else
 		lanes.open_subagent(id, { ref = r.doc, title = r.title, status = if r.frozen then "done" else "running" })
@@ -1062,6 +1063,7 @@ end)
 M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?, picks: (() -> string?)?, id: string?, keys: (() -> ())?, on_extent: ((w: number) -> ())? }): Node
 	local bind = props.bind
 	local keys = props.keys or typing.take
+	local main = props.waiting == true
 	local runs = M.runs_of(bind)
 	watch_docs(runs)
 	local shells = ui.computed(function(): { any }
@@ -1073,8 +1075,11 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 		end
 		return out
 	end)
+	local function threads_working(): number
+		return Threads.working(bind.id())
+	end
 	local clock = P.clock(function(): boolean
-		return Roster.working(runs:get().listed) > 0 or #shells:get() > 0
+		return (if main then threads_working() > 0 else Roster.working(runs:get().listed) > 0) or #shells:get() > 0
 	end)
 	local roster_open = ui.use_state(false)
 	local shells_open = ui.use_state(false)
@@ -1239,6 +1244,28 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 			color = "$success",
 		}),
 	}
+	local threads_pill = P.Pill {
+		id = "pills-threads",
+		class = "pills-pill",
+		label = function(): string
+			return locale.s("ds.pills.working_count", { n = threads_working() })
+		end,
+		active = function(): boolean
+			return Threads.shown(bind.id())
+		end,
+		on_press = press_in,
+		on_click = function()
+			Threads.open(bind.id())
+		end,
+		P.Dots { frame = clock.frame },
+		ui.text {
+			function(): string
+				return locale.s("ds.pills.working_count", { n = threads_working() })
+			end,
+			id = "pills-threads-words",
+			wrap = false,
+		},
+	}
 	local shells_pill = P.Pill {
 		id = "pills-shells-pill",
 		class = "pills-pill",
@@ -1315,24 +1342,17 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 		end,
 		ref = row_ref,
 		pill_slot(function(): string
+			if main then
+				return if threads_working() > 0 then "threads" else ""
+			end
 			return if working() then "agents" else ""
 		end, function(): Node
-			return agents_pill
+			return if main then threads_pill else agents_pill
 		end, true),
 		pill_slot(function(): string
 			return if #shells:get() > 0 then "shells" else ""
 		end, function(): Node
 			return shells_pill
-		end),
-		card(roster_open, "pills-roster-panel", 0, { right = 0 }, function(): Node
-			return M.RosterBody {
-				bind = bind,
-				clock = clock,
-				on_close = function()
-					roster_open:set(false)
-					ui.after(0, keys)
-				end,
-			}
 		end),
 		card(shells_open, "pills-shells-panel", ui.raw(4, "the shells menu's inset"), {
 			w = function(): number
@@ -1342,6 +1362,18 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 			return ShellsBody { bind = bind, tasks = shells, detail = shell_detail, clock = clock }
 		end),
 	}
+	if not main then
+		table.insert(children, card(roster_open, "pills-roster-panel", 0, { right = 0 }, function(): Node
+			return M.RosterBody {
+				bind = bind,
+				clock = clock,
+				on_close = function()
+					roster_open:set(false)
+					ui.after(0, keys)
+				end,
+			}
+		end))
+	end
 	if props.picks then
 		table.insert(children, PicksPill.Pill {
 			open = picks_open,

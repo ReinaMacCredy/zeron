@@ -152,6 +152,18 @@ do
 	end
 end
 
+local Threads: any = nil
+do
+	local ok, found = pcall(function(): any
+		return (require :: any)("@app/screens/chat/threads")
+	end)
+	if ok then
+		Threads = found
+	else
+		print(`zeron-zgx: the panel's threads didn't load: {found}`)
+	end
+end
+
 -- A browser tab's view (screens/panel/browser), loaded the same way.
 type BrowserModule = {
 	title: (tab: state.Tab) -> string?,
@@ -447,6 +459,9 @@ function M.find_in_lane(): boolean
 	end
 	local s = state.of(k)
 	local tab = if s.active then state.find(k, s.active) else nil
+	if tab and tab.kind == "threads" and Threads then
+		tab = Threads.lane_of(tab)
+	end
 	if not tab or (tab.kind ~= "side_chat" and tab.kind ~= "subagent") then
 		return false
 	end
@@ -462,6 +477,9 @@ function M.model_in_lane(): boolean
 	end
 	local s = state.of(k)
 	local tab = if s.active then state.find(k, s.active) else nil
+	if tab and tab.kind == "threads" and Threads then
+		tab = Threads.lane_of(tab)
+	end
 	if not tab or tab.kind ~= "side_chat" then
 		return false
 	end
@@ -681,6 +699,53 @@ function M.open_lane_tab(session: string, lane: { kind: string, id: string, titl
 		set_files(true)
 	end
 end
+function M.open_threads(session: string, thread: string?)
+	local k = state.key(session, nil)
+	if not k then
+		return
+	end
+	local found: string? = nil
+	for _, t in state.of(k).tabs do
+		if t.kind == "threads" then
+			found = t.id
+		end
+	end
+	if found then
+		if thread then
+			state.patch(k, found, { thread = thread })
+		end
+		state.activate(k, found)
+	else
+		found = state.open(k, "threads", { chat = session, thread = thread })
+		state.move(k, found :: string, 1)
+	end
+	set_panel(true)
+end
+
+local function threads_shown(session: string): boolean
+	local k = state.key(session, nil)
+	local files = if shell_view then shell_view.files else nil
+	if not k or not files or files:get() ~= true then
+		return false
+	end
+	local s = state.of(k)
+	local tab = if s.active then state.find(k, s.active) else nil
+	return tab ~= nil and tab.kind == "threads"
+end
+
+function M.toggle_threads(session: string)
+	if threads_shown(session) then
+		set_panel(false)
+	else
+		M.open_threads(session)
+	end
+end
+
+if Threads then
+	Threads.opener = M.open_threads
+	Threads.toggler = M.toggle_threads
+	Threads.showing = threads_shown
+end
 -- A device for a chat's panel: a Device tab for it, the panel opened if that
 -- chat shows. `manual` (the floating preview's Open in right panel) opens one
 -- closed before and turns to one that shows it, as gpui's `open_device_tab`.
@@ -770,6 +835,7 @@ if Device then
 end
 if lanes_card then
 	lanes_card.opener = M.open_lane_tab
+	lanes_card.threads_opener = if Threads then M.open_threads else nil
 	lanes_card.hide_side = function(session: string): boolean
 		local k = state.key(session, nil)
 		if not k or not panel_open() then
@@ -805,6 +871,8 @@ if lanes_card then
 			for _, t in state.of(k).tabs do
 				if (t.kind == "side_chat" or t.kind == "subagent") and t.chat then
 					out[t.chat] = true
+				elseif t.kind == "threads" and t.thread then
+					out[t.thread] = true
 				end
 			end
 		end
@@ -851,6 +919,9 @@ local function title_of(tab: Tab): (string, boolean)
 	end
 	if tab.kind == "plugin" then
 		return tab.title or ui.t("panel.tab.plugin"):get(), false
+	end
+	if tab.kind == "threads" then
+		return ui.t("panel.tab.threads"):get(), false
 	end
 	if tab.kind == "device" then
 		return if Device then Device.title(tab) else ui.t("device.tab"):get(), false
@@ -940,6 +1011,8 @@ M.Panel = ui.component(function(props: Props): Node
 		elseif tab and (tab.kind == "side_chat" or tab.kind == "subagent") and lanes_card then
 			-- Its chat let go (a reload never does this).
 			lanes_card.watch(tab.id, nil)
+		elseif tab.kind == "threads" and Threads then
+			Threads.release(tab)
 		elseif tab.kind == "files" then
 			Files.close_tab(tab.id)
 		end
@@ -1131,6 +1204,7 @@ M.Panel = ui.component(function(props: Props): Node
 					return ui.image { src = path, w = 14, h = 14, fit = "contain", rounded = "$radius.sm" }
 				end)
 			elseif tab.kind == "plugin" then Icon { name = (tab.icon or "widget") :: any, size = 14 }
+			elseif tab.kind == "threads" then Icon { name = "chat-round-line", size = 14 }
 			elseif tab.kind == "device" then ui.presence(function(): string
 					local t = state.find(key:peek() or "", id) or tab
 					return if Device then Device.icon(t) else "smartphone"
@@ -1388,6 +1462,9 @@ M.Panel = ui.component(function(props: Props): Node
 							return "close"
 						elseif dirty() then
 							return "dirty"
+						elseif tab.kind == "threads" and Threads then
+							local n = #Threads.rows(tab.chat)
+							return if n > 0 then `count:{n}` else ""
 						end
 						return (if tab.kind == "side_chat" and Lanes and Lanes.state then Lanes.state(tab) else nil) or ""
 					end, function(which: string): Node
@@ -1408,6 +1485,16 @@ M.Panel = ui.component(function(props: Props): Node
 									close(id)
 								end,
 								Icon { name = "close", size = 12 },
+							}
+						elseif string.sub(which, 1, 6) == "count:" then
+							return ui.text {
+								string.sub(which, 7),
+								id = `panel-tab-{id}-count`,
+								literal = true,
+								text_size = "$font.size.xs",
+								color = "$text.tertiary",
+								tabular = true,
+								wrap = false,
 							}
 						elseif which == "dirty" then
 							return ui.div {
@@ -1711,6 +1798,9 @@ M.Panel = ui.component(function(props: Props): Node
 	local function body(k: string, tab: Tab, shown: () -> boolean): Node
 		if (tab.kind == "side_chat" or tab.kind == "subagent") and Lanes then
 			return Lanes.Tab { tab = tab, panel_key = k }
+		end
+		if tab.kind == "threads" and Threads then
+			return Threads.Tab { tab = tab, panel_key = k }
 		end
 		if tab.kind == "device" then
 			-- (The Device built-in off, the tab says so: Settings → Plugins brings it back.)

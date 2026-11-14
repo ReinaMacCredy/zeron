@@ -256,7 +256,17 @@ M.hide_side = nil :: ((session: string) -> boolean)?
 -- would pick it: the keyboard left in the panel, or the panel expanded.
 M.typing_takes = nil :: ((session: string) -> boolean)?
 
+M.threads_opener = nil :: ((session: string, id: string) -> ())?
+
 function M.open(session: string, lane: { kind: string, id: string, title: string, data: any? })
+	local to_threads = M.threads_opener
+	if to_threads and lane.kind == "side_chat" then
+		local c = M.child_row(lane.id)
+		if c and c.delegation ~= nil then
+			to_threads(session, lane.id)
+			return
+		end
+	end
 	local opener = M.opener
 	if opener then
 		opener(session, lane)

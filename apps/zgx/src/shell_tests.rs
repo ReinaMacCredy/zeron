@@ -89,6 +89,7 @@ const BAR: &[&str] = &[
     "role:button \"Hide session details\"",
     "role:button \"Collapse panel\"",
     "#live-pill",
+    "#titlebar-threads",
     "\"Resize sidebar\"",
     "\"Resize files\"",
 ];
