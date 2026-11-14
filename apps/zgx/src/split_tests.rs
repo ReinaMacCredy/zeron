@@ -310,37 +310,68 @@ fn resizing_split_panes_costs_each_about_what_one_chat_does() {
     assert!(steps.iter().all(|s| (*s as f64) <= pane * 1.25), "each pane more costs about one pane: {calls:?}");
 }
 
-/// A chat carried from the sidebar: over a pane's edge it's a split (Zeron's
-/// cards showing), over the pane's middle or its composer
-/// it's mentioned ("Drop to mention" showing); each drop does what showed.
+/// A chat carried from the sidebar over a chat alone, as gpui's: either half
+/// of the page splits (its card lit), the composer mentions it; each drop
+/// does what showed.
 #[test]
-fn a_sidebar_row_splits_at_an_edge_and_attaches_in_the_middle_or_the_composer() {
+fn a_sidebar_row_splits_on_either_half_and_attaches_at_the_composer() {
     let mut app = mount(&scratch("row-targets"));
     open(&mut app, "Fix the build");
     let page = app.bounds("shell-page");
-    // The middle: attach.
-    let from = row_at(&mut app, "Write the docs");
-    carry(&mut app, from, middle(page), |app| assert_eq!(showing(app), (false, true), "the middle shows Drop to mention"));
-    assert_eq!(panes(&mut app), 0, "the middle doesn't split");
-    assert!(mentioned(&mut app, "Write the docs"), "the middle attaches:\n{}", app.tree());
-    // The composer, low in the page between the side bands: attach.
     let composer = middle(app.bounds("#chat-composer"));
     let from = row_at(&mut app, "Ship the release");
     carry(&mut app, from, composer, |app| assert_eq!(showing(app), (false, true), "the composer shows Drop to mention"));
     assert_eq!(panes(&mut app), 0, "the composer doesn't split");
     assert!(mentioned(&mut app, "Ship the release"), "the composer attaches");
-    // The left edge: a split, shown as Zeron shows it, its left card lit and no half.
     let from = row_at(&mut app, "Tidy the tests");
-    carry(&mut app, from, (page.x + 20., page.y + page.height / 2.), |app| {
-        assert_eq!(showing(app), (false, false), "the edge shows Zeron's cards alone");
+    carry(&mut app, from, (page.x + page.width * 0.3, page.y + page.height * 0.4), |app| {
+        assert_eq!(showing(app), (false, false), "the left half shows Zeron's cards alone");
         app.frames(20);
         let (left, right) = (app.bounds("#split-card-a1-left"), app.bounds("#split-card-a1-right"));
         assert!(left.width > right.width, "the left card is the one lit: {left:?} {right:?}");
     });
-    assert_eq!(panes(&mut app), 2, "the edge splits");
+    assert_eq!(panes(&mut app), 2, "the left half splits");
     let right = app.bounds("shell-page");
     assert!(near(right.x, page.x), "dropped at the left, it's the left one, focused: {right:?}");
-    assert!(!mentioned(&mut app, "Tidy the tests"), "an edge doesn't attach");
+    assert!(!mentioned(&mut app, "Tidy the tests"), "a half doesn't attach");
+}
+
+/// A tab carried straight out of the strip, before the strip's band shows
+/// to hear it go, still grows the cards and lights the one under it.
+#[test]
+fn a_tab_flicked_out_of_the_strip_lights_its_card_and_splits() {
+    let mut app = mount(&scratch("tab-flick"));
+    open(&mut app, "Tidy the tests");
+    open(&mut app, "Fix the build");
+    let page = app.bounds("shell-page");
+    let from = middle(app.bounds("#session-tab-a3"));
+    carry(&mut app, from, (page.x + 20., page.y + page.height / 2.), |app| {
+        app.frames(20);
+        assert!(app.find("#session-tab-rider").is_none(), "out of the strip");
+        let (left, right) = (app.bounds("#split-card-a1-left"), app.bounds("#split-card-a1-right"));
+        assert!(left.height > page.height * 0.6, "tall once out: {left:?}");
+        assert!(left.width > right.width, "the left card is the one lit: {left:?} {right:?}");
+    });
+    assert_eq!(app.error(), None);
+    assert_eq!(panes(&mut app), 2, "the tab dropped at the left splits");
+}
+
+/// A chat carried over a new chat's page, as gpui's: the cards show, and
+/// either half above the composer opens it.
+#[test]
+fn a_chat_dropped_on_a_new_chat_s_page_opens() {
+    let mut app = mount(&scratch("home-drop"));
+    assert_eq!(route_session(&app), None, "a new chat's page");
+    let page = app.bounds("shell-page");
+    let from = row_at(&mut app, "Tidy the tests");
+    carry(&mut app, from, (page.x + page.width * 0.7, page.y + 60.), |app| {
+        app.frames(20);
+        let (left, right) = (app.bounds("#split-card-home-left"), app.bounds("#split-card-home-right"));
+        assert!(right.width > left.width, "the right card is the one lit: {left:?} {right:?}");
+    });
+    assert_eq!(app.error(), None);
+    assert_eq!(route_session(&app).as_deref(), Some("a3"), "the chat dropped opens");
+    assert_eq!(panes(&mut app), 0, "alone");
 }
 
 /// Where pane `id`'s grip is grabbed: at its top's middle, there once the pointer

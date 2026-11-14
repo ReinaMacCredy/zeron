@@ -829,6 +829,17 @@ local function lifted_card(id: string, at: State<Lift?>, t: State<number>): Node
 	}
 end
 
+local function leave_strip()
+	local d = drag:peek()
+	if not d or d.out then
+		return
+	end
+	local again = table.clone(d)
+	again.out = true
+	drag:set(again)
+	anime.animate(slot_w, { value = 0, duration = motion.DRAG_SLIDE.duration, ease = motion.DRAG_SLIDE.ease })
+end
+
 local function slot_left(at: number): number
 	return PAD + (at - 1) * (tab_w:get() + TAB_GAP)
 end
@@ -918,6 +929,10 @@ local Tab = ui.component(function(props: { chat: string, motion: TabStrip.Motion
 			local a = lift_at:peek()
 			if a then
 				lift_at:set({ x = e.x, y = e.y, gx = e.grab_x, gy = e.grab_y, top = a.top, w = a.w })
+			end
+			-- (Past the strip before its band shows to hear it go.)
+			if e.y > ds.TitleBar.middle() + BAR / 2 + LIFT then
+				leave_strip()
 			end
 		end,
 		on_drag_end = function()
@@ -1165,16 +1180,6 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			splits.move_tab(d.key, list[to])
 		end
 	end
-	local function left_band()
-		local d = drag:peek()
-		if not d or d.out then
-			return
-		end
-		local again = table.clone(d)
-		again.out = true
-		drag:set(again)
-		anime.animate(slot_w, { value = 0, duration = motion.DRAG_SLIDE.duration, ease = motion.DRAG_SLIDE.ease })
-	end
 	-- From the window's left whatever the sidebar is doing, so they stay put as
 	-- it moves. (Only the tabs' own part takes the pointer.)
 	return ui.row {
@@ -1301,7 +1306,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 				return type(payload) == "table" and payload.session_tab ~= nil
 			end,
 			on_drag_over = over_band,
-			on_drag_leave = left_band,
+			on_drag_leave = leave_strip,
 			on_drop = function()
 				landed = true
 			end,

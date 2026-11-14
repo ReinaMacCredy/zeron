@@ -41,6 +41,7 @@ local lanes = require("@app/screens/chat/lanes")
 local LaneTab = require("@app/screens/chat/lane_tab")
 local chat_shared = require("@app/screens/chat/shared")
 local DropOverlay = require("@ds/drop_overlay")
+local composer_surface = require("@ds/composer_surface")
 local Dock = require("@app/screens/chat/dock")
 local control = require("@ds/control")
 local Glass = require("@ds/glass")
@@ -1425,7 +1426,7 @@ return function(props: Props): Node
 		end
 		watched = want
 	end)
-	-- Where a chat dragged over a pane lands. Its edges split: a band a
+	-- Where a chat dragged over a split's pane lands. Its edges split: a band a
 	-- quarter of the pane deep (48 points at least) along each side, the
 	-- sides running from its top (owning its top corners) down to its
 	-- composer, the top and bottom between them, the bottom ending above the
@@ -1442,6 +1443,23 @@ return function(props: Props): Node
 		left = { left = 0, top = 0, w = BAND, min_w = LEAST },
 		right = { right = 0, top = 0, w = BAND, min_w = LEAST },
 	}
+	-- A chat alone, and a new chat's page, as gpui's: its two halves, down to
+	-- the composer.
+	local HALVES: { [string]: { [string]: any } } = {
+		left = { left = 0, top = 0, right = "50%" },
+		right = { left = "50%", top = 0, right = 0 },
+	}
+	local HOME = "home"
+	-- (A new chat's: above its composer, 8 points of slack over it, as gpui's.)
+	local function home_room(): number
+		local _ = composer_surface.moved:get()
+		local foot = composer_surface.foot:get()
+		local pill, area = composer_surface.element, split_ref:peek()
+		if not pill or not area or not area.y then
+			return 0
+		end
+		return ui.raw(math.max(0, area.y + (split_ref.height or 0) - (foot - (pill.height or 0)) + 8), "gpui's slack over the new chat's composer")
+	end
 	-- The room a pane's composer takes at its foot: the window's own, measured, over
 	-- the focused one; a pane's own over another.
 	local function composer_room(id: string, extra: number?): () -> number
@@ -1452,16 +1470,21 @@ return function(props: Props): Node
 			return ui.raw(Dock.GAP + h + (extra or 0), "the pane's composer, which attaches")
 		end
 	end
-	local function zone(id: string, side: string): Node
-		local props: { [any]: any } = table.clone(ZONES[side])
+	local function zone(id: string, side: string, alone: boolean): Node
+		local props: { [any]: any } = table.clone(if alone then HALVES[side] else ZONES[side])
 		props.id = `split-zone-{id}-{side}`
 		props.absolute = true
-		if side ~= "top" then
-			props.bottom = composer_room(id)
+		if id == HOME then
+			props.bottom = home_room
+		elseif side ~= "top" then
+			props.bottom = composer_room(id, if alone then 8 else nil)
 		end
 		props.pointer_events = "auto"
 		props.drop_when = function(payload: any): boolean
 			local d = splits.dragged(payload)
+			if id == HOME then
+				return d ~= nil and payload.split_pane == nil
+			end
 			return d ~= nil and d ~= id and splits.can_take(d)
 		end
 		props.on_drag_over = function(_payload: any)
@@ -1481,7 +1504,9 @@ return function(props: Props): Node
 			local d = splits.dragged(payload)
 			over:set(nil)
 			splits.dragging:set(false)
-			if d then
+			if d and id == HOME then
+				route.open_session(d)
+			elseif d then
 				-- (A chat from the sidebar is focused as it lands; a pane moved
 				-- already is, by the press on its grip.)
 				splits.drop(d, id, side, payload.split_pane == nil)
@@ -1803,8 +1828,10 @@ return function(props: Props): Node
 			local o = over:get()
 			return if o and o.id == id then o.side else ""
 		end
+		local home_page = id == HOME
+		local alone = home_page or #members:peek() == 1
 		local function carded(): boolean
-			return #members:get() == 1 or (drag_pane:get() or splits.focused:get()) == id
+			return home_page or #members:get() == 1 or (drag_pane:get() or splits.focused:get()) == id
 		end
 		-- (Zeron's cards alone say where a left or right drop lands, with two panes or fewer.)
 		local preview = ui.show(function(): boolean
@@ -1843,9 +1870,9 @@ return function(props: Props): Node
 			hot = held,
 			inert = function(): boolean
 				local d = splits.carried:get()
-				return d ~= "" and not (d ~= id and splits.can_take(d))
+				return not home_page and d ~= "" and not (d ~= id and splits.can_take(d))
 			end,
-			bottom = composer_room(id, 8),
+			bottom = if home_page then home_room else composer_room(id, 8),
 		}
 		-- (The sides last: over the top's and bottom's ends, they own the
 		-- corners.)
@@ -1853,11 +1880,10 @@ return function(props: Props): Node
 			pointer_events = "none",
 			preview,
 			cards,
-			zone(id, "top"),
-			zone(id, "bottom"),
-			zone(id, "left"),
-			zone(id, "right"),
 		}
+		for _, side in if alone then { "left", "right" } else { "top", "bottom", "left", "right" } do
+			table.insert(item, zone(id, side, alone))
+		end
 		splits.place(item, function(): any
 			return box_of(id)
 		end)
@@ -2000,7 +2026,10 @@ return function(props: Props): Node
 	-- (Each pane's landing, only while a chat is carried. Not a `ui.show` round them:
 	-- its box would lie over the page and keep a drop from the chat under it.)
 	local landing_ids = ui.computed(function(): { string }
-		return if splits.dragging:get() and not expanded() then members:get() else {}
+		if not splits.dragging:get() or expanded() then
+			return {}
+		end
+		return if home() then { HOME } else members:get()
 	end)
 	-- The page's room: the page's card at the focused chat's place, the
 	-- split's panes under it.
