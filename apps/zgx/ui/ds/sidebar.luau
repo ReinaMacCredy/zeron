@@ -65,6 +65,7 @@ local TextField = require("@self/text_field")
 -- chat is being dragged, so the split shows where it can land.
 local split_grouped = ui.shared("split.grouped", {} :: { string })
 local split_dragging = ui.shared("split.dragging", false)
+local edge_held = ui.shared("sidebar.edge_held", false)
 local split_carried = ui.shared("split.carried", "")
 local function in_split(id: string): boolean
 	return table.find(split_grouped:get(), id) ~= nil
@@ -229,6 +230,7 @@ export type Props = {
 	-- Its edge double-clicked, after its width is back to its default: the
 	-- app re-splits what's beside it.
 	on_reset: (() -> ())?,
+	on_fold: ((folded: boolean) -> ())?,
 	selected: State<string?>,
 	pinned: Live<{ Session }>?,
 	card: boolean?,
@@ -319,6 +321,27 @@ local function dark(): boolean
 end
 -- How far it resizes (Zeron's: 242 to 400, 256 by default).
 local MIN_W, MAX_W = 242, 400
+local FOLD_AT, FOLD_BACK, FOLD_SHIFT = 2 / 3, 8, 8
+local function pulled_in(node: Node, on: boolean, fold: any, limit: (() -> number)?, peeking: () -> boolean): Node
+	if not on then
+		return node
+	end
+	local function left(): number
+		if fold.shut:get() then
+			return if peeking() then 1 else 0
+		end
+		local least = if limit then math.min(MIN_W, limit()) else MIN_W
+		return math.clamp(1 + fold.pull:get() / (least * (1 - FOLD_AT)), 0, 1)
+	end
+	return ui.div {
+		h_full = true,
+		opacity = left,
+		x = function(): number
+			return (left() - 1) * FOLD_SHIFT
+		end,
+		node,
+	}
+end
 -- A section's title (Pinned, yours, the groups'): a short row over its
 -- sessions.
 local TITLE = 24
@@ -429,7 +452,7 @@ return ui.component(function(props: Props): Node
 	local resizing = false
 	local dragging = ui.use_state(false)
 	local edge_over = ui.use_state(false)
-	local from_x, from_w = 0, 0
+	local fold = { x = 0, w = 0, kept = 0, pull = ui.use_state(0), shut = ui.use_state(false), settling = nil :: any }
 	-- Its edge's drag: a bounce past its least or most, added to its width.
 	local edge_drag = seam.drag()
 	local easing: any = nil
@@ -447,27 +470,35 @@ return ui.component(function(props: Props): Node
 		local to = target()
 		local folded = collapsed:get()
 		local turned = folded ~= was_folded
+		local showing = base + step:peek() + (if was_folded then 0 else fold.pull:peek())
 		was_folded = folded
+		if turned and resizing and folded ~= fold.shut:peek() then
+			resizing = false
+			dragging:set(false)
+			edge_held:set(false)
+			edge_drag.release()
+		end
 		-- (Asked every time, so the caller's answer follows what moved.)
 		local direct = props.direct ~= nil and props.direct()
 		if to == base then
 			return
 		end
-		if resizing then
-			if easing then
-				easing:cancel()
-				easing = nil
-			end
-			step:set(0)
-			base = to
-		elseif turned or not direct then
-			local showing = base + step:peek()
+		if turned or not (resizing or direct) then
 			base = to
 			if easing then
 				easing:cancel()
 				easing = nil
 			end
-			step:set(showing - to)
+			if folded then
+				if fold.settling then
+					fold.settling:cancel()
+					fold.settling = nil
+				end
+				fold.pull:set(0)
+			else
+				fold.shut:set(false)
+			end
+			step:set(showing - to - fold.pull:peek())
 			local params = motion.column(step:peek(), 0)
 			-- (By number: a callback holding its own clip would keep both for good.)
 			steps += 1
@@ -481,11 +512,11 @@ return ui.component(function(props: Props): Node
 		else
 			base = to
 		end
-		shown_w:set(math.max(base + step:peek() + edge_drag.nudge:peek(), 0))
+		shown_w:set(math.max(base + step:peek() + edge_drag.nudge:peek() + fold.pull:peek(), 0))
 	end)
 	-- (Following the step as it eases, and the edge's bounce.)
 	ui.effect(function()
-		local w = math.max(base + step:get() + edge_drag.nudge:get(), 0)
+		local w = math.max(base + step:get() + edge_drag.nudge:get() + fold.pull:get(), 0)
 		if shown_w:peek() ~= w then
 			shown_w:set(w)
 		end
@@ -6155,7 +6186,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 	if not is_island then
 		local folded_was = collapsed:peek()
 		ui.effect(function()
-			local folded = collapsed:get()
+			local folded = collapsed:get() and not (props.peek ~= nil and props.peek())
 			if folded == folded_was then
 				return
 			end
@@ -6253,7 +6284,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 			cursor = "col_resize",
 			label = locale.t("ds.sidebar.resize"),
 			pointer_events = function()
-				return if collapsed:get() then "none" else "auto"
+				return if collapsed:get() and not dragging:get() then "none" else "auto"
 			end,
 			on_hover = function(inside: boolean)
 				edge_over:set(inside)
@@ -6266,21 +6297,54 @@ fn layer(input:LayerInput)->vec4<f32> {
 					end
 					return
 				end
-				from_x, from_w = e.x, wide:peek()
+				if fold.settling then
+					fold.settling:cancel()
+					fold.settling = nil
+				end
+				fold.kept = wide:peek()
+				fold.x, fold.w = e.x, room_now() + fold.pull:peek()
 				resizing = true
 				dragging:set(true)
+				edge_held:set(true)
 			end,
 			on_pointer_move = function(e)
-				if resizing then
-					local want = from_w + e.x - from_x
-					edge_drag.at(want, MIN_W, if limit then math.min(MAX_W, limit()) else MAX_W)
-					wide:set(math.clamp(want, MIN_W, MAX_W))
+				if not resizing then
+					return
 				end
+				local want = fold.w + e.x - fold.x
+				local most = if limit then math.min(MAX_W, limit()) else MAX_W
+				local on_fold = props.on_fold
+				if not on_fold then
+					edge_drag.at(want, MIN_W, most)
+					wide:set(math.clamp(want, MIN_W, MAX_W))
+					return
+				end
+				local least = math.min(MIN_W, most)
+				local shut = want < least * FOLD_AT + (if fold.shut:peek() then FOLD_BACK else 0)
+				if shut ~= fold.shut:peek() then
+					if shut then
+						wide:set(fold.kept)
+					else
+						fold.pull:set(math.min(want - least, 0))
+					end
+					fold.shut:set(shut)
+					on_fold(shut)
+				end
+				if shut then
+					return
+				end
+				edge_drag.at(math.max(want, least), least, most)
+				fold.pull:set(math.min(want - least, 0))
+				wide:set(math.clamp(want, MIN_W, MAX_W))
 			end,
 			on_release = function()
 				resizing = false
 				dragging:set(false)
+				edge_held:set(false)
 				edge_drag.release()
+				if fold.pull:peek() ~= 0 then
+					fold.settling = anime.animate(fold.pull, motion.column(fold.pull:peek(), 0))
+				end
 			end,
 		}
 	end
@@ -6300,7 +6364,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 		-- Folded away, out of layout and out of reach (no row to tab to),
 		-- its scroll and folds kept for when it opens.
 		hidden = function(): boolean
-			return collapsed:get() and shown_w:get() <= 0 and not peeking()
+			return collapsed:get() and shown_w:get() <= 0 and not peeking() and not dragging:get()
 		end,
 		h_full = true,
 		shrink = 0,
@@ -6326,9 +6390,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 					end
 					return if props.card_bg then props.card_bg() else card_fill()
 				end,
-				ui.column(body),
+				pulled_in(ui.column(body), props.on_fold ~= nil, fold, limit, peeking),
 			}
-			else ui.column(body),
+			else pulled_in(ui.column(body), props.on_fold ~= nil, fold, limit, peeking),
 		-- Under a title bar laid over it, its head is the window's to move it
 		-- by (a double click zooms it), as a title bar is: under its "…" and
 		-- its edge, which keep their presses.
@@ -6443,7 +6507,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 		relative = true,
 		w = card_w,
 		hidden = function(): boolean
-			return collapsed:get() and shown_w:get() <= 0 and not peeking()
+			return collapsed:get() and shown_w:get() <= 0 and not peeking() and not dragging:get()
 		end,
 		h_full = true,
 		shrink = 0,
