@@ -48,6 +48,4 @@ A turn that stopped or failed can be resumed: with an empty composer, the send b
 
 ## The session's … menu
 
-From top to bottom: for a mission thread, **Open mission page** and **Brief**; **Stop Computer Use** while the agent is using apps; **Pin** or **Unpin**; **Session Info**; **Terminal** and **Project Actions** (see [Devices and computer use on iPhone](zeron://docs/mobile-devices)); **Copy Transcript**; **Agents**, **New sidechat**, **Hand off thread** and **Compact Context**; **Archive**.
-
-A thread that belongs to a mission shows a strip at the top with the mission, its step and its progress. Tap it to open the mission's page.
+From top to bottom: **Stop Computer Use** while the agent is using apps; **Pin** or **Unpin**; **Session Info**; **Terminal** and **Project Actions** (see [Devices and computer use on iPhone](zeron://docs/mobile-devices)); **Copy Transcript**; **Agents**, **New sidechat**, **Hand off thread** and **Compact Context**; **Archive**.

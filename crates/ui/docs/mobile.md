@@ -1,6 +1,6 @@
-The Zeron iPhone app lets you follow and steer your sessions, tasks and missions from your phone. The phone is one more device in your synced workspace: it shows the same sessions, sends your messages and answers, starts new sessions and missions, and changes your Macs' settings, but no agent runs on it. Every session runs on one of your computers or servers, which has to be online to act on what you send.
+The Zeron iPhone app lets you follow and steer your sessions and tasks from your phone. The phone is one more device in your synced workspace: it shows the same sessions, sends your messages and answers, starts new sessions, and changes your Macs' settings, but no agent runs on it. Every session runs on one of your computers or servers, which has to be online to act on what you send.
 
-The app has three tabs, **Sessions**, **Tasks** and **Settings**, plus search. It also runs on iPad, where the session list sits in a sidebar next to the open session. The Android app has the same tabs and pages; on an Android tablet, Tasks, missions, pull requests and Git open in the main column beside the session list.
+The app has three tabs, **Sessions**, **Tasks** and **Settings**, plus search. It also runs on iPad, where the session list sits in a sidebar next to the open session. The Android app has the same tabs and pages; on an Android tablet, Tasks, pull requests and Git open in the main column beside the session list.
 
 ## Sign in
 
@@ -29,7 +29,7 @@ Tap **New session**. Describe the task under "What are we building?", then set w
 - **Project**: one of your projects, **No Project…**, or **New Project…**.
 - **Run on**: which of your computers runs it (**Choose host** until you pick one).
 - **Checkout**: **New worktree**, or a **Branch** of the project.
-- **Model** and **Reasoning effort**, and **Start mission** to start a mission instead.
+- **Model** and **Reasoning effort**.
 
 If Zeron cannot tell where to run it, it says **Couldn't start the session**: choose a project or a host.
 
@@ -53,9 +53,9 @@ You can hold the phone to your ear (the screen turns off and Codex plays through
 
 ## More on iPhone
 
-- [The composer on iPhone](zeron://docs/mobile-composer): chips, permissions, context and stats, side chats, hand-offs and missions.
+- [The composer on iPhone](zeron://docs/mobile-composer): chips, permissions, context and stats, side chats and hand-offs.
 - [The transcript on iPhone](zeron://docs/mobile-transcript): Worked for, other agents, fork and rewind, usage limits and session info.
-- [Tasks and missions on iPhone](zeron://docs/mobile-tasks): the Tasks tab, a task's sheet and a mission's page.
+- [Tasks on iPhone](zeron://docs/mobile-tasks): the Tasks tab and a task's sheet.
 - [The sessions list on iPhone](zeron://docs/mobile-inbox): organizing sessions.
 - [Pull requests and Git on iPhone](zeron://docs/mobile-git): the board, a pull request's page, and a checkout's working tree and history.
 - [Settings on iPhone](zeron://docs/mobile-settings): your Macs' accounts, usage, providers, profiles, routing and tools, the phone's own settings, What's New and Docs.

@@ -1,6 +1,6 @@
 The composer sits at the bottom of every open session on the iPhone, and on the **New session** canvas. It works like the [composer](zeron://docs/composer) on your computer: what you pick here is saved with the chat, and the agent runs on the computer that hosts the session.
 
-![A staged quote above the composer's chips, and the Start mission menu](ios-composer.jpg)
+![A staged quote above the composer's chips](ios-composer.jpg)
 
 ## Writing a message
 
@@ -22,7 +22,6 @@ The field reads "Message" followed by the agent's name. With a keyboard attached
 
 The chips under the field change this chat's settings.
 
-- **Start mission** comes first. Turn it on to send the message as a [mission](zeron://docs/mission) instead (see below).
 - **Model** reads the agent profile and the model. A dot after the profile name means you changed the profile's settings in this chat. The menu opens on your [agent profiles](zeron://docs/agent-profiles): apply one, **Revert** or **Save** an edited one, or choose **No profile**. Below them come the models of the current provider and of each provider instance; an instance that fails to load shows why, with **Retry**. On the **New session** canvas, each model shows its agent's mark, and a profile applies to the draft once its Mac is online. Switching models on a chat that already has messages asks **Switch model?** first, and the transcript notes the change.
 - **Effort** offers **Low** to **Max**, plus **Fast** where the model has it. See [Models and reasoning effort](zeron://docs/models-and-effort).
 - **Access** sets the chat's access mode: **Supervised**, **Auto-accept edits**, or **Full access**. It offers only the modes the agent supports, and the chip shows the mode the chat runs with. For an agent that supports it, the menu also has **Plan mode** ("Explore and propose a plan before changing anything."), and the chip reads, for example, **Full access · Plan** while it is on. The **New session** composer has the same chip, and the session starts with that access and plan.
@@ -60,12 +59,6 @@ The session's **…** menu has:
 While a chat runs subagents or background shells, a pill on the row above the composer, beside the side chat and terminal chips, counts them, such as "2 of 3 working · 1 shell". Tap it for a card with each run, its state and how long it has run. **Stop** ends one; tap a row to open its output, its review findings or its chat.
 
 ![The subagents pill, and its roster card](ios-agents-pill.jpg)
-
-## Missions from the composer
-
-With **Start mission** on, a second chip picks **plan.md** or **Steps only** and holds **Review plan first**. Send starts the mission and opens it in **Tasks** (see [Tasks and missions on iPhone](zeron://docs/mobile-tasks)).
-
-In an open chat the field reads "Turn this chat into a mission: what should the team build?". **Settings** > **In a chat, Mission Control** decides what happens: **This chat leads** makes the chat the mission's lead, and **New mission reads this chat** starts a new lead that reads it.
 
 ## Answering the agent
 

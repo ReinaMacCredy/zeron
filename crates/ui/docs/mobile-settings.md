@@ -47,7 +47,7 @@ See [Providers](zeron://docs/providers).
 - **Wallpaper**: **Choose Wallpaper…** and its **Effect**; **Chat background** to show the wallpaper behind open conversations, with **Placement** (**Hero** or **Full**), **Opacity**, **Blur** and **Scrim**, as on the Mac (see [Appearance](zeron://docs/appearance)). Turn on **Sync with Mac** to use a Mac's wallpaper and chat background settings instead; with more than one Mac, **Mac** picks which.
 - **Math**: **Render Math**, **Math Font** and **Math Size**.
 - **Sessions**: **Archived Sessions**.
-- **Composer**: **Queue** or **Steer** for messages you send while the agent runs, and **In a chat, Mission Control** (see [The composer on iPhone](zeron://docs/mobile-composer)).
+- **Composer**: **Queue** or **Steer** for messages you send while the agent runs (see [The composer on iPhone](zeron://docs/mobile-composer)).
 - **Voice** and **Notifications** (see [Zeron on iPhone](zeron://docs/mobile)).
 - **Sign Out**.
 

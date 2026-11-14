@@ -375,7 +375,7 @@ id = "mobile-composer"
 section = "iphone"
 title = "The composer on iPhone"
 icon = "lucide-square-pen"
-blurb = "Model, effort and permission chips, context and stats, queued messages, side chats, hand-offs and missions from the phone."
+blurb = "Model, effort and permission chips, context and stats, queued messages, side chats and hand-offs from the phone."
 actions = ["docs/composer"]
 
 [[article]]
@@ -389,10 +389,10 @@ actions = ["docs/conversation"]
 [[article]]
 id = "mobile-tasks"
 section = "iphone"
-title = "Tasks and missions on iPhone"
+title = "Tasks on iPhone"
 icon = "checklist"
-blurb = "The Tasks tab, a task's sheet, and a mission's plan review and steps on the phone."
-actions = ["tasks", "docs/mission"]
+blurb = "The Tasks tab, its list and kanban, and a task's sheet on the phone."
+actions = ["tasks"]
 
 [[article]]
 id = "mobile-inbox"

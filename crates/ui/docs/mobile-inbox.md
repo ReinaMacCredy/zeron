@@ -16,7 +16,7 @@ To put a session in a section, swipe left on it and tap **Move**, or touch and h
 
 ## Threads under their lead
 
-Threads another thread started sit under it: a mission's step threads under the lead, chats an agent created under that chat, and side chats under the chat they came from. Tap the arrow beside the parent to fold them. A side chat that expired stays in the list, dimmed and marked **Expired**.
+Threads another thread started sit under it: chats an agent created under that chat, and side chats under the chat they came from. Tap the arrow beside the parent to fold them. A side chat that expired stays in the list, dimmed and marked **Expired**.
 
 ## Peek at a session
 
