@@ -249,6 +249,10 @@ jobs:
           # crates/update `mac_app_artifact`: each interface's macOS installs ask for their own name.
           if [ "$APP" = zgx ]; then mac_app="zeron-zgx-$ver-macos-arm64-app.tar.gz"; else mac_app="zeron-$ver-macos-arm64-app.tar.gz"; fi
           test -f "dist/$mac_app" || { echo "missing artifact for tag v$ver: $mac_app"; exit 1; }
+          # Either interface's installs update across: 0.2.132 asks only for the unprefixed name, and a rollback to gpui must reach zgx installs.
+          for other in "zeron-$ver-macos-arm64-app.tar.gz" "zeron-zgx-$ver-macos-arm64-app.tar.gz"; do
+            [ -f "dist/$other" ] || cp "dist/$mac_app" "dist/$other"
+          done
           echo "VERSION=$ver" >> "$GITHUB_ENV"
       - name: updater manifest
         env:
