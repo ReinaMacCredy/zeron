@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use zeron_doc::SessionMessageEntry;
 use zeron_doc::tree::TreeSource;
-use zeron_proto::{Chat, ChatIndicator, HarnessId, Task, TaskStep};
+use zeron_proto::{Chat, ChatIndicator, HarnessId, Task};
 
 use super::{Brand, Rollup};
 use crate::state::AppState;
@@ -20,10 +20,6 @@ impl TreeSource for Source<'_> {
 
     fn tasks(&self) -> &[Task] {
         &self.state.tasks
-    }
-
-    fn steps(&self) -> &[TaskStep] {
-        &[]
     }
 
     fn now(&self) -> DateTime<Utc> {

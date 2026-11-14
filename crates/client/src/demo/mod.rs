@@ -13,10 +13,10 @@ mod claude;
 mod composer;
 mod fixtures;
 mod git;
-mod missions;
 mod png;
 mod review;
 mod settings;
+mod tasks;
 mod terminals;
 mod terminal;
 mod transcripts;
@@ -94,8 +94,6 @@ pub(crate) struct DemoHost {
     leases: Mutex<HashMap<String, Lease>>,
     uploads: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     reply_forks: Mutex<HashMap<String, Vec<SessionMessageEntry>>>,
-    supervisor_settings: Mutex<HashMap<String, zeron_proto::supervisor::SupervisorSettings>>,
-    refused_sends: Mutex<HashSet<String>>,
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
     git: Mutex<git::GitDemo>,
@@ -127,8 +125,6 @@ impl DemoHost {
             leases: Mutex::new(HashMap::new()),
             uploads: Mutex::new(HashMap::new()),
             reply_forks: Mutex::new(HashMap::new()),
-            supervisor_settings: Mutex::new(HashMap::new()),
-            refused_sends: Mutex::new(HashSet::new()),
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
             git: Mutex::new(git::GitDemo::new()),
@@ -168,11 +164,6 @@ impl DemoHost {
         }
         for (device, days) in fixtures::SETTLE_DAYS {
             client.workspace.put_settle_days(device, days);
-        }
-        if seeded.missions {
-            for (device, snapshot) in missions::supervisors(Utc::now()) {
-                client.workspace.put_supervisor(device, snapshot);
-            }
         }
         if let Some(held) = composer::background_session("chat-home") {
             let idle = Session {
@@ -465,7 +456,6 @@ impl DemoHost {
                     });
                     let _ =
                         core.write(|doc| doc.resolve_input(&request_id, Some(&answers), now_ms()));
-                    missions::input_answered(&client, chat_id, &request_id);
                     if answers.is_empty() {
                         self.set_status(&client, chat_id, SessionStatus::Idle, None);
                     } else {
@@ -984,7 +974,7 @@ impl DemoHost {
             {
                 return Ok(demo_blob(&params));
             }
-            m::GET_SESSION_STATS => return Ok(missions::session_stats(&params)),
+            m::GET_SESSION_STATS => return Ok(tasks::session_stats(&params)),
             m::COMPUTER_REVOKE_DESKTOP => return self.revoke_computer(&client, &params),
             m::RESOLVE_LIMIT_OFFER | m::SET_LIMIT_RESUME => {
                 return Ok(limit_rpc(&client, method == m::SET_LIMIT_RESUME, &params));
@@ -1000,8 +990,7 @@ impl DemoHost {
         if terminals::HostTerminals::handles(method) {
             return lock(&self.host_terminals).call(method, &params, now_ms());
         }
-        let plan_estimate = method == m::PREVIEW_ROUTES && params.get("roles").is_some();
-        if settings::HostSettings::handles(method) && !plan_estimate {
+        if settings::HostSettings::handles(method) {
             return lock(&self.settings).call(device_id, method, &params);
         }
         if let Some(reply) = fixtures::today_reply(device_id, method, now_ms()) {
@@ -1019,14 +1008,7 @@ impl DemoHost {
         if let Some(reply) = composer::instance_models(method, &params) {
             return reply;
         }
-        if let Some(reply) = missions::host_call(
-            &client,
-            &self.supervisor_settings,
-            &self.refused_sends,
-            device_id,
-            method,
-            &params,
-        ) {
+        if let Some(reply) = tasks::host_call(&client, device_id, method, &params) {
             return reply;
         }
         if let Some(reply) = self.companion_rpc(&client, method, &params)? {

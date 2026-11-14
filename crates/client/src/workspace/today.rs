@@ -1,12 +1,19 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Local;
 use zeron_doc::WorkspaceState;
 use zeron_proto::today::{self, Part};
-use zeron_proto::{TodayRun, mission};
+use zeron_proto::{ChatIndicator, TodayRun, mission};
 
-use super::{DeriveContext, DeviceView, HostRef, NeedsYouEntry, NeedsYouKind, SessionRow};
+use super::{DeriveContext, DeviceView, HostRef, SessionRow};
+use crate::session::InputRequest;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Ask {
+    Open(InputRequest),
+    Answered(String),
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TodayPage {
@@ -71,7 +78,6 @@ pub(crate) fn derive(
     state: &WorkspaceState,
     rows: &HashMap<String, Arc<SessionRow>>,
     devices: &[DeviceView],
-    needs_you: &[NeedsYouEntry],
     cx: &DeriveContext<'_>,
 ) -> TodayPage {
     let now = cx.now.with_timezone(&Local);
@@ -163,13 +169,14 @@ pub(crate) fn derive(
             host: host(device),
         });
 
-    let asking: HashSet<&str> = needs_you
-        .iter()
-        .filter_map(|entry| match &entry.kind {
-            NeedsYouKind::Input { chat_id, .. } => Some(chat_id.as_str()),
-            _ => None,
+    let asking = rows
+        .values()
+        .filter(|row| {
+            !row.archived
+                && row.indicator == ChatIndicator::AwaitingInput
+                && !matches!(cx.asks.get(&row.id), Some(Ask::Answered(_)))
         })
-        .collect();
+        .count();
     let mut hosts: Vec<_> = cx.today_prs.iter().collect();
     hosts.sort_by(|a, b| a.0.cmp(b.0));
     let flagged = today::attention_prs(hosts.iter().flat_map(|(_, items)| items.iter()));
@@ -187,7 +194,7 @@ pub(crate) fn derive(
             repository: first.repository.clone(),
         }
     });
-    let line = today::header_line(now, asking.len() + flagged.len(), open);
+    let line = today::header_line(now, asking + flagged.len(), open);
     let greeting = today::greeting(now);
     TodayPage {
         greeting: greeting.to_owned(),

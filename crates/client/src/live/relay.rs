@@ -9,7 +9,6 @@ use std::time::Duration;
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-use zeron_proto::supervisor::SupervisorSnapshot;
 use zeron_proto::{CheckoutChangeRequestStatus, LimitResumes, Session, SidebarSettings};
 use zeron_rpc::{LinkCache, LinkCacheConfig, PeerLiveness, RpcError, methods};
 
@@ -162,8 +161,6 @@ pub(crate) struct Relay {
     /// Devices whose engine lacks WatchCheckoutChangeRequest (cleared on
     /// registry reconnect).
     unsupported: Mutex<HashSet<String>>,
-    supervisors: Mutex<HashMap<String, CancellationToken>>,
-    no_supervisor: Mutex<HashSet<String>>,
     host_sessions: Mutex<HashMap<String, CancellationToken>>,
 }
 
@@ -225,8 +222,6 @@ impl Relay {
             limit_watches: Mutex::new(HashMap::new()),
             alive: tokio::sync::watch::Sender::new(0),
             unsupported: Mutex::new(HashSet::new()),
-            supervisors: Mutex::new(HashMap::new()),
-            no_supervisor: Mutex::new(HashSet::new()),
             host_sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -429,7 +424,6 @@ impl Relay {
 
     pub(crate) fn clear_unsupported(&self) {
         lock(&self.unsupported).clear();
-        lock(&self.no_supervisor).clear();
     }
 
     /// Converge the running PR-status streams onto `targets`.
@@ -502,61 +496,34 @@ impl Relay {
         for (_, token) in lock(&self.limit_watches).drain() {
             token.cancel();
         }
-        for (_, token) in lock(&self.supervisors).drain() {
-            token.cancel();
-        }
         for (_, token) in lock(&self.host_sessions).drain() {
             token.cancel();
         }
     }
 
-    /// Each execution host's Supervisor and its own sessions (the background
-    /// work rows name, which never reaches the registry).
+    /// Each execution host's own sessions (the background work rows name,
+    /// which never reaches the registry).
     pub(crate) fn reconcile_hosts(&self, inner: &Arc<ClientInner>, devices: HashSet<String>) {
-        let skip = lock(&self.no_supervisor).clone();
-        let supervised = devices
-            .iter()
-            .filter(|d| !skip.contains(*d))
-            .cloned()
-            .collect();
-        reconcile_host_streams(inner, &self.supervisors, supervised, HostStream::Supervisor);
-        reconcile_host_streams(inner, &self.host_sessions, devices, HostStream::Sessions);
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum HostStream {
-    Supervisor,
-    Sessions,
-}
-
-fn reconcile_host_streams(
-    inner: &Arc<ClientInner>,
-    watches: &Mutex<HashMap<String, CancellationToken>>,
-    devices: HashSet<String>,
-    stream: HostStream,
-) {
-    let mut watches = lock(watches);
-    watches.retain(|device, token| {
-        let keep = devices.contains(device);
-        if !keep {
-            token.cancel();
-        }
-        keep
-    });
-    for device in devices {
-        if watches.contains_key(&device) {
-            continue;
-        }
-        let token = CancellationToken::new();
-        watches.insert(device.clone(), token.clone());
-        let weak = Arc::downgrade(inner);
-        crate::runtime::shared().spawn(async move {
-            watch_host(weak.clone(), &device, token, stream).await;
-            if stream == HostStream::Sessions {
-                forget_host_sessions(&weak, &device);
+        let mut watches = lock(&self.host_sessions);
+        watches.retain(|device, token| {
+            let keep = devices.contains(device);
+            if !keep {
+                token.cancel();
             }
+            keep
         });
+        for device in devices {
+            if watches.contains_key(&device) {
+                continue;
+            }
+            let token = CancellationToken::new();
+            watches.insert(device.clone(), token.clone());
+            let weak = Arc::downgrade(inner);
+            crate::runtime::shared().spawn(async move {
+                watch_host(weak.clone(), &device, token).await;
+                forget_host_sessions(&weak, &device);
+            });
+        }
     }
 }
 
@@ -568,16 +535,7 @@ fn forget_host_sessions(weak: &Weak<ClientInner>, device_id: &str) {
     }
 }
 
-async fn watch_host(
-    weak: Weak<ClientInner>,
-    device_id: &str,
-    cancel: CancellationToken,
-    stream: HostStream,
-) {
-    let method = match stream {
-        HostStream::Supervisor => methods::WATCH_SUPERVISOR,
-        HostStream::Sessions => methods::WATCH_SESSIONS,
-    };
+async fn watch_host(weak: Weak<ClientInner>, device_id: &str, cancel: CancellationToken) {
     let mut backoff = Duration::from_millis(500);
     loop {
         if cancel.is_cancelled() {
@@ -592,9 +550,7 @@ async fn watch_host(
         drop(inner);
         if !fresh {
             // An offline host is not dialed: parked, with no traffic, until it beats.
-            if stream == HostStream::Sessions {
-                forget_host_sessions(&weak, device_id);
-            }
+            forget_host_sessions(&weak, device_id);
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = alive.changed() => backoff = Duration::from_millis(500),
@@ -603,8 +559,7 @@ async fn watch_host(
         }
         let result = async {
             let client = links.client(device_id).await?;
-            if stream == HostStream::Supervisor
-                && let Ok(value) = client.call(methods::GET_SIDEBAR_SETTINGS, json!({})).await
+            if let Ok(value) = client.call(methods::GET_SIDEBAR_SETTINGS, json!({})).await
                 && let Ok(settings) = serde_json::from_value::<SidebarSettings>(value)
                 && let Some(inner) = weak.upgrade()
             {
@@ -612,7 +567,9 @@ async fn watch_host(
                     .workspace
                     .put_settle_days(device_id, settings.settle_after_days);
             }
-            client.subscribe_checked(method, json!({})).await
+            client
+                .subscribe_checked(methods::WATCH_SESSIONS, json!({}))
+                .await
         };
         let subscription = tokio::select! {
             _ = cancel.cancelled() => return,
@@ -626,42 +583,19 @@ async fn watch_host(
                 };
                 let Some(item) = item else { break };
                 let Some(inner) = weak.upgrade() else { return };
-                let changed = match stream {
-                    HostStream::Supervisor => {
-                        let Ok(snapshot) = serde_json::from_value::<SupervisorSnapshot>(item)
-                        else {
-                            continue;
-                        };
-                        inner.workspace.put_supervisor(device_id, snapshot);
-                        true
-                    }
-                    HostStream::Sessions => {
-                        let Ok(sessions) = serde_json::from_value::<Vec<Session>>(item) else {
-                            continue;
-                        };
-                        inner.workspace.put_host_sessions(device_id, sessions)
-                    }
+                let Ok(sessions) = serde_json::from_value::<Vec<Session>>(item) else {
+                    continue;
                 };
                 backoff = Duration::from_millis(500);
-                if changed {
+                if inner.workspace.put_host_sessions(device_id, sessions) {
                     inner.recompute_workspace();
                 }
             },
-            Err(RpcError::UnknownMethod(_) | RpcError::Failed(_)) => {
-                if stream == HostStream::Supervisor
-                    && let Some(inner) = weak.upgrade()
-                    && let Some(live) = inner.live()
-                {
-                    lock(&live.relay.no_supervisor).insert(device_id.to_owned());
-                }
-                return;
-            }
+            Err(RpcError::UnknownMethod(_) | RpcError::Failed(_)) => return,
             Err(RpcError::Closed | RpcError::Transport(_)) => links.invalidate(device_id),
             Err(_) => {}
         }
-        if stream == HostStream::Sessions {
-            forget_host_sessions(&weak, device_id);
-        }
+        forget_host_sessions(&weak, device_id);
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = tokio::time::sleep(backoff) => {}
