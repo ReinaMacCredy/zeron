@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenuGroup
 import androidx.compose.material3.DropdownMenuItem
@@ -22,18 +21,13 @@ import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import sh.zeron.android.core.SessionExtras
 import sh.zeron.android.design.ZIcon
@@ -41,7 +35,6 @@ import sh.zeron.android.design.ZIcons
 import uniffi.zeron_core.BranchOffer
 import uniffi.zeron_core.HandoffTarget
 import uniffi.zeron_core.LimitPill
-import uniffi.zeron_core.MissionStrip
 
 class SessionMenuItem(
     val label: String,
@@ -49,7 +42,6 @@ class SessionMenuItem(
     val subtitle: String? = null,
     val enabled: Boolean = true,
     val destructive: Boolean = false,
-    val checked: Boolean? = null,
     val onClick: () -> Unit,
 )
 
@@ -81,11 +73,6 @@ fun SessionMenu(expanded: Boolean, onDismiss: () -> Unit, groups: List<List<Sess
                         },
                         shape = MenuDefaults.itemShape(i, items.size).shape,
                         leadingIcon = { ZIcon(a.icon, null, Modifier.size(20.dp), tint = tint) },
-                        trailingIcon = if (a.checked == true) {
-                            { ZIcon(ZIcons.Check, "On", Modifier.size(20.dp), tint = tint) }
-                        } else {
-                            null
-                        },
                     )
                 }
             }
@@ -228,26 +215,4 @@ fun HandoffSheet(extras: SessionExtras, onOpenChat: (String) -> Unit, onDismiss:
 @Composable
 private fun SectionLabel(text: String) {
     Text(text, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 12.dp, bottom = 4.dp))
-}
-
-@Composable
-fun MissionStripPill(strip: MissionStrip, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.92f),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = modifier.semantics { contentDescription = "Mission: ${strip.title}, ${strip.done} of ${strip.total}" },
-    ) {
-        Row(Modifier.padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-            ZIcon(ZIcons.TabTasks, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurface)
-            Spacer(Modifier.size(6.dp))
-            Text(
-                "${strip.role} · ${strip.title} · ${strip.done}/${strip.total}",
-                style = MaterialTheme.typography.labelLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
 }

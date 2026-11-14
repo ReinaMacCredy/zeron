@@ -33,7 +33,6 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -66,11 +65,9 @@ import sh.zeron.android.design.ZIcons
 import sh.zeron.android.ui.Staging
 import sh.zeron.android.ui.StagedImage
 import uniffi.zeron_core.CoreClient
-import uniffi.zeron_core.MissionOptions
 import uniffi.zeron_core.TaskDetail
 import uniffi.zeron_core.TaskDraft
 import uniffi.zeron_core.TaskStatus
-import uniffi.zeron_core.missionLabels
 
 private const val MAX_IMAGES = 12
 
@@ -91,7 +88,7 @@ private sealed interface Confirm {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TaskSheet(model: AppModel, taskId: String, onDismiss: () -> Unit, onOpenThread: (String) -> Unit, onOpenMission: (String) -> Unit) {
+fun TaskSheet(model: AppModel, taskId: String, onDismiss: () -> Unit, onOpenThread: (String) -> Unit) {
     val client by model.client.collectAsState()
     val ws by model.workspace.collectAsState()
     val detail = remember(client, ws) { client?.taskDetail(taskId) }
@@ -135,7 +132,6 @@ fun TaskSheet(model: AppModel, taskId: String, onDismiss: () -> Unit, onOpenThre
             return@ModalBottomSheet
         }
         val task = d.row
-        val labels = remember { missionLabels() }
         LazyColumn(Modifier.fillMaxWidth(), contentPadding = PaddingValues(bottom = 24.dp)) {
             item { Text("Task", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 32.dp, bottom = 12.dp)) }
             group("about", null) {
@@ -165,16 +161,14 @@ fun TaskSheet(model: AppModel, taskId: String, onDismiss: () -> Unit, onOpenThre
                     })
                 }
             }
-            if (!task.mission || d.context.isNotEmpty()) {
-                group("context", "Context chats · ${d.context.size}") {
-                    d.context.forEachIndexed { i, chat ->
-                        if (i > 0) RowDivider()
-                        ListRow(chat.title, icon = ZIcons.Chat, onClick = { confirm = Confirm.Context(chat.chatId, chat.title) })
-                    }
-                    if (d.context.size < 5 && d.plan.isEmpty()) {
-                        if (d.context.isNotEmpty()) RowDivider()
-                        ListRow("Add a context chat", icon = ZIcons.Plus, tint = MaterialTheme.colorScheme.primary, onClick = { picking = false })
-                    }
+            group("context", "Context chats · ${d.context.size}") {
+                d.context.forEachIndexed { i, chat ->
+                    if (i > 0) RowDivider()
+                    ListRow(chat.title, icon = ZIcons.Chat, onClick = { confirm = Confirm.Context(chat.chatId, chat.title) })
+                }
+                if (d.context.size < 5) {
+                    if (d.context.isNotEmpty()) RowDivider()
+                    ListRow("Add a context chat", icon = ZIcons.Plus, tint = MaterialTheme.colorScheme.primary, onClick = { picking = false })
                 }
             }
             group("actions", null) {
@@ -186,17 +180,13 @@ fun TaskSheet(model: AppModel, taskId: String, onDismiss: () -> Unit, onOpenThre
                     ListRow(title, icon = icon, tint = tint, onClick = onClick)
                 }
                 val text = MaterialTheme.colorScheme.onSurface
-                if (task.mission) action(labels.openMissionPage, ZIcons.TabTasks, accent) { onOpenMission(taskId) }
                 val lead = task.leadChatId
                 if (lead != null) {
                     action("Open thread", ZIcons.Chat, accent) { onOpenThread(lead) }
-                    if (!task.mission && task.status != TaskStatus.DONE) action("Unassign", ZIcons.Close, text) { run { it.unassignTask(taskId) } }
+                    if (task.status != TaskStatus.DONE) action("Unassign", ZIcons.Close, text) { run { it.unassignTask(taskId) } }
                 } else if (task.status != TaskStatus.DONE) {
-                    action("Start in a new chat", ZIcons.Send, accent) { start(model, d, null, ::run, onOpenThread, onOpenMission) }
+                    action("Start in a new chat", ZIcons.Send, accent) { start(model, d, ::run, onOpenThread) }
                     action("Hand to a thread", ZIcons.ArrowRight, accent) { picking = true }
-                    action(labels.planFirst, ZIcons.TabTasks, accent) {
-                        start(model, d, MissionOptions(approvePlan = true, sameAgents = false, planDoc = true), ::run, onOpenThread, onOpenMission)
-                    }
                 }
                 if (task.status == TaskStatus.DONE) {
                     action("Mark as not done", ZIcons.Restart, text) { run { it.setTaskCompleted(taskId, false) } }
@@ -231,11 +221,7 @@ fun TaskSheet(model: AppModel, taskId: String, onDismiss: () -> Unit, onOpenThre
             run { cl -> cl.setTaskImages(taskId, detail?.images.orEmpty().filter { it != c.path }) }
         }
         is Confirm.Context -> {
-            val choices = buildList {
-                add("Open thread" to false)
-                if (detail?.plan.isNullOrEmpty()) add("Remove" to true)
-            }
-            ChoiceDialog(c.title, null, choices, onDismiss = { confirm = null }) { choice ->
+            ChoiceDialog(c.title, null, listOf("Open thread" to false, "Remove" to true), onDismiss = { confirm = null }) { choice ->
                 confirm = null
                 if (choice == "Open thread") onOpenThread(c.chat) else run { cl ->
                     cl.setTaskContext(taskId, detail?.context.orEmpty().map { it.chatId }.filter { it != c.chat })
@@ -259,10 +245,8 @@ fun TaskSheet(model: AppModel, taskId: String, onDismiss: () -> Unit, onOpenThre
 private fun start(
     model: AppModel,
     detail: TaskDetail,
-    mission: MissionOptions?,
     run: (suspend (CoreClient) -> Unit) -> Unit,
     onOpenThread: (String) -> Unit,
-    onOpenMission: (String) -> Unit,
 ) {
     val device = detail.row.host?.deviceId ?: model.taskHostId()
     if (device == null) {
@@ -271,8 +255,7 @@ private fun start(
     }
     val id = detail.row.id
     run { c ->
-        val chat = c.startTask(id, device, model.lastDraftConfig(), mission)
-        if (mission == null) onOpenThread(chat) else onOpenMission(id)
+        onOpenThread(c.startTask(id, device, model.lastDraftConfig()))
     }
 }
 
@@ -353,19 +336,16 @@ fun ThreadPicker(model: AppModel, title: String, include: (uniffi.zeron_core.Ses
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NewTaskSheet(model: AppModel, planFirst: Boolean, onDismiss: () -> Unit, onCreated: (taskId: String, mission: Boolean) -> Unit) {
+fun NewTaskSheet(model: AppModel, onDismiss: () -> Unit, onCreated: (taskId: String) -> Unit) {
     val ws by model.workspace.collectAsState()
     val client by model.client.collectAsState()
     val hosts = ws?.devices.orEmpty().filter { it.isExecutionHost }
     var hostId by remember { mutableStateOf(model.taskHostId()) }
     var title by remember { mutableStateOf("") }
     var notes by remember { mutableStateOf("") }
-    var mission by remember { mutableStateOf(planFirst) }
-    var approve by remember { mutableStateOf(true) }
     var images by remember { mutableStateOf<List<StagedImage>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
     var hostMenu by remember { mutableStateOf(false) }
-    val labels = remember { missionLabels() }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(MAX_IMAGES)) { uris ->
@@ -385,13 +365,8 @@ fun NewTaskSheet(model: AppModel, planFirst: Boolean, onDismiss: () -> Unit, onC
                         scope.launch {
                             runCatching {
                                 val paths = upload(c, device, images)
-                                val d = draft("$title\n$notes", paths)
-                                if (mission) {
-                                    c.startMission(device, d, model.lastDraftConfig(), MissionOptions(approvePlan = approve, sameAgents = false, planDoc = true))
-                                } else {
-                                    c.createTask(device, d)
-                                }
-                            }.onSuccess { onCreated(it, mission) }.onFailure {
+                                c.createTask(device, draft("$title\n$notes", paths))
+                            }.onSuccess { onCreated(it) }.onFailure {
                                 busy = false
                                 model.toast(TasksText.error(it))
                             }
@@ -421,16 +396,6 @@ fun NewTaskSheet(model: AppModel, planFirst: Boolean, onDismiss: () -> Unit, onC
             FilledTonalButton(onClick = { pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }, modifier = Modifier.fillMaxWidth()) {
                 Text(if (images.isEmpty()) "Add images" else "${images.size} image${if (images.size == 1) "" else "s"} · add more")
             }
-            SwitchRow(labels.planFirst, mission) { mission = it }
-            if (mission) SwitchRow(labels.reviewPlan, approve) { approve = it }
         }
-    }
-}
-
-@Composable
-fun SwitchRow(label: String, on: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-        Switch(on, onChange, enabled = enabled)
     }
 }

@@ -63,11 +63,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import sh.zeron.android.core.WallpaperStore
-import uniffi.zeron_core.ChatMissionLabels
-import uniffi.zeron_core.chatMissionLabels
 import uniffi.zeron_core.coreVersion
 import uniffi.zeron_core.whatsNew
 import kotlinx.coroutines.launch
@@ -92,7 +89,6 @@ fun SettingsScreen(
     val devices = workspace?.devices.orEmpty()
     val client by model.client.collectAsState()
     LaunchedEffect(client) { client?.let { model.wallpaper.refresh(it) } }
-    val mission = remember { chatMissionLabels() }
     val latest = remember { whatsNew() }
     SettingsPage("Settings", onBack) {
         item {
@@ -269,8 +265,6 @@ fun SettingsScreen(
         }
         section("Composer")
         item { ComposerSettings(model) }
-        section(mission.title)
-        item { ChatMissionSettings(mission) }
         section("Help")
         item {
             Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
@@ -429,34 +423,6 @@ private fun ComposerSettings(model: AppModel) {
             supportingContent = { Text("Steer the current run") },
             trailingContent = { CheckMark(steer) },
         ) { Text("Steer") }
-    }
-}
-
-/** Mission Control in a chat: the chat leads its mission, or starts a new one (read by the composer). */
-@Composable
-private fun ChatMissionSettings(labels: ChatMissionLabels) {
-    val prefs = LocalContext.current.getSharedPreferences("settings", 0)
-    var lead by remember { mutableStateOf(prefs.getString("chatMission", "lead") != "newMission") }
-    fun pick(on: Boolean) {
-        lead = on
-        prefs.edit().putString("chatMission", if (on) "lead" else "newMission").apply()
-    }
-    Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
-        SegmentedListItem(
-            onClick = { pick(true) },
-            shapes = segmentedShapes(0, 2),
-            colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
-            leadingContent = { IconTile(ZIcons.TabTasks) },
-            supportingContent = { Text(labels.detail) },
-            trailingContent = { CheckMark(lead) },
-        ) { Text(labels.lead) }
-        SegmentedListItem(
-            onClick = { pick(false) },
-            shapes = segmentedShapes(1, 2),
-            colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
-            leadingContent = { IconTile(ZIcons.Plus) },
-            trailingContent = { CheckMark(!lead) },
-        ) { Text(labels.newMission) }
     }
 }
 

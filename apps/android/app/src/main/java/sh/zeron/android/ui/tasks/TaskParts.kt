@@ -1,8 +1,9 @@
 package sh.zeron.android.ui.tasks
 
 import androidx.annotation.DrawableRes
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,7 +37,6 @@ import sh.zeron.android.design.LocalDarkTheme
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import sh.zeron.android.ui.TonalCircleButton
-import uniffi.zeron_core.StepStatus
 import uniffi.zeron_core.TaskStatus
 import uniffi.zeron_core.TreeStatus
 
@@ -56,7 +56,6 @@ object Tones {
     val done @Composable get() = pick(0x15803D, 0x34D399, 0.9f)
     val idle @Composable get() = if (LocalDarkTheme.current) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.14f)
     val warning @Composable get() = pick(0xA16207, 0xFACC15, 1f)
-    val tertiary @Composable get() = pick(0x97979F, 0x6B6B72, 1f)
 }
 
 @Composable
@@ -68,31 +67,12 @@ fun glyph(status: TaskStatus): Glyph = when (status) {
 }
 
 @Composable
-fun glyph(status: StepStatus): Glyph = when (status) {
-    StepStatus.PLANNED -> Glyph.Dot(Tones.idle)
-    StepStatus.WORKING -> Glyph.Spinner
-    StepStatus.NEEDS_YOU -> Glyph.Dot(Tones.warning)
-    StepStatus.DONE -> Glyph.Check(Tones.done)
-    StepStatus.SKIPPED -> Glyph.Dot(Tones.tertiary)
-    StepStatus.FAILED -> Glyph.Dot(Tones.failed)
-}
-
-@Composable
 fun glyph(status: TreeStatus): Glyph = when (status) {
     TreeStatus.RUNNING -> Glyph.Spinner
     TreeStatus.WAITING -> Glyph.Dot(Tones.warning)
     TreeStatus.DONE -> Glyph.Check(Tones.done)
     TreeStatus.FAILED -> Glyph.Dot(Tones.failed)
     TreeStatus.QUEUED, TreeStatus.STOPPED -> Glyph.Dot(Tones.idle)
-}
-
-fun stepWord(status: StepStatus): String = when (status) {
-    StepStatus.PLANNED -> "Planned"
-    StepStatus.WORKING -> "Working"
-    StepStatus.NEEDS_YOU -> "Needs you"
-    StepStatus.DONE -> "Done"
-    StepStatus.SKIPPED -> "Skipped"
-    StepStatus.FAILED -> "Failed"
 }
 
 @Composable
@@ -114,6 +94,7 @@ fun BrandMarks(brands: List<String>) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ListRow(
     title: String,
@@ -128,13 +109,14 @@ fun ListRow(
     indent: Dp = 0.dp,
     container: Color = Color.Transparent,
     onClick: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
     trailing: (@Composable RowScope.() -> Unit)? = null,
 ) {
     Row(
         modifier
             .fillMaxWidth()
             .background(container)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(if (onClick != null) Modifier.combinedClickable(onLongClick = onLongClick, onClick = onClick) else Modifier)
             .heightIn(min = 52.dp)
             .padding(start = 16.dp + indent, end = 14.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -208,6 +190,3 @@ fun PageBar(title: String, onBack: (() -> Unit)?, actions: @Composable RowScope.
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically, content = actions)
     }
 }
-
-@Composable
-fun accentSoft(): Color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)

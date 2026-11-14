@@ -400,27 +400,12 @@ fun SessionScreen(
                 Box {
                     TonalCircleButton(ZIcons.More, "More", onClick = { overflow = true }, container = MaterialTheme.colorScheme.surfaceContainerHighest)
                     if (overflow) {
-                        val strip = remember { core.missionStrip(chatId) }
-                        val watch = remember { core.watchState(chatId) }
                         val roster = remember { runCatching { handle.backgroundRoster(System.currentTimeMillis()) }.getOrNull() }
-                        val mission = listOfNotNull(
-                            strip?.let { st -> sh.zeron.android.ui.session.SessionMenuItem(uniffi.zeron_core.missionLabels().openMissionPage, ZIcons.TabTasks) { onOpenRoute("tasks:mission:${st.taskId}") } },
-                            strip?.let { st -> sh.zeron.android.ui.session.SessionMenuItem("Brief", ZIcons.Text) { onOpenRoute("tasks:task:${st.stepId ?: st.taskId}") } },
-                            watch?.takeIf { !(it.mission && strip?.stepId != null) }?.let { w ->
-                                sh.zeron.android.ui.session.SessionMenuItem(
-                                    if (w.everything) "Watched (everything is on)" else "Watched by the Supervisor",
-                                    ZIcons.Info,
-                                    enabled = !w.everything,
-                                    checked = w.watched,
-                                ) { extras.launch("Couldn't change the Supervisor's watch. Try again.") { core.setWatched(chatId, !w.watched) } }
-                            },
-                        )
                         val compactBlocked = composer.compactBlocked
                         sh.zeron.android.ui.session.SessionMenu(
                             true,
                             { overflow = false },
                             listOf(
-                                mission,
                                 listOfNotNull(if (stillReceiving) sh.zeron.android.ui.session.SessionMenuItem("Stop Computer Use", ZIcons.Stop, destructive = true) { stopComputer = true } else null),
                                 listOf(
                                     sh.zeron.android.ui.session.SessionMenuItem("New side chat", ZIcons.SideChats) { newSideChat() },
@@ -452,14 +437,6 @@ fun SessionScreen(
                     }
                 }
             }
-        }
-        val missionStrip = remember(workspace, composer) { core.missionStrip(chatId) }
-        missionStrip?.let { st ->
-            sh.zeron.android.ui.session.MissionStripPill(
-                st,
-                onClick = { onOpenRoute("tasks:mission:${st.taskId}") },
-                modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
-            )
         }
         // The transcript runs on under the chips and composer and fades out
         // behind them (iOS's edge fade), instead of stopping at a hard line.

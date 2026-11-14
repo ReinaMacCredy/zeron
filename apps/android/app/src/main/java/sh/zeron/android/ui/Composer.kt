@@ -110,9 +110,6 @@ import uniffi.zeron_core.contextCard
 import uniffi.zeron_core.fastModeOn
 import uniffi.zeron_core.followUpNotice
 import uniffi.zeron_core.isClaudeCardCommand
-import uniffi.zeron_core.missionComposerLabels
-import uniffi.zeron_core.missionStagedError
-import uniffi.zeron_core.missionText
 import uniffi.zeron_core.opensConfigPanel
 import uniffi.zeron_core.pickContext
 import uniffi.zeron_core.profileMenuLabels
@@ -147,7 +144,6 @@ fun Composer(
     quotes: kotlinx.coroutines.flow.Flow<String> = kotlinx.coroutines.flow.emptyFlow(),
 ) {
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
     // The model picker lives here, not in the chips: those leave with the expanded card.
     var picker by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
@@ -171,9 +167,6 @@ fun Composer(
     val deviceId = c.host.deviceId
     var slashCatalog by remember(c.chatId) { mutableStateOf<uniffi.zeron_core.InvocationCatalog?>(null) }
     var renaming by remember { mutableStateOf(false) }
-    val missionAvailable = row?.sidechatOf == null
-    val mission = remember(c.chatId) { MissionDraft() }
-    if (!missionAvailable) mission.on = false
 
     LaunchedEffect(quotes) {
         quotes.collect {
@@ -277,28 +270,6 @@ fun Composer(
         delivery = if (steerDefault) Delivery.Steer else Delivery.Queue
     }
 
-    fun startMission() {
-        val pictures = draft.images.toList()
-        mission.error(pictures.size)?.let {
-            error = it
-            return
-        }
-        val brief = missionText(draft.encoded(), draft.pasted.map { it.text })
-        val options = mission.options()
-        scope.launch {
-            try {
-                val paths = pictures.map { client.uploadAttachment(deviceId, it.name, it.bytes, null) }
-                val started = client.startMissionFromChat(c.chatId, missionDraft(brief, null, paths), options, ComposerExtras.missionLead(context))
-                started.notice?.let { model.toast(it) }
-                sent()
-                mission.on = false
-                onOpenRoute("tasks:mission:${started.taskId}")
-            } catch (e: Exception) {
-                error = e.message ?: "Couldn't start the mission"
-            }
-        }
-    }
-
     fun send(mode: Delivery = delivery) {
         if (!draft.hasContent) return
         if (editingId != null) {
@@ -310,7 +281,6 @@ fun Composer(
             sent()
             return runCommand(it)
         }
-        if (mission.on) return startMission()
         val body = draft.encoded()
         val claude = harness == "claude-code"
         val skills = ComposerExtras.skillNames(deviceId, harness)
@@ -414,12 +384,10 @@ fun Composer(
             })
             else -> followUpNotice(queueing, delivery == Delivery.Steer, canSteer)?.let { StatusBanner(it, null) }
         }
-        val labels = remember { missionComposerLabels(true) }
         ComposerSurface(
             model = draft,
             placeholder = when {
                 editingId != null -> "Edit queued message"
-                mission.on -> labels.placeholder
                 else -> "Message ${row?.harnessLabel ?: "the agent"}"
             },
             action = when {
@@ -439,59 +407,10 @@ fun Composer(
             },
             attach = editingId == null,
             focusRequester = focus,
-            prediction = if (editingId == null && !mission.on) c.prediction else null,
+            prediction = if (editingId == null) c.prediction else null,
         ) {
             if (running && editingId == null) DeliveryChip(delivery, canSteer) { delivery = it }
-            if (missionAvailable && editingId == null) MissionChips(mission, labels)
             SessionChips(client, handle, c, row, switches, onOpenPicker = { picker = true }, onOpenFindings = onOpenFindings)
-        }
-    }
-}
-
-@Stable
-class MissionDraft {
-    var on by mutableStateOf(false)
-    var review by mutableStateOf(true)
-    var planDoc by mutableStateOf(true)
-
-    fun options() = uniffi.zeron_core.MissionOptions(review, false, planDoc)
-
-    fun error(images: Int): String? = missionStagedError(images.toUInt(), null)
-}
-
-fun missionDraft(text: String, spaceId: String?, images: List<String>): uniffi.zeron_core.TaskDraft {
-    val trimmed = text.trim()
-    val title = trimmed.substringBefore('\n')
-    val notes = if (trimmed.contains('\n')) trimmed.substringAfter('\n').trim() else ""
-    return uniffi.zeron_core.TaskDraft(title, notes, spaceId, images, emptyList())
-}
-
-@Composable
-fun MissionChips(mission: MissionDraft, labels: uniffi.zeron_core.MissionComposerLabels) {
-    ContextChip(
-        labels.start,
-        leading = { ZIcon(R.drawable.zi_hugeicons_target_02, null, Modifier.size(16.dp)) },
-        onClick = { mission.on = !mission.on },
-        tint = if (mission.on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    if (mission.on) {
-        var open by remember { mutableStateOf(false) }
-        ContextChip(
-            if (mission.planDoc) labels.planDoc else labels.stepsOnly,
-            leading = { ZIcon(if (mission.review) R.drawable.zi_checklist else R.drawable.zi_document, null, Modifier.size(16.dp)) },
-            onClick = { open = true },
-        ) {
-            ChoiceMenu(
-                open,
-                { open = false },
-                listOf(
-                    MenuSection(labels.start, listOf(
-                        MenuChoice(labels.planDoc, mission.planDoc) { mission.planDoc = true },
-                        MenuChoice(labels.stepsOnly, !mission.planDoc) { mission.planDoc = false },
-                    )),
-                    MenuSection(null, listOf(MenuChoice(labels.reviewPlanFirst, mission.review) { mission.review = !mission.review })),
-                ),
-            )
         }
     }
 }

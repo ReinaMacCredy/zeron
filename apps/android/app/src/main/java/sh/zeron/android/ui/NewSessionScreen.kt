@@ -239,44 +239,12 @@ fun NewSessionScreen(
         }
     }
 
-    val mission = remember { MissionDraft() }
-    val missionLabels = remember { uniffi.zeron_core.missionComposerLabels(false) }
-
-    fun startMission() {
-        val c = client ?: return
-        mission.error(composer.images.size)?.let {
-            scope.launch { snackbar.showSnackbar(it) }
-            return
-        }
-        if (deviceId.isEmpty()) {
-            scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }
-            return
-        }
-        val brief = uniffi.zeron_core.missionText(composer.encoded(), composer.pasted.map { it.text })
-        val pictures = composer.images.toList()
-        val config = draft.copy(model = draft.model ?: choice?.model?.id).config()
-        scope.launch {
-            try {
-                val paths = pictures.map { c.uploadAttachment(deviceId, it.name, it.bytes, null) }
-                val taskId = c.startMission(deviceId, missionDraft(brief, project?.id, paths), config, mission.options())
-                created = true
-                composer.clear()
-                model.newSessionText = ""
-                model.newSessionImages = emptyList()
-                onOpenRoute("tasks:mission:$taskId")
-            } catch (e: Exception) {
-                snackbar.showSnackbar(e.message ?: "Couldn't start the mission")
-            }
-        }
-    }
-
     fun create() {
         model.lastDraft = draft
         uniffi.zeron_core.draftCommandRefusal(composer.text, draft.harness == "claude-code")?.let {
             scope.launch { snackbar.showSnackbar(it) }
             return
         }
-        if (mission.on) return startMission()
         if (runsOnCloud) return createOnCloud()
         val text = composer.encoded()
         val skills = sh.zeron.android.core.ComposerExtras.skillNames(deviceId, draft.harness)
@@ -364,7 +332,7 @@ fun NewSessionScreen(
             )
             ComposerSurface(
                 model = composer,
-                placeholder = if (mission.on) missionLabels.placeholder else "Describe the task",
+                placeholder = "Describe the task",
                 action = ComposerAction.Send,
                 onAction = ::create,
                 alwaysCard = true,
@@ -375,7 +343,6 @@ fun NewSessionScreen(
                     .widthIn(max = 768.dp)
                     .onGloballyPositioned { composerBounds = it.boundsInRoot() },
             ) {
-                MissionChips(mission, missionLabels)
                 ProjectChip(draft, projects, onPick = { draft = it }, onNewProject = { newProject = true }, onNewCloudProject = if (model.cloudOffered) ({ cloudProject = true }) else null)
                 HostChip(draft, project, projects, hosts, runsOnCloud, cloudReach, cloud.credits) { draft = it }
                 if (runsOnCloud && project?.githubRepo != null) {

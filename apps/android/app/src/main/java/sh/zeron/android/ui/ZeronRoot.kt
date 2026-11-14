@@ -108,8 +108,6 @@ object Routes {
     const val TERMINAL = "terminal/{chat}?id={id}"
     const val SUBAGENT = "subagent/{parent}/{doc}?title={title}&running={running}"
     const val TASKS = "tasks"
-    const val MISSION = "mission/{id}"
-    const val SUPERVISOR = "supervisor"
     const val PRS = "prs"
     const val PR = "pr?url={url}&device={device}"
     const val GIT = "git?history={history}"
@@ -124,7 +122,6 @@ object Routes {
     fun terminal(chat: String, id: String?) = "terminal/${Uri.encode(chat)}" + (id?.let { "?id=${Uri.encode(it)}" } ?: "")
     fun subagent(parent: String, doc: String, title: String, running: Boolean) =
         "subagent/${Uri.encode(parent)}/${Uri.encode(doc)}?title=${Uri.encode(title)}&running=$running"
-    fun mission(id: String) = "mission/${Uri.encode(id)}"
     fun pr(url: String, device: String?) = "pr?url=${Uri.encode(url)}" + (device?.let { "&device=${Uri.encode(it)}" } ?: "")
     fun git(history: Boolean) = "git?history=$history"
     fun hostPage(page: String, host: String?) = "host-page/${Uri.encode(page)}" + (host?.let { "?host=${Uri.encode(it)}" } ?: "")
@@ -197,18 +194,10 @@ private fun MainNav(model: AppModel) {
     }
 
     fun openTasks(path: String) {
-        if (wide) {
-            if (path.startsWith("task:")) taskPending = path.removePrefix("task:")
-            return shell.openPage("tasks", path.takeIf { it == "supervisor" || it.startsWith("mission:") }?.let { "tasks:$it" })
-        } else {
-            nav.popBackStack(Routes.HOME, inclusive = false)
-            homeTab = HomeTab.Tasks
-        }
-        when {
-            path == "supervisor" -> nav.navigate(Routes.SUPERVISOR)
-            path.startsWith("mission:") -> nav.navigate(Routes.mission(path.removePrefix("mission:")))
-            path.startsWith("task:") -> taskPending = path.removePrefix("task:")
-        }
+        if (path.startsWith("task:")) taskPending = path.removePrefix("task:")
+        if (wide) return shell.openPage("tasks")
+        nav.popBackStack(Routes.HOME, inclusive = false)
+        homeTab = HomeTab.Tasks
     }
 
     fun openRoute(route: String) {
@@ -342,7 +331,6 @@ private fun MainNav(model: AppModel) {
                         sh.zeron.android.ui.tasks.TasksScreen(
                             model,
                             onOpenChat = open,
-                            onOpenRoute = ::openRoute,
                             openTask = taskPending?.also { taskPending = null },
                         )
                     },
@@ -400,9 +388,7 @@ private fun MainNav(model: AppModel) {
                     page = { chat, page -> InspectorPageContent(model, shell, chat, page) },
                     detail = { route ->
                         when {
-                            route == "tasks" -> sh.zeron.android.ui.tasks.TasksScreen(model, onOpenChat = open, onOpenRoute = ::openRoute, openTask = taskPending?.also { taskPending = null })
-                            route == "tasks:supervisor" -> sh.zeron.android.ui.tasks.SupervisorScreen(model, onBack = shell::popPage, onOpenChat = open, onOpenRoute = ::openRoute)
-                            route.startsWith("tasks:mission:") -> sh.zeron.android.ui.tasks.MissionScreen(model, route.removePrefix("tasks:mission:"), onBack = shell::popPage, onOpenChat = open, onOpenRoute = ::openRoute)
+                            route == "tasks" -> sh.zeron.android.ui.tasks.TasksScreen(model, onOpenChat = open, openTask = taskPending?.also { taskPending = null })
                             route == "prs" -> sh.zeron.android.ui.git.PullRequestsScreen(model, onBack = shell::popPage, onOpenRoute = ::openRoute)
                             route.startsWith("pr:") -> sh.zeron.android.ui.git.PullRequestScreen(model, route.removePrefix("pr:"), null, onBack = shell::popPage, onOpenChat = open, onOpenRoute = ::openRoute)
                             route == "git" || route == "git-history" -> sh.zeron.android.ui.git.GitScreen(model, route == "git-history", onBack = shell::popPage, onOpenChat = open)
@@ -422,17 +408,9 @@ private fun MainNav(model: AppModel) {
                     nav.popBackStack(Routes.HOME, inclusive = false)
                     open(id)
                 },
-                onOpenRoute = ::openRoute,
                 openTask = taskPending?.also { taskPending = null },
                 onBack = { nav.popBackStack() },
             )
-        }
-        composable(Routes.MISSION, arguments = listOf(navArgument("id") { type = NavType.StringType })) { entry ->
-            val id = entry.arguments?.getString("id") ?: return@composable
-            sh.zeron.android.ui.tasks.MissionScreen(model, id, onBack = { nav.popBackStack() }, onOpenChat = open, onOpenRoute = ::openRoute)
-        }
-        composable(Routes.SUPERVISOR) {
-            sh.zeron.android.ui.tasks.SupervisorScreen(model, onBack = { nav.popBackStack() }, onOpenChat = open, onOpenRoute = ::openRoute)
         }
         composable(Routes.PRS) {
             sh.zeron.android.ui.git.PullRequestsScreen(model, onBack = { nav.popBackStack() }, onOpenRoute = ::openRoute)
@@ -540,10 +518,6 @@ private fun MainNav(model: AppModel) {
             onOpenChat = { id ->
                 needsYou = false
                 open(id)
-            },
-            onOpenRoute = { route ->
-                needsYou = false
-                openRoute(route)
             },
         )
     }

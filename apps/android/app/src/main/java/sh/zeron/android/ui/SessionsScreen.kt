@@ -89,9 +89,9 @@ import sh.zeron.android.design.LocalDarkTheme
 import sh.zeron.android.design.ProjectColors
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
+import sh.zeron.android.ui.composer.NeedsYou
 import uniffi.zeron_core.ChatIndicator
 import uniffi.zeron_core.ConnectivityState
-import uniffi.zeron_core.NeedsYouKind
 import uniffi.zeron_core.PullRequestState
 import uniffi.zeron_core.SessionRow
 import uniffi.zeron_core.SidebarOrganization
@@ -180,7 +180,7 @@ fun liveSummary(ws: WorkspaceSnapshot): String? {
     return parts.joinToString(" · ").ifEmpty { null }
 }
 
-private fun frontRows(ws: WorkspaceSnapshot): List<SessionRow> {
+internal fun frontRows(ws: WorkspaceSnapshot): List<SessionRow> {
     val seen = HashSet<String>()
     val f = ws.front
     return (f.pinned + f.sections.flatMap { it.sessions } + f.recent + f.groups.flatMap { it.sessions } + f.nested.values.flatten() + f.settled)
@@ -242,11 +242,7 @@ fun SessionsScreen(
     val ws = workspace
     val counts = remember(ws) { ws?.let { liveCounts(it) } ?: (0 to 0) }
     val today = remember(ws, client) { client?.todayPage() }
-    val asking = remember(ws, client) {
-        val c = client ?: return@remember emptyList()
-        val seen = HashSet<String>()
-        c.needsYou().filter { it.kind is NeedsYouKind.Input && seen.add(it.chatId) }.mapNotNull { model.row(it.chatId) }
-    }
+    val asking = remember(ws) { ws?.let { NeedsYou.waiting(it, null) }.orEmpty() }
 
     LaunchedEffect(client) { home.apply(client) }
     LaunchedEffect(client) { home.refreshToday() }
