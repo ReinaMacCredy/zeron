@@ -81,8 +81,13 @@ fn a_thought_being_written_fades_its_words_in() {
     assert!(old.starts_with("Weighing the parser first."), "{now:?}");
     assert_eq!(*old_color, ink, "what had already shown doesn't fade again");
 
-    // And settles in the thought's own ink.
-    assert!(settles(&mut app, "Then the host.", ink), "the new words never settled: {:?}", pieces(&mut app, "Then the host."));
+    // And settles in the thought's own ink, however its frames were paced: run
+    // flat out, then one more once the fade's time has passed.
+    app.frames(60);
+    std::thread::sleep(std::time::Duration::from_millis(450));
+    app.frames(1);
+    let settled = pieces(&mut app, "Then the host.");
+    assert!(settled.iter().all(|(_, color)| *color == ink), "the new words never settled: {settled:?}");
 
     // Written: its group folds shut, and opened, its row holds the words the
     // draft has let go.
