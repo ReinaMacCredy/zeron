@@ -137,9 +137,9 @@ final class AppModel {
     private(set) var connectivity: Connectivity?
     /// Front-page sessions that are working / waiting on the user.
     private(set) var live = LiveCounts()
-    private(set) var tasks = TasksPage(missions: [], needsYou: [], working: [], toDo: [], done: [], board: [], needsYouCount: 0)
-    private(set) var supervisor = SupervisorPage(hosts: [], doneToday: [], wakes: [])
-    private(set) var needsYou: [NeedsYouEntry] = []
+    private(set) var tasks = TasksPage(needsYou: [], working: [], toDo: [], done: [], board: [], needsYouCount: 0)
+    private(set) var needsYou: [NeedsYouAsk] = []
+    private var answeredAsks = Set<String>()
     private(set) var today = TodayPage(greeting: "", summary: "", tasks: [], openTasks: 0, prompts: 0, digest: [], slots: [], usage: nil, pullRequests: nil, runsLoaded: false, updated: nil)
     private var needsYouObservers: [UUID: () -> Void] = [:]
     private var rows: [String: SessionRow] = [:]
@@ -512,8 +512,11 @@ final class AppModel {
         switch event {
         case .workspaceChanged:
             scheduleRefresh()
-        case let .sessionChanged(chatId, _), let .composerChanged(chatId, _):
+        case let .sessionChanged(chatId, _):
             sessionObservers[chatId]?.values.forEach { $0() }
+        case let .composerChanged(chatId, _):
+            sessionObservers[chatId]?.values.forEach { $0() }
+            if rows[chatId]?.indicator == .awaitingInput { setNeedsYou(waitingAsks()) }
         case let .connectivityChanged(c):
             connectivity = c
             observers.values.forEach { $0() }
@@ -573,25 +576,23 @@ final class AppModel {
         for row in page.sessions + page.sectionSessions.values.flatMap({ $0 }) + page.nested.values.flatMap({ $0 }) where seen.insert(row.id).inserted {
             if row.status == .working { counts.working += 1 }
         }
-        let nextNeeds = client.needsYou()
-        counts.awaiting = nextNeeds.count
         // A row's own content (its model, say) counts even when the lists
         // don't show it: open sessions read their chips from it.
         let rowsChanged = all.count != rows.count || all.contains { rows[$0.key]?.revision != $0.value.revision }
         rows = all
+        let nextNeeds = waitingAsks()
+        counts.awaiting = nextNeeds.count
         // Devices coming and going (Settings, host pickers) count as changes.
         let hosts = hostOptions
         let tasksPage = client.tasksPage()
-        let supervisorPage = client.supervisorPage()
         let todayPage = client.todayPage()
         let changed = rowsChanged || page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
-            || tasksPage != tasks || supervisorPage != supervisor || nextNeeds != needsYou || todayPage != today
+            || tasksPage != tasks || nextNeeds != needsYou || todayPage != today
         let needsChanged = nextNeeds != needsYou
         if hosts != lastHosts { refreshToday() }
         lastHosts = hosts
         today = todayPage
         tasks = tasksPage
-        supervisor = supervisorPage
         live = counts
         if !freshSideChats.isEmpty { sweepFreshSideChats() }
         frontPage = page
@@ -641,7 +642,25 @@ final class AppModel {
         }
     }
 
-    private func setNeedsYou(_ next: [NeedsYouEntry]) {
+    private func waitingAsks() -> [NeedsYouAsk] {
+        guard let client else { return [] }
+        var open = Set<String>()
+        let asks = rows.values
+            .filter { !$0.archived && $0.indicator == .awaitingInput }
+            .sorted { ($0.workingSinceMs ?? $0.lastActivityMs) > ($1.workingSinceMs ?? $1.lastActivityMs) }
+            .compactMap { row -> NeedsYouAsk? in
+                let input = (try? client.openSession(chatId: row.id))?.composer().openInput
+                if let id = input?.requestId {
+                    open.insert(id)
+                    if answeredAsks.contains(id) { return nil }
+                }
+                return NeedsYouAsk(chatId: row.id, requestId: input?.requestId, questions: input?.questions ?? [], hostName: row.deviceName ?? "", atMs: row.workingSinceMs ?? row.lastActivityMs)
+            }
+        answeredAsks.formIntersection(open)
+        return asks
+    }
+
+    private func setNeedsYou(_ next: [NeedsYouAsk]) {
         guard next != needsYou else { return }
         needsYou = next
         needsYouObservers.values.forEach { $0() }
@@ -835,22 +854,18 @@ final class AppModel {
         }
     }
 
-    func answer(_ entry: NeedsYouEntry, _ answers: [(questionId: String, labels: [String])]) -> Bool {
-        guard let ask = entry.input, let handle = try? client?.openSession(chatId: ask.chatId) else { return false }
+    func answer(_ ask: NeedsYouAsk, _ answers: [(questionId: String, labels: [String])]) -> Bool {
+        guard let requestId = ask.requestId, let handle = try? client?.openSession(chatId: ask.chatId) else { return false }
         do {
-            try handle.respondInput(requestId: ask.requestId, answers: answers.map { UserInputAnswer(questionId: $0.questionId, labels: $0.labels) })
+            try handle.respondInput(requestId: requestId, answers: answers.map { UserInputAnswer(questionId: $0.questionId, labels: $0.labels) })
         } catch {
             NSLog("answer failed: \(error)")
             return false
         }
         noteDeliveryActivity()
-        setNeedsYou(client?.needsYou() ?? [])
+        answeredAsks.insert(requestId)
+        setNeedsYou(waitingAsks())
         return true
-    }
-
-    func resolve(deviceId: String, _ answers: [ItemAnswer]) async throws {
-        guard let client else { return }
-        try await client.resolveSupervisorItems(deviceId: deviceId, answers: answers)
     }
 
     // MARK: Companions (side chats, subagents)

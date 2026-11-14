@@ -10,10 +10,8 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
     private var statsTask: Task<Void, Never>?
 
     struct Row: Hashable {
-        var node: TreeNodeRow?
-        var label: String?
-        var depth: UInt32 = 0
-        var id: String { node?.id ?? "label-\(label ?? "")" }
+        var node: TreeNodeRow
+        var id: String { node.id }
 
         static func == (a: Row, b: Row) -> Bool { a.id == b.id }
         func hash(into hasher: inout Hasher) { hasher.combine(id) }
@@ -51,17 +49,7 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
             var bg = UIBackgroundConfiguration.listCell()
             bg.backgroundColor = Palette.elevated
             cell.backgroundConfiguration = bg
-            guard let node = row.node else {
-                var c = UIListContentConfiguration.cell()
-                c.text = row.label
-                c.textProperties.font = Fonts.ui(.sansMedium, 12)
-                c.textProperties.color = Palette.secondary
-                c.directionalLayoutMargins.leading += CGFloat(row.depth) * Self.indent
-                cell.contentConfiguration = c
-                cell.accessories = []
-                cell.accessibilityIdentifier = "tree-group-\(row.label ?? "")"
-                return
-            }
+            let node = row.node
             var c = UIListContentConfiguration.subtitleCell()
             c.textProperties.font = Fonts.ui(node.depth == 0 ? .sansSemibold : .sansMedium, 15)
             c.textProperties.color = node.muted ? Palette.secondary : Palette.text
@@ -69,11 +57,7 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
             c.secondaryTextProperties.font = Fonts.ui(.sans, 12.5)
             c.secondaryTextProperties.color = Palette.secondary
             c.textToSecondaryTextVerticalPadding = 2
-            switch node.kind {
-            case .root: c.text = self.title ?? node.title
-            case let .step(n): c.text = "\(n). \(node.title)"
-            case .agent, .native: c.text = node.title
-            }
+            c.text = node.kind == .root ? self.title ?? node.title : node.title
             c.secondaryText = [node.word, node.time, node.tokens].compactMap { $0 }.joined(separator: " · ")
             var accessories = [TaskGlyph.leading(Self.kind(node.status), indent: CGFloat(node.depth) * Self.indent)]
             if let brand = TaskGlyph.brands([node.brand].compactMap { $0 }) { accessories.append(brand) }
@@ -124,11 +108,7 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
         guard let client = app.client else { return }
         try? client.watchOutlineDocs(rootChatId: rootChatId)
         let nodes = client.taskOutline(rootChatId: rootChatId)
-        var rows: [Row] = []
-        for node in nodes {
-            if let group = node.group { rows.append(Row(label: group, depth: node.depth)) }
-            rows.append(Row(node: node))
-        }
+        let rows = nodes.map { Row(node: $0) }
         var snap = NSDiffableDataSourceSnapshot<Int, Row>()
         snap.appendSections([0])
         snap.appendItems(rows)
@@ -144,12 +124,12 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
     }
 
     func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {
-        dataSource.itemIdentifier(for: indexPath)?.node?.chatId != nil
+        dataSource.itemIdentifier(for: indexPath)?.node.chatId != nil
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: true)
-        guard let chatId = dataSource.itemIdentifier(for: indexPath)?.node?.chatId else { return }
+        guard let chatId = dataSource.itemIdentifier(for: indexPath)?.node.chatId else { return }
         TasksViewController.push(thread: chatId, app: app, from: navigationController ?? parent?.navigationController)
     }
 }

@@ -70,9 +70,6 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private var models: [ModelChoice] = []
     private var harnesses: [HarnessInfo] = []
     private let invocationCatalogs = InvocationCatalogs()
-    private var mission = false
-    private var missionReview = true
-    private var missionPlanDoc = true
     private var profiles: [ProfileRow] = []
     private var profilesFor: (device: String, config: ChatConfig)?
 
@@ -159,11 +156,6 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
         composer.translatesAutoresizingMaskIntoConstraints = false
         composer.chipsAlwaysVisible = true
-        composer.onChipTap = { [weak self] id, _ in
-            guard let self, id == "mission" else { return }
-            self.mission.toggle()
-            self.refreshChips()
-        }
         composer.mentionSearch = { [weak self] q in
             guard let self, let p = self.project else { return [] }
             return await self.app.searchFiles(deviceId: p.device, spaceId: p.id, query: q)
@@ -195,20 +187,16 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
                 return .kept
             }
             let skills = self.invocationCatalogs.skillNames
-            if self.draft.harness == "claude-code", !self.mission, !self.runsOnCloud, !self.deviceId.isEmpty, opensUsagePage(text: text, skills: skills) {
+            if self.draft.harness == "claude-code", !self.runsOnCloud, !self.deviceId.isEmpty, opensUsagePage(text: text, skills: skills) {
                 self.presentPageSheet(HostPageViewController(app: self.app, deviceId: self.deviceId, page: "usage", title: "Usage"))
                 return .sent
             }
-            if self.draft.harness == "claude-code", !self.mission, !self.runsOnCloud, isClaudeCardCommand(text: text, skills: skills) {
+            if self.draft.harness == "claude-code", !self.runsOnCloud, isClaudeCardCommand(text: text, skills: skills) {
                 if let host = self.offlineHost {
                     Toast.show("\(host) is offline, so Claude Code can't answer \(text.trimmingCharacters(in: .whitespaces)).", in: self.view.window, above: self.composer)
                     return .kept
                 }
                 return self.createForCard(text: text, skills: skills) ? .sent : .kept
-            }
-            if self.mission {
-                self.startMission(text: text, images: images)
-                return .kept
             }
             return self.create(text: text, images: images) ? .sent : .kept
         }
@@ -363,11 +351,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     }
 
     private func refreshChips() {
-        let labels = missionComposerLabels(fromChat: false)
-        var chips = [ComposerChip(id: "mission", title: labels.start, symbol: "target", tint: mission ? Palette.accent : nil)]
-        if mission {
-            chips.append(ComposerChip(id: "mission-plan", title: missionPlanDoc ? labels.planDoc : labels.stepsOnly, symbol: missionReview ? "checklist" : "doc.text"))
-        }
+        var chips: [ComposerChip] = []
         if let p = project, runsOnCloud {
             // On its own Cloud machine, from a branch of the repository.
             chips.append(ComposerChip(id: "project", title: p.groupName, symbol: nil, icon: ProjectTile.image(name: p.groupName, colorIndex: p.colorIndex)))
@@ -397,7 +381,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         if let chip = CoreSessionSource.accessChip(draftAccess.current, plan: draftAccess.plan) {
             chips.append(chip)
         }
-        composer.placeholder = mission ? labels.placeholder : "Describe the task"
+        composer.placeholder = "Describe the task"
         composer.chips = chips
         composer.chipMenus = [
             "project": { [weak self] in self?.projectMenu() },
@@ -406,7 +390,6 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             "model": { [weak self] in self?.modelMenu() },
             "effort": { [weak self] in self?.effortMenu() },
             "permission": { [weak self] in self?.accessMenu() },
-            "mission-plan": { [weak self] in self?.missionPlanMenu() },
         ]
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
         loadProfiles()
@@ -678,46 +661,6 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
                 self?.refreshChips()
             }
         })
-    }
-
-    private func missionPlanMenu() -> UIMenu {
-        let labels = missionComposerLabels(fromChat: false)
-        return UIMenu(title: labels.start, children: [
-            UIMenu(options: .displayInline, children: [(true, labels.planDoc), (false, labels.stepsOnly)].map { planDoc, title in
-                UIAction(title: title, state: planDoc == missionPlanDoc ? .on : .off) { [weak self] _ in
-                    self?.missionPlanDoc = planDoc
-                    self?.refreshChips()
-                }
-            }),
-            UIAction(title: labels.reviewPlanFirst, state: missionReview ? .on : .off) { [weak self] _ in
-                self?.missionReview.toggle()
-                self?.refreshChips()
-            },
-        ])
-    }
-
-    private func startMission(text: String, images: [StagedImage]) {
-        let device = deviceId
-        let pictures = images.filter(\.isImage)
-        if let error = missionStagedError(images: UInt32(pictures.count), otherFile: nil) {
-            return Toast.show(error, in: view.window, above: composer)
-        }
-        guard !device.isEmpty else { return showCreateFailed() }
-        app.lastDraft = draft
-        let brief = missionText(text: text, pasted: images.filter { !$0.isImage }.map { String(decoding: $0.data, as: UTF8.self) })
-        let options = MissionOptions(approvePlan: missionReview, sameAgents: false, planDoc: missionPlanDoc)
-        let host = (presentingViewController as? UITabBarController)?.selectedViewController ?? self
-        Task { @MainActor [weak self] in
-            guard let self, await MissionStart.run(app: self.app, deviceId: device, text: brief, spaceId: self.project?.id, images: pictures, config: self.draft.config, options: options, from: host, above: self.composer) != nil else { return }
-            self.created = true
-            self.app.newSessionText = ""
-            self.app.newSessionImages = []
-            self.composer.text = ""
-            self.composer.images = []
-            self.mission = false
-            self.refreshChips()
-            if !self.embedded { self.dismiss(animated: true) }
-        }
     }
 
     private func showCreateFailed() {

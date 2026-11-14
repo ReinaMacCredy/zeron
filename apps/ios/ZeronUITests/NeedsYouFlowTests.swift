@@ -80,25 +80,6 @@ final class NeedsYouFlowTests: XCTestCase {
         snapshot(app, "approval-answered")
     }
 
-    func testADestructiveApprovalIsAnsweredInItsThread() {
-        let app = launch()
-        let list = openSheet(app)
-        let approval = row(app, "chat-approve-push")
-        scrollTo(approval, in: list)
-        approval.tap()
-        let open = app.buttons["question-open-thread"]
-        XCTAssertTrue(open.waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["question-option-0"].exists)
-        snapshot(app, "destructive-approval")
-        open.tap()
-        let approve = app.buttons["question-option-0"]
-        XCTAssertTrue(approve.waitForExistence(timeout: 10))
-        snapshot(app, "destructive-approval-thread")
-        approve.tap()
-        XCTAssertTrue(approve.waitForNonExistence(timeout: 10))
-        snapshot(app, "destructive-approval-answered")
-    }
-
     func testAStepQuestionIsAnsweredFromTheSheet() {
         let app = launch()
         let list = openSheet(app)
@@ -111,49 +92,6 @@ final class NeedsYouFlowTests: XCTestCase {
         first.tap()
         XCTAssertTrue(step.waitForNonExistence(timeout: 10))
         snapshot(app, "step-question-answered")
-    }
-
-    func testADecisionThatFailsKeepsItsPickAndSendsAgain() {
-        let app = launch()
-        let list = openSheet(app)
-        let settle = row(app, "item:item-settle")
-        scrollTo(settle, in: list)
-        settle.tap()
-        let group = app.tables["needs-you-group"]
-        XCTAssertTrue(group.waitForExistence(timeout: 5))
-        let keep = app.cells["needs-you-option-dev-mini/item:item-settle-0"]
-        scrollTo(keep, in: group)
-        keep.tap()
-        snapshot(app, "decision-picked")
-        let send = app.buttons["needs-you-send"]
-        scrollTo(send, in: group)
-        send.tap()
-        let failed = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Could not send'")).firstMatch
-        XCTAssertTrue(failed.waitForExistence(timeout: 10))
-        snapshot(app, "decision-failed")
-        scrollTo(send, in: group)
-        XCTAssertTrue(send.isEnabled)
-        send.tap()
-        XCTAssertTrue(keep.waitForNonExistence(timeout: 10))
-        snapshot(app, "decision-sent")
-    }
-
-    func testAPlanIsApprovedFromTheSheet() {
-        let app = launch()
-        _ = openSheet(app)
-        let plans = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Plans'")).firstMatch
-        XCTAssertTrue(plans.waitForExistence(timeout: 5))
-        plans.tap()
-        let plan = row(app, "plan:")
-        XCTAssertTrue(plan.waitForExistence(timeout: 5))
-        snapshot(app, "sheet-plans")
-        plan.tap()
-        let approve = app.buttons["needs-you-approve-plan"]
-        XCTAssertTrue(approve.waitForExistence(timeout: 5))
-        snapshot(app, "plan")
-        approve.tap()
-        XCTAssertTrue(plan.waitForNonExistence(timeout: 10))
-        snapshot(app, "plan-approved")
     }
 
     func testThePillSitsAboveTheKeyboardAndOpensTheSheet() {
@@ -170,19 +108,6 @@ final class NeedsYouFlowTests: XCTestCase {
         pill.tap()
         XCTAssertTrue(app.tables["needs-you-list"].waitForExistence(timeout: 5))
         snapshot(app, "pill-sheet")
-    }
-
-    func testTheSupervisorOpensTheSharedSheet() {
-        let app = launch("tasks:supervisor")
-        let page = app.collectionViews["supervisor"]
-        XCTAssertTrue(page.waitForExistence(timeout: 15))
-        XCTAssertTrue(app.cells["sv-host:dev-mac"].waitForExistence(timeout: 15))
-        snapshot(app, "supervisor")
-        let entry = app.cells.matching(NSPredicate(format: "identifier BEGINSWITH 'sv-needs:' AND identifier CONTAINS 'item-worktrees'")).firstMatch
-        scrollTo(entry, in: page)
-        entry.tap()
-        XCTAssertTrue(app.tables["needs-you-group"].waitForExistence(timeout: 5))
-        snapshot(app, "supervisor-decisions")
     }
 
     func testTheInlineHtmlPage() {

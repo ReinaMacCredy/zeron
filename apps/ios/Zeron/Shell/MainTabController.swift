@@ -277,11 +277,7 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, U
         guard let nav = selectedTab?.viewController as? UINavigationController,
               let list = nav.viewControllers.first as? TasksViewController else { return }
         nav.popToRootViewController(animated: false)
-        if path == "supervisor" {
-            nav.pushViewController(SupervisorViewController(app: app), animated: false)
-        } else if path.hasPrefix("mission:") {
-            list.openMission(String(path.dropFirst("mission:".count)))
-        } else if path.hasPrefix("task:") {
+        if path.hasPrefix("task:") {
             list.presentTask(String(path.dropFirst("task:".count)))
         }
     }

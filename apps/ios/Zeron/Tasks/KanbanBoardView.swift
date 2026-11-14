@@ -2,6 +2,7 @@ import UIKit
 
 final class KanbanBoardView: UIScrollView {
     var onOpen: ((TaskRow) -> Void)?
+    var onDetails: ((TaskRow) -> Void)?
     var onMove: ((TaskRow, Bool) -> Void)?
     private let columns = UIStackView()
     private var shown: [KanbanColumn] = []
@@ -77,7 +78,8 @@ final class KanbanBoardView: UIScrollView {
                 }
             }
             let open = UIAction(title: "Open", image: UIImage(systemName: "arrow.up.right")) { [weak self] _ in self?.onOpen?(row) }
-            return UIMenu(children: [open] + moves)
+            let details = row.leadChatId == nil ? [] : [UIAction(title: "Task details", image: UIImage(systemName: "info.circle")) { [weak self] _ in self?.onDetails?(row) }]
+            return UIMenu(children: [open] + details + moves)
         }
         return card
     }
@@ -88,16 +90,6 @@ final class KanbanBoardView: UIScrollView {
         case .working: StatusTone.working
         case .needsYou: StatusTone.input
         case .done: StatusTone.done
-        }
-    }
-
-    static func tone(_ status: StepStatus) -> UIColor {
-        switch status {
-        case .done: StatusTone.done
-        case .working: StatusTone.working
-        case .needsYou: Palette.warning
-        case .failed: StatusTone.failed
-        case .planned, .skipped: Palette.text.withAlphaComponent(0.10)
         }
     }
 }
@@ -123,27 +115,12 @@ private final class KanbanCard: UIControl {
         title.numberOfLines = 3
         title.font = Fonts.ui(.sansMedium, TypeScale.size(14))
         title.textColor = row.status == .done ? Palette.secondary : Palette.text
-        var views: [UIView] = [title]
-        if row.mission, !row.stepBar.isEmpty {
-            let bar = UIStackView(arrangedSubviews: row.stepBar.map { status in
-                let segment = UIView()
-                segment.backgroundColor = KanbanBoardView.tone(status)
-                segment.layer.cornerRadius = 2
-                segment.heightAnchor.constraint(equalToConstant: 4).isActive = true
-                return segment
-            })
-            bar.spacing = 2
-            bar.distribution = .fillEqually
-            bar.accessibilityIdentifier = "task-step-bar-\(row.id)"
-            views.append(bar)
-        }
         let footer = UILabel()
-        footer.text = row.mission ? TasksViewController.missionLine(row) : TasksViewController.taskLine(row)
+        footer.text = TasksViewController.taskLine(row)
         footer.font = Fonts.ui(.sans, TypeScale.size(12))
         footer.textColor = Palette.secondary
         footer.numberOfLines = 1
-        views.append(footer)
-        let stack = UIStackView(arrangedSubviews: views)
+        let stack = UIStackView(arrangedSubviews: [title, footer])
         stack.axis = .vertical
         stack.spacing = 8
         stack.isUserInteractionEnabled = false

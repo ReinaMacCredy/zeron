@@ -16,28 +16,6 @@ enum TaskGlyph {
         }
     }
 
-    static func kind(_ status: StepStatus) -> StatusGlyph.Kind {
-        switch status {
-        case .planned: .dot(StatusTone.idle)
-        case .working: .spinner
-        case .needsYou: .dot(Palette.warning)
-        case .done: .check(StatusTone.done)
-        case .skipped: .dot(Palette.tertiary)
-        case .failed: .dot(StatusTone.failed)
-        }
-    }
-
-    static func word(_ status: StepStatus) -> String {
-        switch status {
-        case .planned: "Planned"
-        case .working: "Working"
-        case .needsYou: "Needs you"
-        case .done: "Done"
-        case .skipped: "Skipped"
-        case .failed: "Failed"
-        }
-    }
-
     static func leading(_ kind: StatusGlyph.Kind, indent: CGFloat = 0) -> UICellAccessory {
         let glyph = StatusGlyph(kind)
         guard indent > 0 else {
@@ -75,8 +53,6 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
     private var kanban: Bool { UserDefaults.standard.string(forKey: Self.viewKey) == "kanban" }
 
     enum Row: Hashable {
-        case supervisor(title: String, subtitle: String)
-        case mission(TaskRow)
         case task(TaskRow)
         case tree(TreeIndexRow)
     }
@@ -115,7 +91,8 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         view.addSubview(collectionView)
         board.frame = view.bounds
         board.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        board.onOpen = { [weak self] row in row.mission ? self?.openMission(row.id) : self?.presentTask(row.id) }
+        board.onOpen = { [weak self] row in self?.open(row) }
+        board.onDetails = { [weak self] row in self?.presentTask(row.id) }
         board.onMove = { [weak self] row, completed in
             guard let self, let client = self.app.client else { return }
             Task { @MainActor in
@@ -133,18 +110,6 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
             c.textToSecondaryTextVerticalPadding = 3
             var accessories: [UICellAccessory] = []
             switch row {
-            case let .supervisor(title, subtitle):
-                c.text = title
-                c.secondaryText = subtitle
-                c.image = TaskGlyph.asset("glyph-supervisor")
-                c.imageProperties.tintColor = Palette.accent
-                cell.accessibilityIdentifier = "tasks-supervisor"
-            case let .mission(task):
-                c.text = task.title
-                c.secondaryText = Self.missionLine(task)
-                accessories.append(TaskGlyph.leading(TaskGlyph.kind(task.status)))
-                if let brands = TaskGlyph.brands(task.brands) { accessories.append(brands) }
-                cell.accessibilityIdentifier = "mission-\(task.id)"
             case let .task(task):
                 c.text = task.title
                 c.secondaryText = Self.taskLine(task)
@@ -191,14 +156,6 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         appToken = app.observe { [weak self] in self?.reload() }
     }
 
-    static func missionLine(_ task: TaskRow) -> String {
-        var parts: [String] = []
-        if let host = task.host { parts.append(host.name) }
-        parts.append(task.missionLabel ?? task.word)
-        if task.progressTotal > 0 { parts.append("\(task.progressDone)/\(task.progressTotal) steps") }
-        return parts.joined(separator: " · ")
-    }
-
     static func taskLine(_ task: TaskRow) -> String {
         var parts: [String] = [task.project?.name ?? "No project"]
         if let due = task.dueOn, task.status != .done { parts.append(dueLabel(due)) }
@@ -223,32 +180,9 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         return "due " + out.string(from: date)
     }
 
-    static func supervisorLine(_ page: SupervisorPage, needs: Int) -> String {
-        var parts: [String] = []
-        if needs > 0 { parts.append("\(needs) need\(needs == 1 ? "s" : "") you") }
-        let trees = page.hosts.reduce(0) { $0 + Int($1.trees) }
-        let names = page.hosts.map(\.host.name)
-        if !names.isEmpty {
-            let macs = names.count == 1 ? names[0] : names.dropLast().joined(separator: ", ") + " and " + names.last!
-            parts.append("Watching \(trees) tree\(trees == 1 ? "" : "s") on \(macs)")
-        }
-        if let last = page.hosts.compactMap(\.lastWakeMs).max() {
-            parts.append("last wake " + relativeTimeLabel(atMs: last, nowMs: Int64(Date().timeIntervalSince1970 * 1000)))
-        }
-        return parts.isEmpty ? "No Mac is running a Supervisor" : parts.joined(separator: " · ")
-    }
-
     private func reload() {
         let page = app.tasks
         var snap = NSDiffableDataSourceSnapshot<String, Row>()
-        if !app.supervisor.hosts.isEmpty {
-            snap.appendSections([" "])
-            snap.appendItems([.supervisor(title: "Supervisor", subtitle: Self.supervisorLine(app.supervisor, needs: app.needsYou.filter(\.supervised).count))])
-        }
-        if !page.missions.isEmpty {
-            snap.appendSections(["Missions"])
-            snap.appendItems(page.missions.map(Row.mission))
-        }
         let trees = app.client?.taskTrees() ?? TaskTrees(running: [], doneToday: [])
         let title = { (status: TaskStatus) in page.board.first { $0.status == status }?.title ?? "" }
         for (status, rows) in [(TaskStatus.needsYou, page.needsYou), (.working, page.working), (.toDo, page.toDo), (.done, page.done)] {
@@ -273,29 +207,28 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         collectionView.deselectItem(at: indexPath, animated: true)
         guard let row = dataSource.itemIdentifier(for: indexPath) else { return }
         switch row {
-        case .supervisor:
-            navigationController?.pushViewController(SupervisorViewController(app: app), animated: true)
-        case let .mission(task):
-            openMission(task.id)
         case let .task(task):
-            presentTask(task.id)
+            open(task)
         case let .tree(tree):
             navigationController?.pushViewController(TreeOutlineViewController(app: app, rootChatId: tree.root, title: tree.title), animated: true)
         }
     }
 
-    func openMission(_ taskId: String) {
-        navigationController?.pushViewController(MissionControlViewController(app: app, taskId: taskId), animated: true)
+    func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemsAt indexPaths: [IndexPath], point: CGPoint) -> UIContextMenuConfiguration? {
+        guard let path = indexPaths.first, case let .task(task)? = dataSource.itemIdentifier(for: path), task.leadChatId != nil else { return nil }
+        return UIContextMenuConfiguration(actionProvider: { [weak self] _ in
+            UIMenu(children: [UIAction(title: "Task details", image: UIImage(systemName: "info.circle")) { _ in self?.presentTask(task.id) }])
+        })
+    }
+
+    private func open(_ task: TaskRow) {
+        guard let chat = task.leadChatId else { return presentTask(task.id) }
+        openThread(chat)
     }
 
     func presentTask(_ taskId: String) {
-        let sheet = TaskSheetViewController(app: app, taskId: taskId) { [weak self] destination in
-            self?.dismiss(animated: true) {
-                switch destination {
-                case let .thread(chatId): self?.openThread(chatId)
-                case let .mission(taskId): self?.openMission(taskId)
-                }
-            }
+        let sheet = TaskSheetViewController(app: app, taskId: taskId) { [weak self] chatId in
+            self?.dismiss(animated: true) { self?.openThread(chatId) }
         }
         let nav = UINavigationController(rootViewController: sheet)
         if let presentation = nav.sheetPresentationController {
@@ -305,22 +238,9 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         present(nav, animated: true)
     }
 
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        guard presentedViewController == nil, MissionIntroViewController.due(app: app) else { return }
-        let intro = MissionIntroViewController { [weak self] in self?.presentNewTask(planFirst: true) }
-        if let sheet = intro.sheetPresentationController {
-            sheet.detents = [.medium()]
-            sheet.prefersGrabberVisible = true
-        }
-        present(intro, animated: true)
-    }
-
-    func presentNewTask(planFirst: Bool = false) {
-        let sheet = NewTaskViewController(app: app, planFirst: planFirst) { [weak self] taskId, mission in
-            self?.dismiss(animated: true) {
-                mission ? self?.openMission(taskId) : self?.presentTask(taskId)
-            }
+    func presentNewTask() {
+        let sheet = NewTaskViewController(app: app) { [weak self] taskId in
+            self?.dismiss(animated: true) { self?.presentTask(taskId) }
         }
         let nav = UINavigationController(rootViewController: sheet)
         if let presentation = nav.sheetPresentationController {

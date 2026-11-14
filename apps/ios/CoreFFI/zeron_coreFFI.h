@@ -598,11 +598,6 @@ void uniffi_zeron_mobile_fn_method_coreclient_move_pin(uint64_t ptr, RustBuffer 
 void uniffi_zeron_mobile_fn_method_coreclient_move_section(uint64_t ptr, RustBuffer section_id, RustBuffer after, RustBuffer before, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_NEEDS_YOU
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_NEEDS_YOU
-RustBuffer uniffi_zeron_mobile_fn_method_coreclient_needs_you(uint64_t ptr, RustCallStatus *_Nonnull out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_NETWORK_PATH_CHANGED
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_NETWORK_PATH_CHANGED
 void uniffi_zeron_mobile_fn_method_coreclient_network_path_changed(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -1063,11 +1058,6 @@ uint64_t uniffi_zeron_mobile_fn_method_coreclient_set_session_config_noted(uint6
 RustBuffer uniffi_zeron_mobile_fn_method_coreclient_sidechat_sheet(uint64_t ptr, RustBuffer source_chat_id, RustBuffer source_title, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_START_MISSION_FROM_CHAT
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_START_MISSION_FROM_CHAT
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_start_mission_from_chat(uint64_t ptr, RustBuffer chat_id, RustBuffer draft, RustBuffer options, int8_t lead
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_THREAD_MENTIONS
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_THREAD_MENTIONS
 RustBuffer uniffi_zeron_mobile_fn_method_coreclient_thread_mentions(uint64_t ptr, RustBuffer device_id, RustBuffer space_id, RustBuffer exclude, RustBuffer query, RustCallStatus *_Nonnull out_status
@@ -1153,24 +1143,9 @@ uint64_t uniffi_zeron_mobile_fn_method_coreclient_host_action(uint64_t ptr, Rust
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_host_page(uint64_t ptr, RustBuffer device_id, RustBuffer page
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_APPROVE_PLAN
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_APPROVE_PLAN
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_approve_plan(uint64_t ptr, RustBuffer task_id
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_ASSIGN_TASK
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_ASSIGN_TASK
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_assign_task(uint64_t ptr, RustBuffer task_id, RustBuffer chat_id, int8_t send
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_BRIEF
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_BRIEF
-RustBuffer uniffi_zeron_mobile_fn_method_coreclient_brief(uint64_t ptr, RustBuffer task_id, RustBuffer step_id, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_BRIEF_MESSAGES
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_BRIEF_MESSAGES
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_brief_messages(uint64_t ptr, RustBuffer task_id, RustBuffer step_id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_CREATE_TASK
@@ -1183,59 +1158,9 @@ uint64_t uniffi_zeron_mobile_fn_method_coreclient_create_task(uint64_t ptr, Rust
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_delete_task(uint64_t ptr, RustBuffer task_id
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_EDIT_TASK_PLAN
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_EDIT_TASK_PLAN
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_edit_task_plan(uint64_t ptr, RustBuffer task_id, RustBuffer edit, int8_t approve
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_ENSURE_SUPERVISOR
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_ENSURE_SUPERVISOR
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_ensure_supervisor(uint64_t ptr, RustBuffer device_id, RustBuffer fallback
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_MISSION_INTRO_DUE
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_MISSION_INTRO_DUE
-int8_t uniffi_zeron_mobile_fn_method_coreclient_mission_intro_due(uint64_t ptr, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_MISSION_STRIP
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_MISSION_STRIP
-RustBuffer uniffi_zeron_mobile_fn_method_coreclient_mission_strip(uint64_t ptr, RustBuffer chat_id, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_PLAN_ESTIMATE
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_PLAN_ESTIMATE
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_plan_estimate(uint64_t ptr, RustBuffer task_id
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_REFRESH_OUTLINE_STATS
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_REFRESH_OUTLINE_STATS
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_refresh_outline_stats(uint64_t ptr, RustBuffer root_chat_id
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_RESOLVE_SUPERVISOR_ITEMS
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_RESOLVE_SUPERVISOR_ITEMS
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_resolve_supervisor_items(uint64_t ptr, RustBuffer device_id, RustBuffer answers
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_RESUME_SUPERVISOR
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_RESUME_SUPERVISOR
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_resume_supervisor(uint64_t ptr, RustBuffer device_id
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_RETRY_STEP
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_RETRY_STEP
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_retry_step(uint64_t ptr, RustBuffer step_id
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_STEP_SKIPPED
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_STEP_SKIPPED
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_set_step_skipped(uint64_t ptr, RustBuffer step_id, int8_t skipped
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_SUPERVISOR_SETTINGS
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_SUPERVISOR_SETTINGS
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_set_supervisor_settings(uint64_t ptr, RustBuffer device_id, RustBuffer before, RustBuffer after
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_TASK_COMPLETED
@@ -1253,44 +1178,9 @@ uint64_t uniffi_zeron_mobile_fn_method_coreclient_set_task_context(uint64_t ptr,
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_set_task_images(uint64_t ptr, RustBuffer task_id, RustBuffer images
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_WATCH_EVERYTHING
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_WATCH_EVERYTHING
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_set_watch_everything(uint64_t ptr, RustBuffer device_id, int8_t on
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_WATCHED
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SET_WATCHED
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_set_watched(uint64_t ptr, RustBuffer chat_id, int8_t watched
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_START_MISSION
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_START_MISSION
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_start_mission(uint64_t ptr, RustBuffer device_id, RustBuffer draft, RustBuffer config, RustBuffer options
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_START_TASK
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_START_TASK
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_start_task(uint64_t ptr, RustBuffer task_id, RustBuffer device_id, RustBuffer config, RustBuffer mission
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_STOP_SUPERVISOR
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_STOP_SUPERVISOR
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_stop_supervisor(uint64_t ptr, RustBuffer device_id
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SUPERVISOR_PAGE
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SUPERVISOR_PAGE
-RustBuffer uniffi_zeron_mobile_fn_method_coreclient_supervisor_page(uint64_t ptr, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SUPERVISOR_SETTINGS
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SUPERVISOR_SETTINGS
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_supervisor_settings(uint64_t ptr, RustBuffer device_id
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_TAKE_BACK_PLAN_APPROVAL
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_TAKE_BACK_PLAN_APPROVAL
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_take_back_plan_approval(uint64_t ptr, RustBuffer task_id
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_start_task(uint64_t ptr, RustBuffer task_id, RustBuffer device_id, RustBuffer config
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_TASK_DETAIL
@@ -1321,11 +1211,6 @@ uint64_t uniffi_zeron_mobile_fn_method_coreclient_unassign_task(uint64_t ptr, Ru
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_WATCH_OUTLINE_DOCS
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_WATCH_OUTLINE_DOCS
 void uniffi_zeron_mobile_fn_method_coreclient_watch_outline_docs(uint64_t ptr, RustBuffer root_chat_id, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_WATCH_STATE
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_WATCH_STATE
-RustBuffer uniffi_zeron_mobile_fn_method_coreclient_watch_state(uint64_t ptr, RustBuffer chat_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_ADD_TODAY_TASK
@@ -2685,12 +2570,6 @@ int8_t uniffi_zeron_mobile_fn_func_opens_usage_page(RustBuffer text, RustBuffer 
 RustBuffer uniffi_zeron_mobile_fn_func_access_modes(RustBuffer offered, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_CHAT_MISSION_LABELS
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_CHAT_MISSION_LABELS
-RustBuffer uniffi_zeron_mobile_fn_func_chat_mission_labels(RustCallStatus *_Nonnull out_status
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_COMPACT_COMMAND
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_COMPACT_COMMAND
 RustBuffer uniffi_zeron_mobile_fn_func_compact_command(RustBuffer text, RustCallStatus *_Nonnull out_status
@@ -2735,33 +2614,6 @@ RustBuffer uniffi_zeron_mobile_fn_func_handoff_failed_message(RustBuffer err, Ru
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_HANDOFF_LABELS
 RustBuffer uniffi_zeron_mobile_fn_func_handoff_labels(RustCallStatus *_Nonnull out_status
     
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_MISSION_COMPOSER_LABELS
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_MISSION_COMPOSER_LABELS
-RustBuffer uniffi_zeron_mobile_fn_func_mission_composer_labels(int8_t from_chat, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_MISSION_INTRO
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_MISSION_INTRO
-RustBuffer uniffi_zeron_mobile_fn_func_mission_intro(RustCallStatus *_Nonnull out_status
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_MISSION_LABELS
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_MISSION_LABELS
-RustBuffer uniffi_zeron_mobile_fn_func_mission_labels(RustCallStatus *_Nonnull out_status
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_MISSION_STAGED_ERROR
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_MISSION_STAGED_ERROR
-RustBuffer uniffi_zeron_mobile_fn_func_mission_staged_error(uint32_t images, RustBuffer other_file, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_MISSION_TEXT
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_MISSION_TEXT
-RustBuffer uniffi_zeron_mobile_fn_func_mission_text(RustBuffer text, RustBuffer pasted, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_NEW_SIDECHAT_LABEL
@@ -3389,12 +3241,6 @@ uint16_t uniffi_zeron_mobile_checksum_func_access_modes(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_CHAT_MISSION_LABELS
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_CHAT_MISSION_LABELS
-uint16_t uniffi_zeron_mobile_checksum_func_chat_mission_labels(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_COMPACT_COMMAND
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_COMPACT_COMMAND
 uint16_t uniffi_zeron_mobile_checksum_func_compact_command(void
@@ -3446,36 +3292,6 @@ uint16_t uniffi_zeron_mobile_checksum_func_handoff_failed_message(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_HANDOFF_LABELS
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_HANDOFF_LABELS
 uint16_t uniffi_zeron_mobile_checksum_func_handoff_labels(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_MISSION_COMPOSER_LABELS
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_MISSION_COMPOSER_LABELS
-uint16_t uniffi_zeron_mobile_checksum_func_mission_composer_labels(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_MISSION_INTRO
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_MISSION_INTRO
-uint16_t uniffi_zeron_mobile_checksum_func_mission_intro(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_MISSION_LABELS
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_MISSION_LABELS
-uint16_t uniffi_zeron_mobile_checksum_func_mission_labels(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_MISSION_STAGED_ERROR
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_MISSION_STAGED_ERROR
-uint16_t uniffi_zeron_mobile_checksum_func_mission_staged_error(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_MISSION_TEXT
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_MISSION_TEXT
-uint16_t uniffi_zeron_mobile_checksum_func_mission_text(void
     
 );
 #endif
@@ -3902,12 +3718,6 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_move_pin(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_MOVE_SECTION
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_MOVE_SECTION
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_move_section(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_NEEDS_YOU
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_NEEDS_YOU
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_needs_you(void
     
 );
 #endif
@@ -4463,12 +4273,6 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_sidechat_sheet(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_START_MISSION_FROM_CHAT
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_START_MISSION_FROM_CHAT
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_start_mission_from_chat(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_THREAD_MENTIONS
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_THREAD_MENTIONS
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_thread_mentions(void
@@ -4571,27 +4375,9 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_host_page(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_APPROVE_PLAN
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_APPROVE_PLAN
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_approve_plan(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_ASSIGN_TASK
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_ASSIGN_TASK
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_assign_task(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_BRIEF
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_BRIEF
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_brief(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_BRIEF_MESSAGES
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_BRIEF_MESSAGES
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_brief_messages(void
     
 );
 #endif
@@ -4607,69 +4393,9 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_delete_task(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_EDIT_TASK_PLAN
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_EDIT_TASK_PLAN
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_edit_task_plan(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_ENSURE_SUPERVISOR
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_ENSURE_SUPERVISOR
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_ensure_supervisor(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_MISSION_INTRO_DUE
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_MISSION_INTRO_DUE
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_mission_intro_due(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_MISSION_STRIP
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_MISSION_STRIP
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_mission_strip(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_PLAN_ESTIMATE
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_PLAN_ESTIMATE
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_plan_estimate(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_REFRESH_OUTLINE_STATS
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_REFRESH_OUTLINE_STATS
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_refresh_outline_stats(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_RESOLVE_SUPERVISOR_ITEMS
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_RESOLVE_SUPERVISOR_ITEMS
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_resolve_supervisor_items(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_RESUME_SUPERVISOR
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_RESUME_SUPERVISOR
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_resume_supervisor(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_RETRY_STEP
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_RETRY_STEP
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_retry_step(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SET_STEP_SKIPPED
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SET_STEP_SKIPPED
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_set_step_skipped(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SET_SUPERVISOR_SETTINGS
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SET_SUPERVISOR_SETTINGS
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_set_supervisor_settings(void
     
 );
 #endif
@@ -4691,51 +4417,9 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_set_task_images(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SET_WATCH_EVERYTHING
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SET_WATCH_EVERYTHING
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_set_watch_everything(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SET_WATCHED
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SET_WATCHED
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_set_watched(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_START_MISSION
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_START_MISSION
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_start_mission(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_START_TASK
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_START_TASK
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_start_task(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_STOP_SUPERVISOR
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_STOP_SUPERVISOR
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_stop_supervisor(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SUPERVISOR_PAGE
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SUPERVISOR_PAGE
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_supervisor_page(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SUPERVISOR_SETTINGS
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SUPERVISOR_SETTINGS
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_supervisor_settings(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_TAKE_BACK_PLAN_APPROVAL
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_TAKE_BACK_PLAN_APPROVAL
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_take_back_plan_approval(void
     
 );
 #endif
@@ -4772,12 +4456,6 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_unassign_task(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_WATCH_OUTLINE_DOCS
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_WATCH_OUTLINE_DOCS
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_watch_outline_docs(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_WATCH_STATE
-#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_WATCH_STATE
-uint16_t uniffi_zeron_mobile_checksum_method_coreclient_watch_state(void
     
 );
 #endif

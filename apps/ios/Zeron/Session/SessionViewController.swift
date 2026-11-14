@@ -155,28 +155,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             still.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
             still.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
         ])
-        missionStrip.configuration?.cornerStyle = .capsule
-        missionStrip.configuration?.baseForegroundColor = Palette.text
-        missionStrip.configuration?.background.visualEffect = UIBlurEffect(style: .systemThickMaterial)
-        missionStrip.configuration?.background.backgroundColor = Palette.elevated.withAlphaComponent(0.85)
-        missionStrip.configuration?.background.strokeColor = Palette.hairline
-        missionStrip.configuration?.background.strokeWidth = 1
-        missionStrip.configuration?.image = TaskGlyph.asset("glyph-mission", side: 14)
-        missionStrip.configuration?.imagePadding = 6
-        missionStrip.configuration?.titleLineBreakMode = .byTruncatingTail
-        missionStrip.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 12)
-        missionStrip.accessibilityIdentifier = "mission-strip"
-        missionStrip.isHidden = true
-        missionStrip.translatesAutoresizingMaskIntoConstraints = false
-        missionStrip.addAction(UIAction { [weak self] _ in self?.openMission() }, for: .primaryActionTriggered)
-        view.addSubview(missionStrip)
-        NSLayoutConstraint.activate([
-            missionStrip.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            missionStrip.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
-            missionStrip.trailingAnchor.constraint(lessThanOrEqualTo: still.leadingAnchor, constant: -8),
-        ])
-        missionToken = app.observe { [weak self] in self?.syncMission() }
-        syncMission()
         // Tapping the transcript puts the composer (and keyboard) away.
         let dismissTap = UITapGestureRecognizer(target: self, action: #selector(dismissComposer))
         dismissTap.cancelsTouchesInView = false
@@ -191,10 +169,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             if self.editingQueueId != nil {
                 self.endEdit(commit: text)
                 return .replaced
-            }
-            if self.mission {
-                self.startMission(text: text, images: images)
-                return .kept
             }
             // An immediate send (new turn, steer, stop-and-send) gets the
             // desktop runway; a message queued behind a live turn keeps the
@@ -255,10 +229,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.onActionChange = { [weak self] in self?.render(animated: true) }
         composer.onChipTap = { [weak self] id, _ in
             guard let self else { return }
-            if id == "mission" {
-                self.mission.toggle()
-                return self.render(animated: true)
-            }
             guard let sheet = self.source.chipSheet(id) else { return }
             self.present(sheet, animated: true)
         }
@@ -521,11 +491,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private var voiceBar: VoiceBarItem?
     private var voiceToken: AnyObject?
     private var hostsToken: AnyObject?
-    private var missionToken: AnyObject?
-    private let missionStrip = UIButton(configuration: .plain())
-    private var mission = false
-    private var missionReview = true
-    private var missionPlanDoc = true
 
     deinit {
         if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
@@ -1118,13 +1083,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             list.verticalScrollIndicatorInsets.bottom = inset
             if following { list.contentOffset.y = list.maxOffsetY }
         }
-        let top = missionStrip.isHidden ? 0 : missionStrip.frame.maxY + 6 - view.safeAreaInsets.top
-        if abs(list.contentInset.top - top) > 0.5 {
-            let atTop = list.contentOffset.y <= -list.adjustedContentInset.top + 0.5
-            list.contentInset.top = top
-            list.verticalScrollIndicatorInsets.top = top
-            if atTop { list.contentOffset.y = -list.adjustedContentInset.top }
-        }
     }
 
     // MARK: Queue editing (host lease)
@@ -1268,26 +1226,13 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.resumable = c.resumable
         still.working = c.running
         composer.canSteer = c.canSteer
-        let labels = missionComposerLabels(fromChat: true)
-        let missionAvailable = app.row(chatId)?.sidechatOf == nil
-        if !missionAvailable { mission = false }
-        var chips: [ComposerChip] = []
-        if missionAvailable {
-            chips.append(ComposerChip(id: "mission", title: labels.start, symbol: "target", tint: mission ? Palette.accent : nil))
-        }
-        if mission {
-            chips.append(ComposerChip(id: "mission-plan", title: missionPlanDoc ? labels.planDoc : labels.stepsOnly, symbol: missionReview ? "checklist" : "doc.text"))
-        }
-        chips += c.chips
-        composer.placeholder = mission ? labels.placeholder : c.placeholder
-        composer.prediction = editingQueueId == nil && !mission ? c.prediction : nil
-        composer.chips = chips
+        composer.placeholder = c.placeholder
+        composer.prediction = editingQueueId == nil ? c.prediction : nil
+        composer.chips = c.chips
         composer.comments = c.comments
-        var menus = Dictionary(uniqueKeysWithValues: c.chips.map { chip in
+        composer.chipMenus = Dictionary(uniqueKeysWithValues: c.chips.map { chip in
             (chip.id, { [weak self] in self?.source.chipMenu(chip.id) })
         })
-        menus["mission-plan"] = { [weak self] in self?.missionPlanMenu() }
-        composer.chipMenus = menus
         // One banner for both the row's animation and its contents (the
         // Cloud reading may turn a "not delivered" into nothing).
         let banner: SessionChrome.Banner = editingQueueId != nil ? .editing : cloudBanner(c.banner)
@@ -1469,90 +1414,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         return sheet
     }
 
-    private func syncMission() {
-        guard let strip = app.client?.missionStrip(chatId: chatId) else {
-            missionStrip.isHidden = true
-            view.setNeedsLayout()
-            return
-        }
-        var title = AttributedString("\(strip.role) · \(strip.title) · \(strip.done)/\(strip.total)")
-        title.font = Fonts.ui(.sansMedium, 13)
-        missionStrip.configuration?.attributedTitle = title
-        missionStrip.isHidden = false
-        view.setNeedsLayout()
-    }
-
-    private func missionPlanMenu() -> UIMenu {
-        let labels = missionComposerLabels(fromChat: true)
-        return UIMenu(title: labels.start, children: [
-            UIMenu(options: .displayInline, children: [(true, labels.planDoc), (false, labels.stepsOnly)].map { planDoc, title in
-                UIAction(title: title, state: planDoc == missionPlanDoc ? .on : .off) { [weak self] _ in
-                    self?.missionPlanDoc = planDoc
-                    self?.render(animated: true)
-                }
-            }),
-            UIAction(title: labels.reviewPlanFirst, state: missionReview ? .on : .off) { [weak self] _ in
-                self?.missionReview.toggle()
-                self?.render(animated: true)
-            },
-        ])
-    }
-
-    private func startMission(text: String, images: [StagedImage]) {
-        let pictures = images.filter(\.isImage)
-        if let error = missionStagedError(images: UInt32(pictures.count), otherFile: nil) {
-            return Toast.show(error, in: view.window, above: bottom)
-        }
-        guard let client = app.client, let host = app.row(chatId)?.deviceId else { return }
-        let brief = missionText(text: text, pasted: images.filter { !$0.isImage }.map { String(decoding: $0.data, as: UTF8.self) })
-        let options = MissionOptions(approvePlan: missionReview, sameAgents: false, planDoc: missionPlanDoc)
-        let chat = chatId
-        Task { @MainActor [weak self] in
-            do {
-                let paths = try await MissionStart.upload(pictures, to: host, client: client)
-                let started = try await client.startMissionFromChat(chatId: chat, draft: MissionStart.draft(text: brief, spaceId: nil, images: paths), options: options, lead: ChatMission.lead)
-                guard let self else { return }
-                if let notice = started.notice { Toast.show(notice, in: self.view.window, above: self.bottom) }
-                self.composer.text = ""
-                self.composer.images = []
-                self.mission = false
-                self.render(animated: true)
-                (self.tabBarController as? MainTabController)?.showTasks("mission:\(started.taskId)")
-            } catch {
-                Toast.show(TasksErrors.message(error), in: self?.view.window, above: self?.bottom)
-            }
-        }
-    }
-
-    private func openMission() {
-        guard let strip = app.client?.missionStrip(chatId: chatId) else { return }
-        navigationController?.pushViewController(MissionControlViewController(app: app, taskId: strip.taskId), animated: true)
-    }
-
-    private func missionItems() -> [UIMenuElement] {
-        guard let client = app.client else { return [] }
-        var items: [UIMenuElement] = []
-        let strip = client.missionStrip(chatId: chatId)
-        if let strip {
-            items.append(UIAction(title: missionLabels().openMissionPage, image: TaskGlyph.asset("glyph-mission")) { [weak self] _ in self?.openMission() })
-            items.append(UIAction(title: "Brief", image: UIImage(systemName: "doc.plaintext")) { [weak self] _ in
-                guard let self else { return }
-                self.navigationController?.pushViewController(BriefViewController(app: self.app, taskId: strip.taskId, stepId: strip.stepId), animated: true)
-            })
-        }
-        if let watch = client.watchState(chatId: chatId), !(watch.mission && strip?.stepId != nil) {
-            let chat = chatId
-            items.append(UIAction(title: watch.everything ? "Watched (everything is on)" : "Watched by the Supervisor", image: UIImage(systemName: "eye"), attributes: watch.everything ? .disabled : [], state: watch.watched ? .on : .off) { [weak self] _ in
-                Task { @MainActor in
-                    do { try await client.setWatched(chatId: chat, watched: !watch.watched) } catch {
-                        Toast.show(TasksErrors.message(error), in: self?.view.window)
-                    }
-                }
-            })
-        }
-        return items.isEmpty ? [] : [UIMenu(options: .displayInline, children: items)]
-    }
-
     private func sessionMenu() -> UIMenu {
         UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
             guard let self else { return done([]) }
@@ -1591,7 +1452,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                     self.confirmDelete(app: self.app, self.chatId) { self.leave() }
                 },
             ]
-            done(self.missionItems() + stop + items.compactMap { $0 })
+            done(stop + items.compactMap { $0 })
         }])
     }
 

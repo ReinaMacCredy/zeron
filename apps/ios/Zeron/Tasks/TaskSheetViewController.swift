@@ -3,18 +3,13 @@ import UIKit
 final class TaskSheetViewController: UIViewController, UICollectionViewDelegate {
     private let app: AppModel
     private let taskId: String
-    private let open: (Destination) -> Void
+    private let open: (String) -> Void
     private var collectionView: UICollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<String, Row>!
     private var appToken: AnyObject?
     private var detail: TaskDetail?
     private var thumbs: [String: UIImage] = [:]
     private var loading = Set<String>()
-
-    enum Destination {
-        case thread(String)
-        case mission(String)
-    }
 
     struct Row: Hashable {
         let id: String
@@ -26,7 +21,7 @@ final class TaskSheetViewController: UIViewController, UICollectionViewDelegate 
         var action = false
     }
 
-    init(app: AppModel, taskId: String, open: @escaping (Destination) -> Void) {
+    init(app: AppModel, taskId: String, open: @escaping (String) -> Void) {
         self.app = app
         self.taskId = taskId
         self.open = open
@@ -67,7 +62,7 @@ final class TaskSheetViewController: UIViewController, UICollectionViewDelegate 
                 c.imageProperties.maximumSize = CGSize(width: 44, height: 44)
                 c.imageProperties.cornerRadius = 6
             } else if let symbol = row.symbol {
-                c.image = UIImage(systemName: symbol) ?? TaskGlyph.asset(symbol)
+                c.image = UIImage(systemName: symbol)
                 c.imageProperties.tintColor = row.tint == Palette.text ? Palette.secondary : row.tint
             }
             cell.contentConfiguration = c
@@ -118,29 +113,23 @@ final class TaskSheetViewController: UIViewController, UICollectionViewDelegate 
             snap.appendItems([Row(id: "add-image", title: "Add images", symbol: "plus", tint: Palette.accent, action: true)])
         }
 
-        if !task.mission || !detail.context.isEmpty {
-            snap.appendSections(["Context chats · \(detail.context.count)"])
-            snap.appendItems(detail.context.map { chat in
-                Row(id: "context:\(chat.chatId)", title: chat.title, symbol: "bubble.left.and.text.bubble.right", action: true)
-            })
-            if detail.context.count < 5, detail.plan.isEmpty {
-                snap.appendItems([Row(id: "add-context", title: "Add a context chat", symbol: "plus", tint: Palette.accent, action: true)])
-            }
+        snap.appendSections(["Context chats · \(detail.context.count)"])
+        snap.appendItems(detail.context.map { chat in
+            Row(id: "context:\(chat.chatId)", title: chat.title, symbol: "bubble.left.and.text.bubble.right", action: true)
+        })
+        if detail.context.count < 5 {
+            snap.appendItems([Row(id: "add-context", title: "Add a context chat", symbol: "plus", tint: Palette.accent, action: true)])
         }
 
         var actions: [Row] = []
-        if task.mission {
-            actions.append(Row(id: "mission", title: missionLabels().openMissionPage, symbol: "glyph-mission", tint: Palette.accent, action: true))
-        }
         if let chat = task.leadChatId {
             actions.append(Row(id: "thread:\(chat)", title: "Open thread", symbol: "bubble.left", tint: Palette.accent, action: true))
-            if !task.mission, task.status != .done {
+            if task.status != .done {
                 actions.append(Row(id: "unassign", title: "Unassign", symbol: "person.crop.circle.badge.xmark", tint: Palette.text, action: true))
             }
         } else if task.status != .done {
             actions.append(Row(id: "start", title: "Start in a new chat", symbol: "play", tint: Palette.accent, action: true))
             actions.append(Row(id: "assign", title: "Hand to a thread", symbol: "arrowshape.turn.up.right", tint: Palette.accent, action: true))
-            actions.append(Row(id: "start-mission", title: missionLabels().planFirst, symbol: "glyph-mission", tint: Palette.accent, action: true))
         }
         actions.append(task.status == .done
             ? Row(id: "undone", title: "Mark as not done", symbol: "arrow.uturn.backward", tint: Palette.text, action: true)
@@ -165,17 +154,14 @@ final class TaskSheetViewController: UIViewController, UICollectionViewDelegate 
         let id = taskId
         let source = collectionView.cellForItem(at: indexPath)
         switch row.id {
-        case "mission":
-            open(.mission(id))
         case let thread where thread.hasPrefix("thread:"):
-            open(.thread(String(thread.dropFirst("thread:".count))))
-        case "start", "start-mission":
+            open(String(thread.dropFirst("thread:".count)))
+        case "start":
             guard let device = hostId else { return Toast.show("No Mac is online.", in: view.window) }
-            let mission = row.id == "start-mission" ? MissionOptions(approvePlan: true, sameAgents: false, planDoc: true) : nil
             let config = app.lastDraft.config
             run { [weak self] in
-                let chat = try await client.startTask(taskId: id, deviceId: device, config: config, mission: mission)
-                self?.open(mission == nil ? .thread(chat) : .mission(id))
+                let chat = try await client.startTask(taskId: id, deviceId: device, config: config)
+                self?.open(chat)
             }
         case "assign":
             ThreadPickerController.present(from: self, app: app, title: "Hand to a thread") { [weak self] chat in
@@ -208,13 +194,11 @@ final class TaskSheetViewController: UIViewController, UICollectionViewDelegate 
         case let context where context.hasPrefix("context:"):
             let chat = String(context.dropFirst("context:".count))
             let sheet = UIAlertController(title: row.title, message: nil, preferredStyle: .actionSheet)
-            sheet.addAction(UIAlertAction(title: "Open thread", style: .default) { [weak self] _ in self?.open(.thread(chat)) })
-            if detail?.plan.isEmpty ?? true {
-                sheet.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
-                    let chats = (self?.detail?.context.map(\.chatId) ?? []).filter { $0 != chat }
-                    self?.run { try await client.setTaskContext(taskId: id, chatIds: chats) }
-                })
-            }
+            sheet.addAction(UIAlertAction(title: "Open thread", style: .default) { [weak self] _ in self?.open(chat) })
+            sheet.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
+                let chats = (self?.detail?.context.map(\.chatId) ?? []).filter { $0 != chat }
+                self?.run { try await client.setTaskContext(taskId: id, chatIds: chats) }
+            })
             sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
             sheet.popoverPresentationController?.sourceView = source
             present(sheet, animated: true)
@@ -267,7 +251,7 @@ final class TaskSheetViewController: UIViewController, UICollectionViewDelegate 
         let id = taskId
         let existing = detail?.images ?? []
         run {
-            let paths = try await MissionStart.upload(picked, to: device, client: client)
+            let paths = try await TaskImages.upload(picked, to: device, client: client)
             try await client.setTaskImages(taskId: id, images: Array((existing + paths).prefix(12)))
         }
     }
