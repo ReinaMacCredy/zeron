@@ -591,7 +591,6 @@ pub const SIDECAR_POPOVER_SLIDE: MotionSpec = MotionSpec::new(220, EASE_DRAWER);
 pub const PANEL_RESIZE: MotionSpec = DIALOG_IN;
 /// Terminal tab drag-reorder sliding transforms: 150ms (§1.10).
 pub const TAB_SLIDE: MotionSpec = MotionSpec::new(150, EASE_OUT);
-pub const TAB_GROUP: MotionSpec = MotionSpec::new(240, EASE_OUT);
 /// Diff-pane per-file collapse: 180ms height (§1.11).
 pub const COLLAPSE: MotionSpec = MotionSpec::new(180, EASE_OUT);
 pub const SHELF_OPEN: MotionSpec = MotionSpec::new(240, EASE_OUT);
@@ -2228,9 +2227,6 @@ mod tests {
 #[cfg(windows)]
 #[path = "motion/windows_pulse.rs"]
 mod windows_pulse;
-
-mod fold;
-pub(crate) use fold::{Fold, clipped, folded};
 
 /// A bounded activation sheen for Fast service tier; GPUI handles reduced motion.
 pub fn fast_tier(

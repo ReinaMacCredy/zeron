@@ -507,20 +507,6 @@ async fn pending_ask(
     }
 }
 
-pub(crate) async fn pending_questions(
-    engine: &crate::state::EngineHandle,
-    chat_id: &str,
-    executor: &gpui::BackgroundExecutor,
-) -> Option<Vec<zeron_proto::UserInputQuestion>> {
-    for _ in 0..FETCH_ATTEMPTS {
-        if let Some((_, questions, _)) = pending_ask(engine, chat_id, executor).await {
-            return Some(questions);
-        }
-        executor.timer(FETCH_RETRY).await;
-    }
-    None
-}
-
 /// Dropping the scoped subscription after one frame stops the engine building the full mirror.
 async fn fetch_pending(
     engine: &crate::state::EngineHandle,

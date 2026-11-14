@@ -366,7 +366,7 @@ impl Shell {
         cx.notify();
     }
 
-    /// Sidechats and new threads have no surface to open on from the split or the task center.
+    /// Sidechats and new threads have no surface to open on from the split.
     pub(super) fn on_pane_composer_event(
         &mut self,
         transcript: &Entity<Transcript>,
@@ -1089,8 +1089,6 @@ mod drag_regressions {
                     true,
                     false,
                     false,
-                    false,
-                    None,
                     None,
                     &theme,
                     cx,

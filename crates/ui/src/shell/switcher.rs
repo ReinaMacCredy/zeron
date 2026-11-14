@@ -259,8 +259,6 @@ impl Shell {
             Route::PullRequests
                 | Route::Inbox
                 | Route::Tasks
-                | Route::TaskCenter
-                | Route::Supervisor
                 | Route::Usage
                 | Route::Docs
                 | Route::Skills

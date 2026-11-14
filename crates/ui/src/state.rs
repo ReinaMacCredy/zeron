@@ -975,7 +975,6 @@ pub struct AppState {
     /// Sorted (see [`sort_spaces`]).
     pub spaces: Vec<Space>,
     pub tasks: Vec<zeron_proto::Task>,
-    pub task_steps: Vec<zeron_proto::TaskStep>,
     pub quick_captured: crate::quick_capture::Captured,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
@@ -1046,7 +1045,6 @@ pub struct AppState {
     pub computer_settings: Option<zeron_proto::computer::ComputerSettings>,
     pub sidebar_settings: zeron_proto::SidebarSettings,
     pub device_hub: Option<zeron_proto::device_hub::DeviceHubState>,
-    pub supervisor: Option<zeron_proto::supervisor::SupervisorSnapshot>,
     /// Whether each probed harness can fork or rewind a session (the
     /// `branching` half of the composer's `HarnessCompaction` probe).
     /// Unprobed harnesses are treated as able; the engine has the last word.
@@ -1071,7 +1069,7 @@ pub struct AppState {
     /// Send-in-flight overlay per chat id: a queued doc command the host
     /// hasn't executed yet (see [`Self::begin_pending_send`]).
     pending_sends: HashMap<String, PendingSend>,
-    plan_approvals: HashMap<String, (String, bool)>,
+    plan_approvals: HashSet<String>,
     /// The in-flight send's attachment upload, when it has one.
     upload_progress: Option<UploadProgress>,
     /// Engine-side queued-attachment transfers by uploadId (`WatchTransfers`
@@ -1215,7 +1213,6 @@ fn device_presentation_at(devices: &[Device], now: DateTime<Utc>) -> Vec<(Device
 
 struct Nesting<'a> {
     listed: HashSet<&'a str>,
-    steps: HashSet<&'a str>,
     parents: HashMap<&'a str, &'a str>,
 }
 
@@ -1223,12 +1220,6 @@ impl<'a> Nesting<'a> {
     fn of(state: &'a AppState, overview: &[(ChatIndicator, &'a Chat)]) -> Self {
         Self {
             listed: overview.iter().map(|(_, chat)| chat.id.as_str()).collect(),
-            steps: state
-                .task_steps
-                .iter()
-                .filter(|step| !step.deleted)
-                .filter_map(|step| step.chat_id.as_deref())
-                .collect(),
             parents: state
                 .chats
                 .iter()
@@ -1237,10 +1228,9 @@ impl<'a> Nesting<'a> {
         }
     }
 
-    /// Only a parent with its own sidebar row can hold a child; task step threads stay for the lead's nested step rows.
+    /// Only a parent with its own sidebar row can hold a child.
     fn nests(&self, chat_id: &str, depth: usize) -> bool {
         depth < 16
-            && !self.steps.contains(chat_id)
             && self.parents.get(chat_id).is_some_and(|parent| {
                 self.listed.contains(parent) && !self.nests(parent, depth + 1)
             })
@@ -1267,7 +1257,6 @@ impl AppState {
             sync_clocks: HashMap::new(),
             spaces: Vec::new(),
             tasks: Vec::new(),
-            task_steps: Vec::new(),
             quick_captured: Default::default(),
             chats: Vec::new(),
             pending_side_chat: None,
@@ -1293,7 +1282,6 @@ impl AppState {
             computer_settings: None,
             sidebar_settings: Default::default(),
             device_hub: None,
-            supervisor: None,
             harness_branching: HashMap::new(),
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
@@ -1303,7 +1291,7 @@ impl AppState {
             link_roots_revision: 0,
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
-            plan_approvals: HashMap::new(),
+            plan_approvals: HashSet::new(),
             upload_progress: None,
             transfers: HashMap::new(),
             held_sends: Vec::new(),
@@ -1789,45 +1777,19 @@ impl AppState {
         }
         self.tasks = tasks;
         self.tasks_synced = true;
-        let tasks = &self.tasks;
-        self.plan_approvals.retain(|_, (chat_id, as_task)| {
-            !*as_task || zeron_proto::plan_of_chat(tasks, chat_id).is_none()
-        });
         true
     }
 
-    pub(crate) fn plan_approval(&self, request_id: &str) -> Option<bool> {
-        self.plan_approvals
-            .get(request_id)
-            .map(|(_, as_task)| *as_task)
+    pub(crate) fn plan_approval(&self, request_id: &str) -> bool {
+        self.plan_approvals.contains(request_id)
     }
 
-    pub(crate) fn begin_plan_approval(&mut self, request_id: &str, chat_id: &str, as_task: bool) {
-        self.plan_approvals
-            .insert(request_id.to_owned(), (chat_id.to_owned(), as_task));
+    pub(crate) fn begin_plan_approval(&mut self, request_id: &str) {
+        self.plan_approvals.insert(request_id.to_owned());
     }
 
     pub(crate) fn end_plan_approval(&mut self, request_id: &str) {
         self.plan_approvals.remove(request_id);
-    }
-
-    pub fn apply_task_steps(&mut self, steps: Vec<zeron_proto::TaskStep>) -> bool {
-        if self.task_steps == steps {
-            return false;
-        }
-        self.task_steps = steps;
-        true
-    }
-
-    pub fn apply_supervisor(
-        &mut self,
-        snapshot: zeron_proto::supervisor::SupervisorSnapshot,
-    ) -> bool {
-        if self.supervisor.as_ref() == Some(&snapshot) {
-            return false;
-        }
-        self.supervisor = Some(snapshot);
-        true
     }
 
     fn heal_space_selection(&mut self) {
@@ -4389,7 +4351,6 @@ impl AppState {
         self.transfers.clear();
         self.sync_clocks.clear();
         self.local_device_id = None;
-        self.supervisor = None;
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         cx.notify();
     }
@@ -4700,7 +4661,6 @@ impl AppState {
         }
         self.engine = Some(handle.clone());
         self.device_hub = None;
-        self.supervisor = None;
         self.engine_exit_expected = false;
         let watched = handle.clone();
         self.connection_task = Some(cx.spawn(async move |this, cx| {
@@ -4762,18 +4722,6 @@ impl AppState {
                 handle.clone(),
                 methods::WATCH_TASKS,
                 AppState::apply_tasks,
-            ),
-            spawn_watch(
-                cx,
-                handle.clone(),
-                methods::WATCH_TASK_STEPS,
-                AppState::apply_task_steps,
-            ),
-            spawn_watch(
-                cx,
-                handle.clone(),
-                methods::WATCH_SUPERVISOR,
-                AppState::apply_supervisor,
             ),
             spawn_watch(
                 cx,
@@ -9488,31 +9436,16 @@ mod tests {
         fork.forked_from_chat_id = Some("main".into());
         let mut started = chat("started", 3, Some(3));
         started.created_by_chat_id = Some("main".into());
-        let mut step = chat("step", 4, Some(4));
-        step.created_by_chat_id = Some("main".into());
         let mut orphan = chat("orphan", 5, Some(5));
         orphan.forked_from_chat_id = Some("deleted".into());
-        state.apply_chats(vec![
-            chat("main", 0, Some(0)),
-            side,
-            fork,
-            started,
-            step,
-            orphan,
-        ]);
-        state.task_steps = vec![
-            serde_json::from_value(serde_json::json!({
-                "id": "s", "taskId": "t", "chatId": "step",
-            }))
-            .unwrap(),
-        ];
+        state.apply_chats(vec![chat("main", 0, Some(0)), side, fork, started, orphan]);
         let mut rows: Vec<&str> = state
             .sidebar_chats(now, None)
             .iter()
             .map(|(_, c)| c.id.as_str())
             .collect();
         rows.sort();
-        assert_eq!(rows, ["main", "orphan", "step"]);
+        assert_eq!(rows, ["main", "orphan"]);
 
         let mut grandchild = chat("grandchild", 6, Some(6));
         grandchild.forked_from_chat_id = Some("side".into());
@@ -9532,7 +9465,7 @@ mod tests {
         };
         assert_eq!(
             rows(&state),
-            ["grandchild", "main", "orphan", "step", "supervised"],
+            ["grandchild", "main", "orphan", "supervised"],
             "a child whose parent has no sidebar row keeps its own"
         );
         assert_eq!(state.sidecar_host("side", now).as_deref(), Some("main"));
@@ -9544,7 +9477,7 @@ mod tests {
         state.apply_chats(chats);
         assert_eq!(
             rows(&state),
-            ["fork", "orphan", "side", "started", "step", "supervised"],
+            ["fork", "orphan", "side", "started", "supervised"],
             "an archived parent's children come back to the sidebar"
         );
         assert_eq!(

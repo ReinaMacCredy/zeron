@@ -2440,10 +2440,6 @@ impl Pickers {
             .is_some_and(|list| self.offered(list).is_empty())
     }
 
-    pub(crate) fn harnesses_error(&self) -> Option<&str> {
-        self.harnesses.error()
-    }
-
     /// The resolved harness's steering mode, from the loaded descriptor list.
     /// `None` while the catalog is loading.
     pub fn resolved_steering_mode(&self, cx: &App) -> Option<zeron_proto::SteeringMode> {

@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{AppContext as _, Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
 
-use super::{TaskCenter, TaskCenterEvent, TasksEvent, TasksPage};
+use super::{TasksEvent, TasksPage};
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -39,9 +39,7 @@ fn lab(cx: &mut TestAppContext) -> (Lab, Entity<AppState>) {
     cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::dark());
-        let mut spine = crate::settings::UiSettings::default();
-        spine.tree_view = crate::settings::TreeView::Spine;
-        crate::settings::init(spine, dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
     });
     cx.executor().allow_parking();
     let mut png = std::io::Cursor::new(Vec::new());
@@ -98,12 +96,11 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
-fn mission(state: &Entity<AppState>, cx: &mut TestAppContext) {
+fn linked_todo(state: &Entity<AppState>, cx: &mut TestAppContext) {
     state.update(cx, |state, _| {
         state.tasks = vec![
             serde_json::from_value(serde_json::json!({
                 "id": "orch", "title": "Build it", "orderKey": "a", "chatId": "lead",
-                "mode": "orchestrated",
             }))
             .unwrap(),
         ];
@@ -114,81 +111,7 @@ fn mission(state: &Entity<AppState>, cx: &mut TestAppContext) {
             }))
             .unwrap(),
         ];
-        state.task_steps = vec![
-            serde_json::from_value(serde_json::json!({
-                "id": "s1", "taskId": "orch", "title": "s1", "orderKey": "1",
-            }))
-            .unwrap(),
-        ];
     });
-}
-
-fn edit_step(cx: &mut VisualTestContext) {
-    let at = cx.debug_bounds("task-center-step-s1").unwrap().center();
-    cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
-    cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
-    cx.run_until_parked();
-    click(cx, "task-center-menu-edit");
-    std::thread::sleep(crate::motion::MENU_OUT.total());
-    cx.executor()
-        .advance_clock(std::time::Duration::from_secs(1));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("task-center-editor").is_some());
-}
-
-#[gpui::test]
-fn dropped_and_picked_images_reach_the_step_edit_card_and_the_plan_edit(cx: &mut TestAppContext) {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let _guard = runtime.enter();
-    let (lab, state) = lab(cx);
-    mission(&state, cx);
-    let (center, cx) = cx.add_window_view(|_, cx| TaskCenter::new(state, "orch".into(), cx));
-    cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
-    let sent = Rc::new(RefCell::new(Vec::new()));
-    let sink = sent.clone();
-    cx.update(|_, cx| {
-        cx.subscribe(&center, move |_, event: &TaskCenterEvent, _| {
-            if let TaskCenterEvent::EditPlan { edit, .. } = event {
-                sink.borrow_mut().push(edit.steps.clone());
-            }
-        })
-        .detach();
-    });
-
-    edit_step(cx);
-    drop_on(
-        cx,
-        "task-center-editor",
-        vec![lab.text.clone(), lab.png.clone()],
-    );
-    settle(cx, |cx| {
-        cx.debug_bounds("task-center-edit-image-0").is_some()
-    });
-    assert!(
-        cx.debug_bounds("task-center-edit-image-1").is_none(),
-        "the text file is refused"
-    );
-
-    click(cx, "task-center-edit-add-image");
-    assert!(cx.did_prompt_for_paths());
-    let png = lab.png.clone();
-    cx.simulate_path_prompt_response(move |options| {
-        assert!(options.files && options.multiple && !options.directories);
-        Some(vec![png])
-    });
-    settle(cx, |cx| {
-        cx.debug_bounds("task-center-edit-image-1").is_some()
-    });
-
-    click(cx, "task-center-edit-save");
-    assert!(cx.debug_bounds("task-center-spec-s1-image-1").is_some());
-    click(cx, "task-center-send");
-    let sent = sent.borrow();
-    assert_eq!(sent.len(), 1);
-    assert_eq!(
-        sent[0][0].images,
-        ["/uploads/shot.png", "/uploads/shot.png"]
-    );
 }
 
 #[gpui::test]
@@ -237,29 +160,11 @@ fn dropped_and_picked_images_go_with_a_task_from_the_add_input(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn the_steps_window_button_closes_its_own_window(cx: &mut TestAppContext) {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let _guard = runtime.enter();
-    let (_lab, state) = lab(cx);
-    mission(&state, cx);
-    state.update(cx, |state, _| state.tasks[0].plan_pending = true);
-    let (_center, cx) = cx.add_window_view(|_, cx| TaskCenter::new(state, "orch".into(), cx));
-    cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
-    cx.run_until_parked();
-    click(cx, "task-center-pop-waiting");
-    assert!(cx.debug_bounds("task-center-pop").is_some());
-    click(cx, "task-center-pop-waiting");
-    assert!(cx.debug_bounds("task-center-pop").is_none());
-    click(cx, "task-center-pop-waiting");
-    assert!(cx.debug_bounds("task-center-pop").is_some());
-}
-
-#[gpui::test]
 fn an_idle_tasks_page_stops_asking_for_frames(cx: &mut TestAppContext) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let _guard = runtime.enter();
     let (_lab, state) = lab(cx);
-    mission(&state, cx);
+    linked_todo(&state, cx);
     let (_page, cx) = cx.add_window_view(|_, cx| TasksPage::new(state, cx));
     cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
     cx.run_until_parked();

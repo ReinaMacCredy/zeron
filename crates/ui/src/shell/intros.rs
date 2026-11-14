@@ -336,7 +336,7 @@ fn supervisor_conversation_visual(theme: &Theme, t: f32) -> AnyElement {
     const PREFIX: &str = "Keep an eye on ";
     const MENTION: &str = "@Fix tab strip jitter";
     const WATCH_AT: f32 = 2.4;
-    let tone = crate::supervisor::ok_tone(theme);
+    let (_, _, tone) = chat_status_tone(zeron_proto::ChatIndicator::Completed, theme);
     let total = PREFIX.len() + MENTION.len();
     let typed = (((t - 0.3) / 0.045).max(0.0) as usize).min(total);
     let mention = &MENTION[..typed.saturating_sub(PREFIX.len())];

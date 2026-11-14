@@ -15,7 +15,7 @@ use super::background::{
 };
 use crate::icons::{self, icon};
 use crate::motion;
-use crate::plan_proposal::PlanTarget;
+use crate::plan_proposal::PlanAnswer;
 use crate::popover;
 use crate::theme::Theme;
 
@@ -35,33 +35,13 @@ pub(crate) struct WaitItem {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum WaitKind {
     Ask,
-    Plan {
-        task_id: Option<String>,
-        steps: Vec<String>,
-    },
-    Decision {
-        item_id: String,
-        label: &'static str,
-        detail: String,
-        options: Vec<String>,
-    },
+    Plan { steps: Vec<String> },
 }
 
 #[derive(Debug, Clone)]
 pub enum WaitingAction {
-    ApprovePlan {
-        chat_id: String,
-        target: PlanTarget,
-        as_task: bool,
-    },
-    Decide {
-        item_id: String,
-        choice: String,
-    },
-    Open {
-        chat_id: String,
-        decision: bool,
-    },
+    ApprovePlan { chat_id: String, answer: PlanAnswer },
+    Open { chat_id: String },
 }
 
 #[derive(Default)]
@@ -97,12 +77,12 @@ impl Composer {
         self.waiting
             .items
             .iter()
-            .filter(|item| match &item.kind {
-                WaitKind::Ask => elsewhere(&item.chat_id) && self.ask_info(&item.chat_id).is_some(),
-                WaitKind::Plan { task_id: None, .. } => {
-                    elsewhere(&item.chat_id) && self.plan_answer(&item.chat_id).is_some()
-                }
-                _ => true,
+            .filter(|item| {
+                elsewhere(&item.chat_id)
+                    && match &item.kind {
+                        WaitKind::Ask => self.ask_info(&item.chat_id).is_some(),
+                        WaitKind::Plan { .. } => self.plan_answer(&item.chat_id).is_some(),
+                    }
             })
             .cloned()
             .collect()
@@ -404,19 +384,9 @@ impl Composer {
             );
         let body = match &item.kind {
             WaitKind::Ask => self.render_ask_panel(&item.chat_id, window, cx),
-            WaitKind::Plan { task_id, steps } => {
-                let target = match task_id {
-                    Some(task_id) => Some(PlanTarget::Task(task_id.clone())),
-                    None => self.plan_answer(&item.chat_id).map(PlanTarget::Question),
-                };
-                target.map(|target| self.render_plan_body(&item.chat_id, steps, target, theme, cx))
-            }
-            WaitKind::Decision {
-                item_id,
-                detail,
-                options,
-                ..
-            } => Some(self.render_decision_body(item_id, &item.title, detail, options, theme, cx)),
+            WaitKind::Plan { steps } => self
+                .plan_answer(&item.chat_id)
+                .map(|answer| self.render_plan_body(&item.chat_id, steps, answer, theme, cx)),
         };
         let body = div()
             .relative()
@@ -426,7 +396,6 @@ impl Composer {
             .children(body);
 
         let open_target = item.chat_id.clone();
-        let decision = matches!(item.kind, WaitKind::Decision { .. });
         let footer_link = |id: &'static str, label: &'static str| {
             div()
                 .id(id)
@@ -443,25 +412,6 @@ impl Composer {
                 .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
                 .child(label)
         };
-        let dismiss = match &item.kind {
-            WaitKind::Decision { item_id, .. } => {
-                let item_id = item_id.clone();
-                Some(
-                    footer_link("waiting-dismiss", "Dismiss").on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            this.act_waiting(
-                                WaitingAction::Decide {
-                                    item_id: item_id.clone(),
-                                    choice: "Dismissed".into(),
-                                },
-                                cx,
-                            )
-                        },
-                    )),
-                )
-            }
-            _ => None,
-        };
         let footer = div()
             .flex()
             .flex_row()
@@ -473,33 +423,19 @@ impl Composer {
             .text_size(crate::typography::ui_rems(11.5))
             .text_color(theme.text_faint)
             .child(div().flex_1().child("Esc to answer later"))
-            .children(dismiss)
             .child(
-                footer_link(
-                    "waiting-open",
-                    if decision {
-                        "Open Supervisor"
-                    } else {
-                        "Open thread"
+                footer_link("waiting-open", "Open thread").on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.act_waiting(
+                            WaitingAction::Open {
+                                chat_id: open_target.clone(),
+                            },
+                            cx,
+                        )
                     },
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.act_waiting(
-                        WaitingAction::Open {
-                            chat_id: open_target.clone(),
-                            decision,
-                        },
-                        cx,
-                    )
-                })),
+                )),
             );
 
-        let decide = match &item.kind {
-            WaitKind::Decision {
-                item_id, options, ..
-            } => Some((item_id.clone(), options.clone())),
-            _ => None,
-        };
         let card = div()
             .id("waiting-card")
             .role(gpui::Role::Dialog)
@@ -508,26 +444,9 @@ impl Composer {
                 el.debug_selector(|| "waiting-card".into())
                     .track_focus(&focus)
                     .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                        let key = event.keystroke.key.as_str();
-                        if key == "escape" {
+                        if event.keystroke.key == "escape" {
                             cx.stop_propagation();
                             this.close_waiting(cx);
-                        } else if let Some((item_id, options)) = &decide
-                            && !event.keystroke.modifiers.modified()
-                            && let Some(choice) = key
-                                .parse::<usize>()
-                                .ok()
-                                .and_then(|n| n.checked_sub(1))
-                                .and_then(|n| options.get(n))
-                        {
-                            cx.stop_propagation();
-                            this.act_waiting(
-                                WaitingAction::Decide {
-                                    item_id: item_id.clone(),
-                                    choice: choice.clone(),
-                                },
-                                cx,
-                            );
                         }
                     }))
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_waiting(cx)))
@@ -574,34 +493,22 @@ impl Composer {
         &self,
         chat_id: &str,
         steps: &[String],
-        target: PlanTarget,
+        answer: PlanAnswer,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let state = self.state.read(cx);
-        let (offer_task, busy, task_blocked) = match &target {
-            PlanTarget::Task(_) => (false, false, None),
-            PlanTarget::Question(answer) => (
-                true,
-                state.plan_approval(&answer.request_id).is_some(),
-                crate::tasks::chat_plan_blocker(state, chat_id),
-            ),
-        };
-        let task_off = busy || task_blocked.is_some();
-        let approve = |as_task: bool| {
-            let (chat_id, target) = (chat_id.to_owned(), target.clone());
-            cx.listener(move |this: &mut Composer, _: &gpui::ClickEvent, _, cx| {
-                cx.stop_propagation();
-                this.act_waiting(
-                    WaitingAction::ApprovePlan {
-                        chat_id: chat_id.clone(),
-                        target: target.clone(),
-                        as_task,
-                    },
-                    cx,
-                );
-            })
-        };
+        let busy = self.state.read(cx).plan_approval(&answer.request_id);
+        let chat_id = chat_id.to_owned();
+        let approve = cx.listener(move |this: &mut Composer, _: &gpui::ClickEvent, _, cx| {
+            cx.stop_propagation();
+            this.act_waiting(
+                WaitingAction::ApprovePlan {
+                    chat_id: chat_id.clone(),
+                    answer: answer.clone(),
+                },
+                cx,
+            );
+        });
         div()
             .px(px(14.0))
             .pt(px(6.0))
@@ -654,133 +561,16 @@ impl Composer {
                     .child("Nothing runs until you approve."),
             )
             .child(
-                div()
-                    .flex()
-                    .gap(px(6.0))
-                    .pt(px(4.0))
-                    .child(
-                        popover::btn_primary(theme, "Approve")
-                            .id("waiting-approve")
-                            .debug_selector(|| "waiting-approve".into())
-                            .role(gpui::Role::Button)
-                            .aria_label("Approve")
-                            .aria_disabled(busy)
-                            .when(busy, |el| el.opacity(0.45))
-                            .when(!busy, |el| el.on_click(approve(false))),
-                    )
-                    .when(offer_task, |row| {
-                        row.child(
-                            div()
-                                .id("waiting-approve-task")
-                                .debug_selector(|| "waiting-approve-task".into())
-                                .role(gpui::Role::Button)
-                                .aria_label("Approve as Task")
-                                .aria_disabled(task_off)
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .rounded(px(8.0))
-                                .border_1()
-                                .border_color(theme.border_strong)
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(icon(icons::CHECKLIST).size(px(13.0)).text_color(theme.text))
-                                .child("Approve as Task")
-                                .when(task_off, |el| el.opacity(0.45))
-                                .when_some(task_blocked, |el, reason| {
-                                    el.tooltip(crate::settings::widgets::text_tooltip(reason))
-                                })
-                                .when(!task_off, |el| {
-                                    el.cursor_pointer()
-                                        .hover(|s| s.bg(theme.wash(0.05)))
-                                        .on_click(approve(true))
-                                }),
-                        )
-                    }),
-            )
-            .into_any_element()
-    }
-
-    fn render_decision_body(
-        &self,
-        item_id: &str,
-        title: &str,
-        detail: &str,
-        options: &[String],
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let rows = options.iter().enumerate().map(|(ix, option)| {
-            let (item_id, choice) = (item_id.to_owned(), option.clone());
-            div()
-                .id(("waiting-option", ix))
-                .debug_selector(move || format!("waiting-option-{ix}"))
-                .role(gpui::Role::Button)
-                .aria_label(SharedString::from(option.clone()))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.0))
-                .px(px(8.0))
-                .py(px(6.0))
-                .rounded(px(8.0))
-                .cursor_pointer()
-                .text_color(theme.text.opacity(0.85))
-                .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-                .child(
-                    div()
-                        .size(px(18.0))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(5.0))
-                        .bg(theme.wash(0.08))
-                        .font_family(theme.font_mono.clone())
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from((ix + 1).to_string())),
-                )
-                .child(div().min_w_0().child(SharedString::from(option.clone())))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.act_waiting(
-                        WaitingAction::Decide {
-                            item_id: item_id.clone(),
-                            choice: choice.clone(),
-                        },
-                        cx,
-                    )
-                }))
-        });
-        div()
-            .px(px(14.0))
-            .pt(px(4.0))
-            .pb(px(6.0))
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(14.0))
-                    .text_color(theme.text)
-                    .child(SharedString::from(title.to_owned())),
-            )
-            .when(!detail.trim().is_empty(), |el| {
-                el.child(
-                    div()
-                        .mt(px(4.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(detail.to_owned())),
-                )
-            })
-            .child(
-                div()
-                    .mt(px(6.0))
-                    .mx(px(-8.0))
-                    .flex()
-                    .flex_col()
-                    .children(rows),
+                div().flex().gap(px(6.0)).pt(px(4.0)).child(
+                    popover::btn_primary(theme, "Approve")
+                        .id("waiting-approve")
+                        .debug_selector(|| "waiting-approve".into())
+                        .role(gpui::Role::Button)
+                        .aria_label("Approve")
+                        .aria_disabled(busy)
+                        .when(busy, |el| el.opacity(0.45))
+                        .when(!busy, |el| el.on_click(approve)),
+                ),
             )
             .into_any_element()
     }
@@ -790,7 +580,6 @@ fn kind_label(kind: &WaitKind) -> &'static str {
     match kind {
         WaitKind::Ask => "Question",
         WaitKind::Plan { .. } => "Plan",
-        WaitKind::Decision { label, .. } => label,
     }
 }
 
@@ -798,10 +587,6 @@ fn kind_glyph(kind: &WaitKind, theme: &Theme) -> AnyElement {
     match kind {
         WaitKind::Ask => question_glyph(theme),
         WaitKind::Plan { .. } => icon(icons::CHECKLIST)
-            .size(px(13.0))
-            .text_color(theme.text_muted)
-            .into_any_element(),
-        WaitKind::Decision { .. } => icon(icons::LUCIDE_SHIELD)
             .size(px(13.0))
             .text_color(theme.text_muted)
             .into_any_element(),

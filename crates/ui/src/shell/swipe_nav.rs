@@ -33,13 +33,6 @@ pub(super) struct SwipeLayers {
     pub(super) dot: Option<AnyElement>,
 }
 
-impl SwipeNav {
-    pub(super) fn yield_to_slide(&mut self) {
-        self.enter = None;
-        self.pop = None;
-    }
-}
-
 fn demo_wheel(
     cx: &mut gpui::AsyncWindowContext,
     at: gpui::Point<gpui::Pixels>,

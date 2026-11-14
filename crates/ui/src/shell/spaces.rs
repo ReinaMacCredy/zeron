@@ -2551,7 +2551,6 @@ struct ActiveChatRow {
     change_request: Option<zeron_proto::ChangeRequestSummary>,
     group: Option<(String, String)>,
     created_by: Option<String>,
-    nested: bool,
 }
 
 impl ActiveChatRow {
@@ -2830,200 +2829,6 @@ fn grouped_visible_order(
         .flat_map(|(_, rows)| rows)
         .map(|chat| chat.id)
         .collect()
-}
-
-// One level only: a lead that is itself a step thread keeps its threads as rows, so no cycle hides.
-pub(super) fn sidebar_step_threads(
-    state: &AppState,
-    listed: &HashSet<&str>,
-) -> std::collections::HashMap<String, Vec<String>> {
-    let mut pairs: Vec<(&str, &str)> = Vec::new();
-    for step in state.task_steps.iter().filter(|step| !step.deleted) {
-        let Some(child) = step.chat_id.as_deref() else {
-            continue;
-        };
-        let Some(lead) = state
-            .tasks
-            .iter()
-            .find(|task| task.id == step.task_id && !task.deleted)
-            .and_then(|task| task.chat_id.as_deref())
-        else {
-            continue;
-        };
-        if lead != child
-            && listed.contains(child)
-            && listed.contains(lead)
-            && !pairs.iter().any(|(seen, _)| *seen == child)
-        {
-            pairs.push((child, lead));
-        }
-    }
-    let mut children: std::collections::HashMap<String, Vec<String>> = Default::default();
-    for (child, lead) in &pairs {
-        if !pairs.iter().any(|(nested, _)| nested == lead) {
-            children
-                .entry((*lead).to_owned())
-                .or_default()
-                .push((*child).to_owned());
-        }
-    }
-    children
-}
-
-// A split pair shares one card only while adjacent, so a lead's threads follow its partner.
-pub(super) fn nest_step_threads<T>(
-    rows: Vec<T>,
-    id: impl Fn(&T) -> &str,
-    children: &mut std::collections::HashMap<String, Vec<T>>,
-    pair: Option<&split::SplitPair>,
-) -> Vec<T> {
-    let mut out: Vec<T> = Vec::with_capacity(rows.len());
-    let mut held: Vec<T> = Vec::new();
-    for row in rows {
-        let joins_pair = pair.is_some_and(|pair| {
-            out.last()
-                .and_then(|last| pair.partner(id(last)))
-                .is_some_and(|(partner, _)| partner == id(&row))
-        });
-        if !joins_pair {
-            out.append(&mut held);
-        }
-        held.extend(children.remove(id(&row)).unwrap_or_default());
-        out.push(row);
-    }
-    out.append(&mut held);
-    out
-}
-
-#[derive(Clone)]
-pub(super) struct LeadFold {
-    pub(super) motion_key: String,
-    pub(super) open: bool,
-    pub(super) rollup: SharedString,
-    pub(super) asking: bool,
-    pub(super) holds_selected: bool,
-    pub(super) more: Option<(String, usize)>,
-}
-
-pub(super) fn lead_rollup(children: &[(ChatIndicator, bool)]) -> (String, bool) {
-    let count = |hit: &dyn Fn(ChatIndicator, bool) -> bool| {
-        children
-            .iter()
-            .filter(|(status, needs_you)| hit(*status, *needs_you))
-            .count()
-    };
-    let asking = count(&|status, needs_you| needs_you || status == ChatIndicator::AwaitingInput);
-    let failed = count(&|status, needs_you| !needs_you && status == ChatIndicator::Errored);
-    let running = count(&|status, _| status == ChatIndicator::Working);
-    let total = children.len();
-    let text = match [(asking, "asking"), (failed, "failed"), (running, "running")]
-        .into_iter()
-        .find(|(count, _)| *count > 0)
-    {
-        Some((count, word)) => format!("{total} · {count} {word}"),
-        None => total.to_string(),
-    };
-    (text, asking > 0)
-}
-
-pub(super) fn step_needs_you(
-    state: &AppState,
-    chat: &zeron_proto::Chat,
-    status: ChatIndicator,
-) -> bool {
-    state
-        .task_steps
-        .iter()
-        .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(chat.id.as_str()))
-        .any(|step| {
-            zeron_proto::step_status(step, Some(chat), Some(status))
-                == zeron_proto::StepStatus::NeedsYou
-        })
-}
-
-fn step_live(status: zeron_proto::StepStatus) -> bool {
-    matches!(
-        status,
-        zeron_proto::StepStatus::Working | zeron_proto::StepStatus::NeedsYou
-    )
-}
-
-fn open_plan(
-    state: &AppState,
-    lead: &zeron_proto::Chat,
-    now: DateTime<Utc>,
-) -> Option<(String, crate::tasks::Rollup)> {
-    let task = zeron_proto::plan_of_chat(&state.tasks, &lead.id)?;
-    Some((task.id.clone(), crate::tasks::rollup(state, task, now)))
-}
-
-fn plan_live(plan: &crate::tasks::Rollup) -> bool {
-    plan.lead == Some(ChatIndicator::Working) || plan.steps.iter().any(|row| step_live(row.status))
-}
-
-pub(super) struct SidebarMission {
-    pub(super) task_id: String,
-    done: usize,
-    total: usize,
-    complete: bool,
-}
-
-impl SidebarMission {
-    pub(super) fn of(state: &AppState, lead_id: &str) -> Option<Self> {
-        let task = crate::tasks::plan_led_by(&state.tasks, lead_id)?;
-        let progress = crate::tasks::rollup(state, task, Utc::now()).progress;
-        Some(Self {
-            task_id: task.id.clone(),
-            done: progress.done,
-            total: progress.total,
-            complete: task.completed_at.is_some(),
-        })
-    }
-
-    pub(super) fn ring(&self, size: f32, theme: &Theme) -> AnyElement {
-        let percent = if self.complete {
-            100
-        } else {
-            (self.done * 100)
-                .checked_div(self.total)
-                .unwrap_or(0)
-                .min(100) as u8
-        };
-        let arc = if self.complete {
-            super::chat_status_tone(ChatIndicator::Completed, theme).2
-        } else {
-            theme.accent
-        };
-        crate::loaders::upload_progress_arc(percent, size, theme.text_faint.opacity(0.6), arc)
-    }
-
-    pub(super) fn count(&self) -> SharedString {
-        if self.complete {
-            "Task · done".into()
-        } else if self.total == 0 {
-            "Task".into()
-        } else {
-            format!(
-                "Task · step {} of {}",
-                (self.done + 1).min(self.total),
-                self.total
-            )
-            .into()
-        }
-    }
-
-    pub(super) fn mark(&self, theme: &Theme) -> AnyElement {
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(5.0))
-            .whitespace_nowrap()
-            .text_color(theme.text_muted)
-            .child(self.ring(14.0, theme))
-            .child(self.count())
-            .into_any_element()
-    }
 }
 
 /// Project-mode group of a chat as (key, label). Projects sharing a
@@ -6207,18 +6012,8 @@ impl Shell {
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
         let chats = self.sorted_sidebar_chats(state, Utc::now(), filter.as_deref());
-        let listed: HashSet<&str> = chats.iter().map(|&(_, chat)| chat.id.as_str()).collect();
-        let mut step_threads = sidebar_step_threads(state, &listed);
-        let nested: HashSet<&str> = step_threads
-            .values()
-            .flatten()
-            .map(String::as_str)
-            .collect();
-        let chats: Vec<zeron_proto::Chat> = chats
-            .into_iter()
-            .filter(|(_, chat)| !nested.contains(chat.id.as_str()))
-            .map(|(_, chat)| chat.clone())
-            .collect();
+        let chats: Vec<zeron_proto::Chat> =
+            chats.into_iter().map(|(_, chat)| chat.clone()).collect();
         let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
             .into_iter()
             .partition(|chat| pinned_order.contains(&chat.id));
@@ -6270,8 +6065,7 @@ impl Shell {
         if let Some(pair) = &pair {
             pair.adjoin(&mut visible);
         }
-        step_threads.retain(|lead, _| !self.sidebar_lead_collapsed(lead));
-        nest_step_threads(visible, |id| id, &mut step_threads, pair.as_ref())
+        visible
     }
 
     /// The Drafts disclosure (t3code SidebarDraftRow rows): every unsent draft
@@ -6526,30 +6320,11 @@ impl Shell {
         chat: &zeron_proto::Chat,
         now: DateTime<Utc>,
     ) -> InboxShelf {
-        let status = self.inbox_status(state, status, chat, now);
         InboxShelf::of(
             status,
             sidebar_settled_at(state, status, chat, now),
             self.settings.sidebar_working_shelf,
         )
-    }
-
-    // A lead waits idle while its steps run, so a live mission holds the Working shelf.
-    fn inbox_status(
-        &self,
-        state: &AppState,
-        status: ChatIndicator,
-        chat: &zeron_proto::Chat,
-        now: DateTime<Utc>,
-    ) -> ChatIndicator {
-        if self.settings.sidebar_working_shelf
-            && status != ChatIndicator::AwaitingInput
-            && open_plan(state, chat, now).is_some_and(|(_, plan)| plan_live(&plan))
-        {
-            ChatIndicator::Working
-        } else {
-            status
-        }
     }
 
     fn sorted_sidebar_chats<'a>(
@@ -6559,25 +6334,16 @@ impl Shell {
         filter: Option<&str>,
     ) -> Vec<(ChatIndicator, &'a zeron_proto::Chat)> {
         let mut chats = state.sidebar_chats(now, filter);
-        let folded: HashSet<String> = chats
-            .iter()
-            .filter_map(|(_, chat)| open_plan(state, chat, now))
-            .flat_map(|(_, plan)| plan.steps)
-            .filter(|row| !step_live(row.status))
-            .filter_map(|row| row.step.chat_id)
-            .collect();
-        chats.retain(|(_, chat)| !folded.contains(&chat.id));
         if self.settings.sidebar_organization == SidebarOrganization::Inbox {
             chats.sort_by_cached_key(|(status, chat)| {
-                let status = self.inbox_status(state, *status, chat, now);
                 inbox_rank(
-                    status,
+                    *status,
                     chat,
                     state
                         .session_for(&chat.id)
                         .and_then(|session| session.started_at),
                     self.sidebar_inbox_marks.get(&chat.id).copied(),
-                    sidebar_settled_at(state, status, chat, now),
+                    sidebar_settled_at(state, *status, chat, now),
                     self.settings.sidebar_working_shelf,
                 )
             });
@@ -6632,62 +6398,6 @@ impl Shell {
         format!("{organization}:{group}")
     }
 
-    pub(super) fn sidebar_lead_collapsed(&self, lead: &str) -> bool {
-        self.settings
-            .sidebar_collapsed_leads
-            .iter()
-            .any(|id| id == lead)
-    }
-
-    pub(super) fn toggle_sidebar_lead(&mut self, lead: &str, cx: &mut Context<Self>) {
-        let chats = &self.state.read(cx).chats;
-        self.settings
-            .sidebar_collapsed_leads
-            .retain(|id| chats.iter().any(|chat| &chat.id == id));
-        if self.sidebar_lead_collapsed(lead) {
-            self.settings
-                .sidebar_collapsed_leads
-                .retain(|id| id != lead);
-        } else {
-            self.settings.sidebar_collapsed_leads.push(lead.to_owned());
-        }
-        self.queue_sidebar_reveal(&format!("lead:{lead}"));
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
-    fn expand_sidebar_lead(&mut self, lead: &str, cx: &mut Context<Self>) {
-        if self.sidebar_lead_collapsed(lead) {
-            self.toggle_sidebar_lead(lead, cx);
-        }
-    }
-
-    pub(super) fn sidebar_lead_of(&self, chat_id: &str, cx: &App) -> Option<String> {
-        let state = self.state.read(cx);
-        let chats = state.sidebar_chats(Utc::now(), self.settings.space_filter.as_deref());
-        let listed: HashSet<&str> = chats.iter().map(|&(_, chat)| chat.id.as_str()).collect();
-        sidebar_step_threads(state, &listed)
-            .into_iter()
-            .find(|(_, children)| children.iter().any(|child| child == chat_id))
-            .map(|(lead, _)| lead)
-    }
-
-    pub(super) fn sidebar_has_step_threads(&self, lead: &str, cx: &App) -> bool {
-        let state = self.state.read(cx);
-        let chats = state.sidebar_chats(Utc::now(), self.settings.space_filter.as_deref());
-        let listed: HashSet<&str> = chats.iter().map(|&(_, chat)| chat.id.as_str()).collect();
-        sidebar_step_threads(state, &listed).contains_key(lead)
-    }
-
-    pub(super) fn reveal_sidebar_child(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        if self.settings.sidebar_collapsed_leads.is_empty() {
-            return;
-        }
-        if let Some(lead) = self.sidebar_lead_of(chat_id, cx) {
-            self.expand_sidebar_lead(&lead, cx);
-        }
-    }
-
     /// Open whatever hides `chat_id`'s sidebar row — the sidebar itself, the
     /// Pinned / Sessions / Archived disclosure, its custom section or group,
     /// the Archived page — so an inline rename has a row to draw on. Each
@@ -6696,17 +6406,12 @@ impl Shell {
     /// clear), or a synced section could not be expanded. Either way the
     /// sidebar notice says why.
     pub(super) fn reveal_sidebar_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) -> bool {
-        let lead = self.sidebar_lead_of(chat_id, cx);
-        if let Some(lead) = &lead {
-            self.expand_sidebar_lead(lead, cx);
-        }
-        let row_id = lead.unwrap_or_else(|| chat_id.to_owned());
         let (active, archived) = {
             let state = self.state.read(cx);
             let chats = state.sidebar_chats(Utc::now(), self.settings.space_filter.as_deref());
             let active = chats
                 .iter()
-                .find(|(_, chat)| chat.id == row_id)
+                .find(|(_, chat)| chat.id == chat_id)
                 .map(|(_, chat)| (*chat).clone());
             let archived = self
                 .archived_sidebar_chats(cx)
@@ -6801,135 +6506,6 @@ impl Shell {
         }
     }
 
-    fn fold_step_threads(
-        &mut self,
-        rows: &mut Vec<(String, f32, AnyElement)>,
-        folds: &std::collections::HashMap<String, LeadFold>,
-        lead_of: &std::collections::HashMap<String, String>,
-        pair: Option<&split::SplitPair>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) {
-        for (lead, fold) in folds {
-            let mut children = Vec::new();
-            let mut ix = 0;
-            while ix < rows.len() {
-                let child = rows[ix]
-                    .0
-                    .strip_prefix("c:")
-                    .and_then(|id| lead_of.get(id))
-                    .is_some_and(|of| of == lead);
-                if child {
-                    children.push(rows.remove(ix));
-                } else {
-                    ix += 1;
-                }
-            }
-            let hosted = rows.iter().any(|(key, _, _)| *key == format!("c:{lead}"));
-            if let Some((task_id, count)) = fold.more.as_ref().filter(|_| hosted) {
-                let height = sidebar_row_height(self.settings.sidebar_compact, true, false);
-                let row = self.render_more_steps_row(lead, task_id, *count, height, theme, cx);
-                children.push((format!("more:{lead}"), height, row));
-            }
-            if children.is_empty() {
-                continue;
-            }
-            let host = format!("c:{lead}");
-            let partner = pair
-                .and_then(|pair| pair.partner(lead))
-                .map(|(id, _)| format!("c:{id}"));
-            let Some(at) = rows
-                .iter()
-                .position(|(key, _, _)| *key == host || partner.as_ref() == Some(key))
-            else {
-                rows.extend(children);
-                continue;
-            };
-            let body_height = children
-                .iter()
-                .map(|(_, height, _)| height + SIDEBAR_LIST_GAP)
-                .sum::<f32>();
-            if self.sidebar_reveal_motions.remove(&fold.motion_key) {
-                let (from, to) = if fold.open {
-                    (0.0, body_height)
-                } else {
-                    (body_height, 0.0)
-                };
-                self.begin_sidebar_disclosure_motion(&fold.motion_key, from, to);
-            }
-            let shown = self
-                .sidebar_disclosure_motion
-                .get(&fold.motion_key)
-                .copied()
-                .filter(|motion| motion.animating() && !self.reduced_motion)
-                .map_or(
-                    if fold.open { body_height } else { 0.0 },
-                    SidebarDisclosureMotion::current,
-                );
-            let body = div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .pt(px(SIDEBAR_LIST_GAP))
-                .gap(px(SIDEBAR_LIST_GAP))
-                .children(children.into_iter().map(|(_, _, row)| row))
-                .into_any_element();
-            let body =
-                self.render_sidebar_disclosure_body(&fold.motion_key, fold.open, body_height, body);
-            let (key, height, row) = rows.remove(at);
-            let row = div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .child(row)
-                .child(body)
-                .into_any_element();
-            rows.insert(at, (key, height + shown, row));
-        }
-    }
-
-    fn render_more_steps_row(
-        &self,
-        lead: &str,
-        task_id: &str,
-        count: usize,
-        height: f32,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let label: SharedString = if count == 1 {
-            "1 more step".into()
-        } else {
-            format!("{count} more steps").into()
-        };
-        let task_id = task_id.to_owned();
-        div()
-            .id(SharedString::from(format!("more-steps-{lead}")))
-            .debug_selector({
-                let lead = lead.to_owned();
-                move || format!("more-steps-{lead}")
-            })
-            .h(px(height))
-            .flex_none()
-            .flex()
-            .items_center()
-            .pl(px(10.0 + SIDEBAR_NESTED_INDENT))
-            .pr(px(10.0))
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .role(gpui::Role::Button)
-            .aria_label(label.clone())
-            .hover(|el| el.bg(theme.glass_hover()))
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text_muted.opacity(0.6))
-            .whitespace_nowrap()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_task_center(task_id.clone(), cx);
-            }))
-            .child(label)
-            .into_any_element()
-    }
-
     /// Shared metadata and visibility settings for active and archived sessions.
     fn sidebar_chat_data(
         &self,
@@ -6992,7 +6568,6 @@ impl Shell {
             change_request,
             group,
             created_by,
-            nested: false,
         }
     }
 
@@ -7029,98 +6604,13 @@ impl Shell {
                 drag.filter == filter && profile_key.as_deref() == Some(&drag.profile_key)
             })
             .map(|drag| drag.visible_ids.clone());
-        let (mut rows, mut step_threads): (Vec<ActiveChatRow>, _) = {
+        let mut rows: Vec<ActiveChatRow> = {
             let state = self.state.read(cx);
-            let rows: Vec<ActiveChatRow> = self
-                .sorted_sidebar_chats(state, now, filter.as_deref())
+            self.sorted_sidebar_chats(state, now, filter.as_deref())
                 .into_iter()
                 .map(|(status, chat)| self.sidebar_chat_data(status, chat.clone(), state, now))
-                .collect();
-            let listed: HashSet<&str> = rows.iter().map(|row| row.chat.id.as_str()).collect();
-            let threads = sidebar_step_threads(state, &listed);
-            (rows, threads)
-        };
-        let all_ids: Vec<String> = rows.iter().map(|row| row.chat.id.clone()).collect();
-        let mut nested_rows: std::collections::HashMap<String, ActiveChatRow> = Default::default();
-        for child in step_threads.values().flatten() {
-            if let Some(index) = rows.iter().position(|row| row.chat.id == *child) {
-                let mut row = rows.remove(index);
-                row.nested = true;
-                row.created_by = None;
-                nested_rows.insert(child.clone(), row);
-            }
-        }
-        let mut step_rows: std::collections::HashMap<String, Vec<ActiveChatRow>> = step_threads
-            .drain()
-            .map(|(lead, children)| {
-                let rows = children
-                    .iter()
-                    .filter_map(|child| nested_rows.remove(child))
-                    .collect();
-                (lead, rows)
-            })
-            .collect();
-        let lead_folds: std::collections::HashMap<String, LeadFold> = {
-            let state = self.state.read(cx);
-            let missions: std::collections::HashMap<&str, (String, usize)> = rows
-                .iter()
-                .filter_map(|row| {
-                    let (task_id, plan) = open_plan(state, &row.chat, now)?;
-                    let rest = plan.steps.iter().filter(|step| !step_live(step.status));
-                    Some((row.chat.id.as_str(), (task_id, rest.count())))
-                })
-                .filter(|(_, (_, rest))| *rest > 0)
-                .collect();
-            let no_children = Vec::new();
-            step_rows
-                .iter()
-                .filter(|(_, children)| !children.is_empty())
-                .map(|(lead, _)| lead.as_str())
-                .chain(missions.keys().copied())
-                .collect::<HashSet<&str>>()
-                .into_iter()
-                .map(|lead| {
-                    let children = step_rows.get(lead).unwrap_or(&no_children);
-                    let statuses: Vec<_> = children
-                        .iter()
-                        .map(|row| (row.status, step_needs_you(state, &row.chat, row.status)))
-                        .collect();
-                    let (rollup, asking) = lead_rollup(&statuses);
-                    let fold = LeadFold {
-                        motion_key: format!("lead:{lead}"),
-                        open: !self.sidebar_lead_collapsed(lead),
-                        rollup: rollup.into(),
-                        asking,
-                        holds_selected: !matches!(self.route, Route::PullRequests)
-                            && children.iter().any(|row| {
-                                state.selected_chat.as_deref() == Some(row.chat.id.as_str())
-                            }),
-                        more: missions.get(lead).cloned(),
-                    };
-                    (lead.to_owned(), fold)
-                })
                 .collect()
         };
-        let lead_of: std::collections::HashMap<String, String> = step_rows
-            .iter()
-            .flat_map(|(lead, children)| {
-                children
-                    .iter()
-                    .map(move |row| (row.chat.id.clone(), lead.clone()))
-            })
-            .collect();
-        let folded_leads: HashSet<&str> = lead_folds
-            .iter()
-            .filter(|(_, fold)| {
-                !fold.open
-                    && !self.sidebar_reveal_motions.contains(&fold.motion_key)
-                    && !self
-                        .sidebar_disclosure_motion
-                        .get(&fold.motion_key)
-                        .is_some_and(|motion| motion.animating())
-            })
-            .map(|(lead, _)| lead.as_str())
-            .collect();
         let pinned_order = frozen_pinned
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
@@ -7140,11 +6630,10 @@ impl Shell {
                 .copied()
                 .unwrap_or(usize::MAX)
         });
-        let active: HashSet<&str> = all_ids.iter().map(String::as_str).collect();
-        let leads: HashSet<&str> = base_ids.iter().map(String::as_str).collect();
+        let active: HashSet<&str> = base_ids.iter().map(String::as_str).collect();
         let pinned_count = pinned_order
             .iter()
-            .filter(|id| leads.contains(id.as_str()))
+            .filter(|id| active.contains(id.as_str()))
             .collect::<HashSet<_>>()
             .len();
         let regular_rows = rows.split_off(pinned_count);
@@ -7227,23 +6716,6 @@ impl Shell {
         if let Some(pair) = &split_card {
             pair.adjoin_grouped(&mut regular_groups, |row| row.chat.id.as_str());
         }
-        let mut nest = |rows: Vec<ActiveChatRow>| {
-            nest_step_threads(
-                rows,
-                |row| row.chat.id.as_str(),
-                &mut step_rows,
-                split_card.as_ref(),
-            )
-        };
-        let pinned_rows = nest(pinned_rows);
-        let custom_groups: Vec<_> = custom_groups
-            .into_iter()
-            .map(|(group, rows)| (group, nest(rows)))
-            .collect();
-        let regular_groups: Vec<_> = regular_groups
-            .into_iter()
-            .map(|(group, rows)| (group, nest(rows)))
-            .collect();
         let pinned_count = pinned_rows.len();
         let mut sections = Vec::with_capacity(regular_groups.len() + usize::from(pinned_count > 0));
         if !pinned_rows.is_empty() {
@@ -7438,19 +6910,6 @@ impl Shell {
                     slim,
                     self.settings.sidebar_show_project_label && !project_group,
                 );
-                if lead_of
-                    .get(&row.chat.id)
-                    .is_some_and(|lead| folded_leads.contains(lead.as_str()))
-                {
-                    slot += 1;
-                    rendered_rows.push((
-                        format!("c:{}", row.chat.id),
-                        height,
-                        div().into_any_element(),
-                    ));
-                    continue;
-                }
-                let lead = lead_folds.get(&row.chat.id).cloned();
                 let ActiveChatRow {
                     status,
                     chat,
@@ -7459,7 +6918,6 @@ impl Shell {
                     change_request,
                     group: _,
                     created_by,
-                    nested,
                 } = row;
                 let row_dimmed = dimmed(&chat);
                 let time_ago: SharedString =
@@ -7544,8 +7002,6 @@ impl Shell {
                         self.settings.sidebar_show_project_icon && !project_group,
                         project_group,
                         slim,
-                        nested,
-                        lead,
                         None,
                         theme,
                         cx,
@@ -7650,14 +7106,6 @@ impl Shell {
                 self.join_split_rows(&mut rendered_rows, pair, theme, cx);
             }
             let session_count = rendered_rows.len();
-            self.fold_step_threads(
-                &mut rendered_rows,
-                &lead_folds,
-                &lead_of,
-                split_card.as_ref(),
-                theme,
-                cx,
-            );
 
             let Some((key, label)) = group else {
                 rendered.extend(rendered_rows);
@@ -7700,11 +7148,8 @@ impl Shell {
                 }
             }
             let row_of = |rows: &[(String, f32, AnyElement)], id: &str| {
-                let at = |id: &str| {
-                    rows.iter()
-                        .position(|(row, _, _)| *row == format!("c:{id}"))
-                };
-                at(id).or_else(|| at(lead_of.get(id)?))
+                rows.iter()
+                    .position(|(row, _, _)| *row == format!("c:{id}"))
             };
             let collapse_key = self.sidebar_group_collapse_key(&key);
             let motion_key = format!("group:{collapse_key}");
@@ -7946,7 +7391,9 @@ impl Shell {
         }
         SidebarSessionRows {
             custom_count,
-            regular_count: all_ids.len().saturating_sub(pinned_count + custom_sessions),
+            regular_count: base_ids
+                .len()
+                .saturating_sub(pinned_count + custom_sessions),
             rows: rendered,
             pinned_count,
             moving_row,
@@ -8252,8 +7699,6 @@ impl Shell {
                         self.settings.sidebar_show_project_icon,
                         false,
                         false,
-                        false,
-                        None,
                         None,
                         theme,
                         cx,
@@ -12181,7 +11626,7 @@ mod tests {
 
     use super::{
         CHATS_GROUP_KEY, ChatIndicator, InboxMark, compare_sidebar_chats, compare_sidebar_rows,
-        grouped_visible_order, inbox_rank, lead_rollup, promote_group,
+        grouped_visible_order, inbox_rank, promote_group,
     };
     use crate::settings::{SidebarOrganization, SidebarSort};
 
@@ -12553,66 +11998,6 @@ mod tests {
                 shell.settings.space_filter = Some("a".into());
                 assert_eq!(keys(shell, cx), ["c:a1", "c:a2"]);
 
-                shell.settings.space_filter = None;
-                shell.state.update(cx, |state, _| {
-                    state.tasks = vec![
-                        serde_json::from_value(serde_json::json!({
-                            "id": "t", "chatId": "a2", "mode": "orchestrated",
-                        }))
-                        .unwrap(),
-                    ];
-                    state.task_steps = vec![
-                        serde_json::from_value(serde_json::json!({
-                            "id": "s", "taskId": "t", "chatId": "a1",
-                        }))
-                        .unwrap(),
-                    ];
-                });
-                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
-                assert_eq!(keys(shell, cx), ["c:b1", "c:a2"]);
-                assert_eq!(shell.sidebar_visible_order(cx), ["b1", "a2", "a1"]);
-                shell.toggle_sidebar_lead("a2", cx);
-                assert_eq!(shell.sidebar_visible_order(cx), ["b1", "a2"]);
-                assert_eq!(keys(shell, cx), ["c:b1", "c:a2"]);
-                assert!(shell.reveal_sidebar_chat("a1", cx));
-                assert!(!shell.sidebar_lead_collapsed("a2"));
-                assert_eq!(shell.sidebar_visible_order(cx), ["b1", "a2", "a1"]);
-                shell.toggle_sidebar_lead("a2", cx);
-                shell.reveal_sidebar_child("a1", cx);
-                assert!(!shell.sidebar_lead_collapsed("a2"));
-                shell.settings.sidebar_organization = SidebarOrganization::Inbox;
-                shell.settings.sidebar_working_shelf = true;
-                assert_eq!(keys(shell, cx), ["g:inbox:inbox", "g:inbox:working"]);
-                shell.state.update(cx, |state, _| {
-                    state.task_steps[0].turn = Some(zeron_proto::StepTurn {
-                        ended: zeron_proto::StepTurnEnd::Completed,
-                        turn: None,
-                    });
-                    state.task_steps.push(
-                        serde_json::from_value(serde_json::json!({
-                            "id": "s2", "taskId": "t", "chatId": "b1",
-                        }))
-                        .unwrap(),
-                    );
-                });
-                assert_eq!(shell.sidebar_visible_order(cx), ["a2", "b1"]);
-                shell.state.update(cx, |state, _| {
-                    state.task_steps.truncate(1);
-                });
-                assert_eq!(keys(shell, cx), ["g:inbox:inbox"]);
-                shell
-                    .state
-                    .update(cx, |state, _| state.task_steps[0].turn = None);
-                shell.settings.sidebar_working_shelf = false;
-                shell.settings.sidebar_organization = SidebarOrganization::ByProject;
-                assert_eq!(keys(shell, cx), ["g:project:b", "g:project:a"]);
-                assert_eq!(shell.sidebar_visible_order(cx), ["b1", "a2", "a1"]);
-                shell
-                    .state
-                    .update(cx, |state, _| state.task_steps[0].deleted = true);
-                assert_eq!(shell.sidebar_visible_order(cx), ["a1", "a2", "b1"]);
-                shell.state.update(cx, |state, _| state.task_steps.clear());
-
                 // An open split pulls the pair's later row up beside the
                 // earlier one, across groups, in both the drawn rows (one
                 // card at a1's slot) and the jump/cycle order.
@@ -12637,36 +12022,6 @@ mod tests {
                 assert_eq!(shell.sidebar_visible_order(cx), ["a1", "b1", "a2"]);
             })
             .unwrap();
-    }
-
-    #[test]
-    fn lead_rollup_names_the_most_urgent_live_state() {
-        use ChatIndicator::{AwaitingInput, Completed, Errored, Idle, Working};
-        assert_eq!(
-            lead_rollup(&[
-                (Completed, false),
-                (Working, false),
-                (Idle, false),
-                (Idle, false)
-            ]),
-            ("4 · 1 running".to_owned(), false)
-        );
-        assert_eq!(
-            lead_rollup(&[(Working, false), (Errored, false), (Idle, true)]),
-            ("3 · 1 asking".to_owned(), true)
-        );
-        assert_eq!(
-            lead_rollup(&[(Working, false), (AwaitingInput, false)]),
-            ("2 · 1 asking".to_owned(), true)
-        );
-        assert_eq!(
-            lead_rollup(&[(Working, false), (Errored, false)]),
-            ("2 · 1 failed".to_owned(), false)
-        );
-        assert_eq!(
-            lead_rollup(&[(Completed, false), (Idle, false)]),
-            ("2".to_owned(), false)
-        );
     }
 
     #[test]

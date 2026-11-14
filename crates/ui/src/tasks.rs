@@ -10,9 +10,7 @@ use gpui::{
     prelude::*, px,
 };
 use zeron_proto::mission::column_title;
-use zeron_proto::{
-    ChatIndicator, PlanProgress, StepStatus, TaskPatch, TaskStatus, view::task_thread_status,
-};
+use zeron_proto::{ChatIndicator, TaskPatch, TaskStatus, view::task_thread_status};
 
 use crate::composer::task_completions::TaskCompletions;
 use crate::composer::{ComposerInput, ComposerInputEvent, MentionTab};
@@ -25,7 +23,6 @@ use crate::theme::Theme;
 use crate::typography::ui_rems;
 
 mod card;
-mod center;
 mod drag;
 #[cfg(test)]
 mod image_paths_tests;
@@ -36,22 +33,16 @@ use crate::attachments::StagedAttachment;
 use images::ImageGallery;
 mod logic;
 mod morph;
-mod strip_tree;
 mod thread_tree;
-pub(crate) use thread_tree::{tree_rows, watched_docs};
 mod tree;
 
-pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
-pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};
+pub use card::{CardFocus, TaskCard, TaskCardEvent};
 pub(crate) use index::tree_index;
 use logic::COLUMNS;
 pub(crate) use logic::top_order_key;
 use morph::{Key, Morph, Painted, Rects};
-pub(crate) use strip_tree::{StripTree, StripTreeEvent, TreeHost};
-pub(crate) use tree::{Status as TreeStatus, StatusTone, glyph as tree_glyph, kind_badge};
+pub(crate) use tree::{Status as TreeStatus, StatusTone, glyph as tree_glyph};
 
-pub(crate) const TASK_PAGE: &str = "Task page";
-pub(crate) const OPEN_TASK_PAGE: &str = "Open in Tasks";
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";
 const LIST_MAX_WIDTH: f32 = 640.0;
 const CARD_WIDTH: f32 = 340.0;
@@ -83,7 +74,7 @@ pub enum TasksEvent {
         patch: TaskPatch,
     },
     Card(TaskCardEvent),
-    OpenCenter(String),
+    OpenChat(String),
     Gather {
         task_ids: Vec<String>,
         chat_id: Option<String>,
@@ -138,19 +129,15 @@ struct Linked {
 
 type Brand = (&'static str, Option<Hsla>);
 
-pub(crate) type StepRow = zeron_proto::mission::StepRow<Brand>;
 pub(crate) type Rollup = zeron_proto::mission::Rollup<Brand>;
-pub(crate) use zeron_doc::tree::{linked_label, task_led_by};
-pub(crate) use zeron_proto::mission::{
-    MissionRole, MissionThread, PlanPhase, is_mission, linked_chat, plan_led_by, step_chat,
-};
+pub(crate) use zeron_doc::tree::linked_label;
+pub(crate) use zeron_proto::mission::linked_chat;
 
 struct Row {
     task: zeron_proto::Task,
     status: TaskStatus,
     project: Option<SharedString>,
     linked: Option<Linked>,
-    plan: Rollup,
     captured: bool,
     blocked_by: Vec<(SharedString, bool)>,
 }
@@ -158,7 +145,6 @@ struct Row {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TasksFilter {
     All,
-    Missions,
     Trees,
 }
 
@@ -166,41 +152,12 @@ impl TasksFilter {
     fn label(self) -> &'static str {
         match self {
             Self::All => "All",
-            Self::Missions => "Plans",
             Self::Trees => "Trees",
         }
     }
 
-    fn keeps(self, row: &Row) -> bool {
-        match self {
-            Self::All => true,
-            Self::Missions => is_mission(&row.task, &row.plan),
-            Self::Trees => false,
-        }
-    }
-
-    fn keeps_trees(self) -> bool {
-        self != Self::Missions
-    }
-}
-
-impl Row {
-    fn orchestrated(&self) -> bool {
-        self.task.has_plan() && self.linked.is_some()
-    }
-
-    fn marks(&self) -> Vec<Brand> {
-        let mut marks: Vec<Brand> = Vec::new();
-        let lead = self.linked.as_ref().map(|linked| linked.brand);
-        for brand in lead
-            .into_iter()
-            .chain(self.plan.steps.iter().filter_map(|s| s.brand))
-        {
-            if marks.len() < 3 && !marks.iter().any(|(mark, _)| *mark == brand.0) {
-                marks.push(brand);
-            }
-        }
-        marks
+    fn keeps_tasks(self) -> bool {
+        self == Self::All
     }
 }
 
@@ -425,15 +382,14 @@ impl TasksPage {
     fn open_row(
         &mut self,
         task_id: &str,
-        paged: bool,
+        thread: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if paged {
-            cx.emit(TasksEvent::OpenCenter(task_id.to_string()));
-            return;
+        match thread {
+            Some(chat_id) => cx.emit(TasksEvent::OpenChat(chat_id.to_string())),
+            None => self.open_card(task_id.to_string(), window, cx),
         }
-        self.open_card(task_id.to_string(), window, cx);
     }
 
     pub(crate) fn open_card(
@@ -790,7 +746,7 @@ impl TasksPage {
     fn click_row(
         &mut self,
         task_id: &str,
-        paged: bool,
+        thread: Option<&str>,
         done: bool,
         modifiers: Modifiers,
         window: &mut Window,
@@ -806,7 +762,7 @@ impl TasksPage {
         }
         self.clear_picks(cx);
         self.anchor = Some(task_id.to_string());
-        self.open_row(task_id, paged, window, cx);
+        self.open_row(task_id, thread, window, cx);
     }
 
     fn toggle_pick(&mut self, task_id: &str, cx: &mut Context<Self>) {
@@ -930,14 +886,6 @@ impl TasksPage {
 
     fn check_visual(row: &Row, theme: &Theme) -> gpui::Div {
         let done = row.status == TaskStatus::Done;
-        let ring = theme.text_faint;
-        let progress = (row.orchestrated() && !done).then(|| {
-            let PlanProgress { done, total } = row.plan.progress;
-            let percent = (done * 100).checked_div(total).unwrap_or(0).min(100) as u8;
-            let (_, _, complete) = column_tone(TaskStatus::Done, theme);
-            crate::loaders::upload_progress_arc(percent, CHECK_SIZE, ring.opacity(0.6), complete)
-        });
-        let plain = !done && progress.is_none();
         div()
             .flex_none()
             .size(px(CHECK_SIZE))
@@ -949,21 +897,15 @@ impl TasksPage {
                 el.bg(theme.accent)
                     .child(icon(icons::CHECK).size(px(12.0)).text_color(gpui::white()))
             })
-            .when(plain, |el| el.border_1().border_color(ring))
-            .children(progress)
+            .when(!done, |el| el.border_1().border_color(theme.text_faint))
     }
 
     fn checkbox(&self, row: &Row, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let done = row.status == TaskStatus::Done;
         let task_id = row.task.id.clone();
         let accent = theme.accent;
-        let ringed = row.orchestrated() && !done;
-        let ring_id = task_id.clone();
         Self::check_visual(row, theme)
             .id(SharedString::from(format!("task-check-{task_id}")))
-            .when(ringed, |el| {
-                el.debug_selector(move || format!("task-ring-{ring_id}"))
-            })
             .role(gpui::Role::CheckBox)
             .aria_label(if done {
                 "Mark as not done"
@@ -971,10 +913,9 @@ impl TasksPage {
                 "Mark as done"
             })
             .cursor_pointer()
-            .when(!done && !ringed, |el| {
+            .when(!done, |el| {
                 el.hover(move |s| s.border_color(accent).bg(accent.opacity(0.12)))
             })
-            .when(ringed, |el| el.hover(move |s| s.bg(accent.opacity(0.12))))
             .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
                 cx.stop_propagation();
                 page.set_completed(&task_id, !done, cx);
@@ -982,71 +923,11 @@ impl TasksPage {
             .into_any_element()
     }
 
-    fn marks(marks: &[Brand], theme: &Theme) -> AnyElement {
-        div()
-            .flex()
-            .items_center()
-            .children(marks.iter().enumerate().map(|(ix, (mark, tint))| {
-                div()
-                    .when(ix > 0, |el| el.ml(px(-3.0)))
-                    .rounded_full()
-                    .bg(theme.bg)
-                    .child(
-                        icon(mark)
-                            .size(px(12.0))
-                            .text_color(tint.unwrap_or(theme.text_muted)),
-                    )
-            }))
-            .into_any_element()
-    }
-
-    fn step_counts(plan: &Rollup, theme: &Theme, fragments: &mut Vec<AnyElement>) {
-        let running = plan.count(StepStatus::Working);
-        if running > 0 {
-            let (_, _, tone) = column_tone(TaskStatus::Working, theme);
-            fragments.push(
-                div()
-                    .text_color(tone)
-                    .child(format!("{running} running"))
-                    .into_any_element(),
-            );
-        }
-        let need_you = plan.count(StepStatus::NeedsYou);
-        if need_you > 0 {
-            fragments.push(
-                div()
-                    .text_color(theme.warning)
-                    .child(format!("{need_you} need you"))
-                    .into_any_element(),
-            );
-        }
-    }
-
     fn not_sent(theme: &Theme) -> AnyElement {
         div()
             .text_color(theme.warning)
             .child("Not sent")
             .into_any_element()
-    }
-
-    fn plan_meta(row: &Row, theme: &Theme, fragments: &mut Vec<AnyElement>) {
-        fragments.push(tree::kind_badge(true, theme));
-        let marks = row.marks();
-        if !marks.is_empty() {
-            fragments.push(Self::marks(&marks, theme));
-        }
-        let (label, tone) = row.plan.label(&row.task);
-        let (_, _, tone) = column_tone(tone, theme);
-        fragments.push(div().text_color(tone).child(label).into_any_element());
-        if !row.plan.steps.is_empty() {
-            let PlanProgress { done, total } = row.plan.progress;
-            fragments.push(
-                div()
-                    .child(format!("{done}/{total} steps"))
-                    .into_any_element(),
-            );
-        }
-        Self::step_counts(&row.plan, theme, fragments);
     }
 
     fn meta(row: &Row, today: NaiveDate, theme: &Theme) -> Vec<AnyElement> {
@@ -1069,9 +950,7 @@ impl TasksPage {
                     .into_any_element(),
             );
         }
-        if row.orchestrated() {
-            Self::plan_meta(row, theme, &mut fragments);
-        } else if let Some(linked) = row
+        if let Some(linked) = row
             .linked
             .as_ref()
             .filter(|_| row.status != TaskStatus::Done)
@@ -1217,7 +1096,7 @@ impl TasksPage {
         let hover = theme.glass_hover();
         let open_id = task_id.clone();
         let menu_id = task_id.clone();
-        let paged = row.linked.is_some();
+        let thread = row.linked.as_ref().and(row.task.chat_id.clone());
         let now = motion::now();
         let lifted = self
             .drag
@@ -1283,7 +1162,14 @@ impl TasksPage {
                 ROW_BORDER,
             ))
             .on_click(cx.listener(move |page, event: &ClickEvent, window, cx| {
-                page.click_row(&open_id, paged, done, event.modifiers(), window, cx)
+                page.click_row(
+                    &open_id,
+                    thread.as_deref(),
+                    done,
+                    event.modifiers(),
+                    window,
+                    cx,
+                )
             }))
             .on_mouse_down(MouseButton::Right, Self::row_menu_listener(menu_id, cx));
         let lane = div()
@@ -1873,7 +1759,7 @@ impl TasksPage {
     ) -> AnyElement {
         let root = row.root.clone();
         let mut meta = vec![
-            tree::kind_badge(false, theme),
+            tree::kind_badge(theme),
             div()
                 .when(row.asks, |el| el.text_color(theme.warning))
                 .child(row.line.clone())
@@ -1930,7 +1816,7 @@ impl TasksPage {
                     .child(widgets::meta_line(theme, meta)),
             )
             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                cx.emit(TasksEvent::OpenCenter(root.clone()))
+                cx.emit(TasksEvent::OpenChat(root.clone()))
             }))
             .into_any_element()
     }
@@ -2158,7 +2044,7 @@ impl TasksPage {
         };
         let open_id = task_id.clone();
         let menu_id = task_id.clone();
-        let paged = row.linked.is_some();
+        let thread = row.linked.as_ref().and(row.task.chat_id.clone());
         let thumbs = self.row_images("task-kanban", row, theme, cx);
         Self::card_visual(row, selected, theme)
             .children(thumbs)
@@ -2173,7 +2059,7 @@ impl TasksPage {
                 Edges::all(1.0),
             ))
             .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
-                page.open_row(&open_id, paged, window, cx)
+                page.open_row(&open_id, thread.as_deref(), window, cx)
             }))
             .on_mouse_down(MouseButton::Right, Self::row_menu_listener(menu_id, cx))
             .on_drag(drag, |drag, _, _, cx| {
@@ -2187,63 +2073,43 @@ impl TasksPage {
     fn card_visual(row: &Row, selected: bool, theme: &Theme) -> gpui::Div {
         let task_id = row.task.id.clone();
         let title = SharedString::from(crate::composer::plain_references(&row.task.title));
-        let orchestrated = row.orchestrated();
         let working = row.status == TaskStatus::Working;
-        let bar = orchestrated.then(|| Self::step_bar(row, theme));
-        let footer = if orchestrated {
-            let mut fragments = Vec::new();
-            let marks = row.marks();
-            let PlanProgress { done, total } = row.plan.progress;
-            fragments.push(div().child(format!("{done}/{total}")).into_any_element());
-            Self::step_counts(&row.plan, theme, &mut fragments);
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .min_w_0()
-                .text_size(ui_rems(11.5))
-                .text_color(theme.text_muted)
-                .when(!marks.is_empty(), |el| el.child(Self::marks(&marks, theme)))
-                .children(fragments)
-        } else {
-            let mut footer = div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .min_w_0()
-                .text_size(ui_rems(11.5))
-                .text_color(theme.text_muted);
-            if let Some(linked) = row.linked.as_ref() {
-                let (mark, tint) = linked.brand;
-                footer = footer.child(
-                    icon(mark)
-                        .size(px(12.0))
-                        .text_color(tint.unwrap_or(theme.text_muted)),
-                );
-            }
+        let mut footer = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .min_w_0()
+            .text_size(ui_rems(11.5))
+            .text_color(theme.text_muted);
+        if let Some(linked) = row.linked.as_ref() {
+            let (mark, tint) = linked.brand;
             footer = footer.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(row.project.clone().unwrap_or_else(|| "No project".into())),
+                icon(mark)
+                    .size(px(12.0))
+                    .text_color(tint.unwrap_or(theme.text_muted)),
             );
-            if let Some(since) = row
-                .linked
-                .as_ref()
-                .and_then(|l| l.since)
-                .filter(|_| working)
-            {
-                let (_, _, tone) = crate::shell::chat_status_tone(ChatIndicator::Working, theme);
-                footer = footer.child(crate::loaders::elapsed_label(
-                    format!("task-elapsed-{task_id}"),
-                    since,
-                    ui_rems(11.5),
-                    tone,
-                ));
-            }
-            footer
-        };
+        }
+        footer = footer.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(row.project.clone().unwrap_or_else(|| "No project".into())),
+        );
+        if let Some(since) = row
+            .linked
+            .as_ref()
+            .and_then(|l| l.since)
+            .filter(|_| working)
+        {
+            let (_, _, tone) = crate::shell::chat_status_tone(ChatIndicator::Working, theme);
+            footer = footer.child(crate::loaders::elapsed_label(
+                format!("task-elapsed-{task_id}"),
+                since,
+                ui_rems(11.5),
+                tone,
+            ));
+        }
         div()
             .p(px(12.0))
             .flex()
@@ -2266,33 +2132,7 @@ impl TasksPage {
                     .child(title)
                     .when(row.captured, |el| el.child(new_tag(theme))),
             )
-            .children(bar)
             .child(footer)
-    }
-
-    fn step_bar(row: &Row, theme: &Theme) -> AnyElement {
-        let id = row.task.id.clone();
-        div()
-            .debug_selector(move || format!("task-step-bar-{id}"))
-            .flex()
-            .gap(px(2.0))
-            .children(
-                row.plan
-                    .steps
-                    .iter()
-                    .filter(|step| step.status != StepStatus::Skipped)
-                    .map(|step| {
-                        let fill = match step.status {
-                            StepStatus::Done => column_tone(TaskStatus::Done, theme).2,
-                            StepStatus::Working => column_tone(TaskStatus::Working, theme).2,
-                            StepStatus::NeedsYou => theme.warning,
-                            StepStatus::Failed => theme.danger,
-                            StepStatus::Planned | StepStatus::Skipped => theme.wash(0.10),
-                        };
-                        div().flex_1().h(px(4.0)).rounded(px(2.0)).bg(fill)
-                    }),
-            )
-            .into_any_element()
     }
 
     fn column_head(column: TaskStatus, count: usize, theme: &Theme) -> gpui::Div {
@@ -2447,21 +2287,6 @@ impl TasksPage {
     }
 }
 
-/// A deleted lead leaves the mode without a lead, so the card starts it again.
-pub(crate) fn has_lead(chats: &[zeron_proto::Chat], task: &zeron_proto::Task) -> bool {
-    task.has_plan() && linked_chat(chats, task).is_some()
-}
-
-pub(crate) fn chat_model_label(chat: &zeron_proto::Chat, cx: &gpui::App) -> Option<String> {
-    let config = chat.config.as_ref()?;
-    let model = config.model.as_deref()?;
-    Some(crate::pickers::model_display_label(
-        config.harness,
-        model,
-        cx,
-    ))
-}
-
 pub(crate) fn chat_brand(chat: &zeron_proto::Chat) -> Brand {
     let harness = chat.config.as_ref().map(|config| config.harness);
     let model = chat
@@ -2475,11 +2300,8 @@ pub(crate) fn rollup(state: &AppState, task: &zeron_proto::Task, now: DateTime<U
     zeron_proto::mission::rollup(
         task,
         &state.chats,
-        &state.task_steps,
-        state
-            .supervisor
-            .iter()
-            .flat_map(|snapshot| &snapshot.needs_you),
+        &[],
+        std::iter::empty(),
         |chat| {
             task_thread_status(
                 state.display_status_for(chat, now),
@@ -2491,91 +2313,6 @@ pub(crate) fn rollup(state: &AppState, task: &zeron_proto::Task, now: DateTime<U
     )
 }
 
-pub(crate) fn mission_selection(role: &MissionRole) -> Selection {
-    match role {
-        MissionRole::Lead => Selection::Lead,
-        MissionRole::Step { step_id, .. } => Selection::Step(step_id.clone()),
-    }
-}
-
-pub(crate) fn mission_thread(
-    state: &AppState,
-    chat_id: &str,
-    now: DateTime<Utc>,
-) -> Option<MissionThread> {
-    zeron_proto::mission::mission_thread(&state.tasks, &state.task_steps, chat_id, |task| {
-        rollup(state, task, now)
-    })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TabMember {
-    pub task_id: String,
-    pub lead: String,
-    pub step: Option<usize>,
-}
-
-pub(crate) fn tab_members(state: &AppState) -> std::collections::HashMap<String, TabMember> {
-    let mut tasks: Vec<&zeron_proto::Task> = state
-        .tasks
-        .iter()
-        .filter(|task| !task.deleted && task.has_plan())
-        .collect();
-    tasks.sort_by_key(|task| task.completed_at.is_none());
-    let mut members = std::collections::HashMap::new();
-    for task in tasks {
-        let Some(lead) = task.chat_id.clone() else {
-            continue;
-        };
-        let member = |step| TabMember {
-            task_id: task.id.clone(),
-            lead: lead.clone(),
-            step,
-        };
-        members.insert(lead.clone(), member(None));
-        let steps = state
-            .task_steps
-            .iter()
-            .filter(|step| step.task_id == task.id && !step.deleted);
-        for (ix, step) in steps.enumerate() {
-            if let Some(chat_id) = &step.chat_id {
-                members.insert(chat_id.clone(), member(Some(ix)));
-            }
-        }
-    }
-    members
-}
-
-pub(crate) fn can_add_plan(state: &AppState, chat: &zeron_proto::Chat) -> bool {
-    add_plan_blocker(state, chat).is_none()
-}
-
-const NO_TASK: &str = "This chat cannot become a Task";
-
-pub(crate) fn chat_plan_blocker(state: &AppState, chat_id: &str) -> Option<&'static str> {
-    state
-        .chats
-        .iter()
-        .find(|chat| chat.id == chat_id)
-        .map_or(Some(NO_TASK), |chat| add_plan_blocker(state, chat))
-}
-
-pub(crate) fn add_plan_blocker(state: &AppState, chat: &zeron_proto::Chat) -> Option<&'static str> {
-    if state.local_device_id.as_deref() != Some(chat.device_id.as_str()) {
-        Some("Only the device this chat runs on can make it a Task")
-    } else if chat.archived {
-        Some("Unarchive this chat to make it a Task")
-    } else if chat.sidechat_source_chat_id.is_some() {
-        Some("A side chat cannot become a Task")
-    } else if chat.is_system() || state.is_hidden_chat(&chat.id) || state.is_draft(&chat.id) {
-        Some(NO_TASK)
-    } else if zeron_proto::plan_of_chat(&state.tasks, &chat.id).is_some() {
-        Some("This chat already leads a Task")
-    } else {
-        None
-    }
-}
-
 fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Row {
     let linked = linked_chat(&state.chats, task).map(|chat| Linked {
         title: SharedString::from(zeron_proto::chat_mentions::chat_mention_title(chat)),
@@ -2583,10 +2320,8 @@ fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Ro
         brand: chat_brand(chat),
         since: state.session_for(&chat.id).and_then(|s| s.started_at),
     });
-    let plan = rollup(state, task, now);
     Row {
-        status: plan.status,
-        plan,
+        status: rollup(state, task, now).status,
         project: task
             .space_id
             .as_deref()
@@ -2620,36 +2355,6 @@ fn patched(row: &zeron_proto::Task, patch: &TaskPatch) -> zeron_proto::Task {
         task.notes = notes.clone();
     }
     task
-}
-
-pub(crate) struct Gathered {
-    pub id: String,
-    pub title: SharedString,
-    pub status: TaskStatus,
-}
-
-/// Plain tasks handed to this thread together, in the person's order; a mission's lead is not a gathering.
-pub(crate) fn gathered_tasks(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> Vec<Gathered> {
-    let mut tasks: Vec<&zeron_proto::Task> = state
-        .tasks
-        .iter()
-        .filter(|task| {
-            !task.deleted && !task.has_plan() && task.chat_id.as_deref() == Some(chat_id)
-        })
-        .collect();
-    tasks.sort_by(|a, b| {
-        (&a.order_key, a.created_at, &a.id).cmp(&(&b.order_key, b.created_at, &b.id))
-    });
-    tasks
-        .into_iter()
-        .map(|task| Gathered {
-            id: task.id.clone(),
-            title: SharedString::from(zeron_proto::view::single_line(
-                &crate::composer::plain_references(&task.title),
-            )),
-            status: rollup(state, task, now).status,
-        })
-        .collect()
 }
 
 pub(crate) fn mention_mark(
@@ -2974,33 +2679,27 @@ impl Render for TasksPage {
         let view = tasks_view(cx);
         let now = motion::now();
         let reduced = motion::reduced_motion(cx);
-        let mut trees = match view {
+        let trees = match view {
             TasksView::List => tree_index(self.state.read(cx), Utc::now()),
             TasksView::Kanban => index::IndexRows::default(),
         };
         if view == TasksView::Kanban && self.filter == TasksFilter::Trees {
             self.filter = TasksFilter::All;
         }
-        let counts = [TasksFilter::All, TasksFilter::Missions, TasksFilter::Trees].map(|filter| {
-            let tasks = open.iter().chain(&done).filter(|row| filter.keeps(row));
-            let trees = trees
-                .running
-                .iter()
-                .chain(&trees.done_today)
-                .filter(|_| filter.keeps_trees());
-            (filter, tasks.count() + trees.count())
+        let trees_count = trees.running.len() + trees.done_today.len();
+        let tasks_count = open.len() + done.len();
+        let counts = [TasksFilter::All, TasksFilter::Trees].map(|filter| {
+            let tasks = if filter.keeps_tasks() { tasks_count } else { 0 };
+            (filter, tasks + trees_count)
         });
         let counts: Vec<(TasksFilter, usize)> = counts
             .into_iter()
             .filter(|(filter, _)| view == TasksView::List || *filter != TasksFilter::Trees)
             .collect();
         let chips = self.filter_chips(counts, &theme, cx);
-        let filter = self.filter;
-        open.retain(|row| filter.keeps(row));
-        done.retain(|row| filter.keeps(row));
-        if !filter.keeps_trees() {
-            trees.running.clear();
-            trees.done_today.clear();
+        if !self.filter.keeps_tasks() {
+            open.clear();
+            done.clear();
         }
         if trees.running.iter().any(|row| row.status.live()) && !reduced {
             motion::pulse_lease(cx.entity_id(), cx);

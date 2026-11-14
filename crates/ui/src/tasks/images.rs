@@ -323,29 +323,6 @@ pub(crate) fn strip<V: 'static>(
     }
     row
 }
-pub(crate) fn add_tile(id: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-    let selector = id.to_string();
-    div()
-        .id(SharedString::from(selector.clone()))
-        .debug_selector(move || selector.clone())
-        .role(gpui::Role::Button)
-        .aria_label("Add image")
-        .flex_none()
-        .h(px(SPEC_THUMB.1 - 2.0))
-        .px(px(12.0))
-        .rounded(px(9.0))
-        .border_1()
-        .border_dashed()
-        .border_color(theme.border)
-        .flex()
-        .items_center()
-        .gap(px(5.0))
-        .text_size(crate::typography::ui_rems(12.0))
-        .text_color(theme.text_muted)
-        .cursor_pointer()
-        .hover(|s| s.border_color(theme.text_faint).text_color(theme.text))
-        .child("＋ Add image")
-}
 pub(crate) struct ImageGallery {
     state: Entity<AppState>,
     paths: Vec<String>,

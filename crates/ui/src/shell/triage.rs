@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use super::*;
 use crate::composer::{AskInfo, WaitItem, WaitKind, WaitingAction};
 use crate::provider_instances::InstanceIcon;
@@ -20,18 +18,7 @@ const TICK: std::time::Duration = std::time::Duration::from_secs(1);
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum NeedKind {
     Asking(Option<AskInfo>),
-    PlanReady {
-        task_id: String,
-        steps: Vec<String>,
-    },
     Failed,
-    Decision {
-        item_id: String,
-        title: String,
-        why: zeron_proto::supervisor::ItemWhy,
-        detail: String,
-        options: Vec<String>,
-    },
     Task {
         task_id: String,
         title: String,
@@ -41,22 +28,15 @@ pub(crate) enum NeedKind {
 
 impl NeedKind {
     fn of_chat(&self) -> bool {
-        !matches!(self, NeedKind::Decision { .. } | NeedKind::Task { .. })
+        !matches!(self, NeedKind::Task { .. })
     }
 
     pub(crate) fn waits(&self) -> bool {
-        matches!(
-            self,
-            NeedKind::Asking(Some(_)) | NeedKind::PlanReady { .. } | NeedKind::Decision { .. }
-        )
+        matches!(self, NeedKind::Asking(Some(_)))
     }
 
     fn plan(&self) -> bool {
-        match self {
-            NeedKind::PlanReady { .. } => true,
-            NeedKind::Asking(Some(info)) => info.plan,
-            _ => false,
-        }
+        matches!(self, NeedKind::Asking(Some(info)) if info.plan)
     }
 
     pub(crate) fn label(&self) -> String {
@@ -67,9 +47,7 @@ impl NeedKind {
             }
             NeedKind::Asking(_) => "Asking".into(),
             NeedKind::Failed => "Failed".into(),
-            NeedKind::Decision { why, .. } => why.label().into(),
             NeedKind::Task { reason, .. } => reason.label(),
-            NeedKind::PlanReady { .. } => unreachable!(),
         }
     }
 }
@@ -82,7 +60,6 @@ pub(crate) struct NeedRow {
 impl NeedRow {
     fn key(&self) -> String {
         match &self.kind {
-            NeedKind::Decision { item_id, .. } => format!("decision-{item_id}"),
             NeedKind::Task { task_id, .. } => format!("task-{task_id}"),
             _ => self.chat_id.clone(),
         }
@@ -196,16 +173,14 @@ impl Shell {
         let state = self.state.read(cx);
         let composer = self.composer.read(cx);
         let now = Utc::now();
-        let mut plans: HashMap<String, (String, Vec<String>)> = HashMap::new();
         let mut tasks = Vec::new();
         for task in state
             .tasks
             .iter()
             .filter(|task| !task.deleted && task.completed_at.is_none())
         {
-            let plan = crate::tasks::rollup(state, task, now);
             if let Some(reason @ (zeron_proto::NeedsYou::NotSent | zeron_proto::NeedsYou::Review)) =
-                plan.needs
+                crate::tasks::rollup(state, task, now).needs
             {
                 tasks.push(NeedRow {
                     chat_id: task.chat_id.clone().unwrap_or_default(),
@@ -215,18 +190,6 @@ impl Shell {
                         reason,
                     },
                 });
-            }
-            if !task.plan_pending || plan.phase(task) != zeron_proto::mission::PlanPhase::PlanReady
-            {
-                continue;
-            }
-            if let Some(chat) = crate::tasks::linked_chat(&state.chats, task) {
-                let steps = plan
-                    .steps
-                    .iter()
-                    .map(|row| crate::composer::plain_references(&row.step.title))
-                    .collect();
-                plans.insert(chat.id.clone(), (task.id.clone(), steps));
             }
         }
         let mut triage = Triage::default();
@@ -264,13 +227,9 @@ impl Shell {
                             .or_else(|| session.and_then(|session| session.started_at)),
                         agents: session.map(background_agents).unwrap_or_default(),
                     });
-                    plans
-                        .remove(&chat.id)
-                        .map(|(task_id, steps)| NeedKind::PlanReady { task_id, steps })
+                    None
                 }
-                _ => plans
-                    .remove(&chat.id)
-                    .map(|(task_id, steps)| NeedKind::PlanReady { task_id, steps }),
+                _ => None,
             };
             if let Some(kind) = kind {
                 triage.needs.push(NeedRow {
@@ -289,26 +248,6 @@ impl Shell {
                 triage.needs.push(NeedRow {
                     chat_id: chat_id.to_owned(),
                     kind: NeedKind::Asking(composer.ask_info(chat_id)),
-                });
-            }
-        }
-        for row in state
-            .supervisor
-            .iter()
-            .flat_map(|snapshot| &snapshot.needs_you)
-        {
-            if let zeron_proto::supervisor::NeedsYouRow::Item(item) = row
-                && item.answer.is_none()
-            {
-                triage.needs.push(NeedRow {
-                    chat_id: item.raiser_chat_id.clone(),
-                    kind: NeedKind::Decision {
-                        item_id: item.id.clone(),
-                        title: item.title.clone(),
-                        why: item.why,
-                        detail: item.detail.clone(),
-                        options: item.options.clone(),
-                    },
                 });
             }
         }
@@ -404,43 +343,15 @@ impl Shell {
     fn wait_item(&self, row: &NeedRow, cx: &App) -> WaitItem {
         let state = self.state.read(cx);
         let chat = state.chats.iter().find(|chat| chat.id == row.chat_id);
-        let (kind, from) = match &row.kind {
-            NeedKind::Decision {
-                item_id,
-                why,
-                detail,
-                options,
-                ..
-            } => (
-                WaitKind::Decision {
-                    item_id: item_id.clone(),
-                    label: why.label(),
-                    detail: detail.clone(),
-                    options: options.clone(),
-                },
-                match chat {
-                    Some(_) => format!("Supervisor, from {}", self.triage_title(&row.chat_id, cx)),
-                    None => "Supervisor".into(),
-                },
-            ),
-            kind => {
-                let from = chat
-                    .and_then(|chat| self.chat_project(chat, cx))
-                    .unwrap_or_default();
-                let kind = match kind {
-                    NeedKind::PlanReady { task_id, steps } => WaitKind::Plan {
-                        task_id: Some(task_id.clone()),
-                        steps: steps.clone(),
-                    },
-                    NeedKind::Asking(Some(info)) if info.plan => WaitKind::Plan {
-                        task_id: None,
-                        steps: info.steps.clone(),
-                    },
-                    _ => WaitKind::Ask,
-                };
-                (kind, from)
-            }
+        let kind = match &row.kind {
+            NeedKind::Asking(Some(info)) if info.plan => WaitKind::Plan {
+                steps: info.steps.clone(),
+            },
+            _ => WaitKind::Ask,
         };
+        let from = chat
+            .and_then(|chat| self.chat_project(chat, cx))
+            .unwrap_or_default();
         WaitItem {
             key: row.key(),
             chat_id: row.chat_id.clone(),
@@ -452,20 +363,10 @@ impl Shell {
 
     pub(super) fn on_waiting_action(&mut self, action: &WaitingAction, cx: &mut Context<Self>) {
         match action {
-            WaitingAction::ApprovePlan {
-                chat_id,
-                target,
-                as_task,
-            } => self.approve_plan(chat_id, target.clone(), *as_task, cx),
-            WaitingAction::Decide { item_id, choice } => self.mutate(
-                serde_json::json!({
-                    "op": "resolveSupervisorItems",
-                    "answers": [{ "itemId": item_id, "choice": choice }],
-                }),
-                cx,
-            ),
-            WaitingAction::Open { decision: true, .. } => self.open_supervisor(cx),
-            WaitingAction::Open { chat_id, .. } => self.open_thread(chat_id.clone(), cx),
+            WaitingAction::ApprovePlan { chat_id, answer } => {
+                self.approve_plan(chat_id, answer.clone(), cx)
+            }
+            WaitingAction::Open { chat_id } => self.open_thread(chat_id.clone(), cx),
         }
     }
 
@@ -487,9 +388,7 @@ impl Shell {
 
     fn need_title(&self, row: &NeedRow, cx: &App) -> String {
         match &row.kind {
-            NeedKind::Decision { title, .. } | NeedKind::Task { title, .. }
-                if !title.trim().is_empty() =>
-            {
+            NeedKind::Task { title, .. } if !title.trim().is_empty() => {
                 crate::transcript::single_line(title)
             }
             NeedKind::Task { .. } => "Untitled task".into(),
@@ -499,7 +398,6 @@ impl Shell {
 
     fn open_need(&mut self, chat_id: &str, kind: &NeedKind, cx: &mut Context<Self>) {
         match kind {
-            NeedKind::Decision { .. } => self.open_supervisor(cx),
             NeedKind::Task { task_id, .. } => self.defer_open_task(task_id.clone(), cx),
             _ => self.open_thread(chat_id.to_owned(), cx),
         }
@@ -784,34 +682,6 @@ impl Shell {
             .collect();
 
         let (summary, lead) = tray_summary(need_count, triage.running.len());
-        let ask = div()
-            .id("triage-supervisor")
-            .debug_selector(|| "triage-supervisor".into())
-            .role(gpui::Role::Button)
-            .aria_label("Open the Supervisor chat")
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .h(px(26.0))
-            .px(px(9.0))
-            .rounded(px(7.0))
-            .bg(popup.wash(0.06))
-            .cursor_pointer()
-            .hover(|s| s.bg(popup.wash(0.1)))
-            .text_size(crate::typography::ui_rems(12.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(popup.text)
-            .child(
-                icon(icons::LUCIDE_SHIELD)
-                    .size(px(13.0))
-                    .text_color(popup.text_muted),
-            )
-            .child("Ask Supervisor")
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.close_triage(cx);
-                this.open_supervisor(cx);
-            }));
         let header = div()
             .flex_none()
             .h(px(HEADER_HEIGHT))
@@ -833,8 +703,7 @@ impl Shell {
                             ..Default::default()
                         },
                     )])),
-            )
-            .child(ask);
+            );
 
         let footer_button = |id: &'static str, glyph: &'static str, label: &'static str| {
             div()
@@ -1545,17 +1414,11 @@ fn need_tint(kind: &NeedKind, theme: &Theme) -> gpui::Hsla {
 
 fn card_need_meta(kind: &NeedKind, failed_at: Option<DateTime<Utc>>) -> String {
     match kind {
-        NeedKind::PlanReady { steps, .. } => format!(
-            "Plan ready · {} step{}",
-            steps.len(),
-            if steps.len() == 1 { "" } else { "s" }
-        ),
         NeedKind::Asking(Some(info)) if info.plan => "Plan ready".into(),
         NeedKind::Asking(Some(info)) if !info.question.is_empty() => {
             format!("Asks: {}", crate::transcript::single_line(&info.question))
         }
         NeedKind::Asking(_) => "Asking".into(),
-        NeedKind::Decision { why, .. } => format!("Supervisor · {}", why.label()),
         NeedKind::Task { reason, .. } => format!("Task · {}", reason.label()),
         NeedKind::Failed => match failed_at {
             Some(at) => format!(
@@ -1726,7 +1589,7 @@ pub(super) fn mark_all_read_button(
         .role(gpui::Role::Button)
         .aria_label("Mark chats read")
         .tooltip(crate::settings::widgets::text_tooltip(
-            "Clear the unread dot on every chat. Decisions stay until you answer or dismiss them.",
+            "Clear the unread dot on every chat.",
         ))
         .flex_none()
         .flex()
@@ -2128,23 +1991,6 @@ mod tests {
                 }))
                 .unwrap(),
             ];
-            state.supervisor = Some(zeron_proto::supervisor::SupervisorSnapshot {
-                needs_you: vec![zeron_proto::supervisor::NeedsYouRow::Item(
-                    zeron_proto::supervisor::SupervisorItem {
-                        id: "d1".into(),
-                        at: now,
-                        raised_by: zeron_proto::supervisor::Raiser::Supervisor,
-                        raiser_chat_id: "lead".into(),
-                        task_id: None,
-                        title: "Spend more?".into(),
-                        why: zeron_proto::supervisor::ItemWhy::Spend,
-                        detail: String::new(),
-                        options: Vec::new(),
-                        answer: None,
-                    },
-                )],
-                ..Default::default()
-            });
         });
         let boot = EngineBootConfig {
             data_dir: dir.path().into(),
@@ -2156,7 +2002,7 @@ mod tests {
             default_harness: zeron_proto::HarnessId::Mock,
         };
         let window = cx.add_window(|_, cx| Shell::new(state, boot, cx));
-        let (needs, asker_meta, mut running, waiting, running_meta) = window
+        let (needs, asker_meta, mut running, running_meta) = window
             .update(cx, |shell, _, cx| {
                 let triage = shell.triage(cx);
                 let needs: Vec<String> = triage
@@ -2164,13 +2010,6 @@ mod tests {
                     .iter()
                     .filter(|row| !row.kind.waits())
                     .map(NeedRow::key)
-                    .collect();
-                let waiting: Vec<(String, WaitKind)> = triage
-                    .needs
-                    .iter()
-                    .filter(|row| row.kind.waits())
-                    .map(|row| shell.wait_item(row, cx))
-                    .map(|item| (item.key, item.kind))
                     .collect();
                 let asker = triage.needs.iter().find(|row| row.chat_id == "asker");
                 let meta = asker.map(|row| shell.need_meta(row, cx));
@@ -2184,7 +2023,7 @@ mod tests {
                     .iter()
                     .map(|row| shell.running_meta(row, cx))
                     .collect();
-                (needs, meta, running, waiting, meta_of_running)
+                (needs, meta, running, meta_of_running)
             })
             .unwrap();
         running.sort();
@@ -2192,19 +2031,6 @@ mod tests {
             needs,
             ["asker", "task-unsent", "task-reviewed"],
             "a question whose details have not loaded stays in the tray"
-        );
-        assert_eq!(
-            waiting,
-            [(
-                "decision-d1".into(),
-                WaitKind::Decision {
-                    item_id: "d1".into(),
-                    label: "Spend",
-                    detail: String::new(),
-                    options: Vec::new(),
-                }
-            )],
-            "decisions wait at the composer, not in the titlebar tray"
         );
         assert!(
             asker_meta.is_some_and(|meta| meta.contains("from lead")),

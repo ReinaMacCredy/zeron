@@ -45,6 +45,7 @@ impl ArticleExt for Article {
         self.actions
             .iter()
             .filter_map(|target| Action::parse(target))
+            .filter(|action| *action != Action::Supervisor)
     }
 }
 

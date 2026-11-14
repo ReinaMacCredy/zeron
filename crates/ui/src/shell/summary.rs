@@ -897,27 +897,6 @@ impl Shell {
             section.entries.push(entry);
         }
 
-        if let Some(mission) = crate::tasks::mission_thread(state, &chat.id, now) {
-            let zeron_proto::PlanProgress { done, total } = mission.progress;
-            let step = (done + 1).min(total);
-            let task_id = mission.task_id.clone();
-            let selection = crate::tasks::mission_selection(&mission.role);
-            section.entries.push(
-                SidecarEntry::new(
-                    "task",
-                    0,
-                    icons::CHECKLIST,
-                    format!("Task: {}", mission.title),
-                )
-                .value(Some(SidecarValue::Text(
-                    format!("step {step} of {total}").into(),
-                )))
-                .action(move |this, _, cx| {
-                    this.open_mission(task_id.clone(), selection.clone(), cx)
-                }),
-            );
-        }
-
         if self.composer.read(cx).can_stop_background(cx) {
             section.foot = Some(
                 SidecarEntry::new("stop-all", 0, icons::STOP, "Stop all").action(|this, _, cx| {

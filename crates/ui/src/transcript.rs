@@ -1209,10 +1209,6 @@ pub enum RowKind {
         steps: Arc<Vec<SharedString>>,
         outcome: crate::plan_proposal::PlanOutcome,
     },
-    PlanEstimate {
-        task_id: SharedString,
-        tool: Arc<ToolItem>,
-    },
     NativeRoute {
         route: zeron_proto::ChildRoute,
         title: SharedString,
@@ -1420,13 +1416,6 @@ pub(crate) fn block_plain_text(block: &Block) -> String {
             .join("\n"),
         Block::Rule => String::new(),
     }
-}
-
-fn supervisor_wake_label(events: usize) -> String {
-    format!(
-        "Wake · {events} {}",
-        if events == 1 { "event" } else { "events" }
-    )
 }
 
 fn a11y_clip(text: &str, chars: usize) -> String {
@@ -2174,30 +2163,6 @@ pub fn rows_for_entry(
                     kind: ToolItemKind::Call,
                     images: crate::tool_images::image_paths(call, output.as_deref()),
                 };
-                if let Some(task_id) = crate::plan_estimate::plan_task_id(call) {
-                    if !compact {
-                        flush_group(
-                            &mut rows,
-                            &mut pending_group,
-                            &mut group_ix,
-                            group_last_part_ix,
-                        );
-                    }
-                    rows.push(Row {
-                        id: format!("{}#{}-plan", entry.id, part.id()).into(),
-                        version: tool_fingerprint(std::slice::from_ref(&item), false),
-                        turn_start: false,
-                        kind: RowKind::PlanEstimate {
-                            task_id: task_id.into(),
-                            tool: Arc::new(item),
-                        },
-                        entry_id: entry_id.clone(),
-                        timestamp: None,
-                        copy_text: None,
-                        compact_fold: None,
-                    });
-                    continue;
-                }
                 if let Some(route) = delegate_route.clone().filter(|_| subagent_ref.is_none()) {
                     if !compact {
                         flush_group(
@@ -2765,7 +2730,6 @@ pub fn rows_for_entry(
                     RowKind::ComputerNotice { .. }
                         | RowKind::HtmlRender { .. }
                         | RowKind::NativeRoute { .. }
-                        | RowKind::PlanEstimate { .. }
                 )
             });
             for row in &mut inner {
@@ -4676,7 +4640,6 @@ pub struct Transcript {
     secrets: secret_card::SecretCards,
     html_files: HashMap<std::path::PathBuf, HtmlFileState>,
     html_pages: html_card::HtmlPages,
-    plan_previews: HashMap<SharedString, PlanPreview>,
     limit_choices: HashMap<String, zeron_proto::OfferChoice>,
     limit_spans: HashMap<String, (i64, i64)>,
     limit_rows: HashMap<SharedString, usize>,
@@ -4834,8 +4797,7 @@ pub enum TranscriptEvent {
     },
     ApprovePlan {
         chat_id: String,
-        as_task: bool,
-        target: crate::plan_proposal::PlanTarget,
+        answer: crate::plan_proposal::PlanAnswer,
     },
     EditPlan {
         chat_id: String,
@@ -4854,13 +4816,6 @@ pub enum TranscriptEvent {
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
-
-struct PlanPreview {
-    key: String,
-    preview: Option<Rc<crate::plan_estimate::Preview>>,
-    layout: Option<(usize, usize, bool, bool)>,
-    _fetch: Option<Task<()>>,
-}
 
 impl Transcript {
     fn render_native_route(
@@ -4913,112 +4868,6 @@ impl Transcript {
         )
     }
 
-    fn render_plan_estimate(
-        &mut self,
-        row_id: &SharedString,
-        task_id: &SharedString,
-        tool: &ToolItem,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        use crate::plan_estimate as plan;
-        let latest = self.rows.iter().rev().find_map(|row| match &row.kind {
-            RowKind::PlanEstimate { task_id: id, .. } if id == task_id => Some(&row.id),
-            _ => None,
-        });
-        let state = self.state.read(cx);
-        let task = state
-            .tasks
-            .iter()
-            .find(|task| task.id == task_id.as_ref() && !task.deleted)
-            .filter(|_| latest == Some(row_id))
-            .cloned();
-        let Some(task) = task else {
-            return tool_chip(
-                row_id.clone(),
-                tool,
-                false,
-                false,
-                false,
-                1.0,
-                1.0,
-                1.0,
-                None,
-                theme,
-                cx.entity_id(),
-                cx,
-            );
-        };
-        let steps = plan::plan_steps(&task.id, &state.task_steps);
-        let key = plan::preview_key(&steps);
-        let roles = plan::preview_roles(&steps);
-        let lead_chat = task.chat_id.clone();
-        let stale = self
-            .plan_previews
-            .get(task_id)
-            .is_none_or(|cached| cached.key != key);
-        if stale {
-            self.fetch_plan_preview(task_id.clone(), key, lead_chat.clone(), roles, cx);
-        }
-        let state = self.state.read(cx);
-        let steps = plan::plan_steps(&task.id, &state.task_steps);
-        let lead = lead_chat
-            .as_deref()
-            .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
-            .and_then(|chat| chat.config.as_ref())
-            .map(route_badge::target_of);
-        let cached = self.plan_previews.get(task_id);
-        let preview = cached.and_then(|cached| cached.preview.clone());
-        let lines = plan::plan_lines(&steps, &state.chats, lead.as_ref(), preview.as_deref(), cx);
-        let layout = (
-            lines.len(),
-            lines.iter().filter(|line| line.fallback.is_some()).count(),
-            plan::totals(&lines).raised > 0,
-            task.plan_pending,
-        );
-        if cached.is_some_and(|cached| cached.layout != Some(layout)) {
-            if let Some(cached) = self.plan_previews.get_mut(task_id) {
-                cached.layout = Some(layout);
-            }
-            let row = row_id.clone();
-            cx.spawn(async move |this, cx| {
-                this.update(cx, |this, cx| this.diagram_layout_changed(&[row], cx))
-                    .ok();
-            })
-            .detach();
-        }
-        let transcript = cx.weak_entity();
-        let approve = self.chat_id.clone();
-        let approve_task = task.id.clone();
-        plan::plan_card(
-            plan::PlanCard {
-                id: row_id.clone(),
-                task: &task,
-                lines,
-                lead,
-                on_link: self.route_links(cx),
-                on_start: Rc::new(move |_, cx| {
-                    let Some(chat_id) = approve.clone() else {
-                        return;
-                    };
-                    transcript
-                        .update(cx, |_, cx| {
-                            cx.emit(TranscriptEvent::ApprovePlan {
-                                chat_id,
-                                as_task: false,
-                                target: crate::plan_proposal::PlanTarget::Task(
-                                    approve_task.clone(),
-                                ),
-                            })
-                        })
-                        .ok();
-                }),
-            },
-            theme,
-            cx,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn render_plan_proposal(
         &mut self,
@@ -5030,92 +4879,19 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        use crate::plan_proposal::{self as proposal, CardView, PlanOutcome, StepMark};
-        let latest = self.rows.iter().rev().find_map(|row| match &row.kind {
-            RowKind::PlanProposal { .. } => Some(&row.id),
-            _ => None,
-        }) == Some(row_id);
+        use crate::plan_proposal::{self as proposal, CardView, PlanOutcome};
         let chat_id = self.chat_id.clone().unwrap_or_default();
-        let state = self.state.read(cx);
-        let task = latest
-            .then(|| zeron_proto::plan_of_chat(&state.tasks, &chat_id))
-            .flatten();
-        let flight = state.plan_approval(request_id);
-        let first_current = |steps: &[SharedString]| -> Vec<(SharedString, StepMark)> {
-            steps
-                .iter()
-                .enumerate()
-                .map(|(ix, step)| {
-                    let mark = if ix == 0 {
-                        StepMark::Current
-                    } else {
-                        StepMark::Number
-                    };
-                    (step.clone(), mark)
-                })
-                .collect()
-        };
-        let view = if outcome == PlanOutcome::Approved {
-            CardView::Here
-        } else if outcome == PlanOutcome::Declined && task.is_some() {
-            let title = state
-                .chats
-                .iter()
-                .find(|chat| chat.id == chat_id)
-                .map(zeron_proto::Chat::display_title)
-                .unwrap_or_default();
-            let rows = task
-                .map(|task| crate::tasks::rollup(state, task, chrono::Utc::now()).steps)
-                .unwrap_or_default();
-            let mut current = false;
-            let marked: Vec<(SharedString, StepMark)> = rows
-                .iter()
-                .map(|row| {
-                    let done = matches!(
-                        row.status,
-                        zeron_proto::StepStatus::Done | zeron_proto::StepStatus::Skipped
-                    );
-                    let mark = match (done, current) {
-                        (true, _) => StepMark::Done,
-                        (false, false) => {
-                            current = true;
-                            StepMark::Current
-                        }
-                        (false, true) => StepMark::Number,
-                    };
-                    (SharedString::from(row.step.title.clone()), mark)
-                })
-                .collect();
-            CardView::Task {
-                title: task
-                    .map(|task| task.title.clone())
-                    .filter(|title| !title.is_empty())
-                    .unwrap_or(title)
-                    .into(),
-                steps: if marked.is_empty() {
-                    first_current(steps)
-                } else {
-                    marked
-                },
-            }
-        } else if outcome == PlanOutcome::Declined && flight == Some(true) {
-            CardView::Waiting {
-                busy: true,
-                task_blocked: None,
-            }
-        } else if outcome == PlanOutcome::Declined {
-            CardView::NotApproved
-        } else {
-            CardView::Waiting {
-                busy: flight.is_some(),
-                task_blocked: crate::tasks::chat_plan_blocker(state, &chat_id),
-            }
+        let view = match outcome {
+            PlanOutcome::Approved => CardView::Here,
+            PlanOutcome::Declined => CardView::NotApproved,
+            PlanOutcome::Waiting => CardView::Waiting {
+                busy: self.state.read(cx).plan_approval(request_id),
+            },
         };
         let layout = match &view {
             CardView::Waiting { .. } => (0, steps.len()),
             CardView::Here => (1, steps.len()),
             CardView::NotApproved => (2, steps.len()),
-            CardView::Task { steps, .. } => (3, steps.len()),
         };
         if self.plan_views.insert(row_id.clone(), layout) != Some(layout) {
             let row = row_id.clone();
@@ -5125,7 +4901,6 @@ impl Transcript {
             })
             .detach();
         }
-        let task_id = task.map(|task| task.id.clone());
         let weak = cx.weak_entity();
         let answer = proposal::PlanAnswer {
             request_id: request_id.to_string(),
@@ -5135,24 +4910,21 @@ impl Transcript {
             let weak = weak.clone();
             let chat_id = chat_id.clone();
             let answer = answer.clone();
-            Rc::new(move |as_task: bool, _: &mut Window, cx: &mut gpui::App| {
+            Rc::new(move |_: &mut Window, cx: &mut gpui::App| {
                 weak.update(cx, |_, cx| {
                     cx.emit(TranscriptEvent::ApprovePlan {
                         chat_id: chat_id.clone(),
-                        as_task,
-                        target: proposal::PlanTarget::Question(answer.clone()),
+                        answer: answer.clone(),
                     })
                 })
                 .ok();
             })
         };
         let on_edit = {
-            let weak = weak.clone();
-            let chat_id = chat_id.clone();
             let request = request_id.clone();
             Rc::new(move |_: &mut Window, cx: &mut gpui::App| {
                 weak.update(cx, |transcript, cx| {
-                    if transcript.state.read(cx).plan_approval(&request).is_some() {
+                    if transcript.state.read(cx).plan_approval(&request) {
                         return;
                     }
                     cx.emit(TranscriptEvent::EditPlan {
@@ -5163,13 +4935,6 @@ impl Transcript {
                 .ok();
             })
         };
-        let on_open_task = Rc::new(move |_: &mut Window, cx: &mut gpui::App| {
-            let Some(task_id) = task_id.clone() else {
-                return;
-            };
-            weak.update(cx, |_, cx| cx.emit(TranscriptEvent::OpenTask { task_id }))
-                .ok();
-        });
         proposal::proposal_card(
             proposal::ProposalCard {
                 id: row_id.clone(),
@@ -5177,63 +4942,9 @@ impl Transcript {
                 view,
                 on_approve,
                 on_edit,
-                on_open_task,
             },
             theme,
-            cx.entity_id(),
-            cx,
         )
-    }
-
-    fn fetch_plan_preview(
-        &mut self,
-        task_id: SharedString,
-        key: String,
-        owner: Option<String>,
-        roles: Vec<&'static str>,
-        cx: &mut Context<Self>,
-    ) {
-        let previous = self
-            .plan_previews
-            .get(&task_id)
-            .and_then(|cached| cached.preview.clone());
-        let engine = self.state.read(cx).engine().cloned();
-        let fetch = engine.filter(|_| !roles.is_empty()).map(|engine| {
-            let task_id = task_id.clone();
-            let params =
-                serde_json::json!({ "ownerChatId": owner, "roles": roles, "steps": true });
-            cx.spawn(async move |this, cx| {
-                let preview = engine
-                    .client()
-                    .call_as::<crate::plan_estimate::Preview>(
-                        zeron_rpc::methods::PREVIEW_ROUTES,
-                        params,
-                    )
-                    .await
-                    .ok();
-                this.update(cx, |this, cx| {
-                    if let Some(cached) = this.plan_previews.get_mut(&task_id) {
-                        cached.preview = preview.map(Rc::new);
-                    }
-                    cx.notify();
-                })
-                .ok();
-            })
-        });
-        let preview = if roles.is_empty() {
-            Some(Rc::new(crate::plan_estimate::Preview::default()))
-        } else {
-            previous
-        };
-        self.plan_previews.insert(
-            task_id,
-            PlanPreview {
-                key,
-                preview,
-                layout: None,
-                _fetch: fetch,
-            },
-        );
     }
 
     fn render_limit_card(
@@ -5429,73 +5140,6 @@ impl Transcript {
                                 chat_id: child.clone(),
                             });
                         })),
-                )
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .h(px(1.0))
-                    .ml(px(4.0))
-                    .bg(theme.border.opacity(0.6)),
-            )
-            .into_any_element()
-    }
-
-    fn supervisor_wake_events(&self, row_id: &str, cx: &gpui::App) -> Option<usize> {
-        self.chat_id
-            .as_deref()
-            .filter(|id| zeron_proto::supervisor::is_supervisor_chat(id))?;
-        self.state
-            .read(cx)
-            .supervisor
-            .as_ref()?
-            .wakes
-            .iter()
-            .find(|wake| wake.id == row_id)
-            .map(|wake| wake.events.len())
-    }
-
-    fn render_supervisor_wake_row(
-        &self,
-        events: usize,
-        timestamp: Option<i64>,
-        theme: &Theme,
-    ) -> AnyElement {
-        let clock = timestamp
-            .and_then(chrono::DateTime::from_timestamp_millis)
-            .map(|utc| {
-                utc.with_timezone(&chrono::Local)
-                    .format("%-I:%M %p")
-                    .to_string()
-            });
-        div()
-            .debug_selector(|| "supervisor-wake-row".into())
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .pb(px(8.0))
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted)
-            .child(
-                crate::icons::icon(crate::icons::LUCIDE_SHIELD)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(theme.text_faint),
-            )
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(supervisor_wake_label(events)),
-            )
-            .when_some(clock, |el, clock| {
-                el.child(
-                    div()
-                        .font_family(theme.font_mono.clone())
-                        .text_size(crate::typography::ui_rems(10.0))
-                        .text_color(theme.text_faint)
-                        .child(clock),
                 )
             })
             .child(
@@ -5839,7 +5483,6 @@ impl Transcript {
             secrets: Default::default(),
             html_files: HashMap::new(),
             html_pages: html_card::HtmlPages::new(cx),
-            plan_previews: HashMap::new(),
             limit_choices: HashMap::new(),
             limit_spans: HashMap::new(),
             limit_rows: HashMap::new(),
@@ -11201,9 +10844,6 @@ impl Transcript {
                 let mentions = mentions.clone();
                 let markdown = markdown.clone();
                 let pending = *pending;
-                if let Some(events) = self.supervisor_wake_events(&row.id, cx) {
-                    break 'user self.render_supervisor_wake_row(events, row.timestamp, &theme);
-                }
                 let wake = from_chat_id.as_ref().and_then(|from| {
                     let state = self.state.read(cx);
                     let owner = self.chat_id.as_deref()?;
@@ -11676,9 +11316,6 @@ impl Transcript {
             RowKind::NativeRoute { route, title } => {
                 self.render_native_route(&row.id, route, title, &theme, cx)
             }
-            RowKind::PlanEstimate { task_id, tool } => {
-                self.render_plan_estimate(&row.id, task_id, tool, &theme, cx)
-            }
             RowKind::PlanProposal {
                 request_id,
                 question_id,
@@ -11917,13 +11554,7 @@ impl Transcript {
         let row_id = row.id.clone();
         let a11y = window
             .is_a11y_active()
-            .then(|| {
-                let (label, value) = row_a11y(&row.kind)?;
-                Some(match self.supervisor_wake_events(&row.id, cx) {
-                    Some(events) => (supervisor_wake_label(events).into(), value),
-                    None => (label, value),
-                })
-            })
+            .then(|| row_a11y(&row.kind))
             .flatten();
         let outer = div()
             .id(row.id.clone())
@@ -12938,26 +12569,11 @@ impl Transcript {
                     tool_connector_continuation(connector_progress.get(ix + 1).copied());
                 let row_height = row_heights[ix];
                 if let Some(thread) = tool.subagent_ref.clone().filter(|_| is_thread_link(tool)) {
-                    let state = self.state.read(cx);
-                    let title = started_thread_title(&state.chats, &thread, &tool.call);
-                    let badge = state
-                        .task_steps
-                        .iter()
-                        .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(&thread))
-                        .find_map(|step| step.route.clone())
-                        .map(|route| RouteInfo::for_child(&state.chats, &thread, route))
-                        .and_then(|info| {
-                            route_badge::route_badge(
-                                SharedString::from(format!("{row_id}#s{ix}-route")),
-                                info,
-                                self.route_links(cx),
-                                theme,
-                            )
-                        });
+                    let title =
+                        started_thread_title(&self.state.read(cx).chats, &thread, &tool.call);
                     return started_thread_line(
                         SharedString::from(format!("{row_id}#s{ix}")),
                         title,
-                        badge,
                         row_height,
                         cx.listener(move |_, _, _, cx| {
                             cx.emit(TranscriptEvent::OpenChildChat {
@@ -15743,7 +15359,6 @@ fn started_thread_title(
 fn started_thread_line(
     id: SharedString,
     title: SharedString,
-    badge: Option<AnyElement>,
     height: f32,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     theme: &Theme,
@@ -15774,7 +15389,6 @@ fn started_thread_line(
                 .text_color(theme.text.opacity(0.8))
                 .child(title.clone()),
         )
-        .children(badge)
         .child(div().flex_none().child("·"))
         .child(
             div()

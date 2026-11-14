@@ -99,43 +99,4 @@ mod tests {
             .unwrap();
         assert_eq!(parent.segments.len(), 2);
     }
-
-    #[test]
-    fn only_a_local_live_main_chat_without_an_open_plan_can_add_one() {
-        let now = Utc::now();
-        let mut state = AppState::new();
-        state.local_device_id = Some("mac".into());
-        let mut remote = chat("remote", now);
-        remote.device_id = "pc".into();
-        let mut archived = chat("archived", now);
-        archived.archived = true;
-        let mut side = chat("side", now);
-        side.sidechat_source_chat_id = Some("plain".into());
-        state.chats = vec![
-            chat("plain", now),
-            remote,
-            archived,
-            side,
-            chat("planned", now),
-            chat("was-planned", now),
-        ];
-        let task = |id: &str, lead: &str, done: Option<DateTime<Utc>>| -> zeron_proto::Task {
-            serde_json::from_value(serde_json::json!({
-                "id": id, "title": id, "orderKey": id, "chatId": lead,
-                "mode": "orchestrated", "completedAt": done,
-            }))
-            .unwrap()
-        };
-        state.tasks = vec![
-            task("open", "planned", None),
-            task("done", "was-planned", Some(now)),
-        ];
-        let can: Vec<&str> = state
-            .chats
-            .iter()
-            .filter(|chat| crate::tasks::can_add_plan(&state, chat))
-            .map(|chat| chat.id.as_str())
-            .collect();
-        assert_eq!(can, ["plain", "was-planned"]);
-    }
 }

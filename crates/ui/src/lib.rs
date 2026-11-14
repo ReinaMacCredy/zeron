@@ -71,7 +71,6 @@ pub mod orb;
 pub mod overscroll;
 mod pasted_text;
 pub mod pickers;
-mod plan_estimate;
 mod plan_proposal;
 pub mod popover;
 pub mod project_actions;
@@ -97,7 +96,6 @@ pub mod shell;
 pub mod smooth_scroll;
 pub mod sound;
 pub mod state;
-mod supervisor;
 pub(crate) mod surface_chrome;
 mod swipe;
 pub mod syntax_cache;
@@ -440,9 +438,7 @@ fn open_notification_target(target: String, state: &gpui::Entity<state::AppState
                 window.activate_window();
                 if target == notify::AGENT_UPDATES_TARGET {
                     shell.open_settings(shell::SettingsSection::Harnesses, cx);
-                } else if target == notify::SUPERVISOR_TARGET {
-                    shell.open_supervisor(cx);
-                } else {
+                } else if target != notify::SUPERVISOR_TARGET {
                     shell.open_notification_target(target, window, cx);
                 }
             });
