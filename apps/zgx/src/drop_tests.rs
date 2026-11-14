@@ -277,19 +277,17 @@ fn the_sidebars_headers_keep_their_height_through_a_toggle() {
     assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
 
-/// The shell's column motion (ds/motion `sidebar`, the locked mockup's: 260 ms,
-/// cubic-bezier(.2, .8, .2, 1)): where a column is `ms` into a move from `from`
-/// to `to`.
+/// The shell's column motion (ds/motion `sidebar`: 260 ms on a critically
+/// damped spring's step at 35/s, `settling`'s points 8 ms apart with lines
+/// between): where a column is `ms` into a move from `from` to `to`.
 fn zerons(from: f32, to: f32, ms: f32) -> f32 {
-    let t = (ms / 260.).clamp(0., 1.);
-    let (x1, y1, x2, y2) = (0.2_f32, 0.8_f32, 0.2_f32, 1.0_f32);
-    let at = |a: f32, b: f32, s: f32| 3. * (1. - s) * (1. - s) * s * a + 3. * (1. - s) * s * s * b + s * s * s;
-    let (mut lo, mut hi) = (0_f32, 1_f32);
-    for _ in 0..40 {
-        let mid = (lo + hi) / 2.;
-        if at(x1, x2, mid) < t { lo = mid } else { hi = mid }
-    }
-    from + (to - from) * at(y1, y2, (lo + hi) / 2.)
+    let span = 35. * 0.26_f32;
+    let step = |t: f32| 1. - (1. + t) * (-t).exp();
+    let count = (260_f32 / 8.).ceil();
+    let point = |i: f32| step(span * i / count) / step(span);
+    let at = (ms / 260.).clamp(0., 1.) * count;
+    let lo = at.floor();
+    from + (to - from) * (point(lo) + (point((lo + 1.).min(count)) - point(lo)) * (at - lo))
 }
 
 /// The panel's motion (ds/motion `panel`, 280 ms, cubicBezier(.22, 1, .36, 1)):

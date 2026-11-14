@@ -294,8 +294,8 @@ fn x_of(app: &mut TestApp, selector: &str) -> Option<(f32, f32)> {
 }
 
 /// The most a column's ease moves anything in one 60 Hz frame, past the window's
-/// own step: the sidebar's on the shell's column motion (260 ms,
-/// cubic-bezier(.2,.8,.2,1), steepest in its first frame), over its 261.
+/// own step: the sidebar's on the shell's column motion (260 ms on a spring's
+/// step, steepest in its second frame, a fifth of the way), over its 261.
 const EASE_STEP: f32 = 68.0;
 
 /// Zeron's share of `available` for the panel (shell/panel_layout.rs
