@@ -40,9 +40,8 @@ fn pieces(app: &mut TestApp, words: &str) -> Vec<(String, Color)> {
 }
 
 /// Whether every piece of the text holding `words` comes to paint `ink`, frames
-/// paced as a window's are. (The veil times its fade by `ui.now()`, the wall
-/// clock, and repaints by an animation on the frames' clock: frames run flat
-/// out would end that animation with the fade barely begun.)
+/// paced as a window's are. (The veil's fade runs by `ui.now()`, the wall
+/// clock: frames run flat out would end with the fade barely begun.)
 fn settles(app: &mut TestApp, words: &str, ink: Color) -> bool {
     for _ in 0..60 {
         app.frames(1);
