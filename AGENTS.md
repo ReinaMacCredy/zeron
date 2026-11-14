@@ -29,9 +29,16 @@ worktree.
     checkout's `target/`.
   - Right after `git worktree add`, run `scripts/seed-worktree-target.sh`
     from the new worktree, before its first build: it APFS-clones the main
-    checkout's `target/debug` (about 2-3 min, no extra disk) so only
-    workspace crates rebuild. Worktrees Zeron creates get this from the
-    project's setup Action.
+    checkout's `target/debug` and `apps/zgx/target` (about 2-3 min, no extra
+    disk) so only workspace crates rebuild, writes a git-ignored
+    `.cargo/config.toml` that turns incremental compilation off (24G a
+    worktree), and runs `scripts/sweep-cold-targets.sh`, which moves any
+    worktree's `target/` idle over 3 days to `~/.Trash`. Worktrees Zeron
+    creates get this from the project's setup Action.
+  - Verify with `cargo check -p <crate>` only. `cargo build` and
+    `cargo test` run once, on `main`, in the merge gate: a worktree that
+    builds and tests grows past 100G. Build here only for a visual proof
+    that has to precede the merge.
 - Visual proofs run in an isolated `target/macos-dev<N>/Zeron Dev <N>.app`
   (see `scripts/run-macos-dev.sh`), never in `/Applications/Zeron.app`, which
   hosts the running sessions. Pick an `N` no other bundle uses and set
@@ -55,7 +62,9 @@ in the same hand-off, without waiting to be asked:
    (`git merge --abort`), report, stop.
 3. Merge landed: build the crates you touched on `main` (`cargo build -p
    <crate>`; for `crates/ui`, `cargo test -p zeron-ui --lib --
-   --test-threads=1`). A failure means revert the merge commit and report.
+   --test-threads=1`) and run the filtered tests of the modules you changed,
+   which the worktree skipped. A failure means revert the merge commit and
+   report.
 4. Green: `git worktree remove --force .maestro/worktree/<slug>` and
    `git branch -d <branch>`. Quit your `Zeron Dev <N>` and move its
    `target/macos-dev<N>` folder to `~/.Trash` (the dcg guard blocks recursive
