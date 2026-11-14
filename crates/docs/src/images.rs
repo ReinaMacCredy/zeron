@@ -52,6 +52,10 @@ pub const IMAGES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/assets/whats_new/answer-pill.jpg"),
     ),
     (
+        "zgx-app.jpg",
+        include_bytes!("../../ui/assets/whats_new/zgx-app.jpg"),
+    ),
+    (
         "plan-card.jpg",
         include_bytes!("../../ui/assets/whats_new/plan-card.jpg"),
     ),

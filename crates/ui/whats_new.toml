@@ -4,6 +4,7 @@
 [[entry]]
 version = "0.3.4"
 date = "Nov 13"
+hero = "zgx-app.jpg"
 hero_visual = "text-annotation-hero"
 
 [[entry.features]]
@@ -11,6 +12,18 @@ id = "zgx-app"
 title = "Zeron runs on its new interface"
 description = "Zeron.app is now built on zgx, the interface upstream Zeron ships from 0.3.0. Your chats, projects, drafts, settings and shortcuts carry over on first launch, and the engine is updated with the app."
 details = "The tab bar, rail and sidebar, Sidecar, Tasks, Inbox, the Git and PR pages, the terminal, split chats, side chats and the composer's pills are all on the new interface."
+
+[[entry.features]]
+id = "message-edit"
+title = "Edit a message you sent and send it again"
+description = "Hover a message you sent and click Edit: it opens in place, and Send replaces it and everything after it with your new words. Rewind to here puts the message back in the composer and removes it and the turns after it. Under a reply, Fork from here opens a new chat with the history up to that reply."
+details = "When the agent can't do one of these, its button is dimmed and the tooltip says why."
+
+[[entry.features]]
+id = "pdf-viewer"
+title = "Read PDFs in the file viewer"
+description = "A PDF on this Mac opens as its pages, fitted to the width. Zoom with the buttons or Cmd+ and Cmd-, the footer shows Page N of M, and the menu has Open in Default App and Reveal in Finder."
+details = "A locked, damaged or empty PDF says why it can't open."
 
 [[entry.features]]
 id = "markdown-fence-render"
@@ -117,7 +130,7 @@ text = "A work group's summary says consulted advisor instead of counting the ad
 text = "When the composer shows a prediction, Tab or Right arrow takes it, even while the composer isn't focused, and the two keys show beside it."
 
 [[entry.improvements]]
-text = "A shell code block in a reply has Run beside Copy: it opens a new terminal tab in the chat's folder and runs the block there. Copy gives the block exactly as written, tabs included."
+text = "A shell code block in a reply has Run beside Copy: it opens a new terminal tab in the chat's folder and pastes the block there, so a tab inside it no longer reaches the shell as completion. Copy gives the block exactly as written, tabs included."
 
 [[entry.improvements]]
 text = "Settings moves to a sidebar tree: a group opens to its pages under a guide line, each page has a title and summary, and changing page crossfades. A search hit shows its path, and picking one glides to the row and flashes it."
@@ -164,6 +177,40 @@ text = "Deleting a chat also deletes its side chats and subagents."
 
 [[entry.improvements]]
 text = "Jump to latest and the queued pill hold their place while they fade, and the Compacting line no longer runs into the composer."
+
+[[entry.improvements]]
+text = "@ has a Folders tab after Files. A file or folder you pick stays one chip even when its name has spaces, and chats in the list show their agent's mark."
+
+[[entry.improvements]]
+text = "When a turn stopped short, the send button on an empty composer is Resume. A usage limit notice names the window that ran out, such as \"Claude Code 5-hour limit reached.\""
+
+[[entry.improvements]]
+text = "Settings opens as a panel over your chats, which stay where they were. Esc, the close button or a click outside closes it. Chat is now a section of General, History a section of Browser, and Themes a section of Appearance."
+
+[[entry.improvements]]
+text = "The pills, the side chat tab, the find bar and the other surfaces over a chat are frosted glass, so the conversation no longer shows through them."
+
+[[entry.improvements]]
+text = "The button back to the latest message is a small round arrow. While a reply is still being written below, it shows moving dots and reads New reply."
+
+[[entry.improvements]]
+text = "A tick for each of your messages runs down the chat's left edge. Hover one to preview it, click it to go there."
+
+[[entry.improvements]]
+text = "An agent can close a page of options once you have answered it, and the pill has an X to close one yourself. A closed page says Closed and takes no more picks."
+
+[[entry.improvements]]
+text = "An edit's diff in the chat shows its code in syntax colors."
+
+[[entry.improvements]]
+text = "Tabs grow open and shrink closed in every tab strip, and the tabs beside them slide into place."
+
+[[entry.improvements]]
+text = "Dragging a sidebar row lifts it as frosted glass, and one let go over nothing slides back home. A tab pulled out of its strip grows into its thumbnail, and a chat held at a pane's left or right edge shows the split cards."
+visual = "tab-drag"
+
+[[entry.improvements]]
+text = "A short label cut off with an ellipsis no longer stops the app with a red error banner."
 
 [[entry]]
 version = "0.2.132"
