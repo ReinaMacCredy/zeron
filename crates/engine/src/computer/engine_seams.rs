@@ -275,7 +275,7 @@ impl ComputerManagerSeams for EngineComputerSeams {
 
     fn note(&self, chat_id: &str, text: &str) {
         if let Some(sessions) = self.sessions() {
-            sessions.write_computer_note(chat_id, text, None);
+            sessions.write_system_note(chat_id, text, None);
         }
     }
 }

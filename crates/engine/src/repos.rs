@@ -1514,6 +1514,44 @@ impl Repos {
         })
     }
 
+    pub async fn restore_worktree(
+        &self,
+        repo_path: &Path,
+        path: &Path,
+        branch: Option<&str>,
+    ) -> Result<String, EngineError> {
+        let name = path
+            .file_name()
+            .filter(|_| path.starts_with(self.inner.worktrees.root()))
+            .ok_or_else(|| {
+                EngineError::Other(format!("{} is not a Zeron worktree", path.display()))
+            })?;
+        let fresh = format!("zeron/{}", name.to_string_lossy());
+        let target = path.to_string_lossy();
+        self.git(&["worktree", "prune"], Some(repo_path)).await?;
+        for candidate in branch.into_iter().chain([fresh.as_str()]) {
+            let local = format!("refs/heads/{candidate}");
+            if self
+                .git(
+                    &["rev-parse", "--verify", "--quiet", &local],
+                    Some(repo_path),
+                )
+                .await
+                .is_ok()
+            {
+                self.git(&["worktree", "add", &target, candidate], Some(repo_path))
+                    .await?;
+                return Ok(candidate.to_owned());
+            }
+        }
+        self.git(
+            &["worktree", "add", "-b", &fresh, &target, "HEAD"],
+            Some(repo_path),
+        )
+        .await?;
+        Ok(fresh)
+    }
+
     /// Git's built-in checkout passes `<destination>/.git` in GIT_DIR, whose
     /// separate PATH_MAX - 40 check rejects some launchable Windows paths even
     /// with core.longpaths enabled. Register first, then reset from the new
@@ -2857,6 +2895,85 @@ mod tests {
             Repos::with_worktrees_root(&tmp.path().join("data2"), "test", code.join("wt"));
         let worktree = sibling.create_worktree(&repo, "main").await.unwrap();
         assert!(Path::new(&worktree.path).starts_with(code.join("wt").join("comet")));
+    }
+
+    #[tokio::test]
+    async fn a_removed_worktree_is_restored_at_its_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let root = tmp.path().join("worktrees");
+        let repos = Repos::with_worktrees_root(&tmp.path().join("data"), "test", root);
+        repos
+            .git(&["init", "-b", "main"], Some(&repo))
+            .await
+            .unwrap();
+        repos
+            .git(
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "init",
+                ],
+                Some(&repo),
+            )
+            .await
+            .unwrap();
+        let worktree = repos.create_worktree(&repo, "main").await.unwrap();
+        let path = PathBuf::from(&worktree.path);
+        let current = |path: PathBuf| {
+            let repos = repos.clone();
+            async move {
+                repos
+                    .git(&["branch", "--show-current"], Some(&path))
+                    .await
+                    .unwrap()
+                    .trim()
+                    .to_owned()
+            }
+        };
+
+        repos
+            .git(
+                &["branch", "-m", &worktree.branch, "zeron/renamed"],
+                Some(&repo),
+            )
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&path).unwrap();
+        let restored = repos
+            .restore_worktree(&repo, &path, Some("zeron/renamed"))
+            .await
+            .unwrap();
+        assert_eq!(restored, "zeron/renamed");
+        assert_eq!(current(path.clone()).await, "zeron/renamed");
+
+        repos
+            .git(
+                &["worktree", "remove", "--force", &worktree.path],
+                Some(&repo),
+            )
+            .await
+            .unwrap();
+        repos
+            .git(&["branch", "-D", "zeron/renamed"], Some(&repo))
+            .await
+            .unwrap();
+        let restored = repos
+            .restore_worktree(&repo, &path, Some("zeron/renamed"))
+            .await
+            .unwrap();
+        assert_eq!(restored, worktree.branch);
+        assert_eq!(current(path.clone()).await, worktree.branch);
+
+        let outside = tmp.path().join("elsewhere");
+        assert!(repos.restore_worktree(&repo, &outside, None).await.is_err());
+        assert!(!outside.exists());
     }
 
     async fn two_step_fixture(hook_exit: u8) -> (tempfile::TempDir, Repos, PathBuf) {

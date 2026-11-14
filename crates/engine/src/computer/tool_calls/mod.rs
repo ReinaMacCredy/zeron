@@ -264,11 +264,8 @@ impl ComputerToolSeams for RunToolSeams {
                 list_computer_permissions(&signal.missing)
             )
         };
-        self.sessions.write_computer_note(
-            &self.chat_id,
-            "Computer control needs setup",
-            Some(&hint),
-        );
+        self.sessions
+            .write_system_note(&self.chat_id, "Computer control needs setup", Some(&hint));
     }
 }
 

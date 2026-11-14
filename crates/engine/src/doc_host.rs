@@ -7790,6 +7790,47 @@ impl DocHost {
         self.inner.repos.get()?.source_context(cwd).await
     }
 
+    async fn restore_removed_worktree(&self, sessions: &SessionsEngine, chat_id: &str, cwd: &str) {
+        let path = std::path::Path::new(cwd);
+        if !path.is_absolute() || path.exists() {
+            return;
+        }
+        let (Some(repos), Some(workspace)) = (self.inner.repos.get(), self.workspace()) else {
+            return;
+        };
+        let Some(chat) = workspace.chat(chat_id).ok().flatten() else {
+            return;
+        };
+        let Some(space) = chat
+            .space_id
+            .as_deref()
+            .and_then(|id| workspace.space(id).ok().flatten())
+        else {
+            return;
+        };
+        let branch = chat
+            .work_tree
+            .as_ref()
+            .and_then(|work_tree| work_tree.branch.as_deref())
+            .or(chat.branch.as_deref());
+        match repos
+            .restore_worktree(std::path::Path::new(&space.path), path, branch)
+            .await
+        {
+            Ok(branch) => {
+                tracing::info!(chat = %chat_id, cwd = %cwd, branch = %branch, "removed worktree restored for run");
+                sessions.write_system_note(
+                    chat_id,
+                    &format!("Recreated the deleted worktree {cwd} on {branch}"),
+                    None,
+                );
+            }
+            Err(err) => {
+                tracing::warn!(chat = %chat_id, cwd = %cwd, error = %err, "removed worktree restore failed");
+            }
+        }
+    }
+
     /// Every fresh harness dispatch crosses this boundary, including
     /// steer/input fallbacks and crash recovery. Capture immediately before
     /// dispatch so the conversation records the checkout it works in (the
@@ -7803,6 +7844,8 @@ impl DocHost {
         request: zeron_proto::RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
+        self.restore_removed_worktree(sessions, chat_id, &request.cwd)
+            .await;
         let work_tree = self
             .workspace()
             .and_then(|workspace| workspace.chat(chat_id).ok().flatten())

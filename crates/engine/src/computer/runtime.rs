@@ -319,7 +319,7 @@ impl ComputerRuntime {
                 "computer desktop revoke latched the turn with no computer service to drain"
             ),
         }
-        sessions.write_computer_note(chat_id, COMPUTER_DESKTOP_REVOKED_NOTE, Some(source.hint()));
+        sessions.write_system_note(chat_id, COMPUTER_DESKTOP_REVOKED_NOTE, Some(source.hint()));
     }
 
     pub fn turn_ended(&self, chat_id: &str, turn_id: &str) {
@@ -351,7 +351,7 @@ impl ComputerRuntime {
             let left = service.manager.left_open_windows(&chat_id, &turn_id).await;
             if let Some(sessions) = &sessions {
                 for left in &left {
-                    sessions.write_computer_note(&chat_id, &left_open_note(left), None);
+                    sessions.write_system_note(&chat_id, &left_open_note(left), None);
                 }
             }
         });

@@ -2615,7 +2615,7 @@ impl SessionsEngine {
         let hint = format!(
             "{name} does not receive Zeron's Computer tools. Switch this chat to Claude, Codex or another agent that does to use Computer."
         );
-        self.write_computer_note(
+        self.write_system_note(
             chat_id,
             "Computer is unavailable for this turn",
             Some(&hint),
@@ -2627,7 +2627,7 @@ impl SessionsEngine {
         let hint = format!(
             "{name} cannot reload its session, so Zeron cannot restart it with the Computer tools without losing the conversation. Start a new chat to use Computer with it."
         );
-        self.write_computer_note(
+        self.write_system_note(
             chat_id,
             "Computer is unavailable for this turn",
             Some(&hint),
@@ -4377,12 +4377,12 @@ impl SessionsEngine {
             .filter(|title| !title.trim().is_empty())
     }
 
-    pub fn write_computer_note(&self, chat_id: &str, text: &str, hint: Option<&str>) {
+    pub fn write_system_note(&self, chat_id: &str, text: &str, hint: Option<&str>) {
         let written = self
             .doc_handle(chat_id)
             .and_then(|handle| Ok(handle.write_system_note(&new_id(), text, hint, now_ms())?));
         if let Err(err) = written {
-            tracing::warn!(chat = %chat_id, error = %err, "computer note write failed");
+            tracing::warn!(chat = %chat_id, error = %err, "system note write failed");
         }
     }
 
