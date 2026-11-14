@@ -50,7 +50,7 @@ The question waits for you as well, so you can answer it yourself. If you answer
 
 ## When you write to a child
 
-You can talk to a child yourself in its tab. When you send a message to a delegated task that is still running, its parent's agent gets a note that names the child and quotes what you wrote, so it knows the child's plan may have changed. The same goes for a step of a Task with a plan (see [Agent trees and plans](zeron://docs/mission-control)): its lead gets the note. The note is only news: it does not change the child's result, and the parent's agent does not need to answer it. A thread another chat merely opened with `create_thread` sends no note.
+You can talk to a child yourself in its tab. When you send a message to a delegated task that is still running, its parent's agent gets a note that names the child and quotes what you wrote, so it knows the child's plan may have changed. A step of a plan is a delegated task too (see [Mission](zeron://docs/mission)), so its lead gets the same note. The note is only news: it does not change the child's result, and the parent's agent does not need to answer it. A thread another chat merely opened with `create_thread` sends no note.
 
 ## Check on or stop a task
 
@@ -75,9 +75,9 @@ The **Delegation** section at the bottom of [Settings > Agents > Routing](zeron:
 | Setting | Default | Range |
 | --- | --- | --- |
 | **Delegation depth**: how many levels of delegated tasks an agent may nest | 2 | 1 to 5 |
-| **Delegated tasks per chat**: how many delegated tasks one chat may run at once | 8 | 1 to 32 |
+| **Delegated tasks per chat**: how many threads one chat may run at once | 8 | 1 to 32 |
 
-**Delegated tasks per chat** also caps how many steps of a Task's plan (see [Agent trees and plans](zeron://docs/mission-control)) its lead runs at once. Those steps run on ordinary chats, not as delegated tasks, so they show in the sidebar.
+**Delegated tasks per chat** is one limit for everything a chat has running: its delegated tasks, the steps of its plan (see [Mission](zeron://docs/mission)), and the chats it started with `create_thread` that are still working.
 
 An agent that hits a limit is told so and cannot start the task.
 

@@ -21,7 +21,6 @@ Everything this chat started that runs beside it, under a header that counts the
 - its agents, each with how long it has run, and the finished ones folded under **Previous agents (N)**;
 - its side chats, forks and the threads an agent started, each with its status or **Expired**;
 - background shells, with **Stop** on hover;
-- the Task row, **Task:** and its title with the step it is on, when this chat leads a [Task](zeron://docs/mission-control);
 - **Stop all**, while anything here can be stopped.
 
 Click a row to open it as a tab in the right pane; the row you have open reads **Open**. Past eight children the rest fold under a **N more** row. With nothing beside the chat the section reads **Nothing beside this thread**. See [Delegation](zeron://docs/delegation) and [Side chat](zeron://docs/side-chat).

@@ -73,11 +73,7 @@ pub const BODIES: &[(&str, &str)] = &[
         include_str!("../../ui/docs/pull-requests.md"),
     ),
     ("tasks", include_str!("../../ui/docs/tasks.md")),
-    (
-        "mission-control",
-        include_str!("../../ui/docs/mission-control.md"),
-    ),
-    ("supervisor", include_str!("../../ui/docs/supervisor.md")),
+    ("mission", include_str!("../../ui/docs/mission.md")),
     ("inbox", include_str!("../../ui/docs/inbox.md")),
     ("usage", include_str!("../../ui/docs/usage.md")),
     ("split-view", include_str!("../../ui/docs/split-view.md")),

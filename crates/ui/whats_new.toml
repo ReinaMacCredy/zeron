@@ -2,6 +2,31 @@
 # must be listed in crates/docs/src/images.rs IMAGES. Order does not matter.
 
 [[entry]]
+version = "0.3.5"
+date = "Nov 14"
+
+[[entry.features]]
+id = "mission-threads"
+title = "Every thread a chat hands work to, in one Threads tab"
+description = "Threads is now the first tab of the right panel. It lists the delegated tasks, plan steps and chats this chat started, grouped into Ready for review, Waiting on you, Working, Planned and Done. Click a row to open that thread inside the tab and talk to it, with the chat still beside it. The composer shows N Working."
+details = "A row's menu has Stop, Mark done, Skip, Reopen and Run again. Step threads no longer take a row in the sidebar."
+
+[[entry.features]]
+id = "mission-plan"
+title = "Approve and edit a plan beside the chat"
+description = "When an agent plans work in steps, the plan arrives as a card in the chat with Edit plan and Approve and run, and nothing starts until you approve. Edit opens the plan in the Threads tab: change the overview, rename, reorder, add or remove steps, and save them in one go."
+details = "Steps that have started are locked. Any chat can hold a plan; a task linked to that chat shows its progress."
+
+[[entry.improvements]]
+text = "A thread's question goes to the chat that started it, then to you in the Waiting pill. The Supervisor, the Mission Control pages and Approve as Task are gone."
+
+[[entry.improvements]]
+text = "Delegated tasks per chat is now one limit for delegated tasks, plan steps and the chats an agent started that are still working. The separate cap of 8 open chats is gone."
+
+[[entry.improvements]]
+text = "Agents write a plan with the new plan tool, which has its own switch in Settings > Context & tools > Tools."
+
+[[entry]]
 version = "0.3.4"
 date = "Nov 13"
 hero = "zgx-app.jpg"

@@ -36,13 +36,13 @@ With the sidebar hidden, move the pointer just right of the app rail and it slid
 
 ## Needs you and running
 
-Questions from other chats, plans waiting for your OK and Supervisor decisions wait in the **? N Waiting** pill above the composer, where you answer them without leaving the chat you are in. See [When an agent asks](zeron://docs/agent-questions).
+Questions from other chats and plans waiting for your OK wait in the **? N Waiting** pill above the composer, where you answer them without leaving the chat you are in. See [When an agent asks](zeron://docs/agent-questions).
 
 The pill on the right of the titlebar counts the rest: threads that failed, Tasks whose message did not send or that are ready to review, and the ones running, for example **1 needs you · 2 working**. With nothing failed or waiting it reads only the running count, and with nothing at all it is hidden.
 
 Click it or press Cmd+I to open its tray:
 
-- The header says what needs you and what is running, once, with **Ask Supervisor**, which opens the [Supervisor](zeron://docs/supervisor) chat.
+- The header says what needs you and what is running, once.
 - **Needs you** lists each thread that failed and each Task that waits on you, and shows only when there is one. **Open** opens it.
 - **Running** lists each thread that works, with its agent's mark, its time on the right and its subagents under it.
 - **History** opens the Inbox and **Tasks** opens Tasks.
@@ -51,7 +51,7 @@ Escape, a click outside or Cmd+I closes the tray. Change the shortcut in [Settin
 
 ## Going back and forward
 
-Zeron keeps a history of where you have been: chats, drafts, Settings pages, Inbox, Tasks, a task's page, Supervisor, Usage, pull requests, and these docs. To walk it:
+Zeron keeps a history of where you have been: chats, drafts, Settings pages, Inbox, Tasks, Usage, pull requests, and these docs. To walk it:
 
 - Click the **Back** and **Forward** arrows in the titlebar.
 - Press the back and forward buttons on your mouse.
@@ -65,7 +65,7 @@ On a trackpad that supports it, you feel a light tick when the swipe is far enou
 
 ## Session tabs
 
-The titlebar shows a tab for each session open on this device. A tab shows the agent's mark (which changes while the agent works), the title, and a status dot that turns into a close button when you hover the tab or select it. The tabs of a Task's lead and its steps gather into one group behind a tab with the Task's title; see [Agent trees and plans](zeron://docs/mission-control).
+The titlebar shows a tab for each session open on this device. A tab shows the agent's mark (which changes while the agent works), the title, and a status dot that turns into a close button when you hover the tab or select it.
 
 ![Session tabs in the titlebar, with a Task's tab group and the tab menu open](getting-around-tabs.jpg)
 

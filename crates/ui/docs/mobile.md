@@ -12,7 +12,7 @@ Open the app and tap **Sign In**, then sign in in the browser sheet with the sam
 
 ## Your sessions
 
-The **Sessions** tab lists your sessions. Each row shows its project and a status: **Working**, **Input** (the agent is waiting on you), **Failed**, or **Done** for a finished run you have not opened yet. **Pinned** sessions and your own sections appear as folders at the top. To organize, sort and nest the list, see [The sessions list and the Supervisor on iPhone](zeron://docs/mobile-inbox).
+The **Sessions** tab lists your sessions. Each row shows its project and a status: **Working**, **Input** (the agent is waiting on you), **Failed**, or **Done** for a finished run you have not opened yet. **Pinned** sessions and your own sections appear as folders at the top. To organize, sort and nest the list, see [The sessions list on iPhone](zeron://docs/mobile-inbox).
 
 The search tab looks through **Sessions, projects, branches**.
 
@@ -56,7 +56,7 @@ You can hold the phone to your ear (the screen turns off and Codex plays through
 - [The composer on iPhone](zeron://docs/mobile-composer): chips, permissions, context and stats, side chats, hand-offs and missions.
 - [The transcript on iPhone](zeron://docs/mobile-transcript): Worked for, other agents, fork and rewind, usage limits and session info.
 - [Tasks and missions on iPhone](zeron://docs/mobile-tasks): the Tasks tab, a task's sheet and a mission's page.
-- [The sessions list and the Supervisor on iPhone](zeron://docs/mobile-inbox): organizing sessions, and each Mac's Supervisor.
+- [The sessions list on iPhone](zeron://docs/mobile-inbox): organizing sessions.
 - [Pull requests and Git on iPhone](zeron://docs/mobile-git): the board, a pull request's page, and a checkout's working tree and history.
 - [Settings on iPhone](zeron://docs/mobile-settings): your Macs' accounts, usage, providers, profiles, routing and tools, the phone's own settings, What's New and Docs.
 - [Devices and computer use on iPhone](zeron://docs/mobile-devices): consent, the still preview, stopping computer use, terminals and project actions.

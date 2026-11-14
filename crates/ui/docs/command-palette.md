@@ -23,7 +23,7 @@ Thread search includes archived threads and ignores the sidebar's project filter
 
 ## Commands
 
-The commands include **New chat**, **New terminal**, **New project**, **Open settings**, **Open inbox**, **Open Supervisor**, **Open usage**, **Tasks**, and **Archive thread** for the open chat. Each row shows its shortcut when it has one. Light and dark are set in [Settings > Appearance](zeron://settings/appearance), not here.
+The commands include **New chat**, **New terminal**, **New project**, **Open settings**, **Open inbox**, **Open usage**, **Tasks**, and **Archive thread** for the open chat. Each row shows its shortcut when it has one. Light and dark are set in [Settings > Appearance](zeron://settings/appearance), not here.
 
 In a chat, the palette also lists **Add action…** to create a project action, and the actions the project's `zeron.json` offers, tagged **Import**; either opens the action editor. The palette does not run actions: run them from **Actions** in the [Live state](zeron://docs/live-state) column. See [Projects](zeron://docs/projects).
 

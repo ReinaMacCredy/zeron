@@ -1,4 +1,4 @@
-Routing decides where a delegated child runs when the agent gives it a role and no model. Set it once in [Settings > Agents > Routing](zeron://settings/routing): cheap, fast models for routine work, a strong model for checking it, and what happens when an agent runs out of quota. The same routes run the steps of a Task's plan (see [Agent trees and plans](zeron://docs/mission-control)).
+Routing decides where a delegated child runs when the agent gives it a role and no model. Set it once in [Settings > Agents > Routing](zeron://settings/routing): cheap, fast models for routine work, a strong model for checking it, and what happens when an agent runs out of quota. The same routes run the steps of a plan (see [Mission](zeron://docs/mission)).
 
 ## Roles
 

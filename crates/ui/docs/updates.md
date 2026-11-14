@@ -68,4 +68,4 @@ The question-mark button in the app rail (**Help**) opens a menu with:
 
 ## One sheet per launch
 
-Zeron shows at most one sheet each time it starts. A new install opens on setup in three steps: a welcome that offers sync (**Use without an account** keeps everything on this device), **Your agents**, and a last step with a link to these docs. After an update it is the What's new card above, and only one card is shown however many releases you skipped. How Tasks and plans work is in [Tasks](zeron://docs/tasks) and [Agent trees and plans](zeron://docs/mission-control).
+Zeron shows at most one sheet each time it starts. A new install opens on setup in three steps: a welcome that offers sync (**Use without an account** keeps everything on this device), **Your agents**, and a last step with a link to these docs. After an update it is the What's new card above, and only one card is shown however many releases you skipped. How Tasks and plans work is in [Tasks](zeron://docs/tasks) and [Mission](zeron://docs/mission).

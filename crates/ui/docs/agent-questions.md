@@ -15,11 +15,11 @@ OpenCode's questions use this panel too. OpenCode 2 asks through a form in its s
 
 ## Questions from other chats
 
-When an agent in another chat asks you something or has a plan waiting for your OK, a **? 1 Waiting** pill joins the agent and shell pills above the composer; the number counts everything waiting on you, [Supervisor](zeron://docs/supervisor) decisions included. Click it to open a card above the pill with one tab per item: the chat's title for a question or a plan, or the decision's title. A question shows the same question panel as in its chat, a plan shows its steps with **Approve as Task** and **Approve**, and a decision shows its options. You stay in your chat; once you answer, the next tab slides in, and when nothing is left the pill fades out. **Open thread** opens the chat that asked. Esc, a click outside or another click on the pill closes the card and keeps your picks and text for later. The chat you are in shows its own question in place, so it is not in the pill.
+When an agent in another chat asks you something or has a plan waiting for your OK, a **? 1 Waiting** pill joins the agent and shell pills above the composer; the number counts everything waiting on you. Click it to open a card above the pill with one tab per item, named after its chat. A question shows the same question panel as in its chat, and a plan shows its steps with **Approve**. You stay in your chat; once you answer, the next tab slides in, and when nothing is left the pill fades out. **Open thread** opens the chat that asked. Esc, a click outside or another click on the pill closes the card and keeps your picks and text for later. The chat you are in shows its own question in place, so it is not in the pill.
 
 The **Needs you** card under the composer on New chat lists the same items; **Answer** and **Review** open the card on that item. On New chat the card opens below the pill.
 
-![The Waiting card above the composer: a question from another chat, with tabs for a second question and a Supervisor decision](answer-pill.jpg)
+![The Waiting card above the composer: a question from another chat, with a tab for each other item](answer-pill.jpg)
 
 ## When an agent needs a secret
 

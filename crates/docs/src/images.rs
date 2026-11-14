@@ -68,6 +68,18 @@ pub const IMAGES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/assets/whats_new/usage.jpg"),
     ),
     (
+        "mission-threads.jpg",
+        include_bytes!("../../ui/assets/whats_new/mission-threads.jpg"),
+    ),
+    (
+        "mission-plan.jpg",
+        include_bytes!("../../ui/assets/whats_new/mission-plan.jpg"),
+    ),
+    (
+        "mission-plan-edit.jpg",
+        include_bytes!("../../ui/assets/whats_new/mission-plan-edit.jpg"),
+    ),
+    (
         "mission-control.jpg",
         include_bytes!("../../ui/assets/whats_new/mission-control.jpg"),
     ),

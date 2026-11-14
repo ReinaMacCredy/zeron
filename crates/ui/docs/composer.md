@@ -65,15 +65,14 @@ Turn on **Show predictions** in Settings > General. After a Claude Code or Codex
 
 Turn on the **Plan** switch in the composer bar, or press Shift+Tab, to have the agent write a plan before it changes anything. On a list line, Shift+Tab outdents the line instead. While Plan is on, the composer's border takes the accent color and Claude Code's send button reads **Start plan**. The pull request chat does not have the switch.
 
-When Claude Code's plan is ready, it arrives in the transcript as a card with its steps and three buttons:
+When Claude Code's plan is ready, it arrives in the transcript as a card with its steps and two buttons:
 
 - **Approve** runs the plan in this chat. The card then reads **Running here**.
-- **Approve as Task** tracks the plan's steps in [Tasks](zeron://docs/mission-control): the card turns into the Task with the step it is on and **Open in Tasks ›**, and each step reports back to this chat. It is dimmed, with the reason on hover, when this chat cannot become a Task, for example when it already leads one.
 - **Edit plan** tells the agent no, keeps plan mode on, and puts the cursor in the composer so you can say what to change.
 
 ![A plan card waiting for your approval](plan-card.jpg)
 
-The **Waiting** card above the composer, for a plan from another chat, offers the same **Approve** and **Approve as Task**. On Codex and OpenCode, Plan has the agent write a plan and change nothing, with no approval step, and the send button keeps its arrow.
+The **Waiting** card above the composer, for a plan from another chat, offers the same **Approve**. On Codex and OpenCode, Plan has the agent write a plan and change nothing, with no approval step, and the send button keeps its arrow.
 
 ## Notices above the composer
 

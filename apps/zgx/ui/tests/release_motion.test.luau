@@ -163,6 +163,8 @@ local VISUALS = {
 		{ id = "project-picker", title = "Project picker", description = "", visual = "project-picker" },
 		{ id = "zgx-app", title = "The new interface", description = "" },
 		{ id = "markdown-fence-render", title = "Rendered Markdown", description = "" },
+		{ id = "mission-threads", title = "Threads tab", description = "" },
+		{ id = "mission-plan", title = "Plan card", description = "" },
 		{ id = "not-a-visual", title = "Nothing by its id", description = "" },
 	},
 	improvements = {
@@ -213,6 +215,8 @@ test("every visual the entry names draws in the dialog and the card's hero; a cl
 		"project-picker",
 		"zgx-app",
 		"markdown-fence-render",
+		"mission-threads",
+		"mission-plan",
 	} do
 		expect(app:has(`#whats-new-highlights >> #whats-new-visual-{id}`)).to_be(true)
 	end
@@ -244,4 +248,6 @@ test("with motion reduced no clock runs and each visual holds its still frame", 
 	expect(app:has(`#whats-new-visual-answer-pill >> "Which provider first?"`)).to_be(true)
 	expect(app:has(`#whats-new-visual-zgx-app >> "Moved 12 chats, 2 drafts and 9 settings"`)).to_be(true)
 	expect(app:has(`#whats-new-visual-task-depends >> "Blocked by"`)).to_be(true)
+	expect(app:has(`#whats-new-visual-mission-threads >> "Waiting on you"`)).to_be(true)
+	expect(app:has(`#whats-new-visual-mission-plan >> "Approved"`)).to_be(true)
 end)
