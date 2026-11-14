@@ -366,6 +366,17 @@ fn status_name(status: DelegationStatus) -> &'static str {
     }
 }
 
+pub(super) struct PeerStart<'a> {
+    host: &'a DocHost,
+    chat_id: String,
+}
+
+impl Drop for PeerStart<'_> {
+    fn drop(&mut self) {
+        lock(&self.host.inner.starting_peers).remove(&self.chat_id);
+    }
+}
+
 fn owned_by<'a>(chat: &'a Chat, owner: &str) -> Option<&'a Delegation> {
     chat.delegation
         .as_ref()
@@ -770,28 +781,7 @@ impl DocHost {
             .as_deref()
             .map(|step_id| self.runnable_step(workspace, &owner.id, step_id))
             .transpose()?;
-        let depth = owner.delegation.as_ref().map_or(0, |d| d.depth) + 1;
-        if depth > limits.max_depth {
-            return Err(failure(
-                "depth_limit",
-                format!(
-                    "delegation is limited to {} levels (Settings); this child would be level {depth}",
-                    limits.max_depth
-                ),
-            ));
-        }
-        let running = chats
-            .iter()
-            .filter(|chat| owned_by(chat, &owner.id).is_some_and(Delegation::is_running))
-            .count();
-        if running >= limits.max_running_children as usize {
-            return Err(failure(
-                "child_limit",
-                format!(
-                    "this chat already runs {running} delegated tasks, the limit set in Settings"
-                ),
-            ));
-        }
+        let depth = self.admit_start(&chats, &owner, limits)?;
         let config = self.derived_config(
             &owner,
             params.harness,
@@ -894,6 +884,59 @@ impl DocHost {
             .find(|chat| chat.id == chat_id)
             .ok_or_else(|| failure("orchestration_error", "the child chat vanished"))?;
         Ok(self.task_view(child, &chats))
+    }
+
+    pub(super) fn admit_start(
+        &self,
+        chats: &[Chat],
+        owner: &Chat,
+        limits: DelegationSettings,
+    ) -> Result<u32, EngineError> {
+        let depth = owner.delegation.as_ref().map_or(0, |d| d.depth) + 1;
+        if depth > limits.max_depth {
+            return Err(failure(
+                "depth_limit",
+                format!(
+                    "threads nest at most {} levels (Settings); this thread would be level {depth}",
+                    limits.max_depth
+                ),
+            ));
+        }
+        let sessions = self.sessions();
+        let starting = lock(&self.inner.starting_peers).clone();
+        let peer_live = |chat: &Chat| {
+            starting.contains(&chat.id)
+                || sessions
+                    .as_ref()
+                    .and_then(|sessions| sessions.session_status(&chat.id))
+                    .is_some_and(|session| turn_live(&session))
+        };
+        let running = chats
+            .iter()
+            .filter(|chat| match &chat.delegation {
+                Some(delegation) => {
+                    delegation.delegated_by_chat_id == owner.id && delegation.is_running()
+                }
+                None => chat.created_by_chat_id.as_deref() == Some(&owner.id) && peer_live(chat),
+            })
+            .count();
+        if running >= limits.max_running_children as usize {
+            return Err(failure(
+                "child_limit",
+                format!(
+                    "this chat already runs {running} threads it started, the limit set in Settings"
+                ),
+            ));
+        }
+        Ok(depth)
+    }
+
+    pub(super) fn reserve_peer_start(&self, chat_id: &str) -> PeerStart<'_> {
+        lock(&self.inner.starting_peers).insert(chat_id.to_string());
+        PeerStart {
+            host: self,
+            chat_id: chat_id.to_string(),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

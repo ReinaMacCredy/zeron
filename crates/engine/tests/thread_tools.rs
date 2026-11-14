@@ -347,6 +347,7 @@ async fn create_thread_opens_a_peer_whose_first_turn_is_a_message_from_its_creat
             &Default::default(),
             None,
             None,
+            Default::default(),
         )
         .await
         .expect("create thread");
@@ -433,6 +434,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
             &Default::default(),
             None,
             None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -459,6 +461,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
             &Default::default(),
             None,
             None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -479,6 +482,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
             &Default::default(),
             None,
             None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -503,6 +507,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
             &Default::default(),
             None,
             None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -526,6 +531,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
             &Default::default(),
             None,
             None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -583,6 +589,7 @@ async fn create_thread_never_copies_the_creators_profile_and_applies_the_one_ask
                     &profile,
                     None,
                     None,
+                    Default::default(),
                 )
                 .await
         }
@@ -662,6 +669,7 @@ async fn create_thread_can_open_in_another_project_on_the_device_or_an_existing_
             &Default::default(),
             Some("space-other"),
             None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -685,6 +693,7 @@ async fn create_thread_can_open_in_another_project_on_the_device_or_an_existing_
             &Default::default(),
             None,
             nested.to_str(),
+            Default::default(),
         )
         .await
         .unwrap();
@@ -711,6 +720,7 @@ async fn create_thread_can_open_in_another_project_on_the_device_or_an_existing_
                 &Default::default(),
                 space,
                 cwd,
+                Default::default(),
             )
             .await
             .expect_err(expected);
@@ -795,6 +805,7 @@ async fn a_message_to_a_working_peer_steers_its_turn_when_the_agent_takes_mid_tu
             &Default::default(),
             None,
             None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -860,6 +871,7 @@ async fn a_message_to_a_working_peer_waits_and_take_moves_it_into_the_transcript
             &Default::default(),
             None,
             None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -1008,51 +1020,236 @@ async fn a_message_to_an_idle_peer_with_history_opens_its_next_turn() {
 }
 
 #[tokio::test]
-async fn the_creation_budget_refuses_the_ninth_open_thread() {
-    let rig = rig(Duration::from_millis(1));
-    for n in 0..8 {
+async fn a_ninth_peer_thread_is_refused_while_eight_run_and_opens_once_one_stops() {
+    let rig = rig(Duration::from_secs(60));
+    let open = |prompt: String| {
+        let doc_host = rig.core.doc_host.clone();
+        async move {
+            doc_host
+                .create_thread(
+                    "lead",
+                    &prompt,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &Default::default(),
+                    None,
+                    None,
+                    zeron_engine::registry::DelegationSettings::default(),
+                )
+                .await
+        }
+    };
+    let created = || {
         rig.core
-            .doc_host
-            .create_thread(
-                "lead",
-                &format!("task {n}"),
-                None,
-                None,
-                None,
-                None,
-                &Default::default(),
-                None,
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("thread {n}: {e}"));
+            .workspace
+            .read_chats()
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.created_by_chat_id.as_deref() == Some("lead"))
+            .map(|c| c.id)
+            .collect::<Vec<_>>()
+    };
+    let mut peers = Vec::new();
+    for n in 0..8 {
+        peers.push(
+            open(format!("task {n}"))
+                .await
+                .unwrap_or_else(|e| panic!("thread {n}: {e}")),
+        );
     }
-    let err = rig
-        .core
-        .doc_host
-        .create_thread(
-            "lead",
-            "one too many",
-            None,
-            None,
-            None,
-            None,
-            &Default::default(),
-            None,
-            None,
-        )
+    wait_for(
+        || peers.iter().all(|peer| working(&rig.core, peer)),
+        "eight peers running",
+    )
+    .await;
+    let err = open("one too many".into()).await.expect_err("ninth");
+    assert!(err.to_string().starts_with("child_limit"), "{err}");
+    assert_eq!(created().len(), 8, "a refused start opens no thread");
+
+    queue_interrupt(&rig.core, &peers[0]);
+    wait_for(|| idle(&rig.core, &peers[0]), "the first peer to stop").await;
+    let ninth = open("the ninth".into())
         .await
-        .expect_err("ninth");
-    assert!(err.to_string().contains("8 open threads"), "{err}");
-    let created = rig
+        .expect("a ninth peer opens while seven run");
+    assert_eq!(created().len(), 9);
+    assert!(created().contains(&ninth));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn two_peer_starts_at_once_take_one_running_slot() {
+    let rig = rig(Duration::from_secs(60));
+    let open = |prompt: &'static str| {
+        let doc_host = rig.core.doc_host.clone();
+        async move {
+            doc_host
+                .create_thread(
+                    "lead",
+                    prompt,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &Default::default(),
+                    None,
+                    None,
+                    zeron_engine::registry::DelegationSettings {
+                        max_depth: 2,
+                        max_running_children: 1,
+                    },
+                )
+                .await
+        }
+    };
+    let (first, second) = tokio::join!(open("first"), open("second"));
+    let refusals: Vec<String> = [&first, &second]
+        .into_iter()
+        .filter_map(|started| started.as_ref().err().map(|e| e.to_string()))
+        .collect();
+    assert_eq!(refusals.len(), 1, "{first:?} {second:?}");
+    assert!(refusals[0].starts_with("child_limit"), "{}", refusals[0]);
+    rig.core.shutdown().await;
+}
+
+struct StallingStartHarness {
+    inner: RecordingHarness,
+    gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    entered: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Harness for StallingStartHarness {
+    fn id(&self) -> HarnessId {
+        self.inner.id()
+    }
+    fn display_name(&self) -> &str {
+        self.inner.display_name()
+    }
+    fn supports_steering(&self) -> bool {
+        self.inner.supports_steering()
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        self.inner.steering_mode()
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        self.inner.reasoning_levels()
+    }
+    fn compaction(&self) -> Compaction {
+        self.inner.compaction()
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        self.inner.models().await
+    }
+    fn executable_path(&self) -> Option<std::path::PathBuf> {
+        self.entered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (open, opened) = &*self.gate;
+        let mut open = open.lock().unwrap();
+        while !*open {
+            open = opened.wait(open).unwrap();
+        }
+        None
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.inner.run(request, controls).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_that_is_starting_holds_its_slot_without_holding_other_starts() {
+    let rig = rig(Duration::from_secs(60));
+    let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    rig.core.registry.register(Arc::new(StallingStartHarness {
+        inner: RecordingHarness {
+            id: HarnessId::ClaudeCode,
+            prompts: rig.prompts.clone(),
+            attachments: rig.attachments.clone(),
+            steers: rig.steers.clone(),
+            steerable: false,
+            step_delay: Duration::from_secs(60),
+            reply: "noted",
+        },
+        gate: gate.clone(),
+        entered: entered.clone(),
+    }));
+    rig.core
+        .workspace
+        .create_chat("other", Some("space-tt"), None, None, None)
+        .unwrap();
+    let limits = zeron_engine::registry::DelegationSettings {
+        max_depth: 2,
+        max_running_children: 1,
+    };
+    let open = |harness: HarnessId| {
+        let doc_host = rig.core.doc_host.clone();
+        async move {
+            doc_host
+                .create_thread(
+                    "lead",
+                    "go",
+                    None,
+                    Some(harness),
+                    None,
+                    None,
+                    &Default::default(),
+                    None,
+                    None,
+                    limits,
+                )
+                .await
+        }
+    };
+    let starting = tokio::spawn(open(HarnessId::ClaudeCode));
+    wait_for(
+        || entered.load(std::sync::atomic::Ordering::SeqCst),
+        "the peer's first dispatch to stall",
+    )
+    .await;
+    let peer = rig
         .core
         .workspace
         .read_chats()
         .unwrap()
         .into_iter()
-        .filter(|c| c.created_by_chat_id.as_deref() == Some("lead"))
-        .count();
-    assert_eq!(created, 8);
+        .find(|c| c.created_by_chat_id.as_deref() == Some("lead"))
+        .expect("the peer row")
+        .id;
+    assert!(!starting.is_finished());
+    assert!(!working(&rig.core, &peer), "not live yet");
+
+    let mut other = delegate("elsewhere");
+    other.owner_chat_id = "other".into();
+    let elsewhere = tokio::time::timeout(
+        Duration::from_secs(5),
+        rig.core.doc_host.delegate_task(other, limits),
+    )
+    .await;
+    let held = tokio::time::timeout(Duration::from_secs(5), open(HarnessId::Mock)).await;
+    {
+        let (open, opened) = &*gate;
+        *open.lock().unwrap() = true;
+        opened.notify_all();
+    }
+    elsewhere
+        .expect("another owner starts while the peer is starting")
+        .expect("delegated");
+    let err = held
+        .expect("a refusal while the peer is starting")
+        .expect_err("the slot is held");
+    assert!(err.to_string().starts_with("child_limit"), "{err}");
+    starting.await.unwrap().expect("the peer starts");
+    wait_for(|| working(&rig.core, &peer), "the peer to run").await;
+    let err = open(HarnessId::Mock)
+        .await
+        .expect_err("the slot is still held");
+    assert!(err.to_string().starts_with("child_limit"), "{err}");
     rig.core.shutdown().await;
 }
 
@@ -2600,6 +2797,31 @@ async fn delegation_limits_and_retries_follow_the_settings() {
         .unwrap_err()
         .to_string();
     assert!(err.starts_with("depth_limit"), "{err}");
+    rig.core.registry.set_delegation_settings(limits).unwrap();
+    let task: zeron_proto::Task = serde_json::from_value(serde_json::json!({
+        "id": "nested-task", "title": "Nested", "chatId": child, "mode": "orchestrated",
+    }))
+    .unwrap();
+    rig.core.workspace.create_task(&task).unwrap();
+    let step: zeron_proto::TaskStep = serde_json::from_value(serde_json::json!({
+        "id": "nested-step", "taskId": "nested-task", "title": "Go deeper",
+    }))
+    .unwrap();
+    rig.core.workspace.create_task_step(&step).unwrap();
+    let err = zeron_rpc::RpcService::handle(
+        &*rig.core.rpc_service(),
+        zeron_rpc::methods::CREATE_THREAD,
+        serde_json::json!({ "fromChatId": child, "prompt": "go", "taskStepId": "nested-step" }),
+    )
+    .await
+    .map(|_| ())
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("depth_limit"), "{err}");
+    assert_eq!(
+        rig.core.workspace.task_step("nested-step").unwrap().chat_id,
+        None
+    );
     let cancelled = rig.core.doc_host.task_cancel("lead", &child).await.unwrap();
     assert_eq!(cancelled, "cancel_requested");
     wait_for(
@@ -2760,6 +2982,7 @@ async fn the_delegate_task_and_create_thread_chips_link_to_the_threads_they_open
             &Default::default(),
             None,
             None,
+            Default::default(),
         )
         .await
         .unwrap();

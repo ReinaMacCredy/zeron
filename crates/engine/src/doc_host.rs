@@ -278,6 +278,7 @@ struct DocHostInner {
     store: Arc<DocsStore>,
     config: DocHostConfig,
     delegation_lock: tokio::sync::Mutex<()>,
+    starting_peers: Mutex<HashSet<String>>,
     /// Set-once (first wins), cleared by `shutdown_workers`: sessions and
     /// doc-host reference each other through Arcs, so a retired runtime's
     /// graph only drops once this back-edge is severed.
@@ -535,16 +536,6 @@ enum QueueSend {
 const ATTACHMENT_ONLY_PROMPT: &str = "See the attached image(s).";
 const ATTACHMENT_PROMPT_HEADER: &str = "Attached images (local files — open them to view):";
 
-/// Queue rows keep the user's editable text separate from attachment paths.
-/// Rebuild the transcript/harness transport only when the row is dispatched.
-///
-/// Older clients stored the already-expanded prompt in `text`; recognize the
-/// exact trailer implied by `attachments` so those rows are not expanded a
-/// second time after an upgrade.
-/// Open threads one chat may have created at once (implementer default,
-/// SPEC thread-tools).
-const MAX_CREATED_THREADS: usize = 8;
-
 /// What a harness receives for a message another thread sent: who sent it
 /// and how to answer, then the message itself.
 fn thread_message_prompt(from_chat_id: &str, from_title: Option<&str>, body: &str) -> String {
@@ -593,6 +584,12 @@ pub(crate) fn images_here(text: &str, images: Vec<String>) -> (String, Vec<Strin
     (text, kept)
 }
 
+/// Queue rows keep the user's editable text separate from attachment paths.
+/// Rebuild the transcript/harness transport only when the row is dispatched.
+///
+/// Older clients stored the already-expanded prompt in `text`; recognize the
+/// exact trailer implied by `attachments` so those rows are not expanded a
+/// second time after an upgrade.
 pub(crate) fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
     if attachments.is_empty() {
         return text.to_string();
@@ -1515,6 +1512,7 @@ impl DocHost {
                 store,
                 config,
                 delegation_lock: tokio::sync::Mutex::new(()),
+                starting_peers: Mutex::default(),
                 sessions: Mutex::new(None),
                 quiesced: AtomicBool::new(false),
                 boot_recovery_finished: AtomicBool::new(false),
@@ -4976,6 +4974,7 @@ impl DocHost {
         profile: &ProfileParams,
         space_id: Option<&str>,
         cwd: Option<&str>,
+        limits: crate::registry::DelegationSettings,
     ) -> Result<String, EngineError> {
         let workspace = self
             .workspace()
@@ -4992,21 +4991,8 @@ impl DocHost {
         {
             return Err(EngineError::Other(format!("cwd {cwd} is not a directory")));
         }
-        let bound = self.bound_step_threads(workspace);
-        let live = workspace
-            .read_chats()?
-            .iter()
-            .filter(|chat| {
-                !chat.archived
-                    && chat.created_by_chat_id.as_deref() == Some(from_chat_id)
-                    && !bound.contains(&chat.id)
-            })
-            .count();
-        if live >= MAX_CREATED_THREADS {
-            return Err(EngineError::Other(format!(
-                "this thread already has {live} open threads it created; archive one first"
-            )));
-        }
+        let admitting = self.inner.delegation_lock.lock().await;
+        self.admit_start(&workspace.read_chats()?, &from, limits)?;
         let config = self.derived_config(&from, harness, model, reasoning, profile)?;
         let chat_id = new_id();
         let (space_id, cwd) = match (space_id, cwd) {
@@ -5022,6 +5008,8 @@ impl DocHost {
             cwd,
             Some(from_chat_id).filter(|id| !zeron_proto::voice::is_orchestrator_chat(id)),
         )?;
+        let _starting = self.reserve_peer_start(&chat_id);
+        drop(admitting);
         if let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) {
             workspace.rename_chat(&chat_id, title)?;
         }

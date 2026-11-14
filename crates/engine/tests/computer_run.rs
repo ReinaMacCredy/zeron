@@ -531,6 +531,7 @@ async fn an_agent_delivered_slash_never_activates_while_settings_on_covers_every
             &Default::default(),
             None,
             None,
+            Default::default(),
         )
         .await
         .unwrap();

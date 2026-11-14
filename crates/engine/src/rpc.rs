@@ -5357,6 +5357,7 @@ impl RpcService for EngineRpc {
                             &p.profile,
                             p.space_id.as_deref(),
                             p.cwd.as_deref(),
+                            self.registry.delegation_settings(),
                         )
                         .await
                         .map_err(|e| RpcError::Failed(e.to_string()))?,

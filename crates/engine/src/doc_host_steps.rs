@@ -82,15 +82,6 @@ impl DocHost {
         Ok(step)
     }
 
-    pub(super) fn bound_step_threads(&self, workspace: &WorkspaceHost) -> HashSet<String> {
-        workspace
-            .watch_task_steps()
-            .borrow()
-            .iter()
-            .filter_map(|step| step.chat_id.clone())
-            .collect()
-    }
-
     pub(super) fn step_lead_of(&self, thread: &str) -> Option<String> {
         let workspace = self.workspace()?;
         let task_id = workspace
