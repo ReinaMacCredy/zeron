@@ -111,7 +111,7 @@ CLEAN=(env -i PATH=$PATH TMPDIR=${TMPDIR:-/tmp} LANG=${LANG:-en_US.UTF-8} USER=$
 # ---- the engine -----------------------------------------------------------------
 # (`zgx-smoke` in its argv[0], so a later run knows it as ours.)
 ln -s $ENGINE $RUN/bin/zgx-smoke-engine
-$CLEAN HOME=$RUN/home RUST_LOG=${SMOKE_ENGINE_LOG:-info} ZERON_DATA_DIR=$RUN/engine ZERON_IPC_PORT=$PORT GROK_EXECUTABLE=$FAKE \
+$CLEAN HOME=$RUN/home ZERON_NO_HARNESS_UPDATE_CHECKS=1 RUST_LOG=${SMOKE_ENGINE_LOG:-info} ZERON_DATA_DIR=$RUN/engine ZERON_IPC_PORT=$PORT GROK_EXECUTABLE=$FAKE \
 	$RUN/bin/zgx-smoke-engine > $RUN/engine.log 2>&1 &
 ENGINE_PID=$!
 for _ in {1..100}; do

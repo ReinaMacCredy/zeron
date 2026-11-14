@@ -950,7 +950,10 @@ impl HarnessUpdateCoordinator {
     /// synchronous test assemblies simply omit the worker and can still use
     /// the explicit RPC methods once running under Tokio.
     pub fn start(&self) {
-        if tokio::runtime::Handle::try_current().is_err() {
+        // A Dev or smoke engine runs under a home of its own with no login keychain: a CLI the check spawns raises macOS's "Keychain Not Found" dialog.
+        if tokio::runtime::Handle::try_current().is_err()
+            || std::env::var_os("ZERON_NO_HARNESS_UPDATE_CHECKS").is_some()
+        {
             return;
         }
         let mut worker = lock(&self.inner.worker);

@@ -31,7 +31,9 @@
 //!                                 (HOME, CLAUDE_CONFIG_DIR, CODEX_HOME), so
 //!                                 the agents' logins it reads and writes are
 //!                                 that dir's, not this Mac's: for trying
-//!                                 sign-ins with throwaway state
+//!                                 sign-ins with throwaway state. It skips
+//!                                 the periodic CLI update check, which
+//!                                 finds no login keychain there
 //!   ZERON_ZGX_ENGINE_SPAWN=0      never start one; only use one that runs
 //!
 //! A development build never uses the production engine by accident: ports
@@ -390,7 +392,8 @@ fn spawn(config: &Config, bin: &Path) -> std::io::Result<()> {
         command
             .env("HOME", home)
             .env("CLAUDE_CONFIG_DIR", claude)
-            .env("CODEX_HOME", codex);
+            .env("CODEX_HOME", codex)
+            .env("ZERON_NO_HARNESS_UPDATE_CHECKS", "1");
     }
     #[cfg(unix)]
     {
