@@ -709,6 +709,16 @@ test("⌃Tab from the shell steps the panel's tabs only while the panel has the 
 	-- (The terminal turned to takes the keyboard on the next frame, as it
 	-- does in the app: frames pass before the next click, as a person's do.)
 	app:frames(4)
+	app:set_state("test_panel_visible", false)
+	app:frames(4)
+	app:command("test.step_tab")
+	expect(eventually(app, function(): boolean
+		return app:state("test_panel_stepped") == "false"
+	end)).to_be(true)
+	local hidden = app:state("panel_sessions")["chat:chat-1"]
+	expect(hidden.active).to_be(hidden.tabs[2].id)
+	app:set_state("test_panel_visible", true)
+	app:frames(4)
 	-- The keyboard elsewhere: it leaves the tabs be (the shell steps sessions).
 	app:click("#outside")
 	app:frames(4)
@@ -716,6 +726,32 @@ test("⌃Tab from the shell steps the panel's tabs only while the panel has the 
 	expect(eventually(app, function(): boolean
 		return app:state("test_panel_stepped") == "false"
 	end)).to_be(true)
+end)
+
+test("⌃Tab keeps the keyboard in the panel as it steps, so the next press steps again, round", function()
+	local app = open_panel()
+	open_files(app)
+	app:click('role:button "New Tab"')
+	open_files(app)
+	expect(eventually(app, function(): boolean
+		return #app:state("panel_sessions")["chat:chat-1"].tabs == 2
+	end)).to_be(true)
+	app:click('#panel-strip >> role:tab "Files"[1]')
+	expect(app:wait('role:treeitem "long.txt"', { timeout_ms = 15000 })).to_be(true)
+	app:click('role:treeitem "long.txt"')
+	app:frames(4)
+	local s = app:state("panel_sessions")["chat:chat-1"]
+	local first = s.active
+	for _ = 1, 3 do
+		local before = app:state("panel_sessions")["chat:chat-1"].active
+		app:command("test.step_tab")
+		expect(eventually(app, function(): boolean
+			local now = app:state("panel_sessions")["chat:chat-1"]
+			return app:state("test_panel_stepped") == "true" and now.active ~= before
+		end)).to_be(true)
+		app:frames(4)
+	end
+	expect(app:state("panel_sessions")["chat:chat-1"].active ~= first).to_be(true)
 end)
 
 test("a terminal opened or turned to takes the keyboard: typing reaches its shell, no click", function()

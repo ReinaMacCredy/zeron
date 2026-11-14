@@ -214,6 +214,7 @@ local focus_in: string? = nil
 -- focus reaches the window's root.)
 local claimed = false
 local closer: ((id: string) -> ())? = nil
+local focus_panel: (() -> boolean)? = nil
 local shown_key: (() -> string?)? = nil
 local is_shown: (() -> boolean)? = nil
 
@@ -235,6 +236,16 @@ local function terminal_focused(k: string): boolean
 		return term.focused
 	end)
 	return ok2 and focused == true
+end
+
+local function shown_now(): string?
+	local k = if shown_key then shown_key() else nil
+	return if k and not (is_shown and not is_shown()) then k else nil
+end
+
+local function keyboard_in(): string?
+	local k = shown_now()
+	return if k and (focus_in == k or terminal_focused(k)) then k else nil
 end
 
 -- The window's root heard a focus (its `on_focus`, the shell's): if it
@@ -372,8 +383,8 @@ end
 -- ⌃Tab / ⌃⇧Tab while the panel has the keyboard: the next or previous tab
 -- (`by` 1 or -1), round. Whether it acted (else the shell steps sessions).
 function M.step_tab(by: number): boolean
-	local k = if shown_key then shown_key() else nil
-	if not k or (focus_in ~= k and not terminal_focused(k)) then
+	local k = keyboard_in()
+	if not k then
 		return false
 	end
 	local s = state.of(k)
@@ -389,6 +400,12 @@ function M.step_tab(by: number): boolean
 	end
 	local to = ((at - 1 + by) % n) + 1
 	state.activate(k, s.tabs[to].id)
+	local refocus = focus_panel
+	if refocus then
+		ui.after(0, function()
+			refocus()
+		end)
+	end
 	return true
 end
 
@@ -396,7 +413,7 @@ end
 -- the page's own) opens its find bar: true; else false, and the shell
 -- goes on to its own Find.
 function M.find_in_browser(): boolean
-	local k = if shown_key then shown_key() else nil
+	local k = shown_now()
 	if not k or not Browser then
 		return false
 	end
@@ -412,7 +429,6 @@ function M.find_in_browser(): boolean
 	return true
 end
 
-local focus_panel: (() -> boolean)? = nil
 function M.keyboard_back(): boolean
 	if not focus_in or not focus_panel then
 		return false
@@ -423,9 +439,9 @@ end
 -- Close the visible panel's active tab regardless of keyboard focus. The
 -- shell keeps the panel mounted while hidden, so its layout supplies visibility.
 function M.close_active_tab(): boolean
-	local k = if shown_key then shown_key() else nil
+	local k = shown_now()
 	local close_tab = closer
-	if not k or not close_tab or (is_shown and not is_shown()) then
+	if not k or not close_tab then
 		return false
 	end
 	local active = state.of(k).active
@@ -437,8 +453,7 @@ function M.close_active_tab(): boolean
 end
 
 function M.close_focused_tab(): boolean
-	local k = if shown_key then shown_key() else nil
-	if not k or (focus_in ~= k and not terminal_focused(k)) then
+	if not keyboard_in() then
 		return false
 	end
 	return M.close_active_tab()
