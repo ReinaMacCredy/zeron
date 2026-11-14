@@ -180,8 +180,8 @@ impl Tasks {
         let empty = self.list.borrow().as_array().is_none_or(Vec::is_empty);
         let tasks = mock_tasks().filter(|_| empty);
         let has = |id: &str| self.list.borrow().as_array().into_iter().flatten().any(|t| t["id"] == id);
-        let plan = mock_plan() && !has(MOCK_PLAN_TASK);
-        let now = mock_plan() && !has(MOCK_NOW_TASK);
+        let plan = mock_seeds().0 && !has(MOCK_PLAN_TASK);
+        let now = mock_seeds().1 && !has(MOCK_NOW_TASK);
         if tasks.is_none() && !plan && !now {
             return;
         }
@@ -219,8 +219,13 @@ fn mock() -> bool {
     std::env::var("ZERON_ZGX_MOCK").is_ok_and(|v| v == "1")
 }
 
-fn mock_plan() -> bool {
-    mock() && std::env::var("ZERON_ZGX_MOCK_PLAN").is_ok_and(|v| v == "1")
+fn mock_seeds() -> (bool, bool) {
+    match std::env::var("ZERON_ZGX_MOCK_PLAN").ok().filter(|_| mock()).as_deref() {
+        Some("1") => (true, true),
+        Some("plan") => (true, false),
+        Some("now") => (false, true),
+        _ => (false, false),
+    }
 }
 
 fn mock_tasks() -> Option<usize> {
@@ -286,7 +291,7 @@ fn mock_runs(chat: &str, steps: &[&TaskStep]) -> Vec<Json> {
 }
 
 pub(crate) async fn approved(chat: &str) {
-    if !mock_plan() {
+    if !mock_seeds().0 {
         return;
     }
     let steps = crate::threads::steps();

@@ -1536,7 +1536,13 @@
       "open_subagent": "打开子智能体",
       "from": "来自",
       "from_label": "打开 {title}",
-      "auto_continue": "自动继续"
+      "auto_continue": "自动继续",
+      "plan": {
+        "head": "{n, plural, other {计划 · # 个步骤}}",
+        "edit": "编辑计划",
+        "approve": "批准并运行",
+        "approved": "已批准"
+      }
     },
     "annotation": {
       "add_to_chat": "添加到聊天",
@@ -4814,6 +4820,42 @@
         "skip": "跳过",
         "reopen": "重新打开",
         "retry": "重新运行"
+      },
+      "placeholder": "给这个线程发消息…",
+      "plan": {
+        "title": "计划",
+        "overview": "概述",
+        "hide": "隐藏",
+        "edit": "编辑",
+        "waiting": "等待你的批准。尚未开始任何工作。"
+      },
+      "edit": {
+        "head": "编辑计划",
+        "close": "关闭编辑器",
+        "overview": "概述",
+        "steps": "步骤",
+        "add": "添加步骤",
+        "none": "尚无更改",
+        "count": "{n, plural, other {# 处更改}}",
+        "bad": "步骤需要标题",
+        "discard_ask": "{n, plural, other {放弃 # 处更改？}}",
+        "keep": "继续编辑",
+        "discard": "放弃",
+        "cancel": "取消",
+        "save": "保存",
+        "locked": "已开始。保存会把更改后的说明发送给它的线程。它保持原位，不能移除。",
+        "started": "已开始",
+        "failed": "无法保存计划：{err}",
+        "drag": "拖动以重新排序",
+        "remove": "移除步骤 {n}",
+        "spec_toggle": "步骤 {n} 的说明",
+        "role": "{title} 的角色",
+        "no_role": "无角色",
+        "same_as_lead": "与主线程相同",
+        "title_name": "步骤 {n} 的标题",
+        "title_placeholder": "步骤标题",
+        "spec_name": "步骤 {n} 的说明",
+        "spec_placeholder": "这个步骤要做什么"
       }
     }
   },
@@ -5865,7 +5907,7 @@
       "run_in_name": "运行位置",
       "folder": "文件夹…",
       "plan_first": "先做计划",
-      "plan_first_help": "负责人先写出步骤再开始。你也可以稍后再添加计划。"
+      "plan_first_help": "对话先写出计划再开始，你批准后才会运行。"
     },
     "capture": {
       "added": "已添加到待办：{title}",

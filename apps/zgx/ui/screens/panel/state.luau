@@ -52,6 +52,7 @@ export type Tab = {
 	-- it shows (a side chat's id, a subagent's doc).
 	chat: string?,
 	thread: string?,
+	editing: boolean?,
 	-- A device tab's (screens/device/panel): the device it shows, once
 	-- bound, { host, id }; a name given it by Rename.
 	device_target: { host: string, id: string }?,

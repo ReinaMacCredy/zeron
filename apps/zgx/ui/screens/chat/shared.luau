@@ -1595,6 +1595,15 @@ function M.threads_for(session: () -> string?, home: () -> string?, live: () -> 
 		model_label = function(harness: string?, model: string): string?
 			return (require("@app/screens/chat/store") :: any).model_label(harness, model)
 		end,
+		plan = function(): any
+			return (require("@app/screens/chat/threads") :: any).card(session())
+		end,
+		approve_plan = function()
+			(require("@app/screens/chat/threads") :: any).approve(session())
+		end,
+		edit_plan = function()
+			(require("@app/screens/chat/threads") :: any).edit(session())
+		end,
 	}
 end
 

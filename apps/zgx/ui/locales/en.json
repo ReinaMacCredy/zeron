@@ -1536,7 +1536,13 @@
       "open_subagent": "Open subagent",
       "from": "From",
       "from_label": "Open {title}",
-      "auto_continue": "Auto-continue"
+      "auto_continue": "Auto-continue",
+      "plan": {
+        "head": "{n, plural, one {Plan · # step} other {Plan · # steps}}",
+        "edit": "Edit plan",
+        "approve": "Approve and run",
+        "approved": "Approved"
+      }
     },
     "annotation": {
       "add_to_chat": "Add to chat",
@@ -4814,6 +4820,42 @@
         "skip": "Skip",
         "reopen": "Reopen",
         "retry": "Run again"
+      },
+      "placeholder": "Message this thread…",
+      "plan": {
+        "title": "Plan",
+        "overview": "Overview",
+        "hide": "Hide",
+        "edit": "Edit",
+        "waiting": "Waiting for your approval. Nothing has started."
+      },
+      "edit": {
+        "head": "Edit plan",
+        "close": "Close the editor",
+        "overview": "Overview",
+        "steps": "Steps",
+        "add": "Add step",
+        "none": "No changes yet",
+        "count": "{n, plural, one {# change} other {# changes}}",
+        "bad": "A step needs a title",
+        "discard_ask": "{n, plural, one {Discard # change?} other {Discard # changes?}}",
+        "keep": "Keep editing",
+        "discard": "Discard",
+        "cancel": "Cancel",
+        "save": "Save",
+        "locked": "Already started. Save sends a changed spec to its thread. It keeps its place and cannot be removed.",
+        "started": "Already started",
+        "failed": "Couldn't save the plan: {err}",
+        "drag": "Drag to reorder",
+        "remove": "Remove step {n}",
+        "spec_toggle": "Spec of step {n}",
+        "role": "Role of {title}",
+        "no_role": "No role",
+        "same_as_lead": "same as the lead",
+        "title_name": "Title of step {n}",
+        "title_placeholder": "Step title",
+        "spec_name": "Spec of step {n}",
+        "spec_placeholder": "What this step should do"
       }
     }
   },
@@ -5865,7 +5907,7 @@
       "run_in_name": "Run in",
       "folder": "Folder…",
       "plan_first": "Plan first",
-      "plan_first_help": "The lead writes steps before it starts. You can also Add plan later."
+      "plan_first_help": "The chat writes a plan before it starts, and nothing runs until you approve it."
     },
     "capture": {
       "added": "Added to To do: {title}",

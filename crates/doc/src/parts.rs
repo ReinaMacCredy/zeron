@@ -1035,7 +1035,7 @@ pub fn sidecar_payload(event: &AgentEvent) -> Option<SidecarPayload> {
 /// and a subagent spawn's model/type (see [`spawn_badge`] — a couple of short
 /// identifiers the chip names the child by).
 /// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt, Mcp/Unknown input
-/// (but `respond_to_input`, a `tasks` plan call and `delegate_task` keep the short ids [`zeron_badge`] lists,
+/// (but `respond_to_input`, a `tasks` plan call, `delegate_task` and `plan`'s action keep the short ids [`zeron_badge`] lists,
 /// and `ExitPlanMode` keeps its plan).
 /// Full inputs remain only in the host's local run journal. Idempotent.
 pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
@@ -1090,6 +1090,7 @@ fn zeron_badge(call: &ToolCall) -> Option<serde_json::Value> {
             &["action", "taskId"]
         }
         "delegate_task" => &["title"],
+        "plan" => &["action"],
         _ => return None,
     };
     let kept: serde_json::Map<String, serde_json::Value> = keys
@@ -1717,6 +1718,24 @@ mod tests {
         assert!(matches!(
             sanitize_tool_call(&delegate),
             ToolCall::Mcp { input: Some(input), .. } if input == serde_json::json!({ "title": "Audit" })
+        ));
+        let write = serde_json::json!({ "action": "write", "overview": "secret", "steps": [{ "title": "secret" }] });
+        let lead = ToolCall::Unknown {
+            name: "mcp__zeron__plan".into(),
+            input: Some(write.clone()),
+        };
+        let kept = sanitize_tool_call(&lead);
+        assert_eq!(
+            kept,
+            ToolCall::Unknown {
+                name: "mcp__zeron__plan".into(),
+                input: Some(serde_json::json!({ "action": "write" })),
+            }
+        );
+        assert_eq!(sanitize_tool_call(&kept), kept);
+        assert!(matches!(
+            sanitize_tool_call(&ToolCall::Mcp { server: "zeron".into(), tool: "plan".into(), input: Some(write) }),
+            ToolCall::Mcp { input: Some(input), .. } if input == serde_json::json!({ "action": "write" })
         ));
     }
 

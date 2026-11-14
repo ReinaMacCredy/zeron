@@ -140,7 +140,7 @@ end
 -- Each chat's composer field here, by its chat: where a passage mentioned from its transcript goes.
 local fields: { [string]: any } = {}
 
-local function composer(chat: string, view: any, name: string, focus: State<number>, panel_key: string?, tab_id: string?): Node
+local function composer(chat: string, view: any, name: string, focus: State<number>, panel_key: string?, tab_id: string?, placeholder: string?): Node
 	local jump_w, deck_w, reach = pair(tab_id or name)
 	local lifted = Dock.lift(tab_id or name)
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
@@ -882,7 +882,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		focus = focus,
 		value = draft,
 		-- (ds.Composer's placeholder is a string: read as the tab is made.)
-		placeholder = locale.s("chat.lane_tab.placeholder"),
+		placeholder = locale.s(placeholder or "chat.lane_tab.placeholder"),
 		running = running,
 		access = access,
 		plan = plan,
@@ -1437,7 +1437,7 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 					}),
 					ui.column { w_full = true, grow = 1, min_h = 0, relative = true, transcript },
 				},
-				Dock.Dock { height = dock_h, composer = ui.column { w_full = true, owners(chat, false), composer(chat, view, `lane.{slot}`, focus, props.panel_key, slot) }, id = `lane-composer-{slot}` },
+				Dock.Dock { height = dock_h, composer = ui.column { w_full = true, owners(chat, false), composer(chat, view, `lane.{slot}`, focus, props.panel_key, slot, tab.placeholder) }, id = `lane-composer-{slot}` },
 			}
 			for k, v in zone do
 				body[k] = v

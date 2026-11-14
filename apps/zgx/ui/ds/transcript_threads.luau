@@ -3,6 +3,7 @@ local AgentMark = require("@self/agent_mark")
 local FadeText = require("@self/fade_text")
 local status = require("@self/status")
 local locale = require("@self/locale")
+local Button = require("@self/button")
 
 local M = {}
 
@@ -43,6 +44,9 @@ export type Threads = {
 	limit_op: ((id: string, op: string) -> ())?,
 	agent: (() -> { label: string?, mark: string?, model: string?, harness: string? }?)?,
 	model_label: ((harness: string?, model: string) -> string?)?,
+	plan: (() -> any?)?,
+	approve_plan: (() -> ())?,
+	edit_plan: (() -> ())?,
 }
 
 local CARD, TILE = 30, 18
@@ -1124,6 +1128,185 @@ function M.AutoContinue(): Node
 		selectable = false,
 		ui.div { color = "$text.tertiary", aria_hidden = true, Icon { name = "refresh", size = 11 } },
 		ui.text { locale.s("ds.threads.auto_continue"), wrap = false },
+	}
+end
+
+function M.is_plan_write(t: any): boolean
+	if t.kind ~= "mcp" or type(t.target) ~= "string" then
+		return false
+	end
+	local name = if t.target == "zeron.plan" then "plan" else string.match(t.target, "zeron__(.-)$")
+	return name == "plan" and type(t.call) == "string" and string.find(t.call, '"action":%s*"write"') ~= nil
+end
+
+local function holds(b: any, id: string): boolean
+	for _, t in b.tools or {} do
+		if t.id == id then
+			return true
+		end
+	end
+	for _, inner in b.blocks or {} do
+		if holds(inner, id) then
+			return true
+		end
+	end
+	return false
+end
+M.holds = holds
+
+local function newest_in(blocks: { any }): string?
+	for i = #blocks, 1, -1 do
+		local b = blocks[i]
+		local inner = if b.blocks then newest_in(b.blocks) else nil
+		if inner then
+			return inner
+		end
+		local tools = b.tools or {}
+		for j = #tools, 1, -1 do
+			if M.is_plan_write(tools[j]) then
+				return tools[j].id
+			end
+		end
+	end
+	return nil
+end
+
+function M.newest_plan(messages: { any }): string?
+	for i = #messages, 1, -1 do
+		local m = messages[i]
+		local found = newest_in(m.blocks or { { tools = m.tools } })
+		if found then
+			return found
+		end
+	end
+	return nil
+end
+
+function M.Plan(props: { id: string, threads: Threads }): Node
+	local threads = props.threads
+	local function now(): any
+		return if threads.plan then threads.plan() else nil
+	end
+	local function model_of(s: any): string?
+		if not s.model then
+			return nil
+		end
+		return (if threads.model_label then threads.model_label(s.harness, s.model) else nil) or s.model
+	end
+	local steps = ui.computed(function(): { any }
+		local p = now()
+		return if p then p.steps else {}
+	end)
+	return ui.column {
+		id = props.id,
+		class = "plan-card",
+		w_full = true,
+		min_w = 0,
+		pt = ui.raw(12, "the mockup's question card"),
+		px = ui.raw(12, "the mockup's question card"),
+		pb = ui.raw(8, "the mockup's question card"),
+		rounded = ui.raw(12, "the mockup's question card"),
+		border = 1,
+		border_color = "$border",
+		selectable = false,
+		ui.text {
+			function(): string
+				local p = now()
+				return locale.s("ds.threads.plan.head", { n = if p then p.count else 0 })
+			end,
+			px = ui.raw(4, "the mockup's question card"),
+			pb = ui.raw(8, "the mockup's question card"),
+			text_size = ui.raw(13.5, "the mockup's question card"),
+			weight = "$font.weight.medium",
+			wrap = false,
+		},
+		ui.show(function(): boolean
+			local p = now()
+			return p ~= nil and (p.overview or "") ~= ""
+		end, ui.text {
+			function(): string
+				local p = now()
+				return if p then p.overview or "" else ""
+			end,
+			literal = true,
+			wrap = true,
+			px = ui.raw(4, "the mockup's question card"),
+			pb = ui.raw(8, "the mockup's question card"),
+			text_size = ui.raw(12.5, "the mockup's question card"),
+			color = "$text.secondary",
+		}),
+		ui.each(steps, function(s: any): Node
+			local model = model_of(s)
+			return ui.row {
+				class = "plan-card-step",
+				w_full = true,
+				min_w = 0,
+				px = ui.raw(4, "the mockup's plan line"),
+				py = ui.raw(5, "the mockup's plan line"),
+				gap = ui.raw(8, "the mockup's plan line"),
+				items = "center",
+				text_size = ui.raw(13, "the mockup's plan line"),
+				ui.text { tostring(s.number), literal = true, shrink = 0, wrap = false, font = "$font.mono", text_size = ui.raw(11, "the mockup's step number"), color = "$text.tertiary" },
+				ui.text { s.title or "", literal = true, grow = 1, min_w = 0, wrap = false, truncate = true },
+				if s.mark then AgentMark.Mark { label = s.mark, mark = s.mark, size = 12, bare = true } else nil,
+				if model then ui.text { model, literal = true, shrink = 0, wrap = false, text_size = ui.raw(12, "the mockup's model"), color = "$text.tertiary" } else nil,
+			}
+		end, {
+			key = function(s: any): string
+				return `{s.number}\0{s.title or ""}\0{s.mark or ""}\0{s.model or ""}`
+			end,
+			w_full = true,
+		}),
+		ui.presence(function(): string
+			local p = now()
+			return if p and p.pending then "pending" else "approved"
+		end, function(which: string): Node
+			if which == "approved" then
+				return ui.row {
+					id = `{props.id}-approved`,
+					px = ui.raw(4, "the mockup's approved line"),
+					pt = ui.raw(6, "the mockup's approved line"),
+					pb = ui.raw(2, "the mockup's approved line"),
+					gap = ui.raw(6, "the mockup's approved line"),
+					items = "center",
+					text_size = ui.raw(12.5, "the mockup's approved line"),
+					color = "$success",
+					Icon { name = "check", size = 14 },
+					ui.text { locale.s("ds.threads.plan.approved"), wrap = false },
+				}
+			end
+			return ui.row {
+				w_full = true,
+				justify = "end",
+				px = ui.raw(4, "the mockup's question foot"),
+				pt = ui.raw(6, "the mockup's question foot"),
+				pb = ui.raw(2, "the mockup's question foot"),
+				gap = ui.raw(6, "the mockup's question foot"),
+				items = "center",
+				Button {
+					locale.t("ds.threads.plan.edit"),
+					id = `{props.id}-edit`,
+					tone = "ghost",
+					size = "xs",
+					on_click = function()
+						if threads.edit_plan then
+							threads.edit_plan()
+						end
+					end,
+				},
+				Button {
+					locale.t("ds.threads.plan.approve"),
+					id = `{props.id}-approve`,
+					tone = "accent",
+					size = "xs",
+					on_click = function()
+						if threads.approve_plan then
+							threads.approve_plan()
+						end
+					end,
+				},
+			}
+		end, { w_full = true }),
 	}
 end
 
