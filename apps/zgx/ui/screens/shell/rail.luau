@@ -22,6 +22,7 @@ local updates = require("@app/screens/shell/updates")
 local M = {}
 
 M.W = art.RAIL_W
+M.over = ui.state("shell_rail_over", false)
 
 local BUTTON, GLYPH, GAP, TOP, PAD = 34, 18, 6, 44, 8
 local RING_RADIUS, RING_STROKE, RING_GLYPH = 13, 2.5, 14
@@ -795,6 +796,9 @@ M.Rail = ui.component(function(): Node
 	}
 	local rail: { [any]: any } = {
 		id = "app-rail",
+		on_hover = function(inside: boolean)
+			M.over:set(inside)
+		end,
 		role = "toolbar",
 		label = function(): string
 			return locale.s("shell.rail.label")

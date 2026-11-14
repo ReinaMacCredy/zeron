@@ -204,8 +204,19 @@ function M.panel(to: number): TableParams
 	return { value = to, duration = M.ms(M.PANEL_MS), ease = M.PANEL_EASE }
 end
 
+function M.settling(rate: number, ms: number): string
+	local span = rate * ms / 1000
+	local full = 1 - (1 + span) * math.exp(-span)
+	local count = math.ceil(ms / 8)
+	local points = table.create(count + 1)
+	for i = 0, count do
+		local t = span * i / count
+		points[i + 1] = string.format("%.4f", (1 - (1 + t) * math.exp(-t)) / full)
+	end
+	return `linear({table.concat(points, ", ")})`
+end
 -- What moves with the sidebar: for `ui.tween`.
-M.sidebar = { duration = 260, ease = "cubicBezier(.2,.8,.2,1)" } :: TweenOptions
+M.sidebar = { duration = 260, ease = M.settling(35, 260) } :: TweenOptions
 
 -- A column's width from `from` to `to`, for `anime.animate` (its `value`
 -- the width it goes to): at once, with motion reduced.

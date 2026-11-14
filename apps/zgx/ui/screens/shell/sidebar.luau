@@ -1812,6 +1812,13 @@ M.Sidebar = ui.component(function(props: Props): Node
 		on_reset = function()
 			view.seam_reset:set(view.seam_reset:peek() + 1)
 		end,
+		on_fold = if props.island
+			then nil
+			else function(folded: boolean)
+				if view.collapsed:peek() ~= folded then
+					fit.toggle_sidebar()
+				end
+			end,
 		collapsed = props.collapsed,
 		limit = props.limit,
 		direct = props.direct,
@@ -2121,13 +2128,17 @@ if not shelves_folded:peek() then
 	shared.folded:set(f)
 end
 
-local OPEN_MS, CLOSE_MS, SLIDE_MS = 120, 300, 120
+local OPEN_MS, CLOSE_MS = 50, 80
+local SLIDE_IN = { duration = 130, ease = "outExpo" }
+local SLIDE_OUT = { duration = 90, ease = motion.settling(78, 90) }
 local peek_open = ui.state("shell_sidebar_peek", false)
 local peek_t = ui.state("shell_sidebar_peek_t", 0)
 local peek_edge = ui.state("shell_sidebar_peek_edge", false)
+local peek_rim = ui.state("shell_sidebar_peek_rim", false)
 local peek_inside = ui.state("shell_sidebar_peek_inside", false)
 local peek_handoff = ui.state("shell_sidebar_peek_handoff", false)
 local peek_pressed = ui.state("shell_sidebar_peek_pressed", false)
+local edge_held = ui.shared("sidebar.edge_held", false)
 local peek_keys = ui.state("shell_sidebar_peek_keys", false)
 local peek_touched = false
 local peek_left = ui.state("shell_sidebar_peek_left", 0)
@@ -2190,7 +2201,8 @@ local function peek_set(on: boolean)
 	if peek_going then
 		peek_going:cancel()
 	end
-	peek_going = anime.animate(peek_t, motion.params({ value = if on then 1 else 0, duration = SLIDE_MS, ease = "outCubic" }))
+	local slide = if on then SLIDE_IN else SLIDE_OUT
+	peek_going = anime.animate(peek_t, motion.params({ value = if on then 1 else 0, duration = slide.duration, ease = slide.ease }))
 end
 -- (Nil on v2, whose view has no peek.)
 local hover_setting = (view :: any).sidebar_hover
@@ -2213,14 +2225,14 @@ local function peek_wanted(): boolean
 	if not peek_enabled() or peek_suppressed:get() then
 		return false
 	end
-	local inside, edge = peek_inside:get(), peek_edge:get()
+	local inside, edge = peek_inside:get(), peek_edge:get() or peek_rim:get()
 	if peek_open:get() then
-		return inside or edge or peek_held() or split_dragging:get()
+		return inside or edge or rail.over:get() or peek_held() or split_dragging:get()
 	end
 	return not split_dragging:get() and (edge or (peek_t:get() > 0 and inside))
 end
 ui.effect(function()
-	if not peek_edge:get() and not peek_inside:get() and peek_suppressed:peek() then
+	if not peek_edge:get() and not peek_rim:get() and not peek_inside:get() and not edge_held:get() and peek_suppressed:peek() then
 		peek_suppressed:set(false)
 	end
 	if peek_handoff:get() then
@@ -2272,7 +2284,7 @@ ui.effect(function()
 		return
 	end
 	peek_was = shut
-	peek_suppressed:set(not (not peek_edge:peek() and not peek_inside:peek()))
+	peek_suppressed:set(peek_edge:peek() or peek_rim:peek() or peek_inside:peek() or edge_held:peek())
 	if not shut and peek_t:peek() > 0 then
 		local gap = if fit.current:peek().sidebar then 5 else 0
 		local w = M.peek_w()
@@ -2302,22 +2314,36 @@ function M.peek_dismiss(): boolean
 	end
 	return true
 end
-function M.PeekEdge(): Node
+local function peek_strip(id: string, left: number, shut_w: number, open_w: number, over: State<boolean>): Node
 	return ui.div {
-		id = "sidebar-peek-edge",
+		id = id,
 		absolute = true,
-		left = rail.W,
-		top = 42,
+		left = left,
+		top = 0,
 		bottom = 0,
-		w = 14,
+		w = function(): number
+			return if peek_open:get() then open_w else shut_w
+		end,
 		hidden = function(): boolean
 			return not hover_setting or not hover_setting:get() or not view.collapsed:get() or route.current:get().name == "settings"
 		end,
 		on_hover = function(inside: boolean)
-			if peek_edge:peek() ~= inside then
-				peek_edge:set(inside)
+			if over:peek() ~= inside then
+				over:set(inside)
 			end
 		end,
+	}
+end
+function M.PeekEdge(): Node
+	return ui.div {
+		absolute = true,
+		left = 0,
+		top = 42,
+		bottom = 0,
+		w = rail.W + 18,
+		pointer_events = "none",
+		peek_strip("sidebar-peek-rim", 0, 5, 0, peek_rim),
+		peek_strip("sidebar-peek-edge", rail.W, 18, 9, peek_edge),
 	}
 end
 
