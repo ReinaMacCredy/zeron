@@ -227,6 +227,7 @@ fn mount_with(window: &'static str, step: &'static str, log: &Log, inspector: Op
     let build = move |runtime: &Runtime| {
         let host = ScriptHost::new(runtime, ui_dir().join("app.luau"));
         host.shared("window", window);
+        host.shared("zgx.window.size", zgx_script::window_size_value(1240., 820.));
         host.shared("onboarding.start", step);
         // Setup's window as the host shows it once the intro is over.
         host.shared("onboarding.arrived", true);
@@ -736,10 +737,14 @@ fn a_reload_keeps_the_sidebar_and_settings_where_they_were_scrolled() {
     let log: Log = Rc::default();
     let mut app = mount("main", "signin", &log);
     app.ui.scene.borrow_mut().resize(1200., 600.);
+    app.host.shared("zgx.window.size", Value::Nil).set(zgx_script::window_size_value(1200., 600.));
     app.frames(30);
     app.host.shared("sessions", Value::Nil).set(Value::from_json(&many_sessions()).unwrap());
     app.frames(60);
     assert_eq!(app.error(), None, "the shell failed");
+    // (A project shows its first five sessions: the rest, asked for.)
+    app.click("#shell-sidebar >> role:button ~\"Show 55 more\"");
+    app.frames(30);
     // Down the sidebar's list, in steps as a hand scrolls.
     for _ in 0..6 {
         let row = (1..=60)
@@ -762,18 +767,21 @@ fn a_reload_keeps_the_sidebar_and_settings_where_they_were_scrolled() {
     // Settings' page, scrolled down.
     assert!(app.host.run_command("shell.settings"));
     app.frames(60);
-    for _ in 0..4 {
-        // (At a heading in view: the page runs on below the window.)
+    // (A heading in view: the page runs on below the window.)
+    let heading_in_view = |app: &mut TestApp| {
         let target = zgx_script::driver::parse("#settings-page >> role:heading").unwrap();
         app.ui.prepare_frame();
         let found = zgx_script::driver::find_all(&app.ui, &app.handle, &target).unwrap_or_default();
-        let id = found
+        found
             .into_iter()
             .find(|&id| {
                 let b = app.ui.scene.borrow().hit_bounds(id);
                 b.y > 40. && b.y < 560.
             })
-            .expect("a heading in view");
+            .expect("a heading in view")
+    };
+    for _ in 0..4 {
+        let id = heading_in_view(&mut app);
         zgx_script::driver::scroll(&mut app.ui, id, 150.);
         app.settle();
         app.frames(4);
@@ -783,7 +791,8 @@ fn a_reload_keeps_the_sidebar_and_settings_where_they_were_scrolled() {
     let before = on_screen(&mut app, headings);
     assert!(before[0] != "54.0", "settings never scrolled: {before:?}");
     let _ = app.host.reload();
-    for (frame, n) in [(1, 1), (3, 2), (10, 7), (60, 50)] {
+    // (The floating panel's page comes in over 160 ms, rising 4: where it stands is read once that is over.)
+    for (frame, n) in [(20, 20), (60, 40)] {
         app.frames(n);
         assert_eq!(on_screen(&mut app, headings), before, "frame {frame} after the reload: settings' page moved");
     }
@@ -795,7 +804,7 @@ fn a_reload_keeps_the_sidebar_and_settings_where_they_were_scrolled() {
     app.frames(30);
     assert_eq!(on_screen(&mut app, headings), before, "once settled after the reload: settings' page moved");
     let kept = scroll(&app);
-    let heading = app.target("#settings-page >> role:heading \"Links\"").expect("a heading in view");
+    let heading = heading_in_view(&mut app);
     zgx_script::driver::scroll(&mut app.ui, heading, -100.);
     app.settle();
     app.frames(30);

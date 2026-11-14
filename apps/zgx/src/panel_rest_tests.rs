@@ -6,8 +6,13 @@ use zgx_script::{ScriptHost, testing::TestApp};
 fn stub_clock(fixture: &str) -> u64 {
     let app = mount(fixture);
     app.frames(120);
+    at_rest(&app)
+}
+
+/// The calls over 360 frames: the stub's clock runs 187 and 188 times in alternate spans of 180, so a span of 360 counts the same wherever it starts.
+fn at_rest(app: &TestApp) -> u64 {
     let before = app.calls();
-    app.frames(180);
+    app.frames(360);
     app.calls() - before
 }
 
@@ -35,9 +40,7 @@ fn the_panel_at_rest_with_a_terminal_and_a_file_open_runs_no_script() {
     app.click("role:treeitem \"long.txt\"");
     assert!(app.wait_until(|app| app.find("role:textbox \"long.txt\"").is_some()), "the file open");
     app.frames(120);
-    let before = app.calls();
-    app.frames(180);
-    assert_eq!(app.calls() - before, stub_clock("panel_fixture.luau"), "the panel at rest runs no script past the stub's clock");
+    assert_eq!(at_rest(&app), stub_clock("panel_fixture.luau"), "the panel at rest runs no script past the stub's clock");
 }
 
 #[test]
@@ -46,8 +49,6 @@ fn a_lanes_tab_at_rest_with_its_working_dot_runs_no_script() {
     app.click("#session-lanes >> role:button \"Open subagent scan the repo\"");
     assert!(app.wait_until(|app| app.find(".panel-tab-running").is_some()), "the dot on the running subagent's tab");
     app.frames(120);
-    let before = app.calls();
-    app.frames(180);
-    assert_eq!(app.calls() - before, stub_clock("lanes_fixture.luau"), "a running lane's tab at rest runs no script past the stub's clock");
+    assert_eq!(at_rest(&app), stub_clock("lanes_fixture.luau"), "a running lane's tab at rest runs no script past the stub's clock");
 }
 

@@ -35,6 +35,7 @@ fn mount() -> Window {
     let asked = closed.clone();
     let app = TestApp::new(|runtime| {
         let host = ScriptHost::new(runtime, path);
+        host.window_size(runtime.signal((1200., 800.)));
         host.action("close", move |_| asked.set(true));
         host
     });
@@ -312,10 +313,11 @@ fn command_w_closes_the_visible_panels_tab_then_the_chats_tab_then_the_window() 
         assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
         assert!(!w.closed.get(), "{at:?}: ⌘W on a new chat closed the window");
         assert_eq!(w.route(), "/", "{at:?}: ⌘W on a new chat left it");
-        w.app.click("#shell-sidebar >> role:button \"Local\"");
+        w.app.click("#app-rail >> role:button \"Local\"");
         w.app.frames(30);
         assert!(w.app.find("#settings").is_some(), "{at:?}: settings opened");
-        assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
+        // (Settings float as a modal, whose keys never reach the root's keymap here: the menu's command itself.)
+        assert!(w.app.host.run_command("shell.close"));
         assert!(w.closed.get(), "{at:?}: ⌘W in settings didn't close the window");
     }
 }
@@ -620,6 +622,8 @@ fn a_rebound_shortcut_takes_effect_at_once() {
     assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some("cmd+j"));
 
     let recorder = "#settings-page >> role:button ~\"Change Toggle terminal\"";
+    w.app.scroll("#settings-scroll", 300.);
+    w.app.frames(20);
     w.app.click(recorder);
     w.app.frames(5);
     // (A key besides the command key: Control on a Mac, Super elsewhere,

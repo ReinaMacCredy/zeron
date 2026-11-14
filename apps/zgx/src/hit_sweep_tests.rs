@@ -23,7 +23,11 @@ fn mount(w: f32, h: f32) -> TestApp {
 
 fn mount_fixture(fixture: &str, w: f32, h: f32) -> TestApp {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(fixture);
-    let app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
+    let app = TestApp::new(|runtime| {
+        let host = ScriptHost::new(runtime, path);
+        host.window_size(runtime.signal((w, h)));
+        host
+    });
     app.ui.scene.borrow_mut().resize(w, h);
     app.frames(40);
     app
@@ -98,7 +102,7 @@ fn drawn(app: &TestApp, id: NodeId) -> bool {
 
 /// Every interactive control showing, by where the pointer goes at its
 /// visible middle; those it doesn't reach.
-fn sweep(app: &mut TestApp, w: f32, h: f32) -> (usize, Vec<Covered>) {
+fn sweep(app: &mut TestApp, w: f32, h: f32, within: Option<&str>) -> (usize, Vec<Covered>) {
     app.frames(4);
     let window = Rect { x: 0., y: 0., width: w, height: h };
     let mut controls: Vec<(NodeId, String)> = {
@@ -117,6 +121,11 @@ fn sweep(app: &mut TestApp, w: f32, h: f32) -> (usize, Vec<Covered>) {
         if let Some(id) = app.find(edge) {
             controls.push((id, format!("edge {edge}")));
         }
+    }
+    // (A modal's own controls alone: what lies under it takes no pointer, by design.)
+    if let Some(scope) = within.and_then(|scope| app.find(scope)) {
+        let scene = app.ui.scene.borrow();
+        controls.retain(|(id, _)| scene.contains(*id) && scene.is_within(*id, scope));
     }
     let tree = crate::split_tests::full_tree(app);
     let mut checked = 0;
@@ -170,11 +179,11 @@ fn intersect(a: Rect, b: Rect) -> Option<Rect> {
 fn states(w: f32, h: f32) -> Vec<(String, usize, Vec<Covered>)> {
     let mut app = mount(w, h);
     let mut out = Vec::new();
-    let mut take = |app: &mut TestApp, state: &str| {
-        let (n, covered) = sweep(app, w, h);
+    let mut take = |app: &mut TestApp, state: &str, within: Option<&str>| {
+        let (n, covered) = sweep(app, w, h, within);
         out.push((format!("{state} at {w}×{h}"), n, covered));
     };
-    take(&mut app, "a new chat");
+    take(&mut app, "a new chat", None);
     if app.find("#shell-sidebar >> role:button \"Fix the build\"").is_some() {
         app.click("#shell-sidebar >> role:button \"Fix the build\"");
     } else {
@@ -183,16 +192,16 @@ fn states(w: f32, h: f32) -> Vec<(String, usize, Vec<Covered>)> {
     }
     assert!(app.wait_until(|app| app.find("#transcript").is_some()), "the session didn't open at {w}×{h}");
     app.frames(20);
-    take(&mut app, "a session, its panel closed");
+    take(&mut app, "a session, its panel closed", None);
     assert!(app.find("#titlebar >> role:button \"Panel\"").is_some(), "no Panel toggle in the session at {w}×{h}");
     app.click("#titlebar >> role:button \"Panel\"");
     app.frames(40);
-    take(&mut app, "a session, its panel open");
+    take(&mut app, "a session, its panel open", None);
     // (A shortcut fires through the host's menu bar, which a headless app
     // has none of: the command itself.)
     assert!(app.host.run_command("shell.settings"), "no shell.settings command");
     app.frames(40);
-    take(&mut app, "Settings");
+    take(&mut app, "Settings", Some("#shell-settings"));
     out
 }
 
@@ -276,7 +285,7 @@ fn the_sweep_names_a_layer_that_takes_the_pointer() {
     let mut app = mount_fixture("ui/hit_cover_fixture.luau", w, h);
     assert!(app.host.run_command("hit.cover"));
     app.frames(10);
-    let (n, covered) = sweep(&mut app, w, h);
+    let (n, covered) = sweep(&mut app, w, h, None);
     assert!(n > 10, "the controls weren't found ({n})");
     assert!(
         covered.len() >= n - 1 && covered.iter().all(|c| c.reaches.contains("#hit-cover")),
@@ -285,6 +294,6 @@ fn the_sweep_names_a_layer_that_takes_the_pointer() {
     );
     assert!(app.host.run_command("hit.cover_through"));
     app.frames(10);
-    let (n, covered) = sweep(&mut app, w, h);
+    let (n, covered) = sweep(&mut app, w, h, None);
     assert!(covered.is_empty(), "a layer the pointer passes through covered:\n{}", report(&[("through".into(), n, covered)]));
 }

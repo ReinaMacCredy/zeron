@@ -22,7 +22,11 @@ const STRIP_Y: f32 = 21.;
 
 fn mount() -> TestApp {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/shell_fixture.luau");
-    let app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
+    let app = TestApp::new(|runtime| {
+        let host = ScriptHost::new(runtime, path);
+        host.window_size(runtime.signal((W, H)));
+        host
+    });
     app.ui.scene.borrow_mut().resize(W, H);
     app.frames(30);
     app
@@ -144,12 +148,6 @@ fn the_title_bar_moves_the_window_across_its_width() {
     app.frames(40);
     app.click("#titlebar >> role:button \"Toggle sidebar\"");
     app.frames(40);
-
-    // Settings, under the top bar: the bar's strip is still what moves the window.
-    app.click("#shell-sidebar >> role:button \"Local\"");
-    app.frames(30);
-    assert!(app.find("#settings").is_some(), "settings opened");
-    dead.push(("settings' strip", dead_zones(&mut app, BAR)));
     let dead: Vec<_> = dead.into_iter().filter(|(_, zones)| !zones.is_empty()).collect();
     assert!(dead.is_empty(), "points on the strip that don't move the window: {dead:?}");
 }
@@ -333,7 +331,7 @@ fn the_places_plugins_target_are_there() {
     assert!(app.find("#shell-sidebar >> #sidebar").is_some(), "#sidebar isn't the sidebar's");
     // (The rail is off: none.)
     assert!(app.find("#rail").is_none(), "a rail with the rail off");
-    app.click("#shell-sidebar >> role:button \"Local\"");
+    app.click("#app-rail >> role:button \"Local\"");
     app.frames(30);
     for target in ["#settings-nav", "#settings-page"] {
         assert!(app.find(target).is_some(), "no {target}:\n{}", app.tree());

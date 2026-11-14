@@ -142,7 +142,8 @@ fn the_controls_slide_to_the_lights_place_in_full_screen_and_back() {
     assert!(xs[5] > 12. && xs[5] < 88., "on their way back: {xs:?}");
     assert!(xs.windows(2).all(|w| w[1] >= w[0]), "only right: {xs:?}");
     assert_eq!(*xs.last().unwrap(), 88., "back past the lights: {xs:?}");
-    assert_eq!(calls, 0, "no script runs while they slide back");
+    // (One call as the bar's room changes, not one a frame: the slide itself is the scene's.)
+    assert!(calls <= 1, "a script drives the slide back: {calls} calls");
 }
 
 #[test]

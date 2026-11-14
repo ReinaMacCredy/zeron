@@ -29,6 +29,9 @@ fn archived() -> TestApp {
     assert!(app.host.run_command("archive_thousands"));
     assert!(app.host.run_command("shell.settings"));
     app.frames(10);
+    // (The floating panel's list runs on under its foot: Archived, scrolled to.)
+    app.scroll("#settings-nav", 600.);
+    app.frames(10);
     app.click("#settings-nav >> \"Archived\"");
     app.frames(30);
     app.host
@@ -122,7 +125,8 @@ fn a_rows_wash_runs_edge_to_edge_in_its_card() {
         .find(|t| {
             app.find(t).is_some_and(|row| {
                 let b = app.ui.scene.borrow().bounds(row);
-                b.y > 120. && b.y + b.height < 980.
+                // (Inside the floating panel's page, 750 tall at most in the window's middle.)
+                b.y > 260. && b.y + b.height < 880.
             })
         })
         .expect("a row wholly in view");
