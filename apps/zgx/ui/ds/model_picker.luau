@@ -197,6 +197,8 @@ local COMPACT = ui.persist("model_picker_compact", true)
 -- what a provider switched to with Tab opens on.
 local LAST_MODEL = ui.persist("model_last_used", {} :: { [string]: string })
 local LAST_EFFORT = ui.persist("model_last_effort", {} :: { [string]: string })
+-- The full layout's tab last picked ("" none yet): it opens there again.
+local LAST_TAB = ui.persist("model_picker_tab", "")
 
 -- A list, however it was given.
 local function read(given: any): any
@@ -349,12 +351,16 @@ return ui.component(function(props: Props): Node
 		return not compact() or listing:get()
 	end
 	-- The full layout's tab: the one picked since the panel opened, else the
-	-- chosen model's agent.
+	-- one last picked while its agent is listed, else the chosen model's agent.
 	local tab = ui.use_state(nil :: string?)
 	local function viewed(): string
 		local t = tab:get()
 		if t then
 			return t
+		end
+		local last = LAST_TAB:get()
+		if last == STARRED or agents:get()[last] then
+			return last
 		end
 		local m = current()
 		if m then
@@ -669,6 +675,9 @@ return ui.component(function(props: Props): Node
 	-- Moving to an agent: browsing it on a chat, on a new chat its last model at
 	-- that model's last settings.
 	local function go_to_agent(id: string)
+		if not compact() and LAST_TAB:peek() ~= id then
+			LAST_TAB:set(id)
+		end
 		if id == STARRED then
 			ui.batch(function()
 				tab:set(id)
@@ -952,9 +961,14 @@ return ui.component(function(props: Props): Node
 				text_size = "$font.size.xs",
 				color = "$text.tertiary",
 			}),
-			ui.show(function(): boolean
-				return lit() or starred(item.value)
-			end, IconButton(button)),
+			-- Never unmounted: a click lands on its row's star even when hover lit another row.
+			ui.div {
+				shrink = 0,
+				opacity = function(): number
+					return if lit() or starred(item.value) then 1 else 0.01
+				end,
+				IconButton(button),
+			},
 		}
 	end
 
@@ -2409,10 +2423,11 @@ return ui.component(function(props: Props): Node
 			return { title = locale.s("ds.model_picker.not_found"), hint = locale.s("ds.model_picker.not_found_hint", { where = where, q = q }) }
 		end,
 		on_open = function()
-			-- A new chat with stars opens the full list on them.
+			-- A new chat with stars opens the full list on them, until a tab is picked.
 			local has_stars = next(favorites:peek()) ~= nil
+			local fresh = LAST_TAB:peek() == ""
 			ui.batch(function()
-				tab:set(if not COMPACT:peek() and not committed() and has_stars then STARRED else nil)
+				tab:set(if fresh and not COMPACT:peek() and not committed() and has_stars then STARRED else nil)
 				listing:set(false)
 				tray_at:set(nil)
 				dragged:set(nil)

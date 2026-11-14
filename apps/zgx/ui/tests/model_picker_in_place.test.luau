@@ -275,8 +275,8 @@ test("a new model wears NEW; a listing agent holds its rows, a failed one says w
 	expect(app:error()).to_be(nil)
 end)
 
--- A new chat with stars opens the full layout on them, its rows hinted ⌘1…;
--- the compact list has no hints, and two rows of one name tell themselves
+-- A new chat with stars opens the full layout on them, its rows hinted ⌘1…,
+-- until a tab is picked, which it opens on again; the compact list has no hints, and two rows of one name tell themselves
 -- apart by the description.
 test("a new chat's full list opens on its stars with ⌘ hints; same-named rows say which", function()
 	local app = mount("picker_fixture.luau")
@@ -289,6 +289,13 @@ test("a new chat's full list opens on its stars with ⌘ hints; same-named rows 
 	settle(app)
 	expect(line_of(app, 'option "GPT ⌘1"')).never.to_be_nil()
 	expect(line_of(app, 'option "Sonnet')).to_be_nil()
+	app:click('role:tab "Codex"')
+	settle(app)
+	app:key("Escape")
+	settle(app)
+	app:click('role:button "Model"')
+	settle(app)
+	expect(line_of(app, 'option "Sol NEW"')).never.to_be_nil()
 	app:key("Escape")
 	settle(app)
 	app:set_state("ds/model_picker.luau::model_picker_compact", true)

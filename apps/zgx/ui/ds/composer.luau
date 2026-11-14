@@ -1793,7 +1793,39 @@ return ui.component(function(props: Props): Node
 		end
 		picker_was = now
 	end)
-	local model = ui.presence(side, function(at: string): Node
+	-- The side with more room, fixed while open: zgx flips a panel that doesn't fit, so a tall tab would jump across the chip.
+	local model_at = ui.use_state(side())
+	local model_chip = ui.ref()
+	local function place_model()
+		local at = side()
+		local el = model_chip:peek()
+		local found, r = pcall(ui.window_rect, el)
+		local sized, size = pcall(function(): any
+			return ui.window.size:peek()
+		end)
+		if at == "bottom" and found and r and sized and type(size) == "table" and type(size.height) == "number" then
+			at = if r.y > size.height - r.y - r.height then "top" else "bottom"
+		end
+		if model_at:peek() ~= at then
+			model_at:set(at)
+		end
+	end
+	ui.effect(function()
+		pcall(function()
+			ui.window.size:get()
+		end)
+		side()
+		if not picker_open:get() then
+			ui.after(0, function()
+				if not picker_open:peek() then
+					place_model()
+				end
+			end)
+		end
+	end)
+	local model = ui.presence(function(): string
+		return model_at:get()
+	end, function(at: string): Node
 		return ModelPicker {
 			model = props.model,
 			effort = props.effort,
@@ -3173,7 +3205,7 @@ return ui.component(function(props: Props): Node
 				on_resize = measure(right_w, "w"),
 				items = "center",
 				shrink = 0,
-				ui.row { on_resize = measure(model_w, "w"), items = "center", shrink = 0, model },
+				ui.row { ref = model_chip, on_resize = measure(model_w, "w"), items = "center", shrink = 0, model },
 				context_usage.PlanChip { plan = plan, card = context_card(), side = side },
 				if props.usage
 					then context_usage.Chip {
