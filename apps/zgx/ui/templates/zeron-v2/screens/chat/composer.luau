@@ -241,7 +241,6 @@ local function Composer(): Node
 	local was = ui.state("chat_composer_was", "?" :: string?)
 	local carry_next: { [string]: any }? = nil
 	local undoable: { [string]: any }? = nil
-	local held_back: shared.Whole? = nil
 	local moved_note = ui.state("chat_moved_note", nil :: { key: string, undo: boolean, n: number }?)
 	moved_note:set(nil)
 	ui.effect(function()
@@ -564,7 +563,7 @@ local function Composer(): Node
 	-- Its own goes as the chat changes (kept: a reload isn't a change).
 	local notice_for = ui.state("chat_notice_for", "?")
 	ui.effect(function()
-		local id = session_id:get() or ""
+		local id = session_id:get() or route.draft:get()
 		if notice_for:peek() ~= id then
 			notice_for:set(id)
 			own_notice:set(nil)
@@ -874,7 +873,7 @@ local function Composer(): Node
 	-- as Zeron's composer swaps drafts on navigation.
 	-- (Only a real move: a reload, the same chat shown, keeps the edit.)
 	ui.effect(function()
-		local key = session_id:get() or ""
+		local key = session_id:get() or route.draft:get()
 		if shared.showing() == key then
 			return
 		end
@@ -882,10 +881,6 @@ local function Composer(): Node
 			end_edit("cancel")
 		end
 		shared.show(key)
-		if held_back and key ~= "" then
-			shared.join_draft_before("", held_back)
-			held_back = nil
-		end
 	end)
 
 	-- Arriving on a chat (another session or a new chat shown: a sidebar or
@@ -1360,15 +1355,11 @@ local function Composer(): Node
 		local ms = if reduced then 120 else 320
 		fx_to(0, if reduced then 0 else -12, ms)
 		ui.after(ms, function()
-			local held = shared.whole_of("")
-			local holds = held.text ~= "" or #held.cargo > 0
-			-- (Sent at once, the new chat's own draft isn't sent with it: put back after.)
-			if send_now and holds then
-				shared.put_whole("", { text = "", cargo = {}, quotes = {} })
-			end
-			local wholes = shared.move_draft(id, "")
 			carry_next = carry
+			-- (A draft written in on the new-chat page stays: `new_chat` opens a fresh one for this.)
 			route.new_chat(s.project)
+			local to = route.draft:peek()
+			local wholes = shared.move_draft(id, to)
 			-- (The route's project lands on arrival and a project change clears the branch: each is set a tick later.)
 			ui.after(0, function()
 				if new_chat() and project:peek() ~= carry.project then
@@ -1384,19 +1375,13 @@ local function Composer(): Node
 					shared.focus:add(1)
 					if send_now then
 						send(shared.text:peek())
-						local left = shared.draft_peek("")
-						local went = left.text == "" and #left.cargo == 0
-						if holds and went then
-							held_back = held
-						elseif holds then
-							shared.join_draft_before("", held)
-						end
-						if went then
+						local left = shared.draft_peek(to)
+						if left.text == "" and #left.cargo == 0 then
 							say_moved("chat.composer.sent_new", false)
 						end
 						return
 					end
-					undoable = { from = id, wholes = wholes, before = before }
+					undoable = { from = id, to = to, wholes = wholes, before = before }
 					say_moved("chat.composer.draft_moved", true)
 				end)
 			end)
@@ -1412,7 +1397,7 @@ local function Composer(): Node
 			return
 		end
 		ui.batch(function()
-			shared.put_whole("", u.wholes.to)
+			shared.put_whole(u.to, u.wholes.to)
 			shared.put_whole(u.from, u.wholes.from)
 			defaults:set(u.before.defaults)
 			draft_profile:set(u.before.profile)
@@ -1584,7 +1569,7 @@ local function Composer(): Node
 	local lifted = require("@app/screens/chat/dock").lift("page")
 
 	local dictation = Dictation.bind(shared.text, function(): string
-		return `{session_id:get() or ""}|{if editing:get() then editing:get().item else ""}|{route.current:get().name}`
+		return `{session_id:get() or route.draft:get()}|{if editing:get() then editing:get().item else ""}|{route.current:get().name}`
 	end, function(): boolean
 		return asks.question:get() ~= nil or asks.approval:get() ~= nil or route.current:get().name == "settings" or route.current:get().name == "plugin"
 	end, "main")
@@ -1991,7 +1976,7 @@ local function Composer(): Node
 			mention_empty = completions.empty,
 			mention_sections = completions.sections,
 			draft_key = function(): any
-				return session_id:get() or ""
+				return session_id:get() or route.draft:get()
 			end,
 		}
 	end

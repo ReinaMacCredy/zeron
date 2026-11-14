@@ -862,23 +862,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			return Shared.refs_key(chat)
 		end,
 		-- Its + and a picture pasted: chips on its own draft, as the chat page's.
-		on_attach = function()
-			ui.open_files({ title = ui.t("chat.composer.attach_files"):get(), multiple = true }):after(function(files: any)
-				if files and #files > 0 then
-					Shared.attach_files(files, chat)
-					focus:add(1)
-				end
-			end, function() end)
-		end,
-		on_paste_image = function(): boolean
-			store.paste_image():after(function(path: string?)
-				if type(path) == "string" and path ~= "" then
-					Shared.attach_files({ { name = "image.png", path = path, clipboard = true } }, chat)
-					focus:add(1)
-				end
-			end, function() end)
-			return true
-		end,
+		on_attach = cargo_props.on_attach,
+		on_paste_image = cargo_props.on_paste_image,
 		focus = focus,
 		value = draft,
 		-- (ds.Composer's placeholder is a string: read as the tab is made.)
