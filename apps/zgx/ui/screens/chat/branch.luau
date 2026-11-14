@@ -100,6 +100,10 @@ local function rewind_now()
 	fold.start(function()
 		sessions.rewind(r.chat, r.id):after(function(out: any)
 			local prompt = if type(out) == "table" and type(out.prompt) == "string" then out.prompt else ""
+			local typed = shared.draft_of(r.chat).text
+			if string.find(typed, "%S") and typed ~= prompt then
+				prompt = if prompt == "" then typed else `{prompt}\n\n{typed}`
+			end
 			shared.set_draft_of(r.chat, "text", prompt)
 			shared.focus:add(1)
 			flash()
