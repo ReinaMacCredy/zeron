@@ -95,6 +95,42 @@ fn a_consent_question_never_takes_the_composer() {
     assert_eq!(both.map(|i| i.request_id), Some("plain".to_owned()));
 }
 
+#[test]
+fn only_an_approval_that_deletes_pushes_or_changes_files_is_destructive() {
+    let destructive = |approval: bool, header: &str, text: &str| {
+        let mut ask = question("q", false);
+        ask.approval = approval;
+        ask.header = header.into();
+        ask.question = text.into();
+        let part = MessagePart::Input {
+            id: "r".into(),
+            request_id: "r".into(),
+            questions: vec![ask],
+            resolved: false,
+            answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
+        };
+        open_input(&[entry(vec![part])]).unwrap().destructive
+    };
+    assert!(destructive(
+        true,
+        "Allow Bash?",
+        "Claude wants to use Bash: git push origin release"
+    ));
+    assert!(destructive(
+        true,
+        "Approve file change",
+        "Codex wants to change 2 files"
+    ));
+    assert!(!destructive(
+        true,
+        "Approve command",
+        "Codex wants to run `cargo test -p zeron-mobile`. Allow it?"
+    ));
+    assert!(!destructive(false, "Cleanup", "Delete the old branch?"));
+}
+
 fn generation(session: &SessionHandle, kind: &str) -> Option<Option<u64>> {
     session
         .core

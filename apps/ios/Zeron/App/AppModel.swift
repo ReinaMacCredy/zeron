@@ -654,7 +654,7 @@ final class AppModel {
                     open.insert(id)
                     if answeredAsks.contains(id) { return nil }
                 }
-                return NeedsYouAsk(chatId: row.id, requestId: input?.requestId, questions: input?.questions ?? [], hostName: row.deviceName ?? "", atMs: row.workingSinceMs ?? row.lastActivityMs)
+                return NeedsYouAsk(chatId: row.id, requestId: input?.requestId, questions: input?.questions ?? [], destructive: input?.destructive ?? false, hostName: row.deviceName ?? "", atMs: row.workingSinceMs ?? row.lastActivityMs)
             }
         answeredAsks.formIntersection(open)
         return asks

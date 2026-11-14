@@ -80,6 +80,25 @@ final class NeedsYouFlowTests: XCTestCase {
         snapshot(app, "approval-answered")
     }
 
+    func testADestructiveApprovalIsAnsweredInItsThread() {
+        let app = launch()
+        let list = openSheet(app)
+        let approval = row(app, "chat-approve-push")
+        scrollTo(approval, in: list)
+        approval.tap()
+        let open = app.buttons["question-open-thread"]
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["question-option-0"].exists)
+        snapshot(app, "destructive-approval")
+        open.tap()
+        let approve = app.buttons["question-option-0"]
+        XCTAssertTrue(approve.waitForExistence(timeout: 10))
+        snapshot(app, "destructive-approval-thread")
+        approve.tap()
+        XCTAssertTrue(approve.waitForNonExistence(timeout: 10))
+        snapshot(app, "destructive-approval-answered")
+    }
+
     func testAStepQuestionIsAnsweredFromTheSheet() {
         let app = launch()
         let list = openSheet(app)

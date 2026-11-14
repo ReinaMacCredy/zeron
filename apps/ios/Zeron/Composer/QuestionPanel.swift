@@ -10,6 +10,7 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
     var onOpenThread: (() -> Void)? {
         didSet { other.placeholder = onOpenThread == nil ? "Other…" : "Type my own…" }
     }
+    var quickAnswer = true { didSet { render() } }
 
     private let card = Glass.surface(radius: 26)
     private let header = UILabel()
@@ -179,10 +180,10 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
             header.text = q.header
             question.text = "\(q.text)\n\nEnter it on your Mac. It stays out of chat."
         }
-        options.isHidden = q.secret
-        other.isHidden = q.multiline || q.secret
-        editor.isHidden = !q.multiline || q.secret
-        nextButton.isHidden = q.secret
+        options.isHidden = !quickAnswer || q.secret
+        other.isHidden = q.multiline || !quickAnswer || q.secret
+        editor.isHidden = !q.multiline || !quickAnswer || q.secret
+        nextButton.isHidden = !quickAnswer || q.secret
         close.isHidden = q.secret
         other.text = custom[q.id]
         editor.text = custom[q.id]

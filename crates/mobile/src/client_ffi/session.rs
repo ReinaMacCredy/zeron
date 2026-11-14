@@ -249,6 +249,7 @@ pub struct InputRequest {
     pub entry_id: String,
     pub request_id: String,
     pub questions: Vec<UserInputQuestion>,
+    pub destructive: bool,
 }
 
 impl From<&zc::InputRequest> for InputRequest {
@@ -270,6 +271,7 @@ impl From<&zc::InputRequest> for InputRequest {
                     secret: q.is_secret(),
                 })
                 .collect(),
+            destructive: i.destructive,
         }
     }
 }

@@ -4,6 +4,7 @@ struct NeedsYouAsk: Equatable {
     let chatId: String
     let requestId: String?
     let questions: [UserInputQuestion]
+    let destructive: Bool
     let hostName: String
     let atMs: Int64
 
@@ -177,7 +178,13 @@ final class NeedsYouQuestionController: UIViewController {
         kind.font = Fonts.ui(.sansMedium, 13)
         kind.textColor = Palette.ask
         kind.numberOfLines = 0
-        let stack = UIStackView(arrangedSubviews: [kind, panel])
+        let note = UILabel()
+        note.text = "This changes files or the remote. Review it in the thread."
+        note.font = Fonts.ui(.sans, 14)
+        note.textColor = Palette.secondary
+        note.numberOfLines = 0
+        note.isHidden = !ask.destructive
+        let stack = UIStackView(arrangedSubviews: [kind, panel, note])
         stack.axis = .vertical
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -197,6 +204,7 @@ final class NeedsYouQuestionController: UIViewController {
             guard let self else { return }
             NeedsYou.openThread(chatId, from: self)
         }
+        panel.quickAnswer = !ask.destructive
         panel.configure(ask.panelQuestions)
         panel.onSubmit = { [weak self] answers in self?.send(answers) }
         token = app.observeNeedsYou { [weak self] in

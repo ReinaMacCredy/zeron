@@ -272,6 +272,9 @@ pub struct InputRequest {
     pub entry_id: String,
     pub request_id: String,
     pub questions: Vec<UserInputQuestion>,
+    /// An approval that deletes, pushes or changes files: answered in its
+    /// thread, where the transcript shows what it is for.
+    pub destructive: bool,
 }
 
 /// Host-advertised features that gate composer affordances.

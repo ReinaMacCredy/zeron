@@ -1150,11 +1150,26 @@ fn open_input(entries: &[Arc<Entry>]) -> Option<InputRequest> {
                     entry_id: entry.id.clone(),
                     request_id: request_id.clone(),
                     questions: questions.clone(),
+                    destructive: destructive_approval(questions),
                 });
             }
         }
     }
     None
+}
+
+fn destructive_approval(questions: &[UserInputQuestion]) -> bool {
+    const WORDS: &[&str] = &[
+        "delete", "remove", "rm", "rmdir", "unlink", "trash", "push", "edit", "multiedit",
+        "notebookedit", "write", "modify", "patch", "apply_patch",
+    ];
+    questions.iter().filter(|q| q.approval).any(|q| {
+        let text = format!("{} {}", q.header, q.question).to_lowercase();
+        text.contains("file change")
+            || text
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|word| WORDS.contains(&word))
+    })
 }
 
 /// The `pending://` upload ids a command names.

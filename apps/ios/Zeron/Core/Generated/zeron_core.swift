@@ -16210,13 +16210,15 @@ public struct InputRequest: Equatable, Hashable {
     public var entryId: String
     public var requestId: String
     public var questions: [UserInputQuestion]
+    public var destructive: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(entryId: String, requestId: String, questions: [UserInputQuestion]) {
+    public init(entryId: String, requestId: String, questions: [UserInputQuestion], destructive: Bool) {
         self.entryId = entryId
         self.requestId = requestId
         self.questions = questions
+        self.destructive = destructive
     }
 
     
@@ -16237,7 +16239,8 @@ public struct FfiConverterTypeInputRequest: FfiConverterRustBuffer {
             try InputRequest(
                 entryId: FfiConverterString.read(from: &buf), 
                 requestId: FfiConverterString.read(from: &buf), 
-                questions: FfiConverterSequenceTypeUserInputQuestion.read(from: &buf)
+                questions: FfiConverterSequenceTypeUserInputQuestion.read(from: &buf), 
+                destructive: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -16245,6 +16248,7 @@ public struct FfiConverterTypeInputRequest: FfiConverterRustBuffer {
         FfiConverterString.write(value.entryId, into: &buf)
         FfiConverterString.write(value.requestId, into: &buf)
         FfiConverterSequenceTypeUserInputQuestion.write(value.questions, into: &buf)
+        FfiConverterBool.write(value.destructive, into: &buf)
     }
 }
 

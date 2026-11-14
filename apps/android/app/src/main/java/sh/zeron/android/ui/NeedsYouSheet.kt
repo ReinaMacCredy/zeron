@@ -173,7 +173,22 @@ fun NeedsYouSheet(model: AppModel, excluding: String?, onDismiss: () -> Unit, on
                             modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
                         )
                         Spacer(Modifier.height(6.dp))
-                        QuestionPanel(input) { answer(row, input, it) }
+                        if (input.destructive) {
+                            for (q in input.questions) {
+                                Column(Modifier.padding(horizontal = 24.dp, vertical = 6.dp)) {
+                                    if (q.header.isNotEmpty()) Text(q.header, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(q.question, style = MaterialTheme.typography.titleMedium)
+                                }
+                            }
+                            Text(
+                                "This changes files or the remote. Review it in the thread.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                            )
+                        } else {
+                            QuestionPanel(input) { answer(row, input, it) }
+                        }
                         TextButton(onClick = { hideThen { onOpenChat(row.id) } }, modifier = Modifier.padding(horizontal = 12.dp).testTag("needs-you-open-thread")) { Text("Open thread") }
                     }
                 } else {
