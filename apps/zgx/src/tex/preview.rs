@@ -104,7 +104,9 @@ pub fn compile_with(root: PathBuf, program: Program, tool: Tool, cache: &Path) -
     lock(roots()).insert(dir.clone(), base.clone());
     let started = SystemTime::now();
     let output = dir.join("output.txt");
-    let ran = build::run(build::command(&tool, program, &root, &out), &output, tool.timeout(), |group| {
+    let piped = matches!(tool, Tool::Tectonic(_)).then(|| piped(&root, &dir)).flatten();
+    let stem = if piped.is_some() { build::PIPED.to_string() } else { root.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default() };
+    let ran = build::run(build::command(&tool, program, &root, &out, piped), &output, tool.timeout(), |group| {
         *lock(&slot.group) = Some(group);
         if !current() {
             build::stop(group);
@@ -118,7 +120,6 @@ pub fn compile_with(root: PathBuf, program: Program, tool: Tool, cache: &Path) -
         Ok(ran) => ran,
         Err(e) => return Done::failed(e),
     };
-    let stem = root.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let log = std::fs::read(out.join(format!("{stem}.log"))).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
     let mut problems = build::problems(&log, &base);
     let ok = !ran.timed_out && ran.status.is_some_and(|s| s.success());
@@ -139,6 +140,12 @@ pub fn compile_with(root: PathBuf, program: Program, tool: Tool, cache: &Path) -
         tool: tool.name(),
         root: Some(root),
     }
+}
+
+fn piped(root: &Path, dir: &Path) -> Option<std::fs::File> {
+    let at = dir.join("wrapper.tex");
+    std::fs::write(&at, build::wrapper(root)?).ok()?;
+    std::fs::File::open(at).ok()
 }
 
 fn fresh(path: &Path, since: SystemTime) -> bool {

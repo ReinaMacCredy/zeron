@@ -1,5 +1,6 @@
 use std::{
     ffi::OsString,
+    fs::File,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -152,7 +153,16 @@ pub fn find(program: Program, places: &[PathBuf], bundled: Option<PathBuf>) -> O
         .or_else(|| places.iter().find_map(|dir| here(dir, "tectonic")).map(Tool::Tectonic))
 }
 
-pub fn command(tool: &Tool, program: Program, root: &Path, out: &Path) -> Command {
+pub const PIPED: &str = "texput";
+
+pub fn wrapper(root: &Path) -> Option<String> {
+    let name = root.file_name()?.to_str().filter(|n| !n.contains(['"', '%', '#', '{', '}', '\\', '\n']))?;
+    Some(format!(
+        "\\ifdefined\\pdfgentounicode\\else\\newcount\\pdfgentounicode\\fi\n\\ifdefined\\pdfglyphtounicode\\else\\def\\pdfglyphtounicode#1#2{{}}\\fi\n\\input{{\\detokenize{{{name}}}}}\n"
+    ))
+}
+
+pub fn command(tool: &Tool, program: Program, root: &Path, out: &Path, piped: Option<File>) -> Command {
     let name = root.file_name().map(OsString::from).unwrap_or_default();
     let mut cmd = match tool {
         Tool::Latexmk(bin) => {
@@ -189,10 +199,18 @@ pub fn command(tool: &Tool, program: Program, root: &Path, out: &Path) -> Comman
             cmd.env("PATH", joined);
         }
     }
-    cmd.arg(name);
+    match piped {
+        Some(file) => {
+            cmd.arg("-");
+            cmd.stdin(file);
+        }
+        None => {
+            cmd.arg(name);
+            cmd.stdin(Stdio::null());
+        }
+    }
     cmd.current_dir(root.parent().unwrap_or(Path::new("/")));
     cmd.env("max_print_line", "1000");
-    cmd.stdin(Stdio::null());
     cmd
 }
 
@@ -375,6 +393,20 @@ mod tests {
         assert_eq!(find(Program::Xe, &places, Some(tectonic.clone())), Some(Tool::Tectonic(tectonic)));
         assert!(super::places(None).iter().any(|p| p == Path::new("/Library/TeX/texbin")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tex_tectonic_reads_the_root_through_a_wrapper_that_stands_in_for_pdftex_primitives() {
+        let text = wrapper(Path::new("/my docs/cv~1.tex")).unwrap();
+        assert!(text.contains("\\newcount\\pdfgentounicode") && text.contains("\\def\\pdfglyphtounicode#1#2{}"));
+        assert!(text.ends_with("\\input{\\detokenize{cv~1.tex}}\n"));
+        assert_eq!(wrapper(Path::new("/doc/50%.tex")), None);
+        assert_eq!(wrapper(Path::new("/doc/a{b}.tex")), None);
+        let file = File::open("/dev/null").unwrap();
+        let cmd = command(&Tool::Tectonic("/t/tectonic".into()), Program::Pdf, Path::new("/doc/cv.tex"), Path::new("/out"), Some(file));
+        assert_eq!(cmd.get_args().last().and_then(|a| a.to_str()), Some("-"));
+        let cmd = command(&Tool::Engine("/b/pdflatex".into()), Program::Pdf, Path::new("/doc/cv.tex"), Path::new("/out"), None);
+        assert_eq!(cmd.get_args().last().and_then(|a| a.to_str()), Some("cv.tex"));
     }
 
     #[test]
