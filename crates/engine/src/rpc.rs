@@ -1296,6 +1296,8 @@ enum MutateParams {
         plan_doc: bool,
         #[serde(default)]
         attach_plan: bool,
+        #[serde(default)]
+        claim: bool,
     },
     #[serde(rename_all = "camelCase")]
     StartTasks {
@@ -3721,6 +3723,7 @@ impl EngineRpc {
                 same_agents,
                 plan_doc,
                 attach_plan,
+                claim,
             } => {
                 supervisor::refuse_supervisor(from_chat_id.as_deref(), supervisor::GOAL_OR_SPEND)?;
                 self.refuse_stranger(&task_id, from_chat_id.as_deref())?;
@@ -3731,7 +3734,7 @@ impl EngineRpc {
                     plan_doc,
                     attach: attach_plan,
                 });
-                self.assign_task(&task_id, &chat_id, send, from_chat_id.as_deref(), lead)
+                self.assign_task(&task_id, &chat_id, send, from_chat_id.as_deref(), lead, claim)
                     .await
             }
             MutateParams::StartTasks {
@@ -5733,11 +5736,11 @@ impl RpcService for EngineRpc {
                 let for_run = match (&p.scope, &p.command) {
                     (RespondScope::Once, _) => None,
                     (RespondScope::Run, SessionCommandPayload::RespondInput { request_id, answers }) => {
-                        let access = self
+                        let actions = self
                             .sessions
                             .run_scope_access(&p.chat_id, request_id, answers)
                             .map_err(RpcError::Failed)?;
-                        Some((request_id.clone(), access))
+                        Some((request_id.clone(), actions))
                     }
                     (RespondScope::Run, _) => {
                         return Err(RpcError::BadParams("scope run answers a respondInput only".into()));
@@ -5747,8 +5750,8 @@ impl RpcService for EngineRpc {
                     .doc_host
                     .queue_command_with_transfers(&p.chat_id, p.command, p.transfers)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                if let Some((request_id, access)) = for_run {
-                    self.sessions.allow_for_run(&p.chat_id, access, &request_id);
+                if let Some((request_id, actions)) = for_run {
+                    self.sessions.allow_for_run(&p.chat_id, actions, &request_id);
                 }
                 if let Some(prompt) = prompt {
                     self.watch_mentioned_trees(&p.chat_id, &prompt);

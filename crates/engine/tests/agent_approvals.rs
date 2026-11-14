@@ -13,7 +13,7 @@ use zeron_doc::{
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls, approval};
 use zeron_proto::{
-    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    AccessMode, AgentEvent, ApprovalAction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SessionStatus, SteeringMode, UserInputQuestion,
 };
 use zeron_rpc::{Caller, RpcService, methods, with_caller};
@@ -48,6 +48,11 @@ async fn play(prompt: &str, request_input: &Ask, answers: &Answers) {
         let edit = ask("edit", approval::edit("Mock", &["a.rs"]));
         let command = ask("command", approval::command("Mock", "cargo test"));
         futures::join!(edit, command);
+    } else if prompt.contains("command then tool and edit") {
+        ask("first", approval::command("Mock", "ls")).await;
+        ask("second", approval::command("Mock", "pwd")).await;
+        ask("tool", approval::tool("Mock", "fetch", None)).await;
+        ask("edit", approval::edit("Mock", &["a.rs"])).await;
     } else if prompt.contains("two commands") {
         ask("first", approval::command("Mock", "ls")).await;
         ask("second", approval::command("Mock", "pwd")).await;
@@ -437,6 +442,47 @@ async fn scope_run_lets_the_next_command_through_and_keeps_the_chat_config() {
     );
     assert_eq!(inputs(&rig.core).len(), 1, "the second command never asked");
     assert_eq!(child_access(&rig.core), AccessMode::Supervised);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn scope_run_on_a_command_lets_only_commands_through() {
+    let rig = rig("full-access").await;
+    start_child(&rig.core, "command then tool and edit");
+    wait_for(|| open_inputs(&rig.core).len() == 1, "the command card").await;
+    let (request_id, questions) = open_inputs(&rig.core).remove(0);
+    as_lead(
+        &rig,
+        methods::QUEUE_COMMAND,
+        respond(&request_id, &questions[0].id, "Yes", "run"),
+    )
+    .await
+    .unwrap();
+    for kind in [ApprovalAction::Tool, ApprovalAction::Edit] {
+        let card = || {
+            open_inputs(&rig.core)
+                .into_iter()
+                .find(|(_, questions)| questions[0].action == Some(kind))
+        };
+        wait_for(|| card().is_some(), "the next kind's card").await;
+        let (id, _) = card().unwrap();
+        assert!(
+            rig.core
+                .sessions
+                .respond_input("child", &id, Vec::new())
+                .unwrap()
+        );
+    }
+    wait_for(|| idle(&rig.core), "the child's run to finish").await;
+    assert_eq!(
+        answered(&rig),
+        [
+            ("edit".into(), false),
+            ("first".into(), true),
+            ("second".into(), true),
+            ("tool".into(), false)
+        ]
+    );
     rig.core.shutdown().await;
 }
 

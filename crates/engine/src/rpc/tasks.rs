@@ -376,6 +376,15 @@ impl EngineRpc {
     }
 
     pub(super) fn update_task(&self, task_id: &str, patch: &TaskPatch) -> Result<(), RpcError> {
+        self.update_task_when(task_id, patch, None)
+    }
+
+    fn update_task_when(
+        &self,
+        task_id: &str,
+        patch: &TaskPatch,
+        when: Option<&dyn Fn(&Task) -> Result<(), RpcError>>,
+    ) -> Result<(), RpcError> {
         let leads = patch.chat_id.is_some() || patch.mode.is_some() || patch.completed.is_some();
         let _plans = (leads || patch.depends_on.is_some()).then(|| self.plan_writes());
         if let Some(depends_on) = &patch.depends_on {
@@ -399,6 +408,9 @@ impl EngineRpc {
             }
             if leads {
                 self.check_one_plan(&task, patch)?;
+            }
+            if let Some(when) = when {
+                when(&task)?;
             }
         }
         match self.workspace.update_task(task_id, patch).map_err(failed)? {
@@ -689,6 +701,7 @@ impl EngineRpc {
         send: bool,
         from_chat_id: Option<&str>,
         lead: Option<Lead>,
+        claim: bool,
     ) -> Result<(), RpcError> {
         let task = self
             .workspace
@@ -709,12 +722,24 @@ impl EngineRpc {
         let reads = lead.and_then(|_| {
             self.context_reads(&task, chat.space_id.as_deref(), chat.config.as_ref())
         });
-        self.update_task(
+        let unclaimed = |now: &Task| -> Result<(), RpcError> {
+            if now.completed_at.is_some() {
+                return Err(refused(&format!("task {task_id} is already done")));
+            }
+            match now.chat_id.as_deref() {
+                Some(holder) if holder != chat_id => Err(refused(&format!(
+                    "task {task_id} is claimed by thread {holder}; leave it unless the person hands it over"
+                ))),
+                _ => Ok(()),
+            }
+        };
+        self.update_task_when(
             task_id,
             &TaskPatch {
                 completed: task.completed_at.is_some().then_some(false),
                 ..lead_patch(chat_id, chat.space_id, &task, lead)
             },
+            claim.then_some(&unclaimed as &dyn Fn(&Task) -> Result<(), RpcError>),
         )?;
         if send {
             let sent = self

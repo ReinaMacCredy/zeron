@@ -517,6 +517,24 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
         None,
         "a send that lands clears the old failure"
     );
+    let Err(late) = mutate(json!({
+        "op": "assignTask", "taskId": "t3", "chatId": "talk", "send": false, "claim": true,
+    }))
+    .await
+    else {
+        panic!("a claim on a held task is refused")
+    };
+    assert!(late.to_string().contains("lead-1"), "{late}");
+    assert_eq!(
+        core.workspace.task("t3").unwrap().chat_id.as_deref(),
+        Some("lead-1"),
+        "a claim that lost the race leaves the holder"
+    );
+    mutate(json!({
+        "op": "assignTask", "taskId": "t3", "chatId": "lead-1", "send": false, "claim": true,
+    }))
+    .await
+    .unwrap();
 
     core.workspace
         .create_chat_from("quiet", None, Some("dev-a"), None, None, None)

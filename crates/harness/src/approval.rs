@@ -57,10 +57,18 @@ pub fn covered(access: AccessMode, questions: &[UserInputQuestion]) -> bool {
         })
 }
 
-pub fn least_covering(questions: &[UserInputQuestion]) -> Option<AccessMode> {
-    AccessMode::ALL
-        .into_iter()
-        .find(|access| covered(*access, questions))
+pub fn grantable(questions: &[UserInputQuestion]) -> Option<Vec<ApprovalAction>> {
+    if questions.is_empty() {
+        return None;
+    }
+    questions
+        .iter()
+        .map(|q| q.action.filter(|_| q.approval && q.kind.is_none()))
+        .collect()
+}
+
+pub fn granted(grants: &[ApprovalAction], questions: &[UserInputQuestion]) -> bool {
+    grantable(questions).is_some_and(|actions| actions.iter().all(|a| grants.contains(a)))
 }
 
 pub fn allow_all(questions: &[UserInputQuestion]) -> Vec<UserInputAnswer> {
@@ -180,9 +188,12 @@ mod tests {
             ..command.clone()
         };
         assert!(!covered(FullAccess, &[consent]));
-        assert_eq!(least_covering(&[edit.clone()]), Some(AutoAcceptEdits));
-        assert_eq!(least_covering(&[edit.clone(), tool]), Some(FullAccess));
-        assert_eq!(least_covering(&[command, plan]), None);
+        assert!(granted(&[ApprovalAction::Command], std::slice::from_ref(&command)));
+        assert!(!granted(&[ApprovalAction::Command], std::slice::from_ref(&tool)));
+        assert!(!granted(&[ApprovalAction::Command], std::slice::from_ref(&edit)));
+        assert!(!granted(&[ApprovalAction::Command], &[command.clone(), edit.clone()]));
+        assert_eq!(grantable(&[command, plan]), None);
+        assert_eq!(grantable(&[]), None);
         let yes = allow_all(std::slice::from_ref(&edit));
         assert!(approved(&edit, &yes));
     }

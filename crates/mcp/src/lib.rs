@@ -2426,6 +2426,7 @@ impl ThreadTools {
                                 "chatId": self.chat_id,
                                 "send": false,
                                 "fromChatId": self.chat_id,
+                                "claim": true,
                             }),
                         )
                         .await?;
@@ -5635,7 +5636,7 @@ mod tests {
         assert_eq!(
             logged(&rig.calls, methods::MUTATE),
             [
-                json!({ "op": "assignTask", "taskId": "t3", "chatId": "a", "send": false, "fromChatId": "a" })
+                json!({ "op": "assignTask", "taskId": "t3", "chatId": "a", "send": false, "fromChatId": "a", "claim": true })
             ]
         );
     }
