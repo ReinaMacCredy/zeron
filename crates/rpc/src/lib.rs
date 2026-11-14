@@ -93,8 +93,7 @@ pub mod methods {
     pub const PREVIEW_ROUTES: &str = "PreviewRoutes";
     pub const RESOLVE_LIMIT_OFFER: &str = "ResolveLimitOffer";
     /// Compact a long idle chat before its 1h prompt cache expires. No params /
-    /// `CompactionSettingsUpdate` (settings plus a write-only `jevApiKey`) →
-    /// `CompactionSettingsState`.
+    /// `CompactionSettings` → `CompactionSettings`.
     pub const GET_COMPACTION_SETTINGS: &str = "GetCompactionSettings";
     pub const SET_COMPACTION_SETTINGS: &str = "SetCompactionSettings";
     pub const GET_REVIEW_SETTINGS: &str = "GetReviewSettings";

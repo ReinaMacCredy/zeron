@@ -437,7 +437,12 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             engine::get()
                 .call(&method, params)
                 .await
-                .map(|answer| json_value(&answer))
+                .map(|answer| {
+                    if method == "SetCompactionSettings" {
+                        crate::chat::compaction_settings(&answer);
+                    }
+                    json_value(&answer)
+                })
                 .map_err(|error| {
                     // An engine too old for the method: said as what to do.
                     if error.to_ascii_lowercase().contains("unknown method") {

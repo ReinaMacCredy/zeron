@@ -317,7 +317,7 @@ mod tests {
             running_subagents: 0,
             running_subagent_models: Vec::new(),
             compact_plan: None,
-            classifying: None,
+            compact_hold: None,
             last_turn_outcome: None,
             terminal_activity: None,
             waiting: None,

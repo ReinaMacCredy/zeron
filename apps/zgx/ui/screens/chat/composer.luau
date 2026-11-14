@@ -1795,9 +1795,20 @@ local function Composer(): Node
 						resume_kept:set({ id = s.id, at = s.resume.at })
 					end
 				end,
-				plan = function(): any
+				next = function(): any
 					local s: any = open()
-					return if s then s.compact_plan else nil
+					return if s then s.next_compaction or nil else nil
+				end,
+				marks = function(): any
+					local s: any = open()
+					return if s then s.context_marks or nil else nil
+				end,
+				on_compact = function()
+					compact("")
+				end,
+				busy = function(): boolean
+					local s: any = open()
+					return s ~= nil and (s.compacting == true or (s.compaction_wait or nil) ~= nil)
 				end,
 			},
 			footer_git = function(): boolean

@@ -739,7 +739,13 @@
         "window_week": "Weekly",
         "window_day": "Daily",
         "plan": "{name} · plan",
-        "plan_window": "{percent} · resets {when}"
+        "plan_window": "{percent} · resets {when}",
+        "next": "Next compaction",
+        "next_chip": "{chip} ·",
+        "compact_now": "Compact now",
+        "mark_floor": "New-task reminder from {n}K",
+        "mark_warn": "Agent warned at {n}K",
+        "mark_auto": "Compacts on its own at {n}K"
       },
       "terminal": "Terminal",
       "resume": "Resume",
@@ -1411,40 +1417,10 @@
       "more": "More…"
     },
     "compaction": {
-      "verdict": {
-        "new": "New task",
-        "carry": "Carry over",
-        "continue": "Same task",
-        "failed": "No answer"
-      },
-      "swapped_in": "Swapped in",
-      "usually": "{elapsed}, usually ~{usual}",
       "compacted": "Compacted",
       "compacting": "Compacting",
-      "background": "Compacted in the background",
-      "nothing_carried": "nothing carried",
-      "turns_as_text": "{n, plural, one {# turn as text} other {# turns as text}}",
-      "not_compacted": "Not compacted",
-      "context_kept": "context kept",
-      "no_answer": "the classifier gave no answer",
-      "classifier": "Classifier",
       "queued": "Compaction queued",
       "queued_meta": "· starts when the turn settles",
-      "checking": "Checking whether to compact",
-      "checking_note": "Checking the agent's note",
-      "said": "{verdict} (said {said})",
-      "by": {
-        "stage1": "First look",
-        "stage2": "Second look",
-        "streak": "Three same-task verdicts in a row",
-        "ceiling": "Context near the window, not asked",
-        "agent_note": "Agent note, compacted without asking",
-        "turn_end": "Past the check when the turn ended, not asked",
-        "background_copy": "A copy compacted in the background, not asked"
-      },
-      "decision": "Decision",
-      "reason": "Reason",
-      "decided_by": "Decided by",
       "context": {
         "title": "Context",
         "subtitle": "Claude Code · {model}",
@@ -1454,29 +1430,14 @@
         "compact_now": "Compact now",
         "settings": "Context settings"
       },
-      "context_tokens": "{n} tokens",
-      "tokens": "Tokens",
-      "usage": "{input} in · {output} out",
-      "saw": "What the classifier saw",
-      "would_see": "What it would have seen (not sent)",
-      "first_look": "First look",
-      "second_look": "Second look",
-      "reply": "Reply",
-      "summary_label": "Summary the agent wrote",
-      "carried_label": "Carried over word for word",
-      "nothing_carried_long": "Nothing carried word for word: the next turn starts from the summary",
-      "kept_heading": "WHAT THE AGENT KEPT",
-      "classifier_heading": "CLASSIFIER",
+      "summary_label": "Summary",
       "resume_title": "Resume with less context",
       "resume_body": "{tokens} tokens from {idle} ago · cache expired",
       "resume_compact": "Compact",
       "resume_keep": "Keep full history",
       "minutes_seconds": "{m}m {s}s",
       "days_hours": "{d}d {h}h",
-      "context_label": "Context",
-      "copy_running": "Compacting a copy · {clock}",
-      "copy_ready_turn": "Copy ready · swaps when the turn ends",
-      "copy_ready_background": "Copy ready · waits for background work"
+      "focus_label": "Asked to keep"
     },
     "threads": {
       "agent": "Agent",
@@ -3212,40 +3173,44 @@
     },
     "compaction": {
       "title": "Compaction",
-      "terms": "compaction compact context summary idle cache classifier agents tokens",
+      "terms": "compaction compact context summary idle cache agents tokens window",
       "unread": "Couldn't read the compaction settings",
       "loading": "Loading…",
       "off": "Off",
-      "idle_section": "When idle",
-      "chat_section": "During a chat",
       "idle": {
-        "label": "Compact idle chats before the cache expires",
-        "description": "Summarize a long idle conversation just before its 1-hour prompt cache expires, so coming back reprocesses the summary instead of the whole chat.",
-        "terms": "idle cache expire summarize prompt cache"
+        "label": "The cache is about to expire",
+        "description": "An idle chat compacts before its 1-hour prompt cache runs out.",
+        "terms": "idle cache expire summarize prompt cache",
+        "who": "Zeron"
       },
       "threshold": {
-        "label": "Idle threshold",
-        "description": "Smaller chats are left alone.",
+        "label": "Only chats larger than",
         "terms": "idle threshold tokens size"
       },
       "agents": {
-        "label": "Let agents compact themselves",
-        "description": "Agents get the compact tool, and a reminder once their context fills up.",
-        "terms": "agent compact tool reminder self"
+        "label": "The work changed",
+        "description": "The agent calls compact for a new task; it runs when the turn ends.",
+        "terms": "agent compact tool reminder self",
+        "who": "Agent"
       },
       "tasks": {
-        "label": "In tasks",
-        "description": "Lead and step threads compact by the same rule. Off leaves tasks alone.",
-        "terms": "tasks lead step threads"
-      },
-      "check": {
-        "label": "Check from",
-        "description": "Context a compaction could free, above what the last one left; a chat with a smaller window is checked from 70% of its free room.",
-        "terms": "check from remind at classifier new task threshold"
+        "label": "Mission threads",
+        "description": "Lead and step threads compact like any chat.",
+        "terms": "mission tasks lead step threads"
       },
       "remind": {
-        "label": "Remind at",
-        "description": "Context a compaction could free, above what the last one left; a chat with a smaller window is reminded at 70% of its free room. Every message past it carries the reminder until the chat compacts."
+        "label": "Remind it from",
+        "description": "Tokens above a fresh chat.",
+        "terms": "remind reminder nudge new task tokens"
+      },
+      "reasons_section": "A chat compacts for one of three reasons",
+      "scope_section": "Scope",
+      "window": {
+        "label": "The window is full",
+        "description": "Claude Code compacts on its own near the window and keeps working. The agent is warned at 85%.",
+        "detail": "Window per chat: model picker",
+        "who": "Claude Code",
+        "terms": "window full auto compact claude code model"
       }
     },
     "computer": {
@@ -3373,47 +3338,10 @@
     "lab": {
       "title": "Experimental",
       "description": "Experimental and beta features. They may change or go away in a later version.",
-      "terms": "lab beta experimental compact jev classifier token",
+      "terms": "lab beta experimental token access",
       "beta": "Beta",
       "unread": "Couldn't read the Lab settings",
-      "compaction_section": "Compaction",
       "access_section": "Agent access",
-      "ahead": {
-        "label": "Compact ahead of time",
-        "description": "Claude compacts in place right after a turn. Codex summarizes a copy in the background and swaps it in at the next pause; turns after the copy come back as text.",
-        "terms": "ahead early background summarize copy"
-      },
-      "mode": {
-        "label": "Compact new tasks",
-        "classifier_description": "A model reads each message and compacts first when it starts a new task.",
-        "reminder_description": "Each message carries a reminder; the agent decides whether to compact.",
-        "reminder": "Reminder",
-        "classifier": "Classifier",
-        "terms": "new task reminder classifier mode"
-      },
-      "source": {
-        "label": "Classifier",
-        "description": "An agent's model, or TypeSafe's Jev classifier with your API key. Jev receives the recent conversation and each new message past the check.",
-        "agent": "Agent model",
-        "typesafe": "Jev · TypeSafe",
-        "openrouter": "Jev · OpenRouter",
-        "terms": "jev typesafe openrouter source"
-      },
-      "model": {
-        "label": "Classifier model",
-        "description": "Sonnet when Claude classifies, Codex's default model when Codex does; a small model compacted follow-ups in testing.",
-        "auto": "Session agent",
-        "terms": "classifier model sonnet"
-      },
-      "key": {
-        "label": "API key",
-        "saved": "Key saved in the Keychain.",
-        "none_typesafe": "No key. Get one at console.typesafe.ai/keys",
-        "none_openrouter": "No key. Get one at openrouter.ai/settings/keys",
-        "paste": "Paste key",
-        "remove": "Remove key",
-        "copy_first": "Copy the API key first, then press Paste key."
-      },
       "full_token": {
         "label": "Agents use the full token",
         "description": "New runs reach everything the app can, including allowing plugins and signing in, with no question to you. Only turn this on if a tool you need is refused.",

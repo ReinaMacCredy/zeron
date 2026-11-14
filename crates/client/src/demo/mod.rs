@@ -559,7 +559,7 @@ impl DemoHost {
                 running_subagents: 0,
                 running_subagent_models: Vec::new(),
                 compact_plan: None,
-                classifying: None,
+                compact_hold: None,
                 chat_id: chat_id.to_owned(),
                 device_id: host,
                 status,

@@ -79,10 +79,13 @@ impl SessionsEngine {
                 // chat's next transition.
                 let mut unpublished = std::collections::HashSet::new();
                 for row in &current {
-                    if previous_by_id
-                        .get(row.chat_id.as_str())
-                        .is_none_or(|old| *old != row)
-                    {
+                    // The hold is host-local and the registry never stores it.
+                    if previous_by_id.get(row.chat_id.as_str()).is_none_or(|old| {
+                        Session {
+                            compact_hold: row.compact_hold,
+                            ..(*old).clone()
+                        } != *row
+                    }) {
                         if workspace.chat(&row.chat_id).ok().flatten().is_some() {
                             workspace.record_session(row);
                         } else {
@@ -185,7 +188,7 @@ fn project(
             terminal_activity: None,
             held_by_subagents: Default::default(),
             compacting: Default::default(),
-            classifying: Default::default(),
+            compact_hold: Default::default(),
             compact_plan: Default::default(),
             waiting: None,
         });
@@ -267,7 +270,7 @@ mod tests {
             terminal_activity: None,
             held_by_subagents: Default::default(),
             compacting: Default::default(),
-            classifying: Default::default(),
+            compact_hold: Default::default(),
             compact_plan: Default::default(),
             waiting: None,
         };

@@ -1051,7 +1051,7 @@ pub(crate) fn seed(
                 running_subagents: 0,
                 running_subagent_models: Vec::new(),
                 compact_plan: None,
-                classifying: None,
+                compact_hold: None,
                 chat_id: demo.id.into(),
                 device_id: demo.device.into(),
                 status,

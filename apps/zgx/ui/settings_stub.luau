@@ -132,11 +132,7 @@ local engine: { [string]: any } = {
 		enabled = true,
 		minTokens = 100000,
 		nudgeTokens = 150000,
-		mode = "classifier",
-		classifier = {},
 		missions = true,
-		compactAhead = false,
-		hasJevKey = false,
 	},
 	GetToolSettings = { settings = { disabledTools = {}, disabledGroups = {}, agentsUseFullToken = false }, disabled = { "computer_screenshot" } },
 	-- (Settings → Computer use: the engine's defaults, and two apps once allowed always.)
@@ -385,19 +381,10 @@ local answers: { [string]: (arg: any) -> any } = {
 				engine[get] = w
 			elseif m == "SetTitleSettings" then
 				engine[get] = arg.params
-			elseif m == "SetCompactionSettings" then
-				local c = table.clone(arg.params)
-				local key = c.jevApiKey
-				c.jevApiKey = nil
-				c.hasJevKey = if key ~= nil then key ~= "" else (engine[get].hasJevKey == true)
-				if key ~= nil then
-					log(`jev_key:{key}`)
-				end
-				engine[get] = c
 			elseif m == "SetToolSettings" then
 				engine[get] = { settings = arg.params, disabled = {} }
 				engine[get].disabled = tool_off("")
-			elseif m == "SetComputerSettings" or m == "SetReviewSettings" or m == "SetPredictionSettings" then
+			elseif m == "SetCompactionSettings" or m == "SetComputerSettings" or m == "SetReviewSettings" or m == "SetPredictionSettings" then
 				engine[get] = table.clone(arg.params)
 			elseif m == "SetRoutingSettings" or m == "SetDelegationSettings" then
 				local roles = arg.params.roles

@@ -74,7 +74,7 @@ pub(crate) fn session(chat: &str, status: SessionStatus, outcome: Option<DoneSta
     Session {
         held_by_subagents: false,
         compacting: false,
-        classifying: None,
+        compact_hold: None,
         running_subagent_models: Vec::new(),
         compact_plan: None,
         last_turn_outcome: outcome.map(|status| NativeTurnOutcome { status, finished_at: Utc::now() }),

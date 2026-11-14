@@ -18,7 +18,6 @@ use zeron_doc::schema::{MessageRole, SessionMessageEntry};
 use zeron_markdown::parser::{IncrementalParser, TopBlock};
 use zeron_proto::computer::cards::{computer_notice, consent_question, is_control_denied};
 use zeron_proto::computer::presentation::computer_call;
-use zeron_proto::transcript::CompactionWait;
 use zeron_proto::{HarnessId, UserInputAnswer};
 use zeron_text::WhiteSpace;
 
@@ -370,13 +369,7 @@ impl RowBuilder {
             let (word, since_ms, token_rate) = match &input.compaction {
                 Some((wait, since)) => {
                     let (lead, tail) = wait.words();
-                    let chip = match wait {
-                        CompactionWait::Classifying { harness, model, .. } => {
-                            Some(format!("· {}", seams::side_detail(*harness, model.as_deref())))
-                        }
-                        _ => None,
-                    };
-                    let word = [Some(lead), chip, tail.map(str::to_owned)].into_iter().flatten().collect::<Vec<_>>().join(" ");
+                    let word = [Some(lead), tail.map(str::to_owned)].into_iter().flatten().collect::<Vec<_>>().join(" ");
                     (word, wait.timed().then_some(*since), None)
                 }
                 None if input.entries.last().is_some_and(|e| zeron_doc::schema::consulting_advisor(e)) => {
@@ -527,14 +520,12 @@ impl RowBuilder {
             return rows;
         }
         if entry.role == MessageRole::System {
+            if entry.parts.iter().any(|p| matches!(p, MessagePart::Classifier { .. })) {
+                return rows;
+            }
             let gap = if first { Gap::First } else { Gap::Turn };
             for part in &entry.parts {
                 let core = match part {
-                    MessagePart::Classifier { id, record } => {
-                        let key = format!("{}#{id}", entry.id);
-                        let open = self.expanded.contains(&row_key(&key));
-                        seams::classifier(ctx, key, &entry.id, record, open)
-                    }
                     MessagePart::Handoff { id, harness, text, route } => {
                         let key = format!("{}#{id}", entry.id);
                         let open = self.expanded.contains(&row_key(&key));

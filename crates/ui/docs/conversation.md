@@ -21,7 +21,7 @@ Some rows are not ordinary messages:
 
 - A message another chat sent here reads **From** and the sender's name. See [Agents and other threads](zeron://docs/threads).
 - Rows about delegated tasks and subagent chips are covered in [Delegation and subagents](zeron://docs/delegation).
-- Compaction and classifier rows are covered in [Compaction and context](zeron://docs/compaction).
+- Compaction rows are covered in [Compaction and context](zeron://docs/compaction).
 - A handoff starts with a divider covered in [Hand off a thread](zeron://docs/handoff).
 
 ## Move around

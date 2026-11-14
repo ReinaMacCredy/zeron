@@ -5,7 +5,6 @@ local function system(id: string, line: string, text: string, title: string?): a
 end
 
 local MESSAGES = {
-	system("s1", "classifier", "Classifier: same task"),
 	system("s2", "fork", "", "Old chat"),
 	system("s3", "handoff", "", "Older chat"),
 	system("s4", "handoff", ""),
@@ -24,7 +23,6 @@ local MESSAGES = {
 }
 
 local WORDS = {
-	"Classifier: same task",
 	"Forked from Old chat",
 	"Continued from Older chat",
 	"Context handoff",

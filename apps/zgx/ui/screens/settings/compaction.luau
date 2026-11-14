@@ -1,12 +1,10 @@
--- Settings → Compaction: the shipping app's (crates/ui/src/settings/
--- compaction.rs, its Agents > Compaction page). The engine keeps these
+-- Settings → Compaction: a chat compacts for one of three reasons, each
+-- with who decides it. The engine keeps the settings
 -- (`GetCompactionSettings`, `SetCompactionSettings` through
--- `settings.engine`); "Let agents compact themselves" is the `compact`
--- tool's switch in its tool settings (`GetToolSettings`, `SetToolSettings`).
--- Asked once a visit; each change shown at once, back as it was with the
--- engine's words under the rows when it refuses. The rest of gpui's page
--- (compact ahead, the classifier's source and model) is its Lab's
--- (lab.luau, on these same states).
+-- `settings.engine`); the agent's reason is the `compact` tool's switch in
+-- its tool settings (`GetToolSettings`, `SetToolSettings`). Asked once a
+-- visit; each change shown at once, back as it was with the engine's words
+-- under the rows when it refuses.
 
 local host = require("@app/screens/settings/host")
 local ds = require("@ds")
@@ -21,11 +19,12 @@ M.TITLE = "Compaction"
 local COMPACT_TOOL = "compact"
 
 search.index(M.ID, ui.t("settings.compaction.title"), ui.t("settings.compaction.terms"), {
-	{ key = "idle", title = ui.t("settings.compaction.idle.label"), section = ui.t("settings.compaction.idle_section"), terms = ui.t("settings.compaction.idle.terms") },
-	{ key = "threshold", title = ui.t("settings.compaction.threshold.label"), section = ui.t("settings.compaction.idle_section"), terms = ui.t("settings.compaction.threshold.terms") },
-	{ key = "agents", title = ui.t("settings.compaction.agents.label"), section = ui.t("settings.compaction.chat_section"), terms = ui.t("settings.compaction.agents.terms") },
-	{ key = "tasks", title = ui.t("settings.compaction.tasks.label"), section = ui.t("settings.compaction.chat_section"), terms = ui.t("settings.compaction.tasks.terms") },
-	{ key = "check", title = ui.t("settings.compaction.check.label"), section = ui.t("settings.compaction.chat_section"), terms = ui.t("settings.compaction.check.terms") },
+	{ key = "idle", title = ui.t("settings.compaction.idle.label"), section = ui.t("settings.compaction.reasons_section"), terms = ui.t("settings.compaction.idle.terms") },
+	{ key = "threshold", title = ui.t("settings.compaction.threshold.label"), section = ui.t("settings.compaction.reasons_section"), terms = ui.t("settings.compaction.threshold.terms") },
+	{ key = "agents", title = ui.t("settings.compaction.agents.label"), section = ui.t("settings.compaction.reasons_section"), terms = ui.t("settings.compaction.agents.terms") },
+	{ key = "remind", title = ui.t("settings.compaction.remind.label"), section = ui.t("settings.compaction.reasons_section"), terms = ui.t("settings.compaction.remind.terms") },
+	{ key = "window", title = ui.t("settings.compaction.window.label"), section = ui.t("settings.compaction.reasons_section"), terms = ui.t("settings.compaction.window.terms") },
+	{ key = "tasks", title = ui.t("settings.compaction.tasks.label"), section = ui.t("settings.compaction.scope_section"), terms = ui.t("settings.compaction.tasks.terms") },
 })
 
 -- The engine's, as last read or written (nil until read).
@@ -73,26 +72,16 @@ M.says = says
 
 -- A change to the engine's: shown now, back as it was if refused (its
 -- words under the rows, as gpui's error strip).
-local function save(patch: { [string]: any }, clear: { string }?)
+local function save(patch: { [string]: any })
 	local before = settings:peek()
 	if not before then
 		return
 	end
 	local next = table.clone(before)
-	next.hasJevKey = nil
 	for k, v in patch do
 		next[k] = v
 	end
-	local shown = table.clone(before)
-	for k, v in patch do
-		shown[k] = v
-	end
-	for _, k in clear or {} do
-		next[k] = nil
-		shown[k] = nil
-	end
-	shown.jevApiKey = nil
-	settings:set(shown)
+	settings:set(next)
 	engine("SetCompactionSettings", next):after(function(v: any)
 		if v ~= nil then
 			settings:set(v)
@@ -213,14 +202,47 @@ local function size(n: number): string
 	return `{n // 1000}K`
 end
 
+local function numeral(n: number): Node
+	return ui.row {
+		w = 22,
+		h = 22,
+		shrink = 0,
+		items = "center",
+		justify = "center",
+		rounded = "$radius.full",
+		border = 1,
+		border_color = "$border.strong",
+		text_size = "$font.size.xs",
+		color = "$text.secondary",
+		ui.text { tostring(n) },
+	}
+end
+
+local function decides(who: Message, control: Node?): Node
+	return ui.row {
+		gap = "$space.3",
+		items = "center",
+		ds.Badge { who, tone = "neutral", look = "outline", shape = "pill" },
+		control,
+	}
+end
+
+local function under(key: string, on: () -> boolean?, props: any): Node
+	props.lead = ui.div { w = 22, shrink = 0 }
+	props.disabled = function(): boolean
+		return on() == false
+	end
+	return row(key, props)
+end
+
 function M.view(): Node
 	visits.once("compaction", load)
 	local function ready(): boolean
 		return settings:get() ~= nil and tools:get() ~= nil
 	end
-	local function classifier(): boolean
+	local function idle_on(): boolean?
 		local c = settings:get()
-		return c == nil or c.mode ~= "threshold"
+		return if c then c.enabled ~= false else nil
 	end
 	local function refusal(): Node
 		return ui.show(function(): boolean
@@ -262,37 +284,55 @@ function M.view(): Node
 			w_full = true,
 			gap = "$space.6",
 			ds.Settings.Section {
-				title = ui.t("settings.compaction.idle_section"),
+				title = ui.t("settings.compaction.reasons_section"),
 				ds.Settings.Group {
 					row("idle", {
+						lead = numeral(1),
 						label = ui.t("settings.compaction.idle.label"),
 						description = ui.t("settings.compaction.idle.description"),
-						control = engine_switch(ui.t("settings.compaction.idle.label"), function(): boolean?
-							local c = settings:get()
-							return if c then c.enabled ~= false else nil
-						end, function(on: boolean)
-							save({ enabled = on })
-						end),
+						control = decides(
+							ui.t("settings.compaction.idle.who"),
+							engine_switch(ui.t("settings.compaction.idle.label"), idle_on, function(on: boolean)
+								save({ enabled = on })
+							end)
+						),
 					}),
-					row("threshold", {
+					under("threshold", idle_on, {
 						label = ui.t("settings.compaction.threshold.label"),
-						description = ui.t("settings.compaction.threshold.description"),
 						control = engine_choice(ui.t("settings.compaction.threshold.label"), "minTokens", {
 							{ value = 100000, label = size(100000) },
 							{ value = 150000, label = size(150000) },
 							{ value = 200000, label = size(200000) },
 						}),
 					}),
+					row("agents", {
+						lead = numeral(2),
+						label = ui.t("settings.compaction.agents.label"),
+						description = ui.t("settings.compaction.agents.description"),
+						control = decides(ui.t("settings.compaction.agents.who"), engine_switch(ui.t("settings.compaction.agents.label"), agents_on, save_tool)),
+					}),
+					under("remind", agents_on, {
+						label = ui.t("settings.compaction.remind.label"),
+						description = ui.t("settings.compaction.remind.description"),
+						control = engine_choice(ui.t("settings.compaction.remind.label"), "nudgeTokens", {
+							{ value = 0, label = ui.t("settings.compaction.off") },
+							{ value = 100000, label = size(100000) },
+							{ value = 150000, label = size(150000) },
+							{ value = 200000, label = size(200000) },
+						}),
+					}),
+					row("window", {
+						lead = numeral(3),
+						label = ui.t("settings.compaction.window.label"),
+						description = ui.t("settings.compaction.window.description"),
+						detail = ui.t("settings.compaction.window.detail"),
+						control = decides(ui.t("settings.compaction.window.who"), nil),
+					}),
 				},
 			},
 			ds.Settings.Section {
-				title = ui.t("settings.compaction.chat_section"),
+				title = ui.t("settings.compaction.scope_section"),
 				ds.Settings.Group {
-					row("agents", {
-						label = ui.t("settings.compaction.agents.label"),
-						description = ui.t("settings.compaction.agents.description"),
-						control = engine_switch(ui.t("settings.compaction.agents.label"), agents_on, save_tool),
-					}),
 					row("tasks", {
 						label = ui.t("settings.compaction.tasks.label"),
 						description = ui.t("settings.compaction.tasks.description"),
@@ -302,20 +342,6 @@ function M.view(): Node
 						end, function(on: boolean)
 							save({ missions = on })
 						end),
-					}),
-					row("check", {
-						label = function(): string
-							return ui.t(if classifier() then "settings.compaction.check.label" else "settings.compaction.remind.label"):get()
-						end,
-						description = function(): string
-							return ui.t(if classifier() then "settings.compaction.check.description" else "settings.compaction.remind.description"):get()
-						end,
-						control = engine_choice(ui.t("settings.compaction.check.label"), "nudgeTokens", {
-							{ value = 0, label = ui.t("settings.compaction.off") },
-							{ value = 100000, label = size(100000) },
-							{ value = 150000, label = size(150000) },
-							{ value = 200000, label = size(200000) },
-						}),
 					}),
 				},
 				refusal(),

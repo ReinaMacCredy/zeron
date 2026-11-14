@@ -842,7 +842,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 running_subagents: 0,
                 running_subagent_models: Vec::new(),
                 compact_plan: None,
-                classifying: None,
+                compact_hold: None,
                 chat_id: "chat-legacy".into(),
                 device_id: "dev-a".into(),
                 status: SessionStatus::Idle,

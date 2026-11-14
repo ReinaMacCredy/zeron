@@ -945,7 +945,7 @@ impl From<RawSession> for Session {
             running_subagent_models: Vec::new(),
             background_tasks: raw.background_tasks,
             compact_plan: None,
-            classifying: None,
+            compact_hold: None,
             waiting: raw.waiting,
         }
     }
@@ -1107,7 +1107,7 @@ mod tests {
             started_at: Some(ts(3_000)),
             updated_at: ts(3_500),
             compact_plan: None,
-            classifying: None,
+            compact_hold: None,
             last_turn_outcome: None,
             terminal_activity: None,
             running_subagents: 0,

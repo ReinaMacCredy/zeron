@@ -2980,7 +2980,7 @@ mod tests {
         let session = |chat: &str, status| Session {
             held_by_subagents: false,
             compacting: false,
-            classifying: None,
+            compact_hold: None,
             running_subagent_models: Vec::new(),
             compact_plan: None,
             last_completed_turn: None,
@@ -3370,7 +3370,7 @@ mod tests {
             running_subagents: 0,
             running_subagent_models: Vec::new(),
             compact_plan: None,
-            classifying: None,
+            compact_hold: None,
             waiting: None,
         }
     }

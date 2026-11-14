@@ -1,6 +1,5 @@
 //! Context occupancy is read from the replicated chat snapshot, never local CLI state.
 use crate::popover;
-use crate::session_stats::CompactView;
 use crate::state::AppState;
 use crate::theme::Theme;
 use gpui::{
@@ -8,6 +7,7 @@ use gpui::{
     Window, canvas, div, point, prelude::*, px,
 };
 use zeron_proto::ContextUsage;
+use zeron_proto::stats_view::{ContextMarks, NextCompaction, NextIcon};
 
 pub struct FooterContext {
     state: Entity<AppState>,
@@ -57,27 +57,35 @@ impl FooterContext {
         cx.notify();
     }
 
-    fn compact(&self, cx: &Context<Self>) -> Option<CompactView> {
+    fn compact(&self, cx: &Context<Self>) -> Option<NextCompaction> {
         let state = self.state.read(cx);
         let chat = self.chat.as_deref().or(state.selected_chat.as_deref())?;
-        let session = state.session_for(chat)?;
-        Some(CompactView {
-            plan: session.compact_plan,
-            compacting: state.chat_compacting(chat),
-            stats: state.session_stats_for(self.chat.as_deref()),
-        })
-        .filter(CompactView::shown)
+        let usage = state.context_usage_for(Some(chat));
+        let config = state
+            .chats
+            .iter()
+            .find(|row| row.id == chat)
+            .and_then(|row| row.config.as_ref());
+        let window = usage.and_then(|usage| usage.window);
+        let threshold = zeron_proto::model_options::chat_compact_threshold(config, window);
+        Some(NextCompaction::of(
+            state.session_for(chat),
+            state.chat_compacting(chat),
+            usage.and_then(|usage| usage.tokens),
+            ContextMarks::of(window, threshold, None).auto,
+            config.map_or("", |config| config.harness.display_name()),
+        ))
     }
 
     fn context_card(
         &self,
         context: Option<ContextUsage>,
-        compact: Option<CompactView>,
+        compact: Option<&NextCompaction>,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let theme = Theme::of(cx).for_popup();
         let card = card(context, &theme).when_some(compact, |card, compact| {
-            card.child(crate::session_stats::compact_section(&compact, &theme))
+            card.child(crate::session_stats::next_compaction(compact, &theme))
         });
         let Some(composer) = self.composer.upgrade() else {
             return card;
@@ -152,18 +160,23 @@ impl Render for FooterContext {
             self.ticker = Some(crate::session_stats::tick(1, cx, |_, cx| cx.notify()));
         }
         let ring = has_window(context).then(|| {
-            let chip = chip(context, compact, self.popup.get().is_some(), &theme)
-                .relative()
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|ring, _, _, _| ring.popup.note_trigger_press()),
-                )
-                .on_click(cx.listener(|ring, _, _, cx| ring.toggle(cx)));
+            let chip = chip(
+                context,
+                compact.as_ref(),
+                self.popup.get().is_some(),
+                &theme,
+            )
+            .relative()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|ring, _, _, _| ring.popup.note_trigger_press()),
+            )
+            .on_click(cx.listener(|ring, _, _, cx| ring.toggle(cx)));
             if self.popup.get().is_none() {
                 return chip.into_any_element();
             }
             let content = self
-                .context_card(context, compact, cx)
+                .context_card(context, compact.as_ref(), cx)
                 .on_mouse_down_out(cx.listener(|ring, _, _, cx| ring.dismiss(cx)))
                 .into_any_element();
             chip.child(popover::anchored_menu_above_end(
@@ -181,14 +194,19 @@ impl Render for FooterContext {
 /// on click.
 fn chip(
     usage: Option<ContextUsage>,
-    compact: Option<CompactView>,
+    compact: Option<&NextCompaction>,
     open: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let fraction = usage.and_then(ContextUsage::fraction);
+    let icon = compact.map(|compact| compact.icon);
+    let planned = matches!(
+        icon,
+        Some(NextIcon::Spin | NextIcon::Agent | NextIcon::Clock)
+    );
     let color = match fraction {
-        _ if compact.is_some_and(|c| c.compacting) => theme.busy,
-        _ if compact.is_some() => theme.accent,
+        _ if icon == Some(NextIcon::Spin) => theme.busy,
+        _ if planned => theme.accent,
         Some(f) if f >= 0.9 => theme.danger,
         Some(f) if f >= 0.75 => theme.warning,
         Some(_) => theme.text_muted,
@@ -206,7 +224,7 @@ fn chip(
         open,
         theme,
     )
-    .when(compact.is_some(), |chip| {
+    .when(planned, |chip| {
         chip.relative().child(
             div()
                 .absolute()

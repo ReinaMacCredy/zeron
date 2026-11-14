@@ -1429,7 +1429,7 @@ pub struct Session {
     #[serde(default)]
     pub compacting: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub classifying: Option<Classifying>,
+    pub compact_hold: Option<CompactHold>,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     /// Subagents of this chat streaming right now. Rides the session row (and
@@ -1527,20 +1527,47 @@ pub struct BackgroundTaskOutput {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Classifying {
-    pub harness: crate::HarnessId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum CompactPlan {
     Idle { at: i64 },
     Agent,
-    Copy { since: i64, ready: bool },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CompactHold {
+    Off,
+    Mission,
+    NoCache,
+    ShortCache,
+    Small { min: u64 },
+    Ran,
+    Expired,
+    Busy,
+    #[serde(other)]
+    Other,
+}
+
+impl CompactHold {
+    pub fn detail(self) -> Option<String> {
+        Some(match self {
+            Self::Off => "Idle compaction is off in Settings".into(),
+            Self::Mission => "Mission threads are excluded in Settings".into(),
+            Self::NoCache => "This agent reports no prompt cache".into(),
+            Self::ShortCache => "The prompt cache is the 5-minute tier".into(),
+            Self::Small { min } => format!(
+                "Context is under {}",
+                crate::model_options::compact_tokens(min)
+            ),
+            Self::Ran => "Already compacted since your last message".into(),
+            Self::Expired => "The prompt cache already expired".into(),
+            Self::Busy => "Background work is running, and compacting would restart it".into(),
+            Self::Other => return None,
+        })
+    }
 }
 
 /// Bytes of a command's whole output its host serves (`ReadToolOutput`): the
@@ -3200,6 +3227,29 @@ pub struct ChatConnectivity {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn a_session_row_from_the_classifier_era_still_reads() {
+        let row: Session = serde_json::from_value(serde_json::json!({
+            "chatId": "c",
+            "deviceId": "d",
+            "status": "idle",
+            "startedAt": null,
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "classifying": { "harness": "claude-code", "model": "claude-sonnet-5-5" },
+            "compactPlan": { "kind": "copy", "since": 1, "ready": true },
+            "compactHold": { "kind": "someday" },
+        }))
+        .unwrap();
+        assert_eq!(row.compact_plan, Some(CompactPlan::Other));
+        assert_eq!(row.compact_hold, Some(CompactHold::Other));
+        let hold = serde_json::to_value(CompactHold::Small { min: 100_000 }).unwrap();
+        assert_eq!(hold, serde_json::json!({ "kind": "small", "min": 100_000 }));
+        assert_eq!(
+            serde_json::from_value::<CompactHold>(hold).unwrap(),
+            CompactHold::Small { min: 100_000 }
+        );
+    }
 
     #[test]
     fn chat_configs_and_profiles_read_the_old_permission_mode_as_access() {

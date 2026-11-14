@@ -178,23 +178,6 @@ impl Default for DelegationSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum CompactionMode {
-    /// Every message past `nudge_tokens` reminds the agent to decide.
-    Threshold,
-    /// Past `nudge_tokens`, a one-shot model decides before the message is sent.
-    #[default]
-    Classifier,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JevSource {
-    TypeSafe,
-    OpenRouter,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CompactionSettings {
@@ -202,12 +185,7 @@ pub struct CompactionSettings {
     pub min_tokens: u64,
     /// 0 turns the nudge off.
     pub nudge_tokens: u64,
-    pub mode: CompactionMode,
-    /// None model picks a Sonnet-class model of the harness.
-    pub classifier: TitleSettings,
-    pub jev: Option<JevSource>,
     pub missions: bool,
-    pub compact_ahead: bool,
 }
 
 impl Default for CompactionSettings {
@@ -216,11 +194,7 @@ impl Default for CompactionSettings {
             enabled: true,
             min_tokens: 100_000,
             nudge_tokens: 150_000,
-            mode: CompactionMode::default(),
-            classifier: TitleSettings::default(),
-            jev: None,
             missions: true,
-            compact_ahead: false,
         }
     }
 }
@@ -2283,6 +2257,41 @@ mod title_tests {
             .unwrap();
         reloaded.load_prefs(dir.path());
         assert_eq!(reloaded.title_settings(), TitleSettings::default());
+    }
+
+    #[test]
+    fn a_prefs_file_from_the_classifier_era_keeps_every_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            serde_json::json!({
+                "systemPrompt": "Answer in English.",
+                "compaction": {
+                    "enabled": false,
+                    "minTokens": 150_000,
+                    "nudgeTokens": 200_000,
+                    "mode": "threshold",
+                    "classifier": { "harness": "claude-code", "model": "sonnet" },
+                    "jev": "typesafe",
+                    "missions": false,
+                    "compactAhead": true,
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        assert_eq!(
+            registry.compaction_settings(),
+            CompactionSettings {
+                enabled: false,
+                min_tokens: 150_000,
+                nudge_tokens: 200_000,
+                missions: false,
+            }
+        );
+        assert_eq!(registry.system_prompt(), "Answer in English.");
     }
 
     #[test]

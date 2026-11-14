@@ -162,8 +162,7 @@ export type Props = {
 	-- as the setting says.
 	compact: (() -> boolean)?,
 	-- The compaction the chat waits on (ds/compaction's Wait): it stands in
-	-- the working trailer's place at the conversation's end, or, while the
-	-- decision itself compacts, on that row.
+	-- the working trailer's place at the conversation's end.
 	compaction_wait: (() -> any)?,
 	-- A `/context` card's Compact now and Context settings.
 	on_compact: (() -> ())?,
@@ -625,12 +624,6 @@ end
 -- word and clock, as Zeron's working trailer (transcript.rs); not
 -- delivered, a line to send it again. The reply's own row takes over once
 -- it comes.
--- A wait that stands at the conversation's end: not one a row shows.
-local function trailing_wait(wait: (() -> any)?): any
-	local w = if wait then wait() else nil
-	return if w and w.row == nil then w else nil
-end
-
 local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?, working: any, wait: (() -> any)?, turn_state: ((m: Message, sending: boolean) -> TurnLine?)?): Node
 	local function said(): TurnLine?
 		local m = row:get()
@@ -642,14 +635,10 @@ local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?
 			return "failed"
 		end
 		local s = if w then said() else nil
-		return if w and trailing_wait(wait) then "compaction" elseif s and s.step then "step" elseif s then "said" elseif w then "waiting" else nil
+		return if w and wait and wait() then "compaction" elseif s and s.step then "step" elseif s then "said" elseif w then "waiting" else nil
 	end, function(kind: string): Node
 		if kind == "compaction" then
-			return Compaction.Wait {
-				wait = function(): any
-					return trailing_wait(wait)
-				end,
-			}
+			return Compaction.Wait { wait = wait :: any }
 		end
 		if kind == "said" then
 			return ui.row { w_full = true, mt = "$space.4", turn_line(said) }
@@ -2558,12 +2547,11 @@ local function Transcript(props: Props): Node
 						end)
 					end,
 				if m.role == "switch" then seam(m)
-					elseif m.role == "system" and (m.line == "classifier" or m.line == "compaction") then Compaction.Divider {
+					elseif m.role == "system" and m.line == "compaction" then Compaction.Divider {
 						id = m.id,
 						m = function(): any
 							return state:get()
 						end,
-						live = props.compaction_wait,
 					}
 					elseif m.role == "system" and m.line == "claude_command" and m.context then ContextCard {
 						report = function(): any
@@ -2671,13 +2659,9 @@ local function Transcript(props: Props): Node
 					if not last() or (mine and state:get().waiting ~= nil) then
 						return nil
 					end
-					return if trailing_wait(props.compaction_wait) then "wait" else nil
+					return if props.compaction_wait and props.compaction_wait() then "wait" else nil
 				end, function(): Node
-					return Compaction.Wait {
-						wait = function(): any
-							return trailing_wait(props.compaction_wait)
-						end,
-					}
+					return Compaction.Wait { wait = props.compaction_wait :: any }
 				end, { w_full = true, exit = { opacity = 0, duration = 120 } }),
 				layer.Here(m.id),
 			},

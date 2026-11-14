@@ -482,7 +482,7 @@ mod gate_tests {
             running_subagents: running,
             running_subagent_models: Vec::new(),
             compact_plan: None,
-            classifying: None,
+            compact_hold: None,
             held_by_subagents: false,
             compacting: false,
             background_tasks: Vec::new(),

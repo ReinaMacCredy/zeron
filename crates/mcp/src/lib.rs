@@ -2730,6 +2730,7 @@ impl ThreadTools {
         Ok(json!({
             "queued": true,
             "runs": runs,
+            "context": queued["context"],
             "replacedEarlierRequest": queued["replaced"].as_bool().unwrap_or(false),
             "continueWith": args["continueWith"].as_str().is_some_and(|text| !text.trim().is_empty()),
         }))

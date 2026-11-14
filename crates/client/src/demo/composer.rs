@@ -395,7 +395,7 @@ pub(super) fn background_session(chat_id: &str) -> Option<Session> {
             status: SessionStatus::Idle,
             held_by_subagents: false,
             compacting: false,
-            classifying: None,
+            compact_hold: None,
             background_tasks: Vec::new(),
             started_at: None,
             updated_at: Utc::now(),
@@ -414,7 +414,7 @@ pub(super) fn background_session(chat_id: &str) -> Option<Session> {
         status: SessionStatus::Working,
         held_by_subagents: true,
         compacting: false,
-        classifying: None,
+        compact_hold: None,
         background_tasks: vec![BackgroundTask {
             id: DEMO_SHELL.into(),
             kind: BackgroundTaskKind::Shell,

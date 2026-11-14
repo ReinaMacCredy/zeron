@@ -1802,7 +1802,7 @@ mod sidecar_regressions {
                     status: zeron_proto::SessionStatus::Working,
                     held_by_subagents: false,
                     compacting: false,
-                    classifying: None,
+                    compact_hold: None,
                     background_tasks: Vec::new(),
                     started_at: Some(Utc::now()),
                     updated_at: Utc::now(),

@@ -1947,7 +1947,7 @@ mod tests {
             status,
             held_by_subagents: false,
             compacting: false,
-            classifying: None,
+            compact_hold: None,
             background_tasks,
             started_at: None,
             updated_at: now,

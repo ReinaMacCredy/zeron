@@ -275,9 +275,6 @@ impl Harness for MockHarness {
     fn compacts_in_place(&self) -> bool {
         compact_knob() == Some(CompactKnob::Claude)
     }
-    fn compacts_a_copy(&self) -> bool {
-        compact_knob() == Some(CompactKnob::Codex)
-    }
     async fn compact(
         &self,
         request: RunRequest,
@@ -288,12 +285,7 @@ impl Harness for MockHarness {
                 "compaction is not supported by this harness".into(),
             ));
         }
-        let base = request.resume.clone().unwrap_or_default();
-        let session_id = if request.branch.is_some() {
-            format!("{base}-copy-{}", uuid_like())
-        } else {
-            base
-        };
+        let session_id = request.resume.clone().unwrap_or_default();
         let wait = std::time::Duration::from_millis(knob_number("ZERON_MOCK_COMPACT_MS", 30_000));
         Ok(futures::stream::once(async move {
             tokio::time::sleep(wait).await;

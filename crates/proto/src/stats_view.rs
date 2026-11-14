@@ -1,5 +1,6 @@
-use crate::{CompactPlan, SessionStats};
+use crate::model_options::compact_tokens;
 use crate::usage::format_usd as usd;
+use crate::{CompactPlan, Session, SessionStats, SessionStatus};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cache {
@@ -164,58 +165,115 @@ pub fn token_split(stats: &SessionStats) -> Vec<(&'static str, u64)> {
     split
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompactSection {
-    pub heading: &'static str,
-    pub note: Option<&'static str>,
-    pub rows: Vec<(&'static str, String)>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NextIcon {
+    Spin,
+    Agent,
+    Clock,
+    Warn,
+    Off,
 }
 
-impl CompactSection {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NextCompaction {
+    pub icon: NextIcon,
+    pub title: String,
+    pub detail: Option<String>,
+    pub chip: Option<String>,
+}
+
+const CANCELS: &str = "A message from you first cancels it";
+
+impl NextCompaction {
     pub fn of(
-        plan: Option<CompactPlan>,
+        session: Option<&Session>,
         compacting: bool,
-        stats: Option<&SessionStats>,
-        now_ms: i64,
-    ) -> Option<Self> {
-        if !compacting && plan.is_none() {
-            return None;
-        }
-        let (heading, note) = match plan {
-            _ if compacting => ("Compacting", None),
-            Some(CompactPlan::Agent) => (
-                "Agent compaction",
-                Some("The agent asked to compact. It runs as soon as the turn ends."),
-            ),
-            Some(CompactPlan::Copy { .. }) => (
-                "Background compaction",
-                Some(
-                    "A copy of this chat is compacting. It swaps in at the next pause; turns after it come back as text.",
-                ),
-            ),
-            _ => ("Idle compaction", Some("Sending a message first cancels it.")),
+        tokens: Option<u64>,
+        auto: Option<u64>,
+        harness: &str,
+    ) -> Self {
+        let next = |icon, title: String, detail: Option<&str>, chip: Option<String>| Self {
+            icon,
+            title,
+            detail: detail.map(Into::into),
+            chip,
         };
-        let mut rows = Vec::new();
-        if let Some(cache) = stats.and_then(|stats| Cache::of(stats, false, now_ms)) {
-            rows.push(("Prompt cache", cache.long()));
+        if compacting {
+            return next(NextIcon::Spin, "Compacting now".into(), None, None);
         }
-        match plan {
-            Some(CompactPlan::Idle { at }) => rows.push(("Compacts at", clock(at))),
-            Some(CompactPlan::Agent) => rows.push(("Compacts", "when this turn ends".into())),
-            Some(CompactPlan::Copy { since, ready }) => {
-                rows.push(("Copy started", clock(since)));
-                if ready {
-                    rows.push(("Swaps in", "at the next pause".into()));
-                }
+        match session.and_then(|session| session.compact_plan) {
+            Some(CompactPlan::Agent) => {
+                return next(
+                    NextIcon::Agent,
+                    "Agent asked · when this turn ends".into(),
+                    Some(CANCELS),
+                    Some("compacts after this turn".into()),
+                );
             }
-            None => {}
+            Some(CompactPlan::Idle { at }) => {
+                return next(
+                    NextIcon::Clock,
+                    format!("Idle · {}", clock(at)),
+                    Some(CANCELS),
+                    Some(format!("compacts {}", clock(at))),
+                );
+            }
+            _ => {}
         }
-        Some(Self {
-            heading,
-            note,
-            rows,
-        })
+        if let (Some(tokens), Some(auto)) = (tokens, auto)
+            && tokens * 100 >= auto * 85
+        {
+            let at = compact_tokens(auto);
+            return next(
+                NextIcon::Warn,
+                format!("{harness} · at {at}"),
+                Some("The turn carries on after it"),
+                Some(format!("auto-compacts at {at}")),
+            );
+        }
+        let detail = match session {
+            Some(session) if session.status == SessionStatus::Working => {
+                Some("The agent is working".into())
+            }
+            Some(session) => session.compact_hold.and_then(|hold| hold.detail()),
+            None => None,
+        };
+        Self {
+            detail,
+            ..next(NextIcon::Off, "Not scheduled".into(), None, None)
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContextMarks {
+    pub floor: Option<u64>,
+    pub warn: Option<u64>,
+    pub auto: Option<u64>,
+}
+
+impl ContextMarks {
+    pub fn of(window: Option<u64>, threshold: Option<u64>, floor: Option<u64>) -> Self {
+        let window = window.filter(|window| *window > 0);
+        let auto = threshold.filter(|threshold| window.is_some_and(|window| *threshold < window));
+        let warn = auto.map(|auto| (auto * 85).div_ceil(100));
+        Self {
+            floor: floor.filter(|floor| warn.or(window).is_some_and(|limit| *floor < limit)),
+            warn,
+            auto,
+        }
+    }
+}
+
+pub fn reminder_floor(nudge: u64, baseline: u64, window: Option<u64>) -> Option<u64> {
+    if nudge == 0 {
+        return None;
+    }
+    // A window smaller than the floor would never see the reminder.
+    let floor = window.filter(|window| *window > 0).map_or(nudge, |window| {
+        nudge.min(window.saturating_sub(baseline) * 7 / 10)
+    });
+    Some(baseline + floor)
 }
 
 fn clock(ms: i64) -> String {
@@ -231,30 +289,105 @@ fn clock(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CompactHold;
     use crate::usage::format_tokens as tokens;
 
     #[test]
-    fn the_compact_section_names_the_plan() {
-        assert_eq!(CompactSection::of(None, false, None, 0), None);
-        let running = CompactSection::of(Some(CompactPlan::Agent), true, None, 0).unwrap();
-        assert_eq!((running.heading, running.note), ("Compacting", None));
-        let agent = CompactSection::of(Some(CompactPlan::Agent), false, None, 0).unwrap();
-        assert_eq!(agent.heading, "Agent compaction");
-        assert_eq!(agent.rows, [("Compacts", "when this turn ends".to_string())]);
-        let at = 1_700_000_000_000;
-        let idle = CompactSection::of(Some(CompactPlan::Idle { at }), false, None, 0).unwrap();
-        assert_eq!(idle.heading, "Idle compaction");
-        assert_eq!(idle.note, Some("Sending a message first cancels it."));
-        assert_eq!(idle.rows, [("Compacts at", clock(at))]);
-        let stats = SessionStats {
-            cache_ttl_secs: Some(3600),
-            cache_touched_at: Some(0),
-            ..Default::default()
+    fn the_next_compaction_names_the_first_reason_that_holds() {
+        let mut session: Session = serde_json::from_value(serde_json::json!({
+            "chatId": "c",
+            "deviceId": "d",
+            "status": "idle",
+            "startedAt": null,
+            "updatedAt": "2026-01-01T00:00:00Z",
+        }))
+        .unwrap();
+        let of = |session: &Session, compacting, tokens| {
+            NextCompaction::of(
+                Some(session),
+                compacting,
+                tokens,
+                Some(167_000),
+                "Claude Code",
+            )
         };
-        let cached =
-            CompactSection::of(Some(CompactPlan::Idle { at }), false, Some(&stats), 60_000)
-                .unwrap();
-        assert_eq!(cached.rows[0].0, "Prompt cache");
+        let unheld = of(&session, false, None);
+        assert_eq!(
+            (unheld.icon, unheld.title.as_str(), unheld.detail),
+            (NextIcon::Off, "Not scheduled", None)
+        );
+        assert_eq!(of(&session, true, None).icon, NextIcon::Spin);
+        let warn = of(&session, false, Some(141_950));
+        assert_eq!(warn.icon, NextIcon::Warn);
+        assert_eq!(warn.title, "Claude Code · at 167K");
+        assert_eq!(warn.chip.as_deref(), Some("auto-compacts at 167K"));
+        assert_eq!(of(&session, false, Some(141_949)).icon, NextIcon::Off);
+        session.compact_hold = Some(CompactHold::Small { min: 100_000 });
+        let held = of(&session, false, None);
+        assert_eq!(
+            (held.icon, held.title.as_str(), held.detail.as_deref()),
+            (
+                NextIcon::Off,
+                "Not scheduled",
+                Some("Context is under 100K")
+            )
+        );
+        session.status = SessionStatus::Working;
+        assert_eq!(
+            of(&session, false, None).detail.as_deref(),
+            Some("The agent is working")
+        );
+        let at = 1_700_000_000_000;
+        session.compact_plan = Some(CompactPlan::Idle { at });
+        let idle = of(&session, false, Some(160_000));
+        assert_eq!(idle.icon, NextIcon::Clock);
+        assert_eq!(idle.title, format!("Idle · {}", clock(at)));
+        assert_eq!(idle.detail.as_deref(), Some(CANCELS));
+        session.compact_plan = Some(CompactPlan::Agent);
+        let agent = of(&session, false, None);
+        assert_eq!(agent.chip.as_deref(), Some("compacts after this turn"));
+        session.compact_plan = Some(CompactPlan::Other);
+        session.compact_hold = Some(CompactHold::Other);
+        session.status = SessionStatus::Idle;
+        let unknown = of(&session, false, None);
+        assert_eq!((unknown.icon, unknown.detail), (NextIcon::Off, None));
+    }
+
+    #[test]
+    fn the_meter_marks_sit_under_a_known_auto_compaction() {
+        let floor = reminder_floor(150_000, 20_000, Some(200_000));
+        assert_eq!(floor, Some(20_000 + 126_000));
+        assert_eq!(reminder_floor(0, 0, Some(200_000)), None);
+        assert_eq!(
+            ContextMarks::of(Some(200_000), Some(167_000), floor),
+            ContextMarks {
+                floor: None,
+                warn: Some(141_950),
+                auto: Some(167_000),
+            }
+        );
+        let large = reminder_floor(150_000, 20_000, Some(1_000_000));
+        assert_eq!(
+            ContextMarks::of(Some(1_000_000), Some(967_000), large),
+            ContextMarks {
+                floor: Some(170_000),
+                warn: Some(821_950),
+                auto: Some(967_000),
+            }
+        );
+        let codex = ContextMarks::of(
+            Some(272_000),
+            Some(272_000),
+            reminder_floor(150_000, 0, Some(272_000)),
+        );
+        assert_eq!(
+            codex,
+            ContextMarks {
+                floor: Some(150_000),
+                warn: None,
+                auto: None,
+            }
+        );
     }
 
     #[test]

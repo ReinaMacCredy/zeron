@@ -1,8 +1,8 @@
 -- A chat's compactions as gpui's transcript tells them (ds/compaction,
 -- crates/ui/src/transcript/compaction_card.rs), on the chat fixture's long
--- chat: the rows the host publishes for an engine's classifier and
--- compaction entries (src/chat.rs's tests prove their shape), the wait the
--- session says, the composer's chip and resume card, the ring's card.
+-- chat: the rows the host publishes for an engine's compaction entries
+-- (src/chat.rs's tests prove their shape), the wait the session says, the
+-- composer's chip and resume card, the ring's card and its next compaction.
 
 local function settle(app: any)
 	app:frames(70)
@@ -16,30 +16,8 @@ local function opened(): any
 	return app
 end
 
-local function decision(verdict: string, extra: { [string]: any }?): any
-	local d: { [string]: any } = {
-		verdict = verdict,
-		by = "stage1",
-		ms = 1670,
-		context = 212000,
-		input = "person: refund the order\nagent: done",
-		reply = "CARRY",
-		tokens_in = 2300,
-		tokens_out = 4,
-		agent = "Claude Code",
-		model = "claude-sonnet-5-5",
-		mark = "claude",
-	}
-	for k, v in extra or {} do
-		d[k] = v
-	end
-	return d
-end
-
-local KEPT = { pre = 212000, post = 69000, ms = 53000, summary = "Refunds are done; the tests pass.", carried = "person: next?\nagent: the report", turns = 1 }
-
-local function row(id: string, line: string, fields: { [string]: any }): any
-	local m: { [string]: any } = { id = id, role = "system", line = line, text = fields.text or "" }
+local function row(id: string, fields: { [string]: any }): any
+	local m: { [string]: any } = { id = id, role = "system", line = "compaction", text = fields.text or "" }
 	for k, v in fields do
 		m[k] = v
 	end
@@ -52,47 +30,43 @@ local function push(app: any, rows: { any })
 	settle(app)
 end
 
-local function wait_for(app: any, wait: any)
-	app:set_state("test_patch", { compaction_wait = wait or false })
+local function patch(app: any, fields: { [string]: any })
+	app:set_state("test_patch", fields)
 	app:command("patch_open")
 	settle(app)
 end
 
-local function words(app: any, sel: string): string
-	return app:tree(sel)
+local function wait_for(app: any, wait: any)
+	patch(app, { compaction_wait = wait or false })
 end
 
-test("compaction: each outcome's divider says it in gpui's words, tokens and never dollars", function()
+local function run_for(app: any, seconds: number)
+	local began = os.clock()
+	while os.clock() - began < seconds do
+		app:frames(20)
+	end
+end
+
+test("compaction: each landed divider says who compacted in the entry's words, its sizes and how long; tokens, never dollars", function()
 	local app = opened()
 	push(app, {
-		row("k1", "classifier", { decision = decision("carry"), kept = KEPT }),
-		row("k2", "classifier", { decision = decision("continue") }),
-		row("k3", "classifier", { decision = decision("failed") }),
-		row("k4", "classifier", { decision = decision("new") }),
-		row("k5", "classifier", { decision = decision("carry", { by = "background_copy" }), kept = { pre = 212000, post = 69000, carried = "person: a\nagent: b", turns = 1 } }),
-		row("k6", "classifier", { decision = decision("carry", { by = "streak" }), kept = { pre = 180000, post = 40000, ms = 30000 } }),
-		row("c1", "compaction", { text = "Context compacted", kept = { pre = 120000, post = 40200, ms = 65000 } }),
-		row("c2", "compaction", { text = "Compacted while idle, before the prompt cache expired", kept = {} }),
+		row("c1", { text = "Agent compacted", kept = { pre = 245561, post = 100904, ms = 49000 } }),
+		row("c2", { text = "Compacted while idle, before the prompt cache expired", kept = { pre = 242575, post = 71000, ms = 41000 } }),
+		row("c3", { text = "Compacted, window full", kept = { pre = 567000, post = 80000, ms = 52000 } }),
+		row("c4", { text = "Context compacted", kept = { pre = 120000, post = 40200, ms = 65000 } }),
+		row("c5", { kept = {} }),
 	})
-	local tree = words(app, "#transcript")
+	local tree = app:tree("#transcript")
 	for _, w in {
-		"Compacted",
-		"Carry over",
-		"· 212.0k → 69.0k · 53s",
-		"Not compacted",
-		"· 212.0k · context kept",
-		"· 212.0k · the classifier gave no answer",
-		"Same task",
-		"No answer",
-		"Classifier",
-		"New task",
-		"· 212.0k · 1.7s",
-		"Compacted in the background",
-		"Swapped in",
-		"· 212.0k → 69.0k · 1 turn as text",
-		"· 180.0k → 40.0k · 30s",
-		"· 120.0k → 40.2k · 1m 5s",
+		"Agent compacted",
+		"· 245.6k → 100.9k · 49s",
 		"Compacted while idle, before the prompt cache expired",
+		"· 242.6k → 71.0k · 41s",
+		"Compacted, window full",
+		"· 567.0k → 80.0k · 52s",
+		"Context compacted",
+		"· 120.0k → 40.2k · 1m 5s",
+		"Compacted",
 	} do
 		expect(`{w}: {tree:find(w, 1, true) ~= nil}`).to_be(`{w}: true`)
 	end
@@ -118,32 +92,24 @@ local function clocks(app: any): number
 	return app:state("test_clocks")
 end
 
-test("compaction: the wait stands in the trailer's place through each phase, a clock only while one runs", function()
+test("compaction: the wait stands in the trailer's place, queued then compacting, a clock only while it runs", function()
 	local app = opened()
 	push(app, { { id = "u99", role = "user", text = "Next: the report", waiting = "sending", since = 0 } })
 	expect(app:wait('~"Sending…"', { timeout_ms = 2000 })).to_be(true)
-	wait_for(app, { phase = "checking", agent = "Claude Code", model = "claude-sonnet-5-5", mark = "claude" })
-	local tree = app:tree("#compaction-wait")
-	expect(tree:find("Checking whether to compact", 1, true) ~= nil).to_be(true)
-	expect(tree:find("claude-sonnet-5-5", 1, true) ~= nil).to_be(true)
-	expect(tree:find("· 0s", 1, true) ~= nil).to_be(true)
-	expect(app:has('~"Sending…"')).to_be(false)
-	expect(app:has("#working-clock")).to_be(false)
-	expect(clocks(app)).to_be(1)
-	wait_for(app, { phase = "checking", agent_note = true, agent = "Claude Code" })
-	expect(app:tree("#compaction-wait"):find("Checking the agent's note", 1, true) ~= nil).to_be(true)
-	wait_for(app, { phase = "compacting", tag = "new", tokens = 212000, usual = 53 })
-	tree = app:tree("#compaction-wait")
-	for _, w in { "Compacting", "New task", "· 212.0k · 0s, usually ~53s" } do
-		expect(`{w}: {tree:find(w, 1, true) ~= nil}`).to_be(`{w}: true`)
-	end
-	wait_for(app, { phase = "compacting" })
-	expect(app:tree("#compaction-wait"):find("· 0s", 1, true) ~= nil).to_be(true)
 	wait_for(app, { phase = "queued" })
-	tree = app:tree("#compaction-wait")
+	local tree = app:tree("#compaction-wait")
 	expect(tree:find("Compaction queued", 1, true) ~= nil).to_be(true)
 	expect(tree:find("· starts when the turn settles", 1, true) ~= nil).to_be(true)
+	expect(app:has('~"Sending…"')).to_be(false)
 	expect(clocks(app)).to_be(0)
+	wait_for(app, { phase = "compacting" })
+	tree = app:tree("#compaction-wait")
+	expect(tree:find("Compacting", 1, true) ~= nil).to_be(true)
+	expect(tree:find("· 0:00", 1, true) ~= nil).to_be(true)
+	expect(app:has("#working-clock")).to_be(false)
+	expect(clocks(app)).to_be(1)
+	run_for(app, 2.2)
+	expect(app:tree("#compaction-wait"):find("· 0:02", 1, true) ~= nil).to_be(true)
 	wait_for(app, nil)
 	app:frames(20)
 	expect(app:has("#compaction-wait")).to_be(false)
@@ -170,108 +136,69 @@ test("compaction: the queued divider stays whole: its words between both rules, 
 	expect(left >= 24).to_be(true)
 end)
 
-test("compaction: a decision that compacts shows it on its own row, then Compacted with its sizes", function()
+test("compaction: the panel: what the agent was asked to keep and its summary, opened and closed by a click or Enter, kept by a click elsewhere", function()
 	local app = opened()
 	push(app, {
-		row("k9", "classifier", { decision = decision("carry") }),
-		{ id = "u9", role = "user", text = "Then the report" },
+		row("c1", { text = "Agent compacted", kept = { pre = 245561, post = 100904, ms = 49000, focus = "The cart.ts API and the coupon work", summary = "Checkout is done; coupons are next." } }),
+		row("c2", { text = "Compacted while idle, before the prompt cache expired", kept = { pre = 242575, post = 71000, summary = "The plan, step 3 next." } }),
+		row("c3", { text = "Context compacted", kept = { pre = 90000, post = 30000 } }),
 	})
-	wait_for(app, { phase = "compacting", tag = "carry", tokens = 212000, row = "k9", usual = 53 })
-	local tree = app:tree("#transcript")
-	expect(tree:find("Compacting", 1, true) ~= nil).to_be(true)
-	expect(tree:find("· 212.0k · 0s, usually ~53s", 1, true) ~= nil).to_be(true)
-	expect(app:has("#compaction-wait")).to_be(false)
-	expect(clocks(app)).to_be(1)
-	app:set_state("test_row_patch", { id = "k9", kept = KEPT })
-	app:command("patch_row")
-	wait_for(app, nil)
-	tree = app:tree("#transcript")
-	expect(tree:find("· 212.0k → 69.0k · 53s", 1, true) ~= nil).to_be(true)
-	expect(tree:find("usually", 1, true)).to_be(nil)
-	expect(clocks(app)).to_be(0)
-	expect(app:error()).to_be(nil)
-end)
-
-test("compaction: the open panel: a click or Enter opens and closes it, a click elsewhere keeps it", function()
-	local app = opened()
-	push(app, {
-		row("k1", "classifier", {
-			decision = decision("carry", { said = "continue", by = "stage2", stage2 = "CARRY", reply = "CONTINUE", reason = "Same task, the last turns matter" }),
-			kept = KEPT,
-		}),
-	})
-	expect(app:has('~"WHAT THE AGENT KEPT"')).to_be(false)
-	app:click("#k1-head")
-	settle(app)
-	local tree = app:tree("#transcript")
-	for _, w in {
-		"WHAT THE AGENT KEPT",
-		"Summary the agent wrote",
-		"Refunds are done; the tests pass.",
-		"Carried over word for word",
-		"CLASSIFIER",
-		"Carry over (said Same task)",
-		"Same task, the last turns matter",
-		"Claude Code · claude-sonnet-5-5 · Second look · 1.7s",
-		"212.0k tokens",
-		"2.3k in · 4 out",
-		"What the classifier saw",
-	} do
-		expect(`{w}: {tree:find(w, 1, true) ~= nil}`).to_be(`{w}: true`)
-	end
-	app:click('role:button "What the classifier saw"')
-	settle(app)
-	tree = app:tree("#transcript")
-	expect(tree:find("First look", 1, true) ~= nil and tree:find("Second look", 1, true) ~= nil).to_be(true)
-	expect(tree:find("person: refund the order", 1, true) ~= nil).to_be(true)
-	app:click('#chat-composer >> role:textbox "Message"')
-	settle(app)
-	expect(app:has('~"WHAT THE AGENT KEPT"')).to_be(true)
-	app:click("#k1-head")
-	settle(app)
-	expect(app:has('~"WHAT THE AGENT KEPT"')).to_be(false)
-	app:key("Enter")
-	settle(app)
-	expect(app:has('~"WHAT THE AGENT KEPT"')).to_be(true)
-	app:key("Enter")
-	settle(app)
-	expect(app:has('~"WHAT THE AGENT KEPT"')).to_be(false)
-	expect(app:error()).to_be(nil)
-end)
-
-test("compaction: a plain divider opens what the agent kept; one without a summary doesn't open", function()
-	local app = opened()
-	push(app, {
-		row("c1", "compaction", { text = "Agent compacted", kept = { pre = 120000, post = 40200, ms = 65000, summary = "The plan, step 3 next." } }),
-		row("c2", "compaction", { text = "Context compacted", kept = { pre = 90000, post = 30000 } }),
-	})
+	expect(app:has('~"Asked to keep"')).to_be(false)
+	expect(app:has('~"Checkout is done; coupons are next."')).to_be(false)
 	app:click("#c1-head")
 	settle(app)
 	local tree = app:tree("#transcript")
-	expect(tree:find("The plan, step 3 next.", 1, true) ~= nil).to_be(true)
-	expect(tree:find("Nothing carried word for word: the next turn starts from the", 1, true) ~= nil).to_be(true)
-	expect(tree:find("CLASSIFIER", 1, true)).to_be(nil)
+	for _, w in { "Asked to keep", "The cart.ts API and the coupon work", "Summary", "Checkout is done; coupons are next." } do
+		expect(`{w}: {tree:find(w, 1, true) ~= nil}`).to_be(`{w}: true`)
+	end
+	for _, w in { "CLASSIFIER", "Carried over", "WHAT THE AGENT KEPT" } do
+		expect(`{w}: {tree:find(w, 1, true) ~= nil}`).to_be(`{w}: false`)
+	end
+	local _, _, _, open_h = box(app, "#transcript", "#c1%-panel")
+	expect((open_h or 0) > 30).to_be(true)
+	app:scroll("#transcript", -4000)
+	app:frames(30)
+	app:scroll("#transcript", 8000)
+	app:frames(1)
+	local _, _, _, again_h = box(app, "#transcript", "#c1%-panel")
+	expect(again_h).to_be(open_h)
+	settle(app)
+	app:click('#chat-composer >> role:textbox "Message"')
+	settle(app)
+	expect(app:has('~"Checkout is done; coupons are next."')).to_be(true)
+	app:click("#c1-head")
+	settle(app)
+	expect(app:has('~"Checkout is done; coupons are next."')).to_be(false)
+	local _, _, _, closed_h = box(app, "#transcript", "#c1%-panel")
+	expect(closed_h or 0).to_be(0)
+	app:key("Enter")
+	settle(app)
+	expect(app:has('~"Checkout is done; coupons are next."')).to_be(true)
+	app:key("Enter")
+	settle(app)
+	expect(app:has('~"Checkout is done; coupons are next."')).to_be(false)
 	app:click("#c2-head")
 	settle(app)
-	expect(app:has(".compaction-panel")).to_be(true)
-	local _, count = string.gsub(app:tree("#transcript"), "WHAT THE AGENT KEPT", "")
-	expect(count).to_be(1)
+	tree = app:tree("#transcript")
+	expect(tree:find("The plan, step 3 next.", 1, true) ~= nil).to_be(true)
+	expect(tree:find("Asked to keep", 1, true)).to_be(nil)
+	app:click("#c3-head")
+	settle(app)
+	local _, _, _, c3_h = box(app, "#transcript", "#c3%-panel")
+	expect(c3_h or 0).to_be(0)
+	expect(app:error()).to_be(nil)
 end)
 
 test("compaction: a compaction never moves the reading place or the composer", function()
 	local app = opened()
 	app:scroll("#transcript", -1800)
 	settle(app)
-	local _, y_before = box(app, "#transcript", "#u20 article")
 	local _, cy = box(app, "#transcript", "#u20 article")
 	local _, comp_before = box(app, "", "#chat%-composer ")
-	expect(y_before ~= nil).to_be(true)
+	expect(cy ~= nil).to_be(true)
 	wait_for(app, { phase = "queued" })
-	wait_for(app, { phase = "checking", agent = "Claude Code" })
-	push(app, { row("k7", "classifier", { decision = decision("carry") }) })
-	wait_for(app, { phase = "compacting", tag = "carry", tokens = 212000, row = "k7" })
-	app:set_state("test_row_patch", { id = "k7", kept = KEPT })
-	app:command("patch_row")
+	wait_for(app, { phase = "compacting" })
+	push(app, { row("c7", { text = "Agent compacted", kept = { pre = 212000, post = 69000, ms = 53000, summary = "Refunds are done." } }) })
 	wait_for(app, nil)
 	local _, y_after = box(app, "#transcript", "#u20 article")
 	local _, comp_after = box(app, "", "#chat%-composer ")
@@ -280,13 +207,11 @@ test("compaction: a compaction never moves the reading place or the composer", f
 	expect(app:error()).to_be(nil)
 end)
 
-test("compaction: the composer's chip says the same words while it checks or compacts, none while queued", function()
+test("compaction: the composer's chip says Compacting while it compacts, none while queued", function()
 	local app = opened()
 	wait_for(app, { phase = "queued" })
 	expect(app:has("#composer-compacting")).to_be(false)
-	wait_for(app, { phase = "checking", agent = "Claude Code" })
-	expect(app:tree("#composer-compacting"):find("Checking whether to compact", 1, true) ~= nil).to_be(true)
-	wait_for(app, { phase = "compacting", tag = "carry", tokens = 1 })
+	wait_for(app, { phase = "compacting" })
 	app:frames(60)
 	expect(app:tree("#composer-compacting"):find("Compacting", 1, true) ~= nil).to_be(true)
 	wait_for(app, nil)
@@ -298,9 +223,7 @@ test("compaction: the resume card on a large idle Claude chat: Keep full history
 	local app = opened()
 	expect(app:has("#composer-resume")).to_be(false)
 	local function offer(at: string)
-		app:set_state("test_patch", { resume = { tokens = "184K", idle = "2h 25m", at = at } })
-		app:command("patch_open")
-		settle(app)
+		patch(app, { resume = { tokens = "184K", idle = "2h 25m", at = at } })
 	end
 	offer("t1")
 	local tree = app:tree("#composer-resume")
@@ -314,21 +237,19 @@ test("compaction: the resume card on a large idle Claude chat: Keep full history
 	expect(app:has("#composer-resume")).to_be(false)
 	offer("t2")
 	expect(app:has("#composer-resume")).to_be(true)
-	app:set_state("test_patch", { resume = false })
-	app:command("patch_open")
-	settle(app)
+	patch(app, { resume = false })
 	expect(app:has("#composer-resume")).to_be(false)
 end)
 
 test("compaction: Find finds a compaction by its label's words", function()
 	local app = opened()
 	push(app, {
-		row("k2", "classifier", { decision = decision("continue") }),
-		row("c1", "compaction", { text = "Context compacted", kept = { pre = 120000, post = 40200, ms = 65000 } }),
+		row("c1", { text = "Agent compacted", kept = { pre = 245561, post = 100904, ms = 49000 } }),
+		row("c2", { text = "Context compacted", kept = { pre = 120000, post = 40200, ms = 65000 } }),
 	})
 	app:command("find_open")
 	settle(app)
-	app:type('role:textbox "Find"', "context kept")
+	app:type('role:textbox "Find"', "Agent compacted")
 	settle(app)
 	expect(app:tree("#chat-find"):match('text "(%d+ of %d+)"')).to_be("1 of 1")
 	app:fill('role:textbox "Find"', "120.0k → 40.2k")
@@ -339,7 +260,8 @@ end)
 test("compaction: a /context card: its bar's legend with the buffer and what is free, and its actions", function()
 	local app = opened()
 	push(app, {
-		row("cc", "claude_command", {
+		row("cc", {
+			line = "claude_command",
 			text = "Claude Code /context",
 			context = {
 				model = "claude-opus-5-5",
@@ -359,5 +281,93 @@ test("compaction: a /context card: its bar's legend with the buffer and what is 
 	for _, w in { "Context", "Claude Code · claude-opus-5-5", "61.2K / 200K · 30.6%", "System prompt", "Autocompact buffer", "Free", "106K", "53.0%", "Messages take 40K.", "Compact now", "Context settings" } do
 		expect(`{w}: {tree:find(w, 1, true) ~= nil}`).to_be(`{w}: true`)
 	end
+	expect(app:error()).to_be(nil)
+end)
+
+local WINDOW = { context_tokens = 84000, context_window = 200000 }
+
+local function card(app: any)
+	patch(app, WINDOW)
+	app:hover("#composer-context")
+	app:wait("#composer-context-card", { timeout_ms = 2000 })
+	settle(app)
+end
+
+local function told(app: any, fields: { [string]: any })
+	local all = table.clone(WINDOW)
+	for k, v in fields do
+		all[k] = v
+	end
+	patch(app, all)
+	app:hover('role:textbox "Message"')
+	settle(app)
+	app:hover("#composer-context")
+	app:wait("#composer-context-card", { timeout_ms = 2000 })
+	settle(app)
+end
+
+local IDLE = { icon = "clock", title = "Idle · 3:42 PM", detail = "A message from you first cancels it", chip = "compacts 3:42 PM" }
+
+test("compaction: the context card marks the bar where the agent is reminded, warned and compacted, only those the host names", function()
+	local app = opened()
+	patch(app, { context_marks = { floor = 120000, warn = 142000, auto = 167000 } })
+	card(app)
+	local tree = app:tree("#composer-context-card")
+	for _, w in { "New-task reminder from 120K", "Agent warned at 142K", "Compacts on its own at 167K" } do
+		expect(`{w}: {tree:find(w, 1, true) ~= nil}`).to_be(`{w}: true`)
+	end
+	local bx, _, bw = box(app, "#composer-context-card", 'status "Context window')
+	expect(bx ~= nil).to_be(true)
+	for _, m in { { '"New%-task reminder from 120K"', 0.6 }, { '"Agent warned at 142K"', 0.71 }, { '"Compacts on its own at 167K"', 0.835 } } do
+		local x, _, w = box(app, "#composer-context-card", m[1])
+		local at = ((x :: number) + (w :: number) / 2 - (bx :: number)) / (bw :: number)
+		expect(`{m[1]} {math.abs(at - m[2]) <= 0.01}`).to_be(`{m[1]} true`)
+	end
+	told(app, { context_marks = { auto = 167000 } })
+	tree = app:tree("#composer-context-card")
+	expect(tree:find("Compacts on its own at 167K", 1, true) ~= nil).to_be(true)
+	expect(tree:find("New-task reminder", 1, true)).to_be(nil)
+	expect(tree:find("Agent warned", 1, true)).to_be(nil)
+	told(app, { context_marks = false })
+	expect(app:tree("#composer-context-card"):find("Compacts on its own", 1, true)).to_be(nil)
+	expect(app:error()).to_be(nil)
+end)
+
+test("compaction: the context card says what compacts the chat next, and offers Compact now only while it is idle and nothing compacts", function()
+	local app = opened()
+	patch(app, { next_compaction = IDLE })
+	card(app)
+	expect(app:text("#composer-context-next-title")).to_be("Idle · 3:42 PM")
+	expect(app:text("#composer-context-next-detail")).to_be("A message from you first cancels it")
+	expect(app:has('#composer-context-next >> "Next compaction"')).to_be(true)
+	expect(app:has('#composer-context-next >> role:button "Compact now"')).to_be(true)
+	told(app, { next_compaction = { icon = "warn", title = "Claude Code · at 167K", detail = "The turn carries on after it" }, running = true })
+	expect(app:text("#composer-context-next-title")).to_be("Claude Code · at 167K")
+	expect(app:has('#composer-context-next >> role:button "Compact now"')).to_be(false)
+	told(app, { next_compaction = { icon = "spin", title = "Compacting now" }, running = false, compacting = true, compaction_wait = { phase = "compacting" } })
+	expect(app:text("#composer-context-next-title")).to_be("Compacting now")
+	expect(app:has("#composer-context-next-detail")).to_be(false)
+	expect(app:has('#composer-context-next >> role:button "Compact now"')).to_be(false)
+	told(app, { next_compaction = { icon = "off", title = "Not scheduled", detail = "Context is under 100K" }, compacting = false, compaction_wait = false })
+	expect(app:has('#composer-context-next >> role:button "Compact now"')).to_be(true)
+	told(app, { next_compaction = false })
+	expect(app:has("#composer-context-next")).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("compaction: the footer names the next compaction left of the ring, opening to its width and closing as it goes", function()
+	local app = opened()
+	patch(app, WINDOW)
+	local _, _, closed_w = box(app, "", "#composer%-context%-next%-chip")
+	expect(closed_w or 0).to_be(0)
+	patch(app, { next_compaction = IDLE, context_tokens = 84000, context_window = 200000 })
+	expect(app:text("#composer-context-next-chip")).to_be("compacts 3:42 PM ·")
+	local x, _, w = box(app, "", "#composer%-context%-next%-chip")
+	local rx = box(app, "", "#composer%-context ")
+	expect((w or 0) > 40).to_be(true)
+	expect((x :: number) + (w :: number) <= (rx :: number) + 1).to_be(true)
+	patch(app, { next_compaction = { icon = "off", title = "Not scheduled", detail = "The agent is working" }, context_tokens = 84000, context_window = 200000 })
+	_, _, w = box(app, "", "#composer%-context%-next%-chip")
+	expect(w or 0).to_be(0)
 	expect(app:error()).to_be(nil)
 end)

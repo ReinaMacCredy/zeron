@@ -109,7 +109,7 @@ function M.texts(m: any, b: any?): { { key: string, text: string } }
 		table.insert(out, { key = `{base}:0`, text = x.text or "" })
 	elseif x.line == "claude_config" then
 		table.insert(out, { key = `{base}:0`, text = x.text or "" })
-	elseif x.line and x.line ~= "classifier" and x.line ~= "compaction" then
+	elseif x.line and x.line ~= "compaction" then
 		table.insert(out, { key = `{base}:0`, text = M.line_words(x) })
 	end
 	return out
