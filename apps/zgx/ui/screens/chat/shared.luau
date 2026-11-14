@@ -1307,8 +1307,8 @@ M.dropping = ui.shared("chat.dropping", {} :: { [string]: boolean })
 -- wiser.
 M.dropping_own = ui.shared("chat.dropping_own", {} :: { [string]: boolean | string })
 
--- (`what`: "session" while a sidebar session is carried, its drop a
--- mention; else files.)
+-- (`what`: "session" while a sidebar session is carried, "tab" while a tab
+-- is, either's drop a mention; else files.)
 local function over_in(map: any, zone: string, inside: boolean, what: string?)
 	local now = map:peek()
 	local want = if inside then (what or true) else nil
@@ -1326,7 +1326,7 @@ end
 
 local function any_files(map: any): boolean
 	for _, what in map:get() do
-		if what ~= "session" then
+		if what == true then
 			return true
 		end
 	end
@@ -1348,18 +1348,23 @@ function M.carrying_session(): boolean
 	return false
 end
 
+function M.mentioning_over(zone: string): boolean
+	local what = M.dropping:get()[zone]
+	return what == "session" or what == "tab"
+end
+
 -- Files carried from outside end with a drop or with their leave. One lost
 -- on the way (the platform's drag ended elsewhere, or what the files were
 -- over went first) left the chat dimmed under "Drop to attach" for good,
 -- Escape and all. Any sign the drag is over lets go of them: Escape, the
 -- window losing focus, the pointer over the chat (none reaches a window
 -- while another app's drag is over it), or no word of them for a while. A
--- sidebar session carried is the window's own drag, whose end is always
--- heard: kept. True if files were let go of.
+-- sidebar session or a tab carried is the window's own drag, whose end is
+-- always heard: kept. True if files were let go of.
 local function let_go_in(map: any): boolean
 	local next, any = {}, false
 	for zone, what in map:peek() do
-		if what == "session" then
+		if what ~= true then
 			next[zone] = what
 		else
 			any = true
@@ -1645,7 +1650,8 @@ local function zone_props(map: any, zone: string, key: string?, landed: (() -> (
 			return workspace_paths(payload) ~= nil or (type(payload) == "table" and type(payload.session) == "string")
 		end,
 		on_drag_over = function(payload: any)
-			over_in(map, zone, true, if type(payload) == "table" and type(payload.session) == "string" then "session" else nil)
+			local chat = type(payload) == "table" and type(payload.session) == "string"
+			over_in(map, zone, true, if chat and payload.session_tab ~= nil then "tab" elseif chat then "session" else nil)
 		end,
 		on_drag_leave = function()
 			over_in(map, zone, false)
@@ -1680,8 +1686,7 @@ end
 function M.own_drop_zone(zone: string, key: string, landed: () -> ()): ({ [string]: any }, () -> boolean, () -> boolean)
 	return zone_props(M.dropping_own, zone, key, landed),
 		function(): boolean
-			local what = M.dropping_own:get()[zone]
-			return what ~= nil and what ~= "session"
+			return M.dropping_own:get()[zone] == true
 		end,
 		function(): boolean
 			return M.dropping_own:get()[zone] == "session"

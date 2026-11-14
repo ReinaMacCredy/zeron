@@ -1596,7 +1596,7 @@ local function Composer(): Node
 			keep = "chat",
 			toolbar_id = "composer-toolbar",
 			drop_ring = function(): boolean
-				return shared.dropping:get().composer == "session"
+				return shared.mentioning_over("composer")
 			end,
 			ring = function(): number
 				return Branch.ring:get()

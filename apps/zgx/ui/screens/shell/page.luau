@@ -1443,14 +1443,11 @@ return function(props: Props): Node
 		left = { left = 0, top = 0, w = BAND, min_w = LEAST },
 		right = { right = 0, top = 0, w = BAND, min_w = LEAST },
 	}
-	-- A chat alone, and a new chat's page, as gpui's: its two halves, down to
-	-- the composer.
 	local HALVES: { [string]: { [string]: any } } = {
 		left = { left = 0, top = 0, right = "50%" },
 		right = { left = "50%", top = 0, right = 0 },
 	}
 	local HOME = "home"
-	-- (A new chat's: above its composer, 8 points of slack over it, as gpui's.)
 	local function home_room(): number
 		local _ = composer_surface.moved:get()
 		local foot = composer_surface.foot:get()

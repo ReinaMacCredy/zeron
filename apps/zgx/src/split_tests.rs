@@ -336,8 +336,6 @@ fn a_sidebar_row_splits_on_either_half_and_attaches_at_the_composer() {
     assert!(!mentioned(&mut app, "Tidy the tests"), "a half doesn't attach");
 }
 
-/// A tab carried straight out of the strip, before the strip's band shows
-/// to hear it go, still grows the cards and lights the one under it.
 #[test]
 fn a_tab_flicked_out_of_the_strip_lights_its_card_and_splits() {
     let mut app = mount(&scratch("tab-flick"));
@@ -356,8 +354,22 @@ fn a_tab_flicked_out_of_the_strip_lights_its_card_and_splits() {
     assert_eq!(panes(&mut app), 2, "the tab dropped at the left splits");
 }
 
-/// A chat carried over a new chat's page, as gpui's: the cards show, and
-/// either half above the composer opens it.
+#[test]
+fn a_tab_held_over_the_composer_rings_it_and_is_mentioned() {
+    let mut app = mount(&scratch("tab-composer"));
+    open(&mut app, "Tidy the tests");
+    open(&mut app, "Fix the build");
+    let composer = middle(app.bounds("#chat-composer"));
+    let from = middle(app.bounds("#session-tab-a3"));
+    carry(&mut app, from, composer, |app| {
+        assert!(app.find("#composer-drop-ring").is_some(), "the pill's ring");
+        assert_eq!(showing(app), (false, false), "a tab shows no Drop to mention");
+    });
+    assert_eq!(app.error(), None);
+    assert_eq!(panes(&mut app), 0);
+    assert!(mentioned(&mut app, "Tidy the tests"), "mentioned:\n{}", app.tree());
+}
+
 #[test]
 fn a_chat_dropped_on_a_new_chat_s_page_opens() {
     let mut app = mount(&scratch("home-drop"));
@@ -372,6 +384,23 @@ fn a_chat_dropped_on_a_new_chat_s_page_opens() {
     assert_eq!(app.error(), None);
     assert_eq!(route_session(&app).as_deref(), Some("a3"), "the chat dropped opens");
     assert_eq!(panes(&mut app), 0, "alone");
+}
+
+#[test]
+fn a_chat_dropped_on_a_new_chat_s_composer_is_mentioned_there() {
+    let mut app = mount(&scratch("home-composer"));
+    let composer = app.bounds("#chat-composer");
+    let from = row_at(&mut app, "Tidy the tests");
+    carry(&mut app, from, middle(composer), |app| {
+        for side in ["left", "right"] {
+            let zone = app.bounds(&format!("#split-zone-home-{side}"));
+            eprintln!("HOME zone {side} {zone:?} composer {composer:?}");
+            assert!(zone.y + zone.height <= composer.y, "the {side} half stops above the composer: {zone:?} {composer:?}");
+        }
+    });
+    assert_eq!(app.error(), None);
+    assert_eq!(route_session(&app), None, "still a new chat");
+    assert!(mentioned(&mut app, "Tidy the tests"), "mentioned in the new chat's composer:\n{}", app.tree());
 }
 
 /// Where pane `id`'s grip is grabbed: at its top's middle, there once the pointer
