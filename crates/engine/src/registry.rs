@@ -113,7 +113,8 @@ struct HarnessPrefsFile {
     titles: TitleSettings,
     predictions: PredictionSettings,
     delegation: DelegationSettings,
-    supervisor: zeron_proto::supervisor::SupervisorSettings,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supervisor: Option<serde_json::Value>,
     #[serde(alias = "idleCompaction")]
     compaction: CompactionSettings,
     tools: zeron_proto::tools::ToolSettings,
@@ -700,33 +701,6 @@ impl HarnessRegistry {
             .collect()
     }
 
-    pub(crate) fn turned_off(&self, id: HarnessId) -> bool {
-        self.prefs().disabled.contains(&id)
-    }
-
-    /// Why a chat with `config` cannot run here; a provider instance is checked at its own launch.
-    pub(crate) fn cannot_run(&self, config: &zeron_proto::ChatConfig) -> Option<String> {
-        if config.instance_id.is_some() {
-            return None;
-        }
-        let name = config.harness.display_name();
-        let other = match &config.profile_id {
-            Some(profile) => format!("give the {profile} profile another agent"),
-            None => "pick another agent".to_string(),
-        };
-        if !self.installed_for(config.harness) {
-            Some(format!(
-                "{name} is not installed on this Mac. Install it, or {other}."
-            ))
-        } else if self.turned_off(config.harness) {
-            Some(format!(
-                "{name} is turned off in Settings > Providers. Turn it on, or {other}."
-            ))
-        } else {
-            None
-        }
-    }
-
     /// Whether this device's CLI probe passes for `id` (no spawn, no resolve).
     pub(crate) fn installed_for(&self, id: HarnessId) -> bool {
         match self.slots().get(&id) {
@@ -857,15 +831,6 @@ impl HarnessRegistry {
         self.prefs().routing = settings;
         self.persist_prefs();
         Ok(())
-    }
-
-    pub fn supervisor_settings(&self) -> zeron_proto::supervisor::SupervisorSettings {
-        self.prefs().supervisor
-    }
-
-    pub fn set_supervisor_settings(&self, settings: zeron_proto::supervisor::SupervisorSettings) {
-        self.prefs().supervisor = settings;
-        self.persist_prefs();
     }
 
     pub fn compaction_settings(&self) -> CompactionSettings {
@@ -2122,6 +2087,7 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap();
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(json.get("enabled").is_none(), "{text}");
+        assert!(json.get("supervisor").is_none(), "{text}");
         assert!(text.contains("codex") && text.contains("grok"), "{text}");
         // An agent registered after the migration is new, not a past "no".
         test_slot(&registry, HarnessId::Cursor, true);
@@ -2139,6 +2105,12 @@ mod tests {
     fn routing_settings_persist_and_refuse_unknown_harnesses() {
         use crate::routing::{Role, RoleRoute, RoutingSettings};
         let dir = tempfile::tempdir().unwrap();
+        let supervisor = serde_json::json!({ "decideForMe": true, "heartbeatMinutes": 30 });
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            serde_json::json!({ "supervisor": supervisor }).to_string(),
+        )
+        .unwrap();
         let registry = HarnessRegistry::new();
         registry.load_prefs(dir.path());
         test_slot(&registry, HarnessId::Codex, true);
@@ -2160,6 +2132,7 @@ mod tests {
         let written = std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap();
         let written: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(written["routing"]["roles"]["worker"]["harness"], "codex");
+        assert_eq!(written["supervisor"], supervisor);
         let reloaded = HarnessRegistry::new();
         reloaded.load_prefs(dir.path());
         assert_eq!(reloaded.routing_settings(), settings);

@@ -1,5 +1,4 @@
 use super::*;
-use zeron_proto::supervisor::PlanApproval;
 use zeron_proto::{LinkKind, Task, TaskMode, TaskPatch, TaskStep, TaskStepPatch};
 
 fn refused(message: &str) -> RpcError {
@@ -8,6 +7,70 @@ fn refused(message: &str) -> RpcError {
 
 fn failed(error: crate::EngineError) -> RpcError {
     RpcError::Failed(error.to_string())
+}
+
+const MAX_RESOURCE_KEYS: usize = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResourceKey {
+    Port(u16),
+    Slot(String),
+    Path(String),
+}
+
+impl ResourceKey {
+    fn parse(key: &str) -> Option<Self> {
+        let (kind, value) = key.trim().split_once(':')?;
+        let value = value.trim();
+        match kind.trim() {
+            "port" => value.parse().ok().filter(|port| *port > 0).map(Self::Port),
+            "slot" => (!value.is_empty()
+                && value.len() <= 64
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+            .then(|| Self::Slot(value.to_string())),
+            "path" => {
+                if value.starts_with('/') || value.starts_with('~') {
+                    return None;
+                }
+                let parts: Vec<&str> = value
+                    .split('/')
+                    .filter(|part| !part.is_empty() && *part != ".")
+                    .collect();
+                (!parts.is_empty() && !parts.contains(&"..")).then(|| Self::Path(parts.join("/")))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ResourceKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Port(port) => write!(f, "port:{port}"),
+            Self::Slot(name) => write!(f, "slot:{name}"),
+            Self::Path(path) => write!(f, "path:{path}"),
+        }
+    }
+}
+
+fn checked_keys(keys: &[String]) -> Result<Vec<String>, String> {
+    let mut parsed: Vec<ResourceKey> = Vec::new();
+    for key in keys {
+        let key = ResourceKey::parse(key).ok_or_else(|| {
+            format!("\"{key}\" is not a resource: use port:<1-65535>, slot:<name> or path:<path inside the project>")
+        })?;
+        if !parsed.contains(&key) {
+            parsed.push(key);
+        }
+    }
+    if parsed.len() > MAX_RESOURCE_KEYS {
+        return Err(format!(
+            "A mission declares at most {MAX_RESOURCE_KEYS} resources"
+        ));
+    }
+    Ok(parsed.iter().map(ResourceKey::to_string).collect())
 }
 
 fn task_prompt(task: &Task) -> String {
@@ -251,11 +314,6 @@ fn reorder_keys(
     Ok(moves)
 }
 
-pub(super) struct Rebrief<'a> {
-    pub supervisor: &'a str,
-    pub reason: &'a str,
-}
-
 fn lead_brief(task_id: &str, lead: Lead, reads: bool) -> String {
     let plan = if lead.plan_doc {
         format!(
@@ -289,9 +347,6 @@ fn lead_brief(task_id: &str, lead: Lead, reads: bool) -> String {
     });
     lines.push(
         "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the tasks tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with create_thread and the same taskStepId.",
-    );
-    lines.push(
-        "When a decision changes the goal or costs money the person has not approved, or you cannot settle it from the plan, use the tasks tool action \"escalate\" and keep working on what does not depend on it.",
     );
     lines.push(
         "When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true.",
@@ -926,6 +981,7 @@ impl EngineRpc {
             .map(drop)
     }
 
+    /// A failed send marks the task, so its card says the thread missed the message.
     pub(super) async fn send_to_task_thread(
         &self,
         task: &Task,
@@ -934,10 +990,24 @@ impl EngineRpc {
         text: &str,
         images: Vec<String>,
     ) -> Result<String, RpcError> {
-        self.doc_host
-            .send_to_task_thread(&self.workspace, task, chat_id, from_chat_id, text, images)
-            .await
-            .map_err(failed)
+        let (text, images) = crate::doc_host::images_here(text, images);
+        let sent = self
+            .doc_host
+            .queue_thread_message_with(chat_id, from_chat_id, &text, images)
+            .await;
+        let send_error = match &sent {
+            Ok(id) if task.send_error.is_none() => return Ok(id.clone()),
+            Ok(_) => None,
+            Err(error) => Some(error.to_string()),
+        };
+        let patch = TaskPatch {
+            send_error: Some(send_error),
+            ..Default::default()
+        };
+        self.workspace
+            .update_task(&task.id, &patch)
+            .map_err(failed)?;
+        sent.map_err(failed)
     }
 
     pub(super) fn lead_of(&self, task: &Task) -> Result<String, RpcError> {
@@ -972,32 +1042,7 @@ impl EngineRpc {
         }
     }
 
-    pub(super) fn escalate_task(
-        &self,
-        task_id: &str,
-        from_chat_id: Option<&str>,
-        title: String,
-        why: zeron_proto::supervisor::ItemWhy,
-        detail: String,
-        options: Vec<String>,
-    ) -> Result<String, RpcError> {
-        let task = self.task_or_refuse(task_id)?;
-        let from = from_chat_id.ok_or_else(|| refused("Only the task's lead thread escalates"))?;
-        Self::check_lead(&task, Some(from), "escalates")?;
-        let item = self.raise_item(
-            zeron_proto::supervisor::Raiser::Lead,
-            from,
-            Some(task.id),
-            title,
-            why,
-            detail,
-            options,
-        )?;
-        self.doc_host.supervisor_escalated(&item, false);
-        Ok(item.id)
-    }
-
-    pub(super) async fn plan_steps(
+    pub(super) fn plan_steps(
         &self,
         task_id: &str,
         steps: Vec<(String, String, Option<String>, Option<String>)>,
@@ -1027,7 +1072,7 @@ impl EngineRpc {
         let threads: Vec<Option<String>> = steps.iter().map(|(_, _, id, _)| id.clone()).collect();
         self.check_step_threads(&task, &threads)?;
         let resources = resources
-            .map(|keys| crate::supervisor_resources::checked_keys(&keys))
+            .map(|keys| checked_keys(&keys))
             .transpose()
             .map_err(|message| refused(&message))?
             .filter(|keys| *keys != task.resources);
@@ -1084,15 +1129,12 @@ impl EngineRpc {
             images: (images != task.images).then_some(images),
             ..Default::default()
         };
-        self.withdraw_held_approval(task_id).await?;
         let plans = self.plan_writes();
         self.check_one_plan(&task, &patch)?;
         self.workspace
             .plan_task_steps(task_id, &steps, &patch)
             .map_err(failed)?;
         drop(plans);
-        self.doc_host
-            .supervisor_replanned(&task, &before, &steps, from_chat_id);
         Ok(moved)
     }
 
@@ -1158,60 +1200,6 @@ impl EngineRpc {
         sent
     }
 
-    /// A Supervisor approval still in its hold no longer stands: the plan returns to review, and the lead, never told, hears nothing.
-    pub(super) async fn withdraw_held_approval(&self, task_id: &str) -> Result<bool, RpcError> {
-        let Some(store) = self.doc_host.supervisor() else {
-            return Ok(false);
-        };
-        let approving = store.approving();
-        let _approving = approving.lock().await;
-        let Some((id, PlanApproval::Held { .. })) = store.approval_of(task_id) else {
-            return Ok(false);
-        };
-        self.set_plan_pending(task_id, true)?;
-        store.set_approval(&id, None, None);
-        Ok(true)
-    }
-
-    /// Returns the plan to review while no step has started; the lead hears of it only if the approval reached it.
-    pub(super) async fn take_back_plan_approval(&self, task_id: &str) -> Result<(), RpcError> {
-        let store = self.supervisor_store()?;
-        let approving = store.approving();
-        let _approving = approving.lock().await;
-        let _starting = self.doc_host.step_start_lock().await;
-        let task = self.task_or_refuse(task_id)?;
-        let (id, approval) = store
-            .approval_of(task_id)
-            .ok_or_else(|| refused("The Supervisor has not approved this plan"))?;
-        if matches!(approval, PlanApproval::TakenBack { .. }) {
-            return Err(refused("This approval is already taken back"));
-        }
-        for step in self.workspace.task_steps_of(task_id) {
-            if !self.unstarted(&step) {
-                return Err(refused(
-                    "A step already started, so the approval stays. Edit the plan on the task page or message the lead to change course.",
-                ));
-            }
-        }
-        let lead = self.lead_of(&task)?;
-        self.set_plan_pending(task_id, true)?;
-        store.set_approval(
-            &id,
-            Some(PlanApproval::TakenBack {
-                at: chrono::Utc::now(),
-            }),
-            None,
-        );
-        if approval == PlanApproval::Sent {
-            let text = format!(
-                "The person took back the Supervisor's approval of this plan (task id {task_id}). The plan waits for the person's review again: do not run any step until the approval message comes."
-            );
-            self.send_to_task_thread(&task, &lead, None, &text, Vec::new())
-                .await?;
-        }
-        Ok(())
-    }
-
     pub(super) async fn retry_task_step(&self, step_id: &str) -> Result<(), RpcError> {
         let step = self.step_or_refuse(step_id)?;
         let task = self.task_or_refuse(&step.task_id)?;
@@ -1243,21 +1231,7 @@ impl EngineRpc {
         steps: Vec<PlanEdit>,
         remove_step_ids: &[String],
         order: &[String],
-        rebrief: Option<Rebrief<'_>>,
     ) -> Result<Option<String>, RpcError> {
-        if rebrief.is_some()
-            && (overview.is_some()
-                || overview_images.is_some()
-                || !remove_step_ids.is_empty()
-                || !order.is_empty()
-                || steps
-                    .iter()
-                    .any(|edit| edit.step_id.is_none() || edit.images.is_some()))
-        {
-            return Err(refused(
-                "A re-brief changes an existing step's title and spec only: the overview, new steps, removals and the order are the person's",
-            ));
-        }
         let task = self.task_or_refuse(task_id)?;
         let lead = self.lead_of(&task)?;
         let current = self.workspace.task_steps_of(task_id);
@@ -1466,11 +1440,6 @@ impl EngineRpc {
             }
         }
         let deletes: Vec<String> = removed.iter().map(|step| step.id.clone()).collect();
-        let edits = task_patch != TaskPatch::default()
-            || !updates.is_empty()
-            || !creates.is_empty()
-            || !deletes.is_empty();
-        let withdrawn = edits && self.withdraw_held_approval(task_id).await?;
         self.workspace
             .edit_task_plan(task_id, &task_patch, &updates, &creates, &deletes)
             .map_err(failed)?;
@@ -1483,29 +1452,16 @@ impl EngineRpc {
         if changes.is_empty() {
             return Ok(None);
         }
-        let next = if task.plan_pending || withdrawn {
+        let next = if task.plan_pending {
             "The plan still waits for the person's approval: do not run any step until the approval message comes."
         } else {
             "Run the new and changed steps from this plan, and send a step whose thread is already running what changed with send_message_to_thread."
         };
-        let (who, why, from) = match &rebrief {
-            Some(rebrief) => (
-                "The Supervisor re-briefed",
-                format!("\n\nWhy: {}", rebrief.reason.trim()),
-                Some(rebrief.supervisor),
-            ),
-            None => ("The person edited", String::new(), None),
-        };
         let text = format!(
-            "{who} the plan on the task page (task id {task_id}):\n- {}{why}\n\nRead the whole plan with the tasks tool: action \"list\", taskId \"{task_id}\". {next}",
+            "The person edited the plan on the task page (task id {task_id}):\n- {}\n\nRead the whole plan with the tasks tool: action \"list\", taskId \"{task_id}\". {next}",
             changes.join("\n- ")
         );
-        let mut noted = changes.clone();
-        if withdrawn {
-            noted.push("This edit withdrew your approval while it was held, so the plan waits for review again: approve it if it still fits.".to_string());
-        }
-        self.doc_host.supervisor_plan_edited(&task, &noted, from);
-        self.send_to_task_thread(&task, &lead, from, &text, attached)
+        self.send_to_task_thread(&task, &lead, None, &text, attached)
             .await
             .map(Some)
     }

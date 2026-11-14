@@ -114,6 +114,5 @@ mod tests {
         for harness in [crate::HarnessId::ClaudeCode, crate::HarnessId::Codex] {
             assert_eq!(crate::invocation::harness_prompt(&text, harness), text);
         }
-        assert!(crate::chat_mentions::mentioned_chat_ids(&text).is_empty());
     }
 }

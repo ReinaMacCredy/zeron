@@ -50,10 +50,7 @@ use crate::{EngineError, Terminals, new_id, now_ms};
 mod delegation;
 #[path = "doc_host_steps.rs"]
 mod steps;
-#[path = "doc_host_supervisor.rs"]
-mod supervisor_host;
 pub use delegation::{DelegateTaskParams, ProfileParams, ResolveFindingsParams, TaskView};
-pub(crate) use supervisor_host::newest_supervisor;
 
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
@@ -303,7 +300,6 @@ struct DocHostInner {
     repos: OnceLock<crate::repos::Repos>,
     project_action_runtime: OnceLock<(ProjectActionsStore, Terminals)>,
     thread_watches: OnceLock<crate::thread_watches::ThreadWatches>,
-    supervisor: OnceLock<crate::supervisor::SupervisorStore>,
     /// Cancels every worker spawned through `spawn_worker` — the loops'
     /// own exit conditions (weak handle death, closed channels) don't cover
     /// runtime replacement, where Edge-capable tasks must stop doing
@@ -1532,7 +1528,6 @@ impl DocHost {
                 repos: OnceLock::new(),
                 project_action_runtime: OnceLock::new(),
                 thread_watches: OnceLock::new(),
-                supervisor: OnceLock::new(),
                 shutdown: CancellationToken::new(),
                 edge_disconnected: AtomicBool::new(false),
                 sync_kick: Arc::new(tokio::sync::Notify::new()),
@@ -5959,9 +5954,9 @@ impl DocHost {
     /// permission to release the next queued message. The same lock used by
     /// drains closes the race between clicking Cancel and the status watcher.
     /// A plain Stop ends only the turn: background subagents and shells
-    /// keep running and report back. A `teardown` (the Supervisor's pause,
-    /// `task_cancel`) also ends a parked runtime still running background
-    /// work, which the idle reaper spares.
+    /// keep running and report back. A `teardown` (`task_cancel`) also ends
+    /// a parked runtime still running background work, which the idle
+    /// reaper spares.
     async fn interrupt_and_pause_queue(
         &self,
         sessions: &SessionsEngine,

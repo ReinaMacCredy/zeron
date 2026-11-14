@@ -1184,10 +1184,10 @@ impl WorkspaceHost {
         created_by_chat_id: Option<&str>,
         child_kind: Option<zeron_proto::ChildKind>,
     ) -> Result<(), EngineError> {
-        if zeron_proto::supervisor::is_supervisor_chat(chat_id) {
+        if zeron_proto::is_supervisor_chat(chat_id) {
             return Err(EngineError::Other(format!(
                 "chat ids starting with {} are the Supervisor's",
-                zeron_proto::supervisor::CHAT_PREFIX
+                zeron_proto::SUPERVISOR_CHAT_PREFIX
             )));
         }
         self.insert_chat(

@@ -252,7 +252,7 @@ mod tests {
         }))
         .unwrap();
         assert!(!chat.is_top_level());
-        chat.id = format!("{}1", crate::supervisor::CHAT_PREFIX);
+        chat.id = format!("{}1", crate::SUPERVISOR_CHAT_PREFIX);
         assert!(!chat.is_top_level());
         assert!(!chat.is_person_opened());
         chat.id = "ordinary".into();

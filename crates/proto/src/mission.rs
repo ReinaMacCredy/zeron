@@ -1,12 +1,6 @@
-use chrono::{DateTime, Utc};
-
-use crate::supervisor::{
-    InputAsker, InterventionKind, NeedsYouInput, NeedsYouRow, PlanApproval, Raiser,
-    SupervisorIntervention, SupervisorItem, is_supervisor_chat,
-};
 use crate::{
     Chat, ChatIndicator, NeedsYou, PlanProgress, StepStatus, Task, TaskStatus, TaskStep,
-    plan_of_chat, plan_progress, step_status, task_status,
+    is_supervisor_chat, plan_of_chat, plan_progress, step_status, task_status,
 };
 
 pub struct StepRow<B> {
@@ -22,7 +16,6 @@ pub struct Rollup<B> {
     pub status: TaskStatus,
     pub needs: Option<NeedsYou>,
     pub progress: PlanProgress,
-    pub questions: usize,
 }
 
 impl<B> Rollup<B> {
@@ -124,11 +117,10 @@ pub fn column_title(status: TaskStatus) -> &'static str {
     }
 }
 
-pub fn rollup<'a, B>(
+pub fn rollup<B>(
     task: &Task,
     chats: &[Chat],
     steps: &[TaskStep],
-    needs_you: impl IntoIterator<Item = &'a NeedsYouRow>,
     indicator: impl Fn(&Chat) -> ChatIndicator,
     brand: impl Fn(&Chat) -> B,
 ) -> Rollup<B> {
@@ -148,17 +140,12 @@ pub fn rollup<'a, B>(
         })
         .collect();
     let statuses: Vec<StepStatus> = steps.iter().map(|row| row.status).collect();
-    let questions = needs_you
-        .into_iter()
-        .filter(|row| row.task_id() == Some(task.id.as_str()))
-        .count();
     Rollup {
         lead,
         status: task_status(task, lead, &statuses),
         needs: crate::needs_you(task, lead, &statuses),
         progress: plan_progress(&statuses),
         steps,
-        questions,
     }
 }
 
@@ -331,33 +318,6 @@ pub fn mission_row<B>(task: &Task, plan: &Rollup<B>, held: bool) -> MissionRow {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApprovalState {
-    Held { secs: i64 },
-    Sent,
-    Started,
-    TakenBack,
-}
-
-impl ApprovalState {
-    pub fn line(self) -> String {
-        match self {
-            Self::Held { secs } => format!(
-                "Approved by the Supervisor · starts in {}:{:02}",
-                secs / 60,
-                secs % 60
-            ),
-            Self::Sent => "Approved by the Supervisor · no step has started yet".into(),
-            Self::Started => "Approved by the Supervisor · steps already started. To change course, edit the plan on the mission page or message the lead.".into(),
-            Self::TakenBack => "You took this approval back · the plan went back to review".into(),
-        }
-    }
-
-    pub fn can_take_back(self) -> bool {
-        matches!(self, Self::Held { .. } | Self::Sent)
-    }
-}
-
 pub const HELD_APPROVAL: &str = "Plan approved · can take back";
 
 pub const START_MISSION: &str = "Start mission";
@@ -485,42 +445,6 @@ pub fn mission_text(text: &str, pasted: &[String]) -> String {
         .join("\n\n")
 }
 
-pub fn approval_state(
-    row: &SupervisorIntervention,
-    steps: &[TaskStep],
-    now: DateTime<Utc>,
-) -> Option<ApprovalState> {
-    let task_id = row.task_id.as_deref()?;
-    let started = || {
-        steps.iter().any(|step| {
-            step.task_id == task_id
-                && !step.deleted
-                && (step.chat_id.is_some() || step.outcome.is_some())
-        })
-    };
-    Some(match row.approval.as_ref()? {
-        PlanApproval::TakenBack { .. } => ApprovalState::TakenBack,
-        _ if started() => ApprovalState::Started,
-        PlanApproval::Held { starts_at } => ApprovalState::Held {
-            secs: ((*starts_at - now).num_milliseconds().max(0) + 999) / 1000,
-        },
-        PlanApproval::Sent => ApprovalState::Sent,
-    })
-}
-
-/// The Supervisor's newest approval of the mission's plan, as the person can still act on it.
-pub fn plan_approval(
-    interventions: &[SupervisorIntervention],
-    steps: &[TaskStep],
-    task_id: &str,
-    now: DateTime<Utc>,
-) -> Option<ApprovalState> {
-    let row = interventions.iter().find(|row| {
-        row.kind == InterventionKind::Approve && row.task_id.as_deref() == Some(task_id)
-    })?;
-    approval_state(row, steps, now)
-}
-
 pub struct Names<'a, F> {
     pub chats: &'a [Chat],
     pub tasks: &'a [Task],
@@ -578,25 +502,6 @@ impl<'a, B, F: Fn(&Task) -> Rollup<B>> Names<'a, F> {
             .copied()
     }
 
-    pub fn asker_name(&self, input: &NeedsYouInput) -> String {
-        if matches!(input.asker, InputAsker::Step | InputAsker::Lead)
-            && let Some((who, mission)) = self.plan_thread(&input.chat_id)
-        {
-            return format!("{who} · {mission}");
-        }
-        let mission = self.mission_title(input.task_id.as_deref());
-        let who = match input.asker {
-            InputAsker::Supervisor => return "Supervisor".into(),
-            InputAsker::Thread => self.thread_asker(&input.chat_id),
-            InputAsker::Step => "A step".into(),
-            InputAsker::Lead => "Lead".into(),
-        };
-        match mission {
-            Some(mission) => format!("{who} · {mission}"),
-            None => who,
-        }
-    }
-
     pub fn thread_asker(&self, chat_id: &str) -> String {
         let name = self.thread_name(chat_id);
         match self
@@ -606,16 +511,6 @@ impl<'a, B, F: Fn(&Task) -> Rollup<B>> Names<'a, F> {
         {
             Some(root) => format!("{name} · {root}"),
             None => name,
-        }
-    }
-
-    pub fn raiser_name(&self, item: &SupervisorItem) -> String {
-        match item.raised_by {
-            Raiser::Supervisor => "Supervisor".into(),
-            Raiser::Lead => match self.mission_title(item.task_id.as_deref()) {
-                Some(mission) => format!("Lead · {mission}"),
-                None => "Lead".into(),
-            },
         }
     }
 }

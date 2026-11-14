@@ -656,6 +656,12 @@ impl DelegationDelivery {
     }
 }
 
+pub const SUPERVISOR_CHAT_PREFIX: &str = "supervisor-";
+
+pub fn is_supervisor_chat(chat_id: &str) -> bool {
+    chat_id.starts_with(SUPERVISOR_CHAT_PREFIX)
+}
+
 impl Chat {
     pub fn live_work_tree(&self) -> Option<&ChatWorkTree> {
         self.work_tree
@@ -688,8 +694,7 @@ impl Chat {
     }
 
     pub fn is_system(&self) -> bool {
-        crate::voice::is_orchestrator_chat(&self.id)
-            || crate::supervisor::is_supervisor_chat(&self.id)
+        crate::voice::is_orchestrator_chat(&self.id) || is_supervisor_chat(&self.id)
     }
 
     /// True when this chat syncs over the chat2 dumb relay.
@@ -3637,7 +3642,7 @@ mod tests {
         assert_eq!(link(&side, &[]).map(|l| l.kind), Some(LinkKind::SidechatOf));
         assert_eq!(link(&child(None), &[]), None);
         let mut supervisor = opened.clone();
-        supervisor.id = format!("{}dev", crate::supervisor::CHAT_PREFIX);
+        supervisor.id = format!("{SUPERVISOR_CHAT_PREFIX}dev");
         assert_eq!(link(&supervisor, &[]), None);
 
         let single = task("h", Some("lead"), TaskMode::Single);

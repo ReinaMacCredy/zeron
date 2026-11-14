@@ -1,4 +1,3 @@
-use zeron_proto::supervisor::PlanApproval;
 use zeron_proto::{Delegation, SessionStatus, StepTurn, StepTurnEnd, TaskStep, TaskStepPatch};
 
 use super::delegation::{agent_response, failure, handback_settle, handback_text};
@@ -119,28 +118,9 @@ impl DocHost {
                 "The person has not approved the plan yet. Stop and wait for the approval message.",
             ));
         }
-        if self
-            .supervisor()
-            .and_then(|store| store.approval_of(&task.id))
-            .is_some_and(|(_, approval)| matches!(approval, PlanApproval::Held { .. }))
-        {
-            return Err(failure(
-                "plan_pending",
-                "The plan's approval has not reached you yet. Stop and wait for the approval message.",
-            ));
-        }
         if step.outcome.is_some() {
             return Err(refused(
                 "This step is already marked done or skipped; reopen it with the tasks tool first",
-            ));
-        }
-        if let Some(hold) = self.supervisor().and_then(|store| store.hold_of(step_id)) {
-            return Err(failure(
-                "step_paused",
-                format!(
-                    "The Supervisor paused this step because {} is contended. Run it again only after the Supervisor's resume message. Why: {}",
-                    hold.resource, hold.reason
-                ),
             ));
         }
         let status = |chat_id: &str| {
@@ -282,13 +262,12 @@ impl DocHost {
                     }
                 }
                 if turn.ended != StepTurnEnd::Stopped {
-                    wakes.push((step, thread, turn.ended));
+                    wakes.push(step);
                 }
             }
         }
         let mut leads: Vec<(String, Vec<String>)> = Vec::new();
-        for (step, thread, ended) in wakes {
-            self.supervisor_step_ended(&step, &thread, ended);
+        for step in wakes {
             let Some(lead) = step_lead_to_wake(workspace, &step) else {
                 continue;
             };
@@ -302,6 +281,22 @@ impl DocHost {
                 tracing::warn!(chat = %lead, error = %err, "waking a step's lead failed");
             }
         }
+    }
+
+    fn last_reply(&self, chat_id: &str) -> Option<String> {
+        let entries = self.open(chat_id).ok()?.doc.read_entries().ok()?;
+        entries
+            .iter()
+            .rev()
+            .filter(|entry| entry.role == MessageRole::Assistant)
+            .find_map(|entry| {
+                entry.parts.iter().rev().find_map(|part| match part {
+                    MessagePart::Text { text, .. } if !text.trim().is_empty() => {
+                        Some(text.trim().to_string())
+                    }
+                    _ => None,
+                })
+            })
     }
 
     fn step_wake(

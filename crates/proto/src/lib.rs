@@ -74,7 +74,6 @@ pub mod sidebar_view;
 pub mod sidechat;
 pub mod source_control;
 pub mod stats_view;
-pub mod supervisor;
 pub mod task_mentions;
 pub mod today;
 pub mod tools;

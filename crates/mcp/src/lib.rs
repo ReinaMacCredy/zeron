@@ -142,34 +142,6 @@ fn wait_on_background_tool() -> Value {
     })
 }
 
-fn supervisor_tool() -> Value {
-    json!({
-        "name": "supervisor",
-        "description": "Act as the Supervisor of this device's missions (Tasks with a plan), within the Authority the person set; every wake's footer says what is on. `ask` puts a decision in the person's Needs you list and returns its `itemId` without waiting: `title`, `why` (goal, spend or decision), `detail`, one to three `options`, and `taskId` when it concerns a mission. A change to a mission's goal or spend goes this way unless the person gave you that authority. The person's choice comes back to you as a message, and to that mission's lead. `rebrief` rewrites one step's spec through its lead: `stepId` from the tasks tool, the new `notes`, `title` when it changes, and `reason`, which the lead reads in its one message about it. It never touches the overview and never adds or removes a step. `start` creates a mission and starts its lead on `title` and `notes`, in `projectId` (from list_projects) when given, with `planDoc` for a plan doc; the lead writes a plan the person reviews before any step runs. Missions declare shared `resources` (port:<n>, slot:<name>, path:<path>) in their plan. `check` reads the machine for every resource two running missions share, with lsof for ports and ps for CPU slots (two samples 10 s apart), and returns each one's state, `taskId` narrowing it to one mission. `pause` stops one step that blocks a shared resource: `stepId`, the `resource` as declared, and `reason`; it needs a contention the machine verified, stops the step's thread, refuses create_thread with that `taskStepId` and messages to its thread until you `resume` it (`stepId`, `reason`) or the person does, and tells the lead each time. When the resource frees while the step is still paused, a wake says so. Three actions need a switch the person turns on under Authority; the wake footer lists the ones that are on. `decide` (Decide for me) answers a lead's Needs you item for the person: `itemId`, `choice` (one of the item's options) and `reason`. The lead gets your choice the way it gets the person's, and the person sees it with your reason and may change it, which sends the lead a correction. Items whose why is goal or spend also need the goal and spend switch. `approve` (Decide for me) approves a plan that waits for review: `taskId` and `reason`; the lead gets the approval 30 s later and runs it, and until a step starts the person may take it back, which leaves that plan's review to them. `goal` (goal and spend) changes a mission's goal: `taskId`, the new `title` and/or `notes`, and `reason`; its lead gets one message with the change. A watched tree without a plan (a chat and the threads it opened or delegated) has no steps or items: answer its threads' questions with respond_to_input, which needs Decide for me there, while `decide`, `approve`, `goal`, `rebrief` and `pause` apply once it has a plan.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "action": { "type": "string", "enum": ["ask", "rebrief", "start", "check", "pause", "resume", "decide", "approve", "goal"] },
-                "taskId": { "type": "string" },
-                "itemId": { "type": "string" },
-                "choice": { "type": "string" },
-                "stepId": { "type": "string" },
-                "title": { "type": "string", "maxLength": 500 },
-                "notes": { "type": "string", "maxLength": 10000 },
-                "why": { "type": "string", "enum": ["goal", "spend", "decision"] },
-                "detail": { "type": "string", "maxLength": 10000 },
-                "options": { "type": "array", "items": { "type": "string", "maxLength": 200 }, "minItems": 1, "maxItems": 3 },
-                "reason": { "type": "string", "maxLength": 2000 },
-                "projectId": { "type": "string" },
-                "planDoc": { "type": "boolean" },
-                "resource": { "type": "string" }
-            },
-            "required": ["action"],
-            "additionalProperties": false
-        }
-    })
-}
-
 fn compact_tool() -> Value {
     json!({
         "name": "compact",
@@ -447,11 +419,11 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "tasks",
-            "description": "Manage the person's Tasks list (the rail's Tasks page): to-dos, each assignable to a thread whose status it follows (To do, Working, Needs you) until marked done. A `[title](zeron-task:<id>)` link names a task. Before working on a task you were given, `claim` it: that returns it whole and assigns it to this chat without sending, so its status follows yours; it refuses a done task or one another thread holds. Mark it done with `update` `completed: true` once the work has landed. Use `list` with its `taskId` to read one you will not work on. `list`: open tasks in order (`includeDone` adds done ones; notes cut to 500 characters), or one whole with `taskId`, done or not; `sendError` means the last send to its thread failed. `create`: `title`, optional `notes`, `dueOn` (YYYY-MM-DD), `projectId` (default this chat's project, \"\" for none) and `dependsOn` (ids of tasks it is blocked by; `list` returns it). `update`: `title`, `notes`, `dueOn` (\"\" clears), `completed` or `dependsOn` (replaces the list; [] clears; no unknown ids, itself or cycles). `assign` to `threadId` (default this chat), sending its title and notes there unless `send: false` (the default for this chat); a task has one thread. `unassign`, `delete`. A Task with a plan (`mode` orchestrated) has a lead thread and steps: `list` adds `progress` and `planPending`, and with `taskId` its `plan`, `planDoc`, `context` (threads the lead was given to read) and `steps` (planned, working, needsYou, failed, done or skipped, with `threadId`); a step is done only once its lead marks it. Lead only: `plan` writes `steps` [{title, notes, threadId, role}] and an optional `overview` for `taskId`, replacing unstarted steps and keeping the rest; a step's `threadId` hands it to a thread the lead started (not a sidechat, fork, another chat's thread or one on an open step); replaced steps' images move to the same-titled step or the overview (`imagesMoved`); `resources` replaces the mission's claims (port:<n>, slot:<name>, path:<path in the project>; [] clears) that the Supervisor checks against other missions. `step` marks `stepId` `state` done, skipped or open; run a step with create_thread and its `taskStepId`. `escalate` puts a decision only the person can make in their Needs you list (`title`, `why`, `detail`, one to three `options`) and returns its `itemId` at once; keep working on what does not depend on it, and the choice arrives as a message.",
+            "description": "Manage the person's Tasks list (the rail's Tasks page): to-dos, each assignable to a thread whose status it follows (To do, Working, Needs you) until marked done. A `[title](zeron-task:<id>)` link names a task. Before working on a task you were given, `claim` it: that returns it whole and assigns it to this chat without sending, so its status follows yours; it refuses a done task or one another thread holds. Mark it done with `update` `completed: true` once the work has landed. Use `list` with its `taskId` to read one you will not work on. `list`: open tasks in order (`includeDone` adds done ones; notes cut to 500 characters), or one whole with `taskId`, done or not; `sendError` means the last send to its thread failed. `create`: `title`, optional `notes`, `dueOn` (YYYY-MM-DD), `projectId` (default this chat's project, \"\" for none) and `dependsOn` (ids of tasks it is blocked by; `list` returns it). `update`: `title`, `notes`, `dueOn` (\"\" clears), `completed` or `dependsOn` (replaces the list; [] clears; no unknown ids, itself or cycles). `assign` to `threadId` (default this chat), sending its title and notes there unless `send: false` (the default for this chat); a task has one thread. `unassign`, `delete`. A Task with a plan (`mode` orchestrated) has a lead thread and steps: `list` adds `progress` and `planPending`, and with `taskId` its `plan`, `planDoc`, `context` (threads the lead was given to read) and `steps` (planned, working, needsYou, failed, done or skipped, with `threadId`); a step is done only once its lead marks it. Lead only: `plan` writes `steps` [{title, notes, threadId, role}] and an optional `overview` for `taskId`, replacing unstarted steps and keeping the rest; a step's `threadId` hands it to a thread the lead started (not a sidechat, fork, another chat's thread or one on an open step); replaced steps' images move to the same-titled step or the overview (`imagesMoved`); `resources` replaces the mission's claims (port:<n>, slot:<name>, path:<path in the project>; [] clears). `step` marks `stepId` `state` done, skipped or open; run a step with create_thread and its `taskStepId`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["list", "claim", "create", "update", "assign", "unassign", "delete", "plan", "step", "escalate"] },
+                    "action": { "type": "string", "enum": ["list", "claim", "create", "update", "assign", "unassign", "delete", "plan", "step"] },
                     "taskId": { "type": "string" },
                     "includeDone": { "type": "boolean" },
                     "title": { "type": "string", "maxLength": 500 },
@@ -488,10 +460,7 @@ fn thread_tool_list() -> Value {
                         "items": { "type": "string", "pattern": "^(port:[0-9]{1,5}|slot:[A-Za-z0-9._-]{1,64}|path:[^/~].*)$" }
                     },
                     "stepId": { "type": "string" },
-                    "state": { "type": "string", "enum": ["done", "skipped", "open"] },
-                    "why": { "type": "string", "enum": ["goal", "spend", "decision"] },
-                    "detail": { "type": "string", "maxLength": 10000 },
-                    "options": { "type": "array", "items": { "type": "string", "maxLength": 200 }, "minItems": 1, "maxItems": 3 }
+                    "state": { "type": "string", "enum": ["done", "skipped", "open"] }
                 },
                 "required": ["action"],
                 "additionalProperties": false
@@ -789,11 +758,6 @@ impl ThreadTools {
     async fn tools(&self) -> Value {
         let disabled = self.disabled_tools().await;
         let mut tools = tool_list();
-        if zeron_proto::supervisor::is_supervisor_chat(&self.chat_id)
-            && let Some(list) = tools.as_array_mut()
-        {
-            list.push(supervisor_tool());
-        }
         if self.waits_on_background
             && let Some(list) = tools.as_array_mut()
         {
@@ -907,7 +871,6 @@ impl ThreadTools {
             "resolve_findings" => self.resolve_findings(args).await,
             "task_status" => self.task_status(args).await,
             "task_cancel" => self.task_cancel(args).await,
-            "supervisor" => self.supervisor(args).await,
             WAIT_ON_BACKGROUND if self.waits_on_background => self.wait_on_background(args).await,
             plugins::CREATE_PLUGIN => self.create_plugin(args).await,
             plugins::LIST_PLUGINS => self.list_plugins().await,
@@ -972,7 +935,9 @@ impl ThreadTools {
             .ok_or_else(|| format!("this chat ({}) is not in the registry", self.chat_id))?;
         let peers = chats
             .into_iter()
-            .filter(|chat| chat.device_id == caller.device_id)
+            .filter(|chat| {
+                chat.device_id == caller.device_id && !zeron_proto::is_supervisor_chat(&chat.id)
+            })
             .collect();
         Ok((caller, peers))
     }
@@ -986,7 +951,7 @@ impl ThreadTools {
             .ok_or_else(|| format!("no thread {thread_id} on this device"))
     }
 
-    /// A peer this chat may read or change: a Zeron system chat (the Supervisor) only takes messages.
+    /// A peer this chat may read or change: a Zeron system chat only takes messages.
     async fn open_peer(&self, thread_id: &str) -> Result<Chat, String> {
         let chat = self.peer(thread_id).await?;
         if chat.is_system() && chat.id != self.chat_id {
@@ -1749,44 +1714,6 @@ impl ThreadTools {
         .await
     }
 
-    pub async fn supervisor(&self, args: &Value) -> Result<Value, String> {
-        if !zeron_proto::supervisor::is_supervisor_chat(&self.chat_id) {
-            return Err("only the Supervisor has the supervisor tool".into());
-        }
-        let action = args["action"].as_str().unwrap_or_default();
-        let takes: &[&str] = match action {
-            "ask" => &["taskId", "title", "why", "detail", "options"],
-            "rebrief" => &["stepId", "title", "notes", "reason"],
-            "start" => &["title", "notes", "projectId", "planDoc"],
-            "check" => &["taskId"],
-            "pause" => &["stepId", "resource", "reason"],
-            "resume" => &["stepId", "resource", "reason"],
-            "decide" => &["itemId", "choice", "reason"],
-            "approve" => &["taskId", "reason"],
-            "goal" => &["taskId", "title", "notes", "reason"],
-            _ => {
-                return Err(
-                    "action must be ask, rebrief, start, check, pause, resume, decide, approve or goal"
-                        .into(),
-                );
-            }
-        };
-        if let Some(extra) = args
-            .as_object()
-            .into_iter()
-            .flat_map(|args| args.keys())
-            .find(|key| *key != "action" && !takes.contains(&key.as_str()))
-        {
-            return Err(format!(
-                "{action} takes only {}, not {extra}",
-                takes.join(", ")
-            ));
-        }
-        let mut params = args.clone();
-        params["fromChatId"] = json!(self.chat_id);
-        self.call_engine(methods::SUPERVISOR_ACT, params).await
-    }
-
     pub async fn interrupt_thread(&self, args: &Value) -> Result<Value, String> {
         let thread_id = Self::thread_id(args)?;
         if thread_id == self.chat_id {
@@ -2523,33 +2450,8 @@ impl ThreadTools {
                 .await?;
                 Ok(json!({ "stepId": step_id, "state": args["state"] }))
             }
-            "escalate" => {
-                let task_id = required()?;
-                if args["title"].as_str().is_none_or(|title| title.trim().is_empty()) {
-                    return Err("title is required".into());
-                }
-                let why = args["why"]
-                    .as_str()
-                    .filter(|why| matches!(*why, "goal" | "spend" | "decision"))
-                    .ok_or("why must be goal, spend or decision")?;
-                let raised = self
-                    .call_engine(
-                        methods::MUTATE,
-                        json!({
-                            "op": "escalateTask",
-                            "taskId": task_id,
-                            "fromChatId": self.chat_id,
-                            "title": args["title"],
-                            "why": why,
-                            "detail": args["detail"].as_str().unwrap_or_default(),
-                            "options": args["options"].as_array().cloned().unwrap_or_default(),
-                        }),
-                    )
-                    .await?;
-                Ok(json!({ "taskId": task_id, "itemId": raised["itemId"] }))
-            }
             _ => Err(
-                "action must be list, claim, create, update, assign, unassign, delete, plan, step or escalate"
+                "action must be list, claim, create, update, assign, unassign, delete, plan or step"
                     .into(),
             ),
         }
@@ -5376,17 +5278,6 @@ mod tests {
         drop(replies);
         drop(client_write);
         server.await.unwrap().unwrap();
-
-        let supervisor = ThreadTools::new(memory_client(Arc::new(fixture())), "supervisor-1");
-        let listed = supervisor.tools().await;
-        let names: Vec<&str> = listed
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|tool| tool["name"].as_str())
-            .collect();
-        assert_eq!(names.len(), THREAD_TOOLS.len() + 1);
-        assert_eq!(names.last(), Some(&"supervisor"));
     }
     struct Pipe {
         replies:
@@ -7438,10 +7329,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_peer_only_messages_the_supervisor() {
+    async fn an_agent_never_sees_or_reaches_the_old_supervisor_chat() {
         let mut fake = fixture();
         fake.chats.push(chat("supervisor-1", None, false, None));
         let rig = rig(fake);
+        let listed = rig
+            .tools
+            .list_threads(&json!({ "limit": 200 }))
+            .await
+            .unwrap();
+        assert!(
+            listed["threads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["id"] != "supervisor-1"),
+            "{listed}"
+        );
         let target = json!({ "threadId": "supervisor-1" });
         let refusals = [
             rig.tools.read_thread(&target).await,
@@ -7452,17 +7356,23 @@ mod tests {
             rig.tools
                 .set_thread_archived(&json!({ "threadId": "supervisor-1", "archived": true }))
                 .await,
+            rig.tools
+                .send_message_to_thread(
+                    &json!({ "threadId": "supervisor-1", "text": "Step 2 is done" }),
+                )
+                .await,
+            rig.tools
+                .watch_threads(&json!({ "add": ["supervisor-1"] }))
+                .await,
         ];
         for refusal in refusals {
-            assert!(refusal.unwrap_err().contains("Zeron system chat"));
+            assert_eq!(
+                refusal.unwrap_err(),
+                "no thread supervisor-1 on this device"
+            );
         }
         assert!(queued_commands(&rig.calls).is_empty());
-        rig.tools
-            .send_message_to_thread(
-                &json!({ "threadId": "supervisor-1", "text": "Step 2 is done" }),
-            )
-            .await
-            .expect("a lead still writes to the Supervisor");
+        assert!(logged(&rig.calls, methods::SEND_THREAD_MESSAGE).is_empty());
     }
 
     #[tokio::test]

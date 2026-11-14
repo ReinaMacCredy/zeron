@@ -7,7 +7,6 @@ use zeron_proto::{
 
 use super::*;
 use crate::registry::DelegationSettings;
-use crate::supervisor::fence;
 
 const SUMMARY_CHARS: usize = 600;
 pub(super) const TITLE_CHARS: usize = 72;
@@ -142,6 +141,24 @@ pub(super) fn handback_settle() -> std::time::Duration {
             .and_then(|ms| ms.parse().ok())
             .unwrap_or(500),
     )
+}
+
+static QUOTE_CLOSE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)<\s*/\s*agent-response").expect("valid"));
+
+/// Agent-written text as data: fenced, with any spelling of the closing tag defused.
+fn fence(text: &str, max: usize, full_with: Option<&str>) -> String {
+    let text = text.trim();
+    let total = text.chars().count();
+    let mut body: String = text.chars().take(max).collect();
+    if total > max {
+        let rest = full_with.map_or_else(String::new, |tool| {
+            format!("; use {tool} for the full response")
+        });
+        body.push_str(&format!("\n[truncated {} chars{rest}]", total - max));
+    }
+    let body = QUOTE_CLOSE.replace_all(&body, "<\\/agent-response");
+    format!("<agent-response>\n{body}\n</agent-response>")
 }
 
 pub(super) fn agent_response(reply: &str, full_with: &str) -> Option<String> {
@@ -1376,7 +1393,6 @@ impl DocHost {
         else {
             return;
         };
-        self.supervisor_input(&asker, request_id, questions);
         let owner = asker
             .delegation
             .as_ref()

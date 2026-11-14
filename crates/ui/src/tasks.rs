@@ -2301,7 +2301,6 @@ pub(crate) fn rollup(state: &AppState, task: &zeron_proto::Task, now: DateTime<U
         task,
         &state.chats,
         &[],
-        std::iter::empty(),
         |chat| {
             task_thread_status(
                 state.display_status_for(chat, now),

@@ -100,7 +100,6 @@ impl Ctx<'_> {
             task,
             &self.state.chats,
             &[],
-            std::iter::empty(),
             |chat| self.indicator(chat),
             |chat| brand(chat).unwrap_or_default(),
         )

@@ -92,13 +92,6 @@ pub mod methods {
     pub const SET_ROUTING_SETTINGS: &str = "SetRoutingSettings";
     pub const PREVIEW_ROUTES: &str = "PreviewRoutes";
     pub const RESOLVE_LIMIT_OFFER: &str = "ResolveLimitOffer";
-    pub const ENSURE_SUPERVISOR: &str = "EnsureSupervisor";
-    pub const WATCH_SUPERVISOR: &str = "WatchSupervisor";
-    pub const GET_SUPERVISOR_SETTINGS: &str = "GetSupervisorSettings";
-    pub const SET_SUPERVISOR_SETTINGS: &str = "SetSupervisorSettings";
-    /// IPC-only like the thread tools: `{fromChatId, action: ask|rebrief|start|pause|resume|check, …}` from the Supervisor's `zeron mcp`.
-    pub const SUPERVISOR_ACT: &str = "SupervisorAct";
-    pub const REQUEST_SUPERVISOR_CHECK: &str = "RequestSupervisorCheck";
     /// Compact a long idle chat before its 1h prompt cache expires. No params /
     /// `CompactionSettingsUpdate` (settings plus a write-only `jevApiKey`) →
     /// `CompactionSettingsState`.
@@ -1125,7 +1118,6 @@ pub fn fork_agent_allowed(method: &str) -> bool {
             | methods::SEND_THREAD_MESSAGE
             | methods::SET_THREAD_WATCHES
             | methods::START_REVIEW
-            | methods::SUPERVISOR_ACT
             | methods::TAKE_THREAD_MESSAGES
             | methods::TASK_CANCEL
             | methods::TASK_STATUS

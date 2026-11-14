@@ -163,9 +163,7 @@ pub fn lead_waits<B>(task: &Task, plan: &Rollup<B>) -> Option<String> {
     if plan.phase(task) == PlanPhase::PlanReady {
         waits.push("Plan review".to_owned());
     }
-    let questions = plan
-        .questions
-        .max(usize::from(plan.lead == Some(ChatIndicator::AwaitingInput)));
+    let questions = usize::from(plan.lead == Some(ChatIndicator::AwaitingInput));
     if questions > 0 {
         waits.push(format!(
             "{questions} {}",

@@ -4873,18 +4873,6 @@ impl SessionsEngine {
         }
     }
 
-    pub(crate) fn chats_awaiting_input(&self) -> Vec<String> {
-        lock(&self.inner.runs)
-            .iter()
-            .filter(|(_, run)| {
-                lock(&run.pending_inputs)
-                    .values()
-                    .any(|resolver| !resolver.tx.is_closed())
-            })
-            .map(|(chat_id, _)| chat_id.clone())
-            .collect()
-    }
-
     pub fn awaits_input(&self, chat_id: &str, request_id: &str) -> bool {
         lock(&self.inner.runs).get(chat_id).is_some_and(|run| {
             lock(&run.pending_inputs)
@@ -10550,9 +10538,6 @@ async fn drive_run(
                     SessionStatus::Working
                 };
                 inner.set_status(&chat_id, status, false);
-                if let Some(host) = inner.doc_host() {
-                    host.supervisor_stale();
-                }
             }
             _ => {}
         }

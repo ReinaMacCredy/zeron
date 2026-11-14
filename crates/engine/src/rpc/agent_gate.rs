@@ -109,7 +109,7 @@ fn tool_switch(method: &str, params: &Value) -> Option<&'static str> {
             "renameChat" => "set_thread_title",
             "setChatArchived" => "set_thread_archived",
             "setChatSettled" => "set_thread_settled",
-            "createTask" | "assignTask" | "deleteTask" | "escalateTask" | "planSteps" | "updateTask" | "updateTaskStep" => "tasks",
+            "createTask" | "assignTask" | "deleteTask" | "planSteps" | "updateTask" | "updateTaskStep" => "tasks",
             _ => return None,
         },
         methods::QUEUE_COMMAND => match params["command"]["kind"].as_str()? {
@@ -162,6 +162,12 @@ impl EngineRpc {
         let Caller::Agent { chat } = zeron_rpc::caller() else {
             return Ok(params);
         };
+        if let Some(target) = params["chatId"].as_str()
+            && zeron_proto::is_supervisor_chat(target)
+            && chat.as_deref() != Some(target)
+        {
+            return Err(refused(format!("no such chat: {target}")));
+        }
         if (is_terminal(method) || is_computer(method)) && !self.chat_in_full_access(chat.as_deref()) {
             return Err(refused(
                 "This chat isn't in full access, so it can't use the terminal or the computer: tell the person, who can change the chat's access in Zeron",
@@ -239,7 +245,7 @@ impl EngineRpc {
                     Ok(params)
                 }
                 "renameChat" | "setChatArchived" | "setChatSettled" | "markChatSeen" | "createTask" | "assignTask"
-                | "deleteTask" | "escalateTask" | "planSteps" | "updateTask" | "updateTaskStep" => Ok(params),
+                | "deleteTask" | "planSteps" | "updateTask" | "updateTaskStep" => Ok(params),
                 "setChatConfig" => {
                     let Some(calling) = calling.as_ref() else {
                         return Err(refused("An agent changes only its own chat's config"));
@@ -538,6 +544,42 @@ mod tests {
         assert_eq!(config.harness, HarnessId::Codex);
         assert_eq!(config.model.as_deref(), Some("m1"));
         assert_eq!(config.disabled_tools, ["terminal"]);
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_agent_cannot_reach_the_old_supervisor_chat() {
+        let (_temp, core) = core().await;
+        chat(&core, "bold", "Bold", "workspace-write", "full-access").await;
+        let rpc = core.rpc_service();
+        for (method, params) in [
+            (
+                methods::SEND_THREAD_MESSAGE,
+                json!({"chatId":"supervisor-x", "fromChatId":"bold", "text":"hi"}),
+            ),
+            (
+                methods::QUEUE_MESSAGE,
+                json!({"chatId":"supervisor-x", "text":"hi"}),
+            ),
+            (
+                methods::QUEUE_COMMAND,
+                json!({"chatId":"supervisor-x", "command":{"kind":"interrupt"}}),
+            ),
+            (
+                methods::MUTATE,
+                json!({"op":"renameChat", "chatId":"supervisor-x", "title":"Mine"}),
+            ),
+        ] {
+            let refused = with_caller(agent("bold"), async {
+                rpc.agent_gate(method, params.clone())
+            })
+            .await;
+            assert_eq!(
+                refused.unwrap_err().to_string(),
+                "no such chat: supervisor-x",
+                "{method} {params}"
+            );
+        }
         core.sessions.shutdown().await;
     }
 
