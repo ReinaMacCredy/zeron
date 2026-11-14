@@ -37,7 +37,7 @@ pub fn install(host: &ScriptHost, platform: Rc<RefCell<Option<PlatformService>>>
     host.async_action("chat.thumb", move |args| {
         let path = crate::auth::text(&args);
         async move {
-            let svg = off_thread(move || std::fs::read(&path).ok().and_then(|bytes| thumb_svg(&bytes))).await.flatten();
+            let svg = off_thread(move || read_at_most(Path::new(&path), MAX_THUMB_BYTES).and_then(|bytes| thumb_svg(&bytes))).await.flatten();
             Ok(svg.map_or(Value::Nil, |svg| Value::from(svg.as_str())))
         }
     });
@@ -117,6 +117,14 @@ fn write_png(dir: &Path, w: u32, h: u32, pixels: &[u8]) -> Result<PathBuf, Strin
 }
 
 const THUMB: u32 = 32;
+const MAX_THUMB_BYTES: u64 = 64 * 1024 * 1024;
+
+fn read_at_most(path: &Path, max: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).ok()?.take(max + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= max).then_some(bytes)
+}
 
 /// A picture as an SVG of its centre square in 32×32 cells, corners rounded: an editor chip's icon is an SVG, and the fork's resvg draws no embedded pictures.
 fn thumb_svg(bytes: &[u8]) -> Option<String> {

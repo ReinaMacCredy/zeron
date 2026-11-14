@@ -241,14 +241,31 @@ pub(crate) fn move_to_trash(path: &Path, trash: &Path) -> std::io::Result<()> {
         return Ok(());
     }
     let name = target.file_name().ok_or_else(|| std::io::Error::other("the skill path has no name"))?;
+    into_trash(target, trash, |n| format!("{} {n}", name.to_string_lossy()))
+}
+
+// The free name is reserved before the move, so a name taken in between is never overwritten.
+pub(crate) fn into_trash(target: &Path, trash: &Path, nth: impl Fn(u32) -> String) -> std::io::Result<()> {
+    let name = target.file_name().ok_or_else(|| std::io::Error::other("nothing to move to the Trash"))?;
+    let folder = target.symlink_metadata()?.is_dir();
     std::fs::create_dir_all(trash)?;
-    let mut dest = trash.join(name);
-    let mut n = 2;
-    while dest.symlink_metadata().is_ok() {
-        dest = trash.join(format!("{} {n}", name.to_string_lossy()));
-        n += 1;
-    }
-    std::fs::rename(target, dest)
+    let mut n = 1;
+    let dest = loop {
+        let dest = if n == 1 { trash.join(name) } else { trash.join(nth(n)) };
+        let reserved = if folder {
+            std::fs::create_dir(&dest)
+        } else {
+            std::fs::OpenOptions::new().write(true).create_new(true).open(&dest).map(drop)
+        };
+        match reserved {
+            Ok(()) => break dest,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(e),
+        }
+    };
+    std::fs::rename(target, &dest).inspect_err(|_| {
+        let _ = if folder { std::fs::remove_dir(&dest) } else { std::fs::remove_file(&dest) };
+    })
 }
 
 #[cfg(test)]

@@ -103,14 +103,7 @@ fn trash(path: &Path, trash: &Path) -> std::io::Result<()> {
         return Err(std::io::Error::other("only a playbook's file goes to the Trash"));
     }
     let name = path.file_name().ok_or_else(|| std::io::Error::other("the playbook has no name"))?;
-    std::fs::create_dir_all(trash)?;
-    let mut dest = trash.join(name);
-    let mut n = 2;
-    while dest.symlink_metadata().is_ok() {
-        dest = trash.join(format!("{n} {}", name.to_string_lossy()));
-        n += 1;
-    }
-    std::fs::rename(path, dest)
+    crate::skills::into_trash(path, trash, |n| format!("{n} {}", name.to_string_lossy()))
 }
 
 #[cfg(test)]
