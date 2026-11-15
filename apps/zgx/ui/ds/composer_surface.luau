@@ -4,4 +4,7 @@ return {
 	-- (A new chat's pill: how far it's raised for the Home widgets, 0 to 1, and its foot in window points.)
 	lift = ui.state("composer_surface_lift", 0),
 	foot = ui.state("composer_surface_foot", 0),
+	-- (Arriving on a new chat or on a session, how much of that page's own shows yet, 0 to 1.)
+	hero = ui.state("composer_surface_hero", 1),
+	thread = ui.state("composer_surface_thread", 1),
 }

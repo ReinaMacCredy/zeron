@@ -65,9 +65,15 @@ local function resolve(id: Id): () -> string?
 			return s:get()
 		end
 	end
+	-- (Left for a new chat or a plugin's page, the page keeps the chat it was on while it fades.)
+	local last: string? = nil
 	return function()
 		local now = route.current:get()
-		return if now.name == "session" then now.session else nil
+		if now.name == "session" then
+			last = now.session
+			return last
+		end
+		return if now.name == "settings" then nil else last
 	end
 end
 

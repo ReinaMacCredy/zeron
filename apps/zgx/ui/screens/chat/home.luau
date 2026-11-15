@@ -4,6 +4,7 @@
 -- greeting, suggestions), above where the composer rises to.
 
 local shared = require("@app/screens/chat/shared")
+local composer_surface = require("@ds/composer_surface")
 local EmptyState = require("@ds/empty_state")
 local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
@@ -41,6 +42,9 @@ local function Home(): Node
 		min_h = 0,
 		items = "center",
 		justify = "center",
+		opacity = function(): number
+			return composer_surface.hero:get()
+		end,
 		on_file_hover = zone.on_file_hover,
 		on_file_drop = zone.on_file_drop,
 		drop_when = zone.drop_when,

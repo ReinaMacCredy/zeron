@@ -22,6 +22,7 @@ local sessions = require("@account/sessions")
 local appearance = require("@app/screens/shell/appearance")
 local art = require("@app/screens/shell/art")
 local boundary = require("@app/screens/shell/boundary")
+local composer_surface = require("@ds/composer_surface")
 
 local ZOOM_EASE = motion.EASE
 local function zoom_ms(distance: number): number
@@ -77,14 +78,25 @@ return function(props: Props): Node
 			return ui.div {}
 		end
 		if kind == "session" then
-			return boundary.screen(boundary.named("shell.boundary.screen.session_page"), "@app/screens/chat", function(chat): Node
-				return chat.Session()
-			end)
+			-- (Arriving from a new chat, it comes in under the composer on its way down, rising 8: gpui's transcript.)
+			return ui.div {
+				w_full = true,
+				h_full = true,
+				opacity = function(): number
+					return composer_surface.thread:get()
+				end,
+				y = function(): number
+					return 8 * (1 - composer_surface.thread:get())
+				end,
+				boundary.screen(boundary.named("shell.boundary.screen.session_page"), "@app/screens/chat", function(chat): Node
+					return chat.Session()
+				end),
+			}
 		end
 		return boundary.screen(boundary.named("shell.boundary.screen.new_chat_page"), "@app/screens/chat", function(chat): Node
 			return chat.Home()
 		end)
-	end, { w_full = true, h_full = true })
+	end, { w_full = true, h_full = true, exit = motion.transition({ opacity = 0, duration = 110 }) })
 
 	-- (Where the pointer is, only while a wallpaper reads it: a plugin's.
 	-- Your picture, or none, never does, and its writes on every move

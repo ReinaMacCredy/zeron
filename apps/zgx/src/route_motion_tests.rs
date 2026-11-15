@@ -1,6 +1,7 @@
 //! The composer between a new chat and a session (ui/screens/chat/composer,
-//! mounted headless on ui/shell_fixture.luau): another chat opened or a new
-//! chat puts it where it goes at once, no fade and no slide. (The Lua tests can't read an opacity:
+//! mounted headless on ui/shell_fixture.luau): it travels from one place to
+//! the other, never faded, as gpui's dock does; another session puts it
+//! where it goes at once. (The Lua tests can't read an opacity:
 //! ui/tests/shell_route_motion.test.luau has the panel's side of it.)
 
 use std::time::Duration;
@@ -20,6 +21,13 @@ fn mount() -> TestApp {
     app
 }
 
+/// The composer where it's painted: its box through what moves it on its way.
+fn painted(app: &mut TestApp) -> zgx::scene::Rect {
+    let node = app.find("#chat-composer").expect("the composer");
+    app.ui.prepare_frame();
+    app.ui.scene.borrow().transformed_bounds(node)
+}
+
 /// A frame and a little of the clock, `n` times: each look at the dock's
 /// opacity, the composer's top and its height (the pill's, with what hangs
 /// off it).
@@ -28,50 +36,58 @@ fn watch(app: &mut TestApp, n: usize) -> Vec<(f32, f32, f32)> {
         .map(|_| {
             app.frames(1);
             std::thread::sleep(Duration::from_millis(12));
-            let b = app.bounds("chat-composer");
+            let b = painted(app);
             (app.opacity("chat-composer-dock"), b.y, b.height)
         })
         .collect()
 }
 
-/// Every look after a switch: shown in full (no fade), at its final height
-/// (nothing growing or shrinking), and already where it ends (`to`), give
-/// or take a frame of its size being measured (a quarter of the way
-/// between the two places; a slide would pass through the rest).
-fn at_once(seen: &[(f32, f32, f32)], from: f32, to: f32, what: &str) {
-    let way = (from - to).abs() / 4.;
-    let tall = seen.last().unwrap().2;
-    for (i, (opacity, y, h)) in seen.iter().enumerate() {
+/// Every look as it travels: shown in full (no fade), setting out from
+/// where it stood (`from`), seen on its way, and ending where it goes
+/// (`to`).
+fn travels(seen: &[(f32, f32, f32)], from: f32, to: f32, what: &str) {
+    let way = (from - to).abs();
+    let ys = seen.iter().map(|s| s.1).collect::<Vec<_>>();
+    for (i, (opacity, _, _)) in seen.iter().enumerate() {
         assert!((opacity - 1.0).abs() < 0.01, "{what}: faded, frame {}: opacity {opacity}", i + 1);
-        assert!((h - tall).abs() <= 0.5, "{what}: frame {} {h} tall, growing to {tall}", i + 1);
-        assert!((y - to).abs() <= way, "{what}: frame {} at {y}, not yet where it goes ({to}, from {from})", i + 1);
     }
+    assert!((ys[0] - from).abs() < (ys[0] - to).abs(), "{what}: it sets out from where it stood ({from} to {to}): {ys:?}");
+    let between = ys.iter().filter(|y| (**y - from).abs() > way / 10. && (**y - to).abs() > way / 10.).count();
+    assert!(between >= 2, "{what}: it's seen on its way ({from} to {to}): {ys:?}");
+    assert!((ys.last().unwrap() - to).abs() <= 1., "{what}: it ends where it goes ({to}): {ys:?}");
 }
 
 #[test]
-fn a_new_chat_and_a_session_switch_the_composer_at_once() {
+fn the_composer_travels_between_a_new_chat_and_a_session_and_is_at_once_between_sessions() {
     let mut app = mount();
+    let hero = painted(&mut app).y;
     app.click("#shell-sidebar >> role:button \"Fix the build\"");
-    watch(&mut app, 60);
-    let docked = app.bounds("chat-composer").y;
-    assert!((app.opacity("chat-composer-dock") - 1.0).abs() < 0.01, "the composer shows, docked");
-
-    // To a new chat: mid-page from the first frame, never faded.
-    app.click("#app-rail >> role:button \"New chat\"");
-    let seen = watch(&mut app, 60);
-    let hero = app.bounds("chat-composer").y;
+    let seen = watch(&mut app, 80);
+    let docked = painted(&mut app).y;
     assert!(hero < docked - 50., "it stands mid-page on a new chat ({hero} vs {docked})");
-    at_once(&seen, docked, hero, "to a new chat");
+    travels(&seen, hero, docked, "a chat opened from a new chat");
 
-    // And back to the session: docked from the first frame.
+    // Another session: where it is from the first frame, never faded.
+    app.click("#shell-sidebar >> role:button \"Tidy the tests\"");
+    for (i, (opacity, y, _)) in watch(&mut app, 40).iter().enumerate() {
+        assert!((opacity - 1.0).abs() < 0.01, "another session: faded, frame {}: opacity {opacity}", i + 1);
+        assert!((y - docked).abs() <= 1., "another session: frame {} at {y}, not docked ({docked})", i + 1);
+    }
+
+    // To a new chat: up to mid-page.
+    app.click("#app-rail >> role:button \"New chat\"");
+    let seen = watch(&mut app, 80);
+    assert!((painted(&mut app).y - hero).abs() <= 1., "mid-page again");
+    travels(&seen, docked, hero, "to a new chat");
+
+    // And back to the session: down to the dock.
     app.click("#shell-sidebar >> role:button \"Fix the build\"");
-    let seen = watch(&mut app, 60);
-    assert!((app.bounds("chat-composer").y - docked).abs() <= 1., "docked again");
-    at_once(&seen, hero, docked, "back to the session");
+    let seen = watch(&mut app, 80);
+    travels(&seen, hero, docked, "back to the session");
 
     // Growing in the same chat (lines typed) still eases: seen on its way.
     std::thread::sleep(Duration::from_millis(500));
-    let short = app.bounds("chat-composer").height;
+    let short = painted(&mut app).height;
     app.fill("#chat-composer >> role:textbox", "one\ntwo\nthree\nfour");
     let seen = watch(&mut app, 40);
     let tall = seen.last().unwrap().2;

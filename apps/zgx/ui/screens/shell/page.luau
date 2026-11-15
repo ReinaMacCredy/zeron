@@ -121,14 +121,25 @@ return function(props: Props): Node
 			return ui.div {}
 		end
 		if kind == "session" then
-			return boundary.screen(boundary.named("shell.boundary.screen.session_page"), "@app/screens/chat", function(chat): Node
-				return chat.Session()
-			end)
+			-- (Arriving from a new chat, it comes in under the composer on its way down, rising 8: gpui's transcript.)
+			return ui.div {
+				w_full = true,
+				h_full = true,
+				opacity = function(): number
+					return composer_surface.thread:get()
+				end,
+				y = function(): number
+					return 8 * (1 - composer_surface.thread:get())
+				end,
+				boundary.screen(boundary.named("shell.boundary.screen.session_page"), "@app/screens/chat", function(chat): Node
+					return chat.Session()
+				end),
+			}
 		end
 		return boundary.screen(boundary.named("shell.boundary.screen.new_chat_page"), "@app/screens/chat", function(chat): Node
 			return chat.Home()
 		end)
-	end, { w_full = true, h_full = true })
+	end, { w_full = true, h_full = true, exit = motion.transition({ opacity = 0, duration = 110 }) })
 
 	-- Split chats (screens/shell/split): the chats of the split showing laid
 	-- out in the page, side by side and above one another, the window's gap
