@@ -68,7 +68,6 @@ struct Inputs<'a> {
     live: &'a dyn Fn(&str) -> Option<Session>,
     now: chrono::DateTime<chrono::Utc>,
     steps: &'a [TaskStep],
-    natives: &'a HashMap<String, Vec<Value>>,
     peers: &'a HashMap<String, Vec<String>>,
     previews: &'a HashMap<String, (String, Option<Preview>)>,
 }
@@ -79,16 +78,6 @@ fn word(state: ThreadState) -> String {
 
 fn first_line(text: Option<&str>) -> Option<String> {
     text?.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_owned)
-}
-
-fn native_state(status: &str) -> Option<ThreadState> {
-    match status {
-        "running" => Some(ThreadState::Working),
-        "done" => Some(ThreadState::Done),
-        "failed" => Some(ThreadState::Failed),
-        "stopped" => Some(ThreadState::Cancelled),
-        _ => None,
-    }
 }
 
 fn thread_row(chat: &Chat, kind: &'static str, state: ThreadState, step: Option<(&TaskStep, usize)>) -> Row {
@@ -117,11 +106,6 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
     let steps: Vec<&TaskStep> = i.steps.iter().filter(|s| !s.deleted).collect();
     let mut leads: HashSet<&str> = steps.iter().map(|s| s.owner_chat_id.as_str()).collect();
     let mut wanted: HashSet<&str> = steps.iter().filter_map(|s| s.chat_id.as_deref()).collect();
-    for (id, rows) in i.natives {
-        if !rows.is_empty() {
-            leads.insert(id);
-        }
-    }
     for (id, peers) in i.peers {
         if !peers.is_empty() {
             leads.insert(id);
@@ -209,31 +193,6 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
         let mut own: Vec<&Chat> = children.get(lead_id).into_iter().flatten().copied().filter(|c| !shows.contains_key(c.id.as_str())).collect();
         own.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
         rows.extend(own.into_iter().map(|c| thread_row(c, "owned", zeron_proto::chat_state(c, indicator(c)), None)));
-        let harness = lead.config.as_ref().map(|c| c.harness.as_str().to_owned());
-        for sub in i.natives.get(lead_id).into_iter().flatten() {
-            let field = |key: &str| sub.field(key).map(text).filter(|s| !s.is_empty());
-            let Some(state) = field("status").as_deref().and_then(native_state) else { continue };
-            if state != ThreadState::Working && !sub.field("recent").is_some_and(Value::truthy) {
-                continue;
-            }
-            rows.push(Row {
-                key: format!("subagent:{}", field("ref").unwrap_or_default()),
-                kind: "subagent",
-                chat: None,
-                step: None,
-                number: None,
-                title: field("title").unwrap_or_default(),
-                step_title: None,
-                state,
-                harness: harness.clone(),
-                model: field("model"),
-                line: None,
-                role: None,
-                spec: None,
-                locked: false,
-                updated: sub.field("at").and_then(Value::as_f64).map(|at| at as i64),
-            });
-        }
         for peer in i.peers.get(lead_id).into_iter().flatten().filter_map(|id| chats.get(id.as_str())).filter(|c| !c.archived) {
             rows.push(thread_row(peer, "peer", zeron_proto::chat_state(peer, indicator(peer)), None));
         }
@@ -260,7 +219,7 @@ fn row_value(r: &Row) -> Value {
     Value::record([
         ("key", Value::from(r.key.as_str())),
         ("kind", Value::from(r.kind)),
-        ("read_only", Value::Bool(matches!(r.kind, "subagent" | "peer"))),
+        ("read_only", Value::Bool(r.kind == "peer")),
         ("chat", opt(&r.chat)),
         ("step", opt(&r.step)),
         ("number", r.number.map_or(Value::Nil, |n| Value::from(n as f64))),
@@ -327,14 +286,13 @@ pub(crate) fn waiting_plans() -> Vec<(String, Vec<String>)> {
 
 impl Threads {
     fn recompute(self: &Rc<Self>) {
-        let natives = crate::chat::open_subagents();
         let leads = {
             let steps = self.steps.borrow();
             let peers = self.peers.borrow();
             let previews = self.previews.borrow();
             crate::sessions::with_chats(|chats, live, now| {
                 self.follow_peers(chats);
-                join(&Inputs { chats, live, now, steps: &steps, natives: &natives, peers: &peers, previews: &previews })
+                join(&Inputs { chats, live, now, steps: &steps, peers: &peers, previews: &previews })
             })
         };
         self.fetch_previews(&leads);
@@ -522,7 +480,6 @@ pub(crate) fn join_for_tests(chats: Json, steps: Vec<TaskStep>) {
             live: &|_| None,
             now: chrono::Utc::now(),
             steps: &steps,
-            natives: &HashMap::new(),
             peers: &HashMap::new(),
             previews: &HashMap::new(),
         });
@@ -570,12 +527,12 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn inputs<'a>(chats: &'a Json, steps: &'a [TaskStep], natives: &'a HashMap<String, Vec<Value>>, peers: &'a HashMap<String, Vec<String>>, previews: &'a HashMap<String, (String, Option<Preview>)>, live: &'a dyn Fn(&str) -> Option<Session>) -> Inputs<'a> {
-        Inputs { chats, live, now: chrono::Utc::now(), steps, natives, peers, previews }
+    fn inputs<'a>(chats: &'a Json, steps: &'a [TaskStep], peers: &'a HashMap<String, Vec<String>>, previews: &'a HashMap<String, (String, Option<Preview>)>, live: &'a dyn Fn(&str) -> Option<Session>) -> Inputs<'a> {
+        Inputs { chats, live, now: chrono::Utc::now(), steps, peers, previews }
     }
 
-    fn joined(chats: Json, steps: &[TaskStep], natives: HashMap<String, Vec<Value>>, peers: HashMap<String, Vec<String>>, live: &dyn Fn(&str) -> Option<Session>) -> HashMap<String, Lead> {
-        join(&inputs(&chats, steps, &natives, &peers, &HashMap::new(), live))
+    fn joined(chats: Json, steps: &[TaskStep], peers: HashMap<String, Vec<String>>, live: &dyn Fn(&str) -> Option<Session>) -> HashMap<String, Lead> {
+        join(&inputs(&chats, steps, &peers, &HashMap::new(), live))
     }
 
     fn summary(lead: &Lead) -> Vec<(&'static str, Option<usize>, String, ThreadState)> {
@@ -585,7 +542,7 @@ pub(crate) mod tests {
     #[test]
     fn a_planning_chat_publishes_its_plan_and_its_steps_in_order_then_four_run_once_approved() {
         let pending = json!([chat("lead", json!({ "title": "Storefront", "plan": { "overview": "Four changes" }, "planPending": true }))]);
-        let leads = joined(pending.clone(), &plan("lead", &[]), HashMap::new(), HashMap::new(), &|_| None);
+        let leads = joined(pending.clone(), &plan("lead", &[]), HashMap::new(), &|_| None);
         let lead = &leads["lead"];
         assert_eq!(summary(lead), TITLES.iter().enumerate().map(|(i, t)| ("step", Some(i + 1), t.to_string(), ThreadState::Planned)).collect::<Vec<_>>());
         assert_eq!(lead.rows[0].spec.as_deref(), Some("spec of Add CSV export"));
@@ -604,7 +561,7 @@ pub(crate) mod tests {
         running.extend(["k1", "k2", "k3", "k4"].map(|k| owned(k, "lead", "running")));
         let working = |id: &str| (id == "k2").then(|| serde_json::from_value(json!({ "chatId": id, "deviceId": "mac", "status": "working", "updatedAt": chrono::Utc::now() })).unwrap());
         let steps = plan("lead", &[Some("k1"), Some("k2"), Some("k3"), Some("k4")]);
-        let leads = joined(Json::Array(running.clone()), &steps, HashMap::new(), HashMap::new(), &working);
+        let leads = joined(Json::Array(running.clone()), &steps, HashMap::new(), &working);
         let lead = &leads["lead"];
         assert_eq!(
             summary(lead),
@@ -635,7 +592,7 @@ pub(crate) mod tests {
         chats.push(settled);
         let mut steps = plan("lead", &[Some("k1"), None, Some("k1")]);
         steps.iter_mut().find(|s| s.id == "s1").unwrap().outcome = Some(zeron_proto::StepOutcome::Done);
-        let leads = joined(Json::Array(chats), &steps, HashMap::new(), HashMap::new(), &|_| None);
+        let leads = joined(Json::Array(chats), &steps, HashMap::new(), &|_| None);
         let rows = summary(&leads["lead"]);
         assert_eq!(rows[0], ("step", Some(2), TITLES[1].to_string(), ThreadState::Planned), "step 1 is done on k1, which now runs step 3");
         assert_eq!(rows[1], ("owned", Some(3), "k1".to_string(), ThreadState::Working));
@@ -644,27 +601,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn native_subagents_and_watched_peers_come_as_read_only_rows() {
+    fn a_watched_peer_comes_as_a_read_only_row() {
         let chats = json!([chat("lead", json!({})), chat("peer", json!({ "title": "Their thread", "createdByChatId": "elsewhere" })), owned("k1", "lead", "running")]);
-        let sub = |r: &str, status: &str, recent: bool| Value::from_json(&json!({ "ref": r, "title": format!("Look {r}"), "status": status, "model": "haiku", "recent": recent, "at": 100. }).to_string()).unwrap();
-        let natives = HashMap::from([("lead".to_string(), vec![sub("a", "running", false), sub("b", "done", true), sub("old", "done", false)])]);
         let peers = HashMap::from([("lead".to_string(), vec!["peer".to_string(), "gone".to_string()])]);
-        let leads = joined(chats, &[], natives, peers, &|_| None);
+        let leads = joined(chats, &[], peers, &|_| None);
         let lead = &leads["lead"];
-        assert_eq!(
-            summary(lead),
-            [
-                ("owned", None, "k1".to_string(), ThreadState::Working),
-                ("subagent", None, "Look a".to_string(), ThreadState::Working),
-                ("subagent", None, "Look b".to_string(), ThreadState::Done),
-                ("peer", None, "Their thread".to_string(), ThreadState::ReadyForReview),
-            ]
-        );
+        assert_eq!(summary(lead), [("owned", None, "k1".to_string(), ThreadState::Working), ("peer", None, "Their thread".to_string(), ThreadState::ReadyForReview)]);
         let read_only: Vec<bool> = lead.rows.iter().map(|r| row_value(r).field("read_only") == Some(&Value::Bool(true))).collect();
-        assert_eq!(read_only, [false, true, true, true]);
+        assert_eq!(read_only, [false, true]);
         assert!(lead_value(lead).field("plan") == Some(&Value::Nil), "no plan, no plan bar");
-        assert_eq!(row_value(&lead.rows[1]).field("state").map(text).as_deref(), Some("working"));
-        assert_eq!(row_value(&lead.rows[3]).field("state").map(text).as_deref(), Some("readyForReview"));
+        assert_eq!(row_value(&lead.rows[1]).field("state").map(text).as_deref(), Some("readyForReview"));
     }
 
     #[test]
@@ -676,7 +622,7 @@ pub(crate) mod tests {
         let previews = HashMap::from([("lead".to_string(), (key, Some(preview)))]);
         let at = |plan: Json| {
             let chats = json!([chat("lead", json!({ "plan": plan }))]);
-            let leads = join(&inputs(&chats, &steps, &HashMap::new(), &HashMap::new(), &previews, &|_| None));
+            let leads = join(&inputs(&chats, &steps, &HashMap::new(), &previews, &|_| None));
             let row = &leads["lead"].rows[0];
             (row.harness.clone(), row.model.clone(), leads["lead"].unstarted.is_some())
         };

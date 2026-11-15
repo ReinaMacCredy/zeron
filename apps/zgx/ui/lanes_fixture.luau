@@ -515,7 +515,6 @@ do
 			{ key = "step:s5", kind = "step", read_only = false, step = "s5", number = 5, title = "Write the release notes", spec = "Notes for the release", role = "general", state = "planned", line = "After the four changes land" },
 			{ key = "owned:dg-done", kind = "owned", read_only = false, chat = "dg-done", title = "Docs refresh", state = "done", updated = NOW - 5000 },
 			{ key = "step:s6", kind = "step", read_only = false, step = "s6", number = 6, title = "An old idea", spec = "", role = "research", state = "skipped" },
-			{ key = "subagent:chat-1--sub--1", kind = "subagent", read_only = true, title = "scan the repo", state = "working", updated = NOW - 60 },
 			{ key = "peer:peer-1", kind = "peer", read_only = true, chat = "peer-1", title = "A peer thread", state = "readyForReview", updated = NOW - 120 },
 		} } })
 	end }

@@ -488,17 +488,6 @@ end
 type Ctx = { session: string, key: string, tab: string }
 
 local function open_row(ctx: Ctx, row: any)
-	if row.kind == "subagent" then
-		local ref = string.sub(row.key, #"subagent:" + 1)
-		for _, sub in lanes.subagents() do
-			if sub.ref == ref then
-				lanes.open_subagent(ctx.session, sub)
-				return
-			end
-		end
-		lanes.open_subagent(ctx.session, { ref = ref, title = row.title, status = if row.state == "working" then "running" else "done" })
-		return
-	end
 	if not row.chat then
 		return
 	end
@@ -514,7 +503,7 @@ local function entries(ctx: Ctx, row: any): { any }
 	local function add(list: { any }, label: string, icon: string, act: () -> ())
 		table.insert(list, { label = label, icon = icon, on_select = act })
 	end
-	if row.chat or row.kind == "subagent" then
+	if row.chat then
 		add(out, locale.s("chat.threads.menu.open"), "chat-round-line", function()
 			open_row(ctx, row)
 		end)
@@ -579,9 +568,7 @@ local function dom_id(key: string): string
 end
 
 local function tag_of(row: any): string?
-	if row.kind == "subagent" then
-		return `{locale.s("chat.threads.subagent")} · {locale.s("chat.threads.read_only")}`
-	elseif row.kind == "peer" then
+	if row.kind == "peer" then
 		return `{locale.s("chat.threads.peer")} · {locale.s("chat.threads.read_only")}`
 	elseif row.state == "skipped" then
 		return locale.s("chat.threads.skipped")
@@ -647,7 +634,7 @@ local function RowView(ctx: Ctx, row: any): Node
 	local menu_open = ui.use_state(false)
 	local list = entries(ctx, row)
 	local tag = tag_of(row)
-	local opens = row.chat ~= nil or row.kind == "subagent"
+	local opens = row.chat ~= nil
 	local title: { any } = { items = "baseline", gap = ui.raw(6, "the mockup's step number"), min_w = 0 }
 	if row.number then
 		table.insert(title, ui.text { tostring(row.number), color = "$text.tertiary", tabular = true, shrink = 0, wrap = false })

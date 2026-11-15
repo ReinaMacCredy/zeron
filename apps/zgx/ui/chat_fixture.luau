@@ -225,7 +225,6 @@ do
 		end,
 	}
 	local published = ui.shared("chat.subagents", {} :: { any })
-	local threads_published = ui.shared("chat.threads", {} :: any)
 	ui.command {
 		id = "subagents_running",
 		title = "Subagents run: two working, one done",
@@ -235,14 +234,6 @@ do
 				{ ref = "d2", title = "read the docs", status = "running" },
 				{ ref = "d3", title = "find the flaky test", status = "done" },
 			})
-			local s = store.session:peek()
-			if s and s.id then
-				threads_published:set({ [s.id] = { rows = {
-					{ key = "subagent:d1", kind = "subagent", read_only = true, title = "scan the repo", state = "working" },
-					{ key = "subagent:d2", kind = "subagent", read_only = true, title = "read the docs", state = "working" },
-					{ key = "subagent:d3", kind = "subagent", read_only = true, title = "find the flaky test", state = "done" },
-				} } })
-			end
 		end,
 	}
 end

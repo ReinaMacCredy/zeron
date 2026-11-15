@@ -30,7 +30,7 @@ The tab's head reads the number of threads, and the list groups them by what the
 
 Each row shows the thread's state, its title, its agent's mark and model, and the last thing it said. A row in **Waiting on you** shows the question it asks. A step of the plan carries its number.
 
-The agent's built-in subagents are listed too, as **Sub-agent** rows marked **read-only**, and a chat the lead watches with `watch_threads` is a **Peer** row.
+A chat the lead watches with `watch_threads` is listed too, as a **Peer** row marked **read-only**. The agent's built-in subagents are not threads: they stay on the composer's agents pill and its roster.
 
 With no threads yet, the tab reads **No threads yet. Hand work out in this chat and each piece becomes a thread.**
 

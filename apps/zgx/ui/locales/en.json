@@ -4769,7 +4769,6 @@
       "back": "Back to threads",
       "waiting": "Waiting on you: {line}",
       "read_only": "read-only",
-      "subagent": "Sub-agent",
       "peer": "Peer",
       "skipped": "Skipped",
       "cancelled": "Cancelled",

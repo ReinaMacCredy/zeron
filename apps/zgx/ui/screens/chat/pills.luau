@@ -123,13 +123,14 @@ local function chat_row(id: string?): any
 	return nil
 end
 
-function M.runs_of(bind: any): any
+function M.runs_of(bind: any, no_threads: boolean?): any
 	return ui.computed(function(): any
 		local id = bind.id()
 		local s = bind.session()
 		local row = chat_row(id)
 		return Roster.runs {
 			chat = id,
+			no_threads = no_threads,
 			subs = bind.subs(),
 			children = sessions.children(id),
 			usage = usage:get(),
@@ -508,8 +509,8 @@ local function watch_docs(runs: any)
 	end)
 end
 
-M.RosterBody = ui.component(function(props: { bind: any, clock: any?, on_close: () -> () }): Node
-	local runs = M.runs_of(props.bind)
+M.RosterBody = ui.component(function(props: { bind: any, clock: any?, no_threads: boolean?, on_close: () -> () }): Node
+	local runs = M.runs_of(props.bind, props.no_threads)
 	local detail = ui.use_state(nil :: string?)
 	local clock = props.clock or P.clock(function(): boolean
 		return Roster.working(runs:get().listed) > 0
@@ -1064,7 +1065,7 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 	local bind = props.bind
 	local keys = props.keys or typing.take
 	local main = props.waiting == true
-	local runs = M.runs_of(bind)
+	local runs = M.runs_of(bind, main)
 	watch_docs(runs)
 	local shells = ui.computed(function(): { any }
 		local out: { any } = {}
@@ -1076,10 +1077,10 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 		return out
 	end)
 	local function threads_working(): number
-		return Threads.working(bind.id())
+		return if main then Threads.working(bind.id()) else 0
 	end
 	local clock = P.clock(function(): boolean
-		return (if main then threads_working() > 0 else Roster.working(runs:get().listed) > 0) or #shells:get() > 0
+		return Roster.working(runs:get().listed) > 0 or threads_working() > 0 or #shells:get() > 0
 	end)
 	local roster_open = ui.use_state(false)
 	local shells_open = ui.use_state(false)
@@ -1342,17 +1343,30 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 		end,
 		ref = row_ref,
 		pill_slot(function(): string
-			if main then
-				return if threads_working() > 0 then "threads" else ""
-			end
+			return if threads_working() > 0 then "threads" else ""
+		end, function(): Node
+			return threads_pill
+		end),
+		pill_slot(function(): string
 			return if working() then "agents" else ""
 		end, function(): Node
-			return if main then threads_pill else agents_pill
+			return agents_pill
 		end, true),
 		pill_slot(function(): string
 			return if #shells:get() > 0 then "shells" else ""
 		end, function(): Node
 			return shells_pill
+		end),
+		card(roster_open, "pills-roster-panel", 0, { right = 0 }, function(): Node
+			return M.RosterBody {
+				bind = bind,
+				clock = clock,
+				no_threads = main,
+				on_close = function()
+					roster_open:set(false)
+					ui.after(0, keys)
+				end,
+			}
 		end),
 		card(shells_open, "pills-shells-panel", ui.raw(4, "the shells menu's inset"), {
 			w = function(): number
@@ -1362,18 +1376,6 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 			return ShellsBody { bind = bind, tasks = shells, detail = shell_detail, clock = clock }
 		end),
 	}
-	if not main then
-		table.insert(children, card(roster_open, "pills-roster-panel", 0, { right = 0 }, function(): Node
-			return M.RosterBody {
-				bind = bind,
-				clock = clock,
-				on_close = function()
-					roster_open:set(false)
-					ui.after(0, keys)
-				end,
-			}
-		end))
-	end
 	if props.picks then
 		table.insert(children, PicksPill.Pill {
 			open = picks_open,

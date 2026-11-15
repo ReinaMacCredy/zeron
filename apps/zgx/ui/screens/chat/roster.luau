@@ -113,6 +113,9 @@ function M.runs(input: any): { agents: { Row }, children: { Row }, listed: { Row
 		if docs[c.id] then
 			continue
 		end
+		if c.delegation and input.no_threads then
+			continue
+		end
 		local asking = c.status == "input" or c.status == "awaitingInput"
 		local moving = asking or c.status == "working"
 		if c.delegation then

@@ -4769,7 +4769,6 @@
       "back": "返回线程列表",
       "waiting": "等你处理：{line}",
       "read_only": "只读",
-      "subagent": "子代理",
       "peer": "同级线程",
       "skipped": "已跳过",
       "cancelled": "已取消",

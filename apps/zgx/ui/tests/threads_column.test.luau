@@ -30,8 +30,8 @@ test("threads: the tab opens first, counts the chat's rows, and groups them from
 	local list = tabs(app)
 	expect(list[1].kind).to_be("threads")
 	expect(list[2].kind).to_be("side_chat")
-	expect(app:text(`#panel-tab-{list[1].id}-count`)).to_be("9")
-	expect(app:text("#threads-count")).to_be("9 threads")
+	expect(app:text(`#panel-tab-{list[1].id}-count`)).to_be("8")
+	expect(app:text("#threads-count")).to_be("8 threads")
 	local function y(sel: string): number
 		return tonumber(string.match(app:tree(sel), ",(-?[%d.]+) ")) :: number
 	end
@@ -46,7 +46,7 @@ test("threads: the tab opens first, counts the chat's rows, and groups them from
 	expect(y("#threads-row-owned-dg-fail") > order[2] and y("#threads-row-owned-dg-fail") < order[3]).to_be(true)
 	expect(app:has(".threads-row-failed")).to_be(true)
 	expect(app:tree("#threads-row-step-s6")).to_contain("Skipped")
-	expect(app:tree("#threads-row-subagent-chat-1--sub--1")).to_contain("Sub-agent · read-only")
+	expect(app:has("#threads-row-subagent-chat-1--sub--1")).to_be(false)
 	expect(app:tree("#threads-row-peer-peer-1")).to_contain("Peer · read-only")
 	app:click("#threads-group-done")
 	app:frames(20)
