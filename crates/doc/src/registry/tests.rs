@@ -2940,7 +2940,7 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
         overview: text.into(),
         ..Default::default()
     };
-    doc.write_plan("lead", &overview("Ship it"), &plan, ts(4_000))
+    doc.write_plan("lead", &overview("Ship it"), &plan, false, ts(4_000))
         .unwrap();
     assert_eq!(step_ids(&doc, "lead"), ["run", "done", "n1", "n2"]);
     assert!(doc.task_step("open").is_none());
@@ -2956,7 +2956,7 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
     let before = doc.read_task_steps().unwrap();
     let refused = [step("n3", "lead", "Fine"), step("n4", "lead", "  ")];
     assert!(
-        doc.write_plan("lead", &overview("Ship it"), &refused, ts(5_000))
+        doc.write_plan("lead", &overview("Ship it"), &refused, false, ts(5_000))
             .is_err()
     );
     assert!(
@@ -2964,6 +2964,7 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
             "lead",
             &overview("Ship it"),
             &[step("x", "child", "Other")],
+            false,
             ts(5_000)
         )
         .is_err(),
@@ -3008,14 +3009,20 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
         Some(overview("Ship it twice"))
     );
     assert!(
-        doc.write_plan("gone", &overview(""), &[step("g", "gone", "G")], ts(5_000))
-            .is_err()
+        doc.write_plan(
+            "gone",
+            &overview(""),
+            &[step("g", "gone", "G")],
+            false,
+            ts(5_000)
+        )
+        .is_err()
     );
     let many: Vec<_> = (0..49)
         .map(|n| step(&format!("m{n}"), "lead", "M"))
         .collect();
     assert!(
-        doc.write_plan("lead", &overview(""), &many, ts(7_000))
+        doc.write_plan("lead", &overview(""), &many, false, ts(7_000))
             .is_err(),
         "the 50-step cap counts the started steps a plan keeps"
     );
@@ -3040,7 +3047,13 @@ fn an_oversize_plan_is_refused_on_its_chat_and_writes_nothing() {
     };
     let pending = doc.pending_ops_len();
     let err = doc
-        .write_plan("lead", &wide, &[step("s1", "lead", "One")], ts(3_000))
+        .write_plan(
+            "lead",
+            &wide,
+            &[step("s1", "lead", "One")],
+            false,
+            ts(3_000),
+        )
         .unwrap_err()
         .to_string();
     assert!(err.contains("too large to sync"), "{err}");

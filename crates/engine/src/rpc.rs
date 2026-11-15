@@ -5391,16 +5391,14 @@ impl RpcService for EngineRpc {
                         crate::review::REQUEST_PREFIX
                     )));
                 }
-                if p.step_id.is_none() {
-                    self.doc_host
-                        .refuse_unapproved_mission(&p.owner_chat_id)
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
-                }
                 let p = if self.doc_host.delegated_before(&p) {
                     p
                 } else if p.step_id.is_some() {
                     self.step_delegation(p)?
                 } else {
+                    self.doc_host
+                        .refuse_unapproved_mission(&p.owner_chat_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
                     match self.route_delegation(p)? {
                         Ok(p) => p,
                         Err(native) => return Ok(RpcReply::Value(native)),

@@ -5451,38 +5451,111 @@ async fn a_mission_chat_waits_for_approval_only_on_a_plan_from_the_persons_messa
         .unwrap();
     rig.core
         .doc_host
-        .queue_thread_message("lead", Some("peer"), "the cart step is done")
+        .queue_thread_message("lead", Some("peer"), "the cart research is done")
         .await
         .unwrap();
     wait_for(
-        || turn_over(&rig, "the cart step is done"),
+        || turn_over(&rig, "the cart research is done"),
         "the woken turn to end",
     )
     .await;
     mutate(plan("Add the cart")).await.unwrap();
     assert!(
-        !lead(&rig).plan_pending,
-        "a plan written in a turn another chat opened does not ask"
+        lead(&rig).plan_pending,
+        "a plan the person's message led to asks, even when another chat opened the turn"
     );
-    let briefed = prompts_with(&rig, zeron_proto::MISSION_BRIEF_OPENING);
+    mutate(serde_json::json!({ "op": "approvePlan", "chatId": "lead" }))
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            prompts_with(&rig, zeron_proto::PLAN_APPROVED_PROMPT).len() == 2
+                && idle(&rig.core, "lead")
+        },
+        "the second approval turn to end",
+    )
+    .await;
+
+    queue_run(&rig.core, "lead", "c3", "m3", "and payments");
+    wait_for(
+        || turn_over(&rig, "and payments"),
+        "the payments turn to end",
+    )
+    .await;
+    queue_run(&rig.core, "lead", "c4", "m4", "/status now");
+    wait_for(
+        || turn_over(&rig, "/status now"),
+        "the command's turn to end",
+    )
+    .await;
+    mutate(plan("Add payments")).await.unwrap();
     assert!(
-        briefed
-            .iter()
-            .all(|prompt| !prompt.contains(zeron_proto::PLAN_APPROVED_PROMPT)
-                && !prompt.contains("the cart step is done")),
-        "{briefed:?}"
+        !lead(&rig).plan_pending,
+        "a command the person sends ends the mission turn"
     );
+
+    let chat_mode = zeron_proto::ChatConfig {
+        plan: false,
+        mission: None,
+        ..mission(true)
+    };
+    queue_run(&rig.core, "lead", "c5", "m5", "and returns");
+    wait_for(|| turn_over(&rig, "and returns"), "the returns turn to end").await;
+    rig.core
+        .workspace
+        .set_chat_config("lead", &chat_mode)
+        .unwrap();
+    mutate(plan("Add returns")).await.unwrap();
+    assert!(!lead(&rig).plan_pending, "with Mission off nothing waits");
+    rig.core.workspace.set_chat_config("lead", &stored).unwrap();
+    mutate(plan("Add returns again")).await.unwrap();
+    assert!(
+        !lead(&rig).plan_pending,
+        "the write with Mission off took the mission turn"
+    );
+
+    queue_run(&rig.core, "lead", "c6", "m6", "and search");
+    wait_for(|| turn_over(&rig, "and search"), "the search turn to end").await;
+    rig.core
+        .workspace
+        .set_chat_config("lead", &chat_mode)
+        .unwrap();
+    queue_run(&rig.core, "lead", "c7", "m7", "just a question");
+    wait_for(
+        || turn_over(&rig, "just a question"),
+        "the plain turn to end",
+    )
+    .await;
+    rig.core.workspace.set_chat_config("lead", &stored).unwrap();
+    mutate(plan("Add search")).await.unwrap();
+    assert!(
+        !lead(&rig).plan_pending,
+        "the person's message with Mission off ends the mission turn"
+    );
+
+    let briefed = prompts_with(&rig, zeron_proto::MISSION_BRIEF_OPENING);
+    for unbriefed in [
+        zeron_proto::PLAN_APPROVED_PROMPT,
+        "the cart research is done",
+        "/status now",
+        "just a question",
+    ] {
+        assert!(
+            briefed.iter().all(|prompt| !prompt.contains(unbriefed)),
+            "{unbriefed}: {briefed:?}"
+        );
+    }
     assert_eq!(
         briefed.len(),
-        2,
-        "only the person's messages carry the brief"
+        5,
+        "only the person's typed messages with Mission on carry the brief"
     );
 
     rig.core
         .workspace
         .set_chat_config("lead", &mission(false))
         .unwrap();
-    queue_run(&rig.core, "lead", "c3", "m3", "and a checkout");
+    queue_run(&rig.core, "lead", "c8", "m8", "and a checkout");
     wait_for(
         || turn_over(&rig, "and a checkout"),
         "the unapproved mission turn to end",

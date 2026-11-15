@@ -1642,13 +1642,8 @@ impl SessionsEngine {
         }
     }
 
-    pub(crate) fn take_mission_turn(&self, chat_id: &str) -> bool {
-        let mut turns = lock(&self.inner.mission_turns);
-        let taken = turns.remove(chat_id).is_some();
-        if taken {
-            self.inner.journal.save_mission_turns(&turns);
-        }
-        taken
+    pub(crate) fn mission_turn_open(&self, chat_id: &str) -> bool {
+        lock(&self.inner.mission_turns).contains_key(chat_id)
     }
 
     /// Whether the chat's live runtime still runs background work (subagents,

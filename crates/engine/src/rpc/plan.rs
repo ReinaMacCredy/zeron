@@ -389,17 +389,13 @@ impl EngineRpc {
                 zeron_doc::TASK_IMAGES_MAX,
             )));
         }
+        let mission_turn = !steps.is_empty() && self.sessions.mission_turn_open(chat_id);
+        let pending = mission_turn && mission.is_some_and(|mission| mission.approve);
         self.workspace
-            .write_plan(chat_id, &plan, &steps)
+            .write_plan(chat_id, &plan, &steps, pending)
             .map_err(written)?;
-        if !steps.is_empty()
-            && let Some(mission) = mission
-            && self.sessions.take_mission_turn(chat_id)
-            && mission.approve
-        {
-            self.workspace
-                .set_plan_pending(chat_id, true)
-                .map_err(failed)?;
+        if mission_turn {
+            self.sessions.set_mission_turn(chat_id, None);
         }
         Ok(moved)
     }

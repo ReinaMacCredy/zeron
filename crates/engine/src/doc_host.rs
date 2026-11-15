@@ -5941,16 +5941,14 @@ impl DocHost {
             return Ok(());
         }
         let note_turn = |opens: bool| {
-            if item.from_chat_id.as_ref() != Some(chat_id) {
-                self.note_mission_turn(
-                    &sessions,
-                    chat_id,
-                    &message_id,
-                    &item.text,
-                    from_person,
-                    opens,
-                );
-            }
+            self.note_mission_turn(
+                &sessions,
+                chat_id,
+                &message_id,
+                &item.text,
+                from_person,
+                opens,
+            );
         };
         let mut attachments = item.attachments.clone();
         // A send held for the turn end goes out exactly as it was sent: its
@@ -7885,13 +7883,17 @@ impl DocHost {
         opens: bool,
     ) {
         let person = person && zeron_proto::agent_messages::agent_message_sender(typed).is_none();
-        if !opens
-            || typed == zeron_proto::RESUME_PROMPT
-            || (person && zeron_proto::invocation::leading_command(typed).is_some())
-        {
+        if !opens || !person || typed == zeron_proto::RESUME_PROMPT {
             return;
         }
-        let mission = person && sessions.mission(chat_id).is_some();
+        let command = zeron_proto::invocation::leading_command(typed).is_some()
+            || zeron_proto::invocation::invocation_links(typed)
+                .first()
+                .is_some_and(|(range, invocation)| {
+                    matches!(invocation, zeron_proto::invocation::Invocation::Command { .. })
+                        && typed[..range.start].trim().is_empty()
+                });
+        let mission = !command && sessions.mission(chat_id).is_some();
         sessions.set_mission_turn(chat_id, mission.then_some(message_id));
     }
 

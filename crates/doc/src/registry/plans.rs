@@ -76,6 +76,7 @@ impl RegistryDoc {
         chat_id: &str,
         plan: &ChatPlan,
         steps: &[TaskStep],
+        pending: bool,
         now: DateTime<Utc>,
     ) -> Result<(), DocError> {
         let (kept, dropped): (Vec<TaskStep>, Vec<TaskStep>) = self
@@ -83,7 +84,10 @@ impl RegistryDoc {
             .into_iter()
             .partition(|step| self.step_started(step));
         check_step_count(kept.len() + steps.len())?;
-        let plan_op = self.plan_op(chat_id, Some(plan))?;
+        let mut plan_op = self.plan_op(chat_id, Some(plan))?;
+        if pending && let Some(set) = plan_op.set.as_mut() {
+            set.insert("planPending".into(), json!(true));
+        }
         let ops = self.new_step_ops(chat_id, steps, self.last_step_key(chat_id))?;
         let hlc = self.next_hlc();
         let mut batch: Vec<RowOp> = std::iter::once(plan_op)
