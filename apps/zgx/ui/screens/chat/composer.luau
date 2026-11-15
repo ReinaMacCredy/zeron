@@ -395,7 +395,7 @@ local function Composer(): Node
 			local changed = false
 			for _, k in FIELDS do
 				local v = picked[k]
-				if not equal(d[k], v) then
+				if k ~= "mission" and not equal(d[k], v) then
 					d[k] = v
 					changed = true
 				end

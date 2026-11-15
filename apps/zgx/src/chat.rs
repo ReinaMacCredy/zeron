@@ -4725,6 +4725,11 @@ fn merged_config(config: &Json, args: &Value) -> Json {
             map.remove("mission");
         }
     }
+    if !c["mission"].is_null()
+        && let Some(map) = c.as_object_mut()
+    {
+        map.remove("plan");
+    }
     // The model's Fast option, as the catalog lists it (nil: it has none,
     // or the catalog isn't in yet).
     let fast_of_model = {
