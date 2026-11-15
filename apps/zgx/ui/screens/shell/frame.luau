@@ -466,8 +466,32 @@ end
 
 local CUT_PARAMS = { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } }
 
+-- (A chat's picture waits for the composer to land from a new chat: either picture changing redraws the whole window, which costs the flying composer frames.)
+local ART_HOLD = 300
+local art_held = ui.state("shell_frame_art_held", false)
+local function card_art(): string?
+	return if art_held:get() then "hero" else M.page_art:get()
+end
+
 -- What the card shows, laid out in the window's own coordinates: it holds still as the card's edges move over it.
 local function card_picture(): Node
+	local was = M.page_art:peek()
+	local turn = 0
+	ui.effect(function()
+		local now = M.page_art:get()
+		local landing = was == "hero" and now == "chat" and not motion.reduced_now()
+		was = now
+		turn += 1
+		art_held:set(landing)
+		if landing then
+			local mine = turn
+			ui.after(ART_HOLD, function()
+				if turn == mine then
+					art_held:set(false)
+				end
+			end)
+		end
+	end)
 	return ui.div {
 		id = "shell-card-picture",
 		absolute = true,
@@ -486,7 +510,7 @@ local function card_picture(): Node
 		end,
 		-- (Leaving, it fades as the chat's picture comes in over it: gone at once, the card stood bare between them.)
 		ui.presence(function(): string?
-			return if M.page_art:get() == "hero" then "hero" else nil
+			return if card_art() == "hero" then "hero" else nil
 		end, function(): Node
 			return M.Layer {
 				id = "page-art",
@@ -494,6 +518,9 @@ local function card_picture(): Node
 					return "hero"
 				end,
 				cutout = function(): any
+					if M.page_art:get() ~= "hero" then
+						return nil
+					end
 					local _ = composer_surface.moved:get()
 					local el = composer_surface.element
 					local w, h = el and el.width, el and el.height
@@ -520,7 +547,7 @@ local function card_picture(): Node
 				return art.split:get()
 			end,
 			kind = function(): string?
-				return if M.page_art:get() == "chat" then "chat" else nil
+				return if card_art() == "chat" then "chat" else nil
 			end,
 		},
 		ui.div {
