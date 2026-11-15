@@ -495,49 +495,41 @@ fn a_narrow_panel_keeps_its_tree_beside_the_file() {
     assert!((app.bounds("#shell-files").width - 420.).abs() < 0.5, "it stays where it was let go");
 }
 
-/// The sidebar folding or coming back splits the chat and the panel again,
-/// 50/50, as Zeron's `toggle_sidebar` did (`resplit_panels`), a width dragged
-/// on the panel's edge forgotten as there; and it eases there on the
-/// sidebar's own clock, so the chat between them only ever widens (or
-/// narrows) a frame at a time, never the other way first, and the panel
-/// steps a little each frame. (Gaël's call over Wing's earlier rule, where
-/// the sidebar took only what the chat needed and the panel held.)
+/// The sidebar folding or coming back leaves the panel's width alone, at its
+/// share or dragged: the chat takes all the sidebar gives. Short of the
+/// chat's least, the panel gives way, and has its width back as the sidebar
+/// folds. (It was split 50/50 again on each toggle, a width dragged
+/// forgotten.)
 #[test]
-fn the_sidebar_toggled_splits_the_chat_and_the_panel_again_easing() {
-    for (width, dragged) in [(1340., false), (1340., true), (1000., false)] {
+fn the_sidebar_toggled_leaves_the_panels_width_alone() {
+    for (width, dragged, holds) in [(1500., false, true), (1500., true, true), (1000., false, false)] {
         let mut app = mount();
         app.ui.scene.borrow_mut().resize(width + RAIL, 800.);
         app.frames(30);
         app.click("#shell-sidebar >> role:button \"Fix the build\"");
         app.frames(20);
+        assert!(app.host.run_command("shell.toggle_sidebar"));
+        app.frames(60);
         app.click("#titlebar >> role:button \"Panel\"");
         app.frames(60);
         if dragged {
-            drag(&mut app, "\"Resize files\"", -80.);
+            drag(&mut app, "\"Resize files\"", 80.);
             app.frames(40);
         }
-        for (folding, card) in [(true, 0.), (false, SIDEBAR_DEFAULT)] {
-            // (The chat's half holds our Sidecar's column beside its page.)
-            let chat = |app: &mut TestApp| app.bounds("#shell-page-room").width + app.bounds("#sidecar-slot").width;
-            let mut chats = vec![chat(&mut app)];
-            let mut panels = vec![app.bounds("#shell-files").width];
-            assert!(app.host.run_command("shell.toggle_sidebar"));
-            for _ in 0..24 {
-                app.frame();
-                chats.push(chat(&mut app));
-                panels.push(app.bounds("#shell-files").width);
-            }
-            let what = format!("{width}{}, the sidebar {}", if dragged { " dragged" } else { "" }, if folding { "folding" } else { "back" });
-            let way = if folding { 1. } else { -1. };
-            assert!(chats.windows(2).all(|w| (w[1] - w[0]) * way >= -0.05), "{what}: the chat one way: {chats:?}");
-            let jump = panels.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0., f32::max);
-            let moved = (panels[panels.len() - 1] - panels[0]).abs();
-            assert!(moved > 20. && jump < moved * 0.6, "{what}: the panel eases there: {panels:?}");
-            let panel = *panels.last().unwrap();
-            assert!((panel - share_of(width, card)).abs() < 0.5, "{what}: the panel at its share {}: {panel}", share_of(width, card));
-            assert!((chats.last().unwrap() - panel).abs() < 0.5 || panel <= RIGHT_PANE_MIN + 0.5, "{what}: the chat {} beside the panel {panel}", chats.last().unwrap());
-            app.frames(30);
+        let what = format!("{width}{}", if dragged { " dragged" } else { "" });
+        let before = app.bounds("#shell-files").width;
+        assert!(app.host.run_command("shell.toggle_sidebar"));
+        app.frames(60);
+        let after = app.bounds("#shell-files").width;
+        if holds {
+            assert!((after - before).abs() < 0.5, "{what}: the panel went {before} → {after} with room for the chat");
+        } else {
+            assert!(after < before - 0.5 && after >= RIGHT_PANE_MIN - 0.5, "{what}: the panel should give way ({before} → {after})");
         }
+        assert!(app.host.run_command("shell.toggle_sidebar"));
+        app.frames(60);
+        let back = app.bounds("#shell-files").width;
+        assert!((back - before).abs() < 0.5, "{what}: the sidebar gone, the panel is {back}, was {before}");
     }
 }
 

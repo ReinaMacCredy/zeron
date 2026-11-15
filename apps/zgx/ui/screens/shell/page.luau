@@ -741,20 +741,7 @@ return function(props: Props): Node
 		local function share(v: number, sd: number): number
 			return fit.content_split(math.max(less_gaps(v, sd) - sd - reserve(), 0), floor)
 		end
-		-- (The sidebar folded or brought back, the window as it was.)
-		local toggled = (side > 0) ~= (was.side > 0) and vw == was.vw and floor == was.floor
-		if toggled and floor <= fit.CHAT_PANEL_MIN and not shell_view.expanded:peek() then
-			-- The sidebar folded or back: the chat and this split again, as
-			-- Zeron's `toggle_sidebar` re-split them (`resplit_panels`), a
-			-- width dragged forgotten as there. Below, it eases there.
-			if chosen:peek() then
-				chosen:set(false)
-			end
-			local part = share(vw, side)
-			alloc.pref = part
-			files_w:set(reserve() + part)
-			r = math.min(part, allowed)
-		elseif pref ~= was.pref then
+		if pref ~= was.pref then
 			-- Split or dragged: what it would take, as far as there's room.
 			r = math.min(pref, allowed)
 		elseif not chosen:peek() and floor <= fit.CHAT_PANEL_MIN and floor == was.floor and vw ~= was.vw then
@@ -830,9 +817,8 @@ return function(props: Props): Node
 	-- It opens at its share, unless a width was chosen (its edge dragged):
 	-- then at that width, however it comes back (its toggle, another chat's
 	-- panel shown, the fit hiding it for room and bringing it back). (The
-	-- sidebar folding or coming back splits them again, above, as Zeron's
-	-- does: Gaël's call over Wing's earlier rule, where the chat took all
-	-- the sidebar gave and the panel held.)
+	-- sidebar folding or coming back leaves its width alone: the chat takes
+	-- all the sidebar gives, and the panel gives way only as it must, above.)
 	local was_on = shown:peek()
 	ui.effect(function()
 		local on = shown:get()
@@ -1054,11 +1040,10 @@ return function(props: Props): Node
 				holding:set(false)
 			end
 			off:set(showing - to)
-			-- (Split again as the sidebar folds or comes back: on the sidebar's
-			-- own clock, its curve and its time for its column's travel, so the
-			-- chat between them only ever widens or narrows, as in Zeron, where
-			-- both rode one tween. On the panel's quicker curve, the chat
-			-- narrowed a little first as the sidebar folded, then widened.)
+			-- (Giving way as the sidebar comes back, or back as it folds: on the
+			-- sidebar's own clock, its curve and its time for its column's travel,
+			-- so the chat between them only ever widens or narrows. On the panel's
+			-- quicker curve, the chat narrowed a little first, then widened.)
 			local params = if now.sidebar ~= was.sidebar and not opened
 				then motion.column(math.max(now.side, was.side) + SIDEBAR_GAP, 0)
 				elseif now.expanded ~= was.expanded and now.shown and was.shown
