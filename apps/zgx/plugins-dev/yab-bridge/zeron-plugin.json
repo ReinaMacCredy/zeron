@@ -1,0 +1,18 @@
+{
+  "id": "yab-bridge",
+  "name": "Yab bridge",
+  "version": "1.0.0",
+  "description": "Lets the Yab browser's agent start a Zeron chat, optionally after cloning a GitHub repository.",
+  "entry": "init.luau",
+  "service": "service.luau",
+  "permissions": ["service", "commands", "sessions.read", "messages.send", "projects.create"],
+  "commands": ["git"],
+  "settings": [
+    {
+      "id": "clone_root",
+      "kind": "folder",
+      "label": "Clone folder",
+      "description": "Where Yab's agent clones repositories: each goes in a folder of its own name here. Choose it before the first clone."
+    }
+  ]
+}
