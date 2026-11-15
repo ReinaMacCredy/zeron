@@ -945,6 +945,7 @@ struct Inner {
     agent_compacted: Mutex<std::collections::HashSet<String>>,
     compact_owed: Mutex<HashMap<String, String>>,
     work_tree_owed: Mutex<HashMap<String, String>>,
+    restart_owed: Mutex<HashMap<String, String>>,
     /// Context size at each chat's last reminder: the mid-turn one waits for it to grow.
     nudged_at: Mutex<HashMap<String, u64>>,
     /// Chats `recover_stale` is re-dispatching: their Idle + aborted reply is not an ending.
@@ -1313,6 +1314,7 @@ impl SessionsEngine {
                 agent_compacted: Mutex::new(std::collections::HashSet::new()),
                 compact_owed: Mutex::new(HashMap::new()),
                 work_tree_owed: Mutex::new(HashMap::new()),
+                restart_owed: Mutex::new(HashMap::new()),
                 nudged_at: Mutex::new(HashMap::new()),
                 reviving: Mutex::new(std::collections::HashSet::new()),
                 rejected_resumes: Mutex::new(HashMap::new()),
@@ -1673,6 +1675,61 @@ impl SessionsEngine {
             tasks.max(usize::from(self.driver_reports_background(chat_id))),
             subagents,
         )
+    }
+
+    /// The run's exit only stamps this work stopped: nothing else tells the chat or the agent.
+    fn note_restart_ends_work(&self, chat_id: &str) {
+        let (tasks, subagents) = self.background_work(chat_id);
+        if tasks + subagents as usize == 0 {
+            return;
+        }
+        let rows = self
+            .session_status(chat_id)
+            .map(|s| s.background_tasks)
+            .unwrap_or_default();
+        let agents = rows
+            .iter()
+            .filter(|t| t.kind == zeron_proto::BackgroundTaskKind::Agent)
+            .count();
+        let subagents = (subagents as usize).max(agents);
+        let processes = tasks.saturating_sub(agents);
+        let count =
+            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let mut ended = Vec::new();
+        if subagents > 0 {
+            ended.push(count(subagents, "sub-agent", "sub-agents"));
+        }
+        if processes > 0 {
+            ended.push(count(
+                processes,
+                "background process",
+                "background processes",
+            ));
+        }
+        let mut ended = ended.join(" and ");
+        let commands: Vec<String> = rows
+            .iter()
+            .filter(|t| t.kind != zeron_proto::BackgroundTaskKind::Agent)
+            .map(|t| t.command.chars().take(80).collect::<String>())
+            .filter(|command| !command.trim().is_empty())
+            .take(3)
+            .collect();
+        if !commands.is_empty() {
+            ended.push_str(&format!(" ({})", commands.join("; ")));
+        }
+        self.write_system_note(
+            chat_id,
+            "Restarting the agent ended its background work",
+            Some(&format!(
+                "A changed setting needed a new agent process. That ended {ended} before they finished."
+            )),
+        );
+        lock(&self.inner.restart_owed).insert(
+            chat_id.to_string(),
+            format!(
+                "Zeron restarted your process to apply a changed run setting. That ended {ended} before they finished: their work is not done and no result is coming. Start them again if it is still needed."
+            ),
+        );
     }
 
     fn restart_ends_work(&self, chat_id: &str, in_place: bool) -> bool {
@@ -2356,6 +2413,9 @@ impl SessionsEngine {
             // the routed run died with the message reclaimed, or the launch
             // configuration changed: replace the runtime.
             self.inner.restore_owed(chat_id, owed);
+            if !same_runtime {
+                self.note_restart_ends_work(chat_id);
+            }
             self.terminate(chat_id).await?;
         }
 
@@ -5067,6 +5127,7 @@ struct HarnessPrompt {
 struct Owed {
     note: Option<String>,
     work_tree: Option<String>,
+    restart: Option<String>,
     agent_compacted: bool,
 }
 
@@ -5108,6 +5169,10 @@ impl Inner {
                 .is_none()
                 .then(|| lock(&self.work_tree_owed).remove(chat_id))
                 .flatten(),
+            restart: zeron_proto::invocation::leading_command(typed)
+                .is_none()
+                .then(|| lock(&self.restart_owed).remove(chat_id))
+                .flatten(),
             agent_compacted: zeron_proto::invocation::leading_command(typed).is_none()
                 && lock(&self.agent_compacted).remove(chat_id),
         };
@@ -5132,6 +5197,11 @@ impl Inner {
         }
         if let Some(note) = owed.work_tree {
             lock(&self.work_tree_owed)
+                .entry(chat_id.to_string())
+                .or_insert(note);
+        }
+        if let Some(note) = owed.restart {
+            lock(&self.restart_owed)
                 .entry(chat_id.to_string())
                 .or_insert(note);
         }
@@ -5282,6 +5352,7 @@ impl Inner {
         let lines: Vec<&str> = [
             owed.note.as_deref(),
             owed.work_tree.as_deref(),
+            owed.restart.as_deref(),
             mission,
             findings.as_deref(),
             reminder.as_deref(),

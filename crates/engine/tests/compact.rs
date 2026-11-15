@@ -801,6 +801,44 @@ async fn a_compaction_that_would_restart_over_background_work_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_restart_for_a_changed_setting_says_what_background_work_it_ended() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness = Arc::new(TestHarness::new(requests.clone(), true));
+    *harness.background.lock().unwrap() = sleeping_shell();
+    let core = engine_with_one_turn_by(tmp.path(), harness.clone()).await;
+    wait_for(
+        || {
+            core.sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.background_tasks.len() == 1)
+        },
+        "the shell on the session",
+    )
+    .await;
+    let mut run = run_payload("msg-2", &tmp.path().to_string_lossy());
+    if let SessionCommandPayload::Run { request, .. } = &mut run {
+        request.plan = true;
+    }
+    core.doc_host
+        .queue_command(CHAT, run)
+        .expect("queue second run");
+    wait_for(|| requests.lock().unwrap().len() == 2, "the replacing run").await;
+    let prompt = requests.lock().unwrap()[1].prompt.clone();
+    assert!(
+        prompt.contains("Zeron restarted your process")
+            && prompt.contains("1 background process (sleep 300 && echo done)"),
+        "{prompt}"
+    );
+    let entries = entries(&core);
+    assert!(
+        entries.iter().any(|e| e.role == MessageRole::System
+            && entry_text(e).starts_with("Restarting the agent ended its background work")),
+        "{entries:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_stopped_auto_continue_keeps_its_caption() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, harness, _requests) = engine_with_one_turn_on(tmp.path(), true).await;
