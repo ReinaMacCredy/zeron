@@ -479,7 +479,7 @@ local function card_picture(): Node
 	local turn = 0
 	ui.effect(function()
 		local now = M.page_art:get()
-		local landing = was == "hero" and now == "chat" and not motion.reduced_now()
+		local landing = was == "hero" and now ~= "hero" and route.chat:peek().name == "session" and not motion.reduced_now()
 		was = now
 		turn += 1
 		art_held:set(landing)

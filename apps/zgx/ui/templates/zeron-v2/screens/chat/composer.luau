@@ -2066,6 +2066,8 @@ local function Composer(): Node
 		return anime.createSpring { stiffness = w * w, damping = 2 * w }
 	end
 	local GLIDE = { duration = 260, ease = "out(3)" }
+	-- (A send's page takes two long frames to come in; started under them, the spring's second step is three frames' worth.)
+	local TAKEOFF = 34
 	-- How far it shows from where it's laid out, on its way there.
 	-- (Kept state, as this file's others: the composer is made in a plain
 	-- function, not a component.)
@@ -2120,7 +2122,7 @@ local function Composer(): Node
 			return
 		end
 		offset:set(from)
-		moving[offset] = anime.animate(offset, { value = 0, ease = travel_ease(docking) })
+		moving[offset] = anime.animate(offset, { value = 0, ease = travel_ease(docking), delay = if docking then TAKEOFF else nil })
 	end
 	ui.on_cleanup(function()
 		for _, run in moving do
@@ -2145,7 +2147,7 @@ local function Composer(): Node
 		local clock = if docking then 420 else 470
 		local from, to = if docking then 0.20 else 0.50, if docking then 0.65 else 0.95
 		shows:set(0)
-		moving[shows] = anime.animate(shows, { value = 1, delay = from * clock, duration = (to - from) * clock, ease = "inOut(2)" })
+		moving[shows] = anime.animate(shows, { value = 1, delay = from * clock + (if docking then TAKEOFF else 0), duration = (to - from) * clock, ease = "inOut(2)" })
 	end
 	-- (Its page's middle as it moved, and when: the panel shutting with a session moves it, a layout later.)
 	local middle_was: { at: number, x: number, docking: boolean }? = nil
