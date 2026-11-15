@@ -2017,6 +2017,10 @@ return ui.component(function(props: Props): Node
 				pl = "$space.1",
 				aria_hidden = true,
 				w = send_room,
+				-- (Shut, its text runs past a clip of no width on purpose: the faded edge says so.)
+				fade_x = function()
+					return { 0, if labelled() then 0 else 6 }
+				end,
 				opacity = ui.tween(ui.computed(function(): number
 					return if labelled() then 1 else 0
 				end), fade(150, motion.EASE_OUT)),
