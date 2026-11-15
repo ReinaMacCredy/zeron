@@ -272,6 +272,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
             disabled_tools: Vec::new(),
             access: zeron_proto::AccessMode::FullAccess,
             plan: false,
+            mission: None,
         }),
         last_message_preview: None,
         last_message_at: None,

@@ -472,6 +472,7 @@ mod tests {
             disabled_tools: Vec::new(),
             access: Default::default(),
             plan: false,
+            mission: None,
         };
         let window =
             |config: Option<&zeron_proto::ChatConfig>| with_chat_budget(reported, config).window;

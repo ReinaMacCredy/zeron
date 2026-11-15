@@ -5940,6 +5940,18 @@ impl DocHost {
             handle.publish_queue();
             return Ok(());
         }
+        let note_turn = |opens: bool| {
+            if item.from_chat_id.as_ref() != Some(chat_id) {
+                self.note_mission_turn(
+                    &sessions,
+                    chat_id,
+                    &message_id,
+                    &item.text,
+                    from_person,
+                    opens,
+                );
+            }
+        };
         let mut attachments = item.attachments.clone();
         // A send held for the turn end goes out exactly as it was sent: its
         // text never carried the queue's image note.
@@ -5986,6 +5998,7 @@ impl DocHost {
             )?;
         }
         if send == QueueSend::Steer {
+            note_turn(!sessions.turn_in_flight(chat_id));
             match sessions
                 .steer_now(
                     chat_id,
@@ -6028,6 +6041,7 @@ impl DocHost {
         if send == QueueSend::Interrupt && sessions.turn_in_flight(chat_id) {
             sessions.stop_turn(chat_id).await?;
         }
+        note_turn(true);
         let previous = sessions.last_request(chat_id);
         // ... and on its model, effort and options, not the chat's saved ones.
         let request = held.or_else(|| {
@@ -7287,6 +7301,7 @@ impl DocHost {
                         disabled_tools: request.disabled_tools.clone(),
                         access: request.access,
                         plan: request.plan,
+                        mission: None,
                     };
                     if let Err(err) = ws.set_chat_config(chat_id, &config) {
                         tracing::warn!(chat = %chat_id, error = %err, "run-config backfill failed");
@@ -7330,6 +7345,9 @@ impl DocHost {
                 // host got around to draining a queued command. Idempotent by
                 // id, so the dispatch path's own execution-time write dedupes
                 // to a no-op. A provider switch's seam lands with it, above.
+                let opens =
+                    !sessions.turn_in_flight(chat_id) || !sessions.live_run_steerable(chat_id);
+                self.note_mission_turn(sessions, chat_id, message_id, &request.prompt, true, opens);
                 sessions.note_provider_switch(chat_id, harness, handle);
                 if let Err(err) = handle.write_user_message(
                     message_id,
@@ -7662,6 +7680,10 @@ impl DocHost {
                 Some("held until the turn ends".into()),
             ));
         }
+        if let Some(message_id) = message_id.as_deref() {
+            let opens = !sessions.turn_in_flight(chat_id);
+            self.note_mission_turn(sessions, chat_id, message_id, &prompt, true, opens);
+        }
         // The transcript shows the send while mailbox backpressure holds it.
         // A pending agent update instead holds it in the queue below, where a
         // transcript copy would duplicate it until the update finishes.
@@ -7692,6 +7714,7 @@ impl DocHost {
             }
             SteerOutcome::NotSteerable => {
                 if let Some(message_id) = message_id.as_deref() {
+                    self.note_mission_turn(sessions, chat_id, message_id, &prompt, true, true);
                     handle.write_user_message(message_id, &prompt, issued_at.min(now_ms()))?;
                 }
                 let request = sessions
@@ -7850,6 +7873,26 @@ impl DocHost {
                 tracing::warn!(chat = %chat_id, cwd = %cwd, error = %err, "removed worktree restore failed");
             }
         }
+    }
+
+    fn note_mission_turn(
+        &self,
+        sessions: &SessionsEngine,
+        chat_id: &str,
+        message_id: &str,
+        typed: &str,
+        person: bool,
+        opens: bool,
+    ) {
+        let person = person && zeron_proto::agent_messages::agent_message_sender(typed).is_none();
+        if !opens
+            || typed == zeron_proto::RESUME_PROMPT
+            || (person && zeron_proto::invocation::leading_command(typed).is_some())
+        {
+            return;
+        }
+        let mission = person && sessions.mission(chat_id).is_some();
+        sessions.set_mission_turn(chat_id, mission.then_some(message_id));
     }
 
     /// Every fresh harness dispatch crosses this boundary, including

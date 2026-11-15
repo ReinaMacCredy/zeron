@@ -123,6 +123,7 @@ async fn steering_never_aborts_a_running_tool() {
                 disabled_tools: Vec::new(),
                 access: Default::default(),
                 plan: false,
+                mission: None,
             },
         )
         .unwrap();

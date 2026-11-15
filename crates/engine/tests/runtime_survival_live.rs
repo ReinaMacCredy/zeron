@@ -168,6 +168,7 @@ async fn agent_process_survives_sends_and_cancel() {
                 disabled_tools: Vec::new(),
                 access: zeron_proto::AccessMode::FullAccess,
                 plan: false,
+                mission: None,
             },
         )
         .unwrap();

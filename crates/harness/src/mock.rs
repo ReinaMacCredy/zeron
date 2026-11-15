@@ -819,6 +819,37 @@ impl MockHarness {
                 ]);
             }
         }
+        let mut mission_events = Vec::new();
+        if std::env::var("ZERON_MOCK_MISSION").is_ok_and(|v| !v.is_empty() && v != "0")
+            && let Some(server) = request.mcp.as_ref()
+        {
+            for (ix, (tool, input, result)) in mission_calls(server, &request.prompt)
+                .await
+                .into_iter()
+                .enumerate()
+            {
+                let id = format!("mock-mission-{ix}");
+                mission_events.extend([
+                    AgentEvent::ToolCall {
+                        id: id.clone(),
+                        call: zeron_proto::ToolCall::Mcp {
+                            server: "zeron".into(),
+                            tool: tool.into(),
+                            input: Some(input),
+                        },
+                    },
+                    AgentEvent::ToolResult {
+                        id,
+                        is_error: mock_mcp_failed(&result),
+                        output: Some(mock_mcp_text(&result)),
+                        diff: None,
+                        exit_code: None,
+                        image_payloads: Vec::new(),
+                        preview_paths: Vec::new(),
+                    },
+                ]);
+            }
+        }
         // Dev/testing knob: `ZERON_MOCK_SUBAGENT=1` appends two spawn chips
         // whose nested traffic arrives as tagged `AgentEvent::Subagent`
         // events — the only data-side way to put spawn chips (running → done)
@@ -1213,6 +1244,7 @@ impl MockHarness {
             .chain(read_file_events)
             .chain(html_render_events)
             .chain(delegate_events)
+            .chain(mission_events)
             .chain(reply_event)
             .chain(todo_events)
             .chain(code_event)
@@ -1332,6 +1364,46 @@ fn delegate_calls(json: &str, prompt: &str, chat: Option<&str>) -> Vec<serde_jso
     });
     if calls.is_empty() || own_child || !chat.is_some_and(mark_delegated) {
         return Vec::new();
+    }
+    calls
+}
+
+type MockCall = (
+    &'static str,
+    serde_json::Value,
+    Result<serde_json::Value, String>,
+);
+
+async fn mission_calls(server: &zeron_proto::McpServer, prompt: &str) -> Vec<MockCall> {
+    let mut calls = Vec::new();
+    if prompt.contains(zeron_proto::MISSION_BRIEF_OPENING) {
+        let input = serde_json::json!({
+            "action": "write",
+            "overview": "Mock mission",
+            "steps": [
+                { "title": "Sketch the change", "notes": "Where it goes and how to check it." },
+                { "title": "Build it", "notes": "The change itself." },
+                { "title": "Check it", "notes": "Run the checks and read the result." },
+            ],
+        });
+        let result = mock_mcp_call(server, "plan", input.clone()).await;
+        calls.push(("plan", input, result));
+    } else if prompt.contains(zeron_proto::PLAN_APPROVED_PROMPT) {
+        let input = serde_json::json!({ "action": "read" });
+        let result = mock_mcp_call(server, "plan", input.clone()).await;
+        let plan: serde_json::Value =
+            serde_json::from_str(&mock_mcp_text(&result)).unwrap_or_default();
+        calls.push(("plan", input, result));
+        for step in plan["steps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|step| step["status"] == "planned")
+        {
+            let input = serde_json::json!({ "task": step["title"], "stepId": step["id"] });
+            let result = mock_mcp_call(server, "delegate_task", input.clone()).await;
+            calls.push(("delegate_task", input, result));
+        }
     }
     calls
 }

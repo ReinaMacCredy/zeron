@@ -1054,6 +1054,7 @@ mod tests {
                 disabled_tools: Vec::new(),
                 access: zeron_proto::AccessMode::FullAccess,
                 plan: false,
+                mission: None,
             }),
             last_message_preview: None,
             last_message_at: None,
@@ -1205,6 +1206,7 @@ mod tests {
             disabled_tools: Vec::new(),
             access: zeron_proto::AccessMode::FullAccess,
             plan: false,
+            mission: None,
         };
         assert!(ws.set_chat_config("chat-1", &config).unwrap());
         let row = ws.chat("chat-1").unwrap().expect("row exists");

@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use zeron_proto::{AgentEvent, ToolCall};
 
 const AGENT_COMPACTS_FILE: &str = "agent-compacts.json";
+const MISSION_TURNS_FILE: &str = "mission-turns.json";
 
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
@@ -115,28 +116,44 @@ impl RunJournal {
     /// Compactions agents asked for that have not run yet, so an engine
     /// restart in between does not drop them.
     pub fn agent_compacts<T: serde::de::DeserializeOwned>(&self) -> HashMap<String, T> {
-        std::fs::read(self.dir.join(AGENT_COMPACTS_FILE))
+        self.read_map(AGENT_COMPACTS_FILE)
+    }
+
+    pub fn save_agent_compacts<T: Serialize>(&self, compacts: &HashMap<String, T>) {
+        self.write_map(AGENT_COMPACTS_FILE, compacts);
+    }
+
+    pub fn mission_turns(&self) -> HashMap<String, String> {
+        self.read_map(MISSION_TURNS_FILE)
+    }
+
+    pub fn save_mission_turns(&self, turns: &HashMap<String, String>) {
+        self.write_map(MISSION_TURNS_FILE, turns);
+    }
+
+    fn read_map<T: serde::de::DeserializeOwned>(&self, file: &str) -> HashMap<String, T> {
+        std::fs::read(self.dir.join(file))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default()
     }
 
-    pub fn save_agent_compacts<T: Serialize>(&self, compacts: &HashMap<String, T>) {
-        let path = self.dir.join(AGENT_COMPACTS_FILE);
-        let written = if compacts.is_empty() {
+    fn write_map<T: Serialize>(&self, file: &str, map: &HashMap<String, T>) {
+        let path = self.dir.join(file);
+        let written = if map.is_empty() {
             std::fs::remove_file(&path).or_else(|err| match err.kind() {
                 std::io::ErrorKind::NotFound => Ok(()),
                 _ => Err(err),
             })
         } else {
             let tmp = path.with_extension("json.tmp");
-            serde_json::to_vec(compacts)
+            serde_json::to_vec(map)
                 .map_err(std::io::Error::other)
                 .and_then(|json| std::fs::write(&tmp, json))
                 .and_then(|()| std::fs::rename(&tmp, &path))
         };
         if let Err(err) = written {
-            tracing::warn!(error = %err, "agent compaction ledger write failed");
+            tracing::warn!(error = %err, file, "journal ledger write failed");
         }
     }
 

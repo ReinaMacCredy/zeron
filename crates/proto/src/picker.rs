@@ -248,6 +248,7 @@ mod tests {
             disabled_tools: Vec::new(),
             access: Default::default(),
             plan: false,
+            mission: None,
         }
     }
 

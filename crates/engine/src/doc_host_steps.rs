@@ -26,7 +26,22 @@ pub(super) fn marked_step_threads(workspace: &WorkspaceHost) -> HashSet<String> 
         .collect()
 }
 
+fn unapproved() -> EngineError {
+    failure(
+        "plan_pending",
+        "The person has not approved the plan yet. Stop and wait for the approval message.",
+    )
+}
+
 impl DocHost {
+    pub(crate) fn refuse_unapproved_mission(&self, owner: &str) -> Result<(), EngineError> {
+        let pending = self
+            .workspace()
+            .and_then(|workspace| workspace.chat(owner).ok().flatten())
+            .is_some_and(|chat| chat.plan_pending && chat.mission().is_some());
+        if pending { Err(unapproved()) } else { Ok(()) }
+    }
+
     /// Call under `delegation_lock`, so two starts cannot bind one step.
     pub(super) fn runnable_step(
         &self,
@@ -42,10 +57,7 @@ impl DocHost {
             return Err(refused("Only the chat whose plan holds this step runs it"));
         }
         if workspace.chat(lead)?.is_some_and(|chat| chat.plan_pending) {
-            return Err(failure(
-                "plan_pending",
-                "The person has not approved the plan yet. Stop and wait for the approval message.",
-            ));
+            return Err(unapproved());
         }
         if step.outcome.is_some() {
             return Err(refused(

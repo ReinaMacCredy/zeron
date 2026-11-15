@@ -1019,6 +1019,7 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
             disabled_tools: c.disabled_tools,
             access,
             plan: c.plan.unwrap_or(false),
+            mission: None,
         })
     }
 }
@@ -1034,6 +1035,9 @@ impl ChatConfig {
             }
             if keep_plan {
                 config.plan = existing.plan;
+            }
+            if !config.plan {
+                config.mission = existing.mission;
             }
             config.instructions = existing.instructions;
             config.disabled_tools = existing.disabled_tools;
@@ -1327,6 +1331,7 @@ mod tests {
             disabled_tools: vec!["mcp__zeron__computer".into()],
             access: zeron_proto::AccessMode::Supervised,
             plan: false,
+            mission: None,
         };
         let mut edit = ChatConfig::from(&existing);
         edit.reasoning = Some("high".into());
@@ -1383,6 +1388,7 @@ mod tests {
             disabled_tools: Vec::new(),
             access: Default::default(),
             plan: false,
+            mission: None,
         };
         let edit = ChatConfig::from(&existing);
         assert_eq!(edit.harness, "acp");

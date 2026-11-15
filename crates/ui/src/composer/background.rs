@@ -2379,6 +2379,7 @@ mod tests {
                 disabled_tools: Vec::new(),
                 access: Default::default(),
                 plan: false,
+                mission: None,
             }),
             last_message_preview: None,
             last_message_at: None,

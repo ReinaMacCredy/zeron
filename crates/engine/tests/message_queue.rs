@@ -1941,6 +1941,7 @@ async fn queued_turn_uses_current_config_at_turn_end_and_send_now() {
             disabled_tools: Vec::new(),
             access: zeron_proto::AccessMode::FullAccess,
             plan: false,
+            mission: None,
         };
         core.workspace.set_chat_config(CHAT, &config).unwrap();
         core.doc_host

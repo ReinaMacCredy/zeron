@@ -27,7 +27,7 @@ fn first_turn(task: &Task, lead: Option<Lead>, reads: Option<&str>) -> String {
     format!(
         "{}\n\n{reads_part}{}",
         task_prompt(task),
-        lead_brief(&task.id, lead, reads.is_some())
+        lead_brief(Some(&task.id), lead, reads.is_some())
     )
 }
 
@@ -89,7 +89,17 @@ impl Lead {
     }
 }
 
-fn lead_brief(task_id: &str, lead: Lead, reads: bool) -> String {
+pub(crate) fn mission_brief(mission: zeron_proto::ChatMission) -> String {
+    let lead = Lead {
+        approve_plan: mission.approve,
+        same_agents: mission.same_agents,
+        plan_doc: false,
+        attach: false,
+    };
+    lead_brief(None, lead, false)
+}
+
+fn lead_brief(task_id: Option<&str>, lead: Lead, reads: bool) -> String {
     let mut lines = vec![if lead.plan_doc {
         "Write the plan with the plan tool: action \"write\", overview, steps [{title, notes, role}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done. Keep each step small enough for one agent."
     } else {
@@ -118,9 +128,11 @@ fn lead_brief(task_id: &str, lead: Lead, reads: bool) -> String {
     lines.push(
         "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the plan tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with delegate_task and the same stepId.",
     );
-    lines.push(
-        "When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true.",
-    );
+    lines.push(if task_id.is_some() {
+        "When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true."
+    } else {
+        "When every step is done, check the whole result and tell the person what was built."
+    });
     if reads {
         lines.push(
             "When a step needs one of the chats you read, name it with its threadId in that step's task.",
@@ -136,10 +148,17 @@ fn lead_brief(task_id: &str, lead: Lead, reads: bool) -> String {
     } else {
         "Break it into steps and run each step on its own thread."
     };
-    format!(
-        "You lead this task (task id {task_id}). {intro}\n\n{}",
-        steps.join("\n")
-    )
+    match task_id {
+        Some(task_id) => format!(
+            "You lead this task (task id {task_id}). {intro}\n\n{}",
+            steps.join("\n")
+        ),
+        None => format!(
+            "{}\n\n{}",
+            zeron_proto::MISSION_BRIEF_OPENING,
+            steps.join("\n")
+        ),
+    }
 }
 
 struct Starting<'a> {

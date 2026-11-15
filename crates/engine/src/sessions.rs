@@ -940,6 +940,7 @@ struct Inner {
     /// harness may still be compacting behind the timeout.
     compaction_timed_out: Mutex<std::collections::HashSet<String>>,
     agent_compacts: Mutex<HashMap<String, AgentCompact>>,
+    mission_turns: Mutex<HashMap<String, String>>,
     /// Skips one reminder so a summary still over the floor cannot re-compact on its own continuation.
     agent_compacted: Mutex<std::collections::HashSet<String>>,
     compact_owed: Mutex<HashMap<String, String>>,
@@ -1277,6 +1278,7 @@ impl SessionsEngine {
     ) -> Self {
         let (sessions_tx, _) = watch::channel(Vec::new());
         let agent_compacts = journal.agent_compacts();
+        let mission_turns = journal.mission_turns();
         Self {
             inner: Arc::new(Inner {
                 voice: crate::voice::VoiceManager::default(),
@@ -1307,6 +1309,7 @@ impl SessionsEngine {
                 compacting: Mutex::new(std::collections::HashSet::new()),
                 compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
                 agent_compacts: Mutex::new(agent_compacts),
+                mission_turns: Mutex::new(mission_turns),
                 agent_compacted: Mutex::new(std::collections::HashSet::new()),
                 compact_owed: Mutex::new(HashMap::new()),
                 work_tree_owed: Mutex::new(HashMap::new()),
@@ -1622,6 +1625,30 @@ impl SessionsEngine {
         lock(&self.inner.statuses)
             .get(chat_id)
             .is_some_and(is_active)
+    }
+
+    pub(crate) fn mission(&self, chat_id: &str) -> Option<zeron_proto::ChatMission> {
+        self.inner.mission(chat_id)
+    }
+
+    pub(crate) fn set_mission_turn(&self, chat_id: &str, message_id: Option<&str>) {
+        let mut turns = lock(&self.inner.mission_turns);
+        let changed = match message_id {
+            Some(id) => turns.insert(chat_id.to_string(), id.to_string()).as_deref() != Some(id),
+            None => turns.remove(chat_id).is_some(),
+        };
+        if changed {
+            self.inner.journal.save_mission_turns(&turns);
+        }
+    }
+
+    pub(crate) fn take_mission_turn(&self, chat_id: &str) -> bool {
+        let mut turns = lock(&self.inner.mission_turns);
+        let taken = turns.remove(chat_id).is_some();
+        if taken {
+            self.inner.journal.save_mission_turns(&turns);
+        }
+        taken
     }
 
     /// Whether the chat's live runtime still runs background work (subagents,
@@ -2102,6 +2129,14 @@ impl SessionsEngine {
             .map_err(EngineError::Other)?;
         self.inner
             .apply_native_policy(chat_id, harness_id, &mut request.disabled_tools);
+        if self
+            .inner
+            .workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+            .is_some_and(|chat| chat.mission().is_some())
+        {
+            request.plan = false;
+        }
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
@@ -5081,7 +5116,9 @@ impl Inner {
             agent_compacted: zeron_proto::invocation::leading_command(typed).is_none()
                 && lock(&self.agent_compacted).remove(chat_id),
         };
-        let Some(nudge) = self.context_nudge(chat_id, harness_id, typed, &owed) else {
+        let mission = self.mission_brief(chat_id, user_entry_id);
+        let Some(nudge) = self.context_nudge(chat_id, harness_id, typed, &owed, mission.as_deref())
+        else {
             return (wrapped, owed);
         };
         let mut wrapped = wrapped.unwrap_or_else(|| HarnessPrompt {
@@ -5208,12 +5245,27 @@ impl Inner {
         }
     }
 
+    fn mission_brief(&self, chat_id: &str, user_entry_id: &str) -> Option<String> {
+        if lock(&self.mission_turns).get(chat_id).map(String::as_str) != Some(user_entry_id) {
+            return None;
+        }
+        self.mission(chat_id).map(crate::rpc::mission_brief)
+    }
+
+    fn mission(&self, chat_id: &str) -> Option<zeron_proto::ChatMission> {
+        let chat = self.workspace()?.chat(chat_id).ok().flatten()?;
+        let off = |tool| self.tool_disabled(chat.config.as_ref(), tool);
+        chat.mission()
+            .filter(|_| !off("plan") && !off("delegate_task"))
+    }
+
     fn context_nudge(
         &self,
         chat_id: &str,
         harness_id: HarnessId,
         typed: &str,
         owed: &Owed,
+        mission: Option<&str>,
     ) -> Option<String> {
         if zeron_proto::invocation::leading_command(typed).is_some() {
             return None;
@@ -5235,6 +5287,7 @@ impl Inner {
         let lines: Vec<&str> = [
             owed.note.as_deref(),
             owed.work_tree.as_deref(),
+            mission,
             findings.as_deref(),
             reminder.as_deref(),
         ]

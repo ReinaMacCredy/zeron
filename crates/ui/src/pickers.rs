@@ -275,6 +275,7 @@ impl ResolvedRunConfig {
             disabled_tools: self.disabled_tools.clone(),
             access: self.access,
             plan: self.plan,
+            mission: None,
         }
     }
 }
@@ -2593,7 +2594,12 @@ impl Pickers {
     pub(crate) fn toggle_plan(&mut self, cx: &mut Context<Self>) {
         let plan = !self.effective_plan(cx);
         if self.chat_id(cx).is_some() {
-            self.update_chat_config(cx, None, move |config| config.plan = plan);
+            self.update_chat_config(cx, None, move |config| {
+                config.plan = plan;
+                if plan {
+                    config.mission = None;
+                }
+            });
         } else {
             self.config.plan = plan;
         }
@@ -4158,6 +4164,7 @@ impl Pickers {
             config.instructions = existing.instructions.clone();
             config.profile_id = existing.profile_id.clone();
             config.disabled_tools = existing.disabled_tools.clone();
+            config.mission = existing.mission;
             if existing.harness == config.harness {
                 config.instance_id = existing.instance_id.clone();
             }
@@ -13375,6 +13382,7 @@ mod tests {
             disabled_tools: Vec::new(),
             access: zeron_proto::AccessMode::FullAccess,
             plan: false,
+            mission: None,
         });
         assert_eq!(
             chat.harness_marks(),
@@ -14264,6 +14272,7 @@ mod tests {
                         disabled_tools: Vec::new(),
                         access: Default::default(),
                         plan: false,
+                        mission: None,
                     }),
                     last_message_preview: None,
                     last_message_at: None,
@@ -14431,6 +14440,7 @@ mod tests {
                         disabled_tools: Vec::new(),
                         access: Default::default(),
                         plan: false,
+                        mission: None,
                     }),
                     last_message_preview: None,
                     last_message_at: None,

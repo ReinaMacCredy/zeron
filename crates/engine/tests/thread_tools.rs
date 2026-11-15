@@ -408,6 +408,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
         profile_id: None,
         instance_id: None,
         disabled_tools: Vec::new(),
+        mission: None,
     };
     rig.core
         .workspace
@@ -563,6 +564,7 @@ async fn create_thread_never_copies_the_creators_profile_and_applies_the_one_ask
         profile_id: Some("orchestrator".into()),
         instance_id: None,
         disabled_tools: vec!["mcp__xcode".into()],
+        mission: None,
     };
     rig.core
         .workspace
@@ -1457,6 +1459,7 @@ async fn an_exhausted_route_follows_the_out_of_quota_policy() {
         profile_id: None,
         instance_id: None,
         disabled_tools: Vec::new(),
+        mission: None,
     };
     rig.core.workspace.set_chat_config("lead", &config).unwrap();
     let set = |policy| {
@@ -1578,6 +1581,7 @@ fn codex_rig_that_limits() -> Rig {
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
+                mission: None,
             },
         )
         .unwrap();
@@ -1974,6 +1978,7 @@ async fn a_delegated_child_names_its_own_profile_never_the_owners() {
                 profile_id: Some("planner".into()),
                 instance_id: None,
                 disabled_tools: Vec::new(),
+                mission: None,
             },
         )
         .unwrap();
@@ -3727,6 +3732,7 @@ async fn a_run_carries_the_host_prompt_then_the_chat_instructions() {
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
+                mission: None,
             },
         )
         .unwrap();
@@ -5341,4 +5347,154 @@ async fn step_handbacks_fold_into_one_lead_message() {
         "the handback reads as a message from a step thread"
     );
     core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_mission_chat_waits_for_approval_only_on_a_plan_from_the_persons_message() {
+    let rig = rig(Duration::from_millis(20));
+    let rpc = rig.core.rpc_service();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { zeron_rpc::RpcService::handle(&*rpc, method, params).await }
+    };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
+    let mission = |approve| zeron_proto::ChatConfig {
+        harness: HarnessId::Mock,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        access: zeron_proto::AccessMode::FullAccess,
+        plan: true,
+        instructions: String::new(),
+        profile_id: None,
+        instance_id: None,
+        disabled_tools: Vec::new(),
+        mission: Some(zeron_proto::ChatMission {
+            same_agents: false,
+            approve,
+        }),
+    };
+    let stored: zeron_proto::ChatConfig =
+        serde_json::from_value(serde_json::to_value(mission(true)).unwrap()).unwrap();
+    assert!(!stored.plan, "Mission wins over the harness plan mode");
+    rig.core.workspace.set_chat_config("lead", &stored).unwrap();
+    let lead = |rig: &Rig| rig.core.workspace.chat("lead").unwrap().unwrap();
+    let plan = |title: &str| {
+        serde_json::json!({
+            "op": "planSteps", "chatId": "lead", "fromChatId": "lead",
+            "steps": [{ "title": title }],
+        })
+    };
+    let turn_over =
+        |rig: &Rig, needle: &str| !prompts_with(rig, needle).is_empty() && idle(&rig.core, "lead");
+
+    queue_run(&rig.core, "lead", "c1", "m1", "build the shop");
+    wait_for(
+        || !prompts_with(&rig, zeron_proto::MISSION_BRIEF_OPENING).is_empty(),
+        "the mission brief",
+    )
+    .await;
+    let brief = prompts_with(&rig, zeron_proto::MISSION_BRIEF_OPENING).remove(0);
+    assert!(brief.contains("build the shop"), "{brief}");
+    assert!(brief.contains("Then stop."), "{brief}");
+    assert!(
+        !lead(&rig).plan_pending,
+        "nothing waits before a step exists"
+    );
+    mutate(plan("Build the API")).await.unwrap();
+    assert!(lead(&rig).plan_pending, "the plan waits for the person");
+    let Err(err) = call(
+        zeron_rpc::methods::DELEGATE_TASK,
+        serde_json::json!({ "ownerChatId": "lead", "task": "anything" }),
+    )
+    .await
+    else {
+        panic!("a bare delegate_task waits for the approval too");
+    };
+    assert!(err.to_string().contains("plan_pending"), "{err}");
+
+    wait_for(
+        || turn_over(&rig, "build the shop"),
+        "the mission turn to end",
+    )
+    .await;
+    mutate(serde_json::json!({ "op": "approvePlan", "chatId": "lead" }))
+        .await
+        .unwrap();
+    assert!(!lead(&rig).plan_pending);
+    wait_for(
+        || !prompts_with(&rig, zeron_proto::PLAN_APPROVED_PROMPT).is_empty(),
+        "the approval message",
+    )
+    .await;
+    mutate(plan("Write the docs")).await.unwrap();
+    assert!(
+        !lead(&rig).plan_pending,
+        "a step added after the approval does not ask again"
+    );
+    wait_for(
+        || turn_over(&rig, zeron_proto::PLAN_APPROVED_PROMPT),
+        "the approval turn to end",
+    )
+    .await;
+
+    queue_run(&rig.core, "lead", "c2", "m2", "and a cart");
+    wait_for(
+        || turn_over(&rig, "and a cart"),
+        "the second mission turn to end",
+    )
+    .await;
+    rig.core
+        .workspace
+        .create_chat("peer", Some("space-tt"), None, None, None)
+        .unwrap();
+    rig.core
+        .doc_host
+        .queue_thread_message("lead", Some("peer"), "the cart step is done")
+        .await
+        .unwrap();
+    wait_for(
+        || turn_over(&rig, "the cart step is done"),
+        "the woken turn to end",
+    )
+    .await;
+    mutate(plan("Add the cart")).await.unwrap();
+    assert!(
+        !lead(&rig).plan_pending,
+        "a plan written in a turn another chat opened does not ask"
+    );
+    let briefed = prompts_with(&rig, zeron_proto::MISSION_BRIEF_OPENING);
+    assert!(
+        briefed
+            .iter()
+            .all(|prompt| !prompt.contains(zeron_proto::PLAN_APPROVED_PROMPT)
+                && !prompt.contains("the cart step is done")),
+        "{briefed:?}"
+    );
+    assert_eq!(
+        briefed.len(),
+        2,
+        "only the person's messages carry the brief"
+    );
+
+    rig.core
+        .workspace
+        .set_chat_config("lead", &mission(false))
+        .unwrap();
+    queue_run(&rig.core, "lead", "c3", "m3", "and a checkout");
+    wait_for(
+        || turn_over(&rig, "and a checkout"),
+        "the unapproved mission turn to end",
+    )
+    .await;
+    let unapproved: Vec<String> = prompts_with(&rig, zeron_proto::MISSION_BRIEF_OPENING)
+        .into_iter()
+        .filter(|prompt| prompt.contains("and a checkout"))
+        .collect();
+    assert_eq!(unapproved.len(), 1);
+    assert!(!unapproved[0].contains("Then stop."), "{}", unapproved[0]);
+    mutate(plan("Build the checkout")).await.unwrap();
+    assert!(!lead(&rig).plan_pending, "with approval off nothing waits");
+    rig.core.shutdown().await;
 }

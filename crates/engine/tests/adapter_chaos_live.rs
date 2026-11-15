@@ -208,6 +208,7 @@ impl Suite {
                     disabled_tools: Vec::new(),
                     access: zeron_proto::AccessMode::FullAccess,
                     plan: false,
+                    mission: None,
                 },
             )
             .unwrap();
@@ -1311,6 +1312,7 @@ async fn restart_durability() {
                 disabled_tools: Vec::new(),
                 access: zeron_proto::AccessMode::FullAccess,
                 plan: false,
+                mission: None,
             },
         )
         .unwrap();

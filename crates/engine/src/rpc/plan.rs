@@ -362,6 +362,10 @@ impl EngineRpc {
         );
         let _plans = self.plan_writes();
         let mut plan = self.chat_or_refuse(chat_id)?.plan.unwrap_or_default();
+        let mission = chat.mission();
+        if let Some(mission) = mission {
+            plan.same_agents = mission.same_agents;
+        }
         if let Some(overview) = overview {
             plan.overview = overview;
         }
@@ -388,6 +392,15 @@ impl EngineRpc {
         self.workspace
             .write_plan(chat_id, &plan, &steps)
             .map_err(written)?;
+        if !steps.is_empty()
+            && let Some(mission) = mission
+            && self.sessions.take_mission_turn(chat_id)
+            && mission.approve
+        {
+            self.workspace
+                .set_plan_pending(chat_id, true)
+                .map_err(failed)?;
+        }
         Ok(moved)
     }
 
@@ -436,7 +449,7 @@ impl EngineRpc {
             .set_plan_pending(chat_id, false)
             .map_err(failed)?;
         let sent = self
-            .tell_lead(chat_id, "The plan is approved. Run it.", Vec::new())
+            .tell_lead(chat_id, zeron_proto::PLAN_APPROVED_PROMPT, Vec::new())
             .await;
         if sent.is_err() {
             self.workspace.set_plan_pending(chat_id, true).ok();

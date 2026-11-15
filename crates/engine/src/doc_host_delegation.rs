@@ -708,6 +708,7 @@ impl DocHost {
             disabled_tools: Vec::new(),
             access: AccessMode::Supervised,
             plan: false,
+            mission: None,
         }
     }
 

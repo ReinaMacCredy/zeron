@@ -1397,6 +1397,7 @@ fn a_new_chat_draft_takes_and_drops_a_profile() {
         disabled_tools: Vec::new(),
         access: Default::default(),
         plan: false,
+        mission: None,
     };
     let rows = rt
         .block_on(client.draft_profile_rows(&device, draft.clone()))

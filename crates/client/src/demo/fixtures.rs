@@ -988,6 +988,7 @@ pub(crate) fn seed(
                     disabled_tools: Vec::new(),
                     access: Default::default(),
                     plan: false,
+                    mission: None,
                 },
             )),
             last_message_preview: Some(demo.preview.into()),

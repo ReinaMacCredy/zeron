@@ -113,6 +113,7 @@ async fn steer_now_interrupts_a_streaming_answer() {
                 disabled_tools: Vec::new(),
                 access: Default::default(),
                 plan: false,
+                mission: None,
             },
         )
         .unwrap();

@@ -18512,6 +18512,7 @@ mod tests {
                             disabled_tools: Vec::new(),
                             access: zeron_proto::AccessMode::FullAccess,
                             plan: false,
+                            mission: None,
                         }),
                         last_message_preview: None,
                         last_message_at: None,
@@ -18673,6 +18674,7 @@ mod tests {
                                 disabled_tools: Vec::new(),
                                 access: zeron_proto::AccessMode::FullAccess,
                                 plan: false,
+                                mission: None,
                             });
                             chat.last_message_at =
                                 Some(chrono::Utc::now() - chrono::Duration::minutes(minutes));
@@ -19054,6 +19056,7 @@ mod tests {
                             disabled_tools: Vec::new(),
                             access: zeron_proto::AccessMode::FullAccess,
                             plan: false,
+                            mission: None,
                         })
                     };
                     let mut src = chat_row("src", None);

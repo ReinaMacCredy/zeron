@@ -299,6 +299,13 @@ pub(crate) fn load_registry(store: &DocsStore, device_id: &str) -> Result<Option
 /// "This peer is alive" callback (device id) — see `WorkspaceHost::set_peer_alive_hook`.
 pub type PeerAliveHook = Arc<dyn Fn(&str) + Send + Sync>;
 
+fn without_mission(config: Option<ChatConfig>) -> Option<ChatConfig> {
+    config.map(|config| ChatConfig {
+        mission: None,
+        ..config
+    })
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -1320,6 +1327,11 @@ impl WorkspaceHost {
             }
             None => cwd.unwrap_or_default(),
         };
+        let config = if created_by_chat_id.is_some() || delegation.is_some() {
+            without_mission(config)
+        } else {
+            config
+        };
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
                 id: chat_id.to_string(),
@@ -1396,7 +1408,7 @@ impl WorkspaceHost {
             branch: source.branch.clone(),
             checkout_id: source.checkout_id.clone(),
             source_context: None,
-            config: source.config.clone(),
+            config: without_mission(source.config.clone()),
             last_message_preview: None,
             last_message_at: None,
             created_at: Utc::now(),
@@ -1460,7 +1472,7 @@ impl WorkspaceHost {
             branch: source.branch.clone(),
             checkout_id: source.checkout_id.clone(),
             source_context: None,
-            config: source.config.clone(),
+            config: without_mission(source.config.clone()),
             last_message_preview: None,
             last_message_at: None,
             created_at: Utc::now(),

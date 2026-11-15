@@ -68,6 +68,8 @@ mod device_stats;
 mod remote_plugins;
 mod voice_chat;
 mod voice_remote;
+
+pub(crate) use tasks::mission_brief;
 use async_trait::async_trait;
 use base64::Engine as _;
 use futures::StreamExt;
@@ -5388,6 +5390,11 @@ impl RpcService for EngineRpc {
                         "invalid_request: clientRequestId prefix {} is reserved for review_changes",
                         crate::review::REQUEST_PREFIX
                     )));
+                }
+                if p.step_id.is_none() {
+                    self.doc_host
+                        .refuse_unapproved_mission(&p.owner_chat_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
                 }
                 let p = if self.doc_host.delegated_before(&p) {
                     p

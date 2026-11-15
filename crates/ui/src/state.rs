@@ -9182,6 +9182,7 @@ mod tests {
             disabled_tools: Vec::new(),
             access: zeron_proto::AccessMode::FullAccess,
             plan: false,
+            mission: None,
         };
         state.apply_chat_config("a", config.clone());
         assert_eq!(
@@ -9212,6 +9213,7 @@ mod tests {
                 disabled_tools: Vec::new(),
                 access: zeron_proto::AccessMode::FullAccess,
                 plan: false,
+                mission: None,
             },
         );
     }

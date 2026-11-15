@@ -408,6 +408,7 @@ impl CoreClient {
                     disabled_tools: Vec::new(),
                     access: Default::default(),
                     plan: false,
+                    mission: None,
                 };
                 zeron_voice_session::run(
                     control,

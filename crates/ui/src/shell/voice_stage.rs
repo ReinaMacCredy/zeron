@@ -59,6 +59,7 @@ impl Shell {
                 disabled_tools: Vec::new(),
                 access: Default::default(),
                 plan: false,
+                mission: None,
             });
         let saved = settings::current(cx);
         let device = saved.codex_voice_device.unwrap_or(device);

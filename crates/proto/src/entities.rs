@@ -251,6 +251,21 @@ pub struct ChatConfig {
     pub access: AccessMode,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plan: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission: Option<ChatMission>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMission {
+    #[serde(default)]
+    pub same_agents: bool,
+    #[serde(default = "approve_by_default")]
+    pub approve: bool,
+}
+
+fn approve_by_default() -> bool {
+    true
 }
 
 impl Serialize for ChatConfig {
@@ -263,7 +278,11 @@ impl<'de> Deserialize<'de> for ChatConfig {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut value = serde_json::Value::deserialize(deserializer)?;
         crate::agent::legacy_access(&mut value);
-        ChatConfig::deserialize(value).map_err(serde::de::Error::custom)
+        let mut config = ChatConfig::deserialize(value).map_err(serde::de::Error::custom)?;
+        if config.mission.is_some() {
+            config.plan = false;
+        }
+        Ok(config)
     }
 }
 
@@ -722,6 +741,13 @@ impl Chat {
 
     pub fn has_plan(&self) -> bool {
         self.plan.is_some()
+    }
+
+    pub fn mission(&self) -> Option<ChatMission> {
+        self.config
+            .as_ref()
+            .and_then(|config| config.mission)
+            .filter(|_| self.sidechat_source_chat_id.is_none())
     }
 
     /// True when this chat syncs over the chat2 dumb relay.
@@ -3304,6 +3330,33 @@ mod tests {
             serde_json::from_str(r#"{"name":"P","harness":"codex","permissionMode":"ask"}"#)
                 .unwrap();
         assert_eq!(draft.access, Some(AccessMode::Supervised));
+    }
+
+    #[test]
+    fn a_mission_defaults_to_approval_by_role_and_turns_the_plan_mode_off() {
+        let config = |extra: &str| {
+            serde_json::from_str::<ChatConfig>(&format!(
+                r#"{{"harness":"codex","model":null,"reasoning":null,"sandbox":"workspace-write"{extra}}}"#
+            ))
+            .unwrap()
+        };
+        assert_eq!(config(r#","plan":true"#).mission, None);
+        assert!(config(r#","plan":true"#).plan);
+        let on = config(r#","plan":true,"mission":{}"#);
+        assert_eq!(
+            on.mission,
+            Some(ChatMission {
+                same_agents: false,
+                approve: true
+            })
+        );
+        assert!(!on.plan);
+        let written = serde_json::to_value(&on).unwrap();
+        assert_eq!(
+            written["mission"],
+            serde_json::json!({ "sameAgents": false, "approve": true })
+        );
+        assert!(written.get("plan").is_none());
     }
 
     #[test]

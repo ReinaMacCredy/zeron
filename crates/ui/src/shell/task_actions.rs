@@ -176,6 +176,9 @@ impl Shell {
         let engine = self.task_engine(cx)?;
         let before = config.clone();
         config.plan = on;
+        if on {
+            config.mission = None;
+        }
         let chat_id = chat_id.to_owned();
         self.state.update(cx, |state, cx| {
             state.apply_chat_config(&chat_id, config.clone());

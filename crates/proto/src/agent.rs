@@ -380,6 +380,10 @@ pub struct HarnessCompatibility {
 /// entry carrying exactly this text renders as a "Resumed" divider.
 pub const RESUME_PROMPT: &str = "Resume without asking to continue.";
 
+pub const PLAN_APPROVED_PROMPT: &str = "The plan is approved. Run it.";
+
+pub const MISSION_BRIEF_OPENING: &str = "You lead this mission. Break the person's message into steps and run each step on its own thread.";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LimitResume {

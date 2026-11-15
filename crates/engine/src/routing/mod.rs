@@ -250,6 +250,7 @@ pub(crate) mod tests {
             disabled_tools: Vec::new(),
             access: zeron_proto::AccessMode::Supervised,
             plan: false,
+            mission: None,
         }
     }
 

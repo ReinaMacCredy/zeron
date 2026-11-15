@@ -663,6 +663,7 @@ async fn chat_config_selects_the_run_harness() {
                 disabled_tools: Vec::new(),
                 access: zeron_proto::AccessMode::FullAccess,
                 plan: false,
+                mission: None,
             }),
             None,
         )
