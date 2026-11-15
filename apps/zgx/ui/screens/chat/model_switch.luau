@@ -141,6 +141,11 @@ local function ask_for(from_value: string?, value: string): Ask
 	}
 end
 
+function M.note(from_value: string?, value: string): { note: string, note_hint: string }
+	local a = ask_for(from_value, value)
+	return { note = a.note, note_hint = a.note_hint }
+end
+
 -- For a composer: `current()`, the model it has; `history()`, whether its chat
 -- has anything to reread (nil on a new chat: nothing asks); `land(value, ask)`,
 -- a pick answered yes; `back()`, answered no (2 or Escape), the picker again,

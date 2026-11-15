@@ -10,6 +10,7 @@ export type Props = {
 	on_cancel: () -> (),
 	on_send: () -> (),
 	on_done: (phase: Phase) -> (),
+	lead: Node?,
 }
 
 local OPEN_MS, CANCEL_MS, SEND_MS = 220, 160, 200
@@ -246,6 +247,7 @@ return ui.component(function(props: Props): Node
 				px = "$space.2",
 				pt = ui.raw(6, "the mockup's 6 over the buttons"),
 				pb = "$space.2",
+				ui.row { id = "message-edit-lead", grow = 1, min_w = 0, items = "center", props.lead or ui.div {} },
 				Button {
 					tone = "ghost",
 					size = "sm",

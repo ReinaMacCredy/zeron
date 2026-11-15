@@ -247,6 +247,7 @@ export type Branch = {
 	fork: (m: Message) -> (),
 	rewind: (m: Message, fold: { start: (done: () -> ()) -> (), back: () -> () }) -> (),
 	edit: (m: Message, text: string, back: () -> (), sent: () -> ()) -> (),
+	edit_lead: (() -> Node)?,
 }
 export type Handle = {
 	messages: State<{ Message }>,
@@ -2646,6 +2647,7 @@ local function Transcript(props: Props): Node
 									on_cancel = cancel_edit,
 									on_send = send_edit,
 									on_done = edit_done,
+									lead = if (branch :: Branch).edit_lead then ((branch :: Branch).edit_lead :: () -> Node)() else nil,
 								}
 							end else nil,
 						},

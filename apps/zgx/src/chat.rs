@@ -3442,6 +3442,14 @@ impl View {
             self.publish_messages();
             return Err(why);
         }
+        // (After the rewind: its divider then stands under what's kept, not in what was cut.)
+        if ["model", "effort"].iter().any(|key| req.field(key).is_some_and(|v| !text(v).is_empty())) {
+            let pick = with_fields(req.clone(), [("id", Value::from(id.as_str()))]);
+            if let Err(why) = self.configure(pick).await {
+                self.mark_failed(&id, &message_id, None);
+                return Err(why.to_string());
+            }
+        }
         // A send that fails after the rewind shows on its row, with Retry.
         let _ = self.send(with_fields(req, [("message_id", Value::from(message_id.as_str()))])).await;
         Ok(Value::from(message_id.as_str()))

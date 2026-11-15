@@ -3348,6 +3348,9 @@ do
 	end
 	stub.rewind_send = function(req: any): any
 		note(`rewind_send:{req.session}:{req.entry}:{req.text}:{req.message_id ~= nil}`)
+		if req.model or req.effort then
+			note(`rewind_pick:{req.model}:{req.effort}:{req.note ~= nil}`)
+		end
 		local was = TRANSCRIPTS[req.session] or {}
 		local kept = upto(was, req.entry, false)
 		table.insert(kept, { id = req.entry, role = "user", text = req.text, attachments = {}, waiting = "sending" })

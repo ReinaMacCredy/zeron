@@ -5,6 +5,7 @@ local store = require("@app/screens/chat/store")
 local shared = require("@app/screens/chat/shared")
 local route = require("@app/screens/shell/route")
 local sessions = require("@account/sessions")
+local model_switch = require("@app/screens/chat/model_switch")
 
 local M = {}
 
@@ -138,8 +139,37 @@ function M.blocked(m: any, kind: "edit" | "rewind" | "fork"): string?
 end
 
 function M.props(chat: () -> string?): any
+	local edit_model = ui.state("chat_edit_model", nil :: string?)
+	local edit_effort = ui.state("chat_edit_effort", nil :: string?)
+	local edit_from: { model: string?, effort: string? } = {}
 	return {
 		blocked = M.blocked,
+		edit_lead = function(): Node
+			edit_from = shared.resolve_model(store.session:peek() or {}, store.catalog:peek())
+			ui.batch(function()
+				edit_model:set(edit_from.model)
+				edit_effort:set(edit_from.effort)
+			end)
+			return ds.ModelPicker {
+				model = edit_model,
+				effort = edit_effort,
+				harnesses = function(): { any }
+					local c: any = store.catalog:get()
+					return c.tabs or c.harnesses or {}
+				end,
+				models = function(): { any }
+					return store.catalog:get().models or {}
+				end,
+				model_label = function(): string?
+					local now: any = store.session:get()
+					return if now and now.model == edit_model:get() then now.model_label else nil
+				end,
+				looking = function(): boolean
+					return store.catalog:get().complete ~= true
+				end,
+				placement = { side = "bottom", align = "start", offset = 6 },
+			}
+		end,
 		fork = function(m: any)
 			local source = chat()
 			if not source then
@@ -185,7 +215,18 @@ function M.props(chat: () -> string?): any
 					table.insert(kept, { kind = a.kind, path = a.path or a.src, name = a.name, on_host = true })
 				end
 			end
-			store.rewind_send({ session = id, entry = m.id, text = text, message_id = mid, attachments = kept }):after(sent, function(err: any)
+			local req: { [string]: any } = { session = id, entry = m.id, text = text, message_id = mid, attachments = kept }
+			local model, effort = edit_model:peek(), edit_effort:peek()
+			local switched = model ~= nil and model ~= edit_from.model
+			if switched then
+				local said = model_switch.note(edit_from.model, model :: string)
+				req.model, req.note, req.note_hint = model, said.note, said.note_hint
+			end
+			-- (With another model, the level its card showed: the chat's own may be that model's default, never said.)
+			if effort and (switched or effort ~= edit_from.effort) then
+				req.effort = effort
+			end
+			store.rewind_send(req):after(sent, function(err: any)
 				back()
 				ds.toast.show { title = words(err), tone = "danger" }
 			end)
