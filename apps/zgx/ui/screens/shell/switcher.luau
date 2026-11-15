@@ -26,6 +26,8 @@ local SETTLED_MS = 300
 -- (A session's card shuts on the press that goes to another chat; the frame showing still
 -- has it.)
 local CARD_LINGER_MS = 100
+-- (A quick press goes to the chat before with no cards: they come up once Control has been held this long, or at a second press.)
+local HOLD_MS = 200
 
 M.window = ui.persist("shell_switcher_window", "all")
 M.limit = ui.persist("shell_switcher_limit", 0)
@@ -55,6 +57,8 @@ local card_list = ui.computed(function(): { string }
 	return cards:get() or {}
 end)
 local hi = ui.state("shell_switcher_hi", 1)
+local up = ui.state("shell_switcher_up", false)
+local raised = 0
 local held = ui.modifiers
 
 local pictures = Pictures.Book(PICTURES)
@@ -74,22 +78,26 @@ ui.effect(function()
 end)
 local shown_since = ui.now()
 -- (A wrong picture is worse than an older one, or none.)
-local function picture_of(id: string)
+local function picture_of(id: string): boolean
 	local el = column and column.element
 	if not el or el:covered() or swipe.showing() or card_was_up or ui.now() - card_gone_at < CARD_LINGER_MS or ui.now() - shown_since < SETTLED_MS then
-		return
+		return false
 	end
 	pictures.take(id, function(slot: string): string?
 		local ok, src = pcall(el.snapshot, el, THUMB_PX, slot)
 		return if ok then src else nil
 	end)
+	return true
 end
 local leaving: string? = route.session:peek() and (route.session:peek() :: any).id
+local pressed_on: string? = nil
+local pressed_at = -math.huge
 local on_chat = route.current:peek().name == "session"
 ui.effect(function()
 	local s = route.session:get()
 	local id = if s then s.id else nil
-	if leaving and id ~= leaving and on_chat then
+	-- (A quick press took its picture as it was pressed: not again as it lands.)
+	if leaving and id ~= leaving and on_chat and not (leaving == pressed_on and ui.now() - pressed_at < HOLD_MS) then
 		picture_of(leaving)
 	end
 	if id ~= leaving then
@@ -237,19 +245,30 @@ end)
 
 local function raise(list: { string }, start: number, where: string)
 	local s = route.session:peek()
-	if s and where == "session" then
-		picture_of(s.id)
+	if s and where == "session" and picture_of(s.id) then
+		pressed_on, pressed_at = s.id, ui.now()
 	end
+	raised += 1
+	local mine = raised
 	ui.batch(function()
 		hi:set(start)
+		up:set(false)
 		cards:set(list)
+	end)
+	ui.after(HOLD_MS, function()
+		if raised == mine and cards:peek() then
+			up:set(true)
+		end
 	end)
 end
 
 function M.step(by: number): boolean
 	local list = cards:peek()
 	if list then
-		hi:set((hi:peek() - 1 + by) % #list + 1)
+		ui.batch(function()
+			hi:set((hi:peek() - 1 + by) % #list + 1)
+			up:set(true)
+		end)
 		return true
 	end
 	local el = column and column.element
@@ -421,7 +440,7 @@ function M.Overlay(): Node
 	end
 	return ui.modal {
 		open = function(): boolean
-			return cards:get() ~= nil
+			return cards:get() ~= nil and up:get()
 		end,
 		on_close = function()
 			M.close()

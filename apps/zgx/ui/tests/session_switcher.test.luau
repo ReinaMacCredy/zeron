@@ -19,6 +19,18 @@ local function up(app: any): boolean
 	return app:state("shell_switcher_cards") ~= nil
 end
 
+-- The press that brings them up, held until they show (Control held a moment).
+local function raise(app: any, command: string?)
+	app:command(command or "shell.next_session")
+	for _ = 1, 100 do
+		if app:state("shell_switcher_up") then
+			break
+		end
+		app:wait("#never-shown", { timeout_ms = 20 })
+	end
+	app:frames(10)
+end
+
 local function route_has(app: any, id: string): boolean
 	return tostring(app:state("shell_route_path")):find(id, 1, true) ~= nil
 end
@@ -30,8 +42,7 @@ test("Ctrl+Tab held up lands on the chat before, and letting go goes there", fun
 	open(app, "Tidy the tests")
 	app:hold("ctrl")
 	app:frames(3)
-	app:command("shell.next_session")
-	app:frames(10)
+	raise(app)
 	expect(up(app)).to_be(true)
 	expect(app:has("#switcher-card-a3")).to_be(true)
 	expect(app:has("#switcher-card-a2")).to_be(true)
@@ -44,6 +55,24 @@ test("Ctrl+Tab held up lands on the chat before, and letting go goes there", fun
 	expect(app:error()).to_be_nil()
 end)
 
+test("a quick press, let go before the cards come up, goes to the chat before and shows none", function()
+	local app = shell()
+	open(app, "Fix the build")
+	open(app, "Write the docs")
+	app:hold("ctrl")
+	app:frames(3)
+	app:command("shell.next_session")
+	app:frames(3)
+	expect(up(app)).to_be(true)
+	app:release()
+	app:frames(30)
+	expect(route_has(app, "a1")).to_be(true)
+	app:wait("#never-shown", { timeout_ms = 300 })
+	expect(app:state("shell_switcher_up")).to_be(false)
+	expect(app:has("#session-switcher")).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
+
 test("each press moves on in the order used, Shift back, as the keys come to it", function()
 	local app = shell()
 	open(app, "Fix the build")
@@ -51,8 +80,7 @@ test("each press moves on in the order used, Shift back, as the keys come to it"
 	open(app, "Tidy the tests")
 	app:hold("ctrl")
 	app:frames(3)
-	app:command("shell.next_session")
-	app:frames(5)
+	raise(app)
 	expect(app:state("shell_switcher_hi")).to_be(2)
 	app:key("ctrl+tab")
 	app:frames(5)
@@ -76,8 +104,7 @@ test("Escape leaves it where it was, and Control let go after does nothing", fun
 	open(app, "Write the docs")
 	app:hold("ctrl")
 	app:frames(3)
-	app:command("shell.next_session")
-	app:frames(10)
+	raise(app)
 	expect(up(app)).to_be(true)
 	app:key("escape")
 	app:frames(20)
@@ -95,8 +122,7 @@ test("a click on a card goes to it", function()
 	open(app, "Tidy the tests")
 	app:hold("ctrl")
 	app:frames(3)
-	app:command("shell.next_session")
-	app:frames(10)
+	raise(app)
 	app:click("#switcher-card-a1")
 	app:frames(20)
 	expect(up(app)).to_be(false)
@@ -127,8 +153,7 @@ test("the cards' order: most recent first, then the rest as they stand, a cap ke
 	open(app, "Tidy the tests")
 	app:hold("ctrl")
 	app:frames(3)
-	app:command("shell.next_session")
-	app:frames(10)
+	raise(app)
 	-- (The two most recent; and Fix the build's tab, at work, past the cap.)
 	expect(app:has("#switcher-card-a3")).to_be(true)
 	expect(app:has("#switcher-card-a2")).to_be(true)
@@ -169,8 +194,7 @@ test("set to cycle the tabs, held it shows the strip's tabs as cards, one on fro
 	expect(route_has(app, "a1")).to_be(true)
 	app:hold("ctrl")
 	app:frames(3)
-	app:command("shell.previous_session")
-	app:frames(10)
+	raise(app, "shell.previous_session")
 	expect(app:state("shell_switcher_hi")).to_be(3)
 	app:key("Escape")
 	app:frames(20)
@@ -248,16 +272,14 @@ test("a pointer at rest under the cards leaves the highlight; moving it takes it
 	open(app, "Tidy the tests")
 	app:hold("ctrl")
 	app:frames(3)
-	app:command("shell.next_session")
-	app:frames(10)
+	raise(app)
 	app:hover("#switcher-card-a1")
 	app:frames(3)
 	expect(app:state("shell_switcher_hi")).to_be(3)
 	app:key("Escape")
 	app:frames(20)
 	-- The pointer stays where the cards come up again.
-	app:command("shell.next_session")
-	app:frames(20)
+	raise(app)
 	expect(app:state("shell_switcher_hi")).to_be(2)
 	app:hover("#switcher-card-a3")
 	app:frames(3)
@@ -275,8 +297,7 @@ test("the first press lands on the chat before, the one showing a card too thoug
 	app:frames(5)
 	app:hold("ctrl")
 	app:frames(3)
-	app:command("shell.next_session")
-	app:frames(10)
+	raise(app)
 	expect(app:has("#switcher-card-a3")).to_be(true)
 	expect(app:state("shell_switcher_hi")).to_be(2)
 	app:release()
