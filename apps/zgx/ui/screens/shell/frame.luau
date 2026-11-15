@@ -203,6 +203,8 @@ export type LayerProps = {
 	blur: (() -> number)?,
 	size: (() -> { w: number, h: number })?,
 	cutout: (() -> any)?,
+	gone: (() -> number)?,
+	shown: (() -> boolean)?,
 	scrim: boolean?,
 	unfaded: (boolean | () -> boolean)?,
 	id: string?,
@@ -249,10 +251,14 @@ function M.Layer(props: LayerProps): Node
 			return not off and not (kind() == "chat" and appearance.chat_placement:get() == "full")
 		end,
 	}
+	if props.shown then
+		wall.shown = props.shown
+		wall.kept = true
+	end
 	if props.cutout then
 		local cutout = props.cutout
 		wall.mask = function(): any
-			return { fade = layer_height(kind(), window().h), reveal = 0.5, cutout = cutout() }
+			return { fade = layer_height(kind(), window().h), reveal = 0.5, cutout = cutout(), gone = if props.gone then props.gone() else 0 }
 		end
 	end
 	local kids: { any } = {
@@ -274,7 +280,7 @@ function M.Layer(props: LayerProps): Node
 	if props.scrim ~= false then
 		for _, placement in { "hero", "full" } do
 			table.insert(kids, ui.show(function(): boolean
-				return kind() == "chat" and appearance.chat_scrim:get() and appearance.chat_placement:get() == placement
+				return kind() == "chat" and (not props.shown or props.shown()) and appearance.chat_scrim:get() and appearance.chat_placement:get() == placement
 			end, ui.div {
 				class = "art-scrim",
 				absolute = true,
@@ -466,30 +472,49 @@ end
 
 local CUT_PARAMS = { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } }
 
--- (A chat's picture waits for the composer to land from a new chat: either picture changing redraws the whole window, which costs the flying composer frames.)
-local ART_HOLD = 300
-local art_held = ui.state("shell_frame_art_held", false)
-local function card_art(): string?
-	return if art_held:get() then "hero" else M.page_art:get()
-end
+-- (Between a new chat and a session the new chat's picture goes and comes by its own alpha, over the chat's: a fading box redraws the whole window, which costs the flying composer frames. gpui's dissolve.)
+local art_gone = ui.state("shell_frame_art_gone", 0)
+local art_leaving = ui.state("shell_frame_art_leaving", false)
+local art_coming = ui.state("shell_frame_art_coming", false)
 
 -- What the card shows, laid out in the window's own coordinates: it holds still as the card's edges move over it.
 local function card_picture(): Node
-	local was = M.page_art:peek()
-	local turn = 0
+	local was, was_on = M.page_art:peek(), route.chat:peek().name
+	local run: any = nil
 	ui.effect(function()
-		local now = M.page_art:get()
-		local landing = was == "hero" and now ~= "hero" and route.chat:peek().name == "session" and not motion.reduced_now()
-		was = now
-		turn += 1
-		art_held:set(landing)
+		local now, on = M.page_art:get(), route.chat:peek().name
+		local moves = not motion.reduced_now()
+		local landing = moves and was == "hero" and now ~= "hero" and on == "session"
+		local rising = moves and now == "hero" and was ~= "hero" and was_on == "session"
+		was, was_on = now, on
+		if run then
+			run:cancel()
+			run = nil
+		end
+		art_leaving:set(landing)
+		art_coming:set(rising)
 		if landing then
-			local mine = turn
-			ui.after(ART_HOLD, function()
-				if turn == mine then
-					art_held:set(false)
-				end
-			end)
+			run = anime.animate(art_gone, {
+				value = 1,
+				delay = composer_surface.TAKEOFF + 0.06 * 420,
+				duration = 0.82 * 420,
+				ease = "linear",
+				onComplete = function()
+					art_leaving:set(false)
+				end,
+			})
+		elseif rising then
+			run = anime.animate(art_gone, {
+				value = 0,
+				delay = 0.08 * 470,
+				duration = 0.77 * 470,
+				ease = "linear",
+				onComplete = function()
+					art_coming:set(false)
+				end,
+			})
+		else
+			art_gone:set(if now == "hero" then 0 else 1)
 		end
 	end)
 	return ui.div {
@@ -508,19 +533,37 @@ local function card_picture(): Node
 		h = function(): number
 			return art.window:get().h
 		end,
-		-- (Leaving, it fades as the chat's picture comes in over it: gone at once, the card stood bare between them.)
+		-- (Under the new chat's, and kept built on a new chat: there at once as that one thins, never faded in under it.)
+		M.Layer {
+			id = "page-chat-art",
+			-- (A fade under the bar's clip draws nothing, and the bar sees none of it anyway.)
+			unfaded = function(): boolean
+				return art.split:get()
+			end,
+			kind = function(): string?
+				local page = M.page_art:get()
+				return if page == "chat" or (page == "hero" and appearance.chat_shown()) then "chat" else nil
+			end,
+			shown = function(): boolean
+				return M.page_art:get() == "chat" or art_coming:get()
+			end,
+		},
+		-- (Leaving for anything but a session, it fades.)
 		ui.presence(function(): string?
-			return if card_art() == "hero" then "hero" else nil
+			return if M.page_art:get() == "hero" or art_leaving:get() then "hero" else nil
 		end, function(): Node
 			return M.Layer {
 				id = "page-art",
 				kind = function(): string?
 					return "hero"
 				end,
+				gone = function(): number
+					return art_gone:get()
+				end,
+				shown = function(): boolean
+					return M.page_art:get() == "hero" or art_gone:get() < 1
+				end,
 				cutout = function(): any
-					if M.page_art:get() ~= "hero" then
-						return nil
-					end
 					local _ = composer_surface.moved:get()
 					local el = composer_surface.element
 					local w, h = el and el.width, el and el.height
@@ -540,16 +583,6 @@ local function card_picture(): Node
 			pointer_events = "none",
 			exit = motion.transition({ opacity = 0, duration = HERO_OUT, ease = "in(2)" }),
 		}),
-		M.Layer {
-			id = "page-chat-art",
-			-- (A fade under the bar's clip draws nothing, and the bar sees none of it anyway.)
-			unfaded = function(): boolean
-				return art.split:get()
-			end,
-			kind = function(): string?
-				return if card_art() == "chat" then "chat" else nil
-			end,
-		},
 		ui.div {
 			absolute = true,
 			left = 0,

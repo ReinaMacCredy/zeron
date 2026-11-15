@@ -44,6 +44,8 @@ local M = {}
 export type Props = {
 	effect: (State<string> | () -> string)?,
 	shown: (() -> boolean)?,
+	-- (Hidden, what stands in it stays built.)
+	kept: boolean?,
 	-- What stands in it, by a key of the caller's ("" nothing): it's built
 	-- again (crossfading) as the key changes.
 	key: () -> string,
@@ -189,7 +191,7 @@ fn layer(input:LayerInput)->vec4<f32> {
   cut=smoothstep(0.,m.y,d-m.z);
  }
  let a=1.-(1.-min(cut,f))*(1.-m.w*f);
- return vec4(input.color.rgb,input.color.a*a);
+ return vec4(input.color.rgb,input.color.a*a*(1.-input.params[2].y));
 }
 ]])
 
@@ -205,7 +207,7 @@ function M.Wallpaper(props: Props): Node
 	-- away (hidden): it shows again at once, decoded and drawn, not faded
 	-- in anew each time a new chat opens. A plugin's art goes (it may move).
 	local function what(): string
-		if shown() or (props.picture and props.picture()) then
+		if shown() or props.kept or (props.picture and props.picture()) then
 			return props.key()
 		end
 		return ""
@@ -239,7 +241,7 @@ function M.Wallpaper(props: Props): Node
 				anime.utils.set(el, {
 					layerParam0 = c.x, layerParam1 = c.y, layerParam2 = c.w, layerParam3 = c.h,
 					layerParam4 = c.radius, layerParam5 = c.feather, layerParam6 = c.clearance, layerParam7 = m.reveal,
-					layerParam8 = m.fade,
+					layerParam8 = m.fade, layerParam9 = m.gone or 0,
 				})
 			end
 		end)

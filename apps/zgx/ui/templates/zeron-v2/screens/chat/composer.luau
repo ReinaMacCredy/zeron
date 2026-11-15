@@ -2066,8 +2066,7 @@ local function Composer(): Node
 		return anime.createSpring { stiffness = w * w, damping = 2 * w }
 	end
 	local GLIDE = { duration = 260, ease = "out(3)" }
-	-- (A send's page takes two long frames to come in; started under them, the spring's second step is three frames' worth.)
-	local TAKEOFF = 34
+	local TAKEOFF = composer_surface.TAKEOFF
 	-- How far it shows from where it's laid out, on its way there.
 	-- (Kept state, as this file's others: the composer is made in a plain
 	-- function, not a component.)
