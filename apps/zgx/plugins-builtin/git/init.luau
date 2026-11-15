@@ -97,14 +97,9 @@ zeron.place {
 
 -- The panel home's branch row (core's `slot:zeron.panel.branch`): what the
 -- branch adds over its base, opening Changes at the Branch scope.
-local branch_counts = require("./branch_row")(zeron, Repo)
 zeron.place {
 	at = "slot:zeron.panel.branch",
-	after = branch_counts.row,
-}
-zeron.place {
-	at = "#titlebar-actions",
-	before = branch_counts.toggle,
+	after = require("./branch_row")(zeron, Repo),
 }
 
 -- Last turn: each chat that goes to work has its device note where its

@@ -11,14 +11,19 @@
 local PanelHome = require("@ds/panel_home")
 local Tooltip = require("@ds/tooltip")
 local control = require("@ds/control")
-local Reveal = require("@ds/reveal")
 
 return function(zeron: any, Repo: any)
 	-- Each session's totals as last heard (kept while the window is: the
 	-- home shows them at once when it's back).
 	local heard = ui.state("git.branch_totals", {} :: { [string]: any })
 
-	local function counts(branch: () -> any, panel_of: () -> any, id: string, text_size: any, corner: any, gap: any): (() -> boolean, Node)
+	return function(): Node
+		local branch = zeron.live("panel_branch")
+		local first = branch()
+		if type(first and first.session) ~= "string" then
+			return ui.div {}
+		end
+		local panel = zeron.context("panel")
 		local function slot_of(b: any): string?
 			return if b and type(b.session) == "string" then b.session else nil
 		end
@@ -82,27 +87,19 @@ return function(zeron: any, Repo: any)
 			end
 			return t
 		end
-		local held = ui.use_state(totals())
-		ui.effect(function()
-			local t = totals()
-			if t then
-				held:set(t)
-			end
-		end)
 		local function open()
-			local b, panel = branch(), panel_of()
+			local b = branch()
 			if panel and b then
 				Repo.open_tab(panel, b.session, "changes", "branch")
 			end
 		end
-		return function(): boolean
+		return ui.show(function(): boolean
 			return totals() ~= nil
-		end,
-		ui.row {
-			id = id,
+		end, ui.row {
+			id = "git-branch-totals",
 			role = "button",
 			label = function(): string
-				local t = held:get() or { adds = 0, dels = 0 }
+				local t = totals() or { adds = 0, dels = 0 }
 				return zeron.s("home.diff_label", { adds = t.adds, dels = t.dels })
 			end,
 			tooltip = Tooltip { zeron.t("home.branch_changes") },
@@ -111,9 +108,10 @@ return function(zeron: any, Repo: any)
 			shrink = 0,
 			h = 24,
 			px = "$space.1",
-			gap = gap,
+			gap = "$space.1",
 			items = "center",
-			rounded = corner,
+			-- (6 in from the row's edge, top and bottom.)
+			rounded = PanelHome.inner(6),
 			hover = { bg = "$hover" },
 			focus = control.ring,
 			on_click = open,
@@ -126,56 +124,26 @@ return function(zeron: any, Repo: any)
 			end,
 			ui.text {
 				function(): string
-					local t = held:get()
+					local t = totals()
 					return if t then `+{t.adds}` else ""
 				end,
 				literal = true,
 				font = "$font.mono",
 				tabular = true,
-				text_size = text_size,
+				text_size = "$font.size.xs",
 				color = "$zeron.diff.added",
 			},
 			ui.text {
 				function(): string
-					local t = held:get()
+					local t = totals()
 					return if t then `−{t.dels}` else ""
 				end,
 				literal = true,
 				font = "$font.mono",
 				tabular = true,
-				text_size = text_size,
+				text_size = "$font.size.xs",
 				color = "$zeron.diff.removed",
 			},
-		}
+		})
 	end
-
-	return {
-		row = function(): Node
-			local branch = zeron.live("panel_branch")
-			local first = branch()
-			if type(first and first.session) ~= "string" then
-				return ui.div {}
-			end
-			local panel = zeron.context("panel")
-			return ui.show(counts(branch, function(): any
-				return panel
-			end, "git-branch-totals", "$font.size.xs", PanelHome.inner(6), "$space.1"))
-		end,
-		toggle = function(): Node
-			-- (The title bar provides no session: the window's page's, read as it changes.)
-			local page = ui.shared("zeron.page_session", nil :: any)
-			local function branch(): any
-				local session = page:get()
-				if type(session) ~= "string" then
-					return nil
-				end
-				local record = zeron.context_of("session", session)
-				return { session = session, device = record.device, cwd = record.cwd, branch = record.branch }
-			end
-			local shown, node = counts(branch, function(): any
-				return zeron.context("panel")
-			end, "git-toggle-totals", "$font.size.xs", "$radius.md", ui.raw(6, "Zeron's gap in the toggle"))
-			return Reveal { shown = shown, node }
-		end,
-	}
 end
