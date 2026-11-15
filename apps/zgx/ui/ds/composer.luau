@@ -2012,7 +2012,6 @@ return ui.component(function(props: Props): Node
 		if mission
 			then ui.row {
 				id = "composer-send-label",
-				h_full = true,
 				items = "center",
 				shrink = 0,
 				overflow = "hidden",
