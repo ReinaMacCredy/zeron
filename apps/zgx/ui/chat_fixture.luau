@@ -92,6 +92,12 @@ local function note(what: string)
 	table.insert(said, what)
 	calls:set(table.concat(said, ","))
 end
+local function mission_word(m: any): string
+	if type(m) ~= "table" then
+		return "off"
+	end
+	return `{if m.same_agents then "same" else "by_role"}/{if m.approve == false then "runs" else "asks"}`
+end
 -- (The composer's accounts: `agents.on_device` set by a test, what's asked of
 -- the host noted.)
 do
@@ -461,6 +467,9 @@ stub.send = function(req: any)
 		end)
 	end
 	note(`send:{req.session or "new"}:{req.text}{if req.steer_now then "|steer_now" else ""}{if req.queued then "|queued" else ""}`)
+	if req.mission ~= nil then
+		note(`send_mission:{mission_word(req.mission)}`)
+	end
 	if req.profile then
 		note(`send_profile:{req.profile}`)
 	end
@@ -712,10 +721,31 @@ do
 		note(`shell_watch:{#shells}`)
 	end
 end
+ui.command {
+	id = "offer_missions",
+	title = "Missions offered: the agent and the open chat",
+	run = function()
+		local c = store.catalog:peek()
+		local harnesses: { any } = {}
+		for _, h in c.harnesses do
+			local row = table.clone(h)
+			row.offers_mission = true
+			table.insert(harnesses, row)
+		end
+		store.catalog:set { state = "ready", harnesses = harnesses, models = c.models }
+		for id in META do
+			META[id].mission_offered = true
+		end
+		local s = store.session:peek()
+		if s and s.id then
+			publish(s.id, { mission_offered = true })
+		end
+	end,
+}
 stub.configure = function(id: string, patch: any)
 	local keys = {}
 	for k, v in patch do
-		table.insert(keys, `{k}={tostring(v)}`)
+		table.insert(keys, `{k}={if k == "mission" then mission_word(v) else tostring(v)}`)
 	end
 	table.sort(keys)
 	note(`configure:{id}:{table.concat(keys, ";")}`)

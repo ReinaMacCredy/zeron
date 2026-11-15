@@ -41,6 +41,7 @@ local Tile = require("@self/tile")
 local Dropdown = require("@self/dropdown")
 local ModelPicker = require("@self/model_picker")
 local Switch = require("@self/switch")
+local Segmented = require("@self/segmented")
 local Menu = require("@self/menu")
 local IconButton = require("@self/icon_button").IconButton
 local status = require("@self/status")
@@ -128,6 +129,7 @@ export type Props = {
 	-- plan mode (explore and propose before changing anything).
 	access: State<string?>?,
 	plan: State<boolean>?,
+	mission: { value: State<any>, shown: () -> boolean, planned: () -> boolean }?,
 	-- The model (a ModelPicker: its agents' tabs, its models, its reasoning,
 	-- Fast mode and its other options' picks).
 	model: State<string?>,
@@ -411,6 +413,9 @@ local function head_gap(): number
 	local v = ui.theme.get("zeron.composer.chip.below")
 	return if type(v) == "number" then v else 12
 end
+local MISSION = { same_agents = false, approve = true }
+local OPTIONS, OPTION_H, SEND_LABEL_PAD = 32, 24, 7
+local MISSION_EASE = "cubicBezier(.2,.8,.2,1)"
 -- A pill narrower than this is short of room: the trays' rows fold their
 -- thumbnails and actions.
 local NARROW = 480
@@ -462,10 +467,10 @@ end
 -- Plan mode's row at the access panel's foot: an item's shape, its icon on
 -- its title's line, its switch (centred) where the check would be. The row
 -- (or the switch) flips it.
-local function plan_row(plan: State<boolean>): Node
+local function plan_row(plan: State<boolean>, choose: (on: boolean) -> ()): Node
 	local row: ContainerProps = {
 		on_click = function()
-			plan:toggle()
+			choose(not plan:peek())
 		end,
 		Menu.glyph("map-arrow-right"),
 		ui.column {
@@ -487,7 +492,7 @@ local function plan_row(plan: State<boolean>): Node
 				wrap = true,
 			},
 		},
-		ui.div { self = "center", Switch { value = plan, label = locale.t("ds.composer.plan.mode") :: any } },
+		ui.div { self = "center", Switch { value = plan, label = locale.t("ds.composer.plan.mode") :: any, on_change = choose } },
 	}
 	Menu.look(row, true)
 	return ui.row(row)
@@ -1231,6 +1236,8 @@ return ui.component(function(props: Props): Node
 	local wrapped_h = kept("wrapped_h", 0)
 	local head_h_seen = kept("head_h", 0)
 	local trailing_seen = kept("trailing_w", 0)
+	local lead_seen = kept("lead_w", 0)
+	local switch_seen = kept("mission_w", 0)
 	local right_w = kept("right_w", 0)
 	local model_w = kept("model_w", 0)
 	local access_w = kept("access_w", 0)
@@ -1360,6 +1367,37 @@ return ui.component(function(props: Props): Node
 	local function resuming(): boolean
 		return props.resume ~= nil and props.resume() and not (running and running:get()) and not has_text() and not has_cargo() and not asking() and not dictating()
 	end
+	local mission = props.mission
+	local function mission_now(): any
+		local v = if mission then mission.value:get() else nil
+		return if type(v) == "table" then v else nil
+	end
+	local function mission_on(): boolean
+		return mission ~= nil and mission.shown() and mission_now() ~= nil
+	end
+	local mission_lit = ui.computed(function(): number
+		return if mission_on() then 1 else 0
+	end)
+	local function options_room(): number
+		return if mission_on() and not asking() then OPTIONS else 0
+	end
+	local function choose(mode: "plan" | "mission", on: boolean)
+		ui.batch(function()
+			if mode == "plan" and props.plan and props.plan:peek() ~= on then
+				props.plan:set(on)
+			elseif mode == "mission" and mission and (type(mission.value:peek()) == "table") ~= on then
+				mission.value:set(if on then table.clone(MISSION) else false)
+			end
+			if on and mode == "plan" and mission and mission.value:peek() ~= false then
+				mission.value:set(false)
+			elseif on and mode == "mission" and props.plan and props.plan:peek() then
+				props.plan:set(false)
+			end
+		end)
+	end
+	local function fade(ms: number, ease: string): TweenOptions
+		return { duration = if motion.reduced_now() then motion.FADE else ms, ease = ease }
+	end
 
 	-- Mentions over the pill, its full width (Zeron's).
 	local m = mentions.use {
@@ -1434,6 +1472,17 @@ return ui.component(function(props: Props): Node
 		local w = trailing_seen:get()
 		return if w > 0 then w else CONTROL * 2 + 8
 	end
+	local function lead_w(): number
+		local w = lead_seen:get()
+		return if w > 0 then w else CONTROL
+	end
+	local function mission_switch_shown(): boolean
+		if mission == nil or not mission.shown() or asking() or dictating() then
+			return false
+		end
+		local w = pill_w:get()
+		return w <= 0 or w - HAIRLINES - INSET_OPEN * 2 - CONTROL - switch_seen:get() - 16 - trailing_w() >= 0
+	end
 	local function expanded(): boolean
 		return read(props.expanded) == true
 	end
@@ -1450,7 +1499,7 @@ return ui.component(function(props: Props): Node
 		if width <= 0 then
 			return false
 		end
-		local room = width - HAIRLINES - (INSET_LINE + CONTROL + TEXT_SIDE) - (TEXT_SIDE + tail + INSET_LINE)
+		local room = width - HAIRLINES - (INSET_LINE + lead_w() + TEXT_SIDE) - (TEXT_SIDE + tail + INSET_LINE)
 		local want
 		if string.find(text, "\n") then
 			want = true
@@ -1527,21 +1576,21 @@ return ui.component(function(props: Props): Node
 			local head = head_h:get()
 			-- With something over it, the draft's box starts under that
 			-- with the strip's own gap rather than the pill's top.
-			return head + (if head > 0 then box:get() - TEXT_TOP + HEAD_GAP else box:get()) + toggle_room() + actions() + HAIRLINES
+			return head + (if head > 0 then box:get() - TEXT_TOP + HEAD_GAP else box:get()) + toggle_room() + actions() + HAIRLINES + options_room()
 		end
-		return ONE_LINE + HAIRLINES
+		return ONE_LINE + HAIRLINES + options_room()
 	end)
 	-- Where the text sits: beside the controls on one line, over them
 	-- opened out, under whatever is over it.
 	local text_left = ui.computed(function(): number
-		return if open:get() then TEXT_OPEN_SIDE else INSET_LINE + CONTROL + TEXT_SIDE
+		return if open:get() then TEXT_OPEN_SIDE else INSET_LINE + lead_w() + TEXT_SIDE
 	end)
 	local text_right = ui.computed(function(): number
 		return if open:get() then TEXT_OPEN_SIDE else TEXT_SIDE + trailing_w() + INSET_LINE
 	end)
 	local text_top = ui.computed(function(): number
 		if not open:get() then
-			return (ONE_LINE - LINE) / 2
+			return (ONE_LINE - LINE) / 2 + options_room()
 		end
 		local head = head_h:get()
 		return if head > 0 then head + HEAD_GAP else TEXT_TOP + toggle_room()
@@ -1567,7 +1616,7 @@ return ui.component(function(props: Props): Node
 		end
 		return motion.reduced_now() or ui.now() < snap_until
 	end
-	local function eased(src: ReadOnlyState<number>): State<number>
+	local function eased(src: ReadOnlyState<number>, how: TweenOptions?): State<number>
 		local value = ui.use_state(src:peek())
 		local run: any = nil
 		ui.effect(function()
@@ -1581,7 +1630,8 @@ return ui.component(function(props: Props): Node
 				value:set(v)
 				return
 			end
-			run = anime.animate(value, { value = v, duration = EASE.duration, ease = EASE.ease })
+			local by = how or EASE
+			run = anime.animate(value, { value = v, duration = by.duration, ease = by.ease })
 		end)
 		return value
 	end
@@ -1893,7 +1943,11 @@ return ui.component(function(props: Props): Node
 					return if plan:get() then locale.s("ds.composer.plan.short") else ""
 				end
 				else nil,
-			extra = if plan then plan_row(plan) else nil,
+			extra = if plan
+				then plan_row(plan, function(on: boolean)
+					choose("plan", on)
+				end)
+				else nil,
 			placement = { side = "bottom", align = "start", offset = 6 },
 		}
 	end
@@ -1917,11 +1971,36 @@ return ui.component(function(props: Props): Node
 		on_click = props.on_dictate,
 		Icon { name = "microphone", size = 18 },
 	})
+	local send_label_w = kept("send_label_w", 0)
+	local function labelled(): boolean
+		return mission_on() and not (mission :: any).planned() and not narrow() and not dictating()
+	end
+	local send_shown = eased(ui.computed(function(): number
+		return if labelled() then 1 else 0
+	end), { duration = 220, ease = MISSION_EASE })
+	local function send_room(): number
+		return send_shown:get() * (send_label_w:get() + SEND_LABEL_PAD)
+	end
 	local send_button = Button {
 		shape = "pill",
 		size = "sm",
 		icon = true,
+		tone = if mission
+			then function(): any
+				return if mission_on() then "accent" else "primary"
+			end :: any
+			else nil,
+		bg = if mission then ui.tween(mission_lit, { from = "$zeron.primary.bg", to = "$accent", duration = fade(220, MISSION_EASE).duration, ease = MISSION_EASE }) else nil,
+		w = if mission
+			then function(): number
+				return CONTROL + send_room()
+			end
+			else nil,
+		gap = if mission then 0 else nil,
 		label = function()
+			if labelled() then
+				return locale.s("ds.composer.mission.start")
+			end
 			return locale.s(if running and running:get() then "ds.composer.queue_message" else "ds.composer.send_message")
 		end,
 		disabled = function()
@@ -1930,6 +2009,22 @@ return ui.component(function(props: Props): Node
 		on_press = if spoken then spoken.on_send_press else nil,
 		on_click = send,
 		Icon { name = "arrow-up", size = 14 },
+		if mission
+			then ui.row {
+				id = "composer-send-label",
+				h_full = true,
+				items = "center",
+				shrink = 0,
+				overflow = "hidden",
+				pl = "$space.1",
+				aria_hidden = true,
+				w = send_room,
+				opacity = ui.tween(ui.computed(function(): number
+					return if labelled() then 1 else 0
+				end), fade(150, motion.EASE_OUT)),
+				ui.text { locale.t("ds.composer.mission.start"), shrink = 0, on_resize = measure(send_label_w, "w") },
+			}
+			else nil,
 	}
 	local stop_button = Button {
 		shape = "pill",
@@ -2099,6 +2194,70 @@ return ui.component(function(props: Props): Node
 					end,
 				},
 			}),
+		}
+	end
+
+	local function mode_switch(): Node
+		return Segmented {
+			id = "composer-mission",
+			label = locale.t("ds.composer.mission.mode") :: any,
+			value = ui.computed(mission_on),
+			on_pick = function(v: any)
+				choose("mission", v == true)
+			end,
+			options = {
+				{ value = false, label = locale.t("ds.composer.mission.chat"), id = "composer-mission-chat" },
+				{ value = true, label = locale.t("ds.composer.mission.mission"), id = "composer-mission-on" },
+			},
+			thumb = ui.tween(mission_lit, { from = "$zeron.segmented.thumb", to = "$zeron.composer.mission.thumb", duration = fade(200, MISSION_EASE).duration, ease = MISSION_EASE }),
+			glide = { duration = 200, ease = MISSION_EASE },
+		}
+	end
+	local function option(id: string, icon: Icon.Name, key: string, word: () -> string, flip: () -> ()): Node
+		return Button {
+			id = id,
+			tone = "ghost",
+			size = "xs",
+			gap = "$space.1",
+			shrink = 1,
+			min_w = 0,
+			label = function(): string
+				return locale.s(`ds.composer.mission.{key}_label`, { value = word() })
+			end,
+			on_click = flip,
+			Icon { name = icon, size = 12 },
+			ui.text { locale.t(`ds.composer.mission.{key}`), shrink = 0 },
+			ui.text { word, color = "$text.primary", truncate = true, min_w = 0 },
+		}
+	end
+	local function flip_option(key: string)
+		local now = mission_now()
+		if mission and now then
+			local v = table.clone(now)
+			v[key] = not v[key]
+			mission.value:set(v)
+		end
+	end
+	local function mission_options(): Node
+		return ui.row {
+			w_full = true,
+			h_full = true,
+			items = "center",
+			gap = "$space.1",
+			min_w = 0,
+			pointer_events = "none",
+			option("composer-mission-agents", "users-group-rounded", "agents", function(): string
+				local now = mission_now()
+				return locale.s(if now and now.same_agents then "ds.composer.mission.agents_same" else "ds.composer.mission.agents_by_role")
+			end, function()
+				flip_option("same_agents")
+			end),
+			option("composer-mission-approve", "check", "approve", function(): string
+				local now = mission_now()
+				return locale.s(if now and now.approve == false then "ds.composer.mission.approve_not_needed" else "ds.composer.mission.approve_before")
+			end, function()
+				flip_option("approve")
+			end),
 		}
 	end
 
@@ -2439,6 +2598,23 @@ return ui.component(function(props: Props): Node
 		return if type(own) == "string" then own else own:get()
 	end
 
+	local function hint(text: () -> string, lit: () -> boolean): Node
+		return ui.text {
+			text,
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			truncate = true,
+			text_size = "$zeron.composer.text",
+			line_height = "$zeron.composer.line",
+			color = "$text.tertiary",
+			opacity = ui.tween(ui.computed(function(): number
+				return if lit() then 1 else 0
+			end), fade(220, motion.EASE)),
+		}
+	end
+
 	if props.toolbar_id then
 		composer_surface.field = field
 		ui.effect(function()
@@ -2670,11 +2846,35 @@ return ui.component(function(props: Props): Node
 					Kbd { text = "→", tone = "quiet" },
 				},
 			}),
+			if mission
+				then ui.show(function(): boolean
+					return value:get() == "" and not asking() and shown_prediction() == nil
+				end, ui.div {
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = 0,
+					h = LINE,
+					pointer_events = "none",
+					aria_hidden = true,
+					hint(placeholder, function(): boolean
+						return not mission_on()
+					end),
+					hint(function(): string
+						local now = mission_now()
+						return locale.s(if now and now.approve == false then "ds.composer.placeholder.mission_runs" else "ds.composer.placeholder.mission")
+					end, mission_on),
+				})
+				else nil,
 			ui.textarea(EditorMenu.on({
 				ref = field,
 				value = value,
 				label = locale.t("ds.composer.message"),
-				placeholder = placeholder,
+				placeholder = if mission
+					then function(): string
+						return if asking() then placeholder() else ""
+					end
+					else placeholder,
 				placeholder_color = "$text.tertiary",
 				read_only = disabled,
 				w_full = true,
@@ -2840,14 +3040,37 @@ return ui.component(function(props: Props): Node
 			}, { takes_paste = props.on_paste_image ~= nil or props.on_files ~= nil })),
 		},
 		-- The controls, on the pill's foot.
-		ui.div {
+		ui.row {
+			on_resize = measure(lead_seen, "w"),
 			absolute = true,
 			left = by_open(INSET_LINE, INSET_OPEN),
 			bottom = by_open(INSET_LINE, INSET_OPEN),
+			items = "center",
+			gap = "$space.2",
 			ui.show(function()
 				return not asking()
 			end, attach),
+			if mission then ui.show(mission_switch_shown, ui.row { on_resize = measure(switch_seen, "w"), mode_switch() }) else nil,
 		},
+		if mission
+			then ui.div {
+				absolute = true,
+				left = by_open(INSET_LINE, INSET_OPEN),
+				right = by_open(INSET_LINE, INSET_OPEN),
+				bottom = by_open(ONE_LINE, actions() + 4),
+				h = OPTION_H,
+				pointer_events = "none",
+				ui.presence(function(): string?
+					return if options_room() > 0 then "on" else nil
+				end, mission_options, {
+					w_full = true,
+					h_full = true,
+					pointer_events = "none",
+					enter = motion.transition({ opacity = { 0, 1 }, duration = 150, ease = motion.EASE_OUT }),
+					exit = motion.transition({ opacity = 0, duration = 150, ease = motion.EASE_OUT }),
+				}),
+			}
+			else nil,
 		voice_track(),
 		ui.row {
 			on_resize = measure(trailing_seen, "w"),
@@ -3556,6 +3779,23 @@ return ui.component(function(props: Props): Node
 					return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
 				end,
 			}),
+			if mission
+				then ui.div {
+					id = "composer-mission-ring",
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = 0,
+					bottom = 0,
+					pointer_events = "none",
+					rounded = "$zeron.composer.radius",
+					border = 1,
+					border_color = "$accent",
+					shadow = "$zeron.composer.mission.ring",
+					bg = "$zeron.composer.mission.wash",
+					opacity = ui.tween(mission_lit, fade(220, MISSION_EASE)),
+				}
+				else nil,
 			trays,
 			ui.popover(m.popover(surface)),
 		},

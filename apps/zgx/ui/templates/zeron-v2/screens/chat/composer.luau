@@ -112,6 +112,7 @@ local defaults = ui.persist("chat_new_defaults", {
 	options = nil :: { [string]: string }?,
 	access = "full" :: string?,
 	plan = false,
+	mission = false :: any,
 	checkout = "worktree" :: string?,
 	device = nil :: string?,
 	-- Where (nil: none picked yet; screens/chat/where picks one).
@@ -121,13 +122,13 @@ local defaults = ui.persist("chat_new_defaults", {
 store.new_defaults = defaults
 -- A new chat's own value of each choice where its default is none: what
 -- the composer shows then.
-local NONE: { [string]: any } = { fast = false, options = {}, plan = false }
+local NONE: { [string]: any } = { fast = false, options = {}, plan = false, mission = false }
 
 -- The last default a plugin chose that was taken (its time, ms): one is
 -- taken once, across restarts, never again over a pick made since.
 local plugin_default_seen = ui.persist("chat_new_defaults_plugin", 0)
 
-local FIELDS = { "model", "effort", "fast", "options", "access", "plan" }
+local FIELDS = { "model", "effort", "fast", "options", "access", "plan", "mission" }
 -- Past ds/dialog's leaving and its modal's going (which gives the keys back
 -- to what had them), the draft takes them.
 local DIALOG_OUT = 350
@@ -218,6 +219,7 @@ local function Composer(): Node
 	local options = ui.state("chat_options", {} :: { [string]: string })
 	local access = ui.state("chat_access", "full" :: string?)
 	local plan = ui.state("chat_plan", false)
+	local mission = ui.state("chat_mission", false :: any)
 	local device = ui.state("chat_device", nil :: string?)
 	local checkout = ui.state("chat_checkout", "worktree" :: string?)
 	local branch = ui.state("chat_branch", nil :: string?)
@@ -225,7 +227,7 @@ local function Composer(): Node
 	-- A new chat's agent profile (its id, sent with its first message).
 	local draft_profile = ui.state("chat_profile", nil :: string?)
 	local locals: { [string]: State<any> } =
-		{ model = model, effort = effort, fast = fast, options = options, access = access, plan = plan }
+		{ model = model, effort = effort, fast = fast, options = options, access = access, plan = plan, mission = mission }
 
 	-- A pick answered yes in the switch dialog: its words for the divider.
 	local landing: model_switch.Ask? = nil
@@ -279,6 +281,9 @@ local function Composer(): Node
 				local resolved = shared.resolve_model(s, store.catalog:get())
 				for _, k in FIELDS do
 					local v = (s :: any)[k]
+					if k == "mission" and v == nil then
+						v = false
+					end
 					-- (None found: none shown, never the chat before's.)
 					local own = (k == "model" or k == "effort") and resolved.model == nil
 					if k == "model" or k == "effort" then
@@ -783,6 +788,26 @@ local function Composer(): Node
 	local function agent(): string?
 		return Completions.agent_of(model:get(), if session_id:get() then open() else nil)
 	end
+	-- The agent the composer runs, as its catalog lists it.
+	local function harness_row(): any
+		local id = agent()
+		for _, h in store.catalog:get().harnesses do
+			if (h :: any).id == id or (h :: any).value == id then
+				return h
+			end
+		end
+		return nil
+	end
+	local function mission_offered(): boolean
+		if new_chat() then
+			local row = harness_row()
+			local profile = composer_profiles.find(draft_profile:get())
+			local off: { string } = if profile then (profile :: any).tools_off or {} else {}
+			return row ~= nil and row.offers_mission == true and not table.find(off, "mcp__zeron__plan") and not table.find(off, "mcp__zeron__delegate_task")
+		end
+		local s = open()
+		return s ~= nil and (s :: any).mission_offered == true
+	end
 	-- What each trigger lists, as the agent's settings have it: with
 	-- "Separate / commands" off, `/` lists the skills after the commands
 	-- (Zeron's composer.rs `completion_trigger`).
@@ -1129,6 +1154,7 @@ local function Composer(): Node
 			options = options:peek(),
 			access = access:peek(),
 			plan = plan:peek(),
+			mission = if mission_offered() then mission:peek() else nil,
 			profile = composer_profiles.find(draft_profile:peek()) and draft_profile:peek(),
 		}
 		for _, m in store.catalog:peek().models do
@@ -1408,16 +1434,6 @@ local function Composer(): Node
 		shared.focus:add(1)
 	end
 
-	-- The agent the composer runs, as its catalog lists it.
-	local function harness_row(): any
-		local id = agent()
-		for _, h in store.catalog:get().harnesses do
-			if (h :: any).id == id or (h :: any).value == id then
-				return h
-			end
-		end
-		return nil
-	end
 	-- A usage limit, in Zeron's words (composer/limit_notice.rs).
 	local function reset_words(at: number?): string?
 		if not at or at <= os.time() then
@@ -1639,6 +1655,14 @@ local function Composer(): Node
 				return if #modes > 0 then modes else { "full" }
 			end,
 			plan = plan,
+			mission = {
+				value = mission,
+				shown = mission_offered,
+				planned = function(): boolean
+					local s = open()
+					return s ~= nil and (s :: any).planned == true
+				end,
+			},
 			prediction = function(): string?
 				local s = open()
 				if not s or editing:get() then

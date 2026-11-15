@@ -71,6 +71,9 @@ export type Session = {
 	options: { [string]: string }?,
 	access: string?,
 	plan: boolean?,
+	mission: any?,
+	mission_offered: boolean?,
+	planned: boolean?,
 	-- A turn is running.
 	running: boolean?,
 	-- How much of the model's context is used, 0 to 1; and what it holds,
@@ -107,6 +110,7 @@ export type Request = {
 	options: { [string]: string }?,
 	access: string?,
 	plan: boolean?,
+	mission: any?,
 	-- A new chat's agent profile (its id): its instructions and tools go
 	-- with the config.
 	profile: string?,

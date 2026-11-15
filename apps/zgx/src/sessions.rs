@@ -2182,6 +2182,9 @@ fn where_parent_is(chats: &Json, parent: &str) -> Option<Json> {
             out[wire] = found[wire].clone();
         }
     }
+    if let Some(config) = out["config"].as_object_mut() {
+        config.remove("mission");
+    }
     Some(out)
 }
 
@@ -3414,7 +3417,7 @@ mod tests {
     #[test]
     fn a_side_chat_is_made_where_its_parent_is_and_a_fork_on_its_device() {
         let chats = serde_json::json!([
-            { "id": "p", "deviceId": "mac", "spaceId": "proj", "branch": "main", "cwd": "/w", "config": { "harness": "codex" } },
+            { "id": "p", "deviceId": "mac", "spaceId": "proj", "branch": "main", "cwd": "/w", "config": { "harness": "codex", "mission": { "approve": true } } },
         ]);
         assert_eq!(
             super::where_parent_is(&chats, "p").unwrap(),

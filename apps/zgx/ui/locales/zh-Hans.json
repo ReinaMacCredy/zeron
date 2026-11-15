@@ -709,7 +709,9 @@
         "instead": "或说明要改做什么…",
         "default": "想做什么都可以…",
         "plan": "描述目标。智能体会写计划，不做更改。",
-        "plan_asks": "描述目标。智能体会写计划并等待你确认。"
+        "plan_asks": "描述目标。智能体会写计划并等待你确认。",
+        "mission": "描述目标。智能体会写计划并等待你确认。",
+        "mission_runs": "描述目标。智能体会制定计划并在线程中运行各个步骤。"
       },
       "message": "消息",
       "branch": {
@@ -760,7 +762,21 @@
       "send_options": "发送选项",
       "send": "发送",
       "move_draft": "将草稿移到新对话",
-      "send_new": "在新对话中发送"
+      "send_new": "在新对话中发送",
+      "mission": {
+        "mode": "聊天或任务",
+        "chat": "聊天",
+        "mission": "任务",
+        "start": "开始任务",
+        "agents": "智能体",
+        "agents_label": "智能体：{value}",
+        "agents_by_role": "按角色",
+        "agents_same": "与此聊天相同",
+        "approve": "批准",
+        "approve_label": "批准：{value}",
+        "approve_before": "运行前",
+        "approve_not_needed": "不需要"
+      }
     },
     "markdown": {
       "fit_content": "适合内容",

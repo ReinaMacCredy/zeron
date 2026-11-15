@@ -134,6 +134,7 @@ function M.setup()
 				solid = "{surface.overlay}",
 				plan_knob = "{zeron.switch.knob}",
 				plan_glow = "0 10 40 -18 alpha({accent}, 0.3)",
+				mission = { ring = "0 0 0 3 alpha({accent}, 0.14)", wash = "alpha({accent}, 0.06)", thumb = "over(alpha({accent}, 0.3), {zeron.segmented.thumb})" },
 				edge = "{border}",
 				shadow = "{shadow.lg}",
 				-- Frosted, nothing under it: the glass is its depth.

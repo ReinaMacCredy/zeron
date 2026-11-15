@@ -2048,6 +2048,34 @@ impl Chats {
     }
 }
 
+fn offers_mission(_harness: &str) -> bool {
+    true
+}
+
+fn mission_offered(chat: &Json, config: &Json) -> bool {
+    let off = |tool: &str| config["disabledTools"].as_array().is_some_and(|tools| tools.iter().any(|t| t.as_str() == Some(tool)));
+    chat["parentChatId"].is_null()
+        && config["harness"].as_str().is_none_or(offers_mission)
+        && !off("mcp__zeron__plan")
+        && !off("mcp__zeron__delegate_task")
+}
+
+fn offered_mission_only(chat: &Json, config: &mut Json) {
+    if !mission_offered(chat, config)
+        && let Some(fields) = config.as_object_mut()
+    {
+        fields.remove("mission");
+    }
+}
+
+fn mission_value(config: &Json) -> Value {
+    let m = &config["mission"];
+    if !m.is_object() {
+        return Value::Nil;
+    }
+    Value::record([("same_agents", Value::Bool(m["sameAgents"].as_bool() == Some(true))), ("approve", Value::Bool(m["approve"].as_bool() != Some(false)))])
+}
+
 /// A chat just made here (`sessions.create`), as the engine's list will
 /// have it: `params` is its `createChat` (`chatId`, `deviceId`, `spaceId`,
 /// `config`, `cwd`, `branch`, `parentChatId`).
@@ -2154,6 +2182,7 @@ fn catalog_of(
             ("icon", h["icon"].as_str().map_or(Value::Nil, Value::from)),
             ("access_modes", access_modes_value(&h["accessModes"])),
             ("supports_plan", Value::Bool(h["supportsPlan"].as_bool() == Some(true))),
+            ("offers_mission", Value::Bool(offers_mission(id))),
             ("plan_asks", Value::Bool(matches!(id, "claude-code" | "mock"))),
             ("steers", Value::Bool(steers_of(h))),
             ("compaction_unsupported", unsupported.get(id).map_or(Value::Nil, |r| Value::from(r.as_str()))),
@@ -3263,6 +3292,7 @@ impl View {
         {
             fields.remove("plan");
         }
+        offered_mission_only(&chat, &mut config);
         // A chat just made takes the config it was started with. (Never one
         // without an agent: the engine turns that away as bad params, and
         // the chat keeps the config it was made with: a side chat's, its
@@ -3320,6 +3350,9 @@ impl View {
         }
         if let Some(plan) = config.get("plan") {
             request["plan"] = plan.clone();
+        }
+        if let Some(mission) = config.get("mission") {
+            request["mission"] = mission.clone();
         }
         if !paths.is_empty() {
             request["attachments"] = json!(paths);
@@ -3665,7 +3698,8 @@ impl View {
         let chats = CHATS.with(Rc::clone);
         let id = args.field("id").map(text).unwrap_or_default();
         let chat = chats.chat(&id).ok_or("missing")?;
-        let config = merged_config(&chat["config"], &args);
+        let mut config = merged_config(&chat["config"], &args);
+        offered_mission_only(&chat, &mut config);
         // Shown at once; the engine's word follows.
         if let Some(c) = chats.chats.borrow_mut().get_mut(&id) {
             c["config"] = config.clone();
@@ -4549,7 +4583,8 @@ async fn apply_profile(args: Value) -> Result<(), Outcome> {
         Some(pid) => Some(crate::agent_profiles::find(&pid).ok_or("missing")?),
         None => None,
     };
-    let config = crate::agent_profiles::apply(&chat["config"], profile.as_ref()).ok_or("failed")?;
+    let mut config = crate::agent_profiles::apply(&chat["config"], profile.as_ref()).ok_or("failed")?;
+    offered_mission_only(&chat, &mut config);
     if let Some(c) = chats.chats.borrow_mut().get_mut(&id) {
         c["config"] = config.clone();
     }
@@ -4678,6 +4713,16 @@ fn merged_config(config: &Json, args: &Value) -> Json {
             c["plan"] = json!(true);
         } else if let Some(map) = c.as_object_mut() {
             map.remove("plan");
+        }
+    }
+    if let Some(mission) = args.field("mission") {
+        if matches!(mission, Value::Map(_)) {
+            c["mission"] = json!({
+                "sameAgents": mission.field("same_agents").is_some_and(Value::truthy),
+                "approve": mission.field("approve").is_none_or(Value::truthy),
+            });
+        } else if let Some(map) = c.as_object_mut() {
+            map.remove("mission");
         }
     }
     // The model's Fast option, as the catalog lists it (nil: it has none,
@@ -8294,6 +8339,9 @@ fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool) -> Va
         ("options", options),
         ("access", Value::from(access)),
         ("plan", Value::Bool(config["plan"].as_bool() == Some(true))),
+        ("mission_offered", Value::Bool(mission_offered(&chat, config))),
+        ("mission", if mission_offered(&chat, config) { mission_value(config) } else { Value::Nil }),
+        ("planned", Value::Bool(chat["plan"].is_object() || chat["planPending"].as_bool() == Some(true))),
         // Its profile, and how the chat stands against it (read as the
         // session is published, never as the draft is typed).
         ("profile", crate::agent_profiles::applied(config)),
@@ -9339,6 +9387,12 @@ mod tests {
         let picked = zgx_script::Value::from_json(r#"{"model":"codex/gpt-6.1"}"#).unwrap();
         let config = super::merged_config(&row["config"], &picked);
         assert_eq!((config["harness"].as_str(), config["model"].as_str()), (Some("codex"), Some("gpt-6.1")));
+        let on = zgx_script::Value::from_json(r#"{"mission":{"same_agents":true},"plan":false}"#).unwrap();
+        let config = super::merged_config(&row["config"], &on);
+        assert_eq!(config["mission"], serde_json::json!({ "sameAgents": true, "approve": true }));
+        let off = zgx_script::Value::from_json(r#"{"mission":false}"#).unwrap();
+        assert!(super::merged_config(&config, &off).get("mission").is_none());
+        assert!(!super::mission_offered(&row, &config), "a side chat offers no mission");
     }
 
     #[test]

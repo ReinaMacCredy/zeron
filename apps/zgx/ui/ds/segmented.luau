@@ -26,6 +26,8 @@ export type Props = {
 	id: string?,
 	-- What assistive technology calls the group.
 	label: Label?,
+	thumb: any?,
+	glide: TweenOptions?,
 }
 
 local H = 26
@@ -138,6 +140,9 @@ return function(props: Props): Node
 		return true
 	end
 	local SPRING: SpringOptions = { stiffness = 380, damping = 30 }
+	local function move(to: any): any
+		return if props.glide then motion.tween(to, props.glide) else motion.spring(to, SPRING)
+	end
 	local track: ContainerProps = {
 		role = "radiogroup",
 		id = props.id,
@@ -177,17 +182,17 @@ return function(props: Props): Node
 				top = PAD,
 				h = H - PAD * 2,
 				rounded = ui.raw(control.nest(TRACK_RADIUS, PAD), "the track's corner less the thumb's inset: concentric"),
-				bg = "$zeron.segmented.thumb",
-				w = motion.spring(ui.computed(function(): number
+				bg = props.thumb or "$zeron.segmented.thumb",
+				w = move(ui.computed(function(): number
 					return width(index:get() + 1)
-				end), SPRING),
-				x = motion.spring(ui.computed(function(): number
+				end)),
+				x = move(ui.computed(function(): number
 					local x = 0
 					for i = 1, index:get() do
 						x += width(i)
 					end
 					return x
-				end), SPRING),
+				end)),
 			}
 		),
 		table.unpack(segments),

@@ -709,7 +709,9 @@
         "instead": "Or say what to do instead…",
         "default": "Do anything…",
         "plan": "Describe the goal. The agent writes a plan and changes nothing.",
-        "plan_asks": "Describe the goal. The agent writes a plan and waits for your OK."
+        "plan_asks": "Describe the goal. The agent writes a plan and waits for your OK.",
+        "mission": "Describe the goal. The agent writes a plan and waits for your OK.",
+        "mission_runs": "Describe the goal. The agent plans it and runs the steps on threads."
       },
       "message": "Message",
       "branch": {
@@ -760,7 +762,21 @@
       "send_options": "Send options",
       "send": "Send",
       "move_draft": "Move draft to new thread",
-      "send_new": "Send in new thread"
+      "send_new": "Send in new thread",
+      "mission": {
+        "mode": "Chat or mission",
+        "chat": "Chat",
+        "mission": "Mission",
+        "start": "Start mission",
+        "agents": "Agents",
+        "agents_label": "Agents: {value}",
+        "agents_by_role": "By role",
+        "agents_same": "Same as this chat",
+        "approve": "Approve",
+        "approve_label": "Approve: {value}",
+        "approve_before": "before it runs",
+        "approve_not_needed": "not needed"
+      }
     },
     "markdown": {
       "fit_content": "Fit content",
