@@ -146,6 +146,11 @@ pub async fn run(
     ipc_port: u16,
     data_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
+    let args = match &command {
+        PluginCommand::Call { args, .. } => serde_json::from_str::<Value>(args)
+            .map_err(|e| anyhow::anyhow!("the service's arguments are not JSON: {e}"))?,
+        _ => Value::Null,
+    };
     let client = connect(ipc_port, data_dir).await?;
     let call = |method: &'static str, params: Value| call(&client, method, params);
     match command {
@@ -216,6 +221,30 @@ pub async fn run(
             }
             for item in &plugins {
                 println!("{}", line(item));
+            }
+        }
+        PluginCommand::Call {
+            id,
+            method,
+            timeout,
+            ..
+        } => {
+            let timeout = if timeout.is_finite() && timeout > 0.0 {
+                timeout.min(300.0)
+            } else {
+                30.0
+            };
+            let reply = self::call(
+                &client,
+                methods::CALL_PLUGIN_SERVICE,
+                json!({ "plugin": id, "method": method, "args": args, "timeout": timeout }),
+            )
+            .await?;
+            if reply["ok"] == true {
+                println!("{}", reply["value"]);
+            } else {
+                eprintln!("{}: {}", str_of(&reply, "reason"), str_of(&reply, "message"));
+                std::process::exit(1);
             }
         }
         PluginCommand::Export { id, to } => {

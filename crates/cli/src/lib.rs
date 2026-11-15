@@ -208,6 +208,16 @@ pub enum PluginCommand {
     Verify { path: String },
     /// List the plugins Zeron knows.
     List,
+    /// Call a plugin's service on this device through the running engine.
+    Call {
+        id: String,
+        method: String,
+        #[arg(default_value = "{}", value_name = "JSON-ARGS")]
+        args: String,
+        /// Seconds to wait (default 30, capped at 300).
+        #[arg(long, default_value = "30")]
+        timeout: f64,
+    },
     /// Save a plugin as one signed .zeron-plugin file to share (attach it
     /// to a GitHub release, or send it): anyone installs it from that file
     /// or its link. Your own plugin is signed again first.

@@ -349,6 +349,7 @@ it opened on. From a fullscreen app it is covered and waits; zgx's
 zeron plugin new my-plugin          # yours, signed; edit init.luau and it reloads
 zeron plugin sign <id-or-path>      # sign one you wrote as yours
 zeron plugin verify <path>          # who made it, and whether it changed
+zeron plugin call <id> <method> [json-args] [--timeout <seconds>]  # local service; JSON answer (30 s default, 300 max)
 ZERON_ZGX_REVIEW=<id> …  main       # (dev) that plugin's consent window at launch, with devtools
 ZERON_ZGX_PLUGIN_LOG=1 …            # (dev) tool calls and answers
 zeron template list|use <id>|create <id> [--from F]|status <id>|delete <id>
