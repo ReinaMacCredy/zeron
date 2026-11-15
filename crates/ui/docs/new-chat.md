@@ -46,6 +46,8 @@ Turn on the **Plan** switch in the composer bar, or press Shift+Tab, to have the
 
 The chat starts in plan mode. When Claude Code's plan is ready it arrives as a card with **Approve**, **Approve as Task** and **Edit plan**; see [The composer](zeron://docs/composer). On Codex and OpenCode the agent writes a plan and changes nothing, without an approval step. The next New chat starts with Plan off.
 
+To have the plan split into steps that run on threads, use the **Mission** switch instead; see [Mission](zeron://docs/mission).
+
 ## Drafts
 
 A New chat with text, attachments, or Appshots is a draft. Leave it and it stays in the **Drafts** section of the sidebar, right under Pinned, and it survives a restart. Each row shows the target (project and device) and the start of your prompt. Click a row to pick up where you left off, or hover it and click the **×** to discard it. An empty New chat is dropped when you leave.

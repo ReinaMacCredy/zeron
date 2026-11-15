@@ -1,6 +1,6 @@
 A mission is a chat that hands work out. Each piece it hands out runs on a thread: an agent of its own, on its own chat, that reports back to the chat that started it. The chat that hands the work out is the lead. You keep talking to the lead, and the **Threads** tab beside it shows every thread and where it stands.
 
-Nothing has to be switched on. A chat becomes a lead the moment its agent delegates a task, writes a plan, or starts another chat.
+A chat becomes a lead the moment its agent delegates a task, writes a plan, or starts another chat. Ask for that in your own words, or turn on the **Mission** switch in the composer.
 
 ![A lead chat after its plan was approved, and its Threads tab: four steps working and one planned](mission-threads.jpg)
 
@@ -13,6 +13,19 @@ Ask in your own words:
 - "Run these four changes in parallel and review each one before you report."
 
 The agent hands work out with `delegate_task` and plans with `plan`; see [Delegation and subagents](zeron://docs/delegation) for how a child is started, which agent and model it runs on, and what it may do.
+
+## The Mission switch
+
+The composer has a **Chat | Mission** control beside the **+** button. With **Mission** on, every message you type starts a mission turn: the agent writes a plan before it does anything else, and the steps run on threads. The composer takes the accent ring, and until the chat has a plan the send button reads **Start mission**.
+
+A row of options opens above the composer's controls while Mission is on:
+
+- **Agents**: **By role** sends each step where its role says (see [Routing](zeron://docs/routing)); **Same as this chat** runs every step on this chat's agent and model.
+- **Approve**: **before it runs** holds the plan until you approve it; **not needed** lets the lead start the steps as soon as the plan is written.
+
+The switch stays on for the chat until you turn it off, and each chat has its own. A `/` command you type is not a mission turn. Messages the lead gets from its threads, and the note it gets when you approve or edit the plan, never ask for a new plan.
+
+Mission and the agent's own **Plan mode** (in the access menu) turn each other off: Plan mode is the agent's native read-only planning, Mission is Zeron's plan with steps on threads. The switch is hidden where a chat cannot lead: a side chat, a thread's own composer, and a chat whose `plan` or `delegate_task` tool is off.
 
 ## The Threads tab
 
