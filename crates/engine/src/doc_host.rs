@@ -4782,11 +4782,24 @@ impl DocHost {
             })
     }
 
-    pub async fn queue_continuation(
+    pub async fn resume_after_limit(
         &self,
         continuation: &crate::resume_schedule::Continuation,
     ) -> Result<bool, EngineError> {
-        let chat_id = continuation.chat_id.as_str();
+        if self.continuation_open(&continuation.chat_id)
+            && self
+                .since_user(&continuation.chat_id, continuation.after_user.as_deref())
+                .await?
+                == Since::Quiet
+            && let Some(sessions) = self.sessions()
+            && !sessions.compact_before_resume(&continuation.chat_id).await
+        {
+            return Ok(false);
+        }
+        self.queue_continuation(continuation).await
+    }
+
+    fn continuation_open(&self, chat_id: &str) -> bool {
         let busy = self.sessions().is_some_and(|sessions| {
             sessions.session_status(chat_id).is_some_and(|session| {
                 matches!(
@@ -4799,7 +4812,15 @@ impl DocHost {
             .workspace()
             .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
             .is_none_or(|chat| chat.archived);
-        if busy || archived {
+        !busy && !archived
+    }
+
+    pub async fn queue_continuation(
+        &self,
+        continuation: &crate::resume_schedule::Continuation,
+    ) -> Result<bool, EngineError> {
+        let chat_id = continuation.chat_id.as_str();
+        if !self.continuation_open(chat_id) {
             return Ok(false);
         }
         let handle = self.open(chat_id)?;

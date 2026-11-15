@@ -8,6 +8,8 @@ const RESUME_COMPACTION_IDLE_MINUTES: i64 = 70;
 
 pub const RESUME_COMPACTION_TITLE: &str = "Resume with less context";
 
+pub const COMPACTED_AT_LIMIT_RESET: &str = "Compacted at limit reset";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResumeCompaction {
     pub tokens: u64,

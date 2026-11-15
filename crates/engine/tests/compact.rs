@@ -492,6 +492,66 @@ async fn idle_compaction_says_why_it_ran() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_limit_resume_compacts_a_large_chat_first_unless_turned_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, _harness, requests) = engine_with_one_turn(tmp.path()).await;
+    let resume = async |before_resume: bool| -> Vec<String> {
+        core.registry
+            .set_compaction_settings(CompactionSettings {
+                min_tokens: 20_000,
+                before_resume,
+                ..Default::default()
+            })
+            .unwrap();
+        let continuation = zeron_engine::resume_schedule::Continuation {
+            chat_id: CHAT.into(),
+            after_user: core.doc_host.last_user_entry(CHAT).unwrap(),
+        };
+        let before = requests.lock().unwrap().len();
+        assert!(
+            core.doc_host
+                .resume_after_limit(&continuation)
+                .await
+                .unwrap()
+        );
+        let prompts = || -> Vec<String> {
+            requests.lock().unwrap()[before..]
+                .iter()
+                .map(|r| r.prompt.clone())
+                .collect()
+        };
+        wait_for(
+            || prompts().iter().any(|p| p == zeron_proto::RESUME_PROMPT),
+            "the resume turn",
+        )
+        .await;
+        wait_for(|| !core.sessions.turn_in_flight(CHAT), "the resume settles").await;
+        prompts()
+    };
+
+    let compacted = resume(true).await;
+    assert_eq!(compacted.len(), 2, "{compacted:?}");
+    assert!(
+        compacted[0].starts_with("/compact ") && compacted[0].contains("usage limit"),
+        "{compacted:?}"
+    );
+    assert_eq!(compacted[1], zeron_proto::RESUME_PROMPT);
+    let boundary = entries(&core)
+        .into_iter()
+        .find(|e| e.role == MessageRole::System)
+        .expect("boundary entry");
+    assert_eq!(
+        entry_text(&boundary),
+        format!(
+            "{} · 22.8k → 2.3k tokens",
+            zeron_proto::compaction::COMPACTED_AT_LIMIT_RESET
+        )
+    );
+
+    assert_eq!(resume(false).await, [zeron_proto::RESUME_PROMPT]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_agent_compaction_waits_for_its_turn_then_continues() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;

@@ -210,8 +210,8 @@ pub struct EngineConfig {
 
 /// The assembled engine core — also constructible without the IPC server for tests
 /// and the in-process (headed) mode.
-async fn send_continuation(host: &DocHost, continuation: &resume_schedule::Continuation) {
-    match host.queue_continuation(continuation).await {
+fn log_continuation(continuation: &resume_schedule::Continuation, sent: Result<bool, EngineError>) {
+    match sent {
         Ok(sent) => tracing::info!(chat = %continuation.chat_id, sent, "continuation"),
         Err(error) => {
             tracing::warn!(chat = %continuation.chat_id, %error, "continuation failed")
@@ -450,8 +450,14 @@ impl EngineCore {
             async move {
                 match due {
                     resume_schedule::Due::Resume(continuation) => {
-                        send_continuation(&host, &continuation).await;
-                        schedule.acted(&continuation.chat_id, false);
+                        let worker = host.clone();
+                        worker.spawn_worker(async move {
+                            log_continuation(
+                                &continuation,
+                                host.resume_after_limit(&continuation).await,
+                            );
+                            schedule.acted(&continuation.chat_id, false);
+                        });
                     }
                     resume_schedule::Due::Start(chat_id) => host.start_deferred(&chat_id).await,
                     resume_schedule::Due::Switch(chat_id, to) => {
@@ -467,7 +473,7 @@ impl EngineCore {
         let host = doc_host.clone();
         tokio::spawn(async move {
             for continuation in restarted {
-                send_continuation(&host, &continuation).await;
+                log_continuation(&continuation, host.queue_continuation(&continuation).await);
             }
         });
         auto_compact::spawn(sessions.clone(), registry.clone(), doc_host.clone());

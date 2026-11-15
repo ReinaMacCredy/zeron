@@ -3195,6 +3195,46 @@ impl SessionsEngine {
             .await
     }
 
+    /// False when the compaction was stopped: whoever stopped it decides what runs next.
+    pub(crate) async fn compact_before_resume(&self, chat_id: &str) -> bool {
+        let settings = self.inner.registry.compaction_settings();
+        let tokens = self
+            .doc_handle(chat_id)
+            .ok()
+            .and_then(|handle| handle.doc().context_usage())
+            .and_then(|usage| usage.tokens);
+        if !settings.enabled
+            || !settings.before_resume
+            || !self.auto_compacts(chat_id)
+            || tokens.is_none_or(|tokens| tokens < settings.min_tokens)
+        {
+            return true;
+        }
+        let resumes = match self
+            .compact_noting(
+                chat_id,
+                Some(LIMIT_RESET_FOCUS.into()),
+                zeron_proto::compaction::COMPACTED_AT_LIMIT_RESET,
+            )
+            .await
+        {
+            Ok(outcome) => {
+                tracing::info!(chat = %chat_id, compacted = outcome.compacted, "compaction before the limit resume ran");
+                true
+            }
+            Err(err) => {
+                tracing::info!(chat = %chat_id, error = %err, "compaction before the limit resume did not run");
+                err.to_string() != COMPACTION_INTERRUPTED
+            }
+        };
+        // A compaction inside a parked run reports before that run settles back to Idle.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        while resumes && self.turn_in_flight(chat_id) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        resumes
+    }
+
     /// The reminder a Claude Code PostToolUse hook hands the running turn, if one is due.
     pub fn mid_turn_nudge(&self, chat_id: &str) -> Option<String> {
         self.inner.mid_turn_nudge(chat_id)
@@ -3548,9 +3588,7 @@ impl SessionsEngine {
             turn.compact(request.prompt);
             return match tokio::time::timeout(COMPACT_TIMEOUT, finished).await {
                 Ok(Ok(drain)) => self.compaction_outcome(chat_id, drain),
-                Ok(Err(_)) => Err(EngineError::Other(
-                    "Context compaction was interrupted.".into(),
-                )),
+                Ok(Err(_)) => Err(EngineError::Other(COMPACTION_INTERRUPTED.into())),
                 Err(_elapsed) => {
                     lock(&queued).take();
                     Err(EngineError::Other("Context compaction timed out.".into()))
@@ -6663,7 +6701,7 @@ async fn drain_compaction(
             // explicit failure they would settle as the benign
             // "Nothing to compact" notice.
             _ = cancel.changed() => {
-                drain.failure = Some("Context compaction was interrupted.".into());
+                drain.failure = Some(COMPACTION_INTERRUPTED.into());
                 break;
             }
             next = stream.next() => match next {
@@ -6691,15 +6729,17 @@ async fn drain_compaction(
                 break;
             }
             AgentEvent::Done {
+                status,
                 session_id,
                 result,
                 error,
-                ..
             } => {
                 if let Some(session_id) = &session_id {
                     inner.remember_harness_session(chat_id, session_id, run_cwd, harness_id);
                 }
-                drain.failure = error;
+                drain.failure = error.or_else(|| {
+                    (status == DoneStatus::Interrupted).then(|| COMPACTION_INTERRUPTED.into())
+                });
                 drain.result = result;
                 break;
             }
@@ -6830,6 +6870,8 @@ const COMPACTED_NOTE: &str = "Context compacted";
 const COMPACTED_WINDOW_NOTE: &str = "Compacted, window full";
 const COMPACTED_IDLE_NOTE: &str = "Compacted while idle, before the prompt cache expired";
 const COMPACTED_AGENT_NOTE: &str = "Agent compacted";
+const COMPACTION_INTERRUPTED: &str = "Context compaction was interrupted.";
+const LIMIT_RESET_FOCUS: &str = "This turn was cut off by a usage limit and resumes right after this compaction. Keep what the last turn was doing, its unfinished steps, and any work still running.";
 
 fn unsent_note(continue_with: &str) -> String {
     format!(
@@ -9795,7 +9837,7 @@ async fn drive_run(
                 .map(|queued| {
                     let failure = error.clone().or_else(|| {
                         (*status == DoneStatus::Interrupted)
-                            .then(|| "Context compaction was interrupted.".to_string())
+                            .then(|| COMPACTION_INTERRUPTED.to_string())
                     });
                     queued.finish(result.clone(), failure);
                 })

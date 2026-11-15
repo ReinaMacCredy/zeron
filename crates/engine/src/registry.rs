@@ -186,6 +186,7 @@ pub struct CompactionSettings {
     /// 0 turns the nudge off.
     pub nudge_tokens: u64,
     pub missions: bool,
+    pub before_resume: bool,
 }
 
 impl Default for CompactionSettings {
@@ -195,6 +196,7 @@ impl Default for CompactionSettings {
             min_tokens: 100_000,
             nudge_tokens: 150_000,
             missions: true,
+            before_resume: true,
         }
     }
 }
@@ -2289,6 +2291,7 @@ mod title_tests {
                 min_tokens: 150_000,
                 nudge_tokens: 200_000,
                 missions: false,
+                before_resume: true,
             }
         );
         assert_eq!(registry.system_prompt(), "Answer in English.");
