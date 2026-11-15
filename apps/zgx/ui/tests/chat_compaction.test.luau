@@ -189,6 +189,65 @@ test("compaction: the panel: what the agent was asked to keep and its summary, o
 	expect(app:error()).to_be(nil)
 end)
 
+local function put(app: any, rows: { any })
+	app:set_state("test_rows", rows)
+	app:command("put_rows")
+	settle(app)
+end
+
+test("compaction: what the chat continued with joins its row: · Continued, the note in the panel, no bubble; a limit reset's resume too", function()
+	local app = opened()
+	local NOTE = "Build the checkout page; reuse the cart's price formatter."
+	local landed = row("c1", { text = "Agent compacted", kept = { pre = 406500, post = 19100, ms = 53000, summary = "Cart merged." } })
+	local note = { id = "u-note", role = "user", text = NOTE, from_chat = "s1", waiting = "sending", since = 0 }
+	push(app, { landed, note })
+	expect(app:has("#c1-head-continued")).to_be(false)
+	expect(app:tree("#transcript"):find(NOTE, 1, true) ~= nil).to_be(true)
+	local told = table.clone(landed)
+	told.continued = { note = NOTE }
+	local folded = table.clone(note)
+	folded.continued_on = "c1"
+	put(app, { told, folded })
+	expect(app:wait('~"Sending…"', { timeout_ms = 2000 })).to_be(true)
+	expect(app:tree("#c1-head-continued")).to_contain("Continued")
+	local _, _, w = box(app, "#transcript", "#c1%-head%-continued")
+	expect((w or 0) > 40).to_be(true)
+	local tree = app:tree("#transcript")
+	expect(tree:find(NOTE, 1, true)).to_be(nil)
+	expect(tree:find("Auto-continue", 1, true)).to_be(nil)
+	app:click("#c1-head")
+	settle(app)
+	tree = app:tree("#c1-panel")
+	for _, w in { "Summary", "Cart merged.", "Continued with", NOTE } do
+		expect(`{w}: {tree:find(w, 1, true) ~= nil}`).to_be(`{w}: true`)
+	end
+
+	app:scroll("#transcript", -1800)
+	settle(app)
+	local _, reading = box(app, "#transcript", "#u20 article")
+	expect(reading ~= nil).to_be(true)
+	push(app, {
+		row("c9", { text = "Compacted at limit reset", limit_reset = true, kept = { pre = 300000, post = 20000, focus = "The engine's words" }, continued = { limit = true, at = "2:00 PM" } }),
+		{ id = "r9", role = "system", line = "resumed", text = "", continued_on = "c9" },
+	})
+	local _, still_reading = box(app, "#transcript", "#u20 article")
+	expect(`{still_reading}`).to_be(`{reading}`)
+	app:scroll("#transcript", 8000)
+	settle(app)
+	tree = app:tree("#transcript")
+	expect(tree:find("Compacted at limit reset", 1, true)).to_be(nil)
+	expect(app:tree("#c9-head-continued")).to_contain("Continued after limit reset")
+	expect(tree:find("Resumed", 1, true)).to_be(nil)
+	app:click("#c9-head")
+	settle(app)
+	tree = app:tree("#c9-panel")
+	for _, w in { "Limit reset", "2:00 PM" } do
+		expect(`{w}: {tree:find(w, 1, true) ~= nil}`).to_be(`{w}: true`)
+	end
+	expect(tree:find("Asked to keep", 1, true)).to_be(nil)
+	expect(app:error()).to_be(nil)
+end)
+
 test("compaction: a compaction never moves the reading place or the composer", function()
 	local app = opened()
 	app:scroll("#transcript", -1800)

@@ -133,6 +133,7 @@ local engine: { [string]: any } = {
 		minTokens = 100000,
 		nudgeTokens = 150000,
 		missions = true,
+		beforeResume = true,
 	},
 	GetToolSettings = { settings = { disabledTools = {}, disabledGroups = {}, agentsUseFullToken = false }, disabled = { "computer_screenshot" } },
 	-- (Settings → Computer use: the engine's defaults, and two apps once allowed always.)

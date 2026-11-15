@@ -1482,7 +1482,10 @@ local function Composer(): Node
 		end
 		if waiting then
 			table.insert(actions, { label = ui.t("chat.composer.limit.cancel"):get(), on_click = act("cancel") })
-			return { waiting = true, rest = ui.t("chat.composer.limit.waiting", { name = name, at = at }):get(), actions = actions }
+			local rest = if l.compacts
+				then ui.t("chat.composer.limit.waiting_compacts", { name = name, at = at })
+				else ui.t("chat.composer.limit.waiting", { name = name, at = at })
+			return { waiting = true, rest = rest:get(), actions = actions }
 		end
 		if at then
 			table.insert(actions, { label = ui.t("chat.composer.limit.wait"):get(), on_click = if l.to then act("wait", "arm") else act("arm") })

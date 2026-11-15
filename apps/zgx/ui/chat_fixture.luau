@@ -3597,6 +3597,26 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "put_rows",
+	title = "Publish the test's rows over those with their ids",
+	run = function()
+		local all = {}
+		for i = 1, store.messages:len() do
+			table.insert(all, store.messages:at(i))
+		end
+		for _, m in test_rows:peek() do
+			local at = #all + 1
+			for i, x in all do
+				if x.id == m.id then
+					at = i
+				end
+			end
+			all[at] = m
+		end
+		store.messages:set(all)
+	end,
+}
+ui.command {
 	id = "drop_row",
 	title = "Drop a row of the transcript",
 	run = function()

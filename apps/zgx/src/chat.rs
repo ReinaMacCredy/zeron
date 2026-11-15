@@ -177,6 +177,7 @@ struct Chats {
     compaction_probed: RefCell<HashSet<String>>,
     compaction_unsupported: RefCell<HashMap<String, String>>,
     reminder: Cell<Option<u64>>,
+    resume_floor: Cell<Option<u64>>,
 }
 
 /// A transcript's entry. A settled one, built into its row and older than
@@ -3002,6 +3003,7 @@ impl View {
             {
                 list.insert(at, fork_seam(chats.chat(&source).as_ref()));
             }
+            fold_continuations(&mut list, &open.id);
             let open = &*open;
             // The newest prompt, while its reply hasn't begun: sending,
             // then working, as the shipping app's working trailer says
@@ -6068,6 +6070,34 @@ fn resumed_row(id: &str) -> Value {
     ])
 }
 
+fn fold_continuations(list: &mut [Value], chat: &str) {
+    fn word<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
+        match row {
+            Value::Folded(_) => None,
+            row => match row.field(key) {
+                Some(Value::Str(s)) => Some(s),
+                _ => None,
+            },
+        }
+    }
+    for at in 1..list.len() {
+        if word(&list[at - 1], "line") != Some("compaction") {
+            continue;
+        }
+        let next = &list[at];
+        let continued = if word(next, "role") == Some("user") && word(next, "from_chat") == Some(chat) {
+            Value::record([("note", next.field("text").cloned().unwrap_or(Value::Nil))])
+        } else if word(next, "line") == Some("resumed") && matches!(list[at - 1].field("limit_reset"), Some(Value::Bool(true))) {
+            Value::record([("limit", Value::Bool(true)), ("at", next.field("clock").cloned().unwrap_or(Value::Nil))])
+        } else {
+            continue;
+        };
+        let on = list[at - 1].field("id").cloned().unwrap_or(Value::Nil);
+        list[at] = with_fields(list[at].clone(), [("continued_on", on), ("text", Value::from(""))]);
+        list[at - 1] = with_fields(list[at - 1].clone(), [("continued", continued)]);
+    }
+}
+
 /// An entry as ds/transcript's message; nil for one it doesn't show.
 pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
     let id = entry["id"].as_str()?;
@@ -6088,8 +6118,10 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             if image_note_only(entry) {
                 return None;
             }
+            let created = entry["createdAt"].as_f64().unwrap_or(0.) / 1000.;
+            let clock = stamp(created as i64).and_then(|at| at.rsplit_once(", ").map(|(_, clock)| clock.to_owned())).map_or(Value::Nil, |c| Value::from(c.as_str()));
             if text.trim() == zeron_proto::RESUME_PROMPT {
-                return Some(resumed_row(id));
+                return Some(with_fields(resumed_row(id), [("clock", clock)]));
             }
             // The shipping app's `wake_task_ids`, `step_handback_threads`.
             let wake = zeron_proto::transcript::wake_task_ids(&text);
@@ -6123,7 +6155,6 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             }
             // Always its time under it, as the shipping app's prompts carry
             // it (the strip shows on hover), and its words to copy.
-            let created = entry["createdAt"].as_f64().unwrap_or(0.) / 1000.;
             Some(Value::record([
                 ("id", Value::from(id)),
                 ("role", Value::from("user")),
@@ -6137,7 +6168,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("from_chat", entry["fromChatId"].as_str().filter(|f| !f.is_empty()).map_or(Value::Nil, Value::from)),
                 ("wake", wake.map_or(Value::Nil, |ids| Value::List(ids.iter().map(|id| Value::from(id.as_str())).collect::<Vec<_>>().into()))),
                 ("steps", if steps.is_empty() { Value::Nil } else { Value::List(steps.iter().map(|id| Value::from(id.as_str())).collect::<Vec<_>>().into()) }),
-                ("clock", stamp(created as i64).and_then(|at| at.rsplit_once(", ").map(|(_, clock)| clock.to_owned())).map_or(Value::Nil, |c| Value::from(c.as_str()))),
+                ("clock", clock),
             ]))
         }
         "assistant" => {
@@ -6262,7 +6293,8 @@ fn system_row(entry: &Json, id: &str) -> Option<Value> {
         let record = &compacted["record"];
         let sized = record["preTokens"].is_number() && record["postTokens"].is_number();
         let words = if sized { zeron_proto::transcript::compaction_label(text) } else { text };
-        return row("compaction", words, None, None).map(|r| with_fields(r, [("kept", kept_value(record))]));
+        let limit_reset = words == zeron_proto::compaction::COMPACTED_AT_LIMIT_RESET;
+        return row("compaction", words, None, None).map(|r| with_fields(r, [("kept", kept_value(record)), ("limit_reset", Value::Bool(limit_reset))]));
     }
     if let Some(fork) = part("fork") {
         return row("fork", "", None, Some(&single_line(fork["sourceTitle"].as_str().unwrap_or_default())));
@@ -6425,6 +6457,11 @@ fn compact_blocked(chats: &Chats, open: &Open, harness: &str) -> Value {
     }
 }
 
+fn compacts_before_resume(chats: &Chats, open: &Open, harness: &str) -> bool {
+    chats.resume_floor.get().zip(open.context_usage.0).is_some_and(|(floor, tokens)| tokens >= floor as f64)
+        && !chats.compaction_unsupported.borrow().contains_key(harness)
+}
+
 /// The "Resume with less context" offer on a large Claude chat idle past its prompt cache (gpui's `resume_compaction`).
 fn resume_offer(open: &Open, chat: &Json, harness: &str, blocked: &Value) -> Value {
     if !matches!(blocked, Value::Nil) {
@@ -6482,6 +6519,8 @@ fn compaction_readout(chats: &Chats, open: &Open, config: &Json) -> (Value, Valu
 pub(crate) fn compaction_settings(answer: &Json) {
     let chats = CHATS.with(Rc::clone);
     chats.reminder.set(answer["nudgeTokens"].as_u64());
+    let compacts_first = answer["enabled"].as_bool() == Some(true) && answer["beforeResume"].as_bool() == Some(true);
+    chats.resume_floor.set(answer["minTokens"].as_u64().filter(|_| compacts_first));
     chats.publish_views();
 }
 
@@ -8281,7 +8320,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool) -> Va
         ("compact_blocked", blocked.clone()),
         ("resume", resume_offer(open, &chat, harness, &blocked)),
         ("prediction", open.prediction.as_deref().map_or(Value::Nil, Value::from)),
-        ("limit", open.limit.as_ref().map_or(Value::Nil, |row| limit_value(chats, row))),
+        ("limit", open.limit.as_ref().map_or(Value::Nil, |row| with_fields(limit_value(chats, row), [("compacts", Value::Bool(compacts_before_resume(chats, open, harness)))]))),
         ("limits", Value::List(open.limits.iter().map(|row| limit_value(chats, row)).collect::<Vec<_>>().into())),
         ("work_tree", work_tree_value(&chat["workTree"])),
         ("context", context_tokens.zip(context_window).filter(|(_, w)| *w > 0.).map_or(Value::Nil, |(t, w)| Value::Num((t / w).min(1.)))),
@@ -9909,6 +9948,48 @@ mod tests {
         assert!(k.field("carried").is_none() && k.field("turns").is_none());
         let bare = message(&entry(json!([{ "kind": "compaction", "id": "p", "record": {} }])), None).unwrap();
         assert!(matches!(bare.field("kept").unwrap().field("focus"), Some(Value::Nil)));
+    }
+
+    #[test]
+    fn what_a_chat_sends_itself_right_after_a_compaction_is_told_on_the_compaction_s_row() {
+        let compaction = |id: &str, label: &str| {
+            let words = format!("{label} · 212.0k → 40.0k tokens");
+            message(&json!({ "id": id, "role": "system", "parts": [{ "kind": "text", "id": "t0", "text": words }, { "kind": "compaction", "id": "p", "record": { "preTokens": 212000, "postTokens": 40000 } }] }), None).unwrap()
+        };
+        let said = |id: &str, words: &str, from: Option<&str>| {
+            message(&json!({ "id": id, "role": "user", "createdAt": 1_800_000_000_000_u64, "fromChatId": from, "parts": [{ "kind": "text", "id": "t", "text": words }] }), None).unwrap()
+        };
+        let field = |m: &Value, k: &str| m.field(k).map(crate::auth::text).unwrap_or_default();
+        let limit = zeron_proto::compaction::COMPACTED_AT_LIMIT_RESET;
+        let mut list = vec![
+            compaction("c1", "Agent compacted"),
+            said("u1", "Build the checkout page.", Some("me")),
+            said("u2", "Keep going.", Some("me")),
+            compaction("c2", "Agent compacted"),
+            said("u3", "The parser passes here.", Some("other")),
+            compaction("c3", limit),
+            said("u4", zeron_proto::RESUME_PROMPT, None),
+            said("u5", zeron_proto::RESUME_PROMPT, None),
+            compaction("c4", "Agent compacted"),
+            said("u6", zeron_proto::RESUME_PROMPT, None),
+        ];
+        fold_continuations(&mut list, "me");
+
+        assert_eq!(field(list[0].field("continued").unwrap(), "note"), "Build the checkout page.");
+        assert_eq!((field(&list[1], "continued_on").as_str(), field(&list[1], "text").as_str()), ("c1", ""), "the note keeps its row, drawn as nothing");
+        assert!(list[2].field("continued_on").is_none(), "a self-sent turn after another keeps its bubble");
+        assert_eq!(field(&list[2], "text"), "Keep going.");
+        assert!(list[3].field("continued").is_none() && list[4].field("continued_on").is_none(), "another chat's message is its own");
+
+        assert!(matches!(list[5].field("limit_reset"), Some(Value::Bool(true))));
+        let resumed = list[5].field("continued").unwrap();
+        assert!(matches!(resumed.field("limit"), Some(Value::Bool(true))));
+        assert!(cfg!(not(unix)) || !field(&list[6], "clock").is_empty());
+        assert_eq!(field(resumed, "at"), field(&list[6], "clock"), "the limit reset's time, as the resume's own clock");
+        assert_eq!(field(&list[6], "continued_on"), "c3");
+        assert!(list[7].field("continued_on").is_none(), "a resume with no compaction before it keeps its divider");
+        assert!(matches!(list[8].field("limit_reset"), Some(Value::Bool(false))));
+        assert!(list[8].field("continued").is_none() && list[9].field("continued_on").is_none(), "only a limit reset's compaction tells its resume");
     }
 
     #[test]

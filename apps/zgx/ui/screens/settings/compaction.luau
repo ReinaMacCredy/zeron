@@ -21,6 +21,7 @@ local COMPACT_TOOL = "compact"
 search.index(M.ID, ui.t("settings.compaction.title"), ui.t("settings.compaction.terms"), {
 	{ key = "idle", title = ui.t("settings.compaction.idle.label"), section = ui.t("settings.compaction.reasons_section"), terms = ui.t("settings.compaction.idle.terms") },
 	{ key = "threshold", title = ui.t("settings.compaction.threshold.label"), section = ui.t("settings.compaction.reasons_section"), terms = ui.t("settings.compaction.threshold.terms") },
+	{ key = "resume", title = ui.t("settings.compaction.resume.label"), section = ui.t("settings.compaction.reasons_section"), terms = ui.t("settings.compaction.resume.terms") },
 	{ key = "agents", title = ui.t("settings.compaction.agents.label"), section = ui.t("settings.compaction.reasons_section"), terms = ui.t("settings.compaction.agents.terms") },
 	{ key = "remind", title = ui.t("settings.compaction.remind.label"), section = ui.t("settings.compaction.reasons_section"), terms = ui.t("settings.compaction.remind.terms") },
 	{ key = "window", title = ui.t("settings.compaction.window.label"), section = ui.t("settings.compaction.reasons_section"), terms = ui.t("settings.compaction.window.terms") },
@@ -304,6 +305,16 @@ function M.view(): Node
 							{ value = 150000, label = size(150000) },
 							{ value = 200000, label = size(200000) },
 						}),
+					}),
+					under("resume", idle_on, {
+						label = ui.t("settings.compaction.resume.label"),
+						description = ui.t("settings.compaction.resume.description"),
+						control = engine_switch(ui.t("settings.compaction.resume.label"), function(): boolean?
+							local c = settings:get()
+							return if c then c.beforeResume ~= false else nil
+						end, function(on: boolean)
+							save({ beforeResume = on })
+						end),
 					}),
 					row("agents", {
 						lead = numeral(2),

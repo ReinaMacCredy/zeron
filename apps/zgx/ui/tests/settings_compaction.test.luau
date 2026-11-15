@@ -42,6 +42,8 @@ test("compaction settings: three reasons, who decides each, with the engine's va
 		"An idle chat compacts before its 1-hour prompt cache",
 		"Zeron",
 		"Only chats larger than",
+		"Before resuming at a limit reset",
+		"When a usage limit resets, a chat past the idle",
 		"The work changed",
 		"The agent calls compact for a new task; it runs when",
 		"Agent",
@@ -65,6 +67,7 @@ test("compaction settings: three reasons, who decides each, with the engine's va
 		expect(`{w}: {tree:find(w, 1, true) ~= nil}`).to_be(`{w}: false`)
 	end
 	expect(checked(app, "The cache is about to expire")).to_be(true)
+	expect(checked(app, "Before resuming at a limit reset")).to_be(true)
 	expect(checked(app, "The work changed")).to_be(true)
 	expect(checked(app, "Mission threads")).to_be(true)
 	expect(calls(app)).to_contain("settings.engine:GetCompactionSettings")
@@ -74,9 +77,12 @@ end)
 
 test("compaction settings: each change goes to the engine, the agent's switch to the compact tool", function()
 	local app = open()
-	app:click(`{PAGE} >> role:switch "The cache is about to expire"`)
+	app:click(`{PAGE} >> role:switch "Before resuming at a limit reset"`)
 	app:frames(20)
 	expect(calls(app)).to_contain("settings.engine:SetCompactionSettings")
+	expect(checked(app, "Before resuming at a limit reset")).to_be(false)
+	app:click(`{PAGE} >> role:switch "The cache is about to expire"`)
+	app:frames(20)
 	expect(checked(app, "The cache is about to expire")).to_be(false)
 	app:click(`{PAGE} >> role:switch "The work changed"`)
 	app:frames(20)
@@ -91,6 +97,7 @@ test("compaction settings: each change goes to the engine, the agent's switch to
 	app:click('#settings-nav >> "Compaction"')
 	app:frames(30)
 	expect(checked(app, "The cache is about to expire")).to_be(false)
+	expect(checked(app, "Before resuming at a limit reset")).to_be(false)
 	expect(checked(app, "The work changed")).to_be(false)
 	expect(checked(app, "Mission threads")).to_be(false)
 	expect(app:error()).to_be(nil)

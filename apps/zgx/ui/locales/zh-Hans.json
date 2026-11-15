@@ -1439,7 +1439,11 @@
       "resume_keep": "保留完整历史",
       "minutes_seconds": "{m}分{s}秒",
       "days_hours": "{d}天{h}小时",
-      "focus_label": "要求保留"
+      "focus_label": "要求保留",
+      "continued": "已继续",
+      "continued_after_limit": "上限重置后已继续",
+      "continued_label": "继续说明",
+      "limit_reset_label": "上限重置"
     },
     "threads": {
       "agent": "智能体",
@@ -1499,7 +1503,7 @@
       "open_subagent": "打开子智能体",
       "from": "来自",
       "from_label": "打开 {title}",
-      "auto_continue": "自动继续",
+      "auto_continue": "已继续",
       "plan": {
         "head": "{n, plural, other {计划 · # 个步骤}}",
         "edit": "编辑计划",
@@ -3241,6 +3245,11 @@
         "detail": "每个对话的窗口：模型选择器",
         "who": "Claude Code",
         "terms": "窗口 已满 自动压缩 模型 window"
+      },
+      "resume": {
+        "label": "在用量上限重置后继续之前",
+        "description": "用量上限重置时，超过空闲大小的对话会先压缩再继续。",
+        "terms": "上限 重置 继续 用量 额度 limit reset resume"
       }
     },
     "computer": {
@@ -4592,7 +4601,8 @@
         "wait": "等待重置",
         "cancel": "取消",
         "agent": "智能体",
-        "at": "于 {time} "
+        "at": "于 {time} ",
+        "waiting_compacts": "正在等待 {name} 重置：先压缩，再{at}继续。"
       },
       "expired": "已于 24 小时后过期。请新建侧边对话继续。",
       "steer_queues": "此智能体无法在回合中途引导。你的消息会加入队列，并在当前回合结束时发送。",

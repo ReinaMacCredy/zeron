@@ -33,6 +33,9 @@ export type Match = { key: string, block: number, k: number, row: number }
 -- reply's text blocks (`<id>:<block id>`), or a reply's whole text
 -- (`<id>:r`).
 local function sources(m: any): { { key: string, text: string, breaks: boolean?, plain: boolean? } }
+	if m.continued_on then
+		return {}
+	end
 	if m.role == "user" then
 		return { { key = `{m.id}:u`, text = m.text or "", breaks = true } }
 	end

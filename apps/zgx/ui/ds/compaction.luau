@@ -30,10 +30,12 @@ local M = {}
 
 export type Kept = { pre: number?, post: number?, ms: number?, summary: string?, focus: string? }
 export type Wait = { phase: "queued" | "compacting" }
+export type Continued = { note: string?, limit: boolean?, at: string? }
 export type Head = {
 	icon: "spinner" | "done" | "queued",
 	title: string,
 	meta: string?,
+	continued: string?,
 	chevron: boolean,
 }
 
@@ -74,6 +76,15 @@ local function kept_of(m: any): Kept
 	return if type(m.kept) == "table" then m.kept else {}
 end
 
+local function continued_of(m: any): Continued?
+	return if type(m.continued) == "table" then m.continued else nil
+end
+
+-- (A limit reset's focus is the engine's, not something anyone asked.)
+local function focus_of(m: any): string?
+	return if m.limit_reset then nil else kept_of(m).focus
+end
+
 -- What a landed compaction's label says: the entry's words, then its sizes
 -- and how long it took.
 function M.head(m: any): Head
@@ -88,8 +99,15 @@ function M.head(m: any): Head
 			meta ..= ` · {M.elapsed(math.floor(k.ms / 1000))}`
 		end
 	end
-	local title = if (m.text or "") ~= "" then m.text else s("compacted")
-	return { icon = "done", title = title, meta = meta, chevron = k.summary ~= nil or k.focus ~= nil }
+	local title = if (m.text or "") ~= "" and not m.limit_reset then m.text else s("compacted")
+	local c = continued_of(m)
+	return {
+		icon = "done",
+		title = title,
+		meta = meta,
+		continued = if c then s(if c.limit then "continued_after_limit" else "continued") else nil,
+		chevron = k.summary ~= nil or focus_of(m) ~= nil or (c ~= nil and (c.note ~= nil or c.at ~= nil)),
+	}
 end
 
 -- What the wait in the trailer's place says.
@@ -101,7 +119,8 @@ function M.wait_head(w: Wait, elapsed: number): Head
 end
 
 function M.words_of(h: Head): string
-	return if h.meta then `{h.title} {h.meta}` else h.title
+	local words = if h.meta then `{h.title} {h.meta}` else h.title
+	return if h.continued then `{words} · {h.continued}` else words
 end
 
 function M.words(m: any): string
@@ -204,9 +223,85 @@ local function label_icon(kind: () -> string): Node
 	}
 end
 
--- The label between the rules: icon, words, the meta, a chevron when it
--- opens. `on_toggle`: a landed one that opens.
-local function label(head: () -> Head, open: (() -> boolean)?, on_toggle: (() -> ())?, id: string?): Node
+local function continued(head: () -> Head, still: () -> boolean, id: string?): Node
+	return ui.show(function(): boolean
+		return head().continued ~= nil
+	end, ui.component(function(): Node
+		local quiet = still()
+		local reduced = motion.reduced_now()
+		local natural = ui.use_state(0)
+		local open = ui.use_state(quiet)
+		local lit = ui.use_state(quiet)
+		local landed = ui.use_state(quiet or reduced)
+		if not quiet and reduced then
+			ui.after(0, function()
+				lit:set(true)
+			end)
+		end
+		local function grow(w: number)
+			if open:peek() or w <= 0 then
+				return
+			end
+			natural:set(w)
+			open:set(true)
+			ui.after(60, function()
+				lit:set(true)
+			end)
+			ui.after(200, function()
+				landed:set(true)
+			end)
+		end
+		return ui.row {
+			id = if id then `{id}-continued` else nil,
+			class = "compaction-continued",
+			min_w = 0,
+			overflow = "hidden",
+			max_w = if quiet or reduced
+				then nil
+				else ui.tween(ui.computed(function(): number
+					return if open:get() then natural:get() else 0
+				end), { duration = 200, ease = "cubicBezier(.2,.8,.2,1)" }),
+			opacity = if quiet
+				then nil
+				else ui.tween(ui.computed(function(): number
+					return if lit:get() then 1 else 0
+				end), { duration = if reduced then motion.FADE else 150, ease = motion.EASE_OUT }),
+			ui.row {
+				gap = ui.raw(5, "the mockup's segment"),
+				items = "center",
+				min_w = 0,
+				shrink = function(): number
+					return if landed:get() then 1 else 0
+				end,
+				text_size = ui.raw(11.5, "the mockup's segment"),
+				color = "$text.secondary",
+				on_resize = if quiet or reduced
+					then nil
+					else function(size: { w: number, h: number })
+						grow(size.w)
+					end,
+				ui.text { "·", shrink = 0 },
+				ui.div { color = "$text.tertiary", shrink = 0, aria_hidden = true, Icon { name = "refresh", size = 11 } },
+				ui.text {
+					function(): string
+						return head().continued or ""
+					end,
+					min_w = 0,
+					shrink = function(): number
+						return if landed:get() then 1 else 0
+					end,
+					truncate = function(): boolean
+						return landed:get()
+					end,
+				},
+			},
+		}
+	end)())
+end
+
+-- The label between the rules: icon, words, the meta, what the chat
+-- continued with, a chevron when it opens. `on_toggle`: a landed one that opens.
+local function label(head: () -> Head, open: (() -> boolean)?, on_toggle: (() -> ())?, id: string?, still: (() -> boolean)?): Node
 	local pieces = {
 		gap = ui.raw(7, "gpui's label gaps"),
 		items = "center",
@@ -229,10 +324,14 @@ local function label(head: () -> Head, open: (() -> boolean)?, on_toggle: (() ->
 				return head().meta or ""
 			end,
 			min_w = 0,
+			shrink = function(): number
+				return if head().continued then 0 else 1
+			end,
 			tabular = true,
 			text_size = "$font.size.xs",
 			color = "$text.tertiary",
 		}),
+		if still then continued(head, still, id) else nil,
 		ui.show(function(): boolean
 			return head().chevron and open ~= nil
 		end, ui.div {
@@ -249,8 +348,6 @@ local function label(head: () -> Head, open: (() -> boolean)?, on_toggle: (() ->
 	local box: { [any]: any } = {
 		id = id,
 		class = "compaction-label",
-		shrink = 0,
-		max_w = "80%",
 		px = ui.raw(6, "gpui's compaction card"),
 		py = ui.raw(2, "gpui's compaction card"),
 		rounded = ui.raw(6, "gpui's compaction card"),
@@ -285,7 +382,7 @@ local function label(head: () -> Head, open: (() -> boolean)?, on_toggle: (() ->
 	return ui.row(box)
 end
 
-local function line(head: () -> Head, live: () -> boolean, fill: State<number>, fading: State<boolean>, open: (() -> boolean)?, on_toggle: (() -> ())?, id: string?): Node
+local function line(head: () -> Head, live: () -> boolean, fill: State<number>, fading: State<boolean>, open: (() -> boolean)?, on_toggle: (() -> ())?, id: string?, still: (() -> boolean)?): Node
 	return ui.row {
 		class = "compaction-line",
 		w_full = true,
@@ -293,7 +390,7 @@ local function line(head: () -> Head, live: () -> boolean, fill: State<number>, 
 		gap = "$space.2",
 		items = "center",
 		rule(true, live, fill, fading),
-		label(head, open, on_toggle, id),
+		label(head, open, on_toggle, id, still),
 		rule(false, live, fill, fading),
 	}
 end
@@ -370,10 +467,18 @@ local function panel(id: string, m: () -> any, open: () -> boolean): Node
 				end
 			end,
 			field("focus_label", function(): string?
-				return kept_of(m()).focus
+				return focus_of(m())
 			end),
 			field("summary_label", function(): string?
 				return kept_of(m()).summary
+			end),
+			field("continued_label", function(): string?
+				local c = continued_of(m())
+				return c and c.note
+			end),
+			field("limit_reset_label", function(): string?
+				local c = continued_of(m())
+				return if c and c.limit then c.at else nil
 			end),
 		}),
 	}
@@ -448,9 +553,15 @@ M.Divider = ui.component(function(props: { m: () -> any, id: string }): Node
 		end
 		opened:set_key(id, if is_open() then nil else true)
 	end
+	local built_with = head().continued ~= nil
+	local function still(): boolean
+		local was = built_with
+		built_with = false
+		return was
+	end
 	return ui.column {
 		w_full = true,
-		line(head, never, fill, fading, is_open, toggle, `{id}-head`),
+		line(head, never, fill, fading, is_open, toggle, `{id}-head`, still),
 		panel(id, props.m, is_open),
 	}
 end)

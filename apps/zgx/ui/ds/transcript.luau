@@ -119,6 +119,7 @@ export type Message = {
 	wake: { string }?,
 	steps: { string }?,
 	clock: string?,
+	continued_on: string?,
 }
 
 export type Props = {
@@ -2414,9 +2415,17 @@ local function Transcript(props: Props): Node
 		ui.on_cleanup(function()
 			rows[m.id] = nil
 		end)
+		-- (A row the chat sent itself can be told on a compaction above it only once that row comes, as a chat opens with its newest rows.)
+		local foldable = (mine and m.from_chat ~= nil) or m.line == "resumed"
+		local function told(): boolean
+			return foldable and state:get().continued_on ~= nil
+		end
 		-- Zeron's gaps: a message opens 16 under the lane of the one before;
 		-- a prompt sits 6 under the switch seam over it.
 		local function pt(): number
+			if told() then
+				return 0
+			end
 			if mine and index:get() > 1 then
 				local prev = messages:at(index:get() - 1)
 				if prev and prev.role == "switch" then
@@ -2427,6 +2436,17 @@ local function Transcript(props: Props): Node
 		end
 		local function hovered(): boolean
 			return hover:get() == m.id and not editing_this(m.id) and not dimmed(index:get())
+		end
+		local function fold_or(body: Node): Node
+			if not foldable then
+				return body
+			end
+			return ui.show(function(): boolean
+				return not told()
+			end, body, ui.column {
+				w_full = true,
+				if mine then waiting_line(state, props.on_retry, props.working, props.compaction_wait, props.turn_state) else nil,
+			})
 		end
 		local function folded(): number?
 			local f = fold:get()
@@ -2547,7 +2567,7 @@ local function Transcript(props: Props): Node
 							end
 						end)
 					end,
-				if m.role == "switch" then seam(m)
+				fold_or(if m.role == "switch" then seam(m)
 					elseif m.role == "system" and m.line == "compaction" then Compaction.Divider {
 						id = m.id,
 						m = function(): any
@@ -2654,7 +2674,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered, branch_actions(m, state)),
 						waiting_line(state, props.on_retry, props.working, props.compaction_wait, props.turn_state),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code }),
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?

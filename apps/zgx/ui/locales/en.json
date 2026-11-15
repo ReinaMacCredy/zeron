@@ -1439,7 +1439,11 @@
       "resume_keep": "Keep full history",
       "minutes_seconds": "{m}m {s}s",
       "days_hours": "{d}d {h}h",
-      "focus_label": "Asked to keep"
+      "focus_label": "Asked to keep",
+      "continued": "Continued",
+      "continued_after_limit": "Continued after limit reset",
+      "continued_label": "Continued with",
+      "limit_reset_label": "Limit reset"
     },
     "threads": {
       "agent": "Agent",
@@ -1499,7 +1503,7 @@
       "open_subagent": "Open subagent",
       "from": "From",
       "from_label": "Open {title}",
-      "auto_continue": "Auto-continue",
+      "auto_continue": "Continued",
       "plan": {
         "head": "{n, plural, one {Plan · # step} other {Plan · # steps}}",
         "edit": "Edit plan",
@@ -3241,6 +3245,11 @@
         "detail": "Window per chat: model picker",
         "who": "Claude Code",
         "terms": "window full auto compact claude code model"
+      },
+      "resume": {
+        "label": "Before resuming at a limit reset",
+        "description": "When a usage limit resets, a chat past the idle size is compacted before it continues.",
+        "terms": "limit reset resume usage quota before"
       }
     },
     "computer": {
@@ -4592,7 +4601,8 @@
         "wait": "Wait for reset",
         "cancel": "Cancel",
         "agent": "The agent",
-        "at": "at {time}"
+        "at": "at {time}",
+        "waiting_compacts": "Waiting for the {name} reset: compacts, then resumes {at}."
       },
       "expired": "Expired after 24 hours. Create a new sidechat to continue.",
       "steer_queues": "This agent can't be steered mid-turn. Your message will be queued and sent when the current turn finishes.",
